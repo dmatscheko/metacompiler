@@ -983,6 +983,95 @@ func init() {
 			}
 			return a[2] // the js_jchareq / $valeq result the caller computed
 		}
+		// ----- method-group conversion (docs/todo.md 1.1) -----
+		// The Go twin of js_csmg in languages/lib/csharp-rt.metajs and of
+		// csMethodGroup in languages/csharp-interpreter.abnf; the comment in the
+		// interpreter is the specification half (ECMA-334 10.8, 20.1, 20.5).
+		// `bound` is the forwarder the EMITTER built - layer 2 cannot build one,
+		// having no rest parameter - and this decides only whether the group
+		// exists, whether it needs binding at all, and which object it denotes.
+		m["js_csmg"] = func(a []uint64) uint64 {
+			recv := u(a[0])
+			name := rt.toString(u(a[1]))
+			o, ok := recv.(*jsObject)
+			if !ok {
+				return w(jsUndef)
+			}
+			if b, isCls := o.props["__isclass"].(bool); isCls && b {
+				// A class descriptor: its OWN statics were answered by the js_get
+				// that got here, so this walk is what reaches an inherited one.
+				for cls := interface{}(o); cls != nil; {
+					clsObj, ok := cls.(*jsObject)
+					if !ok {
+						break
+					}
+					if mth, ok := clsObj.props[name]; ok && isCallable(mth) {
+						return w(mth)
+					}
+					cls = clsObj.props["__super"]
+				}
+				return w(jsUndef)
+			}
+			found := false
+			for cls := o.props["__class"]; cls != nil && !found; {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if mth, ok := clsObj.props[name]; ok && isCallable(mth) {
+					found = true
+					break
+				}
+				cls = clsObj.props["__super"]
+			}
+			if !found {
+				return w(jsUndef)
+			}
+			// MEMOISED so that `E -= s.Got` removes what `E += s.Got` added:
+			// ECMA-334 20.5 makes two delegates equal when target and method are
+			// equal, and a delegate is compared by object identity here.
+			key := "__mg_" + name
+			if had, ok := o.props[key]; ok && had != jsUndef {
+				return w(had)
+			}
+			o.set(key, u(a[2]))
+			return a[2]
+		}
+		// js_csdfld(recv, name): the DELEGATE stored in a member of that name, or
+		// undefined. `k.E(5)` on a delegate field parses as a method call and C#
+		// resolves it as the invocation of the field's value (ECMA-334 12.8.10.2).
+		// Answers undefined for every receiver that is not a class instance, so the
+		// call site falls back to js_mcall exactly as it did before.
+		m["js_csdfld"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return w(jsUndef)
+			}
+			cls, hasCls := o.props["__class"]
+			if !hasCls {
+				return w(jsUndef)
+			}
+			name := rt.toString(u(a[1]))
+			v, has := o.props[name]
+			if !has || v == jsUndef {
+				// A property with a get accessor body may hold one too.
+				for c := cls; c != nil; {
+					clsObj, ok := c.(*jsObject)
+					if !ok {
+						break
+					}
+					if g, ok := clsObj.props["__get_"+name]; ok && isCallable(g) {
+						v = rt.call(g, jsUndef, []interface{}{o})
+						break
+					}
+					c = clsObj.props["__super"]
+				}
+			}
+			if cspIsDeleg(v) {
+				return w(v)
+			}
+			return w(jsUndef)
+		}
 		// One of the integral type NAMES as an expression primary.
 		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }
 		// The whole Console object, built here rather than in the grammar so that
@@ -1080,6 +1169,22 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cspIsDeleg: a delegate value is a closure, or a MULTICAST invocation list whose
+// first entry is one. The twins are csIsDelegVal in languages/csharp-interpreter.abnf
+// and in languages/lib/csharp-rt.metajs.
+func cspIsDeleg(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	if isCallable(v) {
+		return true
+	}
+	if arr, ok := v.(*jsArray); ok && len(arr.elems) > 0 {
+		return isCallable(arr.elems[0])
+	}
+	return false
 }
 
 // cspFindToString walks the __class / __super chain for a user-declared ToString,

@@ -247,6 +247,48 @@ namespace Demo
         static byte AdoptW(byte b) { return b; }
         class AdoptBox { public double A = 3; public double P { get; set; } = 3; }
 
+        // ----- method groups, method overloads and the integral local write
+        // (ECMA-334 10.8 / 20.1 / 20.5 / 20.2 / 12.8.10.2 for the groups, 12.6.4 for
+        // the overloads, 10.2.3 at 12.21.2 for the write; docs/todo.md 1.1/1.2/1.3).
+        // A method group did not exist anywhere: `this.M`, a bare `M` and a bare
+        // static `H` all answered undefined or "unknown name" in BOTH halves, a
+        // delegate FIELD called like a method aborted, and .Invoke() was
+        // unsupported. Overloading was implemented for constructors only, so a class
+        // kept the LAST declaration of each method name. And `long x; x = 3;` stored
+        // the raw int, so `x * 1000000 * 1000000` was a 32-bit multiply.
+        delegate int MgOp(int x);
+        class MgK
+        {
+            public int Bias = 1;
+            public MgOp E;
+            public int F(int x) { return x + this.Bias; }
+            public static int G(int x) { return x + 20; }
+            public int ViaThis() { MgOp o = this.F; return o(10); }
+            public int ViaBare() { MgOp o = F; return o(100); }
+            public int ViaStatic() { MgOp o = G; return o(1000); }
+            public int FireE(int x) { return E(x); }
+        }
+        class MgOv
+        {
+            public int M(int a) { return 1; }
+            public int M(double a) { return 2; }
+            public int M(int a, int b) { return 3; }
+            public int M(string a) { return 4; }
+            public static int S(int a) { return 11; }
+            public static int S(string a) { return 12; }
+            public int Only(int a) { return a + 1; }
+        }
+        static int MgFree(int x) { return x + 7; }
+        // An OVERLOADED OPERATOR keeps every declaration too (ECMA-334 12.4.5 /
+        // 15.10.1): the second used to overwrite the first in both halves.
+        class MgV
+        {
+            public double X;
+            public MgV(double x) { X = x; }
+            public static MgV operator +(MgV a, MgV b) { return new MgV(a.X + b.X); }
+            public static MgV operator +(MgV a, int b) { return new MgV(a.X + b); }
+        }
+
         // ----- constructor initializers and constructor overloads (ECMA-334
         // 15.11.2 / 12.6.4, docs/todo.md 1.1 and 1.10). The ': base(d)' header used
         // to be parsed and DISCARDED - the base class' parameterless constructor ran
@@ -820,6 +862,49 @@ namespace Demo
             AdoptBox adB = new AdoptBox();
             adB.A = ctN[0];
             Program.Check("adopt-qualified-write", adB.A / 2 == 1.5 && (adB.A is double));
+
+            // ----- method groups, method overloads, integral local writes
+            // (docs/todo.md 1.1, 1.2, 1.3) -----
+            int[] mgN = {1, 2, 3};
+            string[] mgW = {"x"};
+            double[] mgQ = {1.5};
+            MgK mgk = new MgK();
+            Program.Check("mg-this", mgk.ViaThis() == 11);
+            Program.Check("mg-bare", mgk.ViaBare() == 101);
+            Program.Check("mg-bare-static", mgk.ViaStatic() == 1020);
+            MgOp mgA = MgK.G;
+            Program.Check("mg-qualified-static", mgA(mgN[0]) == 21);
+            MgOp mgB = Program.MgFree;
+            Program.Check("mg-enclosing-static", mgB(mgN[0]) == 8);
+            MgOp mgC = mgk.F;
+            MgK mgk2 = new MgK();
+            mgk2.Bias = mgN[2];
+            MgOp mgC2 = mgk2.F;
+            Program.Check("mg-bound", mgC(mgN[0]) == 2 && mgC2(mgN[0]) == 4);
+            Program.Check("mg-invoke", mgC.Invoke(mgN[2]) == 4);
+            Program.Check("mg-memoised", mgk.F == mgk.F && mgk.F != mgk2.F);
+            mgk.E = mgk.F;
+            Program.Check("mg-delegate-field-call", mgk.E(mgN[2]) == 4 && mgk.FireE(mgN[1]) == 3);
+            MgOv mgO = new MgOv();
+            Program.Check("ovl-int", mgO.M(mgN[0]) == 1);
+            Program.Check("ovl-double", mgO.M(mgQ[0]) == 2);
+            Program.Check("ovl-arity", mgO.M(mgN[0], mgN[1]) == 3);
+            Program.Check("ovl-string", mgO.M(mgW[0]) == 4);
+            Program.Check("ovl-static-int", MgOv.S(mgN[0]) == 11);
+            Program.Check("ovl-static-string", MgOv.S(mgW[0]) == 12);
+            Program.Check("ovl-single", mgO.Only(mgN[1]) == 3);
+            MgV mgv = new MgV(mgN[0]);
+            Program.Check("ovl-operator-obj", (mgv + new MgV(mgN[1])).X == 3);
+            Program.Check("ovl-operator-int", (mgv + mgN[1]).X == 3);
+            long mgL;
+            mgL = mgN[2];
+            Program.Check("adopt-long-local", mgL * 1000000 * 1000000 == 3000000000000L);
+            ulong mgU;
+            mgU = mgN[2];
+            Program.Check("adopt-ulong-local", mgU * 1000000 * 1000000 == 3000000000000UL);
+            int mgI;
+            mgI = mgN[2];
+            Program.Check("adopt-int-local-control", mgI * 1000000 * 1000000 == 2112827392 && (mgI is int));
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;

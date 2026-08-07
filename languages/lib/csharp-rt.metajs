@@ -1323,6 +1323,78 @@ function csIsFn(v) {
 
 // csPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
+// ----- method-group conversion (docs/todo.md 1.1) -----
+// ECMA-334 10.8 makes a method group convertible to a compatible delegate type, and
+// 20.1 gives the delegate the receiver the group was formed on as its target; 20.5
+// makes two delegates equal when target and method are equal, which here (delegates
+// are compared by object identity) means the bound closure has to be MEMOISED - one
+// object per (receiver, method) - or `E -= s.Got` would not remove what
+// `E += s.Got` added.
+//
+// The EMITTER builds the forwarder (a parameterless closure that captures the
+// receiver in a scope of its own and re-enters through js_mcall) because layer 2
+// cannot: MetaJS has no `arguments` and no rest parameter, so a closure written here
+// would have to fix an arity, and the target method's arity is not known at the
+// conversion site. This decides only WHICH object the group denotes.
+//
+// The twins are csMethodGroup in languages/csharp-interpreter.abnf and js_csmg in
+// abnf/jsrtcsharp.go. `__mg_` is a `__`-prefixed slot, so keysOf hides it from every
+// clone, record equality and struct copy (manual 7.9).
+function js_csmg(recv, name, bound) {
+    if (recv === undefined || recv === null) { return undefined }
+    if (typeof recv != "object") { return undefined }
+    if (recv["__isclass"] === true) {
+        // A class descriptor. Its OWN statics were answered by the js_get that got
+        // here; the walk is what reaches one inherited from a base.
+        var sc = recv
+        var g1 = 0
+        while (g1 < 64) {
+            g1 = g1 + 1
+            if (sc === undefined || sc === null) { return undefined }
+            if (typeof sc != "object") { return undefined }
+            var sv = sc[name]
+            if (csIsFn(sv)) { return sv }
+            sc = sc["__super"]
+        }
+        return undefined
+    }
+    var cls = recv["__class"]
+    if (cls === undefined || cls === null) { return undefined }
+    var m = rtFindMethod(cls, name)
+    if (!csIsFn(m)) { return undefined }
+    var key = "__mg_" + name
+    var had = recv[key]
+    if (had !== undefined) { return had }
+    recv[key] = bound
+    return bound
+}
+
+// js_csdfld(recv, name): the DELEGATE stored in a member of that name, or undefined.
+// `k.E(5)` on a delegate field parses as a method call and C# resolves it as the
+// invocation of the field's value (ECMA-334 12.8.10.2). Safe for any receiver - a
+// string, a List, a dictionary all answer undefined and the call site then reaches
+// js_mcall exactly as it did before. The twins are the delegate fallback in
+// mcall0 (languages/csharp-interpreter.abnf) and js_csdfld in abnf/jsrtcsharp.go.
+function csIsDelegVal(v) {
+    if (csIsFn(v)) { return true }
+    if (!Array.isArray(v)) { return false }
+    if (v.length == 0) { return false }
+    return csIsFn(v[0])
+}
+function js_csdfld(recv, name) {
+    if (recv === undefined || recv === null) { return undefined }
+    if (typeof recv != "object") { return undefined }
+    if (Array.isArray(recv)) { return undefined }
+    if (recv["__class"] === undefined) { return undefined }
+    var v = recv[name]
+    if (v === undefined) {
+        var g = rtFindMethod(recv["__class"], "__get_" + name)
+        if (csIsFn(g)) { v = g.apply(undefined, rtPrepend(recv, [])) }
+    }
+    if (csIsDelegVal(v)) { return v }
+    return undefined
+}
+
 // String.Substring with the Go twin's substringRange clamping.
 // js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 

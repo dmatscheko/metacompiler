@@ -3047,7 +3047,7 @@ KwLet       = "let" KwEnd ;
                     b = rc0.b
                     v = rc0.v
                 }
-                if (lty != "") { v = emitAdoptAny(b, lty, v) }
+                if (lty != "") { var ral = emitAdoptLocal(b, lty, v); b = ral.b; v = ral.v }
                 callExt(b, "js_scope_set", [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
@@ -3224,6 +3224,11 @@ KwLet       = "let" KwEnd ;
             }
             if (kind == "instance") {
                 var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                // An unqualified `E(x)` on a DELEGATE FIELD of the enclosing type is an
+                // invocation of the field's value, not a method call (ECMA-334
+                // 12.8.10.2). The interpreter half reaches the same fallback through
+                // mcall0 (docs/todo.md 1.1).
+                if (csDataNames[name] === true) { return emitDelegFieldCall(b, thisV, name, argsV) }
                 return {b: b, v: callExt(b, "js_mcall", [thisV, emitStr(b, name), argsV])}
             }
             if (kind == "static") {
@@ -3454,13 +3459,50 @@ KwLet       = "let" KwEnd ;
     // `long x; x = 3;` stores a value C# would implicitly convert and the loss shows
     // up only past 32 bits; but a `double` slot holding a plain int INTEGER-DIVIDES
     // immediately - `double L; L = 3;` then `L / 2` answered 1 instead of 1.5, which
-    // is the defect the item names. THE INTEGRAL HALF IS STILL OPEN: `long x; x = 3;
-    // x * 1000000 * 1000000` is a 32-bit multiply. Closing it needs the extern to be
-    // called only when it can change something - a plain-number test the emitter can
-    // lower without a call - and that does not exist today.
+    // is the defect the item names.
+    //
+    // THE INTEGRAL HALF IS CLOSED NOW, and the thing that closes it is exactly the
+    // "plain-number test the emitter can lower without a [layer-2] call" the item
+    // asked for. It is js_gival, a C FLOOR primitive (lib/runtime.c: a sized integer
+    // becomes its plain double, EVERYTHING ELSE PASSES THROUGH UNTOUCHED). So
+    //
+    //     icmp eq (js_gival v), v      <=>   v is not a sized-integer box
+    //
+    // is one C call and one comparison - no MetaJS scope frame, which is what the
+    // 2026-08-09 re-measurement confirms the cost actually was: adopting every
+    // integral local write UNCONDITIONALLY reads 23.40e9 against 21.71e9, +7.8% over
+    // 9 draws with spreads of 2.6% and 3.8%, and GC collections go 2340 -> 2533. With
+    // the gate it is 21.34e9, -1.7%, inside the spread. See emitAdoptLocal.
+    //
+    // The gate is WIDTH-BLIND on purpose: it skips a box of ANY width, so a `byte`
+    // box written to an `int` local stays a byte box. That is exactly what happened
+    // before this change (integral locals adopted NOTHING), so the gate is a strict
+    // improvement and never a new wrong answer; making it width-exact needs a floor
+    // primitive that answers the width as a RAW integer, which would be
+    // lib/runtime.c + abnf/jsrtint.go + languages/metajs-interpreter.abnf (manual
+    // 7.2) and buys only the mixed-width implicit conversions C# requires a cast for.
+    // csAdoptLocal in languages/csharp-interpreter.abnf is the twin and gates on
+    // `typeof v == "number"`, which selects the same set: a sized box, a float box and
+    // a char box are all objects there.
     function csLocalWriteTy(ty) {
         if (ty == "double" || ty == "float" || ty == "decimal") { return ty }
+        if (csTypeW["$" + ty] != undefined) { return ty }
         return ""
+    }
+    // An INTEGRAL local write: js_csadopt only when the value is not already a box.
+    // A float/decimal one keeps the unconditional call - a double slot must convert a
+    // plain int, and js_gival cannot see the tag-14 box that a converted one is.
+    function emitAdoptLocal(b, ty, v) {
+        if (csTypeW["$" + ty] == undefined) { return {b: b, v: emitAdoptAny(b, ty, v)} }
+        var uv = callExt(b, "js_gival", [v])
+        var convB = curF.NewBlock("")
+        var keepB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, uv, v), convB, keepB)
+        var cv = emitAdopt(convB, ty, v)
+        convB.NewBr(mergeB)
+        keepB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(cv, convB), llvm.ir.NewIncoming(v, keepB)])}
     }
     function csWriteTy(ty) {
         if (ty == undefined || ty == null) { return "" }
@@ -3669,6 +3711,79 @@ KwLet       = "let" KwEnd ;
         if (name == "Equals") return "equals"
         return name
     }
+    // ----- method-group conversion (docs/todo.md 1.1) -----
+    // The twin of csMethodGroup / csBindMethod in languages/csharp-interpreter.abnf, and
+    // the comment there is the specification half (ECMA-334 10.8 and 20.1/20.5). What is
+    // different here is only HOW the bound delegate is built:
+    //
+    //   - the forwarder is emitted with NO declared parameters, so the caller's argument
+    //     array arrives whole in Params[1] and is handed to js_mcall unchanged. The
+    //     target method's ARITY therefore never has to be known - which matters, because
+    //     `recv.M` does not know the receiver's class at emit time. csCtorDispatchBody
+    //     uses the same device.
+    //   - the receiver is captured in a scope of its own (js_scope_new), NOT in the
+    //     enclosing one. A loop that forms a group on a different receiver each
+    //     iteration would otherwise have every closure see the last receiver, because
+    //     one function invocation has one scope.
+    //   - one forwarder is emitted per METHOD NAME, not per site.
+    //
+    // js_csmg then does the class-chain lookup and the memo, so an absent name still
+    // reads as undefined and a repeat conversion answers the SAME object.
+    var mgFns = {}
+    function csMgBody(name) {
+        return function(b) {
+            var argsP = curF.Params[1]
+            var recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$mgself")])
+            b.NewRet(callExt(b, "js_mcall", [recvV, emitStr(b, name), argsP]))
+            return deadBlock()
+        }
+    }
+    function csMgFn(name) {
+        var k = "$" + name
+        if (mgFns[k] == undefined) { mgFns[k] = emitFunc([], csMgBody(name), false, null, null, false, null) }
+        return mgFns[k]
+    }
+    function emitMethodGroup(b, recvV, name) {
+        var scV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [scV, emitStr(b, "$mgself"), recvV])
+        var cloV = callExt(b, "js_closure", [handle(csMgFn(name)), scV])
+        return {b: b, v: callExt(b, "js_csmg", [recvV, emitStr(b, name), cloV])}
+    }
+    // `recv.M` where some class in the file declares M as a method: a STORED member of
+    // that name wins (a name may be a field in one class and a method in another), and
+    // only a miss becomes a method group. A name no class declares as a method never
+    // reaches this and emits the plain js_get it always did.
+    function emitFieldOrMethodGroup(b, recvV, name) {
+        var v0 = callExt(b, "js_get", [recvV, emitStr(b, name)])
+        var mgB = curF.NewBlock("")
+        var haveB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v0, hUndef])), mgB, haveB)
+        var mr = emitMethodGroup(mgB, recvV, name)
+        mr.b.NewBr(mergeB)
+        haveB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(mr.v, mr.b), llvm.ir.NewIncoming(v0, haveB)])}
+    }
+    // `k.E(5)` where E is a DELEGATE FIELD parses as a method call, and C# resolves it as
+    // the invocation of the field's delegate value (ECMA-334 12.8.10.2 - a delegate
+    // invocation is spelled exactly like a method invocation). js_csdfld answers the
+    // stored delegate or undefined for ANY receiver, so a List / dictionary / string
+    // receiver of the same name still reaches js_mcall and fails there as before.
+    // Emitted only for a name some class declares as DATA. Field-before-method is safe:
+    // C# forbids one class declaring both a field and a method of one name, so no
+    // receiver can have both.
+    function emitDelegFieldCall(b, recvV, name, argsV) {
+        var fV = callExt(b, "js_csdfld", [recvV, emitStr(b, name)])
+        var dB = curF.NewBlock("")
+        var mB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [fV, hUndef])), mB, dB)
+        var dr = emitDelegCall(dB, fV, argsV)
+        dr.b.NewBr(mergeB)
+        var mv = callExt(mB, "js_mcall", [recvV, emitStr(mB, csMName(name)), argsV])
+        mB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(mv, mB)])}
+    }
     // '.HasValue' / '.Value' on a value that carries no such member: the nullable reading
     // (a null test, and the value itself). A real member of that name wins, so a user
     // class with a Value field keeps working; a null receiver takes the nullable reading.
@@ -3804,6 +3919,22 @@ KwLet       = "let" KwEnd ;
                         b = ea.b
                         var keysV = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
                         cur = callExt(b, "js_mcall", [keysV, emitStr(b, "contains"), ea.v])
+                    } else if (s.name == "Invoke" && csMethNames["Invoke"] !== true) {
+                        // `d.Invoke(x)` is `d(x)`: ECMA-334 20.2 gives every delegate
+                        // type an Invoke method with the delegate's own signature. A
+                        // program that declares an Invoke METHOD of its own keeps the
+                        // ordinary dispatch, in both halves (docs/todo.md 1.1).
+                        var eai = emitArgs(b, sfxArgs[i])
+                        b = eai.b
+                        var dir = emitDelegCall(eai.b, cur, eai.v)
+                        b = dir.b
+                        cur = dir.v
+                    } else if (csDataNames[s.name] === true) {
+                        var ea3 = emitArgs(b, sfxArgs[i])
+                        b = ea3.b
+                        var dfr = emitDelegFieldCall(b, cur, s.name, ea3.v)
+                        b = dfr.b
+                        cur = dfr.v
                     } else {
                         var ea2 = emitArgs(b, sfxArgs[i])
                         b = ea2.b
@@ -3830,6 +3961,10 @@ KwLet       = "let" KwEnd ;
                         var cpr = emitPropGet(b, cur, s.name)
                         b = cpr.b
                         cur = cpr.v
+                    } else if (csMethNames[s.name] === true) {
+                        var mgr = emitFieldOrMethodGroup(b, cur, s.name)
+                        b = mgr.b
+                        cur = mgr.v
                     } else {
                         cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                     }
@@ -4402,6 +4537,12 @@ KwLet       = "let" KwEnd ;
     // auto-property and a primary-constructor parameter are all plain slots.
     function csUnqualRead(b, mi, name) {
         var ownV = csUnqualOwner(b, mi)
+        // A bare METHOD name read as a VALUE is a method group (ECMA-334 10.8 and
+        // 12.8.4). An INSTANCE method has to be bound to `this`; a STATIC one is the
+        // closure the descriptor already carries, which the js_get below answers, and
+        // csUnqualOwner has already resolved the descriptor of the class that DECLARES
+        // it - so an inherited static resolves too (docs/todo.md 1.1).
+        if (!mi.dat && mi.kind == "instance") { return emitMethodGroup(b, ownV, name) }
         if (csPropAcc[name] != undefined) { return emitPropGet(b, ownV, name) }
         return {b: b, v: callExt(b, "js_get", [ownV, emitStr(b, name)])}
     }
@@ -4463,7 +4604,12 @@ KwLet       = "let" KwEnd ;
     // these thunks run the walk has long since left the class body.
     function csEmitVarRead(b, defClass, name) {
         var mi = csMemberInfo(defClass, name)
-        if (mi == null || (mi.kind != "instance" && !mi.dat)) {
+        // A bare STATIC METHOD name used to fall through to js_scope_get here and abort
+        // with "variable not defined", deliberately, because answering it in the
+        // compiler alone would have been a halves divergence. Both halves answer it now
+        // (docs/todo.md 1.1), so the guard is only "is this a member of the enclosing
+        // type at all".
+        if (mi == null) {
             return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
         }
         var localB = curF.NewBlock("")
@@ -4715,7 +4861,18 @@ KwLet       = "let" KwEnd ;
     var csAccNames = {}
     var csPlainNames = {}
     function csNoteAccName(name) { csAccNames[name] = true }
-    function csNotePlainName(name) { csPlainNames[name] = true }
+    function csNotePlainName(name) { csPlainNames[name] = true; csDataNames[name] = true }
+    // ----- method groups: the two name sets that gate them (docs/todo.md 1.1) -----
+    // Keyed by member NAME alone, across the whole file, for the same reason csAccNames
+    // is: there is no static receiver type here. csMethNames is every name some class
+    // declares as a METHOD, csDataNames every name some class declares as DATA (a field,
+    // an auto-property, a property with accessor bodies, a primary-constructor
+    // parameter). They gate the two runtime shapes below, and a program whose member
+    // names do not collide with them emits exactly the IR it emitted before.
+    var csMethNames = {}
+    var csDataNames = {}
+    function csNoteMethName(name) { csMethNames[name] = true }
+    function csNoteDataName(name) { csDataNames[name] = true }
     function csAccAmbig(name) { return csAccNames[name] === true && csPlainNames[name] === true }
     // Emits `receiver has an own slot called name ? plain : accessor`. accT and plainT
     // are (block) -> {b, v}; either may split blocks of its own.
@@ -4764,6 +4921,7 @@ KwLet       = "let" KwEnd ;
         for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
         if (auto) { return csAutoField(name, isStatic, init, ty) }
         if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
+        csNoteDataName(name)
         if (addT != null || remT != null) { csEvtAcc[name] = isStatic ? "static" : "instance" }
         csNoteAccName(name)
         // A computed property's GETTER carries a declared type too, so
@@ -4936,6 +5094,7 @@ KwLet       = "let" KwEnd ;
             if (mods[i] == "new") { hides = true }
         }
         if (hides) { csHiddenNames[name] = true }
+        csNoteMethName(name)
         // 'static T M(this X x, ...)' is also reachable as x.M(...): remember which class
         // carries it, so a call site can emit the static call directly.
         if (isStatic && items[3].ext == true) { csExt[name] = curClassName }
@@ -5289,67 +5448,143 @@ KwLet       = "let" KwEnd ;
         }
         return sigs
     }
-    // The dispatcher body: args[0] is `this`, so an argument count of N reaches this
-    // function as a js_pylen of N+1. Each candidate gets a chain of blocks that falls
-    // through to the next one the moment a test fails; the last fallback is candidate 0,
-    // which is what a program whose constructors none of the tests accept gets.
+    // The two-pass chain of csPickCtor, lowered. `off` is how many leading entries of
+    // the callee's argument array are not arguments - 1 for a constructor or an
+    // INSTANCE method (args[0] is `this`), 0 for a static method - so an argument count
+    // of N reaches this function as a js_pylen of N + off. Each candidate gets a chain
+    // of blocks that falls through to the next one the moment a test fails; the last
+    // fallback is candidate 0, which is what a call none of the tests accept gets.
+    // callBs[i] must already be terminated by its caller.
+    function csDispatchChain(b, sigs, off, callBs) {
+        var argsP = curF.Params[1]
+        var nV = callExt(b, "js_pylen", [argsP])
+        var i
+        var k
+        // Pass 1: an exact arity and every declared parameter type satisfied.
+        var cur = b
+        for (i = 0; i < sigs.length; i++) {
+            var s = sigs[i]
+            if (!s.typed) { continue }
+            var nextB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            var hiB = curF.NewBlock("")
+            // n == s.n + off, spelled as two js_lt tests so this uses exactly the
+            // comparison emitParam already uses and owes no new extern.
+            cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, s.n + off)])), nextB, hiB)
+            hiB.NewCondBr(truthy(hiB, callExt(hiB, "js_lt", [emitNum(hiB, s.n + off), nV])), nextB, okB)
+            var tb = okB
+            for (k = 0; k < s.n; k++) {
+                var tnext = curF.NewBlock("")
+                tb.NewCondBr(truthy(tb, callExt(tb, "js_csis", [callExt(tb, "js_arg", [argsP, handle(k + off)]),
+                                                                emitStr(tb, csIrType(s.tys[k]))])),
+                             tnext, nextB)
+                tb = tnext
+            }
+            tb.NewBr(callBs[i])
+            cur = nextB
+        }
+        // Pass 2: the first candidate whose arity accepts the count at all.
+        for (i = 0; i < sigs.length; i++) {
+            var s2 = sigs[i]
+            var next2 = curF.NewBlock("")
+            var lo = (s2.va >= 0) ? s2.va : s2.req
+            var loOkB = curF.NewBlock("")
+            cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, lo + off)])), next2, loOkB)
+            if (s2.va >= 0) {
+                loOkB.NewBr(callBs[i])
+            } else {
+                loOkB.NewCondBr(truthy(loOkB, callExt(loOkB, "js_lt", [emitNum(loOkB, s2.n + off), nV])),
+                                next2, callBs[i])
+            }
+            cur = next2
+        }
+        cur.NewBr(callBs[0])
+    }
     function csCtorDispatchBody(clsName, sigs) {
         return function(b) {
             var argsP = curF.Params[1]
-            var nV = callExt(b, "js_pylen", [argsP])
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var ctorsV = callExt(b, "js_get", [clsV, emitStr(b, "__ctors")])
             var endB = curF.NewBlock("")
             var callBs = []
-            var i
-            var k
-            for (i = 0; i < sigs.length; i++) {
+            for (var i = 0; i < sigs.length; i++) {
                 var cb = curF.NewBlock("")
                 callExt(cb, "js_call", [callExt(cb, "js_pyget", [ctorsV, emitNum(cb, i)]), hUndef, argsP])
                 cb.NewBr(endB)
                 callBs.push(cb)
             }
-            // Pass 1: an exact arity and every declared parameter type satisfied.
-            var cur = b
-            for (i = 0; i < sigs.length; i++) {
-                var s = sigs[i]
-                if (!s.typed) { continue }
-                var nextB = curF.NewBlock("")
-                var okB = curF.NewBlock("")
-                var hiB = curF.NewBlock("")
-                // n == s.n + 1, spelled as two js_lt tests so this uses exactly the
-                // comparison emitParam already uses and owes no new extern.
-                cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, s.n + 1)])), nextB, hiB)
-                hiB.NewCondBr(truthy(hiB, callExt(hiB, "js_lt", [emitNum(hiB, s.n + 1), nV])), nextB, okB)
-                var tb = okB
-                for (k = 0; k < s.n; k++) {
-                    var tnext = curF.NewBlock("")
-                    tb.NewCondBr(truthy(tb, callExt(tb, "js_csis", [callExt(tb, "js_arg", [argsP, handle(k + 1)]),
-                                                                    emitStr(tb, csIrType(s.tys[k]))])),
-                                 tnext, nextB)
-                    tb = tnext
-                }
-                tb.NewBr(callBs[i])
-                cur = nextB
-            }
-            // Pass 2: the first candidate whose arity accepts the count at all.
-            for (i = 0; i < sigs.length; i++) {
-                var s2 = sigs[i]
-                var next2 = curF.NewBlock("")
-                var lo = (s2.va >= 0) ? s2.va : s2.req
-                var loOkB = curF.NewBlock("")
-                cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, lo + 1)])), next2, loOkB)
-                if (s2.va >= 0) {
-                    loOkB.NewBr(callBs[i])
-                } else {
-                    loOkB.NewCondBr(truthy(loOkB, callExt(loOkB, "js_lt", [emitNum(loOkB, s2.n + 1), nV])),
-                                    next2, callBs[i])
-                }
-                cur = next2
-            }
-            cur.NewBr(callBs[0])
+            csDispatchChain(b, sigs, 1, callBs)
             return endB
         }
+    }
+    // ----- METHOD overloads (docs/todo.md 1.2) -----
+    // The twin of csMethodMember / csMethodDispatch in languages/csharp-interpreter.abnf.
+    // Each overload is emitted on its own into a '__ovl_<name>' array on the descriptor
+    // and the NAME becomes a dispatcher; a name with one declaration emits the IR it
+    // emitted before, unchanged. The dispatcher forwards its own argument array
+    // untouched, so an instance callee still finds `this` at index 0.
+    function csOvlDispatchBody(clsName, mname, sigs, off) {
+        return function(b) {
+            var argsP = curF.Params[1]
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var fnsV = callExt(b, "js_get", [clsV, emitStr(b, "__ovl_" + mname)])
+            var callBs = []
+            for (var i = 0; i < sigs.length; i++) {
+                var cb = curF.NewBlock("")
+                cb.NewRet(callExt(cb, "js_call", [callExt(cb, "js_pyget", [fnsV, emitNum(cb, i)]), hUndef, argsP]))
+                callBs.push(cb)
+            }
+            csDispatchChain(b, sigs, off, callBs)
+            return deadBlock()
+        }
+    }
+    // A group that mixes STATIC and INSTANCE declarations has two calling conventions
+    // and cannot share one dispatcher: the last declaration wins there, which is what
+    // EVERY group did before this change, and the interpreter half does the same.
+    // An OVERLOADED OPERATOR is the same defect one member kind further along - see
+    // csOpMember in languages/csharp-interpreter.abnf for the probe and the citation.
+    // An operator is always static (ECMA-334 15.10.1), so off is 0.
+    function csEmitOpOverloads(b, clsV, clsName, mname, infos) {
+        if (infos.length == 1) {
+            var oi = emitFunc(infos[0].pinfo.params, infos[0].body, false, null, undefined, false, infos[0].pinfo)
+            callExt(b, "js_set", [clsV, emitStr(b, mname), callExt(b, "js_closure", [handle(oi), curScopeV])])
+            return b
+        }
+        var fnsV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < infos.length; i++) {
+            var one = infos[i]
+            var xi = emitFunc(one.pinfo.params, one.body, false, null, undefined, false, one.pinfo)
+            callExt(b, "js_arr_push", [fnsV, callExt(b, "js_closure", [handle(xi), curScopeV])])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__ovl_" + mname), fnsV])
+        var di = emitFunc([], csOvlDispatchBody(clsName, mname, csCtorSigs(infos), 0),
+                          false, null, undefined, false, null)
+        callExt(b, "js_set", [clsV, emitStr(b, mname), callExt(b, "js_closure", [handle(di), curScopeV])])
+        return b
+    }
+    function csEmitOverloads(b, clsV, clsName, mname, infos) {
+        var i
+        var same = true
+        for (i = 1; i < infos.length; i++) { if (infos[i].statik !== infos[0].statik) { same = false } }
+        if (!same) {
+            var ml = infos[infos.length - 1]
+            var li = emitFunc(ml.params, ml.body, !ml.statik, null, undefined, false, ml.pinfo, ml.retTy)
+            callExt(b, "js_set", [clsV, emitStr(b, mname),
+                                  csGenWrap(b, callExt(b, "js_closure", [handle(li), curScopeV]))])
+            return b
+        }
+        var fnsV = callExt(b, "js_arr_new", [])
+        for (i = 0; i < infos.length; i++) {
+            var one = infos[i]
+            var oi = emitFunc(one.params, one.body, !one.statik, null, undefined, false, one.pinfo, one.retTy)
+            callExt(b, "js_arr_push", [fnsV, csGenWrap(b, callExt(b, "js_closure", [handle(oi), curScopeV]))])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__ovl_" + mname), fnsV])
+        var off = infos[0].statik ? 0 : 1
+        var di = emitFunc([], csOvlDispatchBody(clsName, mname, csCtorSigs(infos), off),
+                          !infos[0].statik, null, undefined, false, null)
+        callExt(b, "js_set", [clsV, emitStr(b, mname), callExt(b, "js_closure", [handle(di), curScopeV])])
+        return b
     }
     function buildClassStmt(name, members, kind, primary, isRecord) {
         return function(b) {
@@ -5441,12 +5676,30 @@ KwLet       = "let" KwEnd ;
                 ctorIdx = emitFunc([], null, true, fields, superName)
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            // EVERY method declaration is kept, not just the last one (docs/todo.md
+            // 1.2): the group is collected first and the member is built once, from the
+            // FIRST record of its group, so the record order is the declaration order
+            // the resolution rule reads.
+            var mgroups = {}
+            for (i = 0; i < members.length; i++) {
+                if (members[i].kind != "method" && members[i].kind != "op") { continue }
+                var gk = "$" + members[i].kind + "$" + members[i].name
+                if (mgroups[gk] == undefined) { mgroups[gk] = [] }
+                mgroups[gk].push(members[i])
+            }
             for (i = 0; i < members.length; i++) {
                 var m2 = members[i]
                 if (m2.kind == "method") {
-                    var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
-                    callExt(b, "js_set", [clsV, emitStr(b, m2.name),
-                                          csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))])
+                    var grp = mgroups["$method$" + m2.name]
+                    if (grp[0] !== m2) {
+                        // Already emitted with the rest of its group.
+                    } else if (grp.length > 1) {
+                        b = csEmitOverloads(b, clsV, name, m2.name, grp)
+                    } else {
+                        var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
+                        callExt(b, "js_set", [clsV, emitStr(b, m2.name),
+                                              csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))])
+                    }
                     // A custom Deconstruct also gets a '__deconstruct' member: the same body,
                     // wrapped so that it returns its out parameters as a tuple.
                     if (m2.name == "Deconstruct") {
@@ -5489,8 +5742,8 @@ KwLet       = "let" KwEnd ;
                 }
                 // An overloaded operator or a user conversion: a plain static member.
                 if (m2.kind == "op") {
-                    var oi = emitFunc(m2.pinfo.params, m2.body, false, null, undefined, false, m2.pinfo)
-                    callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(oi), curScopeV])])
+                    var ogrp = mgroups["$op$" + m2.name]
+                    if (ogrp[0] === m2) { b = csEmitOpOverloads(b, clsV, name, m2.name, ogrp) }
                 }
             }
             // A record deconstructs into its positional parameters, unless it wrote a
@@ -5610,6 +5863,7 @@ KwLet       = "let" KwEnd ;
             for (var pp = 0; pp < primary.params.length; pp++) {
                 tbl[primary.params[pp]] = "instance"
                 dat[primary.params[pp]] = true
+                csNoteDataName(primary.params[pp])
             }
         }
         csClassMembers[name] = tbl

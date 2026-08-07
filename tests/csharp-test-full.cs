@@ -1685,6 +1685,174 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s30ad6", li / 2 == 1 && (li is int));
         }
 
+
+        // ===== SECTION 31: method-group conversion, method overloads, and the
+        // integral local write =====
+        //
+        // docs/todo.md 1.1, 1.2 and 1.3. ECMA-334 10.8 (method group conversions):
+        // a method group is implicitly convertible to a compatible delegate type.
+        // ECMA-334 20.1 says the delegate so created keeps the receiver the group
+        // was formed on as its target, and 20.5 makes two delegates equal when
+        // target and method are equal - which is what `E -= s.Got` needs, since
+        // Delegate.Remove removes an EQUAL entry. ECMA-334 20.2 gives every
+        // delegate type an Invoke method with the delegate's own signature, and
+        // 12.8.10.2 spells a delegate invocation exactly like a method invocation,
+        // which is why `k.E(5)` on a delegate FIELD is legal. ECMA-334 12.6.4 is
+        // overload resolution and 12.12.12 the run-time type test it is decided by
+        // here. ECMA-334 10.2.3 at 12.21.2 makes a written value adopt the target's
+        // declared type, and 8.3.6 gives `long` a 64-bit range.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value is spec-cited
+        // rather than executed. Every operand is read out of an ARRAY so the
+        // grammars' constant folders cannot answer at compile time.
+        //
+        // WHAT WAS BROKEN. Method-group conversion did not exist anywhere: `this.M`,
+        // a bare `M` and a bare static `H` all answered undefined or aborted with
+        // "unknown name", in BOTH halves; `k.E(5)` on a delegate field aborted with
+        // "unknown method 'E'"; and `.Invoke()` was unsupported. Overloading was
+        // implemented for CONSTRUCTORS only, so a class kept the LAST declaration of
+        // each method name and `M(1)`, `M(1.5)`, `M(1,2)` and `M("x")` all ran
+        // `M(string)`. And `long x; x = 3; x*1000000*1000000` was a 32-bit multiply
+        // answering 2112827392 where C# says 3000000000000.
+        delegate int S31Op(int x);
+        delegate void S31H(string s);
+        class S31K
+        {
+            public int Bias = 1;
+            public S31Op E;
+            public int F(int x) { return x + this.Bias; }
+            public static int G(int x) { return x + 20; }
+            public int ViaThis() { S31Op o = this.F; return o(10); }
+            public int ViaBare() { S31Op o = F; return o(100); }
+            public int ViaStatic() { S31Op o = G; return o(1000); }
+            public int FireE(int x) { return E(x); }
+        }
+        class S31Base { public virtual int V(int x) { return x + 1; } public static int SB(int x) { return x + 90; } }
+        class S31Der : S31Base { public override int V(int x) { return x + 2; } }
+        class S31Sink
+        {
+            public string Tag;
+            public S31Sink(string t) { Tag = t; }
+            public void Got(string s) { Program.S31Log = Program.S31Log + Tag + s; }
+        }
+        class S31Src
+        {
+            public event S31H E;
+            public void Fire(string s) { if (E != null) { E(s); } }
+        }
+        class S31Ov
+        {
+            public int M(int a) { return 1; }
+            public int M(double a) { return 2; }
+            public int M(int a, int b) { return 3; }
+            public int M(string a) { return 4; }
+            public static int S(int a) { return 11; }
+            public static int S(string a) { return 12; }
+            public int Only(int a) { return a + 1; }
+        }
+        // An OVERLOADED OPERATOR: ECMA-334 12.4.5 resolves a user-defined binary
+        // operator by the same overload resolution as a method call, and 15.10.1
+        // makes every operator static. The second declaration used to overwrite the
+        // first, so `v + otherV` ran the (S31V, int) body and died reading `.X` of an
+        // int - in BOTH halves, so --cross was blind to it.
+        class S31V
+        {
+            public double X;
+            public S31V(double x) { X = x; }
+            public static S31V operator +(S31V a, S31V b) { return new S31V(a.X + b.X); }
+            public static S31V operator +(S31V a, int b) { return new S31V(a.X + b); }
+        }
+        static string S31Log = "";
+        static int S31Free(int x) { return x + 7; }
+
+        static void S31()
+        {
+            int[] n = {1, 2, 3};
+            string[] w = {"x", "y"};
+            double[] q = {1.5};
+
+            // ----- method groups -----
+            S31K k = new S31K();
+            Program.Check("s31mg1", k.ViaThis() == 11);
+            Program.Check("s31mg2", k.ViaBare() == 101);
+            Program.Check("s31mg3", k.ViaStatic() == 1020);
+            S31Op a = S31K.G;
+            Program.Check("s31mg4", a(n[0]) == 21);
+            S31Op b = Program.S31Free;
+            Program.Check("s31mg5", b(n[0]) == 8);
+            S31Op c = k.F;
+            Program.Check("s31mg6", c(n[1]) == 3);
+            // A method group is BOUND: it keeps its own receiver's state.
+            S31K k2 = new S31K();
+            k2.Bias = n[2];
+            S31Op c2 = k2.F;
+            Program.Check("s31mg7", c(n[0]) == 2 && c2(n[0]) == 4);
+            // ...and it is VIRTUAL: the object's own override runs, not the one the
+            // static type declares.
+            S31Base d = new S31Der();
+            S31Op v = d.V;
+            Program.Check("s31mg8", v(n[0]) == 3);
+            // An inherited STATIC reached through the derived type name: the group
+            // walks __super, which a plain member read does not.
+            S31Op sb = S31Der.SB;
+            Program.Check("s31mg9", sb(n[0]) == 91);
+            // .Invoke() is the delegate's own method (ECMA-334 20.2).
+            Program.Check("s31mg10", c.Invoke(n[2]) == 4);
+            // A delegate FIELD called like a method, qualified and unqualified.
+            k.E = k.F;
+            Program.Check("s31mg11", k.E(n[2]) == 4 && k.FireE(n[1]) == 3);
+            // ONE object per (receiver, method), so Delegate.Remove finds it again.
+            Program.S31Log = "";
+            S31Src src = new S31Src();
+            S31Sink s1 = new S31Sink("1");
+            S31Sink s2 = new S31Sink("2");
+            src.E += s1.Got;
+            src.E += s2.Got;
+            src.Fire(w[0]);
+            src.E -= s1.Got;
+            src.Fire(w[1]);
+            Program.Check("s31mg12", Program.S31Log == "1x2x2y");
+            Program.Check("s31mg13", s1.Got == s1.Got);
+            Program.Check("s31mg14", s1.Got != s2.Got);
+
+            // ----- method overloads (ECMA-334 12.6.4) -----
+            S31Ov ov = new S31Ov();
+            Program.Check("s31ov1", ov.M(n[0]) == 1);
+            Program.Check("s31ov2", ov.M(q[0]) == 2);
+            Program.Check("s31ov3", ov.M(n[0], n[1]) == 3);
+            Program.Check("s31ov4", ov.M(w[0]) == 4);
+            Program.Check("s31ov5", S31Ov.S(n[0]) == 11);
+            Program.Check("s31ov6", S31Ov.S(w[0]) == 12);
+            // NEGATIVE CONTROL: a name with ONE declaration is unchanged.
+            Program.Check("s31ov7", ov.Only(n[1]) == 3);
+
+            // ----- an overloaded operator (ECMA-334 12.4.5 / 15.10.1) -----
+            S31V ov1 = new S31V(n[0]);
+            Program.Check("s31op1", (ov1 + new S31V(n[1])).X == 3);
+            Program.Check("s31op2", (ov1 + n[1]).X == 3);
+
+            // ----- an integral local write adopts its declared type -----
+            long lx;
+            lx = n[2];
+            Program.Check("s31ad1", lx * 1000000 * 1000000 == 3000000000000L);
+            long ly = n[2];
+            ly = n[1];
+            Program.Check("s31ad2", ly * 1000000 * 1000000 == 2000000000000L);
+            ulong lu;
+            lu = n[2];
+            Program.Check("s31ad3", lu * 1000000 * 1000000 == 3000000000000UL);
+            // NEGATIVE CONTROL: an `int` local must still be a 32-bit multiply, and
+            // must still read as an int.
+            int li;
+            li = n[2];
+            Program.Check("s31ad4", li * 1000000 * 1000000 == 2112827392 && (li is int) && !(li is long));
+            // A value that is ALREADY of the declared type is unchanged (this is the
+            // path the js_gival gate skips).
+            long lz;
+            lz = lx;
+            Program.Check("s31ad5", lz * 1000000 * 1000000 == 3000000000000L);
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -1719,6 +1887,7 @@ b";                                                   // verbatim keeps the newl
             Program.S28(); // SECTION-CALL 28
             Program.S29(); // SECTION-CALL 29
             Program.S30(); // SECTION-CALL 30
+            Program.S31(); // SECTION-CALL 31
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

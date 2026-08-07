@@ -2422,6 +2422,67 @@ KwLet       = "let" KwEnd ;
         return f.apply(undefined, argv)
     }
 
+    // ----- method-group conversion (docs/todo.md 1.1) -----
+    // ECMA-334 10.8 makes a METHOD GROUP - `this.M`, a bare `M`, `C.M` - convertible to
+    // a compatible delegate type, and 20.1 says the delegate so created holds the
+    // receiver the group was formed on as its target. Two consequences have to be got
+    // right, and both are settleable from the specification alone (there is no C#
+    // toolchain on this machine):
+    //
+    //   - the conversion is a BOUND method: `Op o = s.Got; o(1)` runs Got with `s` as
+    //     its `this`, whenever it is called and however far the value has travelled;
+    //   - `E -= s.Got` must remove what `E += s.Got` added. ECMA-334 20.5 defines
+    //     delegate equality as "same target and same method", and a delegate here is
+    //     compared by OBJECT IDENTITY (csDelegSub walks with !==), so the bound closure
+    //     is MEMOISED on the receiver under a `__mg_` key: exactly one object per
+    //     (receiver, method), which makes identity answer what 20.5 asks for.
+    //
+    // A STATIC method needs no receiver, so its group IS the closure the class
+    // descriptor already carries - one object per method, memo unnecessary - and it
+    // must NOT be bound, because makeStaticClosure takes no leading `this`.
+    // `__mg_` is a `__`-prefixed slot, so keysOf hides it and no clone, record
+    // equality or struct copy can see it (manual 7.9).
+    function csMethodStatic(c, name) {
+        if (c == undefined || c == null) { return false }
+        if (!hasOwn(csClassMembers, c.__name)) { return false }
+        var tbl = csClassMembers[c.__name]
+        return tbl[name] == "static"
+    }
+    function csBindMethod(self, m) {
+        return function() {
+            var argv = [self]
+            for (var i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            return m.apply(undefined, argv)
+        }
+    }
+    // The delegate a method group named `name` on `o` denotes, or undefined when `o`
+    // declares no such method. The twin is js_csmg in languages/lib/csharp-rt.metajs
+    // and in abnf/jsrtcsharp.go.
+    function csMethodGroup(o, name) {
+        if (o === undefined || o === null || typeof o != "object") { return undefined }
+        if (o.__isclass === true) {
+            // A class descriptor. Its OWN statics were answered by the plain member read
+            // that got here; the walk is what reaches one inherited from a base, which
+            // getField does not do for a descriptor.
+            for (var sc = o; sc != undefined && sc != null; sc = sc.__super) {
+                if (hasOwn(sc, name) && typeof sc[name] == "function") { return sc[name] }
+            }
+            return undefined
+        }
+        var key = "__mg_" + name
+        if (hasOwn(o, key)) { return o[key] }
+        var m = undefined
+        var dc = null
+        for (var c = o.__class; c != undefined && m == undefined; c = c.__super) {
+            if (hasOwn(c, name)) { m = c[name]; dc = c }
+        }
+        if (typeof m != "function") { return undefined }
+        if (csMethodStatic(dc, name)) { return m }
+        var f = csBindMethod(o, m)
+        o[key] = f
+        return f
+    }
+
     // ----- Extension methods -----
     // A static method whose first parameter carries 'this' is callable as an instance
     // method on that first argument. The registry is filled while the classes are built,
@@ -2448,6 +2509,13 @@ KwLet       = "let" KwEnd ;
         // string conversion; a user override is dispatched normally and wins.
         if (name == "ToString" && args.length == 0 && !csHasMethod(target, "ToString")) {
             return csStr(target)
+        }
+        // `d.Invoke(x)` is `d(x)`: ECMA-334 20.2 gives every delegate type an Invoke
+        // method with the delegate's own signature, and 12.8.10.2 invokes it. A user
+        // type declaring its own Invoke wins, which is what csHasMethod tests
+        // (docs/todo.md 1.1).
+        if (name == "Invoke" && !csHasMethod(target, name) && csIsDelegVal(target)) {
+            return csDelegInvoke(target, args)
         }
         if (typeof target == "string") {
             if (name == "Substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
@@ -2489,7 +2557,22 @@ KwLet       = "let" KwEnd ;
             // (toString, valueOf, ...) under a host JS engine.
             var m = undefined
             for (var c = target.__class; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
-            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            if (typeof m != "function") {
+                // A DELEGATE FIELD called like a method: `this.E(5)` and `k.E(5)` parse
+                // as method calls, and C# resolves the invocation against the field's
+                // delegate value (ECMA-334 12.8.10.2 - a delegate invocation is written
+                // exactly like a method invocation). A real method of the name wins,
+                // which is why this is reached only after the __class walk has missed
+                // (docs/todo.md 1.1).
+                var dv = anytype
+                dv = hasOwn(target, name) ? target[name] : undefined
+                if (dv === undefined) {
+                    var dg = csFindAcc(target, "__get_" + name)
+                    if (dg != undefined) { dv = dg(target) }
+                }
+                if (csIsDelegVal(dv)) { return csDelegInvoke(dv, args) }
+                fail("unknown method '" + name + "' on " + target.__class.__name)
+            }
             return m.apply(undefined, concat2impl([target], args))
         }
         if (target.__isclass === true) {
@@ -2652,7 +2735,7 @@ KwLet       = "let" KwEnd ;
             v = valT()
             if (ref.path.length == 0) {
                 if (op != "=") v = applyOp(op, getVar(ref.name), v)
-                if (lty != "") { v = csAdoptVal(lty, v) }
+                if (lty != "") { v = csAdoptLocal(lty, v) }
                 setVar(ref.name, v)
             } else {
                 var p = csResolveRef(ref)
@@ -4589,10 +4672,22 @@ KwLet       = "let" KwEnd ;
         // A record deconstructs into its positional parameters, unless it declares a
         // Deconstruct of its own (which csDeconstruct asks for first).
         if (isRecord && primary != null && primary != undefined) { cls.__recfields = primary.params }
+        // EVERY method declaration is kept, not just the last one (docs/todo.md 1.2):
+        // the group is collected first, and the member is built once, from the FIRST
+        // record of its group, so the record order is the declaration order the
+        // resolution rule reads.
+        var mgroups = {}
+        for (i = 0; i < members.length; i++) {
+            if (members[i].kind != "method" && members[i].kind != "op") { continue }
+            var gk = "$" + members[i].kind + "$" + members[i].name
+            if (!hasOwn(mgroups, gk)) { mgroups[gk] = [] }
+            mgroups[gk].push(members[i])
+        }
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
-                cls[m2.name] = m2.statik ? makeStaticClosure(m2, cls) : makeInstanceClosure(m2)
+                var grp = mgroups["$method$" + m2.name]
+                if (grp[0] === m2) { cls[m2.name] = csMethodMember(grp, cls) }
                 // 'static T M(this X x, ...)' is also reachable as x.M(...).
                 if (m2.statik && m2.ext) { csExt[m2.name] = cls[m2.name] }
                 // A custom Deconstruct: kept in its raw form so a deconstruction can read
@@ -4608,7 +4703,10 @@ KwLet       = "let" KwEnd ;
                 if (m2.remT != null) { cls["__remove_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.remT, cls) }
             }
             // An overloaded operator or a user conversion: a static member of the class.
-            if (m2.kind == "op") { cls[m2.name] = makeStaticClosure(m2, cls) }
+            if (m2.kind == "op") {
+                var ogrp = mgroups["$op$" + m2.name]
+                if (ogrp[0] === m2) { cls[m2.name] = csOpMember(ogrp, cls) }
+            }
             if (m2.kind == "indexer") {
                 if (m2.getT != null) { cls.__index = csAccClosure(false, m2.pinfo, m2.getT, cls) }
                 if (m2.setT != null) { cls.__setindex = csAccClosure(false, csIdxSetPI(m2.pinfo), m2.setT, cls) }
@@ -4675,7 +4773,7 @@ KwLet       = "let" KwEnd ;
             return info.body()
         }
     }
-    // ----- constructor overload resolution (docs/todo.md 1.10) -----
+    // ----- overload resolution: constructors AND methods (docs/todo.md 1.2/1.10) -----
     // ECMA-334 12.6.4 picks the applicable member whose parameter types best match the
     // argument types. There is no static type here, so the choice is made from the
     // ARGUMENT VALUES, in two passes and in declaration order:
@@ -4734,6 +4832,63 @@ KwLet       = "let" KwEnd ;
             for (i = 1; i < argv.length; i++) { args.push(argv[i]) }
             cls.__ctorFns[csPickCtor(cls.__ctorSigs, args)].apply(undefined, argv)
         }
+    }
+    // ----- METHOD overloads (docs/todo.md 1.2) -----
+    // `c4e1942` did constructors and stopped there; an ordinary method kept ONE
+    // closure per name, so the last declaration simply overwrote the earlier ones and
+    // `K.M(1)`, `K.M(1.5)`, `K.M(1,2)` and `K.M("x")` all ran `M(string)`. The
+    // resolution rule is the same one - ECMA-334 12.6.4, applied to the argument
+    // VALUES, in the two passes above - so csCtorSigs and csPickCtor are reused
+    // verbatim and the compiler half reuses its own lowering of them.
+    //
+    // An INSTANCE method's argument array carries `this` first (makeInstanceClosure)
+    // and a STATIC one's does not (makeStaticClosure), so the offset is decided once,
+    // per group, from the group's own staticness.
+    function csMethodDispatch(fns, sigs, isStatic) {
+        return function() {
+            var argv = []
+            var args = []
+            var i
+            for (i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            for (i = (isStatic ? 0 : 1); i < argv.length; i++) { args.push(argv[i]) }
+            return fns[csPickCtor(sigs, args)].apply(undefined, argv)
+        }
+    }
+    // The member a name's overload group becomes. A group that mixes STATIC and
+    // INSTANCE declarations has two calling conventions and cannot share one
+    // dispatcher: the last declaration wins there, which is what every group did
+    // before this change. C# allows such a group only across a hiding boundary, and
+    // the compiler half does exactly the same thing.
+    function csMethodMember(infos, cls) {
+        var i
+        if (infos.length == 1) {
+            var m0 = infos[0]
+            return m0.statik ? makeStaticClosure(m0, cls) : makeInstanceClosure(m0)
+        }
+        var same = true
+        for (i = 1; i < infos.length; i++) { if (infos[i].statik !== infos[0].statik) { same = false } }
+        if (!same) {
+            var ml = infos[infos.length - 1]
+            return ml.statik ? makeStaticClosure(ml, cls) : makeInstanceClosure(ml)
+        }
+        var fns = []
+        for (i = 0; i < infos.length; i++) {
+            fns.push(infos[i].statik ? makeStaticClosure(infos[i], cls) : makeInstanceClosure(infos[i]))
+        }
+        return csMethodDispatch(fns, csCtorSigs(infos), infos[0].statik)
+    }
+    // An OVERLOADED OPERATOR is the same defect one member kind further along, and
+    // the probe that found it is `V operator +(V, V)` beside `V operator +(V, int)`:
+    // the second declaration overwrote the first, so `v + otherV` ran the (V, int)
+    // body and died reading `.X` of an int. ECMA-334 12.4.5 resolves a user-defined
+    // binary operator by the SAME overload resolution as a method call (12.6.4), so
+    // the same dispatcher serves. An operator is always static (15.10.1), so the
+    // argument array carries no `this`.
+    function csOpMember(infos, cls) {
+        if (infos.length == 1) { return makeStaticClosure(infos[0], cls) }
+        var fns = []
+        for (var i = 0; i < infos.length; i++) { fns.push(makeStaticClosure(infos[i], cls)) }
+        return csMethodDispatch(fns, csCtorSigs(infos), true)
     }
     // An accessor closure: the same shape as a method, so it is called like one.
     function csAccClosure(isStatic, pinfo, body, cls) {
@@ -4837,7 +4992,11 @@ KwLet       = "let" KwEnd ;
         // A property with a get accessor body ('int W { get { ... } }').
         var g = csFindAcc(o, "__get_" + name)
         if (g != undefined) { return (o.__isclass === true) ? g() : g(o) }
-        return undefined
+        // Nothing of that name is stored on the object: it may still be a METHOD, and
+        // `o.M` is then a method group (ECMA-334 10.8). csMethodGroup answers undefined
+        // for a name no class in the chain declares, so a genuinely absent member reads
+        // exactly as it always did.
+        return csMethodGroup(o, name)
     }
     core.getIndex = csGetIndex
 
@@ -4902,9 +5061,33 @@ KwLet       = "let" KwEnd ;
         }
         return null
     }
+    // A bare METHOD name used as a VALUE is a method group (ECMA-334 10.8 and 12.8.4:
+    // a simple name that resolves to a method group). csSelfWith deliberately answers
+    // DATA members only - __sfld and the accessor walk - so this is a second hook
+    // rather than a widening of the first: a WRITE to a method name must still be
+    // "assignment to unknown variable", and setMiss therefore does not consult it.
+    function csVarMethodGroup(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], "this")) {
+                var self = sc[i]["this"]
+                if (self === undefined || self === null || typeof self != "object") { return null }
+                var mg = csMethodGroup(self, name)
+                if (mg == undefined) { return null }
+                return {v: mg}
+            }
+            // A static member body carries its class instead of a `this`.
+            if (hasOwn(sc[i], "__cscls")) {
+                var sg = csMethodGroup(sc[i]["__cscls"], name)
+                if (sg == undefined) { return null }
+                return {v: sg}
+            }
+        }
+        return null
+    }
     core.varMiss = function(name) {
         var o = csSelfWith(name)
-        if (o == null) { return null }
+        if (o == null) { return csVarMethodGroup(name) }
         if (hasOwn(o, name)) { return {v: o[name]} }
         var g = csFindAcc(o, "__get_" + name)
         if (g == undefined) { return {v: o[name]} }
@@ -5110,13 +5293,26 @@ KwLet       = "let" KwEnd ;
     // `long x; x = 3;` stores a value C# would implicitly convert and the loss shows
     // up only past 32 bits; but a `double` slot holding a plain int INTEGER-DIVIDES
     // immediately - `double L; L = 3;` then `L / 2` answered 1 instead of 1.5, which
-    // is the defect the item names. THE INTEGRAL HALF IS STILL OPEN: `long x; x = 3;
-    // x * 1000000 * 1000000` is a 32-bit multiply. Closing it needs the extern to be
-    // called only when it can change something - a plain-number test the emitter can
-    // lower without a call - and that does not exist today.
+    // is the defect the item names.
+    //
+    // THE INTEGRAL HALF IS CLOSED NOW (docs/todo.md 1.3). The compiler half found the
+    // "plain-number test the emitter can lower without a call" the item asked for -
+    // js_gival, a C floor primitive, compared for HANDLE IDENTITY - and the
+    // measurement that follows from it is at csLocalWriteTy in
+    // languages/csharp-to-llvm-ir.abnf: unconditional adoption is +7.8% on
+    // tests/bench/mod.cs over 9 draws, gated adoption is -1.7% and inside the spread.
+    // Here the same gate is `typeof v == "number"`, which selects exactly the same
+    // set: a sized integer, a double and a char are all BOXES (objects) in this half.
+    // It is deliberately width-blind for the reason recorded there.
     function csLocalWriteTy(ty) {
         if (ty == "double" || ty == "float" || ty == "decimal") { return ty }
+        if (hasOwn(csTypeW, ty)) { return ty }
         return ""
+    }
+    function csAdoptLocal(ty, v) {
+        if (ty == "double" || ty == "float" || ty == "decimal") { return csAdoptVal(ty, v) }
+        if (typeof v != "number") { return v }
+        return csAdoptVal(ty, v)
     }
     function csWriteTy(ty) {
         if (ty == undefined || ty == null) { return "" }
