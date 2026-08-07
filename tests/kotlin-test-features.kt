@@ -797,6 +797,53 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("when-is-multiline-comma",
         shapeTag(Dot()) == "dot" && shapeTag(Line()) == "linear" && shapeTag(Ray()) == "linear")
 
+    // ----- Double.toString: the digit run comes from a floPrec round-trip -----
+    // docs/todo.md 1.8. kDecDigits used to take the digits from `"" + a`, i.e.
+    // from whatever the script host printed, and GOJA'S Number-to-String IS NOT
+    // ALWAYS THE SHORTEST ROUND-TRIPPING FORM: for the first seven values below
+    // it prints one digit too few (a run that reads back as a different double),
+    // and for #2..#4, which sit at the subnormal boundary, it emits a non-digit
+    // character outright ("B.70548258834231e-309"). There is no kotlinc on this
+    // machine, so the oracle is the ENGINES: these strings are what the compiled
+    // half, the native binary and the -frozen interpreter all already answered,
+    // and it is the goja interpreter that used to disagree.
+    //
+    // Every operand is read out of THIS ARRAY rather than written at the check,
+    // so the constant folder cannot answer in the renderer's place.
+    val kflo = doubleArrayOf(
+        5.179975601040939e21,         // goja: 5.17997560104094e+21
+        -9.772720132874869e-147,
+        1.870548258834231e-308,       // goja: "B.70548258834231e-309"
+        -1.2658976361944994e-308,     // goja: "-<.658976361944994e-309"
+        -1.3184270331886705e-308,     // goja: "-=.184270331886705e-309"
+        0.0009339729831804499,
+        -1.4487572656910099e-208,
+        4.9e-324,                     // Double.MIN_VALUE - the two-digit rule
+        1.0 / 3.0,
+        1e7, 9999999.0, 1e-3, 9.999999e-4)
+    check("dblstr-goja-short-1", kflo[0].toString() == "5.179975601040939E21")
+    check("dblstr-goja-short-2", kflo[1].toString() == "-9.772720132874869E-147")
+    check("dblstr-goja-nondigit-1", kflo[2].toString() == "1.870548258834231E-308")
+    check("dblstr-goja-nondigit-2", kflo[3].toString() == "-1.2658976361944994E-308")
+    check("dblstr-goja-nondigit-3", kflo[4].toString() == "-1.3184270331886705E-308")
+    check("dblstr-goja-short-3", kflo[5].toString() == "9.339729831804499E-4")
+    check("dblstr-goja-short-4", kflo[6].toString() == "-1.4487572656910099E-208")
+    // Double.MIN_VALUE is really 4.9406564584124654E-324, and Kotlin/JVM's
+    // Double.toString IS java.lang.Double.toString, which never prints fewer than
+    // two significant digits and takes the second from the ACTUAL value rather
+    // than padding a zero. This half printed "5.0E-324" while the compiled half
+    // and the native binary both said "4.9E-324" - a halves divergence --cross
+    // had never reached, found by the probe for this item.
+    check("dblstr-two-sig-min", kflo[7].toString() == "4.9E-324")
+    check("dblstr-third", kflo[8].toString() == "0.3333333333333333")
+    // The plain/scientific boundary is a VALUE window, 1e-3 <= |d| < 1e7, and it
+    // is Kotlin's, never the host printer's.
+    check("dblstr-window", kflo[9].toString() == "1.0E7" && kflo[10].toString() == "9999999.0" &&
+        kflo[11].toString() == "0.001" && kflo[12].toString() == "9.999999E-4")
+    // The same digits at binary32 width, where the shortest run is a FLOAT's.
+    check("fltstr-from-double", kflo[0].toFloat().toString() == "5.1799756E21" &&
+        kflo[5].toFloat().toString() == "9.33973E-4" && kflo[8].toFloat().toString() == "0.33333334")
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 

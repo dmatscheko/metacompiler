@@ -772,7 +772,15 @@ function js_lustr(v) {
 //
 // The round-trip test needs no parsing: "%.15g" reads back exactly when the
 // SHORTEST round-tripping form has at most 15 significant digits, which is what
-// "" + n gives. The DIGITS come from floPrec (host id 70 of
+// "" + n gives ON THIS PATH. This file is layer 2 and is only ever linked into a
+// native binary, so `"" + n` is the C floor's shortest_digits, which is exact -
+// as is jsNumString over in abnf/jsrtlua.go, which is strconv. A TAG SCRIPT has
+// no such guarantee: it also runs on goja, whose Number-to-String is not always
+// shortest, so luaGStr in languages/lua-interpreter.abnf makes the 15-or-17
+// choice by asking floPrec(n, 15) and parsing it back - lua's own test, verbatim.
+// See docs/todo.md 1.8; a 102-value probe went from 73 rows wrong against
+// `lua` 5.5.0 to 0 with this file untouched.
+// The DIGITS come from floPrec (host id 70 of
 // languages/lib/runtime.c, floPrecStr in abnf/commonscript.go) - the value rounded
 // to a FIXED number of significant digits, which MetaJS cannot express and which
 // is NOT the shortest form padded with zeros: 5e-324's fifteen digits are

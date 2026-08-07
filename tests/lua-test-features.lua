@@ -405,6 +405,47 @@ local function transform(list)
 end
 check("combined-pipeline", transform({1, 2, -3}), "o1e2x")
 
+-- ----- float rendering: the 15-then-17 window, chosen by ROUND-TRIP -----
+-- docs/todo.md 1.8. lua 5.5.0 writes a float with "%.15g" and falls back to
+-- "%.17g" only when the text does not read back; it NEVER tries 16. luaGStr used
+-- to pick between them by counting the digits the host printed for `"" + n`, and
+-- goja's Number-to-String is not always the shortest round-tripping form: for the
+-- first seven values below it prints fifteen digits that read back as a DIFFERENT
+-- double (and for #4..#6, which sit at the subnormal boundary, it emits a
+-- non-digit character outright - "B.70548258834231e-309"). The choice is now made
+-- the way lua makes it, by parsing floPrec(n, 15) back, so the answer is the same
+-- under goja, under -frozen, in the compiled half and natively.
+--
+-- Every operand is read out of THIS TABLE, never written as a literal at the
+-- check, so the constant folder cannot answer in the renderer's place. All twelve
+-- expected strings are `lua` 5.5.0's own output.
+local gflo = {
+    -1.4487572656910099e-208,     -- goja: -1.44875726569101e-208, fifteen digits
+    5.179975601040939e21,
+    -9.772720132874869e-147,
+    1.870548258834231e-308,       -- goja: "B.70548258834231e-309"
+    -1.2658976361944994e-308,     -- goja: "-<.658976361944994e-309"
+    -1.3184270331886705e-308,     -- goja: "-=.184270331886705e-309"
+    0.0009339729831804499,
+    1 / 3,                        -- 17 digits, NOT the 16-digit shortest form
+    1e15,                         -- P is 15 and exp is 15, so %g goes exponential
+    1234567890123456.0,           -- P is 17 and exp is 15, so it does not
+    5e-324,                       -- fifteen digits round-trip the smallest subnormal
+    1e16,
+}
+check("flostr-goja-short-1", "" .. gflo[1], "-1.4487572656910099e-208")
+check("flostr-goja-short-2", "" .. gflo[2], "5.1799756010409385e+21")
+check("flostr-goja-short-3", "" .. gflo[3], "-9.7727201328748685e-147")
+check("flostr-goja-nondigit-1", "" .. gflo[4], "1.8705482588342312e-308")
+check("flostr-goja-nondigit-2", "" .. gflo[5], "-1.2658976361944994e-308")
+check("flostr-goja-nondigit-3", "" .. gflo[6], "-1.3184270331886705e-308")
+check("flostr-goja-short-4", "" .. gflo[7], "0.00093397298318044985")
+check("flostr-window-17", "" .. gflo[8], "0.33333333333333331")
+check("flostr-window-15-exp", "" .. gflo[9], "1e+15")
+check("flostr-window-17-plain", "" .. gflo[10], "1234567890123456.0")
+check("flostr-min-subnormal", "" .. gflo[11], "4.94065645841247e-324")
+check("flostr-1e16", "" .. gflo[12], "1e+16")
+
 -- ----- done -----
 print("features: " .. checks .. " checks, " .. fails .. " failures")
 exit(fails)

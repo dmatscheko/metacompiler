@@ -2748,6 +2748,9 @@ NotMemberKw = :script(~~
     // Double.toString (Kotlin/JVM delegates to java.lang.Double): always a decimal
     // point, the shortest digit run that round-trips, plain decimal for
     // 1e-3 <= |d| < 1e7 and scientific notation ("1.0E20") outside it.
+    // The digits come from kDecDigits, never from `"" + a` - see its comment for
+    // why the host's own printer cannot be the source, and note that the host's
+    // exponent threshold is not Kotlin's and is no longer consulted at all.
     function kFloStr(d) {
         if (d !== d) return "NaN"
         if (d === kInf) return "Infinity"
@@ -2755,43 +2758,55 @@ NotMemberKw = :script(~~
         if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
         var neg = d < 0
         var a = neg ? kNegF(d) : d
-        var s = (a >= 0.001 && a < 10000000) ? kFloPlain(a) : kFloSci(a)
+        var sig = kDecDigits(a)
+        var si = sig.indexOf("e")
+        var sd = sig.substring(0, si)
+        var se = parseInt(sig.substring(si + 1), 10)
+        var s = (a >= 0.001 && a < 10000000) ? kPlainDec(sd, se) : kFloSci(a, sd, se)
         return neg ? "-" + s : s
     }
-    function kFloPlain(a) {
-        var s = "" + a
-        if (s.indexOf(".") < 0) { s = s + ".0" }
-        return s
-    }
-    function kFloSci(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
+    // Kotlin's d.dddEnn from a digit run that has already been recovered.
+    function kFloSci(a, digits, e10) {
+        // NEVER FEWER THAN TWO SIGNIFICANT DIGITS, and where the shortest form
+        // has ONE the second is not a zero but the closest two digit decimal to
+        // the ACTUAL value. This half was missing the rule while the compiler
+        // half (jvmFloStr in abnf/jsrtjvm.go) and layer 2 (k1FloStr in
+        // languages/lib/kotlin-rt.metajs) both had it, so Double.MIN_VALUE
+        // printed "5.0E-324" here and "4.9E-324" in the other two - a halves
+        // divergence --cross had never reached, found by the float probe for
+        // docs/todo.md 1.8. 4.9E-324 is the right answer: Kotlin/JVM's
+        // Double.toString IS java.lang.Double.toString, whose rule this is (the
+        // identical code is jFloSci in languages/java-interpreter.abnf, checked
+        // against `java` 24.0.2). For every NORMAL double the two agree - the
+        // value is within ~1e-16 of its one digit form, a thousandth of a two
+        // digit step - so only the subnormals, where the gap between neighbours
+        // is comparable to the value, can show it. Float.toString already had
+        // the rule; see kF32Str.
+        if (digits.length == 1) {
+            // The scaling exponent is the VALUE's, not the shortest form's -
+            // 1e-322 is really 9.88e-323, whose two digit form is 9.9E-323 - so
+            // a scaled value below ten steps down one decade. 10^325 is an
+            // infinity, so the scaling is done in chunks.
+            var r = kFloScale(a, 1 - e10)
+            if (r < 10) { r = kFloScale(a, 2 - e10); e10 = e10 - 1 }
+            var n2 = (r + 0.5) | 0            // r is under 100, so | 0 floors
+            if (n2 >= 100) { n2 = 10; e10 = e10 + 1 }
+            digits = "" + n2
         }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
         var frac = digits.substring(1)
         if (frac == "") { frac = "0" }
-        return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
+        return digits.charAt(0) + "." + frac + "E" + e10
+    }
+    // a * 10^k, in chunks: 10^325 is an infinity and 10^-325 is zero, and the
+    // value this is wanted for is a subnormal, so both ends are live.
+    function kFloScale(a, k) {
+        var e200 = 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        while (k > 200) { a = a * e200; k = k - 200 }
+        while (k < 0 - 200) { a = a / e200; k = k + 200 }
+        var p = 1
+        var n = k < 0 ? 0 - k : k
+        for (var z = 0; z < n; z++) { p = p * 10 }
+        return k < 0 ? a / p : a * p
     }
     // ----- Float.toString -----
     // Double.toString's rule read at 24 significant bits: the SHORTEST decimal that
@@ -2800,45 +2815,52 @@ NotMemberKw = :script(~~
     // twins are k1F32Str in languages/lib/kotlin-rt.metajs and jvmFloStr32 in
     // abnf/jsrtjvm.go.
     //
-    // THE DIGITS COME FROM `"" + a` AND NOT FROM floPrec. floPrec's two
-    // implementations disagree - abnf/commonscript.go answers exactly n digits,
-    // languages/lib/runtime.c's answers max(n, shortest) - so a renderer written on
-    // it would be a halves divergence in every float shorter than its double.
-    // `"" + a` is the shortest round-tripping DOUBLE in every engine, and rounding
-    // that digit string down to n is exact for every n a float wants.
+    // THE DIGITS COME FROM floPrec AND NOT FROM `"" + a`, and that is the
+    // opposite of what this comment used to say (docs/todo.md 1.8).
+    //
+    // `"" + a` IS NOT THE SHORTEST ROUND-TRIPPING FORM IN EVERY ENGINE. goja
+    // renders the double 0x1.18ce9a2c75b3bp+72 as "5.17997560104094e+21",
+    // fifteen digits that read back as a DIFFERENT double; the frozen engine
+    // renders it "5.179975601040939e+21", which is correct - and at some
+    // subnormal boundaries goja emits a non-digit character outright
+    // (0x1.ae6c07415a67ap-1023 comes out "B.70548258834231e-309"). So `"" + a`
+    // was a live goja-vs--frozen divergence that no matrix entry happened to
+    // reach, and unfixable from inside the dialect, since a script cannot ask
+    // the host for more digits than its printer chose to give.
+    //
+    // floPrec CAN be asked, and its two implementations no longer disagree -
+    // the note that used to sit here (abnf/commonscript.go exactly n digits,
+    // languages/lib/runtime.c's max(n, shortest)) was made false by
+    // docs/todo.md 2.8, which taught the C floor's host id 70 the exactly-n
+    // contract that abnf/commonscript.go always had. The shortest round-tripping
+    // form is then a search rather than a host question - ask for n digits,
+    // parse the result back, stop at the first n that reproduces the value - and
+    // the answer is the same in every engine by construction. parseFloat is
+    // exact in both hosts (jsParseFloat in abnf/jsrt.go is strconv.ParseFloat;
+    // goja's is too), which is what makes the test decide rather than
+    // approximate.
 
+    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the
+    // decimal exponent of the FIRST digit, so the text handed to parseFloat
+    // carries the point after that digit.
+    function kSigVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+    }
     // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the FIRST digit.
+    // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
+    // round-trip a binary64, so the loop always terminates with an exact answer.
     function kDecDigits(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charAt(i)
-            if (c == "e" || c == "E") { ei = i }
+        var n = 1
+        while (n < 17) {
+            var c = floPrec(a, n)
+            if (kSigVal(c) === a) { return c }
+            n = n + 1
         }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
-        }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
-        return digits + "e" + (pt + exp - 1)
+        return floPrec(a, 17)
     }
     // A DIGITS "e" EXP form rounded to n significant digits, half to even.
     function kRoundDig(s, n) {
@@ -2915,7 +2937,7 @@ NotMemberKw = :script(~~
         var e10 = parseInt(sig.substring(ei + 1), 10)
         var body = ""
         if (a >= 0.001 && a < 10000000) {
-            body = kF32Plain(ds, e10)
+            body = kPlainDec(ds, e10)
         } else {
             // Never fewer than TWO significant digits, and where the shortest has
             // one the second is the closest two digit decimal to the ACTUAL value
@@ -2935,7 +2957,9 @@ NotMemberKw = :script(~~
     }
     // The plain form. The forced ".0" is here; the two-digit minimum is not,
     // because it is about the significand and only the scientific form shows one.
-    function kF32Plain(ds, e10) {
+    // Shared by Float.toString and Double.toString - the plain form is the same
+    // rule at both widths, only the digit run differs.
+    function kPlainDec(ds, e10) {
         if (e10 >= 0) {
             var ip = ""
             for (var i = 0; i <= e10; i++) { ip = ip + (i < ds.length ? ds.charAt(i) : "0") }

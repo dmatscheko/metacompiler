@@ -1493,14 +1493,25 @@ function k1FloPromotes(l, r) {
 // it, always a decimal point, never fewer than two significant digits in the
 // scientific form.
 //
-// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and that is not a style
-// choice. floPrec's two implementations DISAGREE: abnf/commonscript.go answers
-// exactly n digits and languages/lib/runtime.c's answers max(n, shortest), so
-// floPrec(1/3, 1) is "3e-1" under llvm.Run and "3333333333333333e-1" natively.
-// Using it here would be a halves divergence in every float that needs fewer
-// digits than its double. `"" + a` is the shortest round-tripping DOUBLE in every
-// engine, and rounding that digit string down to n is exact for every n a float
-// can want.
+// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and the reason this file may
+// do that while languages/kotlin-interpreter.abnf may NOT is WHOSE printer runs.
+//
+// This file is layer 2: it is only ever linked into a native binary, so `"" + a`
+// is the C floor's shortest_digits, which is exact. A tag script runs on goja too,
+// and GOJA'S Number-to-String IS NOT ALWAYS THE SHORTEST ROUND-TRIPPING FORM (22
+// of 199,904 random doubles; at some subnormal boundaries a non-digit character
+// outright). That is why kDecDigits over in the interpreter had to move to a
+// floPrec round-trip search and this k1DecDigits did not - docs/todo.md 1.8,
+// where a 133-value probe went from 134 goja-vs--frozen rows to 0 with this file
+// untouched. The Go twin (jvmFloStr32 in abnf/jsrtjvm.go) is exact for the same
+// reason: it is strconv.
+//
+// The note that used to sit here - that floPrec's two implementations DISAGREE,
+// abnf/commonscript.go answering exactly n digits and languages/lib/runtime.c's
+// max(n, shortest) - IS NO LONGER TRUE. docs/todo.md 2.8 taught host id 70 the
+// exactly-n contract, so both answer exactly n and floPrec is a legal source
+// here too; `"" + a` simply costs no round-trip search and is already exact on
+// this path.
 
 // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
 // EXP being the decimal exponent of the FIRST digit.
