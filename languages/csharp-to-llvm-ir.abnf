@@ -387,7 +387,12 @@ ParamName   <~~ push(up.in) ~~>
             = Id ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~>
             = "=" Expression ;
-ParamMod    = ThisMod | ParamsMod | ( "ref" | "out" | "in" | "readonly" | "scoped" ) KwEnd ;
+// `ref` / `out` on a PARAMETER makes it an alias for the caller's variable
+// (ECMA-334 15.6.2.3 / 15.6.2.4). The name is recorded so that reads and writes of
+// it - and ONLY of it - are emitted through the reference box (csRefNames).
+ParamMod    = ThisMod | ParamsMod | RefParamMod | ( "in" | "readonly" | "scoped" ) KwEnd ;
+RefParamMod <~~ push({refparam: true}) ~~>
+            = ( "ref" | "out" ) KwEnd ;
 ThisMod     <~~ push({thisParam: true}) ~~>
             = "this" KwEnd ;
 ParamsMod   <~~ push({paramsParam: true}) ~~>
@@ -1082,13 +1087,12 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // beside its thunk; csFixArgs turns the mixed list back into a positional one using the
 // parameter names the declaration registered (csParamNames), and fills the skipped slots
 // with the 'omitted' marker (undefined) that the parameter binder answers with the
-// parameter's default. 'ref' / 'out' / 'in' at a call site are parsed and dropped.
+// parameter's default. `in` at a call site is parsed and dropped (it is read-only);
+// `ref` and `out` build a REFERENCE BOX over the argument's place - see csRefArg.
 ArgList     = [ Arg { "," Arg } ] ;
-Arg         = OutVarArg | NamedArg | PlainArg ;
+Arg         = OutVarArg | NamedArg | RefArg | PlainArg ;
 // `M(out int x)` / `M(out var x)` (C# 7): the argument DECLARES the variable, in
-// the enclosing scope. There are no genuine out parameters in this model, so the
-// declaration is what is kept: the name is bound to null before the call, which
-// is what makes the uses after the call resolve.
+// the enclosing scope, and then passes a reference box over it.
 OutVarArg   <~~ push(csOutVar(pop())) ~~>
             = ( "out" | "ref" ) KwEnd Type OutVarName ;
 OutVarName  <~~ push(up.in) ~~>
@@ -1097,6 +1101,14 @@ NamedArg    <~~ push(csNamedArg(takeAll())) ~~>
             = ArgName ":" !":" [ ArgRefMod ] Expression ;
 ArgName     <~~ push({argname: up.in}) ~~>
             = Id ;
+// `M(ref r)` / `M(out o)`: an ARGUMENT PASSED BY REFERENCE (ECMA-334 12.6.2.3.3 /
+// 12.6.2.3.4 - the parameter is an alias for the argument's variable). The operand is
+// parsed with the same Target production an assignment uses; anything else falls
+// through to PlainArg and is passed by value, exactly as it was before.
+RefArg      <~~ push(csRefArg(takeAll())) ~~>
+            = RefOutMod Target ;
+RefOutMod   <~~ push({refmod: stripWs(up.in)}) ~~>
+            = ( "ref" | "out" ) KwEnd ;
 PlainArg    = [ ArgRefMod ] Expression ;
 ArgRefMod   = ( "ref" | "out" | "in" ) KwEnd ;
 
@@ -2910,11 +2922,122 @@ KwLet       = "let" KwEnd ;
     // (js_pyget/js_pyset on arrays and dicts).
     // The property name of an anonymous-type PROJECTION: `new { a.B }` names `B`.
     function csProjName(text) { return csSimpleName(text) }
-    // `M(out int x)`: bind the name before the call so the uses after it resolve.
+    // ----- `ref` / `out` arguments: a REFERENCE BOX (docs/todo.md 1.1) -----
+    //
+    // ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the
+    // argument's variable, so `p.Ref(ref r)` must leave r at what the body assigned;
+    // at base the modifier was parsed and dropped and r stayed at 1. Nothing in this
+    // value model can alias a scope slot, so the alias is made explicit: the call site
+    // builds `{__csref, rd, wb}` - two EMITTED closures over the place - and every
+    // read and write of a `ref` PARAMETER goes through it. It is a real alias rather
+    // than a copy-back at return, which is what ECMA-334 says and what makes a body
+    // that reads the variable through another name come out right.
+    //
+    // What keeps it free: the unwrap is emitted only for a NAME that is a `ref`/`out`
+    // parameter somewhere in the program (csRefNames, complete by emit time), and it
+    // is two extern calls with NO basic blocks - js_csrefrd answers the value or the
+    // plain slot, js_csrefwr writes through the box or hands the value back to be
+    // stored. A program with no `ref` parameter emits precisely the IR it did before.
+    // The interpreter half gates on a boolean and tests the VALUE instead, because
+    // there the thunks run rather than emit; a box can only ever reach a `ref`
+    // parameter's slot, so the two gates admit exactly the same values.
+    var csRefNames = {}
+    function csIsRefName(n) { return csRefNames[n] === true }
+    function csScopeRead(b, name) {
+        var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+        if (!csIsRefName(name)) { return v }
+        return callExt(b, "js_csrefrd", [v])
+    }
+    function csScopeWrite(b, name, v) {
+        var nameV = emitStr(b, name)
+        if (!csIsRefName(name)) { callExt(b, "js_scope_set", [curScopeV, nameV, v]); return }
+        // js_csrefwr writes THROUGH a box and hands the box back, so the scope store
+        // that follows is a harmless re-store of the same handle; for a plain slot it
+        // hands the value back and the store is the ordinary one. No branch is needed.
+        var sv = callExt(b, "js_csrefwr", [callExt(b, "js_scope_get", [curScopeV, nameV]), v])
+        callExt(b, "js_scope_set", [curScopeV, nameV, sv])
+    }
+    // The two closures a box is made of. A NAME place reads and writes the captured
+    // scope through csScopeRead / csScopeWrite, so passing a `ref` parameter on as a
+    // `ref` argument aliases one level further out and keeps working.
+    var csRefRdFns = {}
+    var csRefWrFns = {}
+    function csRefNameRdFn(name) {
+        var k = "$" + name
+        if (csRefRdFns[k] == undefined) {
+            csRefRdFns[k] = emitFunc([], function(b) {
+                b.NewRet(csScopeRead(b, name))
+                return deadBlock()
+            }, false, null, null, false, null)
+        }
+        return csRefRdFns[k]
+    }
+    function csRefNameWrFn(name) {
+        var k = "$" + name
+        if (csRefWrFns[k] == undefined) {
+            csRefWrFns[k] = emitFunc([], function(b) {
+                csScopeWrite(b, name, callExt(b, "js_arg", [curF.Params[1], handle(0)]))
+                b.NewRet(hUndef)
+                return deadBlock()
+            }, false, null, null, false, null)
+        }
+        return csRefWrFns[k]
+    }
+    // A member / index place: the base object and the key are captured in a scope of
+    // their own, exactly as emitMethodGroup captures its receiver, so a box built in a
+    // loop does not alias the last iteration's operands.
+    var csRefPlaceFns = {}
+    function csRefPlaceFn(kind) {
+        if (csRefPlaceFns[kind] == undefined) {
+            csRefPlaceFns[kind] = emitFunc([], function(b) {
+                var oV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$rbo")])
+                var kV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$rbk")])
+                if (kind == "fieldrd") { b.NewRet(callExt(b, "js_get", [oV, kV])) }
+                else if (kind == "idxrd") { b.NewRet(callExt(b, "js_pyget", [oV, kV])) }
+                else if (kind == "fieldwr") {
+                    callExt(b, "js_set", [oV, kV, callExt(b, "js_arg", [curF.Params[1], handle(0)])])
+                    b.NewRet(hUndef)
+                } else {
+                    callExt(b, "js_pyset", [oV, kV, callExt(b, "js_arg", [curF.Params[1], handle(0)])])
+                    b.NewRet(hUndef)
+                }
+                return deadBlock()
+            }, false, null, null, false, null)
+        }
+        return csRefPlaceFns[kind]
+    }
+    function csMakeBox(b, rdV, wbV) {
+        var boxV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [boxV, emitStr(b, "__csref"), hTrue])
+        callExt(b, "js_set", [boxV, emitStr(b, "rd"), rdV])
+        callExt(b, "js_set", [boxV, emitStr(b, "wb"), wbV])
+        return boxV
+    }
+    function csNameBox(b, name) {
+        return csMakeBox(b, callExt(b, "js_closure", [handle(csRefNameRdFn(name)), curScopeV]),
+                            callExt(b, "js_closure", [handle(csRefNameWrFn(name)), curScopeV]))
+    }
+    function csRefArg(items) {
+        var ref = items[1]
+        return function(b) {
+            if (ref.path.length == 0) { return {b: b, v: csNameBox(b, ref.name)} }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            var scV = callExt(b, "js_scope_new", [curScopeV])
+            callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbo"), p.obj])
+            callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbk"), p.key])
+            var rk = p.isField ? "fieldrd" : "idxrd"
+            var wk = p.isField ? "fieldwr" : "idxwr"
+            return {b: b, v: csMakeBox(b, callExt(b, "js_closure", [handle(csRefPlaceFn(rk)), scV]),
+                                          callExt(b, "js_closure", [handle(csRefPlaceFn(wk)), scV]))}
+        }
+    }
+    // `M(out int x)`: bind the name before the call so the uses after it resolve, and
+    // pass a reference box over it (ECMA-334 12.6.2.3.4).
     function csOutVar(name) {
         return function(b) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
-            return {b: b, v: hNull}
+            return {b: b, v: csNameBox(b, name)}
         }
     }
     // The target of an assignment whose root is an arbitrary primary. It is an
@@ -2942,7 +3065,13 @@ KwLet       = "let" KwEnd ;
         var last = items[items.length - 1]
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
-        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
+        // `Der.F = 6` writes the ONE storage location `Bas.F` names (ECMA-334 15.5.1),
+        // so the WRITE is redirected to the declaring class exactly as the read is.
+        // The seed name has to be read off the head BEFORE foldCallMember, which
+        // replaces the seed record with its thunk in place.
+        var h0s = head.length == 1 && head[0] != null && head[0] != undefined
+                  && typeof head[0] != "function" && head[0].seedvar != undefined ? head[0].seedvar : ""
+        if (last.kind == "field") { return {name: "", path: [{key: last.name}], sseed: h0s, base: foldCallMember(head)} }
         // The ELEMENT type an index write adopts (docs/todo.md 1.3). It is decided
         // here, at parse time, from the head of the chain - a local of a declared
         // array type, or a member of one - so an index write into anything else
@@ -2956,6 +3085,18 @@ KwLet       = "let" KwEnd ;
     }
     function emitRefPath(b, ref) {
         var o = anytype // Either the lowered base expression or a scope read.
+        // A STATIC member written through a DERIVED type name: the same walk-time
+        // redirect the read path uses (csStaticSeed).
+        var wcls = ""
+        if (ref.sseed != undefined && ref.sseed != "" && ref.path.length == 1
+            && ref.path[0].key != undefined) {
+            wcls = csStaticSeed(ref.sseed, ref.path[0].key)
+        }
+        if (wcls != "") {
+            var wkey = ref.path[0].key
+            return {b: b, obj: callExt(b, "js_scope_get", [curScopeV, emitStr(b, wcls)]),
+                    key: emitStr(b, wkey), keyName: wkey, isField: true}
+        }
         if (ref.base != undefined) {
             var br = ref.base(b)
             b = br.b
@@ -3040,15 +3181,14 @@ KwLet       = "let" KwEnd ;
                     var mk = (op == "=") ? null : function(bx, oldX) { return emitCompound(bx, op, oldX, v) }
                     return csUnqualWrite(b, ref.name, mi, v, mk, false)
                 }
-                var nameV = emitStr(b, ref.name)
                 if (op != "=") {
-                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
+                    var old = csScopeRead(b, ref.name)
                     var rc0 = emitCompound(b, op, old, v)
                     b = rc0.b
                     v = rc0.v
                 }
                 if (lty != "") { var ral = emitAdoptLocal(b, lty, v); b = ral.b; v = ral.v }
-                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+                csScopeWrite(b, ref.name, v)
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -3116,10 +3256,9 @@ KwLet       = "let" KwEnd ;
                         return {b: bx, v: callExt(bx, "js_csstep", [oldX, oneV])}
                     }, !pre)
                 }
-                var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
+                var oldV = csScopeRead(b, ref.name)
                 var newV = callExt(b, "js_csstep", [oldV, oneV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                csScopeWrite(b, ref.name, newV)
                 return {b: b, v: pre ? newV : oldV}
             }
             var p = emitRefPath(b, ref)
@@ -3207,6 +3346,28 @@ KwLet       = "let" KwEnd ;
             c = csSupers[c] != undefined ? csSupers[c] : ""
         }
         return null
+    }
+    // ----- a STATIC member reached through a DERIVED type name (docs/todo.md 1.1) -----
+    // `Der.SB()`, `Der.F`, `Der.P`, `Der.Handler(1)`. ECMA-334 15.3.1 makes every
+    // accessible member of a base class a member of the derived class, and 15.5.1
+    // gives a static field ONE storage location - so `Der.F` and `Bas.F` name the
+    // same slot. Nothing here walks __super for a class DESCRIPTOR (js_get and
+    // js_mcall both stop at the descriptor's own properties), and the descriptors
+    // are per-class objects, so the honest answer is to name the DECLARING class:
+    // the whole hierarchy is known by the time a chain emits, and this costs
+    // exactly nothing at run time. The interpreter half walks __super instead
+    // (csStaticHolder), because there the descriptors exist while the chain runs.
+    //
+    // Answers "" unless the seed really is a class name, the member is STATIC and it
+    // is declared further up the chain - so an ordinary receiver, an instance member
+    // and a class' own static all emit precisely the IR they emitted before.
+    function csStaticSeed(seedName, mname) {
+        if (seedName == "" || mname == "") { return "" }
+        if (csClassMembers[seedName] == undefined) { return "" }
+        if (csLocalTypes[seedName] != undefined) { return "" }
+        var mi = csMemberInfo(seedName, mname)
+        if (mi == null || mi.cls == seedName || mi.kind != "static") { return "" }
+        return mi.cls
     }
     // A bare 'M(args)' call. Inside a class that declares M it is this.M(args) (or the
     // class' own static M); otherwise the name holds a callable value (a lambda, a
@@ -3840,10 +4001,19 @@ KwLet       = "let" KwEnd ;
             else if (sq.kind == "call") { sfxArgs.push(csFixArgs(sq.args, "")) }
             else { sfxArgs.push(null) }
         }
+        var sfx0Name = (suffixes[0].name != undefined) ? suffixes[0].name : ""
+        var sfx0Static = (suffixes[0].kind == "field" || suffixes[0].kind == "mcall")
         return function(b) {
-            var r = primary(b)
-            b = r.b
-            var cur = r.v
+            // A static member reached through a DERIVED type name is the base's own
+            // (see csStaticSeed); the registries are complete now, so ask them here.
+            var seedCls = sfx0Static ? csStaticSeed(seedName, sfx0Name) : ""
+            var cur = anytype
+            if (seedCls != "") { cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, seedCls)]) }
+            else {
+                var r = primary(b)
+                b = r.b
+                cur = r.v
+            }
             var ncName = ""
             var ncEndB = null
             if (hasNC) {
@@ -4610,14 +4780,14 @@ KwLet       = "let" KwEnd ;
         // (docs/todo.md 1.1), so the guard is only "is this a member of the enclosing
         // type at all".
         if (mi == null) {
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+            return {b: b, v: csScopeRead(b, name)}
         }
         var localB = curF.NewBlock("")
         var fieldB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
-        var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
+        var lv = csScopeRead(localB, name)
         localB.NewBr(mergeB)
         var fr = csUnqualRead(fieldB, mi, name)
         fr.b.NewBr(mergeB)
@@ -4642,6 +4812,8 @@ KwLet       = "let" KwEnd ;
         var variadic = -1
         var pendingThis = false
         var pendingParams = false
+        var pendingRef = false
+        var refs = []
         // The declared type each parameter ADOPTS, "" for every parameter that adopts
         // nothing - which is the overwhelming majority. It is decided HERE, at parse
         // time, so emitParam emits an adoption call only where one is owed and a
@@ -4660,8 +4832,13 @@ KwLet       = "let" KwEnd ;
             if (typeof it == "string") {
                 names.push(it)
                 dflts.push(null)
-                adopts.push(pendingTy)
+                adopts.push(pendingRef ? "" : pendingTy)
                 ptypes.push(pendingRaw)
+                refs.push(pendingRef)
+                // A `ref` / `out` parameter is an ALIAS, and the name is what decides
+                // whether a read or a write of it is emitted through the box.
+                if (pendingRef) { csRefNames[it] = true }
+                pendingRef = false
                 pendingRaw = ""
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
@@ -4672,6 +4849,7 @@ KwLet       = "let" KwEnd ;
             }
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
+            if (it.refparam == true) { pendingRef = true; continue }
             // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
             if (it.ptype != undefined) {
                 pendingRaw = stripWs(it.ptype)
@@ -4681,7 +4859,7 @@ KwLet       = "let" KwEnd ;
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
         if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, adopts: adopts,
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, adopts: adopts, refs: refs,
                 ptypes: ptypes}
     }
 
@@ -4692,6 +4870,21 @@ KwLet       = "let" KwEnd ;
     // per declaring class, and a program that declares no operator emits the IR it did
     // before, unchanged.
     var csOpDecls = {}
+    // The DECLARED PARAMETER TYPES of each (operator, declaring class) pair, keyed
+    // '<key>$<class>'. ECMA-334 12.4.5 builds the candidate set from the operand
+    // TYPES and then resolves it like a method call (12.6.4), so an operator whose
+    // parameters neither operand fits is not applicable and the PREDEFINED operator
+    // stands. Probing by the operand's CLASS alone made `"s" + v` run
+    // `V operator +(V, V)` with a string as `a`; C# answers "sV1" through the
+    // predefined `string operator +(string, object)` of 12.10.5 (docs/todo.md 1.1).
+    var csOpSigs = {}
+    function csNoteOpSig(key, cls, pinfo) {
+        var k = key + "$" + cls
+        var l = csOpSigs[k]
+        if (l == undefined) { l = []; csOpSigs[k] = l }
+        var one = csCtorSigs([{pinfo: pinfo}])
+        l.push(one[0])
+    }
     function csNoteOp(key, cls) {
         var l = csOpDecls[key]
         if (l == undefined) { l = []; csOpDecls[key] = l }
@@ -4710,6 +4903,7 @@ KwLet       = "let" KwEnd ;
         }
         var key = "__op" + pinfo.params.length + "_" + sym
         csNoteOp(key, curClassName)
+        csNoteOpSig(key, curClassName, pinfo)
         return {kind: "op", name: key, statik: true, pinfo: pinfo, body: body}
     }
     function makeConvOp(items) {
@@ -4733,6 +4927,66 @@ KwLet       = "let" KwEnd ;
         var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cls)])
         return callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, key)]), hUndef, argsV])
     }
+    // "Does any candidate of this class' operator accept these two operands?", lowered.
+    // ECMA-334 12.4.5 builds the candidate set from the operand TYPES and then
+    // resolves it like a method call (12.6.4), so an operator no operand fits is not
+    // applicable and the PREDEFINED operator of 12.10.5 stands.
+    //
+    // THE TEST IS A KIND TEST, NOT `is`. A first attempt asked js_csis per parameter
+    // and REGRESSED two shapes: a null operand (ECMA-334 10.2.7 makes null
+    // convertible to any reference type, and `is` answers false, so a user
+    // `operator ==(V, V)` stopped being called for `a == null`) and an implicit
+    // numeric conversion (`v + 1` against a `double` parameter). So the question is
+    // only the one this defect needs - could a value of this KIND ever be that
+    // parameter - with null and every primitive-typed parameter accepted outright,
+    // over the shared js_typeof. It runs INSIDE the original class probe, so it can
+    // only ever DECLINE an operator that used to apply and never make one apply that
+    // did not. The interpreter twin is csOpAccepts / csOpFitsTy.
+    function csOpPrimTy(ty) {
+        return ty == "int" || ty == "uint" || ty == "long" || ty == "ulong"
+            || ty == "short" || ty == "ushort" || ty == "byte" || ty == "sbyte"
+            || ty == "double" || ty == "float" || ty == "decimal"
+            || ty == "char" || ty == "bool" || ty == "nint" || ty == "nuint"
+    }
+    function csOpTyKind(ty) {
+        if (ty == "string") { return 1 }
+        if (ty == "" || ty == "object" || ty == "dynamic" || ty == "var") { return 0 }
+        if (csOpPrimTy(ty)) { return 0 }
+        return 3
+    }
+    // One operand's kind test: falls through to okB when it fits, to noB when it
+    // cannot. A null operand always fits.
+    function csEmitKindTest(b, v, ty, okB, noB) {
+        var tk = csOpTyKind(ty)
+        if (tk == 0) { b.NewBr(okB); return }
+        var nullB = curF.NewBlock("")
+        var want = (tk == 1) ? "string" : "object"
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [v]), emitStr(b, want)])), okB, nullB)
+        nullB.NewCondBr(truthy(nullB, callExt(nullB, "js_eq", [v, hNull])), okB, noB)
+    }
+    function emitOpApplies(b, clsName, key, lv, rv, callB, nextB) {
+        var sigs = csOpSigs[key + "$" + clsName]
+        var typed = (sigs != undefined && sigs.length > 0)
+        var j
+        if (typed) {
+            for (j = 0; j < sigs.length; j++) { if (sigs[j].n != 2 || !sigs[j].typed) { typed = false } }
+        }
+        // The original probe: one of the operands must BE of the declaring class.
+        var chkRB = curF.NewBlock("")
+        var fitB = typed ? curF.NewBlock("") : callB
+        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [lv, emitStr(b, clsName)])), fitB, chkRB)
+        chkRB.NewCondBr(truthy(chkRB, callExt(chkRB, "js_is_type", [rv, emitStr(chkRB, clsName)])), fitB, nextB)
+        if (!typed) { return }
+        var cur = fitB
+        for (j = 0; j < sigs.length; j++) {
+            var s = sigs[j]
+            var elseB = (j == sigs.length - 1) ? nextB : curF.NewBlock("")
+            var rB = curF.NewBlock("")
+            csEmitKindTest(cur, lv, s.tys[0], rB, elseB)
+            csEmitKindTest(rB, rv, s.tys[1], callB, elseB)
+            cur = elseB
+        }
+    }
     // A binary step that may hit an overloaded operator: each declaring class is probed on
     // both operands (C# resolves by argument type; there is no type model here), and the
     // built-in meaning is the fallback.
@@ -4744,10 +4998,8 @@ KwLet       = "let" KwEnd ;
         var incs = []
         for (var i = 0; i < cls.length; i++) {
             var callB = curF.NewBlock("")
-            var chkRB = curF.NewBlock("")
             var nextB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [lv, emitStr(b, cls[i])])), callB, chkRB)
-            chkRB.NewCondBr(truthy(chkRB, callExt(chkRB, "js_is_type", [rv, emitStr(chkRB, cls[i])])), callB, nextB)
+            emitOpApplies(b, cls[i], key, lv, rv, callB, nextB)
             var uv = emitOpCall(callB, cls[i], key, [lv, rv])
             callB.NewBr(mergeB)
             incs.push(llvm.ir.NewIncoming(uv, callB))
@@ -5100,7 +5352,7 @@ KwLet       = "let" KwEnd ;
         if (isStatic && items[3].ext == true) { csExt[name] = curClassName }
         csRegParams(name, items[3])
         return {kind: "method", name: name, statik: isStatic, params: params,
-                body: body, retTy: rty, pinfo: items[3]}
+                body: body, retTy: rty, pinfo: items[3], hides: hides}
     }
     // A member declared without a body (abstract, or an interface method with no default):
     // it contributes no callable member, but its NAME is a member of the class, so an
@@ -5175,7 +5427,10 @@ KwLet       = "let" KwEnd ;
         var name = items[2]
         var init = items.length > 3 ? items[3] : null
         var isStatic = false
-        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        // A `const` MEMBER is implicitly static (ECMA-334 15.4), so `Bas.C` names it.
+        // Without this a const field became an INSTANCE field and `Bas.C` read as
+        // nothing at all, in both halves - so --cross was blind to it.
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static" || mods[i] == "const") isStatic = true
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -5523,20 +5778,97 @@ KwLet       = "let" KwEnd ;
     // and the NAME becomes a dispatcher; a name with one declaration emits the IR it
     // emitted before, unchanged. The dispatcher forwards its own argument array
     // untouched, so an instance callee still finds `this` at index 0.
-    function csOvlDispatchBody(clsName, mname, sigs, off) {
+    // `nOwn` is how many of `sigs` are this class' OWN overloads; the rest are the
+    // base's inherited candidates and all share one block that forwards to the base
+    // member (see csNoteMethodSigs). `baseCls` is "" when there are none.
+    function csOvlDispatchBody(clsName, mname, sigs, off, nOwn, baseCls) {
         return function(b) {
             var argsP = curF.Params[1]
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
-            var fnsV = callExt(b, "js_get", [clsV, emitStr(b, "__ovl_" + mname)])
+            var fnsV = anytype
+            if (nOwn > 1) { fnsV = callExt(b, "js_get", [clsV, emitStr(b, "__ovl_" + mname)]) }
             var callBs = []
+            var baseB = null
+            if (baseCls != "") {
+                baseB = curF.NewBlock("")
+                var bclsV = callExt(baseB, "js_scope_get", [curScopeV, emitStr(baseB, baseCls)])
+                baseB.NewRet(callExt(baseB, "js_call", [callExt(baseB, "js_get", [bclsV, emitStr(baseB, mname)]),
+                                                        hUndef, argsP]))
+            }
             for (var i = 0; i < sigs.length; i++) {
+                if (i >= nOwn) { callBs.push(baseB); continue }
                 var cb = curF.NewBlock("")
-                cb.NewRet(callExt(cb, "js_call", [callExt(cb, "js_pyget", [fnsV, emitNum(cb, i)]), hUndef, argsP]))
+                var fV = anytype
+                if (nOwn > 1) { fV = callExt(cb, "js_pyget", [fnsV, emitNum(cb, i)]) }
+                else { fV = callExt(cb, "js_get", [clsV, emitStr(cb, "__ovl1_" + mname)]) }
+                cb.NewRet(callExt(cb, "js_call", [fV, hUndef, argsP]))
                 callBs.push(cb)
             }
             csDispatchChain(b, sigs, off, callBs)
             return deadBlock()
         }
+    }
+    // ----- the candidate set continues into the BASE class (docs/todo.md 1.1) -----
+    // ECMA-334 12.6.4 starts overload resolution in the receiver's own type and MOVES
+    // TO THE BASE when that type offers no applicable candidate, so `class D : B`
+    // declaring `M(string)` does NOT hide `B.M(int)`: `d.M(1)` runs the base's and
+    // answers 1, where a per-class group answered 2. `new` (ECMA-334 15.3.5) stops
+    // the walk, which is precisely what hiding means.
+    //
+    // What is inherited is the candidate LIST, not the bodies: a pick past this
+    // class' own overloads forwards the argument array untouched to the base's
+    // member, which is itself a dispatcher and re-resolves - so a three-level chain
+    // needs nothing extra and no body is emitted twice. The interpreter half does
+    // exactly this over csInheritedGroup / __msig.
+    //
+    // The table is filled while the file is walked, in declaration order, so a base
+    // class' entry is complete before a class that extends it is read - the same
+    // order the interpreter's descriptors are built in.
+    var csMSig = {}
+    function csNoteMethodSigs(clsName, members) {
+        var tbl = {}
+        var seen = {}
+        var i
+        var j
+        for (i = 0; i < members.length; i++) {
+            var m = members[i]
+            if (m.kind != "method") { continue }
+            if (seen[m.name] === true) { continue }
+            seen[m.name] = true
+            var grp = []
+            for (j = 0; j < members.length; j++) {
+                if (members[j].kind == "method" && members[j].name == m.name) { grp.push(members[j]) }
+            }
+            var same = true
+            for (j = 1; j < grp.length; j++) { if (grp[j].statik !== grp[0].statik) { same = false } }
+            if (!same) { continue }
+            var sigs = csCtorSigs(grp)
+            var all = []
+            for (j = 0; j < sigs.length; j++) { all.push(sigs[j]) }
+            var baseCls = ""
+            if (grp[0].hides !== true) {
+                var c = csSupers[clsName] != undefined ? csSupers[clsName] : ""
+                for (var n = 0; n < 32 && c != "" && c != undefined; n++) {
+                    var bt = csMSig[c]
+                    if (bt != undefined && bt[m.name] != undefined && bt[m.name].statik === grp[0].statik) {
+                        baseCls = c
+                        var bs = bt[m.name].sigs
+                        for (j = 0; j < bs.length; j++) { all.push(bs[j]) }
+                        n = 32
+                    } else {
+                        c = csSupers[c] != undefined ? csSupers[c] : ""
+                    }
+                }
+            }
+            tbl[m.name] = {sigs: all, own: sigs.length, base: baseCls, statik: grp[0].statik}
+        }
+        csMSig[clsName] = tbl
+    }
+    function csMSigOf(clsName, mname) {
+        var t = csMSig[clsName]
+        if (t == undefined) { return null }
+        var e = t[mname]
+        return (e == undefined) ? null : e
     }
     // A group that mixes STATIC and INSTANCE declarations has two calling conventions
     // and cannot share one dispatcher: the last declaration wins there, which is what
@@ -5557,7 +5889,7 @@ KwLet       = "let" KwEnd ;
             callExt(b, "js_arr_push", [fnsV, callExt(b, "js_closure", [handle(xi), curScopeV])])
         }
         callExt(b, "js_set", [clsV, emitStr(b, "__ovl_" + mname), fnsV])
-        var di = emitFunc([], csOvlDispatchBody(clsName, mname, csCtorSigs(infos), 0),
+        var di = emitFunc([], csOvlDispatchBody(clsName, mname, csCtorSigs(infos), 0, infos.length, ""),
                           false, null, undefined, false, null)
         callExt(b, "js_set", [clsV, emitStr(b, mname), callExt(b, "js_closure", [handle(di), curScopeV])])
         return b
@@ -5581,9 +5913,27 @@ KwLet       = "let" KwEnd ;
         }
         callExt(b, "js_set", [clsV, emitStr(b, "__ovl_" + mname), fnsV])
         var off = infos[0].statik ? 0 : 1
-        var di = emitFunc([], csOvlDispatchBody(clsName, mname, csCtorSigs(infos), off),
+        var mi = csMSigOf(clsName, mname)
+        var allSigs = (mi == null) ? csCtorSigs(infos) : mi.sigs
+        var bcls = (mi == null) ? "" : mi.base
+        var di = emitFunc([], csOvlDispatchBody(clsName, mname, allSigs, off, infos.length, bcls),
                           !infos[0].statik, null, undefined, false, null)
         callExt(b, "js_set", [clsV, emitStr(b, mname), callExt(b, "js_closure", [handle(di), curScopeV])])
+        return b
+    }
+    // ONE declaration whose candidate set nevertheless continues into the base: the
+    // member becomes a dispatcher too, over the single own signature plus the base's.
+    // The own closure is parked under '__ovl1_<name>' so the dispatcher can reach it
+    // without an array. Reached only for a name a base class also declares - every
+    // other single method emits exactly the IR it emitted before.
+    function csEmitOneWithBase(b, clsV, clsName, m2, mi) {
+        var oi = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
+        callExt(b, "js_set", [clsV, emitStr(b, "__ovl1_" + m2.name),
+                              csGenWrap(b, callExt(b, "js_closure", [handle(oi), curScopeV]))])
+        var off = m2.statik ? 0 : 1
+        var di = emitFunc([], csOvlDispatchBody(clsName, m2.name, mi.sigs, off, 1, mi.base),
+                          !m2.statik, null, undefined, false, null)
+        callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(di), curScopeV])])
         return b
     }
     function buildClassStmt(name, members, kind, primary, isRecord) {
@@ -5695,6 +6045,8 @@ KwLet       = "let" KwEnd ;
                         // Already emitted with the rest of its group.
                     } else if (grp.length > 1) {
                         b = csEmitOverloads(b, clsV, name, m2.name, grp)
+                    } else if (csMSigOf(name, m2.name) != null && csMSigOf(name, m2.name).base != "") {
+                        b = csEmitOneWithBase(b, clsV, name, m2, csMSigOf(name, m2.name))
                     } else {
                         var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
                         callExt(b, "js_set", [clsV, emitStr(b, m2.name),
@@ -5869,6 +6221,7 @@ KwLet       = "let" KwEnd ;
         csClassMembers[name] = tbl
         csMemberTys[name] = tys
         csDataMembers[name] = dat
+        csNoteMethodSigs(name, members)
         // A record is built exactly like the class / struct it names; what it adds is value
         // equality (registered as its 'operator ==' / '!=', so the ordinary operator
         // dispatch reaches it) and deconstruction.

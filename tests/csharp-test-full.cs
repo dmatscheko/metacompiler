@@ -1853,6 +1853,142 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s31ad5", lz * 1000000 * 1000000 == 3000000000000L);
         }
 
+        // ===== SECTION 32: inherited statics, base overloads, operator
+        // applicability and `ref` / `out` parameters =====
+        //
+        // docs/todo.md 1.1. ECMA-334 15.3.1 makes every accessible member of a base
+        // class a member of the derived class, so a STATIC member is reachable
+        // through a derived type name; 15.5.1 gives a static field ONE storage
+        // location, shared by every name that reaches it. 15.4 makes a `const`
+        // member implicitly static. 12.6.4 builds the candidate set for a method
+        // call in the receiver's type and MOVES TO THE BASE when that type offers no
+        // applicable candidate, and 15.3.5 is what `new` stops. 12.4.5 resolves a
+        // user-defined binary operator by that same overload resolution, so an
+        // operator whose parameters neither operand fits is not applicable and the
+        // PREDEFINED operator of 12.10.5 (`string operator +(string, object)`)
+        // stands. 12.6.2.3.3 / 12.6.2.3.4 make a `ref` / `out` parameter an ALIAS
+        // for the argument's variable, so a write through it is a write to that
+        // variable.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
+        // spec-cited rather than executed. Every operand is read out of an ARRAY so
+        // the grammars' constant folders cannot answer at compile time.
+        //
+        // WHAT WAS BROKEN. `S32Der.SB()` aborted with "unknown static method" in all
+        // three engines while the method-GROUP form `S32Op p = S32Der.SB` already
+        // worked; an inherited static FIELD, PROPERTY and delegate field read as
+        // nothing; a `const` member was not static at all, so even `S32Bas.C` was
+        // empty; a derived class' own overload group HID the base's, so `d.M(1)`
+        // answered 2 where C# says 1; a user `operator +` captured string
+        // concatenation, so `"s" + v` answered a V rather than "sV1"; and `ref` /
+        // `out` were parsed and dropped, so `Ref(ref r)` left r alone.
+        class S32Bas
+        {
+            public static int F = 5;
+            public static int P { get { return 9; } }
+            public const int C = 11;
+            public static int SB() { return 7; }
+            public static S32Op BH = (int x) => x + 500;
+            public int M(int x) { return 1; }
+        }
+        class S32Der : S32Bas
+        {
+            public int M(string s) { return 2; }
+        }
+        class S32Hide : S32Bas
+        {
+            public new int M(string s) { return 3; }
+        }
+        delegate int S32Op(int x);
+        class S32V
+        {
+            public int N;
+            public S32V(int n) { N = n; }
+            public override string ToString() { return "V" + N; }
+            public static S32V operator +(S32V a, S32V b) { return new S32V(a.N + b.N); }
+        }
+        class S32Ref
+        {
+            public int Fld;
+            public int[] Arr = {1, 2, 3};
+            public void Bump(ref int a) { a = a + 1; a++; a += 10; }
+            public void ByVal(int a) { a = a + 1; a++; a += 10; }
+            public void Chain(ref int a) { Bump(ref a); }
+            public static void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
+            public static bool TryGet(int k, out int v) { v = k * 2; return k > 0; }
+            public static void Cat(ref string s) { s = s + "!"; }
+        }
+
+        static void S32()
+        {
+            int[] n = {1, 2, 3};
+            string[] w = {"s", "t"};
+
+            // ----- a static member reached through a DERIVED type name -----
+            Program.Check("s32st1", S32Der.SB() == n[2] + 4);
+            Program.Check("s32st2", S32Der.F == n[1] + 3);
+            Program.Check("s32st3", S32Der.P == n[2] + 6);
+            Program.Check("s32st4", S32Der.C == n[2] + 8);
+            Program.Check("s32st5", S32Bas.C == n[2] + 8);
+            Program.Check("s32st6", S32Der.BH(n[0]) == 501);
+            // One storage location, whichever name reaches it (ECMA-334 15.5.1).
+            S32Der.F = n[2] * 100;
+            Program.Check("s32st7", S32Bas.F == 300 && S32Der.F == 300);
+            S32Bas.F = n[1] + 3;
+            // The method-GROUP form of the same inherited static.
+            S32Op sg = S32Der.SB;
+            Program.Check("s32st8", sg == null || sg != null);
+
+            // ----- the candidate set continues into the BASE class -----
+            S32Der d = new S32Der();
+            Program.Check("s32ov1", d.M(n[0]) == n[0]);
+            Program.Check("s32ov2", d.M(w[0]) == n[1]);
+            // `new` hides, so the base candidate is NOT in the set and the int
+            // argument binds to the only declaration there is.
+            S32Hide h = new S32Hide();
+            Program.Check("s32ov3", h.M(w[0]) == n[2]);
+
+            // ----- a user operator that does not ACCEPT the operands -----
+            S32V v = new S32V(n[0]);
+            S32V v2 = new S32V(n[1]);
+            Program.Check("s32op1", (w[0] + v) == "sV1");
+            Program.Check("s32op2", (v + w[0]) == "V1s");
+            Program.Check("s32op3", (v + v2).ToString() == "V3");
+
+            // ----- `ref` and `out` write back -----
+            S32Ref r = new S32Ref();
+            int a = n[0];
+            r.Bump(ref a);
+            Program.Check("s32rf1", a == 13);
+            int b = n[0];
+            r.Chain(ref b);
+            Program.Check("s32rf2", b == 13);
+            int p = n[0];
+            int q = n[1];
+            S32Ref.Swap(ref p, ref q);
+            Program.Check("s32rf3", p == n[1] && q == n[0]);
+            r.Fld = n[2];
+            r.Bump(ref r.Fld);
+            Program.Check("s32rf4", r.Fld == 15);
+            r.Bump(ref r.Arr[1]);
+            Program.Check("s32rf5", r.Arr[1] == 14);
+            int got;
+            bool ok = S32Ref.TryGet(n[1], out got);
+            Program.Check("s32rf6", ok && got == 4);
+            Program.Check("s32rf7", S32Ref.TryGet(n[0], out int fresh) && fresh == n[1]);
+            string s = w[0];
+            S32Ref.Cat(ref s);
+            Program.Check("s32rf8", s == "s!");
+            int[] xs = {5, 6};
+            S32Ref.Swap(ref xs[0], ref xs[1]);
+            Program.Check("s32rf9", xs[0] == 6 && xs[1] == 5);
+            // NEGATIVE CONTROL: an ordinary by-value argument of the same shape must
+            // still leave the caller's variable alone.
+            int keep = n[0];
+            r.ByVal(keep);
+            Program.Check("s32rf10", keep == n[0]);
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -1888,6 +2024,7 @@ b";                                                   // verbatim keeps the newl
             Program.S29(); // SECTION-CALL 29
             Program.S30(); // SECTION-CALL 30
             Program.S31(); // SECTION-CALL 31
+            Program.S32(); // SECTION-CALL 32
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

@@ -289,6 +289,46 @@ namespace Demo
             public static MgV operator +(MgV a, int b) { return new MgV(a.X + b); }
         }
 
+
+        // ----- inherited statics, base overloads, operator applicability and
+        // `ref` / `out` (docs/todo.md 1.1) -----
+        // ECMA-334 15.3.1 (a base member IS a member of the derived class), 15.5.1
+        // (one storage location per static field), 15.4 (a const member is
+        // implicitly static), 12.6.4 (the candidate set moves to the base when the
+        // derived type offers nothing applicable) with 15.3.5 for `new`, 12.4.5 with
+        // 12.10.5 (a user operator that accepts neither operand is not applicable
+        // and the predefined string concatenation stands) and 12.6.2.3.3 / .4 (a
+        // `ref` / `out` parameter is an ALIAS for the argument's variable).
+        // There is no C# toolchain here; every value is spec-cited.
+        delegate int RfOp(int x);
+        class RfBas
+        {
+            public static int F = 5;
+            public static int P { get { return 9; } }
+            public const int C = 11;
+            public static int SB() { return 7; }
+            public static RfOp BH = (int x) => x + 500;
+            public int M(int x) { return 1; }
+        }
+        class RfDer : RfBas { public int M(string s) { return 2; } }
+        class RfHide : RfBas { public new int M(string s) { return 3; } }
+        class RfV
+        {
+            public int N;
+            public RfV(int n) { N = n; }
+            public override string ToString() { return "V" + N; }
+            public static RfV operator +(RfV a, RfV b) { return new RfV(a.N + b.N); }
+        }
+        class RfBox
+        {
+            public int Fld;
+            public int[] Arr = {1, 2, 3};
+            public void Bump(ref int a) { a = a + 1; a++; a += 10; }
+            public void ByVal(int a) { a = a + 1; a++; a += 10; }
+            public static void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
+            public static bool TryGet(int k, out int v) { v = k * 2; return k > 0; }
+        }
+
         // ----- constructor initializers and constructor overloads (ECMA-334
         // 15.11.2 / 12.6.4, docs/todo.md 1.1 and 1.10). The ': base(d)' header used
         // to be parsed and DISCARDED - the base class' parameterless constructor ran
@@ -905,6 +945,39 @@ namespace Demo
             int mgI;
             mgI = mgN[2];
             Program.Check("adopt-int-local-control", mgI * 1000000 * 1000000 == 2112827392 && (mgI is int));
+
+
+            // ----- inherited statics, base overloads, operator applicability,
+            // `ref` / `out` (docs/todo.md 1.1) -----
+            int[] rfN = {1, 2, 3};
+            string[] rfW = {"s"};
+            Program.Check("static-inherited-call", RfDer.SB() == 7);
+            Program.Check("static-inherited-field", RfDer.F == 5);
+            Program.Check("static-inherited-prop", RfDer.P == 9);
+            Program.Check("static-const-member", RfBas.C == 11 && RfDer.C == 11);
+            Program.Check("static-inherited-delegate", RfDer.BH(rfN[0]) == 501);
+            RfDer.F = rfN[2] * 100;
+            Program.Check("static-one-storage", RfBas.F == 300);
+            Program.Check("base-overload-int", new RfDer().M(rfN[0]) == 1);
+            Program.Check("base-overload-string", new RfDer().M(rfW[0]) == 2);
+            Program.Check("base-overload-new-hides", new RfHide().M(rfW[0]) == 3);
+            RfV rfv = new RfV(rfN[0]);
+            Program.Check("operator-declines-concat", (rfW[0] + rfv) == "sV1");
+            Program.Check("operator-applies", (rfv + new RfV(rfN[1])).ToString() == "V3");
+            RfBox rfb = new RfBox();
+            int rfa = rfN[0];
+            rfb.Bump(ref rfa);
+            Program.Check("ref-param-writes-back", rfa == 13);
+            int rfk = rfN[0];
+            rfb.ByVal(rfk);
+            Program.Check("byval-param-control", rfk == 1);
+            rfb.Bump(ref rfb.Arr[1]);
+            Program.Check("ref-param-array-place", rfb.Arr[1] == 14);
+            int rfp = rfN[0];
+            int rfq = rfN[1];
+            RfBox.Swap(ref rfp, ref rfq);
+            Program.Check("ref-param-swap", rfp == 2 && rfq == 1);
+            Program.Check("out-param-declaring", RfBox.TryGet(rfN[1], out int rfo) && rfo == 4);
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;

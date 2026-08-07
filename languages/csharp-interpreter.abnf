@@ -385,7 +385,12 @@ ParamName   <~~ push(up.in) ~~>
             = Id ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~>
             = "=" Expression ;
-ParamMod    = ThisMod | ParamsMod | ( "ref" | "out" | "in" | "readonly" | "scoped" ) KwEnd ;
+// `ref` / `out` on a PARAMETER makes it an alias for the caller's variable
+// (ECMA-334 15.6.2.3 / 15.6.2.4); the marker is what makes csBindArgs keep the
+// reference box the call site built instead of converting it to a value.
+ParamMod    = ThisMod | ParamsMod | RefParamMod | ( "in" | "readonly" | "scoped" ) KwEnd ;
+RefParamMod <~~ push({refparam: true}) ~~>
+            = ( "ref" | "out" ) KwEnd ;
 ThisMod     <~~ push({thisParam: true}) ~~>
             = "this" KwEnd ;
 ParamsMod   <~~ push({paramsParam: true}) ~~>
@@ -1070,13 +1075,12 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // beside its thunk; csFixArgs turns the mixed list back into a positional one using the
 // parameter names the declaration registered (csParamNames), and fills the skipped slots
 // with the 'omitted' marker (undefined) that the parameter binder answers with the
-// parameter's default. 'ref' / 'out' / 'in' at a call site are parsed and dropped.
+// parameter's default. `in` at a call site is parsed and dropped (it is read-only);
+// `ref` and `out` build a REFERENCE BOX over the argument's place - see csRefArg.
 ArgList     = [ Arg { "," Arg } ] ;
-Arg         = OutVarArg | NamedArg | PlainArg ;
+Arg         = OutVarArg | NamedArg | RefArg | PlainArg ;
 // `M(out int x)` / `M(out var x)` (C# 7): the argument DECLARES the variable, in
-// the enclosing scope. There are no genuine out parameters in this model, so the
-// declaration is what is kept: the name is bound to null before the call, which
-// is what makes the uses after the call resolve.
+// the enclosing scope, and then passes a reference box over it.
 OutVarArg   <~~ push(csOutVar(pop())) ~~>
             = ( "out" | "ref" ) KwEnd Type OutVarName ;
 OutVarName  <~~ push(up.in) ~~>
@@ -1085,6 +1089,16 @@ NamedArg    <~~ push(csNamedArg(takeAll())) ~~>
             = ArgName ":" !":" [ ArgRefMod ] Expression ;
 ArgName     <~~ push({argname: up.in}) ~~>
             = Id ;
+// `M(ref r)` / `M(out o)`: an ARGUMENT PASSED BY REFERENCE (ECMA-334 12.6.2.3.3 /
+// 12.6.2.3.4 - the parameter becomes an alias for the argument's variable, and every
+// write through it is a write to that variable). The operand is parsed with the same
+// Target production an assignment uses, which is exactly the set of places C# calls
+// a variable_reference; anything else falls through to PlainArg and is passed by
+// value, as it was before.
+RefArg      <~~ push(csRefArg(takeAll())) ~~>
+            = RefOutMod Target ;
+RefOutMod   <~~ push({refmod: stripWs(up.in)}) ~~>
+            = ( "ref" | "out" ) KwEnd ;
 PlainArg    = [ ArgRefMod ] Expression ;
 ArgRefMod   = ( "ref" | "out" | "in" ) KwEnd ;
 
@@ -2576,8 +2590,20 @@ KwLet       = "let" KwEnd ;
             return m.apply(undefined, concat2impl([target], args))
         }
         if (target.__isclass === true) {
-            var sm = hasOwn(target, name) ? target[name] : undefined
+            // A static member reached through a DERIVED type name is the BASE's, so the
+            // lookup walks __super (ECMA-334 15.3.1) - `Der.SB()` used to abort here
+            // while `Op p = Der.SB` already worked, because csMethodGroup walks and this
+            // did not (docs/todo.md 1.1).
+            var sh2 = csStaticHolder(target, name)
+            var sm = (sh2 == null) ? undefined : sh2[name]
             if (typeof sm == "function") return sm.apply(undefined, args)
+            // A STATIC DELEGATE FIELD called like a method: `K.Handler(5)` invokes the
+            // field's value (ECMA-334 12.8.10.2), exactly as the instance arm above does.
+            if (sm === undefined) {
+                var sdg = csFindAcc(target, "__get_" + name)
+                if (sdg != undefined) { sm = sdg() }
+            }
+            if (csIsDelegVal(sm)) { return csDelegInvoke(sm, args) }
             fail("unknown static method '" + name + "' on " + target.__name)
         }
         var f = hasOwn(target, name) ? target[name] : undefined
@@ -2677,20 +2703,29 @@ KwLet       = "let" KwEnd ;
     // makeChainTarget); everything after the root resolves as it always did.
     function csResolveRef(ref) {
         var o = anytype // The containers along the path may be of mixed types.
-        if (ref.base != undefined) { o = ref.base() } else { o = getVar(ref.name) }
+        if (ref.base != undefined) { o = ref.base() } else { o = csGetVar(ref.name) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = csGetIndex(o, s.idx()) }
             if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
         }
         var last = ref.path[ref.path.length - 1]
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), isIndex: last.key == undefined}
+        var lk = (last.key != undefined) ? last.key : last.idx()
+        // `Der.F = 6` writes the ONE storage location `Bas.F` names (ECMA-334 15.5.1):
+        // a static field reached through a derived type name is the base's own slot,
+        // so the container is the descriptor that declares it.
+        if (last.key != undefined && o !== undefined && o !== null && typeof o == "object"
+            && o.__isclass === true && !hasOwn(o, lk)) {
+            var wh = csStaticHolder(o, lk)
+            if (wh != null) { o = wh }
+        }
+        return {obj: o, key: lk, isIndex: last.key == undefined}
     }
     // Reads the current value of an assignment target (for '??=', which must not assign
     // when the place already holds a value).
     function makeRefRead(ref) {
         return function() {
-            if (ref.path.length == 0) { return getVar(ref.name) }
+            if (ref.path.length == 0) { return csGetVar(ref.name) }
             var p = csResolveRef(ref)
             if (isDict(p.obj)) {
                 var di = dictFind(p.obj, p.key)
@@ -2734,9 +2769,9 @@ KwLet       = "let" KwEnd ;
             var v = anytype
             v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                if (op != "=") v = applyOp(op, csGetVar(ref.name), v)
                 if (lty != "") { v = csAdoptLocal(lty, v) }
-                setVar(ref.name, v)
+                csSetVar(ref.name, v)
             } else {
                 var p = csResolveRef(ref)
                 if (isDict(p.obj)) {
@@ -2784,9 +2819,9 @@ KwLet       = "let" KwEnd ;
         return function() {
             if (ref.path.length == 0) {
                 var n = anytype // The variable may hold a number, a char or a double.
-                n = getVar(ref.name)
+                n = csGetVar(ref.name)
                 var nn = csStep(n, d)
-                setVar(ref.name, nn)
+                csSetVar(ref.name, nn)
                 return pre ? nn : n
             }
             var p = csResolveRef(ref)
@@ -2990,10 +3025,102 @@ KwLet       = "let" KwEnd ;
     // `M(out int x)`: bind the name in the enclosing scope before the call, so the
     // uses after it resolve. There are no out parameters in this model, so the
     // argument itself is null.
+    // ----- `ref` / `out` arguments: a REFERENCE BOX (docs/todo.md 1.1) -----
+    //
+    // ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the
+    // argument's variable, so `p.Ref(ref r)` must leave r at what the body assigned.
+    // Nothing in this value model can alias a scope slot, so the alias is made
+    // explicit: the call site builds `{__csref, rd, wb}` over the PLACE (the same
+    // Target record an assignment resolves), the parameter binds that box, and every
+    // read and write of the parameter inside the body goes through it. That is a real
+    // alias, not a copy-back at return: a write is visible to the caller immediately,
+    // which is what ECMA-334 12.6.2.3.3 says and what a copy-back would get wrong for
+    // a body that also reads the variable through another name.
+    //
+    // csHasRefArgs is the gate: a program with no `ref`/`out` argument pays one boolean
+    // per variable read and nothing else. The compiler half builds the same box (over
+    // two emitted closures) and gates the unwrap by NAME instead, because there the
+    // decision is made at emit time and can cost nothing at all.
+    var csHasRefArgs = false
+    function csIsRefBox(v) {
+        return v !== undefined && v !== null && typeof v == "object" && v.__csref === true
+    }
+    // The scope frame that holds `name`, or null.
+    function csFrameOf(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) { if (hasOwn(sc[i], name)) { return sc[i] } }
+        return null
+    }
+    function csNameBox(fr, nm) {
+        return {__csref: true,
+                rd: function() { return fr[nm] },
+                wb: function(v) { fr[nm] = v }}
+    }
+    function csPlaceBox(o, k, isIndex) {
+        if (isIndex === true) {
+            return {__csref: true,
+                    rd: function() { return csGetIndex(o, k) },
+                    wb: function(v) { o[k] = v }}
+        }
+        return {__csref: true,
+                rd: function() { return hasOwn(o, k) ? o[k] : undefined },
+                wb: function(v) { o[k] = v }}
+    }
+    function csRefArg(items) {
+        var ref = items[1]
+        csHasRefArgs = true
+        return function() {
+            if (ref.path.length == 0) {
+                var fr = csFrameOf(ref.name)
+                if (fr == null) { declVar(ref.name, null); fr = csFrameOf(ref.name) }
+                // Passing a `ref` PARAMETER on as a `ref` argument aliases the SAME
+                // variable one level further out, so the existing box travels rather
+                // than being wrapped again.
+                var cur = fr[ref.name]
+                if (csIsRefBox(cur)) { return cur }
+                return csNameBox(fr, ref.name)
+            }
+            var p = csResolveRef(ref)
+            return csPlaceBox(p.obj, p.key, p.isIndex)
+        }
+    }
+    // A NAME read and written through the box when its slot holds one. Overriding
+    // makeVarRef by ASSIGNMENT rather than by declaration is the rule
+    // docs/abnf-dialect-gotchas.md records: a `function makeVarRef` here would be
+    // hoisted under goja and position-dependent under -frozen, and the two engines
+    // would then disagree about which definition is live.
+    makeVarRef = function(name) {
+        return function() {
+            var v = anytype
+            v = getVar(name)
+            if (csHasRefArgs && csIsRefBox(v)) { return v.rd() }
+            return v
+        }
+    }
+    function csGetVar(name) {
+        var v = anytype
+        v = getVar(name)
+        if (csHasRefArgs && csIsRefBox(v)) { return v.rd() }
+        return v
+    }
+    // The frame is looked up directly rather than through getVar: a write to a name
+    // that is neither a local nor a member must still be setVar's own "assignment to
+    // unknown variable", not getVar's "unknown name".
+    function csSetVar(name, v) {
+        if (csHasRefArgs) {
+            var fr = csFrameOf(name)
+            if (fr != null && csIsRefBox(fr[name])) { fr[name].wb(v); return }
+        }
+        setVar(name, v)
+    }
+    // `M(out int x)`: the argument DECLARES the variable in the enclosing scope and
+    // then passes a reference box over it, so the uses after the call see what the
+    // callee wrote (ECMA-334 12.6.2.3.4).
     function csOutVar(name) {
+        csHasRefArgs = true
         return function() {
             declVar(name, null)
-            return null
+            return csNameBox(csFrameOf(name), name)
         }
     }
     function makeArray(items) {
@@ -3703,7 +3830,10 @@ KwLet       = "let" KwEnd ;
                 for (var k = j; k < args.length; k++) { rest.push(args[k]) }
                 sc[names[j]] = rest
             } else if (j < args.length && args[j] !== undefined) {
-                sc[names[j]] = (ad != null && ad[j] != "") ? csImplicitConv(ad[j], args[j]) : args[j]
+                // A REFERENCE BOX is the alias itself, not a value of the declared
+                // type: converting it would turn `ref int r` into NaN (docs/todo.md 1.1).
+                sc[names[j]] = (ad != null && ad[j] != "" && !csIsRefBox(args[j]))
+                               ? csImplicitConv(ad[j], args[j]) : args[j]
             } else if (pinfo.dflts != undefined && pinfo.dflts[j] != null) {
                 var dv = pinfo.dflts[j]()
                 sc[names[j]] = (ad != null && ad[j] != "") ? csImplicitConv(ad[j], dv) : dv
@@ -4192,6 +4322,11 @@ KwLet       = "let" KwEnd ;
         var variadic = -1
         var pendingThis = false
         var pendingParams = false
+        // `ref` / `out` on this parameter: it is an ALIAS for the caller's variable
+        // (ECMA-334 15.6.2.3), so csBindArgs must keep the reference box the call site
+        // built rather than converting it to the declared type.
+        var pendingRef = false
+        var refs = []
         // The declared type each parameter ADOPTS, "" for every parameter that adopts
         // nothing - which is the overwhelming majority, and is what keeps csBindArgs
         // at one string comparison per parameter per call (docs/todo.md 1.1).
@@ -4210,6 +4345,8 @@ KwLet       = "let" KwEnd ;
                 dflts.push(null)
                 adopts.push(pendingTy)
                 ptypes.push(pendingRaw)
+                refs.push(pendingRef)
+                pendingRef = false
                 pendingRaw = ""
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
@@ -4220,6 +4357,7 @@ KwLet       = "let" KwEnd ;
             }
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
+            if (it.refparam == true) { pendingRef = true; continue }
             // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
             if (it.ptype != undefined) {
                 pendingRaw = stripWs(it.ptype)
@@ -4232,7 +4370,7 @@ KwLet       = "let" KwEnd ;
         var anyAdopt = false
         for (var k = 0; k < adopts.length; k++) { if (adopts[k] != "") { anyAdopt = true } }
         return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount,
-                adopts: adopts, anyAdopt: anyAdopt, ptypes: ptypes}
+                adopts: adopts, anyAdopt: anyAdopt, ptypes: ptypes, refs: refs}
     }
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
@@ -4275,7 +4413,7 @@ KwLet       = "let" KwEnd ;
         // (IEnumerable<double>) names nothing adoptable and csAdoptRet declines it.
         return {kind: "method", name: name, statik: isStatic, params: params,
                 body: isGen ? body : csAdoptRet(rty, body),
-                pinfo: items[3], ext: items[3].ext == true, isGen: isGen}
+                pinfo: items[3], ext: items[3].ext == true, isGen: isGen, hides: hides}
     }
     // Wraps a method body so its {isRet, v} answer adopts the declared return type.
     // Returns the body UNCHANGED when the type adopts nothing, which is almost always.
@@ -4363,7 +4501,10 @@ KwLet       = "let" KwEnd ;
         var name = items[2]
         var init = items.length > 3 ? items[3] : null
         var isStatic = false
-        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        // A `const` MEMBER is implicitly static (ECMA-334 15.4), so `Bas.C` names it.
+        // Without this a const field became an INSTANCE field and `Bas.C` read as
+        // nothing at all, in both halves - so --cross was blind to it.
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static" || mods[i] == "const") isStatic = true
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -4411,10 +4552,75 @@ KwLet       = "let" KwEnd ;
     // An operator member of the class of either operand ('__op2_+'), or of the operand of a
     // unary one ('__op1_-'). C# resolves by argument type; there is no type model here, so
     // the left operand's class is asked first and the right one second.
+    // The class along `o`'s chain that declares `key`, or null. csFindAcc answers the
+    // VALUE; the operator rule below needs the descriptor as well, to read the declared
+    // parameter types off it.
+    function csAccHolder(o, key) {
+        if (o === undefined || o === null || typeof o != "object") { return null }
+        if (o.__isclass === true) { return csStaticHolder(o, key) }
+        for (var c = o.__class; c != undefined; c = c.__super) { if (hasOwn(c, key)) { return c } }
+        return null
+    }
+    // Does any candidate of this class' `key` operator ACCEPT these two operands?
+    // ECMA-334 12.4.5 builds the candidate set from the user-defined operators of the
+    // two operand types and then applies ordinary overload resolution (12.6.4) - so an
+    // operator whose parameters no operand fits is simply not applicable, and the
+    // PREDEFINED operator stands. Without this, `"s" + v` on a class declaring
+    // `V operator +(V, V)` ran that body with a string as `a` and answered nonsense,
+    // where C# uses the predefined `string operator +(string, object)` (12.10.5) and
+    // answers "sV1".
+    //
+    // THE TEST IS A KIND TEST, NOT `is`, AND THAT IS THE WHOLE DESIGN. A first
+    // attempt asked csIsType per parameter and REGRESSED two shapes at once: a null
+    // operand (`a == z` on a user `operator ==(V, V)` stopped calling it, because
+    // ECMA-334 10.2.7 makes null convertible to any reference type and csIsType
+    // answers false) and an implicit numeric conversion (`v + 1` against a `double`
+    // parameter). So the question asked here is only the one this defect needs -
+    // could a value of this KIND ever be that parameter - with null and every
+    // primitive-typed parameter accepted outright. It runs INSIDE the class probe
+    // csFindOp already did, so it can only ever DECLINE an operator that used to
+    // apply; it can never make one apply that did not.
+    function csOpPrimTy(ty) {
+        return ty == "int" || ty == "uint" || ty == "long" || ty == "ulong"
+            || ty == "short" || ty == "ushort" || ty == "byte" || ty == "sbyte"
+            || ty == "double" || ty == "float" || ty == "decimal"
+            || ty == "char" || ty == "bool" || ty == "nint" || ty == "nuint"
+    }
+    // 0 no test at all, 1 the parameter is `string`, 3 it names a class / struct /
+    // interface / type parameter.
+    function csOpTyKind(ty) {
+        if (ty == "string") { return 1 }
+        if (ty == "" || ty == "object" || ty == "dynamic" || ty == "var") { return 0 }
+        if (csOpPrimTy(ty)) { return 0 }
+        return 3
+    }
+    function csOpFitsTy(v, ty) {
+        var tk = csOpTyKind(ty)
+        if (tk == 0) { return true }
+        if (v === null || v === undefined) { return true }
+        if (tk == 1) { return typeof v == "string" }
+        return typeof v == "object"
+    }
+    function csOpAccepts(holder, key, l, r) {
+        if (holder == null) { return false }
+        var t = holder.__opsig
+        if (t == undefined || t == null || !hasOwn(t, key)) { return true }
+        var sigs = t[key]
+        var typed = false
+        for (var i = 0; i < sigs.length; i++) {
+            var s = sigs[i]
+            if (s.n != 2 || !s.typed) { continue }
+            typed = true
+            if (csOpFitsTy(l, s.tys[0]) && csOpFitsTy(r, s.tys[1])) { return true }
+        }
+        return !typed
+    }
     function csFindOp(l, r, key) {
-        var f = csFindAcc(l, key)
-        if (f != undefined) { return f }
-        return csFindAcc(r, key)
+        var hl = csAccHolder(l, key)
+        if (hl != null && csOpAccepts(hl, key, l, r)) { return hl[key] }
+        var hr = csAccHolder(r, key)
+        if (hr != null && csOpAccepts(hr, key, l, r)) { return hr[key] }
+        return undefined
     }
     // A user conversion TO the named type, declared on the value's own class.
     function csConvOf(v, tname) {
@@ -4514,9 +4720,32 @@ KwLet       = "let" KwEnd ;
     // An accessor member ('__get_X', '__index', ...) looked up along the class chain. A
     // class descriptor answers its own static members, an instance its class' ones.
     function csEvtKey(op) { return (op == "+=") ? "__add_" : "__remove_" }
+    // A STATIC member reached through a DERIVED type name (`Der.SB()`, `Der.F`,
+    // `Der.P`). ECMA-334 15.3.1 makes every non-private member of a base class a
+    // member of the derived class too, and 15.5.1 gives a static field ONE storage
+    // location, shared by every name that reaches it - so the answer is the base's
+    // descriptor itself, not a copy. Every class-descriptor lookup here therefore
+    // walks __super, exactly the way the instance walk on the next line does.
+    // The `guard < 64` cap is the one manual 7.9 records for every __super walk.
+    // The twin in the compiler half is a WALK-TIME redirect (csStaticSeed): the
+    // emitter knows the whole hierarchy by the time a chain emits, so the declaring
+    // class' descriptor is named directly and nothing is walked at run time.
+    function csStaticHolder(cls, key) {
+        var c = cls
+        var g = 0
+        while (c != undefined && c != null && g < 64) {
+            g = g + 1
+            if (hasOwn(c, key)) { return c }
+            c = c.__super
+        }
+        return null
+    }
     function csFindAcc(o, key) {
         if (o === undefined || o === null || typeof o != "object") { return undefined }
-        if (o.__isclass === true) { return hasOwn(o, key) ? o[key] : undefined }
+        if (o.__isclass === true) {
+            var h = csStaticHolder(o, key)
+            return (h == null) ? undefined : h[key]
+        }
         for (var c = o.__class; c != undefined; c = c.__super) { if (hasOwn(c, key)) { return c[key] } }
         return undefined
     }
@@ -4705,7 +4934,14 @@ KwLet       = "let" KwEnd ;
             // An overloaded operator or a user conversion: a static member of the class.
             if (m2.kind == "op") {
                 var ogrp = mgroups["$op$" + m2.name]
-                if (ogrp[0] === m2) { cls[m2.name] = csOpMember(ogrp, cls) }
+                if (ogrp[0] === m2) {
+                    cls[m2.name] = csOpMember(ogrp, cls)
+                    // The operator's DECLARED PARAMETER TYPES, published so that an
+                    // operand set no candidate accepts declines the user operator
+                    // instead of capturing the built-in meaning (docs/todo.md 1.1).
+                    if (cls.__opsig == undefined) { cls.__opsig = {} }
+                    cls.__opsig[m2.name] = csCtorSigs(ogrp)
+                }
             }
             if (m2.kind == "indexer") {
                 if (m2.getT != null) { cls.__index = csAccClosure(false, m2.pinfo, m2.getT, cls) }
@@ -4844,14 +5080,21 @@ KwLet       = "let" KwEnd ;
     // An INSTANCE method's argument array carries `this` first (makeInstanceClosure)
     // and a STATIC one's does not (makeStaticClosure), so the offset is decided once,
     // per group, from the group's own staticness.
-    function csMethodDispatch(fns, sigs, isStatic) {
+    // `fns` are this class' OWN overloads; `sigs` may be longer, because the
+    // candidate set continues into the BASE class (see csMethodMember). An index past
+    // the own set means "the base's group answers it" and forwards the argument array
+    // untouched - the base's member is itself a dispatcher over its own candidates, so
+    // it re-resolves and a three-level chain needs nothing extra.
+    function csMethodDispatch(fns, sigs, isStatic, baseFn) {
         return function() {
             var argv = []
             var args = []
             var i
             for (i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
             for (i = (isStatic ? 0 : 1); i < argv.length; i++) { args.push(argv[i]) }
-            return fns[csPickCtor(sigs, args)].apply(undefined, argv)
+            var pick = csPickCtor(sigs, args)
+            if (pick >= fns.length) { return baseFn.apply(undefined, argv) }
+            return fns[pick].apply(undefined, argv)
         }
     }
     // The member a name's overload group becomes. A group that mixes STATIC and
@@ -4859,23 +5102,68 @@ KwLet       = "let" KwEnd ;
     // dispatcher: the last declaration wins there, which is what every group did
     // before this change. C# allows such a group only across a hiding boundary, and
     // the compiler half does exactly the same thing.
+    // ----- the candidate set continues into the BASE class (docs/todo.md 1.1) -----
+    // ECMA-334 12.6.4 builds the candidate set for `d.M(1)` by starting in the type of
+    // the receiver and MOVING TO THE BASE when the derived type offers no applicable
+    // candidate. A `class D : B` that declares `M(string)` therefore does not hide
+    // `B.M(int)`: `d.M(1)` runs the base's. Here the group kept only D's own
+    // declarations, so `d.M(1)` bound the int to a string parameter and answered 2.
+    //
+    // The candidate LIST is what is inherited, not the closures: an index past this
+    // class' own overloads forwards to the base member, which is itself a dispatcher.
+    // The signature list is published on the descriptor as __msig so the next
+    // subclass down can extend it in turn; `new` (ECMA-334 15.3.5) stops the walk,
+    // which is exactly what hiding means.
+    //
+    // A group mixing static and instance declarations is left alone (see below), and
+    // so is a base group of the OTHER staticness - those two cannot share one
+    // dispatcher's calling convention.
+    function csInheritedGroup(cls, name, statik, hides) {
+        if (hides === true) { return null }
+        var sup = (cls == undefined || cls == null) ? undefined : cls.__super
+        var g = 0
+        while (sup != undefined && sup != null && g < 64) {
+            g = g + 1
+            var t = sup.__msig
+            if (t != undefined && t != null && hasOwn(t, name) && t[name].statik === statik
+                && typeof sup[name] == "function") {
+                return {sigs: t[name].sigs, fn: sup[name]}
+            }
+            sup = sup.__super
+        }
+        return null
+    }
     function csMethodMember(infos, cls) {
         var i
-        if (infos.length == 1) {
-            var m0 = infos[0]
-            return m0.statik ? makeStaticClosure(m0, cls) : makeInstanceClosure(m0)
-        }
         var same = true
         for (i = 1; i < infos.length; i++) { if (infos[i].statik !== infos[0].statik) { same = false } }
         if (!same) {
             var ml = infos[infos.length - 1]
             return ml.statik ? makeStaticClosure(ml, cls) : makeInstanceClosure(ml)
         }
+        var name = infos[0].name
+        var statik = infos[0].statik
+        var sigs = csCtorSigs(infos)
+        var inh = csInheritedGroup(cls, name, statik, infos[0].hides === true)
+        var all = sigs
+        if (inh != null) {
+            all = []
+            for (i = 0; i < sigs.length; i++) { all.push(sigs[i]) }
+            for (i = 0; i < inh.sigs.length; i++) { all.push(inh.sigs[i]) }
+        }
+        if (cls != undefined && cls != null) {
+            if (cls.__msig == undefined) { cls.__msig = {} }
+            cls.__msig[name] = {sigs: all, statik: statik}
+        }
+        if (infos.length == 1 && inh == null) {
+            var m0 = infos[0]
+            return m0.statik ? makeStaticClosure(m0, cls) : makeInstanceClosure(m0)
+        }
         var fns = []
         for (i = 0; i < infos.length; i++) {
             fns.push(infos[i].statik ? makeStaticClosure(infos[i], cls) : makeInstanceClosure(infos[i]))
         }
-        return csMethodDispatch(fns, csCtorSigs(infos), infos[0].statik)
+        return csMethodDispatch(fns, all, statik, (inh == null) ? null : inh.fn)
     }
     // An OVERLOADED OPERATOR is the same defect one member kind further along, and
     // the probe that found it is `V operator +(V, V)` beside `V operator +(V, int)`:
@@ -4888,7 +5176,7 @@ KwLet       = "let" KwEnd ;
         if (infos.length == 1) { return makeStaticClosure(infos[0], cls) }
         var fns = []
         for (var i = 0; i < infos.length; i++) { fns.push(makeStaticClosure(infos[i], cls)) }
-        return csMethodDispatch(fns, csCtorSigs(infos), true)
+        return csMethodDispatch(fns, csCtorSigs(infos), true, null)
     }
     // An accessor closure: the same shape as a method, so it is called like one.
     function csAccClosure(isStatic, pinfo, body, cls) {
@@ -4989,6 +5277,12 @@ KwLet       = "let" KwEnd ;
         if (name == "Keys") return mcall(o, "keys", [])
         if (name == "Values") return mcall(o, "values", [])
         if (hasOwn(o, name)) { return o[name] }
+        // A static FIELD / CONST reached through a derived type name: it lives on the
+        // descriptor of the class that declares it (ECMA-334 15.3.1 / 15.5.1).
+        if (o.__isclass === true) {
+            var sh = csStaticHolder(o, name)
+            if (sh != null) { return sh[name] }
+        }
         // A property with a get accessor body ('int W { get { ... } }').
         var g = csFindAcc(o, "__get_" + name)
         if (g != undefined) { return (o.__isclass === true) ? g() : g(o) }

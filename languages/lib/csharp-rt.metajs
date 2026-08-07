@@ -1369,6 +1369,37 @@ function js_csmg(recv, name, bound) {
     return bound
 }
 
+// ----- `ref` / `out` arguments: the REFERENCE BOX (docs/todo.md 1.1) -----
+//
+// ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the argument's
+// variable. Nothing in this value model can alias a scope slot, so the emitter builds
+// `{__csref, rd, wb}` - two emitted closures over the place - at the call site and
+// emits these two probes around every read and write of a `ref` PARAMETER's name.
+// Both are total: anything that is not a box passes straight through, which is what
+// lets the emitter gate on the NAME alone and emit no basic blocks. The twins are
+// js_csrefrd / js_csrefwr in abnf/jsrtcsharp.go and csGetVar / csSetVar in
+// languages/csharp-interpreter.abnf.
+function csIsRefBox(v) {
+    if (v === undefined || v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return v["__csref"] === true
+}
+function js_csrefrd(v) {
+    if (!csIsRefBox(v)) { return v }
+    var f = v["rd"]
+    return f()
+}
+// Writes v THROUGH the box and answers the box, so the scope store the emitter puts
+// after it re-stores the same handle; a plain slot answers v and that store is the
+// ordinary one.
+function js_csrefwr(cur, v) {
+    if (!csIsRefBox(cur)) { return v }
+    var f = cur["wb"]
+    f(v)
+    return cur
+}
+
 // js_csdfld(recv, name): the DELEGATE stored in a member of that name, or undefined.
 // `k.E(5)` on a delegate field parses as a method call and C# resolves it as the
 // invocation of the field's value (ECMA-334 12.8.10.2). Safe for any receiver - a

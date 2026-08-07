@@ -1037,6 +1037,40 @@ func init() {
 			o.set(key, u(a[2]))
 			return a[2]
 		}
+		// ----- `ref` / `out` arguments: the REFERENCE BOX (docs/todo.md 1.1) -----
+		//
+		// ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the
+		// argument's variable. Nothing in this value model can alias a scope slot,
+		// so csharp-to-llvm-ir.abnf builds `{__csref, rd, wb}` - two emitted
+		// closures over the place - at the call site, and emits these two probes
+		// around every read and write of a `ref` PARAMETER's name.
+		//
+		// Both are total: a value that is not a box passes straight through, which
+		// is what lets the emitter gate on the NAME alone and emit no basic blocks.
+		// The twins are js_csrefrd / js_csrefwr in languages/lib/csharp-rt.metajs,
+		// and csGetVar / csSetVar in languages/csharp-interpreter.abnf.
+		m["js_csrefrd"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if o, ok := v.(*jsObject); ok {
+				if b, isRef := o.props["__csref"].(bool); isRef && b {
+					return w(rt.call(o.props["rd"], jsUndef, []interface{}{}))
+				}
+			}
+			return a[0]
+		}
+		// js_csrefwr(cur, v): writes v THROUGH the box `cur` and answers the box, so
+		// the scope store the emitter puts after it re-stores the same handle; for a
+		// plain slot it answers v and that store is the ordinary one.
+		m["js_csrefwr"] = func(a []uint64) uint64 {
+			cur := u(a[0])
+			if o, ok := cur.(*jsObject); ok {
+				if b, isRef := o.props["__csref"].(bool); isRef && b {
+					rt.call(o.props["wb"], jsUndef, []interface{}{u(a[1])})
+					return a[0]
+				}
+			}
+			return a[1]
+		}
 		// js_csdfld(recv, name): the DELEGATE stored in a member of that name, or
 		// undefined. `k.E(5)` on a delegate field parses as a method call and C#
 		// resolves it as the invocation of the field's value (ECMA-334 12.8.10.2).
