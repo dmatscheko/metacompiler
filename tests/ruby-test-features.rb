@@ -340,12 +340,26 @@ def negate(nx)
   0 - nx
 end
 def apply_fn(fx, nx)
-  fx(nx)
+  fx.call(nx)
 end
-check("fn-first-class", apply_fn(double, 21), 42)
-funcs = [double, negate]
+# A method AS A VALUE is `method(:name)'. It used to be written `double', which
+# worked only because a bare name for a method WITH parameters was left uncalled
+# here - and that guard also swallowed `def q(a = 1); end; q', an ordinary call in
+# MRI (docs/todo.md 1.9). Every def is auto-called now, so this is the spelling.
+check("fn-first-class", apply_fn(method(:double), 21), 42)
+funcs = [method(:double), method(:negate)]
 fsel = funcs[1]
-check("fn-in-array", fsel(3), -3)
+check("fn-in-array", fsel.call(3), -3)
+# A bare name is a CALL whatever the method's parameters are, as long as none of
+# them is required: MRI prints 3 for `def q(a = 1); 3; end; q'.
+def bare_opt(a = 4); a + 1; end
+def bare_splat(*a); a.size; end
+def bare_kw(k: 5); k; end
+def bare_blk(&b); b.nil? ? 7 : 8; end
+check("bare-call-optional", bare_opt, 5)
+check("bare-call-splat", bare_splat, 0)
+check("bare-call-keyword", bare_kw, 5)
+check("bare-call-blockparam", bare_blk, 7)
 
 # ----- ranges and blocks (do..end and { }, real closures) -----
 rsum = 0
@@ -511,14 +525,18 @@ class Coll
   def initialize(items)
     @items = items
   end
-  def my_map(fx)
+  # The block is named with &fx, which is how Ruby spells it. It used to be an
+  # ORDINARY parameter that the block bound to because a block travelled as the
+  # bare trailing argument; the block marker ended that, and MRI raised
+  # ArgumentError on the old shape anyway (docs/todo.md 1.9).
+  def my_map(&fx)
     mout = []
-    @items.each { |x| mout << fx(x) }
+    @items.each { |x| mout << fx.call(x) }
     mout
   end
-  def my_reduce(init, fx)
+  def my_reduce(init, &fx)
     macc = init
-    @items.each { |x| macc = fx(macc, x) }
+    @items.each { |x| macc = fx.call(macc, x) }
     macc
   end
 end
@@ -962,6 +980,49 @@ check("param-two-after-splat", pb_tail(1, 2, 3, 4), "1|[2]|3|4")
 check("param-splat-kwrest", pb_kwsplat(1, 2, z: 3), "[1, 2]|1")
 check("param-opt-spare", pb_optz(1) + " " + pb_optz(1, 2), "1|2|1 1|2|2")
 check("param-block-object", pb_blk { |q, r| q }, "false|Proc|2")
+# A Proc handed over as an ORDINARY argument is not the call's block. Until the
+# BLOCK MARKER existed the two were the same thing in the argument list - the
+# block went in as the bare closure and the callee guessed "the trailing callable
+# is the block" - so an optional parameter took its default instead of the proc,
+# `block_given?' was true for a call that was given no block, and `&b' bound the
+# positional proc. The last two were a live halves divergence the interpreter got
+# right and both compiled halves got wrong (docs/todo.md 1.9).
+pb_proc = proc { |v| v }
+def pb_opt_proc(f = 3); f.class.to_s; end
+def pb_splat_proc(*r); r.size.to_s; end
+def pb_bg(f = 3); block_given? ? "blk" : "noblk"; end
+def pb_amp(f = 3, &b); "#{f.class}|#{b.nil?}"; end
+def pb_yield(x = 5); yield x; end
+check("blockmark-optional", pb_opt_proc(pb_proc), "Proc")
+check("blockmark-splat", pb_splat_proc(pb_proc), "1")
+check("blockmark-given", pb_bg(pb_proc) + "/" + pb_bg { 1 }, "noblk/blk")
+check("blockmark-amp", pb_amp(pb_proc), "Proc|true")
+check("blockmark-real-block", pb_yield { |v| v + 1 }, 6)
+# `&nil' is Ruby for "no block", and it is how a method forwards a block it may
+# not have been given. This half aborted on it with "& needs a proc or a symbol"
+# where both compiled halves answered - a live halves divergence --cross had
+# never reached, found probing docs/todo.md 1.9.
+def fwd_target(a = 1, &b); "#{a.class}|#{b.nil?}"; end
+def fwd_caller(*fa, &fb); fwd_target(*fa, &fb); end
+check("forward-absent-block", fwd_caller(7), "Integer|true")
+check("forward-given-block", fwd_caller(7) { }, "Integer|false")
+# Object#send / #__send__ / #public_send were implemented in NO engine: every
+# spelling aborted with "unknown <Type> method: send" in all four legs, so the
+# two halves agreed and --cross was blind. An OPERATOR reached by name is the
+# one shape a type's method table cannot answer.
+class SendC
+  def sm(a = 1); a.class.to_s; end
+  def +(o); "plus#{o}"; end
+end
+sd = [3, "a", [1], SendC.new]
+check("send-named", sd[1].send(:upcase), "A")
+check("send-user-method", sd[3].send(:sm, 2), "Integer")
+check("send-with-block", [1, 2].send(:map) { |x| x + 1 }.inspect, "[2, 3]")
+check("send-operator-num", sd[0].send(:+, 4), 7)
+check("send-operator-str", sd[1].send(:+, "b"), "ab")
+check("send-operator-cmp", sd[0].send(:<=>, 4), -1)
+check("send-operator-user", sd[3].send(:+, 5), "plus5")
+check("send-aliases", sd[0].public_send(:abs).to_s + sd[0].__send__(:zero?).to_s, "3false")
 # String#inspect is the quoted SOURCE form, so it ESCAPES - all three engines
 # printed the characters raw, and no gate here can see that because they agreed.
 # The four control spellings Ruby has and JavaScript does not (\a \b \f \v \e),

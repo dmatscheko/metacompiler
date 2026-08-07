@@ -3130,7 +3130,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blkT != null) {
             var rb = blkT(b)
             b = rb.b
-            callExt(b, "js_arr_push", [argsV, rb.v])
+            // THE BLOCK MARKER. The block used to be pushed as the bare closure,
+            // which made it indistinguishable from a Proc passed as an ordinary
+            // positional argument: js_rposbind could only guess ("the trailing
+            // callable is the block"), so `def m(f = 3); end; m(some_proc)' took
+            // the default and `block_given?' answered true for a method that was
+            // never given a block. js_rblkwrap puts it in a one-slot object
+            // nothing else produces, so the fact is recorded HERE, at the call
+            // site that knows it. js_rblock unwraps at the other end.
+            callExt(b, "js_arr_push", [argsV, callExt(b, "js_rblkwrap", [rb.v])])
         }
         return {b: b, v: argsV}
     }
@@ -4314,6 +4322,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
             }
         }
+        // Kernel#method(:name): a method AS A VALUE, and the only spelling Ruby has -
+        // a bare `double' CALLS double. The symbol's own text is the scope name the
+        // def was declared under, so this is js_scope_get with a RUNTIME name; the
+        // interpreter half walks its scope chain for the same string. An instance
+        // method of the running self is out of reach in both halves (binding one
+        // needs a variadic closure, and layer 2's MetaJS has no `arguments`).
+        if (name == "method" && args.length == 1 && typeof args[0] == "function") {
+            var mT = args[0]
+            var mFallback = makePlainCall(name, args)
+            return function(b) {
+                if (rubyAllMethods["$method"] === true) { return mFallback(b) }
+                if (selfMethod(curClsName, "method")) { return mFallback(b) }
+                var rm = mT(b)
+                b = rm.b
+                var nmV = callExt(b, "js_rstr", [rm.v])
+                return {b: b, v: callExt(b, "js_scope_get", [curScopeV, nmV])}
+            }
+        }
         // block_given?: did the running method receive a block?
         if (name == "block_given?" || name == "iterator?") {
             return function(b) {
@@ -5366,14 +5392,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return makeTry(items, 0)
     }
     // Ruby has no bare method references: an identifier that is not a local variable is
-    // a parenthesis-less call of the method of that name. Only a ZERO parameter method
-    // is auto-called (a bare name for a method taking arguments is an error in Ruby, and
-    // the feature-matrix file uses that shape to pass a method around as a value). The
-    // registry is consulted when the reference is EMITTED, after every tag has run, so a
-    // def anywhere in the file counts.
+    // a parenthesis-less call of the method of that name. The registry is consulted when
+    // the reference is EMITTED, after every tag has run, so a def anywhere in the file
+    // counts.
+    //
+    // Every def is auto-called, WHATEVER its parameters. It used to be only the ones
+    // that declare none, on the argument that a bare name for a method taking arguments
+    // is an error in Ruby - which is only true of a REQUIRED parameter:
+    // `def q(a = 1); end; q` is an ordinary call in MRI and printed nothing here. The
+    // feature-matrix file used the old shape to pass a method around as a value; it now
+    // says `method(:double)`, which is how Ruby spells that (see makeCall), so the guard
+    // has no case left to protect.
     var rubyMethods = {}
-    // Every def of the file by name (rubyMethods holds only the zero parameter ones,
-    // which are auto-called); defined? uses this one to answer "method".
+    // Every def of the file by name; defined? uses this one to answer "method". It is
+    // now the same set as rubyMethods and is kept separate because the two are read in
+    // different places and one of them may narrow again.
     var rubyAllMethods = {}
     makeVarRef = function(name) {
         // __method__ is a bare name, not a call: the method being compiled, as a Symbol.
@@ -5457,7 +5490,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     function makeDefStmt(fn) {
-        if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
+        rubyMethods["$" + fn.name] = true
         rubyAllMethods["$" + fn.name] = true
         return function(b) {
             var savedMN = curMethName

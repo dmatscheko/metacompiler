@@ -189,6 +189,14 @@ function rbIsNil(v) {
 }
 function rbIsFn(v) { return typeof v == "function" }
 
+// The operator METHOD names Object#send may be handed - see rbMethod. The Go
+// twin's rubyIsBinOpName is the same set.
+function rbIsBinOpName(n) {
+    if (n == "+" || n == "-" || n == "*" || n == "/" || n == "%" || n == "**") { return true }
+    if (n == "<<" || n == ">>" || n == "&" || n == "|" || n == "^") { return true }
+    return n == "<" || n == ">" || n == "<=" || n == ">=" || n == "<=>"
+}
+
 // A user object: an instance carrying a __class descriptor (never a class itself).
 function rbUserObj(v) {
     if (!rbIsObj(v)) { return false }
@@ -3084,28 +3092,33 @@ function rbNumMethod(t, name, args) {
     if (name == "integer?") { return isInt }
     if (name == "numerator") { return rbAsRat(t)["n"] }
     if (name == "denominator") { return rbAsRat(t)["d"] }
+    // The block, NOT the trailing argument: since the block marker exists the two
+    // are different things, and these three arms read the raw argument list.
     if (name == "times") {
+        var tblk = rbBlockOf(args)
         var i = 0
         while (i < x) {
-            rbCall1(rbArgAt(args, 0), i)
+            rbCall1(tblk, i)
             i = i + 1
         }
         return t
     }
     if (name == "upto") {
+        var ublk = rbBlockOf(args)
         var u = x
         var hi = rbToF(rbArgAt(args, 0))
         while (u <= hi) {
-            rbCall1(rbArgAt(args, 1), u)
+            rbCall1(ublk, u)
             u = u + 1
         }
         return t
     }
     if (name == "downto") {
+        var dblk = rbBlockOf(args)
         var d = x
         var lo = rbToF(rbArgAt(args, 0))
         while (d >= lo) {
-            rbCall1(rbArgAt(args, 1), d)
+            rbCall1(dblk, d)
             d = d - 1
         }
         return t
@@ -3134,12 +3147,30 @@ function rbNumMethod(t, name, args) {
 }
 
 // ----- Array helpers: the sort / min / max / flatten / join family -------------
-// A block reaches this half as the LAST positional argument (see unwrapArgs in
-// ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf keeps it in a parameter of
-// its own. rbBlockOf / rbPosArgs split the two apart; rubyBlockArgs is the Go
-// twin's spelling.
+// A block reaches this half as the LAST positional argument, WRAPPED in the block
+// marker (see emitArgs in ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf also
+// keeps it in a parameter of its own. rbBlockOf / rbPosArgs split the two apart;
+// rubyBlockArgs is the Go twin's spelling.
+//
+// THE BLOCK MARKER. Until this existed a block travelled as the BARE closure,
+// which made it indistinguishable from a Proc handed over as an ordinary
+// positional argument: `def m(f = 3); end; m(some_proc)' took the default and
+// `def m(f); block_given?; end; m(some_proc)' answered true. js_rblkwrap wraps a
+// block in a one-slot object nothing else produces, so "the trailing argument is
+// a block" is a fact about the CALL SITE. rubyBlkOf of abnf/jsrt.go is the twin.
+// The body of rbIsObj is spelled out rather than called: rbNPos below runs on
+// every array-method call and a MetaJS call is a scope frame (see rbIsObj).
+function rbIsBlk(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return v["__rblk"] !== undefined
+}
+function rbBlkVal(v) { return v["__rblk"] }
+function js_rblkwrap(f) { return {__rblk: f} }
 function rbBlockOf(args) {
-    if (args.length > 0 && rbIsFn(args[args.length - 1])) { return args[args.length - 1] }
+    if (args.length > 0 && rbIsBlk(args[args.length - 1])) { return rbBlkVal(args[args.length - 1]) }
     return null
 }
 function rbPosArgs(args) {
@@ -3155,7 +3186,7 @@ function rbPosArgs(args) {
 // The COUNT of positional arguments, which is what the hot paths want: building
 // the array would allocate on every array-method call, and push/each/map are hot.
 function rbNPos(args) {
-    if (args.length > 0 && rbIsFn(args[args.length - 1])) { return args.length - 1 }
+    if (args.length > 0 && rbIsBlk(args[args.length - 1])) { return args.length - 1 }
     return args.length
 }
 function rbPosAt(args, n, i) {
@@ -4493,6 +4524,33 @@ function rbMemberCall(target, name, args) {
 // rubyMethod is the direct method dispatch (js_rmcall in the Go twin; here it is
 // reached only through js_rxmcall, which is the one the ruby emitter emits).
 function rbMethod(target, name, args) {
+    // Object#send / #__send__ / #public_send: the method NAME is the first
+    // argument and the rest of the list (block marker included) is the call. It
+    // was implemented in no engine at all - `"a".send(:upcase)' aborted with
+    // *unknown String method: send* in all four legs, so --cross never saw it.
+    if (name == "send" || name == "__send__" || name == "public_send") {
+        if (args.length == 0) { fail("no method name given") }
+        var mn = rbStr(args[0])
+        // An OPERATOR reached by name (`3.send(:+, 4)') is the one shape the type
+        // tables cannot answer: they hold named methods, and + / << / <=> are
+        // evaluated by rbBin. == and != are left out on purpose - every dispatcher
+        // answers those already, and routing a user object's == through rbBin sends
+        // it back through the method table it just came out of.
+        // The comparisons are NOT rbBin's (it has no <=> arm at all): they are the
+        // js_rlt/js_rcmp family, exactly as the emitter spells them.
+        if (args.length == 2 && rbIsBinOpName(mn)) {
+            if (mn == "<") { return rbCmp(target, args[1]) < 0 }
+            if (mn == ">") { return rbCmp(target, args[1]) > 0 }
+            if (mn == "<=") { return rbCmp(target, args[1]) <= 0 }
+            if (mn == ">=") { return rbCmp(target, args[1]) >= 0 }
+            if (mn == "<=>") { return js_rcmp(target, args[1]) }
+            return rbBin(mn, target, args[1])
+        }
+        var rest = []
+        var si = 1
+        while (si < args.length) { rest.push(args[si]); si = si + 1 }
+        return rbMethod(target, mn, rest)
+    }
     // Ruby's universal reflective methods, answered for every kind of value.
     if (name == "class") {
         var kind = rbClassName(target)
@@ -4643,9 +4701,12 @@ function rbMethod(target, name, args) {
             }
             if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
             if (name == "each") {
+                // The block, NOT args[0]: since the block marker exists the two are
+                // different things, and this arm read the raw argument list.
+                var eblk = rbBlockOf(args)
                 var e = 0
                 while (e < keys.length) {
-                    rbCall2(rbArgAt(args, 0), keys[e], vals[e])
+                    rbCall2(eblk, keys[e], vals[e])
                     e = e + 1
                 }
                 return target
@@ -5069,10 +5130,7 @@ function js_rnew(cls, args) {
     if (rbIsObj(cls)) {
         var bn = cls["__rbuiltin"]
         if (typeof bn == "string") {
-            if (bn == "Proc") {
-                if (argv.length > 0 && rbIsFn(argv[argv.length - 1])) { return argv[argv.length - 1] }
-                return null
-            }
+            if (bn == "Proc") { return rbBlockOf(argv) }
             // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this
             // arm it fell into the exception construction below and answered the
             // first argument - a silent wrong answer, and a different one in each
@@ -5109,7 +5167,7 @@ function js_rargrest(args, i_raw) {
     if (!rbIsArr(args)) { return out }
     var i = i_raw
     while (i < args.length) {
-        if (i == args.length - 1 && rbIsFn(args[i])) { break }
+        if (i == args.length - 1 && rbIsBlk(args[i])) { break }
         out.push(args[i])
         i = i + 1
     }
@@ -5145,7 +5203,7 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     // last argument outright.
     if (rbTruthy(wantsKw)) {
         var kwAt = pos.length - 1
-        if (kwAt >= 0 && rbIsFn(pos[kwAt])) { kwAt = kwAt - 1 }
+        if (kwAt >= 0 && rbIsBlk(pos[kwAt])) { kwAt = kwAt - 1 }
         if (kwAt >= 0 && rbIsDict(pos[kwAt])) {
             var kept = []
             var j = 0
@@ -5156,11 +5214,12 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
             pos = kept
         }
     }
-    // A literal block travels as the last positional argument and is not a value an
-    // optional or *splat parameter may take. A REQUIRED parameter still reads it, so
-    // `def m(f); end; m(some_proc)' keeps binding f to the proc.
+    // A block travels as the last positional argument, wrapped by js_rblkwrap, and
+    // is not a value ANY parameter may take. A Proc handed over as an ordinary
+    // argument is not wrapped and binds normally, which is what
+    // `def m(f = 3); end; m(some_proc)' needs.
     var npos = pos.length
-    if (npos > 0 && rbIsFn(pos[npos - 1])) { npos = npos - 1 }
+    if (npos > 0 && rbIsBlk(pos[npos - 1])) { npos = npos - 1 }
     var required = 0
     var i = 0
     while (i < kinds.length) {
@@ -5189,7 +5248,7 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
             if (spare > 0 && ai < npos) { out.push(pos[ai]); ai = ai + 1; spare = spare - 1 }
             else { out.push(undefined) }
         } else {
-            if (ai < pos.length) { out.push(pos[ai]) } else { out.push(null) }
+            if (ai < npos) { out.push(pos[ai]) } else { out.push(null) }
             ai = ai + 1
         }
         k = k + 1
@@ -5241,7 +5300,7 @@ function js_rkwrest(kwh, taken) {
 // &blk: the block a call was given - the trailing callable of the argument list -
 // or nil when it was called without one.
 function js_rblock(args) {
-    if (rbIsArr(args) && args.length > 0 && rbIsFn(args[args.length - 1])) { return args[args.length - 1] }
+    if (rbIsArr(args) && args.length > 0 && rbIsBlk(args[args.length - 1])) { return rbBlkVal(args[args.length - 1]) }
     return null
 }
 

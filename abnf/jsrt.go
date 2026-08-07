@@ -4714,18 +4714,21 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "denominator":
 		return rubyAsRat(t).d, true
 	case "times": // n.times { |i| ... }
+		_, tblk := rubyBlockArgs(args)
 		for i := 0.0; i < x; i++ {
-			rt.call(argAt(args, 0), jsUndef, []interface{}{i})
+			rt.call(tblk, jsUndef, []interface{}{i})
 		}
 		return t, true
 	case "upto":
-		for i := x; i <= rubyToF(argAt(args, 0)); i++ {
-			rt.call(argAt(args, 1), jsUndef, []interface{}{i})
+		upos, ublk := rubyBlockArgs(args)
+		for i := x; i <= rubyToF(argAt(upos, 0)); i++ {
+			rt.call(ublk, jsUndef, []interface{}{i})
 		}
 		return t, true
 	case "downto":
-		for i := x; i >= rubyToF(argAt(args, 0)); i-- {
-			rt.call(argAt(args, 1), jsUndef, []interface{}{i})
+		dpos, dblk := rubyBlockArgs(args)
+		for i := x; i >= rubyToF(argAt(dpos, 0)); i-- {
+			rt.call(dblk, jsUndef, []interface{}{i})
 		}
 		return t, true
 	case "divmod":
@@ -6025,6 +6028,40 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 // semantics never perturb the Kotlin/Java/Go/Python languages that also use
 // js_mcall.
 func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) interface{} {
+	// Object#send / #__send__ / #public_send: the method NAME is the first
+	// argument and the rest of the list (block wrapper included) is the call.
+	// It was implemented in no engine at all - `"a".send(:upcase)` aborted with
+	// *unknown String method: send* in all four legs, which is why --cross never
+	// saw it. Re-entering the dispatcher rather than reaching into any one type's
+	// table is what makes it work for a user object, an Array and a Proc alike.
+	if name == "send" || name == "__send__" || name == "public_send" {
+		if len(args) == 0 {
+			rt.fail("no method name given")
+		}
+		mn := rt.rubyStr(args[0])
+		// An OPERATOR reached by name (`3.send(:+, 4)`) is the one shape the type
+		// tables cannot answer: they hold named methods, and + / << / <=> are
+		// evaluated by rubyBin. Only the compiled halves answered the NUMERIC ones
+		// (rubyNumMethod falls through to rubyBin on its own) and no engine
+		// answered "a".send(:+, "b") or [1].send(:<<, 2).
+		if len(args) == 2 && rubyIsBinOpName(mn) {
+			// The comparisons are NOT rubyBin's (it has no <=> arm at all): they
+			// are the js_rlt/js_rcmp family, exactly as the emitter spells them.
+			switch mn {
+			case "<", ">", "<=", ">=":
+				c := rt.rubyCmp(target, args[1])
+				return (mn == "<" && c < 0) || (mn == ">" && c > 0) ||
+					(mn == "<=" && c <= 0) || (mn == ">=" && c >= 0)
+			case "<=>":
+				if c, ok := rt.rubySpaceship(target, args[1]); ok {
+					return float64(c)
+				}
+				return jsNull
+			}
+			return rt.rubyBin(mn, target, args[1])
+		}
+		return rt.rubyMethod(target, mn, args[1:])
+	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
 	case "class":
@@ -6234,8 +6271,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "include?", "has_key?", "key?":
 				return rt.rubyDictFind(keys, argAt(args, 0)) >= 0
 			case "each":
+				_, eblk := rubyBlockArgs(args)
 				for i := range keys.elems {
-					rt.call(argAt(args, 0), jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
+					rt.call(eblk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
 				}
 				return o
 			case "default":
@@ -6364,9 +6402,11 @@ func rubyRand(v interface{}) interface{} {
 
 // rubyBlockArgs splits a Ruby argument list into its positional part and the
 // trailing block. The two compiler halves pass a block as the LAST positional
-// argument (see unwrapArgs in ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf
-// keeps it in a parameter of its own - which is why arrayMethod there takes a
-// fourth argument and this does not.
+// argument, WRAPPED in the block marker (see emitArgs in ruby-to-llvm-ir.abnf),
+// where ruby-interpreter.abnf also keeps it in a parameter of its own - which is
+// why arrayMethod there takes a fourth argument and this does not. The body is
+// below, beside rubyBlkWrap.
+//
 // rubyArity is the parameter shape Proc#arity is computed from: how many
 // parameters are required, how many have defaults, and whether there is a *splat.
 // Keyword and block parameters are not counted at all.
@@ -6393,9 +6433,55 @@ func (rt *jsrt) rubyArityOf(f interface{}) float64 {
 	return float64(a.req)
 }
 
+// THE BLOCK MARKER. A Ruby block travels as the last element of the argument
+// array, and until this existed it travelled as the bare closure - which made a
+// block INDISTINGUISHABLE from a Proc handed over as an ordinary positional
+// argument, so `def m(f = 3); end; m(some_proc)` took the default and
+// `def m(f); block_given?; end; m(some_proc)` answered true. A block is now
+// wrapped in a one-slot object that nothing else can produce, so "the trailing
+// argument is a block" is a fact about the CALL SITE rather than a guess about
+// the value. The wrapper is built by js_rblkwrap (emitArgs of
+// ruby-to-llvm-ir.abnf), and rbBlkOf of lib/ruby-rt.metajs is the same pair.
+func rubyBlkWrap(v interface{}) interface{} {
+	o := newJSObject()
+	o.set("__rblk", v)
+	return o
+}
+
+// rubyBlkOf answers the block a wrapper carries, and whether v is one at all.
+func rubyBlkOf(v interface{}) (interface{}, bool) {
+	if o, isObj := v.(*jsObject); isObj {
+		if f, has := o.props["__rblk"]; has {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+// rubyIsBlkArg reports whether the last element of a positional list is the
+// call's block rather than a value.
+func rubyIsBlkArg(v interface{}) bool {
+	_, is := rubyBlkOf(v)
+	return is
+}
+
+// rubyIsBinOpName is the set of operator METHOD names Object#send may be handed.
+// == and != are left out on purpose: every dispatcher answers those for every
+// value already, and routing them through rubyBin would send a user object's
+// `==` back through the method table it just came out of.
+func rubyIsBinOpName(n string) bool {
+	switch n {
+	case "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "<", ">", "<=", ">=", "<=>":
+		return true
+	}
+	return false
+}
+
 func rubyBlockArgs(args []interface{}) ([]interface{}, interface{}) {
-	if n := len(args); n > 0 && isCallable(args[n-1]) {
-		return args[:n-1], args[n-1]
+	if n := len(args); n > 0 {
+		if f, is := rubyBlkOf(args[n-1]); is {
+			return args[:n-1], f
+		}
 	}
 	return args, nil
 }
@@ -9319,7 +9405,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(out)
 			}
 			for i := int(a[1]); i < len(arr.elems); i++ {
-				if i == len(arr.elems)-1 && isCallable(arr.elems[i]) {
+				if i == len(arr.elems)-1 && rubyIsBlkArg(arr.elems[i]) {
 					break
 				}
 				out.elems = append(out.elems, arr.elems[i])
@@ -9358,7 +9444,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// not the last argument outright.
 			if rubyTruthy(u(a[3])) {
 				kwAt := len(pos) - 1
-				if kwAt >= 0 && isCallable(pos[kwAt]) {
+				if kwAt >= 0 && rubyIsBlkArg(pos[kwAt]) {
 					kwAt--
 				}
 				if kwAt >= 0 {
@@ -9367,11 +9453,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 				}
 			}
-			// A literal block travels as the last positional argument and is not a
-			// value an optional or *splat parameter may take. A REQUIRED parameter
-			// still reads it, so `def m(f); end; m(some_proc)` keeps binding f.
+			// A block travels as the last positional argument, wrapped by
+			// js_rblkwrap, and is not a value any parameter may take - a Proc
+			// handed over as an ORDINARY argument is not wrapped and binds
+			// normally, which is what `def m(f = 3); end; m(some_proc)` needs.
 			npos := len(pos)
-			if npos > 0 && isCallable(pos[npos-1]) {
+			if npos > 0 && rubyIsBlkArg(pos[npos-1]) {
 				npos--
 			}
 			required := 0
@@ -9410,7 +9497,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						out.elems = append(out.elems, jsUndef)
 					}
 				default:
-					if ai < len(pos) {
+					if ai < npos {
 						out.elems = append(out.elems, pos[ai])
 					} else {
 						out.elems = append(out.elems, jsNull)
@@ -9466,10 +9553,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// list - or nil when it was called without one.
 		"js_rblock": func(a []uint64) uint64 {
 			arr, ok := u(a[0]).(*jsArray)
-			if ok && len(arr.elems) > 0 && isCallable(arr.elems[len(arr.elems)-1]) {
-				return w(arr.elems[len(arr.elems)-1])
+			if ok && len(arr.elems) > 0 {
+				if f, is := rubyBlkOf(arr.elems[len(arr.elems)-1]); is {
+					return w(f)
+				}
 			}
 			return w(jsNull)
+		},
+		// js_rblkwrap builds the block marker - see rubyBlkWrap. emitArgs of
+		// ruby-to-llvm-ir.abnf calls it once per call site that was written with
+		// a block, and nothing else produces the shape.
+		"js_rblkwrap": func(a []uint64) uint64 {
+			return w(rubyBlkWrap(u(a[0])))
 		},
 		// A lambda literal (->) / Kernel#lambda: an ordinary closure, remembered
 		// here so `lambda?` can tell it from a proc (their argument arity and their
@@ -9487,8 +9582,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if cls != nil {
 				if bn, isBuiltin := cls.props["__rbuiltin"].(string); isBuiltin {
 					if bn == "Proc" {
-						if len(argv) > 0 && isCallable(argv[len(argv)-1]) {
-							return w(argv[len(argv)-1])
+						if _, blk := rubyBlockArgs(argv); blk != nil {
+							return w(blk)
 						}
 						return w(jsNull)
 					}

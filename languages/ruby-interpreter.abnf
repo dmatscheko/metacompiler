@@ -2906,6 +2906,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo === true }
     function isRat(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rat === true }
     function isCpx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cpx === true }
+    // THE BLOCK MARKER. A call's block is appended to the argument list (makeCall
+    // and mcall below), and until this existed it went in as the BARE closure -
+    // indistinguishable from a Proc handed over as an ordinary positional argument.
+    // bindParams could only guess ("the trailing callable is the block"), so
+    // `def m(f = 3); end; m(some_proc)' took the default where MRI binds the proc.
+    // Wrapping records the fact at the CALL SITE, which is the only place that
+    // knows it. js_rblkwrap of lib/ruby-rt.metajs and rubyBlkWrap of abnf/jsrt.go
+    // are the same pair for the compiler half.
+    function mkBlkArg(f) { return {__rblk: f} }
+    function isBlkArg(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rblk !== undefined }
     function mkFlo(x) { return {__flo: true, f: x} }
     function mkCpx(re, im) { return {__cpx: true, re: re, im: im} }
     function gcd2(a, b) {
@@ -3193,6 +3203,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var out = []
         for (var t = 0; t < n; t++) { for (var j = 0; j < l.length; j++) { out.push(l[j]) } }
         return out
+    }
+    // The operator METHOD names Object#send may be handed - see mcall. The two
+    // compiled halves spell the same set rubyIsBinOpName / rbIsBinOpName.
+    function isBinOpName(n) {
+        if (n == "+" || n == "-" || n == "*" || n == "/" || n == "%" || n == "**") { return true }
+        if (n == "<<" || n == ">>" || n == "&" || n == "|" || n == "^") { return true }
+        return n == "<" || n == ">" || n == "<=" || n == ">=" || n == "<=>"
     }
     function rbin(op, l, r) {
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
@@ -4818,6 +4835,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         fail("unknown Numeric method: " + name)
     }
     function mcall(target, name, args, blk) {
+        // Object#send / #__send__ / #public_send: the method NAME is the first
+        // argument and the rest of the list is the call, with the block travelling
+        // on unchanged. It was implemented in no engine at all - `"a".send(:upcase)'
+        // aborted with *unknown String method: send* in all four legs, which is why
+        // --cross never saw it. Re-entering mcall rather than reaching into any one
+        // type's table is what makes it work for a user object, an Array and a Proc.
+        if (name == "send" || name == "__send__" || name == "public_send") {
+            if (args.length == 0) { fail("no method name given") }
+            var sname = rstr(args[0])
+            // An OPERATOR reached by name (`3.send(:+, 4)') is the one shape the type
+            // tables cannot answer: they hold named methods, and + / << / <=> are
+            // evaluated by rbin. == and != are left out on purpose - every dispatcher
+            // answers those already, and routing a user object's == through rbin sends
+            // it back through the method table it just came out of.
+            // binOps is what a source-level `l <op> r' runs, so routing through it
+            // is agreement with this half's own operators by construction; rbin
+            // alone is not (it has no <=> arm, and spaceship is a separate body).
+            if (args.length == 2 && isBinOpName(sname)) {
+                // `<<' is not in binOps: it is a statement form here (makeAppendStmt),
+                // because a Ruby String is mutable and ours is not.
+                if (sname == "<<") { return appendOp(target, args[1]) }
+                if (hasOwn(binOps, sname)) { return binOps[sname](target, args[1]) }
+                return rbin(sname, target, args[1])
+            }
+            return mcall(target, sname, args.slice(1), blk)
+        }
         // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
         if (typeof target == "function") {
             if (name == "call" || name == "()" || name == "[]" || name == "yield") {
@@ -5148,13 +5191,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
-            // appended as the last positional argument, which is how a method that names
-            // it as an ordinary parameter receives it. invokeRuby binds only as many
-            // arguments as the method has parameters, so the extra one is harmless.
+            // appended as the last positional argument, WRAPPED in the block marker so
+            // no ordinary parameter can bind it (bindParams strips it, and `&b` reads
+            // currentBlock). invokeRuby binds only as many arguments as the method has
+            // parameters, so the extra one is harmless.
             blockStack.push(blk)
             var mr = anytype
             mr = m.apply(undefined, blk == null ? concat2impl([target], args)
-                                                : concat2impl([target], concat2impl(args, [blk])))
+                                                : concat2impl([target], concat2impl(args, [mkBlkArg(blk)])))
             blockStack.pop()
             return mr
         }
@@ -5202,7 +5246,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // The class object itself is the receiver of a class method, so
                 // @@classvars and other class methods resolve from inside it.
                 sr = sm.apply(undefined, blk == null ? concat2impl([target], args)
-                                                     : concat2impl([target], concat2impl(args, [blk])))
+                                                     : concat2impl([target], concat2impl(args, [mkBlkArg(blk)])))
                 blockStack.pop()
                 return sr
             }
@@ -6385,6 +6429,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isSym(v)) {
                 return function(x) { return mcall(x, v.s, [], null) }
             }
+            // `&nil' is Ruby for "no block", and it is how a method FORWARDS the
+            // block it may not have been given: `def a(*r, &b); c(*r, &b); end'
+            // called without one passes &nil. This half aborted on it outright
+            // while both compiled halves answered - a live halves divergence
+            // --cross never reached, found probing docs/todo.md 1.9.
+            if (v === null || v === undefined) { return null }
             fail("& needs a proc or a symbol")
         }
     }
@@ -6567,8 +6617,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (typeof f != "function") { fail("call of a non function: " + name) }
             if (bf == null) { return f.apply(undefined, argv) }
             blockStack.push(bf)
+            // A HOST global (Kernel#lambda, #proc, #loop, #catch) takes the block as
+            // an ordinary parameter of its Go/MetaJS body and cannot see the marker,
+            // so only a Ruby-level callee - a def, or a Proc value being called -
+            // gets the wrapped form that bindParams knows how to strip.
+            var bv = anytype
+            bv = hasOwn(hostGlobals, name) && f === hostGlobals[name] ? bf : mkBlkArg(bf)
             var r = anytype
-            r = catchBlkBreak(function() { return f.apply(undefined, concat2impl(argv, [bf])) })
+            r = catchBlkBreak(function() { return f.apply(undefined, concat2impl(argv, [bv])) })
             blockStack.pop()
             return r
         }
@@ -6706,7 +6762,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // keywords and still took the default, because the block sat behind the Hash.
         // js_rkwargs of the compiler half searches the same two positions.
         var kwAt = pos.length - 1
-        if (kwAt >= 0 && typeof pos[kwAt] == "function") { kwAt = kwAt - 1 }
+        if (kwAt >= 0 && isBlkArg(pos[kwAt])) { kwAt = kwAt - 1 }
         if (wantsKw && kwAt >= 0 && isDict(pos[kwAt])) {
             kw = pos[kwAt]
             var rest = []
@@ -6722,15 +6778,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (i = 0; i < posParams.length; i++) {
             if (posParams[i].splat !== true && posParams[i].defT == undefined) { required = required + 1 }
         }
-        // A literal block travels as the LAST positional argument (mcall / makeCall
-        // append it, which is how a host function such as Kernel#lambda receives it),
-        // and it is NOT one of the values an OPTIONAL or *splat parameter may take -
-        // `def d(x = 5); yield x; end; d { }' binds x to 5 in Ruby, not to the block.
-        // npos is the positional count with that trailing block slot removed. A
-        // REQUIRED parameter still reads it, so `def m(f); end; m(some_proc)' keeps
-        // binding f to the proc; the compiler half draws the same line (js_rposarg).
+        // A block travels as the LAST positional argument, WRAPPED in the block
+        // marker by mcall / makeCall, and it is NOT one of the values ANY parameter
+        // may take - `def d(x = 5); yield x; end; d { }' binds x to 5 in Ruby, not to
+        // the block. npos is the positional count with that trailing block slot
+        // removed. A Proc handed over as an ORDINARY argument carries no marker and
+        // binds normally, which is the whole point of the marker: before it,
+        // `def m(f = 3); end; m(some_proc)' took the default. The compiler half draws
+        // the same line, in js_rposbind.
         var npos = pos.length
-        if (npos > 0 && typeof pos[npos - 1] == "function") { npos = npos - 1 }
+        if (npos > 0 && isBlkArg(pos[npos - 1])) { npos = npos - 1 }
         var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
@@ -6750,7 +6807,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else { declVar(pp.param, pp.defT()) }
                 continue
             }
-            declVar(pp.param, ai < pos.length ? pos[ai] : null)
+            declVar(pp.param, ai < npos ? pos[ai] : null)
             ai = ai + 1
         }
         var claimed = []
@@ -6804,8 +6861,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
+    // A non-local `return' out of a block throws straight past the blockStack.pop()
+    // of the call that pushed the block, so the block STAYED on the stack and the
+    // next method invoked with no block of its own saw it: after section 37 of
+    // tests/ruby-test-full.rb `block_given?' answered true and `&b' bound a stale
+    // block. This half only - the compiler half publishes $blk out of the method's
+    // own argument list, so it cannot leak. invokeRuby restores the depth exactly
+    // the way it restores `scopes'.
+    function blkTrim(n) { while (blockStack.length > n) { blockStack.pop() } }
     function invokeRuby(fn, self, args) {
         var saved = scopes
+        var bdepth = blockStack.length
         var mscope = {}
         scopes = [globalScope, mscope]
         if (self !== undefined && self !== null) { declVar("self", self) }
@@ -6824,11 +6890,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             r = fn.body()
         } catch (e) {
             scopes = saved
+            blkTrim(bdepth)
             if (e !== null && e !== undefined && e.__blkret === true
                 && (e.rtag === undefined || e.rtag === null || e.rtag === mscope)) { return e.v }
             throw e
         }
         scopes = saved
+        blkTrim(bdepth)
         if (isSig(r)) { return r.v }
         return r
     }
@@ -6925,9 +6993,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // is a parenthesis-less call of the method of that name (`pa, qa = s08_pair`).
     // rubyMethods records every name introduced by a top-level def, so makeVarRef can
     // tell a method from an ordinary local (a local always wins, as in Ruby).
-    // Only a ZERO parameter method is auto-called: a bare name for a method that takes
-    // arguments is an error in Ruby anyway, and the feature-matrix file uses that shape
-    // to pass a method around as a value.
+    //
+    // Every def is auto-called, WHATEVER its parameters. It used to be only the ones
+    // that declare none, on the argument that a bare name for a method taking
+    // arguments is an error in Ruby anyway - which is only true of a REQUIRED
+    // parameter: `def q(a = 1); end; q` is an ordinary call in MRI and printed
+    // nothing here. The feature-matrix file used the old shape to pass a method
+    // around as a value; it now says `method(:double)`, which is how Ruby spells
+    // that (hostGlobals["method"] below), so the guard has no case left to protect.
     var rubyMethods = {}
     // The same registration, as an EXPRESSION: its value is the method's name as a Symbol.
     function makeDefExpr(fn) {
@@ -6936,7 +7009,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() { t(); return mkSym(nm) }
     }
     function makeDefStmt(fn) {
-        if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
+        rubyMethods["$" + fn.name] = true
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
     }
     // A bare name inside a method body may also be a method of `self` (Ruby's
@@ -8024,6 +8097,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // enclosing method and, at the top level, aborted this half outright.
     hostGlobals["lambda"] = function(blk) { return markLambda(copyArity(lambdaWrap(blk), blk)) }
     hostGlobals["proc"] = function(blk) { return blk }
+    // Kernel#method(:name): a method AS A VALUE. Ruby has no bare method reference -
+    // `double' on its own CALLS double - so this is the only spelling there is, and
+    // without it the only way to pass a method around here was the bare name that
+    // makeVarRef used to leave uncalled (see rubyMethods). The answer is the closure
+    // itself, so #call, #arity and #to_proc all work on it; its #class is Proc rather
+    // than Method, because this value model has no Method class. It resolves through
+    // the SCOPE CHAIN, which is every def the compiler half can reach too (there it
+    // is js_scope_get of the symbol's own text) - an instance method of the running
+    // self is out of reach in both halves, because binding one needs a variadic
+    // closure and layer 2's MetaJS has no `arguments`.
+    hostGlobals["method"] = function(nm) {
+        var n = rstr(nm)
+        var res = anytype
+        res = undefined
+        for (var mi = scopes.length - 1; mi >= 0 && res == undefined; mi--) {
+            if (hasOwn(scopes[mi], n)) { res = scopes[mi][n] }
+        }
+        // NOT hostGlobals: a Kernel method is not in the emitted module's scope, so
+        // answering one here would abort the compiler half and not this one.
+        if (typeof res != "function") { fail("undefined method '" + n + "' for class 'Object'") }
+        return res
+    }
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)
         return rformat(rstr(a[0]), a.slice(1))

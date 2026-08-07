@@ -25,7 +25,8 @@
 # Deliberately out of scope (not core syntax, or unrunnable here): require/
 # gems and the stdlib (only core Kernel/Object methods: puts/exit as in the
 # feature file, plus loop, format %, dup), threads/fibers/ractors, eval/
-# binding and reflection (send, instance_variable_get), flip-flops, BEGIN/END
+# binding and reflection (instance_variable_get; send/__send__/public_send ARE
+# covered, section 38), flip-flops, BEGIN/END
 # blocks, magic comments (frozen_string_literal), refinements, __END__/DATA,
 # and the 3.4 'it' parameter. Rational 1r / Complex 2i literals ARE covered
 # (literal syntax); define_method appears exactly once. Sections 21-23 need
@@ -1619,6 +1620,66 @@ def s37_lam
   f = lambda { |x| return x * 2 }
   f.call(3) + 1
 end
+# ===== SECTION 38: bare method calls, the block marker and Object#send =====
+# docs/todo.md 1.9. Every right-hand side is ruby 2.6.10p210's own answer, and
+# none of these forms changed between 2.6 and 3.x. Section 37 covers the case a
+# LITERAL block is bound wrongly; this one covers the case a PROC passed as an
+# ordinary argument was mistaken for one, which no engine could tell apart until
+# the argument list carried a block marker. Every operand is read out of an array
+# so no constant folder can answer these at compile time.
+def s38
+  v = [proc { |x| x }, 4, "b"]
+  # A bare name is a CALL whatever the parameters are, as long as none of them is
+  # required - `def q(a = 1); end; q` is an ordinary call in MRI. All four of
+  # these used to answer the METHOD OBJECT instead of calling it.
+  check("z01", s38_opt == 5 && s38_splat == 0)
+  check("z02", s38_kw == 5 && s38_blk == 7)
+  # A Proc handed over as an ORDINARY argument is not the call's block: it fills
+  # the optional parameter, it joins the *splat, `block_given?` stays false and
+  # `&b` stays nil. The last two were a live halves divergence.
+  check("z03", s38_optp(v[0]) == "Proc" && s38_splatp(v[0]) == 1)
+  check("z04", s38_bg(v[0]) == "noblk" && s38_bg { 1 } == "blk")
+  check("z05", s38_amp(v[0]) == "Proc|true" && s38_amp(v[0]) { } == "Proc|false")
+  # ... and a real block still is one.
+  check("z06", s38_yield { |x| x + 1 } == 6)
+  # `&nil` is Ruby for "no block", which is how a method forwards a block it may
+  # not have been given. The interpreter half aborted on it outright.
+  check("z07", s38_fwd(v[1]) == "Integer|true" && s38_fwd(v[1]) { } == "Integer|false")
+  # A method AS A VALUE is `method(:name)` - Ruby has no bare method reference.
+  check("z08", s38_apply(method(:s38_double), v[1]) == 8)
+  fs = [method(:s38_double), method(:s38_negate)]
+  # NOT #arity: the shape registry is armed only for a closure BUILT by a block or
+  # lambda literal, never for a def, so a Method answers 0 where MRI answers 1.
+  # Arming it for every def would put every method closure in a registry keyed by
+  # identity, which is the retention the gate exists to avoid (docs/todo.md 1.9).
+  check("z09", fs[1].call(v[1]) == -4 && fs[0].call(v[1]) == 8)
+  # Object#send / #__send__ / #public_send, including an OPERATOR by name, which
+  # is the one shape a type's method table cannot answer.
+  check("z10", v[2].send(:upcase) == "B" && S38C.new.send(:sm, v[1]) == "Integer")
+  check("z11", [1, 2].send(:map) { |x| x + 1 } == [2, 3])
+  check("z12", v[1].send(:+, 3) == 7 && v[2].send(:+, "c") == "bc")
+  check("z13", v[1].send(:<=>, 5) == -1 && [1].send(:<<, 2) == [1, 2])
+  check("z14", S38C.new.send(:+, 5) == "plus5")
+  check("z15", v[1].public_send(:abs) == 4 && v[1].__send__(:zero?) == false)
+end
+def s38_opt(a = 4); a + 1; end
+def s38_splat(*a); a.size; end
+def s38_kw(k: 5); k; end
+def s38_blk(&b); b.nil? ? 7 : 8; end
+def s38_optp(f = 3); f.class.to_s; end
+def s38_splatp(*r); r.size; end
+def s38_bg(f = 3); block_given? ? "blk" : "noblk"; end
+def s38_amp(f = 3, &b); "#{f.class}|#{b.nil?}"; end
+def s38_yield(x = 5); yield x; end
+def s38_fwd_target(a = 1, &b); "#{a.class}|#{b.nil?}"; end
+def s38_fwd(*fa, &fb); s38_fwd_target(*fa, &fb); end
+def s38_double(n); n * 2; end
+def s38_negate(n); 0 - n; end
+def s38_apply(f, n); f.call(n); end
+class S38C
+  def sm(a = 1); a.class.to_s; end
+  def +(o); "plus#{o}"; end
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -1657,5 +1718,6 @@ s34() # SECTION-CALL 34
 s35() # SECTION-CALL 35
 s36() # SECTION-CALL 36
 s37() # SECTION-CALL 37
+s38() # SECTION-CALL 38
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
