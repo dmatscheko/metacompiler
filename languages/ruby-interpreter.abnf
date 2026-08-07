@@ -4848,6 +4848,102 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (blk != null) { return blockCall(blk, [args[0]]) }
                 fail("key not found: " + rinspect(args[0]))
             }
+            // ----- the Hash-specific half of the Enumerable surface -----
+            // merge / dup / clone CARRY THE RECEIVER'S DEFAULT over, which is what
+            // makes `Hash.new(0).merge(other)["missing"]` still answer 0 in MRI.
+            if (name == "merge" || name == "merge!" || name == "update") {
+                var mg = name == "merge" ? hashCopy(target) : target
+                for (var mi = 0; mi < args.length; mi++) {
+                    var src = args[mi]
+                    if (!isDict(src)) { continue }
+                    for (var mk = 0; mk < src.keys.length; mk++) {
+                        var mfound = dictFind(mg, src.keys[mk])
+                        if (mfound >= 0 && blk != null) {
+                            mg.vals[mfound] = blockCall(blk, [src.keys[mk], mg.vals[mfound], src.vals[mk]])
+                        } else { dictSet(mg, src.keys[mk], src.vals[mk]) }
+                    }
+                }
+                return mg
+            }
+            if (name == "dup" || name == "clone") { return hashCopy(target) }
+            if (name == "to_h" && blk == null) { return target }
+            if (name == "delete") {
+                var xi = dictFind(target, args[0])
+                if (xi < 0) { return blk != null ? blockCall(blk, [args[0]]) : null }
+                var xv = target.vals[xi]
+                // This dialect has no splice: rebuild both sides without the hit.
+                var nk = []
+                var nv = []
+                for (var xj = 0; xj < target.keys.length; xj++) {
+                    if (xj != xi) { nk.push(target.keys[xj]); nv.push(target.vals[xj]) }
+                }
+                arrReplace(target.keys, nk)
+                arrReplace(target.vals, nv)
+                return xv
+            }
+            if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
+            if (name == "each_pair") {
+                if (blk == null) { return mkEnum(hashPairs(target)) }
+                for (var ep = 0; ep < target.keys.length; ep++) { blockCall(blk, [target.keys[ep], target.vals[ep]]) }
+                return target
+            }
+            if (name == "each_key") {
+                for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [target.keys[ek]]) }
+                return target
+            }
+            if (name == "each_value") {
+                for (var ev = 0; ev < target.vals.length; ev++) { blockCall(blk, [target.vals[ev]]) }
+                return target
+            }
+            // Hash#values_at takes KEYS, where Array#values_at takes indices, so it
+            // must not reach the pair delegation below.
+            if (name == "values_at") {
+                var va = []
+                for (var vi = 0; vi < args.length; vi++) {
+                    var vf = dictFind(target, args[vi])
+                    va.push(vf < 0 ? hashDefault(target, args[vi]) : target.vals[vf])
+                }
+                return va
+            }
+            if (name == "invert") {
+                var iv = {__dict: true, keys: [], vals: []}
+                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, target.vals[ii], target.keys[ii]) }
+                return iv
+            }
+            if (name == "key") {
+                for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return target.keys[ky] } }
+                return null
+            }
+            if (name == "transform_values") {
+                var tv = hashCopy(target)
+                for (var ti = 0; ti < tv.vals.length; ti++) { tv.vals[ti] = blockCall(blk, [tv.vals[ti]]) }
+                return tv
+            }
+            if (name == "transform_keys") {
+                var tk = {__dict: true, keys: [], vals: []}
+                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, blockCall(blk, [target.keys[tj]]), target.vals[tj]) }
+                return tk
+            }
+            // Everything else Enumerable is answered over the [key, value] PAIRS,
+            // which is what MRI's Hash does (Hash includes Enumerable and yields a
+            // pair). select / filter / reject answer a HASH again, everything else
+            // the Array that Enumerable builds. The list is explicit rather than a
+            // fallthrough so that a name Hash does NOT have (push, rotate, ...) is
+            // still reported instead of silently answered over the pairs.
+            if (hashEnumName(name)) {
+                var hp = hashPairs(target)
+                if (name == "select" || name == "filter" || name == "reject"
+                    || name == "select!" || name == "filter!" || name == "reject!"
+                    || name == "keep_if" || name == "delete_if") {
+                    if (blk == null) { return mkEnumOp(hp, name) }
+                    var keep = name == "reject" || name == "reject!" || name == "delete_if"
+                        ? arrayMethod(hp, "reject", args, blk) : arrayMethod(hp, "select", args, blk)
+                    var hs = pairsToHash(keep, target)
+                    if (name == "select" || name == "filter" || name == "reject") { return hs }
+                    return arrReplaceDict(target, hs)
+                }
+                return arrayMethod(hp, name, args, blk)
+            }
             fail("unknown Hash method: " + name)
         }
         if (target === null || target === undefined) {
@@ -4899,7 +4995,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mr
         }
         if (target.__isclass === true) {
-            if (name == "new" && target === hostGlobals["Proc"]) { return markLambda(blk) != null ? blk : blk }
+            // Proc.new { } is a PROC, not a lambda: `Proc.new { }.lambda?' is false in
+            // MRI and in the compiler half, and marking it here made this half answer
+            // true. Its `return' is non-local, exactly like a block's.
+            if (name == "new" && target === hostGlobals["Proc"]) { return blk }
             // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this arm
             // it fell into the generic instance construction below and answered a bare
             // object - a silent wrong answer, and a different one in each engine.
@@ -5120,6 +5219,62 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // ----- Enumerator -----
+    // ----- Hash helpers shared by the Hash arm of mcall -----
+    // The [key, value] pair list a Hash yields to every Enumerable method.
+    function hashPairs(o) {
+        var out = []
+        for (var i = 0; i < o.keys.length; i++) { out.push([o.keys[i], o.vals[i]]) }
+        return out
+    }
+    // A shallow copy that KEEPS THE DEFAULT: MRI's Hash#dup, #clone and #merge all
+    // carry the receiver's default value / default_proc into the new Hash.
+    function hashCopy(o) {
+        var c = {__dict: true, keys: o.keys.slice(0), vals: o.vals.slice(0)}
+        if (o.__hdef != undefined) { c.__hdef = o.__hdef }
+        if (o.__hdefp != undefined) { c.__hdefp = o.__hdefp }
+        return c
+    }
+    function pairsToHash(pairs, src) {
+        var d = {__dict: true, keys: [], vals: []}
+        if (src.__hdef != undefined) { d.__hdef = src.__hdef }
+        if (src.__hdefp != undefined) { d.__hdefp = src.__hdefp }
+        for (var i = 0; i < pairs.length; i++) { dictSet(d, pairs[i][0], pairs[i][1]) }
+        return d
+    }
+    // The in-place forms (select!, reject!, keep_if, delete_if) answer the RECEIVER.
+    function arrReplaceDict(o, src) {
+        arrReplace(o.keys, src.keys)
+        arrReplace(o.vals, src.vals)
+        return o
+    }
+    // The Enumerable names a Hash answers over its pairs. Explicit, so that a name
+    // Hash does not have is still an error rather than an Array answer.
+    function hashEnumName(n) {
+        return n == "map" || n == "collect" || n == "flat_map" || n == "collect_concat"
+            || n == "select" || n == "filter" || n == "reject" || n == "select!"
+            || n == "filter!" || n == "reject!" || n == "keep_if" || n == "delete_if"
+            || n == "find" || n == "detect" || n == "find_index" || n == "sort"
+            || n == "sort_by" || n == "min" || n == "max" || n == "min_by" || n == "max_by"
+            || n == "minmax" || n == "sum" || n == "count" || n == "group_by"
+            || n == "partition" || n == "each_with_index" || n == "each_with_object"
+            || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
+            || n == "one?" || n == "first" || n == "take" || n == "drop"
+            || n == "take_while" || n == "drop_while" || n == "each_slice"
+            || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip"
+            || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
+    }
+    // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
+    // back an Enumerator over the receiver. Names that are legal blockless (sort,
+    // min, max, count, sum, all?, any?, none?, one?, find_index, include?) are not
+    // here, and each / each_with_index answer their own Enumerator.
+    function arrWantsBlock(n) {
+        return n == "map" || n == "collect" || n == "map!" || n == "collect!"
+            || n == "select" || n == "filter" || n == "select!" || n == "filter!"
+            || n == "reject" || n == "reject!" || n == "keep_if" || n == "delete_if"
+            || n == "sort_by" || n == "sort_by!" || n == "group_by" || n == "partition"
+            || n == "flat_map" || n == "collect_concat" || n == "find" || n == "detect"
+            || n == "min_by" || n == "max_by" || n == "take_while" || n == "drop_while"
+    }
     // A blockless each / each_slice / each_cons / each_with_index / combination /
     // permutation answers an Enumerator in MRI; before this they answered the array of
     // elements the enumerator would have produced, so `.to_a` was right and `.class`
@@ -5133,7 +5288,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Enumerator.new / an infinite enumerator is not expressible. Mirrored by
     // rbMkEnum / rbEnumMethod in lib/ruby-rt.metajs and rubyMkEnum /
     // rubyEnumMethod in abnf/jsrt.go.
-    function mkEnum(items) { return {__renum: true, items: items, pos: 0} }
+    // An Enumerator remembers the OPERATION that made it: `h.map` is an Enumerator
+    // whose pending op is map, so `h.map.with_index { }` has to answer the MAPPED
+    // list, not the receiver. An eager Enumerator that forgot the op answered the
+    // Enumerator itself and every `map.with_index` was silently wrong.
+    function mkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
+    function mkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
+    // What one pass of the pending operation answers, given the block results.
+    function enumFinish(t, items, results) {
+        var op = t.op
+        if (op == "map" || op == "collect") { return results }
+        if (op == "flat_map" || op == "collect_concat") {
+            var fl = []
+            for (var f = 0; f < results.length; f++) {
+                if (Array.isArray(results[f])) { for (var g = 0; g < results[f].length; g++) { fl.push(results[f][g]) } }
+                else { fl.push(results[f]) }
+            }
+            return fl
+        }
+        if (op == "select" || op == "filter" || op == "reject") {
+            var keep = []
+            for (var k = 0; k < items.length; k++) {
+                var hit = rtest(results[k])
+                if (op == "reject") { hit = !hit }
+                if (hit) { keep.push(items[k]) }
+            }
+            return keep
+        }
+        return t
+    }
     function isEnum(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__renum === true
     }
@@ -5154,8 +5337,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rinspect(items) + ">" }
         if (name == "each") {
             if (blk == null) { return t }
-            for (var i = 0; i < items.length; i++) { blockCall(blk, [items[i]]) }
-            return t
+            var eres = []
+            for (var i = 0; i < items.length; i++) { eres.push(blockCall(blk, [items[i]])) }
+            return enumFinish(t, items, eres)
         }
         // with_index(offset = 0) is each_with_index with a starting number.
         if (name == "with_index" || name == "each_with_index") {
@@ -5164,8 +5348,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var pairs = []
             for (var j = 0; j < items.length; j++) { pairs.push([items[j], j + off]) }
             if (blk == null) { return mkEnum(pairs) }
-            for (var k = 0; k < items.length; k++) { blockCall(blk, [items[k], k + off]) }
-            return t
+            var wres = []
+            for (var k = 0; k < items.length; k++) { wres.push(blockCall(blk, [items[k], k + off])) }
+            return enumFinish(t, items, wres)
         }
         if (name == "with_object" || name == "each_with_object") {
             var memo = args[0]
@@ -5177,6 +5362,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function arrayMethod(t, name, args, blk) {
         var i
+        // A blockless map / select / sort_by / ... is an ENUMERATOR in MRI, not a
+        // call of a null block: `h.map.with_index { }` and `a.each_with_index.map`
+        // both go through here. each / each_with_index answer one below on their own.
+        if (blk == null && arrWantsBlock(name)) { return mkEnumOp(t.slice(0), name) }
         if (name == "size" || name == "length") { return t.length }
         // Array#push is VARIADIC: a.push(1, 2, 3) appends all three.
         if (name == "push" || name == "append" || name == "add") {
@@ -5787,6 +5976,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < lambdaSet.length; i++) { if (lambdaSet[i] === f) { return true } }
         return false
     }
+    // Kernel#lambda's block, made local-returning: the block itself still throws the
+    // __blkret signal makeBlock builds, and this is the frame that stops it.
+    function lambdaWrap(blk) {
+        if (typeof blk != "function") { return blk }
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            try {
+                return blk.apply(undefined, args)
+            } catch (e) {
+                if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+                throw e
+            }
+        }
+    }
     // -> (params) { body }: a callable value. `return` inside it is LOCAL (it returns
     // from the lambda), which is the one behavioural difference from a block.
     function makeLambda(items) {
@@ -5871,7 +6075,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (isSig(r)) {
                     if (r.brk === true) { throw {__blkbrk: true, v: r.v} }
                     if (r.redo === true) { throw {__blkredo: true} }
-                    if (r.ret === true) { throw {__blkret: true, v: r.v} }
+                    // `return' leaves the method the block was WRITTEN in, which is
+                    // not always the innermost one running: `def a(&b); c(&b); end'
+                    // called from `def d; a { return 1 }; end' must return from d.
+                    // The captured scope chain names that frame, so the signal
+                    // carries it and invokeRuby only claims its own.
+                    if (r.ret === true) { throw {__blkret: true, v: r.v, rtag: frameScopeOf(captured)} }
                     return r.v                 // next VALUE is this run's result
                 }
                 return r
@@ -6271,9 +6480,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var wantsKw = false
         for (i = 0; i < params.length; i++) { if (params[i].kw === true || params[i].kwrest === true) { wantsKw = true } }
         var pos = args
-        if (wantsKw && pos.length > 0 && isDict(pos[pos.length - 1])) {
-            kw = pos[pos.length - 1]
-            pos = pos.slice(0, pos.length - 1)
+        // The keyword Hash is the last argument BEFORE the trailing block slot, not
+        // the last argument outright - `def kw(a: 7); end; kw(a: 2) { }' passed the
+        // keywords and still took the default, because the block sat behind the Hash.
+        // js_rkwargs of the compiler half searches the same two positions.
+        var kwAt = pos.length - 1
+        if (kwAt >= 0 && typeof pos[kwAt] == "function") { kwAt = kwAt - 1 }
+        if (wantsKw && kwAt >= 0 && isDict(pos[kwAt])) {
+            kw = pos[kwAt]
+            var rest = []
+            for (i = 0; i < pos.length; i++) { if (i != kwAt) { rest.push(pos[i]) } }
+            pos = rest
         }
         var posParams = []
         for (i = 0; i < params.length; i++) {
@@ -6284,14 +6501,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (i = 0; i < posParams.length; i++) {
             if (posParams[i].splat !== true && posParams[i].defT == undefined) { required = required + 1 }
         }
-        var spare = pos.length - required
+        // A literal block travels as the LAST positional argument (mcall / makeCall
+        // append it, which is how a host function such as Kernel#lambda receives it),
+        // and it is NOT one of the values an OPTIONAL or *splat parameter may take -
+        // `def d(x = 5); yield x; end; d { }' binds x to 5 in Ruby, not to the block.
+        // npos is the positional count with that trailing block slot removed. A
+        // REQUIRED parameter still reads it, so `def m(f); end; m(some_proc)' keeps
+        // binding f to the proc; the compiler half draws the same line (js_rposarg).
+        var npos = pos.length
+        if (npos > 0 && typeof pos[npos - 1] == "function") { npos = npos - 1 }
+        var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
             var pp = posParams[i]
             if (pp.splat === true) {
                 var after = 0
                 for (var q = i + 1; q < posParams.length; q++) { if (posParams[q].splat !== true) { after = after + 1 } }
-                var take = pos.length - ai - after
+                var take = npos - ai - after
                 if (take < 0) { take = 0 }
                 var rest = []
                 for (var r2 = 0; r2 < take; r2++) { rest.push(pos[ai]); ai = ai + 1 }
@@ -6299,7 +6525,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 continue
             }
             if (pp.defT != undefined) {
-                if (spare > 0 && ai < pos.length) { declVar(pp.param, pos[ai]); ai = ai + 1; spare = spare - 1 }
+                if (spare > 0 && ai < npos) { declVar(pp.param, pos[ai]); ai = ai + 1; spare = spare - 1 }
                 else { declVar(pp.param, pp.defT()) }
                 continue
             }
@@ -6348,9 +6574,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // The innermost METHOD scope of a captured chain: the frame a `return' written
+    // in a block created there has to leave. invokeRuby declares $mname in exactly
+    // one scope per method invocation, so the scope OBJECT is the frame identity.
+    function frameScopeOf(chain) {
+        for (var i = chain.length - 1; i >= 0; i--) {
+            if (hasOwn(chain[i], "$mname")) { return chain[i] }
+        }
+        return null
+    }
     function invokeRuby(fn, self, args) {
         var saved = scopes
-        scopes = [globalScope, {}]
+        var mscope = {}
+        scopes = [globalScope, mscope]
         if (self !== undefined && self !== null) { declVar("self", self) }
         declVar("$blk", currentBlock())
         declVar("$defclass", fn.owner)
@@ -6367,7 +6603,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             r = fn.body()
         } catch (e) {
             scopes = saved
-            if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+            if (e !== null && e !== undefined && e.__blkret === true
+                && (e.rtag === undefined || e.rtag === null || e.rtag === mscope)) { return e.v }
             throw e
         }
         scopes = saved
@@ -7560,8 +7797,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     hostGlobals["srand"] = function() { return 0 }
     // Kernel#lambda and Kernel#proc: the block itself is the value; only lambda marks
-    // it, so Proc#lambda? can tell the two apart.
-    hostGlobals["lambda"] = function(blk) { return markLambda(blk) }
+    // it, so Proc#lambda? can tell the two apart. A lambda's `return' is LOCAL, so
+    // Kernel#lambda wraps the block in a closure that swallows the block's own
+    // __blkret signal - without it `lambda { |x| return x }.call(1)' escaped every
+    // enclosing method and, at the top level, aborted this half outright.
+    hostGlobals["lambda"] = function(blk) { return markLambda(lambdaWrap(blk)) }
     hostGlobals["proc"] = function(blk) { return blk }
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)
@@ -7605,6 +7845,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
         if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return rtest(mcall(l, "==", [r], null)) }
+        // undefined and nil both spell Ruby's nil (the compiled halves bind an
+        // absent argument to undefined), so the two must compare equal here too.
+        if (l === undefined || l === null || r === undefined || r === null) {
+            var ln = l === undefined || l === null
+            var rn = r === undefined || r === null
+            return ln && rn
+        }
         if (isExcObj(l) && typeof r == "string") { return rstr(l) === r }
         if (isExcObj(r) && typeof l == "string") { return rstr(r) === l }
         if (Array.isArray(l) && Array.isArray(r)) {

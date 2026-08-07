@@ -38,9 +38,41 @@ nonlocal are the only way out (see pySet).
 Known deviations, all deliberate:
   - Generators run by REPLAY. There are no coroutines in the value model, so every
     step re-runs the body from the top, feeds the yields that already happened the
-    values they were sent, and stops at the next one. A pure generator behaves
-    exactly right; one with side effects repeats them. Same model as
-    languages/js-interpreter.abnf.
+    values they were sent, and stops at the next one. Same model as
+    languages/js-interpreter.abnf; the two COMPILED halves have genuine coroutines
+    (runtime.c's tag-15 cell) and match CPython exactly, so this is the one place
+    the three engines are not the same machine.
+
+    EXACTLY what differs, and it is only this: every side effect BEFORE the yield
+    the generator is parked at happens once per resume instead of once, so the
+    n-th step re-runs the first n-1 segments of the body and stepping a generator
+    to exhaustion is O(n^2) in the body rather than O(n). A side effect on shared
+    state therefore lands more than once - a list a generator appends to before
+    its first yield ends up [1, 1, 2] where CPython leaves [1, 2].
+
+    ORDER IS NOT AFFECTED. Measured, not assumed: an interleaving probe that
+    numbers every driver event and every generator event into one log gives, after
+    collapsing repeats, byte-identically CPython's sequence - for two generators
+    driven alternately, for a generator mutating shared state, for try / with /
+    finally nested around a yield, for close() mid-run, and for an exception
+    object built before a yield and raised after it. That was NOT true before
+    docs/todo.md 2.6 was worked: the suspension signal is a host-level throw, and
+    it used to unwind the program's own try/finally and a with's __exit__ on its
+    way out, so a generator's `finally` ran at the FIRST next() - before CPython
+    runs it at all - and again at every step after that. makeTry, runWith and
+    genClose now let that signal pass through untouched (isGenSuspend), and
+    close() replays to the parked yield and raises there, which is how the
+    `finally` runs at the moment CPython runs it.
+
+    STILL MISSING, and it is not reachable from here: gen.throw(). The record
+    would travel on the resume value exactly as close()'s exit record does, but
+    the COMPILED halves cannot follow - a generator there is the C floor's tag-15
+    cell whose member table is host-dispatched and offers next and return only, so
+    giving python a .throw() the two halves agree on is a runtime.c change.
+    languages/js-interpreter.abnf records the same wall for the same reason. For
+    the same reason a close() is not offered to `except`: the floor's GEN_EXIT
+    sentinel unwinds `finally` clauses without being catchable, so neither engine
+    lets a generator catch its own GeneratorExit, where CPython does.
   - A tuple is a list, so it is mutable and compares equal to a list.
   - A complex whose imaginary part is zero is an ordinary number, and int / float
     are one numeric type, so type() cannot tell 1 from 1.0 or from 1+0j.
@@ -1982,6 +2014,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // is "boom" in CPython and was ValueError('boom') here.
             if (hasOwn(v, "args")) {
                 if (v.args.length == 0) { return "" }
+                // KeyError OVERRIDES BaseException.__str__ with repr(args[0]),
+                // which is why str(KeyError('x')) is "'x'" and not "x". Every
+                // engine here used to fake that by pre-repr'ing the ARGUMENT,
+                // which made str() right and repr() doubly quoted
+                // (docs/todo.md 1.7). The argument is now the key itself and the
+                // repr happens here, where CPython does it.
+                if (v.args.length == 1 && isKeyErrCls(v.__class)) { return prepr(v.args[0]) }
                 if (v.args.length == 1) { return pstr(v.args[0]) }
                 var oute = "("
                 for (var e = 0; e < v.args.length; e++) { if (e > 0) { oute += ", " }; oute += prepr(v.args[e]) }
@@ -1997,6 +2036,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out4 + ")"
         }
         return "<" + v.__class.__name + " object>"
+    }
+    // Is this class KeyError, or a subclass of it? KeyError is the one builtin
+    // exception whose __str__ differs from BaseException's, and a subclass
+    // INHERITS that, so the test is the class chain rather than the name alone.
+    // The three engines represent the chain three ways (__bases here, __super in
+    // languages/lib/python-rt.metajs and abnf/jsrt.go); the depth cap matches
+    // clsFind's neighbours and keeps a cyclic hierarchy from hanging.
+    function isKeyErrCls(cls) {
+        var k = cls
+        var guard = 0
+        while (k != undefined && k != null && guard < 64) {
+            if (k.__name == "KeyError") { return true }
+            var bs = k.__bases
+            if (bs == undefined || bs == null || bs.length == 0) { return false }
+            k = bs[0]
+            guard = guard + 1
+        }
+        return false
     }
     // Walk a class and its bases (left to right, depth first - the MRO this model
     // needs) for a member.
@@ -2033,18 +2090,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
             return {__genalias: true, origin: o, targs: Array.isArray(i) ? i : [i]}
         }
+        // A subscript MISS is a catchable exception, not an abort. It used to be a
+        // fail() in all three engines, so `try: d[k] / except KeyError` - which
+        // CPython supports - killed the process instead (docs/todo.md 1.7). The
+        // KeyError carries the KEY ITSELF, never its repr: CPython's
+        // KeyError.__str__ is repr(args[0]), so pre-repr'ing the argument made
+        // str(e) right by accident and repr(e) doubly quoted.
         if (isDict(o)) {
             var di = dictFind(o, i)
-            if (di < 0) fail("KeyError: " + pstr(i))
+            if (di < 0) { pyRaise(pyMakeExc("KeyError", [i])) }
             return o.vals[di]
         }
         if (typeof o == "string") {
             if (i < 0) i += o.length
-            if (i < 0 || i >= o.length) fail("string index out of range")
+            if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
             return o.charAt(i)
         }
         if (i < 0) i += o.length
-        if (i < 0 || i >= o.length) fail("list index out of range")
+        if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["list index out of range"])) }
         return o[i]
     }
     // Slicing with Python bounds: open ends, negative wrap around, clamping.
@@ -2410,6 +2473,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- the four engine adapters this chapter is written against ----
     function pySFail(msg) { fail(msg) }
+    // A CATCHABLE KeyError, for the one place in the str-method chunk where
+    // CPython raises rather than aborts: "{a}".format(b=1). pySFail is the
+    // engine's abort and cannot be caught (docs/todo.md 1.7).
+    function pySRaiseKey(nm) { pyRaise(pyMakeExc("KeyError", [nm])) }
     function pySFormat1(v, spec, conv) { return pyFormat(v, spec, conv) }
     function pySGetAttr(v, nm) { return pyattr(v, nm) }
     function pySGetItem(v, k) { return pyget(v, k) }
@@ -2428,7 +2495,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var i = dictFind(kw, nm)
             if (i >= 0) { return kw.vals[i] }
         }
-        fail("KeyError: '" + nm + "'")
+        pySRaiseKey(nm)
         return r
     }
     // ===================================================== str methods ==========
@@ -3349,7 +3416,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isGen(target)) {
             if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
             if (name == "__next__") { return genSend(target, undefined) }
-            if (name == "close") { target.st.done = true; return undefined }
+            if (name == "close") { return genClose(target) }
             fail("unknown generator method: " + name)
         }
         if (Array.isArray(target)) {
@@ -3637,7 +3704,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return pv
             }
             if (args.length > 1) { return args[1] }
-            pyRaise(pyMakeExc("KeyError", [prepr(pyArgAt(args, 0))]))
+            pyRaise(pyMakeExc("KeyError", [pyArgAt(args, 0)]))
         }
         if (name == "clear") { pyDictClear(d); return undefined }
         // SHALLOW, like CPython's: the values are shared, only the two spine
@@ -3725,7 +3792,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Assert on membership and size, never on which element.
         if (name == "pop") {
             if (s.keys.length == 0) {
-                pyRaise(pyMakeExc("KeyError", [prepr("pop from an empty set")]))
+                pyRaise(pyMakeExc("KeyError", ["pop from an empty set"]))
             }
             var pv = anytype
             pv = s.keys[0]
@@ -3745,7 +3812,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return undefined
             }
             if (name == "remove") {
-                pyRaise(pyMakeExc("KeyError", [prepr(pyArgAt(args, 0))]))
+                pyRaise(pyMakeExc("KeyError", [pyArgAt(args, 0)]))
             }
             return undefined
         }
@@ -5074,7 +5141,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (key != null) {
                 if (dict == null) { fail("format requires a mapping") }
                 var di = dictFind(dict, key)
-                if (di < 0) { fail("KeyError: '" + key + "'") }
+                if (di < 0) { pyRaise(pyMakeExc("KeyError", [key])) }
                 v = dict.vals[di]
             } else {
                 if (ai >= args.length) { fail("not enough arguments for format string") }
@@ -5503,10 +5570,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (run.k < run.target) {
             var sent = run.sent[run.k + 1]
             run.k = run.k + 1
+            // The RECORD TRAVELS ON THE RESUME VALUE, which is the one thing a
+            // replay can carry into a suspended body (the pattern
+            // languages/js-interpreter.abnf uses for its async .throw()). A
+            // close() puts an exit record on the resume channel of the yield the
+            // generator is parked at, and only that yield ever sees it - by
+            // construction, since it is the last one the replay re-runs.
+            if (sent != undefined && sent != null && sent.__genExitIn == true) {
+                throw {__genExit: true}
+            }
             return sent
         }
         run.k = run.k + 1
         throw {__genYield: true, v: v}
+    }
+    // Is this in-flight throw a generator SUSPENSION rather than a Python
+    // exception? Every host-level try in this file has to ask, because the
+    // suspension unwinds the same way an exception does and must not be seen by
+    // the program's own try/except/finally or by a `with`'s __exit__.
+    function isGenSuspend(e) {
+        return e != undefined && e != null && e.__genYield == true
     }
     // items = [valueThunk?, {yfrom}?]
     function makeYield(items, pos) {
@@ -5562,6 +5645,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return r.value
     }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
+    // g.close(): abandon a suspended generator, RUNNING the `finally` clauses that
+    // wrap its yield. This half used to set the done flag and nothing else, so a
+    // generator's finally never ran at close at all - while the compiled halves,
+    // whose generators are real floor coroutines, run it through runtime.c's
+    // gen_close. It is reachable in the replay model because the close does not
+    // need a frozen stack: replay to the yield the generator is parked at and
+    // raise there instead of resuming.
+    //
+    // The exit signal is deliberately NOT an ordinary Python exception, which is
+    // also what the floor does: gen_close's GEN_EXIT sentinel unwinds `finally`
+    // clauses but is not offered to `except`, so `except BaseException` inside a
+    // generator does not see a close in EITHER engine, where CPython delivers a
+    // catchable GeneratorExit. Making it catchable here alone would be a halves
+    // divergence; making it catchable in both is a floor change. docs/todo.md 2.6.
+    function genClose(g) {
+        var st = g.st
+        if (st.done) { return undefined }
+        // A generator that has never been resumed has no suspension point and no
+        // body state, so close() only marks it closed - CPython's rule too.
+        if (st.count == 0) { st.done = true; return undefined }
+        var r = anytype
+        try {
+            r = genStep(g, {__genExitIn: true})
+        } catch (e) {
+            st.done = true
+            if (e != undefined && e != null && e.__genExit == true) { return undefined }
+            throw e
+        }
+        st.done = true
+        if (r.yielded) {
+            pyRaise(pyMakeExc("RuntimeError", ["generator ignored GeneratorExit"]))
+        }
+        return undefined
+    }
     // Drive a generator to exhaustion, which is what a for-loop or list() needs.
     function genToList(g) {
         var out = []
@@ -6034,7 +6151,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var idx = last.idx()
         if (isDict(o)) {
             var di = dictFind(o, idx)
-            if (di < 0) { fail("KeyError: " + pstr(idx)) }
+            if (di < 0) { pyRaise(pyMakeExc("KeyError", [idx])) }
             listRemoveAt(o.keys, di)
             listRemoveAt(o.vals, di)
             o.__idx = null
@@ -6406,19 +6523,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var savedChain = scopes.slice()
             var box = {sig: undefined}
             var threw = false
+            // A generator SUSPENDS by throwing (see doYield), and the host's own
+            // `finally` below runs for ANY unwinding - so `yield` inside a
+            // try/finally used to run the Python `finally` at every suspension.
+            // That is not a repeated side effect, it is a WRONG ORDER: CPython
+            // runs it once, when the generator finishes or is closed, and this
+            // half printed it before the first next() had even returned, while
+            // both compiled halves (which have real coroutines) got it right.
+            // The suspension signal is engine plumbing, not a Python exception,
+            // so it must reach genStep without touching the handlers, the else
+            // clause or the finally clause. docs/todo.md 2.6.
+            var suspended = false
             try {
                 box.sig = tryT()
             } catch (e) {
+                if (isGenSuspend(e)) { suspended = true; throw e }
                 scopes = savedChain.slice()
                 if (!excIsUser(e)) { throw e }
                 threw = true
                 box.sig = runHandlers(clauses, e)
             } finally {
-                scopes = savedChain.slice()
-                if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
-                if (finallyT != null) {
-                    var fr = finallyT()
-                    if (fr != undefined) { return fr }
+                if (!suspended) {
+                    scopes = savedChain.slice()
+                    if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
+                    if (finallyT != null) {
+                        var fr = finallyT()
+                        if (fr != undefined) { return fr }
+                    }
                 }
             }
             return box.sig
@@ -6518,6 +6649,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             r = runWith(mgrs, i + 1, body)
         } catch (e) {
+            // A `yield` inside a `with` inside a generator suspends by throwing;
+            // __exit__ must NOT run then. Same defect as makeTry's, docs/todo.md 2.6.
+            if (isGenSuspend(e)) { throw e }
             if (ex != null && excIsUser(e)) {
                 var cls = pyUser(e.v) ? e.v.__class : undefined
                 if (pytruthy(ex(mgr, cls, e.v, undefined))) { return undefined }

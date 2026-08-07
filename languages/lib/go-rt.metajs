@@ -260,15 +260,26 @@ function goStrictEq(a, b) {
     return a === b
 }
 
+// goIsNilMap: "this is the zero value of a map type" - an empty dict carrying the
+// __nil mark. The zero value of a map is a MARKED EMPTY MAP and not nil, because a
+// nil map has to READ like an empty one in Go (docs/todo.md 1.9); emitZeroTy in
+// languages/go-to-llvm-ir.abnf has the argument. The twins are giIsNilMap in
+// abnf/jsrt.go and isNilMap in languages/go-interpreter.abnf.
+function goIsNilMap(v) {
+    if (!goIsObj(v)) { return false }
+    if (v.__dict !== true) { return false }
+    return v.__nil === true
+}
+
 // Go's ==: VALUE equality for structs and arrays (both are value types) and
 // identity for everything else; nil compares equal to an unset slice/map/pointer.
 // abnf/jsrt.go's goValueEq, function for function.
 function goValueEq(a, b) {
     if (a === undefined || a === null) {
         if (b === undefined || b === null) { return true }
-        return false
+        return goIsNilMap(b)
     }
-    if (b === undefined || b === null) { return false }
+    if (b === undefined || b === null) { return goIsNilMap(a) }
     if (Array.isArray(a)) {
         if (!Array.isArray(b)) { return false }
         if (a.length != b.length) { return false }
@@ -627,12 +638,22 @@ function g1F32Round(x) {
 }
 
 // ----- the 24-bit renderer --------------------------------------------------
-// THE DIGITS COME FROM THE FLOOR'S OWN float64 RENDERING and not from floPrec,
-// whose two implementations disagree (abnf/commonscript.go answers exactly n
-// digits, runtime.c answers max(n, shortest)) - a renderer written on it would be
-// a halves divergence in every float32 shorter than its double. floStr of a
-// style-1 box is the shortest round-tripping DOUBLE in every engine, and rounding
-// that digit string down to n is exact for every n a float32 wants.
+// THE DIGITS COME FROM THE FLOOR'S OWN float64 RENDERING, which is exact.
+//
+// The old note here said floPrec could not be used because its two
+// implementations disagreed - abnf/commonscript.go answering exactly n digits and
+// runtime.c answering max(n, shortest). `08e8fcb` UNIFIED THEM on exactly-n, so
+// that reason is gone; floPrec would work here too. floStr is kept because it is
+// one call rather than a round-trip search, and because a style-1 box IS a
+// float64: floStr of one is the shortest round-tripping DOUBLE in every engine
+// (the C floor and abnf/jsrtgolang.go both go through strconv-equivalent code, not
+// through a script host's printer), and rounding that digit string down to n is
+// exact for every n a float32 wants.
+//
+// The INTERPRETER half had the same note and it was load-bearing there in the
+// wrong direction: it took the digits from `"" + a`, i.e. from the SCRIPT HOST's
+// printer, and goja's is not always the shortest round-tripping form - see
+// gDigOf in languages/go-interpreter.abnf and docs/todo.md 1.8.
 
 // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
 // EXP being the decimal exponent of the first digit. The input text is go's own
@@ -1186,13 +1207,13 @@ function js_goslice(v, lo0, hi0) {
         var nb = byteLen(v)
         var slo = goBound(lo0, 0)
         var shi = goBound(hi0, nb)
-        if (slo < 0 || shi > nb || slo > shi) { fail("slice bounds [" + slo + ":" + shi + "] out of range") }
+        if (slo < 0 || shi > nb || slo > shi) { goRTPanic("slice bounds [" + slo + ":" + shi + "] out of range") }
         return goSubBytes(v, slo, shi)
     }
     if (!Array.isArray(v)) { fail("slicing a " + typeof v) }
     var lo = goBound(lo0, 0)
     var hi = goBound(hi0, v.length)
-    if (lo < 0 || hi > v.length || lo > hi) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
+    if (lo < 0 || hi > v.length || lo > hi) { goRTPanic("slice bounds [" + lo + ":" + hi + "] out of range") }
     var out = []
     var i = lo
     while (i < hi) { out.push(v[i]); i = i + 1 }
@@ -1289,6 +1310,28 @@ function js_range_val(v, i) {
 
 // ----- indexing and the map -------------------------------------------------
 
+// A Go RUNTIME PANIC, and it has to be a THROW rather than a `fail`.
+//
+// `fail` is the C floor's hard abort: js_gotry (which is what makes a compiled Go
+// frame recoverable) cannot catch it, so an out of range index that a deferred
+// recover() catches ABORTED THE NATIVE BINARY while llvm.Run printed the message
+// and carried on. The Go twin raises the same conditions with rt.fail, which
+// panics with the string "js runtime error: <msg>" and which js_try catches - so
+// throwing that same text here makes the native leg agree with llvm.Run, with the
+// interpreter (goRTPanic in go-interpreter.abnf), and with `go`'s own
+// recoverability. Only the message TEXT still differs from go's
+// "runtime error: index out of range [7] with length 3", which is this project's
+// wording for every runtime error. docs/todo.md 1.9.
+//
+// One residue, and it is the diagnostic rather than the value: an UNRECOVERED one
+// reaches the floor's uncaught-throw handler, which prefixes "js runtime error:
+// uncaught exception: " - so a native binary that dies on an out of range index
+// prints the prefix twice where llvm.Run (whose rt.fail panics outside the throw
+// machinery) prints it once. The recovered VALUE is what a program can read, and
+// that is identical in all three engines; no ratchet can assert the other, since a
+// ratchet has to exit 0.
+function goRTPanic(msg) { throw "js runtime error: " + msg }
+
 // Go indexing: maps read their ZERO VALUE for a missing key, slices their
 // element, a string its i-th BYTE, and a generic instantiation f[int] is the
 // identity (generics are ERASED in the Go grammars).
@@ -1300,13 +1343,13 @@ function js_map_get(c, k) {
     }
     if (Array.isArray(c)) {
         var ai = goIdx(k)
-        if (ai < 0 || ai >= c.length) { fail("index " + ai + " out of range") }
+        if (ai < 0 || ai >= c.length) { goRTPanic("index " + ai + " out of range") }
         return c[ai]
     }
     if (typeof c == "string") {
         var si = goIdx(k)
         var bs = goBytes(c)
-        if (si < 0 || si >= bs.length) { fail("index " + si + " out of range") }
+        if (si < 0 || si >= bs.length) { goRTPanic("index " + si + " out of range") }
         return bs[si]
     }
     if (goIsFn(c)) { return c }
@@ -2000,17 +2043,60 @@ function js_gisetsl(h, iv, v) {
     if (!goIsObj(h)) { return js_pyset(h, iv, v) }
     var arr = h.a
     if (!Array.isArray(arr)) { return js_pyset(h, iv, v) }
-    var idx = goIdx(h.o) + goIdx(iv)
+    var ui = goIdx(iv)
+    var idx = goIdx(h.o) + ui
     var nv = v
     if (typeof h.et == "string") { nv = goAdoptText(h.et, v) }
     else if (idx >= 0 && idx < arr.length) { nv = goAdoptLike(arr[idx], v) }
-    if (idx < 0 || idx >= arr.length) { fail("index " + idx + " out of range") }
+    // THE BOUND IS THE HEADER'S LENGTH, NOT THE BACKING ARRAY'S, and the index
+    // reported is the one the program wrote. `base[0:2]` of a five element slice
+    // has cap 5, so a check against the storage let sub[4] through - and with a
+    // non-zero offset the old message named the OFFSET index. docs/todo.md 1.9.
+    if (ui < 0 || ui >= goIdx(h.n)) { goRTPanic("index " + ui + " out of range") }
     arr[idx] = nv
     return undefined
 }
 
+// The bounds of a slice EXPRESSION s[lo:hi:mx]: Go requires 0 <= lo <= hi <= mx
+// <= cap, and violating it panics. The emitter calls this before it builds the new
+// header (see $sslice in languages/go-to-llvm-ir.abnf); the twin is js_gislbounds
+// in abnf/jsrtgolang.go and the interpreter's own check is in goSlice.
+function js_gislbounds(lo, hi, mx, cp) {
+    var l = goIdx(lo)
+    var h = goIdx(hi)
+    var m = goIdx(mx)
+    var c = goIdx(cp)
+    if (l < 0 || h < l || m < h || c < m) {
+        goRTPanic("slice bounds [" + l + ":" + h + "] out of range")
+    }
+    return undefined
+}
+
+// x[i] THROUGH A SLICE HEADER: the read that mirrors js_gisetsl. It exists for
+// the bound - js_map_get sees only the backing array and cannot know the header's
+// length, so `base[0:2][4]` read the storage in both halves where go panics.
+function js_gislget(h, iv) {
+    if (!goIsObj(h)) { return js_map_get(h, iv) }
+    var arr = h.a
+    if (!Array.isArray(arr)) { return js_map_get(h, iv) }
+    var ui = goIdx(iv)
+    if (ui < 0 || ui >= goIdx(h.n)) { goRTPanic("index " + ui + " out of range") }
+    return arr[goIdx(h.o) + ui]
+}
+
 // x[i] = v, at the width the slot already carries. Delegates the store.
 function js_gisetat(c, k, v) {
+    // A store into a NIL MAP is a panic in Go, and it is the one thing a nil map
+    // does not share with an empty one (see goIsNilMap).
+    if (goIsNilMap(c)) { goRTPanic("assignment to entry in nil map") }
+    // An out of range ARRAY store panics with the same wording the READ uses. It
+    // used to fall through to js_pyset, whose own bound is the floor's `fail` - a
+    // hard abort, so a recover() around `arr[3] = 1` caught it under llvm.Run and
+    // the native binary died. docs/todo.md 1.9.
+    if (Array.isArray(c)) {
+        var ai = goIdx(k)
+        if (ai < 0 || ai >= c.length) { goRTPanic("index " + ai + " out of range") }
+    }
     var cur = goSlotOf(c, k)
     if (cur === undefined) { return js_pyset(c, k, v) }
     return js_pyset(c, k, goAdoptLike(cur, v))

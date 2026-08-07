@@ -1445,6 +1445,149 @@ def s36
   check("x24", ["a", "b"].sum("") == "ab" && [[1], [2]].sum([]) == [1, 2])
   check("x25", [1, 2].sum == 3 && [1.5, 2.5].sum == 4.0)
 end
+# ===== SECTION 37: block binding, non-local return and the Hash Enumerable surface =====
+# docs/todo.md 1.4, 1.5 and 1.6. Every right-hand side is ruby 2.6.10p210's own
+# answer. Each operand is read out of an array or a method, so no constant folder
+# can answer these at compile time.
+def s37
+  v = [5, 7, 2]
+  # 1.4: a literal block is NOT a positional argument. Before this, the block was
+  # bound to the optional / *splat parameter: the interpreter answered NaN and the
+  # compiler aborted with "not a number in '*'".
+  check("y01", s37_deflt { |x| x * 2 } == 10)
+  check("y02", s37_deflt(v[1]) { |x| x * 2 } == 14)
+  check("y03", s37_splat { |n| n + 100 } == 100)
+  check("y04", s37_splat(v[0], v[1]) { |n| n + 100 } == 102)
+  check("y05", s37_optblk { |x| x + 1 } == 6 && s37_optblk(v[1]) { |x| x + 1 } == 8)
+  # A REQUIRED parameter still takes a callable that was passed positionally.
+  check("y06", s37_req(lambda { |z| z * 3 }) == 6)
+  # The keyword Hash sits BEFORE the block, not behind it.
+  check("y07", s37_kw { |x| x * 4 } == 28 && s37_kw(:a => v[2]) { |x| x * 4 } == 8)
+  # 1.5: `return` inside a block leaves the enclosing METHOD, not the block.
+  check("y08", s37_ret == 200)
+  check("y09", s37_ret_nested == 13)
+  check("y10", s37_ret_upto == 52)
+  check("y11", s37_ret_break == -2 && s37_ret_next == 2)
+  # It travels out of a method that only FORWARDS the block, and out of a yield.
+  check("y12", s37_ret_fwd == 73 && s37_ret_yield == 91)
+  check("y13", s37_ret_begin == 102 && s37_ret_ensure == 111)
+  # A lambda's `return` is LOCAL - the one behavioural difference from a block -
+  # and Proc.new is a proc, not a lambda.
+  check("y14", s37_lam == 7 && lambda { |x| return x + 1 }.call(v[2]) == 3)
+  check("y15", lambda { |x| x }.lambda? == true && proc { |x| x }.lambda? == false)
+  check("y16", Proc.new { |x| x }.lambda? == false)
+  # A proc auto-splats and is arity-tolerant where a lambda is strict.
+  check("y17", proc { |a, b| [a, b] }.call(v[0]) == [5, nil])
+  check("y18", lambda { |a, b| [a, b] }.call(v[0], v[1]) == [5, 7])
+  # 1.6: Hash is Enumerable and yields [key, value] PAIRS.
+  h = {"a" => 1, "b" => 2, "c" => 3}
+  check("y19", h.map { |k, n| "#{k}#{n}" } == ["a1", "b2", "c3"])
+  check("y20", h.map { |pair| pair } == [["a", 1], ["b", 2], ["c", 3]])
+  check("y21", h.select { |k, n| n > 1 } == {"b" => 2, "c" => 3})
+  check("y22", h.reject { |k, n| n > 1 } == {"a" => 1})
+  check("y23", h.sort_by { |k, n| -n } == [["c", 3], ["b", 2], ["a", 1]])
+  check("y24", h.any? { |k, n| n == 2 } && h.all? { |k, n| n > 0 } && h.none? { |k, n| n > 9 })
+  check("y25", h.count == 3 && h.count { |k, n| n > 1 } == 2)
+  check("y26", h.find { |k, n| n == 2 } == ["b", 2])
+  check("y27", h.each_with_object([]) { |(k, n), acc| acc << k } == ["a", "b", "c"])
+  check("y28", h.min_by { |k, n| n } == ["a", 1] && h.max_by { |k, n| n } == ["c", 3])
+  check("y29", h.sum { |k, n| n } == 6 && h.partition { |k, n| n.odd? } == [[["a", 1], ["c", 3]], [["b", 2]]])
+  check("y30", h.flat_map { |k, n| [k, n] } == ["a", 1, "b", 2, "c", 3])
+  check("y31", h.inject(0) { |acc, (k, n)| acc + n } == 6)
+  check("y32", h.sort == [["a", 1], ["b", 2], ["c", 3]])
+  check("y33", h.group_by { |k, n| n.odd? } == {true => [["a", 1], ["c", 3]], false => [["b", 2]]})
+  # merge / dup / delete, and the DEFAULT the receiver carries into a copy.
+  check("y34", h.merge({"a" => 3, "d" => 1}) == {"a" => 3, "b" => 2, "c" => 3, "d" => 1})
+  check("y35", h.merge({"a" => 3}) { |k, old, new| old + new } == {"a" => 4, "b" => 2, "c" => 3})
+  d = h.dup
+  d["a"] = 99
+  check("y36", d["a"] == 99 && h["a"] == 1)
+  g = {"a" => 1, "b" => 2}
+  check("y37", g.delete("b") == 2 && g == {"a" => 1} && g.delete("zz") == nil)
+  hd = Hash.new(0)
+  hd["a"] = 1
+  check("y38", hd.merge({"b" => 2})["zz"] == 0 && hd.dup["zz"] == 0)
+  hb = Hash.new { |hh, k| k.to_s * 2 }
+  check("y39", hb.dup["q"] == "qq" && hb.merge({"a" => 1})["q"] == "qq")
+  check("y40", h.values_at("a", "c") == [1, 3] && h.invert == {1 => "a", 2 => "b", 3 => "c"})
+  check("y41", h.key(2) == "b" && h.transform_values { |n| n * 2 } == {"a" => 2, "b" => 4, "c" => 6})
+  # A blockless map / select is an ENUMERATOR, not a crash, and with_index works
+  # on it - which is why 1.4's arity model had to be right first.
+  check("y42", h.map.class == Enumerator && h.select.class == Enumerator)
+  check("y43", h.map.with_index { |(k, n), i| "#{k}#{i}" } == ["a0", "b1", "c2"])
+  check("y44", [10, 20].map.with_index { |x, i| x + i } == [10, 21])
+  check("y45", h.each_with_index.map { |(k, n), i| n * 10 + i } == [10, 21, 32])
+end
+def s37_deflt(x = 5)
+  yield x
+end
+def s37_splat(*xs)
+  yield xs.length
+end
+def s37_optblk(x = 5, &b)
+  b.call(x)
+end
+def s37_req(f)
+  f.call(2)
+end
+def s37_kw(a: 7)
+  yield a
+end
+S37A = [1, 2, 3]
+def s37_ret
+  S37A.each { |x| return x * 100 if x == 2 }
+  -1
+end
+def s37_ret_nested
+  S37A.each { |x| S37A.each { |y| return x * 10 + y if y == 3 } }
+  -1
+end
+def s37_ret_upto
+  1.upto(3) { |i| return i + 50 if i == 2 }
+  -1
+end
+def s37_ret_break
+  S37A.each { |x| break if x == 2 }
+  -2
+end
+def s37_ret_next
+  S37A.each { |x| next if x == 1; return x }
+  -1
+end
+def s37_fwd(&b)
+  S37A.each(&b)
+  -7
+end
+def s37_ret_fwd
+  s37_fwd { |x| return x + 70 if x == 3 }
+  -8
+end
+def s37_yielder
+  yield S37A[0]
+  -9
+end
+def s37_ret_yield
+  s37_yielder { |x| return x + 90 }
+  -10
+end
+def s37_ret_begin
+  begin
+    S37A.each { |x| return x + 100 if x == 2 }
+  rescue
+    -10
+  end
+  -11
+end
+def s37_ret_ensure
+  S37A.each { |x| return 111 if x == 1 }
+  -1
+ensure
+  nil
+end
+def s37_lam
+  f = lambda { |x| return x * 2 }
+  f.call(3) + 1
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -1482,5 +1625,6 @@ s33() # SECTION-CALL 33
 s34() # SECTION-CALL 34
 s35() # SECTION-CALL 35
 s36() # SECTION-CALL 36
+s37() # SECTION-CALL 37
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

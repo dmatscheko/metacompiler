@@ -1350,6 +1350,197 @@ def s30():
 # ===== END SECTIONS =====
 
 
+
+# ===== SECTION 37: a subscript MISS is catchable, and a generator's finally =====
+# docs/todo.md 1.7 and 2.6, and both items were wrong about who was broken.
+#
+#  * 1.7 said `d[missing]` aborted "in the interpreter" and worked in both
+#    compiled halves. It aborted in ALL THREE - rt.fail in abnf/jsrt.go, fail()
+#    in languages/lib/python-rt.metajs, fail() in the interpreter - so
+#    `try: d[3] / except KeyError`, which CPython supports, killed the process
+#    everywhere. Only `del d[k]` next door raised catchably, which is what made
+#    the item look half-true. List and string indexing were the same abort.
+#  * The KeyError's argument was the key's REPR, which made str(e) right by
+#    accident and repr(e) doubly quoted - KeyError('3') where CPython says
+#    KeyError(3) - and e.args[0] a string where CPython has the key. The argument
+#    is the key now and CPython's KeyError.__str__ (repr of args[0], and only
+#    when there is exactly one) is where the repr happens.
+#  * Making the raise reachable exposed a hierarchy that was FLAT in both
+#    compiled halves: every builtin exception derived straight from Exception, so
+#    `except LookupError` did not catch a KeyError and `except ArithmeticError`
+#    did not catch a ZeroDivisionError, and BaseException was not bound at all.
+#  * 2.6 called the interpreter's replay a repetition-and-complexity limit. It
+#    was also an ORDERING defect: the suspension signal is a host-level throw and
+#    it unwound the program's own try/finally and a with's __exit__ on the way
+#    out, so a generator's `finally` ran at the FIRST next() - before CPython
+#    runs it at all - and again at every step. The order assertions below are
+#    written on FIRST OCCURRENCE, which is the property that survives replay:
+#    repetition inserts duplicates, and only a reordering can move a first.
+#
+# Every operand is read out of a list so the constant folder cannot fold a row.
+def firsts(xs):
+    out = []
+    for x in xs:
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def s37():
+    K = [3, "b", 7, "zz", 0]
+    D = {1: "one", "a": "A"}
+    L = [10, 20]
+
+    def caught(f):
+        try:
+            f()
+            return "no-raise"
+        except BaseException as e:
+            return type(e).__name__ + "|" + str(e) + "|" + repr(e)
+
+    # --- the subscript miss is an exception, in all three engines ---------
+    check("ky01", caught(lambda: D[K[0]]) == "KeyError|3|KeyError(3)")
+    check("ky02", caught(lambda: D[K[1]]) == "KeyError|'b'|KeyError('b')")
+    check("ky03", caught(lambda: L[K[2]]) ==
+          "IndexError|list index out of range|IndexError('list index out of range')")
+    check("ky04", caught(lambda: "ab"[K[2]]) ==
+          "IndexError|string index out of range|IndexError('string index out of range')")
+    check("ky05", caught(lambda: D.pop(K[3])) == "KeyError|'zz'|KeyError('zz')")
+    check("ky06", caught(lambda: "%(q)s" % D) == "KeyError|'q'|KeyError('q')")
+    check("ky07", caught(lambda: "{q}".format(a=K[0])) == "KeyError|'q'|KeyError('q')")
+
+    # --- the argument is the KEY, not its text ---------------------------
+    e1 = None
+    try:
+        D[K[0]]
+    except KeyError as ex:
+        e1 = ex
+    check("ky08", len(e1.args) == 1 and e1.args[0] == 3 and type(e1.args[0]).__name__ == "int")
+    e2 = KeyError(K[1])
+    check("ky09", str(e2) == "'b'" and repr(e2) == "KeyError('b')" and e2.args[0] == "b")
+    # Zero arguments falls back to BaseException.__str__, which is the empty text.
+    check("ky10", str(KeyError()) == "" and repr(KeyError()) == "KeyError()")
+    # Only KeyError repr's its argument; its siblings do not.
+    check("ky11", str(ValueError(K[1])) == "b" and repr(ValueError(K[1])) == "ValueError('b')")
+    check("ky12", str(IndexError(K[0])) == "3" and repr(IndexError(K[0])) == "IndexError(3)")
+
+    # --- the hierarchy above the raise -----------------------------------
+    def by(t):
+        try:
+            D[K[0]]
+        except t as ex:
+            return "caught-" + type(ex).__name__
+        except BaseException:
+            return "missed"
+    check("ky13", by(KeyError) == "caught-KeyError")
+    check("ky14", by(LookupError) == "caught-KeyError")
+    check("ky15", by(Exception) == "caught-KeyError")
+    check("ky16", by(BaseException) == "caught-KeyError")
+    check("ky17", by(IndexError) == "missed")
+    check("ky18", issubclass(KeyError, LookupError) and issubclass(IndexError, LookupError))
+    check("ky19", issubclass(LookupError, Exception) and issubclass(Exception, BaseException))
+    check("ky20", issubclass(ZeroDivisionError, ArithmeticError) and
+                  issubclass(UnboundLocalError, NameError))
+    check("ky21", not issubclass(LookupError, KeyError))
+    # A user subclass INHERITS KeyError.__str__, which is why the test is the
+    # class chain rather than the name.
+    check("ky22", str(MyKeyErr(K[0])) == "3" and repr(MyKeyErr(K[0])) == "MyKeyErr(3)")
+    check("ky23", isinstance(MyKeyErr(K[0]), LookupError))
+
+    # --- the generator's finally runs when CPython runs it ----------------
+    lg = []
+
+    def g37():
+        try:
+            with Mark(lg):
+                lg.append("t1")
+                yield K[0]
+                lg.append("t2")
+                yield K[1]
+        finally:
+            lg.append("fin")
+
+    it = g37()
+    lg.append("d-a")
+    next(it)
+    lg.append("d-b")
+    next(it)
+    lg.append("d-c")
+    try:
+        next(it)
+    except StopIteration:
+        lg.append("d-stop")
+    check("ky24", firsts(lg) ==
+          ["d-a", "enter", "t1", "d-b", "t2", "d-c", "exit", "fin", "d-stop"])
+
+    # close() mid-run: the finally runs THERE, not at the first next().
+    lc = []
+
+    def g37b():
+        try:
+            lc.append("c1")
+            yield K[0]
+            lc.append("c2")
+            yield K[1]
+        finally:
+            lc.append("c-fin")
+
+    ck = g37b()
+    lc.append("d0")
+    next(ck)
+    lc.append("d1")
+    check("ky25", ck.close() is None)
+    lc.append("d2")
+    check("ky26", firsts(lc) == ["d0", "c1", "d1", "c-fin", "d2"])
+    # A second close is a no-op, and the body does not run again.
+    check("ky27", ck.close() is None and firsts(lc) == ["d0", "c1", "d1", "c-fin", "d2"])
+
+    # Two generators driven alternately keep their events in CPython's order.
+    li = []
+
+    def ga():
+        li.append("a1")
+        yield K[0]
+        li.append("a2")
+        yield K[1]
+
+    def gb():
+        li.append("b1")
+        yield K[0]
+        li.append("b2")
+        yield K[1]
+
+    A = ga()
+    B = gb()
+    li.append("d0")
+    next(A)
+    li.append("d1")
+    next(B)
+    li.append("d2")
+    next(A)
+    li.append("d3")
+    next(B)
+    li.append("d4")
+    check("ky28", firsts(li) == ["d0", "a1", "d1", "b1", "d2", "a2", "d3", "b2", "d4"])
+
+
+class MyKeyErr(KeyError):
+    pass
+
+
+class Mark:
+    def __init__(self, log):
+        self.log = log
+
+    def __enter__(self):
+        self.log.append("enter")
+        return 1
+
+    def __exit__(self, a, b, c):
+        self.log.append("exit")
+        return False
+
+
 # ===== SECTION 31: str's method library =====
 # `"abc".upper()` failed in BOTH halves with "unknown String method: upper"
 # (docs/todo.md 1.5): Python's str method surface did not exist anywhere - not in
@@ -2014,5 +2205,6 @@ def main():
     s34() # SECTION-CALL 34
     s35() # SECTION-CALL 35
     s36() # SECTION-CALL 36
+    s37() # SECTION-CALL 37
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

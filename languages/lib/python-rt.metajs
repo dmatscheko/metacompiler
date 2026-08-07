@@ -582,6 +582,12 @@ function pyUserRender(v, cls, wantRepr) {
         var ea = v["args"]
         if (Array.isArray(ea)) {
             if (ea.length == 0) { return "" }
+            // KeyError OVERRIDES BaseException.__str__ with repr(args[0]), which
+            // is why str(KeyError('x')) is "'x'" and not "x". Every engine here
+            // used to fake that by pre-repr'ing the ARGUMENT, which made str()
+            // right and repr() doubly quoted (docs/todo.md 1.7). The argument is
+            // now the key itself and the repr happens here.
+            if (ea.length == 1 && pyIsKeyErrCls(cls)) { return pyRepr(ea[0]) }
             if (ea.length == 1) { return pyStr(ea[0]) }
             var oe = "("
             for (var q = 0; q < ea.length; q++) {
@@ -941,14 +947,62 @@ function pyBuiltinClass(name) {
 // (and `except <ThatName>`) for a StopIteration / UnboundLocalError / AttributeError
 // the RUNTIME raised, exactly like for one the program raised.
 function pyExcInstance(name, msg) {
+    return {__class: pyExcClass(name), args: [msg]}
+}
+
+// The class a RUNTIME-raised exception carries, with CPython's hierarchy above
+// it rather than a flat derivation from Exception: pyDIsInstance walks the
+// __super chain by name, so a KeyError whose __super was Exception was not
+// caught by `except LookupError` even though the interpreter half caught it
+// (docs/todo.md 1.7). The parent table is pyExcParent in
+// languages/python-interpreter.abnf and the excParent block of
+// languages/python-to-llvm-ir.abnf.
+function pyExcParentName(name) {
+    if (name == "ZeroDivisionError") { return "ArithmeticError" }
+    if (name == "IndexError") { return "LookupError" }
+    if (name == "KeyError") { return "LookupError" }
+    if (name == "UnboundLocalError") { return "NameError" }
+    if (name == "NotImplementedError") { return "RuntimeError" }
+    if (name == "Exception") { return "BaseException" }
+    return "Exception"
+}
+
+function pyExcClass(name) {
     var cls = pyBuiltinClass(name)
-    if (name != "Exception") {
-        if (cls["__super"] === undefined) { cls["__super"] = pyBuiltinClass("Exception") }
+    if (name != "BaseException") {
+        if (cls["__super"] === undefined) { cls["__super"] = pyExcClass(pyExcParentName(name)) }
     }
-    return {__class: cls, args: [msg]}
+    return cls
 }
 
 function pyRaiseExc(name, msg) { throw pyExcInstance(name, msg) }
+
+// pyExcInstanceV is pyExcInstance with the argument kept as a VALUE rather than
+// as text. It exists for KeyError, whose argument is the KEY: CPython's
+// KeyError.__str__ is repr(args[0]), so every engine here used to pre-repr the
+// argument, which made str(e) right by accident and left repr(e) doubly quoted -
+// KeyError('3') where CPython says KeyError(3) - and e.args[0] a string where
+// CPython has the key (docs/todo.md 1.7). The repr now happens in pyUserRender.
+// A separate function rather than a wider parameter because MetaJS is typed and
+// pyExcInstance's msg is a string at every other call site.
+function pyExcInstanceV(name, arg) {
+    return {__class: pyExcClass(name), args: [arg]}
+}
+
+function pyRaiseExcV(name, arg) { throw pyExcInstanceV(name, arg) }
+
+// pyIsKeyErrCls reports whether a class IS KeyError or derives from it. KeyError
+// is the one builtin exception whose __str__ differs from BaseException's, and a
+// subclass INHERITS that, so the test is the class chain rather than the name.
+// isKeyErrCls in languages/python-interpreter.abnf and pyIsKeyErrCls in
+// abnf/jsrt.go are this body.
+function pyIsKeyErrCls(c) {
+    var mro = pyMRO(c)
+    for (var i = 0; i < mro.length; i++) {
+        if (mro[i]["__name"] == "KeyError") { return true }
+    }
+    return false
+}
 
 // ===================================================== calling ==============
 
@@ -3551,7 +3605,7 @@ function pyBPct(f, arg) {
         if (hasKey) {
             if (dict === null) { pyFail("format requires a mapping") }
             var at = pyDictFind(dict["keys"], key)
-            if (at < 0) { pyFail("KeyError: '" + key + "'") }
+            if (at < 0) { pyRaiseExcV("KeyError", key) }
             v = dict["vals"][at]
         } else {
             if (ai >= args.length) { pyFail("not enough arguments for format string") }
@@ -3921,22 +3975,29 @@ function js_pyget(c, k) {
             if (pyIsCallable(m)) { return pyCallSelf(m, c, [k]) }
         }
     }
+    // A subscript MISS is a CATCHABLE exception, not an abort. All three engines
+    // used to fail() here, so `try: d[k] / except KeyError` - which CPython
+    // supports and which js_pydel_item already did - killed the process instead
+    // (docs/todo.md 1.7). The KeyError carries the KEY ITSELF, never its repr:
+    // CPython's KeyError.__str__ is repr(args[0]) and pyUserRender now does that,
+    // so pre-repr'ing here made str(e) right by accident and repr(e) doubly
+    // quoted. CPython's sequence message carries no index, so neither does this.
     if (pyIsDict(c)) {
         var di = pyDictFind(c["keys"], k)
-        if (di < 0) { fail("KeyError: " + pyStr(k)) }
+        if (di < 0) { pyRaiseExcV("KeyError", k) }
         return c["vals"][di]
     }
     var idx = Math.trunc(pyNum(k))
     if (pyIsArr(c)) {
         if (idx < 0) { idx = idx + c.length }
-        if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(pyNum(k))) }
+        if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", "list index out of range") }
         return c[idx]
     }
     if (typeof c == "string") {
         // Go: rt.strLen / rt.strAt - UTF-16 code units. See the banner.
         var n = c.length
         if (idx < 0) { idx = idx + n }
-        if (idx < 0 || idx >= n) { fail("string index out of range: " + Math.trunc(pyNum(k))) }
+        if (idx < 0 || idx >= n) { pyRaiseExc("IndexError", "string index out of range") }
         return c.charAt(idx)
     }
     // list[int] / dict[str, int]: subscripting a TYPE (a class object or a
@@ -4343,7 +4404,7 @@ function js_pydel_item(c, k) {
         var keys = c["keys"]
         var vals = c["vals"]
         var i = pyDictFind(keys, k)
-        if (i < 0) { pyRaiseExc("KeyError", pyStr(k)) }
+        if (i < 0) { pyRaiseExcV("KeyError", k) }
         pyCRemoveAt(keys, i)
         pyCRemoveAt(vals, i)
         return undefined
@@ -5397,7 +5458,7 @@ function pyDictMethod(d, name, args, kw) {
             return pdV
         }
         if (args.length > 1) { return args[1] }
-        throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+        throw pyExcInstanceV("KeyError", pyFArgAt(args, 0))
     }
     if (name == "clear") {
         pyCTruncate(keys)
@@ -5542,7 +5603,7 @@ function pySetMethod(els, name, args) {
     // size, never on which element.
     if (name == "pop") {
         if (els.length == 0) {
-            throw pyExcInstance("KeyError", pyRepr("pop from an empty set"))
+            throw pyExcInstance("KeyError", "pop from an empty set")
         }
         var pv = anytype
         pv = els[0]
@@ -5561,7 +5622,7 @@ function pySetMethod(els, name, args) {
             ri = ri + 1
         }
         if (name == "remove") {
-            throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+            throw pyExcInstanceV("KeyError", pyFArgAt(args, 0))
         }
         return undefined
     }
@@ -6910,6 +6971,10 @@ function pyMemberCall(target, name, args) {
 
 // ---- the four engine adapters this chapter is written against ----
 function pySFail(msg) { fail(msg) }
+// A CATCHABLE KeyError, for the one place in the str-method chunk where CPython
+// raises rather than aborts: "{a}".format(b=1). pySFail is the engine's abort
+// and cannot be caught (docs/todo.md 1.7).
+function pySRaiseKey(nm) { pyRaiseExc("KeyError", nm) }
 function pySFormat1(v, spec, conv) { return js_pyformat(v, spec, conv) }
 function pySGetAttr(v, nm) { return pyGetAttr(v, nm) }
 function pySGetItem(v, k) { return js_pyget(v, k) }
@@ -6924,7 +6989,7 @@ function pySKwGet(kw, nm) {
             if (i >= 0) { return kw["vals"][i] }
         }
     }
-    fail("KeyError: '" + nm + "'")
+    pySRaiseKey(nm)
     return r
 }
 // ===================================================== str methods ==========

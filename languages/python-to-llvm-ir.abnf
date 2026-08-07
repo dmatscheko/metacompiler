@@ -35,7 +35,13 @@ ordinary classes, so 'class MyError(Exception)' is nothing special.
 
 Generators are REAL: a def whose body contains a yield becomes a generator function
 (js_genfn), its body runs on its own goroutine and yield is a suspending handshake -
-never a replay. yield from, send() and StopIteration carrying the return value all work.
+never a replay. yield from, send() and StopIteration carrying the return value all work,
+and close() runs the body's `finally` clauses through the floor's gen_close. What this
+half does NOT have is gen.throw(): the cell's member table is host-dispatched in
+runtime.c and offers `next` and `return` only, so a throw() is a floor change and both
+halves abort on it today. For the same reason close() is not offered to `except` - the
+GEN_EXIT sentinel unwinds `finally` without being catchable, where CPython delivers a
+catchable GeneratorExit. docs/todo.md 2.6.
 Generator expressions parse (parenthesized and as the sole argument of a call) but are
 materialized eagerly.
 
@@ -3841,18 +3847,46 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var eRest = eb.NewCall(getExtern("js_pyrest", 2), [ef.Params[1], handle(1)])
         eb.NewCall(getExtern("js_set", 3), [eSelf, emitStr(eb, "args"), eRest])
         eb.NewRet(hUndef)
-        var excBase = callExt(b, "js_pyclass_new", [emitStr(b, "Exception"), callExt(b, "js_arr_new", [])])
+        // BaseException sits above Exception, as in CPython: `except BaseException`
+        // aborted with `variable not defined: BaseException` in both compiled
+        // halves while the interpreter half had it (docs/todo.md 1.7).
+        var excRootBases = callExt(b, "js_arr_new", [])
+        var excRoot = callExt(b, "js_pyclass_new", [emitStr(b, "BaseException"), excRootBases])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BaseException"), excRoot])
+        var excBases0 = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [excBases0, excRoot])
+        var excBase = callExt(b, "js_pyclass_new", [emitStr(b, "Exception"), excBases0])
         callExt(b, "js_set", [excBase, emitStr(b, "__init__"),
                               callExt(b, "js_closure", [handle(eiIdx), curScopeV])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Exception"), excBase])
-        var excNames = ["ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError",
-                        "ZeroDivisionError", "AttributeError", "NameError", "UnboundLocalError",
-                        "StopIteration", "ArithmeticError", "LookupError", "OSError", "ExceptionGroup"]
+        // The hierarchy is CPython's, not a flat list under Exception. Every one of
+        // these used to derive straight from Exception, so `except LookupError`
+        // did not catch a KeyError and `except ArithmeticError` did not catch a
+        // ZeroDivisionError in EITHER compiled half, while
+        // languages/python-interpreter.abnf's pyExcParent got both right. It went
+        // unseen because the only way to reach a runtime KeyError was
+        // `d[missing]`, which aborted the process outright (docs/todo.md 1.7).
+        // The list is in parent-first order: an entry's base must already exist.
+        var excNames = ["ValueError", "TypeError", "RuntimeError", "AttributeError",
+                        "NameError", "StopIteration", "ArithmeticError", "LookupError",
+                        "OSError", "ExceptionGroup", "AssertionError",
+                        "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
+                        "NotImplementedError"]
+        var excParent = {}
+        excParent["ZeroDivisionError"] = "ArithmeticError"
+        excParent["IndexError"] = "LookupError"
+        excParent["KeyError"] = "LookupError"
+        excParent["UnboundLocalError"] = "NameError"
+        excParent["NotImplementedError"] = "RuntimeError"
+        var excMade = {}
         for (var e0 = 0; e0 < excNames.length; e0++) {
             var eBases = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [eBases, excBase])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]),
-                                         callExt(b, "js_pyclass_new", [emitStr(b, excNames[e0]), eBases])])
+            var eSup = excBase
+            if (excParent[excNames[e0]] !== undefined) { eSup = excMade[excParent[excNames[e0]]] }
+            callExt(b, "js_arr_push", [eBases, eSup])
+            var eCls = callExt(b, "js_pyclass_new", [emitStr(b, excNames[e0]), eBases])
+            excMade[excNames[e0]] = eCls
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
         b = emitImported(b)
         b = makeSeq(items)(b)

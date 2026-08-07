@@ -74,6 +74,14 @@ func (e *pyStrEnv) sAt(s string, i int) string   { return e.rt.strAt(s, i) }
 func (e *pyStrEnv) sCode(s string, i int) int    { return e.rt.strCodeAt(s, i) }
 func (e *pyStrEnv) sIndex(s, sub string) int     { return e.rt.strIndexOf(s, sub) }
 func (e *pyStrEnv) fail(msg string)              { e.rt.fail("%s", msg) }
+
+// raiseKey is a CATCHABLE KeyError, for the one place in this chunk where
+// CPython raises rather than aborts: "{a}".format(b=1). fail is the engine's
+// abort and cannot be caught (docs/todo.md 1.7). pySRaiseKey in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func (e *pyStrEnv) raiseKey(nm string) {
+	panic(&jsThrown{value: e.rt.pyExcInstanceV("KeyError", nm)})
+}
 func pysFromCode(c int) string                   { return strFromUnits([]uint16{uint16(c)}) }
 
 // ---- the character primitives (pySCPW / pySChars / pySUpCh / ...) ----
@@ -619,7 +627,7 @@ func (e *pyStrEnv) kwGet(kw interface{}, nm string) interface{} {
 			return v
 		}
 	}
-	e.fail("KeyError: '" + nm + "'")
+	e.raiseKey(nm)
 	return jsUndef
 }
 

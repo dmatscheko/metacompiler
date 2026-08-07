@@ -47,9 +47,13 @@ package abnf
 //     that needs a real pointer representation for struct pointers, which would
 //     change field access, method dispatch, assignment, equality and type
 //     switches in both halves - see the report in the commit that added this file.
-//   - A nil MAP prints `<nil>`; go prints `map[]`. A nil map is the null value in
-//     this model, with nothing to tell it from a nil interface. (A nil SLICE does
-//     print `[]`, and a nil pointer / nil interface `<nil>`, both as go does.)
+//   - A nil MAP prints `map[]`, as go does, since docs/todo.md 1.9: the zero value
+//     of a map type is a MARKED EMPTY MAP (__nil) and no longer the null value, so
+//     that it can also be READ like an empty one, which is what go does and what
+//     this model could not express while it was null. (A nil SLICE prints `[]` and
+//     a nil pointer / nil interface `<nil>`, both as go does. A nil slice still
+//     compares UNEQUAL to nil, which go says is true - the empty header carries no
+//     mark; a nil map now compares equal.)
 //   - Only a String() method declared on the type ITSELF is a Stringer; a String()
 //     promoted from an embedded struct is not found. Go's method set rules are not
 //     modelled either, so a String() with a POINTER receiver is used for the value
@@ -740,6 +744,7 @@ func init() {
 		w := rt.wrap
 		baseSet := m["js_set"]
 		basePyset := m["js_pyset"]
+		baseMapGet := m["js_map_get"]
 
 		// (typeText, value): the declared width of a slot whose type IS written at
 		// the site - an append into a []uint8, a parameter binding.
@@ -772,22 +777,76 @@ func init() {
 			if !ok {
 				return basePyset(a)
 			}
-			idx := int(rt.toNumber(h.props["o"])) + int(rt.toNumber(u(a[1])))
+			ui := int(rt.toNumber(u(a[1])))
+			idx := int(rt.toNumber(h.props["o"])) + ui
 			v := u(a[2])
 			if ty, ok := h.props["et"].(string); ok {
 				v = giAdoptText(rt, ty, v)
 			} else if idx >= 0 && idx < len(arr.elems) {
 				v = giAdoptLike(rt, arr.elems[idx], v)
 			}
-			if idx < 0 || idx >= len(arr.elems) {
-				rt.fail("index %d out of range", idx)
+			// THE BOUND IS THE HEADER'S LENGTH, NOT THE BACKING ARRAY'S, and the
+			// index reported is the one the program wrote. `base[0:2]` of a five
+			// element slice has cap 5, so a check against the storage let sub[4]
+			// through - and with a non-zero offset the old message named the
+			// OFFSET index. docs/todo.md 1.9.
+			if ui < 0 || ui >= int(rt.toNumber(h.props["n"])) {
+				rt.fail("index %d out of range", ui)
 			}
 			arr.dropIdx()
 			arr.elems[idx] = v
 			return 0
 		}
+		// The bounds of a slice EXPRESSION s[lo:hi:mx]: Go requires
+		// 0 <= lo <= hi <= mx <= cap, and violating it panics. The emitter calls
+		// this before it builds the new header (see $sslice); the twin is
+		// js_gislbounds in languages/lib/go-rt.metajs.
+		m["js_gislbounds"] = func(a []uint64) uint64 {
+			lo := int(rt.toNumber(u(a[0])))
+			hi := int(rt.toNumber(u(a[1])))
+			mx := int(rt.toNumber(u(a[2])))
+			cp := int(rt.toNumber(u(a[3])))
+			if lo < 0 || hi < lo || mx < hi || cp < mx {
+				rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+			}
+			return 0
+		}
+		// x[i] THROUGH A SLICE HEADER: the read that mirrors js_gisetsl. It exists
+		// for the BOUND - js_map_get sees only the backing array and cannot know
+		// the header's length, so `base[0:2][4]` read the storage in both halves
+		// where go panics. The twin is js_gislget in languages/lib/go-rt.metajs.
+		m["js_gislget"] = func(a []uint64) uint64 {
+			h, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return baseMapGet(a)
+			}
+			arr, ok := h.props["a"].(*jsArray)
+			if !ok {
+				return baseMapGet(a)
+			}
+			ui := int(rt.toNumber(u(a[1])))
+			if ui < 0 || ui >= int(rt.toNumber(h.props["n"])) {
+				rt.fail("index %d out of range", ui)
+			}
+			return w(arr.elems[int(rt.toNumber(h.props["o"]))+ui])
+		}
 		// x[i] = v, at the width the slot already carries. Delegates the store.
 		m["js_gisetat"] = func(a []uint64) uint64 {
+			// A store into a NIL MAP is a panic in Go, and it is the one thing a
+			// nil map does not share with an empty one (see giIsNilMap).
+			if giIsNilMap(u(a[0])) {
+				rt.fail("assignment to entry in nil map")
+			}
+			// An out of range ARRAY store panics with the same wording the READ
+			// uses. It used to fall through to js_pyset, whose message is
+			// "list assignment index out of range" - and whose layer-2 twin uses
+			// the floor's hard-aborting `fail`. docs/todo.md 1.9.
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				i := int(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(arr.elems) {
+					rt.fail("index %d out of range", i)
+				}
+			}
 			cur := rt.giSlotOf(u(a[0]), u(a[1]))
 			if cur == nil {
 				return basePyset(a)

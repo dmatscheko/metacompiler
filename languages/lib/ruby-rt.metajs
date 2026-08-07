@@ -2183,6 +2183,14 @@ function rbPyEqual(x, y) {
     // the matrix, --full and --cross all run llvm.Run. rbEq settles two numbers
     // without reaching this function again.
     if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
+    // undefined and nil both spell Ruby's nil: an ABSENT block parameter reaches
+    // this half as undefined, so `[a, b] == [5, nil]` compared undefined against
+    // null and answered false where ruby-interpreter.abnf and MRI answer true.
+    if (x === undefined || x === null || y === undefined || y === null) {
+        var xn = x === undefined || x === null
+        var yn = y === undefined || y === null
+        return xn && yn
+    }
     if (rbIsArr(x)) {
         if (!rbIsArr(y)) { return false }
         if (x.length != y.length) { return false }
@@ -2237,6 +2245,15 @@ function rbEq(l, r) {
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "==")
         if (m !== undefined) { return rbTruthy(m.apply(undefined, [l, r])) }
+    }
+    // An ABSENT argument reaches this half as UNDEFINED (js_arg / js_rblockarg
+    // answer undefined for one that was not passed) and ruby-interpreter.abnf as
+    // nil. Both spell Ruby's nil, so `b == nil` and `[a, b] == [1, nil]` have to
+    // hold either way - they answered false here and true there.
+    if (l === undefined || l === null || r === undefined || r === null) {
+        var ln = l === undefined || l === null
+        var rn = r === undefined || r === null
+        return ln && rn
     }
     // An exception compares equal to its own message - the same deliberate
     // divergence rubyEq of ruby-interpreter.abnf makes, so a program that raises a
@@ -2968,6 +2985,7 @@ function rbArgAt(args, i) {
 
 function rbCall1(f, a) { return f.apply(undefined, [a]) }
 function rbCall2(f, a, b) { return f.apply(undefined, [a, b]) }
+function rbCall3(f, a, b, c) { return f.apply(undefined, [a, b, c]) }
 
 // rubyNumMethod: the Integer / Float / Rational / Complex method set. It answers
 // `undefined` for a name it does not know, so the caller carries on with the
@@ -3338,7 +3356,41 @@ function rbPermIdx(n, k) {
 // body and ruby-to-llvm-ir.abnf lowers every block by hand (grep js_genfn: zero
 // hits), so there is no coroutine to park in. Mirrors mkEnum / enumMethod of
 // ruby-interpreter.abnf and rubyMkEnum / rubyEnumMethod of abnf/jsrt.go.
-function rbMkEnum(items) { return {__renum: true, items: items, pos: 0} }
+// An Enumerator remembers the OPERATION that made it: `h.map` is an Enumerator
+// whose pending op is map, so `h.map.with_index { }` has to answer the MAPPED list,
+// not the receiver. An eager Enumerator that forgot the op answered the Enumerator
+// itself and every `map.with_index` was silently wrong.
+function rbMkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
+function rbMkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
+// What one pass of the pending operation answers, given the block results.
+function rbEnumFinish(t, items, results) {
+    var op = t["op"]
+    if (op == "map" || op == "collect") { return results }
+    if (op == "flat_map" || op == "collect_concat") {
+        var fl = []
+        var f = 0
+        while (f < results.length) {
+            if (rbIsArr(results[f])) {
+                var g = 0
+                while (g < results[f].length) { fl.push(results[f][g]); g = g + 1 }
+            } else { fl.push(results[f]) }
+            f = f + 1
+        }
+        return fl
+    }
+    if (op == "select" || op == "filter" || op == "reject") {
+        var keep = []
+        var k = 0
+        while (k < items.length) {
+            var hit = rbTruthy(results[k])
+            if (op == "reject") { hit = !hit }
+            if (hit) { keep.push(items[k]) }
+            k = k + 1
+        }
+        return keep
+    }
+    return t
+}
 function rbIsEnum(v) {
     if (!rbIsObj(v)) { return false }
     return v["__renum"] === true
@@ -3362,9 +3414,10 @@ function rbEnumMethod(t, name, args) {
     if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rbInspect(items) + ">" }
     if (name == "each") {
         if (blk === null) { return t }
+        var eres = []
         var e = 0
-        while (e < items.length) { rbCall1(blk, items[e]); e = e + 1 }
-        return t
+        while (e < items.length) { eres.push(rbCall1(blk, items[e])); e = e + 1 }
+        return rbEnumFinish(t, items, eres)
     }
     if (name == "with_index" || name == "each_with_index") {
         var off = 0
@@ -3375,9 +3428,10 @@ function rbEnumMethod(t, name, args) {
             while (j < items.length) { pairs.push([items[j], j + off]); j = j + 1 }
             return rbMkEnum(pairs)
         }
+        var wres = []
         var k2 = 0
-        while (k2 < items.length) { rbCall2(blk, items[k2], k2 + off); k2 = k2 + 1 }
-        return t
+        while (k2 < items.length) { wres.push(rbCall2(blk, items[k2], k2 + off)); k2 = k2 + 1 }
+        return rbEnumFinish(t, items, wres)
     }
     if (name == "with_object" || name == "each_with_object") {
         var memo = rbPosAt(args, nPos, 0)
@@ -3390,8 +3444,232 @@ function rbEnumMethod(t, name, args) {
 }
 // rubyArrayMethod. select and reject use RUBY truthiness, and pop/first/last
 // answer nil (not an error) on an empty array.
+
+// ===================================================== Hash surface =========
+// The Hash-specific and Enumerable half of Hash's methods, in one place. It
+// answers the rbHashUnknown sentinel for a name Hash does not have, so the caller
+// still reports it rather than answering it over the pairs. Mirrors the Hash arm
+// of mcall in ruby-interpreter.abnf and rubyHashMethod of abnf/jsrt.go.
+var rbHashUnknown = {__hashunknown: true}
+
+// The [key, value] pair list a Hash yields to every Enumerable method.
+function rbHashPairs(keys, vals) {
+    var out = []
+    var i = 0
+    while (i < keys.length) {
+        out.push([keys[i], vals[i]])
+        i = i + 1
+    }
+    return out
+}
+
+// A shallow copy that KEEPS THE DEFAULT: MRI's Hash#dup, #clone and #merge all
+// carry the receiver's default value / default_proc into the new Hash, so
+// `Hash.new(0).merge(other)["missing"]` still answers 0.
+function rbHashCopy(src) {
+    var d = js_dict_new()
+    var keys = src["keys"]
+    var vals = src["vals"]
+    var i = 0
+    while (i < keys.length) {
+        d["keys"].push(keys[i])
+        d["vals"].push(vals[i])
+        i = i + 1
+    }
+    var hd = src["__hdef"]
+    if (hd !== undefined) { d["__hdef"] = hd }
+    var hp = src["__hdefp"]
+    if (hp !== undefined) { d["__hdefp"] = hp }
+    return d
+}
+
+function rbPairsToHash(pairs, src) {
+    var d = js_dict_new()
+    var hd = src["__hdef"]
+    if (hd !== undefined) { d["__hdef"] = hd }
+    var hp = src["__hdefp"]
+    if (hp !== undefined) { d["__hdefp"] = hp }
+    var i = 0
+    while (i < pairs.length) {
+        rbDictSet(d, pairs[i][0], pairs[i][1])
+        i = i + 1
+    }
+    return d
+}
+
+// The in-place forms (select!, reject!, keep_if, delete_if) answer the RECEIVER.
+function rbHashReplace(o, src) {
+    rbArrReplace(o["keys"], src["keys"])
+    rbArrReplace(o["vals"], src["vals"])
+    return o
+}
+
+// The Enumerable names a Hash answers over its PAIRS. Explicit rather than a
+// fallthrough, so that a name Hash does not have (push, rotate, ...) is still
+// reported instead of silently answered over the pairs.
+function rbHashEnumName(n) {
+    return n == "map" || n == "collect" || n == "flat_map" || n == "collect_concat"
+        || n == "select" || n == "filter" || n == "reject" || n == "select!"
+        || n == "filter!" || n == "reject!" || n == "keep_if" || n == "delete_if"
+        || n == "find" || n == "detect" || n == "find_index" || n == "sort"
+        || n == "sort_by" || n == "min" || n == "max" || n == "min_by" || n == "max_by"
+        || n == "minmax" || n == "sum" || n == "count" || n == "group_by"
+        || n == "partition" || n == "each_with_index" || n == "each_with_object"
+        || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
+        || n == "one?" || n == "first" || n == "take" || n == "drop"
+        || n == "take_while" || n == "drop_while" || n == "each_slice"
+        || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip"
+        || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
+}
+
+function rbHashMethod(o, keys, vals, name, args) {
+    var blk = rbBlockOf(args)
+    var nPos = rbNPos(args)
+    var i = 0
+    if (name == "merge" || name == "merge!" || name == "update") {
+        var mg = name == "merge" ? rbHashCopy(o) : o
+        var mi = 0
+        while (mi < nPos) {
+            var src = args[mi]
+            mi = mi + 1
+            if (!rbIsDict(src)) { continue }
+            var sk = src["keys"]
+            var sv = src["vals"]
+            var j = 0
+            while (j < sk.length) {
+                var at = rbDictFind(mg["keys"], sk[j])
+                if (at >= 0 && blk !== null) {
+                    mg["vals"][at] = rbCall3(blk, sk[j], mg["vals"][at], sv[j])
+                } else { rbDictSet(mg, sk[j], sv[j]) }
+                j = j + 1
+            }
+        }
+        return mg
+    }
+    if (name == "dup" || name == "clone") { return rbHashCopy(o) }
+    if (name == "to_h" && blk === null) { return o }
+    if (name == "delete") {
+        var di = rbDictFind(keys, rbArgAt(args, 0))
+        if (di < 0) {
+            if (blk !== null) { return rbCall1(blk, rbArgAt(args, 0)) }
+            return null
+        }
+        var dv = vals[di]
+        // This dialect has no splice: rebuild both sides without the hit.
+        var nk = []
+        var nv = []
+        var dj = 0
+        while (dj < keys.length) {
+            if (dj != di) { nk.push(keys[dj]); nv.push(vals[dj]) }
+            dj = dj + 1
+        }
+        rbArrReplace(keys, nk)
+        rbArrReplace(vals, nv)
+        return dv
+    }
+    if (name == "clear") {
+        while (keys.length > 0) { keys.pop() }
+        while (vals.length > 0) { vals.pop() }
+        return o
+    }
+    if (name == "each_pair") {
+        if (blk === null) { return rbMkEnum(rbHashPairs(keys, vals)) }
+        while (i < keys.length) {
+            rbCall2(blk, keys[i], vals[i])
+            i = i + 1
+        }
+        return o
+    }
+    if (name == "each_key") {
+        while (i < keys.length) {
+            rbCall1(blk, keys[i])
+            i = i + 1
+        }
+        return o
+    }
+    if (name == "each_value") {
+        while (i < vals.length) {
+            rbCall1(blk, vals[i])
+            i = i + 1
+        }
+        return o
+    }
+    // Hash#values_at takes KEYS, where Array#values_at takes indices, so it must
+    // not reach the pair delegation below.
+    if (name == "values_at") {
+        var va = []
+        while (i < nPos) {
+            var vf = rbDictFind(keys, args[i])
+            if (vf < 0) { va.push(rbHashDefault(o, args[i])) } else { va.push(vals[vf]) }
+            i = i + 1
+        }
+        return va
+    }
+    if (name == "invert") {
+        var iv = js_dict_new()
+        while (i < keys.length) {
+            rbDictSet(iv, vals[i], keys[i])
+            i = i + 1
+        }
+        return iv
+    }
+    if (name == "key") {
+        while (i < vals.length) {
+            if (rbEq(vals[i], rbArgAt(args, 0))) { return keys[i] }
+            i = i + 1
+        }
+        return null
+    }
+    if (name == "transform_values") {
+        var tv = rbHashCopy(o)
+        while (i < tv["vals"].length) {
+            tv["vals"][i] = rbCall1(blk, tv["vals"][i])
+            i = i + 1
+        }
+        return tv
+    }
+    if (name == "transform_keys") {
+        var tk = js_dict_new()
+        while (i < keys.length) {
+            rbDictSet(tk, rbCall1(blk, keys[i]), vals[i])
+            i = i + 1
+        }
+        return tk
+    }
+    if (!rbHashEnumName(name)) { return rbHashUnknown }
+    // Everything else Enumerable is answered over the [key, value] PAIRS, which is
+    // what MRI's Hash does (Hash includes Enumerable and yields a pair). select /
+    // filter / reject answer a HASH again, everything else the Array Enumerable
+    // builds.
+    var hp = rbHashPairs(keys, vals)
+    if (name == "select" || name == "filter" || name == "reject" || name == "select!"
+        || name == "filter!" || name == "reject!" || name == "keep_if" || name == "delete_if") {
+        if (blk === null) { return rbMkEnumOp(hp, name) }
+        var inner = "select"
+        if (name == "reject" || name == "reject!" || name == "delete_if") { inner = "reject" }
+        var kept = rbArrayMethod(hp, inner, args)
+        var hs = rbPairsToHash(kept, o)
+        if (name == "select" || name == "filter" || name == "reject") { return hs }
+        return rbHashReplace(o, hs)
+    }
+    return rbArrayMethod(hp, name, args)
+}
+
+// The Array/Enumerable names that REQUIRE a block; called without one MRI hands
+// back an Enumerator over the receiver rather than raising. Names that are legal
+// blockless (sort, min, max, count, sum, all?, any?, none?, one?, find_index,
+// include?) are not here, and each / each_with_index answer their own Enumerator.
+function rbArrWantsBlock(n) {
+    return n == "map" || n == "collect" || n == "map!" || n == "collect!"
+        || n == "select" || n == "filter" || n == "select!" || n == "filter!"
+        || n == "reject" || n == "reject!" || n == "keep_if" || n == "delete_if"
+        || n == "sort_by" || n == "sort_by!" || n == "group_by" || n == "partition"
+        || n == "flat_map" || n == "collect_concat" || n == "find" || n == "detect"
+        || n == "min_by" || n == "max_by" || n == "take_while" || n == "drop_while"
+}
 function rbArrayMethod(t, name, args) {
     var blk = rbBlockOf(args)
+    if (blk === null && rbArrWantsBlock(name)) { return rbMkEnumOp(rtCopyArr(t), name) }
     // The POSITIONAL COUNT, not a positional ARRAY: rbPosArgs would allocate on
     // every array-method call and push/each/map are hot, so the arms index args
     // directly and stop at nPos.
@@ -4332,6 +4610,8 @@ function rbMethod(target, name, args) {
                 if (fblk !== null) { return rbCall1(fblk, rbArgAt(args, 0)) }
                 fail("key not found: " + rbInspect(rbArgAt(args, 0)))
             }
+            var hres = rbHashMethod(target, keys, vals, name, args)
+            if (hres !== rbHashUnknown) { return hres }
             fail("unknown Hash method: " + name)
         }
         // Ruby's type predicates on an INSTANCE.
@@ -4369,6 +4649,10 @@ function rbMethod(target, name, args) {
                 }
                 sc = sc["__super"]
             }
+            // Class#name and Class#inspect are the class NAME, which is what
+            // Class#to_s already answered here: `Foo.inspect' and `Foo.name'
+            // aborted this half while ruby-interpreter.abnf answered.
+            if (name == "name" || name == "inspect") { return rbStr(target) }
         }
         // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
         // are ordinarily called without a receiver, but naming Kernel explicitly is
@@ -4773,6 +5057,19 @@ function js_rargrest(args, i_raw) {
         i = i + 1
     }
     return out
+}
+
+// One POSITIONAL argument for a parameter that has a default: the trailing block
+// slot of the argument list is not a positional value, so `def d(x = 5); yield x;
+// end; d { }' leaves x at its default instead of binding it to the block. A
+// REQUIRED parameter reads js_arg instead and still sees a trailing callable, so
+// `def m(f); end; m(some_proc)' keeps binding f to the proc. i is a RAW parameter:
+// the emitter writes it with handle(pos).
+function js_rposarg(args, i_raw) {
+    if (!rbIsArr(args)) { return undefined }
+    var i = i_raw
+    if (i < rbNPos(args)) { return args[i] }
+    return undefined
 }
 
 // The keyword arguments a call passed: the trailing Hash of the argument list (a

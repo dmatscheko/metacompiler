@@ -2142,6 +2142,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curIsBlockFn = false
     var curRedoB = null
     var blkBrkName = "__blkbrk"
+    // `return' inside a block returns from the ENCLOSING METHOD, not from the block
+    // (that is `next'), and it does so through the block, the iterating call and any
+    // number of intervening frames. It travels as a second js_pyexc marker, exactly
+    // like `break' above, carrying [value, method tag]:
+    //   curMethodTag   - the IR function index of the method the block was written
+    //                    in, so a marker is only unwrapped by ITS OWN method and a
+    //                    `return' out of a nested block passes the inner call's catch
+    //                    untouched.
+    //   curBlkNonlocal - whether the block currently being emitted has that
+    //                    semantics at all. A LAMBDA does not (`lambda { return 1 }'
+    //                    returns from the lambda), and neither does a block that is
+    //                    not the argument of a call this file wraps in a js_try -
+    //                    a `proc { }' body stored and called later has no catch on
+    //                    the stack, so it keeps the older plain-ret behaviour rather
+    //                    than throwing a marker nothing would catch.
+    //   emitBlkArg     - set only while emitBlkBreakCall emits a call's arguments,
+    //                    which is where a literal block that IS covered by the try
+    //                    gets emitted. emitFunc consumes it once and clears it, so a
+    //                    lambda or proc written inside such a block does not inherit.
+    //   curMethodFrame - whether the function being emitted is the method's OWN
+    //                    frame, or a begin/rescue/ensure closure belonging to it (a
+    //                    `ret' there becomes a control signal retStmt propagates out).
+    //                    A block or a lambda is NOT that frame, which is what makes a
+    //                    `return' out of a NESTED block pass the inner catch by.
+    var blkRetName = "__blkret"
+    var curMethodTag = 0
+    var curMethodFrame = false
+    var curBlkNonlocal = false
+    var emitBlkArg = false
     // The same marker trick carries `retry' out of a rescue clause closure: the clause
     // returns it, and the loop makeTry wraps around the js_try re-runs the begin body.
     var retryName = "__blkretry"
@@ -2157,20 +2186,61 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // block's `break v' marker back into the value of the call, and re-raises anything
     // else unchanged.
     function emitBlkBreakCall(b, mk) {
-        var tryIdx = emitFunc([], function(bb) { return mk(bb) }, false)
+        // Only the method's OWN frame turns a `return' marker back into a ret; the
+        // same wrapper around a call written inside a block re-raises it, so the
+        // marker reaches the method rather than ending the inner iteration.
+        var myTag = curMethodTag
+        var catchRet = myTag != 0 && curMethodFrame
+        // emitBlkArg is raised INSIDE the try closure's body, not around emitFunc:
+        // emitFunc consumes and clears the flag for the function it opens, so raising
+        // it outside would leave the closure's own arguments - the literal block among
+        // them - emitted with it already cleared.
+        var tryIdx = emitFunc([], function(bb) {
+            var savedArg = emitBlkArg
+            emitBlkArg = true
+            var rmk = mk(bb)
+            emitBlkArg = savedArg
+            return rmk
+        }, false)
         var tryClo = callExt(b, "js_closure", [handle(tryIdx), curScopeV])
         var catchIdx = emitFunc(["$brk"], function(bb) {
             var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$brk")])
             var mineB = curF.NewBlock("")
             var otherB = curF.NewBlock("")
             bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [ev, emitStr(bb, blkBrkName)])), mineB, otherB)
+            if (catchRet) {
+                // A `return' marker of THIS method: hand the marker itself back, and
+                // the call site below turns it into a ret. Anything else re-raises.
+                var retB = curF.NewBlock("")
+                var restB = curF.NewBlock("")
+                otherB.NewCondBr(truthy(otherB, callExt(otherB, "js_is_type", [ev, emitStr(otherB, blkRetName)])), retB, restB)
+                var rArgs = callExt(retB, "js_get", [ev, emitStr(retB, "args")])
+                var tagV = callExt(retB, "js_rget", [rArgs, emitNum(retB, 1)])
+                var mineRetB = curF.NewBlock("")
+                var otherRetB = curF.NewBlock("")
+                retB.NewCondBr(truthy(retB, callExt(retB, "js_seq", [tagV, emitNum(retB, myTag)])), mineRetB, otherRetB)
+                callExt(otherRetB, "js_throw", [ev])
+                otherRetB.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+                mineRetB.NewRet(ev)
+                otherB = restB
+            }
             callExt(otherB, "js_throw", [ev])
             otherB.NewRet(hUndef) // never reached: js_throw unwinds on the host side
             var argsV = callExt(mineB, "js_get", [ev, emitStr(mineB, "args")])
             return {b: mineB, v: callExt(mineB, "js_rget", [argsV, emitNum(mineB, 0)])}
         }, false)
         var catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
-        return {b: b, v: callExt(b, "js_try", [tryClo, catchClo, hUndef])}
+        var tv = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+        if (!catchRet) { return {b: b, v: tv} }
+        var doRetB = curF.NewBlock("")
+        var contB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [tv, emitStr(b, blkRetName)])), doRetB, contB)
+        var vArgs = callExt(doRetB, "js_get", [tv, emitStr(doRetB, "args")])
+        // retStmt terminates doRetB and hands back a fresh unreachable block; nothing
+        // flows into it, so terminate that too or the module has a block with no
+        // terminator (which breaks IR printing before it breaks anything else).
+        retStmt(doRetB, callExt(doRetB, "js_rget", [vArgs, emitNum(doRetB, 0)])).NewRet(hUndef)
+        return {b: contB, v: tv}
     }
 
     function fail(msg) { println("ruby compiler error: " + msg); exit(1) }
@@ -2197,6 +2267,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: v}
         }
     }
+    // One `return' of the value v, from wherever it was written. Inside a block it
+    // leaves the enclosing METHOD: the [value, tag] marker emitBlkBreakCall unwraps.
+    // A plain ret there would only end this one block run - which is `next', and is
+    // what made `def u; A.each { |v| return v if v == 2 }; nil; end' answer nil in
+    // this half alone.
+    function emitRubyRet(b, v) {
+        if (curIsBlockFn && curBlkNonlocal && curMethodTag != 0) {
+            var margs = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [margs, v])
+            callExt(b, "js_arr_push", [margs, emitNum(b, curMethodTag)])
+            callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkRetName), margs])])
+            b.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+            return deadBlock()
+        }
+        // A plain ret, or a control signal when the return leaves a begin body.
+        return retStmt(b, v)
+    }
     // return with several values yields an array (Ruby: `return 3, 4` -> [3, 4]).
     function makeReturn(items) {
         if (items.length > 1) {
@@ -2207,15 +2294,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     b = ri.b
                     callExt(b, "js_arr_push", [arrV, ri.v])
                 }
-                return {b: retStmt(b, arrV), v: hNull}
+                return {b: emitRubyRet(b, arrV), v: hNull}
             }
         }
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
-            // A plain ret, or a control signal when the return leaves a begin body.
-            return {b: retStmt(b, v), v: hNull}
+            return {b: emitRubyRet(b, v), v: hNull}
         }
     }
     makeBreak = function(items) {
@@ -4067,7 +4153,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blkT != null) {
                 var isLam = name == "lambda"
                 return function(b) {
+                    // `return' inside either is LOCAL here: a lambda's return is local
+                    // in Ruby too, and a proc body stored and called later has no
+                    // catch on the stack for a non-local marker. emitBlkArg is cleared
+                    // so neither inherits it from a call being wrapped around us.
+                    var savedBA = emitBlkArg
+                    emitBlkArg = false
                     var r = blkT(b)
+                    emitBlkArg = savedBA
                     if (!isLam) { return r }
                     return {b: r.b, v: callExt(r.b, "js_rlambda", [r.v])}
                 }
@@ -4277,9 +4370,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = emitParamDefault(b, p, "js_seq")
                 continue
             }
-            var argV = isBlock === true
-                ? callExt(b, "js_rblockarg", [argsV, handle(pos), handle(params.length)])
-                : callExt(b, "js_arg", [argsV, handle(pos)])
+            // A parameter with a DEFAULT reads js_rposarg, not js_arg: the trailing
+            // block slot of the argument list is not a positional value, so
+            // `def d(x = 5); yield x; end; d { }' binds x to 5 (Ruby) instead of to
+            // the block itself - which used to abort this half outright. A REQUIRED
+            // parameter still reads js_arg, so `def m(f); end; m(some_proc)' keeps
+            // binding f to the proc; bindParams of ruby-interpreter.abnf draws the
+            // same line.
+            var argV = anytype
+            if (isBlock === true) {
+                argV = callExt(b, "js_rblockarg", [argsV, handle(pos), handle(params.length)])
+            } else if (p.defT != undefined && p.defT != null) {
+                argV = callExt(b, "js_rposarg", [argsV, handle(pos)])
+            } else {
+                argV = callExt(b, "js_arg", [argsV, handle(pos)])
+            }
             callExt(b, "js_scope_decl", [curScopeV, nameV, argV])
             pos = pos + 1
             if (p.pgroup != undefined) {
@@ -4328,6 +4433,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedInBlk = curIsBlockFn
         var savedRedo = curRedoB
         var savedResc = curInRescue
+        var savedMTag = curMethodTag
+        var savedMFrame = curMethodFrame
+        var savedBlkNL = curBlkNonlocal
+        var savedBlkArg = emitBlkArg
+        // A def (or a method in a class body) is the frame a block's `return' leaves;
+        // a block inherits the method it was written in. emitBlkArg is consumed once
+        // here, so a lambda or proc written INSIDE a wrapped block does not inherit
+        // the non-local `return' of the block that encloses it.
+        if (declBlk === true) { curMethodTag = idx; curMethodFrame = true }
+        else if (isCtl !== true) { curMethodFrame = false }
+        curBlkNonlocal = isBlock === true && savedBlkArg === true
+        emitBlkArg = false
         curInRescue = false
         curF = f
         curFTag = idx
@@ -4367,6 +4484,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curIsBlockFn = savedInBlk
         curRedoB = savedRedo
         curInRescue = savedResc
+        curMethodTag = savedMTag
+        curMethodFrame = savedMFrame
+        curBlkNonlocal = savedBlkNL
+        emitBlkArg = savedBlkArg
         return idx
     }
     function makeFun(items) {

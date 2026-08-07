@@ -1739,15 +1739,34 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	}
 }
 
+// giIsNilMap answers "this is the zero value of a map type" - an empty dict
+// carrying the __nil mark. The twins are isNilMap in languages/go-interpreter.abnf
+// and goIsNilMap in languages/lib/go-rt.metajs.
+func giIsNilMap(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	if d, has := o.props["__dict"].(bool); !has || !d {
+		return false
+	}
+	n, has := o.props["__nil"].(bool)
+	return has && n
+}
+
 // goValueEq is Go's ==: structs and arrays are VALUE types and compare element by
 // element, nil equals an unset slice/map/pointer, everything else is strictEq.
 // Used only by the go-to-llvm-ir grammar (js_goeq / js_gone).
 func (rt *jsrt) goValueEq(a, b interface{}) bool {
+	// `m == nil` on the zero value of a map type. The zero value of a map is a
+	// MARKED EMPTY MAP and not nil (emitZeroTy in languages/go-to-llvm-ir.abnf has
+	// the argument: a nil map has to READ like an empty one), so nil-ness is the
+	// __nil mark rather than the null. docs/todo.md 1.9.
 	if isUndefOrNull(a) {
-		return isUndefOrNull(b)
+		return isUndefOrNull(b) || giIsNilMap(b)
 	}
 	if isUndefOrNull(b) {
-		return false
+		return giIsNilMap(a)
 	}
 	if aa, ok := a.(*jsArray); ok {
 		if ba, ok2 := b.(*jsArray); ok2 {
@@ -3196,6 +3215,14 @@ func (rt *jsrt) pyUserRender(o *jsObject, cls *jsObject, wantRepr bool) string {
 		if args, ok := o.props["args"].(*jsArray); ok {
 			if len(args.elems) == 0 {
 				return ""
+			}
+			// KeyError OVERRIDES BaseException.__str__ with repr(args[0]), which
+			// is why str(KeyError('x')) is "'x'" and not "x". Every engine here
+			// used to fake that by pre-repr'ing the ARGUMENT, which made str()
+			// right and repr() doubly quoted (docs/todo.md 1.7). The argument is
+			// now the key itself and the repr happens here.
+			if len(args.elems) == 1 && pyIsKeyErrCls(cls) {
+				return rt.pyRepr(args.elems[0])
 			}
 			if len(args.elems) == 1 {
 				return rt.pyString(args.elems[0])
@@ -5169,6 +5196,13 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 			return rubyTruthy(rt.call(m, jsUndef, []interface{}{l, r}))
 		}
 	}
+	// An ABSENT argument reaches this half as UNDEFINED (js_arg / js_rblockarg
+	// answer undefined for one that was not passed) and ruby-interpreter.abnf as
+	// nil. Both spell Ruby's nil, so `b == nil` and `[a, b] == [1, nil]` have to
+	// hold either way - they answered false here and true there.
+	if isUndefOrNull(l) || isUndefOrNull(r) {
+		return isUndefOrNull(l) && isUndefOrNull(r)
+	}
 	// An exception compares equal to its own message, the same deliberate
 	// divergence rubyEq of ruby-interpreter.abnf makes, so a program that raises a
 	// plain string still reads its rescue value as that string.
@@ -6071,6 +6105,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				rt.fail("key not found: %s", rt.rubyInspect(argAt(pos, 0)))
 			}
+			if v, handled := rt.rubyHashMethod(o, keys, vals, name, args); handled {
+				return v
+			}
 			rt.fail("unknown Hash method: %s", name)
 		}
 		// Ruby's type predicates. is_a?/kind_of? walk the __super chain of the
@@ -6111,6 +6148,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return rt.call(m, jsUndef, append([]interface{}{o}, args...))
 				}
 				cls = clsObj.props["__super"]
+			}
+			// Class#name and Class#inspect are the class NAME, which is what
+			// Class#to_s already answered here: `Foo.inspect' and `Foo.name'
+			// aborted this half while ruby-interpreter.abnf answered.
+			switch name {
+			case "name", "inspect":
+				return rt.rubyStr(o)
 			}
 		}
 		// Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
@@ -6414,6 +6458,243 @@ func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 	return out
 }
 
+// rubyHashPairs is the [key, value] pair list a Hash yields to every Enumerable
+// method. Mirrors hashPairs of ruby-interpreter.abnf and rbHashPairs of
+// lib/ruby-rt.metajs.
+func rubyHashPairs(keys, vals *jsArray) *jsArray {
+	out := &jsArray{}
+	for i := range keys.elems {
+		out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
+	}
+	return out
+}
+
+// rubyHashCopy is a shallow copy that KEEPS THE DEFAULT: MRI's Hash#dup, #clone
+// and #merge all carry the receiver's default value / default_proc into the new
+// Hash, so `Hash.new(0).merge(other)["missing"]` still answers 0.
+func rubyHashCopy(src *jsObject) *jsObject {
+	keys, vals, _ := dictParts(src)
+	out := &jsObject{props: map[string]interface{}{
+		"__dict": true,
+		"keys":   &jsArray{elems: append([]interface{}{}, keys.elems...)},
+		"vals":   &jsArray{elems: append([]interface{}{}, vals.elems...)},
+	}}
+	if d, has := src.props["__hdef"]; has {
+		out.set("__hdef", d)
+	}
+	if d, has := src.props["__hdefp"]; has {
+		out.set("__hdefp", d)
+	}
+	return out
+}
+
+// rubyPairsToHash rebuilds a Hash out of a pair list, carrying src's default.
+func (rt *jsrt) rubyPairsToHash(pairs *jsArray, src *jsObject) *jsObject {
+	out := rubyHashCopy(src)
+	okeys, ovals, _ := dictParts(out)
+	okeys.elems = nil
+	ovals.elems = nil
+	for _, p := range pairs.elems {
+		row, isArr := p.(*jsArray)
+		if !isArr || len(row.elems) < 2 {
+			continue
+		}
+		if i := rt.rubyDictFind(okeys, row.elems[0]); i >= 0 {
+			ovals.elems[i] = row.elems[1]
+			continue
+		}
+		okeys.elems = append(okeys.elems, row.elems[0])
+		ovals.elems = append(ovals.elems, row.elems[1])
+	}
+	return out
+}
+
+// rubyHashEnumName lists the Enumerable names a Hash answers over its PAIRS. It is
+// explicit rather than a fallthrough so that a name Hash does not have (push,
+// rotate, ...) is still reported instead of silently answered over the pairs.
+// Mirrors hashEnumName of ruby-interpreter.abnf and rbHashEnumName of
+// lib/ruby-rt.metajs.
+func rubyHashEnumName(n string) bool {
+	switch n {
+	case "map", "collect", "flat_map", "collect_concat", "select", "filter",
+		"reject", "select!", "filter!", "reject!", "keep_if", "delete_if",
+		"find", "detect", "find_index", "sort", "sort_by", "min", "max",
+		"min_by", "max_by", "minmax", "sum", "count", "group_by", "partition",
+		"each_with_index", "each_with_object", "inject", "reduce", "all?",
+		"any?", "none?", "one?", "first", "take", "drop", "take_while",
+		"drop_while", "each_slice", "each_cons", "empty?", "tally", "zip",
+		"assoc", "uniq", "reverse", "freeze", "itself":
+		return true
+	}
+	return false
+}
+
+// rubyHashMethod is the Hash-specific and Enumerable half of Hash's surface, in
+// one place for both compiled halves. It answers handled=false for a name Hash
+// does not have, so the caller still reports it. Mirrors the Hash arm of mcall in
+// ruby-interpreter.abnf and rbHashMethod of lib/ruby-rt.metajs.
+func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, args []interface{}) (interface{}, bool) {
+	pos, blk := rubyBlockArgs(args)
+	switch name {
+	case "merge", "merge!", "update":
+		mg := o
+		if name == "merge" {
+			mg = rubyHashCopy(o)
+		}
+		mkeys, mvals, _ := dictParts(mg)
+		for _, src := range pos {
+			skeys, svals, isDict := dictParts(src)
+			if !isDict {
+				continue
+			}
+			for i := range skeys.elems {
+				if j := rt.rubyDictFind(mkeys, skeys.elems[i]); j >= 0 {
+					if blk != nil {
+						mvals.elems[j] = rt.call(blk, jsUndef,
+							[]interface{}{skeys.elems[i], mvals.elems[j], svals.elems[i]})
+					} else {
+						mvals.elems[j] = svals.elems[i]
+					}
+					continue
+				}
+				mkeys.elems = append(mkeys.elems, skeys.elems[i])
+				mvals.elems = append(mvals.elems, svals.elems[i])
+			}
+		}
+		mkeys.dropIdx()
+		return mg, true
+	case "dup", "clone":
+		return rubyHashCopy(o), true
+	case "to_h":
+		if blk == nil {
+			return o, true
+		}
+	case "delete":
+		i := rt.rubyDictFind(keys, argAt(pos, 0))
+		if i < 0 {
+			if blk != nil {
+				return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)}), true
+			}
+			return jsNull, true
+		}
+		v := vals.elems[i]
+		keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+		vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+		keys.dropIdx()
+		return v, true
+	case "clear":
+		keys.elems = nil
+		vals.elems = nil
+		keys.dropIdx()
+		return o, true
+	case "each_pair":
+		if blk == nil {
+			return rubyMkEnum(rubyHashPairs(keys, vals)), true
+		}
+		for i := range keys.elems {
+			rt.call(blk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
+		}
+		return o, true
+	case "each_key":
+		for _, k := range append([]interface{}{}, keys.elems...) {
+			rt.call(blk, jsUndef, []interface{}{k})
+		}
+		return o, true
+	case "each_value":
+		for _, v := range append([]interface{}{}, vals.elems...) {
+			rt.call(blk, jsUndef, []interface{}{v})
+		}
+		return o, true
+	case "values_at":
+		// Hash#values_at takes KEYS, where Array#values_at takes indices, so it
+		// must not reach the pair delegation below.
+		out := &jsArray{}
+		for _, k := range pos {
+			if i := rt.rubyDictFind(keys, k); i >= 0 {
+				out.elems = append(out.elems, vals.elems[i])
+			} else {
+				out.elems = append(out.elems, rt.rubyHashDefault(o, k))
+			}
+		}
+		return out, true
+	case "invert":
+		out := rt.rubyPairsToHash(&jsArray{}, o)
+		okeys, ovals, _ := dictParts(out)
+		delete(out.props, "__hdef")
+		delete(out.props, "__hdefp")
+		for i := range keys.elems {
+			if j := rt.rubyDictFind(okeys, vals.elems[i]); j >= 0 {
+				ovals.elems[j] = keys.elems[i]
+				continue
+			}
+			okeys.elems = append(okeys.elems, vals.elems[i])
+			ovals.elems = append(ovals.elems, keys.elems[i])
+		}
+		return out, true
+	case "key":
+		for i := range vals.elems {
+			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
+				return keys.elems[i], true
+			}
+		}
+		return jsNull, true
+	case "transform_values":
+		out := rubyHashCopy(o)
+		_, ovals, _ := dictParts(out)
+		for i := range ovals.elems {
+			ovals.elems[i] = rt.call(blk, jsUndef, []interface{}{ovals.elems[i]})
+		}
+		return out, true
+	case "transform_keys":
+		out := rt.rubyPairsToHash(&jsArray{}, o)
+		delete(out.props, "__hdef")
+		delete(out.props, "__hdefp")
+		okeys, ovals, _ := dictParts(out)
+		for i := range keys.elems {
+			nk := rt.call(blk, jsUndef, []interface{}{keys.elems[i]})
+			if j := rt.rubyDictFind(okeys, nk); j >= 0 {
+				ovals.elems[j] = vals.elems[i]
+				continue
+			}
+			okeys.elems = append(okeys.elems, nk)
+			ovals.elems = append(ovals.elems, vals.elems[i])
+		}
+		return out, true
+	}
+	if !rubyHashEnumName(name) {
+		return nil, false
+	}
+	// Everything else Enumerable is answered over the [key, value] PAIRS, which is
+	// what MRI's Hash does (Hash includes Enumerable and yields a pair). select /
+	// filter / reject answer a HASH again, everything else the Array that
+	// Enumerable builds.
+	hp := rubyHashPairs(keys, vals)
+	switch name {
+	case "select", "filter", "reject", "select!", "filter!", "reject!", "keep_if", "delete_if":
+		if blk == nil {
+			return rubyMkEnumOp(hp, name), true
+		}
+		inner := "select"
+		if name == "reject" || name == "reject!" || name == "delete_if" {
+			inner = "reject"
+		}
+		kept, _ := rt.rubyArrayMethod(hp, inner, args).(*jsArray)
+		if kept == nil {
+			kept = &jsArray{}
+		}
+		hs := rt.rubyPairsToHash(kept, o)
+		if name == "select" || name == "filter" || name == "reject" {
+			return hs, true
+		}
+		hkeys, hvals, _ := dictParts(hs)
+		keys.elems = append([]interface{}{}, hkeys.elems...)
+		vals.elems = append([]interface{}{}, hvals.elems...)
+		keys.dropIdx()
+		return o, true
+	}
+	return rt.rubyArrayMethod(hp, name, args), true
+}
+
 // rubyArrayMethod mirrors the arrayMethod of ruby-interpreter.abnf. select and
 // reject use rubyTruthy (Ruby semantics), and pop/first/last return nil (not an
 // error) on an empty array.
@@ -6486,11 +6767,54 @@ func rubyPick(t *jsArray, picks [][]int) *jsArray {
 // enumMethod of ruby-interpreter.abnf and rbMkEnum / rbEnumMethod of
 // lib/ruby-rt.metajs.
 func rubyMkEnum(items *jsArray) *jsObject {
+	return rubyMkEnumOp(items, "each")
+}
+
+// An Enumerator remembers the OPERATION that made it: `h.map` is an Enumerator
+// whose pending op is map, so `h.map.with_index { }` has to answer the MAPPED
+// list, not the receiver. An eager Enumerator that forgot the op answered the
+// Enumerator itself and every `map.with_index` was silently wrong.
+func rubyMkEnumOp(items *jsArray, op string) *jsObject {
 	e := newJSObject()
 	e.set("__renum", true)
 	e.set("items", items)
 	e.set("pos", float64(0))
+	e.set("op", op)
 	return e
+}
+
+// rubyEnumFinish is what one pass of the pending operation answers, given the
+// block results. Mirrors enumFinish of ruby-interpreter.abnf and rbEnumFinish of
+// lib/ruby-rt.metajs.
+func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interface{} {
+	op, _ := t.props["op"].(string)
+	switch op {
+	case "map", "collect":
+		return &jsArray{elems: results}
+	case "flat_map", "collect_concat":
+		out := &jsArray{}
+		for _, r := range results {
+			if row, isArr := r.(*jsArray); isArr {
+				out.elems = append(out.elems, row.elems...)
+				continue
+			}
+			out.elems = append(out.elems, r)
+		}
+		return out
+	case "select", "filter", "reject":
+		out := &jsArray{}
+		for i := range items.elems {
+			hit := rubyTruthy(results[i])
+			if op == "reject" {
+				hit = !hit
+			}
+			if hit {
+				out.elems = append(out.elems, items.elems[i])
+			}
+		}
+		return out
+	}
+	return t
 }
 
 func rubyIsEnum(v interface{}) bool {
@@ -6535,10 +6859,11 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		if blk == nil {
 			return t
 		}
+		res := []interface{}{}
 		for _, e := range items.elems {
-			rt.call(blk, jsUndef, []interface{}{e})
+			res = append(res, rt.call(blk, jsUndef, []interface{}{e}))
 		}
-		return t
+		return rubyEnumFinish(t, items, res)
 	case "with_index", "each_with_index":
 		off := 0
 		if name == "with_index" && len(pos) > 0 {
@@ -6551,10 +6876,11 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 			}
 			return rubyMkEnum(pairs)
 		}
+		wres := []interface{}{}
 		for i, e := range items.elems {
-			rt.call(blk, jsUndef, []interface{}{e, float64(i + off)})
+			wres = append(wres, rt.call(blk, jsUndef, []interface{}{e, float64(i + off)}))
 		}
-		return t
+		return rubyEnumFinish(t, items, wres)
 	case "with_object", "each_with_object":
 		memo := argAt(pos, 0)
 		for _, e := range items.elems {
@@ -6566,8 +6892,28 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	return rt.rubyArrayMethod(items, name, args)
 }
 
+// rubyArrWantsBlock lists the Array/Enumerable names that REQUIRE a block; called
+// without one MRI hands back an Enumerator over the receiver rather than raising.
+// Names that are legal blockless (sort, min, max, count, sum, all?, any?, none?,
+// one?, find_index, include?) are not here, and each / each_with_index answer
+// their own Enumerator below. Mirrors arrWantsBlock of ruby-interpreter.abnf and
+// rbArrWantsBlock of lib/ruby-rt.metajs.
+func rubyArrWantsBlock(n string) bool {
+	switch n {
+	case "map", "collect", "map!", "collect!", "select", "filter", "select!",
+		"filter!", "reject", "reject!", "keep_if", "delete_if", "sort_by",
+		"sort_by!", "group_by", "partition", "flat_map", "collect_concat",
+		"find", "detect", "min_by", "max_by", "take_while", "drop_while":
+		return true
+	}
+	return false
+}
+
 func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
+	if blk == nil && rubyArrWantsBlock(name) {
+		return rubyMkEnumOp(&jsArray{elems: append([]interface{}{}, t.elems...)}, name)
+	}
 	switch name {
 	case "size", "length":
 		return float64(len(t.elems))
@@ -8789,6 +9135,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(out)
 		},
+		// One POSITIONAL argument for a parameter that has a default: the trailing
+		// block slot of the argument list is not a positional value, so
+		// `def d(x = 5); yield x; end; d { }` leaves x at its default instead of
+		// binding it to the block. A REQUIRED parameter reads js_arg instead and
+		// still sees a trailing callable, so `def m(f); end; m(some_proc)` keeps
+		// binding f to the proc.
+		"js_rposarg": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return jsHUndefined
+			}
+			pos, _ := rubyBlockArgs(arr.elems)
+			if int(a[1]) < len(pos) {
+				return w(pos[a[1]])
+			}
+			return jsHUndefined
+		},
 		// The keyword arguments a call passed: the trailing Hash of the argument
 		// list (a block closure may sit behind it), or an empty Hash.
 		"js_rkwargs": func(a []uint64) uint64 {
@@ -9535,10 +9898,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])}))
 				}
 			}
+			// A subscript MISS is a CATCHABLE exception, not an abort. All three
+			// engines used to rt.fail() here, so `try: d[k] / except KeyError` -
+			// which CPython supports and which js_pydel_item next door already
+			// did - killed the process instead (docs/todo.md 1.7). CPython's
+			// message for the sequence cases carries no index, so neither does
+			// this one any more.
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.pyDictFind(keys, u(a[1]))
 				if i < 0 {
-					rt.fail("KeyError: %s", rt.pyString(u(a[1])))
+					panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", u(a[1]))})
 				}
 				return w(vals.elems[i])
 			}
@@ -9549,7 +9918,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					idx += len(o.elems)
 				}
 				if idx < 0 || idx >= len(o.elems) {
-					rt.fail("list index out of range: %d", int(rt.toNumber(u(a[1]))))
+					panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list index out of range")})
 				}
 				return w(o.elems[idx])
 			case string:
@@ -9558,7 +9927,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					idx += n
 				}
 				if idx < 0 || idx >= n {
-					rt.fail("string index out of range: %d", int(rt.toNumber(u(a[1]))))
+					panic(&jsThrown{value: rt.pyExcInstance("IndexError", "string index out of range")})
 				}
 				return rt.wrapStr(rt.strAt(o, idx))
 			}
@@ -11070,7 +11439,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.pyDictFind(keys, u(a[1]))
 				if i < 0 {
-					panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyString(u(a[1])))})
+					panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", u(a[1]))})
 				}
 				keys.dropIdx()
 				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
@@ -13004,6 +13373,20 @@ func pyLinearize(bases []*jsObject) []*jsObject {
 }
 
 // pyLookup finds a name along the MRO of a class.
+// pyIsKeyErrCls reports whether a class IS KeyError or derives from it. KeyError
+// is the one builtin exception whose __str__ differs from BaseException's, and a
+// subclass INHERITS that, so the test is the class chain rather than the name.
+// isKeyErrCls in languages/python-interpreter.abnf and pyIsKeyErrCls in
+// languages/lib/python-rt.metajs are this body.
+func pyIsKeyErrCls(c *jsObject) bool {
+	for _, k := range pyMRO(c) {
+		if n, ok := k.props["__name"].(string); ok && n == "KeyError" {
+			return true
+		}
+	}
+	return false
+}
+
 func pyLookup(c *jsObject, name string) (interface{}, bool) {
 	if name == "" {
 		return nil, false
@@ -13547,7 +13930,7 @@ func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{
 		if len(args) > 1 {
 			return args[1]
 		}
-		panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
+		panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", argAt(args, 0))})
 	case "clear":
 		keys.elems = keys.elems[:0]
 		vals.elems = vals.elems[:0]
@@ -13681,7 +14064,7 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 		// goja/frozen invariant needs), so the first element is the one taken.
 		// Assert on membership and size, never on which element.
 		if len(els.elems) == 0 {
-			panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr("pop from an empty set"))})
+			panic(&jsThrown{value: rt.pyExcInstance("KeyError", "pop from an empty set")})
 		}
 		v := els.elems[0]
 		els.elems = append(els.elems[:0], els.elems[1:]...)
@@ -13698,7 +14081,7 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 			}
 		}
 		if name == "remove" {
-			panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
+			panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", argAt(args, 0))})
 		}
 		return jsUndef
 	case "union", "update":
@@ -14606,20 +14989,59 @@ func (rt *jsrt) pyExcGroupLeaves(v interface{}) (leaves []interface{}, msg inter
 	return leaves, msg, true
 }
 
+// pyExcInstanceV is pyExcInstance with the argument kept as a VALUE rather than
+// as text. It exists for KeyError, whose argument is the KEY: CPython's
+// KeyError.__str__ is repr(args[0]), so every engine here used to pre-repr the
+// argument, which made str(e) right by accident and left repr(e) doubly quoted -
+// KeyError('3') where CPython says KeyError(3) - and e.args[0] a string where
+// CPython has the key (docs/todo.md 1.7). The repr now happens in pyUserRender.
+func (rt *jsrt) pyExcInstanceV(name string, arg interface{}) interface{} {
+	inst := newJSObject()
+	inst.set("__class", rt.pyExcClass(name))
+	inst.set("args", &jsArray{elems: []interface{}{arg}})
+	return inst
+}
+
+// pyExcParentName is CPython's hierarchy above a RUNTIME-raised exception, which
+// used to be a flat derivation from Exception: rt.pyIsInstance walks the __super
+// chain by name, so a KeyError whose __super was Exception was not caught by
+// `except LookupError` even though the interpreter half caught it
+// (docs/todo.md 1.7). pyExcParent in languages/python-interpreter.abnf and the
+// excParent block of languages/python-to-llvm-ir.abnf are the same table.
+func pyExcParentName(name string) string {
+	switch name {
+	case "ZeroDivisionError":
+		return "ArithmeticError"
+	case "IndexError", "KeyError":
+		return "LookupError"
+	case "UnboundLocalError":
+		return "NameError"
+	case "NotImplementedError":
+		return "RuntimeError"
+	case "Exception":
+		return "BaseException"
+	}
+	return "Exception"
+}
+
+func (rt *jsrt) pyExcClass(name string) *jsObject {
+	cls := rt.pyBuiltinClass(name)
+	if name != "BaseException" {
+		if _, has := cls.props["__super"]; !has {
+			cls.set("__super", rt.pyExcClass(pyExcParentName(name)))
+		}
+	}
+	return cls
+}
+
 func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	// The class the runtime raises with is a stable per-name object that derives
 	// from a class called Exception, so pyIsInstance's name walk answers
 	// `except Exception` (and `except <ThatName>`) for a StopIteration /
 	// UnboundLocalError / AttributeError the RUNTIME raised, exactly like for one
 	// the program raised through the module's own class objects.
-	cls := rt.pyBuiltinClass(name)
-	if name != "Exception" {
-		if _, has := cls.props["__super"]; !has {
-			cls.set("__super", rt.pyBuiltinClass("Exception"))
-		}
-	}
 	inst := newJSObject()
-	inst.set("__class", cls)
+	inst.set("__class", rt.pyExcClass(name))
 	inst.set("args", &jsArray{elems: []interface{}{msg}})
 	return inst
 }
@@ -14926,7 +15348,7 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			}
 			at := rt.pyDictFind(dictK, key)
 			if at < 0 {
-				rt.fail("KeyError: '%s'", key)
+				panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", key)})
 			}
 			v = dictV.elems[at]
 		} else {

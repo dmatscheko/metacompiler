@@ -226,10 +226,43 @@ func s05() {
 		e3, e4 = ivs05[1].(int)
 	}
 	check("dec26", e1 == 7 && e2 && e3 == 0 && !e4)
-	// NOT asserted: nst05["absent"]["k"], where the missing outer key must yield a
-	// NIL map that indexes to the zero value. Both halves reject it instead ("the
-	// comma ok form needs a map" / "indexing a object") - a separate, pre-existing
-	// gap in the zero value of a map type, not in the comma-ok base.
+	// A MISSING OUTER KEY YIELDS A NIL MAP, and a nil map READS like an empty one:
+	// it indexes to the zero value, has length 0, ranges over nothing and prints
+	// map[]. Both halves used to reject this outright ("the comma ok form needs a
+	// map" / "indexing a object") because the zero value of a map type was the null
+	// value; it is now a MARKED empty map, which keeps `== nil` true and keeps a
+	// STORE a panic. docs/todo.md 1.9.
+	n13, n14 := nst05["absent"]["k"]
+	check("dec27", n13 == 0 && !n14)
+	check("dec28", nst05["absent"]["k"] == 0 && len(nst05["absent"]) == 0)
+	var nilm05 map[string]int
+	check("dec29", nilm05 == nil && len(nilm05) == 0 && nilm05["k"] == 0)
+	nv05, nok05 := nilm05["k"]
+	check("dec30", nv05 == 0 && !nok05)
+	cnt05 := 0
+	// `for range m` with NO variables at all does not parse in the compiler half
+	// (it reads `for` as a variable and dies with `variable not defined: for`) -
+	// pre-existing, unrelated to the nil map, and stated here because this is where
+	// it was met. The one-variable form is the one both halves take.
+	for k05 := range nilm05 {
+		_ = k05
+		cnt05++
+	}
+	check("dec31", cnt05 == 0 && fmt.Sprint(nilm05) == "map[]")
+	// A for-INIT may be a comma-ok form. The interpreter said `unknown name: v`:
+	// only a ':=' recorded the names a Go 1.22 loop gives a per-iteration copy of,
+	// so the init inherited the last ':=' ANYWHERE EARLIER and the loop frame was
+	// rebuilt around those instead. The closure below is what per-iteration means.
+	fs05 := []func() int{}
+	for fv05, fok05 := mp05["k"]; fok05; fok05 = false {
+		fs05 = append(fs05, func() int { return fv05 })
+	}
+	check("dec32", len(fs05) == 1 && fs05[0]() == 7)
+	tn05 := 0
+	for tv05, tok05 := iv05.(int); tok05; tok05 = false {
+		tn05 = tv05
+	}
+	check("dec33", tn05 == 11)
 }
 
 // ===== SECTION 06: arrays =====
@@ -273,6 +306,38 @@ func s07() {
 	check("slc6", copy(dst, s) == 3 && dst[1] == 30)
 	rows := [][]int{{1}, {2, 3}}
 	check("slc7", rows[1][1] == 3 && len(rows[0]) == 1)
+	// AN OUT OF RANGE INDEX IS A RECOVERABLE PANIC, and the bound is the LENGTH,
+	// not the backing array: `s[1:3]` has cap 4 here, and reading past its length
+	// used to answer the storage in both halves and `<nil>` (exit 0!) in the
+	// interpreter. Every index comes out of a slice so nothing folds.
+	// docs/todo.md 1.9. The message text is the engine's, not go's, in every half.
+	ix07 := []int{0, 2, 3, 7, -1}
+	check("slc8", panics07(func() { _ = s[ix07[3]] }) && panics07(func() { _ = s[ix07[4]] }))
+	check("slc9", panics07(func() { _ = sub[ix07[1]] }) && sub[ix07[0]] == 30)
+	check("slc10", panics07(func() { sub[ix07[1]] = 1 }) && panics07(func() { s[ix07[3]] = 1 }))
+	arr07 := [3]int{1, 2, 3}
+	check("slc11", panics07(func() { _ = arr07[ix07[2]] }) && panics07(func() { arr07[ix07[2]] = 1 }))
+	str07 := []string{"abc"}
+	check("slc12", str07[0][ix07[1]] == 99 && panics07(func() { _ = str07[0][ix07[2]] }))
+	// A slice EXPRESSION is bounded by the capacity, and s[len:] is legal. Go's
+	// full rule is 0 <= lo <= hi <= max <= cap; the three-index form was unchecked
+	// in BOTH halves and built a header whose capacity was below its length.
+	check("slc13", len(s[ix07[2]:]) == 2 && panics07(func() { _ = s[ix07[3]:] }))
+	check("slc14", panics07(func() { _ = s[ix07[0]:ix07[2]:ix07[1]] }) &&
+		cap(s[ix07[0]:ix07[1]:ix07[2]]) == 3)
+}
+
+// panics07 reports whether f panics. recover() has to see a runtime panic as an
+// ordinary Go value, which is what makes the assertions above testable in all
+// three engines - the tree walker, llvm.Run and the native binary.
+func panics07(f func()) (did bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			did = true
+		}
+	}()
+	f()
+	return false
 }
 
 // ===== SECTION 08: maps =====
@@ -297,6 +362,25 @@ func s08() {
 	check("map5", len(made[1]) == 1 && made[1][0] == "a")
 	clear(ages) // Go 1.21 builtin
 	check("map6", len(ages) == 0)
+	// NESTED COMPOSITE LITERALS whose element type is a MAP. The compiler half
+	// rejected every one of these ("composite literal element of unsupported type")
+	// where the interpreter accepted them, and a doubly nested one then broke the
+	// interpreter instead, because both halves read a map type's VALUE text by
+	// scanning for the LAST ']' - which runs straight past the key of an inner map.
+	// docs/todo.md 1.9.
+	nst08 := map[string]map[string]int{"o": {"k": 1}, "p": {"z": 2}}
+	check("map7", nst08["o"]["k"] == 1 && nst08["p"]["z"] == 2 && len(nst08) == 2)
+	sl08 := []map[string]int{{"a": 1}, {"b": 2}}
+	check("map8", sl08[0]["a"] == 1 && sl08[1]["b"] == 2)
+	deep08 := []map[string]map[string]int{{"a": {"b": 3}}}
+	check("map9", deep08[0]["a"]["b"] == 3)
+	mix08 := map[string]map[string][]int{"a": {"b": {4, 5}}}
+	check("map10", mix08["a"]["b"][1] == 5)
+	ar08 := [2]map[string]int{{"a": 1}, {"b": 2}}
+	check("map11", ar08[1]["b"] == 2 && len(ar08) == 2)
+	// A STORE into a nil map is the one thing it does not share with an empty one.
+	var nm08 map[string]int
+	check("map12", panics07(func() { nm08["k"] = 1 }))
 }
 
 // ===== SECTION 09: structs =====
@@ -798,6 +882,29 @@ func s23() {
 		sum += 0.25
 	}
 	check("flt23", sum == 1.0 && fs23(sum) == "1")
+	// DOUBLES THE SCRIPT HOST MIS-PRINTS. The interpreter half took a double's
+	// digits from `"" + a`, and goja's Number-to-String is not always the shortest
+	// ROUND-TRIPPING form (~1 in 9,000 doubles), while the frozen host's is exact -
+	// so this was three things at once: wrong against `go`, a live goja-vs-`-frozen`
+	// divergence no matrix entry reached, and unfixable from inside the dialect,
+	// since a script cannot ask its host for more digits than the printer gave. The
+	// digits now come from floPrec by ROUND-TRIP SEARCH (docs/todo.md 1.8). Every
+	// value here is one goja gets wrong, read out of a slice so nothing folds; the
+	// first is the one docs/working-on-this-project.md chapter 4 names.
+	gm23 := []float64{
+		0.0013060363926342689,
+		-2.0313047603008369e-255,
+		1.4614656893494439e+288,
+		1.6666157901962729e+09,
+		-1.8473743683904479e+18,
+		2.4600138641387099e+67,
+	}
+	check("flt24", fs23(gm23[0]) == "0.0013060363926342689")
+	check("flt25", fs23(gm23[1]) == "-2.0313047603008369e-255")
+	check("flt26", fs23(gm23[2]) == "1.4614656893494439e+288")
+	check("flt27", fs23(gm23[3]) == "1.6666157901962729e+09")
+	check("flt28", fs23(gm23[4]) == "-1.8473743683904479e+18")
+	check("flt29", fs23(gm23[5]) == "2.4600138641387099e+67")
 }
 
 // ===== SECTION 24: fmt's value rendering =====
@@ -818,7 +925,11 @@ func s23() {
 //	                                            this model, so a struct and a
 //	                                            pointer to it are one value
 //	&n (n an int)   go: 0xc00...  here: &5    - an address is not reproducible
-//	var m map[K]V   go: map[]     here: <nil> - a nil map is the null value here
+//
+// A nil map used to be the third: it printed <nil> where go prints map[], because
+// it was the null value in this model. Since docs/todo.md 1.9 the zero value of a
+// map type is a MARKED EMPTY MAP - so that it can also be READ like an empty one,
+// which is what go does - and it prints map[] in both halves. It is asserted below.
 type stringer24 struct{ n int }
 
 func (s stringer24) String() string { return "S<" + fmt.Sprint(s.n) + ">" }

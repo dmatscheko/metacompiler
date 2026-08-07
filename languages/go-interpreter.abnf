@@ -514,7 +514,10 @@ SfxGlued    = :script(~~
         return abnf.newToken("\x01comma-ok-base-ends-at-its-last-index", 0)
     })()
 ~~) ;
-ExprOnly    <~~ push(exprToStmt(pop())) ~~>
+// An expression statement is NOT a declaration, so it clears the pending
+// short-declaration names (see cokDeclNames): a for-init spelled `for f(); ...`
+// would otherwise inherit whatever the last ':=' in the file declared.
+ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
 ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
@@ -1292,6 +1295,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
     }
     function newMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero} }
+    // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not null.
+    //
+    // In Go a nil map READS like an empty one - `var m map[string]int; m["k"]` is 0,
+    // len(m) is 0, it ranges over nothing and it prints `map[]` - and only a WRITE
+    // panics. As null it could do none of that: `m["k"]` died with `indexing a
+    // object` in the compiler half and a host TypeError in this one, and
+    // `nst["absent"]["k"]` - where the zero value of the OUTER map's value type is
+    // itself a nil map - was unreachable (docs/todo.md 1.9). This is the same trade
+    // goZeroTy already makes for `[]T`, which zeroes to an empty slice HEADER; the
+    // difference is __nil, which keeps `m == nil` true (goEq) and keeps the write a
+    // panic (mapSet), so no row gets worse. The compiler half builds the same
+    // object in emitZeroTy, and the mark is read by goIsNilMap in
+    // languages/lib/go-rt.metajs and giIsNilMap in abnf/jsrt.go.
+    function newNilMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero, __nil: true} }
+    function isNilMap(v) { return isMap(v) && v.__nil == true }
     // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
     // a box, and two boxes holding the same value are different objects, so a
     // program that uses one falls back to a value-comparing scan. The flag is set
@@ -1315,6 +1333,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return i >= 0 ? m.vals[i] : m.zero
     }
     function mapSet(m, k, v) {
+        // Go panics on a store into a nil map, and that is the ONE thing a nil map
+        // does not share with an empty one (see newNilMap).
+        if (m.__nil == true) { goRTPanic("assignment to entry in nil map") }
         var i = mapFind(m, k)
         if (i >= 0) { m.vals[i] = v }
         else { m.keys.push(k); m.vals.push(v) }
@@ -1706,7 +1727,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (base === undefined || base === null) {
             var nlo = s.lo != null ? s.lo() : 0
             var nhi = s.hi != null ? s.hi() : 0
-            if (nlo != 0 || nhi != 0) { fail("slice bounds out of range on a nil slice") }
+            if (nlo != 0 || nhi != 0) { goRTPanic("slice bounds out of range on a nil slice") }
             return newSl([], 0, 0, 0)
         }
         // An array is sliced through a header over the array itself, so a write through
@@ -1714,8 +1735,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var h = isSl(base) ? base : newSl(base, 0, base.length, base.length)
         var lo = s.lo != null ? s.lo() : 0
         var hi = s.hi != null ? s.hi() : h.n
-        var cap = (s.mx != null ? s.mx() : h.c) - lo
-        if (lo < 0 || hi < lo || hi > h.c) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
+        var mx = s.mx != null ? s.mx() : h.c
+        var cap = mx - lo
+        // A slice EXPRESSION is bounded by the CAPACITY (s[:cap(s)] is legal), and
+        // it panics like an index does - see goRTPanic. Go's full rule is
+        // 0 <= lo <= hi <= mx <= cap, and the THREE-index form was unchecked here:
+        // `base[1:4:2]` built a header with a capacity smaller than its length.
+        // The twin is js_gislbounds in languages/lib/go-rt.metajs.
+        if (lo < 0 || hi < lo || mx < hi || h.c < mx) {
+            goRTPanic("slice bounds [" + lo + ":" + hi + "] out of range")
+        }
         return slT(newSl(h.a, h.o + lo, hi - lo, cap), h.et)
     }
     // Field read: struct fields, and the promoted fields of an embedded struct.
@@ -1769,8 +1798,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function isSl(v) { return v != undefined && v != null && typeof v == "object" && v.__sl == true }
     // Wraps a FRESH backing array as a slice over the whole of it.
     function slOf(arr) { return newSl(arr, 0, arr.length, arr.length) }
-    function slGet(s, i) { return s.a[s.o + i] }
-    function slSet(s, i, v) { s.a[s.o + i] = v }
+    // A Go RUNTIME PANIC - `panic: runtime error: index out of range [7] with
+    // length 3` - and it is RECOVERABLE, which is why it cannot be `fail`.
+    //
+    // The compiler half raises exactly this condition through the Go twin's
+    // rt.fail, which panics with the STRING "js runtime error: <msg>"; js_try
+    // catches any panic, so a recover() there sees that string as a plain Go
+    // value. `fail` in this half aborts the process instead, so an out of range
+    // index that a deferred recover() catches would have been a halves divergence
+    // even with the check added. Producing the twin's own value keeps the two
+    // halves byte-identical, at the price of Go's message text - a divergence this
+    // project already carries for every runtime error (compare `go`'s
+    // "runtime error: integer divide by zero" with our "js runtime error: integer
+    // divide by zero"). docs/todo.md 1.9.
+    function goRTPanic(msg) { throw {__gopanic: true, v: "js runtime error: " + msg} }
+    // s[i] IS BOUNDED BY THE LENGTH, NOT BY THE BACKING ARRAY. `base[0:2]` of a
+    // five element slice has len 2 and cap 5, and `sub[4]` is a panic in Go even
+    // though the storage is there - both halves used to answer the element.
+    function slGet(s, i) {
+        if (i < 0 || i >= s.n) { goRTPanic("index " + i + " out of range") }
+        return s.a[s.o + i]
+    }
+    function slSet(s, i, v) {
+        if (i < 0 || i >= s.n) { goRTPanic("index " + i + " out of range") }
+        s.a[s.o + i] = v
+    }
     // The elements of a slice as a plain array - for printing, ranging and spreading.
     function slElems(s) {
         var out = []
@@ -1807,7 +1859,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isMap(o)) { return mapGet(o, i) }
         var ix = szIs(i) ? szNum(i) : i
         if (isSl(o)) { return slGet(o, ix) }
-        if (typeof o == "string") { return utf8Bytes(o)[ix] }
+        // An out of range read is a PANIC in Go, and this half used to answer
+        // undefined - which prints as `<nil>` and exits 0, the worst of the three
+        // behaviours the two halves and `go` had (docs/todo.md 1.9). The array and
+        // the string arms match js_map_get in abnf/jsrtgolang.go and
+        // languages/lib/go-rt.metajs, which already checked.
+        if (typeof o == "string") {
+            var bs = utf8Bytes(o)
+            if (ix < 0 || ix >= bs.length) { goRTPanic("index " + ix + " out of range") }
+            return bs[ix]
+        }
+        if (Array.isArray(o)) {
+            if (ix < 0 || ix >= o.length) { goRTPanic("index " + ix + " out of range") }
+            return o[ix]
+        }
         return hasOwn(o, ix) ? o[ix] : undefined
     }
     // Every write into a container or a struct goes through here, which makes it the
@@ -1829,6 +1894,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             o[ix] = gAdoptTy(fieldTypeOf(o.__class, ix), v)
             return
         }
+        // An ARRAY store is bounds checked for the same reason the read is (see
+        // goIndex); a struct or a scope object falls through untouched.
+        if (Array.isArray(o) && (ix < 0 || ix >= o.length)) { goRTPanic("index " + ix + " out of range") }
         o[ix] = goAdoptLike(hasOwn(o, ix) ? o[ix] : undefined, v)
     }
     // Go copies an ARRAY on assignment and on the way into a parameter (it is a value,
@@ -3285,37 +3353,47 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (a === 0) { return "0" }
         return gGForm(gDigOf(a))
     }
+    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the decimal
+    // exponent of the FIRST digit, so the text to parse carries the point after it.
+    function gSigVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+    }
     // The shortest round-tripping decimal of the DOUBLE a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the first digit. `"" + a` is the shortest
-    // round-tripping form in every engine; floPrec is deliberately not used, since
-    // its two implementations disagree (see kotlin-interpreter.abnf's note).
+    // EXP being the decimal exponent of the first digit.
+    //
+    // THE DIGITS COME FROM floPrec AND NOT FROM `"" + a`, and that is the opposite
+    // of what this comment used to say (docs/todo.md 1.8).
+    //
+    // `"" + a` IS NOT THE SHORTEST ROUND-TRIPPING FORM IN EVERY ENGINE: goja gets
+    // it wrong for 22 of 199,904 random doubles, and at some subnormal boundaries
+    // it emits a non-digit character outright (`-;.627494252092118e-309`). The
+    // frozen host is exact, so reading a double's digits out of the host printer
+    // was a live goja-vs-`-frozen` divergence waiting for the first value to reach
+    // it - and unfixable from inside the dialect, since a script cannot ask the
+    // host for more digits than its printer chose to give.
+    //
+    // The old note here said floPrec could not be used because its two
+    // implementations disagreed. `08e8fcb` UNIFIED THEM: abnf/commonscript.go (goja
+    // and the frozen host, over strconv) and languages/lib/runtime.c host id 70
+    // (over shortest_digits with g_fixdig) both answer EXACTLY n significant
+    // digits. The shortest form is then a search rather than a host question - ask
+    // for n digits, parse the result back, stop at the first n that reproduces the
+    // value - and the answer is the same in every engine by construction, because
+    // parseFloat is strconv.ParseFloat in both hosts. Seventeen digits always
+    // round-trip a binary64, so the loop always terminates. The reference is
+    // jDecDigits in java-interpreter.abnf.
     function gDigOf(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
+        var n = 1
+        while (n < 17) {
+            var c = floPrec(a, n)
+            if (gSigVal(c) === a) { return c }
+            n = n + 1
         }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead + exp
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
-        return digits + "e" + (pt - 1)
+        return floPrec(a, 17)
     }
     // Go's 'g' form of a DIGITS "e" EXP pair: scientific when the decimal exponent
     // is below -4 or at least 6, plain otherwise. strconv.FormatFloat fixes that
@@ -3516,9 +3594,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // untyped constant (i8 == -128), never by object identity.
         if (szIs(l) || szIs(r)) { return szEq(l, r) }
         if (l === r) { return true }
-        if (l === undefined) { return r === null || r === undefined }
-        if (r === undefined) { return l === null }
-        if (l === null || r === null) { return false }
+        if (l === undefined) { return r === null || r === undefined || isNilMap(r) }
+        if (r === undefined) { return l === null || isNilMap(l) }
+        // `m == nil` on the zero value of a map type. A nil map is a marked empty
+        // map here (see newNilMap), so nil-ness is the mark and not the null.
+        if (l === null) { return isNilMap(r) }
+        if (r === null) { return isNilMap(l) }
         if (typeof l != "object" || typeof r != "object") { return false }
         if (isSl(l) || isSl(r)) { return l === r }
         if (Array.isArray(l) && Array.isArray(r)) {
@@ -3758,7 +3839,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // read back out of it. Supporting `var w struct{ a int32 }` needs the
         // grammar to parse that field list the way StructBody does for a named
         // type - a text parse here measured as unrecoverable, not merely awkward.
-        if (w == "map" || w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
+        if (w == "map") { return newNilMap(goZeroTy(mapValText(t))) }
+        if (w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
         var cls = hasOwn(structs, w) ? structs[w] : undefined
         if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStruct(cls) }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
@@ -3864,12 +3946,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return makeConstThunk(n)
     }
     function makeConstThunk(n) { return function() { return n } }
-    // The VALUE type of a map type text: everything after the ']' that closes the key.
-    // Scanned by hand rather than with lastIndexOf, which -frozen does not have.
+    // The VALUE type of a map type text: everything after the ']' that CLOSES the
+    // key type, found by BRACKET DEPTH. A scan for the LAST ']' - which is what
+    // this did - runs straight past the key of a NESTED map, so
+    // `map[string]map[string]int` answered "" and a doubly nested literal died with
+    // "unknown struct type" (docs/todo.md 1.9, and the compiler half's mapValTy has
+    // the same shape). lastIndexOf is not in this dialect anyway.
     function mapValText(t) {
-        var d = -1
-        for (var i = 0; i < t.length; i++) { if (t.charCodeAt(i) == 93) { d = i } }
-        return t.substring(d + 1)
+        var mi = t.indexOf("map[")
+        if (mi < 0) { return "" }
+        var d = 0
+        for (var i = mi + 3; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            if (cc == 91) { d = d + 1 }
+            else if (cc == 93) { d = d - 1; if (d == 0) { return t.substring(i + 1) } }
+        }
+        return ""
     }
     function descOfTypeText(t) {
         if (t.length > 0 && t.charCodeAt(0) == 91) {
@@ -3948,12 +4040,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isDecl) { declVar(name, value); return }
         setVar(name, value)
     }
+    // THE COMMA-OK FORMS DECLARE TOO, so a for-init spelled `for v, ok := m[k];`
+    // has to record its names the way a ShortDecl does - lastDeclNames is read by
+    // the enclosing FInit tag right after this builder runs, and nothing else
+    // clears it, so the init used to inherit the names of the last ':=' ANYWHERE
+    // EARLIER in the file. makeForClassic then replaced the loop frame with copies
+    // of those stale names and v and ok vanished: `unknown name: v`
+    // (docs/todo.md 1.9). '_' is not a variable and must not be copied.
+    function cokDeclNames(isDecl, vName, okName) {
+        lastDeclNames = []
+        if (!isDecl) { return }
+        if (vName != "_") { lastDeclNames.push(vName) }
+        if (okName != "_") { lastDeclNames.push(okName) }
+    }
     function makeAssertOk(items) {
         var vName = items[0]
         var okName = items[1]
         var isDecl = items[2].decl
         var baseT = items[3]
         var ty = items[4].at
+        cokDeclNames(isDecl, vName, okName)
         return function() {
             var v = baseT()
             if (typeMatches(ty, v)) { cokBind(isDecl, vName, v); cokBind(isDecl, okName, true); return }
@@ -3968,6 +4074,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isDecl = items[2].decl
         var baseT = items[3]
         var keyT = items[4]
+        cokDeclNames(isDecl, vName, okName)
         return function() {
             var m = baseT()
             if (!isMap(m)) fail("the comma ok form needs a map")
@@ -4093,6 +4200,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
     // multi value call when there are more targets than expressions.
     function makeAssign(items) {
+        // Not a declaration: clear the names a ':=' left behind, or a for-init
+        // spelled `for i = 0; ...` inherits them (see cokDeclNames).
+        lastDeclNames = []
         var refs = []
         var op = "="
         var i = 0
@@ -4121,6 +4231,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         lastDeclNames = []
         return n
     }
+    function clrDeclNames() { lastDeclNames = [] }
     function makeShortDecl(items) {
         var names = []
         var i = 0
@@ -4140,6 +4251,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // x++ / x-- keep the type of what they step: a float64 stays a float64,
     // everything else steps as an integer.
     function makeIncDec(items) {
+        lastDeclNames = []   // Not a declaration; see makeAssign.
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
@@ -4659,6 +4771,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var okName = items[1]
         var isDecl = items[2].decl
         var chT = items[3]
+        cokDeclNames(isDecl, vName, okName)
         return function() {
             var r = chanRecv(chT())
             if (isDecl) {
@@ -5214,6 +5327,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                           ptypes: mm.ptypes})
     }
 
+    function runEntry(f) {
+        try {
+            return f()
+        } catch (e) {
+            if (e != undefined && e != null && e.__gopanic == true) {
+                // A RUNTIME panic already carries the engine wording (goRTPanic),
+                // and the compiler half reports one of those straight from rt.fail
+                // with no "uncaught exception" wrapper around it - so wrapping here
+                // would put the prefix on twice and diverge. A panic(v) the program
+                // wrote gets the wrapper, which is what both halves do for a throw.
+                var pv = gstr(e.v)
+                if (typeof e.v == "string" && e.v.indexOf("js runtime error: ") == 0) { println(pv) }
+                else { println("js runtime error: uncaught exception: " + pv) }
+                exit(1)
+            }
+            throw e
+        }
+    }
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
     // a bare identifier names a top-level function to call, anything with a '(' is a Go
     // snippet parsed and run in the program's scope (see runMainSnippet).
@@ -5227,7 +5358,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof globalScope[entry] != "function") {
             fail("Go programs need a func " + entry + "().")
         }
-        ret = globalScope[entry]()
+        // AN UNRECOVERED PANIC IS A PROGRAM RESULT, not a host error. Without this
+        // it escaped as the raw {__gopanic} marker and the engine printed
+        // `[object Object]` - which was already true of `panic("boom")` and became
+        // reachable from ordinary code once an out of range index started panicking
+        // (docs/todo.md 1.9). The wording is the compiler half's, which is
+        // languages/lib/runtime.c's and abnf/jsrt.go's for every uncaught throw, so
+        // ./test.sh --cross (which compares stderr too) sees one line in both.
+        ret = runEntry(globalScope[entry])
         println("go interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     }
     exit(ret === undefined ? 0 : ret | 0)

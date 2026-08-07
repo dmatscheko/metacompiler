@@ -1164,5 +1164,55 @@ so2 = sm
 check_true("set-subset-ordering", so1 <= so2 and so2 >= so1 and so1 < so2)
 check_true("set-not-subset", not (so2 <= so1) and not (so1 > so2) and so1 <= so1)
 
+# ----- docs/todo.md 1.7 / 2.6: a subscript miss is CATCHABLE, and a generator's
+# `finally` runs when CPython runs it. `d[missing]` aborted the process in all
+# three engines; the KeyError carried the key's REPR, so repr(e) was doubly
+# quoted; the compiled halves' exception hierarchy was flat under Exception; and
+# the interpreter's replay ran a generator's `finally` at the FIRST next().
+ky = [3, "b", 9]
+kd = {1: "one"}
+
+
+def why(f):
+    try:
+        f()
+        return "no-raise"
+    except BaseException as e:
+        return type(e).__name__ + "|" + str(e) + "|" + repr(e)
+
+
+check("subscript-miss-is-catchable", why(lambda: kd[ky[0]]), "KeyError|3|KeyError(3)")
+check("subscript-miss-str-key", why(lambda: kd[ky[1]]), "KeyError|'b'|KeyError('b')")
+check("index-miss-is-catchable", why(lambda: [1][ky[2]]),
+      "IndexError|list index out of range|IndexError('list index out of range')")
+check("keyerror-arg-is-the-key", str(KeyError(ky[0]).args[0]), "3")
+check_true("keyerror-hierarchy",
+           issubclass(KeyError, LookupError) and issubclass(LookupError, Exception) and
+           issubclass(Exception, BaseException) and not issubclass(LookupError, KeyError))
+kg = []
+
+
+def kgen():
+    try:
+        kg.append("body")
+        yield ky[0]
+        kg.append("after")
+        yield ky[1]
+    finally:
+        kg.append("fin")
+
+
+kit = kgen()
+kg.append("d0")
+next(kit)
+kg.append("d1")
+kit.close()
+kg.append("d2")
+korder = []
+for k in kg:
+    if k not in korder:
+        korder.append(k)
+check("generator-finally-order", str(korder), "['d0', 'body', 'd1', 'fin', 'd2']")
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

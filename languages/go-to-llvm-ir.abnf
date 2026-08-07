@@ -531,7 +531,10 @@ TypeOk      <~~ push(makeTypeOk(takeAll())) ~~>
 AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
 AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
-ExprOnly    <~~ push(exprToStmt(pop())) ~~>
+// An expression statement is NOT a declaration, so it clears the pending
+// short-declaration names (see cokDeclNames): a for-init spelled `for f(); ...`
+// would otherwise inherit whatever the last ':=' in the file declared.
+ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
 ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
@@ -2834,6 +2837,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var isSlice = cet.length > 1 && cet.charCodeAt(1) == 93
             return emitSeqLit(b, isSlice ? "slice" : "array", elemTy(cet), null, els)
         }
+        if (cet.indexOf("map[") == 0) { return emitMapFrom(b, cet, els) }
         var flds = structFields[cet]
         if (flds == undefined) { fail("composite literal element of unsupported type " + cet) }
         var args = []
@@ -2843,6 +2847,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return emitStructVal(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, cet)]),
                              flds, structFTypes[cet], args)
+    }
+    // The VALUE type of a map type text: everything after the ']' that CLOSES the
+    // key type, found by BRACKET DEPTH. A scan for the last ']' - which is what
+    // emitDefinedSeq used to do - runs straight past the key of a nested map, so
+    // `map[string]map[string]int` answered "" instead of "map[string]int".
+    function mapValTy(t) {
+        var mq = t.indexOf("map[")
+        if (mq < 0) { return "" }
+        var d = 0
+        for (var q = mq + 3; q < t.length; q++) {
+            var cc = t.charCodeAt(q)
+            if (cc == 91) { d = d + 1 }
+            else if (cc == 93) { d = d - 1; if (d == 0) { return t.substring(q + 1) } }
+        }
+        return ""
+    }
+    // A NESTED brace group whose element type is a map: `map[string]map[string]int
+    // {"o": {"k": 1}}` and `[]map[string]int{{"a": 1}}` both reach here, and both
+    // used to be rejected with "composite literal element of unsupported type"
+    // while the interpreter half accepted them (docs/todo.md 1.9). The body is
+    // makeMapLit's, over the elements the sequence builder shaped.
+    function emitMapFrom(b, cet, els) {
+        var zero = mapValTy(cet)
+        var mV = callExt(b, "js_dict_new", [])
+        callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+        for (var i = 0; i < els.length; i++) {
+            var e = els[i]
+            if (e.ekey == null) { fail("a map literal element needs a key") }
+            var rk = e.ekey(b)
+            b = rk.b
+            var rv = emitElemVal(b, e, zero)
+            b = rv.b
+            callExt(b, "js_pyset", [mV, rk.v, rv.v])
+        }
+        return {b: b, v: mV}
     }
     // arr[i] = v, growing the array with zero values up to i first (that is what an
     // indexed element like [5]int{4: 9} needs).
@@ -2946,6 +2985,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isDecl = items[2].decl
         var baseT = items[3]
         var keyT = items[4]
+        cokDeclNames(isDecl, vName, okName)
         return function(b) {
             var rm = baseT(b)
             b = rm.b
@@ -3020,11 +3060,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // struct literal's shape (a bare thunk, or a {fkey} marker followed by one).
     function emitDefinedSeq(b, under, args) {
         if (under.indexOf("map[") == 0) {
-            // The VALUE type: everything after the ']' that closes the key. Scanned by
-            // hand rather than with lastIndexOf, which -frozen does not have.
-            var d = -1
-            for (var q = 0; q < under.length; q++) { if (under.charCodeAt(q) == 93) { d = q } }
-            var zero = under.substring(d + 1)
+            var zero = mapValTy(under)
             var mV = callExt(b, "js_dict_new", [])
             callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
             if (args.length > 0) { fail("a keyed literal of a defined map type is not supported") }
@@ -3463,8 +3499,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var i = a[1]
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) {
-                                  return {b: tb, v: callExt(tb, "js_map_get",
-                                          [slF(tb, x, "a"), callExt(tb, "js_jadd", [slF(tb, x, "o"), i])])}
+                                  // js_gislget and not js_map_get on the backing
+                                  // array: the BOUND is the header's length, which
+                                  // only the header knows. `base[0:2]` of a five
+                                  // element slice has cap 5, so reading the storage
+                                  // answered sub[4] where go panics (docs/todo.md
+                                  // 1.9). It also drops the js_jadd.
+                                  return {b: tb, v: callExt(tb, "js_gislget", [x, i])}
                               },
                               function(eb) { return {b: eb, v: callExt(eb, "js_map_get", [x, i])} })
         })
@@ -3533,6 +3574,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                          function(tb) { return {b: tb, v: pc.v} },
                                          function(eb) { return {b: eb, v: mx} })
                     var b3 = rmx.b
+                    // 0 <= lo <= hi <= mx <= cap, which is Go's rule for a slice
+                    // EXPRESSION - and it panics, recoverably. Unchecked, `s[7:]`
+                    // of a five element slice built a header with a negative length
+                    // and carried on here while the interpreter half aborted
+                    // (docs/todo.md 1.9). A four argument extern rather than IR:
+                    // the whole check is one call instead of eight compares.
+                    callExt(b3, "js_gislbounds", [rlo.v, rhi.v, rmx.v, pc.v])
                     var outH = emitSlHdr(b3, pa.v,
                                          callExt(b3, "js_jadd", [po.v, rlo.v]),
                                          callExt(b3, "js_sub", [rhi.v, rlo.v]),
@@ -3904,6 +3952,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // items = [ref..., {op}, exprThunks...]
     function makeAssign(items) {
+        // Not a declaration: clear the names a ':=' left behind, or a for-init
+        // spelled `for i = 0; ...` inherits them (see cokDeclNames).
+        lastDeclNames = []
         var refs = []
         var op = "="
         var i = 0
@@ -3947,6 +3998,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         lastDeclNames = []
         return n
     }
+    function clrDeclNames() { lastDeclNames = [] }
     // items = [vName, okName, {decl}, baseThunk, {at}]: ok gets the dynamic type
     // test, and v the value when it holds or the ZERO of the asserted type when it
     // does not (the single-result form stays the identity, see TypeAssertSfx).
@@ -3959,12 +4011,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (name == "_") { return }
         callExt(b, isDecl ? "js_scope_decl" : "js_scope_set", [curScopeV, emitStr(b, name), v])
     }
+    // THE COMMA-OK FORMS DECLARE TOO, so a for-init spelled `for v, ok := m[k];`
+    // has to record its names the way a ShortDecl does - lastDeclNames is read by
+    // the enclosing FInit tag right after this builder runs, and nothing else
+    // cleared it, so the init inherited the names of the last ':=' ANYWHERE
+    // EARLIER in the file and makeForClassic gave those a per-iteration copy
+    // instead. This half survived it (its per-iteration frame is a CHILD scope, so
+    // a stale name only shadows itself); the interpreter's replaces the frame and
+    // said `unknown name: v`. docs/todo.md 1.9. '_' is not a variable.
+    function cokDeclNames(isDecl, vName, okName) {
+        lastDeclNames = []
+        if (!isDecl) { return }
+        if (vName != "_") { lastDeclNames.push(vName) }
+        if (okName != "_") { lastDeclNames.push(okName) }
+    }
     function makeTypeOk(items) {
         var vName = items[0]
         var okName = items[1]
         var isDecl = items[2].decl
         var baseT = items[3]
         var ty = items[4].at
+        cokDeclNames(isDecl, vName, okName)
         return function(b) {
             var r = baseT(b)
             b = r.b
@@ -4022,6 +4089,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // x++ / x-- : js_jfstep keeps the TYPE of what it steps, so a float64 counter
     // stays a float64 instead of being truncated by the old intWrap.
     function makeIncDec(items) {
+        lastDeclNames = []   // Not a declaration; see makeAssign.
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
@@ -4156,7 +4224,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isFloatTy(wd)) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
         if (wd == "string") { return emitStr(b, "") }
         if (wd == "bool") { return hFalse }
-        if (wd == "map" || wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
+        // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not nil - the twin of
+        // newNilMap in go-interpreter.abnf, and the comment there has the argument.
+        // In short: a nil map READS like an empty one in Go and only a WRITE panics,
+        // which nil could not express (`var m map[string]int; m["k"]` said `indexing
+        // a object`, and `nst["absent"]["k"]` was unreachable). __nil keeps
+        // `m == nil` true (js_goeq) and keeps the store a panic (js_gisetat).
+        if (wd == "map") {
+            var mV = callExt(b, "js_dict_new", [])
+            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZeroTy(b, mapValTy(t))])
+            callExt(b, "js_set", [mV, emitStr(b, "__nil"), hTrue])
+            return mV
+        }
+        if (wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
         var flds = structFields[wd]
         if (flds != undefined && flds != null) {
             return emitStructZero(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)]),
@@ -4685,6 +4765,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var okName = items[1]
         var isDecl = items[2].decl
         var chT = items[3]
+        cokDeclNames(isDecl, vName, okName)
         return function(b) {
             var r = chT(b)
             b = r.b
