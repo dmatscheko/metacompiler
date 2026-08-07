@@ -5,8 +5,9 @@ is the manual** — architecture, how to build and test, the traps, and the engi
 mechanics. Read the manual first; nothing here explains how anything works.
 
 Rebuilt 2026-08-05 at `e284185`; **eleven items closed on 2026-08-06**, **ten on
-2026-08-07**, **ten on 2026-08-08**, and ten more in `483a7a5`..`af16f71`,
-and **ten more in `305fb9e`..`b82f8ed`**, with what those agents found on the way folded in.
+2026-08-07**, **ten on 2026-08-08**, ten more in `483a7a5`..`af16f71`,
+ten more in `305fb9e`..`b82f8ed`, and **ten more in `c4e1942`..`b086d07`**,
+with what those agents found on the way folded in.
 **Chapter 1 is entirely new again**: the old one is closed.
 
 Two conventions, and they are the point of the file:
@@ -20,7 +21,7 @@ Two conventions, and they are the point of the file:
 > agents shipped a NEW halves divergence that their own probes and all seven gates
 > called green.
 >
-> **On the latest round the items were mostly right and STILL not sufficient.**
+> **On the 2026-08-08 round the items were mostly right and STILL not sufficient.**
 > Two were wrong as written — **5.2 said `floExt` was dead code when it is live,
 > and deleting it as written would have introduced a defect**; and 1.9 named one
 > `is` residue where every integral and floating name was broken. And **seven of
@@ -29,6 +30,16 @@ Two conventions, and they are the point of the file:
 > `1L == 1.5`, go's silent `<nil> <nil>` comma-ok, java's anon-class field
 > shadowing in the *compiler* half, and js's `next(v)` not reaching a delegate.
 > **Treat an item as a place to start probing, never as a specification.**
+>
+> **On the `c4e1942`..`b086d07` round every item was real, and every one of the
+> seven agents found MORE than its item named** — 1.8 named one kotlin defect and
+> there were ten; 1.4's `.throw()` came with a `yield`-inside-`catch` defect
+> reachable with no `.throw()` at all; 1.1's csharp constructors came with `js_has`
+> disagreeing between the engines. Two items were wrong about WHOSE fault it was:
+> 1.7 said go's divide-by-zero was unrecoverable in the interpreter when the
+> NATIVE binary aborted too, and 1.7's first bullet was marked *deliberate* when
+> the deliberate part was the representation, not the answer. **The failure mode
+> has moved from "the item is wrong" to "the item is too small."**
 >
 > **Item NUMBERS are re-assigned every time this file is rebuilt.** Code comments
 > of the form `docs/todo.md 1.4` are historical provenance pointing at the
@@ -39,7 +50,7 @@ Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial`
 small machine):
 
 ```
-matrix 351/351 · --full 7,038 assertions, 0 halves disagree · --cross 119/0
+matrix 351/351 · --full 7,161 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 none held · native-full 15/15 · go test ok
 gen-all 15/15 clean · -freeze a fixed point · bench: no row outside its spread
 ```
@@ -60,106 +71,127 @@ your change does not touch is this, not a divergence — re-run before believing
 
 # 1. Correctness, with an oracle on this machine
 
-These change answers real programs give. Each has a toolchain here that settles it.
-**Section 1 was emptied for the fifth time** — all ten items are in chapter 9. What
-follows is what closing them turned up, all **[V]** on `b82f8ed`.
+These change answers real programs give. Each has a toolchain here that settles
+it. **Section 1 was emptied for the sixth time** — all ten items are in chapter 9.
+What follows is what closing them turned up, all **[V]** on `b086d07` unless
+marked otherwise.
 
-### 1.1 csharp: `: base(d)` does not run the base constructor **[V]**
-```csharp
-class P { public double D; public P(double d) { D = d; } }
-class C : P { public C(double d) : base(d) { } }
-   new C(3).D  ->  (empty)      C# says 3
-```
-With and without other members, in all three engines, and **both halves agree** so
-`--cross` is blind. Verified by the coordinator at `08e8fcb` and unchanged by
-`305fb9e`, which fixed inherited *fields* but not constructor chaining. Swift's
-equivalent (`super.init`) was probed in the same round and **works**, so this is
-csharp-specific. Highest-value item here.
+### 1.1 csharp: METHOD-GROUP CONVERSION does not exist anywhere **[V]**
+`this.Got`, a bare `Got`, and `K.G` used as delegate values all answer
+`undefined` in **both** halves; `Op o = F;` says *unknown name: F*. This is what
+still blocks the `E += this.Got` repro that `c4e1942` half-closed — `event` is now
+a real modifier and `E += lambda` works, but a *method* cannot become a delegate.
+Also here: `this.E()` on a delegate **field** parses as a method call and aborts,
+and `.Invoke()` is unsupported. Needs a memoised bound closure per receiver, so
+that `E -= s.Got` still removes the same object. Highest-value csharp item.
 
-### 1.2 swift: `3.0 is Double` is false and `3 is Double` is true **[V]**
-`swiftc` says the reverse. All three engines agree, so `--cross` cannot see it.
-Same root cause as the overload defect `8ff0999` fixed — the shared `rtIsType`
-predates the Float box and answers false for a `{__flo}` box — but `swIsType` also
-drives `as?`/`as!`, and the compiler half has its own site plus layer 2, so it is a
-three-engine change of its own.
+### 1.2 csharp: method overloading is unimplemented for METHODS **[V]**
+`c4e1942` fixed constructors; ordinary methods still keep only the last
+declaration, so `K.M(1)`, `K.M(1.5)`, `K.M(1,2)` and `K.M("x")` all answer `4`.
+The machinery to copy is right there — `csPickCtor`/`csCtorDispatch` and the
+compiler's `js_csis` dispatcher — which is why this is small now and was not
+before. **Same shape in swift**: initializer overloads are still picked at WALK
+time by labels and arity in the compiler half, so `MB(3.0)` runs `init(_ x: Int)`
+where the interpreter and `swiftc` both say `Double`. `js_swfits` is already in
+place for it (`a68e16d`). A live halves divergence in swift's case.
 
-### 1.3 The remaining declaration sites that do not adopt a declared type **[V]**
-`483a7a5`/`1b54644` closed parameters, returns, fields and `[T]`; `8ff0999`/
-`305fb9e` closed the **write** sites for swift and the unqualified ones for csharp.
-Still answering `1` where the toolchain says `1.5`:
-- **swift**: closure parameter and return types, `[String: Double]` value types,
-  tuple element types, an optional annotation (`var op: Double? = 1`), and a
-  `didSet`-observed property written through its own name. Also `n.next!.v = 4`
-  and `tp.0 = 3` do not parse in either half.
-- **csharp**: the qualified write `c.D = 3`, a local write after declaration, and
-  an array element. The mechanism is a run-time `js_csadoptmem(obj, name, v)`
-  reading the type off the receiver's class — `__mty` on the compiler's
-  descriptors plus the Go twin, layer 2 and `csharp-rt.ll` — or a per-method
-  var-type table for locals.
+### 1.3 csharp: a `long` local write still does not adopt **[V]**
+`long x; x = 3; x*1000000*1000000` gives `2112827392`; C# says
+`3000000000000`. All three engines agree. `c4e1942` adopted `double`/`float`/
+`decimal` local writes and **stopped there on a measurement**: adopting every
+local write cost `tests/bench/mod.cs` **+5.3%**, and stayed +5.3% after the
+conversion was made allocation-free — so the cost is the layer-2 **call**, not the
+work. Closing it needs a plain-number test the emitter can lower **without a
+call**. The measurement is at the site.
 
-### 1.4 `.throw()` on a plain generator, and `Symbol.iterator` **[V]**
-Blocked in **every** language by one table: the floor's tag-15 member table offers
-`next` (host id 60) and `return` (61) and nothing else (`runtime.c:3111/3116`), and
-`*jsGenerator` in `abnf/jsrt.go` is shared by every language exposing a generator.
-The interpreter-side machinery now exists in **both** python (`c2b4071`) and js
-(`673a8b1`) — the record would travel on the resume value exactly as the exit
-record does — so this is a `runtime.c` + Go-twin change and nothing else. Shipping
-it interpreter-only would be a new halves divergence, which is why it is not.
-`Symbol.iterator` is separate and larger: there are **no symbols in the value model
-at all**, and `for..of`/`yield*` test structurally for a callable `next`.
-Related and blocked the same way: `close()` is not offered to an `except`/`catch`
-in either engine, where CPython delivers a catchable `GeneratorExit`.
+### 1.4 swift: two adoption sites that need a wrapper, not a walker **[V]**
+- **A function-typed slot**: `let f: (Double) -> Double = { x in x/2 }` answers 1
+  where `swiftc` says 1.5. Unlike every site `a68e16d` closed, the type is on the
+  **slot**, not on the closure, so it needs a synthetic function that adopts each
+  argument, calls the original and adopts the result. Both engines can build one
+  (`emitOverloadDispatch` is the precedent), so **no new extern**.
+- **A NEW dictionary key**: `var d: [String: Double] = [:]; d["b"] = 5` gives 2
+  where `swiftc` says 2.5. Existing keys adopt; a new one has no old value to
+  read. `declTyReg` could record the structural annotation and `makeAssign` derive
+  the element type for a one-level index path.
 
-### 1.5 ruby: post-splat parameters mis-bind in the compiler half **[V]**
-```ruby
-def d(a, b=2, *r, c); end;  d(1,2,3,1)
-   MRI and our interpreter  [1,2,[3],1]        both compiled halves  [1,2,[3,1],3]
-```
-and `def s(*a, **k); end; s(1,2,z:3)` puts the keyword Hash into `a`. A live halves
-divergence `--cross` does not reach. Adjacent to what `c2b4071` fixed but a
-separate mechanism: `js_rargrest` needs a trailing-count and a keyword flag, plus a
-"k-th from the end" positional accessor — a new extern across three engines.
+Also `case is Double:` in a `switch` **does not parse in either half**
+(pre-existing, verified at `0b0f417`); `case let z where z is Double` works and
+agrees with `swiftc` on all 19 probe rows.
 
-### 1.6 ruby: `String#inspect` escapes nothing **[V]**
-`"a".inspect` nested inside another `inspect` prints `["a", 1]` where MRI prints
-the escaped form. **All three engines agree**, so no gate can see it — the
-"both halves agree and both are wrong" class. Also: `Proc#arity` aborts the
-compiler half and answers `0` in the interpreter where MRI says `1` (neither engine
-can recover a closure's parameter count — it needs an arity registry or a boxed
-Proc), `blk.nil?` on a Proc aborts the interpreter, and a `proc` stored in a
-variable and called later still returns *locally* in the compiler half.
+### 1.5 go: five residues, and a nil-pointer dereference is a THREE-WAY split **[V]**
+- **`recover()` on a nil-pointer dereference**: `llvm.Run` recovers it, the
+  interpreter aborts (`fail` at `interp-core.js:533`/`552` — *inside* the file but
+  outside `fail()` itself), and natively the floor's `die("nil dereference…")`
+  aborts. Needs a `core` hook at those two lines plus either a floor change or a
+  go emitter pre-check.
+- **A failed type assertion** to an interface with a missing method does not panic
+  in any engine.
+- **`fmt.Println(f())` with multiple results** prints `[3 3 3]`; `go` prints
+  `3 3 3` (multi-returns travel as an array).
+- **`return nil` from a map-typed result** renders `<nil>`; `go` prints `map[]`
+  (result values do not adopt their declared type).
+- **A func-typed struct field cannot be called**: `h.f(4)` → *unknown method 'f'*.
+- **Slicing a nil slice loses its nilness**: after `b086d07`, `var a []int; a == nil`
+  is correctly `true` but `e := a[:]; e == nil` is still `false` where `go` says
+  `true`. Verified by the coordinator; the empty literal, `make` and `append` cases
+  all correctly stay `false`, so the `__nil` mark does not leak — this is the one
+  slice expression that should propagate it.
 
-### 1.7 go: four runtime-semantics gaps left after `c2b4071` **[V]**
-- a nil **slice** still compares unequal to `nil` (deliberate — the zero value is a
-  usable empty header — but a divergence from `go`);
-- a function that **recovers** returns `<nil>` rather than its result type's zero;
-- an interpreter runtime error other than an index/slice panic is still
-  **unrecoverable** — `recover()` catches a divide-by-zero in the compiler and not
-  in the interpreter. The site is `fail()` in `languages/lib/interp-core.js`, which
-  is shared with six languages, so this is a careful change;
-- `for range m` with no variables at all does not parse in the compiler half;
-- natively, an *unrecovered* panic prints its prefix twice.
+### 1.6 python: `yield from` MATERIALIZES its delegate **[V]**
+So a `.throw()` is raised at the `yield from` and never reaches the delegate's own
+`except` arms, where CPython forwards it. **Both halves agree, so `--cross` is
+blind.** Same root cause as the eager `iterToList`. js/ts forward lazily and now
+match node (`b086d07`), which is what makes this one visible as a gap.
 
-### 1.8 kotlin: `for (i in vs.indices)` dies in the compiler half **[V]**
-`member 'length' of undefined`; the interpreter accepts it. `0 until vs.size` works
-in both. A live halves divergence, unrelated to the float work that found it.
+### 1.7 python: `raise SomeClass` aborts the COMPILER half **[V]**
+A bare class rather than an instance works in the interpreter half and aborts in
+the compiler. A live halves divergence, pre-existing and unrelated to generators —
+found while matching `.throw(SomeClass)` to each half's own `raise`.
 
-### 1.9 python: missing builtins met while fixing `KeyError` **[V]**
-`dict.popitem()` is absent in all three engines (CPython raises
-`KeyError('popitem(): dictionary is empty')`, which `c2b4071`'s arg-carrying fix
-would now render correctly); `super()` is not bound in any engine
-(`name 'super' is not defined`).
+### 1.8 python: two builtins and a printing divergence **[V]**
+- **`dict.fromkeys`** — the receiver is the `dict` *type object*, which reaches a
+  **different dispatcher in each of the three engines**, and it needs both the
+  mcall path and the value path or it is reachable one way and not the other. The
+  "NOT the whole of CPython's" comments in all three engines now name it.
+- **`vars()` is not bound in any engine** (`x.__dict__` works). One line each.
+- **A function PRINTS as its MetaJS source text in the interpreter half** and as
+  `[function]` in both compiled halves — a live halves divergence. The compiled
+  side's text comes from the shared C floor (`runtime.c:2114/3315`), so converging
+  means intercepting in python's own renderer in three engines.
 
-### 1.10 csharp: three more from the member-write round **[V]**
-`E += h` on an instance event fails in **both** halves even fully qualified as
-`this.E += this.Got`; constructor **overload resolution** picks the wrong ctor
-(`new Ctr(4).D` gave 9 in both halves); and `csPropAcc`/`csEvtAcc` are keyed by
-**member name alone across the whole file**, so a property with accessor bodies
-turns every same-named plain field in any other class into an accessor call.
-The swift analogue of the middle one: the compiler cannot pick an **initializer**
-overload by declared type (the interpreter is right — a live halves divergence).
+### 1.9 ruby: two call-binding rules that disagree with MRI **[V]**
+- **A bare method call does not call a method that declares ANY parameters**:
+  `def q(a=1); p 3; end; q` prints nothing in both halves where MRI prints 3.
+  `makeVarRef`'s comment says this is deliberate and that the feature-matrix file
+  relies on the shape to pass a method around as a value — so closing it means
+  finding a different way to express that, not just deleting the guard.
+- **An optional parameter takes its default when handed a proc**:
+  `def m2(f = 3); m2(some_proc)` uses 3 where MRI binds the proc. Both halves
+  agree. Cannot be fixed without a block marker distinct from a positional
+  argument — the same line `js_rposbind`'s comment draws.
 
----
+Also: `Proc#arity` reached via `send(:arity)` answers 0, because the registry
+`b086d07` added is armed by the parse-time appearance of the NAME. That is the
+price of the gate, and the gate is not optional — see chapter 9.
+
+### 1.10 kotlin: the emitter's `this`-probe is not Kotlin-aware **[V]**
+Both are pre-existing (reproduced at `0b0f417`), both live in `rtKtGet`, the
+compiler half's hottest name-resolution helper, and both are one shape:
+- **`with(m) { entries }`** renders `[(a, 1), (b, 2)]` under `llvm.Run` where the
+  interpreter and the native binary say `[a=1, b=2]`. `rtSafeGet(thV, name)` in
+  `probeB` calls the shared `js_get`, whose dict arm answers `entries` as a Pair
+  list, and it hits before anything Kotlin-specific runs. `m.entries` written out
+  is right everywhere.
+- **Unqualified `size` on an EXTENSION RECEIVER** fails in the compiler:
+  `val List<Int>.mid get() = this[size / 2]` → *unknown name: size* (the
+  interpreter answers 2). The narrow fix is to route a receiver with no `__class`
+  to the `js_ktfget` arm — but that arm *aborts* for a class-literal receiver, so
+  it needs its own probe round.
+
+Related and separately recorded at `k2Line`: `println(f())` for a Unit-returning
+`f` prints `kotlin.Unit` under `llvm.Run` and a **blank line** natively. MetaJS
+has no `arguments`, so layer 2 cannot tell `println()` from `println(Unit)`.
 
 # 2. Cross-engine defects and latent traps
 
@@ -223,7 +255,9 @@ interpreter; and the compiler half cannot parse `const a, b = 0.1, 0.2`.
 ### 2.8 Ruby and python residue **[V]**
 - **A bare `except:` will not catch python's `GeneratorExit`** — `d7ef11a` routes
   the close sentinel past every catch arm so the two engines agree; CPython lets
-  `except:` catch it. Documented at the `js_try` site.
+  `except:` catch it. Documented at the `js_try` site. **Now costed as item 3.4**,
+  after `b086d07` landed `.throw()` and looked at doing `close()` the same way:
+  three walls, and the first is that the guard is shared with fifteen languages.
 - **An abandoned python generator never runs its `finally`** — CPython finalizes at
   collection; we have no finalizer hook and the GC deliberately has none.
 - **`d.items()` renders pairs as lists**, the same tuple root cause as 3.1.
@@ -244,8 +278,11 @@ deleting them shrinks layer 2 and is a clean follow-up.
 Two boxed values of the same primitive kind and different declared classes cannot
 be told apart — this value model has one representation per kind, not per box.
 Surfaced by `44dbd04` while routing java's `equals`, and stated in both
-`:description` blocks rather than guessed at. Same family as 1.8 (kotlin's mixed
-Float/Double set key), and the two would likely be closed by one mechanism.
+`:description` blocks rather than guessed at. Same family as **kotlin's mixed
+Float/Double set key** (closed in `1b54644`) and as **swift's `Int` vs `Int64`**,
+which normalise to one representation so `8 as Int64 is Int` is true where
+`swiftc` says false (recorded at the site in `a68e16d`). All three would likely be
+closed by one mechanism: a nominal type on the value.
 
 ### 2.11 A `getattr()`-bound python builtin cannot carry keyword arguments **[V]**
 `getattr(xs,"sort")(reverse=True)` differs from `xs.sort(reverse=True)`: a
@@ -304,7 +341,34 @@ but NOT cold). **`d_pow` and its family cannot move at all** (manual §7.7).
 PROLOGUE**, where `sample` on the spread-heaviest Go program is dominated by
 `scope_get` and `ar_block` repacking args, still MetaJS in both builds.
 
-### 3.4 Coroutines: option A (CPS in the emitter) is the eventual answer **[U]**
+### 3.4 A catchable `GeneratorExit` — three walls, in cost order **[V]**
+`b086d07` landed `.throw()` and **declined `close()` deliberately**, which is the
+useful half of the answer:
+- `js_try`'s `pending != GEN_EXIT` guard is **shared with fifteen languages**,
+  where a close IS a return completion and must not be catchable. Making GEN_EXIT
+  catchable globally is wrong.
+- `GEN_EXIT` is a bare floor object with **no Python class**, so `except Exception`
+  (which must NOT catch it) and bare `except:` (which must) cannot be told apart.
+  It needs to be a real `GeneratorExit` whose `__super` is `BaseException` — which
+  only python's layer 2 can build.
+- So the floor needs `gen_close(g, sentinel)` with the language supplying the
+  value, and python's `g.close()` reaches `gen_close` through the tag-15 `return`
+  member, which has nowhere to pass one. **A new extern → three engines (manual
+  §7.2) → plus `coro-poc`**, plus `gen_close` learning CPython's
+  `RuntimeError("generator ignored GeneratorExit")`.
+This supersedes chapter 2.8's first bullet, which recorded the *current* behaviour
+as deliberate. It still is, until all three walls come down together.
+
+### 3.5 `Symbol.iterator` is a VALUE-MODEL change, not a member-table entry **[V]**
+There are **no symbols in the value model at all**, and `for..of`, `yield*` and
+`js_iterable` all test structurally for a callable `next` in three engines. Adding
+them means a new tag in `runtime.c`, a Go type in `jsrt.go`, `typeof`/`strict_eq`/
+`keysOf`/dict-key arms in all three engines, a well-known-symbol registry, and
+computed-key support in the class and object-literal emitters of js/ts.
+Comparable in size to the tuple item (3.1). It buys one thing the structural test
+does not already give: **a user class becoming iterable**.
+
+### 3.6 Coroutines: option A (CPS in the emitter) is the eventual answer **[U]**
 What shipped is B (pthread + condvar): **4.1 µs per `next()`** natively against
 **0.75 µs** under `llvm.Run`, ~**18.8 KB per live suspended generator** (10,000 →
 187.8 MB RSS), and an abandoned generator parks its thread forever.
@@ -478,13 +542,20 @@ nothing enforces them.)
 `tests/gates.sh --freeze` checks it on demand; a pre-commit hook would remove the
 class entirely.
 
-### 7.7 There is no bench row for js or typescript **[V]**
-`673a8b1` cost ~20% on a `yield*`-heavy workload (5.35 s → 6.40 s on 300,000
-steps) and **no gate could have caught it**, because `tests/bench/` has no `.js`
-or `.ts` program. The agent measured and disclosed it; the next one might not. Add
-`mod.js` and `mod.ts` in the shape of the others and record their rows by hand
-(`--record` rewrites every row and deletes the header — see `tests/bench/mod.go`
-for how the go row was added).
+### 7.7 SEVEN languages have no bench row at all **[V]**
+`tests/bench/` has **no swift, dart, php, js, typescript, bash, batch or metajs
+program**, so seven languages' layer 2 has no performance gate whatsoever.
+
+Two measured cases of what that costs. `673a8b1` cost ~20% on a `yield*`-heavy
+workload (5.35 s → 6.40 s on 300,000 steps) with **no gate able to catch it**. And
+in `a68e16d` a swift change cost **+10.3%** in collections (`charAt` allocates a
+one-character string in the floor); the agent found it BY HAND because no bench row
+loads `swift-rt.ll`, and a `mod.swift` would have caught it automatically.
+
+Both agents measured and disclosed; the next one might not. Add the programs in
+the shape of the others and record their rows **by hand** — `--record` rewrites
+every row and deletes the header, which is where all the reasoning lives (see
+`tests/bench/mod.go` for how the go row was added).
 
 ### 7.8 Wire the shape scan into CI with a ratchet **[V]**
 `go run ./tools/shape-scan -max 2` fails above two groups. Nothing runs it
@@ -545,6 +616,68 @@ ranges.
 ---
 
 # 9. Closed — do not re-open
+
+## The ten closed in `c4e1942`..`b086d07` — ALL of chapter 1 again
+
+`+123 assertions` (7,038 → 7,161), four commits. Seven agents, and **every one of
+them found more than its item named**.
+
+- **1.1 + 1.3(csharp) + 1.10** — `c4e1942`. `CtorInit` PARSED `: base(...)` and
+  threw the arguments away, so the base class' *parameterless* constructor always
+  ran and `new C(3).D` printed **nothing**. A class also kept ONE `ctorInfo`, so
+  the last declaration won — `new Ctr(4).D` was 4 where C# says 9. The compiler's
+  dispatcher lowers over **`js_csis`, the extern its own `is` already uses**, so
+  that half needed no new extern. Found: **`js_has` disagreed between the engines
+  for C#** — layer 2 walked the `__class` chain for `__get_X`, the twin answers
+  only for a `*jsAccessor`, which a C# property never is.
+- **1.2 + 1.3(swift)** — `a68e16d`. `true is Bool` was false in EVERY language
+  (`rtIsType`'s boolean arm spells the Java/Kotlin name `Boolean`), and the fix is
+  swift-LOCAL: `interp-core.js` untouched. Adoption became one structural walker
+  instead of six special cases. The agent **introduced and then caught a
+  run-vs-native divergence with its own native probe leg**, and removed a **+10.3%**
+  regression before landing (`charAt` ALLOCATES in the floor; the extern is now
+  chosen at emit time).
+- **1.8 kotlin** — `e60e3d0`. The item named one defect; `js_ktfget` answered
+  `undefined` for **every** index property and the sweep found **ten**, including
+  `indices` on a String and a StringBuilder missing in BOTH halves,
+  `IntProgression.last` returning the bound rather than the last element, and a Set
+  not being a builtin receiver in ANY engine.
+- **1.4 + 1.5 + 1.6 + 1.7 + 1.9** — `b086d07`, one commit because all four
+  workstreams edit `abnf/jsrt.go` and one edits `runtime.c`.
+  - `.throw()`: the tag-15 table gained a third member; the flag lives in the
+    generator's own control block and the value rides the resume slot, so it is
+    **per-coroutine by construction** — the property item 2.1 records as
+    mandatory. Found: **a `yield` inside a `catch` ARM ran the enclosing `finally`
+    at the suspension** in three interpreter halves, reachable with **no
+    `.throw()` at all**; and `StopIteration`'s args were wrong in all three engines
+    *and disagreed with each other*.
+  - ruby: the item proposed three accessors and that is **not sufficient** — an
+    OPTIONAL parameter also mis-binds, needing `spare = npos - required`, which no
+    per-parameter accessor can compute. Found: `\a \b \f \v \e`, octal `\nnn`
+    and `\u{...}` **were never decoded in any engine**, because all three called
+    the shared JavaScript `unescapeJs` and therefore agreed.
+  - python: `super()` reproduces CPython's mechanism (a `__class__` cell + the
+    frame's first positional) rather than approximating it, and scans the
+    **instance's** MRO — the parent pointer is unsound for diamonds. Found: the
+    interpreter resolved members **depth-first** where both compiled halves used C3.
+  - go: **the item was wrong about who was broken** (the native binary aborted
+    too), and bullet 1's "deliberate" marking was about the representation, not the
+    answer. `fail()` is untouched — go uses it for non-runtime conditions that must
+    not become recoverable panics.
+
+**Three regressions were measured and removed or gated BEFORE landing**, none of
+which any correctness gate can see: swift's `charAt` (+10.3% collections), go's
+unconditional `js_gidivz` (**+30.58%** — a layer-2 call where `js_giarith` is a C
+floor one, so it is not one more call of the same kind; now gated on
+`usesRecover`), and ruby's `Proc#arity` registry (181 KB → **5.1 MB** live, since
+it retains every closure with its whole scope chain; now armed only when the
+program names `arity`).
+
+**And a gate that failed for the right reason and the wrong cause.** `--bench` went
+red on csharp at +3.93% over 5 draws. At 9 draws it is +1.98% — and the CLEAN BASE
+TREE reads +2.02% against the same baseline, so the change is **−0.04% against its
+own parent** and it was the recorded baseline that had drifted. Re-recorded in
+`22b08de`. **Five draws is not always enough to separate a row from its spread.**
 
 ## The ten closed in `305fb9e`..`b82f8ed` — ALL of chapter 1 again, plus 2.6
 
