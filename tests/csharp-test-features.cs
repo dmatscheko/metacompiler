@@ -399,6 +399,59 @@ namespace Demo
                 return e2.Code;
             }
         }
+        // ----- typed catch, filters and rethrow (docs/todo.md 1.1) -----
+        // The FIRST clause is one that must not match, so "first clause wins" scores
+        // zero on every row here.
+        static string PickClause(int k)
+        {
+            Exception[] es = { new FormatException("a"), new InvalidOperationException("b"),
+                               new AggregateException("c") };
+            try { throw es[k]; }
+            catch (FormatException) { return "fmt"; }
+            catch (InvalidOperationException) { return "inv"; }
+            catch (Exception) { return "base"; }
+        }
+        static string WhenChain(int k)
+        {
+            try { throw new OverflowException("x"); }
+            catch (OverflowException) when (k > 4) { return "lo"; }
+            catch (ArithmeticException) { return "hi"; }
+        }
+        static string Unmatched()
+        {
+            string t = "";
+            try
+            {
+                try { throw new TimeoutException("zzz"); }
+                catch (FormatException) { t += "no"; }
+                finally { t += "fin;"; }
+            }
+            catch (TimeoutException e) { t += "out:" + e.Message; }
+            return t;
+        }
+        static string BareRethrow()
+        {
+            try
+            {
+                try { throw new KeyNotFoundException("kk"); }
+                catch (KeyNotFoundException) { throw; }
+            }
+            catch (Exception e) { return "re:" + e.Message; }
+        }
+        // `is` asks the same hierarchy the catch clauses ask (ECMA-334 12.12.12).
+        static string IsChain()
+        {
+            try { throw new DivideByZeroException("d"); }
+            catch (Exception e)
+            {
+                string t = "";
+                if (e is DivideByZeroException) { t += "a"; }
+                if (e is ArithmeticException) { t += "b"; }
+                if (e is Exception) { t += "c"; }
+                if (e is FormatException) { t += "!"; }
+                return t;
+            }
+        }
         static string RetAcrossTry()
         {
             try { return "from-try"; } finally { Program.FinRuns += 1; }
@@ -802,7 +855,7 @@ namespace Demo
                 Program.Risky(5);
                 caught = -2;                                 // not reached
             }
-            catch (Boom e) when (e.Code > 0)                 // filter parsed; first catch wins
+            catch (Boom e) when (e.Code > 0)                 // typed clause + `when` filter
             {
                 caught = e.Code;
             }
@@ -824,6 +877,17 @@ namespace Demo
             Program.Check("finally-cancels-throw", Program.FinCancelsThrow() == "fin");
             Program.Check("break-in-finally", Program.BreakInFinally() == 11);
             Program.Check("continue-in-finally", Program.ContinueInFinally() == 0);
+            // Typed catch clauses select on the RUN-TIME type of the thrown value, in
+            // source order (ECMA-334 13.11), and a `when` filter that declines falls
+            // through to the next clause. Both used to be parsed and discarded, in BOTH
+            // halves, so the first clause always ran (docs/todo.md 1.1). Bare `throw;`
+            // re-raises what the catch is handling (13.10.6) instead of `undefined`.
+            Program.Check("catch-typed-order", Program.PickClause(0) == "fmt"
+                          && Program.PickClause(1) == "inv" && Program.PickClause(2) == "base");
+            Program.Check("catch-when-declines", Program.WhenChain(1) == "hi" && Program.WhenChain(9) == "lo");
+            Program.Check("catch-no-match-propagates", Program.Unmatched() == "fin;out:zzz");
+            Program.Check("catch-bare-rethrow", Program.BareRethrow() == "re:kk");
+            Program.Check("catch-is-hierarchy", Program.IsChain() == "abc");
             Program.Check("loop-break-out-of-try", Program.LoopBreakOutOfTry() == 3);
             Program.Check("loop-continue-out-of-try", Program.LoopContinueOutOfTry() == 4);
 

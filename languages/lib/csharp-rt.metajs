@@ -210,6 +210,145 @@ function csThrow(name, msg) {
     throw o
 }
 
+// csExcParent is the .NET base class of one BCL exception type. It is what makes a
+// typed catch clause discriminate: those types are plain {__excname, Message}
+// objects here, with no descriptor and therefore no chain to walk, which is why
+// `catch (FormatException e) {} catch (InvalidOperationException e) {}` used to run
+// the FormatException body on an InvalidOperationException in BOTH halves - a spec
+// divergence rather than a halves one, so --cross was blind to it (docs/todo.md 1.1).
+//
+// SPEC-DERIVED, NOT MEASURED: there is no C# toolchain on this machine (manual 7.9),
+// so every parent here comes from the type's documented base class in the .NET base
+// class library. "" is Exception's parent - the root of what a catch can name - and
+// "?" means "not a BCL exception name at all", which js_csexcmatch has to tell apart
+// from "has no parent".
+//
+// THE SAME BODY EXISTS IN TWO MORE ENGINES: csExcParent in
+// languages/csharp-interpreter.abnf and abnf/jsrtcsharp.go (the Go twin llvm.Run
+// uses). A chain of ifs rather than a table precisely so all three read alike - and
+// note that ./test.sh, --full and --cross CANNOT SEE THIS FILE at all: only
+// clang-check, native-full and a native -exe probe do (manual chapter 3).
+function csExcParent(n) {
+    if (n == "Exception") { return "" }
+    if (n == "SystemException") { return "Exception" }
+    if (n == "ApplicationException") { return "Exception" }
+    if (n == "AggregateException") { return "Exception" }
+    if (n == "InvalidOperationException") { return "SystemException" }
+    if (n == "ObjectDisposedException") { return "InvalidOperationException" }
+    if (n == "ArgumentException") { return "SystemException" }
+    if (n == "ArgumentNullException") { return "ArgumentException" }
+    if (n == "ArgumentOutOfRangeException") { return "ArgumentException" }
+    if (n == "ArithmeticException") { return "SystemException" }
+    if (n == "OverflowException") { return "ArithmeticException" }
+    if (n == "DivideByZeroException") { return "ArithmeticException" }
+    if (n == "NotImplementedException") { return "SystemException" }
+    if (n == "NotSupportedException") { return "SystemException" }
+    if (n == "IndexOutOfRangeException") { return "SystemException" }
+    if (n == "NullReferenceException") { return "SystemException" }
+    if (n == "InvalidCastException") { return "SystemException" }
+    if (n == "FormatException") { return "SystemException" }
+    if (n == "KeyNotFoundException") { return "SystemException" }
+    if (n == "IOException") { return "SystemException" }
+    if (n == "FileNotFoundException") { return "IOException" }
+    if (n == "DirectoryNotFoundException") { return "IOException" }
+    if (n == "InvalidDataException") { return "SystemException" }
+    if (n == "TimeoutException") { return "SystemException" }
+    if (n == "StackOverflowException") { return "SystemException" }
+    if (n == "OutOfMemoryException") { return "SystemException" }
+    if (n == "RankException") { return "SystemException" }
+    if (n == "UnauthorizedAccessException") { return "SystemException" }
+    return "?"
+}
+
+// Is the BCL exception type `name` a `t` - itself, or any ancestor of it? The
+// guard < 64 cap is the one manual 7.9 keeps on every ancestor walk here.
+function csExcIsA(name, t) {
+    var n = name
+    var guard = 0
+    while (guard < 64) {
+        if (n == "") { return false }
+        if (n == "?") { return false }
+        if (n == t) { return true }
+        n = csExcParent(n)
+        guard = guard + 1
+    }
+    return false
+}
+
+// csExcBase is the BCL exception name at which v's type chain ENTERS the table
+// above, or "" for a value that is not an exception this model recognizes at all.
+// Two ways in: a BCL exception is a plain {__excname, Message} object, and a user
+// class declaring one as its base carries __excbase (emitted by the class emitter in
+// csharp-to-llvm-ir.abnf) - `class MyEx : Exception` IS an Exception. Both
+// js_csexcmatch and the `is` operator (js_csis) ask this. The twins are csExcBase in
+// languages/csharp-interpreter.abnf and in abnf/jsrtcsharp.go.
+function csExcBase(v) {
+    if (v === null) { return "" }
+    if (v === undefined) { return "" }
+    if (typeof v != "object") { return "" }
+    var en = v["__excname"]
+    if (typeof en == "string") { return en }
+    var c = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        if (c === undefined || c === null) { return "" }
+        if (typeof c != "object") { return "" }
+        var eb = c["__excbase"]
+        if (typeof eb == "string") { return eb }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return ""
+}
+
+// "System.IO.IOException" -> "IOException": the exception table is keyed by simple
+// name. Written as a character loop, not lastIndexOf, so it reads the same as
+// csExcTyName in the two grammars.
+function csExcSimple(t) {
+    var start = 0
+    var i = 0
+    while (i < t.length) {
+        if (t.charAt(i) == ".") { start = i + 1 }
+        i = i + 1
+    }
+    return t.substring(start, t.length)
+}
+
+// js_csexcmatch(v, "SimpleName") is C#'s CATCH-CLAUSE selection: does a catch clause
+// of that declared type accept this thrown value? The clauses are examined in source
+// order and the first whose type is the type of, or a base type of, the exception
+// runs (ECMA-334 13.11); csCatchDispatch in csharp-to-llvm-ir.abnf emits one call
+// per clause. The name arrives already reduced to its simple form - csExcTyName does
+// that at EMIT time - so nothing here has to parse namespaces.
+//
+// The twins are csExcMatches in languages/csharp-interpreter.abnf and js_csexcmatch
+// in abnf/jsrtcsharp.go, block for block.
+function js_csexcmatch(v, tname) {
+    if (tname == "object") { return true }
+    if (tname == "Object") { return true }
+    // A user class in the chain, by its own name - `catch (MyEx e)`.
+    if (v !== null && v !== undefined && typeof v == "object") {
+        var c = v["__class"]
+        var guard = 0
+        while (guard < 64) {
+            if (c === undefined || c === null) { guard = 64; continue }
+            if (typeof c != "object") { guard = 64; continue }
+            if (c["__name"] === tname) { return true }
+            c = c["__super"]
+            guard = guard + 1
+        }
+    }
+    var eb = csExcBase(v)
+    if (eb != "") { return csExcIsA(eb, tname) }
+    // A value this model does not recognize as an exception at all - and this subset
+    // lets a program throw any object - is caught by the general types, the way
+    // `catch (Exception e)` is written in practice. java-rt.metajs's js_jvexcmatch
+    // carries the identical arm, and tests/csharp-test-features.cs depends on it:
+    // `catch (Exception e)` there catches a plain `class Boom` and reads e.Code off it.
+    if (tname == "Exception") { return true }
+    return tname == "SystemException"
+}
+
 // ===================================================== the operators ========
 
 // csPromote is ECMA-334 12.4.7.3 binary numeric promotion for two integral
@@ -916,14 +1055,33 @@ function csIdHash(v) {
     v["__idhash"] = 725896960 + csIdSeq
     return v["__idhash"]
 }
+// csExcFullName is the fully qualified .NET name of a BCL exception type. All but
+// five are in System; the exceptions to that are cited beside them. It is what
+// GetType() has to answer for a value whose only type identity is __excname
+// (docs/todo.md 1.1). The twins are csExcFullName in
+// languages/csharp-interpreter.abnf and abnf/jsrtcsharp.go.
+function csExcFullName(n) {
+    if (n == "IOException") { return "System.IO." + n }
+    if (n == "FileNotFoundException") { return "System.IO." + n }
+    if (n == "DirectoryNotFoundException") { return "System.IO." + n }
+    if (n == "InvalidDataException") { return "System.IO." + n }
+    if (n == "KeyNotFoundException") { return "System.Collections.Generic." + n }
+    return "System." + n
+}
+
 // GetType(): a System.Type token with the same two members typeof(T) answers.
 function csTypeOfVal(v) {
     var full = cpElemName(v)
     if (full == "") {
         if (Array.isArray(v)) { full = cpArrayName(v) }
         else if (v !== undefined && v !== null && typeof v == "object") {
+            // A BCL exception is a plain {__excname, Message} object, so the __class
+            // walk cannot see its type and GetType().Name answered "Object" in both
+            // halves. __excname IS the type name (docs/todo.md 1.1).
+            var en = v["__excname"]
             var c = v["__class"]
-            if (c !== undefined && c !== null && typeof c["__name"] == "string") { full = c["__name"] }
+            if (typeof en == "string") { full = csExcFullName(en) }
+            else if (c !== undefined && c !== null && typeof c["__name"] == "string") { full = c["__name"] }
             else if (v["__isclass"] === true && typeof v["__name"] == "string") { full = v["__name"] }
             else { full = "System.Object" }
         } else { full = "System.Object" }
@@ -1283,7 +1441,21 @@ function js_csis(v, tname) {
     // pre-existing halves divergence --cross never reached because no test asks.
     var isChr = t == "char" || t == "Char"
     var bits = csTypeW(t)
-    if (bits == 0 && !isFlo && !isF32 && !isChr) { return js_is_type(v, tname) }
+    if (bits == 0 && !isFlo && !isF32 && !isChr) {
+        if (js_is_type(v, tname)) { return true }
+        // The exception hierarchy is the one part of the run-time type this model keeps
+        // OUTSIDE the __class chain js_is_type walks (a BCL exception is a plain
+        // {__excname, Message} object), so `e is FormatException` inside
+        // `catch (Exception e)` answered FALSE for every BCL type and `myEx is
+        // Exception` answered FALSE for a user class deriving from one - in BOTH halves.
+        // ECMA-334 12.12.12's run-time type test and 13.11's catch-clause selection are
+        // the same question, so they consult the same table (docs/todo.md 1.1). A catch
+        // clause's name is reduced to its simple form at emit time (csExcTyName); an
+        // `is` operand is not, so csExcSimple reduces it here.
+        var eb = csExcBase(v)
+        if (eb == "") { return false }
+        return csExcIsA(eb, csExcSimple(t))
+    }
     if (v === null) { return opt }
     if (v === undefined) { return opt }
     if (isChr) { return rtIsCharBox(v) }

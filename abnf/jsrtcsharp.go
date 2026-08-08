@@ -245,6 +245,86 @@ func csPromote(l, r interface{}) (uint8, bool) {
 	return 32, false
 }
 
+// csExcParent is the .NET base class of one BCL exception type. It is what makes a
+// typed catch clause discriminate: those types are plain {__excname, Message}
+// objects here, with no descriptor and therefore no chain to walk, which is why
+// `catch (FormatException e) {} catch (InvalidOperationException e) {}` used to run
+// the FormatException body on an InvalidOperationException in BOTH halves - a spec
+// divergence rather than a halves one, so --cross was blind to it (docs/todo.md 1.1).
+//
+// SPEC-DERIVED, NOT MEASURED: there is no C# toolchain on this machine (see this
+// file's header and manual 7.9), so every parent here comes from the type's
+// documented base class in the .NET base class library. "" is Exception's parent -
+// the root of what a catch can name - and "?" means "not a BCL exception name at
+// all", which js_csexcmatch has to tell apart from "has no parent".
+//
+// THE SAME BODY EXISTS IN THREE MORE ENGINES: csExcParent in
+// languages/csharp-interpreter.abnf (the tree-walking half) and in
+// languages/lib/csharp-rt.metajs (layer 2, which the NATIVE -exe build links). A
+// chain of ifs rather than a map precisely so it ports into MetaJS unchanged.
+func csExcParent(n string) string {
+	switch n {
+	case "Exception":
+		return ""
+	case "SystemException", "ApplicationException", "AggregateException":
+		return "Exception"
+	case "ObjectDisposedException":
+		return "InvalidOperationException"
+	case "ArgumentNullException", "ArgumentOutOfRangeException":
+		return "ArgumentException"
+	case "OverflowException", "DivideByZeroException":
+		return "ArithmeticException"
+	case "FileNotFoundException", "DirectoryNotFoundException":
+		return "IOException"
+	case "InvalidOperationException", "ArgumentException", "ArithmeticException",
+		"NotImplementedException", "NotSupportedException", "IndexOutOfRangeException",
+		"NullReferenceException", "InvalidCastException", "FormatException",
+		"KeyNotFoundException", "IOException", "InvalidDataException",
+		"TimeoutException", "StackOverflowException", "OutOfMemoryException",
+		"RankException", "UnauthorizedAccessException":
+		return "SystemException"
+	}
+	return "?"
+}
+
+// csExcIsA: is the BCL exception type `name` a `t` - itself, or any ancestor of it?
+// The guard < 64 cap is the one manual 7.9 keeps on every ancestor walk here.
+func csExcIsA(name, t string) bool {
+	n := name
+	for guard := 0; n != "" && n != "?" && guard < 64; guard++ {
+		if n == t {
+			return true
+		}
+		n = csExcParent(n)
+	}
+	return false
+}
+
+// csExcBase is the BCL exception name at which v's type chain ENTERS the table
+// above, or "" for a value that is not an exception this model recognizes at all.
+// Two ways in: a BCL exception is a plain {__excname, Message} object, and a user
+// class declaring one as its base carries __excbase (emitted by the class emitter in
+// csharp-to-llvm-ir.abnf) - `class MyEx : Exception` IS an Exception. Both
+// js_csexcmatch and the `is` operator (js_csis) ask this. The twins are csExcBase in
+// languages/csharp-interpreter.abnf and in languages/lib/csharp-rt.metajs.
+func csExcBase(v interface{}) string {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return ""
+	}
+	if n, isStr := o.props["__excname"].(string); isStr {
+		return n
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		if eb, isStr := cls.props["__excbase"].(string); isStr {
+			return eb
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return ""
+}
+
 // csThrow raises one of the BCL exception types, which in both halves are plain
 // objects carrying __excname and Message - the shape `new
 // DivideByZeroException(msg)` builds and a catch clause reads.
@@ -688,6 +768,42 @@ func init() {
 			}
 			return a[0]
 		}
+		// js_csexcmatch(v, "SimpleName") is C#'s CATCH-CLAUSE selection: does a
+		// catch clause of that declared type accept this thrown value? The clauses
+		// are examined in source order and the first whose type is the type of, or a
+		// base type of, the exception runs (ECMA-334 13.11); csCatchDispatch in
+		// csharp-to-llvm-ir.abnf emits one call per clause. The name arrives already
+		// reduced to its simple form (csExcTyName does that at emit time), so nothing
+		// here has to parse namespaces.
+		//
+		// The twins are csExcMatches in languages/csharp-interpreter.abnf and
+		// js_csexcmatch in languages/lib/csharp-rt.metajs, block for block.
+		m["js_csexcmatch"] = func(a []uint64) uint64 {
+			t := rt.toString(u(a[1]))
+			if t == "object" || t == "Object" {
+				return jsHTrue
+			}
+			// A user class in the chain, by its own name - `catch (MyEx e)`.
+			if o, isObj := u(a[0]).(*jsObject); isObj {
+				cls, _ := o.props["__class"].(*jsObject)
+				for guard := 0; cls != nil && guard < 64; guard++ {
+					if n, _ := cls.props["__name"].(string); n == t {
+						return jsHTrue
+					}
+					cls, _ = cls.props["__super"].(*jsObject)
+				}
+			}
+			if eb := csExcBase(u(a[0])); eb != "" {
+				return boolH(csExcIsA(eb, t))
+			}
+			// A value this model does not recognize as an exception at all - and this
+			// subset lets a program throw any object - is caught by the general types,
+			// the way `catch (Exception e)` is written in practice. jsrtjava.go's
+			// js_jvexcmatch carries the identical arm, and
+			// tests/csharp-test-features.cs depends on it: `catch (Exception e)` there
+			// catches a plain `class Boom` and reads e.Code off it.
+			return boolH(t == "Exception" || t == "SystemException")
+		}
 		// js_csis(v, t) is `v is T` / `v as T` / a type pattern. ECMA-334 12.12.12
 		// asks for the RUN-TIME type of v - there is no implicit conversion in a
 		// type test, which is why `object o = 5; o is long` is false in C# - and
@@ -723,7 +839,28 @@ func init() {
 			// divergence --cross never reached because no test program asks.
 			isChr := t == "char" || t == "Char"
 			if !isInt && !isFlo && !isF32 && !isChr {
-				return baseIs(a)
+				if baseIs(a) == jsHTrue {
+					return jsHTrue
+				}
+				// The exception hierarchy is the one part of the run-time type this
+				// model keeps OUTSIDE the __class chain js_is_type walks (a BCL
+				// exception is a plain {__excname, Message} object), so
+				// `e is FormatException` inside `catch (Exception e)` answered FALSE
+				// for every BCL type and `myEx is Exception` answered FALSE for a
+				// user class deriving from one - in BOTH halves. ECMA-334 12.12.12's
+				// run-time type test and 13.11's catch-clause selection are the same
+				// question, so they consult the same table (docs/todo.md 1.1).
+				if eb := csExcBase(u(a[0])); eb != "" {
+					// `e is System.IO.IOException`: the table is keyed by simple
+					// name. A catch clause is reduced at emit time (csExcTyName);
+					// an `is` operand is not, so it is reduced here.
+					sn := t
+					if i := strings.LastIndexByte(sn, '.'); i >= 0 {
+						sn = sn[i+1:]
+					}
+					return boolH(csExcIsA(eb, sn))
+				}
+				return jsHFalse
 			}
 			if isChr {
 				switch u(a[0]).(type) {
@@ -1635,6 +1772,22 @@ func (rt *jsrt) csIdHash(v interface{}) int32 {
 	return h
 }
 
+// csExcFullName is the fully qualified .NET name of a BCL exception type. All but
+// five are in System; the exceptions to that are cited beside them. It is what
+// GetType() has to answer for a value whose only type identity is __excname
+// (docs/todo.md 1.1). The twins are csExcFullName in
+// languages/csharp-interpreter.abnf and languages/lib/csharp-rt.metajs.
+func csExcFullName(n string) string {
+	switch n {
+	case "IOException", "FileNotFoundException", "DirectoryNotFoundException",
+		"InvalidDataException":
+		return "System.IO." + n
+	case "KeyNotFoundException":
+		return "System.Collections.Generic." + n
+	}
+	return "System." + n
+}
+
 // GetType(): a System.Type token with the same two members typeof(T) answers.
 func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 	full := cspElemName(v)
@@ -1643,7 +1796,13 @@ func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 		case *jsArray:
 			full = cspArrayName(t)
 		case *jsObject:
-			if c, isObj := t.props["__class"].(*jsObject); isObj {
+			// A BCL exception is a plain {__excname, Message} object, so the
+			// __class walk below cannot see its type and GetType().Name answered
+			// "Object" in both halves. __excname IS the type name (todo.md 1.1).
+			if n, isStr := t.props["__excname"].(string); isStr {
+				full = csExcFullName(n)
+			}
+			if c, isObj := t.props["__class"].(*jsObject); isObj && full == "" {
 				if n, isStr := c.props["__name"].(string); isStr {
 					full = n
 				}

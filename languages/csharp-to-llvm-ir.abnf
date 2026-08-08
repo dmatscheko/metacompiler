@@ -36,7 +36,9 @@ creation as the head of a member chain.
 
 Also modelled: labels and goto (including goto case / goto default, which re-enter the
 enclosing switch), the throw EXPRESSION, the BCL exception types (a program may throw new
-Exception(...) without declaring one), named and optional arguments (a skipped parameter
+Exception(...) without declaring one) with their .NET base-class chain, so a TYPED catch
+clause and `is` both discriminate (ECMA-334 13.11 / 12.12.12) and `when` filters and a
+bare `throw;` rethrow work, named and optional arguments (a skipped parameter
 takes its default), collection expressions with a spread element, the index-from-end
 operator and range slicing, delegate { ... } without a parameter list, unsafe blocks,
 implicitly typed and sized-with-initializer arrays, nested and indexed member
@@ -561,18 +563,32 @@ Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 // try/catch/finally and throw are implemented: throw calls js_throw, each try/catch/
 // finally body compiles to its own closure handed to js_try, and a return/break/continue
 // leaving a try or catch body becomes a control signal that excDispatch re-issues in the
-// enclosing frame. The first catch clause wins (the exception type and an optional 'when
-// (cond)' filter are parsed but not discriminated / evaluated). A catch may omit the parens
+// enclosing frame. ONE catch closure dispatches over the clauses in source order and the
+// first one whose declared type accepts the value AND whose 'when (cond)' filter is true
+// runs, which is ECMA-334 13.11 - csCatchDispatch. A catch may omit the parens
 // ('catch { }'), the binding ('catch (T) { }') or bind a name ('catch (T e) { }').
+// The DECLARED TYPE and the FILTER EXPRESSION are both kept now; they used to be parsed
+// and thrown away, so the FIRST clause always won (docs/todo.md 1.1). The interpreter
+// half's csTry runs the identical rule.
 Try         <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch [ "(" Type [ Id <~~ push(up.in) ~~> ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block ;
+CatchClause <~~ push(csCatchClause(takeAll())) ~~>
+            = KwCatch [ "(" CatchType [ Id <~~ push({ctchname: up.in}) ~~> ] ")" ]
+              [ KwWhen "(" CatchWhen ")" ] Block ;
+// The declared type as the source spells it ('System.IO.IOException', 'MyEx<T>');
+// csExcTyName reduces it to the simple name js_csexcmatch compares.
+CatchType   <~~ push({ctchtype: stripWs(up.in)}) ~~>
+            = Type ;
+// An exception filter. It is an ordinary bool expression, evaluated with the catch
+// parameter in scope and BEFORE the catch block runs (ECMA-334 13.11).
+CatchWhen   <~~ push({ctchwhen: pop()}) ~~>
+            = Expression ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
-// throw e; raises e via js_throw; a bare throw; (rethrow) raises undefined (no value here).
+// throw e; raises e via js_throw; a bare throw; inside a catch RE-RAISES the exception
+// being handled (ECMA-334 13.10.6) by reading __caught, the catch closure's parameter.
 Throw       <~~ push(makeThrow(csThrowVal(takeAll()))) ~~>
             = KwThrow [ Expression ] ";" ;
 
@@ -4279,23 +4295,105 @@ KwLet       = "let" KwEnd ;
 
     // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
     // try and catch bodies are ctl closures (isCtl), so a return/break/continue leaving
-    // them becomes a control signal that excDispatch re-issues here. The first catch wins.
-    // makeCatch is shared - see lib/compile-core.js.
+    // them becomes a control signal that excDispatch re-issues here.
+    //
+    // One catch clause: its optional declared type, optional binding and optional `when`
+    // filter, in whatever order the optionals matched. This replaces compile-core's
+    // shared makeCatch, which kept only the name and the block. Every part but the block
+    // arrives as a keyed record, so the block is the only bare function on the stack.
+    function csCatchClause(items) {
+        var body = anytype
+        var nm = anytype
+        var ty = anytype
+        var wh = anytype
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it; continue }
+            if (it.ctchname != undefined) { nm = it.ctchname; continue }
+            if (it.ctchtype != undefined) { ty = it.ctchtype; continue }
+            if (it.ctchwhen != undefined) { wh = it.ctchwhen; continue }
+        }
+        return {catchbody: body, catchname: nm, catchtype: ty, catchwhen: wh}
+    }
+    // "System.IO.IOException" / "MyEx<T>" / "Exception?" -> the simple name js_csexcmatch
+    // compares against a descriptor's __name and a BCL object's __excname. Done at EMIT
+    // time, so the runtime never sees a qualified name - jCatchTyName in
+    // java-to-llvm-ir.abnf does exactly this for the same reason. The interpreter half's
+    // csExcTyName is the same reduction at walk time.
+    function csExcTyName(t0) {
+        var stop = t0.length
+        var i = 0
+        while (i < stop) { if (t0.charAt(i) == "<") { stop = i } else { i = i + 1 } }
+        var start = 0
+        for (i = 0; i < stop; i++) { if (t0.charAt(i) == ".") { start = i + 1 } }
+        if (stop > start && t0.charAt(stop - 1) == "?") { stop = stop - 1 }
+        return t0.substring(start, stop)
+    }
+    // ONE catch closure that dispatches over the clauses in source order, which is what
+    // a C# try/catch actually is (ECMA-334 13.11). This half used to keep only the FIRST
+    // clause and ignore both its type and its filter entirely - and so did the
+    // interpreter, so it was a SPEC divergence rather than a halves one and --cross was
+    // blind to it: `catch (FormatException e) {} catch (InvalidOperationException e) {}`
+    // ran the FormatException body on an InvalidOperationException, and the second clause
+    // was not emitted at all (docs/todo.md 1.1).
+    //
+    // The closure's parameter is always __caught, whatever the clauses call their
+    // bindings: each clause declares its own name in the catch scope on the way in, and
+    // a bare `throw;` reads __caught back out (ECMA-334 13.10.6). A value that matches
+    // nothing is RE-THROWN, so an outer try still sees it - csTry in
+    // csharp-interpreter.abnf does the same, and the finally closure handed to js_try
+    // runs either way.
+    //
+    // A `when` filter is emitted INSIDE the type test's hit path and before the body,
+    // with the binding already declared, and a false filter falls through to the next
+    // clause. That is why the filter cannot live in js_csexcmatch: it is program code.
+    function csCatchDispatch(clauses) {
+        return function(bb) {
+            var caughtV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "__caught")])
+            var endB = curF.NewBlock("")
+            for (var i = 0; i < clauses.length; i++) {
+                var c = clauses[i]
+                var hitB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                if (c.catchtype == undefined) { bb.NewBr(hitB) }
+                else {
+                    var okV = callExt(bb, "js_csexcmatch", [caughtV, emitStr(bb, csExcTyName(c.catchtype))])
+                    bb.NewCondBr(truthy(bb, okV), hitB, nextB)
+                }
+                if (c.catchname != undefined) {
+                    callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, c.catchname), caughtV])
+                }
+                if (c.catchwhen != undefined) {
+                    var fr = c.catchwhen(hitB)
+                    var runB = curF.NewBlock("")
+                    fr.b.NewCondBr(truthy(fr.b, fr.v), runB, nextB)
+                    hitB = runB
+                }
+                var doneB = c.catchbody(hitB)
+                doneB.NewBr(endB)
+                bb = nextB
+            }
+            // No clause matched: re-raise, so an enclosing try can catch it.
+            callExt(bb, "js_throw", [caughtV])
+            bb.NewRet(hUndef)
+            return endB
+        }
+    }
     function makeTry(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var tryT = anytype, finallyT = anytype
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
-            }
+            else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, null, null, true)), curScopeV])
             var catchClo = hUndef
-            if (catchT != undefined) {
-                var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, null, null, true)), curScopeV])
+            if (clauses.length > 0) {
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitFunc(["__caught"], csCatchDispatch(clauses), false, null, null, true)),
+                                    curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
@@ -4306,7 +4404,6 @@ KwLet       = "let" KwEnd ;
         }
     }
     // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
-    // csThrowVal supplies e's thunk (an undefined constant for a bare throw; rethrow).
     function makeThrow(e) {
         return function(b) {
             var r = e(b)
@@ -4315,7 +4412,16 @@ KwLet       = "let" KwEnd ;
             return deadBlock()
         }
     }
-    function csThrowVal(items) { return items.length > 0 ? items[0] : makeConst(undefined) }
+    // csThrowVal supplies e's thunk: the expression for 'throw e;', or - for a bare
+    // 'throw;' - a read of __caught, csCatchDispatch's closure parameter. It used to be
+    // an undefined CONSTANT, so a rethrow raised undefined and the enclosing catch died
+    // on e.Message (docs/todo.md 1.1). Outside a catch the name is unbound and the read
+    // aborts, which matches the interpreter half and is the closest this has to
+    // ECMA-334 13.10.6's compile-time error.
+    function csThrowVal(items) { return items.length > 0 ? items[0] : csRethrowT }
+    function csRethrowT(b) {
+        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])}
+    }
     // The expression form: same raise, but it hands the block back so the ternary (or
     // '??') that contains it can still branch to its merge block.
     function makeThrowExpr(e) {
@@ -5659,7 +5765,10 @@ KwLet       = "let" KwEnd ;
     // it adopts nothing. Dynamically scoped: emitFunc saves and restores it, and
     // makeReturn's thunk runs inside body(b) below (docs/todo.md 1.1).
     var curRetTy = ""
-    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy, cinit) {
+    // excBase: present only on a CONSTRUCTOR of a class whose base is a BCL exception
+    // name (see __excbase at the class emitter). It holds that class' OWN name, which is
+    // the default Message. See the ': base(...)' arm below.
+    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy, cinit, excBase) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5725,6 +5834,23 @@ KwLet       = "let" KwEnd ;
                 }
             }
             callExt(b, "js_call", [supCtorV, hUndef, sargsV])
+        }
+        // `class MyEx : Exception` - the base is a BCL exception, which is not a class
+        // here (see csBclExc), so superName is null and the base constructor call above
+        // does not happen at all. System.Exception's own constructor is inlined instead:
+        // it stores the message (ECMA-335, System.Exception(String)). Before this the
+        // base was silently dropped, so ': base(m)' set nothing and e.Message read empty
+        // in BOTH halves (docs/todo.md 1.1). No message means the class name, which is
+        // what `new XException()` on a BCL name already answers in makeNew.
+        if (excBase != undefined && excBase != null && !isThisInit) {
+            var thisEV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
+                var er = cinit.cargs[0](b)
+                b = er.b
+                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v])
+            } else {
+                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), emitStr(b, excBase)])
+            }
         }
         if (fields != null && !isThisInit) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -6079,6 +6205,20 @@ KwLet       = "let" KwEnd ;
                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
                 }
             }
+            // ...EXCEPT a BCL exception name, which is not a class here at all and used
+            // to be dropped with the interfaces. __excbase records it, which is what
+            // gives js_csexcmatch a chain to walk past the end of __super
+            // (`class MyEx : Exception` IS an Exception) and emitFunc a Message to write.
+            // typeof == "string" is load-bearing: makeMethod also pushes an `ext` slot,
+            // holding a BOOLEAN that says whether the method is an extension method.
+            var excBase = null
+            for (i = 0; i < members.length; i++) {
+                if (typeof members[i].ext == "string" && csKnownClasses[members[i].ext] != true
+                    && csBclExc[members[i].ext] == true) {
+                    excBase = name
+                    callExt(b, "js_set", [clsV, emitStr(b, "__excbase"), emitStr(b, members[i].ext)])
+                }
+            }
             for (i = 0; i < members.length; i++) {
                 var mm = members[i]
                 if (mm.kind == "field") {
@@ -6121,20 +6261,21 @@ KwLet       = "let" KwEnd ;
                 for (i = 0; i < ctorInfos.length; i++) {
                     var ci = ctorInfos[i]
                     var oneIdx = emitFunc(ci.params, ci.body, true, fields, superName, false, ci.pinfo,
-                                          undefined, csCinitOf(ci, name))
+                                          undefined, csCinitOf(ci, name), excBase)
                     callExt(b, "js_arr_push", [ctorsV, callExt(b, "js_closure", [handle(oneIdx), curScopeV])])
                 }
                 callExt(b, "js_set", [clsV, emitStr(b, "__ctors"), ctorsV])
                 ctorIdx = emitFunc([], csCtorDispatchBody(name, csCtorSigs(ctorInfos)), true, null, undefined, false, null)
             } else if (ctorInfo != null) {
                 ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, superName, false, ctorInfo.pinfo,
-                                   undefined, csCinitOf(ctorInfo, name))
+                                   undefined, csCinitOf(ctorInfo, name), excBase)
             } else if (primary != null && primary != undefined) {
                 // A primary constructor: its parameters are bound like any other, and the
                 // synthesized body copies them onto the instance as members.
-                ctorIdx = emitFunc(primary.params, primaryBody(primary.params), true, fields, superName, false, primary)
+                ctorIdx = emitFunc(primary.params, primaryBody(primary.params), true, fields, superName, false,
+                                   primary, undefined, null, excBase)
             } else {
-                ctorIdx = emitFunc([], null, true, fields, superName)
+                ctorIdx = emitFunc([], null, true, fields, superName, false, null, undefined, null, excBase)
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
             // EVERY method declaration is kept, not just the last one (docs/todo.md

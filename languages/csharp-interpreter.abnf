@@ -36,7 +36,9 @@ creation as the head of a member chain.
 
 Also modelled: labels and goto (including goto case / goto default, which re-enter the
 enclosing switch), the throw EXPRESSION, the BCL exception types (a program may throw new
-Exception(...) without declaring one), named and optional arguments (a skipped parameter
+Exception(...) without declaring one) with their .NET base-class chain, so a TYPED catch
+clause and `is` both discriminate (ECMA-334 13.11 / 12.12.12) and `when` filters and a
+bare `throw;` rethrow work, named and optional arguments (a skipped parameter
 takes its default), collection expressions with a spread element, the index-from-end
 operator and range slicing, delegate { ... } without a parameter list, unsafe blocks,
 implicitly typed and sized-with-initializer arrays, nested and indexed member
@@ -553,20 +555,35 @@ KwYield     = "yield" KwEnd ;
 Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 
-// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
-// raises the value, catch binds it (the first catch clause wins - the exception type and
-// an optional 'when (cond)' filter are parsed but not discriminated / evaluated), finally
-// always runs. return/break/continue inside a try still propagate. A catch may omit the
-// parens ('catch { }'), the binding ('catch (T) { }') or bind a name ('catch (T e) { }').
-Try         <~~ push(excTry(takeAll())) ~~>
+// try/catch/finally and throw are implemented (excThrow, languages/lib; csTry here):
+// throw raises the value, and the catch clauses are examined IN SOURCE ORDER - the first
+// one whose declared type accepts the value AND whose 'when (cond)' filter is true runs,
+// which is ECMA-334 13.11. finally always runs. return/break/continue inside a try still
+// propagate. A catch may omit the parens ('catch { }'), the binding ('catch (T) { }') or
+// bind a name ('catch (T e) { }'). The DECLARED TYPE and the FILTER EXPRESSION are both
+// kept now; they used to be parsed and thrown away, so the FIRST clause always won
+// (docs/todo.md 1.1). The compiler half lowers the same rule in csCatchDispatch.
+Try         <~~ push(csTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch [ "(" Type [ Id <~~ push(up.in) ~~> ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block ;
+CatchClause <~~ push(csCatchClause(takeAll())) ~~>
+            = KwCatch [ "(" CatchType [ Id <~~ push({ctchname: up.in}) ~~> ] ")" ]
+              [ KwWhen "(" CatchWhen ")" ] Block ;
+// The declared type as the source spells it ('System.IO.IOException', 'MyEx<T>');
+// csExcTyName reduces it to the simple name the descriptors carry.
+CatchType   <~~ push({ctchtype: stripWs(up.in)}) ~~>
+            = Type ;
+// An exception filter. It is an ordinary bool expression, evaluated with the catch
+// parameter in scope and BEFORE the catch block runs (ECMA-334 13.11).
+CatchWhen   <~~ push({ctchwhen: pop()}) ~~>
+            = Expression ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
-// throw e; raises e; a bare throw; (rethrow) has no value here, so it raises undefined.
+// throw e; raises e; a bare throw; inside a catch RE-RAISES the exception being handled
+// (ECMA-334 13.10.6) - csTry declares it as __caught in the catch scope, which is also
+// what the compiler half reads. A bare throw outside a catch is a compile-time error in
+// C#; here it aborts on the unbound name, in both halves.
 Throw       <~~ push(excThrow(csThrowVal(takeAll()))) ~~>
             = KwThrow [ Expression ] ";" ;
 
@@ -2173,11 +2190,30 @@ KwLet       = "let" KwEnd ;
         if (!hasOwn(v, "__idhash")) { csIdSeq = csIdSeq + 1; v.__idhash = 725896960 + csIdSeq }
         return v.__idhash
     }
+    // The fully qualified .NET name of a BCL exception type. All but five are in
+    // System; the exceptions to that are cited beside them. It is what GetType() has to
+    // answer for a value whose only type identity is __excname (docs/todo.md 1.1) - the
+    // twins are csExcFullName in abnf/jsrtcsharp.go and languages/lib/csharp-rt.metajs.
+    function csExcFullName(n) {
+        // System.IO.
+        if (n == "IOException" || n == "FileNotFoundException"
+            || n == "DirectoryNotFoundException" || n == "InvalidDataException") {
+            return "System.IO." + n
+        }
+        // System.Collections.Generic.
+        if (n == "KeyNotFoundException") { return "System.Collections.Generic." + n }
+        return "System." + n
+    }
     // GetType(): a System.Type token with the same two members typeof(T) answers.
     function csTypeOfVal(v) {
         var full = csElemName(v)
         if (full == "") {
-            if (Array.isArray(v)) { full = csArrayName(v) }
+            // A BCL exception is a plain {__excname, Message} object, so the __class
+            // walk below cannot see its type and GetType().Name answered "Object" in
+            // both halves. __excname IS the type name (docs/todo.md 1.1).
+            if (v !== null && v !== undefined && typeof v == "object"
+                && typeof v.__excname == "string") { full = csExcFullName(v.__excname) }
+            else if (Array.isArray(v)) { full = csArrayName(v) }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined
                      && typeof v.__class.__name == "string") { full = v.__class.__name }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true
@@ -3479,7 +3515,15 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "object" && v !== null) {
             for (var c = v.__class; c != undefined; c = c.__super) { if (c.__name == t) { return true } }
         }
-        return false
+        // The exception hierarchy is the one part of the run-time type this model keeps
+        // OUTSIDE the __class chain (a BCL exception is a plain {__excname, Message}
+        // object), so `e is FormatException` inside `catch (Exception e)` answered FALSE
+        // for every BCL type and `myEx is Exception` answered FALSE for a user class
+        // deriving from one - in BOTH halves. ECMA-334 12.12.12's run-time type test
+        // and 13.11's catch-clause selection are the same question, so they now consult
+        // the same table (docs/todo.md 1.1).
+        var eb = csExcBase(v)
+        return eb != "" && csExcIsA(eb, t)
     }
     // The BCL name of each integral type keyword, so `o is Int64` answers what
     // `o is long` answers (ECMA-334 8.3.5: the keywords are aliases).
@@ -4126,10 +4170,16 @@ KwLet       = "let" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
-    // csThrowVal supplies the thrown-value thunk: the expression for 'throw e;', or an
-    // undefined constant for a bare 'throw;' rethrow (which carries no value in this model).
-    function csThrowVal(items) { return items.length > 0 ? items[0] : makeConst(undefined) }
+    // try/catch/finally are handled by csTry above; throw by excThrow (lib/interp-core.js).
+    // csThrowVal supplies the thrown-value thunk: the expression for 'throw e;', or - for
+    // a bare 'throw;' - a read of __caught, the name csTry binds the exception being
+    // handled to in every catch scope. It used to be an undefined CONSTANT, so a rethrow
+    // raised undefined and the enclosing catch died on e.Message (docs/todo.md 1.1).
+    // ECMA-334 13.10.6 permits a bare throw only inside a catch block; outside one the
+    // name is unbound and both halves abort, which is the closest this has to a
+    // compile-time error.
+    function csThrowVal(items) { return items.length > 0 ? items[0] : csRethrowT }
+    function csRethrowT() { return getVar("__caught") }
 
     // ----- typeof / nameof / sizeof / default -----
     // A type token: never null, and it answers .Name / .FullName like System.Type does.
@@ -4529,8 +4579,9 @@ KwLet       = "let" KwEnd ;
     }
     // The BCL exception types a program may 'throw new ...' without declaring them. They
     // are not real classes here: 'new XException(msg)' builds a plain object carrying
-    // __excname and Message, which is all catch (no type discrimination) and e.Message
-    // need. A class the program declares itself always wins (see makeNew).
+    // __excname and Message. A class the program declares itself always wins (see
+    // makeNew). The PARENT of each of these names is csExcParent below, which is what
+    // makes a typed catch clause discriminate.
     var csBclExc = {}
     var csBclExcNames = ["Exception", "SystemException", "ApplicationException",
         "InvalidOperationException", "ArgumentException", "ArgumentNullException",
@@ -4542,6 +4593,207 @@ KwLet       = "let" KwEnd ;
         "AggregateException", "RankException", "InvalidDataException",
         "FileNotFoundException", "DirectoryNotFoundException", "UnauthorizedAccessException"]
     for (var iBcl = 0; iBcl < csBclExcNames.length; iBcl++) { csBclExc[csBclExcNames[iBcl]] = true }
+
+    // ----- the BCL exception hierarchy, and typed catch (docs/todo.md 1.1) -----
+    //
+    // A catch clause selects on the RUN-TIME type of the thrown value: the clauses are
+    // examined in source order and the first one whose type is the type of, or a BASE
+    // type of, the exception is the one that runs (ECMA-334 13.11). That needs a parent
+    // chain, and the BCL exception types here are plain {__excname, Message} objects with
+    // no descriptor at all - which is exactly why, before this,
+    // `catch (FormatException e) {} catch (InvalidOperationException e) {}` ran the
+    // FormatException body on an InvalidOperationException, in BOTH halves, so --cross
+    // was blind to it.
+    //
+    // The chain is the .NET class hierarchy of the 28 names csBclExcNames lists. It is
+    // SPEC-DERIVED, not measured: there is no C# toolchain on this machine (manual 7.9's
+    // C# caveat), so every parent here comes from the type's documented base class in the
+    // .NET base class library. "" is Exception's parent - the root of what a catch can
+    // name - and "?" means "not a BCL exception name at all", which csExcMatches has to
+    // tell apart from "has no parent".
+    //
+    // THESE THREE FUNCTIONS EXIST VERBATIM IN THREE MORE ENGINES: js_csexcmatch in
+    // languages/lib/csharp-rt.metajs (the native build) and in abnf/jsrtcsharp.go (the
+    // Go twin llvm.Run uses), plus csCatchDispatch in csharp-to-llvm-ir.abnf which emits
+    // the calls. A chain of `if`s rather than a table precisely so the body ports into
+    // MetaJS and Go unchanged - manual chapter 4: a fix spanning engines lands whole.
+    function csExcParent(n) {
+        if (n == "Exception") { return "" }
+        if (n == "SystemException") { return "Exception" }
+        if (n == "ApplicationException") { return "Exception" }
+        if (n == "AggregateException") { return "Exception" }
+        if (n == "InvalidOperationException") { return "SystemException" }
+        if (n == "ObjectDisposedException") { return "InvalidOperationException" }
+        if (n == "ArgumentException") { return "SystemException" }
+        if (n == "ArgumentNullException") { return "ArgumentException" }
+        if (n == "ArgumentOutOfRangeException") { return "ArgumentException" }
+        if (n == "ArithmeticException") { return "SystemException" }
+        if (n == "OverflowException") { return "ArithmeticException" }
+        if (n == "DivideByZeroException") { return "ArithmeticException" }
+        if (n == "NotImplementedException") { return "SystemException" }
+        if (n == "NotSupportedException") { return "SystemException" }
+        if (n == "IndexOutOfRangeException") { return "SystemException" }
+        if (n == "NullReferenceException") { return "SystemException" }
+        if (n == "InvalidCastException") { return "SystemException" }
+        if (n == "FormatException") { return "SystemException" }
+        if (n == "KeyNotFoundException") { return "SystemException" }
+        if (n == "IOException") { return "SystemException" }
+        if (n == "FileNotFoundException") { return "IOException" }
+        if (n == "DirectoryNotFoundException") { return "IOException" }
+        if (n == "InvalidDataException") { return "SystemException" }
+        if (n == "TimeoutException") { return "SystemException" }
+        if (n == "StackOverflowException") { return "SystemException" }
+        if (n == "OutOfMemoryException") { return "SystemException" }
+        if (n == "RankException") { return "SystemException" }
+        if (n == "UnauthorizedAccessException") { return "SystemException" }
+        return "?"
+    }
+    // Is the BCL exception type `name` a `t` - itself, or any ancestor of it? The
+    // `guard < 64` cap is the one manual 7.9 keeps on every ancestor walk here.
+    function csExcIsA(name, t) {
+        var n = name
+        var guard = 0
+        while (n != "" && n != "?" && guard < 64) {
+            if (n == t) { return true }
+            n = csExcParent(n)
+            guard = guard + 1
+        }
+        return false
+    }
+    // "System.IO.IOException" / "MyEx<T>" / "Exception?" -> the simple name a class
+    // descriptor's __name and a BCL object's __excname carry. Written as character
+    // loops, not indexOf/lastIndexOf, so the body ports into MetaJS unchanged.
+    function csExcTyName(t0) {
+        var stop = t0.length
+        var i = 0
+        while (i < stop) { if (t0.charAt(i) == "<") { stop = i } else { i = i + 1 } }
+        var start = 0
+        for (i = 0; i < stop; i++) { if (t0.charAt(i) == ".") { start = i + 1 } }
+        if (stop > start && t0.charAt(stop - 1) == "?") { stop = stop - 1 }
+        return t0.substring(start, stop)
+    }
+    // The BCL exception name at which v's type chain ENTERS the table above, or "" for
+    // a value that is not an exception this model recognizes at all. Two ways in: a BCL
+    // exception is a plain {__excname, Message} object, and a user class declaring one
+    // as its base carries __excbase (see buildClassFrom) - `class MyEx : Exception` IS
+    // an Exception. Both csExcMatches and the `is` operator ask this.
+    function csExcBase(v) {
+        if (v === null || v === undefined || typeof v != "object") { return "" }
+        if (typeof v.__excname == "string") { return v.__excname }
+        var c = v.__class
+        var guard = 0
+        while (c != undefined && c != null && guard < 64) {
+            if (typeof c.__excbase == "string") { return c.__excbase }
+            c = c.__super
+            guard = guard + 1
+        }
+        return ""
+    }
+    // Does the thrown value v match a catch clause whose declared type is t0? The twin
+    // is js_csexcmatch in csharp-rt.metajs / jsrtcsharp.go, block for block.
+    function csExcMatches(v, t0) {
+        var t = csExcTyName(t0)
+        if (t == "object" || t == "Object") { return true }
+        // A user class in the chain, by its own name - `catch (MyEx e)`.
+        if (v !== null && v !== undefined && typeof v == "object") {
+            var c = v.__class
+            var guard = 0
+            while (c != undefined && c != null && guard < 64) {
+                if (c.__name == t) { return true }
+                c = c.__super
+                guard = guard + 1
+            }
+        }
+        var eb = csExcBase(v)
+        if (eb != "") { return csExcIsA(eb, t) }
+        // A value this model does not recognize as an exception at all - and this subset
+        // lets a program throw any object - is caught by the general types, the way
+        // `catch (Exception e)` is written in practice. java-interpreter.abnf's
+        // core.excMatches carries the identical arm for the identical reason, and
+        // tests/csharp-test-features.cs depends on it: `catch (Exception e)` there
+        // catches a plain `class Boom` and reads e.Code off it.
+        return t == "Exception" || t == "SystemException"
+    }
+
+    // One catch clause: its optional declared type, optional binding and optional
+    // `when` filter, in whatever order the optionals matched. Every part but the block
+    // arrives as a keyed record, so the block is the only bare function on the stack.
+    function csCatchClause(items) {
+        var body = anytype
+        var nm = anytype
+        var ty = anytype
+        var wh = anytype
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it; continue }
+            if (it.ctchname != undefined) { nm = it.ctchname; continue }
+            if (it.ctchtype != undefined) { ty = it.ctchtype; continue }
+            if (it.ctchwhen != undefined) { wh = it.ctchwhen; continue }
+        }
+        return {catchbody: body, catchname: nm, catchtype: ty, catchwhen: wh}
+    }
+    // The catch parameter, plus __caught: a bare `throw;` in the block re-raises the
+    // exception being handled (ECMA-334 13.10.6) by reading that name, and the compiler
+    // half reads the same name out of the catch closure's scope.
+    function csDeclCaught(c, v) {
+        declVar("__caught", v)
+        if (c.catchname != undefined) { declVar(c.catchname, v) }
+    }
+    // try/catch/finally, with typed clauses and exception filters. This is
+    // excTryTyped (lib/interp-core.js) plus the `when` filter, kept LOCAL to C# rather
+    // than pushed into the shared core - the filter has to run in the catch scope with
+    // the parameter bound and before any clause body, which the six other users of
+    // excTryTyped have no notion of (manual 7.12's include-override trap).
+    //
+    // A value that no clause accepts is RE-THROWN, so an enclosing try still sees it,
+    // and `finally` runs on that path too.
+    function csTry(items) {
+        var tryT = anytype, finallyT = anytype
+        var clauses = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        return function() {
+            var savedChain = scopes.slice()
+            var box = {sig: undefined}
+            try {
+                box.sig = tryT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                var hit = null
+                if (excIsUser(e)) {
+                    for (var k = 0; k < clauses.length; k++) {
+                        var c = clauses[k]
+                        if (c.catchtype != undefined && !csExcMatches(e.v, c.catchtype)) { continue }
+                        if (c.catchwhen == undefined) { hit = c; break }
+                        // The filter is evaluated with the catch parameter in scope and
+                        // BEFORE any catch block runs (ECMA-334 13.11).
+                        scopes.push({})
+                        csDeclCaught(c, e.v)
+                        var okf = core.test(c.catchwhen())
+                        scopes.pop()
+                        if (okf) { hit = c; break }
+                    }
+                }
+                if (hit == null) { throw e }
+                scopes.push({})
+                csDeclCaught(hit, e.v)
+                box.sig = hit.catchbody()
+                scopes.pop()
+            } finally {
+                scopes = savedChain.slice()
+                if (finallyT != undefined) {
+                    var fr = finallyT()
+                    // Returning from the host finally overrides the try/catch completion
+                    // AND cancels a rethrown exception - the rule excTry records.
+                    if (fr != undefined) { return fr }
+                }
+            }
+            return box.sig
+        }
+    }
 
     // The type-parameter names of every generic class ('Pair' -> ["TA", "TB"]). Filled
     // while the file is walked, so it is complete before any thunk runs.
@@ -5037,6 +5289,12 @@ KwLet       = "let" KwEnd ;
                 // Lenient: a base that is not a known class (an interface) is ignored.
                 sup = globalScope[members[i].ext]
                 if (sup != undefined) cls.__super = sup
+                // ...EXCEPT a BCL exception name, which is not a class here at all (see
+                // csBclExc) and used to be silently dropped: `class MyEx : Exception`
+                // then had no base at all, so ': base(m)' set nothing and e.Message read
+                // empty, in both halves. __excbase records the name, which gives
+                // csExcMatches a chain to walk and initBase a Message to write.
+                else if (csBclExc[members[i].ext] == true) { cls.__excbase = members[i].ext }
             }
         }
         // The names this class declares as STATIC data members - static fields,
@@ -5092,6 +5350,14 @@ KwLet       = "let" KwEnd ;
         // it (ECMA-334 15.11.2) - an empty list means the parameterless one, which is
         // the implicit initializer every constructor without one has.
         function initBase(self, bargs) {
+            // `class MyEx : Exception` - the base is a BCL exception, which is not a
+            // class here, so System.Exception's own constructor is inlined: it stores
+            // the message (ECMA-335 / System.Exception(String)). No message means the
+            // class name, which is what `new XException()` already answers in makeNew.
+            if (sup == null && cls.__excbase != undefined) {
+                self.Message = (bargs.length > 0) ? bargs[0] : name
+                return
+            }
             if (sup == null) { return }
             var argv = [self]
             for (var q = 0; q < bargs.length; q++) { argv.push(bargs[q]) }

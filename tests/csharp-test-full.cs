@@ -2255,6 +2255,255 @@ b";                                                   // verbatim keeps the newl
                 "Index and length must refer to a location within the string. (Parameter 'length')");
         }
 
+
+        // ===== SECTION 35: typed catch clauses, exception filters and rethrow =====
+        //
+        // docs/todo.md 1.1.
+        //
+        // ECMA-334 13.11: the catch clauses of a try statement are examined IN ORDER
+        // and the FIRST one whose exception type is the type of, or a base type of,
+        // the thrown exception - and whose `when` filter, if any, evaluates true -
+        // is the one that runs. Before this, both halves kept the first clause only
+        // and ignored its type AND its filter entirely, so
+        // `catch (FormatException e) {} catch (InvalidOperationException e) {}` ran
+        // the FormatException body on an InvalidOperationException. BOTH HALVES
+        // AGREED ON THAT WRONG ANSWER, so ./test.sh --cross was blind to it by
+        // construction; it took a differential probe against the spec to see it.
+        //
+        // ECMA-334 13.10.6: a `throw;` with no operand rethrows the exception the
+        // enclosing catch block is handling. It used to raise `undefined`, so an
+        // outer `catch (Exception e)` reading e.Message ABORTED the run.
+        //
+        // The BCL parent chain the type test walks is SPEC-DERIVED, not measured:
+        // there is no C# toolchain on this machine, so each parent below is the
+        // type's documented base class in the .NET base class library (see
+        // csExcParent, which exists in four engines).
+        //
+        // Every operand is read out of an ARRAY so the grammars' constant folders
+        // cannot answer at compile time.
+        class S35Ex : Exception
+        {
+            public int Code;
+            public S35Ex(string m, int c) : base(m) { this.Code = c; }
+        }
+        class S35Sub : S35Ex
+        {
+            public S35Sub(string m) : base(m, 7) { }
+        }
+        class S35Plain
+        {
+            public int N;
+            public S35Plain(int n) { this.N = n; }
+        }
+
+        // The clause that ran, named. The FIRST clause is deliberately one that must
+        // NOT match, so "first clause wins" scores zero here.
+        static string S35Pick(object[] box, int i)
+        {
+            try { throw (Exception) box[i]; }
+            catch (FormatException) { return "format"; }
+            catch (ArgumentNullException) { return "argnull"; }
+            catch (ArgumentException) { return "arg"; }
+            catch (ArithmeticException) { return "arith"; }
+            catch (SystemException) { return "system"; }
+            catch (Exception) { return "exception"; }
+        }
+        // An unmatched value must reach the OUTER try, and the inner finally must
+        // still run on the way past.
+        static string S35Fallthrough(string[] w, int i)
+        {
+            string t = "";
+            try
+            {
+                try { throw new OverflowException(w[i]); }
+                catch (FormatException) { t += "no"; }
+                finally { t += "fin;"; }
+            }
+            catch (OverflowException e) { t += "outer:" + e.Message; }
+            return t;
+        }
+        // A bare `throw;` re-raises the exception being handled, message and all.
+        static string S35Rethrow(string[] w, int i)
+        {
+            try
+            {
+                try { throw new KeyNotFoundException(w[i]); }
+                catch (FormatException) { return "wrong"; }
+                catch (KeyNotFoundException) { throw; }
+            }
+            catch (Exception e) { return "re:" + e.Message; }
+        }
+        // Filters run in clause order, only on clauses whose TYPE already matched,
+        // with the catch parameter bound, and BEFORE any clause body.
+        static string S35Filter(int[] n, int i)
+        {
+            string t = "";
+            try { throw new OverflowException("v" + n[i]); }
+            catch (FormatException) { t += "!"; }
+            catch (OverflowException e) when (S35Note(e.Message) && n[i] < 0) { t += "c1"; }
+            catch (ArithmeticException e) when (S35Note(e.Message) && n[i] >= 0) { t += "c2"; }
+            catch (Exception) { t += "c3"; }
+            return t;
+        }
+        static string S35Log = "";
+        static bool S35Note(string s) { Program.S35Log += "f"; return true; }
+        // Control flow out of a NON-FIRST clause: the clauses now share one emitted
+        // catch closure, so a return/break/continue leaving the second one has to
+        // become the same control signal the first one raises.
+        static int S35RetSecond(object[] box, int i)
+        {
+            try { throw (Exception) box[i]; }
+            catch (FormatException) { return 11; }
+            catch (OverflowException) { return 22; }
+            finally { Program.S35Log += "F"; }
+        }
+        static string S35LoopCtl(int[] q)
+        {
+            string t = "";
+            for (int i = 0; i < 4; i++)
+            {
+                try
+                {
+                    if (q[i] == 0) { throw new FormatException("f"); }
+                    throw new OverflowException("o");
+                }
+                catch (FormatException) { t += "F" + i; continue; }
+                catch (OverflowException) { if (i == 3) { break; } t += "O" + i; }
+            }
+            return t;
+        }
+
+        static void S35()
+        {
+            object[] box = { new FormatException("m0"), new ArgumentNullException("m1"),
+                             new ArgumentOutOfRangeException("m2"), new OverflowException("m3"),
+                             new DivideByZeroException("m4"), new IndexOutOfRangeException("m5"),
+                             new FileNotFoundException("m6"), new ObjectDisposedException("m7"),
+                             new AggregateException("m8"), new S35Ex("m9", 3),
+                             new S35Sub("m10"), new InvalidOperationException("m11") };
+            string[] w = { "boom", "bang" };
+            int[] n = { 0, 1, 2, 3 };
+            int[] q = { 0, 1, 0, 1 };
+
+            // ----- the clause chosen is the first whose type ACCEPTS the value -----
+            // Each of these used to answer "format", the first clause, whatever was
+            // thrown - that is the whole of docs/todo.md 1.1.
+            Program.Check("s35p0", S35Pick(box, n[0]) == "format");
+            // ArgumentNullException : ArgumentException, and the more derived clause
+            // is written first, so ORDER decides.
+            Program.Check("s35p1", S35Pick(box, n[1]) == "argnull");
+            // ArgumentOutOfRangeException : ArgumentException - no clause of its own,
+            // so the base clause takes it.
+            Program.Check("s35p2", S35Pick(box, n[2]) == "arg");
+            // OverflowException and DivideByZeroException : ArithmeticException.
+            Program.Check("s35p3", S35Pick(box, n[3]) == "arith");
+            Program.Check("s35p4", S35Pick(box, n[3] + 1) == "arith");
+            // IndexOutOfRangeException / FileNotFoundException : SystemException
+            // (the latter through System.IO.IOException).
+            Program.Check("s35p5", S35Pick(box, n[3] + 2) == "system");
+            Program.Check("s35p6", S35Pick(box, n[3] + 3) == "system");
+            // ObjectDisposedException : InvalidOperationException : SystemException.
+            Program.Check("s35p7", S35Pick(box, n[3] + 4) == "system");
+            // AggregateException derives from Exception DIRECTLY, not SystemException,
+            // so the SystemException clause must NOT take it.
+            Program.Check("s35p8", S35Pick(box, n[3] + 5) == "exception");
+            // A user class whose base is a BCL exception name is one of those types:
+            // `class S35Ex : Exception` is caught by `catch (Exception)` and not by
+            // `catch (SystemException)`.
+            Program.Check("s35p9", S35Pick(box, n[3] + 6) == "exception");
+            Program.Check("s35p10", S35Pick(box, n[3] + 7) == "exception");
+            Program.Check("s35p11", S35Pick(box, n[3] + 8) == "system");
+
+            // ----- a user exception carries its own name, its base's Message and
+            // its own members -----
+            string uname = "";
+            int ucode = 0;
+            try { throw new S35Sub(w[n[0]]); }
+            catch (S35Ex e) { uname = e.Message; ucode = e.Code; }
+            // ': base(m)' used to set NOTHING - the base was a BCL name, which is not
+            // a class here, so it was dropped with the interfaces and Message read "".
+            Program.Check("s35u1", uname == "boom" && ucode == 7);
+            // A class the program declares that is NOT an exception is still caught
+            // by `catch (Exception e)`: this subset lets a program throw any object.
+            string pn = "";
+            try { throw (Exception) (object) new S35Plain(n[3]); }
+            catch (Exception) { pn = "caught"; }
+            Program.Check("s35u2", pn == "caught");
+
+            // ----- an unmatched value reaches the outer try; finally still runs ----
+            Program.Check("s35f1", S35Fallthrough(w, n[0]) == "fin;outer:boom");
+            Program.Check("s35f2", S35Fallthrough(w, n[1]) == "fin;outer:bang");
+
+            // ----- a bare `throw;` re-raises what the catch is handling -----
+            Program.Check("s35r1", S35Rethrow(w, n[0]) == "re:boom");
+            Program.Check("s35r2", S35Rethrow(w, n[1]) == "re:bang");
+
+            // ----- `when` filters (13.11) -----
+            Program.S35Log = "";
+            // n[1] is 1, so the first filter is false and the second is true: the
+            // ArithmeticException clause runs even though OverflowException is the
+            // more derived match, because its filter declined.
+            Program.Check("s35w1", S35Filter(n, n[1]) == "c2");
+            // BOTH filters were evaluated, in order, and the FormatException clause's
+            // was not - its type did not match, so no filter ran for it.
+            Program.Check("s35w2", Program.S35Log == "ff");
+            Program.S35Log = "";
+            Program.Check("s35w3", S35Filter(n, n[0]) == "c2");
+
+            // ----- control flow out of a non-first clause -----
+            Program.S35Log = "";
+            Program.Check("s35c1", S35RetSecond(box, n[0]) == 11);
+            Program.Check("s35c2", S35RetSecond(box, n[3]) == 22);
+            Program.Check("s35c3", Program.S35Log == "FF");
+            // continue from the second-listed clause, break from the third iteration.
+            Program.Check("s35c4", S35LoopCtl(q) == "F0O1F2");
+
+            // ----- `is` asks the SAME hierarchy the catch clauses ask (12.12.12) ---
+            string isr = "";
+            try { throw new FormatException(w[n[0]]); }
+            catch (Exception e)
+            {
+                if (e is FormatException) { isr += "a"; }
+                if (e is SystemException) { isr += "b"; }
+                if (e is Exception) { isr += "c"; }
+                if (e is OverflowException) { isr += "!"; }
+            }
+            Program.Check("s35i1", isr == "abc");
+            string isu = "";
+            try { throw new S35Sub(w[n[0]]); }
+            catch (Exception e)
+            {
+                if (e is S35Sub) { isu += "a"; }
+                if (e is S35Ex) { isu += "b"; }
+                if (e is Exception) { isu += "c"; }
+                if (e is SystemException) { isu += "!"; }
+            }
+            Program.Check("s35i2", isu == "abc");
+
+            // ----- GetType() on a BCL exception (8.2.3) -----
+            // A BCL exception is a plain {__excname, Message} object, so the __class
+            // walk GetType() does could not see its type at all and answered "Object"
+            // in both halves. The namespaces are spec-derived: all but five of these
+            // types are in System.
+            string gt = "";
+            try { throw new FormatException(w[n[0]]); }
+            catch (Exception e) { gt = e.GetType().Name + "|" + e.GetType().FullName; }
+            Program.Check("s35t1", gt == "FormatException|System.FormatException");
+            string gt2 = "";
+            try { throw new KeyNotFoundException(w[n[0]]); }
+            catch (Exception e) { gt2 = e.GetType().FullName; }
+            Program.Check("s35t2", gt2 == "System.Collections.Generic.KeyNotFoundException");
+            string gt3 = "";
+            try { throw new FileNotFoundException(w[n[0]]); }
+            catch (Exception e) { gt3 = e.GetType().FullName; }
+            Program.Check("s35t3", gt3 == "System.IO.FileNotFoundException");
+            // A user exception keeps its own declared name, as it always did.
+            string gt4 = "";
+            try { throw new S35Sub(w[n[0]]); }
+            catch (Exception e) { gt4 = e.GetType().Name; }
+            Program.Check("s35t4", gt4 == "S35Sub");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2291,6 +2540,7 @@ b";                                                   // verbatim keeps the newl
             Program.S32(); // SECTION-CALL 32
             Program.S33(); // SECTION-CALL 33
             Program.S34(); // SECTION-CALL 34
+            Program.S35(); // SECTION-CALL 35
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
