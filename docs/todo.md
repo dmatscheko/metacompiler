@@ -4,8 +4,8 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-05 at `e284185`; **eighty-one items closed since**, in eight
-rounds. Chapter 1 has been emptied and refilled eight times; chapter 9 keeps only
+Rebuilt 2026-08-05 at `e284185`; **ninety-nine items closed since**, in nine
+rounds. Chapter 1 has been emptied and refilled nine times; chapter 9 keeps only
 what those rounds taught.
 
 Two conventions, and they are the point of the file:
@@ -20,10 +20,13 @@ Two conventions, and they are the point of the file:
 >
 > - **The item is wrong.** Six of ten on the first round. Three items later were
 >   wrong about *which engine* was broken; two named a defect already fixed.
-> - **The item is too small** — now the common case. On three rounds nearly every
->   agent found MORE than its item named: one named a single kotlin defect where
->   there were ten, another one `yield from` consequence where there were five.
->   Five of those extras were live halves divergences `--cross` had never reached.
+> - **The item is too small** — now the common case, and on the ninth round it was
+>   NINE items of ten. An extension did not lose a type's static overloads, it
+>   REPLACED all of them including methods and subscripts; one csharp item named
+>   one language of two; one ruby bullet named one String method of seventeen; go's
+>   four residues came with six more on the same code path; kotlin's one range
+>   defect came with eight. Many of those extras were live halves divergences
+>   `--cross` had never reached.
 > - **The item's PRESCRIPTION is wrong while its diagnosis is right.** Four items
 >   in one round told you how to fix them and were wrong: one regressed two shapes
 >   when implemented as written, one gave a false reason, one prescribed a design
@@ -42,9 +45,11 @@ Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial`
 small machine):
 
 ```
-matrix 351/351 · --full 7,509 assertions, 0 halves disagree · --cross 119/0
-clang-check 16/16 none held · native-full 15/15 · go test ok
-gen-all 15/15 clean · -freeze a fixed point · bench: no row outside its spread
+matrix 351/351 · --full 7,766 assertions, 0 halves disagree · --cross 119/0
+clang-check 16/16 none held · go test ok · gen-all 15/15 clean
+native-full 15 languages / 29 native programs (ratchet AND feature matrix), 0 held
+shape-scan 15 groups / 481 recoverable · -freeze a fixed point
+bench: 15 rows, no row outside its spread
 ```
 
 **Run `tests/gates.sh --bench` for anything that touches layer 2 or the floor.**
@@ -76,126 +81,105 @@ paired runs. Both were draw-set artifacts of the bimodal layout distribution
 (manual chapter 4). **Raise `--draws` until two paired runs agree, and quote the
 spread beside the median.**
 
-**On a loaded machine pass `--timeout 600` to `./test.sh --full`.** The js compiler
-half is ~19 s idle and **82 s at load 16** against a 120 s default. This fires
-repeatedly with several agents running; a `RUN-FAILED … exit 124` in a language
-your change does not touch is this, not a divergence — re-run before believing it.
+**`tests/gates.sh` now passes `--timeout 600` itself, and a short read is a
+FAILURE.** It used to be silent: if the FIRST probe run is killed, `full_probe`
+returns without writing the count, both halves record `-`, the two halves
+therefore AGREE, and the summary prints a smaller number as though it were the
+answer — observed at **437 assertions below baseline with no failure reported
+anywhere**. `test.sh` now emits `RUN-FAILED` on a killed first run, and `gates.sh`
+checks the total against a recorded FLOOR (`FULL_ASSERTIONS`) and names any
+language whose count is `-`. **Running `./test.sh --full` by hand still needs
+`--timeout 600` on a loaded machine** — the js compiler half is ~19 s idle and
+82 s at load 16 against a 120 s default.
 
 ---
 
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give. Each has a toolchain here that settles
-it. **Section 1 was emptied for the eighth time** — all ten items are in
-chapter 9. What follows is what closing them turned up, all **[V]** on `468f2eb`
-unless marked otherwise.
+it. **Section 1 was emptied for the ninth time** — all ten of the previous round's
+items are in chapter 9. What follows is what closing them turned up, all **[V]**
+on `4d54d60`.
 
-**The failure mode moved again, and this time it was the PRESCRIPTIONS.** Every
-item's *defect* was real except where noted, but four items were wrong about the
-**fix**, and that is a new place to be careful:
+**The failure mode this round: the item was TOO SMALL, nine times out of ten.**
+Every defect was real and every diagnosis held, but the swift item named a third
+of its defect (extensions REPLACED a type's overloads rather than only losing the
+statics), the csharp item named one language of two (java had the identical
+divergence), ruby's 1.10 bullet named one String method of seventeen, and the go
+item's four residues came with six more on the same code path. Two prescriptions
+were still wrong — swift's "the same `initIdxs` treatment" does not close it, and
+1.7's fix is impossible where the item points. **Probe the fix as well as the
+defect, and sweep the surface around an item rather than fixing its example.**
 
-- **1.1 csharp told you how to close the operator bullet, and doing that
-  regressed two shapes.** "Decline the user operator when no candidate accepts
-  the operands" using the signature machinery — tested per parameter with
-  `csIsType`, a null operand stopped selecting `operator ==(V,V)` (ECMA-334
-  10.2.7 makes null convertible to any reference type, and `is` says false) and
-  an implicit numeric conversion stopped selecting a `double` parameter.
-- **1.5 ruby gave a REASON that was false.** "Binding one needs a variadic
-  closure and MetaJS has no `arguments`" — MetaJS *has* `arguments`;
-  `metajs-to-llvm-ir.abnf:650` binds it in every compiled function and
-  `lib/go-rt.metajs:1709` already builds a bound receiver with it.
-- **1.6 kotlin prescribed a DESIGN that is not available.** "Carry the receiver's
-  origin on the value" — `setMember` rejects every non-numeric key on a
-  `*jsArray`, in the twin and in the floor, so a materialized progression cannot
-  be marked at all. The *syntactic position* decides instead.
-- **1.2 swift declared one bullet impossible and it was not.** "Needs layer 2 to
-  build a closure inside `js_swadoptdeep` and cannot" — true of layer 2, and
-  irrelevant: the emitter knows every function-type leaf at compile time and can
-  pass in a map of makers.
+### 1.1 `Math`'s MEMBERS diverge: a live run-vs-native defect in three languages **[V]**
+The floor seeds eleven methods; the grammar host and the Go twin also carry
+`sin cos tan exp log log2 log10 cbrt atan2 hypot`. lua, ruby and php read the
+**host** `Math` out of the root scope, so `puts Math.sin(1)` answers
+`0.8414709848078965` under `llvm.Run` and **`js runtime error: unknown method
+'sin'` in the native binary** — reproduced at `1367c23`. Converging means either
+soft-float transcendentals in the floor or trimming the two upper engines. This is
+the largest remaining live divergence in the tree.
 
-And **2.5 was 7 of 11 bullets already fixed**, including one whose stated blocker
-("`excCatch` binds exactly one name") was simply false.
+### 1.2 java: a read past the end of an array answers `undefined` **[V]**
+Instead of throwing `ArrayIndexOutOfBoundsException`, in all four engines. It is
+the real root of the closed 1.2 — converging the *value* on NaN was the cheap fix
+and is done; **throwing is the correct one**, and needs the emitter's index path
+plus the twin. C#'s equivalent errors natively with a raw *"list index out of
+range"* rather than an `IndexOutOfRangeException`.
 
-**So: probe the fix as well as the defect.** An item's diagnosis and its
-prescription are two different claims and this round the prescriptions were less
-reliable than the diagnoses.
+### 1.3 ruby residue, two of them live halves divergences **[V]**
+- **`super(m)` inside a user `Exception` subclass' `initialize` aborts both
+  compiled halves** (`unknown super method 'initialize'`) while the interpreter
+  runs it. Common code.
+- **A top-level `return` ends the program in the compiled halves (as MRI does) and
+  does not in the interpreter.**
+- The modifier `rescue` does not catch in any engine: `raise "a" rescue 7` still
+  raises, `Integer("z") rescue 5` yields the *exception object*.
+- `Exception#inspect` / `p exc` is unimplemented; MRI says `#<RuntimeError: m>`.
+- A bare `puts` on the line after a `{ }` block takes the block as its argument.
+- Two-argument index **assignment** (`a[1, 2] = 9`) writes one element where MRI
+  replaces the slice; the read path is fixed, the write path goes through
+  `makeTargetRef`/`js_rset`, which carry one key.
+- A bounded range with a **negative endpoint in a variable** (`r = 1..-1; s[r]`)
+  is approximate in the compiled halves — 5 of 91 probe rows, against 91 of 91
+  before `8ae225b`; closing it needs a representation change for Range.
+- `bytes`, `tr`, `center`, `ljust`/`rjust`, `count`, `delete` are missing from all
+  three engines.
 
-### 1.1 No `Error`/`TypeError`/`ReferenceError` GLOBALS exist in any engine **[V]**
-`new TypeError("x")` is *variable not defined* in all six js/ts engines. So the
-BigInt mix error closed in `bed05be` is caught as a **string**: `e.message` and
-`e instanceof TypeError` are unavailable, matching the precedent already set by
-the iterator-throw `TypeError`. This is the ceiling on every "make X catchable"
-item, including 3.2, and it is one value-model decision away from being fixed
-properly (a real exception class hierarchy for js, which python and ruby already
-have).
+### 1.4 python: a bound builtin's `__name__`, all three engines wrong **[V]**
+`getattr([1,2], "count").__name__` is `<lambda>` in the interpreter and
+`None`/`False` in both compiled halves; CPython says `'count'`. Same family as the
+closed 1.9 but a different table — `pyBoundBuiltin` mints a fresh closure that
+neither table knows.
 
-### 1.2 csharp: `undefined + int` is a live run-vs-native divergence **[V]**
-`NaN` in the interpreter and `llvm.Run`, **`1` natively**: `rtjNum` in
-`languages/lib/runtime-jvm.metajs` answers 0 for undefined where the twin's
-`toNumber` answers NaN. Repro: `dynamic d = obj; d.Missing + 1`. **Deliberately
-not fixed in `1260832`** because that file is shared with java and the correct C#
-answer is a `RuntimeBinderException` neither engine can raise — so closing it
-means deciding whether java should move too, or splitting the body.
+### 1.5 kotlin range surface residue **[V]**
+`"abcdef".substring(1..3)` ignores the range and answers `"abcdef"` (Kotlin:
+`"bcd"`); `"abcdef".slice(1..3)` answers the *list* `[b, c, d]` (Kotlin: `"bcd"`);
+`(1..5).reversed()` answers a `List` where Kotlin answers an `IntProgression`;
+`(1..5).random()` exists in no engine. All pre-existing, all three engines agree.
 
-### 1.3 csharp: a `(object)a == null` guard inside a user `operator ==` recurses forever **[V]**
-Stack overflow, reproduced identically at `d473319`, so pre-existing. There are no
-static types here to make the cast suppress the operator, which is exactly what
-C# uses it for — this is the idiomatic null-guard, so it is likely to be met
-again.
+### 1.6 csharp: `v[0].Equals((object) v[1])` aborts the compiler half **[V]**
+*unknown method 'equals' on an instance*, while the interpreter accepts it. Found
+while writing the operator section; the assertion was dropped rather than shipped
+red.
 
-### 1.4 An extension's static overloads still lose the type's own **[V]**
-`emitExtMembers` restarts the static-overload counter at 0, so
-`extension S { static func f(_:Int) }` on a type already declaring `static func f`
-drops the type's. swift, pre-existing "last wins" for that shape and NOT widened
-by `fc635bb`, which fixed the non-extension case. Closing it needs the same
-`initIdxs` treatment initializers already get.
+### 1.7 swift: `typeInfo` is keyed by the BARE type name **[V]**
+`struct A { struct Inner {…} }` and `struct B { struct Inner {…} }` share one
+record, so the second `Inner`'s memberwise initializer lands on a key nothing
+looks up — the compiler half aborts where the interpreter and `swiftc` are fine.
+Pre-existing and deliberately not widened by `adf8a77`. Needs a qualified type key
+threaded through `typeRec`/`superName`/`superMethGroup`.
 
-### 1.5 go: four residues, each with `go` as the oracle **[V]**
-- an **iota-group constant as an array length** (`const (R = iota; G; B); var a [B]int`
-  is 0 where go says 2) in all three engines — `cBindSpec` has no resolved value
-  for a spec with no `=`, so it needs the iota re-emission machinery;
-- a **struct-valued map key** (`Named{Pair{1,2}: "p"}`) misses on lookup, because
-  `dictFind` compares by identity; base cannot even parse the literal;
-- the **compiler's package object is a snapshot**, so a later write to a package
-  var is invisible through the qualifier while the interpreter (which binds the
-  scope) is live. Making the compiler live needs the package object to *be* a
-  scope, and a scope handle is not something `js_get` can read a member off;
-- **struct type names are one flat table** across packages (`structs` /
-  `structFields`), so two packages declaring the same type name collide.
+### 1.8 js/ts: three `fail` aborts where node throws a catchable error **[V]**
+A member read on `null`/`undefined`, an undefined variable, and
+`fail("TypeError: Promise resolver is not a function")` are uncatchable host
+aborts. **The blocker is gone** — `4d54d60` gave js/ts a real Error hierarchy — so
+what remains is deciding which `fail` sites become throws. See 3.2, which this
+unblocks. Related and pre-existing: the BigInt mix message keeps an
+`(operator '+')` suffix node does not print, and `typeof` a class descriptor is
+`"object"` where node says `"function"`.
 
-### 1.6 ruby: `Kernel#lambda { |x| }.call` is not arity-checked **[V]**
-`->(x){}.call` is, after `310e6b6`. The block's shape reaches `lambdaWrap` /
-`js_rlambda` only through the arity registry, which is gated on the program naming
-`arity` — and using that gate for *correctness* would make behaviour depend on it.
-Closing it means carrying the block's `kinds` from the literal site into
-`Kernel#lambda` in both engines and wrapping the closure: ~60–80 lines over four
-files, and it changes the identity of a `Kernel#lambda` result.
-
-### 1.7 ruby: an uncaught exception reports `[object Object]` **[V]**
-In both compiled halves; the interpreter prints the message. Pre-existing at
-`d473319`, in shared machinery, and reachable by any uncaught `raise` — so it is
-the first thing a user sees when their program is wrong.
-
-### 1.8 kotlin: an empty range's `first` is a live halves divergence **[V]**
-`(5..1).first` is **5** in the interpreter and **`kotlin.Unit`** in both compiled
-halves. Not fixed in `deddac4` and deliberately not asserted, because no single
-expected value holds for both halves: it is unrecoverable from an empty
-materialized list without changing how a progression is represented. Same family
-as 2.4's "the value model has one representation per kind".
-
-### 1.9 python: `len.__name__` answers nothing **[V]**
-The builtin-render table added in `468f2eb` deliberately does not feed `__name__`,
-because doing so would desynchronise the def-name table that answers a *user*
-function's `__name__`. One line if the two tables are reconciled.
-
-### 1.10 Small gaps met in passing, each cheap **[V]**
-ruby `String#start_with?` is unimplemented in both compiled halves (the
-interpreter has it) and `s[0, 6]` answers one character instead of the substring
-in all three; kotlin's unqualified `toString()` on a `Pair`/`Map.Entry` misses in
-all three, and `mr.range.toString()` gives `[object Object]`. Also java
-`Integer.toHexString`, `Double.NaN`, `Boolean.valueOf`; swift
-`Float.greatestFiniteMagnitude` / `.leastNonzeroMagnitude`. Each is a one-line
-binding or close to it; they are grouped because none is worth its own item.
+---
 
 # 2. Cross-engine defects and latent traps
 
@@ -218,10 +202,17 @@ answer, so the whole mechanism came out; `itc20`/`itc24` pin the gap with the re
 beside them. **Any future attempt needs a per-coroutine stack, not a per-program
 one.**
 
-### 2.2 `-rdynamic` will break the first Linux native build that uses a generator **[V]**
-`gen_create` finds `coro_entry` via `dlsym` with no link flag, which works on
-darwin; linux needs `-rdynamic` on the clang line in `abnf/llvmlink.go`. Nothing
-here builds on linux to prove it, and there is no `rdynamic` anywhere in the repo.
+### 2.2 `rt_bump` walks off the end of the arena instead of aborting **[V]**
+`languages/lib/bash-rt.c`'s `arena[4194304]` and `batch-rt.c`'s `AR[2097152]` are
+bump-allocated with **no bounds check** and never freed. Measured: `tests/bench/mod.sh`
+at 40,000 iterations exits **139 having printed nothing** (~202 bytes/iteration —
+`$(( ))` re-parses the accumulator's decimal text and `rt_int2str` writes a fresh
+arena string per assignment); last count that runs ~20,750. `mod.sh` therefore
+runs 10,000, and `mod.bat` keeps 40,000 at only a **1.6×** margin (~32
+bytes/iteration, ceiling ~65,468). A bounds-checked `rt_bump` that aborts with a
+message would turn a silent segfault into a diagnosis — and this is exactly the
+manual's "a crashing binary looks fast" trap, which fired live while the bench row
+was being added.
 
 ### 2.3 `with` is the one js construct that cannot be lowered honestly **[V]**
 ~170 lines, and size is not the blocker. The INTERPRETER can implement it exactly
@@ -312,9 +303,13 @@ hashability becomes a real rule (today a list is a valid dict key).
 and its two surprises (key aliasing needs two hops; `is` under-reads, so the box
 must be a pointer) are the reusable half.
 
-### 3.2 A catchable `NameError` under the compiler **[U]**
+### 3.2 A catchable `NameError` under the compiler — **NOW UNBLOCKED** **[V]**
 The site is `js_scope_get`, shared by all sixteen languages and pinned by
-clang-check and the SHOULD-ABORT rows.
+clang-check and the SHOULD-ABORT rows. **The ceiling that blocked it is gone**:
+`4d54d60` gave js/ts a real Error class hierarchy, and python and ruby already had
+one, so a raised value can now BE a `ReferenceError`/`NameError` rather than a
+string. What remains is deciding which `fail` sites become throws in each
+language, and doing it without moving the SHOULD-ABORT rows. See 1.8.
 
 ### 3.3 Part B: moving floor bodies into layer 2 has no landed move **[U]**
 The floor→layer-2 upcall costs **120 ns** and is affordable; a nine-iteration
@@ -375,34 +370,23 @@ by having done B: the extern surface is identical.
 
 The suite's blind spots, in the order they are likely to hurt.
 
-### 4.1 The two MetaJS halves bind different host globals **[V]**
-`metajs-interpreter.abnf` binds eleven; the compiler half's `standardJSBindings`
-(and the C floor, which matches the *compiler*) also bind `Infinity NaN Array
-Object byteLen sprint rawSet`. `tests/metajs-test-full.js` asserts only the
-intersection, so nothing can see it. Same family: `"ß".toUpperCase()` is `"SS"` in
-the interpreter (real JS) and `"ß"` in the compiler and floor (Go's simple
-mapping).
+### 4.1 Three native programs are still not covered **[V]**
+`tests/bash-test-features.sh` **does not exist** — bash is the only native-full
+language with no feature file, and its layer 2 is a C runtime (`bash-rt.c`) that
+only the ratchet exercises. `batch` has never been in `native-full.sh`'s ROWS at
+all despite having `exePath` and a ratchet (`clang-check` does native-run it, so it
+is an undocumented asymmetry rather than a hole). And the four toys (brainfuck,
+calculator, lisp, tinyc) have feature files never run natively — deliberately, as
+they do not follow the `"…checks, N failures"` + `exit(fails)` protocol and have no
+layer 2, so covering them needs expected-output comparison instead.
 
-### 4.2 Two `die("PROBE-C <<")` probes are wired into the shipping floor **[V]**
-`runtime.c:2410` and `:2417`. They are the fatal probes that measured the
-shift-result-type claim, which fired **zero** times. Document them at the site or
-remove them; they currently read as leftover scaffolding.
-
-### 4.3 A FEATURE-MATRIX assertion is never RUN natively — only built **[V]**
-The matrix's native rows are `-exe` with no run, and `mec … -exe PATH` only BUILDS
-(manual 7.10). So a fix asserted **only** in `tests/<lang>-test-features.<ext>`
-never executes in a native binary in any gate: `clang-check` and `native-full`
-both run the **ratchet** file, `tests/<lang>-test-full.<ext>`.
-
-**This is not theoretical.** On the `b3eb5c3` round a layer-2 `Hash#each` defect —
-in `ruby-rt.metajs`, i.e. the half only a native run can see — survived every one
-of the seven gates and was found because the agent ran the binary by hand. It was
-closed only after a ratchet SECTION was added.
-
-**So: a layer-2 or floor fix needs a ratchet section, not just a feature-matrix
-assertion.** Two ways to close the hole properly, neither started: give the
-feature-matrix files native rows that RUN (the `SHOULD ABORT` rows already prove
-the mechanism exists), or make `native-full.sh` run both files per language.
+### 4.2 The goja full-case-mapping fix is pinned in metajs only **[V]**
+`1367c23` routed goja's `toUpperCase`/`toLowerCase` through the same
+`strings.ToUpper` the frozen engine uses, which closed the divergence in **every**
+language's interpreter half at once (`ruby#upcase`, `python .upper()`, …). Only
+`tests/metajs-test-full.js` asserts it, so nothing would catch a regression in the
+others. Related and harmless-but-invisible: `Math.random` is `function` under goja
+and `undefined` under `-frozen` in the grammar host.
 
 ---
 
@@ -426,7 +410,11 @@ All small. All verified. The shape scan is the measure — `go run ./tools/shape
 > sites, and only the call sites decide. **Measure with `tests/gates.sh --bench`
 > before and after — the seven correctness gates cannot see a slowdown.**
 
-`-min 60` is finished at 2 groups, both deliberate declines (manual §7.12).
+**`-min 60` is NOT "finished at 2 groups" — that number predates `a69a4fd`**,
+which fixed shape-scan's brace counting (one-line bodies had been running on into
+the next function). It is **34** today, and the default `-min 140` tier is **15
+groups / 820 lines occupied / 481 recoverable** over 2,200 bodies — the numbers
+`tests/gates.sh` now ratchets. Lowering them is this item's job.
 Note that the 4-line `*Arg` bodies below are the *same shape* as the ones that
 regressed, so the intra-file merges are the safe half of this item and the
 cross-language ones need the measurement.
@@ -508,18 +496,7 @@ silently changes what the grammar accepts, so it needs its own validated pass.
 
 Ordered by how much time each would save. The first one is measured and ready.
 
-### 7.1 Should `test.sh` default to 2× ncpu jobs? **[V]**
-`test.sh` defaults `JOBS` to `sysctl -n hw.ncpu`, which does **not** saturate the
-machine: `./test.sh` 35.0 s at 768% CPU, `-j 32` **25.4 s at 1143%**, same
-329/329. The other two groups do not benefit and should keep the default
-(`--full` 95 s → 91 s, tail-bound on ~16 ratchet files; `--cross` 12 s both ways).
-Decide whether the matrix's default becomes `2 * ncpu` or whether `gates.sh`
-passes `-j` for the matrix only, and confirm on a second machine that
-oversubscription introduces no flakiness or memory pressure — the entries are
-independent subprocesses, so the mechanism is the one already used at 16-way, but
-this was a single measurement.
-
-### 7.2 Re-measure lua's hash-index buy-backs with draws **[V]**
+### 7.1 Re-measure lua's hash-index buy-backs with draws **[V]**
 The `scope_find` hash index costs lua **~+4%** — real, re-measured twice (it
 exceeds both rows' spreads, `c` as a control moved +0.02%, and a 5× longer loop
 gives the same percentage, so it is steady-state loop cost). Its two proposed
@@ -535,48 +512,31 @@ against its own 2.05% spread with NO lua change anywhere in the round — record
 in `tests/bench/baseline.txt` rather than smoothed. lua is the noisiest row
 relative to its own size, so this item needs more draws than most.
 
-### 7.3 Per-language coverage of the floor **[U]**
+### 7.2 Per-language coverage of the floor **[U]**
 The instrumentation that found 24 unreached floor bodies was written once and
 thrown away. Keeping it as `tools/floor-coverage` would make "is this body dead or
 untested?" answerable at any time — **it is the question that gates Part B (3.3)**,
 because a body no test reaches is a body no move can be validated against.
 
-### 7.4 A `--why` flag for the emitters **[U]**
+### 7.3 A `--why` flag for the emitters **[U]**
 Understanding which extern an emitter chooses for an operator means reading
 thousands of lines of grammar, repeatedly. A flag that prints the extern chosen
 per AST node would make layer-2 work dramatically faster.
 
-### 7.5 Make MetaJS's dialect gaps loud **[U]**
+### 7.4 Make MetaJS's dialect gaps loud **[U]**
 No exponent literal, no `toPrecision`, typed locals, ASI differences: each is
 discovered by a confusing failure. A `-verify` pass over `lib/*.metajs` that names
 them would pay for itself immediately. (`docs/abnf-dialect-gotchas.md` lists them;
 nothing enforces them.)
 
-### 7.6 Make the frozen-snapshot rule mechanical **[U]**
-"Did you `-freeze` after touching the emitter?" is a question a script should ask.
-`tests/gates.sh --freeze` checks it on demand; a pre-commit hook would remove the
-class entirely.
-
-### 7.7 SEVEN languages have no bench row at all **[V]**
-`tests/bench/` has **no swift, dart, php, js, typescript, bash, batch or metajs
-program**, so seven languages' layer 2 has no performance gate whatsoever.
-
-Two measured cases of what that costs. `673a8b1` cost ~20% on a `yield*`-heavy
-workload (5.35 s → 6.40 s on 300,000 steps) with **no gate able to catch it**. And
-in `a68e16d` a swift change cost **+10.3%** in collections (`charAt` allocates a
-one-character string in the floor); the agent found it BY HAND because no bench row
-loads `swift-rt.ll`, and a `mod.swift` would have caught it automatically.
-
-Both agents measured and disclosed; the next one might not. Add the programs in
-the shape of the others and record their rows **by hand** — `--record` rewrites
-every row and deletes the header, which is where all the reasoning lives (see
-`tests/bench/mod.go` for how the go row was added).
-
-### 7.8 Wire the shape scan into CI with a ratchet **[V]**
-`go run ./tools/shape-scan -max 2` fails above two groups. Nothing runs it
-automatically.
-
----
+### 7.5 Confirm the matrix job count on a second machine **[V]**
+`1fd6293` made the matrix default to `2 * ncpu` on a sign test of six
+interleaved A/B pairs (6 of 6 wins, p = 0.031) — but every timing was taken
+under load 40-70 from other agents, and twelve matrix runs at the new setting
+were 351/351 with no flakiness **on this machine only**. Confirm on a second one.
+Related, from the same commit: on glibc < 2.34 `dlopen`/`dlsym` live in `libdl`
+and `pthread_create` in `libpthread`, so such a system needs `-ldl -lpthread`
+beside the new `-rdynamic`. Recorded in the code comment rather than guessed at.
 
 # 8. Reference-corpus gaps
 
@@ -631,6 +591,58 @@ ranges.
 ---
 
 # 9. Closed — do not re-open
+
+## The ten closed in `adf8a77`..`4d54d60` — ALL of chapter 1, plus 2.2 and all of 4 and 7's tooling
+
+`+257 assertions` (7,509 → 7,766), ten commits. Every defect was real; **nine of
+ten items were too small**, and two prescriptions were wrong while their diagnoses
+held.
+
+- **swift** — an extension did not ADD overloads, it REPLACED them: instance
+  methods and subscripts too, every row a live divergence the interpreter got
+  right. Plus a second `extension Int {…}` making the first block unreachable (an
+  ABORT), and a static subscript testing arity at the wrong argument offset —
+  **wrong at base with no extension involved**.
+- **csharp + java** — `undefined + int` read three different ways in three engines
+  (`1 0 false` / `NaN 0 false` / `1 1 true`); java had the identical divergence, so
+  splitting the shared body would not have closed it. Real java THROWS there, so
+  neither answer was the language's and the engines were made to agree instead. The
+  `(object)a == null` recursion was fixed by reading the operand's TEXT after
+  recognising the cast by thunk IDENTITY proved to be a goja-vs-`-frozen`
+  divergence — goja exports a JS function as a fresh Go closure.
+- **go** — four residues, and the item was wrong about which engine twice; its
+  stated blocker for the package snapshot was false (a scope handle is an ordinary
+  value). Six more found on the path, including a keyed nested struct element that
+  was a live divergence, and a `-frozen`-only failure caused by a typed MetaJS
+  local holding both a thunk and a brace group.
+- **ruby** — `[object Object]` on every uncaught exception, fixed by having the
+  program report it (the shared handler serves sixteen languages); `->(x){}` was
+  not arity-checked ON THE UPPER BOUND either, in every `def`; `start_with?` was
+  one of SEVENTEEN String methods that aborted both compiled halves.
+- **kotlin** — ranges became a first-class progression instead of a materialized
+  list, and eight more defects fell out, including `3 in (1..10 step 4)` where the
+  INTERPRETER was the wrong one. Six existing assertions had been pinning wrong
+  expectations.
+- **js/ts + python** — a real Error hierarchy (the recorded ceiling on every
+  make-X-catchable item), which unblocked 3.2; a default derived constructor
+  DROPPED ITS ARGUMENTS in all four engines; and two error classes were built,
+  measured at +3.40% on a paired sign test, and declined.
+- **4.1 / 4.2** — the three engines bound different host globals in BOTH
+  directions, now converged and pinned by a Go test that reads all three out of
+  their own sources. And the `PROBE-C` guards whose "fired zero times" result the
+  file had recorded as evidence were a **tautology** — the line above them assigned
+  `w = si_width_of(l,l)` and the probe tested `si_width_of(l,l) != w`.
+- **4.3** — `native-full` runs the feature files too; six php layer-2 externs had
+  been reachable by ZERO gates. Proved by sabotage, and the gate got 3× faster.
+- **Tooling** — `-rdynamic` (the item named the wrong file), the shape ratchet (the
+  item's `-max 2` was stale, and the group count alone is not sufficient — a third
+  copy of an already-grouped body does not move it), per-group job defaults, a
+  pre-commit hook, and five new bench rows.
+
+**Three instruments were wrong, and finding that was worth more than several of
+the fixes.** The ratchet could not see a killed run; the shape ratchet could not
+see a third copy; and a recorded fatal probe could not fire. **Whenever a gate
+reports "nothing", ask what it would do if the thing were there.**
 
 Eight rounds of ten, `e284185`..`10c6e58`, taking the ratchet to **7,509
 assertions**. Per-item detail is in this file's git history and in the commit
