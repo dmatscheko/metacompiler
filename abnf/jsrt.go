@@ -445,6 +445,14 @@ type jsrt struct {
 	// and setMember take their original path and never look for an accessor.
 	accessorCount int
 
+	// jsErrClasses is the Error hierarchy the js/ts emitter built and handed over
+	// with js_jserrreg, keyed by name. The runtime's own raises (bigRaise) build
+	// their instance from THESE class objects rather than from a second set of
+	// their own, which is what makes `e instanceof TypeError` hold for an error
+	// the engine raised. Stays nil for every grammar that is not js or ts.
+	// docs/todo.md 1.1.
+	jsErrClasses map[string]*jsObject
+
 	// hasBigInt says whether a BigInt value was ever created in this runtime.
 	// BigInt is the only value type the arithmetic externals cannot handle as a
 	// double, so while this is false they take exactly their original path and the
@@ -13845,7 +13853,10 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 			panic(r)
 		}
 		if exc, ok := r.(*jsThrown); ok {
-			panic(jsProgramPanic{"js runtime error: uncaught exception: " + rt.toString(exc.value)})
+			// jsvString, not toString: a thrown Error INSTANCE renders through
+			// its own Error.prototype.toString, so an uncaught engine error
+			// still reports "TypeError: ..." and not "[object Object]".
+			panic(jsProgramPanic{"js runtime error: uncaught exception: " + rt.jsvString(exc.value)})
 		}
 		panic(jsProgramPanic{fmt.Sprint(r)})
 	}()
@@ -14750,6 +14761,13 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			if n, has := o.props["__name"]; has {
 				return n
 			}
+		}
+		// docs/todo.md 1.9: the BUILTIN table is asked too, and FIRST, exactly as
+		// pyFuncRender asks it - len.__name__ is 'len' where before this fell
+		// through to getMember and answered None. The two tables are keyed by the
+		// closure VALUE, so a user `def len(...)` still answers its own name.
+		if c, ok := rt.pyBuiltinRender[obj]; ok {
+			return strings.TrimPrefix(c, "*")
 		}
 		if fn, ok := rt.pyFuncNames[obj]; ok {
 			return fn
@@ -15978,6 +15996,12 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 			if _, has := o.props["__name"]; has {
 				return true
 			}
+		}
+		// docs/todo.md 1.9: both tables, matching pyGetAttr above - hasattr must
+		// answer exactly what getattr can answer, or the three-argument getattr
+		// (which asks this first) hands back its default for a readable name.
+		if _, ok := rt.pyBuiltinRender[obj]; ok {
+			return true
 		}
 		if _, ok := rt.pyFuncNames[obj]; ok {
 			return true

@@ -132,8 +132,12 @@ func bigFromLiteral(s string) (*big.Int, bool) {
 // iterator-throw TypeError. Every rt.fail in this file goes through here except the
 // "invalid BigInt literal" one, which is a malformed-input abort and not reachable
 // from a program that parsed. docs/todo.md 2.6.
+// Since docs/todo.md 1.1 the value is a real Error INSTANCE whenever the emitter
+// registered the hierarchy (jsErrFromText finds the class the message text
+// already names), so e.message and `e instanceof TypeError` answer; `"" + e` is
+// unchanged, because Error.prototype.toString rebuilds exactly this text.
 func (rt *jsrt) bigRaise(format string, args ...interface{}) {
-	panic(&jsThrown{value: fmt.Sprintf(format, args...)})
+	panic(&jsThrown{value: rt.jsErrFromText(fmt.Sprintf(format, args...))})
 }
 
 // bigMixFail is the spec's TypeError for an operator that got one BigInt and one

@@ -102,7 +102,7 @@ FULL_TIMEOUT=600
 # in flight and uncommitted when it was measured, and a floor must not be set from
 # a tree that may not be the one that gets committed. The gate says "+95, RAISE
 # FULL_ASSERTIONS" until someone does; that message IS the ratchet doing its job.
-FULL_ASSERTIONS=7720      # recorded 2026-08-08 at 1367c23
+FULL_ASSERTIONS=7766      # recorded 2026-08-08 after the ten-item round
 
 # The shape ratchet: layer-2 bodies in languages/lib/*.metajs that are identical
 # modulo names, ACROSS FILES, at the default -min 140. It is the only measure of

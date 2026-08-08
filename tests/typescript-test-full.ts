@@ -1837,6 +1837,123 @@ function s37(): number {
     return 0
 }
 
+// ===== SECTION 38: the Error hierarchy =====
+// docs/todo.md 1.1. Before this, `new TypeError("x")` was *variable not defined*
+// in all six js/ts engines, so every error the engine raised had to be caught as
+// a STRING - e.message and `e instanceof TypeError` did not exist, and that was
+// the stated ceiling on every "make X catchable" item. The classes are ordinary
+// {__isclass, __name, __super, __ctor} descriptors, so instanceof, `new` and
+// `extends` are the machinery that was already there.
+//
+// Every row below is node v24's answer, except s38keys - see the comment there.
+function s38(): void {
+    var xs = ["boom", 1n, 2, 255, "zz"]
+
+    var te = new TypeError(xs[0])
+    check("err1", te.name === "TypeError" && te.message === "boom")
+    check("err2", te.toString() === "TypeError: boom" && ("" + te) === "TypeError: boom")
+    // stack has no frames here (no engine in this project has a frame walker),
+    // but it starts with exactly the line node's does, which is what the
+    // `e.stack.split("\n")[0]` idiom reads.
+    check("err3", typeof te.stack === "string" && te.stack.split("\n")[0] === "TypeError: boom")
+    check("err4", te instanceof TypeError && te instanceof Error)
+    check("err5", !(te instanceof RangeError) && !(te instanceof ReferenceError))
+
+    // The five. EvalError and URIError are deliberately absent - see the
+    // jsErrClassNames table in the emitters for the measurement that decided it.
+    var mk = [new Error(xs[0]), new TypeError(xs[0]), new RangeError(xs[0]),
+              new ReferenceError(xs[0]), new SyntaxError(xs[0])]
+    var nm = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError"]
+    var okn = 0
+    var oki = 0
+    for (var i = 0; i < mk.length; i++) {
+        if (mk[i].name === nm[i] && ("" + mk[i]) === nm[i] + ": boom") { okn = okn + 1 }
+        if (mk[i] instanceof Error) { oki = oki + 1 }
+    }
+    check("err6", okn === 5 && oki === 5)
+
+    // No message: `new Error()` and `new Error(undefined)` both leave "", and
+    // toString then answers the bare name.
+    var e0 = new Error()
+    check("err7", e0.message === "" && e0.toString() === "Error" && e0.name === "Error")
+
+    // A user subclass. name comes from the NEAREST BUILTIN ancestor, because in a
+    // real engine it lives on the prototype and E.prototype does not shadow it.
+    class S41MyErr extends Error {}
+    var m1 = new S41MyErr(xs[0])
+    check("err8", m1.message === "boom" && m1.name === "Error" && ("" + m1) === "Error: boom")
+    check("err9", m1 instanceof S41MyErr && m1 instanceof Error && !(m1 instanceof TypeError))
+    class S41TErr extends TypeError {
+        constructor(msg: string) { super(msg); this.code = 7 }
+    }
+    var m2 = new S41TErr(xs[0])
+    check("err10", m2.name === "TypeError" && m2.message === "boom" && m2.code === 7)
+    check("err11", m2 instanceof S41TErr && m2 instanceof TypeError && m2 instanceof Error)
+    // Two levels, and the message still arrives through BOTH default constructors.
+    class S41Deep extends S41TErr {}
+    var m3 = new S41Deep(xs[0])
+    check("err12", m3.message === "boom" && m3.name === "TypeError" && m3.code === 7)
+
+    // A default DERIVED constructor forwards its arguments. It passed none, so
+    // this was `undefined` in all four engines where node says 5 - both halves
+    // agreeing and both wrong, which is the defect class only an oracle sees.
+    class S41Base { constructor(a, b) { this.a = a; this.b = b } }
+    class S41Sub extends S41Base {}
+    var sb = new S41Sub(xs[2], xs[3])
+    check("err13", sb.a === 2 && sb.b === 255)
+
+    // Throwing and catching one, and re-throwing through a finally.
+    var seen = ""
+    try {
+        throw new RangeError(xs[0])
+    } catch (e) {
+        seen = e.name + "/" + e.message + "/" + (e instanceof RangeError) + "/" + (e instanceof Error)
+    }
+    check("err14", seen === "RangeError/boom/true/true")
+
+    // ----- the ENGINE's own errors are instances of these classes now -----
+    // The BigInt mix error and the iterator-throw TypeError are the two the item
+    // named; the number toString() radix is a third, which used to be an
+    // uncatchable abort on the number path while the BigInt path beside it
+    // raised a real RangeError.
+    var got = []
+    try { got.push("v" + (xs[1] + xs[2])) } catch (e) {
+        got.push("mix:" + (e instanceof TypeError) + (e.message.indexOf("Cannot mix BigInt") === 0))
+    }
+    try { got.push("v" + BigInt(xs[4])) } catch (e) {
+        got.push("syn:" + (e instanceof SyntaxError) + (e instanceof Error))
+    }
+    try { got.push("v" + (xs[3]).toString(1)) } catch (e) {
+        got.push("rdx:" + (e instanceof RangeError) + (e.message.indexOf("radix") >= 0))
+    }
+    check("err15", got.join(",") === "mix:truetrue,syn:truetrue,rdx:truetrue")
+    // A yield* delegate with no throw() method: the iterator-throw TypeError.
+    var gd = s38deleg()
+    gd.next()
+    var itm = ""
+    try { gd.throw(new Error(xs[0])) } catch (e) {
+        itm = "" + (e instanceof TypeError) + (e.message.indexOf("does not provide") >= 0)
+    }
+    check("err16", itm === "truetrue")
+    // And the program keeps running after every one of them.
+    check("err17", xs[1] + xs[1] === 2n)
+
+    // The message text survives the round trip unchanged, which is what keeps
+    // every pre-existing `("" + e).indexOf(...)` assertion in this file honest.
+    check("err18", ("" + new TypeError(xs[0])).indexOf("TypeError: ") === 0)
+
+    // name / message / stack ARE ENUMERABLE HERE and non-enumerable in node,
+    // where Object.keys(new Error("x")) is []. That is a value-model ceiling,
+    // not a slip: the floor's js_keys IS for-in and object spread, a layer-2
+    // object has exactly one key list - the floor's - and no way to mark an
+    // entry hidden, and the only alternative was three more key comparisons on
+    // js_jsmget's hot path, which that function's own measurements (+21% to
+    // +43% for one added test) rule out. All four engines were made to AGREE
+    // and to diverge from node together, so this row asserts OUR answer.
+    check("err19", Object.keys(new Error(xs[0])).join(",") === "name,message,stack")
+}
+function* s38deleg(): Generator<number> { yield* [3, 4] }
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1875,6 +1992,7 @@ function main(): number {
     s35(); // SECTION-CALL 35
     s36(); // SECTION-CALL 36
     s37(); // SECTION-CALL 37
+    s38(); // SECTION-CALL 38
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

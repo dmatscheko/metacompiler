@@ -895,6 +895,12 @@ function pyGetAttr(obj, name) {
         if (pyIsObj(obj)) {
             if (obj["__name"] !== undefined) { return obj["__name"] }
         }
+        // docs/todo.md 1.9: the BUILTIN table is asked too, and FIRST, exactly
+        // as pyFuncRenderOf asks it - len.__name__ is 'len' where before this
+        // fell through to pyGetMember and answered None. The two tables are
+        // keyed by identity, so a user `def len(...)` still answers its own.
+        var bfc = rtPairGet(pyBBFnObjs, pyBBFnCodes, obj)
+        if (bfc !== undefined) { return pyBBFnName(pyToStr(bfc)) }
         var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
     }
@@ -3331,6 +3337,18 @@ function pyDHasAttr(obj, name) {
     // __class__, which EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
     if (pyDBuiltinAttr(obj, name)) { return true }
+    // docs/todo.md 1.9: hasattr must answer exactly what the getattr above can
+    // answer, or the three-argument getattr - which asks this first - hands back
+    // its default for a name that IS readable. Both tables, in the same order.
+    // The synthetic class object for a BUILTIN type (what type(3) hands out)
+    // carries only its name and has no __isclass, so the arm above misses it -
+    // hasattr(str, "__name__") was False here and True in the Go twin, which has
+    // had this line all along. A layer-2-only gap, found by the 1.9 probe.
+    if (name == "__name__") {
+        if (pyIsObj(obj) && obj["__name"] !== undefined) { return true }
+        if (rtPairGet(pyBBFnObjs, pyBBFnCodes, obj) !== undefined) { return true }
+        if (rtPairGet(pyBFnObjs, pyBFnNames, obj) !== undefined) { return true }
+    }
     if (typeof obj != "object") { return false }
     if (Array.isArray(obj)) { return false }
     return obj[name] !== undefined
@@ -3471,6 +3489,14 @@ function js_pybfn(fn, code) {
 function pyBBFnRender(c) {
     if (c.charAt(0) == "*") { return "<class '" + c.substring(1, c.length) + "'>" }
     return "<built-in function " + c + ">"
+}
+
+// The builtin's __name__, from the same code (docs/todo.md 1.9). CPython
+// answers 'len' for the function form and 'map' for the class form, so the
+// leading "*" is the only difference between the two.
+function pyBBFnName(c) {
+    if (c.charAt(0) == "*") { return c.substring(1, c.length) }
+    return c
 }
 
 // ===================================================== print / repr =========

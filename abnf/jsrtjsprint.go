@@ -1135,7 +1135,11 @@ func (rt *jsrt) jsvNumberMethod(x float64, name string, args []interface{}) (int
 			return jsNumString(x), true
 		}
 		if radix < 2 || radix > 36 {
-			rt.fail("toString() radix must be between 2 and 36")
+			// node makes an out-of-range radix a CATCHABLE RangeError, and this is
+			// the number path - the BigInt path beside it (jsrtjsbig.go) has raised
+			// one all along, so the same engine answered the same mistake two
+			// different ways. Reachable now that the hierarchy exists.
+			rt.bigRaise("RangeError: toString() radix must be between 2 and 36")
 		}
 		return jsvRadixString(x, radix), true
 	case "valueOf":
@@ -1580,9 +1584,192 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return baseMcall(a)
 	}
 
+	// ----- the Error hierarchy (docs/todo.md 1.1) --------------------------
+	//
+	// The classes are ordinary {__isclass, __name, __errname, __super, __ctor}
+	// descriptors - the same shape emitClass builds - so js_jsinstanceof's chain
+	// walk and makeNewFrom's class arm answer them with no arm of their own. The
+	// emitter owns the two closures and the js_scope_decl bindings (a floor
+	// primitive layer 2 cannot call); everything else is these externs:
+	//
+	//   js_jserrcls   builds (and memoizes) one class from its name and the two
+	//                 emitted closures, so that the errors the RUNTIME raises
+	//                 (bigRaise) carry the VERY SAME class object the program's
+	//                 own `new TypeError(...)` constructs from - two class
+	//                 objects of one name would make instanceof false. Building
+	//                 them here rather than with six memSets each in the emitter
+	//                 is what keeps the fixed cost of the hierarchy at +3,075
+	//                 bytes of IR per module instead of +10,201;
+	//   js_jserrinit  the shared constructor body: it walks the instance's own
+	//                 __class chain for __errname, which is what makes a user
+	//                 subclass answer its nearest builtin ancestor's name;
+	//   js_jserrstr   Error.prototype.toString.
+	//
+	// The twins are in languages/lib/js-rt.metajs and the interpreter halves'
+	// jsErr* helpers. name / message / stack are set with set() rather than
+	// through the key-order machinery, because all three are non-enumerable in a
+	// real engine: Object.keys(new Error("x")) is [].
+	m["js_jserrcls"] = func(a []uint64) uint64 { // (name, ctor, toString) -> the class
+		if rt.jsErrClasses == nil {
+			rt.jsErrClasses = map[string]*jsObject{}
+		}
+		name := rt.toString(u(a[0]))
+		if o, has := rt.jsErrClasses[name]; has {
+			return w(o)
+		}
+		cls := newJSObject()
+		cls.set("__isclass", true)
+		cls.set("__name", name)
+		cls.set("__errname", name)
+		cls.set("__ctor", u(a[1]))
+		if name == jsErrNames[0] {
+			// toString lives on the ROOT only, exactly as Error.prototype does:
+			// the __class/__super walk finds it from any of the seven and from
+			// any user subclass.
+			cls.set("toString", u(a[2]))
+		} else if root, has := rt.jsErrClasses[jsErrNames[0]]; has {
+			cls.set("__super", root)
+		}
+		rt.jsErrClasses[name] = cls
+		return w(cls)
+	}
+	m["js_jserrinit"] = func(a []uint64) uint64 {
+		self, ok := u(a[0]).(*jsObject)
+		if !ok {
+			return jsHUndefined
+		}
+		msg := ""
+		// `new Error()` and `new Error(undefined)` both leave message "": the
+		// spec only assigns it when the argument is not undefined. null is NOT
+		// undefined, so `new Error(null).message` is "null".
+		if v := u(a[1]); v != interface{}(jsUndef) {
+			msg = rt.jsvString(v)
+		}
+		rt.jsErrInit(self, msg)
+		return jsHUndefined
+	}
+	m["js_jserrstr"] = func(a []uint64) uint64 {
+		return w(rt.jsErrToString(u(a[0])))
+	}
+	// "TypeError: Cannot mix BigInt..." -> a real TypeError carrying just the
+	// message, or the text UNCHANGED when its prefix names no registered Error
+	// class. This is what routes the emitters' own thrown strings (the
+	// iterator-throw TypeError) through the hierarchy.
+	m["js_jserrmk"] = func(a []uint64) uint64 { return w(rt.jsErrFromText(rt.toString(u(a[0])))) }
+
 	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
 	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.
 	rt.addJSBigIntExterns(m)
+}
+
+// jsErrNames is the Error hierarchy, root first. jsErrFromText scans it in this
+// order, and "Error: " cannot shadow "TypeError: " either way round because a
+// prefix test is anchored at the start.
+var jsErrNames = []string{"Error", "TypeError", "RangeError", "ReferenceError",
+	"SyntaxError"}
+
+// jsErrNameOf is the nearest BUILTIN error name up the instance's class chain,
+// which is what makes `class E extends TypeError {}` answer "TypeError" and
+// `class E extends Error {}` answer "Error" - name lives on the prototype in a
+// real engine and E.prototype does not shadow it. The guard is the same 64 the
+// rest of this project puts on a descriptor walk.
+func jsErrNameOf(self *jsObject) string {
+	guard := 0
+	for cls := self.props["__class"]; cls != nil && guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if n, has := clsObj.props["__errname"]; has {
+			if s, isStr := n.(string); isStr {
+				return s
+			}
+		}
+		cls = clsObj.props["__super"]
+	}
+	return "Error"
+}
+
+// jsErrText is Error.prototype.toString's rule: "TypeError: x", the name alone
+// when there is no message, the message alone when the name has been emptied.
+func jsErrText(name, msg string) string {
+	if msg == "" {
+		return name
+	}
+	if name == "" {
+		return msg
+	}
+	return name + ": " + msg
+}
+
+// jsErrInit is the shared Error constructor. STACK cannot be honest here - there
+// is no frame walker in any of the four engines - so it holds exactly the first
+// line node's stack starts with and no frames, which is what an
+// `e.stack.split("\n")[0]` idiom reads.
+func (rt *jsrt) jsErrInit(self *jsObject, msg string) {
+	// NAME / MESSAGE / STACK ARE ENUMERABLE HERE AND NON-ENUMERABLE IN A REAL
+	// ENGINE, and that is a value-model ceiling rather than a slip:
+	// Object.keys(new Error("x")) is [] in node and ["name","message","stack"] in
+	// all four engines here. The floor's js_keys IS for-in and object spread, a
+	// layer-2 object has exactly one key list - the floor's - and no way to mark
+	// an entry hidden; the only alternative was three more key comparisons on
+	// js_jsmget's hot path, which that function's own measurements (+21% to +43%
+	// for one added test) rule out. So set(), not props[]: all four engines were
+	// made to AGREE and to diverge from node together, which is the one thing
+	// this project's byte-identity gates can still see.
+	name := jsErrNameOf(self)
+	self.set("name", name)
+	self.set("message", msg)
+	self.set("stack", jsErrText(name, msg))
+}
+
+func (rt *jsrt) jsErrToString(v interface{}) string {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return "Error"
+	}
+	name := "Error"
+	if n, has := o.props["name"]; has && n != interface{}(jsUndef) {
+		name = rt.jsvString(n)
+	}
+	msg := ""
+	if mv, has := o.props["message"]; has && mv != interface{}(jsUndef) {
+		msg = rt.jsvString(mv)
+	}
+	return jsErrText(name, msg)
+}
+
+// jsMakeErr builds an instance of a REGISTERED class - the same object the
+// program's own `new TypeError(...)` constructs from, so instanceof holds.
+// Answers nil when the emitter never registered that name (a grammar with no
+// Error block, or a language that is not js/ts).
+func (rt *jsrt) jsMakeErr(name, msg string) *jsObject {
+	cls, ok := rt.jsErrClasses[name]
+	if !ok {
+		return nil
+	}
+	o := newJSObject()
+	o.set("__class", cls)
+	rt.jsErrInit(o, msg)
+	return o
+}
+
+// jsErrFromText turns "TypeError: ..." into a real TypeError carrying just the
+// message. Every error the js runtime raises already spells its own class in its
+// message text, so the whole routing is this one split rather than a rewrite of
+// thirty call sites - and a text naming no class of ours is returned exactly as
+// it was, a thrown string.
+func (rt *jsrt) jsErrFromText(t string) interface{} {
+	for _, n := range jsErrNames {
+		pre := n + ": "
+		if len(t) > len(pre) && t[:len(pre)] == pre {
+			if e := rt.jsMakeErr(n, t[len(pre):]); e != nil {
+				return e
+			}
+			return t
+		}
+	}
+	return t
 }
 
 // ============================================================================

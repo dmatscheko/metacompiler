@@ -1656,13 +1656,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The names that are BUILTIN TYPE OBJECTS (str, int, list, ...) are not
     // here: they already render <class 'str'> through prender's class arm. The
     // twins are js_pybfn in abnf/jsrt.go and in languages/lib/python-rt.metajs,
-    // filled by python-to-llvm-ir.abnf's declBind - and there, as here, what is
-    // stored is the FULL TEXT, so the two-form split lives in one place per half.
+    // filled by python-to-llvm-ir.abnf's declBind.
+    //
+    // WHAT IS STORED IS THE CODE, not the finished text - the builtin's NAME
+    // with a leading "*" when CPython prints it as a class - which is what the
+    // two compiled halves already stored. That reconciliation is what makes
+    // len.__name__ answerable (docs/todo.md 1.9): the render text cannot be cut
+    // back to a name without re-parsing it, and feeding the DEF-name table
+    // instead would have desynchronised the name a user function answers. The
+    // render form is derived by bfnText and the name by bfnName, so both
+    // questions read ONE table in all three engines.
     var bfnFns = []
-    var bfnTexts = []
-    function bfnText(f) {
-        for (var bi = 0; bi < bfnFns.length; bi++) { if (bfnFns[bi] === f) { return bfnTexts[bi] } }
+    var bfnCodes = []
+    function bfnCode(f) {
+        for (var bi = 0; bi < bfnFns.length; bi++) { if (bfnFns[bi] === f) { return bfnCodes[bi] } }
         return undefined
+    }
+    function bfnText(f) {
+        var c = bfnCode(f)
+        if (c === undefined) { return undefined }
+        if (c.charAt(0) == "*") { return "<class '" + c.substring(1, c.length) + "'>" }
+        return "<built-in function " + c + ">"
+    }
+    // The builtin's __name__: CPython answers 'len' for the function form and
+    // 'map' for the class form, so the code's "*" is the only difference.
+    function bfnName(f) {
+        var c = bfnCode(f)
+        if (c === undefined) { return undefined }
+        if (c.charAt(0) == "*") { return c.substring(1, c.length) }
+        return c
     }
     var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
                         "max", "min", "ord", "chr", "iter", "next", "sorted", "all", "any",
@@ -1672,13 +1694,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     for (var bn0 = 0; bn0 < pyBFuncNames.length; bn0++) {
         if (typeof hostGlobals[pyBFuncNames[bn0]] == "function") {
             bfnFns.push(hostGlobals[pyBFuncNames[bn0]])
-            bfnTexts.push("<built-in function " + pyBFuncNames[bn0] + ">")
+            bfnCodes.push(pyBFuncNames[bn0])
         }
     }
     for (var bn1 = 0; bn1 < pyBClassNames.length; bn1++) {
         if (typeof hostGlobals[pyBClassNames[bn1]] == "function") {
             bfnFns.push(hostGlobals[pyBClassNames[bn1]])
-            bfnTexts.push("<class '" + pyBClassNames[bn1] + "'>")
+            bfnCodes.push("*" + pyBClassNames[bn1])
         }
     }
 
@@ -7249,7 +7271,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return m
             }
         }
-        if (typeof o == "function" && name == "__name__") { return fnName(o) }
+        // docs/todo.md 1.9: the BUILTIN table is asked first, exactly as prender
+        // asks it, so len.__name__ is 'len' rather than the '<lambda>' fnName
+        // answers for a function no `def` ever named. The two tables are keyed
+        // by identity, so a user `def len(...)` still answers its own name.
+        if (typeof o == "function" && name == "__name__") {
+            var bfnm = bfnName(o)
+            if (bfnm !== undefined) { return bfnm }
+            return fnName(o)
+        }
         pyRaise(pyMakeExc("AttributeError", ["'" + name + "'"]))
     }
     // The instance attribute dict. pySetAttr records the order it created names in.

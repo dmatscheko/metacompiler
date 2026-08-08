@@ -3990,8 +3990,12 @@ NotFuncHead = :script(~~
                               yretB, ythrowB)
             callExt(jsThisSet(yretB, seqV), "js_call", [yrfV, seqV, callExt(yretB, "js_arr_new", [])])
             yretB.NewBr(ythrowB)
+            // js_jserrmk turns the text into a real TypeError instance (the class
+            // object emitErrorClasses registered), so this one is catchable as
+            // `e instanceof TypeError` like every other error. docs/todo.md 1.1.
             callExt(ythrowB, "js_throw",
-                    [emitStr(ythrowB, "TypeError: The iterator does not provide a 'throw' method.")])
+                    [callExt(ythrowB, "js_jserrmk",
+                             [emitStr(ythrowB, "TypeError: The iterator does not provide a 'throw' method.")])])
             ythrowB.NewRet(hUndef) // Never reached: js_throw does not return.
             splitB.NewCondBr(yisItC, ystepB, yidxB)
             // next(received.value): the sent value is forwarded, which is what makes
@@ -5144,9 +5148,17 @@ NotFuncHead = :script(~~
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
-            var sargsV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
-            jsCall(b, supCtor, hUndef, sargsV)
+            // A default derived constructor is `constructor(...args) { super(...args) }`,
+            // so it FORWARDS its arguments. A fresh array holding only `this` was
+            // passed, so `class A { constructor(x) { this.x = x } } class B extends A {}`
+            // made new B(5).x undefined where node says 5 - in all four engines,
+            // both halves agreeing and both wrong. THIS function's own argument
+            // array already IS [this, ...args] (a default ctor declares no
+            // parameters of its own), which is exactly the shape the parent
+            // constructor is called with, so it is handed over unchanged. Found
+            // while giving Error a hierarchy, because `class E extends Error {}`
+            // has to carry its message through. docs/todo.md 1.1.
+            jsCall(b, supCtor, hUndef, f.Params[1])
         }
         if (initFields != null) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -5758,6 +5770,84 @@ NotFuncHead = :script(~~
     // the completion value: what the last executed expression statement produced.
     // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
     // runs the program, and then calls main() - the self checking test convention.
+    // ----- the Error hierarchy (docs/todo.md 1.1) ---------------------------
+    //
+    // `new TypeError("x")` was *variable not defined* in all six js/ts engines,
+    // so every error this engine raises had to be caught as a STRING: e.message
+    // and `e instanceof TypeError` did not exist, and that was the stated ceiling
+    // on every "make X catchable" item.
+    //
+    // The model is python-to-llvm-ir.abnf's builtin-exception block, and it is
+    // deliberately ORDINARY class machinery rather than a special case: each
+    // class is the same {__isclass, __name, __super, __ctor} descriptor
+    // emitClass builds, so js_jsinstanceof's chain walk already answers
+    // `e instanceof Error` for a TypeError, makeNewFrom's class arm already
+    // constructs one, and `class E extends Error {}` already works.
+    //
+    // ONE constructor serves all seven: the name is not baked into the closure
+    // but recovered inside js_jserrinit by walking the instance's own __class
+    // chain for __errname, which is what makes a user subclass answer its
+    // NEAREST BUILTIN ANCESTOR's name - node's `class E extends TypeError {}`
+    // answers "TypeError" and `class E extends Error {}` answers "Error",
+    // exactly because name lives on the prototype and E.prototype does not
+    // shadow it. That also keeps the emitted cost at two function bodies and
+    // seven small objects rather than one body per class.
+    //
+    // js_jserrcls also REGISTERS each class with the runtime, so the errors the
+    // RUNTIME itself raises (the BigInt family) carry the very same class
+    // object - two class objects of one name would make instanceof false.
+    // Twins: abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    // WHY FIVE AND NOT SEVEN. EvalError and URIError are standard globals too and
+    // cost nothing to write, and they were measured out: on tests/bench/mod.js -
+    // a GC-dominated loop that collects 131 times - the live set the boot classes
+    // add is +2,720 bytes at one class, +3,584 at three, +3,680 at FIVE and
+    // +6,112 at seven, and only the seven-class form steps the arena (heap
+    // 10,528,880 -> 10,530,160). The collector marks the live set at every one of
+    // those 131 collections, which is the whole mechanism: seven classes read
+    // SLOWER in 19 of 21 paired draws (+3.40%) where five is inside the row's own
+    // spread. So the table is the five the exception hierarchy actually needs and
+    // the two extras are declined, with the numbers kept here rather than
+    // re-derived. docs/todo.md 1.1.
+    var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
+                           "SyntaxError"]
+    function emitErrorClasses(b) {
+        // The shared constructor: js_jserrinit(this, args[1]).
+        funcCount++
+        var ciIdx = funcCount
+        var cf = m.NewFunc("jsf_" + ciIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var cb = cf.NewBlock("entry")
+        cb.NewCall(getExtern("js_jserrinit", 2),
+                   [cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)]),
+                    cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(1)])])
+        cb.NewRet(hUndef)
+        // Error.prototype.toString. A class method is dispatched with the
+        // receiver PREPENDED, so args[0] is the error.
+        funcCount++
+        var tsIdx = funcCount
+        var tf = m.NewFunc("jsf_" + tsIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var tb = tf.NewBlock("entry")
+        tb.NewRet(tb.NewCall(getExtern("js_jserrstr", 1),
+                             [tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])]))
+        var ctorV = callExt(b, "js_closure", [handle(ciIdx), curScopeV])
+        var tsV = callExt(b, "js_closure", [handle(tsIdx), curScopeV])
+        // The seven descriptors are built by js_jserrcls rather than by six
+        // memSets each, and that is a MEASURED choice, not a style one: the
+        // memSet form put a fixed +10,201 bytes of IR into every js module,
+        // TRIPLING a small one (5,522 -> 15,723); this form costs +3,075. The
+        // heap is identical either way - the same seven objects with the same
+        // slots - so nothing moved except emitted text. js_scope_decl is the one
+        // step that cannot move into the extern: it is a FLOOR primitive and a
+        // layer-2 file cannot call it (that is why it is in the floor at all),
+        // so the binding stays here, in the PROGRAM's own scope like RegExp and
+        // Object above, where no other language's compiler can see the name.
+        for (var ei = 0; ei < jsErrClassNames.length; ei++) {
+            callExt(b, "js_scope_decl",
+                    [curScopeV, emitStr(b, jsErrClassNames[ei]),
+                     callExt(b, "js_jserrcls", [emitStr(b, jsErrClassNames[ei]), ctorV, tsV])])
+        }
+        return b
+    }
+
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its
         // top-level statement thunks for the real jsrun instead of emitting a second one.
@@ -5804,6 +5894,7 @@ NotFuncHead = :script(~~
         // `typeof Promise` is "function"; Promise.resolve / reject / all / allSettled /
         // race / any resolve through js_jsmcall, like String.fromCharCode above.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
+        b = emitErrorClasses(b)
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

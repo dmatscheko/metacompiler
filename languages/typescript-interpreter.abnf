@@ -3698,7 +3698,11 @@ NotFuncHead = :script(~~
         if (name == "toString") {
             var radix = Math.floor(jsArgNum(args, 0, 10))
             if (radix == 10) { return {v: "" + x} }
-            if (radix < 2 || radix > 36) { fail("toString() radix must be between 2 and 36") }
+            // node makes an out-of-range radix a CATCHABLE RangeError, and this is the
+        // number path - the BigInt path beside it has raised one all along, so the
+        // same engine answered the same mistake two different ways. Reachable now
+        // that the hierarchy exists (docs/todo.md 1.1); it was a bare `fail` abort.
+        if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix must be between 2 and 36") }
             return {v: jsRadixStr(x, radix)}
         }
         return null
@@ -3737,10 +3741,12 @@ NotFuncHead = :script(~~
     // `try { xs[0] + xs[1] } catch (e) { ... }` with a BigInt and a number in xs
     // runs the catch clause, where this engine used to stop the program dead.
     // The raised record is excThrow's ({__exc, v}) so jsExcTry offers it to the
-    // catch clause, and the VALUE is the message string - the spelling the
-    // iterator-throw TypeError in this same file already uses, and the same one
-    // the two compiled halves raise through js_throw. docs/todo.md 2.6.
-    function biRaise(msg) { throw {__exc: true, v: msg} }
+    // catch clause. The VALUE used to be the message STRING; since docs/todo.md
+    // 1.1 it is a real Error instance built by jsErrFromText from the class name
+    // the message already spells, so e.message and `e instanceof TypeError`
+    // answer. `"" + e` is unchanged, because Error.prototype.toString rebuilds
+    // exactly the text that used to be thrown. docs/todo.md 2.6.
+    function biRaise(msg) { throw {__exc: true, v: jsErrFromText(msg)} }
     function jsBigIntFn(v) {
         if (arguments.length == 0) { biRaise("TypeError: Cannot convert undefined to a BigInt") }
         return biOf(v)
@@ -4986,6 +4992,155 @@ NotFuncHead = :script(~~
         return mkRegex(src, jsReCanon(fl))
     })
 
+    // ----- the Error hierarchy (docs/todo.md 1.1) ---------------------------
+    //
+    // `new TypeError("x")` was *variable not defined* in all six js/ts engines,
+    // so every error this engine raises had to be caught as a STRING: e.message
+    // and `e instanceof TypeError` did not exist, and that was the stated ceiling
+    // on every "make X catchable" item.
+    //
+    // The model is python's installExceptions (python-interpreter.abnf) and
+    // ruby's mkBuiltinClass hierarchy, and it is deliberately ORDINARY class
+    // machinery rather than a special case: each Error class is the same
+    // {__isclass, __name, __super, __ctor} descriptor makeClassValue builds, so
+    //
+    //   - instanceOf's __class/__super walk already answers `e instanceof Error`
+    //     for a TypeError, with no arm of its own;
+    //   - makeNewFrom's class arm already constructs one through __ctor;
+    //   - `class E extends Error {}` already works through makeClassValue's
+    //     getVar(superName) + __isclass check.
+    //
+    // ONE __ctor serves all of them: the name is not baked into the closure but
+    // recovered by walking the instance's own __class chain for __errname, which
+    // is what makes a user subclass answer its nearest builtin ancestor's name -
+    // node's `class E extends TypeError {}; new E("x").name` is "TypeError", and
+    // `class E extends Error {}` is "Error", exactly because name lives on the
+    // prototype and E.prototype does not shadow it.
+    //
+    // name / message / stack are set as OWN properties but are NOT tracked in
+    // __keys, which is correct rather than a shortcut: all three are
+    // non-enumerable in a real engine, so Object.keys(new Error("x")) is [] and
+    // for..in visits nothing. STACK is the one thing that cannot be honest here
+    // - there is no frame walker in any of the four engines - so it holds
+    // exactly the first line node's stack starts with (the toString text) and no
+    // frames, which is what an `e.stack.split("\n")[0]` idiom reads.
+    //
+    // The twins are js_jserr* in abnf/jsrtjsprint.go and in
+    // languages/lib/js-rt.metajs, with the classes themselves built by
+    // typescript-to-llvm-ir.abnf's buildMain.
+    // WHY FIVE AND NOT SEVEN. EvalError and URIError are standard globals too and
+    // cost nothing to write, and they were measured out: on tests/bench/mod.js -
+    // a GC-dominated loop that collects 131 times - the live set the boot classes
+    // add is +2,720 bytes at one class, +3,584 at three, +3,680 at FIVE and
+    // +6,112 at seven, and only the seven-class form steps the arena (heap
+    // 10,528,880 -> 10,530,160). The collector marks the live set at every one of
+    // those 131 collections, which is the whole mechanism: seven classes read
+    // SLOWER in 19 of 21 paired draws (+3.40%) where five is inside the row's own
+    // spread. So the table is the five the exception hierarchy actually needs and
+    // the two extras are declined, with the numbers kept here rather than
+    // re-derived. docs/todo.md 1.1.
+    var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
+                           "SyntaxError"]
+    // The nearest BUILTIN error name up the instance's class chain. The `guard`
+    // cap is the same 64 the rest of this project puts on a descriptor walk.
+    function jsErrNameOf(self) {
+        var guard = 0
+        for (var cl = self.__class; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, "__errname")) { return cl.__errname }
+            guard = guard + 1
+        }
+        return "Error"
+    }
+    // The Error constructor, shared by every class in the table. `new Error()`
+    // and `new Error(undefined)` both leave message "" - the spec only assigns
+    // it when the argument is not undefined, and null is not undefined.
+    //
+    // NAME / MESSAGE / STACK ARE ENUMERABLE HERE AND NON-ENUMERABLE IN A REAL
+    // ENGINE, and that is a value-model ceiling rather than a slip:
+    // `Object.keys(new Error("x"))` is [] in node and ["name","message","stack"]
+    // in all four engines here. The floor's js_keys IS for-in and object spread
+    // (languages/lib/runtime.c), a layer-2 object has exactly ONE key list - the
+    // floor's - and no way to mark an entry hidden; the only alternative was
+    // three more key comparisons on js_jsmget's hot path, which that function's
+    // own measurements (+21% to +43% for one added test) rule out. So all four
+    // engines were made to AGREE and to diverge from node together, which is the
+    // one thing this project's byte-identity gates can still see. The three
+    // values themselves, and everything read off them, are node's exactly.
+    function jsErrInit(self, msg) {
+        var n = jsErrNameOf(self)
+        var m = ""
+        if (msg !== undefined) { m = jsStr(msg) }
+        scopePut(self, "name", n)
+        trackKey(self, "name")
+        scopePut(self, "message", m)
+        trackKey(self, "message")
+        scopePut(self, "stack", jsErrText(n, m))
+        trackKey(self, "stack")
+        return undefined
+    }
+    // Error.prototype.toString: "TypeError: x", the name alone when there is no
+    // message, and the message alone when the name has been emptied.
+    function jsErrText(n, m) {
+        if (m === "") { return n }
+        if (n === "") { return m }
+        return n + ": " + m
+    }
+    function jsErrToString(self) {
+        var n = "Error"
+        if (self.name !== undefined) { n = jsStr(self.name) }
+        var m = ""
+        if (self.message !== undefined) { m = jsStr(self.message) }
+        return jsErrText(n, m)
+    }
+    function jsInstallErrors() {
+        var root = {}
+        root["__isclass"] = true
+        root["__name"] = "Error"
+        root["__errname"] = "Error"
+        root["__ctor"] = function() { return jsErrInit(arguments[0], (arguments.length > 1) ? arguments[1] : undefined) }
+        root["toString"] = jsErrToString
+        scopePut(hostGlobals, "Error", root)
+        for (var i = 1; i < jsErrClassNames.length; i++) {
+            var n = jsErrClassNames[i]
+            var c = {}
+            c["__isclass"] = true
+            c["__name"] = n
+            c["__errname"] = n
+            c["__super"] = root
+            c["__ctor"] = root["__ctor"]
+            scopePut(hostGlobals, n, c)
+        }
+    }
+    jsInstallErrors()
+    // An instance of one of the classes above, built without going through
+    // `new`. This is how the ENGINE's own errors become catchable objects.
+    function jsMakeErr(name, msg) {
+        var o = {}
+        o["__keys"] = []
+        o["__class"] = hostGlobals[name]
+        jsErrInit(o, msg)
+        return o
+    }
+    // "TypeError: Cannot mix BigInt..." -> a real TypeError carrying just the
+    // message. Every error this engine raises already spells its own class in
+    // its message text, so the whole routing is this one split rather than a
+    // rewrite of thirty call sites in four engines - and a text that names no
+    // Error class (or none of ours) is left EXACTLY as it was, a thrown string.
+    function jsErrFromText(t) {
+        // anytype, not `var r = t`: MetaJS types a slot by its FIRST value, so a
+        // string-seeded slot cannot later hold the instance (manual chapter 4).
+        var r = anytype
+        r = t
+        for (var i = 0; i < jsErrClassNames.length; i++) {
+            var pre = jsErrClassNames[i] + ": "
+            if (t.length > pre.length && t.substring(0, pre.length) === pre) {
+                r = jsMakeErr(jsErrClassNames[i], t.substring(pre.length, t.length))
+                i = jsErrClassNames.length
+            }
+        }
+        return r
+    }
+
     // JavaScript's own string unescaping, on top of the shared unescapeJs: that one
     // predates \u{...} and the line continuation, and it is used by a dozen other
     // languages, so the two JS-only shapes are handled here instead.
@@ -5547,7 +5702,7 @@ NotFuncHead = :script(~~
     }
     function jpNoThrowMethod(v) {
         jpCloseDelegate(v)
-        throw {__exc: true, v: "TypeError: The iterator does not provide a 'throw' method."}
+        biRaise("TypeError: The iterator does not provide a 'throw' method.")
     }
     // The value one plain `yield` answers, RAW - without the throw-in unpacking
     // jpAwaitValue does at an ordinary yield. Only the `yield*` loop wants it raw: it
@@ -6147,7 +6302,16 @@ NotFuncHead = :script(~~
             // EXPRESSION ('class extends mixin(B) {}') have a default constructor too.
             if (isDefault && hasSuper) {
                 var supCls = getVar("__class__").__super
-                supCls.__ctor.apply(undefined, [self])
+                // A default derived constructor is `constructor(...args) { super(...args) }`,
+                // so it FORWARDS its arguments. This passed none, so
+                // `class A { constructor(x) { this.x = x } } class B extends A {}`
+                // made new B(5).x undefined where node says 5 - in all four
+                // engines, both halves agreeing and both wrong. Found while
+                // giving Error a hierarchy, because `class E extends Error {}`
+                // has to carry its message through. docs/todo.md 1.1.
+                var supArgs = [self]
+                for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
+                supCls.__ctor.apply(undefined, supArgs)
             }
             for (var k = 0; k < fields.length; k++) {
                 var fk = memberKey(fields[k])
@@ -7345,7 +7509,7 @@ NotFuncHead = :script(~~
             ret = runMainSnippet(entry, "Statement")
             jsDrain()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + jsStr(e.v)) }
             throw e
         }
         println("typescript interpreter: -main snippet returned " + ret)
@@ -7360,7 +7524,7 @@ NotFuncHead = :script(~~
             // program gets. The compiler half drains at the same point.
             jsDrain()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + jsStr(e.v)) }
             throw e
         }
         println("typescript interpreter: " + entry + "() returned " + ret)

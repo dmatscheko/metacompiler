@@ -2567,6 +2567,34 @@ def s39():
     lam = lambda q: q
     check("it40", "<lambda>" in str(lam))
 
+    # ----- and what a BUILTIN's __name__ answers (docs/todo.md 1.9) -----
+    # The render table above and the def-name table are now the SAME table read
+    # two ways, so a builtin has a __name__ where it used to answer '<lambda>'
+    # in the interpreter and None in both compiled halves. CPython 3.14.6 is the
+    # oracle for every row here.
+    nok = 0
+    for i in range(len(fns)):
+        if fns[i].__name__ == fnames[i]:
+            nok += 1
+    check("it41", nok == 6)
+    # The class-form builtins drop the '*' the code carries: map.__name__ is
+    # 'map', not '*map' and not "<class 'map'>".
+    nok2 = 0
+    for i in range(len(clss)):
+        if clss[i].__name__ == cnames[i]:
+            nok2 += 1
+    check("it42", nok2 == 6)
+    # The def-name table is UNDISTURBED, which is the reconciliation's whole
+    # risk: a user def, a lambda, and a def that shadows a builtin name.
+    check("it43", sorted_like.__name__ == "sorted_like" and lam.__name__ == "<lambda>")
+    check("it44", str.__name__ == "str" and int.__name__ == "int")
+    # hasattr has to agree with getattr, because the three-argument getattr asks
+    # it first and would otherwise hand back its default for a readable name.
+    check("it45", hasattr(len, "__name__") and getattr(len, "__name__", "NOPE") == "len")
+    check("it46", hasattr(map, "__name__") and getattr(map, "__name__", "NOPE") == "map")
+    check("it47", hasattr(str, "__name__") and getattr(str, "__name__", "NOPE") == "str")
+    check("it48", getattr(sorted_like, "__name__", "NOPE") == "sorted_like")
+
 
 def main():
     s01() # SECTION-CALL 01

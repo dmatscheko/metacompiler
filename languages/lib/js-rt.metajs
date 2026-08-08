@@ -159,9 +159,13 @@ function js_jstypeof(v) {
 // and a js_try deliberately does not recover it; MetaJS's own `throw` compiles to
 // the floor's js_throw, which is exactly what the emitted try/catch recovers. The
 // thrown VALUE is the message string - the spelling the interpreter halves and
-// both emitters already use for the iterator-throw TypeError. The Go twin's half
-// of this is abnf/jsrtjsbig.go's bigRaise. docs/todo.md 2.6.
-function jbRaise(msg) { throw msg }
+// both emitters already use for the iterator-throw TypeError. Since
+// docs/todo.md 1.1 the value is a real Error INSTANCE whenever the emitter
+// registered the hierarchy (jvErrFromText finds the class the message text
+// already names), so e.message and `e instanceof TypeError` answer; `"" + e` is
+// unchanged, because Error.prototype.toString rebuilds exactly this text. The Go
+// twin's half of this is abnf/jsrtjsbig.go's bigRaise. docs/todo.md 2.6.
+function jbRaise(msg) { throw jvErrFromText(msg) }
 
 // ================================ the floor externs a BigInt is taken from ===
 //
@@ -1135,6 +1139,139 @@ function js_jsinstanceof(v, c) {
     // compare with the class descriptor.
     return jvChainHas(v, c)
 }
+
+// ================================================ the Error hierarchy =======
+//
+// docs/todo.md 1.1. The classes are ordinary {__isclass, __name, __errname,
+// __super, __ctor} descriptors - the same shape the emitter's own emitClass
+// builds - so js_jsinstanceof's chain walk above and makeNewFrom's class arm
+// answer them with no arm of their own. The emitter (js-to-llvm-ir.abnf's
+// emitErrorClasses) owns the two closures and the js_scope_decl bindings, which
+// is the one step that cannot move here: js_scope_decl is a FLOOR primitive and
+// a layer-2 file cannot call it. The twins are in abnf/jsrtjsprint.go and the
+// two interpreter halves' jsErr* helpers.
+//
+// The registry exists so that the errors the RUNTIME raises (jbRaise, above)
+// carry the VERY SAME class object the program's own `new TypeError(...)`
+// constructs from - two class objects of one name would make instanceof false.
+// Two parallel arrays and a linear scan, the identity-keyed side-table shape
+// jvCtorFn/jvCtorD above already uses; there are seven entries.
+var jvErrNames = []
+var jvErrClasses = []
+
+// (name, ctor, toString) -> the class, memoized by name. Building the seven
+// descriptors here rather than with six memSets each in the emitter is what
+// keeps the fixed cost of the hierarchy at +3,075 bytes of IR per module
+// instead of +10,201; the heap is identical either way.
+function js_jserrcls(name, ctor, tostr) {
+    var got = jvErrClassOf(name)
+    if (got !== undefined) { return got }
+    var cls = {}
+    cls["__isclass"] = true
+    cls["__name"] = name
+    cls["__errname"] = name
+    cls["__ctor"] = ctor
+    if (name === "Error") {
+        // toString lives on the ROOT only, exactly as Error.prototype does: the
+        // __class/__super walk finds it from any of the seven and from any user
+        // subclass.
+        cls["toString"] = tostr
+    } else {
+        var root = jvErrClassOf("Error")
+        if (root !== undefined) { cls["__super"] = root }
+    }
+    jvErrNames.push(name)
+    jvErrClasses.push(cls)
+    return cls
+}
+
+function jvErrClassOf(name) {
+    var i = 0
+    while (i < jvErrNames.length) {
+        if (jvErrNames[i] === name) { return jvErrClasses[i] }
+        i = i + 1
+    }
+    return undefined
+}
+
+// The nearest BUILTIN error name up the instance's class chain, which is what
+// makes `class E extends TypeError {}` answer "TypeError" and
+// `class E extends Error {}` answer "Error" - name lives on the prototype in a
+// real engine and E.prototype does not shadow it. The guard is the same 64 the
+// rest of this project puts on a descriptor walk.
+function jvErrNameOf(self) {
+    var guard = 0
+    var cls = self["__class"]
+    while (jvIsObj(cls) && guard < 64) {
+        var en = cls["__errname"]
+        if (typeof en == "string") { return en }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return "Error"
+}
+
+// Error.prototype.toString's rule: "TypeError: x", the name alone when there is
+// no message, the message alone when the name has been emptied.
+function jvErrText(name, msg) {
+    if (msg === "") { return name }
+    if (name === "") { return msg }
+    return name + ": " + msg
+}
+
+// The shared Error constructor. `new Error()` and `new Error(undefined)` both
+// leave message "" - the spec only assigns it when the argument is not
+// undefined, and null is not undefined. STACK cannot be honest here (no engine
+// in this project has a frame walker), so it holds exactly the first line node's
+// stack starts with and no frames, which is what an `e.stack.split("\n")[0]`
+// idiom reads. name / message / stack go in with rawSet rather than through the
+// key-order machinery, because all three are NON-ENUMERABLE in a real engine:
+// Object.keys(new Error("x")) is [].
+function js_jserrinit(self, msg) {
+    var m = ""
+    if (msg !== undefined) { m = jvStr(msg) }
+    var n = jvErrNameOf(self)
+    self["name"] = n
+    self["message"] = m
+    self["stack"] = jvErrText(n, m)
+    return undefined
+}
+
+function js_jserrstr(self) {
+    var n = "Error"
+    if (jvIsObj(self)) {
+        if (self["name"] !== undefined) { n = jvStr(self["name"]) }
+        var m = ""
+        if (self["message"] !== undefined) { m = jvStr(self["message"]) }
+        return jvErrText(n, m)
+    }
+    return n
+}
+
+// "TypeError: Cannot mix BigInt..." -> a real TypeError carrying just the
+// message. Every error this runtime raises already spells its own class in its
+// message text, so the whole routing is this one split rather than a rewrite of
+// thirty call sites in four engines - and a text naming no class of ours (or a
+// grammar that registered none) is returned EXACTLY as it was, a thrown string.
+function jvErrFromText(t) {
+    var r = anytype
+    r = t
+    var i = 0
+    while (i < jvErrNames.length) {
+        var pre = jvErrNames[i] + ": "
+        if (t.length > pre.length && t.substring(0, pre.length) === pre) {
+            var o = {}
+            o["__class"] = jvErrClasses[i]
+            js_jserrinit(o, t.substring(pre.length, t.length))
+            r = o
+            i = jvErrNames.length
+        }
+        i = i + 1
+    }
+    return r
+}
+
+function js_jserrmk(t) { return jvErrFromText(t) }
 
 // ===================================================== the globals ========
 
@@ -2122,7 +2259,11 @@ function jvNumMethod(x, name, args) {
     if (name == "toString") {
         var radix = jvToInt(jvNumArg(args, 0, 10))
         if (radix === 10) { return x + "" }
-        if (radix < 2 || radix > 36) { fail("toString() radix must be between 2 and 36") }
+        // node makes an out-of-range radix a CATCHABLE RangeError, and this is the
+        // number path - the BigInt path beside it has raised one all along, so the
+        // same engine answered the same mistake two different ways. Reachable now
+        // that the hierarchy exists (docs/todo.md 1.1); it was a bare `fail` abort.
+        if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix must be between 2 and 36") }
         return jvRadixString(x, radix)
     }
     if (name == "valueOf") { return x }
