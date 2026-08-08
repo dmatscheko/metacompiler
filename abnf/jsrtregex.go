@@ -1895,6 +1895,16 @@ func (rt *jsrt) rxSplit(reObj interface{}, s string) *jsArray {
 	return parts
 }
 
+// rxWantsPattern names the String methods whose argument is a PATTERN, which Ruby
+// accepts as a plain String and compiles to a Regexp.
+func rxWantsPattern(name string) bool {
+	switch name {
+	case "match", "match?", "=~", "scan", "sub", "gsub", "sub!", "gsub!":
+		return true
+	}
+	return false
+}
+
 // rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData,
 // or ok=false when the name is none of theirs.
 func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
@@ -2115,7 +2125,19 @@ func (rt *jsrt) addRegexExterns(m map[string]func(args []uint64) uint64) {
 		}
 		target := u(a[0])
 		name := rt.toString(u(a[1]))
-		if rxIsRegexObj(target) || rxIsMatchObj(target) || rxIsRegexObj(argAt(arr.elems, 0)) {
+		// A STRING PATTERN reaches the regexp half too. The gate used to require a
+		// Regexp RECEIVER or a Regexp first ARGUMENT, so `s.sub("a", "z")` - Ruby
+		// compiles a String pattern to a Regexp - never reached rxRegexMethod and
+		// died in the base dispatch with "unknown String method: sub". Six methods
+		// were unreachable that way in both compiled halves while
+		// ruby-interpreter.abnf answered: sub, gsub, sub!, gsub!, match, match?
+		// (and =~ / scan, whose spellings a program rarely writes with a string).
+		// rxRegexMethod itself already normalized a String argument; nothing but
+		// the gate was missing. split and index are NOT in the list: with a
+		// plain-string argument they are ordinary string operations.
+		_, targetIsStr := target.(string)
+		if rxIsRegexObj(target) || rxIsMatchObj(target) || rxIsRegexObj(argAt(arr.elems, 0)) ||
+			(targetIsStr && rxWantsPattern(name)) {
 			if v, handled := rt.rxRegexMethod(target, name, arr.elems); handled {
 				return w(v)
 			}

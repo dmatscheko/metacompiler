@@ -625,9 +625,13 @@ SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
-// A subscript reaches a user-defined #[] with a full argument list; only the first
-// argument is lowered, the rest are parsed so the surrounding file is understood.
-IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0]}) ~~>
+// A subscript reaches a user-defined #[] with a full argument list. A ONE-argument
+// subscript is the ordinary index (js_rxget); a TWO-argument one is Ruby's
+// `s[start, len]' / `a[start, len]' subsequence and is routed through the `[]'
+// METHOD instead, which is also what a user class' `def [](a, b)' wants. Before
+// this only the first argument was lowered, so `"hello world"[0, 6]' answered ONE
+// CHARACTER in every engine. docs/todo.md 1.10.
+IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = LineCont "[" Arg { "," Arg } "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
@@ -2931,10 +2935,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         // pop, keys, ...); routed through js_rmcall like the interpreter.
                         cur = callExt(b, "js_rxmcall", [cur, emitStr(b, methodKey(s.name)), callExt(b, "js_arr_new", [])])
                     }
+                } else if (s.idx2 == undefined || s.idx2 == null) {
+                    var ir0 = s.idx(b)
+                    b = ir0.b
+                    cur = callExt(b, core.indexExt, [cur, ir0.v])
                 } else {
+                    // `x[start, len]': the two-argument subscript is the `[]' METHOD,
+                    // so String / Array answer a subsequence and a user class' own
+                    // `def [](a, b)' is reached with both arguments.
                     var ir = s.idx(b)
                     b = ir.b
-                    cur = callExt(b, core.indexExt, [cur, ir.v])
+                    var ir2 = s.idx2(b)
+                    b = ir2.b
+                    var iav = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [iav, ir.v])
+                    callExt(b, "js_arr_push", [iav, ir2.v])
+                    cur = callExt(b, "js_rxmcall", [cur, emitStr(b, methodKey("[]")), iav])
                 }
             }
             return {b: b, v: cur}
@@ -3003,6 +3019,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return ""
     }
+    // One character per POSITIONAL parameter - "0" required, "1" optional, "2" splat
+    // - which is js_rposbind's own encoding of a parameter list's shape and all an
+    // arity check needs. Keyword and block parameters are not positional and are
+    // left out, exactly as emitParams does.
+    function paramKinds(params) {
+        var kinds = ""
+        for (var i = 0; i < params.length; i++) {
+            var p = anytype
+            if (typeof params[i] == "string") { p = {name: params[i]} } else { p = params[i] }
+            if (p.blockp === true || p.kw === true || p.kwrest === true) { continue }
+            if (p.splat === true) { kinds = kinds + "2" }
+            else if (p.defT != undefined && p.defT != null) { kinds = kinds + "1" }
+            else { kinds = kinds + "0" }
+        }
+        return kinds
+    }
     // Proc#arity needs a closure's PARAMETER SHAPE, and no function value carries one
     // in either engine. Both halves therefore keep a registry keyed by function
     // identity, filled where the closure is BUILT; js_rarity is the write and it hands
@@ -3038,7 +3070,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var q = 1; q <= np; q++) { params.push(paramDesc({param: "_" + q})) }
         }
         var bodyStmt = blockBodyOf(items)
-        return {blkT: function(b) {
+        // blkKinds travels beside the block so that Kernel#lambda can arity-check it
+        // (makeCall below). The arity REGISTRY cannot carry it: it is armed only when
+        // the program names `arity' (it retains every closure with its whole scope
+        // chain - measured 181 KB -> 5.1 MB), and behaviour must not depend on that.
+        // The block's PARAMETER SHAPE is known right here, at the literal, which is
+        // the one place it is free. docs/todo.md 1.6.
+        return {blkKinds: paramKinds(params), blkT: function(b) {
             var idx = emitFunc(params, bodyStmt, false, false, true)
             return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
         }}
@@ -4264,6 +4302,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: excDispatch(b, ctl), v: ctl}
         }
     }
+    // MRI's first backtrace frame for a `raise' at this position: "prog.rb:2:in
+    // `<main>'". Read at EMIT time, so curMethName is the method being emitted.
+    // Only the raise SITE is modelled; MRI's further backtrace frames are not, and
+    // a block is reported as its enclosing method rather than "block in NAME".
+    function raiseSite(pos) {
+        var who = curMethName == "" ? "<main>" : curMethName
+        return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
+    }
     // raise [EXPR[, EXPR]]: evaluate the operand and the optional message and hand
     // both to js_rraise, which decides what exception object to throw.
     function makeRaise(items, pos) {
@@ -4284,11 +4330,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (t != null) { var r = t(b); b = r.b; v = r.v }
             var msgV = hUndef
             if (msgT != null) { var rm = msgT(b); b = rm.b; msgV = rm.v }
-            // js_rraise does the whole of Ruby's raise: a CLASS becomes a fresh
+            // js_rraiseat does the whole of Ruby's raise: a CLASS becomes a fresh
             // instance (its initialize runs, so a default message through `super'
             // works), a STRING becomes a RuntimeError, and a bare raise re-raises
-            // whatever the running rescue clause caught.
-            callExt(b, "js_rraise", [v, msgV])
+            // whatever the running rescue clause caught. The third argument is the
+            // SOURCE SITE, in MRI's own backtrace spelling, recorded on the
+            // exception so js_rtop can print MRI's uncaught-exception line. Only
+            // this site passes one, so a re-raise (js_rraise) keeps the original
+            // site, exactly as MRI does. docs/todo.md 1.7.
+            callExt(b, "js_rraiseat", [v, msgV, emitStr(b, raiseSite(pos))])
             b.NewRet(hUndef) // Never reached: js_rraise unwinds on the host side.
             return {b: deadBlock(), v: hNull}
         }
@@ -4303,8 +4353,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // lambda { } / proc { } / Proc.new { }: the block IS the value.
         if ((name == "lambda" || name == "proc") && args.length > 0) {
             var blkT = null
+            var blkKinds = null
             for (var q = 0; q < args.length; q++) {
-                if (args[q] != undefined && typeof args[q] != "function" && args[q].blkT != undefined) { blkT = args[q].blkT }
+                if (args[q] != undefined && typeof args[q] != "function" && args[q].blkT != undefined) {
+                    blkT = args[q].blkT
+                    if (typeof args[q].blkKinds == "string") { blkKinds = args[q].blkKinds }
+                }
             }
             if (blkT != null) {
                 var isLam = name == "lambda"
@@ -4318,7 +4372,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var r = blkT(b)
                     emitBlkArg = savedBA
                     if (!isLam) { return r }
-                    return {b: r.b, v: callExt(r.b, "js_rlambda", [r.v])}
+                    // A LAMBDA IS ARITY-CHECKED AND A BLOCK IS NOT, so Kernel#lambda
+                    // has to wrap: the block binds loosely (a missing parameter is
+                    // nil, an extra argument is dropped) and that stays true for
+                    // `proc'. js_rlamchk builds the checking wrapper from the shape
+                    // recorded at the literal. IT CHANGES THE IDENTITY of the result:
+                    // the value is the wrapper, not the block, so the arity registry
+                    // entry is re-registered onto it (js_rlamchk does that) and two
+                    // `lambda' calls on the SAME block object answer two different
+                    // Procs. Neither is observable in Ruby - a block literal is not a
+                    // value there at all. docs/todo.md 1.6.
+                    var lv = r.v
+                    if (blkKinds != null) { lv = callExt(r.b, "js_rlamchk", [lv, emitStr(r.b, blkKinds)]) }
+                    return {b: r.b, v: callExt(r.b, "js_rlambda", [lv])}
                 }
             }
         }
@@ -6121,9 +6187,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, bn),
                                          callExt(b, "js_rclass", [emitStr(b, bn)])])
         }
-        // Imported definitions first, each under its own source, then this file's own items.
-        b = emitImportedWith(b, function(item, bb) { return item(bb).b })
-        for (var i = 0; i < items.length; i++) { b = items[i](b).b }
+        // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an exception nobody rescued
+        // is reported BY THE PROGRAM (js_rtop) instead of escaping the module. What
+        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
+        // which renders a value with the generic object toString - so every uncaught
+        // `raise' in both compiled halves read "js runtime error: uncaught
+        // exception: [object Object]", with no message and no class. This is the
+        // shape go-to-llvm-ir.abnf already uses for an unrecovered panic (js_gotry /
+        // js_gotop); the difference is that Ruby's top level IS the program, so the
+        // BODY goes inside the closure rather than a call to an entry function.
+        // docs/todo.md 1.7.
+        var bodyT = function(bb) {
+            bb = emitImportedWith(bb, function(item, b2) { return item(b2).b })
+            for (var i = 0; i < items.length; i++) { bb = items[i](bb).b }
+            return {b: bb, v: hNull}
+        }
+        var topCatchT = function(bb) {
+            var excV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])
+            callExt(bb, "js_rtop", [excV])
+            return {b: bb, v: hNull}
+        }
+        var topTryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
+        var topCatchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], topCatchT, false, true)), curScopeV])
+        callExt(b, "js_try", [topTryClo, topCatchClo, hUndef])
         b.NewRet(handle(0))
     }
 

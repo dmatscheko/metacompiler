@@ -3024,7 +3024,13 @@ function rbRxMethod(target, name, args) {
         if (name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!") { wants = true }
         if (name == "split" || name == "index") { wants = true }
         if (!wants) { return undefined }
-        var pat = args[0]
+        // `var pat = anytype`, not `var pat = args[0]`: MetaJS is typed and a local
+        // keeps the type of its first assignment, so with a STRING pattern (which
+        // reaches here since js_rxmcall's gate learned about them) the re-assignment
+        // below died with "variable 'pat' has type string and cannot hold a object"
+        // - NATIVELY ONLY, layer 2 being the only engine that compiles this file.
+        var pat = anytype
+        pat = args[0]
         if (!rbRxIsRegex(pat)) {
             if (name == "split" || name == "index") { return undefined }
             pat = rbRxNewRegex(rbStr(args[0]), "m")
@@ -3183,6 +3189,74 @@ function rbIsBlk(v) {
 }
 function rbBlkVal(v) { return v["__rblk"] }
 function js_rblkwrap(f) { return {__rblk: f} }
+// String#start_with? / #end_with?: true when ANY of the given prefixes/suffixes
+// matches. MRI accepts a list, so `s.start_with?("a", "b")` is one call, not two.
+// Mirrors ruby-interpreter.abnf's arms and rubyStartsWith of abnf/jsrt.go.
+function rbStartsWith(target, args) {
+    var n = rbNPos(args)
+    var i = 0
+    while (i < n) {
+        var p = rbStr(args[i])
+        if (target.slice(0, p.length) == p) { return true }
+        i = i + 1
+    }
+    return false
+}
+function rbEndsWith(target, args) {
+    var n = rbNPos(args)
+    var i = 0
+    while (i < n) {
+        var p = rbStr(args[i])
+        if (p.length <= target.length && target.slice(target.length - p.length) == p) { return true }
+        i = i + 1
+    }
+    return false
+}
+// String#strip / #chars / #split with a plain separator - the interpreter half's
+// bodies, which the compiled halves had no equivalent of at all. split has no
+// `split` in the frozen engine to lean on, so it walks.
+//
+// DELIBERATE DIVERGENCE FROM MRI, kept because the two halves must agree and this
+// is what ruby-interpreter.abnf has always done: MRI treats a SINGLE SPACE (and no
+// argument at all) as the "awk" separator - any run of whitespace, with leading
+// whitespace dropped - while this splits on the literal separator, so
+// `"a  b".split(" ")` is ["a", "", "b"] here and ["a", "b"] in MRI.
+// docs/todo.md 1.10.
+function rbStrStrip(s) {
+    var a = 0
+    var b = s.length
+    while (a < b && rbIsSpaceCh(s.charAt(a))) { a = a + 1 }
+    while (b > a && rbIsSpaceCh(s.charAt(b - 1))) { b = b - 1 }
+    return s.slice(a, b)
+}
+function rbIsSpaceCh(c) {
+    return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\u000b" || c == "\u0000"
+}
+function rbStrChars(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) { out.push(s.charAt(i)); i = i + 1 }
+    return out
+}
+function rbStrSplit(s, sep) {
+    var out = []
+    if (sep == "") { return rbStrChars(s) }
+    var cur = ""
+    var i = 0
+    while (i < s.length) {
+        if (s.slice(i, i + sep.length) == sep) {
+            out.push(cur)
+            cur = ""
+            i = i + sep.length
+            continue
+        }
+        cur = cur + s.charAt(i)
+        i = i + 1
+    }
+    out.push(cur)
+    return out
+}
+
 function rbBlockOf(args) {
     if (args.length > 0 && rbIsBlk(args[args.length - 1])) { return rbBlkVal(args[args.length - 1]) }
     return null
@@ -3317,6 +3391,39 @@ function rbArrNorm(t, v) {
     var n = Math.trunc(rbToF(v))
     if (n < 0) { return t.length + n }
     return n
+}
+// Ruby's SUBSEQUENCE rule for Array#[start, len]. nil for a negative length or a
+// start past the end, [] for a start exactly at the end, and len clamped to what is
+// left. Mirrors rsubseq of ruby-interpreter.abnf and rubyArrSubseq of abnf/jsrt.go.
+// docs/todo.md 1.10.
+function rbArrSubseq(t, start, len) {
+    var s = Math.trunc(rbToF(start))
+    var k = Math.trunc(rbToF(len))
+    if (k < 0) { return null }
+    if (s < 0) { s = s + t.length }
+    if (s < 0 || s > t.length) { return null }
+    return rbArrSub(t, s, k)
+}
+// The same rule for String#[start, len].
+function rbStrSubseq(t, start, len) {
+    var s = Math.trunc(rbToF(start))
+    var k = Math.trunc(rbToF(len))
+    if (k < 0) { return null }
+    if (s < 0) { s = s + t.length }
+    if (s < 0 || s > t.length) { return null }
+    if (s + k > t.length) { k = t.length - s }
+    return t.slice(s, s + k)
+}
+// A CLOSED range reaches the compiler halves already MATERIALIZED as an array (that
+// is what ruby-to-llvm-ir.abnf emits for 1..2), so an array subscript on a String or
+// an Array IS a range: its first element is the low bound and its length the count.
+// Array#slice already read it that way; js_rget did not, so `a[0..2]' answered the
+// element at index 0 while ruby-interpreter.abnf answered nil - a live halves
+// divergence, both wrong. docs/todo.md 1.10.
+function rbRangeSubseq(o, r) {
+    if (r.length == 0) { return typeof o == "string" ? "" : [] }
+    if (typeof o == "string") { return rbStrSubseq(o, r[0], r.length) }
+    return rbArrSubseq(o, r[0], r.length)
 }
 function rbArrSub(t, from, len) {
     var out = []
@@ -3767,6 +3874,12 @@ function rbArrayMethod(t, name, args) {
     // directly and stop at nPos.
     var nPos = rbNPos(args)
     if (name == "size" || name == "length") { return t.length }
+    // Array#[]: one index or a materialized range (js_rget), or start+len.
+    // docs/todo.md 1.10.
+    if (name == "[]") {
+        if (nPos > 1) { return rbArrSubseq(t, args[0], args[1]) }
+        return js_rget(t, rbPosAt(args, nPos, 0))
+    }
     if (name == "push" || name == "append" || name == "add") {
         var i = 0
         while (i < args.length) {
@@ -4591,6 +4704,19 @@ function rbMethod(target, name, args) {
             }
         }
     }
+    // Exception#backtrace: MRI's frame list. Only the RAISE SITE is modelled here
+    // (js_rraiseat records it), so the answer is that one frame, in MRI's own
+    // spelling - "prog.rb:2:in `<main>'". An exception raised by the runtime rather
+    // than by a `raise', and one that was never raised at all, has no site and
+    // answers nil, which is exactly what MRI does for an un-raised exception object.
+    // docs/todo.md 1.7.
+    if (name == "backtrace") {
+        if (rbIsObj(target) && target["__isclass"] !== true && rbFindMethod(target, name) === undefined) {
+            var bw = target["__rwhere"]
+            if (typeof bw == "string") { return [bw] }
+            return null
+        }
+    }
     if (name == "frozen?") {
         if (typeof target == "string") { return true }
         return rbIsNum(target)
@@ -4681,6 +4807,53 @@ function rbMethod(target, name, args) {
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
+        // String#[] / #slice: one index or a materialized range (js_rget), or
+        // start+len. docs/todo.md 1.10.
+        if (name == "[]" || name == "slice") {
+            var sPos = rbNPos(args)
+            if (sPos > 1) { return rbStrSubseq(target, args[0], args[1]) }
+            return js_rget(target, rbPosAt(args, sPos, 0))
+        }
+        // String#start_with? / #end_with? take ANY NUMBER of prefixes/suffixes and
+        // answer true when one of them matches. Both existed only in
+        // ruby-interpreter.abnf, so a program testing a prefix aborted in both
+        // compiled halves with "unknown String method". docs/todo.md 1.10.
+        if (name == "start_with?") { return rbStartsWith(target, args) }
+        if (name == "end_with?") { return rbEndsWith(target, args) }
+        // THE PLAIN STRING METHODS THAT EXISTED ONLY IN ruby-interpreter.abnf.
+        // Every one of them aborted both compiled halves with "unknown String
+        // method", including split/strip/chars/empty?/index - so any program doing
+        // ordinary text work was a halves divergence, not just the start_with? the
+        // item named. Bodies are ruby-interpreter.abnf's, line for line.
+        // docs/todo.md 1.10.
+        if (name == "capitalize") {
+            if (target.length == 0) { return target }
+            return rbUpper(target.charAt(0)) + rbLower(target.slice(1))
+        }
+        if (name == "reverse") {
+            var rv = ""
+            var rq = target.length - 1
+            while (rq >= 0) { rv = rv + target.charAt(rq); rq = rq - 1 }
+            return rv
+        }
+        if (name == "strip") { return rbStrStrip(target) }
+        if (name == "chars") { return rbStrChars(target) }
+        if (name == "split") { return rbStrSplit(target, rbNPos(args) > 0 ? rbStr(args[0]) : " ") }
+        if (name == "index") {
+            var ix = target.indexOf(rbStr(rbArgAt(args, 0)))
+            return ix < 0 ? null : ix
+        }
+        if (name == "empty?") { return target.length == 0 }
+        if (name == "succ" || name == "next") { return rbStrSucc(target) }
+        if (name == "replace") { return rbStr(rbArgAt(args, 0)) }
+        if (name == "each_char") {
+            var ecb = rbBlockOf(args)
+            if (ecb !== null) {
+                var ec = 0
+                while (ec < target.length) { rbCall1(ecb, target.charAt(ec)); ec = ec + 1 }
+            }
+            return target
+        }
         if (name == "dup" || name == "clone" || name == "freeze") { return target }
         if (name == "to_str" || name == "+@" || name == "-@" || name == "itself") { return target }
         fail("unknown String method: " + name)
@@ -4713,6 +4886,9 @@ function rbMethod(target, name, args) {
                 }
                 return pairs
             }
+            // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
+            // js_rget. String and Array answer it too. docs/todo.md 1.10.
+            if (name == "[]") { return js_rget(target, rbArgAt(args, 0)) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
             if (name == "each") {
                 // The block, NOT args[0]: since the block marker exists the two are
@@ -4975,7 +5151,24 @@ function js_rcmp(l, r) {
 }
 
 // lo..hi / lo...hi with BOTH bounds: the array the lowering iterates and indexes.
-function js_rrangearr(lo, hi, excl) { return rbRangeArr(lo, hi, rbTruthy(excl)) }
+//
+// IT ALSO REMEMBERS THE RAW ENDPOINTS OF THE ARRAY IT JUST BUILT, because a
+// materialized range cannot carry them and Ruby's SUBSCRIPT rule needs them:
+// `(1..-1)` is the EMPTY array, while `s[1..-1]` means "from index 1 to the last
+// character" - the commonest range subscript there is. The slot holds the array
+// itself, so js_rget can only use the endpoints for THAT object; anything else
+// falls back to reading the materialized indices. One slot, not a registry: a
+// registry would retain every range array ever built (`(1..1_000_000)`), and one
+// slot is exact for the case that matters, since a range written AT a subscript is
+// the last one evaluated before the index. Mirrors rubyRangeArr's slot in
+// abnf/jsrt.go; ruby-interpreter.abnf needs none, a Range being a real object there.
+// docs/todo.md 1.10.
+var rbLastRange = []
+function js_rrangearr(lo, hi, excl) {
+    var a = rbRangeArr(lo, hi, rbTruthy(excl))
+    rbLastRange = [a, lo, hi, rbTruthy(excl)]
+    return a
+}
 
 // (5..) / (..9): no array to build, so the range stays an object that answers
 // cover? / include? / ===.
@@ -5103,6 +5296,24 @@ function js_rget(o, k) {
         if (i < 0) { return rbHashDefault(o, k) }
         return o["vals"][i]
     }
+    // a[0..2] / s[0..2]: a materialized range as the subscript of an Array or a
+    // String is a SUBSEQUENCE, not an index. When the array IS the one the last
+    // range literal built, its raw endpoints are still known and the answer is
+    // exact; otherwise the materialized indices are all there is - see
+    // js_rrangearr. docs/todo.md 1.10.
+    // s[6..] / s[..2]: an OPEN range keeps its endpoints in the object itself, so
+    // this case is exact with no slot at all. It answered the first character before
+    // (js_rget read the object as a number), while ruby-interpreter.abnf - where a
+    // Range is a real object - was right. docs/todo.md 1.10.
+    if (rbIsRange(k) && (rbIsArr(o) || typeof o == "string")) {
+        return js_rsubrange(o, k["begin"], k["end"], k["excl"])
+    }
+    if (rbIsArr(k) && (rbIsArr(o) || typeof o == "string")) {
+        if (rbLastRange.length == 4 && rbLastRange[0] === k) {
+            return js_rsubrange(o, rbLastRange[1], rbLastRange[2], rbLastRange[3])
+        }
+        return rbRangeSubseq(o, k)
+    }
     var idx = Math.trunc(rbToF(k))
     if (rbIsArr(o)) {
         if (idx < 0) { idx = idx + o.length }
@@ -5116,6 +5327,35 @@ function js_rget(o, k) {
     }
     if (rbIsNil(o)) { fail("indexing nil") }
     return o[k]
+}
+
+// s[lo..hi] / a[lo...hi] written as a RANGE LITERAL at the subscript: the endpoints
+// arrive RAW, because a materialized range cannot carry them - `(1..-1)` is the
+// empty array while `s[1..-1]` means "from index 1 to the last character". A nil
+// endpoint is the beginning / the end (`s[1..]`), and an exclusive end with no
+// endpoint is still the end. Anything that is not a String or an Array (a Hash whose
+// key is a range, a user class' own `def []`) keeps the materialized-array form, so
+// nothing else changes. Mirrors rsubrange of ruby-interpreter.abnf and
+// rubySubrange of abnf/jsrt.go. docs/todo.md 1.10.
+function js_rsubrange(o, lo, hi, excl) {
+    if (rbIsArr(o) || typeof o == "string") {
+        var n = o.length
+        var b0 = rbIsNil(lo) ? 0 : Math.trunc(rbToF(lo))
+        if (b0 < 0) { b0 = b0 + n }
+        if (b0 < 0 || b0 > n) { return null }
+        var e0 = n - 1
+        if (!rbIsNil(hi)) {
+            e0 = Math.trunc(rbToF(hi))
+            if (e0 < 0) { e0 = e0 + n }
+            if (rbTruthy(excl)) { e0 = e0 - 1 }
+        }
+        var len = e0 - b0 + 1
+        if (len < 0) { len = 0 }
+        if (typeof o == "string") { return rbStrSubseq(o, b0, len) }
+        return rbArrSubseq(o, b0, len)
+    }
+    if (rbIsNil(lo) || rbIsNil(hi)) { return js_rget(o, js_rrangeopen(lo, hi, excl)) }
+    return js_rget(o, js_rrangearr(lo, hi, excl))
 }
 
 // Ruby index assignment: a user class dispatches `def []=`, a missing Hash key is
@@ -5170,6 +5410,48 @@ function js_rraise(v, msg) {
     throw rbMakeExc(v, msg)
 }
 
+// The same raise, plus the SOURCE SITE of the `raise' that wrote it - "prog.rb:2:in
+// `<main>'", exactly MRI's first backtrace frame. Only makeRaise emits this form, so
+// a re-raise (js_rraise, which hands the same object back) keeps the ORIGINAL site,
+// as MRI does. js_rtop prints it when the exception reaches the top of the program.
+// docs/todo.md 1.7.
+function js_rraiseat(v, msg, where) {
+    var e = rbMakeExc(v, msg)
+    if (rbIsObj(e) && e["__rwhere"] === undefined && typeof where == "string") {
+        e["__rwhere"] = where
+    }
+    throw e
+}
+
+// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the value left
+// the module and the floor's uncaught-throw handler rendered it with the generic
+// object toString, so every uncaught `raise' in both compiled halves read
+// "js runtime error: uncaught exception: [object Object]" - no message, no class.
+// This is MRI's own first line, and rbExcTopLine is shared with the interpreter
+// half's runProgram so all three engines print the SAME text. docs/todo.md 1.7.
+function js_rtop(exc) {
+    println(rbExcTopLine(exc))
+    exit(1)
+    return undefined
+}
+
+// MRI's uncaught-exception line: "prog.rb:2:in `<main>': boom (RuntimeError)".
+// The site is what js_rraiseat recorded; an exception raised by the RUNTIME rather
+// than by a `raise' has none, and then only "msg (Class)" is printed. Mirrors
+// excTopLine of ruby-interpreter.abnf and rubyExcTopLine of abnf/jsrt.go.
+function rbExcTopLine(exc) {
+    if (!rbIsObj(exc)) { return "uncaught throw " + rbInspect(exc) }
+    var msg = rbExcMessage(exc)
+    if (msg === undefined) { msg = "" }
+    var cname = "RuntimeError"
+    var cls = exc["__class"]
+    if (rbIsObj(cls) && typeof cls["__name"] == "string") { cname = cls["__name"] }
+    var where = exc["__rwhere"]
+    var head = ""
+    if (typeof where == "string") { head = where + ": " }
+    return head + msg + " (" + cname + ")"
+}
+
 // Whether an argument was ABSENT (js_arg answers undefined for one that was not
 // passed). Ruby's nil is a VALUE and must not trigger a default.
 function js_rundef(v) { return v === undefined }
@@ -5212,7 +5494,9 @@ function js_rargchk(args, off_raw, req_raw) {
     var npos = args.length - off
     if (npos < 0) { npos = 0 }
     if (npos > 0 && rbIsBlk(args[args.length - 1])) { npos = npos - 1 }
-    if (npos >= req) { return null }
+    // TOO MANY is an error as well: this arm's parameter list is all-required, so
+    // the count must be EXACTLY req. docs/todo.md 1.6.
+    if (npos == req) { return null }
     var kinds = ""
     var i = 0
     while (i < req) { kinds = kinds + "0"; i = i + 1 }
@@ -5351,6 +5635,17 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     // emitter binds one with js_rblockarg, and Ruby arity-checks methods and
     // lambdas only. docs/todo.md 1.5.
     if (npos < required) { rbArgCountErr(npos, kinds) }
+    // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises for
+    // `->(x, y = 2) { }.call(1, 2, 3)' exactly as it does for too few; the extra
+    // arguments were silently dropped here. bindParams of ruby-interpreter.abnf and
+    // js_rargchk's fast path ask the same question. docs/todo.md 1.6.
+    var star = false
+    var s0 = 0
+    while (s0 < kinds.length) {
+        if (kinds.charAt(s0) == "2") { star = true }
+        s0 = s0 + 1
+    }
+    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds) }
     var spare = npos - required
     var ai = 0
     var k = 0
@@ -5449,6 +5744,50 @@ function js_rblockarg(args, i_raw, n_raw) {
 function js_rlambda(f) {
     rbLambdas.push(f)
     return f
+}
+
+// KERNEL#LAMBDA'S ARITY CHECK. A block binds loosely (a missing parameter is nil,
+// an extra argument is dropped) and a lambda does not, so `lambda { |x| }' has to
+// WRAP its block in a frame that raises MRI's ArgumentError; `->(x) { }' gets the
+// same check from emitParams instead, because its body IS the checked function.
+// `kinds' is js_rposbind's encoding, recorded at the block LITERAL by the emitter -
+// the arity registry could not supply it, being armed only when the program names
+// `arity'. The registry entry, if there is one, is re-registered onto the wrapper so
+// Proc#arity still answers. docs/todo.md 1.6.
+function js_rlamchk(f, kinds) {
+    if (!rbIsFn(f)) { return f }
+    var w = function() {
+        var av = []
+        var i = 0
+        while (i < arguments.length) { av.push(arguments[i]); i = i + 1 }
+        rbLamArity(av, kinds)
+        return f.apply(undefined, av)
+    }
+    var rec = rtPairGet(rbArityFns, rbArityRec, f)
+    if (rec !== undefined) {
+        rbArityFns.push(w)
+        rbArityRec.push(rec)
+    }
+    return w
+}
+// The count check itself: a trailing block marker is not a positional argument, a
+// *splat lifts the ceiling, and the message is MRI's. Mirrors lamArity of
+// ruby-interpreter.abnf and rubyLamArity of abnf/jsrt.go.
+function rbLamArity(av, kinds) {
+    var npos = av.length
+    if (npos > 0 && rbIsBlk(av[npos - 1])) { npos = npos - 1 }
+    var req = 0
+    var star = false
+    var i = 0
+    while (i < kinds.length) {
+        var c = kinds.charAt(i)
+        if (c == "2") { star = true }
+        else if (c != "1") { req = req + 1 }
+        i = i + 1
+    }
+    if (npos < req) { rbArgCountErr(npos, kinds) }
+    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds) }
+    return undefined
 }
 
 // The parameter shape of the closure just built, for Proc#arity - the closure
@@ -5556,11 +5895,29 @@ function js_rxnew(src, flags) {
 }
 
 function js_rxmcall(target, name, args) {
-    if (rbRxIsRegex(target) || rbRxIsMatch(target) || (rbIsArr(args) && args.length > 0 && rbRxIsRegex(args[0]))) {
-        var v = rbRxMethod(target, rbStr(name), args)
+    var mn = rbStr(name)
+    // A STRING PATTERN reaches the regexp half too. The gate used to require a
+    // Regexp RECEIVER or a Regexp first ARGUMENT, so `s.sub("a", "z")` - Ruby
+    // compiles a String pattern to a Regexp - never reached rbRxMethod and died in
+    // the base dispatch with "unknown String method: sub". Six methods were
+    // unreachable that way in both compiled halves while ruby-interpreter.abnf
+    // answered: sub, gsub, sub!, gsub!, match, match? (and =~ / scan, whose
+    // spellings a program rarely writes with a string). rbRxMethod itself already
+    // normalized a String argument; nothing but the gate was missing.
+    if (rbRxIsRegex(target) || rbRxIsMatch(target)
+        || (rbIsArr(args) && args.length > 0 && rbRxIsRegex(args[0]))
+        || (typeof target == "string" && rbRxWantsPattern(mn))) {
+        var v = rbRxMethod(target, mn, args)
         if (v !== undefined) { return v }
     }
-    return rbMethod(target, rbStr(name), args)
+    return rbMethod(target, mn, args)
+}
+// The String methods whose argument is a PATTERN. split and index are left out on
+// purpose: with a plain-string argument they are ordinary string operations and
+// rbMethod answers them.
+function rbRxWantsPattern(name) {
+    if (name == "match" || name == "match?" || name == "=~" || name == "scan") { return true }
+    return name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!"
 }
 
 function js_rxcase(l, r) {

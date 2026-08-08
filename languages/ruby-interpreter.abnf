@@ -593,9 +593,13 @@ SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
-// A subscript reaches a user-defined #[] with a full argument list; only the first
-// argument is lowered, the rest are parsed so the surrounding file is understood.
-IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0]}) ~~>
+// A subscript reaches a user-defined #[] with a full argument list. A ONE-argument
+// subscript is the ordinary index; a TWO-argument one is Ruby's `s[start, len]' /
+// `a[start, len]' subsequence and is routed through the `[]' METHOD instead, which
+// is also what a user class' `def [](a, b)' wants. Before this only the first
+// argument was evaluated, so `"hello world"[0, 6]' answered ONE CHARACTER in every
+// engine. docs/todo.md 1.10.
+IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = LineCont "[" Arg { "," Arg } "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
@@ -4571,6 +4575,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (di < 0) { return hashDefault(o, i) }
             return o.vals[di]
         }
+        // s[a..b] / a[a..b]: a Range subscript is a SUBSEQUENCE, not an index. Both
+        // answered the first character / element before, and the compiled halves
+        // (which materialize a bounded range as an array) answered the element at
+        // the range's own first value - a live halves divergence. docs/todo.md 1.10.
+        if (isRange(i) && (typeof o == "string" || Array.isArray(o))) { return rsubrange(o, i) }
         if (typeof o == "string") {
             if (i < 0) { i += o.length }
             if (i < 0 || i >= o.length) { return null }
@@ -4786,6 +4795,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isEnum(v)) { return hostGlobals["Enumerator"] }
         if (isUserObj(v)) { return v.__class }
         return hostGlobals["Object"]
+    }
+    // String#start_with? / #end_with?: true when ANY of the given prefixes/suffixes
+    // matches. Mirrors rbStartsWith/rbEndsWith of lib/ruby-rt.metajs and the
+    // start_with?/end_with? arms of abnf/jsrt.go. docs/todo.md 1.10.
+    function strAnyPrefix(s, args) {
+        for (var i = 0; i < args.length; i++) {
+            var p = rstr(args[i])
+            if (s.slice(0, p.length) == p) { return true }
+        }
+        return false
+    }
+    function strAnySuffix(s, args) {
+        for (var i = 0; i < args.length; i++) {
+            var p = rstr(args[i])
+            if (p.length <= s.length && s.slice(s.length - p.length) == p) { return true }
+        }
+        return false
+    }
+    // Ruby's SUBSEQUENCE rule, shared by String#[] and Array#[]. `o[start, len]'
+    // answers nil for a negative length or a start past the end, "" / [] for a start
+    // exactly at the end, and clamps len to what is left. A negative start counts
+    // back from the end. Mirrors rbStrSubseq / rbArrSubseq of lib/ruby-rt.metajs and
+    // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go. docs/todo.md 1.10.
+    function rsubseq(o, start, len) {
+        var n = o.length
+        var s = Math.trunc(toF(start))
+        var k = Math.trunc(toF(len))
+        if (k < 0) { return null }
+        if (s < 0) { s = s + n }
+        if (s < 0 || s > n) { return null }
+        if (s + k > n) { k = n - s }
+        return o.slice(s, s + k)
+    }
+    // `o[range]': the same rule with the bounds taken from the Range. An open end
+    // runs to the end of the receiver. Mirrors js_rsubrange of lib/ruby-rt.metajs and
+    // rubySubrange of abnf/jsrt.go - which the compiled halves can only reach for the
+    // range they most recently materialized, a materialized range having no endpoints
+    // of its own (js_rrangearr's slot). A Range is a real object here, so this half
+    // is exact for every shape.
+    function rsubrange(o, r) {
+        var n = o.length
+        var lo = (r.lo === null || r.lo === undefined) ? 0 : Math.trunc(toF(r.lo))
+        if (lo < 0) { lo = lo + n }
+        if (lo < 0 || lo > n) { return null }
+        var hi = n - 1
+        if (r.hi !== null && r.hi !== undefined) {
+            hi = Math.trunc(toF(r.hi))
+            if (hi < 0) { hi = hi + n }
+            if (r.excl === true) { hi = hi - 1 }
+        } else if (r.excl === true) { hi = n - 1 }
+        var len = hi - lo + 1
+        if (len < 0) { len = 0 }
+        return rsubseq(o, lo, len)
     }
     function strStrip(s) {
         var a = 0
@@ -5008,8 +5070,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return target.split("") }
             if (name == "split") { return args.length > 0 ? target.split(rstr(args[0])) : target.split(" ") }
-            if (name == "start_with?") { return target.slice(0, rstr(args[0]).length) == rstr(args[0]) }
-            if (name == "end_with?") { return target.slice(target.length - rstr(args[0]).length) == rstr(args[0]) }
+            // String#[] / #slice: one index, a Range, or start+len (docs/todo.md 1.10).
+            if (name == "[]" || name == "slice") {
+                if (args.length > 1) { return rsubseq(target, args[0], args[1]) }
+                return rindex(target, args[0])
+            }
+            // MRI takes a LIST of prefixes/suffixes and answers true when any one
+            // matches; reading only args[0] silently ignored the rest.
+            if (name == "start_with?") { return strAnyPrefix(target, args) }
+            if (name == "end_with?") { return strAnySuffix(target, args) }
             if (name == "index") { var ix = target.indexOf(rstr(args[0])); return ix < 0 ? null : ix }
             if (name == "empty?") { return target.length == 0 }
             if (name == "inspect") { return strInspect(target) }
@@ -5044,6 +5113,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var dp = 0; dp < target.keys.length; dp++) { dpairs.push([target.keys[dp], target.vals[dp]]) }
                 return dpairs
             }
+            // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
+            // rindex. String and Array answer it too. docs/todo.md 1.10.
+            if (name == "[]") { return rindex(target, args[0]) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
                 for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
@@ -5585,6 +5657,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // both go through here. each / each_with_index answer one below on their own.
         if (blk == null && arrWantsBlock(name)) { return mkEnumOp(t.slice(0), name) }
         if (name == "size" || name == "length") { return t.length }
+        // Array#[]: one index, a Range, or start+len. (#slice has its own arm below,
+        // kept as it was.) docs/todo.md 1.10.
+        if (name == "[]") {
+            if (args.length > 1) { return rsubseq(t, args[0], args[1]) }
+            return rindex(t, args[0])
+        }
         // Array#push is VARIADIC: a.push(1, 2, 3) appends all three.
         if (name == "push" || name == "append" || name == "add") {
             for (i = 0; i < args.length; i++) { t.push(args[i]) }
@@ -6151,6 +6229,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
                     else { cur = mcall(cur, s.name, []) }
+                } else if (s.idx2 != undefined && s.idx2 != null) {
+                    // `x[start, len]': the two-argument subscript is the `[]' METHOD,
+                    // so String / Array answer a subsequence and a user class' own
+                    // `def [](a, b)' is reached with both arguments.
+                    cur = mcall(cur, "[]", [s.idx(), s.idx2()], null)
                 } else {
                     cur = rindex(cur, s.idx())
                 }
@@ -6255,6 +6338,44 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (req == 0 && opt == 0 && !star) { return f }
         return markArity(f, req, opt, star)
     }
+    // KERNEL#LAMBDA'S ARITY CHECK. A block binds loosely (a missing parameter is
+    // nil, an extra argument is dropped, and a single Array argument auto-splats) and
+    // a lambda does not, so `lambda { |x| }' has to WRAP its block in a frame that
+    // raises MRI's ArgumentError; `->(x) { }' gets the same check from bindParams
+    // instead, because its body IS the checked function. The parameter list comes
+    // from the block LITERAL, carried on the block marker by makeBlock - the arity
+    // REGISTRY could not supply it, being armed only when the program names `arity'
+    // (it retains every closure with its whole scope chain). js_rlamchk of
+    // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
+    // docs/todo.md 1.6.
+    function lamArityWrap(f, params) {
+        if (typeof f != "function" || params == undefined || params == null) { return f }
+        return function() {
+            var av = []
+            for (var i = 0; i < arguments.length; i++) { av.push(arguments[i]) }
+            lamArity(av, params)
+            return f.apply(undefined, av)
+        }
+    }
+    function lamArity(av, params) {
+        var posParams = []
+        var i
+        for (i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.kw === true || p.kwrest === true || p.blockp === true) { continue }
+            posParams.push(p)
+        }
+        var npos = av.length
+        if (npos > 0 && isBlkArg(av[npos - 1])) { npos = npos - 1 }
+        var req = 0
+        var star = false
+        for (i = 0; i < posParams.length; i++) {
+            if (posParams[i].splat === true) { star = true }
+            else if (posParams[i].defT == undefined) { req = req + 1 }
+        }
+        if (npos < req) { argCountErr(npos, posParams) }
+        if (!star && npos > posParams.length) { argCountErr(npos, posParams) }
+    }
     // Kernel#lambda's block, made local-returning: the block itself still throws the
     // __blkret signal makeBlock builds, and this is the frame that stops it.
     function lambdaWrap(blk) {
@@ -6336,7 +6457,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var np = numberedParamCount(btext)
             for (var p = 1; p <= np; p++) { params.push({param: "_" + p}) }
         }
-        return {blkT: function() {
+        // blkParams travels beside the block so that Kernel#lambda can arity-check
+        // it (makeCall below). The arity REGISTRY cannot carry it: it is armed only
+        // when the program names `arity', and behaviour must not depend on that.
+        // docs/todo.md 1.6.
+        return {blkParams: params, blkT: function() {
             var captured = scopes.slice(0)
             var f = function() {
                 var args = []
@@ -6406,10 +6531,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function splitBlock(args) {
         var plain = []
         var blk = null
+        var bparams = null
         for (var i = 0; i < args.length; i++) {
-            if (args[i].blkT != undefined) { blk = args[i].blkT } else { plain.push(args[i]) }
+            if (args[i].blkT != undefined) {
+                blk = args[i].blkT
+                // A LITERAL block carries its parameter list (makeBlock); an `&expr'
+                // block argument does not, and its shape is unknowable here - which
+                // is why Kernel#lambda checks the first and not the second.
+                if (args[i].blkParams != undefined) { bparams = args[i].blkParams }
+            } else { plain.push(args[i]) }
         }
-        return {args: plain, blk: blk}
+        return {args: plain, blk: blk, blkParams: bparams}
     }
     // blockCall runs one block invocation and turns a `redo` into a re-run.
     function blockCall(f, args) {
@@ -6608,9 +6740,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var sp = splitBlock(items.slice(1))
         var args = sp.args
         var blkT = sp.blk
+        var lamParams = sp.blkParams
         return function() {
             // block_given? asks whether the ENCLOSING method received a block.
             if (name == "block_given?") { return methodBlock() != null }
+            // Kernel#lambda with a LITERAL block: built here rather than through
+            // hostGlobals["lambda"], because only this side knows the block's
+            // parameter list and a lambda is arity-checked where a block is not.
+            // The compiler half decides the same thing at the same place, in its own
+            // makeCall. IT CHANGES THE IDENTITY of the result - the value is the
+            // checking wrapper, not the block - so the arity record is copied over;
+            // nothing in Ruby can observe the difference, a block literal not being
+            // a value there at all. docs/todo.md 1.6.
+            if (name == "lambda" && blkT != null && lamParams != null) {
+                var lb0 = blkT()
+                return markLambda(copyArity(lamArityWrap(lambdaWrap(lb0), lamParams), lb0))
+            }
             var argv = evalArgList(args)
             var bf = null
             if (blkT != null) { bf = blkT() }
@@ -6669,11 +6814,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 body: body != null ? body : makeBody([])}
     }
     function runProgram(items) {
-        // A raise that escapes the top level is reported like any runtime error.
+        // A raise that escapes the top level is reported the way MRI reports it -
+        // "prog.rb:2:in `<main>': boom (RuntimeError)" - rather than as an engine
+        // error, so all three engines print the same line. js_rtop of
+        // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins, which
+        // used to print "uncaught exception: [object Object]". docs/todo.md 1.7.
         try {
             for (var i = 0; i < items.length; i++) { items[i]() }
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + rstr(e.v)) }
+            if (excIsUser(e)) {
+                println(excTopLine(e.v))
+                exit(1)
+            }
             throw e
         }
     }
@@ -6831,6 +6983,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // host abort - the class and the message are MRI's, and both compiled halves
         // raise the same ones (js_rposbind in lib/ruby-rt.metajs / abnf/jsrt.go).
         if (npos < required) { argCountErr(npos, posParams) }
+        // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises
+        // for `def one(a); end; one(1, 2)' and for `->(x) { }.call(1, 2)' exactly as
+        // it does for too few; both were accepted here, and the extra arguments were
+        // silently dropped. The two compiled halves ask the same question in
+        // js_rposbind / js_rargchk. docs/todo.md 1.6.
+        var hasStar = false
+        for (i = 0; i < posParams.length; i++) { if (posParams[i].splat === true) { hasStar = true } }
+        if (!hasStar && npos > posParams.length) { argCountErr(npos, posParams) }
         var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
@@ -7948,20 +8108,57 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             if (t == null) {
                 if (curExc.length > 0) { throw {__exc: true, v: curExc[curExc.length - 1]} }
-                throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], "unhandled exception")}
+                throw {__exc: true, v: excAt(mkExc(hostGlobals["RuntimeError"], "unhandled exception"), pos)}
             }
             var v = anytype
             v = t()
             var msg = anytype
             msg = mt != null ? rstr(mt()) : undefined
-            if (typeof v == "string") { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], v)} }
+            if (typeof v == "string") { throw {__exc: true, v: excAt(mkExc(hostGlobals["RuntimeError"], v), pos)} }
             if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) {
-                throw {__exc: true, v: mcall(v, "new", msg === undefined ? [] : [msg], null)}
+                throw {__exc: true, v: excAt(mcall(v, "new", msg === undefined ? [] : [msg], null), pos)}
             }
-            throw {__exc: true, v: v}
+            throw {__exc: true, v: excAt(v, pos)}
         }
     }
     function mkExc(cls, msg) { return mcall(cls, "new", [msg], null) }
+    // MRI's first backtrace frame for a `raise' running right now: "prog.rb:2:in
+    // `<main>'". The method name is read from the running scope chain ($mname is
+    // declared once per method invocation), which is the interpreter's answer to
+    // the compiler's emit-time curMethName. Only the raise SITE is modelled; MRI's
+    // further backtrace frames are not, and a block is reported as its enclosing
+    // method rather than "block in NAME". docs/todo.md 1.7.
+    function raiseSite(pos) {
+        var who = "<main>"
+        if (hasVar("$mname")) {
+            var mv = getVar("$mname")
+            if (typeof mv == "string" && mv != "") { who = mv }
+        }
+        return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
+    }
+    // Record the raise site on the exception object, unless it already carries one
+    // (a re-raise keeps the ORIGINAL site, as MRI does).
+    function excAt(v, pos) {
+        if (v !== null && v !== undefined && typeof v == "object" && !hasOwn(v, "__rwhere")) {
+            rawSet(v, "__rwhere", raiseSite(pos))
+        }
+        return v
+    }
+    // MRI's uncaught-exception line: "prog.rb:2:in `<main>': boom (RuntimeError)".
+    // An exception raised by the RUNTIME rather than by a `raise' carries no site,
+    // and then only "msg (Class)" is printed. Mirrors rbExcTopLine of
+    // lib/ruby-rt.metajs and rubyExcTopLine of abnf/jsrt.go.
+    function excTopLine(v) {
+        if (v === null || v === undefined || typeof v != "object") {
+            return "uncaught throw " + rinspect(v)
+        }
+        var cname = "RuntimeError"
+        var cls = v.__class
+        if (cls !== null && cls !== undefined && typeof cls.__name == "string") { cname = cls.__name }
+        var head = ""
+        if (typeof v.__rwhere == "string") { head = v.__rwhere + ": " }
+        return head + rstr(v) + " (" + cname + ")"
+    }
 
     // ----- The builtin class objects -----
     // `when Integer`, `x.is_a?(String)` and `rescue ArgumentError` all need the class
@@ -8047,7 +8244,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     excBase["message"] = excMessageFn
     excBase["to_s"] = excMessageFn
     excBase["full_message"] = excMessageFn
-    excBase["backtrace"] = function() { return [] }
+    // Exception#backtrace: MRI's frame list. Only the RAISE SITE is modelled here
+    // (makeRaise records it), so the answer is that one frame, in MRI's own spelling
+    // - "prog.rb:2:in `<main>'". An exception raised by the runtime rather than by a
+    // `raise', and one that was never raised at all, has no site and answers nil,
+    // which is what MRI does for an un-raised exception object. This used to answer
+    // an empty Array unconditionally. docs/todo.md 1.7.
+    excBase["backtrace"] = function() {
+        var self = arguments[0]
+        if (typeof self.__rwhere == "string") { return [self.__rwhere] }
+        return null
+    }
 
     // ----- Class-body directives (ordinary method calls in Ruby) -----
     // They all act on the class whose body is running, which findSelf() supplies.

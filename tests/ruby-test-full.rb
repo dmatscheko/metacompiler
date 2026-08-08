@@ -1804,6 +1804,118 @@ s35() # SECTION-CALL 35
 s36() # SECTION-CALL 36
 s37() # SECTION-CALL 37
 s38() # SECTION-CALL 38
+# ===== SECTION 40: subsequences, prefix tests and the lambda argument count =====
+# docs/todo.md 1.6, 1.7 and 1.10. Every right-hand side is ruby 2.6.10p210's own
+# answer, and none of these forms changed between 2.6 and 3.x. THIS SECTION RUNS
+# NATIVELY (docs/todo.md 4.3): the subsequence rule, String#start_with?, the
+# argument-count check and Exception#backtrace all live in layer 2 as well as in
+# the twin, and a feature-matrix assertion is only ever BUILT. Every operand is
+# read out of an array so no constant folder can answer these at compile time.
+def s40_try
+  begin
+    yield
+    "no error"
+  rescue ArgumentError => e
+    e.message
+  end
+end
+def s40_one(a); a; end
+def s40_where
+  ln = __LINE__ + 2
+  begin
+    raise "s40 site"
+  rescue RuntimeError => e
+    bt = e.backtrace
+    return [bt, ln]
+  end
+end
+def s40
+  v = [0, 6, 1, 2, 3, 100]
+  s = ["hello world", "abc", ""]
+  a = [[10, 20, 30, 40, 50]]
+  # s[start, len]: only the FIRST subscript argument used to be evaluated, so this
+  # answered ONE CHARACTER in every engine.
+  check("ab01", s[0][v[0], v[1]] == "hello ")
+  check("ab02", s[0][v[2], v[3]] == "el")
+  # A negative start counts back from the end; a negative length is nil; a start
+  # exactly at the end is the empty string and one past it is nil.
+  check("ab03", s[0][0 - v[4], v[3]] == "rl")
+  check("ab04", s[0][v[2], 0 - v[3]].nil?)
+  check("ab05", s[0][s[0].length, v[3]] == "" && s[0][v[5], v[3]].nil?)
+  # A RANGE subscript is a subsequence too. The compiler halves materialize a
+  # bounded range as an array and answered the element at the range's own first
+  # value, while the interpreter answered nil - a live halves divergence.
+  check("ab06", s[0][0..4] == "hello" && s[0][0...4] == "hell")
+  check("ab07", a[0][0..2] == [10, 20, 30] && a[0][1...3] == [20, 30])
+  check("ab08", a[0][v[2], v[3]] == [20, 30] && a[0][v[2], v[5]] == [20, 30, 40, 50])
+  check("ab09", a[0][0 - v[4]..0 - v[2]] == [30, 40, 50])
+  # An ENDLESS range subscript keeps its endpoints in the Range object itself, so it
+  # is exact in every engine; both compiled halves answered the FIRST character.
+  check("ab09b", s[0][6..] == "world" && s[0][v[5]..].nil? && a[0][2..] == [30, 40, 50])
+  # String#start_with? / #end_with? existed only in the interpreter half; both
+  # compiled halves aborted with "unknown String method". MRI takes a LIST.
+  check("ab10", s[0].start_with?("hell") && !s[0].start_with?("xx"))
+  check("ab11", s[1].start_with?("z", "a") && !s[1].start_with?("y", "z"))
+  check("ab12", s[0].end_with?("rld") && !s[0].end_with?("rl"))
+  check("ab13", s[1].end_with?("z", "bc") && s[1].start_with?(s[2]))
+  # A LAMBDA IS ARITY-CHECKED AND A BLOCK IS NOT. Kernel#lambda used to check
+  # neither bound and the -> literal only the lower one, so every one of these
+  # ran and dropped or nil-bound its arguments.
+  la = [lambda { |x| x }, lambda { 7 }, lambda { |*r| r.size }, lambda { |x, y = 1| x + y }]
+  check("ab14", s40_try { la[0].call(v[2], v[3]) } == "wrong number of arguments (given 2, expected 1)")
+  check("ab15", s40_try { la[0].call } == "wrong number of arguments (given 0, expected 1)")
+  check("ab16", s40_try { la[1].call(v[2]) } == "wrong number of arguments (given 1, expected 0)")
+  check("ab17", s40_try { la[3].call(v[2], v[3], v[4]) } == "wrong number of arguments (given 3, expected 1..2)")
+  # ... and the shapes that must still be accepted, plus Proc#arity, which the
+  # wrapper Kernel#lambda now builds must not lose.
+  check("ab18", la[2].call(v[2], v[3], v[4]) == 3 && la[3].call(v[2]) == 2)
+  check("ab19", la[0].arity == 1 && la[2].arity == -1 && la[3].arity == -2)
+  check("ab20", la[0].lambda? && !proc { |x| x }.lambda?)
+  # A PROC still binds loosely: extra arguments are dropped, missing ones are nil,
+  # and a single Array argument auto-splats.
+  pr = [proc { |x, y| [x, y] }]
+  check("ab21", pr[0].call(v[2], v[3], v[4]) == [1, 2] && pr[0].call(v[2]) == [1, nil])
+  check("ab22", pr[0].call([v[2], v[3]]) == [1, 2])
+  # A METHOD is arity-checked at both bounds as well; only too few used to raise.
+  check("ab23", s40_try { s40_one(v[2], v[3]) } == "wrong number of arguments (given 2, expected 1)")
+  check("ab24", s40_one(v[4]) == 3)
+  # Exception#backtrace is the raise SITE, in MRI's own spelling, which is what
+  # makes an uncaught exception print "prog.rb:LINE:in `<main>': msg (Class)"
+  # instead of "[object Object]". MRI's further frames are not modelled, so only
+  # the first one is asserted; an exception that was never raised has no site.
+  # NOTHING HERE MAY NAME THE FILE: ./test.sh --full copies the ratchet to a
+  # temp path before running it, so a filename assertion fails there and nowhere
+  # else. The LINE is pinned through __LINE__ instead, which is path-independent
+  # and survives an edit anywhere else in the file.
+  bw = s40_where
+  bt = bw[0]
+  # bt.length is 1 here and 2 in MRI (which also records the CALLER frame), so
+  # only the first frame - the raise site, the one that is modelled - is asserted.
+  check("ab25", !bt.nil? && bt.length >= 1 && bt[0].end_with?("in `s40_where\'"))
+  check("ab26", bt[0].end_with?(":" + bw[1].to_s + ":in `s40_where\'") &&
+        RuntimeError.new("x").backtrace.nil?)
+  # THE REST OF THE STRING METHOD SET, which existed only in the interpreter half:
+  # every one of these aborted both compiled halves with "unknown String method",
+  # so ordinary text work - not just the start_with? the item named - was a halves
+  # divergence. `"a  b".split(" ")` is deliberately NOT asserted: MRI reads a single
+  # space as the awk separator (any run of whitespace) and all three engines here
+  # split on the literal separator.
+  w = ["Hello World", "  pad  ", "", "abc", "a,b,,c"]
+  check("ab27", w[0].capitalize == "Hello world" && w[0].reverse == "dlroW olleH")
+  check("ab28", w[1].strip == "pad" && w[2].strip == "" && w[3].chars == ["a", "b", "c"])
+  check("ab29", w[4].split(",") == ["a", "b", "", "c"] && w[0].split(" ") == ["Hello", "World"])
+  check("ab30", w[0].index("World") == 6 && w[0].index("zz").nil? && w[2].empty? && !w[3].empty?)
+  check("ab31", w[3].succ == "abd" && w[3].next == "abd")
+  # A STRING PATTERN reaches the regexp half: MRI compiles one to a Regexp, and the
+  # gate on js_rxmcall / js_rxmcall's twin used to demand a real Regexp, so
+  # `s.sub("o", "0")` died where `s.sub(/o/, "0")` worked.
+  check("ab32", w[0].sub("o", "0") == "Hell0 World" && w[0].gsub("o", "0") == "Hell0 W0rld")
+  check("ab33", w[0].match?("Wor") && !w[0].match?("zz") && (w[0] =~ /World/) == 6)
+  ecs = ""
+  w[3].each_char { |c| ecs = ecs + c + "-" }
+  check("ab34", ecs == "a-b-c-")
+end
 s39() # SECTION-CALL 39
+s40() # SECTION-CALL 40
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

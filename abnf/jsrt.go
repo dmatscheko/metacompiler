@@ -375,6 +375,15 @@ type jsrt struct {
 	// counts are stored rather than the answer.
 	rubyArities map[interface{}]rubyArity
 
+	// rubyLastRange is the ARRAY the most recent bounded range literal materialized,
+	// with that range's raw endpoints beside it. A materialized range cannot carry
+	// them and Ruby's subscript rule needs them - see js_rrangearr. One slot, not a
+	// registry, so nothing is retained beyond a single array.
+	rubyLastRange   *jsArray
+	rubyLastRangeLo interface{}
+	rubyLastRangeHi interface{}
+	rubyLastRangeEx bool
+
 	// rubyCurExc is the exception the innermost js_try handed to a catch clause,
 	// which is what a BARE `raise' inside a rescue re-raises (Ruby's $!). It is
 	// only ever read by js_rraise.
@@ -5263,6 +5272,154 @@ func (rt *jsrt) rubyMakeExc(v interface{}, msg interface{}) interface{} {
 	return v
 }
 
+// rubySubrange is Ruby's subscript rule for a range whose RAW ENDPOINTS are still
+// known: a nil endpoint is the beginning / the end (`s[1..]`), a negative one counts
+// back from the end, and an exclusive end with no endpoint is still the end. The
+// second result is false when the receiver is neither a String nor an Array, so the
+// caller can fall back to ordinary indexing. Mirrors rsubrange of
+// ruby-interpreter.abnf and js_rsubrange of lib/ruby-rt.metajs. docs/todo.md 1.10.
+func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, bool) {
+	n := -1
+	switch t := o.(type) {
+	case *jsArray:
+		n = len(t.elems)
+	case string:
+		n = rt.strLen(t)
+	}
+	if n < 0 {
+		return nil, false
+	}
+	b0 := 0
+	if !isUndefOrNull(lo) {
+		b0 = int(math.Trunc(rubyToF(lo)))
+	}
+	if b0 < 0 {
+		b0 += n
+	}
+	if b0 < 0 || b0 > n {
+		return jsNull, true
+	}
+	e0 := n - 1
+	if !isUndefOrNull(hi) {
+		e0 = int(math.Trunc(rubyToF(hi)))
+		if e0 < 0 {
+			e0 += n
+		}
+		if excl {
+			e0--
+		}
+	}
+	length := e0 - b0 + 1
+	if length < 0 {
+		length = 0
+	}
+	if str, isStr := o.(string); isStr {
+		return rt.rubyStrSubseq(str, float64(b0), float64(length)), true
+	}
+	return rubyArrSubseq(o.(*jsArray), float64(b0), float64(length)), true
+}
+
+// rubyIndexGet is Ruby indexing: a[i], h[k], s[i]. Identical to js_pyget except
+// that a missing Hash key and an out-of-range index answer NIL instead of raising
+// - which is Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf
+// does. js_rget and js_rsubrange's non-sequence fallback share it.
+func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
+	// A Proc answers p[x] by calling itself.
+	if isCallable(o) {
+		return rt.call(o, jsUndef, []interface{}{k})
+	}
+	// A user class defines its own indexing with `def [](i)`.
+	if rubyUserObj(o) {
+		return rt.rubyMethod(o, "[]", []interface{}{k})
+	}
+	if keys, vals, ok := dictParts(o); ok {
+		i := rt.rubyDictFind(keys, k)
+		if i < 0 {
+			return rt.rubyHashDefault(o, k)
+		}
+		return vals.elems[i]
+	}
+	// a[0..2] / s[0..2]: a materialized range as the subscript of an Array or a
+	// String is a SUBSEQUENCE, not an index. When the array IS the one the last
+	// range literal built, its raw endpoints are still known and the answer is
+	// exact; otherwise the materialized indices are all there is - see
+	// js_rrangearr. docs/todo.md 1.10.
+	// s[6..] / s[..2]: an OPEN range keeps its endpoints in the object itself, so
+	// this case is exact with no slot at all. It answered the first character before
+	// (rubyIndexGet read the object as a number), while ruby-interpreter.abnf - where
+	// a Range is a real object - was right. docs/todo.md 1.10.
+	if ko, isObj := k.(*jsObject); isObj {
+		if _, isRng := ko.props["__rrange"]; isRng {
+			if v, ok := rt.rubySubrange(o, ko.props["begin"], ko.props["end"], rt.truthy(ko.props["excl"])); ok {
+				return v
+			}
+		}
+	}
+	if r, isRng := k.(*jsArray); isRng {
+		if r == rt.rubyLastRange && rt.rubyLastRange != nil {
+			if v, ok := rt.rubySubrange(o, rt.rubyLastRangeLo, rt.rubyLastRangeHi, rt.rubyLastRangeEx); ok {
+				return v
+			}
+		}
+		if v, ok := rt.rubyRangeSubseq(o, r); ok {
+			return v
+		}
+	}
+	idx := int(rt.toNumber(k))
+	switch o := o.(type) {
+	case *jsArray:
+		if idx < 0 {
+			idx += len(o.elems)
+		}
+		if idx < 0 || idx >= len(o.elems) {
+			return jsNull
+		}
+		return o.elems[idx]
+	case string:
+		n := rt.strLen(o)
+		if idx < 0 {
+			idx += n
+		}
+		if idx < 0 || idx >= n {
+			return jsNull
+		}
+		return rt.strAt(o, idx)
+	}
+	if isUndefOrNull(o) {
+		rt.fail("indexing nil")
+	}
+	return rt.getMember(o, k)
+}
+
+// rubyExcTopLine is MRI's uncaught-exception line:
+// "prog.rb:2:in `<main>': boom (RuntimeError)". The site is what js_rraiseat
+// recorded; an exception raised by the RUNTIME rather than by a `raise' has none,
+// and then only "msg (Class)" is printed. Mirrors excTopLine of
+// ruby-interpreter.abnf and rbExcTopLine of lib/ruby-rt.metajs. docs/todo.md 1.7.
+func (rt *jsrt) rubyExcTopLine(exc interface{}) string {
+	o, isObj := exc.(*jsObject)
+	if !isObj {
+		return "uncaught throw " + rt.rubyInspect(exc)
+	}
+	msg := ""
+	if m, ok := rt.rubyExcMessage(o); ok {
+		msg = rt.rubyStr(m)
+	}
+	cname := "RuntimeError"
+	if c, has := o.props["__class"]; has {
+		if co, isCo := c.(*jsObject); isCo {
+			if n, isStr := co.props["__name"].(string); isStr {
+				cname = n
+			}
+		}
+	}
+	head := ""
+	if where, isStr := o.props["__rwhere"].(string); isStr {
+		head = where + ": "
+	}
+	return head + msg + " (" + cname + ")"
+}
+
 // rubyExcMessage is Exception#message / #to_s: the first constructor argument,
 // or the class name when the exception was raised without one (MRI's default).
 func (rt *jsrt) rubyExcMessage(o *jsObject) (interface{}, bool) {
@@ -6230,6 +6387,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return "false"
 		}
+	// Exception#backtrace: MRI's frame list. Only the RAISE SITE is modelled here
+	// (js_rraiseat records it), so the answer is that one frame, in MRI's own
+	// spelling - "prog.rb:2:in `<main>'". An exception raised by the runtime rather
+	// than by a `raise', and one that was never raised at all, has no site and
+	// answers nil, which is what MRI does for an un-raised exception object.
+	// docs/todo.md 1.7.
+	case "backtrace":
+		if o, isObj := target.(*jsObject); isObj {
+			if _, isCls := o.props["__isclass"]; !isCls {
+				if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+					if where, isStr := o.props["__rwhere"].(string); isStr {
+						return &jsArray{elems: []interface{}{where}}
+					}
+					return jsNull
+				}
+			}
+		}
 	case "message", "full_message":
 		// Exception#message: the raise argument, or the class name. Only for an
 		// INSTANCE that does not define a message method of its own, so a user
@@ -6370,6 +6544,109 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return strings.ToLower(o)
 		case "include?":
 			return strings.Contains(o, rt.toString(argAt(args, 0)))
+		// String#[] / #slice: one index or a materialized range (js_rget's own
+		// rule), or start+len. docs/todo.md 1.10.
+		case "[]", "slice":
+			spos, _ := rubyBlockArgs(args)
+			if len(spos) > 1 {
+				return rt.rubyStrSubseq(o, spos[0], spos[1])
+			}
+			if r, isRng := argAt(spos, 0).(*jsArray); isRng {
+				v, _ := rt.rubyRangeSubseq(o, r)
+				return v
+			}
+			n := rt.strLen(o)
+			ix := int(rt.toNumber(argAt(spos, 0)))
+			if ix < 0 {
+				ix += n
+			}
+			if ix < 0 || ix >= n {
+				return jsNull
+			}
+			return rt.strAt(o, ix)
+		// String#start_with? / #end_with? take ANY NUMBER of prefixes/suffixes and
+		// answer true when one of them matches. Both existed only in
+		// ruby-interpreter.abnf, so a program testing a prefix aborted in both
+		// compiled halves with "unknown String method". docs/todo.md 1.10.
+		case "start_with?":
+			pfx, _ := rubyBlockArgs(args)
+			for _, a := range pfx {
+				if strings.HasPrefix(o, rt.toString(a)) {
+					return true
+				}
+			}
+			return false
+		case "end_with?":
+			sfx, _ := rubyBlockArgs(args)
+			for _, a := range sfx {
+				if strings.HasSuffix(o, rt.toString(a)) {
+					return true
+				}
+			}
+			return false
+		// THE PLAIN STRING METHODS THAT EXISTED ONLY IN ruby-interpreter.abnf.
+		// Every one of them aborted both compiled halves with "unknown String
+		// method", including split/strip/chars/empty?/index - so any program doing
+		// ordinary text work was a halves divergence, not just the start_with? the
+		// item named. Bodies are ruby-interpreter.abnf's. `split` keeps that half's
+		// LITERAL separator (MRI's single space is the awk separator - a run of
+		// whitespace with the leading run dropped); the two halves must agree and
+		// this is the shape they already had. docs/todo.md 1.10.
+		case "capitalize":
+			if o == "" {
+				return o
+			}
+			return strings.ToUpper(rt.strAt(o, 0)) + strings.ToLower(rt.strRange(o, 1, rt.strLen(o)))
+		case "reverse":
+			n := rt.strLen(o)
+			out := ""
+			for i := n - 1; i >= 0; i-- {
+				out += rt.strAt(o, i)
+			}
+			return out
+		case "strip":
+			return strings.Trim(o, " \t\n\r\f\v\x00")
+		case "chars":
+			n := rt.strLen(o)
+			out := &jsArray{}
+			for i := 0; i < n; i++ {
+				out.elems = append(out.elems, rt.strAt(o, i))
+			}
+			return out
+		case "split":
+			sep := " "
+			if pos, _ := rubyBlockArgs(args); len(pos) > 0 {
+				sep = rt.toString(pos[0])
+			}
+			out := &jsArray{}
+			if sep == "" {
+				for i := 0; i < rt.strLen(o); i++ {
+					out.elems = append(out.elems, rt.strAt(o, i))
+				}
+				return out
+			}
+			for _, part := range strings.Split(o, sep) {
+				out.elems = append(out.elems, part)
+			}
+			return out
+		case "index":
+			if i := rt.strIndexOf(o, rt.toString(argAt(args, 0))); i >= 0 {
+				return float64(i)
+			}
+			return jsNull
+		case "empty?":
+			return o == ""
+		case "succ", "next":
+			return rubyStrSucc(o)
+		case "replace":
+			return rt.toString(argAt(args, 0))
+		case "each_char":
+			if _, blk := rubyBlockArgs(args); blk != nil {
+				for i := 0; i < rt.strLen(o); i++ {
+					rt.call(blk, jsUndef, []interface{}{rt.strAt(o, i)})
+				}
+			}
+			return o
 		case "dup", "clone", "freeze", "to_str", "+@", "-@", "itself":
 			// A Ruby String is mutable, so `s = "a".dup` hands back a copy; the
 			// compiler models a String as a value, which makes the copy the value.
@@ -6413,6 +6690,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
 				}
 				return out
+			// Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes
+			// through js_rget. String and Array answer it too. docs/todo.md 1.10.
+			case "[]":
+				if i := rt.rubyDictFind(keys, argAt(args, 0)); i >= 0 {
+					return vals.elems[i]
+				}
+				return rt.rubyHashDefault(o, argAt(args, 0))
 			case "include?", "has_key?", "key?":
 				return rt.rubyDictFind(keys, argAt(args, 0)) >= 0
 			case "each":
@@ -6568,6 +6852,34 @@ type rubyArity struct {
 // per-parameter code string ("0" required, "1" optional, "2" splat). Mirrors
 // argCountErr of ruby-interpreter.abnf and rbArgCountErr of lib/ruby-rt.metajs.
 // docs/todo.md 1.5.
+// rubyLamArity is Kernel#lambda's count check: a trailing block marker is not a
+// positional argument, a *splat lifts the ceiling, and the message is MRI's.
+// Mirrors lamArity of ruby-interpreter.abnf and rbLamArity of lib/ruby-rt.metajs.
+// docs/todo.md 1.6.
+func (rt *jsrt) rubyLamArity(args []interface{}, kinds string) {
+	npos := len(args)
+	if npos > 0 && rubyIsBlkArg(args[npos-1]) {
+		npos--
+	}
+	req := 0
+	star := false
+	for i := 0; i < len(kinds); i++ {
+		switch kinds[i] {
+		case '2':
+			star = true
+		case '1':
+		default:
+			req++
+		}
+	}
+	if npos < req {
+		rt.rubyArgCountErr(npos, kinds)
+	}
+	if !star && npos > len(kinds) {
+		rt.rubyArgCountErr(npos, kinds)
+	}
+}
+
 func (rt *jsrt) rubyArgCountErr(given int, kinds string) {
 	req, opt, star := 0, 0, false
 	for i := 0; i < len(kinds); i++ {
@@ -6778,6 +7090,68 @@ func rubyArrSub(t *jsArray, from, length int) *jsArray {
 		}
 	}
 	return out
+}
+
+// Ruby's SUBSEQUENCE rule for Array#[start, len] and String#[start, len]: nil for
+// a negative length or a start past the end, an EMPTY result for a start exactly at
+// the end, and the length clamped to what is left. A negative start counts back
+// from the end. Mirrors rsubseq of ruby-interpreter.abnf and
+// rbArrSubseq/rbStrSubseq of lib/ruby-rt.metajs. docs/todo.md 1.10.
+func rubyArrSubseq(t *jsArray, start, length interface{}) interface{} {
+	s := int(math.Trunc(rubyToF(start)))
+	k := int(math.Trunc(rubyToF(length)))
+	if k < 0 {
+		return jsNull
+	}
+	if s < 0 {
+		s += len(t.elems)
+	}
+	if s < 0 || s > len(t.elems) {
+		return jsNull
+	}
+	return rubyArrSub(t, s, k)
+}
+
+func (rt *jsrt) rubyStrSubseq(t string, start, length interface{}) interface{} {
+	n := rt.strLen(t)
+	s := int(math.Trunc(rubyToF(start)))
+	k := int(math.Trunc(rubyToF(length)))
+	if k < 0 {
+		return jsNull
+	}
+	if s < 0 {
+		s += n
+	}
+	if s < 0 || s > n {
+		return jsNull
+	}
+	if s+k > n {
+		k = n - s
+	}
+	return rt.strRange(t, s, s+k)
+}
+
+// A CLOSED range reaches the compiler halves already MATERIALIZED as an array (that
+// is what ruby-to-llvm-ir.abnf emits for 1..2), so an array subscript on a String or
+// an Array IS a range: its first element is the low bound and its length the count.
+// Array#slice already read it that way; js_rget did not, so `a[0..2]' answered the
+// element at index 0 while ruby-interpreter.abnf answered nil - a live halves
+// divergence, both wrong. The second result is false when the receiver is neither,
+// so an ordinary subscript carries on unchanged. docs/todo.md 1.10.
+func (rt *jsrt) rubyRangeSubseq(o interface{}, r *jsArray) (interface{}, bool) {
+	switch t := o.(type) {
+	case *jsArray:
+		if len(r.elems) == 0 {
+			return &jsArray{}, true
+		}
+		return rubyArrSubseq(t, r.elems[0], float64(len(r.elems))), true
+	case string:
+		if len(r.elems) == 0 {
+			return "", true
+		}
+		return rt.rubyStrSubseq(t, r.elems[0], float64(len(r.elems))), true
+	}
+	return nil, false
 }
 
 // rubyArrHas / rubyArrAnd / rubyArrOr back Array#& and Array#|. Both keep the
@@ -7361,6 +7735,24 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	switch name {
 	case "size", "length":
 		return float64(len(t.elems))
+	// Array#[]: one index or a materialized range (js_rget's own rule), or
+	// start+len. docs/todo.md 1.10.
+	case "[]":
+		if len(pos) > 1 {
+			return rubyArrSubseq(t, pos[0], pos[1])
+		}
+		if r, isRng := argAt(pos, 0).(*jsArray); isRng {
+			v, _ := rt.rubyRangeSubseq(t, r)
+			return v
+		}
+		ix := int(rt.toNumber(argAt(pos, 0)))
+		if ix < 0 {
+			ix += len(t.elems)
+		}
+		if ix < 0 || ix >= len(t.elems) {
+			return jsNull
+		}
+		return t.elems[ix]
 	case "push", "append", "add":
 		// Ruby's Array#push is VARIADIC (`a.push(1, 2, 3)`); taking only args[0]
 		// dropped every further element silently. `a.push` with no argument is a
@@ -8899,45 +9291,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Hash key and an out-of-range index answer NIL instead of raising - which is
 		// Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf does.
 		"js_rget": func(a []uint64) uint64 {
-			// A Proc answers p[x] by calling itself.
-			if isCallable(u(a[0])) {
-				return w(rt.call(u(a[0]), jsUndef, []interface{}{u(a[1])}))
-			}
-			// A user class defines its own indexing with `def [](i)`.
-			if rubyUserObj(u(a[0])) {
-				return w(rt.rubyMethod(u(a[0]), "[]", []interface{}{u(a[1])}))
-			}
-			if keys, vals, ok := dictParts(u(a[0])); ok {
-				i := rt.rubyDictFind(keys, u(a[1]))
-				if i < 0 {
-					return w(rt.rubyHashDefault(u(a[0]), u(a[1])))
-				}
-				return w(vals.elems[i])
-			}
-			idx := int(rt.toNumber(u(a[1])))
-			switch o := u(a[0]).(type) {
-			case *jsArray:
-				if idx < 0 {
-					idx += len(o.elems)
-				}
-				if idx < 0 || idx >= len(o.elems) {
-					return w(jsNull)
-				}
-				return w(o.elems[idx])
-			case string:
-				n := rt.strLen(o)
-				if idx < 0 {
-					idx += n
-				}
-				if idx < 0 || idx >= n {
-					return w(jsNull)
-				}
-				return rt.wrapStr(rt.strAt(o, idx))
-			}
-			if isUndefOrNull(u(a[0])) {
-				rt.fail("indexing nil")
-			}
-			return w(rt.getMember(u(a[0]), u(a[1])))
+			return w(rt.rubyIndexGet(u(a[0]), u(a[1])))
 		},
 		// Ruby index assignment: a[i] = v, h[k] = v, obj[i] = v. Like js_pyset except
 		// that a user class dispatches its own `def []=`, a missing Hash key is
@@ -9209,6 +9563,32 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// thrown exactly like js_throw does.
 		"js_rraise": func(a []uint64) uint64 {
 			panic(&jsThrown{value: rt.rubyMakeExc(u(a[0]), u(a[1]))})
+		},
+		// The same raise, plus the SOURCE SITE of the `raise` that wrote it -
+		// "prog.rb:2:in `<main>'", exactly MRI's first backtrace frame. Only
+		// makeRaise emits this form, so a re-raise (js_rraise, which hands the same
+		// object back) keeps the ORIGINAL site, as MRI does. js_rtop prints it when
+		// the exception reaches the top of the program. docs/todo.md 1.7.
+		"js_rraiseat": func(a []uint64) uint64 {
+			e := rt.rubyMakeExc(u(a[0]), u(a[1]))
+			if o, isObj := e.(*jsObject); isObj {
+				if _, had := o.props["__rwhere"]; !had {
+					if where, isStr := u(a[2]).(string); isStr {
+						rt.setMember(o, "__rwhere", where)
+					}
+				}
+			}
+			panic(&jsThrown{value: e})
+		},
+		// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the
+		// value left jsmain and runJSModule's uncaught-throw handler rendered it
+		// with the generic object toString, so every uncaught `raise` in both
+		// compiled halves read "js runtime error: uncaught exception:
+		// [object Object]" - no message, no class. docs/todo.md 1.7.
+		"js_rtop": func(a []uint64) uint64 {
+			fmt.Fprintln(outWriter, wtf8Clean(rt.rubyExcTopLine(u(a[0]))))
+			os.Exit(1)
+			return 0
 		},
 		"js_throw": func(a []uint64) uint64 {
 			// Raise the thrown value as a Go panic; the nearest js_try recovers it.
@@ -9519,8 +9899,41 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// class object by is_a?, everything else by ==.
 		// lo..hi / lo...hi with BOTH bounds: the array the lowering iterates and
 		// indexes with. Numbers and the String ranges "a".."c" alike.
+		// IT ALSO REMEMBERS THE RAW ENDPOINTS OF THE ARRAY IT JUST BUILT, because a
+		// materialized range cannot carry them and Ruby's SUBSCRIPT rule needs them:
+		// `(1..-1)` is the EMPTY array, while `s[1..-1]` means "from index 1 to the
+		// last character" - the commonest range subscript there is. The slot holds
+		// the array itself, so rubyIndexGet can only use the endpoints for THAT
+		// object; anything else falls back to reading the materialized indices. One
+		// slot, not a registry: a registry would retain every range array ever built
+		// (`(1..1_000_000)`), and one slot is exact for the case that matters, since
+		// a range written AT a subscript is the last one evaluated before the index.
+		// Mirrors js_rrangearr's slot in lib/ruby-rt.metajs; ruby-interpreter.abnf
+		// needs none, a Range being a real object there. docs/todo.md 1.10.
 		"js_rrangearr": func(a []uint64) uint64 {
-			return w(rt.rubyRangeArr(u(a[0]), u(a[1]), rt.truthy(u(a[2]))))
+			arr := rt.rubyRangeArr(u(a[0]), u(a[1]), rt.truthy(u(a[2])))
+			rt.rubyLastRange = arr
+			rt.rubyLastRangeLo = u(a[0])
+			rt.rubyLastRangeHi = u(a[1])
+			rt.rubyLastRangeEx = rt.truthy(u(a[2]))
+			return w(arr)
+		},
+		// s[lo..hi] / a[lo...hi] written as a RANGE LITERAL at the subscript: the
+		// endpoints arrive RAW, because a materialized range cannot carry them -
+		// `(1..-1)` is the empty array while `s[1..-1]` means "from index 1 to the
+		// last character". A nil endpoint is the beginning / the end (`s[1..]`), and
+		// an exclusive end with no endpoint is still the end. Anything that is not a
+		// String or an Array (a Hash whose key is a range, a user class' own
+		// `def []`) keeps the materialized-array form, so nothing else changes.
+		// docs/todo.md 1.10.
+		"js_rsubrange": func(a []uint64) uint64 {
+			if v, ok := rt.rubySubrange(u(a[0]), u(a[1]), u(a[2]), rt.truthy(u(a[3]))); ok {
+				return w(v)
+			}
+			if isUndefOrNull(u(a[1])) || isUndefOrNull(u(a[2])) {
+				return w(rt.rubyIndexGet(u(a[0]), rubyOpenRange(u(a[1]), u(a[2]), rt.truthy(u(a[3])))))
+			}
+			return w(rt.rubyIndexGet(u(a[0]), rt.rubyRangeArr(u(a[1]), u(a[2]), rt.truthy(u(a[3])))))
 		},
 		// (5..) / (..9): no array to build, so the range stays an object that answers
 		// cover? / include? / === (see rubyOpenRangeCover).
@@ -9649,6 +10062,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// reaches here - the emitter binds one with js_rblockarg, and Ruby
 			// arity-checks methods and lambdas only. docs/todo.md 1.5.
 			if npos < required {
+				rt.rubyArgCountErr(npos, kinds)
+			}
+			// TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI
+			// raises for `->(x, y = 2) { }.call(1, 2, 3)` exactly as it does for
+			// too few; the extra arguments were silently dropped. bindParams of
+			// ruby-interpreter.abnf and js_rargchk's fast path ask the same
+			// question. docs/todo.md 1.6.
+			if !strings.ContainsRune(kinds, '2') && npos > len(kinds) {
 				rt.rubyArgCountErr(npos, kinds)
 			}
 			spare := npos - required
@@ -9856,6 +10277,32 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.rubyLambdas[u(a[0])] = true
 			return a[0]
 		},
+		// KERNEL#LAMBDA'S ARITY CHECK. A block binds loosely (a missing parameter
+		// is nil, an extra argument is dropped) and a lambda does not, so
+		// `lambda { |x| }` has to WRAP its block in a frame that raises MRI's
+		// ArgumentError; `->(x) { }` gets the same check from emitParams instead,
+		// because its body IS the checked function. `kinds` is js_rposbind's
+		// encoding, recorded at the block LITERAL by the emitter - the arity
+		// registry could not supply it, being armed only when the program names
+		// `arity`. The registry entry, if there is one, is re-registered onto the
+		// wrapper so Proc#arity still answers. docs/todo.md 1.6.
+		"js_rlamchk": func(a []uint64) uint64 {
+			inner := u(a[0])
+			if !isCallable(inner) {
+				return a[0]
+			}
+			kinds, _ := u(a[1]).(string)
+			wrap := jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				rt.rubyLamArity(args, kinds)
+				return rt.call(inner, jsUndef, args)
+			})
+			if rt.rubyArities != nil {
+				if rec, has := rt.rubyArities[inner]; has {
+					rt.rubyArities[wrap] = rec
+				}
+			}
+			return w(wrap)
+		},
 		// The parameter shape of the closure just built, for Proc#arity - the
 		// closure itself is handed straight back, exactly as js_rlambda does.
 		"js_rarity": func(a []uint64) uint64 {
@@ -9887,7 +10334,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if npos > 0 && rubyIsBlkArg(arr.elems[len(arr.elems)-1]) {
 				npos--
 			}
-			if npos < req {
+			// TOO MANY is an error as well: this arm's parameter list is
+			// all-required, so the count must be EXACTLY req. docs/todo.md 1.6.
+			if npos != req {
 				rt.rubyArgCountErr(npos, strings.Repeat("0", req))
 			}
 			return jsHUndefined
