@@ -80,11 +80,43 @@ language whose count is `-`. **Running `./test.sh --full` by hand still needs
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give, and each has a toolchain here that
-settles it.
+settles it. The previous nine were closed in `0907c7f..40a8f4f`; what follows is
+what closing them turned up, all **[V]** on `40a8f4f` and all found by probing
+OUTWARD from an item rather than by reading code.
 
-**Section 1 is EMPTY for the twelfth time** — all nine items, plus 2.2, are closed
-in `0907c7f..40a8f4f`. What that round found is folded into the box at the top of
-this file; the per-item detail is in those six commit messages.
+### 1.1 swift: `x is P` is false for a type that conforms to protocol `P` **[V]**
+`Outer.A() is Greet` → `false`, `swiftc` says `true`. Wrong in all three engines,
+so `--cross` is blind. **Protocol conformance is recorded on no value in either
+engine**, which is also why `40a8f4f`'s sibling commit had to exempt user
+protocols from `catch` filtering — filtering on a false answer turns a caught
+error into an uncaught one, so this gap is currently load-bearing. Needs a
+conformance marker on the descriptor in both engines plus an emitter arm.
+**And a live halves divergence in the same area, where the COMPILER is the wrong
+half**: `extension Greet { func hi() { return "hi:" + tag() } }` with a conforming
+type overriding `tag()` answers `hi:?` in the interpreter (which is `swiftc`'s
+answer) and `hi:A` in the compiler half.
+
+### 1.2 dart's `FormatException` is not a bound builtin **[V]**
+`unknown name: FormatException` in both halves — found while sweeping six
+languages' catch dispatch, all of which were otherwise correct. No `dart`
+toolchain here, so cite the `dart:core` docs. Check the rest of the `dart:core`
+exception names in the same pass; this one was found by accident, not by a sweep.
+
+### 1.3 ruby: a per-object singleton method table **[V]**
+`o = Object.new; o.extend(M)` is `unknown method 'extend'` in **all three**
+engines — the CLASS-level `extend M` was closed in `018c693`, the instance-level
+one was not. It is the same wall that makes the emitter declare
+`def inside class << VALUE` not-implemented: there is no per-object method table
+checked ahead of the `__class` chain. ~2 sites × 3 engines plus the `extend` arm.
+
+### 1.4 js: `this` at module scope is `undefined` here, `module.exports` in node **[V]**
+All three engines agree and all three are wrong, so `--cross` cannot see it. One
+row of a 35-row probe that is otherwise byte-identical to node v24.
+
+### 1.5 bash: `declare -i` leaks its attribute out of the function **[V]**
+An integer attribute declared inside a function is still in force after it
+returns. Found while writing SECTION 29, which had to rename its variable to
+avoid the collision — so it is already costing test authors.
 
 # 2. Cross-engine defects and latent traps
 
@@ -347,6 +379,22 @@ imported by three grammars. Never started.
 
 ---
 
+### 5.4 Divergences recorded at their sites this round, each with a reason **[V]**
+Not defects to fix blind — each is written at the code with the measurement, and
+each is here only so it is findable. **C#** `e.ToString()` prints
+`[object Object]`; .NET returns `FullName: Message` plus a stack trace, which this
+engine cannot produce, so any partial version is a wrong answer in a new shape.
+**ruby** `("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare
+`.size` to `js_pylen`, which is also for-in's trip count, so splitting them
+changes every Ruby program (implemented, measured, reverted). **ruby** `p (x).m`
+parses as `(p(x)).m` here and `p((x).m)` in MRI — pre-existing, unrelated to
+ranges, and it has now bitten two people. **python** `repr(math)` names a
+machine-specific `.so` path in CPython; `import math as m` INSIDE a function
+binds nothing, and adding imports to the local set would break
+`def f(): import re; return re.I`. **swift** static initialisers are eager where
+Swift's are lazy, and `x is Inner` cannot tell two same-named nested types apart —
+the one place a `__qname` would earn its keep.
+
 # 6. Simplifications now unblocked
 
 Both of these were blocked by something that no longer blocks them.
@@ -395,24 +443,35 @@ against its own 2.05% spread with NO lua change anywhere in the round — record
 in `tests/bench/baseline.txt` rather than smoothed. lua is the noisiest row
 relative to its own size, so this item needs more draws than most.
 
-### 7.2 Per-language coverage of the floor **[U]**
+### 7.2 `tests/probe.sh`'s `run` leg is EMPTY for bash and batch **[V]**
+`-qq` on those two COMPILER halves prints nothing at all, so the four-way probe
+silently compares three legs and reports agreement. The manual's chapter 2 gives
+the rule (`-qq` suppresses a grammar's default output, which for a compiler
+grammar is the module, leaving the program's own prints) — but bash and batch emit
+SELF-CONTAINED IR and run the program natively, so there is no side channel to
+survive it. Either teach `probe.sh` to use `-exe` for the compiler leg of a
+self-contained language, or make it FAIL LOUDLY on an empty leg. It currently
+does the one thing this project treats as worst: reports green for a comparison it
+did not make.
+
+### 7.3 Per-language coverage of the floor **[U]**
 The instrumentation that found 24 unreached floor bodies was written once and
 thrown away. Keeping it as `tools/floor-coverage` would make "is this body dead or
 untested?" answerable at any time — **it is the question that gates Part B (3.3)**,
 because a body no test reaches is a body no move can be validated against.
 
-### 7.3 A `--why` flag for the emitters **[U]**
+### 7.4 A `--why` flag for the emitters **[U]**
 Understanding which extern an emitter chooses for an operator means reading
 thousands of lines of grammar, repeatedly. A flag that prints the extern chosen
 per AST node would make layer-2 work dramatically faster.
 
-### 7.4 Make MetaJS's dialect gaps loud **[U]**
+### 7.5 Make MetaJS's dialect gaps loud **[U]**
 No exponent literal, no `toPrecision`, typed locals, ASI differences: each is
 discovered by a confusing failure. A `-verify` pass over `lib/*.metajs` that names
 them would pay for itself immediately. (`docs/abnf-dialect-gotchas.md` lists them;
 nothing enforces them.)
 
-### 7.5 On glibc < 2.34, the native link needs `-ldl -lpthread` **[U]**
+### 7.6 On glibc < 2.34, the native link needs `-ldl -lpthread` **[U]**
 `dlopen`/`dlsym` live in `libdl` and `pthread_create` in `libpthread` there, so
 such a system needs both beside the new `-rdynamic`. Recorded in the code comment
 rather than guessed at, and untestable here — this machine is darwin.
