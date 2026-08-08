@@ -107,7 +107,7 @@ FULL_TIMEOUT=600
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=8154      # raised for C# typed catch (+31), the twelfth round
+FULL_ASSERTIONS=8213      # C# typed catch +31, bash IFS/case/base +59
 
 # The shape ratchet: layer-2 bodies in languages/lib/*.metajs that are identical
 # modulo names, ACROSS FILES, at the default -min 140. It is the only measure of

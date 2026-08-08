@@ -1198,6 +1198,129 @@ s27() {
 }
 
 
+# ===== SECTION 28: field splitting under a non-whitespace IFS =====
+# Its own section because the POSIX delimiter rule touches EVERY unquoted
+# expansion, not one operator: a character of IFS that is space, tab or newline
+# delimits in RUNS and is ignored at the ends of the value, while any other
+# member of IFS delimits exactly one field on its own - so two of them in a row
+# leave an EMPTY field between them. Every count below was run under bash 5.3.15.
+s28() {
+  local saved_ifs="$IFS"
+  IFS=:
+  local v="a:b::c"
+  set -- $v
+  check ifs1 "$#" 4
+  check ifs2 "$1-$2-$3-$4" "a-b--c"
+  # a LEADING delimiter makes an empty first field, a TRAILING one adds nothing
+  set -- ":a:"
+  set -- $1
+  check ifs3 "$#" 2
+  check ifs4 "[$1][$2]" "[][a]"
+  set -- "a:"
+  set -- $1
+  check ifs5 "$#" 1
+  # a run of non-whitespace delimiters is a run of empty fields
+  set -- "::"
+  set -- $1
+  check ifs6 "$#" 2
+  # an array assignment splits the same way
+  local -a arr=($v)
+  check ifs7 "${#arr[@]}" 4
+  check ifs8 "[${arr[2]}]" "[]"
+  # two delimiters, both non-whitespace
+  IFS=":,"
+  local w="a:b,c::d"
+  set -- $w
+  check ifs9 "$#" 5
+  check ifs10 "[$3][$4][$5]" "[c][][d]"
+  # MIXED: the blank is IFS whitespace, so " : " is ONE delimiter, but "::" is two
+  IFS=" :"
+  set -- "a : b::c"
+  set -- $1
+  check ifs11 "$#" 4
+  check ifs12 "[$1][$2][$3][$4]" "[a][b][][c]"
+  # whitespace-only IFS still collapses runs and strips the ends
+  IFS=$' \t\n'
+  set -- "  a  b   c  "
+  set -- $1
+  check ifs13 "$#" 3
+  # an empty IFS suppresses splitting entirely
+  IFS=
+  set -- "a b:c"
+  set -- $1
+  check ifs14 "$#" 1
+  IFS="$saved_ifs"
+  set --
+}
+
+# ===== SECTION 29: case-mapping patterns, BASE#DIGITS, file kinds, fd 2 =====
+s29() {
+  local s=banana t=BANANA
+  # the pattern operand of ^ ^^ , ,, - matched against ONE character at a time
+  check cmp1 "${s^^[bn]}" BaNaNa
+  check cmp2 "${s^^[an]}" bANANA
+  check cmp3 "${t,,[BN]}" bAnAnA
+  check cmp4 "${s^^a}" bAnAnA
+  check cmp5 "${s^^?}" BANANA
+  check cmp6 "${s^^*}" BANANA
+  check cmp7 "${s^[bn]}" Banana
+  # a first character the pattern does not match is left alone
+  check cmp8 "${s^[x]}" banana
+  check cmp9 "${t,[X]}" BANANA
+  check cmp10 "${s^^[!a]}" BaNaNa
+  # no pattern at all is still "every character" / "the first character"
+  check cmp11 "${s^^}" BANANA
+  check cmp12 "${s^}" Banana
+  # a bracket expression matches one CHARACTER, not one byte
+  local u="Ünïcode"
+  check cmp13 "${u^^[ïn]}" "ÜNÏcode"
+  case "ï" in [ïn]) check cmp14 hit hit ;; *) check cmp14 miss hit ;; esac
+  # BASE#DIGITS: the alphabet SEPARATES the two letter cases above base 36
+  check bnm1 "$(( 36#z ))" 35
+  check bnm2 "$(( 64#Az ))" 2339
+  check bnm3 "$(( 64#@_ ))" 4031
+  check bnm4 "$(( 62#Z ))" 61
+  check bnm5 "$(( 16#FF ))" 255
+  check bnm6 "$(( 16#ff ))" 255
+  # ... and either operand may be built by expansion
+  # NOT `num`: SECTION 22 does `declare -i num`, and this engine leaks that attribute
+  # out of the function where real bash keeps it local - so `local bnum=0012` here would
+  # be read as an octal arithmetic assignment. Sections must be self-contained.
+  local bnum=0012 bhx=ff bbase=2
+  check bnm7 "$(( 10#$bnum ))" 12
+  check bnm8 "$(( 10#$bnum + 1 ))" 13
+  check bnm9 "$(( 16#$bhx ))" 255
+  check bnm10 "$(( $bbase#101 ))" 5
+  check bnm11 "$(( ${bbase}#111 ))" 7
+  check bnm12 "$(( 3 * 16#ff + 1 ))" 766
+  # the file-kind model: /dev/null is a CHARACTER DEVICE, not a regular file
+  if [ -f /dev/null ]; then check fsk1 yes no; else check fsk1 no no; fi
+  if [ -c /dev/null ]; then check fsk2 yes yes; else check fsk2 no yes; fi
+  if [ -b /dev/null ]; then check fsk3 yes no; else check fsk3 no no; fi
+  if [ -s /dev/null ]; then check fsk4 yes no; else check fsk4 no no; fi
+  if [ -s /usr ]; then check fsk5 yes yes; else check fsk5 no yes; fi
+  if [ -x /usr ]; then check fsk6 yes yes; else check fsk6 no yes; fi
+  if [ -x /dev/null ]; then check fsk7 yes no; else check fsk7 no no; fi
+  if [ -L /usr ]; then check fsk8 yes no; else check fsk8 no no; fi
+  # fd 2 is a real channel: a redirection decides where it goes, and 2>&1
+  # brings it back into a command substitution while 2>/dev/null drops it
+  s29e() { echo toerr >&2; echo toout; }
+  check err1 "$(s29e 2>/dev/null)" toout
+  check err2 "$(s29e 2>&1)" "toerr
+toout"
+  check err3 "$( { echo g >&2; echo o; } 2>&1 )" "g
+o"
+  check err4 "$( { echo g >&2; echo o; } 2>/dev/null )" o
+  check err5 "$( ( echo g >&2; echo o ) 2>&1 )" "g
+o"
+  check err6 "$( { printf 'p\n' >&2; } 2>&1 )" p
+  # set -u names the variable it could not read, on fd 2
+  check err7 "$( ( set -u; echo "${nope_on_purpose}"; echo unreached ) 2>/dev/null )" ""
+  # an ARRAY name is set even though its scalar slot is not: set -u must not fire
+  check err8 "$( set -u; a29=(11 22); echo "$a29"; echo after )" "11
+after"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1225,5 +1348,7 @@ s24   # SECTION-CALL 24
 s25   # SECTION-CALL 25
 s26   # SECTION-CALL 26
 s27   # SECTION-CALL 27
+s28   # SECTION-CALL 28
+s29   # SECTION-CALL 29
 echo "full: $checks checks, $fails failures"
 exit $fails

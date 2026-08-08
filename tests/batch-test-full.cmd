@@ -1131,6 +1131,66 @@ set want=tiny
 call :check
 exit /b 0
 
+
+rem ===== SECTION 27: the two stacks the emitted code indexes itself =====
+rem batch-to-llvm-ir.abnf's makeCall increments `frame` and `call_sp`, and
+rem bat_setlocal increments `loc_sp`. All three index FIXED global arrays -
+rem args[DEPTH*ARGN], call_stack[DEPTH] with DEPTH 256, and loc_v/loc_d with
+rem LDEPTH 32 - and none of the increments was checked, so this is emitted code
+rem that no runtime can defend from the inside (bat_shift could only refuse to
+rem COMPOUND the overflow, which is what it already did). Measured at the parent
+rem commit: a script recursing 400 deep exits 139 having printed nothing, and 40
+rem nested setlocals silently walk over the globals behind loc_v.
+rem
+rem These assertions go the OTHER way, because a run that crosses a limit exits
+rem 70 and this file must exit 0: they pin the guards' bounds by staying just
+rem inside them. A guard written with the wrong comparison would break here.
+:s27
+set /a s27n=0
+call :s27rec 1
+set cid=dep1
+set got=%s27n%
+set want=250
+call :check
+set s27v=outer
+call :s27loc 1
+set cid=dep2
+set got=%s27v%
+set want=outer
+call :check
+rem the frames really are separate: the innermost call's %1 is not the outer one's
+set cid=dep3
+set got=%s27deep%
+set want=250
+call :check
+exit /b 0
+
+:s27rec
+set /a s27n=%1
+if %s27n% GEQ 250 (
+  set s27deep=%1
+  exit /b 0
+)
+set /a s27next=%1+1
+call :s27rec %s27next%
+exit /b 0
+
+rem 31 nested setlocals - one below LDEPTH - each shadowing the same name, then
+rem 31 endlocals: the outermost value has to come back untouched. The 32nd push
+rem is the one the new guard refuses, and it exits 70 with a diagnostic rather
+rem than writing past loc_v.
+:s27loc
+setlocal
+set s27v=lvl%1
+if %1 LSS 31 call :s27locmore %1
+endlocal
+exit /b 0
+
+:s27locmore
+set /a s27lnext=%1+1
+call :s27loc %s27lnext%
+exit /b 0
+
 rem ===== END SECTIONS =====
 
 :main
@@ -1160,5 +1220,6 @@ call :s23 SECTION-CALL 23
 call :s24 SECTION-CALL 24
 call :s25 SECTION-CALL 25
 call :s26 SECTION-CALL 26
+call :s27 SECTION-CALL 27
 echo full: %checks% checks, %fails% failures
 exit /b %fails%

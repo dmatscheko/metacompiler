@@ -60,8 +60,9 @@ and section 25 the ${...} corners - all settled against the real bash 5.3 first.
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
 (mec languages/bash-to-llvm-ir.abnf script.sh -exe out && ./out). The supported language, and
-what is modelled rather than real (no filesystem, no environment, no process id, stderr as a
-channel whose text is dropped), is the one documented in bash-interpreter.abnf. In addition,
+what is modelled rather than real (no filesystem, no environment, no process id), is the one
+documented in bash-interpreter.abnf. Standard error is a real channel and a NATIVE -exe binary
+writes it to fd 2; under llvm.Run, which has no fd 2 at all, its text is dropped. In addition,
 this compiler requires the command word of a simple command to be a literal (static dispatch),
 and the arrays a subshell ADDS are not rolled back when it ends.") ;
 
@@ -199,11 +200,11 @@ AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
 AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
-Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
+Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ RedirList ] ;
 // { LIST; } is a plain grouping: it runs in the CURRENT shell.
 // "{" only opens a group when it is a WORD OF ITS OWN: `{ls; }` is the word "{ls" plus a
 // stray "}", which real bash refuses.
-BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
+BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
@@ -557,7 +558,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -567,6 +568,34 @@ ArHex       = ArHexPfx :whitespace() ArHexDig { ArHexDig } ;
 ArHexPfx    = "0x" | "0X" ;
 ArHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
 ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
+// BASE#DIGITS WHERE EITHER SIDE IS BUILT BY EXPANSION. Real bash expands the whole
+// arithmetic string first and only then lexes it, so `10#$num` is `10#0012` is 12; here the
+// expression is a parse tree, so the two operands are parsed as WORDS (literal characters
+// plus any $ expansion) and joined at run time. Without this `$(( 10#$num ))` did not parse
+// as arithmetic at all and the shell fell back to $( ( ... ) ), i.e. "command not found:
+// 10#0012" (docs/todo.md 1.8).
+//
+// The BASE side admits only DIGITS as literal text, which is what keeps this rule from
+// swallowing anything else: bash rejects a bare name there too - `b=16; echo $(( b#ff ))` is
+// "invalid arithmetic operator", while `$(( $b#ff ))` is 255 - so `b#ff` must still fail
+// here and reach ArVar exactly as before. It has to be tried BEFORE ArNum: ArNumTok's own
+// ArBase alternative fails on `10#$num` and ArDec then matches just "10", and PEG ordered
+// choice never comes back (manual chapter 4).
+//
+// WHITESPACE, and it cost an hour: a LEADING `:whitespace()` on this production made the
+// rule never match at all (mkArBaseDyn was never called, and `16#ff` quietly fell through
+// to ArNum's own ArBase). It has to sit AFTER the first element, exactly like ArHex's
+// `ArHexPfx :whitespace() ArHexDig`. The two operand productions turn skipping off after
+// their first segment for the same reason `$(( 1 6#3 ))` must stay an error: with skipping
+// on, ArBaseLhs read "1" and "6" across the blank and answered base 16.
+ArBaseDyn   <~~ push(mkArBaseDyn(takeAll())) ~~>
+            = ArBaseLhs :whitespace() "#" ArBaseRhs :whitespace(Whitespace) ;
+ArBaseLhs   <~~ push(mkWord(takeAll())) ~~> = ArBaseLSeg :whitespace() { ArBaseLSeg } ;
+ArBaseLSeg  = ExpSeg | ArBaseDig ;
+ArBaseDig   <~~ push(makeConst(up.in)) ~~> = "0"..."9" ;
+ArBaseRhs   <~~ push(mkWord(takeAll())) ~~> = ArBaseRSeg :whitespace() { ArBaseRSeg } ;
+ArBaseRSeg  = ExpSeg | ArBaseAl ;
+ArBaseAl    <~~ push(makeConst(up.in)) ~~> = ArAlnum ;
 ArAlnum     = "0"..."9" | "a"..."z" | "A"..."Z" | "@" | "_" ;
 ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
@@ -1128,11 +1157,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
-    // standard error channel, 2 = discarded. There is no stderr primitive behind a compiled
-    // run either, so channel 1's text is dropped - what MATTERS is which channel a
-    // redirection routes a command to, and that is modelled exactly.
+    // standard error channel, 2 = discarded. Channel 1 reaches fd 2 in a NATIVE build and is
+    // dropped under llvm.Run, which has no standard error to reach - the reasoning is at
+    // rt_putc in languages/lib/bash-rt.c. Either way, which channel a redirection routes a
+    // command to is modelled exactly.
     var gSinkOut = rtGlobal("sink_out", i32)
     var gSinkErr = rtGlobal("sink_err", i32)
+    // 1 only in a native build: it is what lets rt_putc send the standard error CHANNEL to
+    // fd 2. llvm.Run has no fd 2 (its RunResult carries only Out) and no `write` extern, so
+    // the store below is the switch that keeps the byte-writing path unreachable there.
+    // The reasoning in full is at rt_putc in languages/lib/bash-rt.c.
+    var gErrNative = rtGlobal("err_native", i32)
     // Standard input for `read`: the read position (the buffer is gStdin above).
     var gStdinPos = rtGlobal("stdin_pos", i32)
 
@@ -1229,6 +1264,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtInt2str = rtDecl("rt_int2str", true, [0])
     // i32 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
     var rtStr2int = rtDecl("rt_str2int", false, [1])
+    // rt_basenum(digits, base): BASE#DIGITS when either side was built by expansion.
+    var rtBasenum = rtDecl("rt_basenum", false, [1, 0])
     // i32 rt_class(i8* p, i32 ch): p points at "[". Returns -1 when the bracket expression is
     // unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
     var rtClass = rtDecl("rt_class", false, [1, 0])
@@ -1256,7 +1293,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${v#p} ${v%p} ${v/p/r} ${v^} ${v@Q} ${v@E}, and `read`.
     var rtStrip = rtDecl("rt_strip", true, [1, 1, 0])
     var rtReplace = rtDecl("rt_replace", true, [1, 1, 1, 0])
-    var rtCase = rtDecl("rt_case", true, [1, 0])
+    var rtCase = rtDecl("rt_case", true, [1, 0, 1])
     var rtShQuote = rtDecl("rt_shquote", true, [1])
     var rtAnsiC = rtDecl("rt_ansic", true, [1])
     var rtHasChar = rtDecl("rt_haschar", false, [1, 0])
@@ -1331,9 +1368,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- output, capture, subshell and `local` -----------------------------------------
     // Bodies in languages/lib/bash-rt.c.
     // rt_nounset: under set -u, reading an unset variable raises the abort flag.
-    var rtNounset = rtDecl("rt_nounset", true, [1])
+    var rtNounset = rtDecl("rt_nounset", true, [1, 1, 0])
     // rt_putc: one byte to the current sink - the innermost capture buffer if one is open,
-    // stdout if not, nowhere when the channel is not the standard output one.
+    // stdout if not; channel 1 goes to fd 2 in a native build and nowhere under llvm.Run.
     var rtPutc = rtDecl("rt_putc", false, [0])
     var rtCapBegin = rtDecl("rt_cap_begin", false, [0])
     var rtCapEnd = rtDecl("rt_cap_end", true, [0])
@@ -1369,9 +1406,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
         // an array name expands to its element 0
+        //
+        // A SELECT EVALUATES BOTH OPERANDS (manual chapter 7.10), so rt_nounset runs even
+        // when the name IS an array - and an array's plain gvars slot is the unset marker,
+        // so `set -u; a=(11 22); echo "$a"` raised the abort flag and ended the shell where
+        // bash 5.3 prints 11 and carries on. That was silent until rt_nounset gained a
+        // diagnostic; it is fixed by telling rt_nounset which arm is live rather than by
+        // branching, because varString must return its value in the block it was given.
         var isA = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, name)), zero)
         return b.NewSelect(isA, b.NewCall(rtArrGet, [gepStr(b, name), gepStr(b, "0")]),
-                                b.NewCall(rtNounset, loadVar(b, name)))
+                                b.NewCall(rtNounset, [loadVar(b, name), gepStr(b, name), b.NewZExt(isA, i32)]))
     }
 
     // ===================================================================================
@@ -1447,9 +1491,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var xfIsArr = hasOwn(assocArrays, "$" + name)
         var xfName = name
         function applyXf(b, v) {
-            if (xf == "U") { return b.NewCall(rtCase, [v, one]) }
-            if (xf == "L") { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3)]) }
-            if (xf == "u") { return b.NewCall(rtCase, [v, zero]) }
+            if (xf == "U") { return b.NewCall(rtCase, [v, one, emptyPtr(b)]) }
+            if (xf == "L") { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3), emptyPtr(b)]) }
+            if (xf == "u") { return b.NewCall(rtCase, [v, zero, emptyPtr(b)]) }
             if (xf == "E") { return b.NewCall(rtAnsiC, v) }
             if (xf == "P") { return v }
             if (xf == "a") { return gepStr(b, xfIsArr ? "a" : "") }
@@ -1632,8 +1676,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pe == "^^") { cmode = 1 }
             if (pe == ",") { cmode = 2 }
             if (pe == ",,") { cmode = 3 }
+            // PeCaseForm's optional PePatArg was parsed and dropped here: ${s^^[bn]} on
+            // banana answered BANANA where bash 5.3 answers BaNaNa (docs/todo.md 1.8).
+            // It reaches rt_case as a third operand now; "" is the absent case.
+            var cpW = (words.length > 0) ? words[0] : null
             return {c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtCase, [valOf(b), llvm.constant.NewInt(i32, cmode)])}
+                var cv = valOf(b)
+                var cp = emptyPtr(b)
+                if (cpW != null) { var cr = evalWord(b, cpW); b = cr.b; cp = cr.v }
+                return {b: b, v: b.NewCall(rtCase, [cv, llvm.constant.NewInt(i32, cmode), cp])}
             }}
         }
         if (pe == "/" || pe == "//") {
@@ -1879,6 +1930,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function mkInt(text) { var c = llvm.constant.NewInt(i32, parseDec(text)); return function(b) { return {b: b, v: c} } }
     // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
+    // See languages/bash-interpreter.abnf's copy for the measurement: bash's digit alphabet
+    // SEPARATES the two letter cases once the base passes 36, and adds "@" (62) and "_" (63).
+    // This copy folds a LITERAL base#digits at compile time; rt_basenum in
+    // languages/lib/bash-rt.c is the same table for the operands built by expansion.
     function digitsInBase(t, base) {
         var v = 0
         var i
@@ -1887,7 +1942,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var d = -1
             if (cc >= 48 && cc <= 57) { d = cc - 48 }
             else if (cc >= 97 && cc <= 122) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 90) { d = cc - 55 }
+            else if (cc >= 65 && cc <= 90) { d = (base > 36) ? cc - 29 : cc - 55 }
+            else if (cc == 64) { d = 62 }
+            else if (cc == 95) { d = 63 }
             if (d < 0 || d >= base) { d = 0 }
             v = (v * base + d) | 0
         }
@@ -1905,6 +1962,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return parseDec(t)
     }
     function mkNum(text) { var c = llvm.constant.NewInt(i32, parseNumLit(text)); return function(b) { return {b: b, v: c} } }
+    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule.
+    function mkArBaseDyn(items) {
+        var lw = items[0], rw = items[1]
+        return function(b) {
+            var rl = evalWord(b, lw)
+            var rr = evalWord(rl.b, rw)
+            var bb = rr.b
+            return {b: bb, v: bb.NewCall(rtBasenum, [rr.v, bb.NewCall(rtStr2int, rl.v)])}
+        }
+    }
     function mkArOfStr(o) { return function(b) { var r = evalWord(b, o); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} } }
     function mkUn(op, t) {
         return function(b) {
@@ -2199,8 +2266,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isArray) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
                 if (asgs[j] != null) {
                     b = emitAssign(b, asgs[j], assoc)
-                    if (upper) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), one])) }
-                    if (lower) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), llvm.constant.NewInt(i32, 3)])) }
+                    if (upper) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), one, emptyPtr(b)])) }
+                    if (lower) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), llvm.constant.NewInt(i32, 3), emptyPtr(b)])) }
                 }
                 else if (kw == "local" && !isArray) { storeVar(b, names[j], unsetPtr(b)) }
             }
@@ -2249,12 +2316,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (fa == "-E") { escapes = false; start = start + 1 }
             else { flagging = false }
         }
+        // EVALUATE EVERY WORD FIRST, THEN CHECK THE set -u ABORT, THEN PRINT. This used to
+        // print each word as it was evaluated, so `set -u; echo "${nope}"` had already
+        // written the newline by the time emitAbortCheck (which runs at the TOP of the
+        // command, before any expansion) could see the flag the expansion raised: the native
+        // binary printed a spurious blank line where bash 5.3 and this language's
+        // interpreter half both print nothing. The interpreter checks abortSignal after
+        // evaluating the words for exactly this reason.
         var i
+        var vals = []
         for (i = start; i < args.length; i++) {
-            if (i > start) { b.NewCall(rtPrints, gepStr(b, " ")) }
             var r = evalWord(b, args[i])
             b = r.b
-            b.NewCall(rtPrints, escapes ? b.NewCall(rtUnescape, r.v) : r.v)
+            vals.push(escapes ? b.NewCall(rtUnescape, r.v) : r.v)
+        }
+        b = emitAbortCheck(b)
+        for (i = 0; i < vals.length; i++) {
+            if (i > 0) { b.NewCall(rtPrints, gepStr(b, " ")) }
+            b.NewCall(rtPrints, vals[i])
         }
         if (newline) { b.NewCall(rtPutc, llvm.constant.NewInt(i32, 10)) }
         storeStatusI(b, 0)
@@ -2316,9 +2395,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return boolStatus(b, b.NewOr(setScalar, setArray))
         }
         var k = b.NewCall(rtFskind, arg.v)
-        if (op == "-d") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))) }
+        // The model and the predicate table are documented at fsKind in
+        // languages/bash-interpreter.abnf, including why a real stat() was declined.
+        var two = llvm.constant.NewInt(i32, 2)
+        if (op == "-d") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, two)) }
         if (op == "-e" || op == "-r" || op == "-w") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, k, zero)) }
-        if (op == "-f" || op == "-s" || op == "-c" || op == "-b") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, one)) }
+        if (op == "-f") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, one)) }
+        if (op == "-s") { return boolStatus(b, b.NewOr(b.NewICmp(llvm.enum.IPredEQ, k, one),
+                                                      b.NewICmp(llvm.enum.IPredEQ, k, two))) }
+        if (op == "-x") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, two)) }
+        if (op == "-c") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 3))) }
         return one
     }
     function testBinaryIR(b, l, op, r) {
@@ -2482,6 +2568,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeGroup(bodyT) { return bodyT }
 
+    // ( LIST ) and { LIST; } CARRY THEIR OWN [ RedirList ], and both tags used to read the
+    // stack with pop() - which takes the LAST value pushed, i.e. the redirection, not the
+    // body. `{ echo A; } >&2` therefore ran with no redirection at all (A went to stdout),
+    // and `( echo B ) >&2` handed a redirection RECORD to makeSubshell and died with
+    // "TypeError: Not a function: [object Object]" in BOTH halves. Measured against bash
+    // 5.3, which sends both to fd 2. takeAll() + mkRedirected is what CompoundRedir on the
+    // line above has always done; these two only ever needed the same treatment.
+    function withRedirs(bodyT, items) {
+        var wrapped = [bodyT]
+        var i
+        for (i = 1; i < items.length; i++) { wrapped.push(items[i]) }
+        return mkRedirected(wrapped)
+    }
+    function makeSubshellR(items) { return withRedirs(makeSubshell(items[0]), items) }
+    function makeGroupR(items) { return withRedirs(makeGroup(items[0]), items) }
+
     function makeArithCmd(exprT) {
         return function(b) {
             var r = exprT(b)
@@ -2635,8 +2737,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: merge, v: merge.NewLoad(i32, resP)}
         }
     }
-    // Write a diagnostic on the standard error CHANNEL (whose text is dropped, like every
-    // other stderr write here) without disturbing the caller's redirections.
+    // Write a diagnostic on the standard error CHANNEL without disturbing the caller's
+    // redirections. The text used to be dropped like every other stderr write here; rt_putc
+    // sends channel 1 to fd 2 in a native build now (docs/todo.md 1.9), so this is the real
+    // thing - and routing it through the CHANNEL rather than straight to the fd is what
+    // makes `cmd 2>/dev/null` silence it exactly as the shell does.
     function emitOnStderr(b, msg) {
         var saved = b.NewLoad(i32, gSinkOut)
         b.NewStore(b.NewLoad(i32, gSinkErr), gSinkOut)
@@ -3489,6 +3594,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // when its module is generated, so THIS main has to make the call - and it is not
         // optional bookkeeping: every string literal in the runtime is materialized there.
         entry.NewCall(rtGinit, [])
+        // Native build only: turn the fd-2 writer in rt_putc on. c.exePath is "" under
+        // llvm.Run, and rt_putc's comment says why that has to stay silent rather than
+        // abort on the first stderr byte.
+        entry.NewStore(llvm.constant.NewInt(i32, (c.exePath != undefined && c.exePath != "") ? 1 : 0), gErrNative)
         // Now that every variable slot is known, mark them all unset in entry (a raw null
         // would trap on the first load, so the marker is a real pointer to a NUL byte).
         var up0 = unsetPtr(entry)

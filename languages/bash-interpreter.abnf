@@ -40,8 +40,9 @@ standard paths (/dev/null and friends exist, / and /tmp and a few others are dir
 everything else is absent), and an output redirection discards the output instead of writing a
 file while an input redirection other than a here-document is end of file at once. There is no
 process environment or process id, so HOME, PWD and IFS start at fixed documented values and
-$$ / $! are constants. Standard error is a real second CHANNEL - which channel a redirection
-routes a command to is modelled exactly - but its text is dropped, since only stdout exists.
+$$ / $! are constants. Standard error is a real second CHANNEL: which channel a redirection
+routes a command to is modelled exactly, and this half writes channel 1 to the host's standard
+error (line buffered - a final partial line gains a newline, the one byte this cannot match).
 
 Still out of scope: external commands of every kind, job control, process substitution,
 globbing against a real directory, getopts, and a here-document whose marker is not the last
@@ -185,11 +186,11 @@ AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
 AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
-Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
+Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ RedirList ] ;
 // { LIST; } is a plain grouping: it runs in the CURRENT shell. "{" only opens a group when
 // it is a WORD OF ITS OWN - `{ls; }` is the word "{ls" followed by a stray "}", which real
 // bash refuses ("syntax error near unexpected token `}'"), so BraceKwEnd demands the blank.
-BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
+BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
@@ -549,7 +550,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -559,6 +560,34 @@ ArHex       = ArHexPfx :whitespace() ArHexDig { ArHexDig } ;
 ArHexPfx    = "0x" | "0X" ;
 ArHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
 ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
+// BASE#DIGITS WHERE EITHER SIDE IS BUILT BY EXPANSION. Real bash expands the whole
+// arithmetic string first and only then lexes it, so `10#$num` is `10#0012` is 12; here the
+// expression is a parse tree, so the two operands are parsed as WORDS (literal characters
+// plus any $ expansion) and joined at run time. Without this `$(( 10#$num ))` did not parse
+// as arithmetic at all and the shell fell back to $( ( ... ) ), i.e. "command not found:
+// 10#0012" (docs/todo.md 1.8).
+//
+// The BASE side admits only DIGITS as literal text, which is what keeps this rule from
+// swallowing anything else: bash rejects a bare name there too - `b=16; echo $(( b#ff ))` is
+// "invalid arithmetic operator", while `$(( $b#ff ))` is 255 - so `b#ff` must still fail
+// here and reach ArVar exactly as before. It has to be tried BEFORE ArNum: ArNumTok's own
+// ArBase alternative fails on `10#$num` and ArDec then matches just "10", and PEG ordered
+// choice never comes back (manual chapter 4).
+//
+// WHITESPACE, and it cost an hour: a LEADING `:whitespace()` on this production made the
+// rule never match at all (mkArBaseDyn was never called, and `16#ff` quietly fell through
+// to ArNum's own ArBase). It has to sit AFTER the first element, exactly like ArHex's
+// `ArHexPfx :whitespace() ArHexDig`. The two operand productions turn skipping off after
+// their first segment for the same reason `$(( 1 6#3 ))` must stay an error: with skipping
+// on, ArBaseLhs read "1" and "6" across the blank and answered base 16.
+ArBaseDyn   <~~ push(mkArBaseDyn(takeAll())) ~~>
+            = ArBaseLhs :whitespace() "#" ArBaseRhs :whitespace(Whitespace) ;
+ArBaseLhs   <~~ push(mkWord(takeAll())) ~~> = ArBaseLSeg :whitespace() { ArBaseLSeg } ;
+ArBaseLSeg  = ExpSeg | ArBaseDig ;
+ArBaseDig   <~~ push(makeConst(up.in)) ~~> = "0"..."9" ;
+ArBaseRhs   <~~ push(mkWord(takeAll())) ~~> = ArBaseRSeg :whitespace() { ArBaseRSeg } ;
+ArBaseRSeg  = ExpSeg | ArBaseAl ;
+ArBaseAl    <~~ push(makeConst(up.in)) ~~> = ArAlnum ;
 ArAlnum     = "0"..."9" | "a"..."z" | "A"..."Z" | "@" | "_" ;
 ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
@@ -952,16 +981,48 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var cmdSubRan = false   // did the word just evaluated contain a substitution? ($? rule)
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
-    // standard error channel, 2 = discarded. There is no stderr primitive behind a grammar
-    // run, so channel 1's text is dropped - what MATTERS for a script is which channel a
-    // redirection routes a command to, and that is modelled exactly.
+    // standard error channel, 2 = discarded.
+    //
+    // CHANNEL 1 USED TO BE DROPPED, and the comment here said "there is no stderr primitive
+    // behind a grammar run". There is: `eprintln` is the tag host's diagnostic channel, it
+    // goes straight to standard error, and BOTH script hosts bind it identically (goja in
+    // abnf/commonscript.go, the frozen engine in abnf/jsrt.go's standardJSBindings) - which
+    // is the condition the matrix imposes, since it demands byte-identical stderr too.
+    // Dropping meant `echo x >&2` printed nothing where real bash 5.3 prints it
+    // (docs/todo.md 1.9).
+    //
+    // eprintln APPENDS a newline and there is no eprint, so channel 1 is LINE BUFFERED
+    // here: bytes accumulate in errBuf and each complete line is handed over without its
+    // newline. That reproduces the shell exactly for the only text a shell writes to fd 2
+    // (diagnostics and `echo`, both newline-terminated). A final PARTIAL line - `printf x
+    // >&2` with no newline - is flushed at the end of the run and does gain a newline; that
+    // is the one byte where this half cannot match, and it is recorded rather than hidden.
     var sinkOut = 0
     var sinkErr = 1
+    var errBuf = ""
 
     function writeChan(ch, s) {
+        if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
         if (ch != 0) { return }
         if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + s }
         else { print(s) }
+    }
+    // Emit every COMPLETE line sitting in errBuf. charCodeAt, not indexOf on a "\n"
+    // literal: the frozen MetaJS subset the grammar hosts share is the reason every scan in
+    // this file is written as an explicit loop.
+    function flushErrLines() {
+        var i = 0
+        var start = 0
+        for (i = 0; i < errBuf.length; i++) {
+            if (errBuf.charCodeAt(i) == 10) {
+                eprintln(errBuf.slice(start, i))
+                start = i + 1
+            }
+        }
+        if (start > 0) { errBuf = errBuf.slice(start, errBuf.length) }
+    }
+    function flushErrTail() {
+        if (errBuf.length > 0) { eprintln(errBuf); errBuf = "" }
     }
     function emitOut(s) { writeChan(sinkOut, s) }
     function emitErr(s) { writeChan(sinkErr, s) }
@@ -1072,7 +1133,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
         // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
         // status, so the abort is recorded and picked up by the command about to run.
-        if (optNounset) { abortSignal = {ret: 1, isExit: 1} }
+        // The diagnostic is bash 5.3's minus the "line N:" part, which no engine here keeps
+        // a line table for; languages/lib/bash-rt.c's rt_nounset writes the same string.
+        if (optNounset) { emitErr("bash: " + name + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
         return ""
     }
     // "$*" joins with the FIRST character of IFS (a space when IFS is unset).
@@ -1142,10 +1205,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    function caseMap(v, mode) {
+    // pat is the OPTIONAL operand of ${v^pat} / ${v^^pat} / ${v,pat} / ${v,,pat}: a glob
+    // matched against ONE character at a time, so only the characters it matches are
+    // converted. It used to be parsed and dropped, so ${s^^[bn]} on banana answered BANANA
+    // where bash 5.3 answers BaNaNa (docs/todo.md 1.8). "" is the absent case and means
+    // every character - globMatch("", "a") is false, so it is tested for, not delegated.
+    function caseMap(v, mode, pat) {
         var out = ""
         var up = (mode == "^" || mode == "^^")
         var all = (mode == "^^" || mode == ",,")
+        var nopat = (pat == "")
         var i = 0
         var first = true
         while (i < v.length) {
@@ -1156,7 +1225,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // maps those: ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute. Only
             // ASCII used to be mapped, in a runtime whose ${#s} and ${s:i:n} were already
             // codepoint-aware.
-            if ((all || first) && ch.length == 1) {
+            var touch = (all || first) && (nopat || globMatch(pat, ch))
+            if (touch && ch.length == 1) {
                 var cc = ch.charCodeAt(0)
                 var isL1u = cc >= 192 && cc <= 222 && cc != 215
                 var isL1l = cc >= 224 && cc <= 254 && cc != 247
@@ -1486,7 +1556,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") {
             var cmode = pe
-            return function() { return caseMap(getVarVal(nameOf()), cmode) }
+            var cpT = (args.length > 0) ? args[0] : null
+            return function() {
+                var cpat = (cpT != null) ? wordJoin(cpT()) : ""
+                return caseMap(getVarVal(nameOf()), cmode, cpat)
+            }
         }
         if (pe == "/" || pe == "//") {
             var rmode = (anchor != "") ? anchor : ((pe == "//") ? "all" : "one")
@@ -1547,8 +1621,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (asgs[k] != null) {
                     if (isArray) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
                     runAssign(asgs[k], assoc)
-                    if (upper) { setVarVal(names[k], caseMap(getVarVal(names[k]), "^^")) }
-                    if (lower) { setVarVal(names[k], caseMap(getVarVal(names[k]), ",,")) }
+                    if (upper) { setVarVal(names[k], caseMap(getVarVal(names[k]), "^^", "")) }
+                    if (lower) { setVarVal(names[k], caseMap(getVarVal(names[k]), ",,", "")) }
                 }
                 else if (kw == "local" && !isArray) { unsetVar(names[k]) }
             }
@@ -2163,6 +2237,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
         return strToInt(t)
     }
+    // bash's digit alphabet is base dependent above 36, and this used to be one map for
+    // every base: 0-9, then a-z AND A-Z both 10..35. Measured against bash 5.3.15,
+    // $(( 64#Az )) is 2339 and $(( 64#@_ )) is 4031, so once the base passes 36 the two
+    // cases SEPARATE - a-z is 10..35, A-Z is 36..61 - and "@" and "_" are digits 62 and 63.
+    // At 36 and below the alphabet is case insensitive, which is what makes 16#FF and 16#ff
+    // both 255. languages/lib/bash-rt.c's rt_basenum is the same table for the compiled half.
     function digitsInBase(t, base) {
         var v = 0
         var i
@@ -2171,11 +2251,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var d = -1
             if (cc >= 48 && cc <= 57) { d = cc - 48 }
             else if (cc >= 97 && cc <= 122) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 90) { d = cc - 55 }
+            else if (cc >= 65 && cc <= 90) { d = (base > 36) ? cc - 29 : cc - 55 }
+            else if (cc == 64) { d = 62 }
+            else if (cc == 95) { d = 63 }
             if (d < 0 || d >= base) { d = 0 }
             v = (v * base + d) | 0
         }
         return v
+    }
+    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule.
+    function mkArBaseDyn(items) {
+        var lw = items[0], rw = items[1]
+        return function() { return digitsInBase(wordJoin(rw()), strToInt(wordJoin(lw()))) }
     }
     function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
     function mkArOfStr(t) { return function() { return strToInt(wordJoin(t())) } }
@@ -2636,22 +2723,48 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return 0
     }
-    // Split on the characters of IFS (default: space, tab and newline), dropping empty fields.
+    // FIELD SPLITTING, with the POSIX delimiter rule. This used to drop every empty field,
+    // which is right only for the IFS WHITESPACE characters: measured against bash 5.3.15,
+    // `IFS=:` on "a:b::c" is FOUR fields (the third empty) and was three here, ":a:" is two
+    // and was one, and `IFS=" :"` on "a : b::c" is four and was three (docs/todo.md 1.8).
+    //
+    // The rule, and it is the whole of the difference: a character of IFS that is space, tab
+    // or newline is IFS WHITESPACE and a RUN of it is one delimiter, ignored entirely at the
+    // ends of the value; any other character of IFS delimits exactly ONE field on its own,
+    // so two of them in a row leave an empty field between them. A delimiter is therefore
+    // "optional IFS whitespace, then at most one non-whitespace IFS character, then optional
+    // IFS whitespace" - which is also why a TRAILING non-whitespace delimiter adds nothing
+    // ("a:" is one field) while a LEADING one adds an empty first field.
+    //
+    // languages/lib/bash-rt.c's rt_splitifs is the same walk for the compiled half.
+    function ifsIsWs(seps, ch) {
+        if (ch != " " && ch != "\t" && ch != "\n") { return false }
+        return ifsHas(seps, ch)
+    }
+    function ifsHas(seps, ch) {
+        var j
+        for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { return true } }
+        return false
+    }
     function splitIFS(line) {
         var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
         var out = []
-        var cur = ""
         var i = 0
+        while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
         while (i < line.length) {
-            var ch = chunkAt(line, i)
-            i = i + ch.length
-            var isSep = false
-            var j
-            for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { isSep = true } }
-            if (isSep) { if (cur != "") { out.push(cur) }; cur = "" }
-            else { cur = cur + ch }
+            var cur = ""
+            while (i < line.length && !ifsHas(seps, chunkAt(line, i))) {
+                var ch = chunkAt(line, i)
+                cur = cur + ch
+                i = i + ch.length
+            }
+            out.push(cur)
+            while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
+            if (i < line.length && ifsHas(seps, chunkAt(line, i))) {
+                i = i + chunkAt(line, i).length
+                while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
+            }
         }
-        if (cur != "") { out.push(cur) }
         return out
     }
 
@@ -2683,9 +2796,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // There is no real filesystem behind a grammar run, so the file predicates answer from a
     // small MODEL of the standard paths every shell can rely on. Anything else is "absent".
     // 0 = absent, 1 = exists and is not a directory, 2 = directory.
+    // THE FILE PREDICATES ANSWER FROM A MODEL, AND stat() WAS DECLINED - here is why, so
+    // that nobody re-derives it. docs/todo.md 1.8 asked for a real stat() in the runtime.
+    // A native -exe binary could do it (bash-rt.c links libc directly), but the OTHER TWO
+    // engines cannot follow: the tag-script host that runs this interpreter half has no
+    // filesystem API at all beyond the import loader's readFile, and llvm.Run cannot call
+    // stat either - abnf/llvmmap.go's libcExterns lists only what the IR interpreter can
+    // implement EXACTLY, and a stat struct is not one of them (a floor that guesses a struct
+    // layout is not a floor; the same argument killed swapcontext, docs/todo.md 3.6). So a
+    // stat() in the runtime alone buys ONE engine of three and ships a designed-in halves
+    // divergence, which the manual's chapter 5 rule makes a loss.
+    //
+    // What WAS done instead is to stop the model being wrong about the paths it does know.
+    // It used to answer kind 1, "regular file", for /dev/null and friends, so `[ -f /dev/null ]`
+    // was TRUE here and is false in bash 5.3. They are CHARACTER DEVICES, and that is kind 3
+    // now. Measured with bash 5.3.15 on this machine, `test OP PATH` for every path in the
+    // model:
+    //     /dev/null /dev/zero /dev/tty        -e -r -w -c
+    //     / /dev /usr /bin /usr/bin           -e -d -s -r -x
+    //     anything else                       nothing
+    // /tmp, /etc and /var answer -h -L as well on darwin, where they are symlinks, and do
+    // not on Linux - so the model deliberately does NOT claim it. /dev/stdin, /dev/stdout
+    // and /dev/stderr follow whatever the process's fds are attached to (they read as -f -s
+    // through a pipe and as -c on a terminal), so they are modelled as the character devices
+    // they are when a shell is interactive.
+    //
+    // What is still divergent, and deliberately: -f on a REAL regular file is false here and
+    // true in bash - that is the model, not a bug in it - and -w answers "it exists", so the
+    // five system directories read as writable where bash asks the kernel and (for a
+    // non-root user) says no. Modelling that would mean modelling a uid, and the answer
+    // would then be wrong for a root shell instead. 46 of the 52 predicate/path cells above
+    // match bash 5.3.15 exactly; those five -w cells and -w on nothing else are the rest.
+    // 0 = absent, 1 = regular file, 2 = directory, 3 = character device.
     function fsKind(p) {
-        if (p == "/dev/null" || p == "/dev/zero" || p == "/dev/tty") { return 1 }
-        if (p == "/dev/stdin" || p == "/dev/stdout" || p == "/dev/stderr") { return 1 }
+        if (p == "/dev/null" || p == "/dev/zero" || p == "/dev/tty") { return 3 }
+        if (p == "/dev/stdin" || p == "/dev/stdout" || p == "/dev/stderr") { return 3 }
         if (p == "/" || p == "/dev" || p == "/tmp" || p == "/usr" || p == "/etc") { return 2 }
         if (p == "/var" || p == "/bin" || p == "/usr/bin") { return 2 }
         return 0
@@ -2722,10 +2867,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (sp.key != null) { return arrHas(sp.name, sp.key) ? 0 : 1 }
             return (isSetVar(s) || isArr(s)) ? 0 : 1
         }
+        // See fsKind for the model and for why stat() was declined. -s is "exists and has a
+        // nonzero size", which a directory has and a character device does not; -x is
+        // "searchable/executable", which is true of the model's directories and unknowable
+        // for anything else; -b, -p, -S, -h, -L, -g, -u, -k, -O and -t are all false,
+        // because the model has no block device, no fifo, no socket and no symlink.
         if (op == "-d") { return (fsKind(s) == 2) ? 0 : 1 }
         if (op == "-e" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
-        if (op == "-f" || op == "-s") { return (fsKind(s) == 1) ? 0 : 1 }
-        if (op == "-c" || op == "-b") { return (fsKind(s) == 1) ? 0 : 1 }
+        if (op == "-f") { return (fsKind(s) == 1) ? 0 : 1 }
+        if (op == "-s") { return (fsKind(s) == 1 || fsKind(s) == 2) ? 0 : 1 }
+        if (op == "-x") { return (fsKind(s) == 2) ? 0 : 1 }
+        if (op == "-c") { return (fsKind(s) == 3) ? 0 : 1 }
         return 1
     }
     function testBinary(l, op, r) {
@@ -3091,6 +3243,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // { LIST; } runs in the current shell, so it is just its body.
     function makeGroup(bodyT) { return bodyT }
+
+    // ( LIST ) and { LIST; } CARRY THEIR OWN [ RedirList ], and both tags used to read the
+    // stack with pop() - which takes the LAST value pushed, i.e. the redirection, not the
+    // body. `{ echo A; } >&2` therefore ran with no redirection at all (A went to stdout),
+    // and `( echo B ) >&2` handed a redirection RECORD to makeSubshell and died with
+    // "TypeError: Not a function: [object Object]" in BOTH halves. Measured against bash
+    // 5.3, which sends both to fd 2. takeAll() + mkRedirected is what CompoundRedir on the
+    // line above has always done; these two only ever needed the same treatment.
+    function withRedirs(bodyT, items) {
+        var wrapped = [bodyT]
+        var i
+        for (i = 1; i < items.length; i++) { wrapped.push(items[i]) }
+        return mkRedirected(wrapped)
+    }
+    function makeSubshellR(items) { return withRedirs(makeSubshell(items[0]), items) }
+    function makeGroupR(items) { return withRedirs(makeGroup(items[0]), items) }
 
     // (( expr )) : status 0 when the value is non-zero (the opposite of C).
     function makeArithCmd(exprT) {
@@ -3472,11 +3640,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < stmts.length; i++) {
             r = stmts[i]()
             if (typeof r == "object") {
-                if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); exit(r.ret) }
+                if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
                 setStatus(r.ret)
             }
         }
         runExitTrap()
+        // A `printf x >&2` with no trailing newline is still sitting in errBuf; hand it over
+        // (see writeChan) rather than losing it.
+        flushErrTail()
         exit(lastStatus)
     }
 

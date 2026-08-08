@@ -93,6 +93,12 @@ int cond_err;
 int sink_out;
 int sink_err = 1;
 
+/* 1 exactly when this module was linked into a NATIVE executable, stored by the
+ * emitted main's entry block (bash-to-llvm-ir.abnf). It is what lets rt_putc
+ * write channel 1 to fd 2 without making llvm.Run - which has no fd 2 and no
+ * `write` extern - abort on the first stderr byte. See rt_putc. */
+int err_native;
+
 /* Positional parameters live in ONE global stack rather than in function
  * arguments, so "$@" can expand to any number of words. NARGV = 4096. */
 char *argv[4096];
@@ -110,7 +116,10 @@ int rt_strcmp(char *a, char *b);
 char *rt_strcat(char *a, char *b);
 char *rt_int2str(int n);
 int rt_str2int(char *s);
+int rt_basenum(char *s, int base);
 int rt_class(char *p, int ch);
+int rt_cpw(char *s);
+int rt_cpat(char *s);
 int rt_clsid(char *nm);
 int re_ctype(int ctid, int ctch);
 int rt_eg(char *egp, char *egs, int egstar);
@@ -123,7 +132,7 @@ int rt_matchlen(char *p, char *s, int i);
 int rt_matchend(char *p, char *s);
 char *rt_strip(char *s, char *p, int mode);
 char *rt_replace(char *s, char *p, char *r, int mode);
-char *rt_case(char *s, int mode);
+char *rt_case(char *s, int mode, char *pat);
 char *rt_shquote(char *sq);
 char *rt_ansic(char *ac);
 int rt_haschar(char *s, int ch);
@@ -135,6 +144,7 @@ int rt_nfields(char *v);
 char *rt_getfield(char *v, int k);
 char *rt_wordjoin(char *v);
 char *rt_splitifs(char *v, char *ifs);
+int rt_ifsws(char *ifs, int ch);
 char *rt_bnd_acc(char *acc, char *open, char *f);
 char *rt_bnd_open(char *open, char *f);
 int rt_arr_find(char *nm, char *k);
@@ -155,7 +165,7 @@ char *rt_param(int n);
 char *rt_params(char *sep, int star);
 int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps);
 char *rt_regex_error(void);
-char *rt_nounset(char *v);
+char *rt_nounset(char *v, char *name, int isarr);
 int rt_putc(int c);
 int rt_cap_begin(int u);
 char *rt_cap_end(int u);
@@ -453,6 +463,78 @@ int rt_clsid(char *nm) {
  * {[,:,d,i,g,t} and answer "no". bash 5.3.15 answers "yes". An UNKNOWN name is
  * not an error in a glob - bash matches nothing, silently - so it simply
  * contributes no characters. */
+/* ---- ONE UTF-8 CODEPOINT ---------------------------------------------------
+ * The glob matcher used to be pure BYTES, in a runtime whose ${#s} and ${s:i:n}
+ * were already codepoint aware, and it diverged from bash 5.3 AND from this
+ * language's own interpreter half on every non-ASCII pattern - measured:
+ * `[[ ï == [ïn] ]]` is true in bash and in bash-interpreter.abnf and was false
+ * in the native binary, and `${y/[ïn]/Z}` replaced ONE BYTE and left a lone
+ * continuation byte behind. A bracket expression matches one CHARACTER, so the
+ * matcher has to read one.
+ *
+ * rt_cpw answers 1 for anything that is not a well-formed sequence, so invalid
+ * UTF-8 still advances and still compares byte-for-byte - the old behaviour,
+ * exactly, on the inputs the old code was right about. */
+int rt_cpw(char *s) {
+    int c0 = (int)(unsigned char)s[0];
+    int w = 1;
+    int i;
+    if (c0 >= 240) { w = 4; }
+    else if (c0 >= 224) { w = 3; }
+    else if (c0 >= 192) { w = 2; }
+    i = 1;
+    while (i < w) {
+        int cc = (int)(unsigned char)s[i];
+        if (cc < 128 || cc > 191) return 1;
+        i = i + 1;
+    }
+    return w;
+}
+
+int rt_cpat(char *s) {
+    int w = rt_cpw(s);
+    int c0 = (int)(unsigned char)s[0];
+    int v;
+    int i;
+    if (w == 1) return c0;
+    if (w == 2) { v = c0 - 192; }
+    else if (w == 3) { v = c0 - 224; }
+    else { v = c0 - 240; }
+    i = 1;
+    while (i < w) {
+        v = v * 64 + ((int)(unsigned char)s[i] - 128);
+        i = i + 1;
+    }
+    return v;
+}
+
+/* rt_basenum(digits, base): the value of BASE#DIGITS when either operand was
+ * built by expansion (`$(( 10#$num ))`), which the emitter cannot fold. The
+ * alphabet is bash 5.3's and it is base dependent above 36 - 0-9, then a-z as
+ * 10..35, then A-Z as 36..61, "@" 62 and "_" 63 - while at 36 and below the two
+ * letter cases coincide, which is what makes 16#FF and 16#ff both 255. A digit
+ * that is out of range contributes 0 here; bash errors, and that is recorded
+ * rather than reproduced (there is no arithmetic-error channel in this design).
+ * The identical table is digitsInBase in both bash grammars. */
+int rt_basenum(char *s, int base) {
+    int n = rt_strlen(s);
+    int v = 0;
+    int i = 0;
+    while (i < n) {
+        int cc = (int)(unsigned char)s[i];
+        int d = -1;
+        if (cc >= 48 && cc <= 57) { d = cc - 48; }
+        else if (cc >= 97 && cc <= 122) { d = cc - 87; }
+        else if (cc >= 65 && cc <= 90) { d = base > 36 ? cc - 29 : cc - 55; }
+        else if (cc == 64) { d = 62; }
+        else if (cc == 95) { d = 63; }
+        if (d < 0 || d >= base) { d = 0; }
+        v = v * base + d;
+        i = i + 1;
+    }
+    return v;
+}
+
 int rt_class(char *p, int ch) {
     int j = 1, neg = 0, m = 0, first = 1;
     int c0 = (int)(unsigned char)p[1];
@@ -485,15 +567,21 @@ int rt_class(char *p, int ch) {
             }
             /* no ":]" at all: fall through and treat "[" as an ordinary member */
         }
-        int cn = (int)(unsigned char)p[j + 1];
+        /* A member - and a range endpoint - is a CHARACTER, not a byte; `ch` is
+         * the subject's codepoint (rt_glob decodes it). See rt_cpw. */
+        int mw = rt_cpw(&p[j]);
+        int mc = rt_cpat(&p[j]);
+        int cn = (int)(unsigned char)p[j + mw];
         int cn2 = 0;
-        if (cn == 45) cn2 = (int)(unsigned char)p[j + 2];
+        if (cn == 45) cn2 = (int)(unsigned char)p[j + mw + 1];
         if (cn == 45 && cn2 != 0 && cn2 != 93) {
-            if (ch >= cj && ch <= cn2) m = 1;
-            j = j + 3;
+            int hw = rt_cpw(&p[j + mw + 1]);
+            int hc = rt_cpat(&p[j + mw + 1]);
+            if (ch >= mc && ch <= hc) m = 1;
+            j = j + mw + 1 + hw;
         } else {
-            if (ch == cj) m = 1;
-            j = j + 1;
+            if (ch == mc) m = 1;
+            j = j + mw;
         }
     }
     int fin = neg ? 1 - m : m;
@@ -670,6 +758,8 @@ int rt_glob(char *p, char *s)
     int off;
     int nc;
     int isEsc;
+    int scw;
+    int pcw;
 
     pp = p;
     sp = s;
@@ -703,17 +793,21 @@ int rt_glob(char *p, char *s)
                 if (rec != 0) return 1;
                 kc = (int)(unsigned char)scur[0];
                 if (kc == 0) return 0;
-                sp = scur + 1;
+                sp = scur + rt_cpw(scur);
             }
         }
 
         scur2 = sp;
-        sc = (int)(unsigned char)scur2[0];
-        if (sc == 0) return 0;
+        if ((int)(unsigned char)scur2[0] == 0) return 0;
+        /* "?" matches one CHARACTER and a bracket expression holds characters,
+         * so the subject is decoded once here and every arm below steps by scw.
+         * See rt_cpw for what this used to get wrong. */
+        scw = rt_cpw(scur2);
+        sc = rt_cpat(scur2);
 
         if (pc == 63) {
             pp = pcur + 1;
-            sp = scur2 + 1;
+            sp = scur2 + scw;
             continue;
         }
         if (pc == 91) {
@@ -723,7 +817,7 @@ int rt_glob(char *p, char *s)
                 off = cr / 2;
                 if (matched == 0) return 0;
                 pp = pcur + off;
-                sp = scur2 + 1;
+                sp = scur2 + scw;
                 continue;
             }
             /* cr < 0: not a bracket expression after all - fall through to
@@ -732,16 +826,18 @@ int rt_glob(char *p, char *s)
             nc = (int)(unsigned char)pcur[1];
             isEsc = (pc == 92) && (nc != 0);
             if (isEsc) {
-                if (nc != sc) return 0;
-                pp = pcur + 2;
-                sp = scur2 + 1;
+                pcw = rt_cpw(pcur + 1);
+                if (rt_cpat(pcur + 1) != sc) return 0;
+                pp = pcur + 1 + pcw;
+                sp = scur2 + scw;
                 continue;
             }
         }
         /* literal */
-        if (pc != sc) return 0;
-        pp = pcur + 1;
-        sp = scur2 + 1;
+        pcw = rt_cpw(pcur);
+        if (rt_cpat(pcur) != sc) return 0;
+        pp = pcur + pcw;
+        sp = scur2 + scw;
     }
 }
 
@@ -973,17 +1069,42 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
  * 0xC3 followed by 0x80..0xBE in UTF-8, upper and lower 0x20 apart, with the
  * multiplication and division signs (0x97 / 0xB7) not letters. Codepoints
  * outside ASCII and Latin-1 are copied through. */
-char *rt_case(char *s, int mode) {
+char *rt_case(char *s, int mode, char *pat) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len + 1);
     int up = mode < 2;
     int all = (mode == 1) || (mode == 3);
     int i = 0;
     int first = 1;
+    int nopat = pat[0] == 0;
+    char one[8];
     while (i < len) {
         int c0 = (int)(unsigned char)s[i];
         int touch = all || (first != 0);
         int n;
+        /* THE PATTERN OPERAND. ${v^^[bn]} converts only the characters the glob
+         * matches, and it used to be parsed and then thrown away in all three
+         * engines: bash 5.3 answers BaNaNa for banana, we answered BANANA
+         * (docs/todo.md 1.8). The pattern is matched against ONE character at a
+         * time, which is what the shell specifies, so the subject is the current
+         * codepoint's bytes in a stack buffer - never the arena, or a long value
+         * would allocate one temporary per character. An ABSENT pattern is ""
+         * and means "every character"; rt_glob("", "a") is false, so the empty
+         * case is tested for rather than handed to the matcher. */
+        if (touch != 0 && nopat == 0) {
+            int cw = 1;
+            int ct = 0;
+            if (c0 >= 240) { cw = 4; }
+            else if (c0 >= 224) { cw = 3; }
+            else if (c0 >= 192) { cw = 2; }
+            if (i + cw > len) { cw = len - i; }
+            while (ct < cw) {
+                one[ct] = s[i + ct];
+                ct = ct + 1;
+            }
+            one[cw] = 0;
+            touch = rt_glob(pat, one) != 0;
+        }
         if (c0 < 128) {
             int isLow = (c0 >= 97) && (c0 <= 122);
             int isUp = (c0 >= 65) && (c0 <= 90);
@@ -1373,48 +1494,76 @@ char *rt_wordjoin(char *v) {
  * L cost 2L+5 bytes of arena where the answer is L+3. Every unquoted expansion
  * in an emitted program calls this, so it is the single largest per-word cost in
  * the runtime - see tests/bench/mod.sh's header for the measurement. */
+/* One IFS WHITESPACE character: space, tab or newline AND a member of IFS. See
+ * rt_splitifs. */
+int rt_ifsws(char *ifs, int ch) {
+    if (ch != 32 && ch != 9 && ch != 10) return 0;
+    return rt_haschar(ifs, ch) != 0 ? 1 : 0;
+}
+
 char *rt_splitifs(char *v, char *ifs) {
     int len = rt_strlen(v);
-    int i = 0, in = 0, nf = 0, tot = 0, o;
+    int nf = 0;
+    int tot = 0;
+    int i;
+    int o;
+    int pass;
     char *dst;
-    while (i < len) {
-        int ch = (int)(unsigned char)v[i];
-        if (rt_haschar(ifs, ch) != 0) {
-            in = 0;
-        } else {
-            if (in == 0) { in = 1; nf = nf + 1; }
-            tot = tot + 1;
+    dst = &empty[0];
+    /* THE POSIX DELIMITER RULE. Every empty field used to be dropped, which is
+     * right only for the IFS whitespace characters: bash 5.3.15 splits "a:b::c"
+     * under IFS=: into FOUR fields and this answered three (docs/todo.md 1.8).
+     * A run of IFS whitespace is one delimiter and is ignored at both ends of
+     * the value; any OTHER member of IFS delimits exactly one field by itself,
+     * so two in a row leave an empty field between them. One delimiter is
+     * therefore "optional IFS whitespace, at most one non-whitespace IFS
+     * character, optional IFS whitespace", which is why a trailing ":" adds no
+     * field while a leading one adds an empty first field.
+     *
+     * languages/bash-interpreter.abnf's splitIFS is the same walk.
+     *
+     * TWO PASSES over one walk: pass 0 sizes the buffer (this is the single
+     * largest per-word cost in the runtime - see tests/bench/mod.sh - and the
+     * shape that made it linear rather than quadratic is kept), pass 1 fills it. */
+    pass = 0;
+    while (pass < 2) {
+        i = 0;
+        nf = 0;
+        tot = 0;
+        o = 1;
+        while (i < len && rt_ifsws(ifs, (int)(unsigned char)v[i]) != 0) { i = i + 1; }
+        while (i < len) {
+            while (i < len && rt_haschar(ifs, (int)(unsigned char)v[i]) == 0) {
+                if (pass != 0) { dst[o] = v[i]; o = o + 1; }
+                tot = tot + 1;
+                i = i + 1;
+            }
+            nf = nf + 1;
+            if (pass != 0) { dst[o] = 1; o = o + 1; }
+            while (i < len && rt_ifsws(ifs, (int)(unsigned char)v[i]) != 0) { i = i + 1; }
+            if (i < len && rt_haschar(ifs, (int)(unsigned char)v[i]) != 0) {
+                i = i + 1;
+                while (i < len && rt_ifsws(ifs, (int)(unsigned char)v[i]) != 0) { i = i + 1; }
+            }
         }
-        i = i + 1;
-    }
-    /* no fields at all: the empty list is a module literal, as it was before. */
-    if (nf == 0) return "\x02";
-    /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the commonest
-     * case, and it needs no allocation, because a plain string IS a one-field
-     * list in this protocol: rt_nfields answers 1 for it, rt_getfield(v, 0)
-     * answers v, rt_wordjoin returns it unchanged, and rt_bnd_acc/rt_bnd_open
-     * both go through rt_nfields. The only value that must not take this path
-     * is one whose first byte is already the 0x02 list marker, which would then
-     * be re-read as a list. */
-    if (nf == 1 && tot == len && (int)(unsigned char)v[0] != 2) return v;
-    dst = rt_bump(1 + tot + nf + 1);
-    dst[0] = 2;
-    o = 1;
-    in = 0;
-    i = 0;
-    while (i < len) {
-        int ch = (int)(unsigned char)v[i];
-        if (rt_haschar(ifs, ch) != 0) {
-            if (in != 0) { dst[o] = 1; o = o + 1; in = 0; }
+        if (pass == 0) {
+            /* no fields at all: the empty list is a module literal, as before. */
+            if (nf == 0) return "\x02";
+            /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the
+             * commonest case, and it needs no allocation, because a plain string
+             * IS a one-field list in this protocol: rt_nfields answers 1 for it,
+             * rt_getfield(v, 0) answers v, rt_wordjoin returns it unchanged, and
+             * rt_bnd_acc/rt_bnd_open both go through rt_nfields. The only value
+             * that must not take this path is one whose first byte is already the
+             * 0x02 list marker, which would then be re-read as a list. */
+            if (nf == 1 && tot == len && (int)(unsigned char)v[0] != 2) return v;
+            dst = rt_bump(1 + tot + nf + 1);
+            dst[0] = 2;
         } else {
-            in = 1;
-            dst[o] = (char)ch;
-            o = o + 1;
+            dst[o] = 0;
         }
-        i = i + 1;
+        pass = pass + 1;
     }
-    if (in != 0) { dst[o] = 1; o = o + 1; }
-    dst[o] = 0;
     return dst;
 }
 
@@ -1722,18 +1871,63 @@ char *rt_params(char *sep, int star) {
 /* ---- output, capture stack, subshell snapshots, local save stack --------- */
 
 /* Under set -u, reading an unset variable raises the abort flag. */
-char *rt_nounset(char *v)
+/* `name` is the source name of the variable being read, so that the diagnostic
+ * can be written: real bash 5.3 prints "bash: line N: nope: unbound variable" on
+ * fd 2 and this printed nothing at all (docs/todo.md 1.9). The line number is
+ * not recoverable here - the emitted program keeps no line table - so the text
+ * is the rest of bash's message, and languages/bash-interpreter.abnf writes the
+ * same string, character for character, from getVarVal.
+ *
+ * `isarr` is 1 when the caller's OTHER select arm is the live one (an array name
+ * expands to element 0). The emitter cannot branch there - varString has to hand
+ * its value back in the block it was given - and an LLVM select evaluates both
+ * operands, so without this flag the dead arm raised the abort. */
+char *rt_nounset(char *v, char *name, int isarr)
 {
     char *um;
+    int saved;
     um = &unset_marker[0];
-    if (opt_nounset != 0 && v == um) {
+    if (isarr == 0 && opt_nounset != 0 && v == um) {
         abort_flag = 1;
+        /* On the standard error CHANNEL, not straight to fd 2: a `2>/dev/null`
+         * around the failing command must silence it exactly as it does in the
+         * shell, and rt_putc is what honours that. */
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_prints("bash: ");
+        rt_prints(name);
+        rt_prints(": unbound variable\n");
+        sink_out = saved;
     }
     return v;
 }
 
 /* One output byte - into the innermost capture buffer if a command substitution
- * is running, otherwise to stdout. Channels other than 0 are dropped. */
+ * is running, otherwise to stdout. Channel 1 is the standard error channel and
+ * channel 2 is the bit bucket.
+ *
+ * CHANNEL 1 USED TO BE DROPPED TOO, which meant `echo x >&2`, a `set -u`
+ * failure, a bad regex and a `[[ ]]` that could not be evaluated all printed
+ * NOTHING under -exe where real bash 5.3 prints them on fd 2 (docs/todo.md 1.9).
+ * rt_ech is the fd-2 writer rt_die already used; this is the same one byte at a
+ * time, so a redirection that reroutes the channel still decides where the text
+ * goes and $( ) capture is unaffected (capture is channel 0 only, exactly like
+ * the shell).
+ *
+ * WHY IT IS GATED ON err_native, AND WHY THAT IS NOT A HIDDEN DIVERGENCE.
+ * rt_ech calls write(2, ...), and `write` is deliberately absent from
+ * abnf/llvmmap.go's libcExterns - so under llvm.Run a call to it stops the run
+ * with "call to undefined external function @write". llvm.Run has no standard
+ * error at all: its RunResult carries one field, Out, filled by putchar, and a
+ * grammar prints that. So the honest options for the IR interpreter are DROP or
+ * ABORT, and dropping is what it already did. err_native is stored as 1 by
+ * main's entry block ONLY when the emitter is building a native executable
+ * (bash-to-llvm-ir.abnf, `c.exePath`), so the write is unreachable in the engine
+ * that cannot perform it and exact in the engine that can. This is the same
+ * ceiling as manual chapter 7.11, not a choice between two implementations.
+ *
+ * The INTERPRETER half writes channel 1 through the tag host's eprintln, so the
+ * two halves a user actually runs agree; see bash-interpreter.abnf writeChan. */
 int rt_putc(int c)
 {
     int chan;
@@ -1741,6 +1935,12 @@ int rt_putc(int c)
     char *buf;
     int l;
     chan = sink_out;
+    if (chan == 1) {
+        if (err_native != 0) {
+            rt_ech(c);
+        }
+        return 0;
+    }
     if (chan == 0) {
         d = cap_depth;
         if (d > 0) {
@@ -1963,18 +2163,22 @@ int rt_eval_assign(char *s)
 }
 
 /* There is no real filesystem behind a compiled run, so the file predicates go
- * through a model of the standard paths: 1 = file, 2 = directory, 0 = absent.
+ * through a model of the standard paths: 0 = absent, 1 = regular file,
+ * 2 = directory, 3 = character device.
  * Every comparison is performed, in order; the last hit wins. */
 int rt_fskind(char *p)
 {
     int k;
     k = 0;
-    k = rt_streq(p, "/dev/null") != 0 ? 1 : k;
-    k = rt_streq(p, "/dev/zero") != 0 ? 1 : k;
-    k = rt_streq(p, "/dev/tty") != 0 ? 1 : k;
-    k = rt_streq(p, "/dev/stdin") != 0 ? 1 : k;
-    k = rt_streq(p, "/dev/stdout") != 0 ? 1 : k;
-    k = rt_streq(p, "/dev/stderr") != 0 ? 1 : k;
+    /* CHARACTER DEVICES, not regular files: `[ -f /dev/null ]` was TRUE here and
+     * is false in bash 5.3 (docs/todo.md 1.8). Why this is still a model and not
+     * a stat() is written out at fsKind in languages/bash-interpreter.abnf. */
+    k = rt_streq(p, "/dev/null") != 0 ? 3 : k;
+    k = rt_streq(p, "/dev/zero") != 0 ? 3 : k;
+    k = rt_streq(p, "/dev/tty") != 0 ? 3 : k;
+    k = rt_streq(p, "/dev/stdin") != 0 ? 3 : k;
+    k = rt_streq(p, "/dev/stdout") != 0 ? 3 : k;
+    k = rt_streq(p, "/dev/stderr") != 0 ? 3 : k;
     k = rt_streq(p, "/") != 0 ? 2 : k;
     k = rt_streq(p, "/dev") != 0 ? 2 : k;
     k = rt_streq(p, "/tmp") != 0 ? 2 : k;

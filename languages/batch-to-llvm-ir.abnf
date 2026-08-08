@@ -711,6 +711,14 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     // one runtime helper that calls back into this module, through bat_lookup below.
     var rtExpand = m.NewFunc("rt_expand", i8ptr, llvm.ir.NewParam("s", i8ptr))
 
+    // rt_die(what, want, used, cap) is batch-rt.c's one exit from a fixed-size table that
+    // has run out: a diagnostic on fd 2 and exit(70). It is DECLARED here because three of
+    // the fixed tables - the call/return stack, the argument frames and the setlocal stack -
+    // are indexed by code THIS FILE emits, so the runtime cannot defend them from the
+    // inside. See emitDepthGuard.
+    var rtDie = m.NewFunc("rt_die", i32, [llvm.ir.NewParam("what", i8ptr), llvm.ir.NewParam("want", i32),
+                                          llvm.ir.NewParam("used", i32), llvm.ir.NewParam("cap", i32)])
+
 
     // ===================================================================================
     //  Value / word thunks:  {fn: function(b) -> {b, v: i8*}, c: const-string|undefined}
@@ -1046,6 +1054,29 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
 
     // Pop a return id (or leave main with the current errorlevel when the stack is empty).
+    // A BOUNDS CHECK ON A TABLE THE RUNTIME CANNOT DEFEND.
+    //
+    // `call :label`, `setlocal` and the call/return stack all index fixed global arrays
+    // whose index is incremented by the code emitted below, not by batch-rt.c - so
+    // 4a2facd's nine runtime checks could not reach them. Measured at base: a batch script
+    // that recurses 400 deep exits 139 having printed nothing, because makeCall stored
+    // args[frame*10 + i] with frame past DEPTH and walked over whatever the linker had put
+    // after `args`. bat_shift already refused to COMPOUND that (it is the one consumer that
+    // lives in C); this is the store itself.
+    //
+    // `val >= cap` is the test, signed, because the counters are i32 and only ever grow by
+    // one from zero - so a signed compare cannot itself wrap before the check fires.
+    // mkBlk makes a block in the function being emitted into (main, or bat_setlocal, which
+    // nb() cannot reach), and onDie terminates the die block - rt_die does not return, but
+    // the IR still needs a terminator and llvm.Run needs one that verifies.
+    function emitDepthGuard(b, mkBlk, val, cap, what, onDie) {
+        var dieB = mkBlk(), okB = mkBlk()
+        b.NewCondBr(b.NewICmp(SGE, val, ci32(cap)), dieB, okB)
+        dieB.NewCall(rtDie, [gepStr(dieB, what), one, val, ci32(cap)])
+        onDie(dieB)
+        return okB
+    }
+
     function emitReturn(b) {
         var sp = b.NewLoad(i32, gCsp)
         var exitP = nb(), popP = nb()
@@ -1085,6 +1116,10 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             }
             if (tail == null) { tail = emptyPtr(b) }
             var fr = b.NewAdd(b.NewLoad(i32, gFrame), one)
+            // frame and call_sp move together (call_sp is always frame - 1 here: makeCall
+            // pushes both, emitReturn pops call_sp and the continuation block pops frame),
+            // so ONE check on the larger of the two bounds both DEPTH-sized tables.
+            b = emitDepthGuard(b, nb, fr, DEPTH, "call nesting", function(db) { db.NewBr(exitBlock) })
             var base = b.NewMul(fr, ci32(ARGN))
             for (i = 0; i < ARGN; i++) {
                 var v = (i < vals.length) ? vals[i] : emptyPtr(b)
@@ -1108,6 +1143,15 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             return contB
         }
     }
+    // UNSETTLED, AND DELIBERATELY LEFT: does `exit /b` implicitly pop an open `setlocal`?
+    // There is no cmd.exe on this machine, so this cannot be measured, and the normative
+    // help texts do not settle it either. What Microsoft DOES document (`setlocal /?`,
+    // `endlocal /?`) is that localization ends "when the endlocal command is encountered or
+    // the end of the batch file is reached" - it says nothing about returning from a CALLed
+    // label. So a subroutine here that does `setlocal` and then `exit /b` without an
+    // `endlocal` leaks one frame of loc_v/loc_d, and 32 such leaks now reach the depth guard
+    // in bat_setlocal instead of walking past the array. Implementing an implicit pop would
+    // be a guess about the language; the guard makes the consequence of NOT guessing loud.
     function makeExitB(items) {
         var codeT = (items.length > 0) ? items[0] : null
         return function(b) {
@@ -1395,6 +1439,12 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var i
         var e = batSetlocal.NewBlock("entry")
         var sp = e.NewLoad(i32, gLsp)
+        // The third table the runtime cannot defend: loc_v / loc_d are LDEPTH frames of N
+        // slots and loc_sp is incremented here, so the 33rd nested `setlocal` used to write
+        // past all three. batEndlocal already refuses to pop an empty stack; this is the
+        // push. rt_die does not return, so the ret below is only there to terminate.
+        e = emitDepthGuard(e, function() { return batSetlocal.NewBlock("") }, sp, LDEPTH,
+                           "setlocal nesting", function(db) { db.NewRet(zero) })
         var base = e.NewMul(sp, ci32(N))
         for (i = 0; i < varSlotList.length; i++) {
             e.NewStore(e.NewLoad(i8ptr, varSlotList[i]), e.NewGetElementPtr(lvTy, gLv, zero, e.NewAdd(base, ci32(i))))
