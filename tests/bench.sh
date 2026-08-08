@@ -53,6 +53,23 @@
 # CONTROL: it compiles to self-contained IR with no js_* extern at all, so a
 # floor or layer-2 change that moves it is measuring the machine, not the change.
 #
+# THE ROWS FALL INTO TWO FAMILIES AND ONLY ONE OF THEM SEES LAYER 2. c, bash and
+# batch compile to SELF-CONTAINED IR against a C runtime (lib/runtime.ll,
+# lib/bash-rt.c, lib/batch-rt.c) - unboxed machine words, no js_* extern, no
+# MetaJS at all. The other twelve compile to HANDLE IR and link lib/runtime.ll
+# plus lib/<lang>-rt.ll, so they are the rows a layer-2 or floor change can move.
+# Never read a self-contained row against a handle-IR one: they differ by two
+# orders of magnitude by construction. bash and batch are here because their C
+# runtimes had no performance gate of any kind and their arenas are UNCOLLECTED
+# (manual 7.8); each program's header records the arena ceiling it runs under,
+# and mod.sh runs 10,000 iterations instead of 40,000 because 40,000 overflows
+# bash's arena and segfaults.
+#
+# typescript deliberately has no program: it links lib/js-rt.ll, the same layer 2
+# and the same Go twin as js, so mod.ts would measure mod.js's code twice and
+# double the gate's runtime. The residual gap is the typescript EMITTER's own
+# codegen; add mod.ts the first time a change lands in only one of the two.
+#
 # Usage:
 #   tests/bench.sh                 run every program, diff against the baseline
 #   tests/bench.sh kotlin python   run only these
@@ -127,12 +144,17 @@ done
 trap 'rm -rf "$work" "$LOCK"' EXIT
 
 # ext -> language, i.e. which grammar compiles it.
+#
+# .metajs is not a real MetaJS extension - every MetaJS file in the tree is a
+# .js - but mod.js already claims .js for the js grammar, and one extension can
+# only name one grammar here. tests/bench/mod.metajs says so at the top.
 lang_of() {
     case "$1" in
         kt) echo kotlin ;; py) echo python ;; lua) echo lua ;; c) echo c ;;
         java) echo java ;; rb) echo ruby ;; kts) echo kotlin ;;
         js) echo js ;; ts) echo typescript ;; go) echo go ;; php) echo php ;;
         cs) echo csharp ;; swift) echo swift ;; dart) echo dart ;;
+        metajs) echo metajs ;; sh) echo bash ;; bat) echo batch ;;
         *) echo "" ;;
     esac
 }

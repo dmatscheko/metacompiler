@@ -1,0 +1,21 @@
+// See mod.kt. Same loop, so the languages are comparable to each other.
+//
+// metajs had NO bench row until docs/todo.md 7.7. This row is the one that
+// measures the SUBSTRATE: metajs-to-llvm-ir.abnf is the grammar every other
+// language's layer 2 is compiled by, and lib/metajs-rt.metajs is uniquely
+// compiled by the grammar that links its output (manual 7.2). A change to the
+// MetaJS emitter therefore moves every other row in this file, and this row is
+// the one that says so directly.
+//
+// The extension is .metajs and not .js on purpose: lang_of in tests/bench.sh
+// maps .js to the js grammar, and mod.js already claims it.
+function main() {
+    var s = 0
+    var i = 0
+    while (i < 40000) {
+        s = s + i % 7
+        i = i + 1
+    }
+    println(s)
+    return 0
+}

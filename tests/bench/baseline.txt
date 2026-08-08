@@ -183,13 +183,84 @@
 # the ones recorded at 418ab6f. go had no row at all until then, and docs/todo.md
 # 1.7 notes what that cost: `a, b := xs[i], ys[j]` did not parse in either half
 # and no bench program existed to meet it.
+#
+# ===========================================================================
+# 2026-08-08, docs/todo.md 7.7: THE LAST FIVE UNCOVERED LANGUAGES. Added BY HAND
+# in a clean `git archive` tree of 1fd6293, at 21 DRAWS per row, twice.
+#
+# The item's list of eight was stale - mod.swift, mod.js, mod.cs and mod.go had
+# landed since it was written. Re-derived from `ls tests/bench/` against the
+# grammars that declare c.exePath, the truly uncovered real languages were SIX:
+# dart, php, metajs, bash, batch and typescript. Five got a program; typescript
+# did not, and why is below.
+#
+# dart        3903000000   spread 4.49%    (3,903,035,970 / 3,902,923,718)
+# php         8064800000   spread 4.17%    (8,065,044,385 / 8,064,465,651)
+# metajs       222990000   spread 0.76%      (223,018,012 /   222,968,468)
+# bash          54970000   spread 0.32%       (54,982,321 /    54,955,779)
+# batch         32880000   spread 0.56%       (32,892,473 /    32,869,792)
+#
+# The two 21-draw runs in the parentheses are independent runs of the SAME tree.
+# They agree to 0.003% (dart), 0.007% (php), 0.02% (metajs), 0.05% (bash) and
+# 0.07% (batch) - in every case one to three orders of magnitude inside the row's
+# own spread, which is the check the todo header asks for. dart and php are
+# rounded to seven significant figures for the reason the js row states: their
+# spreads are 4%+ and nine digits of a number that moves 4% between builds invite
+# someone to read a 0.01% delta as real. The three tight rows are rounded to five,
+# which is still well below their spread.
+#
+# READ THE ROWS IN TWO FAMILIES. c, bash and batch compile to SELF-CONTAINED IR
+# against a C runtime - unboxed machine words, no js_* extern, no MetaJS layer 2 -
+# and the other twelve compile to HANDLE IR and link lib/<lang>-rt.ll. Only the
+# second family can be moved by a floor or layer-2 change; the first is two orders
+# of magnitude smaller by construction, and comparing across the line is
+# meaningless. bash and batch are here anyway because bash-rt.c and batch-rt.c had
+# NO performance gate of any kind and are the two runtimes whose arenas are never
+# collected (manual 7.8) - a per-iteration allocation regression there is exactly
+# what an instruction count sees.
+#
+# AND IT PAID OFF ON THE FIRST RUN: the 40,000-iteration mod.sh SEGFAULTS. bash's
+# `arena[4194304]` is 4 MiB, `rt_bump` has no bounds check and nothing is freed,
+# and this loop costs ~202 bytes an iteration because `$(( ))` re-parses the
+# accumulator's decimal text and rt_int2str writes a fresh arena string per
+# assignment. Bisected: last count that runs ~20,750, first that does not ~20,781,
+# and past it the binary exits 139 having printed nothing - the manual's "a
+# crashing binary looks fast" trap, live, in the very first row measured. mod.sh
+# therefore runs 10,000 iterations, a 2x margin, and says so at the top. batch's
+# `AR[2097152]` is 2 MiB at ~32 bytes an iteration and its ceiling is ~65,468, so
+# mod.bat keeps the standard 40,000 at a 1.6x margin. Neither ceiling was changed:
+# languages/ was not this round's to touch, and both are recorded as findings.
+#
+# WHY THERE IS STILL NO mod.ts. typescript-to-llvm-ir.abnf links lib/js-rt.ll -
+# the same layer 2 and the same Go twin as js - so mod.ts would run mod.js's code
+# a second time and double the gate's runtime for it. The item counted typescript
+# as an uncovered LAYER 2 and that is no longer true: js covers it. What remains
+# uncovered is the typescript EMITTER's own codegen, and the standing decision
+# (recorded above at the js row) is to add mod.ts the first time a change lands in
+# one of the two emitters and not the other.
+#
+# WHAT THE NEW ROWS ARE WORTH. php is one of the three languages that need the
+# __raw truthiness rule (manual 7.1), so its loop condition goes through layer 2
+# every iteration; dart shares lib/runtime-dartswift.metajs with swift, so that
+# file now has two callers measured rather than one, which is the same argument
+# that put csharp beside java. metajs is the substrate row: metajs-to-llvm-ir.abnf
+# is the grammar every other language's layer 2 is compiled by, so a change there
+# moves every handle-IR row in this file, and this row is the one that says so
+# directly. It is also the tightest handle-IR row here at 0.76%, which makes it
+# the most sensitive instrument in the file after `c`.
+# ===========================================================================
+bash          54970000
+batch         32880000
 c          11087591
 csharp     21293689255
+dart       3903000000
 go         844921947
 java       8625680206
 js         1309000000
 kotlin     18318579476
 lua        1529985212
+metajs       222990000
+php        8064800000
 python     34121176976
 ruby       5708270489
 swift      4516900000
