@@ -999,10 +999,73 @@ KwDefault   = "default" KwEnd ;
     // in principle: it says "generator" for any object with a callable `next`.
     function isGeneratorHost(v) { return false }
 
+    // ----- THE HOST-GLOBAL SET IS THE C FLOOR'S seed_root LIST, EXACTLY -----
+    //
+    // docs/todo.md 4.1. This table used to bind eleven names where the other two
+    // engines bound eighteen, and NOTHING IN THE SUITE COULD SEE IT: the --full
+    // runner makes both halves run the same file and report the same assertion
+    // count, so an assertion on a compiler-only global fails on this half by
+    // construction, and it cannot be guarded either (`typeof sprint` is
+    // "function" over there and a hard `variable not defined: sprint` here).
+    //
+    // The set is now pinned by abnf/hostglobals_test.go, which parses all three
+    // engines out of their own sources - this literal, seed_root(...) in
+    // languages/lib/runtime.c, and programJSBindings() in abnf/jsrtint.go - and
+    // fails `go test ./abnf/` if any of them gains or loses a name. Add a global
+    // to one engine and that test tells you the other two.
+    //
+    // What still differs, deliberately, and is NOT a name:
+    //   Math's MEMBERS. The floor seeds eleven (floor abs max min imul ceil trunc
+    //   round sign sqrt pow) plus PI and E; the grammar host below and the Go twin
+    //   also carry sin/cos/tan/exp/log/log2/log10/cbrt/atan2/hypot, which the
+    //   floor cannot have without soft-float transcendentals. No layer-2 file uses
+    //   one (grepped), so nothing here reaches the gap, but a MetaJS program that
+    //   calls Math.sin runs under the interpreter and under llvm.Run and fails in
+    //   a native binary. See the report on docs/todo.md 4.1: ruby's `Math.sin` has
+    //   exactly this defect today, through ruby-to-llvm-ir.abnf's js_scope_get of
+    //   the host Math.
+    //
+    // String and Array are PLAIN OBJECTS with one method each, not the grammar
+    // host's own constructors: the floor's boot() seeds them as
+    // seed_host(strobj, "fromCharCode", 30) / seed_host(arrobj, "isArray", 31) and
+    // abnf/jsrt.go's standardJSBindings builds the same two objects. Binding the
+    // host's String here made `typeof String` answer "function" in this half and
+    // "object" in the other two - the same divergence one level down from a name.
+    var stringHostObj = {
+        fromCharCode: function() { return String.fromCharCode.apply(undefined, arguments) }
+    }
+    var arrayHostObj = {
+        isArray: function(v) { return Array.isArray(v) }
+    }
+    // fail(msg): a RUNTIME ERROR, not an exception, and NOT interp-core.js's
+    // fail() - that one is the tag script's own diagnostic and prints
+    // "metajs interpreter error: ..." on stdout. Host id 36 of the C floor writes
+    // "js runtime error: " + the message to STDERR and exits 1, and abnf/jsrt.go's
+    // rt.fail says the same words; this reproduces those bytes. Every layer-2 file
+    // calls fail(), so it is part of the MetaJS host contract and not an extra.
+    function failHost(msg) {
+        eprintln("js runtime error: " + ("" + msg))
+        exit(1)
+    }
+
     var hostGlobals = {
         "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
         "eprintln": siEprintln,
-        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
+        // sprint: fmt.Sprint's text - the rendering println gives, returned rather
+        // than printed, with a space between two adjacent NON-string operands.
+        // fmt_sprint in languages/lib/runtime.c (host id 35) and standardJSBindings
+        // in abnf/jsrt.go are the other two. The grammar hosts bind the name for
+        // this line: frozen.go through standardJSBindings, and commonscript.go
+        // explicitly, which it did not until docs/todo.md 4.1.
+        "sprint": function() { return sprint.apply(undefined, siPrintArgs(arguments)) },
+        // The UTF-8 byte length; .length counts UTF-16 code units. Host id 32.
+        "byteLen": byteLen,
+        "fail": failHost,
+        // Infinity and NaN are values, not functions, and the dialect cannot write
+        // either as a literal (there is no exponent literal - manual chapter 4).
+        "Infinity": Infinity, "NaN": NaN,
+        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math,
+        "String": stringHostObj, "Array": arrayHostObj,
         // floPrec(v, n): |v| rounded to n significant digits as DIGITSeEXP. Host
         // id 70 of languages/lib/runtime.c and floPrecStr in abnf/commonscript.go
         // (which is what this name resolves to here - the interpreter runs on a

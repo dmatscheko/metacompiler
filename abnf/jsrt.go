@@ -13312,8 +13312,14 @@ func (rt *jsrt) printArgs(args []interface{}) []interface{} {
 	return out
 }
 
-// standardJSBindings are the host globals of a standalone MetaJS program (the
-// same set that metajs-interpreter.abnf exposes).
+// standardJSBindings are the host globals of a GRAMMAR TAG SCRIPT under the
+// frozen engine (frozenBaseBindings, frozen.go), mirrored for goja in
+// commonscript.go. It is ALSO the base programJSBindings (jsrtint.go) starts
+// from - but not the set a MetaJS program ends up with: that one is the C
+// floor's seed_root list, and programJSBindings removes the grammar-only names
+// from this map and says which and why. The header used to claim this was "the
+// same set that metajs-interpreter.abnf exposes"; it was not, and nothing could
+// see the difference (docs/todo.md 4.1). abnf/hostglobals_test.go now can.
 func standardJSBindings() map[string]interface{} {
 	mathObj := newJSObject()
 	mathObj.set("imul", jsHostFunc("imul", func(rt *jsrt, this uint64, args []interface{}) interface{} {

@@ -2435,7 +2435,26 @@ long si_apply(long code, long l, long r) {
 	 * Int >> UInt8, Int64 >> UInt16, Int << UInt32, UInt8 >> Int, Int8 >> UInt64).
 	 * Kotlin, C# and Dart cannot express a non-int count at all; no toolchain for
 	 * those three is installed here, so that rests on the specifications named
-	 * above. */
+	 * above.
+	 *
+	 * 2026-08-08, docs/todo.md 4.2: the two `die("PROBE-C <<" / ">>")` calls that
+	 * measurement left behind in the two shift arms are REMOVED, and the "fired
+	 * zero times" reading above must not be quoted for the C engine, because the
+	 * C probe COULD NOT HAVE FIRED. It read
+	 *     if (si_width_of(l, l) != w || si_uns_of(l, l) != u) die(...)
+	 * *after* the `if (code == 9 || code == 10)` line below had already assigned
+	 * w = si_width_of(l, l) and u = si_uns_of(l, l) - so both operands of both
+	 * comparisons were the same expression and the condition was false by
+	 * construction. It was a tautology, not evidence. (The other three sites named
+	 * above were removed when the measurement finished; only these two were left,
+	 * which is what made them read as scaffolding.)
+	 *
+	 * Nothing is lost by removing them: the override on the line below is
+	 * UNCONDITIONAL, so the shift arms already compute at the left operand's own
+	 * width and signedness whatever type the count arrived with. A guard that
+	 * fires would therefore have aborted a program that was about to produce the
+	 * RIGHT answer. The invariant is enforced by that assignment, not checked by a
+	 * predicate, and this comment is the record. */
 	long a = si_val(l);
 	long b = si_val(r);
 	long x = 0;
@@ -2461,14 +2480,12 @@ long si_apply(long code, long l, long r) {
 	else if (code == 7) { x = a ^ b; }
 	else if (code == 8) { x = a & (0 - b - 1); }   /* &^, i.e. a & ~b */
 	else if (code == 9) {
-		if (si_width_of(l, l) != w || si_uns_of(l, l) != u) { die("PROBE-C <<"); }
 		/* Go's rule, and unlike C not undefined: a count at or above the width
 		 * shifts everything out. A negative count does too. */
 		s = b;
 		if (s < 0 || s >= w) { x = 0; } else { x = a << s; }
 	}
 	else if (code == 10) {
-		if (si_width_of(l, l) != w || si_uns_of(l, l) != u) { die("PROBE-C >>"); }
 		s = b;
 		if (s < 0) { x = 0; }
 		else if (u) {

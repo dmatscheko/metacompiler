@@ -234,6 +234,14 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// (lib/compile-core.js emitStr). goja exports the string as UTF-8.
 	vm.Set("byteLen", func(s string) int { return len(s) })
 
+	// sprint: fmt.Sprint's text, the rendering println gives returned rather than
+	// printed. The frozen grammar host has had it all along (standardJSBindings,
+	// jsrt.go) and this side did not, so a tag script that used the name would
+	// have been a silent goja-vs--frozen divergence. metajs-interpreter.abnf's
+	// hostGlobals now needs it, because the C floor seeds sprint as host id 35 and
+	// the MetaJS host-global set is the floor's list (docs/todo.md 4.1).
+	vm.Set("sprint", fmt.Sprint)
+
 	// rawSet writes an OWN property, bypassing any Object.prototype accessor: a
 	// plain obj[name] = v with name "__proto__" invokes the prototype SETTER
 	// under a host JS engine (a TypeError for primitive values, a silent
@@ -380,7 +388,50 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("abnf", newHostAPIObject(vm, r.AbnfFuncMap))
 	vm.Set("llvm", newHostAPIObject(vm, llvmFuncMap))
 
+	installGojaCaseMapping(vm)
+
 	return &common
+}
+
+// installGojaCaseMapping replaces goja's String.prototype.toUpperCase and
+// toLowerCase with Go's strings.ToUpper / strings.ToLower.
+//
+// WHY. Those two methods were a LIVE goja-vs--frozen divergence in every
+// interpreter half and no gate could reach it (docs/todo.md 4.1). Measured on
+// this tree before the change, through metajs-interpreter.abnf:
+//
+//	                 goja      -frozen / llvm.Run / native binary
+//	"ss".toUpperCase()   SS        ss          (U+00DF)
+//	"fi".toUpperCase()   FI        fi          (U+FB01, the ligature)
+//	"I".toLowerCase()    i.        i           (U+0130 -> i + U+0307)
+//
+// goja is the one that is RIGHT as JavaScript: ECMA-262 uses the full Unicode
+// case mapping, where those three grow or shrink a character. The other three
+// engines all use the SIMPLE per-rune mapping, because that is what
+// strings.ToUpper is (abnf/jsrt.go's frozen string methods and the Go twin) and
+// what languages/lib/runtime.c's floor implements.
+//
+// THE DECISION IS TO CONVERGE ON THE SIMPLE MAPPING, i.e. to move goja, and it
+// is not a preference: full case mapping in the floor is `case_map`, which was
+// built, measured at 135x on a real workload and reverted
+// (docs/working-on-this-project.md chapter 5). Three engines of four already
+// implement the simple mapping and the fourth cannot afford the other one.
+//
+// The change cannot introduce a divergence, only remove one: goja's answer
+// becomes literally the function the frozen engine already calls, for every
+// input. Any assertion that passes today passes after, because it has to pass
+// under -frozen today.
+func installGojaCaseMapping(vm *goja.Runtime) {
+	vm.Set("__goStrUpper", strings.ToUpper)
+	vm.Set("__goStrLower", strings.ToLower)
+	// String.prototype so it reaches a primitive receiver too; `this` is boxed
+	// there, hence the explicit String(this).
+	if _, err := vm.RunString(`
+		String.prototype.toUpperCase = function () { return __goStrUpper(String(this)) };
+		String.prototype.toLowerCase = function () { return __goStrLower(String(this)) };
+	`); err != nil {
+		panic(err)
+	}
 }
 
 // hostAPIObject exposes one of the host API maps (c, abnf, llvm) to goja.

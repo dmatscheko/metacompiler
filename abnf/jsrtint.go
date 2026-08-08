@@ -475,6 +475,43 @@ func programJSBindings() map[string]interface{} {
 	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
 	})
+	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
+	// languages/lib/runtime.c, whose comment already claims "the Go twin's rt.fail
+	// panics with exactly this text". It did, but the name was not BOUND here, so
+	// `fail` was a floor-only global: every layer-2 file calls it (kotlin-rt 73
+	// times, python-rt 65, ruby-rt 38) and a MetaJS program could call it in a
+	// native binary and not under llvm.Run. docs/todo.md 4.1.
+	b["fail"] = jsHostFunc("fail", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		rt.fail("%s", rt.toString(argAt(args, 0)))
+		return jsUndef
+	})
+	// THE PROGRAM SET IS THE C FLOOR'S seed_root LIST, EXACTLY - see
+	// metajsProgramGlobals in hostglobals_test.go, which parses all three engines
+	// out of their own sources and fails if any of them gains or loses a name.
+	//
+	// standardJSBindings serves two masters: this one and the GRAMMAR script host
+	// (frozenBaseBindings in frozen.go, mirrored for goja in commonscript.go). The
+	// three names below belong to the grammar host alone and were reaching a MetaJS
+	// program only because it inherits that map:
+	//
+	//   Object  - only ever wanted as Object.prototype.hasOwnProperty.call(o, k) by
+	//             tag scripts (c-preprocessor.abnf, lisp, tinyc, bash, swift...).
+	//             languages/lib/runtime.c seeds no such name, so it worked under
+	//             llvm.Run and died in the native binary. js and typescript do NOT
+	//             lose anything: their emitters declare their own Object into the
+	//             program scope with js_jsobject (js-to-llvm-ir.abnf:5786).
+	//   rawSet  - an own-property write that bypasses a host accessor. A MetaJS
+	//             program has no accessors, so it is meaningless to one; the floor
+	//             seeds no such name either. interp-core.js's use of it is a TAG
+	//             SCRIPT use and keeps working.
+	//
+	// __jmath is the one deliberate exception and it STAYS: it is `__`-prefixed
+	// (not a name a MetaJS program is meant to see), and java-to-llvm-ir.abnf reads
+	// it through jvScopeProbe, which takes the hit arm under llvm.Run and falls
+	// back to layer 2's own java.lang descriptor natively. Removing it would change
+	// java's answers under llvm.Run.
+	delete(b, "Object")
+	delete(b, "rawSet")
 	return b
 }
 

@@ -23,13 +23,28 @@
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
-// The HOST GLOBALS asserted here are the intersection of the two halves, which
-// is smaller than either: metajs-interpreter.abnf binds exactly println, print,
-// printf, sprintf, eprintln, parseInt, parseFloat, Math, String, exit and
-// anytype, while the compiler half (abnf/jsrt.go standardJSBindings) also has
-// Infinity, NaN, Array, Object, byteLen, sprint and rawSet. That difference is a
-// real one and is recorded in docs/runtime-rework-plan.md rather than asserted
-// here, because a check on it would fail on one half by construction.
+// The HOST GLOBALS used to be asserted only at the INTERSECTION of the two
+// halves, which was smaller than either: metajs-interpreter.abnf bound eleven
+// names while the compiler half (abnf/jsrt.go standardJSBindings) also had
+// Infinity, NaN, Array, Object, byteLen, sprint and rawSet - and no check on the
+// difference was possible, because it would fail on one half by construction.
+//
+// THAT IS CLOSED (docs/todo.md 4.1). All three engines now bind the SAME 48
+// names - the C floor's seed_root list in languages/lib/runtime.c is the
+// authority, the interpreter gained the six it was missing, and the two that only
+// the grammar's own tag scripts ever wanted (Object, rawSet) left the program set.
+// SECTION 31 asserts every one of the 48 on both halves, which is only possible
+// because they agree; abnf/hostglobals_test.go parses the three sources and fails
+// `go test ./abnf/` if a future name lands in fewer than three of them.
+//
+// SECTION 32 is the other half of that item: string CASE MAPPING. All four
+// engines now use the SIMPLE per-rune mapping (Go's strings.ToUpper), so
+// "ss".toUpperCase() keeps one character. goja used to give real JavaScript's
+// full mapping ("SS") - a live goja-vs--frozen divergence in this half that no
+// gate could reach - and installGojaCaseMapping in abnf/commonscript.go now
+// routes it through the same Go function the other three engines call. The
+// direction was forced: full case mapping in the C floor is `case_map`, measured
+// at 135x and reverted.
 //
 // Deliberately out of scope, because MetaJS does not have them (they belong to
 // tests/js-test-full.js): classes, arrow functions, template literals,
@@ -1648,6 +1663,119 @@ function s30() {
     check("gen08", typeof fake === "object" && isGenerator(fake) === false)
 }
 
+// ===== SECTION 31: the host-global SET, all 48 names on both halves =====
+// docs/todo.md 4.1. This section exists because it COULD NOT BE WRITTEN before:
+// the --full runner makes both halves run this same file and report the same
+// assertion count, so a check on a name only one half bound failed on the other
+// by construction, and it could not be guarded either - `typeof sprint` answered
+// "function" under the compiler and a hard `variable not defined: sprint` under
+// the interpreter, which is an abort and not a false.
+//
+// The set is the C floor's seed_root list in languages/lib/runtime.c, and that is
+// the authority for the other two engines (programJSBindings in abnf/jsrtint.go,
+// hostGlobals in metajs-interpreter.abnf). abnf/hostglobals_test.go parses all
+// three and fails if they stop matching; this section is the runtime half of the
+// same statement and adds what a source parse cannot see - that the names are
+// bound to something of the right KIND, in a native binary too.
+//
+// WHAT CANNOT BE ASSERTED HERE: absence. `typeof Object` is not "undefined" in
+// any of the three engines, it is a hard "variable not defined" abort, so the
+// removal of Object and rawSet from the program set is pinned by the Go test
+// only.
+function s31() {
+    // The six output and diagnostic names.
+    check("hg01", typeof println === "function" && typeof print === "function")
+    check("hg02", typeof printf === "function" && typeof sprintf === "function")
+    check("hg03", typeof eprintln === "function" && typeof sprint === "function")
+    // fail() is a runtime ERROR and exits, so only its binding can be checked.
+    check("hg04", typeof fail === "function" && typeof exit === "function")
+    check("hg05", typeof parseInt === "function" && typeof parseFloat === "function")
+    check("hg06", typeof byteLen === "function" && typeof floPrec === "function")
+    // The eleven sized-integer names.
+    check("hg07", typeof sint === "function" && typeof sintRaw === "function")
+    check("hg08", typeof sintIs === "function" && typeof sintHi === "function")
+    check("hg09", typeof sintLo === "function" && typeof sintWidth === "function")
+    check("hg10", typeof sintUns === "function" && typeof sintOp === "function")
+    check("hg11", typeof sintCmp === "function" && typeof sintConv === "function")
+    check("hg12", typeof sintStr === "function" && typeof sintNum === "function")
+    // The ten boxed-double names.
+    check("hg13", typeof flo === "function" && typeof floIs === "function")
+    check("hg14", typeof floNum === "function" && typeof floStyle === "function")
+    check("hg15", typeof floStr === "function" && typeof floOp === "function")
+    check("hg16", typeof floEq === "function" && typeof floAbs === "function")
+    check("hg17", typeof floMax === "function" && typeof floMin === "function")
+    // Object walking, the scope API and the generator test.
+    check("hg18", typeof keysOf === "function" && typeof delKey === "function")
+    check("hg19", typeof scopeNew === "function" && typeof scopeParent === "function")
+    check("hg20", typeof scopeGet === "function" && typeof scopeHas === "function")
+    check("hg21", typeof scopeDecl === "function" && typeof isGenerator === "function")
+    // The five non-function names. anytype is the declaration marker and is an
+    // object in all three engines (a cell of tag 12 in the floor).
+    check("hg22", typeof Infinity === "number" && typeof NaN === "number")
+    check("hg23", typeof Math === "object" && typeof anytype === "object")
+    // String and Array are PLAIN OBJECTS carrying one method each, not the host
+    // engine's constructors: seed_host(strobj, "fromCharCode", 30) and
+    // seed_host(arrobj, "isArray", 31) in the floor's boot(). The interpreter used
+    // to bind the grammar host's own String here, which answered "function".
+    check("hg24", typeof String === "object" && typeof Array === "object")
+    check("hg25", typeof String.fromCharCode === "function" && typeof Array.isArray === "function")
+
+    // The six names the interpreter half gained, exercised rather than named.
+    check("hg26", Infinity - 1 === Infinity && 0 - Infinity < 0)
+    check("hg27", NaN !== NaN && !(NaN === NaN))
+    check("hg28", Array.isArray([1, 2]) === true)
+    check("hg29", Array.isArray("x") === false && Array.isArray({}) === false)
+    // byteLen is UTF-8 bytes where .length is UTF-16 code units.
+    check("hg30", byteLen("abc") === 3 && "abc".length === 3)
+    check("hg31", byteLen("é") === 2 && "é".length === 1)
+    check("hg32", byteLen("🎉") === 4 && "🎉".length === 2)
+    // sprint is fmt.Sprint: a space between two adjacent operands only when
+    // NEITHER of them is a string (fmt_sprint in languages/lib/runtime.c tests
+    // tag 4 on both sides).
+    check("hg33", sprint("a", "b") === "ab")
+    check("hg34", sprint(1, 2) === "1 2")
+    check("hg35", sprint("a", 1) === "a1" && sprint(1, "a") === "1a")
+    check("hg36", sprint() === "")
+    check("hg37", String.fromCharCode(65, 66) === "AB")
+}
+
+// ===== SECTION 32: string case mapping is the SIMPLE per-rune mapping =====
+// docs/todo.md 4.1, the second half. Real JavaScript uses the FULL Unicode case
+// mapping, in which a few characters change length: "ss".toUpperCase() is "SS" in
+// node, "fi" (the U+FB01 ligature) becomes "FI", and "I" (U+0130) lowercases to
+// "i" plus a combining dot. This project answers the SIMPLE per-rune mapping in
+// all four engines instead - Go's strings.ToUpper / strings.ToLower.
+//
+// THE DECISION, and why it went this way rather than toward the JS spec: full
+// case mapping in the C floor is `case_map`, which was built, passed every gate,
+// was measured at 135x on a real workload and was reverted
+// (docs/working-on-this-project.md chapter 5). Three of the four engines already
+// did simple mapping; the fourth was goja, and moving goja costs nothing - it now
+// calls the same Go function the frozen engine calls
+// (installGojaCaseMapping in abnf/commonscript.go).
+//
+// Until then this was a LIVE goja-vs--frozen divergence in the interpreter half
+// that ./test.sh could not see, because no matrix entry upper-cased a non-ASCII
+// string. These rows are what makes it visible from now on.
+function s32() {
+    check("cm01", "abc".toUpperCase() === "ABC" && "ABC".toLowerCase() === "abc")
+    check("cm02", "é".toUpperCase() === "É" && "É".toLowerCase() === "é")
+    // The three characters where the full mapping differs from the simple one.
+    check("cm03", "ß".toUpperCase() === "ß" && "ß".toUpperCase().length === 1)
+    check("cm04", "ﬁ".toUpperCase() === "ﬁ" && "ﬁ".toUpperCase().length === 1)
+    check("cm05", "İ".toLowerCase() === "i" && "İ".toLowerCase().length === 1)
+    // Characters whose simple mapping IS the answer, so both models agree.
+    check("cm06", "ı".toUpperCase() === "I" && "ǉ".toUpperCase() === "Ǉ")
+    check("cm07", "I".toLowerCase() === "i" && "i".toUpperCase() === "I")
+    // Case mapping never changes the code-unit count in the simple model.
+    check("cm08", "ßﬁİ".toUpperCase().length === 3 && "ßﬁİ".toLowerCase().length === 3)
+    // Astral pairs still map (the surrogate pair is one rune to Go): U+10428
+    // DESERET SMALL LETTER LONG I upper-cases to U+10400.
+    check("cm09", String.fromCharCode(55297, 56360).toUpperCase() ===
+                  String.fromCharCode(55297, 56320))
+    check("cm10", "".toUpperCase() === "" && " ".toUpperCase() === " ")
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1679,6 +1807,8 @@ function main() {
     s28() // SECTION-CALL 28
     s29() // SECTION-CALL 29
     s30() // SECTION-CALL 30
+    s31() // SECTION-CALL 31
+    s32() // SECTION-CALL 32
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
