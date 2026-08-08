@@ -1506,6 +1506,128 @@ func s31() {
     check("31p", S31.h(ii[0]) == "sI" && S31.h(ss[0]) == "sS")
 }
 
+// ===== SECTION 32: extension overloads, and the FloatingPoint range statics =====
+// An extension used to restart the overload counter at 0 in the COMPILER half, so
+// its member overwrote the one the type declared: static funcs, instance methods
+// and subscripts all lost the type's own, where an initializer did not. The
+// interpreter's addMethod merged onto the same table and was always right, so every
+// row here was a live halves divergence --cross never reached (docs/todo.md 1.4).
+struct S32 {
+    var v: Int = 0
+    static func f32(_ a: String) -> String { return "sS" }
+    func m32(_ a: String) -> String { return "mS" }
+    subscript(_ a: String) -> String { return "xS" }
+    init(s: String) { self.v = s.count }
+}
+extension S32 {
+    static func f32(_ a: Int) -> String { return "sI" }
+    func m32(_ a: Int) -> String { return "mI" }
+    subscript(_ a: Int) -> String { return "xI" }
+    init(i: Int) { self.v = i }
+}
+// The type already carries a DISPATCHER (two overloads); the extension adds a third.
+struct T32 {
+    func p32(_ a: Int) -> String { return "pI" }
+    func p32(_ a: String) -> String { return "pS" }
+    static func q32(_ a: Int) -> String { return "qI" }
+    static func q32(_ a: String) -> String { return "qS" }
+}
+extension T32 {
+    func p32(_ a: Double) -> String { return "pD" }
+    static func q32(_ a: Double) -> String { return "qD" }
+}
+// Two separate extensions, each adding one candidate.
+struct U32 { func r32(_ a: Int) -> String { return "rI" } }
+extension U32 { func r32(_ a: String) -> String { return "rS" } }
+extension U32 { func r32(_ a: Double) -> String { return "rD" } }
+// An extension on a SUBCLASS re-opens the base's group rather than hiding it.
+class B32 { func g32(_ a: Int) -> String { return "gI" } }
+class D32: B32 {}
+extension D32 { func g32(_ a: String) -> String { return "gS" } }
+enum E32 {
+    case one
+    func w32(_ a: Int) -> String { return "wI" }
+    static func z32(_ a: Int) -> String { return "zI" }
+}
+extension E32 {
+    func w32(_ a: String) -> String { return "wS" }
+    static func z32(_ a: String) -> String { return "zS" }
+}
+protocol P32 {}
+extension P32 {
+    func t32(_ a: Int) -> String { return "tI" }
+    func t32(_ a: String) -> String { return "tS" }
+}
+struct V32: P32 {}
+// A SECOND `extension Int` used to declare a second, empty table under the same
+// name, and every member the first block added became unreachable - an outright
+// abort in the compiler half where the interpreter printed the right answer.
+extension Int { func aa32() -> String { return "aa\(self)" } }
+extension Int { func bb32() -> String { return "bb\(self)" } }
+// A static OPERATOR and a STATIC SUBSCRIPT are the two remaining shapes of the
+// static overload surface. The static subscript is the one static reached WITH a
+// receiver - sw_subget pushes the type descriptor at args[0] - so its dispatcher
+// counts arguments from 1; counting from 0 made the arity test reject every
+// candidate and the fallback run the first, and that was already wrong at base
+// with no extension involved.
+struct M32 {
+    var v: Int
+    static func + (a: M32, b: M32) -> M32 { return M32(v: a.v + b.v) }
+    static subscript(_ i: Int) -> String { return "yI" }
+    static subscript(_ s: String) -> String { return "yS" }
+}
+extension M32 {
+    static func + (a: M32, b: Int) -> M32 { return M32(v: a.v + b * 10) }
+    static subscript(_ f: Double) -> String { return "yD" }
+}
+
+func s32() {
+    let ii: [Int] = [3]
+    let ss: [String] = ["ab"]
+    let dd: [Double] = [1.5]
+    let s = S32(s: ss[0])
+    check("32a", S32.f32(ss[0]) == "sS" && S32.f32(ii[0]) == "sI")
+    check("32b", s.m32(ss[0]) == "mS" && s.m32(ii[0]) == "mI")
+    check("32c", s[ss[0]] == "xS" && s[ii[0]] == "xI")
+    check("32d", S32(s: ss[0]).v == 2 && S32(i: ii[0]).v == 3)
+    let t = T32()
+    check("32e", t.p32(ii[0]) == "pI" && t.p32(ss[0]) == "pS" && t.p32(dd[0]) == "pD")
+    check("32f", T32.q32(ii[0]) == "qI" && T32.q32(ss[0]) == "qS" && T32.q32(dd[0]) == "qD")
+    let u = U32()
+    check("32g", u.r32(ii[0]) == "rI" && u.r32(ss[0]) == "rS" && u.r32(dd[0]) == "rD")
+    let d = D32()
+    check("32h", d.g32(ii[0]) == "gI" && d.g32(ss[0]) == "gS")
+    let e = E32.one
+    check("32i", e.w32(ii[0]) == "wI" && e.w32(ss[0]) == "wS")
+    check("32j", E32.z32(ii[0]) == "zI" && E32.z32(ss[0]) == "zS")
+    let v = V32()
+    check("32k", v.t32(ii[0]) == "tI" && v.t32(ss[0]) == "tS")
+    check("32l", ii[0].aa32() == "aa3" && ii[0].bb32() == "bb3")
+    let ms: [M32] = [M32(v: 1), M32(v: 2)]
+    check("32w", (ms[0] + ms[1]).v == 3 && (ms[0] + ii[0]).v == 31)
+    check("32x", M32[ii[0]] == "yI" && M32[ss[0]] == "yS" && M32[dd[0]] == "yD")
+
+    // The FloatingPoint range statics: all eight answered nil in all three engines
+    // (docs/todo.md 1.10 named two). Float's are FLOATS, so they print at float
+    // precision; the values are read back as text, which is what pins them.
+    check("32m", "\(Double.greatestFiniteMagnitude)" == "1.7976931348623157e+308")
+    check("32n", "\(Double.leastNonzeroMagnitude)" == "5e-324")
+    check("32o", "\(Double.leastNormalMagnitude)" == "2.2250738585072014e-308")
+    check("32p", "\(Double.ulpOfOne)" == "2.220446049250313e-16")
+    check("32q", "\(Float.greatestFiniteMagnitude)" == "3.4028235e+38")
+    check("32r", "\(Float.leastNonzeroMagnitude)" == "1e-45")
+    check("32s", "\(Float.leastNormalMagnitude)" == "1.1754944e-38")
+    check("32t", "\(Float.ulpOfOne)" == "1.1920929e-07")
+    let two: [Double] = [2.0]
+    let ft: [Float] = [2.0]
+    check("32u", Double.greatestFiniteMagnitude * two[0] == Double.infinity
+              && Double.leastNonzeroMagnitude / two[0] == 0.0
+              && 1.0 + Double.ulpOfOne > 1.0)
+    check("32v", Float.greatestFiniteMagnitude * ft[0] == Float.infinity
+              && Float.leastNonzeroMagnitude / ft[0] == Float(0)
+              && Float(1) + Float.ulpOfOne > Float(1))
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1540,6 +1662,7 @@ func main() {
     s29() // SECTION-CALL 29
     s30() // SECTION-CALL 30
     s31() // SECTION-CALL 31
+    s32() // SECTION-CALL 32
     print("full: \(checks) checks, \(fails) failures")
 }
 

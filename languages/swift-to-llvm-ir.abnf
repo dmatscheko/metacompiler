@@ -964,7 +964,7 @@ NotChar63   = :script(~~
 ~~) ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+FieldSfx    = "." Id <~~ push(makeFieldSfx(up.in)) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
 // the property names "0", "1", ... (and additionally under their label when the
 // element has one), so an element read is an ordinary field read.
@@ -5280,6 +5280,42 @@ KwContinue  = "continue" KwEnd ;
         if (!hasOwn(typeInfo, "$" + name)) { typeInfo["$" + name] = {inits: [], superName: null, meths: {}} }
         return typeInfo["$" + name]
     }
+    // The overload GROUP a type accumulates under one member name, across the type's
+    // own declaration AND every later `extension T`. It carries the next free slot
+    // number, the candidate list in declaration order, and whether a dispatcher has
+    // already displaced the plain name - which is what decides whether candidate 0
+    // still has to be aliased to name$0.
+    //
+    // Without it an extension restarted the counter at 0 and js_set overwrote the
+    // type's own slot: `extension S { static func f(_ a: Int) }` on a type declaring
+    // `static func f(_ a: String)` DROPPED the String one, and the same for instance
+    // methods and for subscripts (docs/todo.md 1.4 named only the statics). Only
+    // initializers escaped, because makeExtensionStmt already hands emitExtMembers
+    // an initIdxs continuing rec.inits. It was a compiler-half defect alone: the
+    // interpreter's addMethod merges onto the very same table and was always right,
+    // so `s.m(1)` after `extension S { func m(_:Int) }` was a live halves divergence
+    // --cross never reached.
+    function ovGroups(rec, isStat) {
+        if (isStat) {
+            if (rec.sown == undefined || rec.sown == null) { rec.sown = {} }
+            return rec.sown
+        }
+        if (rec.own == undefined || rec.own == null) { rec.own = {} }
+        return rec.own
+    }
+    function ovGroup(tname, isStat, name) {
+        var g = ovGroups(typeRec(tname == undefined || tname == null ? "" : tname), isStat)
+        if (!hasOwn(g, "$" + name)) { g["$" + name] = {n: 0, lst: [], disp: false} }
+        return g["$" + name]
+    }
+    // The slot number this declaration takes, continuing whatever the type already
+    // has under that name.
+    function ovNext(tname, isStat, name) {
+        var grp = ovGroup(tname, isStat, name)
+        var n = grp.n
+        grp.n = n + 1
+        return n
+    }
     function memberKey(name, n) { return n == 0 ? name : name + "$" + n }
     // Picks the storage key of the overload that accepts these argument records.
     function pickOverload(name, sigs, recs) {
@@ -5368,10 +5404,14 @@ KwContinue  = "continue" KwEnd ;
     // Candidate 0 is COPIED aside to name$0 - memberKey never produces a $0, so the
     // alias cannot collide with the numbering initializers, extensions and inherited
     // slots all share - and the dispatcher takes the plain name's place.
-    function noteOverload(names, cands, name, n, params) {
+    //
+    // The candidate list is the TYPE's own persistent one (ovGroup), not a list per
+    // emission pass, so an extension's candidates join the type's instead of
+    // replacing them.
+    function noteOverload(names, cands, name, n, params, tname, isStat) {
         if (name == "init") { return }
         var ck = "$" + name
-        if (!hasOwn(cands, ck)) { names.push(name); cands[ck] = [] }
+        if (!hasOwn(cands, ck)) { names.push(name); cands[ck] = ovGroup(tname, isStat, name).lst }
         cands[ck].push({key: n == 0 ? name + "$0" : memberKey(name, n), params: params})
     }
     // ----- Inheriting an overload GROUP (docs/todo.md 1.2) -----
@@ -5441,7 +5481,9 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < names.length; i++) {
             var nm = names[i]
             var lst = cands["$" + nm]
-            var out = hasOwn(rec.meths, "$" + nm) ? rec.meths["$" + nm] : []
+            // Rebuilt, not appended to: lst is the type's persistent group and
+            // already holds everything an earlier pass recorded.
+            var out = []
             for (var k = 0; k < lst.length; k++) {
                 var key = lst[k].key
                 if (lst.length < 2 && key == nm + "$0") { key = nm }
@@ -5450,14 +5492,29 @@ KwContinue  = "continue" KwEnd ;
             rec.meths["$" + nm] = out
         }
     }
-    function emitOverloadSlots(b, tblV, names, cands, off) {
+    function emitOverloadSlots(b, tblV, names, cands, off, tname, isStat) {
         var aoff = (off == undefined || off == null) ? 1 : off
         for (var i = 0; i < names.length; i++) {
             var lst = cands["$" + names[i]]
             if (lst.length < 2) { continue }
-            callExt(b, "js_set", [tblV, emitStr(b, names[i] + "$0"),
-                                  callExt(b, "js_get", [tblV, emitStr(b, names[i])])])
-            var didx = emitMemberDispatch(names[i], lst, aoff)
+            // A STATIC SUBSCRIPT is the one static reached with a receiver: sw_subget
+            // pushes the type descriptor at args[0] exactly as it does an instance,
+            // so its dispatcher counts from 1 while every other static counts from 0.
+            // With 0 the arity test `nargs <= P.length + off` rejected EVERY
+            // candidate and the fallback ran the first, so `M[aString]` answered the
+            // Int subscript - true at base with no extension in sight, in the
+            // compiler half alone.
+            var noff = names[i].slice(0, 15) == "__static___sub_" ? 1 : aoff
+            // The alias is taken ONCE per group. On a later `extension T` pass the
+            // plain name already holds the previous dispatcher, and copying that into
+            // name$0 would bury candidate 0 behind an infinite indirection.
+            var grp = ovGroup(tname, isStat, names[i])
+            if (!grp.disp) {
+                grp.disp = true
+                callExt(b, "js_set", [tblV, emitStr(b, names[i] + "$0"),
+                                      callExt(b, "js_get", [tblV, emitStr(b, names[i])])])
+            }
+            var didx = emitMemberDispatch(names[i], lst, noff)
             var dsc = callExt(b, "js_scope_new", [curScopeV])
             callExt(b, "js_scope_decl", [dsc, emitStr(b, "__ovtbl"), tblV])
             callExt(b, "js_set", [tblV, emitStr(b, names[i]),
@@ -5530,24 +5587,39 @@ KwContinue  = "continue" KwEnd ;
         return idx
     }
 
-    function emitInstallMembers(b, tblV, statV, mem, tname) {
+    // isDecl marks the type's OWN declaration, as against an extension of it. It
+    // clears the overload groups, because typeInfo is keyed by the BARE type name:
+    // `struct A { struct Inner {...} }` and `struct B { struct Inner {...} }` share
+    // one record, and without the reset the second Inner's members would number
+    // themselves after the first's and land on keys nothing looks up. (That sharing
+    // is a pre-existing defect in its own right - the memberwise initializer already
+    // collides through rec.inits, and both trees abort on the same line of the same
+    // probe - but an extension must not be the thing that widens it.)
+    function emitInstallMembers(b, tblV, statV, mem, tname, isDecl) {
+        if (isDecl) {
+            var rc = typeRec(tname == undefined || tname == null ? "" : tname)
+            rc.own = {}
+            rc.sown = {}
+        }
         var seen = {}
         var ovNames = []
         var ovCands = {}
-        var statSeen = {}
         var statNames = []
         var statCands = {}
         for (var i = 0; i < mem.methods.length; i++) {
             var mth = mem.methods[i]
-            var n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0
-            seen["$" + mth.name] = n + 1
+            var n
+            if (mth.name == "init") {
+                n = hasOwn(seen, "$init") ? seen["$init"] : 0
+                seen["$init"] = n + 1
+            } else { n = ovNext(tname, false, mth.name) }
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
-            noteOverload(ovNames, ovCands, mth.name, n, mth.params)
+            noteOverload(ovNames, ovCands, mth.name, n, mth.params, tname, false)
         }
         b = emitInheritOverloads(b, tblV, ovNames, ovCands, tname)
-        b = emitOverloadSlots(b, tblV, ovNames, ovCands)
+        b = emitOverloadSlots(b, tblV, ovNames, ovCands, 1, tname, false)
         recordMeths(tname, ovNames, ovCands)
         for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
         for (var lz = 0; lz < mem.lazies.length; lz++) { b = emitLazy(b, tblV, mem.lazies[lz]) }
@@ -5566,13 +5638,12 @@ KwContinue  = "continue" KwEnd ;
             // runs the Int one (docs/todo.md 1.2). The instance machinery transfers
             // whole, at ARGUMENT OFFSET 0: memberCall passes a receiver only when the
             // target has a __class, and a type descriptor has none.
-            var sn = hasOwn(statSeen, "$" + skey) ? statSeen["$" + skey] : 0
-            statSeen["$" + skey] = sn + 1
+            var sn = ovNext(tname, true, skey)
             callExt(b, "js_set", [statV, emitStr(b, memberKey(skey, sn)),
                                   callExt(b, "js_closure", [handle(sidx), curScopeV])])
-            noteOverload(statNames, statCands, skey, sn, st.params)
+            noteOverload(statNames, statCands, skey, sn, st.params, tname, true)
         }
-        b = emitOverloadSlots(b, statV, statNames, statCands, 0)
+        b = emitOverloadSlots(b, statV, statNames, statCands, 0, tname, true)
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]
             if (sp.get != null) {
@@ -5804,7 +5875,7 @@ KwContinue  = "continue" KwEnd ;
             }
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
-            b = emitInstallMembers(b, clsV, clsV, mem, name)
+            b = emitInstallMembers(b, clsV, clsV, mem, name, true)
             if (inheritInit) {
                 // js_get does NOT walk __super for a plain property - only accessors
                 // and method calls do - so the inherited initializers are COPIED onto
@@ -5849,6 +5920,15 @@ KwContinue  = "continue" KwEnd ;
     // Members an `extension Int { ... }` added, by name -> builtin type.
     var builtinComp = {}
     var builtinMeth = {}
+    // The one member table an `extension Int`/`extension String` hangs its members
+    // on, made on the first such block and looked up by every later one.
+    var builtinExtTbl = {}
+    function extTable(b, base, firstBlock) {
+        if (!firstBlock) { return b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + base)]) }
+        var tV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ext$" + base), tV])
+        return tV
+    }
     function builtinCompOf(n) { return hasOwn(builtinComp, "$" + n) ? builtinComp["$" + n] : null }
     function builtinMethOf(n) { return hasOwn(builtinMeth, "$" + n) ? builtinMeth["$" + n] : null }
     function isBuiltinTypeName(n) {
@@ -5909,7 +5989,7 @@ KwContinue  = "continue" KwEnd ;
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] == 1) { b = emitAdoptProtocol(b, pV, pn) }
             }
-            b = emitInstallMembers(b, pV, pV, mem, name)
+            b = emitInstallMembers(b, pV, pV, mem, name, true)
             typeStack.pop()
             lastTypeName = name
             return b
@@ -5945,9 +6025,16 @@ KwContinue  = "continue" KwEnd ;
             if (!isBuiltinTypeName(base)) { return notImplStmt("extension of an unknown type", up.pos) }
             for (var ci = 0; ci < mem.comps.length; ci++) { builtinComp["$" + mem.comps[ci].name] = base }
             for (var mi = 0; mi < mem.methods.length; mi++) { builtinMeth["$" + mem.methods[mi].name] = base }
+            // A SECOND `extension Int { ... }` used to declare a second, empty table
+            // under the same $ext$Int name, and every member the first block added
+            // became unreachable - `call of a non function value: undefined`, an
+            // outright abort in this half where the interpreter (one builtinTable per
+            // name) printed the right answer. Swift only allows an extension at file
+            // scope, so one table per base name is reachable from every use site.
+            var firstBlock = !hasOwn(builtinExtTbl, "$" + base)
+            builtinExtTbl["$" + base] = 1
             return function(b) {
-                var tV = callExt(b, "js_obj_new", [])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ext$" + base), tV])
+                var tV = extTable(b, base, firstBlock)
                 typeStack.push({name: base, superName: null})
                 b = emitExtMembers(b, tV, tV, mem, base, initIdxs)
                 typeStack.pop()
@@ -5976,20 +6063,22 @@ KwContinue  = "continue" KwEnd ;
     // type already has (an extension adds to them).
     function emitExtMembers(b, tblV, statV, mem, tname, initIdxs) {
         var nInit = 0
-        var seen = {}
         var ovNames = []
         var ovCands = {}
         for (var i = 0; i < mem.methods.length; i++) {
             var mth = mem.methods[i]
             var n
             if (mth.name == "init") { n = initIdxs[nInit]; nInit++ }
-            else { n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0; seen["$" + mth.name] = n + 1 }
+            else { n = ovNext(tname, false, mth.name) }
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
-            noteOverload(ovNames, ovCands, mth.name, n, mth.params)
+            noteOverload(ovNames, ovCands, mth.name, n, mth.params, tname, false)
         }
-        b = emitOverloadSlots(b, tblV, ovNames, ovCands)
+        // A name the extension re-opens on a SUBCLASS must still pull the base's
+        // candidates in, exactly as the type's own declaration does.
+        b = emitInheritOverloads(b, tblV, ovNames, ovCands, tname)
+        b = emitOverloadSlots(b, tblV, ovNames, ovCands, 1, tname, false)
         recordMeths(tname, ovNames, ovCands)
         for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
         var only = {raw: "", inherits: [], cases: [], nested: mem.nested, fields: [], initProps: [],
@@ -6073,7 +6162,7 @@ KwContinue  = "continue" KwEnd ;
                 if (protoNames[pn] != 1) { continue }
                 b = emitAdoptProtocol(b, tblV, pn)
             }
-            b = emitInstallMembers(b, tblV, eV, mem, name)
+            b = emitInstallMembers(b, tblV, eV, mem, name, true)
             var namesArr = callExt(b, "js_arr_new", [])
             var nrName = "$nr$" + name
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nrName), emitNum(b, 0)])
@@ -6226,6 +6315,20 @@ KwContinue  = "continue" KwEnd ;
                                   callExt(b, "js_swarith", [emitStr(b, "/"), zeroV, zeroV])])
             callExt(b, "js_set", [floV, emitStr(b, "pi"), callExt(b, floExt, [emitNum(b, floPi)])])
             callExt(b, "js_set", [floV, emitStr(b, "zero"), zeroV])
+            // The FloatingPoint statics that name the type's range (docs/todo.md
+            // 1.10, which named two of these eight; all eight answered nil). Each is
+            // spelled as TEXT and handed to parseFloat because the tag dialect has no
+            // exponent literal - `5e-324` lexes as the identifier `e324` - and each
+            // goes through the type's own constructor extern, so Float's stay floats:
+            // swiftc 6.1.2 prints Float.greatestFiniteMagnitude as 3.4028235e+38 and
+            // Float.leastNonzeroMagnitude, a SUBNORMAL, as 1e-45.
+            var floStatics = usesFloStatics ? swFloStatics() : []
+            for (var si = 0; si < floStatics.length; si++) {
+                var stf = floStatics[si]
+                var stx = floTypeNames[fi] == "Float" ? stf.f : stf.d
+                callExt(b, "js_set", [floV, emitStr(b, stf.n),
+                                      callExt(b, floExt, [emitNum(b, parseFloat(stx))])])
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, floTypeNames[fi]), floV])
         }
         // abs/max/min are Double-aware: Math.abs would truncate a boxed operand to
@@ -6238,6 +6341,29 @@ KwContinue  = "continue" KwEnd ;
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(handle(0))
+    }
+    // A field read is where the range statics are spelled, and there is no other way
+    // to reach them, so noting the NAME at walk time is enough to decide at emit time
+    // whether the table is worth building - the whole parse, imports included,
+    // finishes before the start function emits. Unconditionally it is 196 lines of IR
+    // - eight numGetters and their calls - in every swift module ever emitted, which
+    // is +29% on tests/bench/mod.swift's 666. With the flag the emitted module of
+    // every existing swift test is byte-identical to the one before this change.
+    var usesFloStatics = false
+    function makeFieldSfx(n) {
+        var sl = swFloStatics()
+        for (var i = 0; i < sl.length; i++) { if (sl[i].n == n) { usesFloStatics = true } }
+        return {kind: "field", name: n}
+    }
+    // The four FloatingPoint range statics, as the exact DOUBLE each type's value
+    // widens to. Kept as text for parseFloat (no exponent literal in this dialect)
+    // and duplicated verbatim in swift-interpreter.abnf, which is the convention for
+    // every other swift table the two halves share.
+    function swFloStatics() {
+        return [{n: "greatestFiniteMagnitude", d: "1.7976931348623157e308",  f: "3.4028234663852886e38"},
+                {n: "leastNonzeroMagnitude",   d: "5e-324",                  f: "1.401298464324817e-45"},
+                {n: "leastNormalMagnitude",    d: "2.2250738585072014e-308", f: "1.1754943508222875e-38"},
+                {n: "ulpOfOne",                d: "2.220446049250313e-16",   f: "1.1920928955078125e-7"}]
     }
 
     // == / != understand enum case values (name plus associated values); everything

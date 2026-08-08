@@ -5666,9 +5666,33 @@ KwContinue  = "continue" KwEnd ;
         if (x === null || x === undefined) { fail("Float conversion of nil") }
         return swF32(swD(x) * 1)
     }
+    // The four FloatingPoint range statics, as the exact DOUBLE each type's value
+    // widens to. Kept as text for parseFloat (no exponent literal in this dialect -
+    // `5e-324` lexes as the identifier `e324`) and duplicated verbatim in
+    // swift-to-llvm-ir.abnf, the convention for every other swift table the two
+    // halves share. docs/todo.md 1.10 named two of these eight; all eight answered
+    // nil in all three engines.
+    function swFloStatics() {
+        return [{n: "greatestFiniteMagnitude", d: "1.7976931348623157e308",  f: "3.4028234663852886e38"},
+                {n: "leastNonzeroMagnitude",   d: "5e-324",                  f: "1.401298464324817e-45"},
+                {n: "leastNormalMagnitude",    d: "2.2250738585072014e-308", f: "1.1754943508222875e-38"},
+                {n: "ulpOfOne",                d: "2.220446049250313e-16",   f: "1.1920928955078125e-7"}]
+    }
+    // The statics go on through scopePut rather than into the literal, so the two
+    // types share one LIST and Float's stay FLOATS: swiftc 6.1.2 prints
+    // Float.greatestFiniteMagnitude as 3.4028235e+38, and
+    // Float.leastNonzeroMagnitude - a SUBNORMAL - as 1e-45.
+    function swAddFloStatics(t, is32) {
+        var sl = swFloStatics()
+        for (var i = 0; i < sl.length; i++) {
+            var x = parseFloat(is32 ? sl[i].f : sl[i].d)
+            scopePut(t, sl[i].n, is32 ? swF32(x) : swFlo(x))
+        }
+        return t
+    }
     function swFloType() {
-        return {infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
-                zero: swFlo(0), __conv: swFloConv}
+        return swAddFloStatics({infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
+                zero: swFlo(0), __conv: swFloConv}, false)
     }
     // Float's own statics are FLOATS, so Float.pi prints 3.1415925 and not the
     // double's 3.141592653589793.
@@ -5680,8 +5704,8 @@ KwContinue  = "continue" KwEnd ;
     // Float.pi and Float(3.1415925025939941) identically and Float(Double.pi) as
     // 3.1415927.
     function swF32Type() {
-        return {infinity: swF32(swInfF), nan: swF32(swNanF), pi: swF32(3.1415925025939941),
-                zero: swF32(0), __conv: swF32Conv}
+        return swAddFloStatics({infinity: swF32(swInfF), nan: swF32(swNanF), pi: swF32(3.1415925025939941),
+                zero: swF32(0), __conv: swF32Conv}, true)
     }
     hostGlobals["Double"] = swFloType()
     hostGlobals["Float"] = swF32Type()
