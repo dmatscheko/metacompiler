@@ -555,9 +555,9 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 
 // do { STMTS } catch [pattern] { STMTS } [catch ...]: genuine try/catch (Swift has NO
 // finally). throw calls js_throw (a Go panic the runtime unwinds); each body compiles
-// to its own IR closure handed to js_try. The first catch clause wins (patterns are
-// parsed but not discriminated). A return/break/continue leaving a try or catch body
-// becomes a control signal that excDispatch re-issues in the enclosing frame. A catch
+// to its own IR closure handed to js_try. The first catch clause whose pattern MATCHES
+// wins. A return/break/continue leaving a try or catch body becomes a control signal
+// that excDispatch re-issues in the enclosing frame. A catch
 // with no `let NAME` binds the implicit name `error`. Each part is marked so makeTry
 // can tell them apart. defer and fallthrough stay not lowered.
 Do          <~~ push(makeTry(takeAll())) ~~>
@@ -569,7 +569,14 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 // that pattern's bindings - plus the implicit `error` - are live in the body.
 CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
             = KwCatch [ CatchPat { "," CatchPat } [ CatchWhere ] ] Block ;
-CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern [ "as" KwEnd Type ] ;
+// `catch let e as NetErr`: the `as TYPE` used to be parsed and DISCARDED, so the
+// clause bound e and matched EVERYTHING - a DiskErr and a plain struct error both ran
+// the NetErr arm, in all three engines, where swiftc runs the next clause
+// (docs/todo.md 1.1's sweep, swift's arm). It is now carried on the pattern as `asty`
+// and tested by matchPat/emitMatchPat with exactly the `is` operator's test, so
+// `catch let e as T` and `catch is T` agree by construction.
+CatchPat    <~~ push({cpat: makeCatchPat(takeAll())}) ~~> = Pattern [ "as" KwEnd CatchAsType ] ;
+CatchAsType <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
 CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: everything AFTER it in its block is emitted into a js_try whose
 // FINALLY closure is the defer body, so it runs on the normal path, on a return (a
@@ -2692,7 +2699,31 @@ KwContinue  = "continue" KwEnd ;
     // The plain read is the lowered sw_kget helper below rather than
     // core.scopeGetExt: that field names an EXTERN, and js_kget is no longer one.
     makeVarRef = function(name) {
-        var plain = function(b) { return {b: b, v: b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])} }
+        // A TYPE name is read under its qualified key, resolved at EMIT time (which
+        // is top-down, so typeStack names the enclosing types): a nested type has no
+        // bare binding in the surrounding scope at all. See the typeInfo block.
+        //
+        // The two keys differ only for a bare name inside a type that has (or is
+        // enclosed by one that has) a nested type of that name, and only there is the
+        // extra test emitted. It is the same question swResolve asks in the
+        // interpreter: a LOCAL of that name wins - `let Inner = 42` inside A is legal
+        // Swift and answers 42 - while a same-named TOP-LEVEL type does not.
+        var plain = function(b) {
+            var n2 = isTypeName(name) ? typeKeyOf(name) : name
+            if (n2 == name) { return {b: b, v: b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])} }
+            var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+            var boundB = curF.NewBlock("")
+            var qB = curF.NewBlock("")
+            var useLB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), qB, boundB)
+            var lv = boundB.NewCall(rtKGet(), [curScopeV, emitStr(boundB, name)])
+            boundB.NewCondBr(truthy(boundB, boundB.NewCall(rtIsTypeVal(), [lv])), qB, useLB)
+            useLB.NewBr(joinB)
+            var qv = qB.NewCall(rtKGet(), [curScopeV, emitStr(qB, n2)])
+            qB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, useLB), llvm.ir.NewIncoming(qv, qB)])}
+        }
         return function(b) {
             if (!isComputedName(name) && !isMemberMethod(name)) { return plain(b) }
             var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
@@ -2757,6 +2788,23 @@ KwContinue  = "continue" KwEnd ;
         })
     }
     function rtEqKey() { return rtProbe("sw_eqkey", "__eqkey") }
+    // True iff v is a TYPE DESCRIPTOR (struct/class, enum or protocol). It is what
+    // tells a LOCAL apart from a same-named type in makeVarRef below - the interpreter
+    // asks the same question in swResolve, by looking at the value.
+    function rtIsTypeVal() {
+        return rtFunc("sw_istypeval", 1, function(b, ps) {
+            var v = ps[0]
+            var yesB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var c3 = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isclass", "__isclass"), [v])), yesB, c2)
+            c2.NewCondBr(truthy(c2, c2.NewCall(rtProbe("sw_isenum", "__isenum"), [v])), yesB, c3)
+            c3.NewCondBr(truthy(c3, c3.NewCall(rtProbe("sw_isproto", "__isprotocol"), [v])), yesB, noB)
+            yesB.NewRet(hTrue)
+            noB.NewRet(hFalse)
+        })
+    }
     // ----- Strings are sequences of extended grapheme clusters -----
     // .count counts CLUSTERS and == compares by CANONICAL EQUIVALENCE, so these two
     // walk the string by code point (js_kindex answers the rune at a code-unit index;
@@ -3253,6 +3301,14 @@ KwContinue  = "continue" KwEnd ;
     // ----- Patterns and binding conditions -----
     // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
     // fails on nil and matches the unwrapped value) around one core form.
+    // The pattern of one catch clause, plus the type of its optional `as` suffix.
+    function makeCatchPat(items) {
+        var p = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].casty != undefined) { p.asty = items[i].casty }
+        }
+        return p
+    }
     function makePattern(items) {
         var n = 0
         for (var i = 1; i < items.length; i++) { n++ }
@@ -3285,7 +3341,24 @@ KwContinue  = "continue" KwEnd ;
     // variable rather than an enum case.
     function emitMatchPat(b, p, v, binding, failB) {
         if (p.opt > 0) { b = emitNotNil(b, v, failB) }
+        // `catch let e as T`: the type test comes first, and only then the binding.
+        // Error and Any match every thrown value by Swift's own typing rule, and a
+        // user PROTOCOL is not testable (conformance is recorded on no value in either
+        // half, so `x is P` is false for a conforming type in all three engines) -
+        // matching keeps the clause's old behaviour rather than turning a caught error
+        // into an uncaught one. The twin is swCatchTyMatch in swift-interpreter.abnf.
+        // protoNames is complete here: this runs at EMIT time, after the whole walk.
+        if (p.asty != undefined && !catchTyAlways(p.asty)) {
+            var ra = emitIsType(b, v, p.asty)
+            var okA = curF.NewBlock("")
+            ra.b.NewCondBr(truthy(ra.b, ra.v), okA, failB)
+            b = okA
+        }
         return emitMatchCore(b, p.core, v, binding, failB)
+    }
+    function catchTyAlways(t0) {
+        var t = baseTypeName(t0)
+        return t == "Error" || t == "Any" || protoNames[t] == 1
     }
     function emitMatchCore(b, k, v, binding, failB) {
         // `case is Double:` - the same js_swis the `is` operator emits.
@@ -3670,7 +3743,7 @@ KwContinue  = "continue" KwEnd ;
                 var sname = (t == null || t.superName == null) ? null : t.superName
                 var thisV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")])
                 if (sname == null) { return {b: b, v: hUndef} }
-                var sV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, sname)])
+                var sV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(sname))])
                 var s0 = suffixes[0]
                 var cur
                 if (s0.kind == "mcall") {
@@ -3757,7 +3830,11 @@ KwContinue  = "continue" KwEnd ;
                     var nk = pathKey == null ? typeKeyOf(s.name) : pathKey + "." + s.name
                     if (typeAt(nk) == null) { nk = typeKeyOf(s.name) }
                     pathKey = nk
-                    var rc = emitConstruct(b, nk, callExt(b, "js_get", [cur, emitStr(b, s.name)]), s.args)
+                    var nkC = nk
+                    var bC = b
+                    var argsC = s.args
+                    var clsC = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    var rc = withTypeCtx(nkC, function() { return emitConstruct(bC, nkC, clsC, argsC) })
                     b = rc.b
                     cur = rc.v
                 } else if (s.kind == "mcall") {
@@ -4140,22 +4217,32 @@ KwContinue  = "continue" KwEnd ;
             }
         }
         return function(b) {
+            // WHICH type this bare name means is decided HERE, at emit time, because
+            // classNames/enumNames are keyed by the BARE name and two nested types of
+            // the same name can be of different KINDS: `struct A { enum Mode {...};
+            // struct M2 { struct Mode {...} } }` made `Mode()` inside M2 take the enum
+            // rawValue arm below and abort with `list index out of range`, in both
+            // compiled engines, where the interpreter (which decides from the resolved
+            // descriptor's own __isenum) and swiftc both answer. rec.kind is the
+            // resolved key's own answer; the bare tables are the fallback for a name
+            // no record claims.
+            var ck = isTypeName(name) ? typeKeyOf(name) : name
+            var krec = typeAt(ck)
+            var isEnumT = krec == null ? enumNames[name] == 1 : krec.kind == "enum"
+            var isClassT = krec == null ? classNames[name] == 1 : krec.kind == "class"
             // E(rawValue: r): the failable initializer every raw-value enum gets free.
-            if (enumNames[name] == 1) {
-                var eV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
-                var ear = emitArgRecs(b, args)
+            if (isEnumT) {
+                var eV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
+                var ear = withTypeCtx(ck, function() { return emitArgRecs(b, args) })
                 b = ear.b
                 return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_pyget", [ear.v, emitNum(b, 0)])])}
             }
-            if (classNames[name] == 1) {
+            if (isClassT) {
                 // A bare type name inside an enclosing type means THAT type's nested
-                // one, which is why the descriptor is read under the qualified alias:
-                // every nested type is also declared into the surrounding scope under
-                // its bare name, so a second `struct B { struct Inner {...} }` made
-                // `Inner(...)` inside A construct B's Inner in all three engines.
-                var ck = typeKeyOf(name)
+                // one, which is what typeKeyOf answered above: the descriptor is read
+                // under its qualified key, the only name it is bound to.
                 var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
-                return emitConstruct(b, ck, clsV, args)
+                return withTypeCtx(ck, function() { return emitConstruct(b, ck, clsV, args) })
             }
             var ea = emitArgRecs(b, args)
             b = ea.b
@@ -4911,7 +4998,7 @@ KwContinue  = "continue" KwEnd ;
         if (superName != undefined && superName != null) {
             var sArgs = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [sArgs, thisV])
-            var sCls = b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])
+            var sCls = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(superName))])
             callExt(b, "js_call", [callExt(b, "js_get", [sCls, emitStr(b, "__ctor")]), hUndef, sArgs])
         }
         for (var f0 = 0; f0 < allFields.length; f0++) {
@@ -5356,15 +5443,27 @@ KwContinue  = "continue" KwEnd ;
     // RE-KEYED by the parent, restoring whatever the bare key held. Everything that
     // reads a record therefore goes through typeAt/typeKeyOf rather than indexing
     // typeInfo directly, and a stale bare entry is recognised by `rec.key != k`.
-    // A nested type is STILL declared into the surrounding scope under its bare name,
-    // which is what keeps the interpreter and this half agreeing on every shape they
-    // already agreed on; the qualified key is additionally declared as an ALIAS, and
-    // that alias is what `Outer.Inner`, `extension A.Inner` and a bare `Inner` inside
-    // Outer are resolved through. A program with no nested type emits an unchanged
-    // module.
+    // A nested type is declared into the surrounding scope under its QUALIFIED KEY
+    // ONLY, never under its bare name, and that key is what `Outer.Inner`,
+    // `extension A.Inner` and a bare `Inner` inside Outer are resolved through.
+    //
+    // It used to be declared under BOTH, and the bare one is exactly
+    // docs/todo.md 1.2: `struct Inner {...}` beside `struct A { struct Inner {...} }`
+    // made the nested descriptor overwrite the top-level one at file scope, so
+    // `Inner()` in main answered the nested type in all three engines where swiftc
+    // answers the top-level one. Two nested types of the same name at DIFFERENT
+    // levels (`A.Mode` and `A.M2.Mode`) collided the same way, and that one was a
+    // live halves divergence: this half resolved both correctly through typeKeyOf
+    // while the interpreter read the clobbered bare binding and aborted.
+    //
+    // Swift's rule is lexical, and both halves now implement it as such: a nested
+    // type is NOT in the surrounding scope at all, it is a member of its enclosing
+    // type, reached STATICALLY here (typeKeyOf walks typeStack outward) and at RUN
+    // time in the interpreter (swLookupType walks curOwner()'s `__outer` chain).
+    // A program with no nested type emits an unchanged module.
     var typeInfo = {}
     var typeUid = 0
-    var deadRec = {inits: [], superName: null, meths: {}, key: "", bname: "", kids: [], prev: null, uid: -1, adopted: 1}
+    var deadRec = {inits: [], superName: null, meths: {}, key: "", bname: "", kids: [], prev: null, uid: -1, adopted: 1, kind: ""}
     // The record at this exact key, or null. A record whose own `key` has moved on
     // is a stale bare entry left behind by a re-key.
     function typeAt(k) {
@@ -5376,7 +5475,7 @@ KwContinue  = "continue" KwEnd ;
         var r = typeAt(k)
         if (r != null) { return r }
         typeUid = typeUid + 1
-        typeInfo["$" + k] = {inits: [], superName: null, meths: {}, key: k, bname: k, kids: [], prev: null, uid: typeUid, adopted: 0}
+        typeInfo["$" + k] = {inits: [], superName: null, meths: {}, key: k, bname: k, kids: [], prev: null, uid: typeUid, adopted: 0, kind: ""}
         return typeInfo["$" + k]
     }
     // The record a type DECLARATION owns. Always fresh, so two same-named types never
@@ -5384,7 +5483,7 @@ KwContinue  = "continue" KwEnd ;
     function newTypeRec(name) {
         var prev = hasOwn(typeInfo, "$" + name) ? typeInfo["$" + name] : null
         typeUid = typeUid + 1
-        var r = {inits: [], superName: null, meths: {}, key: name, bname: name, kids: [], prev: prev, uid: typeUid, adopted: 0}
+        var r = {inits: [], superName: null, meths: {}, key: name, bname: name, kids: [], prev: prev, uid: typeUid, adopted: 0, kind: ""}
         typeInfo["$" + name] = r
         return r
     }
@@ -5443,6 +5542,22 @@ KwContinue  = "continue" KwEnd ;
             if (typeStack[i].name == name) { return k }
         }
         return name
+    }
+    // Runs fn with `key` pushed as the enclosing type, for emission that belongs to a
+    // type but happens somewhere else. planArgs materialises a callee's DEFAULTS as
+    // argument records at the CALL SITE, so `struct A { struct I {}; var x = I() }`
+    // emitted the memberwise default `I()` with the CALLER's typeStack and read the
+    // bare name `I`, which since docs/todo.md 1.2 is not bound at all.
+    function withTypeCtx(key, fn) {
+        var r = typeAt(key)
+        typeStack.push({name: rtNameOf(key), key: key,
+                        superName: r == null ? null : r.superName})
+        var out = fn()
+        typeStack.pop()
+        return out
+    }
+    function isTypeName(n) {
+        return classNames[n] == 1 || enumNames[n] == 1 || protoNames[n] == 1
     }
     // A dotted path spelled in the source (`extension A.Inner`, `A.B.C`), resolved
     // one component at a time from the enclosing scope.
@@ -5667,9 +5782,6 @@ KwContinue  = "continue" KwEnd ;
     // The FINAL storage key of every candidate, after emitOverloadSlots has decided
     // whether a dispatcher displaced the plain name: with a dispatcher, candidate 0
     // lives at `name$0`; without one, at `name` itself.
-    // The RUNTIME scope name of a type: a nested type is keyed `A.Inner` here but is
-    // still declared into the surrounding scope under `Inner`, and `owner` below is
-    // read back with js_scope_get.
     // The scope name a static method reads its own descriptor back under: the
     // qualified alias for a nested type, the bare name otherwise, and "" for a type
     // that has no descriptor in scope at all (an `extension Int { static ... }`).
@@ -5686,7 +5798,9 @@ KwContinue  = "continue" KwEnd ;
     function recordMeths(tname, names, cands) {
         if (tname == undefined || tname == null || tname == "") { return }
         var rec = typeRec(tname)
-        var rtn = rtNameOf(tname)
+        // The QUALIFIED key, because that is the only scope name a nested type is
+        // declared under - the bare one was removed with docs/todo.md 1.2.
+        var rtn = tname
         if (rec.meths == undefined || rec.meths == null) { rec.meths = {} }
         for (var i = 0; i < names.length; i++) {
             var nm = names[i]
@@ -5864,17 +5978,13 @@ KwContinue  = "continue" KwEnd ;
                                       callExt(b, "js_closure", [handle(emitFunc([plainParam(sp.setP)], sp.set, false)), curScopeV])])
             }
         }
-        for (var q = 0; q < mem.statProps.length; q++) {
-            var v = hNull
-            if (mem.statProps[q].init != null) {
-                var rv = mem.statProps[q].init(b)
-                b = rv.b
-                v = rv.v
-            }
-            callExt(b, "js_set", [statV, emitStr(b, mem.statProps[q].name), v])
-        }
-        // A nested type declares itself into the surrounding scope and is ALSO
-        // installed on the enclosing descriptor, so Outer.Inner() resolves.
+        // A nested type is installed on the enclosing descriptor, and read back under
+        // its QUALIFIED key - it has no bare binding in the surrounding scope.
+        // BEFORE the static property initialisers, which may CONSTRUCT one: a static
+        // initialiser runs eagerly here (Swift's is lazy), so `static let s = Inner()`
+        // read a descriptor the nested declaration had not emitted yet and aborted
+        // with `variable not defined: A.Inner`. Pre-existing; the interpreter had the
+        // same order and answered the wrong Inner instead of aborting.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastTypeName = null
             lastTypeKey = null
@@ -5883,6 +5993,15 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [statV, emitStr(b, lastTypeName),
                                       b.NewCall(rtKGet(), [curScopeV, emitStr(b, lastTypeKey)])])
             }
+        }
+        for (var q = 0; q < mem.statProps.length; q++) {
+            var v = hNull
+            if (mem.statProps[q].init != null) {
+                var rv = mem.statProps[q].init(b)
+                b = rv.b
+                v = rv.v
+            }
+            callExt(b, "js_set", [statV, emitStr(b, mem.statProps[q].name), v])
         }
         return b
     }
@@ -6018,6 +6137,7 @@ KwContinue  = "continue" KwEnd ;
         if (declaresWrappedValue(mem)) { wrapperNames["$" + name] = 1 }
         if (isStruct) { hasStructs = true }
         var rec = newTypeRec(name)
+        rec.kind = "class"
         adoptNested(rec, mem)
         for (var i = 0; i < mem.methods.length; i++) {
             if (mem.methods[i].name == "init") { rec.inits.push(mem.methods[i].params); regTypeSig(rec.uid, name, mem.methods[i].params) }
@@ -6080,18 +6200,18 @@ KwContinue  = "continue" KwEnd ;
                 for (var z = 0; z < fieldNames.length; z++) { callExt(b, "js_arr_push", [fa, emitStr(b, fieldNames[z])]) }
                 callExt(b, "js_set", [clsV, emitStr(b, "__fields"), fa])
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV]) }
+            // ONE binding, under the qualified key (== the bare name at top level).
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV])
             if (superName != null) {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(superName))])])
             }
             // Every protocol in the clause contributes its default implementations.
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
                 callExt(b, "js_set", [clsV, emitStr(b, "__proto_" + pn),
-                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, pn)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])])
                 b = emitAdoptProtocol(b, clsV, pn)
             }
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
@@ -6101,7 +6221,7 @@ KwContinue  = "continue" KwEnd ;
                 // js_get does NOT walk __super for a plain property - only accessors
                 // and method calls do - so the inherited initializers are COPIED onto
                 // this descriptor rather than left to be found by a chain walk.
-                var supV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])
+                var supV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(superName))])
                 for (var ci = 0; ci < inhCount; ci++) {
                     var ik = memberKey("init", ci)
                     callExt(b, "js_set", [clsV, emitStr(b, ik),
@@ -6161,7 +6281,7 @@ KwContinue  = "continue" KwEnd ;
     function emitAdoptProtocol(b, clsV, pn) {
         var keys = protoMembers["$" + pn]
         if (keys == undefined) { return b }
-        var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, pn)])
+        var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])
         for (var i = 0; i < keys.length; i++) {
             var have = callExt(b, "js_get", [clsV, emitStr(b, keys[i])])
             var setB = curF.NewBlock("")
@@ -6202,6 +6322,7 @@ KwContinue  = "continue" KwEnd ;
             protoMembers["$" + name] = mine
         }
         var rec = newTypeRec(name)
+        rec.kind = "proto"
         adoptNested(rec, mem)
         noteDeclRec(rec)
         return function(b) {
@@ -6209,8 +6330,7 @@ KwContinue  = "continue" KwEnd ;
             var pV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [pV, emitStr(b, "__isprotocol"), hTrue])
             callExt(b, "js_set", [pV, emitStr(b, "__name"), emitStr(b, name)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), pV])
-            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), pV]) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), pV])
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] == 1) { b = emitAdoptProtocol(b, pV, pn) }
@@ -6286,9 +6406,9 @@ KwContinue  = "continue" KwEnd ;
         }
         return function(b) {
             typeStack.push({name: base, key: rec.key, superName: rec.superName})
-            // Under the QUALIFIED alias, not the bare leaf: `extension Deep.Mid.Leaf`
-            // must reach Deep's Leaf even when a later `Other.Mid.Leaf` has taken the
-            // bare scope name, which is where every nested type is also declared.
+            // Under the QUALIFIED key, which since docs/todo.md 1.2 is the ONLY name
+            // a nested type is bound to: `extension Deep.Mid.Leaf` reaches Deep's Leaf
+            // and never `Other.Mid.Leaf`.
             var tV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, rec.key)])
             var instV = tV
             if (enumNames[base] == 1) { instV = callExt(b, "js_get", [tV, emitStr(b, "__members")]) }
@@ -6393,6 +6513,7 @@ KwContinue  = "continue" KwEnd ;
         enumNames[name] = 1
         hasRichEnum = true
         var rec = newTypeRec(name)
+        rec.kind = "enum"
         adoptNested(rec, mem)
         noteDeclRec(rec)
         return function(b) {
@@ -6404,9 +6525,11 @@ KwContinue  = "continue" KwEnd ;
             var tblV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [tblV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_set", [eV, emitStr(b, "__members"), tblV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), eV])
-            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), eV]) }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$etbl$" + name), tblV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), eV])
+            // $etbl$ is keyed by the QUALIFIED key for the same reason the descriptor
+            // is: two nested enums of the same name at different levels would
+            // otherwise share one member table.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$etbl$" + rec.key), tblV])
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
@@ -6414,14 +6537,14 @@ KwContinue  = "continue" KwEnd ;
             }
             b = emitInstallMembers(b, tblV, eV, mem, rec.key, true)
             var namesArr = callExt(b, "js_arr_new", [])
-            var nrName = "$nr$" + name
+            var nrName = "$nr$" + rec.key
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nrName), emitNum(b, 0)])
             for (var k = 0; k < mem.cases.length; k++) {
                 var cs = mem.cases[k]
                 callExt(b, "js_arr_push", [namesArr, emitStr(b, cs.cname)])
                 if (cs.cassoc != null) {
                     callExt(b, "js_set", [eV, emitStr(b, cs.cname),
-                                          callExt(b, "js_closure", [handle(emitCaseCtor(name, cs)), curScopeV])])
+                                          callExt(b, "js_closure", [handle(emitCaseCtor(name, rec.key, cs)), curScopeV])])
                     continue
                 }
                 var rawV = hUndef
@@ -6447,7 +6570,9 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     // The constructor of a case with associated values: Shape.circle(r: 5).
-    function emitCaseCtor(ename, cs) {
+    // ename is the enum's BARE name (it becomes __etype, which case equality reads);
+    // ekey is its QUALIFIED key, which is the scope name its member table lives under.
+    function emitCaseCtor(ename, ekey, cs) {
         var n = cs.cassoc.length
         var pnames = []
         for (var i = 0; i < n; i++) { pnames.push("$a" + i) }
@@ -6462,7 +6587,7 @@ KwContinue  = "continue" KwEnd ;
             if (cl != undefined && cl != null && cl != "") { anyAL = true }
         }
         var body = function(b) {
-            var tblV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$etbl$" + ename)])
+            var tblV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$etbl$" + ekey)])
             var vals = callExt(b, "js_arr_new", [])
             var key = emitStr(b, cname + "(")
             for (var i = 0; i < n; i++) {

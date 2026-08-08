@@ -313,7 +313,11 @@ Member      = PoundIfMember | MemberDirective | MemberSemi | MemberType | [ Memb
 MemberSemi  <~~ push({}) ~~> = ";" ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
-MemberType  <~~ push({nested: pop()}) ~~>
+// nidx carries the WALK-time INDEX of the type just declared (an index, never the
+// record - a value pushed onto the tag stack is deep-copied), which is how the
+// enclosing declaration marks it NESTED. A TypeAliasDecl clears lastDeclIdx, so it
+// contributes none. See declType for what nesting changes.
+MemberType  <~~ push({nested: pop(), nidx: lastDeclIdx}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
@@ -435,7 +439,7 @@ ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: types are parsed and ignored, so an alias needs nothing at run time.
-TypeAliasDecl <~~ push(function() {}) ~~>
+TypeAliasDecl <~~ push(clearDeclIdx()) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
@@ -550,7 +554,7 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 
 // do { STMTS } catch [pattern] { STMTS } [catch ...]: genuine try/catch (Swift has
 // NO finally). throw raises a value that unwinds to the nearest catch; the first
-// catch clause wins (patterns are parsed but not discriminated); a catch with no
+// catch clause whose pattern MATCHES wins; a catch with no
 // `let NAME` binds the implicit name `error`. return/break/continue inside a do still
 // propagate to the enclosing loop or function. Each part is marked so excTry can tell
 // them apart on the stack. defer and fallthrough stay not implemented.
@@ -565,7 +569,14 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 // `catch let VendErr.limit(k)`, which binds only for that case.
 CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
             = KwCatch [ CatchPat { "," CatchPat } [ CatchWhere ] ] Block ;
-CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern [ "as" KwEnd Type ] ;
+// `catch let e as NetErr`: the `as TYPE` used to be parsed and DISCARDED, so the
+// clause bound e and matched EVERYTHING - a DiskErr and a plain struct error both ran
+// the NetErr arm, in all three engines, where swiftc runs the next clause
+// (docs/todo.md 1.1's sweep, swift's arm). It is now carried on the pattern as `asty`
+// and tested by matchPat/emitMatchPat with exactly the `is` operator's test, so
+// `catch let e as T` and `catch is T` agree by construction.
+CatchPat    <~~ push({cpat: makeCatchPat(takeAll())}) ~~> = Pattern [ "as" KwEnd CatchAsType ] ;
+CatchAsType <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
 CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: the block is registered on the enclosing function's defer frame
 // and runs when that function leaves - in LIFO order, on the normal path, on an
@@ -1382,7 +1393,7 @@ Raw1Chunk   <~~ push({s: up.in}) ~~> = Raw1Char { Raw1Char } ;
 Raw1Char    = !'"#' !"\\#(" "\x00"..."\U0010ffff" ;
 
 Nil         <~~ push(makeConst(null)) ~~>  = "nil" KwEnd ;
-VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
+VarRef      <~~ push(swVarRef(up.in)) ~~> = Id ;
 
 // ----- Widened surface: a balanced { ... } / < ... > run consumed but ignored -----
 SkipBlock   = "{" { SkipItem } "}" ;
@@ -3377,6 +3388,14 @@ KwContinue  = "continue" KwEnd ;
     // ----- Patterns and binding conditions -----
     // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
     // fails on nil and matches the unwrapped value) around one core form.
+    // The pattern of one catch clause, plus the type of its optional `as` suffix.
+    function makeCatchPat(items) {
+        var p = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].casty != undefined) { p.asty = items[i].casty }
+        }
+        return p
+    }
     function makePattern(items) {
         var n = 0
         for (var i = 1; i < items.length; i++) { n++ }
@@ -3411,7 +3430,26 @@ KwContinue  = "continue" KwEnd ;
     // under the binding, `case .busy(let n)` only the one it marks).
     function matchPat(p, v, binding) {
         if (p.opt > 0 && (v === null || v === undefined)) { return false }
+        // `catch let e as T`: the type test comes first, and only then the binding.
+        if (p.asty != undefined && !swCatchTyMatch(v, p.asty)) { return false }
         return matchCore(p.core, v, binding)
+    }
+    // The type test of `catch ... as T`, which is the `is` test with two names it
+    // cannot be asked about:
+    //  - EVERY value a Swift program can throw conforms to Error, and Any matches
+    //    anything, so both always match. swiftc would not compile the throw otherwise.
+    //  - a user PROTOCOL is not testable at all here: conformance is recorded on
+    //    NEITHER half's values, so `x is P` is false for a conforming type in all
+    //    three engines (found while building this, not fixed - it needs a conformance
+    //    marker on the descriptor in both engines plus an emitter arm). Matching keeps
+    //    the clause's pre-existing behaviour instead of turning a caught error into an
+    //    UNCAUGHT one, which is what filtering on a false answer would do.
+    // The twin is the same three-way test in swift-to-llvm-ir.abnf's emitMatchPat.
+    function swCatchTyMatch(v, t0) {
+        var t = swBaseTy(t0)
+        if (t == "Error" || t == "Any") { return true }
+        if (protoNames["$" + t] == 1) { return true }
+        return swIsType(v, t0)
     }
     function matchCore(k, v, binding) {
         // `case is Double:` - the same test the `is` operator runs.
@@ -3988,7 +4026,17 @@ KwContinue  = "continue" KwEnd ;
     // Building an instance: __ctor lays down the default property values (the
     // superclass's first), then init runs. A failable initializer that ran `return nil`
     // makes the whole construction nil.
+    // The type being constructed is the OWNER for the whole of the construction, so a
+    // bare type name in a stored property's default (`var x = Inner()`), in a
+    // memberwise default or in an initializer body resolves LEXICALLY against it -
+    // construction runs from whatever frame asked for the value, and without this the
+    // nested Inner lost to a same-named top-level one. A user-declared init pushes the
+    // same owner again through makeMethodClosure, which is harmless.
     function constructInstance(f, argv, labels) {
+        ownerStack.push(f)
+        try { return constructIn(f, argv, labels) } finally { ownerStack.pop() }
+    }
+    function constructIn(f, argv, labels) {
         var obj = f.__struct === true ? {__class: f, __struct: true} : {__class: f}
         if (typeof f.__ctor == "function") { f.__ctor(obj) }
         var init = classFind(f, "init")
@@ -4026,15 +4074,21 @@ KwContinue  = "continue" KwEnd ;
             }
         }
         return function() {
-            var ea = evalArgs(recs)
+            // A bare type name inside an enclosing type means THAT type's NESTED one,
+            // or one of an enclosing type further out - see declType.
+            //
+            // Resolved BEFORE the arguments, and pushed as the owner while they are
+            // evaluated: planArgs materialises a callee's DEFAULTS as argument records
+            // at the CALL SITE, so `struct A { struct I {}; var x = I() }` evaluated
+            // the memberwise default `I()` in the caller's frame, where the nested I
+            // is not in scope at all.
+            var fh = swResolve(name)
+            var f = fh == null ? getVar(name) : fh.v
+            var ownT = isTypeVal(f)
+            if (ownT) { ownerStack.push(f) }
+            var ea = anytype
+            try { ea = evalArgs(recs) } finally { if (ownT) { ownerStack.pop() } }
             var argv = ea.argv
-            // A bare type name inside an enclosing type means THAT type's NESTED one.
-            // A nested type is also declared into the surrounding scope under its bare
-            // name, so a second `struct B { struct Inner {...} }` made `Inner(...)`
-            // inside A construct B's Inner - in this engine and in the compiler half,
-            // which resolves the same rule statically through typeKeyOf.
-            var f = ownNestedType(name)
-            if (f == null) { f = getVar(name) }
             // E(rawValue: r): the failable initializer every raw-value enum gets for
             // free - the case whose raw value is r, or nil.
             if (f != undefined && f !== null && f.__isenum === true) {
@@ -4989,7 +5043,7 @@ KwContinue  = "continue" KwEnd ;
     // member to it: MemberModifiers pushes its own markers, in source order, ahead
     // of the member's record. Answers the pieces every type builder needs.
     function splitMembers(items, from) {
-        var mem = {raw: "", inherits: [], cases: [], nested: [], fields: [], initProps: [],
+        var mem = {raw: "", inherits: [], cases: [], nested: [], nestedIdx: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
                    lazies: [], wrapped: [], hasInit: false}
         var isStatic = false
@@ -5001,7 +5055,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.mstatic != undefined) { isStatic = true; continue }
             if (it.mlazy != undefined) { isLazy = true; continue }
             if (it.mattr != undefined) { attr = it.mattr; continue }
-            if (it.nested != undefined) { mem.nested.push(it.nested); continue }
+            if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedIdx.push(it.nidx); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
@@ -5085,7 +5139,15 @@ KwContinue  = "continue" KwEnd ;
         }
         scopePut(cls, name, value)
     }
+    // cls is pushed as the OWNER for the whole of this, so everything that runs while
+    // a type is being built - a nested declaration's own inheritance clause, a static
+    // property initialiser, a nested type of a nested type - resolves a bare type name
+    // against this type first, exactly as a method body does.
     function installMembers(cls, mem) {
+        ownerStack.push(cls)
+        try { installMembersIn(cls, mem) } finally { ownerStack.pop() }
+    }
+    function installMembersIn(cls, mem) {
         for (var m = 0; m < mem.methods.length; m++) {
             addMethod(cls, mem.methods[m].name, makeMethodClosure(mem.methods[m], cls), mem.methods[m].params)
         }
@@ -5112,16 +5174,22 @@ KwContinue  = "continue" KwEnd ;
             if (sp.get != null) { tput(cls, "__get_" + sp.name, makeMethodClosure({name: "__get_" + sp.name, params: [], body: sp.get}, cls)) }
             if (sp.set != null) { tput(cls, "__set_" + sp.name, makeMethodClosure({name: "__set_" + sp.name, params: [plainParam(sp.setP)], body: sp.set}, cls)) }
         }
-        for (var st = 0; st < mem.statProps.length; st++) {
-            tput(cls, mem.statProps[st].name, mem.statProps[st].init == null ? null : mem.statProps[st].init())
-        }
-        // A nested type declares itself into the surrounding scope (which is how it
-        // stays reachable unqualified inside the body) and is ALSO installed on the
-        // enclosing descriptor, so Outer.Inner() and Outer.Mode.fast resolve.
+        // A nested type is installed on the enclosing descriptor and NOWHERE else -
+        // it is not in the surrounding scope (see declType). __outer records who
+        // installed it, which is how a bare name inside a member body resolves
+        // outward, and cls is pushed as the owner so the nested declaration's OWN
+        // inheritance clause and static initialisers can already see its siblings.
+        // BEFORE the static property initialisers, which may CONSTRUCT one: a static
+        // initialiser runs eagerly here (Swift's is lazy), so `static let s = Inner()`
+        // used to answer the wrong Inner. The compiler half aborted outright on the
+        // same order; both are pre-existing.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastType = null
             mem.nested[nt]()
-            if (lastType != null) { tput(cls, lastType.name, lastType.v) }
+            if (lastType != null) { tput(cls, lastType.name, lastType.v); setOuter(lastType.v, cls) }
+        }
+        for (var st = 0; st < mem.statProps.length; st++) {
+            tput(cls, mem.statProps[st].name, mem.statProps[st].init == null ? null : mem.statProps[st].init())
         }
     }
 
@@ -5141,6 +5209,8 @@ KwContinue  = "continue" KwEnd ;
     function makeTypeStmt(items, isStruct) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        markNestedAll(mem)
+        var myIdx = noteDeclIdx(name)
         typeDeclSeq = typeDeclSeq + 1
         var typeSigKey = typeDeclSeq
         // A property WRAPPER is recognised by what it declares - a wrappedValue
@@ -5186,7 +5256,7 @@ KwContinue  = "continue" KwEnd ;
             // SUPERCLASS (its members are found by walking __super); a name that
             // resolves to a protocol contributes its default implementations.
             for (var h = 0; h < mem.inherits.length; h++) {
-                var sup = lookupOrNull(baseTypeName(mem.inherits[h]))
+                var sup = swResolve(baseTypeName(mem.inherits[h]))
                 if (sup == null || sup.v == undefined || sup.v === null) { continue }
                 if (sup.v.__isclass === true) { cls.__super = sup.v }
                 else if (sup.v.__isprotocol === true) { adoptProtocol(cls, sup.v) }
@@ -5248,22 +5318,28 @@ KwContinue  = "continue" KwEnd ;
                     }
                 })
             }
-            declType(name, cls)
+            declType(name, cls, isNestedDecl(myIdx))
         }
     }
     // ----- Protocols and extensions -----
     // A protocol carries a member table of DEFAULT implementations (contributed by
     // `extension P { ... }`) plus the protocols it inherits. Adopting one copies the
     // defaults it does not already have - the conforming type's own members win.
+    // Every protocol NAME declared in the program. Complete by the time any thunk
+    // runs, which is why swCatchTyMatch consults it at match time and not at walk time.
+    var protoNames = {}
     function makeProtocolStmt(items) {
         var name = items[0]
+        protoNames["$" + name] = 1
         var mem = splitMembers(items, 1)
+        markNestedAll(mem)
+        var myIdx = noteDeclIdx(name)
         return function() {
             var p = {__isprotocol: true, __name: name, __inherits: mem.inherits}
             var tbl = {__name: name}
             installMembers(tbl, mem)
             p.__members = tbl
-            declType(name, p)
+            declType(name, p, isNestedDecl(myIdx))
         }
     }
     function copyDefaults(cls, tbl) {
@@ -5277,7 +5353,7 @@ KwContinue  = "continue" KwEnd ;
         var inh = p.__inherits
         if (inh != undefined && inh != null) {
             for (var i = 0; i < inh.length; i++) {
-                var up2 = lookupOrNull(baseTypeName(inh[i]))
+                var up2 = swResolve(baseTypeName(inh[i]))
                 if (up2 != null && up2.v != undefined && up2.v !== null && up2.v.__isprotocol === true) {
                     adoptProtocol(cls, up2.v)
                 }
@@ -5327,7 +5403,7 @@ KwContinue  = "continue" KwEnd ;
     // where swiftc prints the answer, and an outright compile abort in the other half.
     function extTargetOf(path) {
         var parts = swSplitDots(path)
-        var h = lookupOrNull(parts[0])
+        var h = swResolve(parts[0])
         if (h == null) { return null }
         var v = h.v
         for (var i = 1; i < parts.length; i++) {
@@ -5350,6 +5426,8 @@ KwContinue  = "continue" KwEnd ;
         var parts0 = swSplitDots(path)
         var base = parts0[parts0.length - 1]
         var mem = splitMembers(items, k)
+        markNestedAll(mem)
+        clearDeclIdx()
         return function() {
             var h = null
             var tv = extTargetOf(path)
@@ -5368,7 +5446,7 @@ KwContinue  = "continue" KwEnd ;
             // Extension-declared stored fields do not exist in Swift, but a
             // conformance in the clause does apply.
             for (var j = 0; j < mem.inherits.length; j++) {
-                var pr = lookupOrNull(baseTypeName(mem.inherits[j]))
+                var pr = swResolve(baseTypeName(mem.inherits[j]))
                 if (pr != null && pr.v != undefined && pr.v !== null && pr.v.__isprotocol === true) {
                     adoptProtocol(target, pr.v)
                 }
@@ -5379,7 +5457,104 @@ KwContinue  = "continue" KwEnd ;
     // Every type declaration goes through declType, so the enclosing type builder can
     // pick a nested declaration up by name without enumerating a scope.
     var lastType = null
-    function declType(name, v) { lastType = {name: name, v: v}; declVar(name, v) }
+
+    // ----- Nested types are NOT in the surrounding scope -----
+    //
+    // A nested type used to declare itself into the scope its enclosing type was
+    // declared in, under its bare name, and that is docs/todo.md 1.2: with
+    // `struct Inner {...}` beside `struct A { struct Inner {...} }`, A's nested Inner
+    // overwrote the top-level binding and `Inner()` in main answered "nested" where
+    // swiftc 6.1.2 answers "top". Two nested types of the same name at DIFFERENT
+    // levels (`A.Mode` and `A.M2.Mode`) collided in the same binding, and there this
+    // engine was the wrong one of the two: the compiler half resolves both correctly
+    // through typeKeyOf while a bare read here found whichever ran last and aborted.
+    //
+    // Swift's rule is lexical, and both halves now implement it as such. A nested type
+    // is a MEMBER of its enclosing descriptor (installMembers already put it there)
+    // and nothing else; the compiler half resolves a bare type name STATICALLY through
+    // typeKeyOf/typeStack, and this half resolves it at RUN time through
+    // swLookupType, which walks the enclosing type of the running member outward along
+    // the `__outer` slot each nested descriptor now carries. `__outer` is the value
+    // model answering the question rather than a side table (manual 7.15): the
+    // descriptor already knows who installed it, it just never recorded it.
+    //
+    // Whether a declaration is nested is decided at WALK time, by the enclosing
+    // declaration marking its children (MemberType hands up their indices), so the
+    // run-time closure only reads the finished answer.
+    var typeDecls = []
+    var lastDeclIdx = -1
+    function noteDeclIdx(name) {
+        typeDecls.push({nested: 0, name: name})
+        lastDeclIdx = typeDecls.length - 1
+        return lastDeclIdx
+    }
+    function clearDeclIdx() { lastDeclIdx = -1; return function() {} }
+    function markNested(i) {
+        if (i == undefined || i == null || i < 0 || i >= typeDecls.length) { return }
+        typeDecls[i].nested = 1
+        nestedTypeNames["$" + typeDecls[i].name] = 1
+    }
+    function markNestedAll(mem) {
+        for (var i = 0; i < mem.nestedIdx.length; i++) { markNested(mem.nestedIdx[i]) }
+    }
+    function isNestedDecl(i) {
+        if (i == undefined || i == null || i < 0 || i >= typeDecls.length) { return false }
+        return typeDecls[i].nested == 1
+    }
+    function declType(name, v, nested) {
+        lastType = {name: name, v: v}
+        if (!nested) { declVar(name, v) }
+    }
+    // The enclosing descriptor a nested type was installed on, so a bare name inside
+    // a member body can be resolved OUTWARD. Hidden (`__` prefixed slots are invisible
+    // to keysOf) and set with a plain write, so it never joins __keys and is never
+    // copied into a conforming type by copyDefaults.
+    function setOuter(v, owner) {
+        if (v == undefined || v === null || typeof v != "object") { return }
+        v.__outer = owner
+    }
+    function isTypeVal(v) {
+        return v != undefined && v !== null && typeof v == "object"
+               && (v.__isclass === true || v.__isenum === true || v.__isprotocol === true)
+    }
+    // The type this name means LEXICALLY: a nested type of the enclosing type, then of
+    // the type that encloses THAT, and so on. The enclosing type of the running member
+    // is curOwner(); each step outward is one `__outer` hop. classFind walks __super,
+    // so a nested type a superclass declares is visible in the subclass, as in Swift.
+    function swLookupType(name) {
+        var ow = curOwner()
+        var n = 0
+        while (ow != undefined && ow !== null && n < 64) {
+            var nt = classFind(ow, name)
+            if (isTypeVal(nt)) { return nt }
+            ow = ow.__outer
+            n = n + 1
+        }
+        return null
+    }
+    // Bare-name resolution in Swift's order. An ordinary local, parameter or function
+    // of that name wins over both - only a TYPE binding is displaced by a nested type,
+    // which is exactly the ambiguity a nested type creates.
+    function swResolve(name) {
+        var h = lookupOrNull(name)
+        if (h != null && !isTypeVal(h.v)) { return h }
+        var nt = swLookupType(name)
+        if (nt != null) { return {v: nt} }
+        return h
+    }
+    // The VarRef thunk. The shared makeVarRef is kept for every name no nested type
+    // uses, so the common read stays one scope scan; nestedTypeNames is complete by
+    // the time any thunk RUNS, which is why the test is inside the closure.
+    var nestedTypeNames = {}
+    function swVarRef(name) {
+        var key = "$" + name
+        return function() {
+            if (!hasOwn(nestedTypeNames, key)) { return getVar(name) }
+            var h = swResolve(name)
+            if (h == null) { return getVar(name) }
+            return h.v
+        }
+    }
 
     // `Crate15<Int>` / `Beast13` -> the bare type name an inheritance entry names.
     function baseTypeName(t) {
@@ -5405,17 +5580,6 @@ KwContinue  = "continue" KwEnd ;
     // `super` resolves against (self's own type would loop on an inherited method).
     var ownerStack = []
     function curOwner() { return ownerStack.length > 0 ? ownerStack[ownerStack.length - 1] : null }
-    // The type descriptor the enclosing type declares under this name, or null. Only
-    // a TYPE is answered - a static property or method of the same name must keep
-    // going through the ordinary scope path.
-    function ownNestedType(name) {
-        var ow = curOwner()
-        if (ow == undefined || ow === null) { return null }
-        var nt = classFind(ow, name)
-        if (nt == undefined || nt === null || typeof nt != "object") { return null }
-        if (nt.__isclass === true || nt.__isenum === true || nt.__isprotocol === true) { return nt }
-        return null
-    }
     function superBase() {
         var o = curOwner()
         if (o == null || o.__super == undefined || o.__super === null) { return null }
@@ -5478,6 +5642,8 @@ KwContinue  = "continue" KwEnd ;
     function makeEnumStmt(items) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        markNestedAll(mem)
+        var myIdx = noteDeclIdx(name)
         var kind = rawKind(mem.raw)
         return function() {
             var e = {__isenum: true, __enum: true, __name: name}
@@ -5499,7 +5665,7 @@ KwContinue  = "continue" KwEnd ;
                 scopePut(e, cs.cname, newCaseVal(name, cs.cname, rv, null, null, tbl))
             }
             e.__cases = order
-            declType(name, e)
+            declType(name, e, isNestedDecl(myIdx))
         }
     }
     // `.tails` / `.circle(r: 5)`: an enum case with no type to resolve against.

@@ -453,6 +453,92 @@ struct NL { struct Inner: NTag { var x: Int
         func tag() -> String { return "L\(x)" }
         static subscript(i: Int) -> Int { return i * 3 } } }
 func ntake(_ p: NTag) -> String { return p.tag() }
+// A nested type must NOT shadow a same-named TOP-LEVEL one (docs/todo.md 1.2). It
+// used to be declared into the SURROUNDING scope under its bare name as well as
+// being installed on its enclosing descriptor, so the nested descriptor overwrote
+// the top-level binding and `NSInner()` at file scope answered the nested type in
+// all three engines where swiftc 6.1.2 answers the top-level one. Two nested types
+// of the same name at DIFFERENT depths collided in that one binding too, and there
+// the two halves DISAGREED: the compiler resolved both correctly through typeKeyOf
+// while the interpreter read whichever ran last.
+struct NSInner { func who() -> Int { return 1 } }
+enum NSMode: Int { case on = 1 }
+struct NSOuter {
+    struct NSInner { func who() -> Int { return 2 } }
+    enum NSMode: Int { case on = 2 }
+    class NSBase { func f() -> Int { return 20 } }
+    class NSCub: NSBase { override func f() -> Int { return 200 + super.f() } }
+    struct Deeper { struct NSInner { func who() -> Int { return 3 } }
+                    func mk() -> Int { return NSInner().who() } }
+    static func mk() -> Int { return NSInner().who() * 10 + NSMode.on.rawValue }
+    static func cub() -> Int { return NSCub().f() }
+}
+// `catch let e as T` used to parse the `as T` and DISCARD it, so the clause bound e
+// and matched EVERY thrown value - the swift arm of docs/todo.md 1.1's sweep. Note
+// that `as Error` and `as SomeProtocol` still match everything, which for Error is
+// what swiftc does and for a user protocol is a recorded gap (conformance is not on
+// the value in either half).
+// Two nested types of the same name at different depths AND of different KINDS.
+// classNames/enumNames are keyed by the bare name, so `Mode()` inside Sub took the
+// enum rawValue arm and aborted with `list index out of range` in both compiled
+// engines while the interpreter aborted on the clobbered bare binding.
+struct NSKind {
+    enum Mode: Int { case on = 1 }
+    struct Sub { struct Mode { func t() -> Int { return 9 } }
+                 func mk() -> Int { return Mode().t() } }
+    static func mk() -> Int { return Mode.on.rawValue }
+}
+// A nested type constructed by a stored property's DEFAULT, by a memberwise default
+// and by a static initialiser: none of those runs in the enclosing type's own frame -
+// planArgs materialises a callee's defaults as argument records at the CALL SITE, and
+// a static initialiser used to run before the nested declaration had been installed.
+struct NSDef { var q = 7 }
+struct NSHost {
+    struct NSDef { var q = 1 }
+    var x = NSDef()
+    static let s = NSDef()
+    var arr: [NSDef] = [NSDef()]
+    func get() -> Int { return x.q + arr[0].q }
+}
+// A default ARGUMENT naming a nested type, and a LOCAL that shadows one. Neither
+// runs in the enclosing type's frame: planArgs materialises defaults at the call site,
+// and `let NSDef = 42` is legal Swift that must beat the nested type.
+struct NSArg {
+    struct NSDef { var q = 1 }
+    func f(_ v: NSDef = NSDef()) -> Int { return v.q }
+    static func g(_ v: NSDef = NSDef()) -> Int { return v.q + 100 }
+    func shadow() -> Int { let NSDef = 42; return NSDef }
+}
+// The same shadowing with the TOP-LEVEL type declared AFTER the nested one.
+struct NSOuter2 { struct NSLater { func who() -> Int { return 5 } } }
+struct NSLater { func who() -> Int { return 6 } }
+enum CNet: Error { case timeout, refused(code: Int) }
+enum CDisk: Error { case full }
+struct CBoom: Error { let n: Int }
+func cthrow(_ k: Int) throws -> String {
+    if k == 0 { throw CNet.timeout }
+    if k == 1 { throw CNet.refused(code: 42) }
+    if k == 2 { throw CDisk.full }
+    if k == 3 { throw CBoom(n: 7) }
+    return "ok"
+}
+func ccatch(_ k: Int) -> String {
+    do { return try cthrow(k) }
+    catch CNet.refused(let c) { return "refused\(c)" }
+    catch let e as CNet { return "net" }
+    catch is CDisk { return "disk" }
+    catch let e as CBoom { return "boom\(e.n)" }
+    catch { return "other" }
+}
+func ccatchAny(_ k: Int) -> String {
+    do { return try cthrow(k) } catch let e as Error { return "any" }
+}
+func ccatchOuter(_ k: Int) -> String {
+    do {
+        do { return try cthrow(k) } catch let e as CDisk { return "inner-disk" }
+    } catch { return "outer" }
+    return "?"
+}
 
 func main() {
     // ----- numbers, arithmetic, precedence -----
@@ -950,6 +1036,28 @@ func main() {
     let nlv: [NL.Inner] = [NL.Inner(x: 2)]
     check("nested-as-type-and-witness", ntake(nkv) == "K1" && ntake(nlv[0]) == "L2")
     check("nested-static-subscript", NK.Inner[4] == 8 && NL.Inner[4] == 12)
+    check("nested-does-not-shadow-toplevel", NSInner().who() == 1 && NSMode.on.rawValue == 1)
+    check("nested-qualified-still-reaches-nested",
+          NSOuter.NSInner().who() == 2 && NSOuter.NSMode.on.rawValue == 2)
+    check("nested-wins-unqualified-inside-outer", NSOuter.mk() == 22)
+    check("nested-wins-at-the-deeper-level", NSOuter.Deeper().mk() == 3)
+    check("nested-superclass-is-the-nested-one", NSOuter.cub() == 220)
+    check("nested-same-name-different-kinds", NSKind.mk() == 1 && NSKind.Sub().mk() == 9)
+    check("nested-in-property-and-static-defaults",
+          NSHost().get() == 2 && NSHost.s.q == 1 && NSDef().q == 7)
+    check("nested-in-default-argument-and-local-shadow",
+          NSArg().f() == 1 && NSArg.g() == 101 && NSArg().shadow() == 42)
+    check("toplevel-declared-after-nested-still-wins",
+          NSLater().who() == 6 && NSOuter2.NSLater().who() == 5)
+
+    // ----- typed catch (docs/todo.md 1.1, swift's arm) -----
+    check("catch-as-type-discriminates",
+          ccatch(0) == "net" && ccatch(1) == "refused42" && ccatch(2) == "disk"
+            && ccatch(3) == "boom7" && ccatch(4) == "ok")
+    check("catch-as-error-catches-everything",
+          ccatchAny(0) == "any" && ccatchAny(3) == "any" && ccatchAny(4) == "ok")
+    check("catch-as-type-rethrows-to-outer",
+          ccatchOuter(2) == "inner-disk" && ccatchOuter(0) == "outer" && ccatchOuter(4) == "ok")
 
     print("features: \(checks) checks, \(fails) failures")
 }
