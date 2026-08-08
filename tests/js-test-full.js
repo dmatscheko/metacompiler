@@ -1955,6 +1955,83 @@ function s42() {
     check("math34", Math.atanh(a[12]) === -Infinity)
 }
 
+
+// ===== SECTION 43: three uncatchable aborts become catchable throws =====
+// docs/todo.md 1.8 and 3.2. A name with no binding, a member read on
+// null/undefined and `new Promise(5)` were UNCATCHABLE `fail` aborts in all six
+// js/ts engines: the program stopped dead where node throws a ReferenceError or
+// a TypeError that a plain try/catch recovers. The first two live in the FLOOR's
+// scope_get / get_member (and abnf/jsrt.go's scopeGet / getMember), shared by
+// all sixteen languages, so they are reached through a per-language hook the
+// emitter registers - js_rt_missvar / js_rt_missmem - and a language that
+// registers none is unchanged, which is what keeps the three SHOULD-ABORT matrix
+// rows where they are.
+//
+// Two pre-existing divergences ride along: `typeof K` for a class was "object"
+// where node says "function" (a class here is an ordinary object carrying
+// __isclass), and the BigInt mix message carried an `(operator '+')` suffix node
+// does not print.
+//
+// Every row is node v24's answer, verified against it.
+function s43() {
+    var xs = [null, undefined, {a: 1}, 5, "k", 1n]
+
+    var r1 = "none"
+    try { r1 = "" + nosuchname_zz }
+    catch (e) { r1 = (e instanceof ReferenceError) + "|" + (e instanceof Error) + "|" + e.name + "|" + e.message }
+    check("ref1", r1 === "true|true|ReferenceError|nosuchname_zz is not defined")
+    // `typeof <bare name>` is still the one expression that may name an
+    // undeclared variable without raising.
+    check("ref2", typeof nosuchname_zz === "undefined")
+
+    var r2 = "none"
+    try { r2 = "" + xs[0].k }
+    catch (e) { r2 = (e instanceof TypeError) + "|" + e.message }
+    check("ref3", r2 === "true|Cannot read properties of null (reading 'k')")
+    var r3 = "none"
+    try { r3 = "" + xs[1][xs[4]] }
+    catch (e) { r3 = (e instanceof TypeError) + "|" + e.message }
+    check("ref4", r3 === "true|Cannot read properties of undefined (reading 'k')")
+
+    var r4 = "none"
+    try { new Promise(xs[3]) }
+    catch (e) { r4 = (e instanceof TypeError) + "|" + e.message }
+    check("ref5", r4 === "true|Promise resolver 5 is not a function")
+
+    // The program CONTINUES afterwards - the point of the whole item.
+    var n = 0
+    for (var i = 0; i < 3; i++) {
+        try { n = n + xs[0].len }
+        catch (e) { n = n + 1 }
+    }
+    check("ref6", n === 3)
+
+    // ...and the throw travels the ordinary try/finally machinery.
+    var log = []
+    try {
+        try { log.push("t"); var q = xs[1].z }
+        finally { log.push("f") }
+    } catch (e) { log.push("c:" + e.name) }
+    check("ref7", log.join(",") === "t,f,c:TypeError")
+
+    class K { m() { return 1 } }
+    check("ref8", typeof K === "function")
+    var arr = [K]
+    check("ref9", typeof arr[0] === "function" && typeof new K() === "object")
+    check("ref10", typeof Math === "object" && typeof Math.max === "function")
+
+    // The WRITE sibling of ref3/ref4, with node's other wording.
+    var r6 = "none"
+    try { xs[0].k = 1 }
+    catch (e) { r6 = (e instanceof TypeError) + "|" + e.message }
+    check("ref12", r6 === "true|Cannot set properties of null (setting 'k')")
+
+    var r5 = "none"
+    try { r5 = "" + (xs[5] + xs[3]) }
+    catch (e) { r5 = e.message }
+    check("ref11", r5 === "Cannot mix BigInt and other types, use explicit conversions")
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1998,6 +2075,7 @@ function main() {
     s40() // SECTION-CALL 40
     s41() // SECTION-CALL 41
     s42() // SECTION-CALL 42
+    s43() // SECTION-CALL 43
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

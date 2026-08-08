@@ -142,13 +142,23 @@ function jvIsCallable(v) {
 // Everything below this line is a LOUD STUB. See docs/runtime-next-plan.md part 3,
 // the JS/TS section, for what is measured and what is not.
 
-// `typeof` for a native build. The emitter routes the user-visible `typeof` here
-// under -exe only (js-to-llvm-ir.abnf's typeofExt): abnf/jsrtjsbig.go's BigInt is a
-// Go TYPE whose js_typeof answers "bigint", and layer 2's is an ordinary object box
-// that the floor's type_of can only call "object". Everything else is the floor's
-// own answer, tag 16 ("function") included.
+// `typeof`. The emitter routes the user-visible `typeof` here in BOTH compiled
+// halves now (js-to-llvm-ir.abnf's typeofExt; the twin is js_jstypeof in
+// abnf/jsrtjsprint.go): abnf/jsrtjsbig.go's BigInt is a Go TYPE whose js_typeof
+// answers "bigint", and layer 2's is an ordinary object box that the floor's
+// type_of can only call "object". Everything else is the floor's own answer,
+// tag 16 ("function") included.
+//
+// A CLASS DESCRIPTOR IS A FUNCTION to `typeof`, and only to `typeof`. Every class
+// here is an ordinary object carrying __isclass - which is what makes instanceof,
+// `extends` and `new` plain object machinery - so `typeof K` answered "object"
+// where node says "function" for every class there has ever been. The test stays
+// out of the engine's own `is this callable` guards on purpose: those decide
+// whether a value can be CALLED, and a class descriptor still cannot.
+// docs/todo.md 1.8.
 function js_jstypeof(v) {
     if (jbIsBig(v)) { return "bigint" }
+    if (jvIsObj(v)) { if (v["__isclass"] === true) { return "function" } }
     return typeof v
 }
 
@@ -3116,7 +3126,8 @@ function jbOf(v) {
 // ------------------------------------------------- the mixed-operand rule ---
 
 function jbMixFail(op) {
-    jbRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+    // node's message has NO operator suffix. docs/todo.md 1.8.
+    jbRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions")
     return undefined
 }
 
@@ -4444,7 +4455,11 @@ function js_jspromfn() {
     if (jpFn === undefined) {
         jpFn = function (exec) {
             var p = jpNew()
-            if (!jvIsCallable(exec)) { fail("TypeError: Promise resolver is not a function") }
+            // jbRaise, not fail: node throws this and a try/catch recovers it,
+            // where fail is the floor's abort and a js_try deliberately does not
+            // see it. The resolver's VALUE is part of node's message.
+            // docs/todo.md 1.8.
+            if (!jvIsCallable(exec)) { jbRaise("TypeError: Promise resolver " + jvStr(exec) + " is not a function") }
             try { jvCallT(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
             catch (e) { jpSettle(p, 2, e) }
             return p

@@ -1196,6 +1196,26 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// String(v) / the ToString an interpolation needs.
 	m["js_jsstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jsvString(u(a[0]))) }
 
+	// js_jstypeof is `typeof` for js/ts, and the twin of the layer-2 function of
+	// the same name. It used to be reached under -exe only, because the one thing
+	// it added there - "bigint" for layer 2's object box - the Go twin already
+	// answered from the Go type. It is now the extern in BOTH compiled halves,
+	// because a CLASS DESCRIPTOR IS A FUNCTION to `typeof`: every class here is
+	// an ordinary object carrying __isclass, so `typeof K` answered "object"
+	// where node says "function" for every class there has ever been. The test
+	// stays out of typeOf itself, which is shared by all sixteen languages, and
+	// out of the engine's own `is this callable` guards, which decide whether a
+	// value can be CALLED - a class descriptor still cannot. docs/todo.md 1.8.
+	m["js_jstypeof"] = func(a []uint64) uint64 {
+		v := u(a[0])
+		if o, ok := v.(*jsObject); ok {
+			if c, has := o.props["__isclass"]; has && c == interface{}(true) {
+				return rt.wrapStr("function")
+			}
+		}
+		return rt.wrapStr(rt.typeOf(v))
+	}
+
 	// js_jsprintfn("println"|"print") answers the host FUNCTION VALUE the grammar
 	// declares over the root scope's binding of the same name. Going through a
 	// binding rather than through a call-site rewrite is what keeps shadowing

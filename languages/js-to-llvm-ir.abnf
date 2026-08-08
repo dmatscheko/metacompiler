@@ -3099,10 +3099,11 @@ NotFuncHead = :script(~~
     if (nativeBuild) { core.truthyExt = "js_jstruthy" }
 
 
-    function typeofExt() {
-        if (nativeBuild) { return "js_jstypeof" }
-        return "js_typeof"
-    }
+    // js_jstypeof in BOTH halves, not js_typeof under llvm.Run: the floor's and
+    // the Go twin's shared type_of/typeOf serve all sixteen languages and call a
+    // class descriptor an object, where node says `typeof K` is "function" for
+    // every class. The Go twin's arm is in abnf/jsrtjsprint.go. docs/todo.md 1.8.
+    function typeofExt() { return "js_jstypeof" }
 
     function memGetExt() {
         if (nativeBuild) { return "js_jsmget" }
@@ -3500,9 +3501,26 @@ NotFuncHead = :script(~~
         return function(b) { return {b: t(b).b, v: hUndef} }
     }
     // 'typeof name' for a possibly undeclared name.
+    // `typeof <bare name>` is the one expression that may name an UNDECLARED
+    // variable without a ReferenceError, so it asks js_scope_typeof rather than
+    // reading the name. That answers the SHARED type_of, though, which calls a
+    // class descriptor an object - so when the name is bound the value is read
+    // and typed through js_jstypeof, which knows that `typeof K` is "function".
+    // The read is safe exactly because js_scope_typeof already said the name
+    // resolves: it cannot trip the js_rt_missvar hook. docs/todo.md 1.8.
     function makeTypeofName(name) {
         return function(b) {
-            return {b: b, v: callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])}
+            var nmV = emitStr(b, name)
+            var tv = callExt(b, "js_scope_typeof", [curScopeV, nmV])
+            var absB = curF.NewBlock("")
+            var hitB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), absB, hitB)
+            absB.NewBr(endB)
+            var hv = callExt(hitB, "js_jstypeof", [callExt(hitB, "js_scope_get", [curScopeV, nmV])])
+            hitB.NewBr(endB)
+            return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(tv, absB),
+                                             llvm.ir.NewIncoming(hv, hitB)])}
         }
     }
 
@@ -5848,6 +5866,83 @@ NotFuncHead = :script(~~
         return b
     }
 
+    // ----- the three recoverable-error hooks (docs/todo.md 1.8 and 3.2) ------
+    //
+    // `zzz` with no binding, `null.x` and `null.x = 1` were UNCATCHABLE ABORTS in
+    // both compiled halves, where node throws a ReferenceError and a TypeError
+    // that a plain try/catch recovers. All three sites - scope_get, get_member
+    // and set_member - are shared by all sixteen languages, and turning either abort into a throw for
+    // everyone is wrong: a statically typed language means "this program is
+    // broken" by it, and the three SHOULD-ABORT matrix rows are how the floor's
+    // abort path is reached by a test at all. So the floor and abnf/jsrt.go take
+    // a per-language HOOK (js_rt_missvar / js_rt_missmem), the language registers
+    // one here, and a language that registers nothing is bit-for-bit unchanged.
+    //
+    // The hook ANSWERS the value to throw rather than throwing it: the runtime
+    // clears the slot while the hook runs, so a hook that itself trips the same
+    // site falls back to the original abort instead of recursing, and the
+    // clear/restore has to bracket a call that RETURNS. It costs nothing on the
+    // hot path - the test is on the miss path, after the whole chain walk has
+    // already failed.
+    //
+    // The message texts are node's, verified against node v24:
+    //   ReferenceError: zzz is not defined
+    //   TypeError: Cannot read properties of null (reading 'x')
+    //   TypeError: Cannot set properties of null (setting 'x')
+    // js_jserrmk turns either text into the very class object emitErrorClasses
+    // registered above, so `e instanceof ReferenceError` and e.message answer.
+    function emitMissHooks(b) {
+        funcCount++
+        var vIdx = funcCount
+        var vf = m.NewFunc("jsf_" + vIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var vb = vf.NewBlock("entry")
+        var nmV = vb.NewCall(getExtern("js_arg", 2), [vf.Params[1], handle(0)])
+        var vTxt = callExt(vb, "js_add", [callExt(vb, "js_add", [emitStr(vb, "ReferenceError: "), nmV]),
+                                          emitStr(vb, " is not defined")])
+        vb.NewRet(callExt(vb, "js_jserrmk", [vTxt]))
+
+        funcCount++
+        var mIdx = funcCount
+        var mf = m.NewFunc("jsf_" + mIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var mb = mf.NewBlock("entry")
+        var keyV = mb.NewCall(getExtern("js_arg", 2), [mf.Params[1], handle(0)])
+        var objV = mb.NewCall(getExtern("js_arg", 2), [mf.Params[1], handle(1)])
+        var mTxt = callExt(mb, "js_add",
+                           [callExt(mb, "js_add",
+                                    [callExt(mb, "js_add",
+                                             [callExt(mb, "js_add",
+                                                      [emitStr(mb, "TypeError: Cannot read properties of "),
+                                                       callExt(mb, "js_jsstr", [objV])]),
+                                              emitStr(mb, " (reading '")]),
+                                     callExt(mb, "js_jsstr", [keyV])]),
+                            emitStr(mb, "')")])
+        mb.NewRet(callExt(mb, "js_jserrmk", [mTxt]))
+
+        // The WRITE sibling: `null.x = 1` was the same uncatchable abort, and node
+        // spells it "Cannot set properties of null (setting 'x')".
+        funcCount++
+        var sIdx = funcCount
+        var sf = m.NewFunc("jsf_" + sIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var sb = sf.NewBlock("entry")
+        var sKeyV = sb.NewCall(getExtern("js_arg", 2), [sf.Params[1], handle(0)])
+        var sObjV = sb.NewCall(getExtern("js_arg", 2), [sf.Params[1], handle(1)])
+        var sTxt = callExt(sb, "js_add",
+                           [callExt(sb, "js_add",
+                                    [callExt(sb, "js_add",
+                                             [callExt(sb, "js_add",
+                                                      [emitStr(sb, "TypeError: Cannot set properties of "),
+                                                       callExt(sb, "js_jsstr", [sObjV])]),
+                                              emitStr(sb, " (setting '")]),
+                                     callExt(sb, "js_jsstr", [sKeyV])]),
+                            emitStr(sb, "')")])
+        sb.NewRet(callExt(sb, "js_jserrmk", [sTxt]))
+
+        callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(vIdx), curScopeV])])
+        callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(mIdx), curScopeV])])
+        callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(sIdx), curScopeV])])
+        return b
+    }
+
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its
         // top-level statement thunks for the real jsrun instead of emitting a second one.
@@ -5895,6 +5990,7 @@ NotFuncHead = :script(~~
         // race / any resolve through js_jsmcall, like String.fromCharCode above.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
         b = emitErrorClasses(b)
+        b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

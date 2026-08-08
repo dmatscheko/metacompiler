@@ -2431,6 +2431,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
             return o.charAt(i)
         }
+        // Subscripting something that is not a sequence, a mapping or a generic
+        // alias is CPython's TypeError, and it was a raw HOST CRASH here -
+        // `None[0]` read `.length` of undefined and took the tag script down with
+        // "Cannot read property 'length' of undefined", which no `except` and no
+        // engine diagnostic could see. docs/todo.md 1.8.
+        // The test is "has no numeric length" rather than "is not an array", so
+        // nothing that used to index successfully can start raising here.
+        if (o === null || o === undefined || typeof o.length != "number") {
+            pyRaise(pyMakeExc("TypeError",
+                ["'" + pyTypeOf(o).__name + "' object is not subscriptable"]))
+        }
         if (i < 0) i += o.length
         if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["list index out of range"])) }
         return o[i]
@@ -4288,13 +4299,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     makeNot = function(t) { return function() { return !pytruthy(t()) } }
+    // WHICH of the two `del` exceptions CPython 3.14 raises depends on WHERE the
+    // deleted name lived: a deleted GLOBAL is a NameError with the same text an
+    // unbound name gets, a deleted LOCAL is an UnboundLocalError. Every engine
+    // here used to answer NameError for both, so `def f(): y = 1; del y; y` read
+    // NameError against CPython's UnboundLocalError - and the compiled halves
+    // already answered UnboundLocalError, so it was a live halves divergence.
+    // The holder is the FIRST scope up the chain that binds the name, which is
+    // exactly where makeDel put the sentinel; scopes[0] is the module namespace.
+    // The twins are abnf/jsrt.go's scopeGet (s == pyModuleScope(sc)) and
+    // py_getvar in languages/python-to-llvm-ir.abnf. docs/todo.md 3.2.
+    function pyDeletedExc(name) {
+        for (var s0 = scopes.length - 1; s0 > 0; s0--) {
+            if (hasOwn(scopes[s0], name)) {
+                return pyMakeExc("UnboundLocalError",
+                                 ["cannot access local variable '" + name +
+                                  "' where it is not associated with a value"])
+            }
+        }
+        return pyMakeExc("NameError", ["name '" + name + "' is not defined"])
+    }
     // Reading a name that `del` removed is Python's UnboundLocalError/NameError,
     // and it must be RAISABLE (the program may catch it), so the sentinel check
     // lives here rather than in the shared getVar.
     function pyReadName(name) {
         var v = anytype
         v = getVar(name)
-        if (v === pyDeleted) { pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"])) }
+        if (v === pyDeleted) { pyRaise(pyDeletedExc(name)) }
         return v
     }
     makeVarRef = function(name) {
@@ -4308,7 +4339,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = getVar(name)
             // One extra identity compare on the hottest path in the interpreter -
             // deliberately inlined rather than routed through pyReadName.
-            if (v === pyDeleted) { pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"])) }
+            if (v === pyDeleted) { pyRaise(pyDeletedExc(name)) }
             return v
         }
     }
@@ -7330,7 +7361,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyattr(o, name) {
         if (o === null || o === undefined) {
             if (name == "__class__") { return pyTypeOf(o) } // None.__class__ is NoneType.
-            fail("AttributeError: '" + name + "' of None")
+            // A CATCHABLE AttributeError with CPython's own text, as the other two
+            // engines raise. fail() ended the program where CPython runs the
+            // except clause. docs/todo.md 1.8.
+            pyAttrErr(o, name)
         }
         // Every Python number carries .real / .imag; a complex answers them from its
         // own fields further down, an ordinary number is its own real part.

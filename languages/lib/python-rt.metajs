@@ -893,6 +893,17 @@ function pyInstanceDict(inst) {
 }
 
 function pyGetAttr(obj, name) {
+    // None has no attributes and CPython says so with a catchable AttributeError;
+    // this used to fall through to the floor's get_member and abort the program
+    // with "member 'x' of undefined" - the last uncatchable attribute read left
+    // after docs/todo.md 1.4. __class__ is the one name None does answer, and it
+    // is handled by the instance arm below (pyInstClassOf), so the guard is
+    // placed after it in effect by naming it here. docs/todo.md 1.8.
+    if (obj === undefined) {
+        if (name != "__class__") {
+            pyRaiseExc("AttributeError", "'NoneType' object has no attribute '" + name + "'")
+        }
+    }
     if (pyIsSuper(obj)) { return pySuperAttr(obj, name) }
     if (pyIsClass(obj)) {
         // __qualname__ of a class is its __name__ for every class this subset can
@@ -4370,7 +4381,9 @@ function js_pyget(c, k) {
     // (origin, parameter) pair, so 'list[int] == list[int]' holds.
     var alias = pyCGenericAlias(c, k)
     if (alias !== undefined) { return alias }
-    fail("indexing a " + typeof c)
+    // CPython's TypeError, and CATCHABLE: this was fail(), so `None[0]` ended the
+    // program where CPython runs the except clause. docs/todo.md 1.8.
+    pyRaiseExc("TypeError", "'" + pyTypeName(c) + "' object is not subscriptable")
     return undefined
 }
 

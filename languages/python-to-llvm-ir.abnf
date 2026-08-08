@@ -1380,18 +1380,49 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nmP = pyGetVarF.Params[1]
             var eb = pyGetVarF.NewBlock("entry")
             var goneB = pyGetVarF.NewBlock("deleted")
+            var globB = pyGetVarF.NewBlock("deleted_global")
+            var locB = pyGetVarF.NewBlock("deleted_local")
             var okB = pyGetVarF.NewBlock("live")
             var vv = callExt(eb, "js_scope_get", [envP, nmP])
             var dd = callExt(eb, "js_scope_get", [envP, emitStr(eb, "pydel*")])
             eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [vv, dd])), goneB, okB)
-            var msg = callExt(goneB, "js_add",
-                              [callExt(goneB, "js_add", [emitStr(goneB, "local variable '"), nmP]),
-                               emitStr(goneB, "' referenced before assignment")])
-            var ar = callExt(goneB, "js_arr_new", [])
-            callExt(goneB, "js_arr_push", [ar, msg])
-            var clsV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "UnboundLocalError")])
-            callExt(goneB, "js_throw", [callExt(goneB, "js_pycall", [clsV, ar, handle(0)])])
-            goneB.NewRet(handle(0))
+            // WHICH exception depends on where the deleted name lived, and CPython
+            // 3.14 draws the line at the module: a deleted GLOBAL is a NameError
+            // with the very text an unbound name gets, a deleted LOCAL is an
+            // UnboundLocalError. Raising UnboundLocalError for both made a
+            // module-level `del x; x` disagree with the interpreter half AND with
+            // CPython. "Am I at module level" is the boundary test the marks
+            // already answer: pyfn* is the nearest enclosing boundary scope and
+            // pymod* is the module's, and at the top level they are the same scope.
+            // The floor's scope API cannot say which scope a chain walk stopped in,
+            // so the holder is reconstructed from the two marks plus js_scope_has
+            // (the OWN-scope test): at module level the two marks are the same
+            // scope and the answer is NameError; below it, the sentinel is a LOCAL
+            // one only if the nearest boundary scope itself binds the name, and
+            // otherwise it came from an outer namespace and is a NameError again.
+            // That reproduces abnf/jsrt.go's `s == pyModuleScope(sc)` for every
+            // shape a Python program can write. docs/todo.md 3.2.
+            var fnScV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "pyfn*")])
+            var modScV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "pymod*")])
+            var ownB = pyGetVarF.NewBlock("deleted_own")
+            goneB.NewCondBr(truthy(goneB, callExt(goneB, "js_seq", [fnScV, modScV])), globB, ownB)
+            ownB.NewCondBr(truthy(ownB, callExt(ownB, "js_scope_has", [fnScV, nmP])), locB, globB)
+            var gmsg = callExt(globB, "js_add",
+                               [callExt(globB, "js_add", [emitStr(globB, "name '"), nmP]),
+                                emitStr(globB, "' is not defined")])
+            var gar = callExt(globB, "js_arr_new", [])
+            callExt(globB, "js_arr_push", [gar, gmsg])
+            var gclsV = callExt(globB, "js_scope_get", [envP, emitStr(globB, "NameError")])
+            callExt(globB, "js_throw", [callExt(globB, "js_pycall", [gclsV, gar, handle(0)])])
+            globB.NewRet(handle(0))
+            var msg = callExt(locB, "js_add",
+                              [callExt(locB, "js_add", [emitStr(locB, "cannot access local variable '"), nmP]),
+                               emitStr(locB, "' where it is not associated with a value")])
+            var ar = callExt(locB, "js_arr_new", [])
+            callExt(locB, "js_arr_push", [ar, msg])
+            var clsV = callExt(locB, "js_scope_get", [envP, emitStr(locB, "UnboundLocalError")])
+            callExt(locB, "js_throw", [callExt(locB, "js_pycall", [clsV, ar, handle(0)])])
+            locB.NewRet(handle(0))
             okB.NewRet(vv)
         }
         return b.NewCall(pyGetVarF, [envV, nameV])
@@ -4098,6 +4129,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             excMade[excNames[e0]] = eCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
+        // ----- the recoverable-name hook (docs/todo.md 3.2) -----------------
+        //
+        // Reading a name that is nowhere bound was an UNCATCHABLE abort in both
+        // compiled halves - `js runtime error: variable not defined: x` - where
+        // this project's own interpreter half and CPython both raise a catchable
+        // NameError. The site is the floor's scope_get / abnf/jsrt.go's scopeGet,
+        // shared by all sixteen languages, so it cannot simply be made to throw:
+        // a statically typed language means "this program is broken" by it, and
+        // the three SHOULD-ABORT matrix rows are how the abort path is reached by
+        // a test at all. Both engines therefore take a per-language HOOK
+        // (js_rt_missvar) and this registers python's; a language that registers
+        // nothing is bit-for-bit unchanged. Registering it AFTER the class block
+        // is required, because the hook raises one of those classes.
+        //
+        // The hook ANSWERS the exception instead of throwing it: the runtime
+        // clears the slot while it runs, so this body's own js_scope_get of
+        // "NameError" cannot recurse - if that name were somehow unbound the
+        // original abort is what comes out. js_pycall on the module's own
+        // NameError class is py_delvar's shape one for one, so the instance
+        // derives from Exception exactly like a raised one.
+        funcCount++
+        var nmIdx = funcCount
+        var nmf = m.NewFunc("jsf_" + nmIdx, i64,
+                            [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var nmb = nmf.NewBlock("entry")
+        var nmName = nmb.NewCall(getExtern("js_arg", 2), [nmf.Params[1], handle(0)])
+        var nmMsg = callExt(nmb, "js_add",
+                            [callExt(nmb, "js_add", [emitStr(nmb, "name '"), nmName]),
+                             emitStr(nmb, "' is not defined")])
+        var nmArgs = callExt(nmb, "js_arr_new", [])
+        callExt(nmb, "js_arr_push", [nmArgs, nmMsg])
+        var nmCls = callExt(nmb, "js_scope_get", [nmf.Params[0], emitStr(nmb, "NameError")])
+        nmb.NewRet(callExt(nmb, "js_pycall", [nmCls, nmArgs, handle(0)]))
+        callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(nmIdx), curScopeV])])
         b = emitImported(b)
         b = makeSeq(items)(b)
 

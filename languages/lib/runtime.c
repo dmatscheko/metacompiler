@@ -439,6 +439,31 @@ long GC_COUNT;
 long PINS[8192];     /* js_gc_pin: module globals that hold a handle for ever */
 long PIN_N;
 
+/* ----- the three RECOVERABLE-ERROR HOOKS (docs/todo.md 1.8 / 3.2) ---------
+ *
+ * scope_get, get_member and set_member are shared by all sixteen languages, and
+ * all three used to end in an uncatchable abort: `x` with no binding and `null.x` stopped the
+ * program dead where node throws a ReferenceError / a TypeError and CPython a
+ * NameError. Making the abort a throw UNCONDITIONALLY is wrong - kotlin, swift,
+ * java and metajs mean "this program is broken" by it, and the three
+ * SHOULD-ABORT matrix rows are how the floor's abort path is reached by a test
+ * at all - so the choice is the LANGUAGE's, made once at boot.
+ *
+ * The mechanism is a registered closure per site, and it costs nothing on the
+ * hot path: the test is on the MISS path only, and a language that registers
+ * nothing behaves exactly as before. The closure ANSWERS the value to throw
+ * rather than throwing it itself, which is what makes the hook non-recursive -
+ * the slot is cleared for the duration of the call, so a handler that itself
+ * reads a name nowhere bound aborts with the original diagnostic instead of
+ * recursing forever, and it is restored before the throw (a throw longjmps, so
+ * a restore placed after it would never run).
+ *
+ * The twins are abnf/jsrt.go's rt.missVar / rt.missMem, and the registering
+ * externs are js_rt_missvar / js_rt_missmem below. */
+long RT_MISS_VAR;    /* closure(name)      -> the value to throw, or 0 = abort */
+long RT_MISS_MEM;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
+long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
+
 void gc_collect(void);
 
 /* One bit per slot, in a malloc'd side array. */
@@ -3099,14 +3124,67 @@ void die3(const char *pre, long key, const char *mid, long obj) {
 	exit(1);
 }
 
+long js_throw(long v);
+
+/* Hand `name` (and, for the member form, the object) to the language's hook and
+ * throw what it answers. Clearing the slot for the duration is the recursion
+ * guard described where RT_MISS_VAR is declared. Answering 0 means "abort after
+ * all", so a hook can decline one case and keep the diagnostic. */
+long rt_miss_var(long name) {
+	long h = RT_MISS_VAR;
+	long args;
+	long v;
+	if (h == 0) { return 0; }
+	RT_MISS_VAR = 0;
+	args = mk_arr();
+	arr_push(args, name);
+	v = js_call(h, H_UNDEF, args);
+	RT_MISS_VAR = h;
+	return v;
+}
+
+long rt_miss_mem(long key, long obj) {
+	long h = RT_MISS_MEM;
+	long args;
+	long v;
+	if (h == 0) { return 0; }
+	RT_MISS_MEM = 0;
+	args = mk_arr();
+	arr_push(args, key);
+	arr_push(args, obj);
+	v = js_call(h, H_UNDEF, args);
+	RT_MISS_MEM = h;
+	return v;
+}
+
+/* The WRITE sibling. It is a hook of its own rather than a flag on the read one
+ * because the two messages differ: node says "Cannot read properties of null
+ * (reading 'x')" and "Cannot set properties of null (setting 'x')". */
+long rt_miss_set(long key, long obj) {
+	long h = RT_MISS_SET;
+	long args;
+	long v;
+	if (h == 0) { return 0; }
+	RT_MISS_SET = 0;
+	args = mk_arr();
+	arr_push(args, key);
+	arr_push(args, obj);
+	v = js_call(h, H_UNDEF, args);
+	RT_MISS_SET = h;
+	return v;
+}
+
 long scope_get(long s, long name) {
 	long cur = s;
+	long exc;
 	while (cur != 0) {
 		long i = scope_find(cur, name);
 		long *vals;
 		if (i >= 0) { vals = (long *)fb(cur); return vals[i]; }
 		cur = ff(cur);
 	}
+	exc = rt_miss_var(name);
+	if (exc != 0) { js_throw(exc); }
 	die2("variable not defined: ", name);
 	return H_UNDEF;
 }
@@ -3197,7 +3275,12 @@ long get_member(long obj, long key) {
 	long t = tag_of(obj);
 	long name;
 	long idx;
-	if (t == 0 || t == 1) { die3("member '", key, "' of ", obj); }
+	long exc;
+	if (t == 0 || t == 1) {
+		exc = rt_miss_mem(key, obj);
+		if (exc != 0) { js_throw(exc); }
+		die3("member '", key, "' of ", obj);
+	}
 	if (tag_of(key) == 4 && is_callable(obj)) {
 		if (str_eq_c(key, "apply")) { return mk_bound(obj, 40); }
 		if (str_eq_c(key, "call"))  { return mk_bound(obj, 41); }
@@ -3250,7 +3333,12 @@ long get_member(long obj, long key) {
 void set_member(long obj, long key, long val) {
 	long t = tag_of(obj);
 	long idx;
-	if (t == 0 || t == 1) { die3("member assignment '", key, "' on ", obj); }
+	long exc;
+	if (t == 0 || t == 1) {
+		exc = rt_miss_set(key, obj);
+		if (exc != 0) { js_throw(exc); }
+		die3("member assignment '", key, "' on ", obj);
+	}
 	if (t == 6) { obj_put(obj, to_string(key), val); return; }
 	if (t == 5) {
 		if (tag_of(key) == 4 && str_eq_c(key, "length")) {
@@ -5685,10 +5773,50 @@ long host_call(long id, long self, long args) {
 
 /* ---------------------------------------------------- exceptions --------- */
 
+/* THE TEXT OF AN EXCEPTION NOBODY CAUGHT. to_string of an object is
+ * "[object Object]" - the correct answer for String(o) and a useless one here,
+ * and it is what every uncaught throw in both compiled halves used to print:
+ * an uncaught `new TypeError("boom")` in a NATIVE js binary read
+ * "js runtime error: uncaught exception: [object Object]" while llvm.Run, whose
+ * jsvString consults the value's own toString, read "TypeError: boom". That was
+ * a live halves divergence, and every throw docs/todo.md 1.8 and 3.2 add lands
+ * on it.
+ *
+ * Two shapes are recognised, and they are the two the exception hierarchies in
+ * this project actually use - this is deliberately NOT a toString dispatch,
+ * because the js Error's toString lives on the CLASS descriptor and calling it
+ * from here would mean a __class walk plus a re-entrant js_call inside the
+ * abort path:
+ *
+ *   {name, message}   the js/ts Error instance (js_jserrinit writes both as OWN
+ *                     properties) -> "TypeError: boom", node's own first line.
+ *   {__class, args}   the python / ruby style instance -> str(e), which is what
+ *                     the interpreter halves already print.
+ *
+ * Anything else keeps to_string exactly. The twin is abnf/jsrt.go's excText. */
+long exc_text(long v) {
+	long nm;
+	long msg;
+	long args;
+	if (tag_of(v) != 6) { return to_string(v); }
+	nm = obj_get(v, mk_cstr("name"));
+	msg = obj_get(v, mk_cstr("message"));
+	if (tag_of(msg) == 4) {
+		if (tag_of(nm) == 4 && str_len(nm) > 0) {
+			if (str_len(msg) == 0) { return nm; }
+			return str_cat(str_cat(nm, mk_cstr(": ")), msg);
+		}
+		return msg;
+	}
+	args = obj_get(v, mk_cstr("args"));
+	if (tag_of(args) == 5 && arr_len(args) > 0) { return to_string(arr_get(args, 0)); }
+	return to_string(v);
+}
+
 long js_throw(long v) {
 	THROWN = v;
 	if (JB_DEPTH <= 0) {
-		long s = to_string(v);
+		long s = exc_text(v);
 		OUTFD = 2;
 		o_cstr("js runtime error: uncaught exception: ");
 		o_str(s);
@@ -5778,6 +5906,11 @@ void gc_roots(void) {
 	long i = 0;
 	gc_try(G_ROOT, 1);
 	gc_try(THROWN, 1);
+	/* The recoverable-error hooks: an emitted closure the module registered once
+	 * at boot and never mentions again, so nothing else keeps it alive. */
+	gc_try(RT_MISS_VAR, 1);
+	gc_try(RT_MISS_MEM, 1);
+	gc_try(RT_MISS_SET, 1);
 	gc_try(RETSLOT, 1);
 	gc_try(GEN_EXIT, 1);
 	while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; }
@@ -5831,6 +5964,16 @@ long js_gc_pin(long v) {
 	PIN_N = PIN_N + 1;
 	return v;
 }
+
+/* The recoverable-error hooks. An emitter that wants a name with no binding
+ * (or a member read on null/undefined) to be a CATCHABLE exception registers a
+ * closure here in its boot block; one that wants the abort registers nothing.
+ * See the note at RT_MISS_VAR for why the closure answers the value instead of
+ * throwing it. The twins are abnf/jsrt.go's js_rt_missvar / js_rt_missmem.
+ * docs/todo.md 1.8 and 3.2. */
+long js_rt_missvar(long clo) { RT_MISS_VAR = clo; return 0; }
+long js_rt_missmem(long clo) { RT_MISS_MEM = clo; return 0; }
+long js_rt_missset(long clo) { RT_MISS_SET = clo; return 0; }
 
 /* js_str_mem is the string-literal cache; str_intern, next to mk_str above, is
  * the whole of it. */
@@ -6540,7 +6683,7 @@ int main(void) {
 	buf = jb_at(0);
 	JB_DEPTH = 1;
 	if (setjmp((void *)buf) != 0) {
-		long s = to_string(THROWN);
+		long s = exc_text(THROWN);
 		OUTFD = 2;
 		o_cstr("js runtime error: uncaught exception: ");
 		o_str(s);

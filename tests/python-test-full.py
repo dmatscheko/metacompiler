@@ -2734,6 +2734,96 @@ def s39():
     check("it75", repr([rpat]) == "[re.compile('a(b)')]")
 
 
+# ===== SECTION 40: a name with no binding is a catchable NameError =====
+# docs/todo.md 3.2. Reading a name that is nowhere bound was an UNCATCHABLE
+# abort in both compiled halves - `js runtime error: variable not defined: x` -
+# where the interpreter half and CPython raise a NameError a plain
+# try/except recovers. The site is the FLOOR's scope_get (and abnf/jsrt.go's
+# scopeGet), shared by all sixteen languages, so it is reached through a
+# per-language hook the emitter registers (js_rt_missvar); a language that
+# registers none is unchanged, which is what keeps the three SHOULD-ABORT
+# matrix rows where they are.
+#
+# The `del` rows ride along: CPython 3.14 answers UnboundLocalError for a
+# deleted LOCAL and NameError for a deleted GLOBAL, and every engine here used
+# to answer one of the two for both.
+#
+# Every row is CPython 3.14.6's answer, verified against it.
+def s40():
+    r1 = "none"
+    try:
+        r1 = str(nosuchname_zz)
+    except NameError as e:
+        r1 = f"{type(e).__name__}|{e}|{isinstance(e, Exception)}"
+    check("nm1", r1 == "NameError|name 'nosuchname_zz' is not defined|True")
+
+    # The program CONTINUES afterwards - the point of the whole item.
+    n = 0
+    for _ in range(3):
+        try:
+            n = n + nosuchname_zz
+        except NameError:
+            n = n + 1
+    check("nm2", n == 3)
+
+    r2 = "none"
+    try:
+        nosuchname_zz
+    except Exception as e:
+        r2 = type(e).__name__
+    check("nm3", r2 == "NameError")
+
+    log = []
+    try:
+        try:
+            log.append("t")
+            nosuchname_zz
+        finally:
+            log.append("f")
+    except NameError:
+        log.append("c")
+    check("nm4", ",".join(log) == "t,f,c")
+
+    def inner2():
+        y = 1
+        del y
+        try:
+            return str(y)
+        except NameError as e:
+            return type(e).__name__
+    check("nm5", inner2() == "UnboundLocalError")
+    check("nm6", issubclass(UnboundLocalError, NameError))
+
+    # None has no attributes and is not subscriptable, and BOTH were uncatchable:
+    # `None.x` aborted with "member 'x' of undefined" in the compiled halves and
+    # `None[0]` CRASHED THE TAG SCRIPT in the interpreter ("Cannot read property
+    # 'length' of undefined"), which no except and no engine diagnostic could see.
+    nones = [None, 1]
+    r4 = "none"
+    try:
+        r4 = str(nones[0].nope)
+    except AttributeError as e:
+        r4 = f"{type(e).__name__}|{e}"
+    check("nm8", r4 == "AttributeError|'NoneType' object has no attribute 'nope'")
+    r5 = "none"
+    try:
+        r5 = str(nones[0][0])
+    except TypeError as e:
+        r5 = f"{type(e).__name__}|{e}"
+    check("nm9", r5 == "TypeError|'NoneType' object is not subscriptable")
+    check("nm10", nones[0].__class__ is type(None))
+
+    global nm_gzz
+    nm_gzz = 1
+    del nm_gzz
+    r3 = "none"
+    try:
+        r3 = str(nm_gzz)
+    except NameError as e:
+        r3 = type(e).__name__
+    check("nm7", r3 == "NameError")
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -2774,5 +2864,6 @@ def main():
     s37() # SECTION-CALL 37
     s38() # SECTION-CALL 38
     s39() # SECTION-CALL 39
+    s40() # SECTION-CALL 40
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

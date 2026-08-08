@@ -143,7 +143,10 @@ func (rt *jsrt) bigRaise(format string, args ...interface{}) {
 // bigMixFail is the spec's TypeError for an operator that got one BigInt and one
 // value of another type. It is raised only in strict mode (see the file comment).
 func (rt *jsrt) bigMixFail(op string) {
-	rt.bigRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '%s')", op)
+	// node's message has NO operator suffix - it is the same text for every
+	// operator. docs/todo.md 1.8.
+	_ = op
+	rt.bigRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions")
 }
 
 // bigBinary is the BigInt arm of a binary arithmetic or bitwise operator. handled is

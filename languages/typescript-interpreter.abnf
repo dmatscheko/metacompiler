@@ -3338,7 +3338,13 @@ NotFuncHead = :script(~~
     // `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
     var jsPromiseFn = function(exec) {
         var p = jpNew()
-        if (typeof exec != "function") { fail("TypeError: Promise resolver is not a function") }
+        // biRaise, not fail: node THROWS this and a try/catch recovers it, where
+        // fail is an engine abort no catch clause can see. The resolver's VALUE is
+        // part of node's message ("Promise resolver 5 is not a function"); node
+        // spells an object `#<Object>` where String(v) says "[object Object]",
+        // which is a node-internal rendering with no other user here.
+        // docs/todo.md 1.8.
+        if (typeof exec != "function") { biRaise("TypeError: Promise resolver " + jsStr(exec) + " is not a function") }
         try { callWithThis(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
         catch (e) {
             if (!excIsUser(e)) { throw e }
@@ -3789,7 +3795,12 @@ NotFuncHead = :script(~~
             if (hasOwn(scopes[i], name)) return scopes[i][name]
         }
         if (hasOwn(hostGlobals, name)) return hostGlobals[name]
-        fail("variable not defined: " + name)
+        // A name with no binding is node's ReferenceError, not an engine abort:
+        // `try { zzz } catch (e) { e instanceof ReferenceError }` is true in node
+        // and the program used to stop dead here. The compiler half reaches the
+        // same answer through the floor's js_rt_missvar hook (see the note in
+        // js-to-llvm-ir.abnf's emitMissHooks). docs/todo.md 1.8 and 3.2.
+        biRaise("ReferenceError: " + name + " is not defined")
     }
     declVar = function(name, value) {
         scopePut(scopes[scopes.length - 1], name, value)
@@ -3904,7 +3915,9 @@ NotFuncHead = :script(~~
     }
 
     function getMemberRaw(o, k) {
-        if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        // Catches null and undefined. node's TypeError, catchable, with node's own
+        // wording; the compiler half reaches it through js_rt_missmem.
+        if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(k) + "')") }
         // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
         // (jsBuiltin -> jpMethod), so a promise has no own slot of that name and
         // `const t = p.then` answered undefined where node answers a function. Same
@@ -4115,12 +4128,25 @@ NotFuncHead = :script(~~
     // typeof reports "bigint" for a boxed BigInt (see makeBigInt) and otherwise the
     // host's own answer, which already covers number/string/boolean/object/function
     // /undefined the way JavaScript does.
+    // A CLASS DESCRIPTOR IS A FUNCTION to `typeof`, and only to `typeof`. Every
+    // class in this engine is an ordinary object carrying __isclass (which is
+    // what makes instanceof, `extends` and `new` plain object machinery), so the
+    // host calls it "object" where node says "function" for every class there
+    // has ever been. The test is deliberately confined to the USER-VISIBLE
+    // operator and not pushed into the engine's own `typeof m != "function"`
+    // guards: those decide whether a value can be CALLED, and a class descriptor
+    // still cannot ("Class constructor K cannot be invoked without 'new'").
+    // docs/todo.md 1.8.
+    function jsTypeofVal(v) {
+        if (isBigInt(v)) { return "bigint" }
+        if (v != undefined && v != null && typeof v == "object" && v.__isclass === true) { return "function" }
+        return typeof v
+    }
     function makeTypeof(t) {
         return function() {
             var v = anytype // typeof accepts every type, that is the point of it.
             v = t()
-            if (isBigInt(v)) { return "bigint" }
-            return typeof v
+            return jsTypeofVal(v)
         }
     }
     // 'typeof <bare name>' is the ONE expression in JavaScript that may name an
@@ -4132,11 +4158,10 @@ NotFuncHead = :script(~~
                 if (hasOwn(scopes[i], name)) {
                     var v = anytype // The variable may hold any type.
                     v = scopes[i][name]
-                    if (isBigInt(v)) { return "bigint" }
-                    return typeof v
+                    return jsTypeofVal(v)
                 }
             }
-            if (hasOwn(hostGlobals, name)) { return typeof hostGlobals[name] }
+            if (hasOwn(hostGlobals, name)) { return jsTypeofVal(hostGlobals[name]) }
             return "undefined"
         }
     }
@@ -4596,7 +4621,11 @@ NotFuncHead = :script(~~
     // to be BigInts or NEITHER. Comparison (< == etc.) and string concatenation are
     // the exceptions and never reach here.
     function biMixFail(op) {
-        biRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+        // node's message has NO operator suffix - "TypeError: Cannot mix BigInt and
+        // other types, use explicit conversions" is the whole of it, for every
+        // operator. The `op` parameter stays so the call sites are untouched.
+        // docs/todo.md 1.8.
+        biRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions")
     }
     // The BigInt arm of a binary operator, or null when neither operand is one.
     function biBinOp(op, l, r) {
@@ -7118,8 +7147,12 @@ NotFuncHead = :script(~~
         }
         var last = ref.path[ref.path.length - 1]
         if (last.kind != "member") fail("assignment target must end in a member")
-        if (cur == undefined) fail("member assignment on " + cur)
-        return {obj: cur, key: last.key()}
+        // node's TypeError, catchable, with node's own wording; the compiler half
+        // reaches it through js_rt_missset. docs/todo.md 1.8.
+        var lk = anytype
+        lk = last.key()   // Once: the key expression must not be evaluated twice.
+        if (cur == undefined) { biRaise("TypeError: Cannot set properties of " + jsStr(cur) + " (setting '" + jsStr(lk) + "')") }
+        return {obj: cur, key: lk}
     }
     applyOp = function(op, a, b) {
         // A compound assignment is its operator applied to the current value, so it
@@ -7497,7 +7530,18 @@ NotFuncHead = :script(~~
 
     // Run the top level (it binds the functions), then call main(). The exit code of
     // this metacompiler run is what main() returned, so test programs are self checking.
-    progT()
+    // THE TOP LEVEL RUNS INSIDE THE SAME GUARD AS main(). It used to be a bare
+    // call, which was harmless only while every engine error at the top level was
+    // a `fail` abort: since docs/todo.md 1.8 a ReferenceError at the top level is
+    // a real THROW, and one nobody caught escaped the interpreter as a raw host
+    // exception and was reported as a TAG SCRIPT crash ("[object Object] at
+    // biRaise") instead of as the program's uncaught exception.
+    try {
+        progT()
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + jsStr(e.v)) }
+        throw e
+    }
     // The entry point defaults to main() but the -main flag (c.mainName) can name any
     // other top-level function.
     var entry = c.mainName

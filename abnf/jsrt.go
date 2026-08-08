@@ -360,6 +360,21 @@ type jsrt struct {
 
 	lastGets [][2]uint64 // The most recent member lookups (obj, key handles), for error messages.
 
+	// The three RECOVERABLE-ERROR HOOKS, the twins of RT_MISS_VAR / RT_MISS_MEM /
+	// RT_MISS_SET in languages/lib/runtime.c. scopeGet, getMember and setMember
+	// are shared by all sixteen languages and all three used to end in an
+	// uncatchable rt.fail; a language whose
+	// semantics say "this is a catchable exception" (js, typescript, python)
+	// registers a closure here in its boot block and one that means "the program
+	// is broken" (kotlin, swift, java, metajs - and the three SHOULD-ABORT matrix
+	// rows) registers nothing and is unchanged. The closure ANSWERS the value to
+	// throw; the slot is cleared while it runs, so a handler that itself reads a
+	// name nowhere bound falls back to the original abort instead of recursing.
+	// docs/todo.md 1.8 and 3.2.
+	missVar interface{} // f(name)      -> the value to throw, or nil = abort
+	missMem interface{} // f(key, obj)  -> the value to throw, or nil = abort
+	missSet interface{} // f(key, obj)  -> the value to throw, or nil = abort
+
 	callBuf [2]uint64 // The (env, args) pair handed to a compiled callee; see callInner.
 
 	// strCache remembers what indexing and interning had to derive from the
@@ -1045,7 +1060,14 @@ func (rt *jsrt) promiseGlobal() *hostFunc {
 		p := promNew()
 		exec := argAt(args, 0)
 		if !isCallable(exec) {
-			rt.fail("TypeError: Promise resolver is not a function")
+			// node throws this and a try/catch recovers it, where rt.fail is an
+			// engine abort js_try deliberately does not see. bigRaise is the same
+			// *jsThrown panic js_throw builds, and jsErrFromText turns the text
+			// into the very TypeError the program's own `new TypeError` builds.
+			// The resolver's VALUE is part of node's message; node spells an
+			// object `#<Object>` where String(v) says "[object Object]", which is
+			// a node-internal rendering with no other user here. docs/todo.md 1.8.
+			rt.bigRaise("TypeError: Promise resolver %s is not a function", rt.jsvString(exec))
 		}
 		res := jsHostFunc("resolve", func(rt *jsrt, this uint64, a []interface{}) interface{} {
 			rt.promResolve(p, argAt(a, 0))
@@ -2333,8 +2355,21 @@ func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 			// later read raises UnboundLocalError - a catchable exception - instead
 			// of resolving to an enclosing binding of the same name.
 			if v == pyDeleted {
+				// WHICH exception depends on where the deleted name lived, and
+				// CPython 3.14 draws the line at the module: a deleted GLOBAL is a
+				// NameError ("name 'x' is not defined", the same text an unbound
+				// name gets) and a deleted LOCAL is an UnboundLocalError. Answering
+				// UnboundLocalError for both made a module-level `del x; x` read
+				// UnboundLocalError here where the interpreter half and CPython say
+				// NameError - a live halves divergence. The messages are 3.14's;
+				// "referenced before assignment" is the pre-3.11 wording.
+				// docs/todo.md 3.2.
+				if s == pyModuleScope(sc) {
+					panic(&jsThrown{value: rt.pyExcInstance("NameError",
+						"name '"+name+"' is not defined")})
+				}
 				panic(&jsThrown{value: rt.pyExcInstance("UnboundLocalError",
-					"local variable '"+name+"' referenced before assignment")})
+					"cannot access local variable '"+name+"' where it is not associated with a value")})
 			}
 			if rt.traced {
 				rt.trVar("read", name, v)
@@ -2342,8 +2377,30 @@ func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 			return v
 		}
 	}
+	if exc, ok := rt.runMissHook(&rt.missVar, name); ok {
+		panic(&jsThrown{value: exc})
+	}
 	rt.fail("variable not defined: %s", name)
 	return nil
+}
+
+// runMissHook calls one of the three recoverable-error hooks, with the slot
+// cleared for the duration so that a handler which itself trips the same site
+// falls back to the original abort instead of recursing. The slot is restored
+// BEFORE the caller throws, because a panic would skip a deferred restore's
+// effect on a later run of the same program. See the fields' declaration.
+func (rt *jsrt) runMissHook(slot *interface{}, args ...interface{}) (interface{}, bool) {
+	h := *slot
+	if h == nil {
+		return nil, false
+	}
+	*slot = nil
+	v := rt.call(h, jsUndef, args)
+	*slot = h
+	if v == nil || v == jsUndef {
+		return nil, false
+	}
+	return v, true
 }
 
 func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
@@ -2508,6 +2565,9 @@ func (rt *jsrt) dictMemberIdx(keys *jsArray, key interface{}) int {
 
 func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 	if isUndefOrNull(obj) {
+		if exc, ok := rt.runMissHook(&rt.missMem, key, obj); ok {
+			panic(&jsThrown{value: exc})
+		}
 		rt.fail("member '%s' of %s", rt.toString(key), rt.toString(obj))
 	}
 	// Function values understand apply and call like in JS.
@@ -2785,6 +2845,9 @@ func (rt *jsrt) importGoValue(v interface{}) interface{} {
 
 func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 	if isUndefOrNull(obj) {
+		if exc, ok := rt.runMissHook(&rt.missSet, key, obj); ok {
+			panic(&jsThrown{value: exc})
+		}
 		rt.fail("member assignment '%s' on %s", rt.toString(key), rt.toString(obj))
 	}
 	switch o := obj.(type) {
@@ -10366,6 +10429,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// This half is garbage collected by Go, so there is nothing to do.
 		"js_gc_pin": func(a []uint64) uint64 { return a[0] },
 
+		// The two recoverable-error hooks. An emitter registers a closure here in
+		// its boot block to make "no such variable" / "member of null" a CATCHABLE
+		// exception in its language; one that registers nothing keeps the abort.
+		// The twins are js_rt_missvar / js_rt_missmem in languages/lib/runtime.c.
+		// docs/todo.md 1.8 and 3.2.
+		"js_rt_missvar": func(a []uint64) uint64 { rt.missVar = u(a[0]); return 0 },
+		"js_rt_missmem": func(a []uint64) uint64 { rt.missMem = u(a[0]); return 0 },
+		// The WRITE sibling of missMem: a hook of its own because node's two
+		// messages differ ("Cannot read properties of" / "Cannot set properties of").
+		"js_rt_missset": func(a []uint64) uint64 { rt.missSet = u(a[0]); return 0 },
+
 		"js_num_i": func(a []uint64) uint64 { // (i64 value) -> number handle
 			return rt.wrapNum(float64(int64(a[0])))
 		},
@@ -12189,8 +12263,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if v, ok := rt.pyGenericAlias(u(a[0]), u(a[1])); ok {
 				return w(v)
 			}
-			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
-			return 0
+			// CPython's TypeError, and CATCHABLE: this was rt.fail, so `None[0]`
+			// ended the program where CPython runs the except clause.
+			// docs/todo.md 1.8.
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				"'"+pyTypeName(rt, u(a[0]))+"' object is not subscriptable")})
 		},
 		"js_pyset": func(a []uint64) uint64 { // List element (negative wraps) or dict entry assignment.
 			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __setitem__.
@@ -15057,6 +15134,41 @@ func (e jsProgramPanic) Error() string  { return e.msg }
 func (e jsProgramPanic) String() string { return e.msg }
 
 // runJSModule is llvm.RunJS(): it executes the entry function of a MetaJS
+// excText is the text of an exception nobody caught, and the twin of exc_text in
+// languages/lib/runtime.c. String(o) of an object is "[object Object]" - correct
+// for String() and useless here - so the two shapes the exception hierarchies in
+// this project use are recognised first:
+//
+//	{name, message}   the js/ts Error instance      -> "TypeError: boom"
+//	{__class, args}   the python / ruby style one   -> str(e)
+//
+// Before this, an uncaught `raise ValueError("boom")` read "js runtime error:
+// uncaught exception: [object Object]" in BOTH compiled halves while the
+// interpreter printed the message, and an uncaught `new TypeError("boom")` in a
+// NATIVE js binary read the same where llvm.Run read "TypeError: boom" - a live
+// halves divergence. docs/todo.md 1.8 and 3.2.
+func (rt *jsrt) excText(v interface{}) string {
+	if o, ok := v.(*jsObject); ok {
+		if mv, has := o.props["message"]; has {
+			if msg, isStr := mv.(string); isStr {
+				name := ""
+				if nv, hasN := o.props["name"]; hasN {
+					if n, isStr := nv.(string); isStr {
+						name = n
+					}
+				}
+				return jsErrText(name, msg)
+			}
+		}
+		if av, has := o.props["args"]; has {
+			if arr, isArr := av.(*jsArray); isArr && len(arr.elems) > 0 {
+				return rt.toString(arr.elems[0])
+			}
+		}
+	}
+	return rt.jsvString(v)
+}
+
 // module with the standard host bindings and returns its int32 result.
 // This is the program runtime, so the -cfgraph and -trace hooks live here.
 func runJSModule(m *ir.Module, entry string) *RunResult {
@@ -15080,10 +15192,10 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 			panic(r)
 		}
 		if exc, ok := r.(*jsThrown); ok {
-			// jsvString, not toString: a thrown Error INSTANCE renders through
-			// its own Error.prototype.toString, so an uncaught engine error
-			// still reports "TypeError: ..." and not "[object Object]".
-			panic(jsProgramPanic{"js runtime error: uncaught exception: " + rt.jsvString(exc.value)})
+			// excText, not jsvString: String(o) of an object is "[object Object]"
+			// and that is what every uncaught throw carrying a python-style
+			// {__class, args} instance used to print. See excText.
+			panic(jsProgramPanic{"js runtime error: uncaught exception: " + rt.excText(exc.value)})
 		}
 		panic(jsProgramPanic{fmt.Sprint(r)})
 	}()
@@ -15947,6 +16059,15 @@ func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
 
 // pyGetAttr reads obj.name with Python's lookup order.
 func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
+	// None has no attributes and CPython says so with a catchable AttributeError;
+	// this used to fall through to getMember and abort the program with
+	// "member 'x' of undefined" - the last uncatchable attribute read left after
+	// docs/todo.md 1.4. __class__ is the one name None does answer.
+	// docs/todo.md 1.8.
+	if isUndefOrNull(obj) && name != "__class__" {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'NoneType' object has no attribute '"+name+"'")})
+	}
 	if sup, isSup := pySuperObj(obj); isSup {
 		return rt.pySuperAttr(sup, name)
 	}
