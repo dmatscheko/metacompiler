@@ -33,9 +33,15 @@
 //     a string             ==  String
 //     an array             ==  Array
 //     a {__dict} object    ==  Hash: keys/vals parallel arrays, INSERTION ordered
-//     {__rrange, begin, end, excl}  == a Range with an OPEN end. A range with BOTH
-//                              bounds is MATERIALIZED as an array by js_rrangearr,
-//                              which is what the whole lowering expects.
+//     {__rrange, begin, end, excl}  == a Range. EVERY range, bounded or open. It
+//                              used to be only the open ones: a bounded literal
+//                              was MATERIALIZED into an Array, so `p (1..3)'
+//                              printed [1, 2, 3], `.begin' aborted with *unknown
+//                              Array method*, `r.class' said Array and a range
+//                              could not be a Hash key. rbRangeToArr materializes
+//                              on demand instead, and the Range method table
+//                              delegates the whole Enumerable surface to the
+//                              Array's. docs/todo.md 1.5.
 //     {__isclass, __name, __super, ...}   == a class / module descriptor. A BUILTIN
 //                              class additionally carries __rbuiltin.
 //     {__rxsrc, __rxflags}            == a Regexp
@@ -1395,13 +1401,7 @@ function rbStr(v) {
             var msg = rbExcMessage(v)
             if (msg !== undefined) { return "" + msg }
         }
-        // A Range that kept its endpoints (an open one, or a bounded one that
-        // materialized empty) renders as `lo..hi`, not as "[object Object]".
-        // docs/todo.md 1.3.
-        if (rbIsRange(v)) {
-            var rdots = v["excl"] === true ? "..." : ".."
-            return rbStr(v["begin"]) + rdots + rbStr(v["end"])
-        }
+        if (rbIsRange(v)) { return rbRangeText(v, false) }
         // A plain instance with no #to_s of its own. MRI writes
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
@@ -1474,6 +1474,10 @@ function rbInspect(v) {
     if (rbIsNil(v)) { return "nil" }
     if (typeof v == "string") { return rbStrInspect(v) }
     if (rbIsSym(v)) { return ":" + v["s"] }
+    // Range#inspect INSPECTS its endpoints where #to_s renders them, which is the
+    // only place the two differ: `("a".."e").inspect' is `"a".."e"' and its #to_s
+    // is `a..e'. Both used to be the materialized array's. docs/todo.md 1.5.
+    if (rbIsRange(v)) { return rbRangeText(v, true) }
     if (rbIsArr(v)) {
         var out = "["
         var i = 0
@@ -2217,10 +2221,13 @@ function rbDictFind(keys, k) {
     if (at >= 0) { return at }
     if (k === null) { return 0 - 1 }
     if (typeof k != "object") { return 0 - 1 }
-    if (rbIsArr(k) || rbIsDict(k)) {
+    // A Range is a VALUE key too - `h[1..3]' has to find the entry `h[1..3] = v'
+    // made, and two range literals are two distinct objects that rtDictFind (an
+    // identity/strictEq scan) can never match. docs/todo.md 1.5.
+    if (rbIsArr(k) || rbIsDict(k) || rbIsRange(k)) {
         var a = 0
         while (a < keys.length) {
-            if (rbIsArr(keys[a]) || rbIsDict(keys[a])) {
+            if (rbIsArr(keys[a]) || rbIsDict(keys[a]) || rbIsRange(keys[a])) {
                 if (rbEq(keys[a], k)) { return a }
             }
             a = a + 1
@@ -2294,6 +2301,15 @@ function rbPyEqual(x, y) {
     // the matrix, --full and --cross all run llvm.Run. rbEq settles two numbers
     // without reaching this function again.
     if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
+    // A Range is a VALUE for the same reason a boxed number is: two range literals
+    // are two objects, so `[1..2] == [1..2]` was false in the NATIVE BINARY (the Go
+    // twin reaches rubyEq's own range arm through strictEq) while llvm.Run agreed
+    // with MRI. Exactly the run-vs-native shape the boxed-number arm above records.
+    // docs/todo.md 1.5.
+    if (rbIsRange(x) || rbIsRange(y)) {
+        if (!rbIsRange(x) || !rbIsRange(y)) { return false }
+        return rbRangeEq(x, y)
+    }
     // undefined and nil both spell Ruby's nil: an ABSENT block parameter reaches
     // this half as undefined, so `[a, b] == [5, nil]` compared undefined against
     // null and answered false where ruby-interpreter.abnf and MRI answer true.
@@ -2353,6 +2369,10 @@ function rbEq(l, r) {
         }
         return rbToF(l) == rbToF(r)
     }
+    // Two Ranges compare by their endpoints. Identity was all a plain object got,
+    // so `(1..3) == (1..3)' was false and a Range could not be a Hash KEY - rbEql,
+    // which is what rbDictFind scans with, lands here. docs/todo.md 1.5.
+    if (rbIsRange(l) && rbIsRange(r)) { return rbRangeEq(l, r) }
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "==")
         if (m !== undefined) { return rbTruthy(m.apply(undefined, [l, r])) }
@@ -2482,6 +2502,12 @@ function rbClassName(v) {
     if (rbIsArr(v)) { return "Array" }
     if (rbIsDict(v)) { return "Hash" }
     if (rbIsEnum(v)) { return "Enumerator" }
+    // A Range is a VALUE, so it has a class like everything else. This one arm
+    // gates `.class', `is_a?(Range)', `case r when Range', eql? and therefore the
+    // hash-key comparison, and the emitter's own `*r' splat test - all of which
+    // answered Array while a bounded range was a materialized array.
+    // docs/todo.md 1.5.
+    if (rbIsRange(v)) { return "Range" }
     // A Proc / lambda / block closure. Without this arm `blk.class' and
     // `blk.is_a?(Proc)' aborted both compiled halves with "method call 'class' on a
     // function", where ruby-interpreter.abnf answered off classOf.
@@ -2653,6 +2679,7 @@ function rbIsA(v, cls) {
         if (bn == "Kernel") { return true }
         if (bn == "Enumerable") {
             if (kind == "Array") { return true }
+            if (kind == "Range") { return true }
             return kind == "Hash"
         }
         return false
@@ -2856,6 +2883,13 @@ function rbFromCodes(codes) {
     return out
 }
 
+// TWO DELIBERATE DIVERGENCES FROM MRI LIVE HERE, both measured this round against
+// /usr/bin/ruby 2.6.10 and both PRE-EXISTING - they are what materializing means,
+// not what making a Range a value changed:
+//   * a FLOAT range iterates: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5] where MRI raises
+//     TypeError ("can't iterate from Float"). rbRangeAt / rbRangeLen now use the
+//     SAME arithmetic, so for-in and to_a at least agree with each other.
+//   * `("a".."e").size' is 5 where MRI answers nil - see the Range method table.
 // rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
 // step caps keep a nonsensical range from hanging the program - the same two
 // constants the Go twin uses.
@@ -2888,8 +2922,179 @@ function rbRangeArr(lo, hi, excl) {
     return out
 }
 
-// rubyOpenRangeCover: `r.cover?(v)` / `r === v` for a range with a missing bound,
-// where the missing side never constrains.
+// ----- A Range as a VALUE ---------------------------------------------------
+// Every range is a {__rrange, begin, end, excl} object now, so these four are the
+// whole of what a range CAN do that an Array cannot; everything else materializes
+// and delegates. Twins: rubyRangeText / rubyRangeToArr / rubyRangeLen /
+// rubyRangeAt in abnf/jsrt.go, and rangeToA / rangeMethod in
+// languages/ruby-interpreter.abnf, which had the right model all along.
+// docs/todo.md 1.5.
+function rbRangeText(r, insp) {
+    var dots = r["excl"] === true ? "..." : ".."
+    var lo = r["begin"]
+    var hi = r["end"]
+    var ls = ""
+    var hs = ""
+    if (!rbIsNil(lo)) { ls = insp ? rbInspect(lo) : rbStr(lo) }
+    if (!rbIsNil(hi)) { hs = insp ? rbInspect(hi) : rbStr(hi) }
+    return ls + dots + hs
+}
+
+// The element sequence. An ENDLESS range has none, and asking for one is an error
+// in MRI too - the message is ruby-interpreter.abnf's, so all three engines agree.
+function rbRangeToArr(r) {
+    if (rbIsNil(r["end"]) || rbIsNil(r["begin"])) {
+        fail("cannot convert an endless range to an array")
+    }
+    return rbRangeArr(r["begin"], r["end"], r["excl"] === true)
+}
+
+// rbRangeLen / rbRangeAt are what js_pylen / js_pyget answer for a range, and they
+// are ARITHMETIC for the numeric case on purpose: for-in, splat and destructuring
+// all ask for the length once and then index element by element, so materializing
+// inside rbRangeAt would make every one of them quadratic.
+function rbRangeNumeric(r) {
+    return typeof r["begin"] != "string"
+}
+// THE ARITHMETIC HERE MUST BE rbRangeArr'S, EXACTLY. rbRangeArr walks `i = lo;
+// while (i <= hi) { push(i); i = i + 1 }', so element i is lo + i and the count is
+// floor(hi - lo) + 1 - NOT trunc(hi) - trunc(lo) + 1, which is the same for
+// integers and differs for a FLOAT range: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5]
+// while a truncating index answered 1, 2, 3, so `for x in 1.5..3.5' disagreed with
+// the range's own to_a. (MRI raises TypeError for both - that is rbRangeArr's own
+// pre-existing divergence, unchanged here - but the two paths of ONE value model
+// have to agree with each other.) docs/todo.md 1.5.
+function rbRangeSpan(r) {
+    var hi = rbToF(r["end"])
+    if (r["excl"] === true) { hi = hi - 1 }
+    return hi - rbToF(r["begin"])
+}
+function rbRangeLen(r) {
+    if (rbIsNil(r["end"]) || rbIsNil(r["begin"])) {
+        fail("cannot take the length of an endless range")
+    }
+    if (!rbRangeNumeric(r)) { return rbRangeToArr(r).length }
+    var n = Math.floor(rbRangeSpan(r)) + 1
+    if (n < 0) { return 0 }
+    return n
+}
+function rbRangeAt(r, i) {
+    if (!rbRangeNumeric(r)) {
+        var a = rbRangeToArr(r)
+        if (i < 0 || i >= a.length) { fail("range index out of range: " + i) }
+        return a[i]
+    }
+    if (i < 0 || i >= rbRangeLen(r)) { fail("range index out of range: " + i) }
+    return rbToF(r["begin"]) + i
+}
+
+// Two ranges are == when their endpoints and their exclusivity are; MRI compares
+// `1..3' and `1...3' as different, and a Range is never == to its own to_a.
+function rbRangeEq(l, r) {
+    if (l["excl"] === true) {
+        if (r["excl"] !== true) { return false }
+    } else if (r["excl"] === true) { return false }
+    if (!rbEq(l["begin"], r["begin"])) { return false }
+    return rbEq(l["end"], r["end"])
+}
+
+// The Range method table. Everything a Range can answer that an Array cannot is
+// here; EVERYTHING ELSE MATERIALIZES AND DELEGATES to rbArrayMethod, which is what
+// keeps the whole Enumerable surface (each / map / select / sum / reduce / zip /
+// group_by / each_slice / find / reverse_each / …) working without a second copy of
+// it. That delegation is why the seven methods this table used to answer were
+// enough while a bounded range WAS an array, and why the list had to grow the
+// moment it stopped being one. ruby-interpreter.abnf's rangeMethod is the same
+// shape and always was; rubyRangeMethod in abnf/jsrt.go is the twin.
+// docs/todo.md 1.5.
+function rbRangeMethod(t, name, args) {
+    var blk = rbBlockOf(args)
+    var npos = rbNPos(args)
+    var endless = rbIsNil(t["end"]) || rbIsNil(t["begin"])
+    // Membership stays LAZY - it is the one part that an endless range can answer,
+    // and materializing (1..1_000_000) to ask `include?(3)` would be absurd.
+    if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
+        return rbOpenRangeCover(t, rbArgAt(args, 0))
+    }
+    if (name == "exclude_end?") { return t["excl"] === true }
+    if (name == "begin") { return t["begin"] }
+    // #end and #last with NO argument are the range's END, not its last element:
+    // `(1...3).last' is 3 where `(1...3).to_a.last' is 2. With an argument they are
+    // the Array's, so those fall through to the delegation below.
+    if (name == "end") { return t["end"] }
+    if (name == "first" && npos == 0) { return t["begin"] }
+    if (name == "last" && npos == 0) { return t["end"] }
+    if (name == "to_s") { return rbRangeText(t, false) }
+    if (name == "inspect") { return rbRangeText(t, true) }
+    if (name == "class") { return rbBuiltinClass("Range") }
+    if (name == "is_a?" || name == "kind_of?") { return rbIsA(t, rbArgAt(args, 0)) }
+    if (name == "instance_of?") {
+        var iof = rbArgAt(args, 0)
+        return rbIsObj(iof) && iof["__rbuiltin"] === "Range"
+    }
+    if (name == "nil?") { return false }
+    if (name == "frozen?") { return false }
+    if (name == "hash" || name == "object_id") { return 0 }
+    if (name == "dup" || name == "clone" || name == "freeze" || name == "itself") { return t }
+    if (name == "==" || name == "eql?" || name == "equal?") {
+        var o = rbArgAt(args, 0)
+        if (!rbIsRange(o)) { return false }
+        return rbRangeEq(t, o)
+    }
+    if (name == "to_a" || name == "entries" || name == "to_ary") { return rbRangeToArr(t) }
+    // An endless range has no sequence, so only the two questions that do not need
+    // one can be answered; MRI agrees that (1..).min is 1 and (1..).max raises.
+    if (endless) {
+        if (name == "min") { return t["begin"] }
+        if (name == "size" || name == "length" || name == "count") {
+            fail("cannot take the length of an endless range")
+        }
+    }
+    if (npos == 0 && blk === null) {
+        // #size, #length and #count all answer the ELEMENT COUNT, and that is a
+        // DELIBERATE divergence, measured and left. MRI's Range#size is nil for a
+        // non-numeric range (`("a".."e").size' is nil) while #count is 5 - but
+        // ruby-to-llvm-ir.abnf lowers every bare `.size' / `.length' straight to
+        // js_pylen (the smcall / field arms), so it never reaches this table, and
+        // js_pylen is ALSO what for-in asks for its trip count. Splitting them
+        // would mean taking `.size' off that lowering in every ruby program, which
+        // is a far larger change than the answer is worth. All three engines agree,
+        // and agreed before this round too. docs/todo.md 1.5.
+        if (name == "size" || name == "length" || name == "count") { return rbRangeLen(t) }
+    }
+    // Range#step(n): every n-th element. It existed in NO engine, interpreter
+    // included - `(1..10).step(3)' aborted with *unknown Array method: step*.
+    // Without a block MRI answers an ArithmeticSequence; the nearest thing in this
+    // value model is an Enumerator, which answers #to_a and #each the same way.
+    if (name == "step") {
+        var by = Math.trunc(rbToF(rbArgAt(args, 0)))
+        if (by <= 0) { rbRaiseErr("ArgumentError", "step can't be 0 or negative") }
+        var src = rbRangeToArr(t)
+        var picked = []
+        var si = 0
+        while (si < src.length) {
+            picked.push(src[si])
+            si = si + by
+        }
+        if (blk !== null) {
+            var pi = 0
+            while (pi < picked.length) {
+                rbCall1(blk, picked[pi])
+                pi = pi + 1
+            }
+            return t
+        }
+        return rbMkEnum(picked)
+    }
+    var av = rbArrayMethod(rbRangeToArr(t), name, args)
+    // #each answers the RECEIVER in MRI, and the receiver is the range.
+    if (name == "each" && blk !== null) { return t }
+    return av
+}
+
+// rubyOpenRangeCover: `r.cover?(v)` / `r === v` for ANY range - it was written for
+// the open ones and is exactly right for a bounded one too, exclusive end included,
+// which is why making every range an object needed no change here.
 function rbOpenRangeCover(o, v) {
     var lo = o["begin"]
     if (!rbIsNil(lo)) {
@@ -3630,17 +3835,10 @@ function rbStrSubseq(t, start, len) {
     if (s + k > t.length) { k = t.length - s }
     return t.slice(s, s + k)
 }
-// A CLOSED range reaches the compiler halves already MATERIALIZED as an array (that
-// is what ruby-to-llvm-ir.abnf emits for 1..2), so an array subscript on a String or
-// an Array IS a range: its first element is the low bound and its length the count.
-// Array#slice already read it that way; js_rget did not, so `a[0..2]' answered the
-// element at index 0 while ruby-interpreter.abnf answered nil - a live halves
-// divergence, both wrong. docs/todo.md 1.10.
-function rbRangeSubseq(o, r) {
-    if (r.length == 0) { return typeof o == "string" ? "" : [] }
-    if (typeof o == "string") { return rbStrSubseq(o, r[0], r.length) }
-    return rbArrSubseq(o, r[0], r.length)
-}
+// rbRangeSubseq is GONE. It read a materialized range's first element as the low
+// bound and its length as the count, which is exactly the guesswork a range that
+// carries its own endpoints makes unnecessary - js_rsubrange is the only path now.
+// docs/todo.md 1.5.
 function rbArrSub(t, from, len) {
     var out = []
     var i = from
@@ -4301,6 +4499,24 @@ function rbArrayMethod(t, name, args) {
     if (name == "sort!") { return rbArrReplace(t, rbMSort(t, blk, false)) }
     if (name == "sort_by") { return rbUndecorate(rbArrKeyed(t, blk)) }
     if (name == "sort_by!") { return rbArrReplace(t, rbUndecorate(rbArrKeyed(t, blk))) }
+    // #reverse_each yields (or enumerates) from the back. It was missing in ALL
+    // THREE engines - surfaced by Range#reverse_each, which delegates here.
+    // docs/todo.md 1.5.
+    if (name == "reverse_each") {
+        var rvz = []
+        var zi = t.length - 1
+        while (zi >= 0) {
+            rvz.push(t[zi])
+            zi = zi - 1
+        }
+        if (blk === null) { return rbMkEnum(rvz) }
+        var qz = 0
+        while (qz < rvz.length) {
+            rbCall1(blk, rvz[qz])
+            qz = qz + 1
+        }
+        return t
+    }
     if (name == "reverse" || name == "reverse!") {
         var rev = []
         var vi = t.length - 1
@@ -4668,14 +4884,13 @@ function rbArrayMethod(t, name, args) {
         return va
     }
     if (name == "slice") {
-        // A closed range reaches this half ALREADY MATERIALIZED as an array (that
-        // is what ruby-to-llvm-ir.abnf emits for 1..2), so an array first argument
-        // here IS the range: its first element is the low bound, its length the
-        // count.
-        if (rbIsArr(rbPosAt(args, nPos, 0))) {
+        // A Range argument is a SUBSEQUENCE, read from its own endpoints. It used
+        // to arrive materialized as an array, so this guessed the bounds from the
+        // elements: `[1,2,3].slice(1..2)' answered the element at index 1 the
+        // moment a range became a value. docs/todo.md 1.5.
+        if (rbIsRange(rbPosAt(args, nPos, 0))) {
             var rr = args[0]
-            if (rr.length == 0) { return [] }
-            return rbArrSub(t, rbArrNorm(t, rr[0]), rr.length)
+            return js_rsubrange(t, rr["begin"], rr["end"], rr["excl"])
         }
         var six = rbArrNorm(t, rbPosAt(args, nPos, 0))
         if (nPos > 1) { return rbArrSub(t, six, Math.trunc(rbToF(args[1]))) }
@@ -5094,27 +5309,7 @@ function rbMethod(target, name, args) {
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
     if (rbIsEnum(target)) { return rbEnumMethod(target, name, args) }
     if (rbIsObj(target)) {
-        if (rbIsRange(target)) {
-            if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
-                return rbOpenRangeCover(target, rbArgAt(args, 0))
-            }
-            if (name == "begin" || name == "first") { return target["begin"] }
-            if (name == "end" || name == "last") { return target["end"] }
-            if (name == "exclude_end?") { return target["excl"] }
-            // A BOUNDED range that materialized EMPTY (1..-1) is kept as this
-            // object so its raw endpoints survive into a[r] - see js_rrangearr. As
-            // a SEQUENCE such a range is empty in MRI too, so every other method is
-            // the empty Array's. docs/todo.md 1.3.
-            if (!rbIsNil(target["begin"]) && !rbIsNil(target["end"])) {
-                if (name == "size" || name == "count" || name == "length") { return 0 }
-                if (name == "to_s" || name == "inspect") {
-                    var xs = target["excl"] === true ? "..." : ".."
-                    return rbStr(target["begin"]) + xs + rbStr(target["end"])
-                }
-                return rbMethod([], name, args)
-            }
-            fail("unknown method on an endless Range: " + name)
-        }
+        if (rbIsRange(target)) { return rbRangeMethod(target, name, args) }
         if (rbIsDict(target)) {
             var keys = target["keys"]
             var vals = target["vals"]
@@ -5323,6 +5518,13 @@ function js_pyget(c, k) {
         if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(rbToF(k))) }
         return c[idx]
     }
+    // A Range. THIS ARM AND js_pylen'S CARRY EVERY SEQUENCE USE OF A RANGE THERE
+    // IS: `for x in a..b', `[*r]', `a, b, c = *r' and every destructure lower to
+    // js_pylen once and js_pyget per element - the emitter has no separate range
+    // path. js_pylen answered 0 for a range and this function had no arm at all,
+    // which is why the two of them are the FIRST thing to make right: a miss here
+    // is silent, the loop simply runs zero times. docs/todo.md 1.5.
+    if (rbIsRange(c)) { return rbRangeAt(c, idx) }
     if (typeof c == "string") {
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { fail("string index out of range: " + Math.trunc(rbToF(k))) }
@@ -5345,9 +5547,12 @@ function js_pylen(v) {
     // lowered to js_pylen rather than to a method call (ruby-to-llvm-ir.abnf's
     // smcall / field arms), so it never reaches rbEnumMethod.
     if (rbIsEnum(v)) { return v["items"].length }
-    // Likewise a Range that kept its endpoints (1..-1): it is empty as a sequence.
-    // docs/todo.md 1.3.
-    if (rbIsRange(v)) { return 0 }
+    // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
+    // materializing, because for-in asks for it once and then indexes. This
+    // answered a flat 0 while a bounded range was an array and only the empty
+    // (1..-1) shape ever reached it - so `for x in 1..3' ran zero times the instant
+    // a range became a value. See js_pyget. docs/todo.md 1.5.
+    if (rbIsRange(v)) { return rbRangeLen(v) }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -5452,46 +5657,19 @@ function js_rcmp(l, r) {
     return c
 }
 
-// lo..hi / lo...hi with BOTH bounds: the array the lowering iterates and indexes.
-//
-// IT ALSO REMEMBERS THE RAW ENDPOINTS OF THE ARRAY IT JUST BUILT, because a
-// materialized range cannot carry them and Ruby's SUBSCRIPT rule needs them:
-// `(1..-1)` is the EMPTY array, while `s[1..-1]` means "from index 1 to the last
-// character" - the commonest range subscript there is. The slot holds the array
-// itself, so js_rget can only use the endpoints for THAT object; anything else
-// falls back to reading the materialized indices. One slot, not a registry: a
-// registry would retain every range array ever built (`(1..1_000_000)`), and one
-// slot is exact for the case that matters, since a range written AT a subscript is
-// the last one evaluated before the index. Mirrors rubyRangeArr's slot in
-// abnf/jsrt.go; ruby-interpreter.abnf needs none, a Range being a real object there.
-// docs/todo.md 1.10.
-var rbLastRange = []
-// What a range LITERAL becomes. A closed range is materialized as an Array,
-// because that is what everything downstream expects - but a range with a
-// NEGATIVE endpoint (1..-1) materializes EMPTY and the endpoints are then the only
-// thing that mattered: `r = 1..-1; s[r]` has to mean "from 1 to the last" and
-// answered "" in both compiled halves while the interpreter half, where a Range is
-// a real object, was right. Those ranges therefore keep the same {__rrange} object
-// the open-ended ones already use; as a SEQUENCE they are empty in MRI too, so the
-// Range method table delegates to the empty Array. Mirrors rubyRangeValue of
-// abnf/jsrt.go. docs/todo.md 1.3.
+// lo..hi / lo...hi with BOTH bounds. It used to MATERIALIZE the array here, and
+// carry a one-slot `rbLastRange' cache of the raw endpoints beside it because a
+// materialized range cannot carry its own bounds and `s[1..-1]' needs them. Both
+// are gone: the object IS the endpoints. The cache was also wrong by construction -
+// one slot, so `a[r1]' after `r2' had been evaluated read r2's bounds - and that
+// whole class of bug is now unreachable. This entry point stays separate from
+// js_rrangeopen only because the emitter distinguishes the two syntactic forms;
+// the two build the same thing. docs/todo.md 1.5.
 function js_rrangearr(lo, hi, excl) {
-    var a = rbRangeArr(lo, hi, rbTruthy(excl))
-    if (a.length == 0 && (rbNegBound(lo) || rbNegBound(hi))) {
-        return js_rrangeopen(lo, hi, excl)
-    }
-    rbLastRange = [a, lo, hi, rbTruthy(excl)]
-    return a
+    return js_rrangeopen(lo, hi, excl)
 }
 
-function rbNegBound(v) {
-    if (typeof v == "number") { return v < 0 }
-    if (rbIsFlo(v)) { return v["f"] < 0 }
-    return false
-}
-
-// (5..) / (..9): no array to build, so the range stays an object that answers
-// cover? / include? / ===.
+// THE Range constructor: 1..3, 1...3, (5..), (..9) - all of them.
 function js_rrangeopen(lo, hi, excl) {
     return {__rrange: true, begin: lo, end: hi, excl: rbTruthy(excl)}
 }
@@ -5517,6 +5695,12 @@ function js_rcase(l, r) {
 // js_rcase above is for). Not exported: only the regex-aware js_rxwhen is emitted.
 function rbWhen(l, r) {
     if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
+    // `when' is Ruby's ===, and a Range's === is MEMBERSHIP. The emitter routes a
+    // range LITERAL to js_rcase by syntax, so this only bites when the when value
+    // is a variable (`when r'), which answered false in both compiled halves the
+    // moment a range stopped being an array that == could compare elementwise.
+    // docs/todo.md 1.5.
+    if (rbIsRange(l)) { return rbOpenRangeCover(l, r) }
     return rbEq(l, r)
 }
 
@@ -5616,23 +5800,14 @@ function js_rget(o, k) {
         if (i < 0) { return rbHashDefault(o, k) }
         return o["vals"][i]
     }
-    // a[0..2] / s[0..2]: a materialized range as the subscript of an Array or a
-    // String is a SUBSEQUENCE, not an index. When the array IS the one the last
-    // range literal built, its raw endpoints are still known and the answer is
-    // exact; otherwise the materialized indices are all there is - see
-    // js_rrangearr. docs/todo.md 1.10.
-    // s[6..] / s[..2]: an OPEN range keeps its endpoints in the object itself, so
-    // this case is exact with no slot at all. It answered the first character before
-    // (js_rget read the object as a number), while ruby-interpreter.abnf - where a
-    // Range is a real object - was right. docs/todo.md 1.10.
+    // a[0..2] / s[6..] / a[1..-1]: a Range as the subscript of an Array or a String
+    // is a SUBSEQUENCE, and it is now EXACT for every range, because the range
+    // carries its own raw endpoints. This is the part that was already right for
+    // open ranges (10 of 10 MRI rows) and it is now the only path - the
+    // materialized-array key and its one-slot endpoint cache are gone.
+    // docs/todo.md 1.5.
     if (rbIsRange(k) && (rbIsArr(o) || typeof o == "string")) {
         return js_rsubrange(o, k["begin"], k["end"], k["excl"])
-    }
-    if (rbIsArr(k) && (rbIsArr(o) || typeof o == "string")) {
-        if (rbLastRange.length == 4 && rbLastRange[0] === k) {
-            return js_rsubrange(o, rbLastRange[1], rbLastRange[2], rbLastRange[3])
-        }
-        return rbRangeSubseq(o, k)
     }
     var idx = Math.trunc(rbToF(k))
     if (rbIsArr(o)) {
@@ -5690,6 +5865,22 @@ function rbSliceBounds(n, k1, k2) {
         st = Math.trunc(rbToF(k1))
         ln = Math.trunc(rbToF(k2))
         if (ln < 0) { ln = 0 }
+    } else if (rbIsRange(k1)) {
+        // A RANGE key, read from its own endpoints. It used to be a materialized
+        // array, so this arm guessed the bounds from the elements and could not
+        // express `a[1..-1] = v' at all. docs/todo.md 1.5.
+        var rb0 = rbIsNil(k1["begin"]) ? 0 : Math.trunc(rbToF(k1["begin"]))
+        if (rb0 < 0) { rb0 = rb0 + n }
+        var re0 = n - 1
+        if (!rbIsNil(k1["end"])) {
+            re0 = Math.trunc(rbToF(k1["end"]))
+            if (re0 < 0) { re0 = re0 + n }
+            if (k1["excl"] === true) { re0 = re0 - 1 }
+        }
+        st = rb0
+        ln = re0 - rb0 + 1
+        if (ln < 0) { ln = 0 }
+        return {s: st, l: ln}
     } else if (rbIsArr(k1)) {
         if (k1.length == 0) { return {s: n, l: 0} }
         st = Math.trunc(rbToF(k1[0]))
@@ -5723,7 +5914,9 @@ function js_rsetsl(o, k1, k2, v) {
         return o.substring(0, sb["s"]) + rbStr(v) + o.substring(sb["s"] + ls, o.length)
     }
     if (!rbIsArr(o)) { js_rset(o, k1, v); return o }
-    if (rbIsNil(k2) && !rbIsArr(k1)) { js_rset(o, k1, v); return o }
+    // A RANGE key is a slice write, not an element write - it reached js_rset as a
+    // whole object once a range stopped being an array. docs/todo.md 1.5.
+    if (rbIsNil(k2) && !rbIsArr(k1) && !rbIsRange(k1)) { js_rset(o, k1, v); return o }
     var ab = rbSliceBounds(o.length, k1, k2)
     if (ab["s"] < 0) { fail("index " + ab["s"] + " too small for array") }
     while (o.length < ab["s"]) { o.push(null) }

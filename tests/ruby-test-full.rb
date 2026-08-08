@@ -137,6 +137,40 @@ def s05
   check("rng1", (1..4).to_a == [1, 2, 3, 4] && (1...4).to_a == [1, 2, 3])
   check("rng2", ("a".."c").to_a == ["a", "b", "c"] && ((1..3) === 2) == true)
   check("rng3", (1..9).include?(5) && (5..).cover?(99) && !(5..).cover?(4))
+  # A Range is a VALUE, not a materialized Array. Both compiled halves used to
+  # MATERIALIZE a bounded range literal, so `p (1..3)' printed [1, 2, 3], `.begin'
+  # aborted, `r.class' said Array and a range could not be a Hash key; the
+  # interpreter half printed the array for #inspect, wrapped `*r' as one element
+  # and had no #step. docs/todo.md 1.5.
+  rr = (1..3)
+  check("rng4", rr.inspect == "1..3" && rr.to_s == "1..3" && "#{rr}" == "1..3")
+  check("rng5", ("a".."c").inspect == "\"a\"..\"c\"" && ("a".."c").to_s == "a..c")
+  check("rng6", rr.class == Range && rr.is_a?(Range) && !rr.is_a?(Array))
+  check("rng7", rr.begin == 1 && rr.end == 3 && (1...3).end == 3 && !rr.exclude_end?)
+  check("rng8", rr.first(2) == [1, 2] && rr.last(2) == [2, 3] && rr.first == 1)
+  check("rng9", rr.size == 3 && rr.min == 1 && rr.max == 3 && (1...3).max == 2)
+  check("rng10", rr == (1..3) && rr != (1...3) && (1..3).eql?((1..3)))
+  # for-in, splat and destructuring all lower to js_pylen + js_pyget, which
+  # answered 0 for a range and had no range arm - each would have run ZERO times.
+  rng_acc = []
+  for rv in (1..3)
+    rng_acc << rv
+  end
+  p1, p2, p3 = *rr
+  check("rng11", rng_acc == [1, 2, 3] && [*rr] == [1, 2, 3] && [p1, p2, p3] == [1, 2, 3])
+  check("rng12", (1..10).step(3).to_a == [1, 4, 7, 10] && ("a".."e").step(2).to_a == ["a", "c", "e"])
+  # `when' with the range in a VARIABLE is the form that does not reach js_rcase.
+  check("rng13", (case 2 when rr then "in" else "out" end) == "in")
+  rh = {(1..2) => "a", (3..4) => "b"}
+  check("rng14", rh[(3..4)] == "b" && rh.size == 2 && [(1..2), (1..2)].uniq.size == 1)
+  # The slicing half, which was already right and must not regress.
+  ra = [10, 20, 30, 40]
+  rw = [10, 20, 30, 40]
+  rw[1..2] = [9]
+  check("rng15", ra[rr] == [20, 30, 40] && ra[1..-1] == [20, 30, 40] && rw == [10, 9, 40])
+  check("rng16", "hello"[1..3] == "ell" && [1, 2, 3].slice(1..2) == [2, 3] && "hello world"[6..] == "world")
+  check("rng17", rr.map { |v| v * 2 } == [2, 4, 6] && rr.sum == 6 && rr.each_slice(2).to_a == [[1, 2], [3]])
+  check("rng18", rr.reverse_each.to_a == [3, 2, 1] && rr.each { |v| v } == rr)
 end
 # ===== SECTION 06: string interpolation and formatting =====
 def s06

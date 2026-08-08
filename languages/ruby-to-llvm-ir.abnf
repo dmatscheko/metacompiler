@@ -2528,11 +2528,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- ranges (eager arrays), arrays, hashes, templates -----
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
-        // A range with BOTH bounds is materialized as an array (js_rrangearr, which
-        // also knows the String ranges "a".."c"), because that is what everything
-        // downstream expects: `for i in 1..3', `a[1..2]', `(1..n).each'.
-        // A range with an open end ((5..), (..9)) has no array to build and becomes
-        // the js_rrangeopen object, which answers cover? / include? / === instead.
+        // EVERY range is a {__rrange} VALUE now, bounded or not. A bounded one used
+        // to be MATERIALIZED into an Array here, which is why `p (1..3)' printed
+        // [1, 2, 3], `.begin' aborted with *unknown Array method*, `r.class' said
+        // Array and a range could not be a Hash key. The two entry points below are
+        // kept apart only because the two syntactic forms are distinguishable here;
+        // js_rrangearr and js_rrangeopen build the same object. Everything
+        // downstream that iterates one (for-in, splat, destructure) goes through
+        // js_pylen / js_pyget, which now know a Range. docs/todo.md 1.5.
         var beginless = typeof items[0] == "string"
         var loT = beginless ? null : items[0]
         var op = beginless ? items[0] : items[1]
@@ -2871,7 +2874,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var elseB = curF.NewBlock("")
             var oneB = curF.NewBlock("")
             var doneB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, isTypeNamed(b, r.v, "Array")), arrB, elseB)
+            b.NewCondBr(truthy(b, isSplatSeq(b, r.v)), arrB, elseB)
             emitSpliceInto(arrB, outV, r.v).NewBr(doneB)
             elseB.NewCondBr(truthy(elseB, callExt(elseB, "js_seq", [r.v, hNull])), doneB, oneB)
             callExt(oneB, "js_arr_push", [outV, r.v])
@@ -3527,6 +3530,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function isTypeNamed(b, valV, nm) {
         return callExt(b, "js_seq", [typeNameV(b, valV), emitStr(b, nm)])
+    }
+    // What `*x' on a right-hand side SPLICES rather than wraps: an Array, and now
+    // also a Range - `[*1..3]' is [1, 2, 3] and `a, b, c = *r' unpacks. It worked
+    // by accident while a bounded range WAS an array and would have silently
+    // regressed to a one-element wrap the moment it stopped being one. Written as
+    // js_rbor of two name tests rather than a new extern: js_rbor already answers
+    // `bool || truthy', both operands are pure, and this keeps the engine boundary
+    // where it is. NOTE that emitAsArray is deliberately NOT changed - MRI does not
+    // splat a bare range in `a, b = 1..3', which leaves a = 1..3 and b = nil.
+    // docs/todo.md 1.5.
+    function isSplatSeq(b, valV) {
+        return callExt(b, "js_rbor", [isTypeNamed(b, valV, "Array"), isTypeNamed(b, valV, "Range")])
     }
     // The classes of the program that declare `mname` (#deconstruct /
     // #deconstruct_keys). Emitting one js_is_type probe per declaring class is the

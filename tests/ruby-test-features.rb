@@ -1380,5 +1380,151 @@ check("mix-superclass-sub", MixB.superclass, MixA)
 check("mix-superclass-exc", MixErr.superclass, StandardError)
 check("mix-superclass-prepend", MixW.superclass, Object)
 
+# ----- a Range is a VALUE, not a materialized Array -----
+# A bounded range literal used to be MATERIALIZED into an Array by both compiled
+# halves, so `p (1..3)' printed [1, 2, 3], `.begin' aborted with *unknown Array
+# method*, `r.class' said Array, a range could not be a Hash key and `case v when r'
+# (a range in a VARIABLE) never matched. The interpreter half had a real Range and
+# was wrong the other way: it printed the array for #inspect, wrapped `*r' as one
+# element and had no #step. Every want below is /usr/bin/ruby 2.6.10's own answer -
+# ranges are a Ruby-2 construct whose behaviour is unchanged in 3.x - EXCEPT the
+# five beginless-range rows at the end, which 2.6 cannot even parse (beginless
+# ranges are 2.7) and which are therefore spec-derived and marked. docs/todo.md 1.5.
+rng_lo = [1, 3, 'a', 5, 1, 1]
+rng_hi = [3, 1, 'e', 5, -1, 1]
+rng_r   = (rng_lo[0]..rng_hi[0])
+rng_x   = (rng_lo[0]...rng_hi[0])
+rng_s   = (rng_lo[2]..rng_hi[2])
+rng_rev = (rng_lo[1]..rng_hi[1])
+rng_neg = (rng_lo[4]..rng_hi[4])
+rng_arr = [10, 20, 30, 40]
+# The range AS A VALUE: what it prints, what class it is, what it equals.
+check("rng-inspect", rng_r.inspect, "1..3")
+check("rng-inspect-excl", rng_x.inspect, "1...3")
+check("rng-inspect-str", rng_s.inspect, "\"a\"..\"e\"")
+check("rng-inspect-rev", rng_rev.inspect, "3..1")
+check("rng-to-s", rng_r.to_s, "1..3")
+check("rng-to-s-str", rng_s.to_s, "a..e")
+check("rng-interp", "#{rng_r}", "1..3")
+check("rng-class", rng_r.class, Range)
+check("rng-is-a", rng_r.is_a?(Range), true)
+check("rng-not-array", rng_r.is_a?(Array), false)
+check("rng-eq", rng_r == (1..3), true)
+check("rng-eq-excl", rng_r == rng_x, false)
+check("rng-eql", (1..3).eql?((1..3)), true)
+check("rng-uniq", [(1..2), (1..2)].uniq.size, 1)
+# The endpoints. #end and #last with NO argument are the range's END, not its last
+# element; with an argument they are the Array's.
+check("rng-begin", rng_r.begin, 1)
+check("rng-end", rng_r.end, 3)
+check("rng-end-excl", rng_x.end, 3)
+check("rng-first", rng_r.first, 1)
+check("rng-last", rng_r.last, 3)
+check("rng-last-excl", rng_x.last, 3)
+check("rng-first-n", rng_r.first(2), [1, 2])
+check("rng-last-n", rng_r.last(2), [2, 3])
+check("rng-excl-false", rng_r.exclude_end?, false)
+check("rng-excl-true", rng_x.exclude_end?, true)
+# As a SEQUENCE.
+check("rng-to-a", rng_r.to_a, [1, 2, 3])
+check("rng-to-a-excl", rng_x.to_a, [1, 2])
+check("rng-to-a-str", rng_s.to_a, ["a", "b", "c", "d", "e"])
+check("rng-to-a-rev", rng_rev.to_a, [])
+check("rng-to-a-neg", rng_neg.to_a, [])
+check("rng-size", rng_r.size, 3)
+check("rng-size-excl", rng_x.size, 2)
+check("rng-count", rng_r.count, 3)
+check("rng-min", rng_r.min, 1)
+check("rng-max", rng_r.max, 3)
+check("rng-max-excl", rng_x.max, 2)
+check("rng-min-empty", rng_rev.min, nil)
+check("rng-sum", rng_r.sum, 6)
+check("rng-map", rng_r.map { |v| v * 2 }, [2, 4, 6])
+check("rng-select", rng_r.select { |v| v > 1 }, [2, 3])
+check("rng-reduce", rng_r.reduce(0) { |a, b| a + b }, 6)
+check("rng-sort-by", rng_r.sort_by { |v| -v }, [3, 2, 1])
+check("rng-partition", rng_r.partition { |v| v.odd? }, [[1, 3], [2]])
+check("rng-zip", rng_r.zip([9, 8, 7]), [[1, 9], [2, 8], [3, 7]])
+check("rng-each-slice", rng_r.each_slice(2).to_a, [[1, 2], [3]])
+check("rng-reverse-each", rng_r.reverse_each.to_a, [3, 2, 1])
+check("rng-each-with-index", rng_r.each_with_index.to_a, [[1, 0], [2, 1], [3, 2]])
+check("rng-take", rng_r.take(2), [1, 2])
+check("rng-group-by", rng_r.group_by { |v| v % 2 }, {1 => [1, 3], 0 => [2]})
+rng_acc = []
+rng_each_ret = rng_r.each { |v| rng_acc << v }
+check("rng-each", rng_acc, [1, 2, 3])
+check("rng-each-returns-self", rng_each_ret, rng_r)
+# Range#step existed in NO engine, interpreter included.
+check("rng-step", (1..10).step(3).to_a, [1, 4, 7, 10])
+check("rng-step-str", ('a'..'e').step(2).to_a, ["a", "c", "e"])
+rng_st = []
+(1..7).step(3) { |v| rng_st << v }
+check("rng-step-block", rng_st, [1, 4, 7])
+# for-in, splat and destructuring - all three lower to js_pylen + js_pyget, which
+# answered 0 and had no range arm at all, so each would have run ZERO times.
+rng_for = []
+for rng_v in (1..3)
+  rng_for << rng_v
+end
+check("rng-for-in", rng_for, [1, 2, 3])
+check("rng-splat-literal", [*rng_r], [1, 2, 3])
+rng_p1, rng_p2, rng_p3 = *rng_r
+check("rng-splat-destructure", [rng_p1, rng_p2, rng_p3], [1, 2, 3])
+def rng_three(a, b, c); [a, b, c]; end
+check("rng-splat-args", rng_three(*rng_r), [1, 2, 3])
+# Membership, ===, and case/when - both as a literal and through a VARIABLE, which
+# is the form that did not reach js_rcase.
+check("rng-include", rng_r.include?(2), true)
+check("rng-include-no", rng_r.include?(4), false)
+check("rng-include-excl", rng_x.include?(3), false)
+check("rng-cover", rng_r.cover?(2), true)
+check("rng-include-str", rng_s.include?('c'), true)
+check("rng-case-eq", (rng_r === 2), true)
+check("rng-case-eq-no", (rng_r === 9), false)
+check("rng-when-literal", (case 2 when 1..3 then "in" else "out" end), "in")
+check("rng-when-var", (case 2 when rng_r then "in" else "out" end), "in")
+check("rng-when-var-miss", (case 9 when rng_r then "in" else "out" end), "out")
+# A range as a Hash KEY. Two range literals are two distinct objects, so this needs
+# the value comparison rbEql / core.keyEq reach.
+rng_h = {(1..2) => "a", (3..4) => "b"}
+check("rng-hash-key", rng_h[(3..4)], "b")
+check("rng-hash-keys", rng_h.keys, [(1..2), (3..4)])
+check("rng-hash-size", rng_h.size, 2)
+# SLICING, which was the half that was already right and must not regress.
+check("rng-slice-arr", rng_arr[rng_r], [20, 30, 40])
+check("rng-slice-lit", rng_arr[1..2], [20, 30])
+check("rng-slice-lit-excl", rng_arr[1...3], [20, 30])
+check("rng-slice-neg", rng_arr[1..-1], [20, 30, 40])
+check("rng-slice-neg-var", rng_arr[rng_neg], [20, 30, 40])
+check("rng-slice-str", "hello"[1..3], "ell")
+check("rng-slice-str-neg", "abcdef"[1..-2], "bcde")
+check("rng-slice-method", [1, 2, 3].slice(1..2), [2, 3])
+check("rng-slice-method-excl", [1, 2, 3].slice(1...3), [2, 3])
+check("rng-slice-str-method", "hello".slice(1..3), "ell")
+rng_w = [10, 20, 30, 40]
+rng_w[1..2] = [9]
+check("rng-slice-assign", rng_w, [10, 9, 40])
+rng_w2 = [1, 2, 3, 4, 5]
+rng_w2[1...3] = [0]
+check("rng-slice-assign-excl", rng_w2, [1, 0, 4, 5])
+# ENDLESS (2.6) ranges: no sequence, so only the lazy questions are answerable.
+rng_open = (1..)
+check("rng-open-begin", rng_open.begin, 1)
+check("rng-open-end", rng_open.end, nil)
+check("rng-open-include", rng_open.include?(99), true)
+check("rng-open-min", rng_open.min, 1)
+check("rng-open-case", (rng_open === 5), true)
+check("rng-open-slice-str", "hello world"[6..], "world")
+check("rng-open-slice-arr", rng_arr[2..], [30, 40])
+# BEGINLESS ranges are Ruby 2.7 syntax, so /usr/bin/ruby 2.6.10 cannot parse them
+# and these five wants are SPEC-DERIVED (ruby-doc Range: #begin is nil, the missing
+# side never constrains) rather than corpus-derived. All three engines agree.
+rng_bl = (..3)
+check("rng-beginless-begin", rng_bl.begin, nil)
+check("rng-beginless-end", rng_bl.end, 3)
+check("rng-beginless-include", rng_bl.include?(1), true)
+check("rng-beginless-include-no", rng_bl.include?(9), false)
+check("rng-beginless-slice", "hello"[..4], "hello")
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)

@@ -3847,11 +3847,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
     // (and nil becomes the empty Array), which is what Ruby's splat on a right side does.
+    // What `*x' SPLICES rather than wraps: an Array, and a Range - `[*1..3]' is
+    // [1, 2, 3] and `f(*r)' passes three arguments. docs/todo.md 1.5.
+    function splatSeq(v) {
+        if (isRange(v)) { return rangeToA(v) }
+        return v
+    }
     function makeSplatRhs(t) {
         return function() {
             var v = anytype
             v = t()
             if (Array.isArray(v)) { return v.slice(0) }
+            // `*r' on a Range SPLICES it: `[*1..3]' is [1, 2, 3] and
+            // `a, b, c = *r' unpacks. This half wrapped the range as ONE element
+            // while the compiled halves happened to be right, because a bounded
+            // range there WAS an array - a live halves divergence.
+            // docs/todo.md 1.5.
+            if (isRange(v)) { return rangeToA(v) }
             if (v === null || v === undefined) { return [] }
             return [v]
         }
@@ -3998,7 +4010,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return "a" + out
     }
     function rangeToA(r) {
-        if (r.hi === null || r.hi === undefined) { fail("cannot convert an endless range to an array") }
+        if (r.hi === null || r.hi === undefined || r.lo === null || r.lo === undefined) {
+            fail("cannot convert an endless range to an array")
+        }
         var out = []
         if (typeof r.lo == "string") {
             var cur = r.lo
@@ -4063,14 +4077,71 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mkRange(lo, hi, op == "...")
         }
     }
+    // rangeText: #to_s renders its endpoints, #inspect INSPECTS them. That is the
+    // only place the two differ - `("a".."e").inspect' is `"a".."e"' and its #to_s
+    // is `a..e'. Twins: rbRangeText in languages/lib/ruby-rt.metajs and
+    // rubyRangeText in abnf/jsrt.go. docs/todo.md 1.5.
+    function rangeText(r, insp) {
+        var dots = r.excl === true ? "..." : ".."
+        var ls = ""
+        var hs = ""
+        if (r.lo !== null && r.lo !== undefined) { ls = insp ? rinspect(r.lo) : rstr(r.lo) }
+        if (r.hi !== null && r.hi !== undefined) { hs = insp ? rinspect(r.hi) : rstr(r.hi) }
+        return ls + dots + hs
+    }
+    // Two ranges are == when their endpoints and their exclusivity are; MRI
+    // compares `1..3' and `1...3' as different, and a Range is never == to its to_a.
+    function rangeEq(l, r) {
+        if ((l.excl === true) !== (r.excl === true)) { return false }
+        if (!rubyEq(l.lo, r.lo)) { return false }
+        return rubyEq(l.hi, r.hi)
+    }
     // The methods of a Range; iteration and the Enumerable methods go through the
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
         if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
         if (name == "include?" || name == "member?" || name == "cover?" || name == "===") { return rangeCover(t, args[0]) }
-        if (name == "first" || name == "begin") { return t.lo }
-        if (name == "last" || name == "end") { return t.hi }
+        if (name == "begin") { return t.lo }
+        // #end and #last with NO argument are the range's END, not its last
+        // element: `(1...3).last' is 3 where `(1...3).to_a.last' is 2. With an
+        // ARGUMENT they are the Array's - `(1..3).first(2)' is [1, 2] - and this
+        // half answered the bare endpoint for both. docs/todo.md 1.5.
+        if (name == "end") { return t.hi }
+        if (name == "first" && args.length == 0) { return t.lo }
+        if (name == "last" && args.length == 0) { return t.hi }
         if (name == "exclude_end?") { return t.excl }
+        if (name == "to_s") { return rangeText(t, false) }
+        if (name == "inspect") { return rangeText(t, true) }
+        if (name == "==" || name == "eql?" || name == "equal?") {
+            return isRange(args[0]) && rangeEq(t, args[0])
+        }
+        // Range#step(n): every n-th element. It existed in NO engine - `(1..10).step(3)'
+        // aborted with *unknown Array method: step* here too. Without a block MRI
+        // answers an ArithmeticSequence; the nearest thing in this value model is an
+        // Enumerator, which answers #to_a and #each the same way. docs/todo.md 1.5.
+        if (name == "step") {
+            var by = Math.trunc(toF(args[0]))
+            if (by <= 0) { raiseErr("ArgumentError", "step can't be 0 or negative") }
+            var src = anytype
+            src = rangeToA(t)
+            var picked = []
+            for (var pi = 0; pi < src.length; pi += by) { picked.push(src[pi]) }
+            if (blk != null) {
+                for (var pj = 0; pj < picked.length; pj++) { blockCall(blk, [picked[pj]]) }
+                return t
+            }
+            return mkEnum(picked)
+        }
+        // An endless (or beginless) range has no sequence, so only the two
+        // questions that do not need one can be answered; MRI agrees that (1..).min
+        // is 1 and (1..).max raises. Without this, #min materialized first and
+        // `(1..).min' aborted. docs/todo.md 1.5.
+        if (t.hi === null || t.hi === undefined || t.lo === null || t.lo === undefined) {
+            if (name == "min") { return t.lo }
+            if (name == "size" || name == "length" || name == "count") {
+                fail("cannot take the length of an endless range")
+            }
+        }
         // Range#size / #min / #max on their own. #size used to fall through to
         // arrayMethod, which has no `size' arm, and answered NIL where both
         // compiled halves answered the count - a live halves divergence. #min used
@@ -4079,11 +4150,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (args.length == 0 && blk == null) {
             var ra = anytype
             ra = rangeToA(t)
+            // #size, #length and #count all answer the ELEMENT COUNT, and that is
+            // a DELIBERATE divergence, measured and left - see the twin in
+            // languages/lib/ruby-rt.metajs for why splitting them is not worth it.
+            // docs/todo.md 1.5.
             if (name == "size" || name == "length" || name == "count") { return ra.length }
             if (name == "min") { return ra.length == 0 ? null : ra[0] }
             if (name == "max") { return ra.length == 0 ? null : ra[ra.length - 1] }
         }
-        return arrayMethod(rangeToA(t), name, args, blk)
+        var av = anytype
+        av = arrayMethod(rangeToA(t), name, args, blk)
+        // #each answers the RECEIVER in MRI, and the receiver is the range.
+        if (name == "each" && blk != null) { return t }
+        return av
     }
     // [a, *b, c]: a splat element splices an array in (a non-array splats as itself).
     function makeArray(items) {
@@ -4103,7 +4182,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (items[i].splat != undefined) {
                     var sv = anytype
-                    sv = items[i].splat()
+                    // A Range SPLICES like an Array: `[*1..3]' is [1, 2, 3]. This
+                    // half wrapped it as one element. docs/todo.md 1.5.
+                    sv = splatSeq(items[i].splat())
                     if (Array.isArray(sv)) { for (var j = 0; j < sv.length; j++) { out.push(sv[j]) } }
                     else { out.push(sv) }
                 } else { out.push(items[i]()) }
@@ -4294,6 +4375,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
         if (isSym(v)) { return ":" + v.s }
+        // Range#inspect INSPECTS its endpoints where #to_s renders them, which is
+        // the only place the two differ: `("a".."e").inspect' is `"a".."e"' and its
+        // #to_s is `a..e'. This half fell through to the generic object arm and
+        // printed the class name; the compiled halves printed the materialized
+        // array. docs/todo.md 1.5.
+        if (isRange(v)) { return rangeText(v, true) }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) { if (i > 0) { out += ", " } out += rinspect(v[i]) }
@@ -6582,6 +6669,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "sort!") { return arrReplace(t, arrSortWith(t, arrCmpFn(blk))) }
         if (name == "sort_by") { return arrUndecorate(arrKeyed(t, blk)) }
         if (name == "sort_by!") { return arrReplace(t, arrUndecorate(arrKeyed(t, blk))) }
+        // #reverse_each yields (or enumerates) from the back. It was missing in ALL
+        // THREE engines - surfaced by Range#reverse_each, which delegates here.
+        // docs/todo.md 1.5.
+        if (name == "reverse_each") {
+            var rvz = []
+            for (i = t.length - 1; i >= 0; i--) { rvz.push(t[i]) }
+            if (blk == null) { return mkEnum(rvz) }
+            for (i = 0; i < rvz.length; i++) { blockCall(blk, [rvz[i]]) }
+            return t
+        }
         if (name == "reverse" || name == "reverse!") {
             var rev = []
             for (i = t.length - 1; i >= 0; i--) { rev.push(t[i]) }
@@ -7275,7 +7372,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (t.splatT != undefined) {
                 var sv = anytype
-                sv = t.splatT()
+                sv = splatSeq(t.splatT())
                 if (Array.isArray(sv)) { for (var j = 0; j < sv.length; j++) { out.push(sv[j]) } }
                 else if (isDict(sv)) {
                     if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
@@ -9555,6 +9652,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.keyEq = function(a, b) {
         if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
         if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
+        // A Range is a VALUE key for the same reason an Array is: two range
+        // literals are two objects, so `h[1..3] = v; h[1..3]` answered nil.
+        // docs/todo.md 1.5.
+        if (isRange(a) && isRange(b)) { return rangeEq(a, b) }
         if (!isBig(a) || !isBig(b)) { return false }
         return bigCmp(a, b) == 0
     }
