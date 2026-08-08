@@ -4,9 +4,9 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-05 at `e284185`; **ninety-nine items closed since**, in nine
-rounds. Chapter 1 has been emptied and refilled nine times; chapter 9 keeps only
-what those rounds taught.
+Rebuilt 2026-08-05 at `e284185`; **~109 items closed since**, in ten rounds.
+Chapter 1 has been emptied and refilled every round; chapter 9 keeps only what
+those rounds taught.
 
 Two conventions, and they are the point of the file:
 
@@ -97,19 +97,9 @@ language whose count is `-`. **Running `./test.sh --full` by hand still needs
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give. Each has a toolchain here that settles
-it. **Section 1 was emptied for the ninth time** — all ten of the previous round's
-items are in chapter 9. What follows is what closing them turned up, all **[V]**
-on `4d54d60`.
-
-**The failure mode this round: the item was TOO SMALL, nine times out of ten.**
-Every defect was real and every diagnosis held, but the swift item named a third
-of its defect (extensions REPLACED a type's overloads rather than only losing the
-statics), the csharp item named one language of two (java had the identical
-divergence), ruby's 1.10 bullet named one String method of seventeen, and the go
-item's four residues came with six more on the same code path. Two prescriptions
-were still wrong — swift's "the same `initIdxs` treatment" does not close it, and
-1.7's fix is impossible where the item points. **Probe the fix as well as the
-defect, and sweep the surface around an item rather than fixing its example.**
+it. Everything below is what closing the previous round turned up, all **[V]** on
+`4d54d60` — and on that round the item was TOO SMALL nine times out of ten, so
+sweep the surface around an item rather than fixing its example.
 
 ### 1.1 `Math`'s MEMBERS diverge: a live run-vs-native defect in three languages **[V]**
 The floor seeds eleven methods; the grammar host and the Go twin also carry
@@ -429,24 +419,7 @@ Cross-language ones whose home is **already imported**, so they are free today:
 Not free, and why, is manual §7.13: anything involving `js-rt.metajs` (imports
 `regex.js` only) or `lua-rt.metajs` (imports nothing).
 
-### 5.2 ~~`floExt` is unreachable~~ — **THE ITEM WAS WRONG. CLOSED `4f77621`.**
-> **The discipline this item created has now paid out once.** `468f2eb` deleted
-> eight python helpers claimed dead by the old item 2.9 — but only after a fatal
-> probe at the top of each body fired **0 times** across every python program
-> built NATIVELY and run. Two neighbours in the same family, `pyFTypeOf` and
-> `pyFArgAt`, are live and were kept. Do this every time; the cost is one
-> regenerate-and-run.
-
-`floExt` is **live**: `emitTypedBin` reaches it whenever a STATIC float type is
-known, so `float64(9) / x` emits `js_jfdiv` while `a[0]-a[1]` does not. Only the
-`emitBinNum` **read** was dead, because `giBase` holds every key `floExt` has and
-is consulted first. **Deleting the table, as this item implied, would have
-introduced a defect.** Proved by construction and by fatal probe at both sites
-(the dead one fired 0 times over the whole corpus, the live one fired); the two
-dead lines are gone and both proofs are recorded at the site. Kept here as the
-standing example of why this file says re-verify before you act.
-
-### 5.3 The four `runtime-*.metajs` splits can be folded back **[V]**
+### 5.2 The four `runtime-*.metajs` splits can be folded back **[V]**
 `runtime-decimal` (188 lines), `runtime-bignum` (263), `runtime-jvm` (159),
 `runtime-dartswift` (50) were split off **only** to keep the per-declaration
 live-body tax off non-callers. The `scope_find` hash index removed that tax, so
@@ -456,7 +429,7 @@ does not apply to it**: folding a module back moves DECLARATIONS, which the hash
 index made free, and adds no call depth. It is the *delegation* that costs, not the
 location.
 
-### 5.4 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
+### 5.3 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
 `swift-to-llvm-ir.abnf:2495,2531`, `dart:2437,2451`, `kotlin:2555` (which says
 "transferred verbatim" at the site). They are **emitter closures that build basic
 blocks**, so `runtime.metajs` cannot hold them; merging means a shared ABNF module
@@ -592,114 +565,29 @@ ranges.
 
 # 9. Closed — do not re-open
 
-## The ten closed in `adf8a77`..`4d54d60` — ALL of chapter 1, plus 2.2 and all of 4 and 7's tooling
+**~109 items over ten rounds** (`e284185`..`4d54d60`), ratchet to 7,766
+assertions: the value model and numbers, coroutines and iterators, the six object
+models, the python/ruby/kotlin library surfaces, and the tooling (`gates.sh`,
+`probe.sh`, `bench.sh`, `shape-scan`, `gen-all.sh`, `-O2` — 2.2× on every native
+binary — and a `scope_find` hash index worth 20–42%). Order and dates no longer
+matter; per-item detail is in git history and in the commit messages, which are
+written to be read.
 
-`+257 assertions` (7,509 → 7,766), ten commits. Every defect was real; **nine of
-ten items were too small**, and two prescriptions were wrong while their diagnoses
-held.
+## The lessons worth carrying — each paid for once
 
-- **swift** — an extension did not ADD overloads, it REPLACED them: instance
-  methods and subscripts too, every row a live divergence the interpreter got
-  right. Plus a second `extension Int {…}` making the first block unreachable (an
-  ABORT), and a static subscript testing arity at the wrong argument offset —
-  **wrong at base with no extension involved**.
-- **csharp + java** — `undefined + int` read three different ways in three engines
-  (`1 0 false` / `NaN 0 false` / `1 1 true`); java had the identical divergence, so
-  splitting the shared body would not have closed it. Real java THROWS there, so
-  neither answer was the language's and the engines were made to agree instead. The
-  `(object)a == null` recursion was fixed by reading the operand's TEXT after
-  recognising the cast by thunk IDENTITY proved to be a goja-vs-`-frozen`
-  divergence — goja exports a JS function as a fresh Go closure.
-- **go** — four residues, and the item was wrong about which engine twice; its
-  stated blocker for the package snapshot was false (a scope handle is an ordinary
-  value). Six more found on the path, including a keyed nested struct element that
-  was a live divergence, and a `-frozen`-only failure caused by a typed MetaJS
-  local holding both a thunk and a brace group.
-- **ruby** — `[object Object]` on every uncaught exception, fixed by having the
-  program report it (the shared handler serves sixteen languages); `->(x){}` was
-  not arity-checked ON THE UPPER BOUND either, in every `def`; `start_with?` was
-  one of SEVENTEEN String methods that aborted both compiled halves.
-- **kotlin** — ranges became a first-class progression instead of a materialized
-  list, and eight more defects fell out, including `3 in (1..10 step 4)` where the
-  INTERPRETER was the wrong one. Six existing assertions had been pinning wrong
-  expectations.
-- **js/ts + python** — a real Error hierarchy (the recorded ceiling on every
-  make-X-catchable item), which unblocked 3.2; a default derived constructor
-  DROPPED ITS ARGUMENTS in all four engines; and two error classes were built,
-  measured at +3.40% on a paired sign test, and declined.
-- **4.1 / 4.2** — the three engines bound different host globals in BOTH
-  directions, now converged and pinned by a Go test that reads all three out of
-  their own sources. And the `PROBE-C` guards whose "fired zero times" result the
-  file had recorded as evidence were a **tautology** — the line above them assigned
-  `w = si_width_of(l,l)` and the probe tested `si_width_of(l,l) != w`.
-- **4.3** — `native-full` runs the feature files too; six php layer-2 externs had
-  been reachable by ZERO gates. Proved by sabotage, and the gate got 3× faster.
-- **Tooling** — `-rdynamic` (the item named the wrong file), the shape ratchet (the
-  item's `-max 2` was stale, and the group count alone is not sufficient — a third
-  copy of an already-grouped body does not move it), per-group job defaults, a
-  pre-commit hook, and five new bench rows.
-
-**Three instruments were wrong, and finding that was worth more than several of
-the fixes.** The ratchet could not see a killed run; the shape ratchet could not
-see a third copy; and a recorded fatal probe could not fire. **Whenever a gate
-reports "nothing", ask what it would do if the thing were there.**
-
-Eight rounds of ten, `e284185`..`10c6e58`, taking the ratchet to **7,509
-assertions**. Per-item detail is in this file's git history and in the commit
-messages, which are written to be read. What is kept here is only the part that
-should change how the NEXT item is worked.
-
-## What was closed, by area
-
-- **Value model and numbers** — `float` as a real binary32 in java, kotlin, swift,
-  go and csharp, each with its own renderer; Go untyped and named constants (a
-  parse-time bignum/rational folder); Ruby's arbitrary-precision Integer (~2,300
-  lines, and ruby ended **11.8% FASTER**); Ruby `Float#to_s`; python `repr()`;
-  java `record` equality and `hashCode`; kotlin `Float.hashCode()`; the
-  signed-zero family, sighted **nine** times.
-- **Coroutines and iterators** — async/await, `for await`, `async function*`,
-  `ag.throw()`, `.throw()` on plain generators, `yield*` throw-forwarding and
-  delegate `next(v)`, iterator close on `break`/`return`/labeled break, python
-  `yield from` (five consequences where the item named one), `g.return()`.
-- **Object models** — java unqualified field access; csharp constructors,
-  `: base(...)`, overloaded operators, `is`, inherited statics and delegate
-  fields; swift initializer/method/subscript overload dispatch and `as` as a real
-  coercion; python `super()` over the instance MRO; go interface method sets,
-  embedded-struct promotion, multi-value expansion; ruby blocks-as-arguments,
-  non-local `return`, `method(:x)`, `send`/`__send__`/`public_send`.
-- **Library surfaces** — python builtins and the dict/set/list/str surfaces; ruby
-  Array and Hash; kotlin index properties and collection receivers; twelve foreign
-  method names denied by RECEIVER TYPE rather than by name.
-- **Infrastructure** — `tests/gates.sh`, `tests/probe.sh`, `tests/bench.sh`,
-  `tools/shape-scan`, `tests/gen-all.sh` (25.3 s → 3.3 s), native `-exe` matrix
-  rows, overlapping the gates (5:07 → 2:26), **`-O2` missing from
-  `buildExecutable` for the project's entire life** (2.2× on every native binary),
-  and a `scope_find` hash index (13 languages, 20–42% fewer instructions).
-
-## The lessons worth carrying
-
-The mechanics are in the manual, chapters 4 and 7. These are the ones about how to
-WORK, and every one was paid for.
-
-- **The instrument itself was wrong twice.** A single build cannot measure below
-  ~2% (the layout lottery), and then the MEDIAN turned out to be the wrong
-  statistic on a bimodal sample. Both fixes are in `tests/bench.sh` — `--draws`,
-  `--paired`, the printed mean — and the rule is at the top of this file.
-- **Four regressions were invisible to every correctness gate.** Three were caught
-  because someone measured: swift's `charAt` (+10.3% collections), go's
-  unconditional `js_gidivz` (**+30.58%**), ruby's `Proc#arity` registry (181 KB →
-  **5.1 MB** live). The fourth was not caught for four commits — the fifth merge
-  pass cost python **41%**, ruby 11% and java 5.7% by turning three hot predicates
-  into one-line delegations. That is why `--bench` exists and why 5.1 carries its
-  warning.
-- **Two defects were found only by running a binary BY HAND**, because a
-  feature-matrix native row only builds. That hole is item 4.3, still open.
-- **Deleting "dead" code needs a fatal probe that fires zero times**, not an
-  argument. Eight python helpers went that way; two neighbours in the same family
-  proved live and were kept. The one item that skipped the step (`floExt`) was
-  wrong, and deleting as written would have introduced a defect.
-- **Both halves agreeing is not evidence.** The largest class of defect closed
-  across these rounds is "both halves agree and both are wrong" — `--cross` cannot
-  see it by construction; only an external oracle can.
-- **Two test files had been relying on defects.** When a fix makes a test fail,
-  establish which of the two is wrong before touching either.
+- **The instrument itself was wrong twice**: a single build cannot measure below
+  ~2% (the layout lottery), and the MEDIAN is the wrong statistic on a bimodal
+  sample. Both fixes are in `bench.sh`; the rules are at the top of this file.
+- **Whenever a gate reports "nothing", ask what it would do if the thing WERE
+  there** — three instruments were wrong that way, including a recorded fatal
+  probe that was a tautology and could not fire.
+- **Four regressions were invisible to every correctness gate**, one of them
+  python +41% for four commits. That is why `--bench` exists and why 5.1 warns.
+- **Deleting "dead" code needs a fatal probe that fires zero times, not an
+  argument** — the one item that skipped it was wrong, and deleting as written
+  would have introduced a defect.
+- **Both halves agreeing is not evidence**; the largest class of defect closed
+  here is "both halves agree and both are wrong", invisible to `--cross`. Two
+  defects were found only by running a binary BY HAND, and two test files had been
+  relying on defects — when a fix makes a test fail, establish which of the two is
+  wrong before touching either.
