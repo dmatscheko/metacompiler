@@ -314,6 +314,13 @@ type pyBoundInfo struct {
 	self interface{}
 	fn   interface{}
 	typ  string
+	// kind distinguishes the three callables this record now describes -
+	// "" a bound method, "d" an unbound method descriptor (list.count),
+	// "m" a module-level builtin function (math.sqrt). They print, name and
+	// introspect differently; see abnf/jsrtpydesc.go, which is where the three
+	// are minted, and the matching fifth pyBMTab slot in
+	// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+	kind string
 }
 
 // pyBoundOf answers the bound-method record of v, or nil.
@@ -374,6 +381,17 @@ type jsrt struct {
 	missVar interface{} // f(name)      -> the value to throw, or nil = abort
 	missMem interface{} // f(key, obj)  -> the value to throw, or nil = abort
 	missSet interface{} // f(key, obj)  -> the value to throw, or nil = abort
+
+	// The FOURTH of the family, and the odd one out: it is a plain VALUE, not a
+	// closure. memberCall cannot build node's message for a call of a non-function
+	// - `xs[1] is not a function` names the SOURCE EXPRESSION, and `xs[1]` and
+	// `xs[i]` reach it as the same key - so the runtime's half of the job is only
+	// to say "nothing claimed this call" and let the CALL SITE, which knows the
+	// text at compile time, raise. missCall holds the sentinel to answer with; a
+	// language that never registers one (fourteen of sixteen) keeps the abort, and
+	// with it every engine-internal js_mcall that has ever caught a runtime bug.
+	// docs/todo.md 1.4.
+	missCall interface{}
 
 	callBuf [2]uint64 // The (env, args) pair handed to a compiled callee; see callInner.
 
@@ -520,6 +538,9 @@ type jsrt struct {
 	// for every grammar that never compiles Python.
 	pyTypes     map[string]*jsObject
 	pyFuncNames map[interface{}]string
+	// pyBuiltinsMod is the ONE `builtins` module object of a run (len.__self__
+	// is it, so it cannot be minted afresh). abnf/jsrtpydesc.go.
+	pyBuiltinsMod *jsObject
 	// pyBuiltinRender is how a BUILTIN prints, keyed by the closure the emitter
 	// bound the name to and filled by js_pybfn. Separate from pyFuncNames on
 	// purpose: that one answers f.__name__ and holds only what a def recorded.
@@ -2403,6 +2424,17 @@ func (rt *jsrt) runMissHook(slot *interface{}, args ...interface{}) (interface{}
 	return v, true
 }
 
+// mcallMiss answers the registered MISS SENTINEL at every memberCall site that was
+// about to abort with "no such method". Nothing is cleared and nothing recurses -
+// unlike the three closure hooks this one does not run program code - so it is a
+// field read on a path that had already decided to end the program. See missCall.
+func (rt *jsrt) mcallMiss() (interface{}, bool) {
+	if rt.missCall == nil {
+		return nil, false
+	}
+	return rt.missCall, true
+}
+
 func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	for s := sc; s != nil; s = s.parent {
 		if s.has(name) {
@@ -3631,6 +3663,14 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if s, ok := rxPyRepr(t); ok {
 			return s
 		}
+		// A MODULE object. CPython prints <module 'builtins' (built-in)> for a
+		// built-in module and, for an extension module like math, the .so PATH
+		// it was loaded from - machine-specific and unmatchable, so every module
+		// here takes the built-in spelling. Without this a module printed the
+		// host's own object dump. docs/todo.md 1.7.
+		if mod, isMod := pyIsModule(t); isMod {
+			return "<module '" + rt.toString(mod.props["__pymod"]) + "' (built-in)>"
+		}
 		return rt.toString(v)
 	default:
 		if isCallable(v) {
@@ -3661,6 +3701,16 @@ func (rt *jsrt) pyFuncRender(v interface{}) string {
 	// receiver's ADDRESS in both forms; the address is its own and cannot be
 	// matched, so it is left off here exactly as it is for <function f> above.
 	if bi := pyBoundOf(v); bi != nil {
+		// An UNBOUND descriptor names the type it belongs to, in single quotes,
+		// and says "objects" plural - CPython's own spelling for list.count. A
+		// module-level builtin prints exactly like any other builtin function.
+		// docs/todo.md 1.7.
+		if bi.kind == "d" {
+			return "<method '" + bi.name + "' of '" + bi.typ + "' objects>"
+		}
+		if bi.kind == "m" {
+			return "<built-in function " + bi.name + ">"
+		}
 		if bi.fn == nil {
 			return "<built-in method " + bi.name + " of " + bi.typ + " object>"
 		}
@@ -4431,6 +4481,9 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		case "isEmpty":
 			return len(o) == 0
 		}
+		if v, ok := rt.mcallMiss(); ok {
+			return v
+		}
 		rt.fail("unknown String method: %s", name)
 	case *jsObject:
 		if keys, vals, isDict := dictParts(o); isDict {
@@ -4449,6 +4502,9 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 				}
 				return jsUndef
 			}
+			if v, ok := rt.mcallMiss(); ok {
+				return v
+			}
 			rt.fail("unknown dict method '%s'", name)
 		}
 		if cls, ok := o.props["__class"]; ok {
@@ -4463,10 +4519,16 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 				}
 				cls = clsObj.props["__super"]
 			}
+			if v, ok := rt.mcallMiss(); ok {
+				return v
+			}
 			rt.fail("unknown method '%s' on an instance", name)
 		}
 		if m, ok := o.props[name]; ok && isCallable(m) {
 			return rt.call(m, jsUndef, args)
+		}
+		if v, ok := rt.mcallMiss(); ok {
+			return v
 		}
 		rt.fail("unknown method '%s'", name)
 	case *jsGenerator:
@@ -4479,6 +4541,9 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		// and each language had to spell the call out as js_get + js_call.
 		if m := rt.getMember(o, name); isCallable(m) {
 			return rt.call(m, jsUndef, args)
+		}
+		if v, ok := rt.mcallMiss(); ok {
+			return v
 		}
 		rt.fail("unknown method '%s' on a generator", name)
 	case *jsArray:
@@ -4560,7 +4625,13 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 			}
 			return false
 		}
+		if v, ok := rt.mcallMiss(); ok {
+			return v
+		}
 		rt.fail("unknown list method '%s'", name)
+	}
+	if v, ok := rt.mcallMiss(); ok {
+		return v
 	}
 	rt.fail("method call '%s' on a %s", name, rt.typeOf(target))
 	return nil
@@ -5384,10 +5455,49 @@ func rubyExcIsA(v interface{}, bn string) bool {
 // rubyIsA is `v.is_a?(cls)` / `cls === v`: a builtin class matches by the value's
 // runtime kind (with Integer/Float also counting as Numeric and Comparable), a
 // compiled class by walking the instance's __class / __super chain.
+// rubyMixIsA is the mixin half of is_a?. ruby-to-llvm-ir.abnf FLATTENS `include M'
+// at build time - M's method bodies are re-emitted into the including class and the
+// module is never named again - so nothing at run time knew M was an ancestor and
+// `obj.is_a?(M)' / `case obj when M' were FALSE in both compiled halves while
+// ruby-interpreter.abnf, whose class objects carry a real __mixins list, was right.
+// The emitter now records the ancestry: `$mix$<Name>' -> the module object on every
+// class in the chain (include and prepend), `$xmix$<Name>' on the class OBJECT for
+// `extend M'. Identity, not the name, decides. Twin: rbMixIsA in
+// languages/lib/ruby-rt.metajs; emitMixRecord in the emitter. docs/todo.md 1.3.
+func rubyMixIsA(v interface{}, clsObj *jsObject) bool {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return false
+	}
+	nm, hasName := clsObj.props["__name"].(string)
+	if !hasName {
+		return false
+	}
+	if isCls, _ := o.props["__isclass"].(bool); isCls {
+		return o.props["$xmix$"+nm] == interface{}(clsObj)
+	}
+	key := "$mix$" + nm
+	c := o.props["__class"]
+	for guard := 0; guard < 64; guard++ {
+		co, isO := c.(*jsObject)
+		if !isO {
+			return false
+		}
+		if co.props[key] == interface{}(clsObj) {
+			return true
+		}
+		c = co.props["__super"]
+	}
+	return false
+}
+
 func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 	clsObj, ok := cls.(*jsObject)
 	if !ok {
 		return false
+	}
+	if rubyMixIsA(v, clsObj) {
+		return true
 	}
 	if bn, isBuiltin := clsObj.props["__rbuiltin"].(string); isBuiltin {
 		kind := rubyClassName(v)
@@ -5405,6 +5515,23 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 			return rubyIsNum(v)
 		case "Comparable":
 			return rubyIsNum(v) || kind == "String"
+		case "Class", "Module":
+			// `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in
+			// MRI, a Module is not a Class, and neither name means anything for a
+			// value that is not a class object. rubyClassName answers "" for one, so
+			// the kind == bn test above never fires here. docs/todo.md 1.3.
+			o, isObj := v.(*jsObject)
+			if !isObj {
+				return false
+			}
+			if isCls, _ := o.props["__isclass"].(bool); !isCls {
+				return false
+			}
+			if bn == "Module" {
+				return true
+			}
+			isMod, _ := o.props["__ismodule"].(bool)
+			return !isMod
 		case "Object", "BasicObject", "Kernel":
 			return true
 		case "Enumerable":
@@ -5430,6 +5557,126 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		}
 		return false
 	}
+}
+
+// ----- Module#ancestors and the module relational operators -----
+// Every one of these was missing from BOTH compiled halves (`unknown method
+// 'ancestors'' / 'include?'', and `A < M' raised *comparison of Object with Object
+// failed*) and answered [] in the interpreter half. They all read the same emitted
+// record rubyMixIsA reads. Twins: rbAncestors / rbModRel in
+// languages/lib/ruby-rt.metajs, ancestorsOf / modRel in ruby-interpreter.abnf.
+// docs/todo.md 1.3.
+func rubyIsClassObj(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	isCls, _ := o.props["__isclass"].(bool)
+	return o, isCls
+}
+
+func rubyRootAncestor(n string) bool {
+	return n == "Object" || n == "Kernel" || n == "BasicObject"
+}
+
+func rubyPushAll(out *jsArray, v interface{}) {
+	if a, isArr := v.(*jsArray); isArr {
+		out.elems = append(out.elems, a.elems...)
+	}
+}
+
+// The ancestor list in MRI's order: at each level the PREPENDED modules, then the
+// class itself, then the INCLUDED modules, then the superclass. A synthetic level
+// (the `X$core' a prepend introduces, the `X$builtin' shim an exception subclass
+// gets) is skipped - it is an artifact of the lowering and MRI has no name for it.
+// A builtin class ends the __super chain, so the walk continues by NAME through
+// rubyExcParent, which is where the builtin hierarchy lives.
+func (rt *jsrt) rubyAncestors(cls interface{}) *jsArray {
+	out := &jsArray{}
+	clsObj, isCls := rubyIsClassObj(cls)
+	if !isCls {
+		return out
+	}
+	c := interface{}(clsObj)
+	for guard := 0; guard < 64; guard++ {
+		co, isO := c.(*jsObject)
+		if !isO {
+			break
+		}
+		if synth, _ := co.props["__synth"].(bool); synth {
+			c = co.props["__super"]
+			continue
+		}
+		if _, isBuiltin := co.props["__rbuiltin"].(string); isBuiltin {
+			// Object / Kernel / BasicObject close EVERY class's list below, so the
+			// name chase stops before them rather than duplicating them.
+			for bn, _ := co.props["__name"].(string); bn != "" && !rubyRootAncestor(bn); bn = rubyExcParent[bn] {
+				out.elems = append(out.elems, rt.rubyBuiltinClass(bn))
+			}
+			break
+		}
+		rubyPushAll(out, co.props["__preorder"])
+		out.elems = append(out.elems, co)
+		rubyPushAll(out, co.props["__mixorder"])
+		c = co.props["__super"]
+	}
+	if isMod, _ := clsObj.props["__ismodule"].(bool); !isMod {
+		out.elems = append(out.elems, rt.rubyBuiltinClass("Object"),
+			rt.rubyBuiltinClass("Kernel"), rt.rubyBuiltinClass("BasicObject"))
+	}
+	return out
+}
+
+func (rt *jsrt) rubyAncestorHas(cls interface{}, m interface{}) bool {
+	if m == cls {
+		return false
+	}
+	for _, a := range rt.rubyAncestors(cls).elems {
+		if a == m {
+			return true
+		}
+	}
+	return false
+}
+
+// Module#< / #<= / #> / #>=: the ancestry relation, and NIL for two unrelated
+// modules - which is why these do not go through rubyCmp, whose contract is to raise.
+// rubyRel is what js_rlt / js_rgt / js_rle / js_rge do: the module relation when
+// both sides are class objects, the ordinary comparison otherwise.
+func (rt *jsrt) rubyRel(op string, l, r interface{}) uint64 {
+	_, lIsCls := rubyIsClassObj(l)
+	_, rIsCls := rubyIsClassObj(r)
+	if lIsCls && rIsCls {
+		return rt.wrap(rt.rubyModRel(l, r, op))
+	}
+	c := rt.rubyCmp(l, r)
+	switch op {
+	case "<":
+		return rt.wrap(c < 0)
+	case ">":
+		return rt.wrap(c > 0)
+	case "<=":
+		return rt.wrap(c <= 0)
+	}
+	return rt.wrap(c >= 0)
+}
+
+func (rt *jsrt) rubyModRel(l, r interface{}, op string) interface{} {
+	same := l == r
+	lIsR := rt.rubyAncestorHas(l, r)
+	rIsL := rt.rubyAncestorHas(r, l)
+	if !same && !lIsR && !rIsL {
+		return jsNull
+	}
+	switch op {
+	case "<":
+		return lIsR
+	case "<=":
+		return same || lIsR
+	case ">":
+		return rIsL
+	}
+	return same || rIsL
 }
 
 // rubyExc builds an exception instance: {__class: <class>, args: [message]}, the
@@ -7974,7 +8221,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return c
 			}
 		case "instance_of?":
-			return o.props["__class"] == argAt(args, 0)
+			// A class OBJECT has no __class slot, so this arm answered false for
+			// `A.instance_of?(Class)'; the __isclass block below owns that case.
+			if isCls, _ := o.props["__isclass"].(bool); !isCls {
+				return o.props["__class"] == argAt(args, 0)
+			}
 		case "is_a?", "kind_of?":
 			// rubyIsA, not a bare identity walk of __super. A builtin class object
 			// carries no __super (the hierarchy is rubyExcParent, by NAME), so the
@@ -8006,6 +8257,54 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			switch name {
 			case "name", "inspect":
 				return rt.rubyStr(o)
+			}
+			// The reflection surface. A user `def self.ancestors' still wins - the
+			// $s$ walk above runs first. docs/todo.md 1.3.
+			isMod, _ := o.props["__ismodule"].(bool)
+			switch name {
+			case "ancestors":
+				return rt.rubyAncestors(o)
+			case "include?":
+				return rt.rubyAncestorHas(o, argAt(args, 0))
+			case "class":
+				if isMod {
+					return rt.rubyBuiltinClass("Module")
+				}
+				return rt.rubyBuiltinClass("Class")
+			case "instance_of?":
+				a0, isObj0 := argAt(args, 0).(*jsObject)
+				if !isObj0 {
+					return false
+				}
+				bn, _ := a0.props["__rbuiltin"].(string)
+				if isMod {
+					return bn == "Module"
+				}
+				return bn == "Class"
+			case "superclass":
+				// Class#superclass skips the synthetic levels the lowering inserts,
+				// and a root class answers Object the way MRI does.
+				if isMod {
+					return jsNull
+				}
+				sup := o.props["__super"]
+				for guard := 0; guard < 64; guard++ {
+					so, isO := sup.(*jsObject)
+					if !isO {
+						break
+					}
+					if synth, _ := so.props["__synth"].(bool); !synth {
+						return so
+					}
+					sup = so.props["__super"]
+				}
+				switch nm, _ := o.props["__name"].(string); nm {
+				case "BasicObject":
+					return jsNull
+				case "Object":
+					return rt.rubyBuiltinClass("BasicObject")
+				}
+				return rt.rubyBuiltinClass("Object")
 			}
 		}
 		// Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
@@ -10439,6 +10738,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// The WRITE sibling of missMem: a hook of its own because node's two
 		// messages differ ("Cannot read properties of" / "Cannot set properties of").
 		"js_rt_missset": func(a []uint64) uint64 { rt.missSet = u(a[0]); return 0 },
+		// The CALL sibling, and a value rather than a closure: see the missCall
+		// field. docs/todo.md 1.4.
+		"js_rt_misscall": func(a []uint64) uint64 { rt.missCall = u(a[0]); return 0 },
 
 		"js_num_i": func(a []uint64) uint64 { // (i64 value) -> number handle
 			return rt.wrapNum(float64(int64(a[0])))
@@ -10577,6 +10879,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, append([]interface{}{u(a[1])}, args.elems...)))
 				}
 				cls = clsObj.props["__super"]
+			}
+			// The MISS SENTINEL, for a language that asked for one: node makes
+			// `super.zz()` an ordinary "is not a function" TypeError and the call
+			// site raises it. docs/todo.md 1.4.
+			if v, ok := rt.mcallMiss(); ok {
+				return w(v)
 			}
 			rt.fail("unknown super method '%s'", name)
 			return jsHUndefined
@@ -11116,10 +11424,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_req":   func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
 		"js_rne":   func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
-		"js_rlt":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) < 0) },
-		"js_rgt":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) > 0) },
-		"js_rle":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) <= 0) },
-		"js_rge":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) >= 0) },
+		// < > <= >= between two MODULES is the ancestry relation, not a value
+		// comparison: `A < M' after `include M' is true and `A < String' is NIL,
+		// where rubyCmp's contract is to raise. Both compiled halves raised
+		// *comparison of Object with Object failed* for all four. docs/todo.md 1.3.
+		"js_rlt": func(a []uint64) uint64 { return rt.rubyRel("<", u(a[0]), u(a[1])) },
+		"js_rgt": func(a []uint64) uint64 { return rt.rubyRel(">", u(a[0]), u(a[1])) },
+		"js_rle": func(a []uint64) uint64 { return rt.rubyRel("<=", u(a[0]), u(a[1])) },
+		"js_rge": func(a []uint64) uint64 { return rt.rubyRel(">=", u(a[0]), u(a[1])) },
 		"js_rcmp": func(a []uint64) uint64 { // <=>: nil when the two cannot be compared
 			c, ok := rt.rubySpaceship(u(a[0]), u(a[1]))
 			if !ok {
@@ -15998,10 +16310,26 @@ func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'super' object has no attribute '"+name+"'")})
 	}
+	// A staticmethod / classmethod found through super(). The owner a
+	// classmethod binds to is the ORIGINAL cls - `super().who()` inside C.who()
+	// must still pass C - and __sobj is exactly that when the frame's first
+	// argument was a class. docs/todo.md 1.7.
+	if pyDescKind(m) != "" {
+		return rt.pyDescGet(m, rt.pySuperOwner(s), name)
+	}
 	if isCallable(m) {
 		return rt.pyBindMethod(s.props["__sobj"], m, name)
 	}
 	return m
+}
+
+// pySuperOwner is the class a classmethod reached through super() binds to.
+func (rt *jsrt) pySuperOwner(s *jsObject) interface{} {
+	o := s.props["__sobj"]
+	if _, isCls := pyClassObj(o); isCls {
+		return o
+	}
+	return rt.pyBuiltinClass(pyTypeName(rt, o))
 }
 
 func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw interface{}) interface{} {
@@ -16010,6 +16338,10 @@ func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw in
 	if !found {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'super' object has no attribute '"+name+"'")})
+	}
+	if pyDescKind(m) != "" {
+		d := rt.pyDescGet(m, rt.pySuperOwner(s), name)
+		return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
 	}
 	if !isCallable(m) {
 		return rt.callPyValue(m, args, kw)
@@ -16077,6 +16409,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		// write: CPython qualifies only a NESTED class, and a nested `class` here
 		// is bound by the same name as a top-level one. docs/todo.md 1.4.
 		case "__name__", "__qualname__":
+			if n, ok := cls.props["__name"].(string); ok {
+				return pyShortName(n)
+			}
 			return cls.props["__name"]
 		case "__mro__":
 			return cls.props["__mro"]
@@ -16087,6 +16422,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return &jsArray{}
 		}
 		if v, found := pyLookup(cls, name); found {
+			// A staticmethod / classmethod read off the CLASS: the static one
+			// loses nothing, the class one binds to this very class.
+			// abnf/jsrtpydesc.go, docs/todo.md 1.7.
+			if pyDescKind(v) != "" {
+				return rt.pyDescGet(v, cls, name)
+			}
 			return v
 		}
 		// docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises. This
@@ -16107,6 +16448,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return v
 		}
 		if v, found := pyLookup(cls, name); found {
+			// staticmethod / classmethod, before every other arm: a static one
+			// must NOT pick up the instance as self, and a class one binds to
+			// the receiver's OWN class, so D().c() passes D. docs/todo.md 1.7.
+			if pyDescKind(v) != "" {
+				return rt.pyDescGet(v, cls, name)
+			}
 			if get, isDesc := pyIsDescriptor(v, "__get__"); isDesc {
 				return rt.call(get, jsUndef, []interface{}{v, obj, cls})
 			}
@@ -16119,9 +16466,32 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")})
 	}
+	// A MODULE object. `builtins.len` resolves through the module's own slot,
+	// which the emitter filled with the very binding the global name resolves
+	// to, so `builtins.len is len` holds rather than answering a copy; a math
+	// function becomes a first-class value the same way `re`'s constants already
+	// were readable. Ahead of the builtin arms because a module's own data slots
+	// (math.pi) must win. abnf/jsrtpydesc.go, docs/todo.md 1.7.
+	if mod, isMod := pyIsModule(obj); isMod {
+		if v, has := rt.pyModuleAttr(mod, name); has {
+			return v
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"module '"+rt.toString(mod.props["__pymod"])+"' has no attribute '"+name+"'")})
+	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
 	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
 		return m
+	}
+	// list.count / str.upper / dict.get read off the BUILTIN type object: an
+	// unbound method descriptor (docs/todo.md 1.7). It sits HERE rather than in
+	// the pyClassObj branch above because a builtin type object carries only a
+	// __name and no __mro, so pyClassObj declines it - which is also why
+	// dict.fromkeys is answered on this same line.
+	if tn, isType := rt.pyClassName(obj); isType {
+		if samp := pyDescTypeSample(tn); samp != nil && rt.pyBuiltinAttr(samp, name) {
+			return rt.pyUnboundDesc(obj.(*jsObject), name)
+		}
 	}
 	// A BOUND METHOD knows its own name, receiver and underlying function -
 	// docs/todo.md 1.4. Asked before the two name tables because a bound method
@@ -16135,8 +16505,23 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		case "__name__":
 			return bi.name
 		case "__qualname__":
+			// A module-level builtin's qualname is its bare name; the other two
+			// kinds are TYPE.NAME, which bi.typ already holds.
+			if bi.kind == "m" {
+				return bi.name
+			}
 			return bi.typ + "." + bi.name
+		case "__objclass__":
+			// CPython gives a method DESCRIPTOR no __self__ at all and offers
+			// __objclass__ instead. docs/todo.md 1.7.
+			if bi.kind == "d" {
+				return bi.self
+			}
 		case "__self__":
+			if bi.kind == "d" {
+				panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+					"'method_descriptor' object has no attribute '__self__'")})
+			}
 			return bi.self
 		case "__func__":
 			if bi.fn == nil {
@@ -16161,12 +16546,22 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// scope recorded at every def site in the emitter, the interpreter and layer
 	// 2; the bound-method arm above already answers 'C.m' because a bound method
 	// knows its receiver. docs/todo.md 1.4.
+	// len.__self__ is the builtins MODULE in CPython, not a receiver - the
+	// builtin functions are that module's members. docs/todo.md 1.7.
+	if name == "__self__" {
+		if _, isBuiltin := rt.pyBuiltinRender[obj]; isBuiltin {
+			return rt.pyBuiltinsModule()
+		}
+	}
 	if name == "__name__" || name == "__qualname__" {
 		// A synthetic class object for a BUILTIN type (what type(3) hands out)
 		// carries only its name, and a closure carries none of its own - the name
 		// its def bound it under was recorded by js_pyfnname.
 		if o, ok := obj.(*jsObject); ok {
 			if n, has := o.props["__name"]; has {
+				if ns, isStr := n.(string); isStr {
+					return pyShortName(ns)
+				}
 				return n
 			}
 		}
@@ -16190,6 +16585,14 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// class object type(x) hands out, so `[].__class__ is list` holds.
 	if name == "__class__" {
 		return rt.pyBuiltinClass(pyTypeName(rt, obj))
+	}
+	// CPython names a TYPE OBJECT differently from a value: "type object 'list'
+	// has no attribute 'nope'", not "'type' object has no attribute 'nope'".
+	// Both compiled halves used the value wording for a builtin type object -
+	// only the user-class arm above had the type wording. docs/todo.md 1.7.
+	if tn2, isType2 := rt.pyClassName(obj); isType2 {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"type object '"+tn2+"' has no attribute '"+name+"'")})
 	}
 	// docs/todo.md 1.4: an attribute a builtin value does NOT have raises, as
 	// CPython does. This used to fall into getMember and answer None - so
@@ -16335,6 +16738,19 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if sup, isSup := pySuperObj(target); isSup {
 		return rt.pySuperMCall(sup, name, args, kw)
 	}
+	// A METHOD CALL THROUGH A MODULE OBJECT - `builtins.len(xs)`, `math.sqrt(2)`
+	// once math's own dispatcher has declined. The member is read and called, so
+	// `builtins.len(xs)` and `builtins.len` answer the same function. It sits
+	// FIRST because a module holds arbitrary member names, one of which is
+	// literally `next`: without this the cursor and generator arms below would
+	// claim it. docs/todo.md 1.7.
+	if mod, isMod := pyIsModule(target); isMod {
+		if v, has := rt.pyModuleAttr(mod, name); has {
+			return rt.callPyValue(v, args, kw)
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"module '"+rt.toString(mod.props["__pymod"])+"' has no attribute '"+name+"'")})
+	}
 	// A CURSOR (iter(), map(), zip(), ...) is NOT a generator - here it never was,
 	// because the arm below is a real type test, but layer 2's pyIsGen is
 	// STRUCTURAL and answered true for one, so this arm exists to keep the three
@@ -16394,8 +16810,29 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
 		return rt.call(m, jsUndef, args)
 	}
+	// list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
+	// object rather than read as a value. The emitter routes a method call
+	// through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
+	// on both paths or the read works and the call says "unknown method".
+	// docs/todo.md 1.7.
+	if tn, isType := rt.pyClassName(target); isType {
+		if samp := pyDescTypeSample(tn); samp != nil && rt.pyBuiltinAttr(samp, name) {
+			if len(args) == 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"unbound method "+tn+"."+name+"() needs an argument")})
+			}
+			return rt.unwrap(rt.pyBoundBuiltinCall(args[0], name, args[1:]))
+		}
+	}
 	if cls, ok := pyClassObj(target); ok {
 		if m, found := pyLookup(cls, name); found {
+			// C.s(...) / C.c(...) on a staticmethod or classmethod: pyDescGet
+			// answers the very callable the attribute read hands back, so the
+			// call path and the read path cannot drift. docs/todo.md 1.7.
+			if pyDescKind(m) != "" {
+				d := rt.pyDescGet(m, cls, name)
+				return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
+			}
 			if isCallable(m) {
 				return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
 			}
@@ -16408,6 +16845,13 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw)) // A plain function in an attribute.
 		}
 		if m, found := pyLookup(cls, name); found {
+			// inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
+			// classmethod gets the receiver's OWN class - checked before the
+			// callable arm, which would otherwise prepend the instance.
+			if pyDescKind(m) != "" {
+				d := rt.pyDescGet(m, cls, name)
+				return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
+			}
 			if isCallable(m) {
 				self := append([]interface{}{target}, args...)
 				return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
@@ -17415,6 +17859,12 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		_, found := pyLookup(cls, name)
 		return found
 	}
+	// A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
+	// has to agree with what `math.sqrt` answers. docs/todo.md 1.7.
+	if mod, isMod := pyIsModule(obj); isMod {
+		_, has := rt.pyModuleAttr(mod, name)
+		return has
+	}
 	// docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).
 	if name == "__class__" || rt.pyBuiltinAttr(obj, name) {
@@ -17625,6 +18075,31 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if n := pyIterName(rt, t); n != "" {
 			return n
 		}
+		// A compiled regexp and a match object name their own CPython types, and
+		// the name is MODULE-QUALIFIED on purpose: this is the string an
+		// AttributeError interpolates, and CPython says "'re.Pattern' object has
+		// no attribute 'nope'". type(p).__name__ is the SHORT 'Pattern', which is
+		// why the __name__ arms below cut at the last dot (pyShortName).
+		// docs/todo.md 1.6 recorded this as declined, reasoning that one arm would
+		// trade one wrong answer for another; both strings are in fact reachable
+		// from the same one and differ only by that cut. The markers are the ones
+		// rxPyCompile and the match builder set in abnf/jsrtregexpy.go.
+		if _, isRe := t.props["__pyre"]; isRe {
+			return "re.Pattern"
+		}
+		if _, isM := t.props["__pymatch"]; isM {
+			return "re.Match"
+		}
+		// docs/todo.md 1.7: the two decorator wrappers and a module object are
+		// their own CPython types. abnf/jsrtpydesc.go mints the first two.
+		if k := pyDescKind(t); k == "s" {
+			return "staticmethod"
+		} else if k == "c" {
+			return "classmethod"
+		}
+		if _, isMod := t.props["__pymod"]; isMod {
+			return "module"
+		}
 		return "object"
 	case *jsGenerator:
 		// CPython's type(gen).__name__, and the name its AttributeError uses.
@@ -17634,6 +18109,11 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		// types, and the interpreter half already said 'type' for a class object
 		// where this one said 'object' - a live halves divergence.
 		if bi := pyBoundOf(v); bi != nil {
+			// An UNBOUND descriptor is its own CPython type; a module-level
+			// builtin and a bound builtin method share one. docs/todo.md 1.7.
+			if bi.kind == "d" {
+				return "method_descriptor"
+			}
 			if bi.fn == nil {
 				return "builtin_function_or_method"
 			}
@@ -17651,6 +18131,20 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		return "dict"
 	}
 	return "object"
+}
+
+// pyShortName is the last component of a possibly module-qualified type name.
+// __name__ and __qualname__ of a builtin type object are the SHORT name in
+// CPython (type(re.compile("a")).__name__ is "Pattern") while the type object
+// itself renders and reports as "re.Pattern". Keep in step with pyShortName in
+// languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
+func pyShortName(n string) string {
+	for i := len(n) - 1; i >= 0; i-- {
+		if n[i] == '.' {
+			return n[i+1:]
+		}
+	}
+	return n
 }
 
 // pyBuiltinClass hands out one stable class object per builtin type name, so

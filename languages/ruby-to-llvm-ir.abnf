@@ -5734,6 +5734,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var moduleDefs = {}       // module name -> instance method descriptors
     var moduleSDefs = {}      // module name -> descriptors callable ON the module
     var moduleConsts = {}     // module name -> the constant names its body assigns
+    // module name -> the module names ITS OWN body includes/prepends. Without this
+    // an `include' one level deep was invisible: `module P; include N; end; class C;
+    // include P; end' left C with none of N's methods and C.new.is_a?(N) false, in
+    // ALL THREE engines. mixAncestry closes over it. docs/todo.md 1.3.
+    var moduleIncludes = {}
 
     // A nested `class X ... end` / `module X ... end` reaches the enclosing module as
     // one opaque thunk, and the module has to publish it under its NAME. Tags run
@@ -5912,6 +5917,70 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (d == undefined) { return [] }
         return d
     }
+    function nameIn(list, n) {
+        for (var i = 0; i < list.length; i++) { if (list[i] == n) { return true } }
+        return false
+    }
+    // mixAncestry turns a SOURCE-ORDER list of mixed-in module names into Ruby's
+    // ancestor order - NEAREST FIRST - closed transitively over each module's own
+    // includes. `class C; include A; include B; end' where B includes N gives
+    // [B, N, A]: the LAST include is the closest ancestor, and a module's own
+    // includes sit behind it. The depth cap is the same guard the __class/__super
+    // walks use (manual 7.9): a cyclic include is not expressible in Ruby but a
+    // build-time recursion has to terminate anyway.
+    function mixAncestry(names, depth) {
+        var out = []
+        if (depth > 16) { return out }
+        for (var i = names.length - 1; i >= 0; i--) {
+            var n = names[i]
+            if (nameIn(out, n)) { continue }
+            out.push(n)
+            var inner = moduleIncludes["$" + n]
+            if (inner == undefined) { continue }
+            var sub = mixAncestry(inner, depth + 1)
+            for (var j = 0; j < sub.length; j++) {
+                if (!nameIn(out, sub[j])) { out.push(sub[j]) }
+            }
+        }
+        return out
+    }
+    // The method descriptors a whole ancestry contributes, in the order emitMethods
+    // wants them: FARTHEST ancestor first, because emitMethods js_sets in order and
+    // the last write wins.
+    function mixinDefsAll(anc) {
+        var out = []
+        for (var i = anc.length - 1; i >= 0; i--) {
+            var d = mixinDefs(anc[i])
+            for (var k = 0; k < d.length; k++) { out.push(d[k]) }
+        }
+        return out
+    }
+    // A mixed-in name is only RECORDED on the class object when there is an object
+    // to record: a compiled module, or one of the builtin class/module constants the
+    // prologue declares. Anything else (a module this compilation unit never saw)
+    // would make js_scope_get abort at run time on a program that works today.
+    function mixNameHasObject(n) {
+        if (moduleDefs["$" + n] != undefined) { return true }
+        if (classMethods["$" + n] != undefined) { return true }
+        return nameIn(rubyBuiltinClasses, n)
+    }
+    // Emit the `$mix$<Name>' markers and the __mixorder / __preorder lists that
+    // rbIsA / rubyIsA, Module#ancestors, Module#include? and Module#< all read.
+    // The compiler FLATTENS a mixin at build time (mixinDefsAll above), so without
+    // this record nothing at run time knew the module was ever there: `obj.is_a?(M)'
+    // and `case obj when M' were false in BOTH compiled halves and true in the
+    // interpreter, a live halves divergence. docs/todo.md 1.3.
+    function emitMixRecord(b, dstV, anc, slot, orderKey) {
+        var listV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < anc.length; i++) {
+            if (!mixNameHasObject(anc[i])) { continue }
+            var modV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, anc[i])])
+            callExt(b, "js_set", [dstV, emitStr(b, slot + anc[i]), modV])
+            callExt(b, "js_arr_push", [listV, modV])
+        }
+        callExt(b, "js_set", [dstV, emitStr(b, orderKey), listV])
+        return b
+    }
 
     function makeDefineMethod(items) {
         var name = items[0]
@@ -5947,27 +6016,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // (so the module wins). `include Comparable` has no compiled module behind
         // it; all it owes is #between?, since the runtime already compares through
         // <=>.
-        var own = []
-        var mi = 0
-        for (mi = 0; mi < r.includes.length; mi++) {
-            var idefs = mixinDefs(r.includes[mi])
-            for (var a1 = 0; a1 < idefs.length; a1++) { own.push(idefs[a1]) }
-            if (r.includes[mi] == "Comparable") { own.push(comparableBetween()) }
-        }
+        var incAnc = mixAncestry(r.includes, 0)
+        var preAnc = mixAncestry(r.prepends, 0)
+        var extAnc = mixAncestry(r.extends, 0)
+        var own = mixinDefsAll(incAnc)
+        if (nameIn(incAnc, "Comparable")) { own.push(comparableBetween()) }
         for (var a2 = 0; a2 < r.methods.length; a2++) { own.push(r.methods[a2]) }
         // The prepended methods sit on the CLASS itself while the class's own move
         // into a synthetic ancestor, which is how a `super` inside a prepended method
         // reaches the method it overrode.
-        var front = []
-        for (mi = 0; mi < r.prepends.length; mi++) {
-            var pdefs = mixinDefs(r.prepends[mi])
-            for (var a3 = 0; a3 < pdefs.length; a3++) { front.push(pdefs[a3]) }
-        }
-        var sdefs = []
-        for (mi = 0; mi < r.extends.length; mi++) {
-            var edefs = mixinDefs(r.extends[mi])
-            for (var a4 = 0; a4 < edefs.length; a4++) { sdefs.push(edefs[a4]) }
-        }
+        var front = mixinDefsAll(preAnc)
+        var sdefs = mixinDefsAll(extAnc)
         for (var a5 = 0; a5 < r.sdefs.length; a5++) { sdefs.push(r.sdefs[a5]) }
         var hasInit = false
         var mnames = []
@@ -6000,6 +6059,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 baseSet = true
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            // The mixin record. A prepended module is an ancestor IN FRONT of the
+            // class and an extended one belongs to the class OBJECT (`D.is_a?(M)'
+            // after `extend M'), so the three go in three slots.
+            b = emitMixRecord(b, clsV, incAnc, "$mix$", "__mixorder")
+            b = emitMixRecord(b, clsV, preAnc, "$mix$", "__preorder")
+            b = emitMixRecord(b, clsV, extAnc, "$xmix$", "__extorder")
             var savedCls = curClsName
             curClsName = name
             // A NESTED class or module is declared in the ENCLOSING scope, not inside the
@@ -6046,6 +6111,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var shimV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [shimV, emitStr(b, "__isclass"), hTrue])
                 callExt(b, "js_set", [shimV, emitStr(b, "__name"), emitStr(b, name + "$builtin")])
+                // Marked SYNTHETIC so Module#ancestors and Class#superclass step
+                // over it: it is an artifact of the lowering and MRI has no such
+                // level. docs/todo.md 1.3.
+                callExt(b, "js_set", [shimV, emitStr(b, "__synth"), hTrue])
                 callExt(b, "js_set", [shimV, emitStr(b, "__super"), baseV])
                 baseV = shimV
                 hasShim = true
@@ -6056,6 +6125,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var coreV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [coreV, emitStr(b, "__isclass"), hTrue])
                 callExt(b, "js_set", [coreV, emitStr(b, "__name"), emitStr(b, coreName)])
+                callExt(b, "js_set", [coreV, emitStr(b, "__synth"), hTrue])
                 if (baseSet) { callExt(b, "js_set", [coreV, emitStr(b, "__super"), baseV]) }
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"), coreV])
                 ownDstV = coreV
@@ -6148,7 +6218,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         moduleDefs["$" + name] = r.methods
         moduleSDefs["$" + name] = r.sdefs
         moduleConsts["$" + name] = r.consts
+        // A module may include another module, and a class including THIS one has to
+        // pick up both. The names are recorded here and closed over by mixAncestry
+        // at every including class - the module's own defs stay its own.
+        var minc = []
+        for (var q1 = 0; q1 < r.includes.length; q1++) { minc.push(r.includes[q1]) }
+        for (var q2 = 0; q2 < r.prepends.length; q2++) { minc.push(r.prepends[q2]) }
+        moduleIncludes["$" + name] = minc
+        var modAnc = mixAncestry(minc, 0)
+        var mixDefs = mixinDefsAll(modAnc)
         var mnames = []
+        for (var q3 = 0; q3 < mixDefs.length; q3++) { mnames.push(mixDefs[q3].name) }
         for (var m1 = 0; m1 < r.methods.length; m1++) { mnames.push(r.methods[m1].name) }
         classMethods["$" + name] = mnames
         var snames = []
@@ -6167,6 +6247,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
             callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV])
+            b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
             curClsName = name
             // A module body's statements (constants, nested classes and modules) run
@@ -6183,6 +6264,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
                 }
             }
+            b = emitMethods(b, modV, mixDefs, "", name, [])
             b = emitMethods(b, modV, r.methods, "", name, [])
             b = emitMethods(b, modV, r.sdefs, "$s$", name, [])
             for (var ai = 0; ai < r.aliases.length; ai++) {
@@ -6256,6 +6338,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "String", "Symbol", "Array", "Hash", "Range", "Proc", "NilClass", "TrueClass",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
         "Enumerator",
+        // Class and Module are what a class object and a module object ANSWER to
+        // #class, and `A.instance_of?(Class)' / `M.is_a?(Module)' are the ordinary
+        // way to ask. Without the names declared, both aborted with *variable not
+        // defined: Class*. docs/todo.md 1.3.
+        //
+        // THE PRICE OF THIS WHOLE ITEM, MEASURED. These two names cost every ruby
+        // program +10 IR lines in its prologue, and languages/lib/ruby-rt.ll grew
+        // 115,609 -> 117,637 for the reflection surface. Paired against a clean
+        // e89fd9e archive, 15 layout draws built to the same paths,
+        // tests/bench/mod.rb (which declares no class at all, so the mixin record
+        // itself costs it nothing): +0.41%, SLOWER IN 15 OF 15 PAIRS. Unanimous, so
+        // it is real and not a layout draw - but it is inside ruby's recorded 4.14%
+        // row spread and it is layer-2 SIZE, the arena-occupancy mechanism of
+        // docs/todo.md 2.9, not work in the loop. The 3.07% that a first cut cost
+        // WAS work in the loop, and is fixed - see js_rlt in
+        // languages/lib/ruby-rt.metajs.
+        "Class", "Module",
         // Math is a MODULE, and it belongs here for the same reason the classes do:
         // without it the name fell through to the ROOT scope's JavaScript Math, so
         // Math.sqrt(4) answered the integer 2 where Ruby answers 2.0, Math::PI

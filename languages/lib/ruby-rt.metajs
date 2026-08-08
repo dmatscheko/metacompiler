@@ -2599,8 +2599,36 @@ function rbExcIsA(v, bn) {
 // rubyIsA: `v.is_a?(cls)` / `cls === v`. A builtin class matches by the value's
 // runtime kind (Integer/Float also count as Numeric and Comparable), a compiled
 // class by walking the instance's __class / __super chain.
+// rbMixIsA: the mixin half of is_a?. The COMPILER FLATTENS `include M' at build
+// time - M's method bodies are re-emitted into the including class and the module
+// itself is never named again - so nothing at run time knew M was an ancestor and
+// `obj.is_a?(M)' / `case obj when M' were FALSE in both compiled halves and TRUE in
+// the interpreter, whose class objects carry a real __mixins list. The emitter now
+// records the ancestry: `$mix$<Name>' -> the module object on every class in the
+// chain (include and prepend), `$xmix$<Name>' on the class OBJECT for `extend M'.
+// Identity, not the name, decides. Twin: rubyMixIsA in abnf/jsrt.go;
+// emitMixRecord in languages/ruby-to-llvm-ir.abnf. docs/todo.md 1.3.
+function rbMixIsA(v, cls) {
+    if (!rbIsObj(v)) { return false }
+    var nm = cls["__name"]
+    if (typeof nm != "string") { return false }
+    if (v["__isclass"] === true) { return v["$xmix$" + nm] === cls }
+    var key = "$mix$" + nm
+    var c = v["__class"]
+    var guard = 0
+    while (rbIsObj(c) && guard < 64) {
+        if (c[key] === cls) { return true }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return false
+}
+
 function rbIsA(v, cls) {
     if (!rbIsObj(cls)) { return false }
+    // The `typeof' guard keeps the mixin walk off `1.is_a?(Integer)' entirely: only
+    // an object can carry a $mix$ record, and in MetaJS a call is a scope frame.
+    if (typeof v == "object" && rbMixIsA(v, cls)) { return true }
     var bn = cls["__rbuiltin"]
     if (typeof bn == "string") {
         var kind = rbClassName(v)
@@ -2610,6 +2638,15 @@ function rbIsA(v, cls) {
         if (bn == "Comparable") {
             if (rbIsNum(v)) { return true }
             return kind == "String"
+        }
+        // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in MRI,
+        // a Module is not a Class, and neither name means anything for a value that
+        // is not a class object at all. rbClassName answers "" for one, so the
+        // kind == bn test above never fires here. docs/todo.md 1.3.
+        if (bn == "Class" || bn == "Module") {
+            if (!rbIsObj(v) || v["__isclass"] !== true) { return false }
+            if (bn == "Module") { return true }
+            return v["__ismodule"] !== true
         }
         if (bn == "Object") { return true }
         if (bn == "BasicObject") { return true }
@@ -2628,6 +2665,81 @@ function rbIsA(v, cls) {
         c = c["__super"]
     }
     return false
+}
+
+// ----- Module#ancestors and the module relational operators -----
+// Every one of these was missing from BOTH compiled halves (`unknown method
+// 'ancestors'' / 'include?'', and `A < M' raised *comparison of Object with Object
+// failed*) and answered [] in the interpreter. They all read the same emitted
+// record rbMixIsA reads. Twins: rubyAncestors / rubyModRel in abnf/jsrt.go,
+// ancestorsOf / modRel in languages/ruby-interpreter.abnf. docs/todo.md 1.3.
+function rbIsClassObj(v) { return rbIsObj(v) && v["__isclass"] === true }
+
+function rbRootAncestor(n) { return n == "Object" || n == "Kernel" || n == "BasicObject" }
+
+function rbPushAll(out, arr) {
+    if (!rbIsArr(arr)) { return out }
+    for (var i = 0; i < arr.length; i++) { out.push(arr[i]) }
+    return out
+}
+
+// The ancestor list, in MRI's order: at each level the PREPENDED modules, then the
+// class itself, then the INCLUDED modules, then the superclass. A synthetic level
+// (the `X$core' a prepend introduces, the `X$builtin' shim an exception subclass
+// gets) is skipped - it is an artifact of the lowering and MRI has no name for it.
+// A builtin class ends the __super chain, so the walk continues by NAME through
+// rbExcParent, which is where the builtin hierarchy lives.
+function rbAncestors(cls) {
+    var out = []
+    if (!rbIsClassObj(cls)) { return out }
+    var c = cls
+    var guard = 0
+    while (rbIsObj(c) && guard < 64) {
+        guard = guard + 1
+        if (c["__synth"] === true) { c = c["__super"]; continue }
+        if (typeof c["__rbuiltin"] == "string") {
+            // Object / Kernel / BasicObject close EVERY class's list below, so the
+            // name chase stops before them rather than duplicating them.
+            var bn = c["__name"]
+            while (typeof bn == "string" && bn != "" && !rbRootAncestor(bn)) {
+                out.push(rbBuiltinClass(bn))
+                bn = rbExcParentOf(bn)
+            }
+            c = null
+            continue
+        }
+        rbPushAll(out, c["__preorder"])
+        out.push(c)
+        rbPushAll(out, c["__mixorder"])
+        c = c["__super"]
+    }
+    if (cls["__ismodule"] !== true) {
+        out.push(rbBuiltinClass("Object"))
+        out.push(rbBuiltinClass("Kernel"))
+        out.push(rbBuiltinClass("BasicObject"))
+    }
+    return out
+}
+
+function rbAncestorHas(cls, m) {
+    var anc = rbAncestors(cls)
+    for (var i = 0; i < anc.length; i++) {
+        if (anc[i] === m && m !== cls) { return true }
+    }
+    return false
+}
+
+// Module#< / #<= / #> / #>=: the ancestry relation, and NIL for two unrelated
+// modules - which is why these do not go through rbCmp, whose contract is to raise.
+function rbModRel(l, r, op) {
+    var same = l === r
+    var lIsR = rbAncestorHas(l, r)
+    var rIsL = rbAncestorHas(r, l)
+    if (!same && !lIsR && !rIsL) { return null }
+    if (op == "<") { return lIsR }
+    if (op == "<=") { return same || lIsR }
+    if (op == ">") { return rIsL }
+    return same || rIsL
 }
 
 // rubyExc: {__class: <class>, args: [message]}, the shape the message reader and
@@ -5060,7 +5172,9 @@ function rbMethod(target, name, args) {
             var c0 = target["__class"]
             if (c0 !== undefined) { return c0 }
         }
-        if (name == "instance_of?") { return target["__class"] === rbArgAt(args, 0) }
+        // A class OBJECT has no __class slot, so this arm answered false for
+        // `A.instance_of?(Class)'; the __isclass block below owns that case.
+        if (name == "instance_of?" && target["__isclass"] !== true) { return target["__class"] === rbArgAt(args, 0) }
         // rbIsA, not a bare identity walk of __super. A builtin class object carries
         // no __super (the hierarchy is a name table), so the walk alone answered
         // false for `raise "x" rescue e; e.is_a?(Exception)' and for every user
@@ -5089,6 +5203,35 @@ function rbMethod(target, name, args) {
             // Class#to_s already answered here: `Foo.inspect' and `Foo.name'
             // aborted this half while ruby-interpreter.abnf answered.
             if (name == "name" || name == "inspect") { return rbStr(target) }
+            // The reflection surface. A user `def self.ancestors' still wins - the
+            // $s$ walk above runs first. docs/todo.md 1.3.
+            if (name == "ancestors") { return rbAncestors(target) }
+            if (name == "include?") { return rbAncestorHas(target, rbArgAt(args, 0)) }
+            if (name == "class") {
+                if (target["__ismodule"] === true) { return rbBuiltinClass("Module") }
+                return rbBuiltinClass("Class")
+            }
+            // Class#superclass skips the synthetic levels the lowering inserts, and
+            // a root class answers Object the way MRI does.
+            if (name == "superclass") {
+                if (target["__ismodule"] === true) { return null }
+                var sup = target["__super"]
+                var sg = 0
+                while (rbIsObj(sup) && sup["__synth"] === true && sg < 64) {
+                    sup = sup["__super"]
+                    sg = sg + 1
+                }
+                if (rbIsObj(sup)) { return sup }
+                if (target["__rbuiltin"] === "BasicObject") { return null }
+                if (target["__name"] === "Object") { return rbBuiltinClass("BasicObject") }
+                return rbBuiltinClass("Object")
+            }
+            if (name == "instance_of?") {
+                var iof = rbArgAt(args, 0)
+                if (!rbIsObj(iof)) { return false }
+                if (target["__ismodule"] === true) { return iof["__rbuiltin"] === "Module" }
+                return iof["__rbuiltin"] === "Class"
+            }
         }
         // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
         // are ordinarily called without a receiver, but naming Kernel explicitly is
@@ -5274,10 +5417,33 @@ function js_rbnot(v) {
 
 function js_req(l, r) { return rbEq(l, r) }
 function js_rne(l, r) { return !rbEq(l, r) }
-function js_rlt(l, r) { return rbCmp(l, r) < 0 }
-function js_rgt(l, r) { return rbCmp(l, r) > 0 }
-function js_rle(l, r) { return rbCmp(l, r) <= 0 }
-function js_rge(l, r) { return rbCmp(l, r) >= 0 }
+// < > <= >= between two MODULES is the ancestry relation, not a value comparison:
+// `A < M' after `include M' is true and `A < String' is NIL, where rbCmp's contract
+// is to raise. Both compiled halves raised *comparison of Object with Object
+// failed* for every one of these. docs/todo.md 1.3.
+// The `typeof l == "object"' guard is NOT redundant with rbIsClassObj, it is the
+// whole cost of this arm: `while i < 40000' calls js_rlt once per iteration, and
+// in MetaJS A CALL IS A SCOPE FRAME (docs/todo.md 5.1). Two rbIsClassObj calls per
+// comparison measured ruby +3.07%, SLOWER IN 15 OF 15 PAIRS on tests/bench/mod.rb -
+// a paired sign test, not a layout draw. `typeof' is an operator, so a numeric
+// operand now short-circuits with no call at all and the row is back inside its
+// spread.
+function js_rlt(l, r) {
+    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, "<") }
+    return rbCmp(l, r) < 0
+}
+function js_rgt(l, r) {
+    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, ">") }
+    return rbCmp(l, r) > 0
+}
+function js_rle(l, r) {
+    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, "<=") }
+    return rbCmp(l, r) <= 0
+}
+function js_rge(l, r) {
+    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, ">=") }
+    return rbCmp(l, r) >= 0
+}
 
 // <=>: nil when the two cannot be compared.
 function js_rcmp(l, r) {

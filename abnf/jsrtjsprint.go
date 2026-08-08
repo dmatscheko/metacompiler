@@ -1459,6 +1459,29 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return rt.agObject(g)
 		}))
 	}
+	// The two RAW PREDICATES the call site uses to keep node's TypeErrors off the
+	// hot path (docs/todo.md 1.4). They answer 0 or 1 as a plain integer, never a
+	// handle, so the emitter can branch on the result with an icmp instead of
+	// paying js_typeof + js_seq - the two-extern shape the method-call arm above
+	// still uses. The layer-2 twins are js_jsfnp__raw / js_jsctorp__raw in
+	// languages/lib/js-rt.metajs, and the `__raw` suffix there is what makes them
+	// return the same plain integer instead of a boolean HANDLE (manual 7.1).
+	m["js_jsfnp"] = func(a []uint64) uint64 {
+		if isCallable(u(a[0])) {
+			return 1
+		}
+		return 0
+	}
+	// `new X` needs a class DESCRIPTOR - the {__isclass, __ctor, ...} object every
+	// emitted class is - and a non-constructor must not reach the __ctor read.
+	m["js_jsctorp"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok {
+			if _, has := o.props["__isclass"]; has {
+				return 1
+			}
+		}
+		return 0
+	}
 	baseGet := m["js_get"]
 	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
 	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site

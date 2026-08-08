@@ -10,6 +10,9 @@
 # byte-identical output on all four legs (interpreter/compiler x goja/-frozen)
 # mean everything passed.
 
+import math
+import re
+
 fails = [0]
 checks = [0]
 
@@ -1671,6 +1674,591 @@ check("builtin-str-map", str(map), "<class 'map'>")
 check("builtin-str-range", str(range), "<class 'range'>")
 check("builtin-str-type-name", str(str), "<class 'str'>")
 
+
+
+# ----- SECTION: Python's STATIC binding analysis (docs/todo.md 1.6) -----
+#
+# Every name a function body binds is a local for the WHOLE body, so a read
+# before the binding is an UnboundLocalError - and, crucially, does NOT fall
+# through to an enclosing binding of the same name. Before this section existed
+# `sb_shadow` below answered the string "global", in all three engines, which is
+# a silently wrong VALUE and not just a wrong error class.
+sb_global = "global"
+UNBOUND = "cannot access local variable"
+
+
+def sb_caught(f):
+    try:
+        f()
+        return "no-raise"
+    except UnboundLocalError as e:
+        return "UnboundLocalError " + ("yes" if UNBOUND in str(e) else "no")
+    except NameError as e:
+        return "NameError"
+
+
+def sb_read_before():
+    r = sb_global
+    sb_global = 1
+    return r
+
+
+def sb_augassign():
+    sb_aug += 1
+    return sb_aug
+
+
+def sb_branch(flag):
+    if flag:
+        q = 3
+    return q
+
+
+def sb_delete():
+    z = 1
+    del z
+    return z
+
+
+def sb_del_only():
+    del never_bound_here
+    return 1
+
+
+def sb_loopvar():
+    for k in []:
+        pass
+    return k
+
+
+def sb_except_as():
+    try:
+        raise ValueError("v")
+    except ValueError as sb_e:
+        pass
+    return sb_e
+
+
+def sb_nested_def():
+    r = sb_inner_fn
+    def sb_inner_fn():
+        pass
+    return r
+
+
+def sb_nested_class():
+    r = SbInner
+    class SbInner:
+        pass
+    return r
+
+
+def sb_tuple_target():
+    r = sb_t1
+    sb_t1, sb_t2 = 1, 2
+    return r
+
+
+def sb_annotation():
+    r = sb_ann
+    sb_ann: int = 3
+    return r
+
+
+def sb_match_capture():
+    r = sb_cap
+    match 1:
+        case sb_cap:
+            pass
+    return r
+
+
+def sb_walrus():
+    r = sb_w
+    if (sb_w := 2) > 1:
+        pass
+    return r
+
+
+def sb_typealias():
+    r = SbAlias
+    type SbAlias = int
+    return r
+
+
+check("sb-read-before", sb_caught(sb_read_before), "UnboundLocalError yes")
+check("sb-augassign", sb_caught(sb_augassign), "UnboundLocalError yes")
+check("sb-branch-not-taken", sb_caught(lambda: sb_branch(False)), "UnboundLocalError yes")
+check("sb-branch-taken", sb_branch(True), 3)
+check("sb-delete", sb_caught(sb_delete), "UnboundLocalError yes")
+check("sb-del-unbound", sb_caught(sb_del_only), "UnboundLocalError yes")
+check("sb-loopvar", sb_caught(sb_loopvar), "UnboundLocalError yes")
+check("sb-except-as", sb_caught(sb_except_as), "UnboundLocalError yes")
+check("sb-nested-def", sb_caught(sb_nested_def), "UnboundLocalError yes")
+check("sb-nested-class", sb_caught(sb_nested_class), "UnboundLocalError yes")
+check("sb-tuple-target", sb_caught(sb_tuple_target), "UnboundLocalError yes")
+check("sb-annotation", sb_caught(sb_annotation), "UnboundLocalError yes")
+check("sb-match-capture", sb_caught(sb_match_capture), "UnboundLocalError yes")
+check("sb-walrus", sb_caught(sb_walrus), "UnboundLocalError yes")
+check("sb-typealias", sb_caught(sb_typealias), "UnboundLocalError yes")
+
+# `global` and `nonlocal` take the name OUT of the local set again, so a read
+# before the assignment sees the outer binding exactly as CPython does.
+sb_g = "outer"
+
+
+def sb_uses_global():
+    global sb_g
+    r = sb_g
+    sb_g = "inner"
+    return r
+
+
+check("sb-global-declared", sb_uses_global(), "outer")
+check("sb-global-written", sb_g, "inner")
+
+
+def sb_nonlocal_outer():
+    n = "outer"
+
+    def inner():
+        nonlocal n
+        r = n
+        n = "inner"
+        return r
+
+    return [inner(), n]
+
+
+check("sb-nonlocal-declared", str(sb_nonlocal_outer()), "['outer', 'inner']")
+
+
+# A COMPREHENSION is its own scope, so its target is NOT a local of the function
+# around it - a bare read after it is a NameError, not an UnboundLocalError.
+def sb_comp_target():
+    r = [sb_ci for sb_ci in range(3)]
+    try:
+        return sb_ci
+    except NameError:
+        return "NameError " + str(r)
+
+
+check("sb-comp-target-not-local", sb_comp_target(), "NameError [0, 1, 2]")
+
+
+# A CLASS BODY compiles its reads as LOAD_NAME, so the same shape is a NameError
+# there and an UnboundLocalError in a function.
+sb_cls_probe = ["unset"]
+
+
+class SbClassBody:
+    try:
+        sb_cls_probe[0] = sb_cb
+    except NameError:
+        sb_cls_probe[0] = "NameError"
+    except UnboundLocalError:
+        sb_cls_probe[0] = "UnboundLocalError"
+    sb_cb = 1
+
+
+check("sb-class-body-is-nameerror", sb_cls_probe[0], "NameError")
+
+
+# A FREE variable of an enclosing function that never got a value is a NameError,
+# not an UnboundLocalError: the empty slot is not this frame's own. The old
+# interpreter walk answered UnboundLocalError here and both compiled halves
+# answered NameError - a live halves divergence `--cross` never reached.
+def sb_free_var():
+    def inner():
+        return sb_fv
+    try:
+        return inner()
+    except NameError as e:
+        return "NameError " + str(e)
+    sb_fv = 1
+
+
+check("sb-free-var-is-nameerror", sb_free_var(),
+      "NameError name 'sb_fv' is not defined")
+
+
+# `obj.attr = v` and `xs[0] = v` bind NOTHING, so the base name must stay a read
+# of the enclosing binding. Getting this wrong turns every attribute store in a
+# function into an UnboundLocalError.
+class SbHolder:
+    pass
+
+
+sb_holder = SbHolder()
+sb_holder.v = 1
+sb_list = [0]
+
+
+def sb_attr_store():
+    sb_holder.v = 2
+    sb_list[0] = 3
+    return [sb_holder.v, sb_list[0]]
+
+
+check("sb-attr-store-binds-nothing", str(sb_attr_store()), "[2, 3]")
+
+# An ordinary expression statement whose whole expression is a bare NAME must not
+# make that name a local - the parser tries Target three times on it before
+# ExprSmall reads it, and a tag on Target would have fired for all three.
+sb_bare = 7
+
+
+def sb_bare_expr_stmt():
+    sb_bare
+    sb_bare == 1
+    return sb_bare
+
+
+check("sb-bare-expression-statement", sb_bare_expr_stmt(), 7)
+
+
+# ----- SECTION: del obj.attr, and the re type names (docs/todo.md 1.6/1.7) ----
+class DelAttrHolder:
+    pass
+
+
+_dh = DelAttrHolder()
+_dh.gone = 1
+check("delattr-before", _dh.gone, 1)
+del _dh.gone
+check("delattr-after", hasattr(_dh, "gone"), False)
+
+_pat = re.compile("a(b)")
+_mat = _pat.match("ab")
+check("re-pattern-type-name", type(_pat).__name__, "Pattern")
+check("re-match-type-name", type(_mat).__name__, "Match")
+check("re-pattern-type-repr", repr(type(_pat)), "<class 're.Pattern'>")
+check("re-match-type-repr", repr(type(_mat)), "<class 're.Match'>")
+check_true("re-pattern-type-interned", type(_pat) is type(re.compile("z")))
+check("re-pattern-attr-error", it_denied(lambda: _pat.nope),
+      "'re.Pattern' object has no attribute 'nope'")
+check("re-match-attr-error", it_denied(lambda: _mat.nope),
+      "'re.Match' object has no attribute 'nope'")
+# A BUILTIN type object is interned in every engine, so `type(x) is type(y)`
+# holds. The interpreter half used to build a fresh one per call and answered
+# False - a live halves divergence.
+check_true("type-obj-interned-cursor", type(iter([1])) is type(iter([2])))
+check_true("type-obj-interned-builtin", type(len) is type(sorted))
+
+
+# ----- SECTION: the math module (docs/todo.md 1.7) -----
+mv = [2.0, -2.7, 0.5, 100.0, 8.0, 3.0, 4.0, 12.0, 18.0]
+check("math-pi", str(math.pi), "3.141592653589793")
+check("math-e", str(math.e), "2.718281828459045")
+check("math-tau", str(math.tau), "6.283185307179586")
+check("math-inf", str(math.inf), "inf")
+check("math-nan", str(math.nan), "nan")
+check("math-sqrt", math.sqrt(mv[0]), 1.4142135623730951)
+check("math-sqrt-is-float", str(math.sqrt(mv[6])), "2.0")
+check("math-floor-neg", math.floor(mv[1]), -3)
+check("math-ceil-neg", math.ceil(mv[1]), -2)
+check("math-trunc-neg", math.trunc(mv[1]), -2)
+check("math-floor-is-int", str(math.floor(mv[0])), "2")
+check("math-fabs-is-float", str(math.fabs(mv[1])), "2.7")
+check("math-pow-is-float", str(math.pow(mv[0], mv[4])), "256.0")
+check("math-exp", str(math.exp(0.0)), "1.0")
+check("math-log-e", str(math.log(math.e)), "1.0")
+check("math-log-base", str(math.log(mv[4], mv[0])), "3.0")
+check("math-log2", str(math.log2(mv[4])), "3.0")
+check("math-log10", str(math.log10(100.0)), "2.0")
+check("math-hypot", str(math.hypot(mv[5], mv[6])), "5.0")
+check("math-hypot3", str(math.hypot(mv[0], mv[0], mv[0] + 1.0)), "4.123105625617661")
+check("math-atan2", str(math.atan2(0.0, 1.0)), "0.0")
+check("math-sin0", str(math.sin(0.0)), "0.0")
+check("math-cos0", str(math.cos(0.0)), "1.0")
+check("math-tan0", str(math.tan(0.0)), "0.0")
+check("math-degrees", str(math.degrees(0.0)), "0.0")
+check("math-radians", str(math.radians(0.0)), "0.0")
+check("math-fmod", str(math.fmod(7.0, mv[5])), "1.0")
+check("math-fmod-neg", str(math.fmod(-7.0, mv[5])), "-1.0")
+check("math-copysign", str(math.copysign(1.0, -2.0)), "-1.0")
+check("math-copysign-negzero", str(math.copysign(1.0, 0.0 * -1.0)), "-1.0")
+check("math-gcd", math.gcd(12, 18), 6)
+check("math-gcd3", math.gcd(12, 18, 30), 6)
+check("math-lcm", math.lcm(4, 6), 12)
+check("math-lcm3", math.lcm(4, 6, 10), 60)
+check("math-factorial-5", math.factorial(5), 120)
+check("math-factorial-20", math.factorial(20), 2432902008176640000)
+# Past 20! the product leaves the exact-double range and finishes on the
+# arbitrary-precision integer, which is what makes this row exact.
+check("math-factorial-25", str(math.factorial(25)), "15511210043330985984000000")
+check("math-factorial-30", str(math.factorial(30)),
+      "265252859812191058636308480000000")
+check_true("math-isnan", math.isnan(math.nan))
+check("math-isnan-false", math.isnan(mv[0]), False)
+check_true("math-isinf", math.isinf(math.inf))
+check_true("math-isinf-neg", math.isinf(-math.inf))
+check_true("math-isfinite", math.isfinite(mv[0]))
+check("math-isfinite-inf", math.isfinite(math.inf), False)
+check_true("math-isclose", math.isclose(1.0, 1.0))
+check("math-isclose-nan", math.isclose(math.nan, math.nan), False)
+check_true("math-isclose-inf", math.isclose(math.inf, math.inf))
+check("math-expm1-0", str(math.expm1(0.0)), "0.0")
+check("math-log1p-0", str(math.log1p(0.0)), "0.0")
+
+
+def math_err(f):
+    try:
+        f()
+        return "no-raise"
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+# CPython 3.14's own texts, quoted from python3 rather than invented.
+check("math-sqrt-domain", math_err(lambda: math.sqrt(-1.0)),
+      "ValueError: expected a nonnegative input, got -1.0")
+check("math-log-domain", math_err(lambda: math.log(0.0)),
+      "ValueError: expected a positive input, got 0.0")
+check("math-log2-domain", math_err(lambda: math.log2(0.0)),
+      "ValueError: expected a positive input, got 0.0")
+check("math-log10-domain", math_err(lambda: math.log10(-1.0)),
+      "ValueError: expected a positive input, got -1.0")
+check("math-asin-domain", math_err(lambda: math.asin(2.0)),
+      "ValueError: expected a number in range from -1 up to 1, got 2.0")
+check("math-acos-domain", math_err(lambda: math.acos(-2.0)),
+      "ValueError: expected a number in range from -1 up to 1, got -2.0")
+check("math-log1p-domain", math_err(lambda: math.log1p(-1.0)),
+      "ValueError: expected argument value > -1, got -1.0")
+check("math-log-base-1", math_err(lambda: math.log(5.0, 1.0)),
+      "ZeroDivisionError: division by zero")
+check("math-floor-inf", math_err(lambda: math.floor(math.inf)),
+      "OverflowError: cannot convert float infinity to integer")
+check("math-floor-nan", math_err(lambda: math.floor(math.nan)),
+      "ValueError: cannot convert float NaN to integer")
+check("math-factorial-negative", math_err(lambda: math.factorial(-1)),
+      "ValueError: factorial() not defined for negative values")
+check("math-unknown-member", math_err(lambda: math.nope(1.0)),
+      "AttributeError: module 'math' has no attribute 'nope'")
+# OverflowError joined the builtin hierarchy with the math module, so it must
+# derive from ArithmeticError the way CPython's does.
+check_true("math-overflow-is-arithmetic",
+           issubclass(OverflowError, ArithmeticError))
+
+
+# ----- SECTION: staticmethod / classmethod (docs/todo.md 1.7) -----
+#
+# Both names were UNDEFINED in every engine, so a bare `@staticmethod` aborted
+# the run. They are descriptors: the decorator only wraps, and the unwrapping
+# happens at the class-member lookup - the one place that knows both the
+# receiver and its class. Every row below is a shape CPython 3.14.6 was asked
+# about directly.
+class SmShape:
+    kind = "shape"
+
+    def __init__(self, n):
+        self.n = n
+
+    @classmethod
+    def make(cls, n):
+        return cls(n)
+
+    @classmethod
+    def named(cls):
+        return cls.kind
+
+    @staticmethod
+    def helper(x):
+        return x * 10
+
+    def describe(self):
+        return self.kind + str(self.n)
+
+
+class SmCircle(SmShape):
+    kind = "circle"
+
+
+class SmSquare(SmShape):
+    kind = "square"
+
+    @classmethod
+    def named(cls):
+        return "sq:" + cls.kind
+
+
+# cls is the ACTUAL class of the receiver, which is what makes an alternative
+# constructor build the subclass rather than the base.
+check("sm-cls-is-receiver-base", type(SmShape.make(1)).__name__, "SmShape")
+check("sm-cls-is-receiver-sub", type(SmCircle.make(2)).__name__, "SmCircle")
+check("sm-classmethod-on-class", SmShape.named(), "shape")
+check("sm-classmethod-inherited", SmCircle.named(), "circle")
+check("sm-classmethod-overridden", SmSquare.named(), "sq:square")
+check("sm-classmethod-via-instance", SmCircle(1).named(), "circle")
+check("sm-classmethod-via-instance-sub", SmSquare(1).named(), "sq:square")
+# A staticmethod gets NO self, through the class or through an instance.
+check("sm-static-on-class", SmShape.helper(2), 20)
+check("sm-static-inherited", SmCircle.helper(3), 30)
+check("sm-static-via-instance", SmCircle(0).helper(4), 40)
+check("sm-ordinary-method-still-bound", SmCircle(5).describe(), "circle5")
+check("sm-static-via-getattr", getattr(SmShape, "helper")(1), 10)
+check("sm-static-via-getattr-instance", getattr(SmCircle(0), "helper")(2), 20)
+check("sm-classmethod-via-getattr", getattr(SmCircle, "named")(), "circle")
+check_true("sm-hasattr-static", hasattr(SmShape, "helper"))
+check_true("sm-hasattr-classmethod", hasattr(SmShape, "make"))
+check("sm-hasattr-absent", hasattr(SmShape, "nope"), False)
+
+
+# The BARE form, not the decorator - `f = staticmethod(g)` in a class body.
+class SmBare:
+    g = staticmethod(lambda a: a * 2)
+    h = classmethod(lambda cls, a: cls.__name__ + str(a))
+
+
+check("sm-bare-static-class", SmBare.g(3), 6)
+check("sm-bare-static-instance", SmBare().g(3), 6)
+check("sm-bare-classmethod-class", SmBare.h(4), "SmBare4")
+check("sm-bare-classmethod-instance", SmBare().h(4), "SmBare4")
+check("sm-wrapper-type-static", type(staticmethod(len)).__name__, "staticmethod")
+check("sm-wrapper-type-class", type(classmethod(len)).__name__, "classmethod")
+
+
+# super() inside a classmethod: the zero-argument form reads the frame's first
+# argument, which for a classmethod is the CLASS - and the ORIGINAL class, so
+# C.who() still passes C to the base implementation.
+class SmA:
+    @classmethod
+    def who(cls):
+        return "A:" + cls.__name__
+
+
+class SmB(SmA):
+    @classmethod
+    def who(cls):
+        return "B<" + super().who() + ">"
+
+
+class SmC(SmB):
+    pass
+
+
+check("sm-super-classmethod-base", SmA.who(), "A:SmA")
+check("sm-super-classmethod-mid", SmB.who(), "B<A:SmB>")
+check("sm-super-classmethod-leaf", SmC.who(), "B<A:SmC>")
+check("sm-super-classmethod-instance", SmC().who(), "B<A:SmC>")
+
+
+# cls.<attr> writes through to the class the call was made on - the shape an
+# alternative-constructor registry uses.
+class SmReg:
+    items = []
+
+    @classmethod
+    def add(cls, v):
+        cls.items.append(v)
+        return len(cls.items)
+
+
+check("sm-classmethod-mutates-class", SmReg.add(1), 1)
+check("sm-classmethod-mutates-class-2", SmReg.add(2), 2)
+check("sm-classmethod-state", str(SmReg.items), "[1, 2]")
+
+
+# ----- SECTION: unbound method descriptors (docs/todo.md 1.7) -----
+#
+# `list.count` read off the TYPE OBJECT is not a bound method: CPython answers
+# <method 'count' of 'list' objects>, a descriptor with no __self__ that takes
+# the receiver as its FIRST argument. Every engine raised "type object 'list'
+# has no attribute 'count'". The item named list.count; the whole family falls
+# out of one arm, because the per-type "is this one of my methods" tables are
+# the ones pyBuiltinAttr already had.
+check("desc-repr-list-count", repr(list.count), "<method 'count' of 'list' objects>")
+check("desc-repr-list-append", repr(list.append), "<method 'append' of 'list' objects>")
+check("desc-repr-list-sort", repr(list.sort), "<method 'sort' of 'list' objects>")
+check("desc-repr-str-upper", repr(str.upper), "<method 'upper' of 'str' objects>")
+check("desc-repr-str-replace", repr(str.replace), "<method 'replace' of 'str' objects>")
+check("desc-repr-dict-get", repr(dict.get), "<method 'get' of 'dict' objects>")
+check("desc-repr-dict-keys", repr(dict.keys), "<method 'keys' of 'dict' objects>")
+check("desc-repr-set-add", repr(set.add), "<method 'add' of 'set' objects>")
+check("desc-type-name", type(list.count).__name__, "method_descriptor")
+check("desc-name", list.count.__name__, "count")
+check("desc-qualname", list.count.__qualname__, "list.count")
+check_true("desc-objclass", list.count.__objclass__ is list)
+
+dsc_xs = [3, 1, 2]
+list.append(dsc_xs, 9)
+check("desc-call-append", str(dsc_xs), "[3, 1, 2, 9]")
+check("desc-call-count", list.count(dsc_xs, 9), 1)
+check("desc-call-index", list.index(dsc_xs, 2), 2)
+check("desc-call-str-replace", str.replace("aXbXc", "X", "-"), "a-b-c")
+check("desc-call-str-split", str.split("a b c")[1], "b")
+dsc_d = {"k": 1}
+check("desc-call-dict-get", dict.get(dsc_d, "k"), 1)
+check("desc-call-dict-get-default", dict.get(dsc_d, "z", 5), 5)
+check("desc-call-dict-keys", str(list(dict.keys(dsc_d))), "['k']")
+dsc_st = {1, 2}
+set.add(dsc_st, 3)
+check("desc-call-set-add", str(sorted(dsc_st)), "[1, 2, 3]")
+# A descriptor read off a value is still the BOUND builtin method, unchanged.
+check("desc-bound-still-bound", [1, 2, 2].count(2), 2)
+
+
+def desc_err(f):
+    try:
+        f()
+        return "no-raise"
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+check("desc-no-receiver", desc_err(lambda: list.count()),
+      "TypeError: unbound method list.count() needs an argument")
+check("desc-no-self-attr", desc_err(lambda: list.count.__self__),
+      "AttributeError: 'method_descriptor' object has no attribute '__self__'")
+# The TYPE-OBJECT wording, which CPython uses for a type and not for a value.
+# Every engine said "'type' object has no attribute 'nope'" here.
+check("desc-absent-name", desc_err(lambda: list.nope),
+      "AttributeError: type object 'list' has no attribute 'nope'")
+
+
+# ----- SECTION: the builtins module and module values (docs/todo.md 1.7) -----
+#
+# len.__self__ IS the builtins module in CPython, and `builtins.len is len`
+# holds - which is why the module's slots are filled from the very scope
+# bindings the global names resolve to rather than from copies.
+check("bi-module-repr", repr(builtins), "<module 'builtins' (built-in)>")
+check("bi-module-type", type(builtins).__name__, "module")
+check("bi-call-len", builtins.len([1, 2]), 2)
+check("bi-call-abs", builtins.abs(-3), 3)
+check("bi-call-sorted", str(builtins.sorted([2, 1])), "[1, 2]")
+check("bi-call-str", builtins.str(12), "12")
+check("bi-call-next", builtins.next(iter([7, 8])), 7)
+check_true("bi-identity-len", builtins.len is len)
+check_true("bi-identity-abs", builtins.abs is abs)
+check_true("bi-identity-exception", builtins.ValueError is ValueError)
+check_true("bi-identity-baseexception", builtins.BaseException is BaseException)
+check_true("bi-len-self", len.__self__ is builtins)
+check_true("bi-abs-self", abs.__self__ is builtins)
+check_true("bi-getattr", getattr(builtins, "len") is len)
+
+# A math member is now a FIRST-CLASS VALUE, not only something callable through
+# the module - `f = math.sqrt` used to raise.
+check("mv-type", type(math).__name__, "module")
+check("mv-repr-sqrt", repr(math.sqrt), "<built-in function sqrt>")
+check("mv-repr-isclose", repr(math.isclose), "<built-in function isclose>")
+check("mv-name", math.sqrt.__name__, "sqrt")
+check("mv-qualname", math.sqrt.__qualname__, "sqrt")
+check("mv-type-name", type(math.sqrt).__name__, "builtin_function_or_method")
+check_true("mv-self-is-module", math.sqrt.__self__ is math)
+mv_fns = [math.sqrt, math.floor, math.gcd, math.isnan]
+check("mv-call-sqrt", str(mv_fns[0](9.0)), "3.0")
+check("mv-call-floor", mv_fns[1](3.7), 3)
+check("mv-call-gcd", mv_fns[2](12, 18), 6)
+check("mv-call-isnan", mv_fns[3](1.0), False)
+check("mv-getattr", getattr(math, "sqrt")(16.0), 4.0)
+check_true("mv-hasattr", hasattr(math, "sqrt"))
+check("mv-hasattr-absent", hasattr(math, "nope"), False)
+check("mv-absent-name", desc_err(lambda: math.nope),
+      "AttributeError: module 'math' has no attribute 'nope'")
+# A MODULE is not a generator. The builtins module holds a member called `next`,
+# so layer 2's structural pyIsGen answered True for it and type(builtins) read
+# "generator" in the NATIVE binary alone - a divergence only an -exe run sees.
+check("mv-module-not-generator", type(builtins).__name__, "module")
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

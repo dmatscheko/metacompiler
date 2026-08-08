@@ -657,6 +657,17 @@ func init() {
 		basePyMcall := m["js_pymcall"]
 		m["js_pyrxmcall"] = func(a []uint64) uint64 {
 			target := u(a[0])
+			// The `math` module (abnf/jsrtpymath.go, docs/todo.md 1.7) rides the
+			// same dispatcher: it is the ONE extern the python emitter routes every
+			// method call through, and a module object is not an instance, a class,
+			// a dict or a list, so nothing further down pyMethodCall would find it.
+			if pyMathIsMod(target) {
+				arr, ok := u(a[2]).(*jsArray)
+				if !ok {
+					rt.fail("js_pyrxmcall args must be an array")
+				}
+				return w(rt.pyMathCall(rt.toString(u(a[1])), arr.elems))
+			}
 			if rxPyIsMod(target) || rxPyIsRe(target) || rxPyIsMatch(target) {
 				arr, ok := u(a[2]).(*jsArray)
 				if !ok {

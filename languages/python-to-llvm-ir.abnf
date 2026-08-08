@@ -355,7 +355,7 @@ For         <~~ push(makeFor(takeAll())) ~~>
             = [ "async" KwEnd ] "for" KwEnd TargetList "in" KwEnd ExprList Suite [ Else ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ "->" DiscardType ] Suite ;
+            = "def" KwEnd Id <~~ push(up.in); sbPush() ~~> [ TypeParams ] ParamList [ "->" DiscardType ] Suite ;
 // PEP 695 type parameters - def f[T](...) / class C[A, B] - parsed and ignored.
 TypeParams  = "[" TypeParam { "," TypeParam } [ "," ] "]" ;
 TypeParam   = [ "**" | "*" ] Id [ ":" DiscardType ] [ "=" DiscardType ] ;
@@ -398,7 +398,7 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // (js_pyclass_new), so multiple inheritance costs nothing at lookup time.
 // Keyword arguments (metaclass=...) parse and are ignored.
 Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
-            = "class" KwEnd Id <~~ push({cname: up.in}) ~~> [ TypeParams ]
+            = "class" KwEnd Id <~~ push({cname: up.in}); sbPush() ~~> [ TypeParams ]
               [ ClassBases ] Suite ;
 // The base list may be written across lines (`class C(unittest.TestCase,` / `  Mixin):`)
 // and may carry keyword arguments and a `**kwargs` spread (`class C[T](B, a=1, **kw)`),
@@ -753,7 +753,7 @@ Ternary     <~~ push(makeTernary(takeAll())) ~~>
 // `lambda a, /, b: ...` (positional-only marker) and `lambda a,: 0` (trailing comma) are
 // both legal and both appear in CPython's suite.
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
-            = "lambda" KwEnd [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
+            = "lambda" KwEnd <~~ sbPush() ~~> [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults,
 // *args and **kwargs work exactly like in def.
 LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
@@ -1441,6 +1441,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hitB = pyDelVarF.NewBlock("present")
             var tv = callExt(eb, "js_scope_typeof", [envP, nmP])
             eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            // Deleting a slot that is ALREADY empty raises, and the static binding
+            // analysis (docs/todo.md 1.6) is what makes that reachable: `def f():
+            // del x` now finds x's own empty local slot, where CPython says
+            // UnboundLocalError - not the NameError a name bound nowhere gets.
+            // py_getvar answers exactly that exception for exactly that slot, so
+            // the check is one call to it rather than a second copy of the
+            // local-vs-free reasoning.
             var msg = callExt(missB, "js_add",
                               [callExt(missB, "js_add", [emitStr(missB, "name '"), nmP]),
                                emitStr(missB, "' is not defined")])
@@ -1450,6 +1457,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(missB, "js_throw", [callExt(missB, "js_pycall", [clsV, ar, handle(0)])])
             missB.NewRet(handle(0))
             var dd = callExt(hitB, "js_scope_get", [envP, emitStr(hitB, "pydel*")])
+            pyGetVar(hitB, envP, nmP)
             callExt(hitB, "js_scope_set", [envP, nmP, dd])
             hitB.NewRet(handle(0))
         }
@@ -1633,6 +1641,89 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a def with a yield anywhere in it becomes a generator function.
     var sawYield = false
     var genClosure = false
+
+    // ----- Python's STATIC binding analysis (docs/todo.md 1.6) -----
+    //
+    // CPython decides a function's locals STATICALLY: every name the body binds is a
+    // local for the WHOLE body, so `def h(): print(w); w = 1` raises
+    // UnboundLocalError even when a global `w` exists. No engine here performed that
+    // analysis, and the damage was not just a wrong exception class - with an outer
+    // binding in scope the read SUCCEEDED and answered the outer value. All three
+    // engines agreed, so `--cross` was blind to it by construction.
+    //
+    // The set is collected at PARSE time here and seeded in emitClosure as the
+    // `pydel*` sentinel - the marker `del` already leaves in a slot - so py_getvar's
+    // existing "the slot is empty" arm raises the exception, with the
+    // local-vs-free distinction it already draws. languages/python-interpreter.abnf
+    // runs the identical collection (sbPush / sbPop / sbName / sbTarget /
+    // sbPattern) and seeds pyDeleted; the two must stay in step or the halves
+    // diverge.
+    //
+    // WHY THE COLLECTION IS IN THE make* FUNCTIONS AND NOT IN A TAG ON `Target`.
+    // AugAssign, AnnAssign and Assign each try `Target` first and then fail when the
+    // operator, the colon or the `=` does not follow, so the ordinary expression
+    // statement `x == 1` matches Target three times before ExprSmall reads it - and
+    // PEG never un-runs a tag. Every collector below sits in the tag of a production
+    // that has already succeeded in full. Comprehension targets fall out correctly
+    // for free: CompFor consumes its CompTarget itself and reaches no collector,
+    // which is right, because a comprehension is its own scope in CPython.
+    var sbFrames = []
+    function sbPush() { sbFrames.push({names: [], decl: []}) }
+    // The names of the frame just closed, de-duplicated, minus anything a `global`
+    // or `nonlocal` declaration in the same body claimed for another scope.
+    function sbPop() {
+        if (sbFrames.length == 0) { return [] }
+        var f = sbFrames.pop()
+        var out = []
+        for (var i = 0; i < f.names.length; i++) {
+            var n = f.names[i]
+            var skip = false
+            for (var d = 0; d < f.decl.length; d++) { if (f.decl[d] == n) { skip = true } }
+            for (var o = 0; o < out.length; o++) { if (out[o] == n) { skip = true } }
+            if (!skip) { out.push(n) }
+        }
+        return out
+    }
+    function sbName(n) {
+        if (sbFrames.length == 0) { return }
+        if (n == undefined || n == null || n == "") { return }
+        sbFrames[sbFrames.length - 1].names.push(n)
+    }
+    function sbDecl(n) {
+        if (sbFrames.length == 0) { return }
+        sbFrames[sbFrames.length - 1].decl.push(n)
+    }
+    // A target record is {name, path} for a reference, {tuple:[...]} for an unpacking
+    // pattern and {startgt} for a starred one. ONLY a bare name - an empty path -
+    // binds; `obj.attr = 1` binds nothing and must not make `obj` a local.
+    function sbTarget(t) {
+        if (t == undefined || t == null) { return }
+        if (t.tuple != undefined) {
+            for (var i = 0; i < t.tuple.length; i++) { sbTarget(t.tuple[i]) }
+            return
+        }
+        if (t.startgt != undefined) { sbTarget(t.startgt); return }
+        if (t.path != undefined && t.path.length == 0) { sbName(t.name) }
+    }
+    // A `match` case pattern binds by CAPTURE: a bare name, `... as n`, `*rest` and
+    // `**rest`, nested through sequence / or / class / map patterns.
+    function sbPattern(p) {
+        if (p == undefined || p == null) { return }
+        if (typeof p != "object") { return }
+        if (p.capture != undefined) { sbName(p.capture); return }
+        if (p.pstar != undefined) { sbName(stripWs(p.pstar).substring(1)); return }
+        if (p.asname != undefined && p.asname != null) { sbName(p.asname) }
+        if (p.por != undefined) { for (var i = 0; i < p.por.length; i++) { sbPattern(p.por[i]) } }
+        if (p.pseq != undefined) { for (var s = 0; s < p.pseq.length; s++) { sbPattern(p.pseq[s]) } }
+        if (p.pmap != undefined) {
+            for (var m = 0; m < p.pmap.length; m++) { sbPattern(p.pmap[m].mpat) }
+            if (p.prest != null) { sbName(p.prest) }
+        }
+        if (p.pcls != undefined) {
+            for (var g = 0; g < p.ppos.length; g++) { sbPattern(p.ppos[g]) }
+            for (var k = 0; k < p.pkw.length; k++) { sbPattern(p.pkw[k].cpat) }
+        }
+    }
 
     // ----- Numeric literals -----
     // numText strips the whitespace the literal rule's trailing skip picked up and
@@ -2446,6 +2537,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // assignment uses (so the scoping rule is identical) and leaves the value behind,
     // which is what makes it an expression.
     function makeWalrus(name, valT) {
+        sbName(name)
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -2575,6 +2667,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var heads = []
         var valT = items[items.length - 1]
         for (var i = 0; i < items.length - 1; i++) { heads.push(items[i].tlist) }
+        for (var s = 0; s < heads.length; s++) { sbTarget(heads[s]) }
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -2584,6 +2677,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeAugAssign(items) {
         var ref = items[0]
+        sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
         return function(b) {
@@ -2605,6 +2699,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // partly matched pattern may leave a binding behind, which PEP 634 allows.
     function makeCase(items) {
         var c3 = {pat: items[0], guard: null, body: items[items.length - 1]}
+        sbPattern(c3.pat)
         for (var i = 1; i < items.length - 1; i++) {
             if (items[i] != undefined && items[i].guard != undefined) { c3.guard = items[i].guard }
         }
@@ -2852,6 +2947,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // loop ran out on its own - break jumps past it, which is the whole point.
     function makeFor(items) {
         var tgt = items[0]
+        sbTarget(tgt)
         var listT = items[1]
         var bodyT = items[2]
         var elseT = null
@@ -3156,6 +3252,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // del a, b[i], c.x
     function makeDel(refs) {
+        // `del x` makes x a LOCAL of the enclosing function even if nothing else in
+        // the body binds it: CPython answers UnboundLocalError, not NameError.
+        for (var s = 0; s < refs.length; s++) { sbTarget(refs[s]) }
         return function(b) {
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
@@ -3257,6 +3356,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // assigned exactly like a plain assignment.
     function makeAnnAssign(items) {
         var ref = items[0]
+        // A bare annotation with no value still makes the name a local in CPython.
+        if (ref.path.length == 0) { sbName(ref.name) }
         var ann = null
         var valT = null
         for (var i = 1; i < items.length; i++) {
@@ -3282,6 +3383,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof items[i] == "function") { valT = items[i] }
             else if (items[i].tname != undefined) { name = items[i].tname }
         }
+        sbName(name)
         return function(b) {
             var alias = callExt(b, "js_pyclass_new", [emitStr(b, name), callExt(b, "js_arr_new", [])])
             var r = valT(b)
@@ -3322,6 +3424,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.estar != undefined) { cl.hstar = true }
             else if (it.etype != undefined) { cl.htype = it.etype }
         }
+        // `except E as e` binds e as an ordinary function local (and CPython deletes
+        // it again at the end of the handler, so reading it afterwards is an
+        // UnboundLocalError rather than a NameError - a live halves divergence
+        // before this pass existed).
+        sbName(cl.hname)
         return {excl: cl}
     }
     // handlerDepth is > 0 exactly while an except body is being EMITTED, which is
@@ -3489,6 +3596,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // context expression, bind the target to its value, then run the body.
     function makeWithItem(items) {
         var target = items.length > 1 ? items[1] : null
+        sbTarget(target)
         return {ctxitem: items[0], target: target}
     }
     // with EXPR [as T]: the real context-manager protocol. __enter__ runs before
@@ -3579,8 +3687,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ext = false
         if (nkwonly > 0) { ext = true }
         if (kwargs != null) { ext = true }
+        // `locals` is the STATIC binding analysis of the body this parameter list
+        // belongs to, filled in by makeDef / makeLambda once the body has parsed
+        // (sbPop) and read back by emitClosure.
         return {params: names, dflts: dflts, rest: rest, kwargs: kwargs,
-                nkwonly: nkwonly, ext: ext, complex: false}
+                nkwonly: nkwonly, ext: ext, complex: false, locals: []}
     }
     function makeNamedParam(items) {
         if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
@@ -3653,6 +3764,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else {
             curScopeV = pyOpenBoundary(fb, f.Params[0], false)
         }
+        // CPython's STATIC locals (docs/todo.md 1.6): every name the body binds owns
+        // a slot from the moment the frame exists, holding NOTHING. The `pydel*`
+        // sentinel IS that "slot exists and is empty" marker, so py_getvar's
+        // existing arm raises UnboundLocalError for a read of one - with the
+        // local-vs-free split it already draws, since these are declared in the
+        // BOUNDARY scope and js_scope_has(pyfn*, n) is therefore true here and false
+        // in any nested function that merely closes over the name. Seeded before the
+        // parameters, which then overwrite their own slots. A try/except/with body
+        // closure (isCtl) shares the function's frame and must not re-seed anything.
+        if (!isCtl) {
+            var lcs = plist.locals != undefined ? plist.locals : []
+            if (lcs.length > 0) {
+                var sentV = callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "pydel*")])
+                for (var L = 0; L < lcs.length; L++) {
+                    callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, lcs[L]), sentV])
+                }
+            }
+        }
         for (var i = 0; i < params.length; i++) {
             var argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
             if (i < dflts.length && dflts[i] != null) {
@@ -3722,6 +3851,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A def pushes {dname, dstmt}: the name is what a decorator chain rebinds.
     // js_pyfnname remembers it on the closure so f.__name__ can answer.
     function makeDef(bodyT, plist, name, pos) {
+        // The body's frame closes here; the def's own NAME binds in the scope
+        // AROUND it, so sbName runs after sbPop.
+        plist.locals = sbPop()
+        sbName(name)
         return {dname: name, dstmt: function(b) {
             var idx = emitClosure(plist, bodyT, false)
             var er = emitDefaultsEnv(b, plist)
@@ -3749,6 +3882,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (items[i].cbase != undefined) { bases.push(items[i].cbase) }
             else { bodyT = items[i] }
         }
+        // A CLASS BODY is a namespace, not a function frame: CPython compiles its
+        // reads as LOAD_NAME, so `class C: print(zz); zz = 1` is a NameError and not
+        // an UnboundLocalError. Its frame is closed and DISCARDED - only the class's
+        // own name binds in the scope around it.
+        sbPop()
+        sbName(name)
         return {dname: name, dstmt: function(b) {
             var basesV = callExt(b, "js_arr_new", [])
             for (var j = 0; j < bases.length; j++) {
@@ -3815,6 +3954,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // later js_pyset_var lands there. nonlocal NAME: js_pynonlocal requires an
     // enclosing non-root binding (a runtime error otherwise).
     function makeGlobal(names, pos) {
+        for (var s = 0; s < names.length; s++) { sbDecl(names[s]) }
         return function(b) {
             for (var i = 0; i < names.length; i++) {
                 pyGlobal(b, curScopeV, emitStr(b, names[i]))
@@ -3823,6 +3963,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function makeNonlocal(names, pos) {
+        for (var s = 0; s < names.length; s++) { sbDecl(names[s]) }
         return function(b) {
             for (var i = 0; i < names.length; i++) {
                 pyNonlocal(b, curScopeV, emitStr(b, names[i]))
@@ -3834,6 +3975,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lambda: an own IR function like def, but the body is a single expression
     // whose value is returned; the lambda expression's value is the closure.
     function makeLambda(exprT, plist, pos) {
+        plist.locals = sbPop()
         return function(b) {
             var idx = emitClosure(plist, function(fb) {
                 var r = exprT(fb)
@@ -3903,7 +4045,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyClassBuiltin["$" + name] == true) { return "*" + name }
         return name
     }
+    // Every name declBind has bound, in order, so the `builtins` module object
+    // can be filled from the very scope bindings the global names resolve to -
+    // which is what makes `builtins.len is len` hold rather than answering a copy
+    // (docs/todo.md 1.7).
+    var pyBuiltinNameList = []
     function declBind(b, name, cloV) {
+        pyBuiltinNameList.push(name)
         if (pyTypeBuiltin["$" + name] == true) {
             var cls = callExt(b, "js_pybuiltincls", [emitStr(b, name)])
             callExt(b, "js_set", [cls, emitStr(b, "__conv"), cloV])
@@ -3996,6 +4144,36 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
         // dispatches re.search(...) on it (abnf/jsrtregexpy.go).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "re"), callExt(b, "js_pyre_module", [])])
+        // The `math` module, bound the same way and for the same reason
+        // (docs/todo.md 1.7): `import math` binds nothing in this flat import
+        // model, so the module object is simply always there. js_pygetattr reads
+        // math.pi / math.inf straight out of it and js_pyrxmcall dispatches
+        // math.sqrt(2) on it - abnf/jsrtpymath.go for the Go twin,
+        // js_pymath_module in languages/lib/python-rt.metajs for the native build.
+        // ----- `open` and file I/O: DECLINED, and this is the reason ------------
+        //
+        // docs/todo.md 1.7 lists `open` beside `math`. It is not implemented, and the
+        // decision is a measurement rather than a preference: THERE IS NO FILE I/O
+        // PRIMITIVE ANYWHERE IN THIS PROJECT'S RUNTIME. languages/lib/runtime.c
+        // declares exactly putchar, write(2), malloc, exit, getenv, setjmp/longjmp,
+        // pthread and dlopen/dlsym - no open/read/close - and `nm -u` on any native
+        // binary showing libc and nothing else is a property the manual states in
+        // chapter 1. c.readFile IS in the grammar host, but it is the COMPILE-time
+        // import reader, not something an interpreted program can reach.
+        //
+        // So `open` is not a builtin to add; it is a new capability across four
+        // engines: three libc declarations plus a file-handle tag in runtime.c, an
+        // os.File-backed Go type in the twin, a MetaJS layer-2 object, a host global
+        // in metajs-interpreter.abnf (manual 7.2: a host global means THREE engines,
+        // and abnf/hostglobals_test.go pins the set), and then the whole file-object
+        // surface - read/readline/readlines/write/close, iteration, and the context
+        // manager - before one realistic program works. The test suite could not
+        // assert on it either without fixtures the matrix has no mechanism for.
+        //
+        // `open(...)` therefore raises the catchable NameError any unbound name gets
+        // (d0f4db3), which is a truthful answer. Saying so here is worth more than a
+        // fake `open` that pretends to read.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "math"), callExt(b, "js_pymath_module", [])])
         b = declBuiltin(b, "str", "js_pyrxstr", 1)
         b = declBuiltin(b, "int", "js_pyint", 1)
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
@@ -4060,6 +4238,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO
         // engine while the attribute worked in all three. docs/todo.md 1.8.
         b = declBuiltin(b, "vars", "js_pyvars", 1)
+        // staticmethod / classmethod (docs/todo.md 1.7). Both were undefined in
+        // every engine, so a bare `@staticmethod` aborted the run. The builtin
+        // only WRAPS; the unwrapping happens at the class-member lookup, which is
+        // the one place that knows both the receiver and its class - see
+        // abnf/jsrtpydesc.go and pyDDescGet in languages/lib/python-rt.metajs.
+        b = declBuiltin(b, "staticmethod", "js_pystaticmethod", 1)
+        b = declBuiltin(b, "classmethod", "js_pyclassmethod", 1)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
         // only reaches the eight that convert, so `class C(object)`, `type(None)
@@ -4112,13 +4297,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "NameError", "StopIteration", "ArithmeticError", "LookupError",
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
-                        "NotImplementedError"]
+                        "NotImplementedError", "OverflowError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
         excParent["KeyError"] = "LookupError"
         excParent["UnboundLocalError"] = "NameError"
         excParent["NotImplementedError"] = "RuntimeError"
+        // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
+        // integral answer does not exist rather than being out of domain.
+        excParent["OverflowError"] = "ArithmeticError"
         var excMade = {}
         for (var e0 = 0; e0 < excNames.length; e0++) {
             var eBases = callExt(b, "js_arr_new", [])
@@ -4129,6 +4317,47 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             excMade[excNames[e0]] = eCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
+        // ----- the `builtins` module (docs/todo.md 1.7) ---------------------
+        //
+        // CPython's len.__self__ IS the builtins module, and `builtins.len is
+        // len` holds. Both fall out of ONE object filled here, AFTER every
+        // builtin and every exception class has been declared, by reading each
+        // name back out of the scope - so the module's slot holds the identical
+        // value the bare name resolves to, not a copy. The read side is the
+        // module arm of pyGetAttr (abnf/jsrtpydesc.go's pyModuleAttr and
+        // pyGetAttr in languages/lib/python-rt.metajs).
+        // WHAT THIS SECTION COSTS, MEASURED, so the next person does not re-derive
+        // it (docs/todo.md 2.9 asks for exactly this beside the row):
+        //
+        //                      collections   live      heap        module bytes
+        //   e89fd9e base       3574          243712    11627376    47250
+        //   ungated fill       3574          252752    12675952    65976   <- +1 chunk
+        //   gated (this)       3574          250928    11627376    49400
+        //
+        // `collections` is IDENTICAL in all three, so nothing new is EXECUTED in
+        // the benchmark loop; the ungated version stepped the arena by a whole
+        // 1 MiB chunk on module text alone, which is the tax 2.9 warns about and
+        // is why the fill is gated. What remains is a 3.0% larger LIVE SET, which
+        // the collector marks on each of the 3,574 sweeps: tests/bench.sh
+        // --paired against a clean archive of the base reads python +0.55%,
+        // slower in 8 of 9 pairs, with all thirteen other languages at 0.00% as
+        // controls. That is the honest price of the module and descriptor
+        // surface, and it is a marking cost, not an arena step and not new work.
+        var bmodV = callExt(b, "js_pybuiltins_module", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "builtins"), bmodV])
+        if (pySawBuiltins) {
+        for (var bn0 = 0; bn0 < pyBuiltinNameList.length; bn0++) {
+            var bnm = pyBuiltinNameList[bn0]
+            callExt(b, "js_set", [bmodV, emitStr(b, bnm),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, bnm)])])
+        }
+        for (var be0 = 0; be0 < excNames.length; be0++) {
+            callExt(b, "js_set", [bmodV, emitStr(b, excNames[be0]), excMade[excNames[be0]]])
+        }
+        callExt(b, "js_set", [bmodV, emitStr(b, "Exception"), excBase])
+        callExt(b, "js_set", [bmodV, emitStr(b, "BaseException"), excRoot])
+        }
+
         // ----- the recoverable-name hook (docs/todo.md 3.2) -----------------
         //
         // Reading a name that is nowhere bound was an UNCATCHABLE abort in both
@@ -4200,7 +4429,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // scope_get knows nothing about. core.scopeGetExt names an EXTERN and py_getvar
     // is an emitted IR function, so makeVarRef (lib/compile-core.js) is overridden
     // here instead - the same move swift and dart made for js_kget.
+    // Did the program ever NAME `builtins`? The module object itself is cheap and
+    // is always built (len.__self__ is it), but FILLING it is one js_set per
+    // builtin and per exception class - about 19 KB of module text, which is
+    // enough to step tests/bench/mod.py's arena by a whole chunk for a program
+    // that never mentions the module (docs/todo.md 2.9). The tags run at parse
+    // time and the boot block is emitted afterwards, so the answer is known
+    // before it is needed. `import builtins` also sets it, in ImportMod.
+    var pySawBuiltins = false
     makeVarRef = function(name) {
+        if (name == "builtins") { pySawBuiltins = true }
         // ----- super() -----
         //
         // CPython's zero-argument super() is compiler magic and this is the same
@@ -4236,7 +4474,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (prefix match, so os.path
     // resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and

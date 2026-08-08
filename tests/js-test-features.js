@@ -508,6 +508,33 @@ check("bigint-mix-catchable", (function() {
 })() === true);
 check("bigint-after-catch", 1n + 1n === 2n);
 
+// ----- calling a non-function is a catchable TypeError (docs/todo.md 1.4) -----
+// `xs[1]()` with undefined in the slot used to END THE PROGRAM in all three
+// engines, each with its own wording. node's message is the callee's SOURCE TEXT,
+// which the grammars now render at parse time; the runtime only reports that
+// nothing claimed the call (js_rt_misscall, the fourth js_rt_miss* hook).
+check("noncall-index", (function() {
+    var xs = [1, undefined];
+    try { xs[1](); return "no"; } catch (e) { return (e instanceof TypeError) + "|" + e.message; }
+})() === "true|xs[1] is not a function");
+check("noncall-member", (function() {
+    var o = {a: 1};
+    try { o.nope(); return "no"; } catch (e) { return e.message; }
+})() === "o.nope is not a function");
+check("noncall-plain", (function() {
+    var vs = [7]; var n = vs[0];
+    try { n(); return "no"; } catch (e) { return e.message; }
+})() === "n is not a function");
+check("noncall-new", (function() {
+    var vs = [7]; var n = vs[0];
+    try { new n(); return "no"; } catch (e) { return e.message; }
+})() === "n is not a constructor");
+check("noncall-continues", (function() {
+    var xs = [1, undefined]; var k = 0;
+    for (var i = 0; i < 3; i++) { try { xs[1](); } catch (e) { k = k + 1; } }
+    return k;
+})() === 3);
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

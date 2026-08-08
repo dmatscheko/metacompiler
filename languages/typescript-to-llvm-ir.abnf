@@ -313,7 +313,7 @@ DecoratedDecl <~~ push(makeDecoratedClass(takeAll())) ~~>
 Decorator   <~~ push({deco: pop()}) ~~>
             = "@" DecoExpr ;
 DecoExpr    <~~ push(foldCallMember(takeAll())) ~~>
-            = DecoBase { DotSuffix | CallSuffix } ;
+            = DecoBase <~~ push({ptxt: up.in}) ~~> { DotSuffix | CallSuffix } ;
 DecoBase    = "(" Expression ")" | DecoName ;
 DecoName    <~~ push(makeSoftVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
@@ -648,7 +648,7 @@ TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" { TargetSuffix } ;
 TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
-            = Primary TargetSuffix { TargetSuffix } ;
+            = Primary <~~ push({ptxt: up.in}) ~~> TargetSuffix { TargetSuffix } ;
 TargetSuffix = CallSuffix | DotSuffix | IndexSuffix | NonNullSfx ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
@@ -815,7 +815,7 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // nothing at all and so are the identity at run time, transparent to foldCallMember.
 // The '!' carries a negative lookahead, so it is never stolen from '!=' / '!=='.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix
+            = Primary <~~ push({ptxt: up.in}) ~~> { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix
                       | AsCast | SatisfiesCast | NonNullSfx } ;
 AsCast      = KwAs ( "const" KwEnd | Type ) ;
 SatisfiesCast = KwSatisfies Type ;
@@ -831,25 +831,25 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
 // same way the TypeScript compiler resolves this ambiguity.
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", key: makeConst(idName(up.in))}) ~~> ) ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ) ;
 // 'this.#x': a private name. It is stored under the mangled key '__#x' (see ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
-PrivSuffix  = "#" Id <~~ push({kind:"member", key: makeConst(privName(idName(up.in)))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
+PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: makeConst(privName(idName(up.in)))}) ~~> ;
+IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
 OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"optmember", key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"optmember", txt: up.in, key: pop()}) ~~>
             = "?." "[" Expression "]" ;
-OptDotSuffix = "?." Id <~~ push({kind:"optmember", key: makeConst(idName(up.in))}) ~~> ;
+OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivSuffix. It must use the SAME mangled
 // key privName builds ('__#x'), not a raw '#x': the field is stored under the mangled
 // name, and a key that only carries the marker reads a slot that was never written.
 // Tried before the plain form, whose Id cannot start at a '#'.
-OptPrivateSuffix <~~ push({kind:"optmember", key: makeConst(privName(pop()))}) ~~>
+OptPrivateSuffix <~~ push(privSuffixOpt(pop())) ~~>
             = "?." "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // A call/array/new argument. The spread form (...expr) pushes a marker instead of a
@@ -884,12 +884,12 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
 // argument list at all - are ACCEPTED but not lowered (makeNew only knows 'new C(args)').
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
-            = KwNew NewCallee [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
+            = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // The suffix chain belongs to the CALLEE ('new a.b.C()' constructs a.b.C), and it must
 // not contain a call: 'new f()' is the construction, not a call of f whose result is
 // constructed. Every seed therefore shares one member-only chain.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef ;
 
 // super.x / super[i] as a VALUE (SuperCall above covers the call forms): accepted,
@@ -2539,6 +2539,43 @@ NotFuncHead = :script(~~
     // Emitted ONLY when -exe is building a binary, so the module llvm.Run sees is
     // byte-for-byte the one it always was and nothing in the matrix moves.
     var nativeBuild = (c.exePath != undefined && c.exePath != "")
+    // ----- calling a non-function, docs/todo.md 1.4 ----------------------------
+    //
+    // `xs[1]()` with undefined in the slot is a catchable TypeError in node and was
+    // an UNCATCHABLE ABORT in all three engines here, worded differently in each:
+    // *call of a non function value (method '1')* in the interpreter, *unknown list
+    // method '1'* under llvm.Run and *unknown method '1' on object* natively. The
+    // floor's js_call (die2) is shared by every language's layer-2 internals and
+    // must keep aborting, so the check is made HERE, at the js/ts call site, where
+    // the callee's source text is known and the whole message is a constant:
+    //
+    //   js_jsfnp   raw 0/1, "is this value callable" - one extern on the taken path
+    //   badB       three instructions, never executed unless the call really fails
+    //
+    // js_jserrmk builds the very TypeError class emitErrorClasses registered, so
+    // `e instanceof TypeError` answers and a plain try/catch recovers.
+    function emitSiteThrow(bb, msg) {
+        callExt(bb, "js_throw", [callExt(bb, "js_jserrmk", [emitStr(bb, "TypeError: " + msg)])])
+        bb.NewRet(hUndef) // Never reached: js_throw does not return.
+    }
+    function jsCallChecked(b, fnV, thisV, argsV, site) {
+        var okB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsfnp", [fnV]), handle(0)), okB, badB)
+        emitSiteThrow(badB, site + " is not a function")
+        return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
+    }
+    // The MISS SENTINEL js_jsmcall answers when no arm claimed a method call. It is
+    // one pinned object made in the boot block, so the same handle in both engines
+    // (abnf/jsrt.go gives a *jsObject a stable id), which is what lets the call site
+    // compare it with a raw icmp instead of a js_seq call. Held in an array because a
+    // grammar-script global may not change type between the two script hosts.
+    var mcallMissGH = []
+    function mcallMissGlob() {
+        if (mcallMissGH.length == 0) { mcallMissGH.push(m.NewGlobalDef("jsmcallmiss", llvm.constant.NewInt(i64, 0))) }
+        return mcallMissGH[0]
+    }
+
     function jsCall(b, fnV, thisV, argsV) {
         if (nativeBuild) { callExt(b, "js_jssetthis", [thisV]) }
         return callExt(b, "js_call", [fnV, thisV, argsV])
@@ -3650,10 +3687,113 @@ NotFuncHead = :script(~~
     // into a single phi at the END of the chain, instead of merging step by step.
     // The nullish test is the loose equality with null, which is true for exactly null
     // and undefined.
+    // ===== THE CALLEE TEXT OF A CALL SITE - docs/todo.md 1.4 ====================
+    //
+    // node's message for calling a non-function is the callee's SOURCE TEXT:
+    //
+    //   xs[1]()     TypeError: xs[1] is not a function
+    //   o.nope()    TypeError: o.nope is not a function
+    //   new n()     TypeError: n is not a constructor
+    //
+    // V8 recovers it by re-printing the AST of the call site (CallPrinter), so it is
+    // NOT derivable from any runtime value: `xs[1]` and `xs[i]` reach the runtime as
+    // one and the same key. It IS derivable at PARSE time, and that is what these
+    // three functions do. The grammar hands the primary's own matched input over
+    // (`up.in` after Primary / NewSeed) and every member suffix now carries either its
+    // identifier (`name`) or its bracketed source text (`txt`); siteTexts renders one
+    // callee text per suffix position ONCE, while the closure is built. Nothing here
+    // runs at call time - the message is a constant string chosen at parse time - so
+    // the hot path is untouched: every message this emits is a COMPILE-TIME CONSTANT
+    // string, emitted into the cold block that raises it, so nothing is built, looked
+    // up or interned at call time. The interpreter half's siteTexts is the twin and
+    // the two must render identically, or the halves disagree on the message.
+    //
+    // WHAT MATCHES NODE AND WHAT DOES NOT. Matching, verified against node v24: a bare
+    // name, a dot chain, `this.x`, an index by identifier or by number literal, a
+    // string-literal index (node prints o["k"] as o.k, so this does too), a call
+    // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
+    // not a name (node's own "(intermediate value)"). NOT matching, because V8
+    // re-prints its AST rather than the source: a foldable constant index (node says
+    // xs[2] for xs[1+1]) and a compound index expression, which V8 parenthesises and
+    // re-spaces (`xs[(i + 1)]` for `xs[i+1]`). Both keep the class and the shape.
+    function siteIdentOk(t) {
+        // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
+        if (t.length == 0) { return false }
+        var atStart = true
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            var alpha = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 36
+            if (atStart) {
+                if (!alpha) { return false }
+                atStart = false
+            } else if (c == 46) {
+                atStart = true
+            } else if (!alpha && !(c >= 48 && c <= 57)) {
+                return false
+            }
+        }
+        return !atStart
+    }
+    function sitePrimaryText(t) {
+        // V8 prints the callee's own source range for everything that is not a
+        // COMPUTED result, literals included - `[1,2].nope`, `"abc".nope`, `1.nope`,
+        // `true.nope` - and "(intermediate value)" for what a call, a `new` or a
+        // function expression produced. A "(" is exactly the line between the two,
+        // and it also marks a PARENTHESISED primary, whose parentheses V8 does not
+        // print: `(o.g)()` reads `o.g is not a function`. So one layer is stripped
+        // and the test repeated. A grammar's Primary that starts at "(" is the
+        // parenthesized-expression form and is balanced by construction, so there is
+        // no `(a)(b)` to mis-strip - that is a primary plus a call SUFFIX.
+        if (t.length == 0) { return "(intermediate value)" }
+        if (t.indexOf("(") < 0) { return t }
+        if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
+            var inner = t.substring(1, t.length - 1)
+            if (inner.indexOf("(") < 0) { return inner }
+        }
+        return "(intermediate value)"
+    }
+    function siteIndexText(base, txt) {
+        // txt is the suffix's own matched input, brackets and all, with the tag
+        // engine's whitespace already elided ("[ i + 1 ]" arrives as "[i+1]"). The
+        // optional form's rule also matched its "?." in one grammar and not in the
+        // other, so the opening bracket is SEARCHED for rather than assumed at 0.
+        var open = txt.indexOf("[")
+        if (open < 0) { return base + "[?]" }
+        var inner = txt.substring(open + 1, txt.length - 1)
+        if (inner.length >= 2) {
+            var q = inner.charCodeAt(0)
+            if ((q == 34 || q == 39) && inner.charCodeAt(inner.length - 1) == q) {
+                var body = inner.substring(1, inner.length - 1)
+                if (siteIdentOk(body)) { return base + "." + body }
+            }
+        }
+        return base + "[" + inner + "]"
+    }
+    // One entry per suffix: the callee text a call AT that position would name. The
+    // entry for a call that follows a member is therefore the text INCLUDING that
+    // member, which is what makes `o.nope()` read `o.nope` and not `o`.
+    function siteTexts(ptxt, suffixes) {
+        var out = []
+        var base = sitePrimaryText(ptxt)
+        for (var i = 0; i < suffixes.length; i++) {
+            out.push(base)
+            var s = suffixes[i]
+            if (s.kind == "member" || s.kind == "optmember") {
+                if (s.name != undefined) { base = base + "." + s.name }
+                else if (s.txt != undefined) { base = siteIndexText(base, s.txt) }
+                else { base = "(intermediate value)" }
+            } else if (s.kind == "call" || s.kind == "optcall" || s.kind == "tagcall") {
+                base = base + "(...)"
+            }
+        }
+        return out
+    }
+    function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: makeConst(privName(n))} }
     foldCallMember = function(items) {
-        if (items.length == 1) return items[0]
+        if (items.length == 2) return items[0]
         var primary = items[0]
-        var suffixes = items.slice(1)
+        var suffixes = items.slice(2)
+        var sTexts = siteTexts(items[1].ptxt, suffixes)
         var hasOpt = false
         for (var oi = 0; oi < suffixes.length; oi++) {
             if (suffixes[oi].kind == "optmember" || suffixes[oi].kind == "optcall") { hasOpt = true }
@@ -3704,8 +3844,21 @@ NotFuncHead = :script(~~
                         // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
                         // Number / Object method surface (abnf/jsrtjsprint.go).
                         var ev = callExt(jsThisSet(elseB, objV), "js_jsmcall", [objV, keyV, argsV])
-                        elseB.NewBr(mergeB)
-                        cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
+                        // ...and when nothing at all claimed the call, js_jsmcall
+                        // ANSWERS THE MISS SENTINEL rather than aborting. `o.nope()`
+                        // used to end the program in both compiled halves, with two
+                        // different messages and neither node's. The sentinel travels
+                        // as an ordinary handle and is compared RAW, so the taken path
+                        // pays one load, one icmp and a never-taken branch, and the
+                        // message in the cold block is a compile-time constant.
+                        // docs/todo.md 1.4.
+                        var mOkB = curF.NewBlock("")
+                        var mBadB = curF.NewBlock("")
+                        elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
+                                        mBadB, mOkB)
+                        emitSiteThrow(mBadB, sTexts[i + 1] + " is not a function")
+                        mOkB.NewBr(mergeB)
+                        cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB)])
                         b = mergeB
                         curThis = hUndef
                         i = i + 2
@@ -3721,7 +3874,7 @@ NotFuncHead = :script(~~
                         i = i + 1
                     }
                 } else if (s.kind == "tag") {
-                    var tr = emitTagCall(b, cur, curThis, s.parts)
+                    var tr = emitTagCall(b, cur, curThis, s.parts, sTexts[i])
                     b = tr.b
                     cur = tr.v
                     curThis = hUndef
@@ -3729,7 +3882,9 @@ NotFuncHead = :script(~~
                 } else {
                     var argsV2 = callExt(b, "js_arr_new", [])
                     b = pushArgs(b, argsV2, s.args)
-                    cur = jsCall(b, cur, curThis, argsV2)
+                    var pcr = jsCallChecked(b, cur, curThis, argsV2, sTexts[i])
+                    b = pcr.b
+                    cur = pcr.v
                     curThis = hUndef
                     i = i + 1
                 }
@@ -3753,10 +3908,19 @@ NotFuncHead = :script(~~
     // when the path hangs off an arbitrary expression instead of a name ('[1].a = 2',
     // '(a ** b).c = 1'). retarget re-roots a parenthesized target and appends whatever
     // suffixes follow the ')', so '(a).b' is the very same reference as 'a.b'.
-    function makeTargetBase(items) { return {base: items[0], path: items.slice(1)} }
+    function makeTargetBase(items) { return {base: items[0], ptxt: items[1].ptxt, path: items.slice(2)} }
     function retarget(items) {
         var inner = items[0]
-        return {name: inner.name, base: inner.base, path: inner.path.concat(items.slice(1))}
+        return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1))}
+    }
+    // The primary text of an assignment TARGET's reference. compile-core's shared
+    // makeTargetRef answers {name, path} and is not this grammar's to change, so a
+    // named target falls back to its own name - which is exactly what node prints for
+    // `f().x = 1`. docs/todo.md 1.4.
+    function refSiteText(ref) {
+        if (ref.ptxt != undefined) { return ref.ptxt }
+        if (ref.name != undefined) { return ref.name }
+        return "(intermediate value)"
     }
     function emitRefPath(b, ref) {
         var cur = anytype
@@ -3778,7 +3942,11 @@ NotFuncHead = :script(~~
             } else {
                 var argsV = callExt(b, "js_arr_new", [])
                 b = pushArgs(b, argsV, s.args)
-                cur = jsCall(b, cur, curThis, argsV)
+                // A call in the MIDDLE of an assignment target ('f().x = 1'): the same
+                // check the ordinary call site makes. docs/todo.md 1.4.
+                var rcr = jsCallChecked(b, cur, curThis, argsV, siteTexts(refSiteText(ref), ref.path)[i])
+                b = rcr.b
+                cur = rcr.v
                 curThis = hUndef
             }
         }
@@ -4095,7 +4263,7 @@ NotFuncHead = :script(~~
     // 'raw' - a plain object rather than a js_arr_new array, because the runtime's arrays
     // are pure element sequences and cannot carry the 'raw' property the tag protocol
     // needs. Index reads (strings[0]) work either way: a member read stringifies its key.
-    function emitTagCall(b, fnV, thisV, parts) {
+    function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
         var raws = []
         var exprs = []
@@ -4131,7 +4299,9 @@ NotFuncHead = :script(~~
             b = r.b
             callExt(b, "js_arr_push", [argsV, r.v])
         }
-        return {b: b, v: jsCall(b, fnV, thisV, argsV)}
+        // A tag that is not callable is node's ordinary "is not a function", not the
+        // floor's abort. docs/todo.md 1.4.
+        return jsCallChecked(b, fnV, thisV, argsV, site)
     }
 
     // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
@@ -4902,15 +5072,17 @@ NotFuncHead = :script(~~
         }
         return makeNewFrom(function(b) {
             return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])}
-        }, argThunks)
+        }, argThunks, clsName)
     }
     // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
     // argument list may be absent entirely ('new C'), which is the same as an empty one.
+    // items = [calleeThunk, {ptxt}, argThunk...]; the ptxt marker is NewCallee's own
+    // matched input, which is the text node names in "X is not a constructor".
     function makeNewGeneral(items) {
-        return makeNewFrom(items[0], items.slice(1))
+        return makeNewFrom(items[0], items.slice(2), sitePrimaryText(items[1].ptxt))
     }
-    // The construction itself, shared by both forms.
-    function makeNewFrom(calleeT, argThunks) {
+    // The construction itself, shared by both forms. `site` is only for the message.
+    function makeNewFrom(calleeT, argThunks, site) {
         return function(b) {
             var cr = calleeT(b)
             b = cr.b
@@ -4932,7 +5104,18 @@ NotFuncHead = :script(~~
             var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
             var oF = callExt(fnB, "js_jsnewres", [retF, oF0])
             fnB.NewBr(mergeB)
-            // The class form: the constructor convention prepends the instance.
+            // The class form: the constructor convention prepends the instance. A
+            // callee that is neither a function nor a class descriptor is node's
+            // `X is not a constructor` TypeError, and CATCHABLE: reading __ctor off
+            // undefined used to end the program with "Cannot read properties of
+            // undefined (reading '__ctor')" in both compiled halves while the
+            // interpreter said "unknown class: expression". docs/todo.md 1.4.
+            var ctorOkB = curF.NewBlock("")
+            var ctorBadB = curF.NewBlock("")
+            clsB.NewCondBr(clsB.NewICmp(llvm.enum.IPredNE, callExt(clsB, "js_jsctorp", [clsV]), handle(0)),
+                           ctorOkB, ctorBadB)
+            emitSiteThrow(ctorBadB, site + " is not a constructor")
+            clsB = ctorOkB
             var oC = callExt(clsB, "js_obj_new", [])
             callExt(clsB, memSetExt(), [oC, emitStr(clsB, "__class"), clsV])
             var cargs = callExt(clsB, "js_arr_new", [])
@@ -4969,7 +5152,16 @@ NotFuncHead = :script(~~
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
-            return {b: b, v: callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+            var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])
+            // The same miss-sentinel check the method-call arm makes: nothing on the
+            // __super chain is node's "is not a function", not an abort. It has no
+            // source text for a super receiver either and prints "(intermediate
+            // value).<name>". docs/todo.md 1.4.
+            var scOkB = curF.NewBlock("")
+            var scBadB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, scV, b.NewLoad(i64, mcallMissGlob())), scBadB, scOkB)
+            emitSiteThrow(scBadB, "(intermediate value)." + name + " is not a function")
+            return {b: scOkB, v: scV}
         }
     }
 
@@ -5882,6 +6074,16 @@ NotFuncHead = :script(~~
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(vIdx), curScopeV])])
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(mIdx), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(sIdx), curScopeV])])
+
+        // The fourth of the family, and the one the call site needs: js_rt_misscall
+        // hands both engines the MISS SENTINEL, after which a method call nothing
+        // claimed ANSWERS it instead of aborting, and the call site raises node's
+        // TypeError. A language that never calls this extern keeps the abort, which
+        // is what leaves the other fifteen bit-for-bit unchanged. It is pinned
+        // because a module global is invisible to the collector. docs/todo.md 1.4.
+        var missV = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])
+        b.NewStore(missV, mcallMissGlob())
+        callExt(b, "js_rt_misscall", [missV])
         return b
     }
 

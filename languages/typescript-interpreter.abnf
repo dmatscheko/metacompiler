@@ -491,7 +491,7 @@ PatternAssign <~~ push(makePatternAssign(takeAll())) ~~>
 LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
             = HasTopLevelAssign LhsHead LhsSuffixes ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
               | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
-LhsHead     <~~ push({lhsprim: pop()}) ~~>
+LhsHead     <~~ push({lhsprim: pop(), ptxt: up.in}) ~~>
             = Primary ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
 // path does in between, the LAST suffix is always a member and the place exists.
@@ -710,7 +710,7 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 //                  from the '!=' / '!==' operators.
 //   AsCast         'as T', 'as const' and 'satisfies T'.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { TypeArgsSuffix | CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TaggedTemplate | NonNullSuffix | AsCast } ;
+            = Primary <~~ push({ptxt: up.in}) ~~> { TypeArgsSuffix | CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TaggedTemplate | NonNullSuffix | AsCast } ;
 TypeArgsSuffix = TypeArgs TypeArgsFollow ;
 NonNullSuffix = "!" !"=" ;
 AsCast      = ( KwAs | KwSatisfies ) ( KwConst | Type ) ;
@@ -723,26 +723,26 @@ TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
+DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: up.in, key: makeConst(up.in)}) ~~> ;
 // 'this.#secret' / 'this.#bump()': a private member is an ordinary property whose name
 // carries the '#', so the access only has to keep the marker in the key. Tried first,
 // because the plain form's Id cannot start at a '#'.
-PrivateDotSuffix <~~ push({kind:"member", key: makeConst("#" + pop())}) ~~>
+PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
             = "." "#" Id <~~ push(up.in) ~~> ;
-IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
 OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ) ;
 OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"member", opt: true, key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"member", opt: true, txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
-OptDotSuffix = Id <~~ push({kind:"member", opt: true, key: makeConst(up.in)}) ~~> ;
+OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: up.in, key: makeConst(up.in)}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivateDotSuffix. A private member is an
 // ordinary property whose name carries the '#', so the access only keeps the marker in
 // the key. Tried before the plain form, whose Id cannot start at a '#'.
-OptPrivateSuffix <~~ push({kind:"member", opt: true, key: makeConst("#" + pop())}) ~~>
+OptPrivateSuffix <~~ push(privDotSuffixOpt(pop())) ~~>
             = "#" Id <~~ push(up.in) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
@@ -789,13 +789,13 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 // NewExpr is kept only because a bare name resolves without evaluating a thunk (and can
 // name the class in its failure message).
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
-            = KwNew NewCallee [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
+            = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // The callee of a 'new': anything a member expression can start with. 'new ["b"]' and
 // 'new function(){}' are as legal as 'new a.b()', so the literal and function forms
 // belong here too. The suffix chain belongs to the CALLEE and must not contain a call:
 // 'new f()' constructs f, it does not construct the result of calling f.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | ImportCall | "(" Expression ")" | FunctionExpr | ClassExpr
             | TemplateLit | ArrayLit | ObjectLit | VarRef ;
 
@@ -1200,7 +1200,7 @@ ClassDecorators <~~ push({cdecs: takeAll()}) ~~>
 // of it ('@x().y', '@f(1).g(2)') and not only at the end - which is what the compiler
 // half already accepted and this one did not.
 Decorator   <~~ push(foldCallMember(takeAll())) ~~>
-            = "@" ( "(" Expression ")" | VarRef ) { DotSuffix | CallSuffix | TypeArgsSuffix } ;
+            = "@" ( "(" Expression ")" | VarRef ) <~~ push({ptxt: up.in}) ~~> { DotSuffix | CallSuffix | TypeArgsSuffix } ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
 // 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. The plain
@@ -3983,7 +3983,10 @@ NotFuncHead = :script(~~
         return function() {
             var a = []
             for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
-            return mcall(o, k, a)
+            // A bound shim has lost its call site (`const f = o.m; f()`), so the text
+            // node would print is the NAME the shim was made from, on an anonymous
+            // receiver. docs/todo.md 1.4.
+            return mcall(o, k, a, "(intermediate value)." + k)
         }
     }
     // Writing a member goes through the SETTER when there is one, which is what makes
@@ -6357,7 +6360,10 @@ NotFuncHead = :script(~~
     // Method dispatch on an instance: follow the __class / __super chain. Native and
     // object-literal methods never reach here - foldCallMember calls this only when the
     // looked-up member was not itself a function value.
-    function mcall(target, name, args) {
+    // `site` is the callee's SOURCE TEXT, rendered by siteTexts when the call site's
+    // closure was built - node's message names the expression, not the value, and no
+    // runtime value can supply it. docs/todo.md 1.4.
+    function mcall(target, name, args, site) {
         // BigInt.prototype: toString([radix]) and valueOf, the two that make sense
         // without a wrapper object.
         if (isBigInt(target)) {
@@ -6373,10 +6379,13 @@ NotFuncHead = :script(~~
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
             for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
-            if (typeof m != "function") fail("unknown method '" + name + "' on an instance")
+            // A missing (or non-callable) instance method is node's ordinary
+            // "not a function" TypeError, and CATCHABLE: this used to be an engine
+            // abort no try/catch could see. docs/todo.md 1.4.
+            if (typeof m != "function") { biRaise("TypeError: " + site + " is not a function") }
             return m.apply(undefined, concat2impl([target], args))
         }
-        fail("call of a non function value (method '" + name + "')")
+        biRaise("TypeError: " + site + " is not a function")
     }
 
     // ----- Class members -----
@@ -6645,8 +6654,10 @@ NotFuncHead = :script(~~
     }
     // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
     // argument list may be absent entirely ('new C'), which is the same as an empty one.
+    // items = [calleeThunk, {ptxt}, argThunk...]; the ptxt marker is NewCallee's own
+    // matched input, which is the text node names in "X is not a constructor".
     function makeNewGeneral(items) {
-        return makeNewFrom(items[0], items.slice(1), "expression")
+        return makeNewFrom(items[0], items.slice(2), sitePrimaryText(items[1].ptxt))
     }
     // The construction itself, shared by both forms. clsName is only for the message.
     function makeNewFrom(calleeT, argThunks, clsName) {
@@ -6675,7 +6686,11 @@ NotFuncHead = :script(~~
                 if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { return r }
                 return self
             }
-            if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
+            // node's TypeError for `new` on something that is neither a class nor a
+            // constructor function, and CATCHABLE: this used to be an engine abort
+            // ("unknown class: n"), and the two compiled halves said something else
+            // again. docs/todo.md 1.4.
+            if (cls == undefined || !cls.__isclass) { biRaise("TypeError: " + clsName + " is not a constructor") }
             var obj = {}
             obj["__class"] = cls
             obj["__keys"] = []
@@ -6855,7 +6870,9 @@ NotFuncHead = :script(~~
             var self = getVar("this")
             var m = undefined
             for (var cl = getVar("__class__").__super; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
-            if (typeof m != "function") fail("unknown super method '" + name + "'")
+            // node's wording: it has no source text for a super receiver either,
+              // and prints "(intermediate value).<name>". docs/todo.md 1.4.
+            if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
             var argv = concat2impl([self], evalArgs(argThunks))
             return m.apply(undefined, argv)
         }
@@ -7047,10 +7064,120 @@ NotFuncHead = :script(~~
     // object as 'this' (native string/array methods, object-literal methods); otherwise
     // it is a __class instance method, routed through mcall (which prepends the receiver
     // and follows __super). A call not preceded by a member is a plain function call.
+    // ===== THE CALLEE TEXT OF A CALL SITE - docs/todo.md 1.4 ====================
+    //
+    // node's message for calling a non-function is the callee's SOURCE TEXT:
+    //
+    //   xs[1]()     TypeError: xs[1] is not a function
+    //   o.nope()    TypeError: o.nope is not a function
+    //   new n()     TypeError: n is not a constructor
+    //
+    // V8 recovers it by re-printing the AST of the call site (CallPrinter), so it is
+    // NOT derivable from any runtime value: `xs[1]` and `xs[i]` reach the runtime as
+    // one and the same key. It IS derivable at PARSE time, and that is what these
+    // three functions do. The grammar hands the primary's own matched input over
+    // (`up.in` after Primary / NewSeed) and every member suffix now carries either its
+    // identifier (`name`) or its bracketed source text (`txt`); siteTexts renders one
+    // callee text per suffix position ONCE, while the closure is built. Nothing here
+    // runs at call time - the message is a constant string chosen at parse time - so
+    // the hot path is untouched. The compiler half builds the same strings in its own
+    // siteTexts and hands them to js_jsmcall / js_jscallck.
+    //
+    // WHAT MATCHES NODE AND WHAT DOES NOT. Matching, verified against node v24: a bare
+    // name, a dot chain, `this.x`, an index by identifier or by number literal, a
+    // string-literal index (node prints o["k"] as o.k, so this does too), a call
+    // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
+    // not a name (node's own "(intermediate value)"). NOT matching, because V8
+    // re-prints its AST rather than the source: a foldable constant index (node says
+    // xs[2] for xs[1+1]) and a compound index expression, which V8 parenthesises and
+    // re-spaces (`xs[(i + 1)]` for `xs[i+1]`). Both keep the class and the shape.
+    function siteIdentOk(t) {
+        // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
+        if (t.length == 0) { return false }
+        var atStart = true
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            var alpha = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 36
+            if (atStart) {
+                if (!alpha) { return false }
+                atStart = false
+            } else if (c == 46) {
+                atStart = true
+            } else if (!alpha && !(c >= 48 && c <= 57)) {
+                return false
+            }
+        }
+        return !atStart
+    }
+    function sitePrimaryText(t) {
+        // V8 prints the callee's own source range for everything that is not a
+        // COMPUTED result, literals included - `[1,2].nope`, `"abc".nope`, `1.nope`,
+        // `true.nope` - and "(intermediate value)" for what a call, a `new` or a
+        // function expression produced. A "(" is exactly the line between the two,
+        // and it also marks a PARENTHESISED primary, whose parentheses V8 does not
+        // print: `(o.g)()` reads `o.g is not a function`. So one layer is stripped
+        // and the test repeated. A grammar's Primary that starts at "(" is the
+        // parenthesized-expression form and is balanced by construction, so there is
+        // no `(a)(b)` to mis-strip - that is a primary plus a call SUFFIX.
+        if (t.length == 0) { return "(intermediate value)" }
+        if (t.indexOf("(") < 0) { return t }
+        if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
+            var inner = t.substring(1, t.length - 1)
+            if (inner.indexOf("(") < 0) { return inner }
+        }
+        return "(intermediate value)"
+    }
+    function siteIndexText(base, txt) {
+        // txt is the suffix's own matched input, brackets and all, with the tag
+        // engine's whitespace already elided ("[ i + 1 ]" arrives as "[i+1]"). The
+        // optional form's rule also matched its "?." in one grammar and not in the
+        // other, so the opening bracket is SEARCHED for rather than assumed at 0.
+        var open = txt.indexOf("[")
+        if (open < 0) { return base + "[?]" }
+        var inner = txt.substring(open + 1, txt.length - 1)
+        if (inner.length >= 2) {
+            var q = inner.charCodeAt(0)
+            if ((q == 34 || q == 39) && inner.charCodeAt(inner.length - 1) == q) {
+                var body = inner.substring(1, inner.length - 1)
+                if (siteIdentOk(body)) { return base + "." + body }
+            }
+        }
+        return base + "[" + inner + "]"
+    }
+    // One entry per suffix: the callee text a call AT that position would name. The
+    // entry for a call that follows a member is therefore the text INCLUDING that
+    // member, which is what makes `o.nope()` read `o.nope` and not `o`.
+    // The primary text of an assignment TARGET's reference: a name for 'a.b = 1',
+    // the primary's own matched input for the '(expr).b = 1' form, and nothing at all
+    // for a reference some other production built. docs/todo.md 1.4.
+    function refSiteText(ref) {
+        if (ref.ptxt != undefined) { return ref.ptxt }
+        return "(intermediate value)"
+    }
+    function siteTexts(ptxt, suffixes) {
+        var out = []
+        var base = sitePrimaryText(ptxt)
+        for (var i = 0; i < suffixes.length; i++) {
+            out.push(base)
+            var s = suffixes[i]
+            if (s.kind == "member" || s.kind == "optmember") {
+                if (s.name != undefined) { base = base + "." + s.name }
+                else if (s.txt != undefined) { base = siteIndexText(base, s.txt) }
+                else { base = "(intermediate value)" }
+            } else if (s.kind == "call" || s.kind == "optcall" || s.kind == "tagcall") {
+                base = base + "(...)"
+            }
+        }
+        return out
+    }
+    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: makeConst("#" + n)} }
+    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: makeConst("#" + n)} }
+
     foldCallMember = function(items) {
-        if (items.length == 1) return items[0]
+        if (items.length == 2) return items[0]
         var primary = items[0]
-        var suffixes = items.slice(1)
+        var suffixes = items.slice(2)
+        var sTexts = siteTexts(items[1].ptxt, suffixes)
         return function() {
             var cur = anytype     // A member chain hops between types,
             var curThis = anytype // so do the remembered receiver
@@ -7077,7 +7204,7 @@ NotFuncHead = :script(~~
                 } else if (s.kind == "tagcall") {
                     // A tagged template: the tag gets the literal chunks first, then one
                     // argument per substitution.
-                    if (typeof cur != "function") fail("tagged template on a non function value")
+                    if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
                     cur = callWithThis(cur, curThis, tagArgs(s.parts))
                     curThis = undefined
                 } else {
@@ -7104,7 +7231,7 @@ NotFuncHead = :script(~~
                     } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {
-                        cur = mcall(curThis, lastKey, argv)
+                        cur = mcall(curThis, lastKey, argv, sTexts[i])
                     }
                     curThis = undefined
                 }
@@ -7119,9 +7246,9 @@ NotFuncHead = :script(~~
     makeTargetRef = function(items) {
         if (items[0] != undefined && items[0].parenref != undefined) {
             var inner = items[0].parenref
-            return {name: inner.name, path: concat2impl(inner.path, items.slice(1))}
+            return {name: inner.name, ptxt: inner.ptxt, path: concat2impl(inner.path, items.slice(1))}
         }
-        return {name: items[0], path: items.slice(1)}
+        return {name: items[0], ptxt: items[0], path: items.slice(1)}
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
@@ -7140,7 +7267,13 @@ NotFuncHead = :script(~~
                 cur = getMember(cur, s.key())
             } else {
                 var argv = evalArgs(s.args)
-                if (typeof cur != "function") fail("call of a non function value: " + cur)
+                // A call in the MIDDLE of an assignment target ('f().x = 1'). Same
+                // defect and the same fix as an ordinary call site, except that the
+                // text is rendered here, on the failure path, rather than when the
+                // closure was built - this walk is a run-time one. docs/todo.md 1.4.
+                if (typeof cur != "function") {
+                    biRaise("TypeError: " + siteTexts(refSiteText(ref), ref.path)[i] + " is not a function")
+                }
                 cur = callWithThis(cur, curThis, argv)
                 curThis = undefined
             }
@@ -7213,7 +7346,7 @@ NotFuncHead = :script(~~
     // it builds carries the primary's thunk instead of a variable name; everything after
     // that is the ordinary assignment path.
     function makeLhsAssign(items) {
-        var ref = {prim: items[0].lhsprim, path: items.slice(1, items.length - 2)}
+        var ref = {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length - 2)}
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {

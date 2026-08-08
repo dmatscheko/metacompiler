@@ -1281,5 +1281,104 @@ t13_up = []
 "ab".upto("ad") { |x| t13_up << x }
 check("t13-upto", t13_up, ["ab", "ac", "ad"])
 
+# ----- mixins as ancestors: is_a?, ancestors, and the module operators -----
+# ruby-to-llvm-ir.abnf FLATTENS `include M' at build time - M's method bodies are
+# re-emitted into the including class - so nothing at run time knew M had ever been
+# there: `obj.is_a?(M)' and `case obj when M' answered FALSE in both compiled halves
+# and TRUE in the interpreter, a live halves divergence --cross had never reached.
+# The emitter now records the ancestry ($mix$/$xmix$ + __mixorder/__preorder) and
+# all three engines read it. A module included INTO A MODULE was invisible in every
+# engine, and Module#ancestors / #include? / #< / #<= / #> / #>= existed in none of
+# them. docs/todo.md 1.3. Every want here is /usr/bin/ruby 2.6.10's answer, and the
+# constructs are all Ruby-2 forms whose behaviour is unchanged in 3.x.
+module MixM
+  def mix_hello; "hi"; end
+end
+module MixN
+  def mix_bye; "bye"; end
+end
+module MixP
+  include MixN
+end
+module MixL
+  def mix_word; super.upcase; end
+end
+class MixA
+  include MixM
+end
+class MixB < MixA
+end
+class MixC
+  include MixP
+end
+class MixD
+  extend MixM
+end
+class MixW
+  prepend MixL
+  include MixM
+  def mix_word; "abc"; end
+end
+class MixErr < StandardError
+end
+class MixSz
+  include Comparable
+  attr_reader :n
+  def initialize(n); @n = n; end
+  def <=>(o); n <=> o.n; end
+end
+mix_a = MixA.new
+check("mix-isa", mix_a.is_a?(MixM), true)
+check("mix-kindof", mix_a.kind_of?(MixM), true)
+check("mix-instanceof", mix_a.instance_of?(MixM), false)
+check("mix-caseeq", (MixM === mix_a), true)
+check("mix-when", (case mix_a when MixM then "m" else "no" end), "m")
+check("mix-unrelated", mix_a.is_a?(MixN), false)
+# The module is inherited through the SUPERCLASS as well.
+check("mix-sub-isa", MixB.new.is_a?(MixM), true)
+# A module included into a MODULE: the methods and the ancestry both carry.
+check("mix-modmod-method", MixC.new.mix_bye, "bye")
+check("mix-modmod-isa-outer", MixC.new.is_a?(MixP), true)
+check("mix-modmod-isa-inner", MixC.new.is_a?(MixN), true)
+# extend M puts M on the class OBJECT, not on its instances.
+check("mix-extend-cls", MixD.is_a?(MixM), true)
+check("mix-extend-inst", MixD.new.is_a?(MixM), false)
+# prepend: the module is an ancestor IN FRONT of the class.
+check("mix-prepend-super", MixW.new.mix_word, "ABC")
+check("mix-prepend-isa", MixW.new.is_a?(MixL), true)
+check("mix-prepend-order", MixW.ancestors, [MixL, MixW, MixM, Object, Kernel, BasicObject])
+# Comparable is NOT universal - the interpreter half answered true for everything.
+check("mix-comparable-yes", MixSz.new(1).is_a?(Comparable), true)
+check("mix-comparable-no", mix_a.is_a?(Comparable), false)
+check("mix-comparable-op", (MixSz.new(1) < MixSz.new(2)), true)
+# Module#ancestors, including through a BUILTIN superclass.
+check("mix-anc-class", MixA.ancestors, [MixA, MixM, Object, Kernel, BasicObject])
+check("mix-anc-sub", MixB.ancestors, [MixB, MixA, MixM, Object, Kernel, BasicObject])
+check("mix-anc-module", MixM.ancestors, [MixM])
+check("mix-anc-modmod", MixP.ancestors, [MixP, MixN])
+check("mix-anc-exc", MixErr.ancestors, [MixErr, StandardError, Exception, Object, Kernel, BasicObject])
+check("mix-include?", MixA.include?(MixM), true)
+check("mix-include?-self", MixA.include?(MixA), false)
+check("mix-include?-no", MixA.include?(MixN), false)
+# Module#< / #<= / #> / #>=: the ancestry relation, and NIL for two unrelated ones.
+check("mix-lt-mod", (MixA < MixM), true)
+check("mix-lt-super", (MixB < MixA), true)
+check("mix-lt-rev", (MixA < MixB), false)
+check("mix-le-same", (MixA <= MixA), true)
+check("mix-gt", (MixA > MixM), false)
+check("mix-ge-same", (MixA >= MixA), true)
+check("mix-lt-unrelated", (MixA < String), nil)
+# Class and Module as constants, and #class / #superclass on a class object.
+check("mix-class-of-class", MixA.class, Class)
+check("mix-class-of-module", MixM.class, Module)
+check("mix-instof-class", MixA.instance_of?(Class), true)
+check("mix-instof-module", MixM.instance_of?(Module), true)
+check("mix-mod-not-class", MixM.is_a?(Class), false)
+check("mix-class-is-module", MixA.is_a?(Module), true)
+check("mix-superclass-root", MixA.superclass, Object)
+check("mix-superclass-sub", MixB.superclass, MixA)
+check("mix-superclass-exc", MixErr.superclass, StandardError)
+check("mix-superclass-prepend", MixW.superclass, Object)
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)

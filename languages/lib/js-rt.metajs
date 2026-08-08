@@ -275,6 +275,34 @@ function js_jstruthy__raw(v) {
 // A UNIQUE object, so no user value can ever be mistaken for it.
 var jvMiss = {}
 
+// The CALL-SITE MISS SENTINEL - docs/todo.md 1.4. `xs[1]()` with undefined in the
+// slot is a catchable TypeError in node, and was an uncatchable abort here worded
+// three different ways. node's message is the callee's SOURCE TEXT (`xs[1] is not
+// a function`), which no runtime value carries - `xs[1]` and `xs[i]` arrive as the
+// same key - so the split is: this file says only "nothing claimed the call" by
+// answering the sentinel, and the CALL SITE, which knows the text at compile time,
+// raises. The emitter makes the object and hands it over here in its boot block,
+// so both engines compare the very same handle. Empty until then, and while it is
+// empty jvFallbackCall aborts exactly as it always did.
+var jvMissCall = anytype
+var jvMissCallSet = false
+function js_rt_misscall(v) { jvMissCall = v; jvMissCallSet = true }
+
+// The two RAW PREDICATES the js/ts call site branches on, twins of js_jsfnp /
+// js_jsctorp in abnf/jsrtjsprint.go. The `__raw` suffix (manual 7.1) is what makes
+// -rt-lib export them returning a plain 0/1 instead of a boolean HANDLE, which is
+// what the emitter's icmp needs.
+function js_jsfnp__raw(v) {
+    if (jvIsCallable(v)) { return 1 }
+    return 0
+}
+function js_jsctorp__raw(v) {
+    if (jvIsObj(v)) {
+        if (v["__isclass"] !== undefined) { return 1 }
+    }
+    return 0
+}
+
 // The accessor-property count. abnf/jsrt.go's rt.accessorCount: while it is 0 the
 // member paths cannot meet an accessor and skip the whole lookup.
 var jvAccN = 0
@@ -816,7 +844,16 @@ function jvBoundBuiltin(recv, name) {
             a.push(arguments[i])
             i = i + 1
         }
-        return js_jsmcall(recv, name, a)
+        // The shim re-enters the WHOLE method surface, so it can meet the miss
+        // sentinel js_jsmcall now answers - and here that is an engine bug, not a
+        // program one: js_jsvget only builds this shim for a name it already found.
+        // Turning it back into the abort keeps the sentinel from ever reaching user
+        // code through this door. docs/todo.md 1.4.
+        var br = js_jsmcall(recv, name, a)
+        if (jvMissCallSet) {
+            if (br === jvMissCall) { fail("unknown method '" + name + "' on " + typeof recv) }
+        }
+        return br
     }
 }
 
@@ -1029,6 +1066,9 @@ function js_supercall(sup, self, name, args) {
         if (jvIsCallable(m)) { return jvCallT(m, self, jvPrepend(self, args)) }
         cls = cls["__super"]
     }
+    // Nothing on the __super chain: the sentinel, which the call site turns into
+    // node's "is not a function" TypeError. docs/todo.md 1.4.
+    if (jvMissCallSet) { return jvMissCall }
     fail("unknown super method '" + k + "'")
     return undefined
 }
@@ -2374,11 +2414,15 @@ function jvFallbackCall(recv, name, args) {
                 var av = jvAccGet(acc, recv)
                 if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
             }
+            // Nothing on the __class chain: the call site turns the sentinel into
+            // node's "<callee> is not a function" TypeError. docs/todo.md 1.4.
+            if (jvMissCallSet) { return jvMissCall }
             fail("unknown method '" + name + "' on an instance")
         }
     }
     var own = js_jsmget(recv, name)
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
+    if (jvMissCallSet) { return jvMissCall }
     fail("unknown method '" + name + "' on " + typeof recv)
     return undefined
 }

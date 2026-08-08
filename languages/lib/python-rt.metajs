@@ -236,6 +236,15 @@ function pyIsGen(v) {
     if (v["__pyit"] !== undefined) { return false }
     if (v["__mro"] !== undefined) { return false }
     if (v["__class"] !== undefined) { return false }
+    // A MODULE object is not a generator, and the test HAD to be added: the
+    // `builtins` module holds every builtin under its own name, one of which is
+    // `next` - so this structural test answered TRUE for it, type(builtins) read
+    // "generator" in the native binary against "module" under llvm.Run, and
+    // `builtins.next(it)` would have taken pyDMethodCall's generator arm and
+    // stepped the MODULE. The Go twin tests a real type and never saw it: a
+    // native-only divergence of exactly the shape docs/todo.md 1.4 recorded for
+    // cursors. docs/todo.md 1.7.
+    if (v["__pymod"] !== undefined) { return false }
     return typeof v["next"] == "function"
 }
 
@@ -462,6 +471,13 @@ function pyStr(v) {
     // its own and cannot be matched, so it is left off rather than invented, and
     // all three engines print this same short form.
     if (pyIsIter(v)) { return "<" + pyToStr(v["__pyit"]) + " object>" }
+    // A MODULE object. CPython prints <module 'builtins' (built-in)> for a
+    // built-in module and, for an extension module like math, the .so PATH it was
+    // loaded from - machine-specific and unmatchable, so every module here takes
+    // the built-in spelling. Without this a module printed [object Object].
+    if (pyIsObj(v)) {
+        if (v["__pymod"] !== undefined) { return "<module '" + pyToStr(v["__pymod"]) + "' (built-in)>" }
+    }
     // A GENERATOR, on the same rule. CPython says <generator object gen at
     // 0x...>; neither the address nor the generating function's name is
     // recoverable from the value, so the short form is printed. Every engine
@@ -687,6 +703,9 @@ function pyTypeName(v) {
         // types, and both compiled halves answered 'function' for all three.
         var bml = pyBMFind(v)
         if (bml >= 0) {
+            // An UNBOUND descriptor is its own CPython type; a module-level
+            // builtin and a bound builtin method share one.
+            if (pyBMTab[bml + 4] == "d") { return "method_descriptor" }
             if (pyBMTab[bml + 3] === null) { return "builtin_function_or_method" }
             return "method"
         }
@@ -715,9 +734,34 @@ function pyTypeName(v) {
         // raises interpolates - CPython says "'list_iterator' object has no
         // attribute 'send'", not "'object' ...".
         if (pyIsIter(v)) { return pyToStr(v["__pyit"]) }
+        // A compiled regexp and a match object name their own CPython types, and
+        // the name is MODULE-QUALIFIED here on purpose: this is the string an
+        // AttributeError interpolates, and CPython says "'re.Pattern' object has
+        // no attribute 'nope'". type(p).__name__ is the SHORT 'Pattern', which is
+        // why pyGetAttr's __name__ arm cuts at the last dot (pyShortName).
+        // docs/todo.md 1.6 recorded this as declined, on the reasoning that one
+        // arm would trade one wrong answer for another - both strings are in fact
+        // reachable from the same one, and the two spellings differ only by that
+        // cut.
+        if (v["__pyre"] === true) { return "re.Pattern" }
+        if (v["__pymatch"] === true) { return "re.Match" }
+        if (v["__pysm"] !== undefined) { return "staticmethod" }
+        if (v["__pycm"] !== undefined) { return "classmethod" }
+        if (v["__pymod"] !== undefined) { return "module" }
         return "object"
     }
     return "object"
+}
+
+// The last component of a possibly module-qualified type name. __name__ and
+// __qualname__ of a builtin type object are the SHORT name in CPython
+// (type(re.compile('a')).__name__ is 'Pattern') while the type object itself
+// renders and reports as 're.Pattern'.
+function pyShortName(n) {
+    var cut = -1
+    for (var i = 0; i < n.length; i++) { if (n.charAt(i) == ".") { cut = i } }
+    if (cut < 0) { return n }
+    return n.substring(cut + 1, n.length)
 }
 
 // ===================================================== equality and order ===
@@ -909,14 +953,20 @@ function pyGetAttr(obj, name) {
         // __qualname__ of a class is its __name__ for every class this subset can
         // write: CPython qualifies only a NESTED class, and a nested `class` here
         // is bound by the same name as a top-level one.
-        if (name == "__name__" || name == "__qualname__") { return obj["__name"] }
+        if (name == "__name__" || name == "__qualname__") { return pyShortName(pyToStr(obj["__name"])) }
         if (name == "__mro__") { return obj["__mro"] }
         if (name == "__bases__") {
             var bl = obj["__basesl"]
             if (pyIsArr(bl)) { return bl }
             return []
         }
-        if (pyLookupHas(obj, name)) { return pyLookupVal(obj, name) }
+        if (pyLookupHas(obj, name)) {
+            var cv = pyLookupVal(obj, name)
+            // A staticmethod / classmethod read off the CLASS: the static one
+            // loses nothing, the class one binds to this very class.
+            if (pyDIsStatic(cv) || pyDIsClsM(cv)) { return pyDDescGet(cv, obj, name) }
+            return cv
+        }
         // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises. This
         // was fail(), which layer 2 cannot catch at all, so `try: getattr(C,
         // "nope") except AttributeError:` ended the program in both compiled
@@ -931,6 +981,10 @@ function pyGetAttr(obj, name) {
         if (obj[name] !== undefined) { return obj[name] }
         if (pyLookupHas(cls, name)) {
             var v = pyLookupVal(cls, name)
+            // staticmethod / classmethod, before every other arm: a static one
+            // must NOT pick up the instance as self, and a class one binds to the
+            // receiver's OWN class, so D().c() passes D.
+            if (pyDIsStatic(v) || pyDIsClsM(v)) { return pyDDescGet(v, cls, name) }
             var get = pyDescriptor(v, "__get__")
             if (get !== undefined) { return get.apply(undefined, [v, obj, cls]) }
             // A METHOD read off an instance comes back BOUND, so `f = a.m; f()`
@@ -944,9 +998,32 @@ function pyGetAttr(obj, name) {
         pyRaiseExc("AttributeError",
                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
+    // A MODULE object. `builtins.len` resolves through the module's own slot,
+    // which the emitter filled with the very binding the global name resolves to,
+    // so `builtins.len is len` holds rather than answering a copy; a math
+    // function becomes a first-class value the same way `re`'s constants already
+    // were readable. Placed before the bound-builtin arm because a module's own
+    // data slots (math.pi) must win.
+    if (pyIsObj(obj)) {
+        if (obj["__pymod"] !== undefined && obj[name] === undefined) {
+            if (obj["__pymod"] === "math" && pyMHas(name)) { return pyDModuleFn(obj, name) }
+            pyRaiseExc("AttributeError",
+                       "module '" + pyToStr(obj["__pymod"]) + "' has no attribute '" + name + "'")
+        }
+    }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(obj, name)
     if (bcm !== undefined) { return bcm }
+    // list.count / str.upper / dict.get read off the BUILTIN type object: an
+    // unbound method descriptor (docs/todo.md 1.7). It sits HERE rather than in
+    // the pyIsClass branch above because a builtin type object carries only a
+    // __name and no __mro, so pyIsClass declines it - which is also why
+    // dict.fromkeys is answered on this same line.
+    var dtn0 = pyClassName(obj)
+    if (dtn0 !== null) {
+        var samp0 = pyDTypeSample(dtn0)
+        if (samp0 !== undefined && pyDBuiltinAttr(samp0, name)) { return pyDUnboundDesc(obj, name) }
+    }
     // A BOUND METHOD knows its own name, receiver and underlying function
     // (docs/todo.md 1.4). __qualname__ is answered HERE and nowhere else on
     // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
@@ -955,8 +1032,22 @@ function pyGetAttr(obj, name) {
     if (typeof obj == "function") {
         var bmj = pyBMFind(obj)
         if (bmj >= 0) {
+            var bmk = pyBMTab[bmj + 4]
             if (name == "__name__") { return pyBMTab[bmj + 1] }
-            if (name == "__qualname__") { return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyToStr(pyBMTab[bmj + 1]) }
+            if (name == "__qualname__") {
+                // An unbound descriptor's owner is the TYPE OBJECT itself, and a
+                // module function's qualname is its bare name.
+                if (bmk == "d") { return pyToStr(pyBMTab[bmj + 2]["__name"]) + "." + pyToStr(pyBMTab[bmj + 1]) }
+                if (bmk == "m") { return pyBMTab[bmj + 1] }
+                return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyToStr(pyBMTab[bmj + 1])
+            }
+            // CPython gives a method DESCRIPTOR no __self__ at all - it is not
+            // bound to anything - and offers __objclass__ instead.
+            if (name == "__objclass__" && bmk == "d") { return pyBMTab[bmj + 2] }
+            if (name == "__self__" && bmk == "d") {
+                pyRaiseExc("AttributeError",
+                           "'method_descriptor' object has no attribute '__self__'")
+            }
             if (name == "__self__") { return pyBMTab[bmj + 2] }
             if (name == "__func__") {
                 if (pyBMTab[bmj + 3] === null) {
@@ -979,12 +1070,18 @@ function pyGetAttr(obj, name) {
     // this says 'm'. Closing that one needs the DEFINING scope recorded at every
     // def site in three engines and the emitter; the bound-method arm above
     // already answers 'C.m'. docs/todo.md 1.4.
+    // len.__self__ is the builtins MODULE in CPython, not a receiver - the
+    // builtin functions are that module's members. docs/todo.md 1.7.
+    if (name == "__self__" && typeof obj == "function") {
+        var bsc = rtPairGet(pyBBFnObjs, pyBBFnCodes, obj)
+        if (bsc !== undefined && pyDBuiltinsMod !== null) { return pyDBuiltinsMod }
+    }
     if (name == "__name__" || name == "__qualname__") {
         // A synthetic class object for a BUILTIN type (what type(3) hands out)
         // carries only its name, and a function carries none of its own - the name
         // its def bound it under was recorded by js_pyfnname (chunk B).
         if (pyIsObj(obj)) {
-            if (obj["__name"] !== undefined) { return obj["__name"] }
+            if (obj["__name"] !== undefined) { return pyShortName(pyToStr(obj["__name"])) }
         }
         // docs/todo.md 1.9: the BUILTIN table is asked too, and FIRST, exactly
         // as pyFuncRenderOf asks it - len.__name__ is 'len' where before this
@@ -1003,6 +1100,14 @@ function pyGetAttr(obj, name) {
     // x.__class__ for a value that is not a user instance - the same synthetic
     // class object type(x) hands out, so `[].__class__ is list` holds.
     if (name == "__class__") { return js_pytype(obj) }
+    // CPython names a TYPE OBJECT differently from a value: "type object 'list'
+    // has no attribute 'nope'", not "'type' object has no attribute 'nope'".
+    // Both compiled halves used the value wording for a builtin type object -
+    // only the user-class arm above had the type wording. docs/todo.md 1.7.
+    var tn2 = pyClassName(obj)
+    if (tn2 !== null) {
+        pyRaiseExc("AttributeError", "type object '" + tn2 + "' has no attribute '" + name + "'")
+    }
     // docs/todo.md 1.4: an attribute a builtin value does NOT have raises, as
     // CPython does. This used to fall into pyGetMember and answer None - so
     // `[1,2].nope` and getattr([1,2], "nope") were None in both compiled halves
@@ -1193,6 +1298,7 @@ function pyExcParentName(name) {
     if (name == "KeyError") { return "LookupError" }
     if (name == "UnboundLocalError") { return "NameError" }
     if (name == "NotImplementedError") { return "RuntimeError" }
+    if (name == "OverflowError") { return "ArithmeticError" }
     if (name == "Exception") { return "BaseException" }
     return "Exception"
 }
@@ -3438,6 +3544,15 @@ function pyDHasAttr(obj, name) {
         if (obj[name] !== undefined) { return true }
         return pyLookupHas(cls, name)
     }
+    // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
+    // has to agree with what `math.sqrt` answers. docs/todo.md 1.7.
+    if (pyIsObj(obj)) {
+        if (obj["__pymod"] !== undefined) {
+            if (obj[name] !== undefined) { return true }
+            if (obj["__pymod"] === "math") { return pyMHas(name) }
+            return false
+        }
+    }
     // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
     // __class__, which EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
@@ -5050,6 +5165,9 @@ function pySuperAttr(s, name) {
     if (m === undefined) {
         pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
     }
+    // A staticmethod / classmethod found through super(), same rule as the call
+    // path in pySuperMCall. docs/todo.md 1.7.
+    if (pyDIsStatic(m) || pyDIsClsM(m)) { return pyDDescGet(m, pyDSuperOwner(s), name) }
     if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m, name) }
     return m
 }
@@ -5095,22 +5213,36 @@ function pyDBindMethod(self, m, name) {
 //
 // Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
 // family in languages/python-interpreter.abnf.
+// The stride is FIVE, not four: the fifth slot is the KIND, because three
+// different CPython callables now share this record and they print, name and
+// introspect differently (docs/todo.md 1.7).
+//
+//   ""  a bound method
+//   "d" an unbound METHOD DESCRIPTOR read off a builtin type object - list.count,
+//       str.upper - printed <method 'count' of 'list' objects>, with no __self__
+//       at all and the receiver as its FIRST call argument. `self` holds the TYPE
+//       OBJECT for it, not a receiver.
+//   "m" a MODULE-level builtin function read off a module object - math.sqrt -
+//       printed <built-in function sqrt>, whose __self__ IS the module.
 var pyBMTab = []
 
-function pyBMSet(f, name, self, fn) {
+function pyBMSet(f, name, self, fn) { return pyBMSetK(f, name, self, fn, "") }
+
+function pyBMSetK(f, name, self, fn, kind) {
     pyBMTab.push(f)
     pyBMTab.push(pyToStr(name))
     pyBMTab.push(self)
     pyBMTab.push(fn)
+    pyBMTab.push(kind)
     return f
 }
 
 // The index of f's record, or -1.
 function pyBMFind(f) {
-    var i = pyBMTab.length - 4
+    var i = pyBMTab.length - 5
     while (i >= 0) {
         if (pyBMTab[i] === f) { return i }
-        i = i - 4
+        i = i - 5
     }
     return 0 - 1
 }
@@ -5129,16 +5261,36 @@ function pyBMOwner(self) {
 function pyBMRender(i) {
     var nm = pyToStr(pyBMTab[i + 1])
     var self = pyBMTab[i + 2]
+    var kind = pyBMTab[i + 4]
+    // An UNBOUND descriptor names the type it belongs to, in single quotes, and
+    // says "objects" plural - CPython's own spelling for list.count.
+    if (kind == "d") { return "<method '" + nm + "' of '" + pyToStr(self["__name"]) + "' objects>" }
+    // A module-level builtin prints exactly like any other builtin function; its
+    // module is reachable as __self__ but is not part of the render.
+    if (kind == "m") { return "<built-in function " + nm + ">" }
     if (pyBMTab[i + 3] === null) {
         return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
     }
     return "<bound method " + pyBMOwner(self) + "." + nm + " of " + pyRepr(self) + ">"
 }
+// The class a classmethod reached through super() binds to: the ORIGINAL cls -
+// `super().who()` inside C.who() must still pass C - which __sobj already is
+// when the frame's first argument was a class. docs/todo.md 1.7.
+function pyDSuperOwner(s) {
+    var o = s["__sobj"]
+    if (pyIsClass(o)) { return o }
+    return js_pytype(o)
+}
+
 function pySuperMCall(s, name, args, kw) {
     pySuperCheck(s)
     var m = pySuperFind(s, name)
     if (m === undefined) {
         pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
+    }
+    if (pyDIsStatic(m) || pyDIsClsM(m)) {
+        var sd = pyDDescGet(m, pyDSuperOwner(s), name)
+        return pyCall(sd, pyBindCall(sd, args, kw))
     }
     if (!pyIsCallable(m)) { return pyDCallPyValue(m, args, kw) }
     var self = rtPrepend(s["__sobj"], args)
@@ -5303,6 +5455,24 @@ function js_pygetattr(obj, name) { return pyGetAttr(obj, pyToStr(name)) }
 // rt.pySetAttr is jsrt.go:9158, in the prelude.
 function js_pysetattr(obj, name, v) {
     pySetAttr(obj, pyToStr(name), v)
+    return undefined
+}
+
+// del obj.name (Go: js_pydel_attr, jsrt.go:14096). THIS BODY WAS SIMPLY MISSING:
+// python-to-llvm-ir.abnf's makeDel emits js_pydel_attr and abnf/jsrt.go defines it,
+// so `del o.attr` ran under llvm.Run and the NATIVE build failed to LINK -
+// "1 unresolved symbol(s): js_pydel_attr". No gate could see it: the matrix,
+// --full and --cross all run llvm.Run (manual chapter 3), and clang-check only
+// builds the ratchet, which had no `del obj.attr` in it. Found by a stress probe
+// for docs/todo.md 1.6, which is how the whole class gets found.
+// `delKey` is the floor's js_del under its host-builtin name (runtime.c host id
+// 63); it drops the key AND its insertion-order entry, which is what keeps
+// keysOf, and therefore vars()/dir(), right after a delete.
+function js_pydel_attr(obj, name) {
+    if (obj === null || obj === undefined || typeof obj != "object") {
+        fail("attribute deletion on a " + pyTypeName(obj))
+    }
+    delKey(obj, pyToStr(name))
     return undefined
 }
 
@@ -5629,6 +5799,22 @@ function pyDMethodCall(target, name, args, kw) {
     if (typeof target == "string") {
         if (pySIsStrMethod(name)) { return pyStrMethod(target, name, args, kw) }
     }
+    // A METHOD CALL THROUGH A MODULE OBJECT - `builtins.len(xs)`. The member is
+    // read and called, so `builtins.len(xs)` and `builtins.len` answer the same
+    // function. It sits FIRST because a module holds arbitrary member names, one
+    // of which is literally `next`: without this the cursor and generator arms
+    // below would claim it. math is handled ahead of this, in js_pyrxmcall.
+    // docs/todo.md 1.7.
+    if (pyIsObj(target)) {
+        if (target["__pymod"] !== undefined) {
+            var mv = target[pyToStr(name)]
+            if (mv === undefined) {
+                pyRaiseExc("AttributeError",
+                           "module '" + pyToStr(target["__pymod"]) + "' has no attribute '" + pyToStr(name) + "'")
+            }
+            return pyDCallPyValue(mv, args, kw)
+        }
+    }
     // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, and this arm is
     // what says so. It used to fall into the generator arm below, because
     // pyIsGen answered true for one - a plain object carrying a callable "next"
@@ -5699,10 +5885,38 @@ function pyDMethodCall(target, name, args, kw) {
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(target, name)
     if (bcm !== undefined) { return bcm.apply(undefined, args) }
+    // list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
+    // object rather than read as a value. The emitter routes a method call
+    // through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
+    // on both paths or the read works and the call says "unknown method".
+    // docs/todo.md 1.7.
+    var dtn = pyClassName(target)
+    if (dtn !== null) {
+        var dsamp = pyDTypeSample(dtn)
+        if (dsamp !== undefined && pyDBuiltinAttr(dsamp, name)) {
+            if (args.length == 0) {
+                pyRaiseExc("TypeError", "unbound method " + dtn + "." + pyToStr(name) + "() needs an argument")
+            }
+            var drest = []
+            var dk = 1
+            while (dk < args.length) {
+                drest.push(args[dk])
+                dk = dk + 1
+            }
+            return pyDMethodCall(args[0], name, drest, undefined)
+        }
+    }
     var cls = pyClassOf(target)
     if (cls !== null) {
         if (pyLookupHas(cls, name)) {
             var cm = pyLookupVal(cls, name)
+            // C.s(...) / C.c(...) on a staticmethod or classmethod: pyDDescGet
+            // answers the callable the attribute read would have handed back, so
+            // the call path and the read path cannot drift apart.
+            if (pyDIsStatic(cm) || pyDIsClsM(cm)) {
+                var cd = pyDDescGet(cm, cls, name)
+                return pyCall(cd, pyBindCall(cd, args, kw))
+            }
             if (pyIsCallable(cm)) { return pyCall(cm, pyBindCall(cm, args, kw)) }
             return pyDCallPyValue(cm, args, kw)
         }
@@ -5724,6 +5938,13 @@ function pyDMethodCall(target, name, args, kw) {
         }
         if (pyLookupHas(icls, name)) {
             var m = pyLookupVal(icls, name)
+            // inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
+            // classmethod gets the receiver's own class - checked before the
+            // callable arm, which would otherwise prepend the instance.
+            if (pyDIsStatic(m) || pyDIsClsM(m)) {
+                var md = pyDDescGet(m, icls, name)
+                return pyCall(md, pyBindCall(md, args, kw))
+            }
             if (pyIsCallable(m)) {
                 var self = rtPrepend(target, args)
                 return pyCall(m, pyBindCall(m, self, kw))
@@ -6320,6 +6541,96 @@ function pyDBoundBuiltin(target, name) {
     // null in the fourth slot is what says "a BUILTIN method": it is why
     // __func__ raises and why the repr is <built-in method ...>.
     return pyBMSet(f, name, target, null)
+}
+
+// ----- staticmethod / classmethod (docs/todo.md 1.7) ------------------------
+//
+// Both were undefined in every engine, so `@staticmethod` aborted the run. They
+// are DESCRIPTORS: the decorator only WRAPS, and the unwrapping happens at the
+// class-member lookup, which is the one place that knows both the receiver and
+// its class. A staticmethod yields the plain function; a classmethod yields it
+// bound to a class - and to the class of the RECEIVER, so a subclass instance
+// passes the subclass as cls, which is what makes alternative constructors work.
+//
+// The wrapper is a plain object with a __-prefixed slot, so keysOf hides it and
+// it never reaches __dict__ or a class's member enumeration.
+function js_pystaticmethod(f) { return {__pysm: f} }
+function js_pyclassmethod(f) { return {__pycm: f} }
+
+function pyDIsStatic(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pysm"] !== undefined
+}
+
+function pyDIsClsM(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pycm"] !== undefined
+}
+
+// The member as the attribute read should hand it back. `owner` is the class a
+// classmethod binds to: the receiver's own class for an instance access, the
+// class itself for a class access.
+function pyDDescGet(m, owner, name) {
+    if (pyDIsStatic(m)) { return m["__pysm"] }
+    return pyDBindMethod(owner, m["__pycm"], name)
+}
+
+// ----- the UNBOUND method descriptor (docs/todo.md 1.7) ---------------------
+//
+// `list.count` read off the TYPE OBJECT is not a bound method: CPython hands
+// back <method 'count' of 'list' objects>, a descriptor with no __self__ that
+// takes the receiver as its first argument, so list.count([1,2,2], 2) is 2.
+// Every engine raised "type object 'list' has no attribute 'count'" instead.
+// The item named list.count as the EXAMPLE; the whole family falls out of one
+// arm, because "is this a method of that type" is already answered per type by
+// pyDBuiltinAttr - it just needs a VALUE of the type, which pyDTypeSample gives.
+function pyDTypeSample(tname) {
+    if (tname == "list") { return [] }
+    if (tname == "str") { return "" }
+    if (tname == "set") { return pyNewSet([]) }
+    if (tname == "dict") { return pyNewDict() }
+    return undefined
+}
+
+function pyDUnboundDesc(cls, name) {
+    var f = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        if (args.length == 0) {
+            pyRaiseExc("TypeError",
+                "unbound method " + pyToStr(cls["__name"]) + "." + pyToStr(name) + "() needs an argument")
+        }
+        var rest = []
+        var k = 1
+        while (k < args.length) {
+            rest.push(args[k])
+            k = k + 1
+        }
+        return pyDMethodCall(args[0], name, rest, undefined)
+    }
+    return pyBMSetK(f, name, cls, null, "d")
+}
+
+// A MODULE-level builtin function read off a module object as a VALUE -
+// `f = math.sqrt` - rather than called through it. Minted ON DEMAND, so a
+// program that never does it pays nothing: the alternative was twenty-five
+// closures held in the module object forever, and tests/bench/mod.py sits on an
+// arena threshold (docs/todo.md 2.9).
+function pyDModuleFn(mod, name) {
+    var f = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        return js_pyrxmcall(mod, name, args, undefined)
+    }
+    return pyBMSetK(f, name, mod, null, "m")
 }
 
 // docs/todo.md 5.2 and 2.4. pyMemberCall is layer 2's copy of the SHARED
@@ -7278,6 +7589,14 @@ function pyERxRepr(v) {
 // keyword dict is carried through untouched, exactly as the Go twin does - no re
 // method takes a keyword argument in this dialect.
 function js_pyrxmcall(target, name, args, kw) {
+    // The `math` module rides the same dispatcher: js_pyrxmcall is the ONE
+    // extern the python emitter routes every method call through, and a module
+    // object is not an instance, a class, a dict or a list, so nothing further
+    // down js_pymcall would find it. docs/todo.md 1.7.
+    if (pyMIsMathMod(target)) {
+        if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
+        return pyMathCall(pyToStr(name), args)
+    }
     if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
         var nm = pyToStr(name)
@@ -7287,6 +7606,278 @@ function js_pyrxmcall(target, name, args, kw) {
     }
     return js_pymcall(target, name, args, kw)
 }
+
+// ================================================ the `math` module ========
+//
+// Go twin: abnf/jsrtpymath.go. Interpreter: hostGlobals["math"] plus pyMathCall
+// in languages/python-interpreter.abnf. docs/todo.md 1.7.
+//
+// Every arm routes to the host `Math`, which the C floor seeds in full
+// (runtime.c host ids 51-93, thirty-one members) - manual chapter 7.7's rule
+// that d_pow / d_exp / d_log / d_sqrt already exist in the floor and must NOT be
+// reimplemented here. What is NOT in Math is written out: expm1, log1p, fmod,
+// copysign, gcd, lcm and factorial.
+//
+// THE ANSWER'S TYPE IS PART OF THE SPECIFICATION, and CPython is not uniform:
+// sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
+// answer a FLOAT (math.pow(2, 10) is 1024.0), floor / ceil / trunc / gcd /
+// factorial answer an INT, and isnan / isinf / isfinite answer a bool. A float
+// is the {__flo} box; a plain number is an int.
+//
+// The module is a plain object with no function members, dispatched BY NAME
+// through js_pyrxmcall - twenty-five stored closures would be twenty-five floor
+// cells held forever, and tests/bench/mod.py sits on an arena threshold
+// (docs/todo.md 2.9).
+
+// ----- the `builtins` module (docs/todo.md 1.7) -----------------------------
+//
+// CPython's len.__self__ IS the builtins module, and `builtins.len is len`
+// holds. The emitter fills this object at boot from the very scope bindings the
+// global names resolve to (see the builtins-module block of
+// languages/python-to-llvm-ir.abnf), so the identity is not a copy.
+// ONE builtins module per run, remembered so len.__self__ can answer it without
+// a scope lookup layer 2 has no way to make.
+var pyDBuiltinsMod = null
+
+function js_pybuiltins_module() {
+    if (pyDBuiltinsMod === null) { pyDBuiltinsMod = {__pymod: "builtins"} }
+    return pyDBuiltinsMod
+}
+
+// Is `name` a function this math module offers? One list, consulted by the
+// attribute read (`f = math.sqrt`) and by hasattr; the CALL path does not need
+// it, because pyMathCall's own fall-through raises the AttributeError. Keep in
+// step with pyMathNames in languages/python-interpreter.abnf and pyMathHas in
+// abnf/jsrtpymath.go.
+function pyMHas(name) {
+    if (name == "sqrt" || name == "exp" || name == "expm1" || name == "log") { return true }
+    if (name == "log1p" || name == "log2" || name == "log10" || name == "pow") { return true }
+    if (name == "fabs" || name == "fmod" || name == "copysign" || name == "atan2") { return true }
+    if (name == "hypot" || name == "sin" || name == "cos" || name == "tan") { return true }
+    if (name == "asin" || name == "acos" || name == "atan" || name == "sinh") { return true }
+    if (name == "cosh" || name == "tanh" || name == "degrees" || name == "radians") { return true }
+    if (name == "floor" || name == "ceil" || name == "trunc" || name == "gcd") { return true }
+    if (name == "lcm" || name == "factorial" || name == "isnan" || name == "isinf") { return true }
+    if (name == "isfinite" || name == "isclose") { return true }
+    return false
+}
+
+function js_pymath_module() {
+    return {
+        __pymod: "math",
+        pi: pyMkFlo(3.141592653589793),
+        e: pyMkFlo(2.718281828459045),
+        tau: pyMkFlo(6.283185307179586),
+        inf: pyMkFlo(pyMInf()),
+        nan: pyMkFlo(pyMNaN())
+    }
+}
+
+// MetaJS has no exponent literal (1e308 parses as the identifier e308), so an
+// infinity is BUILT - manual chapter 4. A NaN comes from an invalid operation.
+function pyMInf() { return Math.pow(2, 1024) }
+function pyMNaN() { return Math.pow(2, 1024) - Math.pow(2, 1024) }
+
+function pyMIsMathMod(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pymod"] === "math"
+}
+
+function pyMArg(args, i) {
+    if (i >= args.length) { fail("math: missing argument") }
+    return pyNum(args[i])
+}
+
+// CPython 3.14's own domain-error texts, which quote the offending operand as a
+// FLOAT repr ("expected a nonnegative input, got -1.0"). Getting the wording from
+// the oracle rather than inventing one is what makes these rows assertable.
+function pyMDom(kind, v) {
+    var got = pyStr(pyMkFlo(v))
+    if (kind == "nonneg") { pyRaiseExc("ValueError", "expected a nonnegative input, got " + got) }
+    if (kind == "pos") { pyRaiseExc("ValueError", "expected a positive input, got " + got) }
+    if (kind == "unit") { pyRaiseExc("ValueError", "expected a number in range from -1 up to 1, got " + got) }
+    pyRaiseExc("ValueError", "expected argument value > -1, got " + got)
+}
+
+// floor / ceil / trunc must answer an INT, and there is no int for a non-finite
+// operand, so CPython raises rather than answering an infinity.
+function pyMInt(f) {
+    // CPython splits the two: an INFINITY is an OverflowError (there is no such
+    // int) and a NaN a ValueError, and the two texts differ as well.
+    if (f !== f) { pyRaiseExc("ValueError", "cannot convert float NaN to integer") }
+    if (f === pyMInf() || f === 0 - pyMInf()) {
+        pyRaiseExc("OverflowError", "cannot convert float infinity to integer")
+    }
+    return f
+}
+
+function pyMGcd2(a, b) {
+    var x = Math.abs(Math.trunc(a))
+    var y = Math.abs(Math.trunc(b))
+    while (y !== 0) {
+        var t = x - Math.floor(x / y) * y
+        x = y
+        y = t
+    }
+    return x
+}
+
+// Beyond 20! the product leaves the exact-double range, so it is finished on the
+// arbitrary-precision integer this value model already carries - which is what
+// makes math.factorial(30) CPython's exact answer rather than a rounded double.
+function pyMFactorial(n) {
+    if (n <= 20) {
+        var r = 1
+        var i = 2
+        while (i <= n) { r = r * i; i = i + 1 }
+        return r
+    }
+    var acc = pyABigFromNum(1)
+    var k = 2
+    while (k <= n) { acc = pyABigMul(acc, pyABigFromNum(k)); k = k + 1 }
+    return pyABigNarrow(acc)
+}
+
+function pyMathCall(name, args) {
+    if (name == "sqrt") {
+        var sq = pyMArg(args, 0)
+        if (sq < 0) { pyMDom("nonneg", sq) }
+        return pyMkFlo(Math.sqrt(sq))
+    }
+    if (name == "exp") { return pyMkFlo(Math.exp(pyMArg(args, 0))) }
+    if (name == "expm1") { return pyMkFlo(Math.expm1(pyMArg(args, 0))) }
+    if (name == "log") {
+        var lg = pyMArg(args, 0)
+        if (lg <= 0) { pyMDom("pos", lg) }
+        if (args.length > 1) {
+            // math.log(x, 1) divides by log(1) == 0: CPython raises
+            // ZeroDivisionError, not a domain error.
+            var lb = Math.log(pyMArg(args, 1))
+            if (lb === 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
+            return pyMkFlo(Math.log(lg) / lb)
+        }
+        return pyMkFlo(Math.log(lg))
+    }
+    if (name == "log1p") {
+        var l1 = pyMArg(args, 0)
+        if (l1 <= 0 - 1) { pyMDom("gt", l1) }
+        return pyMkFlo(Math.log1p(l1))
+    }
+    if (name == "log2") {
+        var l2 = pyMArg(args, 0)
+        if (l2 <= 0) { pyMDom("pos", l2) }
+        return pyMkFlo(Math.log2(l2))
+    }
+    if (name == "log10") {
+        var l10 = pyMArg(args, 0)
+        if (l10 <= 0) { pyMDom("pos", l10) }
+        return pyMkFlo(Math.log10(l10))
+    }
+    if (name == "pow") { return pyMkFlo(Math.pow(pyMArg(args, 0), pyMArg(args, 1))) }
+    if (name == "fabs") { return pyMkFlo(Math.abs(pyMArg(args, 0))) }
+    if (name == "fmod") {
+        var fa = pyMArg(args, 0)
+        var fb = pyMArg(args, 1)
+        return pyMkFlo(fa - Math.trunc(fa / fb) * fb)
+    }
+    if (name == "copysign") {
+        var cm = Math.abs(pyMArg(args, 0))
+        var cs = pyMArg(args, 1)
+        // The sign BIT, not `cs < 0`: copysign(1, -0.0) is -1.0 in CPython. A
+        // negative zero is recognised by 1/x being negative infinity, and the
+        // negation divides by -1 rather than subtracting (manual chapter 4).
+        if (cs < 0 || (cs === 0 && 1 / cs < 0)) { return pyMkFlo(cm / (0 - 1)) }
+        return pyMkFlo(cm)
+    }
+    if (name == "atan2") { return pyMkFlo(Math.atan2(pyMArg(args, 0), pyMArg(args, 1))) }
+    if (name == "hypot") {
+        var mx = 0
+        var i = 0
+        while (i < args.length) {
+            var av = Math.abs(pyNum(args[i]))
+            if (av === pyMInf()) { return pyMkFlo(pyMInf()) }
+            if (av > mx) { mx = av }
+            i = i + 1
+        }
+        if (mx === 0) { return pyMkFlo(0) }
+        var sum = 0
+        var j = 0
+        while (j < args.length) {
+            var t2 = pyNum(args[j]) / mx
+            sum = sum + t2 * t2
+            j = j + 1
+        }
+        return pyMkFlo(mx * Math.sqrt(sum))
+    }
+    if (name == "sin") { return pyMkFlo(Math.sin(pyMArg(args, 0))) }
+    if (name == "cos") { return pyMkFlo(Math.cos(pyMArg(args, 0))) }
+    if (name == "tan") { return pyMkFlo(Math.tan(pyMArg(args, 0))) }
+    if (name == "asin") {
+        var as1 = pyMArg(args, 0)
+        if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }
+        return pyMkFlo(Math.asin(as1))
+    }
+    if (name == "acos") {
+        var ac1 = pyMArg(args, 0)
+        if (ac1 < 0 - 1 || ac1 > 1) { pyMDom("unit", ac1) }
+        return pyMkFlo(Math.acos(ac1))
+    }
+    if (name == "atan") { return pyMkFlo(Math.atan(pyMArg(args, 0))) }
+    if (name == "sinh") { return pyMkFlo(Math.sinh(pyMArg(args, 0))) }
+    if (name == "cosh") { return pyMkFlo(Math.cosh(pyMArg(args, 0))) }
+    if (name == "tanh") { return pyMkFlo(Math.tanh(pyMArg(args, 0))) }
+    if (name == "degrees") { return pyMkFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
+    if (name == "radians") { return pyMkFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }
+    if (name == "floor") { return pyMInt(Math.floor(pyMArg(args, 0))) }
+    if (name == "ceil") { return pyMInt(Math.ceil(pyMArg(args, 0))) }
+    if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
+    if (name == "gcd") {
+        if (args.length == 0) { return 0 }
+        var g = Math.abs(Math.trunc(pyNum(args[0])))
+        var gi = 1
+        while (gi < args.length) { g = pyMGcd2(g, pyNum(args[gi])); gi = gi + 1 }
+        return g
+    }
+    if (name == "lcm") {
+        if (args.length == 0) { return 1 }
+        var l = Math.abs(Math.trunc(pyNum(args[0])))
+        var li = 1
+        while (li < args.length) {
+            var lb = Math.abs(Math.trunc(pyNum(args[li])))
+            if (l === 0 || lb === 0) { return 0 }
+            l = l / pyMGcd2(l, lb) * lb
+            li = li + 1
+        }
+        return l
+    }
+    if (name == "factorial") {
+        var fn = pyMArg(args, 0)
+        if (fn < 0 || Math.trunc(fn) !== fn) {
+            pyRaiseExc("ValueError", "factorial() not defined for negative values")
+        }
+        return pyMFactorial(fn)
+    }
+    if (name == "isnan") { var nn = pyMArg(args, 0); return nn !== nn }
+    if (name == "isinf") {
+        var iv = pyMArg(args, 0)
+        return iv === pyMInf() || iv === 0 - pyMInf()
+    }
+    if (name == "isfinite") {
+        var fv = pyMArg(args, 0)
+        return fv === fv && fv !== pyMInf() && fv !== 0 - pyMInf()
+    }
+    if (name == "isclose") {
+        var ca = pyMArg(args, 0)
+        var cb = pyMArg(args, 1)
+        if (ca === cb) { return true }
+        if (ca !== ca || cb !== cb) { return false }
+        if (ca === pyMInf() || ca === 0 - pyMInf()) { return false }
+        if (cb === pyMInf() || cb === 0 - pyMInf()) { return false }
+        return Math.abs(ca - cb) <= 0.000000001 * Math.max(Math.abs(ca), Math.abs(cb))
+    }
+    pyRaiseExc("AttributeError", "module 'math' has no attribute '" + name + "'")
+}
+
 
 // js_pyrxstr is str()/print() of a pattern or a match. The Go twin falls through
 // to the js_pystr extern; here it falls through to the prelude's pyStr, which is

@@ -286,7 +286,7 @@ For         <~~ push(makeForStmt(takeAll())) ~~>
 // genPush/genPop bracket the body so makeYield can mark the def as a GENERATOR
 // function (calling it then yields a generator object rather than running the body).
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "def" KwEnd Id <~~ push(up.in); genPush() ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
+            = "def" KwEnd Id <~~ push(up.in); genPush(); sbPush() ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
 // Parameter lists: plain names, default values (evaluated once, when the def
 // statement runs - like real Python) and a *args rest parameter all work;
 // **kwargs, the bare '*' and '/' markers and keyword-only parameters after
@@ -325,7 +325,7 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // namespace scope, so plain statements (loops, conditionals) inside a class body work
 // and every name it binds - including its defs - becomes a class attribute.
 Class       <~~ push(makeClass(takeAll())) ~~>
-            = "class" KwEnd Id <~~ push(up.in) ~~> [ SkipBracket ] [ ClassBases ] Suite ;
+            = "class" KwEnd Id <~~ push(up.in); sbPush() ~~> [ SkipBracket ] [ ClassBases ] Suite ;
 ClassBases  <~~ push({bases: takeAll()}) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // A PEP 695 type-parameter list, [T], [A, B] - parsed and dropped (types are erased).
@@ -664,7 +664,7 @@ NamedTest   = Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
-            = "lambda" KwEnd [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
+            = "lambda" KwEnd <~~ sbPush() ~~> [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults
 // and *args work like in def, **kwargs is reported as not implemented.
 LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
@@ -1218,6 +1218,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // type objects, so they are built the way a cursor's type is below.
             var bml = pyBMFind(v)
             if (bml >= 0) {
+                // An UNBOUND descriptor is its own CPython type; a module-level
+                // builtin and a bound builtin method share one.
+                if (pyBMTab[bml + 4] == "d") { return pyBuiltinTypeObj("method_descriptor") }
                 if (pyBMTab[bml + 3] === null) { return pyBuiltinTypeObj("builtin_function_or_method") }
                 return pyBuiltinTypeObj("method")
             }
@@ -1239,12 +1242,54 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Built rather than looked up in hostGlobals, which holds only the
         // fourteen NAMED builtin types. docs/todo.md 1.4.
         if (isPyIt(v)) { return pyBuiltinTypeObj(v.__pyit) }
+        // A compiled regexp and a match object name their own CPython types, and
+        // the name is MODULE-QUALIFIED on purpose: it is the string an
+        // AttributeError interpolates ("'re.Pattern' object has no attribute
+        // 'nope'"), while type(p).__name__ is the SHORT 'Pattern' - which is why
+        // the __name__ / __qualname__ arm of pyattr cuts at the last dot
+        // (pyShortName). docs/todo.md 1.6 recorded this as declined on the
+        // reasoning that a one-line arm would trade one wrong answer for another;
+        // both strings are in fact reachable from the same one and differ only by
+        // that cut.
+        if (v.__pyre === true) { return pyBuiltinTypeObj("re.Pattern") }
+        if (v.__pymatch === true) { return pyBuiltinTypeObj("re.Match") }
+        // docs/todo.md 1.7: the two decorator wrappers and a module object are
+        // their own CPython types.
+        if (hasOwn(v, "__pysm")) { return pyBuiltinTypeObj("staticmethod") }
+        if (hasOwn(v, "__pycm")) { return pyBuiltinTypeObj("classmethod") }
+        if (v.__pymod != undefined) { return pyBuiltinTypeObj("module") }
         return hostGlobals["object"]
+    }
+    // The last component of a possibly module-qualified type name. Keep in step
+    // with pyShortName in languages/lib/python-rt.metajs and pyShortName in
+    // abnf/jsrt.go.
+    function pyShortName(n) {
+        var cut = -1
+        for (var i = 0; i < n.length; i++) { if (n.charAt(i) == ".") { cut = i } }
+        if (cut < 0) { return n }
+        return n.substring(cut + 1, n.length)
     }
     // A builtin type object that is not one of the fourteen NAMED ones above -
     // a cursor's type, and the two callable types of docs/todo.md 1.4.
+    //
+    // INTERNED, one object per name, and that is load-bearing rather than a
+    // saving: `type(x) is type(y)` compares the two type objects by identity, and
+    // building a fresh one per call made `type(iter([])) is type(iter([]))` FALSE
+    // here while both compiled halves - where rt.pyBuiltinClass / pyBuiltinClass
+    // have always kept one object per name - and CPython say True. A live halves
+    // divergence `--cross` never reached, found while re-checking docs/todo.md
+    // 1.6's declined `re.Pattern` note. It reached generators and builtin
+    // functions too, not only cursors.
+    var pyTypeObjNames = []
+    var pyTypeObjVals = []
     function pyBuiltinTypeObj(n) {
-        return {__isclass: true, __name: n, __bases: [], __builtin: true}
+        for (var i = 0; i < pyTypeObjNames.length; i++) {
+            if (pyTypeObjNames[i] === n) { return pyTypeObjVals[i] }
+        }
+        var o = {__isclass: true, __name: n, __bases: [], __builtin: true}
+        pyTypeObjNames.push(n)
+        pyTypeObjVals.push(o)
+        return o
     }
     // float("inf") - CPython's float_from_string accepts the three non-finite
     // SPELLINGS, case-insensitively and with an optional sign, after stripping
@@ -1669,6 +1714,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // one line, over the same pyattr the `.` operator uses.
     hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
 
+    // ----- staticmethod / classmethod (docs/todo.md 1.7) --------------------
+    //
+    // Both were undefined in every engine, so `@staticmethod` aborted the run.
+    // They are DESCRIPTORS: the decorator only WRAPS, and the unwrapping happens
+    // at the class-member lookup, which is the one place that knows both the
+    // receiver and its class. A staticmethod yields the plain function; a
+    // classmethod yields it bound to a class - and to the class of the RECEIVER,
+    // so a subclass instance passes the subclass as cls, which is what makes
+    // alternative constructors work.
+    //
+    // The wrapper is a plain object with a __-prefixed slot, so keysOf hides it
+    // and it never reaches __dict__ or a class's member enumeration.
+    hostGlobals["staticmethod"] = function(f) { return {__pysm: f} }
+    hostGlobals["classmethod"] = function(f) { return {__pycm: f} }
+    function pyIsStatic(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__pysm") }
+    function pyIsClsM(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__pycm") }
+    // The member as the attribute read should hand it back. `owner` is the class
+    // a classmethod binds to: the receiver's own class for an instance access,
+    // the class itself for a class access.
+    function pyDescGet(m, owner, name) {
+        if (pyIsStatic(m)) { return m.__pysm }
+        return bindMethod(owner, m.__pycm, name)
+    }
+
+    // ----- the `builtins` module (docs/todo.md 1.7) -------------------------
+    //
+    // CPython's len.__self__ IS the builtins module, and `builtins.len is len`
+    // holds. Both fall out of one object whose attribute read goes straight to
+    // hostGlobals, so the identity is not a copy but the very binding the global
+    // name resolves to.
+    hostGlobals["builtins"] = {__pymod: "builtins"}
+
     // ----- the BUILTIN render table (docs/todo.md 1.4) ----------------------
     //
     // print(len) said "<function <lambda>>" in ALL THREE engines where CPython
@@ -1738,6 +1815,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__") { return true }
             return clsFind(o, name) != null
         }
+        // A MODULE object, mirroring pyattr's module arm - hasattr(math, "sqrt")
+        // has to agree with what `math.sqrt` answers. docs/todo.md 1.7.
+        if (typeof o == "object" && o.__pymod != undefined) {
+            if (hasOwn(o, name)) { return true }
+            if (o.__pymod == "builtins") { return hasOwn(hostGlobals, name) }
+            if (o.__pymod == "math") { return pyMathHas(name) }
+            return false
+        }
         // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
@@ -1799,6 +1884,51 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pyBMSet(f, name, target, null)
     }
+    // ----- the UNBOUND method descriptor (docs/todo.md 1.7) -----------------
+    //
+    // `list.count` read off the TYPE OBJECT is not a bound method: CPython hands
+    // back <method 'count' of 'list' objects>, a descriptor with no __self__
+    // that takes the receiver as its first argument, so list.count([1,2,2], 2)
+    // is 2. Every engine here raised "type object 'list' has no attribute
+    // 'count'" instead. The item named list.count as the EXAMPLE; the whole
+    // family falls out of one arm, because the "is this a method of that type"
+    // question is already answered per type by pyBuiltinAttr - it just needs a
+    // VALUE of the type to ask about, which pyTypeSample supplies.
+    function pyTypeSample(tname) {
+        if (tname == "list") { return [] }
+        if (tname == "str") { return "" }
+        if (tname == "set") { return newSet() }
+        if (tname == "dict") { return newDict() }
+        return undefined
+    }
+    function pyUnboundDesc(cls, name) {
+        var f = function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            if (args.length == 0) {
+                pyRaise(pyMakeExc("TypeError",
+                    ["unbound method " + cls.__name + "." + name + "() needs an argument"]))
+            }
+            var recv = args[0]
+            var rest = []
+            for (var k = 1; k < args.length; k++) { rest.push(args[k]) }
+            return mcall(recv, name, rest, undefined)
+        }
+        return pyBMSetK(f, name, cls, null, "d")
+    }
+    // A MODULE-level builtin function read off a module object as a VALUE -
+    // `f = math.sqrt` - rather than called through it. Minted ON DEMAND, so a
+    // program that never does it pays nothing: the alternative was twenty-five
+    // closures held in the module object forever, and tests/bench/mod.py sits on
+    // an arena threshold (docs/todo.md 2.9).
+    function pyModuleFn(mod, name) {
+        var f = function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return mcall(mod, name, args, undefined)
+        }
+        return pyBMSetK(f, name, mod, null, "m")
+    }
     // ----- what a BOUND METHOD knows about itself (docs/todo.md 1.4) ----------
     //
     // getattr([1,2], "count").__name__ was '<lambda>' here and None in both
@@ -1819,17 +1949,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
     // family in languages/lib/python-rt.metajs.
+    // The stride is FIVE, not four: the fifth slot is the KIND, because three
+    // different CPython callables now share this record and they print, name and
+    // introspect differently (docs/todo.md 1.7).
+    //
+    //   ""  a bound method            <bound method C.m of ...> / <built-in method
+    //                                 count of list object>
+    //   "d" an unbound METHOD DESCRIPTOR read off a builtin type object -
+    //       list.count, str.upper - which CPython prints <method 'count' of 'list'
+    //       objects>, gives no __self__ at all, and calls with the receiver as its
+    //       FIRST argument. `self` holds the TYPE OBJECT for it, not a receiver.
+    //   "m" a MODULE-level builtin function read off a module object - math.sqrt -
+    //       which prints <built-in function sqrt> and whose __self__ IS the module.
     var pyBMTab = []
-    function pyBMSet(f, name, self, fn) {
+    function pyBMSet(f, name, self, fn) { return pyBMSetK(f, name, self, fn, "") }
+    function pyBMSetK(f, name, self, fn, kind) {
         pyBMTab.push(f)
         pyBMTab.push(name)
         pyBMTab.push(self)
         pyBMTab.push(fn)
+        pyBMTab.push(kind)
         return f
     }
     // The index of f's record, or -1.
     function pyBMFind(f) {
-        for (var i = pyBMTab.length - 4; i >= 0; i -= 4) {
+        for (var i = pyBMTab.length - 5; i >= 0; i -= 5) {
             if (pyBMTab[i] === f) { return i }
         }
         return 0 - 1
@@ -1846,6 +1990,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyBMRender(i) {
         var nm = pyBMTab[i + 1]
         var self = pyBMTab[i + 2]
+        var kind = pyBMTab[i + 4]
+        // An UNBOUND descriptor names the type it belongs to, in single quotes,
+        // and says "objects" plural - CPython's own spelling for list.count.
+        if (kind == "d") { return "<method '" + nm + "' of '" + self.__name + "' objects>" }
+        // A module-level builtin prints exactly like any other builtin function;
+        // its module is reachable as __self__ but is not part of the render.
+        if (kind == "m") { return "<built-in function " + nm + ">" }
         if (pyBMTab[i + 3] === null) {
             return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
         }
@@ -2203,6 +2354,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out2 + "}"
         }
         if (pyUser(v)) { return pyUserRender(v, false) }
+        // A MODULE object. CPython prints <module 'builtins' (built-in)> for a
+        // built-in module and, for an extension module like math, the .so PATH it
+        // was loaded from - which is machine-specific and cannot be matched, so
+        // every module here takes the built-in spelling. Without this a module
+        // printed the host's [object Object].
+        if (v !== null && v !== undefined && typeof v == "object" && v.__pymod != undefined) {
+            return "<module '" + v.__pymod + "' (built-in)>"
+        }
         // An iterator object. CPython prints <map object at 0x...>; the address
         // is its own and cannot be matched, so it is left off rather than
         // invented - and all three engines print this same short form.
@@ -2806,6 +2965,285 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                          L: PY_RE_L, LOCALE: PY_RE_L, M: PY_RE_M, MULTILINE: PY_RE_M,
                          S: PY_RE_S, DOTALL: PY_RE_S, U: PY_RE_U, UNICODE: PY_RE_U,
                          X: PY_RE_X, VERBOSE: PY_RE_X}
+
+    // ----- `open` and file I/O: DECLINED, and this is the reason ------------
+    //
+    // docs/todo.md 1.7 lists `open` beside `math`. It is not implemented, and the
+    // decision is a measurement rather than a preference: THERE IS NO FILE I/O
+    // PRIMITIVE ANYWHERE IN THIS PROJECT'S RUNTIME. languages/lib/runtime.c
+    // declares exactly putchar, write(2), malloc, exit, getenv, setjmp/longjmp,
+    // pthread and dlopen/dlsym - no open/read/close - and `nm -u` on any native
+    // binary showing libc and nothing else is a property the manual states in
+    // chapter 1. c.readFile IS in the grammar host, but it is the COMPILE-time
+    // import reader, not something an interpreted program can reach.
+    //
+    // So `open` is not a builtin to add; it is a new capability across four
+    // engines: three libc declarations plus a file-handle tag in runtime.c, an
+    // os.File-backed Go type in the twin, a MetaJS layer-2 object, a host global
+    // in metajs-interpreter.abnf (manual 7.2: a host global means THREE engines,
+    // and abnf/hostglobals_test.go pins the set), and then the whole file-object
+    // surface - read/readline/readlines/write/close, iteration, and the context
+    // manager - before one realistic program works. The test suite could not
+    // assert on it either without fixtures the matrix has no mechanism for.
+    //
+    // `open(...)` therefore raises the catchable NameError any unbound name gets
+    // (d0f4db3), which is a truthful answer. Saying so here is worth more than a
+    // fake `open` that pretends to read.
+
+    // ================================================ the `math` module ====
+    //
+    // Go twin: abnf/jsrtpymath.go. Layer 2: js_pymath_module / pyMathCall in
+    // languages/lib/python-rt.metajs. docs/todo.md 1.7.
+    //
+    // `import math` binds no module object in this flat import model, so the
+    // module is a host global - exactly what `re` above already is, and the
+    // deviation is the same one: `math` is always there, imported or not.
+    //
+    // SCOPE. Everything here is a pure function of doubles or of integers, which
+    // is what this value model carries exactly. DELIBERATELY ABSENT: the complex
+    // surface (cmath's job), the statistics helpers (fsum / prod / dist / comb /
+    // perm - each a real algorithm rather than a rename), and nextafter / ulp /
+    // ldexp / frexp / modf, which read a double's BIT LAYOUT and therefore belong
+    // to the C floor (manual chapter 7.7). Adding any of them later is one arm in
+    // three engines.
+    //
+    // THE ANSWER'S TYPE IS PART OF THE SPECIFICATION and CPython is not uniform:
+    // sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
+    // answer a FLOAT (math.pow(2, 10) is 1024.0), floor / ceil / trunc / gcd /
+    // factorial answer an INT, and isnan / isinf / isfinite answer a bool.
+    // THE GENERAL RULE, and it will bite whoever adds the next module here: a
+    // top-level STATEMENT in a grammar's tag script may only call a function
+    // declared ABOVE it. goja hoists function declarations to the top of the
+    // script; the frozen engine binds them in textual order, so a call that runs
+    // during the script's own top-level execution sees a declaration that comes
+    // later as UNDEFINED. The two engines therefore pick opposite winners, and
+    // only `-frozen` fails - which no goja-only run, and no amount of reading,
+    // can show you. (Manual chapter 4 has the same rule from the other side, for
+    // an unprefixed helper in a shared core.)
+    //
+    // Here that meant writing the float boxes OUT instead of building them with
+    // pyFlo, which is declared ~1,600 lines further down: `pyFlo(3.14...)` ran
+    // green under goja and aborted every python interpreter row under -frozen
+    // with "variable not defined: pyFlo" - seven matrix entries at once.
+    // pyFlo's whole body is {__flo: f}, so the literal below is the same value.
+    // The FUNCTION BODIES in this chapter are safe by construction: they run at
+    // program time, long after the whole script has been evaluated.
+    hostGlobals["math"] = {__pymod: "math",
+                           pi: {__flo: 3.141592653589793},
+                           e: {__flo: 2.718281828459045},
+                           tau: {__flo: 6.283185307179586},
+                           inf: {__flo: Math.pow(2, 1024)},
+                           nan: {__flo: Math.pow(2, 1024) - Math.pow(2, 1024)}}
+
+    function pyMInf() { return Math.pow(2, 1024) }
+    function pyMArg(args, i) {
+        if (i >= args.length) { fail("math: missing argument") }
+        return floVal(args[i])
+    }
+    // CPython 3.14's own domain-error texts, which quote the offending operand as
+    // a FLOAT repr ("expected a nonnegative input, got -1.0"). Taken from the
+    // oracle rather than invented, which is what makes these rows assertable.
+    function pyMDom(kind, v) {
+        var got = pstr(pyFlo(v))
+        if (kind == "nonneg") { pyRaise(pyMakeExc("ValueError", ["expected a nonnegative input, got " + got])) }
+        if (kind == "pos") { pyRaise(pyMakeExc("ValueError", ["expected a positive input, got " + got])) }
+        if (kind == "unit") { pyRaise(pyMakeExc("ValueError", ["expected a number in range from -1 up to 1, got " + got])) }
+        pyRaise(pyMakeExc("ValueError", ["expected argument value > -1, got " + got]))
+    }
+    // floor / ceil / trunc must answer an INT, and there is no int for a
+    // non-finite operand, so CPython raises rather than answering an infinity.
+    function pyMInt(f) {
+        // CPython splits the two: an INFINITY is an OverflowError (there is no
+        // such int) and a NaN a ValueError, and the texts differ as well.
+        if (f !== f) { pyRaise(pyMakeExc("ValueError", ["cannot convert float NaN to integer"])) }
+        if (f === pyMInf() || f === 0 - pyMInf()) {
+            pyRaise(pyMakeExc("OverflowError", ["cannot convert float infinity to integer"]))
+        }
+        return f
+    }
+    function pyMGcd2(a, b) {
+        var x = Math.abs(Math.trunc(a))
+        var y = Math.abs(Math.trunc(b))
+        while (y !== 0) {
+            var t = x - Math.floor(x / y) * y
+            x = y
+            y = t
+        }
+        return x
+    }
+    // Beyond 20! the product leaves the exact-double range, so it finishes on the
+    // arbitrary-precision integer this value model already carries - which makes
+    // math.factorial(30) CPython's exact answer and not a rounded double.
+    function pyMFactorial(n) {
+        if (n <= 20) {
+            var r = 1
+            var i = 2
+            while (i <= n) { r = r * i; i = i + 1 }
+            return r
+        }
+        var acc = bigFromNum(1)
+        var k = 2
+        while (k <= n) {
+            var bk = bigFromNum(k)
+            acc = bigOb(acc.sign * bk.sign, magMul(acc.limbs, bk.limbs))
+            k = k + 1
+        }
+        return bigOut(acc)
+    }
+    // Is `name` a function this math module offers? One list, consulted by the
+    // attribute read (`f = math.sqrt`) and by hasattr; the CALL path does not
+    // need it, because pyMathCall's own fall-through raises the AttributeError.
+    // Keep in step with pyMHas in languages/lib/python-rt.metajs and pyMathHas
+    // in abnf/jsrtpymath.go.
+    var pyMathNames = ["sqrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
+                       "fabs", "fmod", "copysign", "atan2", "hypot", "sin", "cos", "tan",
+                       "asin", "acos", "atan", "sinh", "cosh", "tanh", "degrees", "radians",
+                       "floor", "ceil", "trunc", "gcd", "lcm", "factorial",
+                       "isnan", "isinf", "isfinite", "isclose"]
+    function pyMathHas(name) {
+        for (var i = 0; i < pyMathNames.length; i++) { if (pyMathNames[i] == name) { return true } }
+        return false
+    }
+    function pyMathCall(name, args) {
+        if (name == "sqrt") {
+            var sq = pyMArg(args, 0)
+            if (sq < 0) { pyMDom("nonneg", sq) }
+            return pyFlo(Math.sqrt(sq))
+        }
+        if (name == "exp") { return pyFlo(Math.exp(pyMArg(args, 0))) }
+        if (name == "expm1") { return pyFlo(Math.expm1(pyMArg(args, 0))) }
+        if (name == "log") {
+            var lg = pyMArg(args, 0)
+            if (lg <= 0) { pyMDom("pos", lg) }
+            if (args.length > 1) {
+                // math.log(x, 1) divides by log(1) == 0: CPython raises
+                // ZeroDivisionError, not a domain error.
+                var lb = Math.log(pyMArg(args, 1))
+                if (lb === 0) { pyRaise(pyMakeExc("ZeroDivisionError", ["division by zero"])) }
+                return pyFlo(Math.log(lg) / lb)
+            }
+            return pyFlo(Math.log(lg))
+        }
+        if (name == "log1p") {
+            var l1 = pyMArg(args, 0)
+            if (l1 <= 0 - 1) { pyMDom("gt", l1) }
+            return pyFlo(Math.log1p(l1))
+        }
+        if (name == "log2") {
+            var l2 = pyMArg(args, 0)
+            if (l2 <= 0) { pyMDom("pos", l2) }
+            return pyFlo(Math.log2(l2))
+        }
+        if (name == "log10") {
+            var l10 = pyMArg(args, 0)
+            if (l10 <= 0) { pyMDom("pos", l10) }
+            return pyFlo(Math.log10(l10))
+        }
+        if (name == "pow") { return pyFlo(Math.pow(pyMArg(args, 0), pyMArg(args, 1))) }
+        if (name == "fabs") { return pyFlo(Math.abs(pyMArg(args, 0))) }
+        if (name == "fmod") {
+            var fa = pyMArg(args, 0)
+            var fb = pyMArg(args, 1)
+            return pyFlo(fa - Math.trunc(fa / fb) * fb)
+        }
+        if (name == "copysign") {
+            var cm = Math.abs(pyMArg(args, 0))
+            var cs = pyMArg(args, 1)
+            // The sign BIT, not `cs < 0`: copysign(1, -0.0) is -1.0 in CPython.
+            // A negative zero is recognised by 1/x, and the negation divides by
+            // -1 rather than subtracting (manual chapter 4).
+            if (cs < 0 || (cs === 0 && 1 / cs < 0)) { return pyFlo(cm / (0 - 1)) }
+            return pyFlo(cm)
+        }
+        if (name == "atan2") { return pyFlo(Math.atan2(pyMArg(args, 0), pyMArg(args, 1))) }
+        if (name == "hypot") {
+            var mx = 0
+            var i = 0
+            while (i < args.length) {
+                var av = Math.abs(floVal(args[i]))
+                if (av === pyMInf()) { return pyFlo(pyMInf()) }
+                if (av > mx) { mx = av }
+                i = i + 1
+            }
+            if (mx === 0) { return pyFlo(0) }
+            var sum = 0
+            var j = 0
+            while (j < args.length) {
+                var t2 = floVal(args[j]) / mx
+                sum = sum + t2 * t2
+                j = j + 1
+            }
+            return pyFlo(mx * Math.sqrt(sum))
+        }
+        if (name == "sin") { return pyFlo(Math.sin(pyMArg(args, 0))) }
+        if (name == "cos") { return pyFlo(Math.cos(pyMArg(args, 0))) }
+        if (name == "tan") { return pyFlo(Math.tan(pyMArg(args, 0))) }
+        if (name == "asin") {
+            var as1 = pyMArg(args, 0)
+            if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }
+            return pyFlo(Math.asin(as1))
+        }
+        if (name == "acos") {
+            var ac1 = pyMArg(args, 0)
+            if (ac1 < 0 - 1 || ac1 > 1) { pyMDom("unit", ac1) }
+            return pyFlo(Math.acos(ac1))
+        }
+        if (name == "atan") { return pyFlo(Math.atan(pyMArg(args, 0))) }
+        if (name == "sinh") { return pyFlo(Math.sinh(pyMArg(args, 0))) }
+        if (name == "cosh") { return pyFlo(Math.cosh(pyMArg(args, 0))) }
+        if (name == "tanh") { return pyFlo(Math.tanh(pyMArg(args, 0))) }
+        if (name == "degrees") { return pyFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
+        if (name == "radians") { return pyFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }
+        if (name == "floor") { return pyMInt(Math.floor(pyMArg(args, 0))) }
+        if (name == "ceil") { return pyMInt(Math.ceil(pyMArg(args, 0))) }
+        if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
+        if (name == "gcd") {
+            if (args.length == 0) { return 0 }
+            var g = Math.abs(Math.trunc(floVal(args[0])))
+            var gi = 1
+            while (gi < args.length) { g = pyMGcd2(g, floVal(args[gi])); gi = gi + 1 }
+            return g
+        }
+        if (name == "lcm") {
+            if (args.length == 0) { return 1 }
+            var l = Math.abs(Math.trunc(floVal(args[0])))
+            var li = 1
+            while (li < args.length) {
+                var lb = Math.abs(Math.trunc(floVal(args[li])))
+                if (l === 0 || lb === 0) { return 0 }
+                l = l / pyMGcd2(l, lb) * lb
+                li = li + 1
+            }
+            return l
+        }
+        if (name == "factorial") {
+            var fn = pyMArg(args, 0)
+            if (fn < 0 || Math.trunc(fn) !== fn) {
+                pyRaise(pyMakeExc("ValueError", ["factorial() not defined for negative values"]))
+            }
+            return pyMFactorial(fn)
+        }
+        if (name == "isnan") { var nn = pyMArg(args, 0); return nn !== nn }
+        if (name == "isinf") {
+            var iv = pyMArg(args, 0)
+            return iv === pyMInf() || iv === 0 - pyMInf()
+        }
+        if (name == "isfinite") {
+            var fv = pyMArg(args, 0)
+            return fv === fv && fv !== pyMInf() && fv !== 0 - pyMInf()
+        }
+        if (name == "isclose") {
+            var ca = pyMArg(args, 0)
+            var cb = pyMArg(args, 1)
+            if (ca === cb) { return true }
+            if (ca !== ca || cb !== cb) { return false }
+            if (ca === pyMInf() || ca === 0 - pyMInf()) { return false }
+            if (cb === pyMInf() || cb === 0 - pyMInf()) { return false }
+            return Math.abs(ca - cb) <= 0.000000001 * Math.max(Math.abs(ca), Math.abs(cb))
+        }
+        pyRaise(pyMakeExc("AttributeError", ["module 'math' has no attribute '" + name + "'"]))
+        return undefined
+    }
 
     // ---- the four engine adapters this chapter is written against ----
     function pySFail(msg) { fail(msg) }
@@ -3747,6 +4185,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (target !== null && target !== undefined && typeof target == "object" && !Array.isArray(target)) {
             if (target.__pysup == true) { return pySuperMCall(target, name, args, kw) }
             if (target.__pymod == "re") { return pyReModCall(name, args) }
+            if (target.__pymod == "math") { return pyMathCall(name, args) }
+            // Any other module object - `builtins.len(xs)`. A method call does
+            // not go through pyattr in this half, so the module's own member is
+            // read here and called, which keeps `builtins.len(xs)` and
+            // `builtins.len` answering the same function.
+            if (target.__pymod != undefined) { return pyCall(pyattr(target, name), args, kw) }
             if (target.__pyre === true) { return pyReMethod(target, name, args) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
         }
@@ -4309,13 +4753,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // exactly where makeDel put the sentinel; scopes[0] is the module namespace.
     // The twins are abnf/jsrt.go's scopeGet (s == pyModuleScope(sc)) and
     // py_getvar in languages/python-to-llvm-ir.abnf. docs/todo.md 3.2.
+    // WHICH scope holds the empty slot is the whole question, and "any scope but the
+    // module" is the WRONG test: a name that is a local of an ENCLOSING function is a
+    // free variable here, and CPython says NameError for it, not UnboundLocalError
+    //
+    //     def o():
+    //         def i(): return vv     # NameError: name 'vv' is not defined
+    //         return i()
+    //         vv = 1
+    //
+    // The rule is the one py_getvar already emitted in the compiler half - the slot
+    // must belong to THIS frame's own function boundary - and the old walk disagreed
+    // with it (a live halves divergence on `except E as e` that --cross never
+    // reached: the interpreter said UnboundLocalError, both compiled halves NameError).
     function pyDeletedExc(name) {
-        for (var s0 = scopes.length - 1; s0 > 0; s0--) {
-            if (hasOwn(scopes[s0], name)) {
-                return pyMakeExc("UnboundLocalError",
-                                 ["cannot access local variable '" + name +
-                                  "' where it is not associated with a value"])
-            }
+        var fs = pyFnScope()
+        if (fs != null && hasOwn(fs, name)) {
+            return pyMakeExc("UnboundLocalError",
+                             ["cannot access local variable '" + name +
+                              "' where it is not associated with a value"])
         }
         return pyMakeExc("NameError", ["name '" + name + "' is not defined"])
     }
@@ -5989,6 +6445,92 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function genPush() { genFlags.push(false) }
     function genPop() { return genFlags.pop() }
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
+
+    // ----- Python's STATIC binding analysis (docs/todo.md 1.6) -----
+    //
+    // CPython decides a function's locals STATICALLY: every name the body binds is
+    // a local for the WHOLE body, including the part before the binding runs. So
+    // `def h(): print(w); w = 1` raises UnboundLocalError, and it does so even when
+    // a global `w` exists. No engine here performed that analysis, and the visible
+    // consequence was NOT merely a wrong exception class: with an outer `w` in
+    // scope the read SUCCEEDED and answered the outer value - a silently wrong
+    // answer that `--cross` cannot see, because all three engines agreed.
+    //
+    // The set is collected here, at TAG time, and handed to callScopes, which seeds
+    // each name with pyDeleted - the very "the slot exists and holds nothing"
+    // marker `del` already leaves behind, so every read path that had to recognise
+    // it already does. languages/python-to-llvm-ir.abnf runs the same collection and
+    // seeds the same sentinel through js_scope_decl; the two must stay in step.
+    //
+    // WHY THE COLLECTION IS IN THE make* FUNCTIONS AND NOT IN A TAG ON `Target`.
+    // A tag on Target (or on TargetName) looks like one edit instead of a dozen and
+    // is WRONG: AugAssign, AnnAssign and Assign each try `Target` first and then
+    // fail when the operator, the colon or the `=` does not follow, so the bare
+    // expression statement `x == 1` matches Target three times before ExprSmall
+    // finally reads it - and PEG never un-runs a tag. Every collector below sits in
+    // the tag of a production that has ALREADY succeeded in full.
+    // Comprehension targets fall out correctly for free: CompFor consumes its
+    // CompTarget itself and never reaches a collector, which is right, because a
+    // comprehension is its own scope in CPython (`[i for i in r]` leaves no `i`).
+    var sbFrames = []
+    function sbPush() { sbFrames.push({names: [], decl: []}) }
+    // The names of the frame just closed, de-duplicated, minus anything a `global`
+    // or `nonlocal` declaration in the same body claimed for another scope.
+    function sbPop() {
+        if (sbFrames.length == 0) { return [] }
+        var f = sbFrames.pop()
+        var out = []
+        for (var i = 0; i < f.names.length; i++) {
+            var n = f.names[i]
+            var skip = false
+            for (var d = 0; d < f.decl.length; d++) { if (f.decl[d] == n) { skip = true } }
+            for (var o = 0; o < out.length; o++) { if (out[o] == n) { skip = true } }
+            if (!skip) { out.push(n) }
+        }
+        return out
+    }
+    function sbName(n) {
+        if (sbFrames.length == 0) { return }
+        if (n == undefined || n == null || n == "") { return }
+        sbFrames[sbFrames.length - 1].names.push(n)
+    }
+    function sbDecl(n) {
+        if (sbFrames.length == 0) { return }
+        sbFrames[sbFrames.length - 1].decl.push(n)
+    }
+    // A target record is {name, path} for a reference, {tuple:[...]} for an unpacking
+    // pattern and {startgt} for a starred one. ONLY a bare name - an empty path -
+    // binds; `obj.attr = 1` and `xs[0] = 1` bind nothing and must not make `obj` or
+    // `xs` a local, which is exactly why the walk tests path.length.
+    function sbTarget(t) {
+        if (t == undefined || t == null) { return }
+        if (t.tuple != undefined) {
+            for (var i = 0; i < t.tuple.length; i++) { sbTarget(t.tuple[i]) }
+            return
+        }
+        if (t.startgt != undefined) { sbTarget(t.startgt); return }
+        if (t.path != undefined && t.path.length == 0) { sbName(t.name) }
+    }
+    // A `match` case pattern binds by CAPTURE: a bare name, `... as n`, `*rest` and
+    // `**rest` are all bindings, and they nest through sequence / or / class / map
+    // patterns. The records are the ones makeSeqPattern and friends build.
+    function sbPattern(p) {
+        if (p == undefined || p == null) { return }
+        if (typeof p != "object") { return }
+        if (p.capture != undefined) { sbName(p.capture); return }
+        if (p.pstar != undefined) { sbName(stripWs(p.pstar).substring(1)); return }
+        if (p.asname != undefined && p.asname != null) { sbName(p.asname) }
+        if (p.por != undefined) { for (var i = 0; i < p.por.length; i++) { sbPattern(p.por[i]) } }
+        if (p.pseq != undefined) { for (var s = 0; s < p.pseq.length; s++) { sbPattern(p.pseq[s]) } }
+        if (p.pmap != undefined) {
+            for (var m = 0; m < p.pmap.length; m++) { sbPattern(p.pmap[m].mpat) }
+            if (p.prest != null) { sbName(p.prest) }
+        }
+        if (p.pcls != undefined) {
+            for (var g = 0; g < p.ppos.length; g++) { sbPattern(p.ppos[g]) }
+            for (var k = 0; k < p.pkw.length; k++) { sbPattern(p.pkw[k].cpat) }
+        }
+    }
     // The value of one `yield`, RAW - without the exit/throw-in unpacking doYield
     // does below. A replay of an already-produced yield answers with the value the
     // corresponding send(v) passed in and carries on; the one being produced now
@@ -6267,6 +6809,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // __value__ is the same structural alias a subscripted type builds (list[int]).
     function makeTypeAlias(items) {
         var name = items[0]
+        sbName(name)
         var valT = items[1]
         return function() {
             noteBound(name)
@@ -6657,6 +7200,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var heads = []
         var valT = items[items.length - 1]
         for (var i = 0; i < items.length - 1; i++) { heads.push(items[i].tlist) }
+        for (var s = 0; s < heads.length; s++) { sbTarget(heads[s]) }
         return function() {
             var v = anytype // The assigned value may be of any type.
             v = valT()
@@ -6678,6 +7222,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // name := value: assign in the enclosing scope and yield the value.
     function makeWalrus(name, valT) {
+        sbName(name)
         return function() {
             var v = anytype
             v = valT()
@@ -6692,6 +7237,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python raises there anyway, and a later assignment simply rebinds it.
     var pyDeleted = {__deleted: true}
     function makeDel(items) {
+        // `del x` makes x a LOCAL of the enclosing function even if nothing else in
+        // the body binds it: CPython answers UnboundLocalError, not NameError.
+        for (var s = 0; s < items.length; s++) { sbTarget(items[s]) }
         return function() {
             for (var i = 0; i < items.length; i++) { delTarget(items[i]) }
         }
@@ -6699,9 +7247,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function delTarget(ref) {
         if (ref.path.length == 0) {
             for (var s2 = scopes.length - 1; s2 >= 0; s2--) {
-                if (hasOwn(scopes[s2], ref.name)) { scopePut(scopes[s2], ref.name, pyDeleted); return }
+                if (hasOwn(scopes[s2], ref.name)) {
+                    // Deleting a slot that is ALREADY empty raises, and the static
+                    // binding analysis (docs/todo.md 1.6) is what makes that
+                    // reachable: `def f(): del x` now finds x's own empty local
+                    // slot, where CPython says UnboundLocalError - not the
+                    // NameError a name bound nowhere at all still gets.
+                    if (scopes[s2][ref.name] === pyDeleted) { pyRaise(pyDeletedExc(ref.name)) }
+                    scopePut(scopes[s2], ref.name, pyDeleted)
+                    return
+                }
             }
-            fail("NameError: " + ref.name)
+            pyRaise(pyMakeExc("NameError", ["name '" + ref.name + "' is not defined"]))
         }
         var o = anytype
         o = getVar(ref.name)
@@ -6747,6 +7304,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeAugAssign(items) {
         var ref = items[0]
+        sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
         var bop = op.substring(0, op.length - 1)
@@ -6784,6 +7342,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // items = [targetList, iterThunk, bodyThunk, {loopelse}?]
     function makeForStmt(items) {
         var tgt = items[0]
+        sbTarget(tgt)
         var listT = items[1]
         var bodyT = items[2]
         var elseT = (items.length > 3 && items[3] != undefined && items[3].loopelse != undefined) ? items[3].loopelse : null
@@ -6946,6 +7505,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeAnnAssign(items) {
         var ref = items[0]
         var name = (ref.path.length == 0) ? ref.name : null
+        // A bare annotation with no value still makes the name a local in CPython.
+        sbName(name)
         var tname = null
         var valT = null
         for (var i = 1; i < items.length; i++) {
@@ -6983,7 +7544,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "LookupError", "IndexError", "KeyError", "ValueError", "TypeError",
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
-                      "OSError", "ExceptionGroup"]
+                      "OSError", "ExceptionGroup", "OverflowError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -7002,6 +7563,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["AssertionError"] = "Exception"
     pyExcParent["OSError"] = "Exception"
     pyExcParent["ExceptionGroup"] = "Exception"
+    // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
+    // integral answer does not exist rather than being out of domain. Added with
+    // the `math` module (docs/todo.md 1.7).
+    pyExcParent["OverflowError"] = "ArithmeticError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -7084,6 +7649,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.htype != undefined) { h.htype = it.htype }
             else if (it.hname != undefined) { h.hname = it.hname }
         }
+        // `except E as e` binds e as an ordinary function local (and CPython deletes
+        // it again at the end of the handler, which is why reading it afterwards is
+        // an UnboundLocalError rather than a NameError).
+        sbName(h.hname)
         return h
     }
     // try/except/else/finally with real type discrimination. The first clause whose
@@ -7230,6 +7799,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- with -----
     function makeWithItem(items) {
         var target = items.length > 1 ? items[1] : null
+        sbTarget(target)
         return {ctxitem: items[0], target: target}
     }
     // The context-manager protocol: __enter__ before the body, __exit__ after it -
@@ -7276,6 +7846,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // attribute, and ordinary statements (loops, conditionals) work in a class body.
     function makeClass(items) {
         var name = items[0]
+        // A CLASS BODY is a namespace, not a function frame: CPython compiles its
+        // reads as LOAD_NAME, so `class C: print(zz); zz = 1` is a NameError and not
+        // an UnboundLocalError. Its frame is therefore closed and DISCARDED - only
+        // the class's own name binds in the scope around it.
+        sbPop()
+        sbName(name)
         var baseArgs = null
         var bodyT = items[items.length - 1]
         for (var i = 1; i < items.length - 1; i++) {
@@ -7379,7 +7955,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // __qualname__ of a class is its __name__ for every class this subset
             // can write: CPython qualifies only a NESTED class, and a nested
             // `class` here is bound by the same name as a top-level one.
-            if (name == "__name__" || name == "__qualname__") { return o.__name }
+            if (name == "__name__" || name == "__qualname__") { return pyShortName(o.__name) }
             // The resolution order, as the two compiled halves already answered it
             // (pyGetAttr in abnf/jsrt.go and in languages/lib/python-rt.metajs).
             // It was missing HERE only - AttributeError in the interpreter half
@@ -7390,10 +7966,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__mro__") { return clsMRO(o).slice(0) }
             if (name == "__bases__") { return hasOwn(o, "__bases") ? o.__bases.slice(0) : [] }
             var cv = clsFind(o, name)
-            if (cv != null) { return cv }
+            if (cv != null) {
+                // A staticmethod / classmethod read off the CLASS: the static one
+                // loses nothing, the class one binds to this very class.
+                if (pyIsStatic(cv) || pyIsClsM(cv)) { return pyDescGet(cv, o, name) }
+                return cv
+            }
             // A method the TYPE OBJECT itself carries - dict.fromkeys.
             var bcm = pyBuiltinClsMethod(o, name)
             if (bcm != null) { return bcm }
+            // list.count / str.upper / dict.get read off the BUILTIN type object:
+            // an unbound method descriptor (docs/todo.md 1.7).
+            if (o.__builtin == true) {
+                var samp = pyTypeSample(o.__name)
+                if (samp !== undefined && pyBuiltinAttr(samp, name)) { return pyUnboundDesc(o, name) }
+            }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
             // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises,
@@ -7401,6 +7988,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // uncatchable abort, in all three engines.
             pyRaise(pyMakeExc("AttributeError",
                               ["type object '" + o.__name + "' has no attribute '" + name + "'"]))
+        }
+        // A MODULE object. `builtins.len` resolves straight through hostGlobals,
+        // which is what makes `builtins.len is len` hold rather than answering a
+        // copy; a math function becomes a first-class value the same way `re`'s
+        // constants already were readable. Ahead of the own-property arm because
+        // the math module's own slots (pi, e, ...) are read there and must win.
+        if (o !== null && o !== undefined && typeof o == "object" && o.__pymod != undefined
+            && !hasOwn(o, name)) {
+            if (o.__pymod == "builtins" && hasOwn(hostGlobals, name)) { return hostGlobals[name] }
+            if (o.__pymod == "math" && pyMathHas(name)) { return pyModuleFn(o, name) }
+            pyRaise(pyMakeExc("AttributeError",
+                              ["module '" + o.__pymod + "' has no attribute '" + name + "'"]))
         }
         // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1)
         // is the 1 CPython answers. Ahead of the own-property arm because a dict
@@ -7419,6 +8018,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__class__") { return o.__class }
             var m = clsFind(o.__class, name)
             if (m != null) {
+                // staticmethod / classmethod, before the plain-function arm: a
+                // static one must NOT pick up the instance as self, and a class
+                // one binds to the receiver's OWN class, so D().c() passes D.
+                if (pyIsStatic(m) || pyIsClsM(m)) { return pyDescGet(m, o.__class, name) }
                 if (pyUser(m)) {
                     var g = clsFind(m.__class, "__get__")
                     if (g != null) { return g(m, o, o.__class) }
@@ -7435,8 +8038,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "function") {
             var bmj = pyBMFind(o)
             if (bmj >= 0) {
+                var bmk = pyBMTab[bmj + 4]
                 if (name == "__name__") { return pyBMTab[bmj + 1] }
-                if (name == "__qualname__") { return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyBMTab[bmj + 1] }
+                if (name == "__qualname__") {
+                    // An unbound descriptor's owner is the TYPE OBJECT itself, not
+                    // a receiver whose type has to be looked up, and a module
+                    // function's qualname is its bare name.
+                    if (bmk == "d") { return pyBMTab[bmj + 2].__name + "." + pyBMTab[bmj + 1] }
+                    if (bmk == "m") { return pyBMTab[bmj + 1] }
+                    return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyBMTab[bmj + 1]
+                }
+                // CPython gives a method DESCRIPTOR no __self__ at all - it is not
+                // bound to anything - and offers __objclass__ instead.
+                if (name == "__objclass__" && bmk == "d") { return pyBMTab[bmj + 2] }
+                if (name == "__self__" && bmk == "d") {
+                    pyRaise(pyMakeExc("AttributeError",
+                        ["'method_descriptor' object has no attribute '__self__'"]))
+                }
                 if (name == "__self__") { return pyBMTab[bmj + 2] }
                 if (name == "__func__") {
                     if (pyBMTab[bmj + 3] === null) {
@@ -7468,6 +8086,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bfnm = bfnName(o)
             if (bfnm !== undefined) { return bfnm }
             return fnName(o)
+        }
+        // len.__self__ is the builtins MODULE in CPython, not a receiver - the
+        // builtin functions are that module's members. docs/todo.md 1.7.
+        if (typeof o == "function" && name == "__self__" && bfnCode(o) !== undefined) {
+            return hostGlobals["builtins"]
         }
         // CPython names the TYPE as well as the attribute: "'list' object has no
         // attribute 'nope'", not "'nope'". Both compiled halves say the long
@@ -7584,14 +8207,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r == null) {
             pyRaise(pyMakeExc("AttributeError", ["'super' object has no attribute '" + name + "'"]))
         }
+        // A staticmethod / classmethod found through super(). The owner a
+        // classmethod binds to is the ORIGINAL cls - `super().who()` inside
+        // C.who() must still pass C - and s.__sobj is exactly that when the
+        // frame's first argument was a class. docs/todo.md 1.7.
+        if (pyIsStatic(r.v) || pyIsClsM(r.v)) { return pyDescGet(r.v, pySuperOwner(s), name) }
         if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
+    }
+    // The class a classmethod reached through super() binds to.
+    function pySuperOwner(s) {
+        var o = s.__sobj
+        if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) { return o }
+        return pyTypeOf(o)
     }
     function pySuperMCall(s, name, args, kw) {
         pySuperCheck(s)
         var r = pySuperFind(s, name)
         if (r == null) {
             pyRaise(pyMakeExc("AttributeError", ["'super' object has no attribute '" + name + "'"]))
+        }
+        if (pyIsStatic(r.v) || pyIsClsM(r.v)) {
+            return pyCall(pyDescGet(r.v, pySuperOwner(s), name), args, kw)
         }
         if (typeof r.v != "function") { return pyCall(r.v, args, kw) }
         kSetNamed(kw)
@@ -7702,6 +8339,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- match -----
     function makeCase(items) {
         var c3 = {pat: items[0], guard: null, body: items[items.length - 1]}
+        sbPattern(c3.pat)
         for (var i = 1; i < items.length - 1; i++) {
             if (items[i] != undefined && items[i].guard != undefined) { c3.guard = items[i].guard }
         }
@@ -7917,7 +8555,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 dflts.push(it.pdflt != undefined ? it.pdflt : null)
             }
         }
-        return {slots: slots, dflts: dflts, rest: rest, kwrest: kwrest}
+        // `locals` is the STATIC binding analysis of the body this parameter list
+        // belongs to, filled in by makeDef / makeLambda once the body has parsed
+        // (sbPop). It travels on the parameter list because that is the one record a
+        // call, and a generator resumption, both already carry - see callScopes.
+        return {slots: slots, dflts: dflts, rest: rest, kwrest: kwrest, locals: []}
     }
     function makeNamedParam(items) {
         if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
@@ -7951,6 +8593,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __pyfn marks this frame as a FUNCTION boundary and __pyd carries the
         // global/nonlocal declarations of the body - see pySet.
         var fscope = {__pyfn: true, __pyd: ""}
+        // CPython's STATIC locals (docs/todo.md 1.6): every name the body binds has
+        // a slot from the moment the frame exists, holding NOTHING. pyDeleted is
+        // exactly that marker, so pyReadName / makeVarRef already turn a read of one
+        // into the UnboundLocalError CPython raises, and pySet's chain walk stops
+        // here instead of writing an enclosing binding of the same name. Seeded
+        // BEFORE the parameters, which then overwrite their own slots.
+        var lcs = plist.locals
+        for (var L = 0; L < lcs.length; L++) { scopePut(fscope, lcs[L], pyDeleted) }
         var slots = plist.slots
         var used = null
         var ai = 0
@@ -8002,6 +8652,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeDef(bodyT, plist, name, pos) {
         var isGenFn = genPop()
+        // The body's frame closes here; the def's own NAME binds in the scope
+        // AROUND it, so sbName runs after sbPop.
+        plist.locals = sbPop()
+        sbName(name)
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
@@ -8031,6 +8685,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // global NAME: make sure NAME is bound in the module scope (unless a host
     // built-in already answers for it), so a later assignment lands there.
     function makeGlobal(names, pos) {
+        for (var s = 0; s < names.length; s++) { sbDecl(names[s]) }
         return function() {
             for (var i = 0; i < names.length; i++) {
                 var n = names[i]
@@ -8044,6 +8699,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // nonlocal NAME: NAME must already be bound in an enclosing function scope
     // (neither the innermost scope nor the module scope count, like real Python).
     function makeNonlocal(names, pos) {
+        for (var s = 0; s < names.length; s++) { sbDecl(names[s]) }
         return function() {
             for (var i = 0; i < names.length; i++) {
                 var found = false
@@ -8059,6 +8715,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lambda: a real single-expression function value, with the same lexical
     // capture, defaults and call scoping as def.
     function makeLambda(exprT, plist, pos) {
+        plist.locals = sbPop()
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
@@ -8154,7 +8811,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and

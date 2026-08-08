@@ -2032,6 +2032,115 @@ function s43() {
     check("ref11", r5 === "Cannot mix BigInt and other types, use explicit conversions")
 }
 
+// ===== SECTION 44: calling a non-function is a catchable TypeError, worded as node does =====
+// docs/todo.md 1.4. `xs[1]()` with undefined in the slot was an UNCATCHABLE abort
+// in all three engines and each said something different: "call of a non function
+// value (method '1')" in the interpreter, "unknown list method '1'" under
+// llvm.Run and "unknown method '1' on object" natively. node says
+// `xs[1] is not a function` - the callee's SOURCE TEXT, which V8 recovers by
+// re-printing the AST and which no runtime value carries, since `xs[1]` and
+// `xs[i]` reach the runtime as the same key.
+//
+// So the text is built at PARSE time (siteTexts, one copy per grammar) and the
+// runtime's job is only to say "nothing claimed this call": the floor's js_call
+// and the shared memberCall are used by every language's layer-2 internals and
+// still abort, and js/ts opt out through js_rt_misscall - the fourth of the
+// js_rt_miss* family - plus a raw callability test at the call site itself.
+//
+// Every message below is node v24's, byte for byte.
+function s44() {
+    var xs = [1, undefined, null, "s", {}, [1, 2], 7]
+    var o = {a: 1, g: 5, sub: {}}
+    var i = 1
+    var n = xs[6]
+    var s = xs[3]
+    var u = xs[1]
+    var nl = xs[2]
+    var arr = xs[5]
+
+    function msg(f) {
+        try { f(); return "none" }
+        catch (e) { return (e instanceof TypeError) + "|" + (e instanceof Error) + "|" + e.message }
+    }
+
+    // A member call whose member is missing or is not callable.
+    check("nfn1", msg(function () { return xs[1]() }) === "true|true|xs[1] is not a function")
+    check("nfn2", msg(function () { return xs[i]() }) === "true|true|xs[i] is not a function")
+    check("nfn3", msg(function () { return o.nope() }) === "true|true|o.nope is not a function")
+    // node prints a string-literal index as a dot access.
+    check("nfn4", msg(function () { return o["nope"]() }) === "true|true|o.nope is not a function")
+    check("nfn5", msg(function () { return o.g() }) === "true|true|o.g is not a function")
+    check("nfn6", msg(function () { return o.sub.q() }) === "true|true|o.sub.q is not a function")
+    check("nfn7", msg(function () { return o.g?.() }) === "true|true|o.g is not a function")
+    check("nfn8", msg(function () { return s.nope() }) === "true|true|s.nope is not a function")
+    check("nfn9", msg(function () { return arr.nope() }) === "true|true|arr.nope is not a function")
+    check("nfn10", msg(function () { return n.nope() }) === "true|true|n.nope is not a function")
+    check("nfn11", msg(function () { return Math.nope() }) === "true|true|Math.nope is not a function")
+
+    // A PLAIN call of a value that is not callable, which is the floor's js_call.
+    check("nfn12", msg(function () { return u() }) === "true|true|u is not a function")
+    check("nfn13", msg(function () { return nl() }) === "true|true|nl is not a function")
+    check("nfn14", msg(function () { return n() }) === "true|true|n is not a function")
+    check("nfn15", msg(function () { return s() }) === "true|true|s is not a function")
+    check("nfn16", msg(function () { return o() }) === "true|true|o is not a function")
+    check("nfn17", msg(function () { return arr() }) === "true|true|arr is not a function")
+
+    // The parentheses of a parenthesised callee are not part of node's text, and
+    // anything a CALL produced is "(intermediate value)".
+    check("nfn18", msg(function () { return (o.g)() }) === "true|true|o.g is not a function")
+    var f5 = function () { return 5 }
+    check("nfn19", msg(function () { return f5()() }) === "true|true|f5(...) is not a function")
+    // A literal receiver is printed as written.
+    check("nfn20", msg(function () { return "abc".nope() }) === "true|true|\"abc\".nope is not a function")
+    check("nfn21", msg(function () { return [].nope() }) === "true|true|[].nope is not a function")
+
+    // A class instance whose method does not exist.
+    class C { m() { return 1 } }
+    var c = new C()
+    check("nfn22", msg(function () { return c.zz() }) === "true|true|c.zz is not a function")
+
+    // A generator's member table, and a tagged template.
+    check("nfn23", msg(function () { var g = xs[3]; return g`x` }) === "true|true|g is not a function")
+
+    // `new` on something that is not a constructor - the same abort, node's other
+    // wording, and previously THREE different messages across the engines.
+    check("nfn24", msg(function () { return new n() }) === "true|true|n is not a constructor")
+    check("nfn25", msg(function () { return new o.nope() }) === "true|true|o.nope is not a constructor")
+    check("nfn26", msg(function () { return new o() }) === "true|true|o is not a constructor")
+
+    // ?.() short circuits on a nullish callee instead of raising.
+    check("nfn27", u?.() === undefined && o.nope?.() === undefined && xs[1]?.() === undefined)
+
+    // The program CONTINUES, the throw travels the ordinary try/finally machinery,
+    // and it can be caught, wrapped and re-thrown.
+    var k = 0
+    for (var j = 0; j < 3; j++) {
+        try { xs[1]() } catch (e) { k = k + 1 }
+    }
+    check("nfn28", k === 3)
+    var log = []
+    try {
+        try { log.push("t"); o.nope() }
+        finally { log.push("f") }
+    } catch (e) { log.push("c:" + e.name) }
+    check("nfn29", log.join(",") === "t,f,c:TypeError")
+    var r = "none"
+    try {
+        try { xs[1]() } catch (e) { throw new TypeError("re:" + e.message) }
+    } catch (e2) { r = e2.message }
+    check("nfn30", r === "re:xs[1] is not a function")
+
+    // A call in the MIDDLE of an assignment target, which is its own walk in every
+    // engine and aborted in all three ("call of a non function value: 5").
+    check("nfn31", msg(function () { n().x = 1 }) === "true|true|n is not a function")
+    check("nfn32", msg(function () { o.sub.f().y = 1 }) === "true|true|o.sub.f is not a function")
+    // super.m() with nothing on the __super chain: node has no source text for a
+    // super receiver either and prints "(intermediate value)".
+    class SA { }
+    class SB extends SA { go() { return super.zz() } }
+    check("nfn33", msg(function () { return new SB().go() }) === "true|true|(intermediate value).zz is not a function")
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -2076,6 +2185,7 @@ function main() {
     s41() // SECTION-CALL 41
     s42() // SECTION-CALL 42
     s43() // SECTION-CALL 43
+    s44() // SECTION-CALL 44
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

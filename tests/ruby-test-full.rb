@@ -430,6 +430,13 @@ class S17Size
   def initialize(n); @n = n; end
   def <=>(o); n <=> o.n; end
 end
+# A module included INTO A MODULE, and a mixin inherited through a superclass:
+# both were invisible in every engine, and the mixin was invisible to is_a? in
+# the two COMPILED halves, which flatten `include' at build time. docs/todo.md 1.3.
+module S17Inner2; def deep_tag; "deep"; end; end
+module S17Mid; include S17Inner2; end
+class S17Deep; include S17Mid; end
+class S17Heir < S17Person; end
 def s17
   check("mod1", S17Person.new("bo").greet == "hi bo")
   check("mod2", S17Person.util_tag == "u!")
@@ -437,6 +444,24 @@ def s17
   check("mod4", S17Outer::Inner::VALUE == 7 && S17Outer::Inner.value == 14)
   check("mod5", S17Calc.calc_double(21) == 42)
   check("mod6", S17Size.new(1) < S17Size.new(2) && S17Size.new(5).between?(S17Size.new(1), S17Size.new(9)))
+  # The mixin as an ANCESTOR, not just as a method donor.
+  check("mod7", S17Person.new("bo").is_a?(S17Greet) && (S17Greet === S17Person.new("bo")))
+  check("mod8", (case S17Person.new("bo") when S17Greet then "g" else "no" end) == "g")
+  check("mod9", S17Heir.new("bo").is_a?(S17Greet) && !S17Person.new("bo").is_a?(S17Util))
+  check("mod10", S17Person.is_a?(S17Util))
+  check("mod11", S17Word.new.is_a?(S17Loud))
+  check("mod12", S17Deep.new.deep_tag == "deep" && S17Deep.new.is_a?(S17Inner2))
+  check("mod13", S17Size.new(1).is_a?(Comparable) && !S17Person.new("bo").is_a?(Comparable))
+  check("mod14", S17Person.ancestors == [S17Person, S17Greet, Object, Kernel, BasicObject])
+  check("mod15", S17Word.ancestors == [S17Loud, S17Word, Object, Kernel, BasicObject])
+  check("mod16", S17Mid.ancestors == [S17Mid, S17Inner2])
+  check("mod17", S17Person.include?(S17Greet) && !S17Person.include?(S17Util))
+  check("mod18", (S17Person < S17Greet) && (S17Heir < S17Person) && (S17Person < S17Heir) == false)
+  check("mod19", (S17Person <= S17Person) && (S17Person < String).nil?)
+  check("mod20", S17Person.class == Class && S17Greet.class == Module)
+  check("mod21", S17Person.instance_of?(Class) && S17Greet.instance_of?(Module))
+  check("mod22", S17Person.is_a?(Module) && S17Greet.is_a?(Class) == false)
+  check("mod23", S17Person.superclass == Object && S17Heir.superclass == S17Person)
 end
 # ===== SECTION 18: exceptions =====
 class S18Err < StandardError; end
