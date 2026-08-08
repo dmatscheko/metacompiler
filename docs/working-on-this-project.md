@@ -177,6 +177,12 @@ tests/bench.sh [--draws N]   # native perf against checked-in baselines, in
 go run ./tools/shape-scan    # layer-2 bodies that are identical modulo names
 ```
 
+**Install the frozen-snapshot hook once, and stop thinking about the rule**:
+`ln -s ../../tools/pre-commit .git/hooks/pre-commit` refuses a commit that stages
+`metajs-to-llvm-ir.abnf` or `lib/compile-core.js` without the regenerated
+snapshot. `git commit --no-verify` bypasses it; `tests/gates.sh --freeze` remains
+the fixed-point check.
+
 **What each group cannot see** — learn this or you will ship a defect:
 
 - **The matrix compares each engine against ITSELF.** goja vs `-frozen` is one

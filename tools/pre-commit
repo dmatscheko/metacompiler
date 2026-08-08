@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# tools/pre-commit - refuse a commit that changes the frozen bootstrap's SOURCE
+# without also committing the regenerated SNAPSHOT.
+#
+# docs/todo.md 7.6: "Did you -freeze after touching the emitter?" is a question a
+# script should ask.
+#
+# The rule (manual chapter 4, "Regenerate the frozen snapshot"): any change to
+#
+#     languages/metajs-to-llvm-ir.abnf
+#     languages/lib/compile-core.js        (the snapshot INLINES it, via include())
+#
+# needs `./mec -freeze languages/metajs-to-llvm-ir.abnf`, which rewrites
+#
+#     abnf/jsbootstrap.ll
+#     abnf/jsagrammar.go
+#
+# and a second -freeze must produce a byte-identical file. Forget it and every
+# `-frozen` leg in the suite runs the OLD emitter against the NEW one - which is
+# not a clean red: the matrix demands goja and -frozen agree byte for byte, so a
+# stale snapshot reads as a divergence in whatever the change happened to touch,
+# and people have gone hunting for a defect that was not there.
+#
+# WHAT THIS CHECKS, and what it deliberately does not:
+#
+#   - Staged source change, no staged snapshot change  -> REFUSE. This is the
+#     whole point and it is decidable from the index alone.
+#   - Staged source change WITH a staged snapshot change -> allowed, WITHOUT
+#     re-running -freeze. Running the real thing here would cost ~10-20 s on every
+#     such commit and would have to write into the working tree mid-commit, which
+#     a hook must not do. `tests/gates.sh --freeze` is the check that the snapshot
+#     is actually a FIXED POINT; this hook only refuses to let you forget it
+#     entirely. It is the cheap 90%, not a replacement for the gate.
+#
+# INSTALLING IT IS YOUR DECISION, not this repo's - hooks are not version
+# controlled and a hook that appears without consent is a bad surprise:
+#
+#     ln -s ../../tools/pre-commit .git/hooks/pre-commit
+#
+# and `git commit --no-verify` bypasses it for the one commit where you mean to.
+
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+SOURCES='languages/metajs-to-llvm-ir.abnf languages/lib/compile-core.js'
+SNAPSHOT='abnf/jsbootstrap.ll abnf/jsagrammar.go'
+
+staged=$(git diff --cached --name-only)
+[ -z "$staged" ] && exit 0
+
+hit=""
+for f in $SOURCES; do
+    printf '%s\n' "$staged" | grep -qxF "$f" && hit="$hit $f"
+done
+[ -z "$hit" ] && exit 0
+
+snap=""
+for f in $SNAPSHOT; do
+    printf '%s\n' "$staged" | grep -qxF "$f" && snap="$snap $f"
+done
+[ -n "$snap" ] && exit 0
+
+cat >&2 <<EOF
+
+pre-commit: THE FROZEN SNAPSHOT WAS NOT REGENERATED.
+
+  changed and staged:$hit
+  NOT staged:        $SNAPSHOT
+
+The snapshot is what -frozen runs, and it inlines both files above. Committing
+one without the other leaves every -frozen leg of the suite running the OLD
+emitter, which does not report itself as staleness - it reports as a goja vs
+-frozen DIVERGENCE somewhere unrelated.
+
+Fix it:
+
+    go build -o mec . && ./mec -freeze languages/metajs-to-llvm-ir.abnf
+    git add $SNAPSHOT
+    tests/gates.sh --freeze      # confirms the new snapshot is a FIXED POINT
+
+Or, if you are certain this change cannot affect the emitted bootstrap:
+
+    git commit --no-verify
+
+EOF
+exit 1

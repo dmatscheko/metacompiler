@@ -29,8 +29,9 @@
 #   ./test.sh -l, --list      list the matrix entries and exit
 #   ./test.sh -v, --verbose   print every entry as it runs (default: only failures
 #                             and a progress dot per entry)
-#   ./test.sh -j, --jobs N    run N entries in parallel (default: CPU count;
-#                             1 = sequential)
+#   ./test.sh -j, --jobs N    run N entries in parallel (1 = sequential).
+#                             Default: 2x CPU count for the MATRIX, 1x for --full
+#                             and --cross - measured, see the note at JOBS below.
 #   ./test.sh -t, --timeout N per-run timeout in seconds (default 120)
 #   ./test.sh --full          run the SECOND test group: the full-syntax ratchet
 #                             files (tests/*-test-full.*). For every grammar it
@@ -57,15 +58,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
 FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120; FULL=0; CROSS=0
-JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+JOBS=""; JOBS_EXPLICIT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -f|--filter)  FILTER="${2:-}"; shift ;;
         --filter=*)   FILTER="${1#*=}" ;;
         -v|--verbose) VERBOSE=1 ;;
         -l|--list)    LIST=1 ;;
-        -j|--jobs)    JOBS="${2:-1}"; shift ;;
-        --jobs=*)     JOBS="${1#*=}" ;;
+        -j|--jobs)    JOBS="${2:-1}"; JOBS_EXPLICIT=1; shift ;;
+        --jobs=*)     JOBS="${1#*=}"; JOBS_EXPLICIT=1 ;;
         -t|--timeout) TIMEOUT="${2:-120}"; shift ;;
         --timeout=*)  TIMEOUT="${1#*=}" ;;
         --full)       FULL=1 ;;
@@ -75,6 +77,31 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+# THE DEFAULT JOB COUNT IS PER GROUP, and the reason is measured rather than
+# assumed (docs/todo.md 7.1).
+#
+# The MATRIX is 351 short, independent subprocesses, most of which spend a large
+# part of their life not on a core at all - process start, reading the grammar,
+# writing results. At one job per CPU it therefore does NOT saturate the machine:
+# `./test.sh` was measured at 35.0 s and 768% CPU against `-j 32`'s 25.4 s at
+# 1143%, same result. Re-measured 2026-08-08 as six INTERLEAVED A/B pairs, three
+# with the default first and three with -j 32 first so the ordering cannot
+# explain it: -j 32 was faster in all six (130.5/82.6, 76.5/60.5, 58.8/54.4,
+# 66.3/48.0, 51.4/50.6, 51.6/50.6 s, default/32). Those runs were taken on a
+# machine at load 40-70 from other work, which compresses the margin - the win is
+# largest when there is idle capacity, which is exactly the case being fixed.
+# Twelve runs, six of them oversubscribed: 351/351 every time, no flakiness.
+#
+# --full and --cross keep one job per CPU. --full is TAIL-BOUND on ~16 ratchet
+# files - one of them (js) dominates the whole group, so more jobs cannot help
+# (measured 95 s -> 91 s) - and each of its probes holds a whole ratchet file's
+# compile in memory, which is the one place oversubscription costs something real.
+# --cross measured 12 s either way.
+#
+# An explicit -j always wins, for every group.
+if [ "$JOBS_EXPLICIT" = 0 ]; then
+    if [ "$FULL" -eq 1 ] || [ "$CROSS" -eq 1 ]; then JOBS="$NCPU"; else JOBS=$((NCPU * 2)); fi
+fi
 case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
 
 command -v go >/dev/null 2>&1 || { echo "test.sh: 'go' not found on PATH" >&2; exit 2; }
@@ -163,6 +190,32 @@ full_probe() {
             iter=$((iter + 1))
             if [ "$iter" -gt 60 ]; then printf '    (stopped after 60 rounds)\n'; break; fi
             out="$(RUN "$BIN" "$G" "$work" -q 2>&1)"; rc=$?
+            # A run KILLED BY THE PER-RUN TIMEOUT is not a language gap, and until
+            # this arm existed it was reported as one - SILENTLY, which is the worst
+            # available outcome here.
+            #
+            # The path: the kill leaves $out empty, so no 'Last good parse position',
+            # no 'not implemented' and no 'line N' can be extracted, and the probe
+            # fell through to full_isolate / 'error without a usable position' and
+            # broke out of the loop WITHOUT EVER WRITING $R.checks. The count then
+            # reads '-'. If both halves of a language were killed - which is the
+            # normal case, because whatever is slow is slow in both - the two halves
+            # AGREE on '-', the CHECK-COUNT report prints no MISMATCH, no
+            # RUN-FAILED/FROZEN-DIFF line exists anywhere in the output for
+            # tests/gates.sh to grep, and the only trace is that the total assertion
+            # count is smaller. Observed for real: gates.sh reported the ratchet 437
+            # assertions below baseline with no failure reported anywhere.
+            #
+            # 124 is timeout(1)/gtimeout(1); 142 is the perl-alarm fallback (SIGALRM);
+            # 137/143 are a KILL/TERM from anything else.
+            case "$rc" in
+                124|137|142|143)
+                    printf '    RUN-FAILED - the probe run was KILLED (exit %s) after the %ss --timeout.\n' "$rc" "$TIMEOUT"
+                    printf '                 This is NOT a language gap and NOT a frozen divergence: nothing\n'
+                    printf '                 was measured. Re-run on a quieter machine, or raise --timeout.\n'
+                    echo RUN-FAILED > "$R.checks"
+                    break ;;
+            esac
             if [ "$rc" -eq 0 ]; then
                 # A zero exit is NOT enough. Every *-test-full.* file ends main()
                 # with the summary line 'full: <checks> checks, <failures> failures'

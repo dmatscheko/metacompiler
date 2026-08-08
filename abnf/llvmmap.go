@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1270,6 +1271,47 @@ func quotedSymbol(s string) string {
 // The failure report is built from the MODULE (sorted names, filtered by what the
 // linker's output mentions), never from the raw linker text: that text carries the
 // temp file names, and this path is in the test matrix, which compares bytes.
+// rdynamicFlags answers the link flags a generator needs to find its own thread
+// entry, and it is a PLATFORM question rather than a preference.
+//
+// languages/lib/runtime.c's gen_resume takes the address of coro_entry with
+// dlsym(dlopen(0), "coro_entry") - see the comment at runtime.c:73, the reason
+// being that c-to-llvm-ir.abnf compiles a function NAME to a call and has no way
+// to spell a function POINTER, so the address has to come from the loader at run
+// time. That lookup only succeeds if coro_entry is in the executable's DYNAMIC
+// symbol table:
+//
+//   - Mach-O (darwin) puts every non-static global symbol of the executable in
+//     the symbol table that dlsym searches, so the lookup works with no flag.
+//     Passing -rdynamic here would still be ACCEPTED (Apple clang maps it to
+//     ld -export_dynamic and warns about nothing - measured), but it is not a
+//     no-op: it enlarges the exported symbol table, which changes the binary and
+//     therefore its code layout, and this project measures native binaries down
+//     to a percent (manual chapter 4). So darwin does not get it.
+//   - ELF (linux and the BSDs) exports NOTHING from an executable by default.
+//     Without -rdynamic the dlsym answers NULL and gen_resume dies with
+//     "coroutines: dlsym of coro_entry failed" at the first generator - i.e. the
+//     first native build of any language with a coroutine. That is what this
+//     adds.
+//   - Anything else (windows/PE) gets nothing: -rdynamic is not a flag clang
+//     accepts for a PE target, and no coroutine build is claimed to work there.
+//
+// Not verifiable on this machine (nothing here builds on linux); the darwin half
+// - that the flag is absent and the build is byte-for-byte what it was - is.
+//
+// Known and NOT handled here, because it is a separate question and would be a
+// guess: on a glibc older than 2.34, dlopen/dlsym live in libdl and
+// pthread_create in libpthread, so such a system also needs -ldl -lpthread. From
+// 2.34 both are folded into libc and -rdynamic alone is enough.
+func rdynamicFlags() []string {
+	switch runtime.GOOS {
+	case "darwin", "windows", "js", "plan9":
+		return nil
+	default:
+		return []string{"-rdynamic"}
+	}
+}
+
 func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	inputs := linkInputs(runtime)
 	linkingForReal := len(inputs) > 0 || len(LinkLibs) > 0
@@ -1301,6 +1343,7 @@ func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	// promote those slots to registers. Without any -O flag clang does none of it. The
 	// effect is measured in docs/runtime-rework-plan.md.
 	args := []string{"-Wno-override-module", "-O2", "-o", outPath, tmpName}
+	args = append(args, rdynamicFlags()...)
 	args = append(args, inputs...)
 	for _, d := range LinkDirs {
 		args = append(args, "-L"+d)

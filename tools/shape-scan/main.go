@@ -217,6 +217,13 @@ func main() {
 	min := flag.Int("min", 140, "minimum normalised body length to consider")
 	verbose := flag.Bool("v", false, "list every member of every group")
 	max := flag.Int("max", -1, "exit 1 if more than this many groups (CI ratchet)")
+	// -max alone is NOT a sufficient ratchet, and the gap is easy to hit by
+	// accident: copying a body that is ALREADY duplicated into a third language
+	// grows an existing group instead of creating a new one, so the group COUNT
+	// does not move. Measured: pasting pyABigMul into lua-rt.metajs left the count
+	// at 15 while recoverable went 481 -> 511. The recoverable-line total is the
+	// number that actually tracks the debt, so tests/gates.sh ratchets both.
+	maxLines := flag.Int("max-lines", -1, "exit 1 if more than this many RECOVERABLE lines (CI ratchet)")
 	dir := flag.String("dir", "languages/lib", "directory of .metajs layer-2 files")
 	flag.Parse()
 
@@ -295,8 +302,16 @@ func main() {
 		"(threshold %d chars, %d top-level bodies scanned)\n",
 		len(keys), occupied, recoverable, *min, total)
 
+	over := false
 	if *max >= 0 && len(keys) > *max {
 		fmt.Fprintf(os.Stderr, "shape-scan: %d groups exceeds the ratchet of %d\n", len(keys), *max)
+		over = true
+	}
+	if *maxLines >= 0 && recoverable > *maxLines {
+		fmt.Fprintf(os.Stderr, "shape-scan: %d recoverable lines exceeds the ratchet of %d\n", recoverable, *maxLines)
+		over = true
+	}
+	if over {
 		os.Exit(1)
 	}
 }
