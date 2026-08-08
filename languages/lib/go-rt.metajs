@@ -238,7 +238,33 @@ function goClassOf(v) {
 // every key type a Go map may have.
 // SHARED as rtDictFind - lib/runtime.metajs. goKeyEq is goStrictEq, which is a
 // hand respelling of the floor's strict_eq for numbers and therefore `===`.
-function goDictFind(keys, k) { return rtDictFind(keys, k) }
+function goDictFind(keys, k) {
+    // The typeof gate is the fast path: a string or number key - which is nearly every
+    // Go map - leaves here without a call.
+    if (typeof k == "object" && k !== null && goKeyIsVal(k)) {
+        var i = 0
+        while (i < keys.length) {
+            if (goValueEq(keys[i], k)) { return i }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+    return rtDictFind(keys, k)
+}
+
+// A Go map key that is a VALUE TYPE - a struct or an array. Go's == on those is
+// element-by-element (goValueEq), so `m[Pair{1,2}]` has to find an entry stored under a
+// DIFFERENT Pair object holding the same fields; rtDictFind's === answered -1 and every
+// lookup, delete and comma-ok missed. A slice is excluded on purpose: it is not a legal
+// Go map key at all and identity is the cheaper answer for it. The twins are the goLang
+// arm of dictKeyEq in abnf/jsrt.go and mapFind in languages/go-interpreter.abnf.
+// docs/todo.md 1.5.
+function goKeyIsVal(k) {
+    if (Array.isArray(k)) { return true }
+    var c = goClassOf(k)
+    if (c === undefined) { return false }
+    return goStrOf(c.__name) != "$sl"
+}
 
 // rt.strictEq over the value model Go uses. The two number tags compare by
 // VALUE, never by identity: int8(1) == 1 holds and float64(1) == 1 holds.
@@ -323,6 +349,15 @@ function goValueEq(a, b) {
         return true
     }
     return goStrictEq(a, b)
+}
+
+// The imported package SCOPE an object carries, or undefined for every other value.
+// __pkgscope holds a real scope handle (an ordinary value: js_closure has carried one
+// since the beginning), which the floor's scope host API - scopeHas / scopeGet /
+// scopeDecl, ids 67 / 66 / 68 - can open. See js_gofield.
+function goPkgScope(o) {
+    if (!goIsObj(o)) { return undefined }
+    return o.__pkgscope
 }
 
 // o.props[k] with an absent key answering undefined, which is what the Go twin's
@@ -1676,6 +1711,17 @@ function js_gofield(o, kv) {
     if (o === undefined || o === null) { goNilDeref() }   // see goNilDeref
     var key = goStrOf(kv)
     if (goIsObj(o)) {
+        // AN IMPORTED PACKAGE OBJECT IS LIVE. buildPackages
+        // (languages/go-to-llvm-ir.abnf) hangs the package's own runtime SCOPE off the
+        // object as __pkgscope beside the snapshot of its exported names; reading the
+        // slot out of the scope is what makes `pkga.Counter` see a write the package
+        // made afterwards, and the snapshot below stays as the fallback. Read as a bare
+        // slot rather than through goPkgScope: this is on every field access in the
+        // language, and every receiver that is not a package object pays exactly one
+        // property read for it. The twin is goPkgSlot in abnf/jsrtgolang.go.
+        // docs/todo.md 1.5.
+        var ps = o.__pkgscope
+        if (ps !== undefined && scopeHas(ps, key)) { return scopeGet(ps, key) }
         if (goHas(o, key)) { return o[key] }
         var pf = goPromField(o, key, 16)
         if (pf !== undefined) { return pf.v }
@@ -1801,6 +1847,13 @@ function js_gomcall(recv, namev, args) {
     var name = goStrOf(namev)
     var mv = goMethod(recv, name)
     if (mv !== undefined) { return mv.fn.apply(undefined, goPrepend(mv.recv, args)) }
+    // Only after a real method has missed: a package function reaches its receiver's
+    // scope, so `pkg.F()` calls the binding rather than the snapshot. See js_gofield.
+    var pf = goPkgScope(recv)
+    if (pf !== undefined && scopeHas(pf, name)) {
+        var pfn = scopeGet(pf, name)
+        if (goIsFn(pfn)) { return pfn.apply(undefined, args) }
+    }
     return goMemberCall(recv, name, args)
 }
 
@@ -2283,6 +2336,12 @@ function js_giadopt(ty, v) {
 function js_gosetfield(o, namev, v) {
     if (o === undefined || o === null) { goNilDeref() }   // see goNilDeref: was the floor's die()
     var name = goStrOf(namev)
+    // A write through a package qualifier goes to the package's OWN variable - see the
+    // __pkgscope arm of js_gofield. scopeDecl and not a chain walk: an exported package
+    // var is declared in that scope itself, so this rebinds exactly the cell the
+    // package's own functions resolve.
+    var pw = goIsObj(o) ? o.__pkgscope : undefined
+    if (pw !== undefined && scopeHas(pw, name)) { scopeDecl(pw, name, v); return undefined }
     var ty = goFieldTy(o, name)
     if (ty == "") {
         o[name] = v

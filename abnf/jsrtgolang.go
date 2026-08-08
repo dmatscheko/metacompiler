@@ -1024,6 +1024,11 @@ func init() {
 		baseSetField := m["js_gosetfield"]
 		m["js_gofield"] = func(a []uint64) uint64 {
 			goNilDeref(rt, u(a[0]))
+			if sc, name, ok := goPkgSlot(rt, u(a[0]), u(a[1])); ok {
+				if v, has := sc.get(name); has {
+					return w(v)
+				}
+			}
 			return baseField(a)
 		}
 		m["js_gomcall"] = func(a []uint64) uint64 {
@@ -1047,13 +1052,48 @@ func init() {
 					}
 				}
 			}
+			if sc, name, ok := goPkgSlot(rt, u(a[0]), u(a[1])); ok {
+				if fn, has := sc.get(name); has && isCallable(fn) {
+					if args, isArr := u(a[2]).(*jsArray); isArr {
+						return w(rt.call(fn, jsUndef, args.elems))
+					}
+				}
+			}
 			return baseMcall(a)
 		}
 		m["js_gosetfield"] = func(a []uint64) uint64 {
 			goNilDeref(rt, u(a[0]))
+			if sc, name, ok := goPkgSlot(rt, u(a[0]), u(a[1])); ok {
+				if _, has := sc.get(name); has {
+					rt.scopeSet(sc, name, u(a[2]))
+					return 0
+				}
+			}
 			return baseSetField(a)
 		}
 	})
+}
+
+// goPkgSlot: the SCOPE behind an imported package object, and the member name, when
+// the receiver is one. buildPackages (languages/go-to-llvm-ir.abnf) puts the package's
+// own runtime scope on the object as __pkgscope beside the snapshot of its exported
+// names; reading the slot out of the scope instead of off the object is what makes
+// `pkga.Counter` see a write the package made after the object was assembled, and what
+// makes `pkga.Counter = 50` reach the variable the package's own functions resolve.
+// The twin is the __pkgscope arm of js_gofield / js_gosetfield / js_gomcall in
+// languages/lib/go-rt.metajs; the interpreter half binds the scope directly and has
+// always been live. Answers false for every other receiver, at the cost of one map
+// lookup on a member access whose receiver is an object. docs/todo.md 1.5.
+func goPkgSlot(rt *jsrt, recv, key interface{}) (*jsScope, string, bool) {
+	o, ok := recv.(*jsObject)
+	if !ok {
+		return nil, "", false
+	}
+	sc, ok := o.props["__pkgscope"].(*jsScope)
+	if !ok {
+		return nil, "", false
+	}
+	return sc, rt.toString(key), true
 }
 
 // goHasMethod: a method of v's own descriptor, or one PROMOTED from an embedded

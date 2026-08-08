@@ -195,7 +195,7 @@ TypeGroup   <~~ push(notImplStmt("grouped type declaration", up.pos)) ~~>
 // expression list seen, re-emitted with the new iota (which is how red/green/blue and
 // 1 << (10 * iota) count up).
 ConstGroup  <~~ push(makeConstGroup(takeAll())) ~~>
-            = "const" KwEnd "(" { ConstSpec } ")" [ ";" ] ;
+            = "const" KwEnd CGrpOn "(" { ConstSpec } ")" [ ";" ] ;
 ConstSpec   <~~ push(makeConstSpec(cBindSpec(takeAll()))) ~~>
             = CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" CExprList ] [ ";" ] ;
 // An ungrouped const spec BINDS SEVERAL NAMES, exactly like the grouped ConstSpec
@@ -205,12 +205,17 @@ ConstSpec   <~~ push(makeConstSpec(cBindSpec(takeAll()))) ~~>
 // handles n names and n initializers (it is the same builder `var a, b = 1, 2` uses),
 // so the fix is entirely in the rule. docs/todo.md 2.7.
 ConstSingle <~~ push(makeVarDecl(cBindSpec(takeAll()))) ~~>
-            = "const" KwEnd CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> }
+            = "const" KwEnd CGrpOn CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> }
               [ VType ] [ "=" CExprList ] [ ";" ] ;
-// The iota watermark. A const spec that mentions iota cannot be bound to ONE constant
-// (its expression list is re-read once per spec with a different iota), so the count is
-// taken here, before the spec's expressions, and compared again in cBindSpec.
-CSpecOn     <~~ cIotaMark = cIotaCount ~~> = [ "\x00" ] ;
+// The spec index inside the const group, which is what `iota` means. There used to be
+// an iota WATERMARK here as well - a count of the iotas seen, compared again in
+// cBindSpec, which refused to bind any spec that mentioned one. cFnByPos binds them
+// correctly now, so the count had no reader left and is gone.
+CSpecOn     <~~ cIotaIdx = cIotaIdx + 1 ~~> = [ "\x00" ] ;
+// The group watermark: `iota` is the index of the spec INSIDE this const block, so the
+// counter and the repeated expression list are reset at every `const`. Grouped and
+// ungrouped both carry it, which is what makes a lone `const c = iota` zero.
+CGrpOn      <~~ cIotaIdx = 0 - 1; cLastFns = [] ~~> = [ "\x00" ] ;
 // An expression list that also tags each element's END POSITION - the key its folded
 // constant was registered under, and the only way the binding can read it back.
 CExprList   = CExprItem { "," CExprItem } ;
@@ -902,7 +907,8 @@ AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
             | GoDecLit | True | False | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit | StructLit
+            | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit
+            | QualStructLit | StructLit
             | ArrayLit | ConvExpr | CompLitNI | Call | VarRef ;
 
 // A conversion whose target type is written out: []byte(s), []rune(s) and the
@@ -1052,7 +1058,10 @@ SeqBody     <~~ push({selems: takeAll()}) ~~>
             = "{" [ SeqElem { "," SeqElem } [ "," ] ] "}" ;
 SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
             = [ KeyAhead SeqKey ] SeqVal ;
-SeqKey      <~~ push({ekey: pop()}) ~~> = Expression ":" ;
+// A key may be a bare brace group here too, which is what a NESTED map literal with a
+// struct key needs: `[]Named{{{1, 2}: "p"}}` and `map[string]Named{"x": {{1, 2}: "p"}}`.
+// Disjoint from Expression: no Go expression starts with '{'.
+SeqKey      <~~ push({ekey: pop(), ektext: firstWord(up.in)}) ~~> = ( SeqNest | Expression ) ":" ;
 SeqVal      = SeqNest | Expression ;
 SeqNest     <~~ push({enest: pop()}) ~~> = SeqBody ;
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
@@ -1104,11 +1113,15 @@ MakeSlice   <~~ push(makeMakeSlice(takeAll())) ~~>
 MapLit      <~~ push(makeMapLit(takeAll())) ~~>
             = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
 MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
-            = Expression ":" MapVal ;
+            = MapKey ":" MapVal ;
+// A KEY may be a bare brace group built against the map's KEY type, which is what a
+// struct-keyed literal is written with: map[Pair]string{{1, 2}: "p"}. No Go expression
+// starts with '{', so trying the group first is unambiguous. docs/todo.md 1.5.
+MapKey      = SeqNest | Expression ;
 // A value may be a bare brace group built against the map's VALUE type, as in
 // map[string][]int{"a": {1, 2}}.
 MapVal      = SeqNest | Expression ;
-MakeMap     <~~ push(makeMakeMap(pop())) ~~>
+MakeMap     <~~ push(makeMakeMap(takeAll())) ~~>
             = "make" KwEnd "(" MapTypeZ ")" ;
 
 // new(T): a zero value of T - a POINTER to it for a scalar type (a fresh one slot
@@ -1127,7 +1140,10 @@ MakeChan    <~~ push(makeMakeChan(takeAll())) ~~>
             = "make" KwEnd "(" ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ChanElemT
               [ "," Expression <~~ pop() ~~> ] ")" ;
 ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
-MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
+MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
+// The KEY type text, which an elided struct key is built against (see MapKey).
+KType       <~~ push({mkey: firstType(up.in)}) ~~>
+            = Type ;
 ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
 
@@ -1136,6 +1152,21 @@ ZType       <~~ push({mzero: up.in}) ~~>
 // tried first: its 'name:' would otherwise parse as a bare expression.
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
             = StructGate NotTypeKw Id <~~ push(up.in) ~~> [ TypeArgs ]
+              "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+// pkga.Item{N: 3}: a composite literal of ANOTHER PACKAGE'S type. It has to be tried
+// before CompLitNI, whose CompName is `Id { "." Id }` and whose SkipBlock ate the body -
+// which is why both halves reported `composite literal not implemented` for a shape
+// real Go accepts. docs/todo.md 1.5.
+//
+// THE PEG QUESTION (manual chapter 4). A rule that can match a PREFIX of a later
+// alternative must exclude the continuation explicitly. This one cannot: it REQUIRES a
+// '.' and a second Id and a '{', so on any input a later alternative would take it
+// fails before consuming anything the later alternative wants - `pkga.Fn(` fails at the
+// '(', `pkga` alone fails at the missing '.', and the chain form `x.y.z` fails at the
+// second '.'. It is strictly longer than StructLit's bare-name form, never a prefix of
+// it. StructGate keeps it out of an if/for header, so `if x.y {` is still a condition.
+QualStructLit <~~ push(makeQualStructLit(takeAll())) ~~>
+            = StructGate NotTypeKw Id <~~ push(up.in) ~~> "." Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // struct{ a, b int }{10, 20}: an anonymous struct type carries its own field list, so
 // the descriptor is built at the literal site instead of being looked up by name. No
@@ -1159,7 +1190,13 @@ LitElem     = KeyedElem | SeqNest | Expression ;
 // already pushed. The KeyAhead guard decides before anything is pushed, so an
 // unkeyed element leaks nothing onto the value stack. docs/todo.md 1.3.
 KeyedElem   = KeyAhead LitKey ":" LitVal ;
-LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop()}) ~~> = Expression ;
+// A KEY may also be a bare BRACE GROUP, which is what a struct-keyed literal of a
+// DEFINED map type is written with: `type Named map[Pair]string; Named{{1, 2}: "p"}`.
+// (MapKey is the same feature on the literal-type path, `map[Pair]string{{1, 2}: "p"}`;
+// this rule is the named-type one, which goes through StructLit because the type is a
+// bare name.) No Go expression starts with '{', so the group is disjoint from
+// Expression and the ordered choice cannot strand a later alternative.
+LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop()}) ~~> = SeqNest | Expression ;
 LitVal      = SeqNest | Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
@@ -1660,6 +1697,127 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // thunks that read the text run afterwards, when every frame but the top-level one
     // has been popped. `[string]` of a map type and `[...]` of an inferred array
     // resolve to nothing and are left exactly as they were. docs/todo.md 2.7.
+    // ----- a constant EXPRESSION as an array length -----
+    //
+    // goArrConstLen below substitutes a bare NAME. `var a [B+1]int` is just as ordinary
+    // Go and was the empty array in all three engines, so this evaluates the whole
+    // bracket text over the same folded constants when it is more than a name. It is
+    // deliberately tiny - integer literals, names, unary +/-, parentheses, and Go's two
+    // binary levels (* / % << >> & | ^ and + -) - because anything it cannot read
+    // answers null and the text is then left EXACTLY as it was, which is the behaviour
+    // that was already there. It never touches the folder: the value it computes is
+    // spliced into a TYPE TEXT and nowhere else. docs/todo.md 1.5.
+    var aeSrc = ""
+    var aePos = 0
+    function aeSkip() {
+        while (aePos < aeSrc.length && aeSrc.charCodeAt(aePos) == 32) { aePos = aePos + 1 }
+    }
+    function aeAt(k) {
+        if (aePos + k >= aeSrc.length) { return "" }
+        return aeSrc.charAt(aePos + k)
+    }
+    function aeEval(t) {
+        if (t.length == 0 || t.length > 200) { return null }
+        aeSrc = t
+        aePos = 0
+        var v = aeAdd()
+        if (v == null) { return null }
+        aeSkip()
+        if (aePos != aeSrc.length) { return null }
+        return v
+    }
+    function aeAdd() {
+        var l = aeMul()
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (l == null) { return null }
+            aeSkip()
+            var c = aeAt(0)
+            if (c != "+" && c != "-" && c != "|" && c != "^") { return l }
+            aePos = aePos + 1
+            var r = aeMul()
+            if (r == null) { return null }
+            var nx = cApply(c, l, r)
+            if (nx == null || cTooBig(nx)) { return null }
+            l = nx
+        }
+        return null
+    }
+    function aeMul() {
+        var l = aeUnary()
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (l == null) { return null }
+            aeSkip()
+            var c = aeAt(0)
+            var op = ""
+            if (c == "*" || c == "/" || c == "%" || c == "&") { op = c }
+            if ((c == "<" && aeAt(1) == "<") || (c == ">" && aeAt(1) == ">")) { op = c + c }
+            if (op.length == 0) { return l }
+            aePos = aePos + op.length
+            var r = aeUnary()
+            if (r == null) { return null }
+            var nx = cApply(op, l, r)
+            if (nx == null || cTooBig(nx)) { return null }
+            l = nx
+        }
+        return null
+    }
+    function aeUnary() {
+        aeSkip()
+        var c = aeAt(0)
+        if (c == "+") { aePos = aePos + 1; return aeUnary() }
+        if (c == "-") {
+            aePos = aePos + 1
+            var v = aeUnary()
+            if (v == null) { return null }
+            return cNeg(v)
+        }
+        return aePrim()
+    }
+    function aePrim() {
+        aeSkip()
+        var c = aeAt(0)
+        if (c == "(") {
+            aePos = aePos + 1
+            var v = aeAdd()
+            if (v == null) { return null }
+            aeSkip()
+            if (aeAt(0) != ")") { return null }
+            aePos = aePos + 1
+            return v
+        }
+        var start = aePos
+        var cc = aePos < aeSrc.length ? aeSrc.charCodeAt(aePos) : 0
+        if (cc >= 48 && cc <= 57) {
+            while (aePos < aeSrc.length) {
+                var dc = aeSrc.charCodeAt(aePos)
+                if (dc < 48 || dc > 57) { break }
+                aePos = aePos + 1
+            }
+            return cFromIntText(aeSrc.substring(start, aePos), 10, 0)
+        }
+        if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95) {
+            while (aePos < aeSrc.length) {
+                var ic = aeSrc.charCodeAt(aePos)
+                if (!((ic >= 48 && ic <= 57) || (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) || ic == 95)) { break }
+                aePos = aePos + 1
+            }
+            return aeName(aeSrc.substring(start, aePos))
+        }
+        return null
+    }
+    // A name in an array length: the folded constant, or the typed-const side table
+    // goArrConstLen already consults. Answers null for anything else, which is what
+    // leaves a `[n]` over a variable untouched.
+    function aeName(n) {
+        var c = cLookup(n)
+        if (c != null && goConstIntText(c).length > 0) { return c }
+        if (typeof cArrLenTbl["$" + n] == "string") { return cFromIntText(cArrLenTbl["$" + n], 10, 0) }
+        return null
+    }
     // Integer values of TYPED constants, for goArrConstLen only - see cBindSpec.
     var cArrLenTbl = {}
     function goArrConstLen(t) {
@@ -1681,6 +1839,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var ct = goConstIntText(cLookup(inner))
                 if (ct.length == 0 && typeof cArrLenTbl["$" + inner] == "string") { ct = cArrLenTbl["$" + inner] }
                 if (ct.length > 0) { rep = ct }
+            } else {
+                var ce = goConstIntText(aeEval(inner))
+                if (ce.length > 0) { rep = ce }
             }
             out += "[" + rep + "]"
             i = close + 1
@@ -2457,6 +2618,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function regConst(pos, c) {
         if (pos == undefined || pos == null) { return }
         constByPos["p" + pos] = (c == null) ? cNone : c
+        if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
     }
     function constAt(pos) {
         if (pos == undefined || pos == null) { return null }
@@ -2464,6 +2626,78 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (c == undefined) { return null }
         if (c.none === true) { return null }
         return c
+    }
+    // ----- the IOTA-AWARE parallel channel: a position -> function(iota) -> constant --
+    //
+    // WHY A SECOND CHANNEL AND NOT A SECOND FOLD. Inside `const ( A = 1 << iota; B; C )`
+    // a spec with no '=' REPEATS the previous spec's expression list, and that list is
+    // PARSED ONCE. constByPos can therefore only ever hold A's value; B and C need the
+    // same expression evaluated at a different iota, and nothing survives the parse that
+    // could be re-evaluated. So every fold site registers, beside its constant, the fold
+    // ITSELF as a closure over iota. cBindSpec is the only reader.
+    //
+    // constByPos is deliberately NOT given iota's value: a run mentioning iota must keep
+    // failing to fold, or goFoldConst would materialize A's constant INTO THE THUNK and
+    // makeConstGroup - which re-emits that same thunk for B and C - would hand all three
+    // specs A's value. The emission path is unchanged by this whole channel; only the
+    // COMPILE-TIME binding (cBindConst, cArrLenTbl, and so goArrConstLen) gains a value.
+    //
+    // The channel never holds null: an absent or unfoldable position answers cFnNone,
+    // which answers null for every iota, so a composition needs no per-operand test.
+    var cFnByPos = {}
+    function cFnNone(io) { return null }
+    function cKonstFn(c) { return function(io) { return c } }
+    function cIotaFn(io) { return cInt(1, cbFromSmall(io)) }
+    function cNegFn(f) {
+        return function(io) {
+            var v = f(io)
+            if (v == null) { return null }
+            return cNeg(v)
+        }
+    }
+    function cNotFn(f) {
+        return function(io) {
+            var v = f(io)
+            if (v == null) { return null }
+            return cNot(v)
+        }
+    }
+    function regCFn(pos, f) {
+        if (pos == undefined || pos == null) { return }
+        cFnByPos["p" + pos] = f
+    }
+    function cfnAt(pos) {
+        if (pos == undefined || pos == null) { return cFnNone }
+        var f = cFnByPos["p" + pos]
+        if (f == undefined) { return cFnNone }
+        return f
+    }
+    // goFoldConst's run, kept as a function of iota instead of evaluated once. Built
+    // whether or not the constant fold succeeded, because the reason it failed may be
+    // exactly that an operand was iota.
+    function goFoldCFn(items, ops, ty) {
+        if (ty != null) { return cFnNone }
+        var fs = [cfnAt(items[1].at)]
+        var k = 0
+        while (k < ops.length) {
+            fs.push(cfnAt(items[3 * k + 4].at))
+            k = k + 1
+        }
+        return function(io) {
+            var acc = fs[0](io)
+            if (acc == null) { return null }
+            var j = 0
+            while (j < ops.length) {
+                var rhs = fs[j + 1](io)
+                if (rhs == null) { return null }
+                var nx = cApply(ops[j], acc, rhs)
+                if (nx == null) { return null }
+                if (cTooBig(nx)) { return null }
+                acc = nx
+                j = j + 1
+            }
+            return acc
+        }
     }
     // The thunk is handed straight back; the point is the clear. Used by every unary
     // form whose value is NOT its operand's constant (!x, &x, *x, <-x).
@@ -2514,14 +2748,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // within its width instead, which is not a constant fold.
     function goComplC(items) {
         if (tyAt(items[1].at) != null) { return }
+        var inner = cfnAt(items[1].at)
         var c = constAt(items[1].at)
         if (c != null) { regConst(items[1].at, cNot(c)) }
+        else { regCFn(items[1].at, cNotFn(inner)) }
     }
     // -x and (x) do not move the END position of what they wrap (a prefix operator
     // and the group's ')' respectively), so both simply re-register at their own key.
     function goNegC(t, pos) {
+        var inner = cfnAt(pos)
         var c = constAt(pos)
-        if (c == null) { return makeNeg(t) }
+        if (c == null) { regCFn(pos, cNegFn(inner)); return makeNeg(t) }
         var nc = cNeg(c)
         regConst(pos, nc)
         // UNARY MINUS IS A FOLD SITE, and the reason is a value rather than a
@@ -2548,6 +2785,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goParenC(items, pos) {
         var c = constAt(items[1].at)
         if (c != null) { regConst(pos, c) }
+        else { regCFn(pos, cfnAt(items[1].at)) }
         return items[0]
     }
     function cFromRadixText(text) {
@@ -2617,8 +2855,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var cScopes = [{n: [], v: []}]
     var cPend = []
     var cSwMarks = []
-    var cIotaCount = 0
-    var cIotaMark = 0
     function cTop() { return cScopes[cScopes.length - 1] }
     // A parameter or receiver name is collected here and applied to the NEXT frame,
     // which is the function body: poisoning it where the tag fires would poison it in
@@ -2689,7 +2925,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function cSwCase() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks[cSwMarks.length - 1]) } }
     function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
-    function goIotaC() { cIotaCount = cIotaCount + 1 }
+    // The spec index INSIDE the current const group, which is what `iota` means, and
+    // the group's last seen expression list as functions of it. CGrpOn resets both at
+    // every `const`, grouped or not; CSpecOn steps the index once per spec.
+    var cIotaIdx = 0
+    var cLastFns = []
+    function cSpecVal(fns, n, ok, io) {
+        if (!ok) { return null }
+        return fns[n](io)
+    }
     // A bare name registers its constant against its own end position, exactly as a
     // literal does, so every fold above it reads names and literals the same way. The
     // thunk is UNCHANGED - the name still reads its variable - so a fold is the only
@@ -2697,7 +2941,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // before. The clear on the miss is the constByPos invariant: a node that ends where
     // an operand ends either re-registers or clears.
     function goNameC(name, pos) {
-        if (name === "iota") { goIotaC() }
+        if (name === "iota") {
+            // No CONSTANT (see cFnByPos: folding iota would poison the re-emitted
+            // thunk a repeating spec shares), but a fn channel entry, which is what
+            // gives `const ( R = iota; G; B )` its compile-time 0, 1, 2.
+            regConst(pos, null)
+            regCFn(pos, cIotaFn)
+            return makeVarRef(name)
+        }
         regConst(pos, cLookup(name))
         return makeVarRef(name)
     }
@@ -2721,10 +2972,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else { rest.push(items[k]) }
             k = k + 1
         }
-        var ok = !typed && cIotaCount === cIotaMark && ats.length === names.length && rest.length === names.length
+        // The spec's expression list AS FUNCTIONS OF IOTA. A spec that HAS one records
+        // it as the group's current list; a spec with no '=' at all repeats it, which
+        // is Go's rule and the whole reason the fn channel exists. Anything else (a
+        // name count that does not match the expression count) binds nothing, exactly
+        // as the old iota watermark did.
+        var fns = []
+        if (ats.length === names.length && rest.length === names.length) {
+            var af = 0
+            while (af < ats.length) { fns.push(cfnAt(ats[af])); af = af + 1 }
+            cLastFns = fns
+        } else if (ats.length === 0 && rest.length === 0 && cLastFns.length === names.length) {
+            fns = cLastFns
+        }
+        var okn = fns.length === names.length
         var n = 0
         while (n < names.length) {
-            cBindConst(names[n], ok ? constAt(ats[n]) : null)
+            cBindConst(names[n], typed ? null : cSpecVal(fns, n, okn, cIotaIdx))
             n = n + 1
         }
         // A TYPED const is deliberately NOT an untyped folding constant (cBindConst
@@ -2735,10 +2999,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // value. Flat rather than scoped, which is the one thing it gives up: a
         // function-local typed const shadowing a package-level one of the same name
         // would take the inner value for both. docs/todo.md 2.7.
-        if (typed && cIotaCount === cIotaMark && ats.length === names.length) {
+        if (typed) {
             var tn = 0
             while (tn < names.length) {
-                var td = goConstIntText(constAt(ats[tn]))
+                var td = goConstIntText(cSpecVal(fns, tn, okn, cIotaIdx))
                 if (td.length > 0) { cArrLenTbl["$" + names[tn]] = td }
                 tn = tn + 1
             }
@@ -2842,9 +3106,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             i += 3
         }
         if (ops.length == 0) { return ts[0] }
+        // Built BEFORE the clear below: this run ends where its last operand does, so
+        // regConst(pos, null) would erase the very entry the composition reads.
+        var cfn = goFoldCFn(items, ops, ty)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
         regConst(pos, null)
+        regCFn(pos, cfn)
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -2865,8 +3133,48 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     var hidCount = 0     // Names hidden range-loop counters.
-    var structFields = {} // struct name -> field name list (source order).
-    var structFTypes = {} // struct name -> the parallel list of field type texts.
+    // STRUCT TYPE NAMES ARE PER PACKAGE, and the key carries the package because the
+    // table is read from inside EMIT closures, long after the walk that filled it.
+    // Flat was a wrong answer rather than a limitation: two imported packages each
+    // declaring `type Item struct{...}` collided on one key, last import wins, so
+    // pkga.Make(7) built a pkgb Item and every field pkgb does not have came out
+    // <nil>. The declaration side keys on curPkgName (the package being WALKED) and
+    // the lookup side on curEmitPkg (the package being EMITTED); a name a package does
+    // not declare falls back to the unqualified key, which is the main file's.
+    // docs/todo.md 1.5.
+    var structFields = {} // "pkg.Name" (or a bare name in the main file) -> field name list.
+    var structFTypes = {} // the same key -> the parallel list of field type texts.
+    var curEmitPkg = null  // the package whose declarations are being emitted (null = main file)
+    function sKey(pkg, name) { return pkg == null ? name : pkg + "." + name }
+    function sFields(name) {
+        if (curEmitPkg != null) {
+            var q = structFields[sKey(curEmitPkg, name)]
+            if (q != undefined) { return q }
+        }
+        return structFields[name]
+    }
+    function sFTypes(name) {
+        if (curEmitPkg != null) {
+            var q = structFTypes[sKey(curEmitPkg, name)]
+            if (q != undefined) { return q }
+        }
+        return structFTypes[name]
+    }
+    // The same lookup at WALK time, where the package is curPkgName instead.
+    function sFieldsWalk(name) {
+        if (curPkgName != null) {
+            var q = structFields[sKey(curPkgName, name)]
+            if (q != undefined) { return q }
+        }
+        return structFields[name]
+    }
+    function sFTypesWalk(name) {
+        if (curPkgName != null) {
+            var q = structFTypes[sKey(curPkgName, name)]
+            if (q != undefined) { return q }
+        }
+        return structFTypes[name]
+    }
     // Defined type name -> the type text it is defined OVER (`type L []int` -> "[]int",
     // `type Q Point` -> "Point"), the compiler's mirror of the interpreter's table.
     var definedUnder = {}
@@ -3039,11 +3347,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // indexed, or a nested brace group built against the element type), and only the
     // result differs - a slice gets a header over the array, an array IS the array.
     function makeSeqElem(items) {
-        var e = {ekey: null, eval: null, enest: null}
+        var e = {ekey: null, ektext: null, eval: null, enest: null}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { e.eval = it }
-            else if (it.ekey != undefined) { e.ekey = it.ekey }
+            else if (it.ekey != undefined) { e.ekey = it.ekey; e.ektext = it.ektext }
             else if (it.enest != undefined) { e.enest = it.enest }
         }
         return e
@@ -3080,20 +3388,47 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return emitSeqLit(b, isSlice ? "slice" : "array", elemTy(cet), null, els)
         }
         if (cet.indexOf("map[") == 0) { return emitMapFrom(b, cet, els) }
-        var flds = structFields[cet]
-        if (flds == undefined) { fail("composite literal element of unsupported type " + cet) }
-        var args = []
-        for (var i = 0; i < els.length; i++) {
-            if (els[i].ekey != null) { fail("a keyed nested struct element is not supported") }
-            args.push(els[i].eval)
+        // A DEFINED element type: `type Named map[Pair]string; []Named{{...}}` and
+        // `type Q Point; []Q{{1, 2}}`. resolveDefined lands on a spelling that is not
+        // itself a defined name, so this re-enters at most once. The interpreter half
+        // has done this in buildLit from the start; the compiler half refused with
+        // "composite literal element of unsupported type Named".
+        var rdef = resolveDefined(cet)
+        if (rdef != cet) { return emitElemVal(b, e, rdef) }
+        // A QUALIFIED element type: []pkga.Item{{1, 2}}.
+        var qe = goQualTy(cet)
+        if (qe != null) {
+            var qek = sKey(qe.p, qe.n)
+            var qeu = resolveDefined(qek)
+            if (qeu != qek) { return emitElemVal(b, e, qeu) }
+            var qef = structFields[qek]
+            if (qef != undefined) {
+                return emitStructVal(b, emitPkgMember(b, qe.p, qe.n), qef, structFTypes[qek],
+                                     seqElemsAsStructArgs(els))
+            }
         }
+        var flds = sFields(cet)
+        if (flds == undefined) { fail("composite literal element of unsupported type " + cet) }
         return emitStructVal(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, cet)]),
-                             flds, structFTypes[cet], args)
+                             flds, sFTypes(cet), seqElemsAsStructArgs(els))
     }
     // The VALUE type of a map type text: everything after the ']' that CLOSES the
     // key type, found by BRACKET DEPTH. A scan for the last ']' - which is what
     // emitDefinedSeq used to do - runs straight past the key of a nested map, so
     // `map[string]map[string]int` answered "" instead of "map[string]int".
+    // The KEY type of a map type text: everything between the "map[" and the ']' that
+    // CLOSES it, found by the same bracket-depth walk mapValTy uses for the other half.
+    function mapKeyTy(t) {
+        var mq = t.indexOf("map[")
+        if (mq < 0) { return "" }
+        var d = 0
+        for (var q = mq + 3; q < t.length; q++) {
+            var cc = t.charCodeAt(q)
+            if (cc == 91) { d = d + 1 }
+            else if (cc == 93) { d = d - 1; if (d == 0) { return t.substring(mq + 4, q) } }
+        }
+        return ""
+    }
     function mapValTy(t) {
         var mq = t.indexOf("map[")
         if (mq < 0) { return "" }
@@ -3114,10 +3449,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var zero = mapValTy(cet)
         var mV = callExt(b, "js_dict_new", [])
         callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+        var kty = mapKeyTy(cet)
         for (var i = 0; i < els.length; i++) {
             var e = els[i]
             if (e.ekey == null) { fail("a map literal element needs a key") }
-            var rk = e.ekey(b)
+            // An ELIDED key is a brace group instead of a thunk, built against the
+            // map's declared KEY type - see MapKey and LitKey.
+            var rk = emitMapKey(b, e.ekey, kty)
             b = rk.b
             var rv = emitElemVal(b, e, zero)
             b = rv.b
@@ -3144,6 +3482,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var e = elems[i]
             var idx = at
             if (e.ekey != null) {
+                // An INDEX, so a brace group is not a key a sequence can have - only a
+                // map's key may be elided (SeqKey allows both shapes for the map case).
+                if (typeof e.ekey != "function") { fail("a brace group is not a valid index in a slice or array literal") }
                 var rk = e.ekey(b)
                 b = rk.b
                 idx = rk.v
@@ -3182,16 +3523,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitStr(b, cet)])}
         }
     }
-    // items = [{mzero}, {mk, mv}...] -> a map built in source order. The zero value
+    // items = [{mkey}, {mzero}, {mk, mv}...] -> a map built in source order. The zero
     // of the value type is stored on the map itself (js_map_get reads it).
     function makeMapLit(items) {
-        var zero = items[0].mzero
-        var entries = items.slice(1)
+        var kty = items[0].mkey
+        var zero = items[1].mzero
+        var entries = items.slice(2)
         return function(b) {
             var mV = callExt(b, "js_dict_new", [])
             callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
             for (var i = 0; i < entries.length; i++) {
-                var rk = entries[i].mk(b)
+                var rk = emitMapKey(b, entries[i].mk, kty)
                 b = rk.b
                 var mv = entries[i].mv
                 var rv = (typeof mv == "function")
@@ -3211,8 +3553,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var ty = items[0].cet
         return function(b) { return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])} }
     }
-    function makeMakeMap(mz) {
-        var zero = mz.mzero
+    function makeMakeMap(items) {
+        var zero = items[items.length - 1].mzero
         return function(b) {
             var mV = callExt(b, "js_dict_new", [])
             callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
@@ -3284,6 +3626,42 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
+    // `pkg.Name` as a type text: {p, n}, or null for anything else. The callers have
+    // already peeled off a pointer, slice, array or map spelling, so what reaches here
+    // is a plain name - qualified or not.
+    function goQualTy(t) {
+        if (t == undefined || t == null) { return null }
+        var d = t.indexOf(".")
+        if (d <= 0 || d == t.length - 1) { return null }
+        var p = t.substring(0, d)
+        var n = t.substring(d + 1)
+        if (!goIsIdentText(p) || !goIsIdentText(n)) { return null }
+        return {p: p, n: n}
+    }
+    // A member of an imported package object, as IR. The object is live through
+    // js_gofield (buildPackages hangs the package scope on it as __pkgscope), so a type
+    // descriptor read this way is the very object that package's own code builds with -
+    // which is what makes a method declared in that package reachable on the value.
+    function emitPkgMember(b, pkg, nm) {
+        return callExt(b, "js_gofield", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, pkg)]),
+                                         emitStr(b, nm)])
+    }
+    // pkga.Item{...}: makeStructLit with the package qualifier carried through. The
+    // field list is already keyed "pkga.Item" (see structFields), and a DEFINED type in
+    // that package resolves through the same qualified key.
+    function makeQualStructLit(items) {
+        var qpkg = items[0]
+        var qnm = items[1]
+        var qargs = items.slice(2)
+        return function(b) {
+            var key = sKey(qpkg, qnm)
+            var und = resolveDefined(key)
+            if (und != key && isCompositeText(und)) { return emitDefinedSeq(b, und, qargs) }
+            var flds = structFields[key]
+            if (flds == undefined) { fail("composite literal of unsupported type " + qpkg + "." + qnm) }
+            return emitStructVal(b, emitPkgMember(b, qpkg, qnm), flds, structFTypes[key], qargs)
+        }
+    }
     // Point{a, b}: the field names are known at compile time.
     // items = [name, ({fkey}? valueThunk)...]: a positional or keyed struct literal.
     // Every field the literal leaves out is ZERO-filled from its declared type, the way
@@ -3298,10 +3676,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // the table (every tag has walked by the time an emit closure runs).
             var name = resolveDefined(tyName)
             if (name != tyName && isCompositeText(name)) { return emitDefinedSeq(b, name, args) }
-            var flds = structFields[name]
+            var flds = sFields(name)
             if (flds == undefined) { fail("composite literal of unsupported type " + tyName) }
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            return emitStructVal(b, clsV, flds, structFTypes[name], args)
+            return emitStructVal(b, clsV, flds, sFTypes(name), args)
         }
     }
     // The literal of a defined SLICE, ARRAY or MAP type, whose elements arrived in the
@@ -3315,19 +3693,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // The elements arrive in the STRUCT literal's shape - a {fkey, fkeyT}
             // record followed by its value - so the key thunk is the one LitKey kept
             // beside the field name. docs/todo.md 1.3.
-            var mk = null
-            for (var mi = 0; mi < args.length; mi++) {
-                var ma = args[mi]
-                if (typeof ma != "function" && ma.fkeyT != undefined) { mk = ma.fkeyT; continue }
-                if (mk == null) { fail("a map literal element needs a key") }
-                var rk = mk(b)
+            // Read as PAIRS - a {fkey, fkeyT} marker and then its value - rather than
+            // with a carried key variable: an ELIDED key (`Named{{1, 2}: "p"}`) is a
+            // brace group where an ordinary one is a thunk, and MetaJS is typed, so one
+            // variable cannot hold both. See emitMapKey.
+            var kty = mapKeyTy(under)
+            var mi = 0
+            while (mi < args.length) {
+                var ka = args[mi]
+                if (typeof ka == "function" || ka.fkeyT == undefined) { fail("a map literal element needs a key") }
+                if (mi + 1 >= args.length) { fail("a map literal element needs a value") }
+                var ma = args[mi + 1]
+                var rk = emitMapKey(b, ka.fkeyT, kty)
                 b = rk.b
                 var rv = emitElemVal(b, {ekey: null,
                                          eval: (typeof ma == "function") ? ma : null,
                                          enest: (typeof ma == "function") ? null : ma.enest}, zero)
                 b = rv.b
                 callExt(b, "js_pyset", [mV, rk.v, rv.v])
-                mk = null
+                mi = mi + 2
             }
             return {b: b, v: mV}
         }
@@ -3412,6 +3796,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [objV, emitStr(b, name), emitAdoptTy(b, ftypeOfName(fields, ftypes, name), r.v)])
         }
         return {b: b, v: objV}
+    }
+    // A map literal's KEY: an ordinary thunk, or an ELIDED brace group built against
+    // the map's declared key type.
+    //
+    // OUT OF LINE BECAUSE METAJS IS TYPED (manual chapter 4). Written inline, the key
+    // had to be carried in one variable that holds a thunk for one element and a brace
+    // group for the next, and the frozen host refused it with *variable 'mk' has type
+    // object and cannot hold a function* - while goja was green. That is the shape the
+    // manual warns about, and in a COMPILER half it reads as `RUN-FAILED - goja exit 0,
+    // -frozen exit 1` rather than as a wrong answer.
+    function emitMapKey(b, k, kty) {
+        if (typeof k == "function") { return k(b) }
+        return emitElemVal(b, {ekey: null, eval: null, enest: k.enest}, kty)
+    }
+    // The elements of a nested brace group, in the shape emitStructVal reads: a {fkey}
+    // marker before a keyed element, then the element itself. A KEYED nested struct
+    // element - `map[string]P{"x": {N: 1}}`, `[]P{{N: 1}}` - was refused outright here
+    // with "a keyed nested struct element is not supported" while the INTERPRETER half
+    // built it, so it was a live halves divergence. SeqKey keeps the key's TEXT beside
+    // its thunk for exactly this. docs/todo.md 1.5.
+    function seqElemsAsStructArgs(els) {
+        var out = []
+        for (var i = 0; i < els.length; i++) {
+            var e = els[i]
+            if (e.ekey != null) {
+                // A brace-group key is a MAP key (see SeqKey) and cannot name a field,
+                // so it must not be read as one - `[]P{{1, 2}: 3}` is not Go.
+                if (typeof e.ekey != "function" || typeof e.ektext != "string" || e.ektext.length == 0) {
+                    fail("a keyed nested struct element needs a field name")
+                }
+                out.push({fkey: e.ektext})
+            }
+            if (e.enest != null) { out.push({enest: e.enest}) } else { out.push(e.eval) }
+        }
+        return out
     }
     function emitZeroOf(b, t) { return emitZeroTy(b, t) }
     // The declared type text of one field of a struct, by field name.
@@ -4579,6 +4998,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [arr, emitZeroTy(b, el)]) }
             return arr
         }
+        // `var x pkga.Item`: goTyWord stops at the '.', so the whole qualified form
+        // used to read as the type `pkga` and zero to nil. docs/todo.md 1.5.
+        var qz = goQualTy(t)
+        if (qz != null) {
+            var qk = sKey(qz.p, qz.n)
+            var qu = resolveDefined(qk)
+            if (qu != qk) { return emitZeroTy(b, qu) }
+            var qf = structFields[qk]
+            if (qf != undefined) { return emitStructZero(b, emitPkgMember(b, qz.p, qz.n), qf, structFTypes[qk]) }
+            return hNull
+        }
         var wd = goTyWord(t)
         var it = goIntTy(wd)
         if (it != null) { return emitGiConv(b, emitNum(b, 0), it) }
@@ -4599,10 +5029,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return mV
         }
         if (wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
-        var flds = structFields[wd]
+        var flds = sFields(wd)
         if (flds != undefined && flds != null) {
             return emitStructZero(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)]),
-                                  flds, structFTypes[wd])
+                                  flds, sFTypes(wd))
         }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
         // over `type L []int` is an empty SLICE (append/len/range all work) rather
@@ -5598,9 +6028,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             declaredTypes[aName] = true
             notePkgTopName(aName)
             if (aTgt != "" && declaredTypes[aTgt] == true) {
-                if (structFields[aTgt] != undefined) {
-                    structFields[aName] = structFields[aTgt]
-                    structFTypes[aName] = structFTypes[aTgt]
+                if (sFieldsWalk(aTgt) != undefined) {
+                    structFields[sKey(curPkgName, aName)] = sFieldsWalk(aTgt)
+                    structFTypes[sKey(curPkgName, aName)] = sFTypesWalk(aTgt)
                 }
                 return function(b) {
                     callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName),
@@ -5643,6 +6073,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // is read from inside the emit closures, which run long after every
             // TypeDecl has been walked - so a type used before it is declared is fine.
             definedUnder[dName] = dUnder
+            // ... and under the package-qualified key, so `pkga.L{1, 2}` and
+            // `var x pkga.L` resolve the same way the unqualified form does inside the
+            // package. Both keys, so every existing flat reader is unchanged.
+            if (curPkgName != null) { definedUnder[sKey(curPkgName, dName)] = dUnder }
             return function(b) { return declConv(b, dName, dUnder) }
         }
         return makeStructStmt(items)
@@ -5753,8 +6187,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             pending = []
         }
         for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
-        structFields[name] = fields
-        structFTypes[name] = ftypes
+        structFields[sKey(curPkgName, name)] = fields
+        structFTypes[sKey(curPkgName, name)] = ftypes
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -6013,7 +6447,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             c.pushSourceFile(g.file)
             curScopeV = sc
+            // The emit-time package, for sFields/sFTypes: a struct literal inside an
+            // imported function is emitted HERE, when curPkgName is long since null.
+            curEmitPkg = (typeof pn == "string") ? pn : null
             for (var ii = 0; ii < g.items.length; ii++) { b = g.items[ii](b) }
+            curEmitPkg = null
             c.popSource()
             curScopeV = mainScope
         }
@@ -6021,20 +6459,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curScopeV = mainScope
         return b
     }
-    // Assemble each imported package object from its exported top-level names - now read
-    // out of THAT PACKAGE'S scope - and bind it under the package name in the main scope,
-    // mirroring the fmt/os objects. A var is copied by value, so a later write to the
-    // package's own variable is not seen through the qualifier; the interpreter half
-    // binds the scope itself and is live there. Recorded rather than converged: making
-    // this live needs the package object to BE a scope, and a scope handle is not
-    // something js_get can read a member off.
+    // Assemble each imported package object from its exported top-level names - read out
+    // of THAT PACKAGE'S scope - and bind it under the package name in the main scope,
+    // mirroring the fmt/os objects.
+    //
+    // THE OBJECT ALSO CARRIES THE SCOPE ITSELF, in __pkgscope, and that is what makes a
+    // package VAR live. The snapshot below is a copy, so `pkga.Counter = 50` wrote the
+    // copy and the package's own Bump() never saw it, while a write INSIDE the package
+    // was invisible through the qualifier - a halves divergence, since the interpreter
+    // half binds the scope and is live. The old note here said this needed the package
+    // object to BE a scope; it does not. A scope handle is an ordinary value, js_closure
+    // has stored one in a closure since the beginning, and go's OWN member externs
+    // (js_gofield / js_gosetfield / js_gomcall, emitted by no other grammar) can read it
+    // back - through rt.scopeGet in abnf/jsrtgolang.go and through the floor's scope
+    // host API (scopeHas/scopeGet/scopeDecl, ids 66..68) in languages/lib/go-rt.metajs.
+    // The snapshot STAYS: it is what an aliased import bound as a plain value still
+    // prints and iterates, and it is the fallback for a name the scope does not hold.
+    // docs/todo.md 1.5.
     function buildPackages(b) {
         for (var i = 0; i < pkgOrder.length; i++) {
             var pname = pkgOrder[i]
             var names = pkgExports["$" + pname]
             var psc = pkgScopeV["$" + pname]
-            if (psc == undefined) { psc = curScopeV }
             var pkgV = callExt(b, "js_obj_new", [])
+            if (psc == undefined) { psc = curScopeV }
+            else { callExt(b, "js_set", [pkgV, emitStr(b, "__pkgscope"), psc]) }
             for (var j = 0; j < names.length; j++) {
                 callExt(b, "js_set", [pkgV, emitStr(b, names[j]),
                                       callExt(b, "js_scope_get", [psc, emitStr(b, names[j])])])
@@ -6097,17 +6546,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The named-constant scope goes with them - an import is a different package, and
         // its constants reach this file as pkg.Name, which is a selector and never folds.
         var savedConsts = constByPos
+        var savedCFns = cFnByPos
         var savedConvs = convByPos
         var savedScopes = cScopes
         var savedPend = cPend
         var savedSwMarks = cSwMarks
         constByPos = {}
+        cFnByPos = {}
         convByPos = {}
         cScopes = [{n: [], v: []}]
         cPend = []
         cSwMarks = []
         c.compile(asg)
         constByPos = savedConsts
+        cFnByPos = savedCFns
         convByPos = savedConvs
         cScopes = savedScopes
         cPend = savedPend

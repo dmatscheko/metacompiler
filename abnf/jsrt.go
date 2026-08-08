@@ -418,6 +418,18 @@ type jsrt struct {
 	// Python they are one key, because bool subclasses int - see pyDictFind.
 	pyLang bool
 
+	// goLang says the module being run came out of the GO grammar, decided the
+	// same way pyLang is: js_gotop is emitted by go-to-llvm-ir.abnf, by no other
+	// grammar, and unconditionally (it is the entry's panic-frame pop), so a go
+	// module always declares it.
+	//
+	// It exists for ONE rule, and it needs the guard for the same reason pyLang
+	// does: a STRUCT or ARRAY is a Go VALUE type and `==` on it is
+	// element-by-element, so two different objects holding the same fields are
+	// ONE map key - while in the ten other grammars that share js_pyget/js_pyset
+	// an object key is identity. See the goLang arm of dictKeyEq.
+	goLang bool
+
 	// accessorCount counts the getter/setter properties js_defprop has defined in
 	// this runtime. While it is zero - which it stays for every grammar that never
 	// emits js_defprop, and for every JS program without an accessor - getMember
@@ -1176,6 +1188,8 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 			rt.trackThis = true
 		case "js_pytruthy":
 			rt.pyLang = true
+		case "js_gotop":
+			rt.goLang = true
 		}
 	}
 	ma.relNew, ma.relThru = jsReclaimable, jsThroughArgs
@@ -3170,7 +3184,31 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 			return rt.pyNumEq(a, b)
 		}
 	}
+	// GO: a struct or array key compares BY VALUE (goValueEq), because both are
+	// value types and Go's == on them is element-by-element. Neither is
+	// dictKeyable, so every lookup with one already arrives here; the identity
+	// answer made m[Pair{1,2}] miss an entry stored under an equal Pair. A slice
+	// is not a legal Go map key and is left on identity.
+	if rt.goLang && (goIsValueKey(a) || goIsValueKey(b)) {
+		return rt.goValueEq(a, b)
+	}
 	return rt.strictEq(a, b)
+}
+
+// goIsValueKey: a Go map key whose == is VALUE equality - an array, or a struct
+// instance (anything with a class descriptor that is not the slice header's).
+// The twins are goKeyIsVal in languages/lib/go-rt.metajs and in
+// languages/go-interpreter.abnf.
+func goIsValueKey(v interface{}) bool {
+	if _, ok := v.(*jsArray); ok {
+		return true
+	}
+	cls := goClassOf(v)
+	if cls == nil {
+		return false
+	}
+	name, _ := cls.props["__name"].(string)
+	return name != "$sl"
 }
 
 // reindex rebuilds the key index. Only the first position of a key is indexed,

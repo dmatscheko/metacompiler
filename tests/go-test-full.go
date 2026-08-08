@@ -2523,6 +2523,212 @@ func s40() {
 	check("cm4", c40a*xs[0] == 1)
 }
 
+// ===== SECTION 41: iota as an array length, and a struct-valued map key =====
+// Two residues of docs/todo.md 1.5, both of which all three engines got wrong
+// TOGETHER - so --cross was blind to each and only `go run` settles them.
+//
+//   - An IOTA-GROUP constant as an array length. `const (R = iota; G; B)` binds no
+//     compile-time value at all in the old fold: a spec that mentions iota cannot be
+//     bound to one constant, and a spec with no '=' has no expression to bind. So
+//     `var a [B]int` was an EMPTY array (len 0 where go says 2) in all three engines,
+//     while `R`, `G` and `B` themselves printed correctly - the run-time iota was
+//     always right, only the compile-time value was missing. The fix keeps the fold
+//     ITSELF, as a function of iota, beside the constant.
+//   - A STRUCT- or ARRAY-VALUED map key. Both are Go VALUE types and `==` on them is
+//     element-by-element, so `m[Pair{1, 2}]` must find an entry stored under a
+//     different Pair holding the same fields; the key scan compared by identity and
+//     every read, comma-ok and delete missed. The literal `map[Pair]string{{1, 2}: "p"}`
+//     did not PARSE in either half either - an elided composite key was not a key form.
+const (
+	r41 = iota
+	g41
+	b41
+	n41
+)
+
+const (
+	x41 = iota * 3
+	y41
+	z41
+)
+
+const (
+	k41a = 1 << iota
+	k41b
+	k41c
+	k41d
+)
+
+const (
+	t41a int = iota + 2
+	t41b
+	t41c
+)
+
+type pair41 struct {
+	A int
+	B int
+}
+
+type named41 struct {
+	P pair41
+	S string
+}
+
+func s41() {
+	// The values themselves were never wrong; these pin that they stay right.
+	check("io1", r41 == 0 && g41 == 1 && b41 == 2 && n41 == 3)
+	check("io2", x41 == 0 && y41 == 3 && z41 == 6)
+	check("io3", k41a == 1 && k41b == 2 && k41c == 4 && k41d == 8)
+	// ... and these are the rows that were 0 in every engine.
+	var a [b41]int
+	check("io4", len(a) == 2)
+	var bb [n41]int
+	check("io5", len(bb) == 3)
+	var cc [z41]int
+	check("io6", len(cc) == 6)
+	var dd [k41d]int
+	check("io7", len(dd) == 8)
+	// A TYPED iota constant reaches the array-length side table too.
+	var ee [t41c]int
+	check("io8", len(ee) == 4 && t41a == 2)
+	// Two dimensions, and a literal whose length comes from the group.
+	var ff [3][b41]int
+	check("io9", len(ff) == 3 && len(ff[0]) == 2)
+	// A constant EXPRESSION in the brackets, which the name substitution alone could
+	// not read: it understood a bare NAME and left everything else as written, so
+	// [b41 + 1] was the empty array in all three engines just as [b41] was.
+	var gg2 [b41 + 1]int
+	check("io12", len(gg2) == 3)
+	var hh2 [(n41 * 2) - 1]int
+	check("io13", len(hh2) == 5)
+	var ii2 [1 << b41]int
+	check("io14", len(ii2) == 4)
+	var jj2 [t41c * 2]int
+	check("io15", len(jj2) == 8)
+	var kk2 [2][b41 + 2]int
+	check("io16", len(kk2) == 2 && len(kk2[0]) == 4)
+	// ... and the shapes the substitution must NOT touch: a map key type, a slice, and
+	// a length whose name is a plain variable rather than a constant.
+	var mm2 map[string][]int
+	check("io17", len(mm2) == 0)
+	nv := 3
+	check("io18", len(make([]int, nv)) == 3)
+	gg := [b41]string{"p", "q"}
+	check("io10", len(gg) == 2 && gg[1] == "q")
+	hh := make([]int, n41)
+	check("io11", len(hh) == 3)
+
+	// A struct key: every operand read out of a slice, so nothing folds.
+	ks := []pair41{{1, 2}, {3, 4}, {1, 2}}
+	m := map[pair41]string{}
+	m[ks[0]] = "a"
+	m[ks[1]] = "b"
+	check("mk1", len(m) == 2)
+	check("mk2", m[ks[2]] == "a")
+	v, ok := m[ks[2]]
+	check("mk3", v == "a" && ok)
+	_, miss := m[pair41{9, 9}]
+	check("mk4", !miss)
+	delete(m, ks[2])
+	check("mk5", len(m) == 1 && m[ks[0]] == "")
+	// The elided-key literal form, which neither half could parse.
+	m2 := map[pair41]string{{1, 2}: "p", {5, 6}: "q"}
+	check("mk6", len(m2) == 2 && m2[ks[0]] == "p")
+	// A NESTED struct key, compared field by field all the way down.
+	n1 := named41{pair41{1, 2}, "x"}
+	n2 := named41{pair41{1, 2}, "x"}
+	n3 := named41{pair41{1, 3}, "x"}
+	m3 := map[named41]int{}
+	m3[n1] = 7
+	check("mk7", m3[n2] == 7 && len(m3) == 1)
+	check("mk8", m3[n3] == 0)
+	// An ARRAY key is a value type as well.
+	as := [][2]int{{1, 2}, {1, 2}, {2, 1}}
+	m4 := map[[2]int]string{}
+	m4[as[0]] = "arr"
+	check("mk9", m4[as[1]] == "arr" && m4[as[2]] == "")
+	// A string key still compares as it always did.
+	m5 := map[string]int{"a": 1}
+	check("mk10", m5["a"] == 1 && m5["b"] == 0)
+	// A map value keyed by a struct, ranged over: insertion order is the model's.
+	tot := 0
+	for _, val := range m3 {
+		tot += val
+	}
+	check("mk11", tot == 7)
+}
+
+// ===== SECTION 42: an elided key on a NAMED map type, and keyed nested elements =====
+// Two more residues of docs/todo.md 1.5, both settled by `go run`.
+//
+//   - `type Named map[Pair]string; Named{{1, 2}: "p"}` is legal Go and parsed in
+//     NEITHER half. The literal-type spelling map[Pair]string{{1, 2}: "p"} goes through
+//     MapLit, which knows the key type from the type it just parsed; the NAMED spelling
+//     goes through StructLit, whose key production took an Expression only - so an
+//     elided key was a parse failure and the native build failed with it. Both key
+//     productions take a brace group now, built against the map's declared key type.
+//     Nested defined types come with it: []Named{{{1, 2}: "a"}} reached the compiler
+//     half's element builder as the unresolved name "Named" and was refused.
+//   - A KEYED nested struct element - map[string]P{"x": {N: 1}} - was a live halves
+//     divergence: the interpreter built it and the compiler answered "a keyed nested
+//     struct element is not supported". The key's TEXT was thrown away at the nested
+//     element's key production, so the field name was not there to be used.
+type pair42 struct {
+	A int
+	B int
+}
+
+type named42 map[pair42]string
+
+type tally42 map[string]int
+
+type nums42 []int
+
+type pt42 struct {
+	N int
+	X int
+}
+
+func s42() {
+	ks := []pair42{{1, 2}, {3, 4}}
+	// The named-map form, with an elided key and a written-out one side by side.
+	m := named42{{1, 2}: "p", pair42{3, 4}: "q"}
+	check("nm1", len(m) == 2 && m[ks[0]] == "p" && m[ks[1]] == "q")
+	// A defined map over ordinary key types is unaffected.
+	t := tally42{"k": 8}
+	check("nm2", t["k"] == 8 && len(t) == 1)
+	// A defined SLICE type still builds from the same production.
+	n := nums42{4, 5, 6}
+	check("nm3", len(n) == 3 && n[2] == 6)
+	// The zero value of a defined map type reads like an empty one.
+	var z named42
+	check("nm4", len(z) == 0 && z[ks[0]] == "")
+	// A nested brace group whose element type is a DEFINED map: the compiler half
+	// refused this with "composite literal element of unsupported type named42".
+	ms := []named42{{{1, 2}: "a"}, {{1, 2}: "b"}}
+	check("nm5", len(ms) == 2 && ms[0][ks[0]] == "a" && ms[1][ks[0]] == "b")
+	mm := map[string]named42{"x": {{1, 2}: "z"}}
+	check("nm6", mm["x"][ks[0]] == "z")
+	// The literal-type spelling of the same thing, which SECTION 41 introduced.
+	lit := map[pair42]string{{1, 2}: "L"}
+	check("nm7", lit[ks[0]] == "L")
+
+	// A KEYED nested struct element, in a map value, a slice element and an array.
+	km := map[string]pt42{"x": {N: 1, X: 2}, "y": {3, 4}}
+	check("ke1", km["x"].N == 1 && km["x"].X == 2 && km["y"].N == 3)
+	ks2 := []pt42{{N: 5}, {6, 7}, {X: 8}}
+	check("ke2", ks2[0].N == 5 && ks2[0].X == 0 && ks2[1].X == 7 && ks2[2].N == 0 && ks2[2].X == 8)
+	var ka [2]pt42
+	check("ke3", len(ka) == 2 && ka[0].N == 0)
+	// ... and an INDEXED element of a slice or array, which is a different use of the
+	// same key production and must keep meaning an index rather than a field name.
+	idx := []int{0: 5, 3: 9}
+	check("ke4", len(idx) == 4 && idx[3] == 9 && idx[0] == 5)
+	arr := [5]int{4: 1}
+	check("ke5", len(arr) == 5 && arr[4] == 1)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2564,6 +2770,8 @@ func main() {
 	s38() // SECTION-CALL 38
 	s39() // SECTION-CALL 39
 	s40() // SECTION-CALL 40
+	s41() // SECTION-CALL 41
+	s42() // SECTION-CALL 42
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

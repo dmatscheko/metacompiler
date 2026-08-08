@@ -176,15 +176,20 @@ TypeGroup   <~~ notImpl("grouped type declaration", up.pos) ~~>
 // const ( A = iota; B; C ): every spec gets the running iota index, and a spec
 // without its own '=' repeats the previous spec's expression list.
 ConstGroup  <~~ push(makeConstGroup(takeAll())) ~~>
-            = "const" KwEnd "(" { ConstSpec } ")" [ ";" ] ;
+            = "const" KwEnd CGrpOn "(" { ConstSpec } ")" [ ";" ] ;
 ConstSpec   <~~ push(makeConstSpec(cBindSpec(takeAll()))) ~~>
             = CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" CExprList ] [ ";" ] ;
 ConstSingle <~~ push(makeVarDecl(cBindSpec(takeAll()))) ~~>
-            = "const" KwEnd CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ VType ] [ "=" CExprList ] [ ";" ] ;
-// The iota watermark. A const spec that mentions iota cannot be bound to ONE constant
-// (its expression list is re-read once per spec with a different iota), so the count is
-// taken here, before the spec's expressions, and compared again in cBindSpec.
-CSpecOn     <~~ cIotaMark = cIotaCount ~~> = [ "\x00" ] ;
+            = "const" KwEnd CGrpOn CSpecOn Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ VType ] [ "=" CExprList ] [ ";" ] ;
+// The spec index inside the const group, which is what `iota` means. There used to be
+// an iota WATERMARK here as well - a count of the iotas seen, compared again in
+// cBindSpec, which refused to bind any spec that mentioned one. cFnByPos binds them
+// correctly now, so the count had no reader left and is gone.
+CSpecOn     <~~ cIotaIdx = cIotaIdx + 1 ~~> = [ "\x00" ] ;
+// The group watermark: `iota` is the index of the spec INSIDE this const block, so the
+// counter and the repeated expression list are reset at every `const`. Grouped and
+// ungrouped both carry it, which is what makes a lone `const c = iota` zero.
+CGrpOn      <~~ cIotaIdx = 0 - 1; cLastFns = [] ~~> = [ "\x00" ] ;
 // An expression list that also tags each element's END POSITION - the key its folded
 // constant was registered under, and the only way the binding can read it back.
 CExprList   = CExprItem { "," CExprItem } ;
@@ -882,9 +887,12 @@ CompSlice   <~~ push({ckind: "slice", cet: pop().cet}) ~~>
             = "[" "]" CompElemT ;
 CompArray   <~~ push(makeArrDesc(takeAll())) ~~>
             = "[" ( "..." | Expression ) "]" CompElemT ;
-CompMapT    <~~ push({ckind: "map", czero: pop().mzero}) ~~>
+CompMapT    <~~ push({ckind: "map", czero: pop().mzero, ckeyt: pop().mkey}) ~~>
             = MapTypeZ ;
-CompNamed   <~~ push({ckind: "struct", cname: typeBaseName(up.in)}) ~~>
+// compTypeName and not typeBaseName: the name KEEPS a package qualifier, because
+// `pkga.Item{...}` is that package's type and stopping at the '.' made buildLit look up
+// `pkga` and die with `unknown struct type: pkga`. docs/todo.md 1.5.
+CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in)}) ~~>
             = NotTypeKw NamedType ;
 CompElemT   <~~ push({cet: firstType(up.in)}) ~~>
             = Type ;
@@ -897,8 +905,11 @@ CompBody    <~~ push({celems: takeAll()}) ~~>
             = "{" [ CompElem { "," CompElem } [ "," ] ] "}" ;
 CompElem    <~~ push(makeCompElem(takeAll())) ~~>
             = [ KeyAhead CompKey ] CompValue ;
+// A KEY may be a bare brace group built against the map's KEY type, which is what a
+// struct-keyed literal is written with: map[Pair]string{{1, 2}: "p"}. No Go expression
+// starts with '{', so trying the group first is unambiguous. docs/todo.md 1.5.
 CompKey     <~~ push({ckey: pop(), ktext: firstWord(up.in)}) ~~>
-            = Expression ":" ;
+            = ( CompNested | Expression ) ":" ;
 CompValue   = CompNested | Expression ;
 CompNested  <~~ push({cnested: pop()}) ~~>
             = CompBody ;
@@ -907,7 +918,7 @@ CompNested  <~~ push({cnested: pop()}) ~~>
 MakeCall    <~~ push(makeMakeCall(takeAll())) ~~>
             = "make" KwEnd "(" MakeType [ "," Expression ] [ "," Expression ] ")" ;
 MakeType    = MakeMapT | MakeSliceT | MakeChanT ;
-MakeMapT    <~~ push({mkind: "map", czero: pop().mzero}) ~~> = MapTypeZ ;
+MakeMapT    <~~ push({mkind: "map", czero: pop().mzero, mkey: pop().mkey}) ~~> = MapTypeZ ;
 MakeSliceT  <~~ push({mkind: "slice", cet: pop().cet}) ~~> = "[" "]" CompElemT ;
 // The ELEMENT type comes along: a receive from a closed, drained channel yields it
 // zero-valued (`v, open := <-ch` with open false).
@@ -973,7 +984,7 @@ ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
             | "uint" | "int" ;
 
 // iota: the index of the current spec inside a const group (0 outside one).
-Iota        <~~ goIotaC(); push(makeIota()) ~~> = "iota" KwEnd ;
+Iota        <~~ push(goIotaLit(up.pos)) ~~> = "iota" KwEnd ;
 
 // nil is the null value (structs, slices, maps and pointers share one). Tried before
 // VarRef so it is not read as an undefined identifier.
@@ -1038,7 +1049,10 @@ RuneLit     <~~ push(goRuneLitC(pop(), up.pos)) ~~>
 FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
-MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
+MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
+// The KEY type text, which an elided struct key is built against (see CompKey).
+KType       <~~ push({mkey: firstType(up.in)}) ~~>
+            = Type ;
 ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
 
@@ -1370,6 +1384,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // nothing - the same shape as the usesComplex probe.
     var goSeenSized = false
     function mapFind(m, k) {
+        // A STRUCT OR ARRAY KEY COMPARES BY VALUE. Go's == on a value type is
+        // element-by-element (goEq), so a lookup with a different object holding the
+        // same fields has to hit; indexOf's === answered -1 and every read, delete and
+        // comma-ok missed. A slice is not a legal map key and stays on identity.
+        // The twins are goKeyIsVal/goDictFind in languages/lib/go-rt.metajs and the
+        // goLang arm of dictKeyEq in abnf/jsrt.go. docs/todo.md 1.5.
+        if (goKeyIsVal(k)) {
+            for (var vi = 0; vi < m.keys.length; vi++) {
+                if (goEq(m.keys[vi], k)) { return vi }
+            }
+            return 0 - 1
+        }
         if (szIs(k)) { goSeenSized = true }
         if (!goSeenSized) { return m.keys.indexOf(k) }
         var i = m.keys.indexOf(k)
@@ -1380,6 +1406,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if ((szIs(kk) || szIs(k)) && (szIs(kk) || typeof kk == "number") && szEq(kk, k)) { return j }
         }
         return 0 - 1
+    }
+    function goKeyIsVal(k) {
+        if (k === undefined || k === null) { return false }
+        if (Array.isArray(k)) { return true }
+        if (typeof k != "object") { return false }
+        if (k.__class == undefined) { return false }
+        return !isSl(k)
     }
     function mapGet(m, k) {
         var i = mapFind(m, k)
@@ -2992,6 +3025,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function regConst(pos, c) {
         if (pos == undefined || pos == null) { return }
         constByPos["p" + pos] = (c == null) ? cNone : c
+        if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
     }
     function constAt(pos) {
         if (pos == undefined || pos == null) { return null }
@@ -2999,6 +3033,78 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (c == undefined) { return null }
         if (c.none === true) { return null }
         return c
+    }
+    // ----- the IOTA-AWARE parallel channel: a position -> function(iota) -> constant --
+    //
+    // WHY A SECOND CHANNEL AND NOT A SECOND FOLD. Inside `const ( A = 1 << iota; B; C )`
+    // a spec with no '=' REPEATS the previous spec's expression list, and that list is
+    // PARSED ONCE. constByPos can therefore only ever hold A's value; B and C need the
+    // same expression evaluated at a different iota, and nothing survives the parse that
+    // could be re-evaluated. So every fold site registers, beside its constant, the fold
+    // ITSELF as a closure over iota. cBindSpec is the only reader.
+    //
+    // constByPos is deliberately NOT given iota's value: a run mentioning iota must keep
+    // failing to fold, or goFoldConst would materialize A's constant INTO THE THUNK and
+    // makeConstGroup - which re-emits that same thunk for B and C - would hand all three
+    // specs A's value. The emission path is unchanged by this whole channel; only the
+    // COMPILE-TIME binding (cBindConst, cArrLenTbl, and so goArrConstLen) gains a value.
+    //
+    // The channel never holds null: an absent or unfoldable position answers cFnNone,
+    // which answers null for every iota, so a composition needs no per-operand test.
+    var cFnByPos = {}
+    function cFnNone(io) { return null }
+    function cKonstFn(c) { return function(io) { return c } }
+    function cIotaFn(io) { return cInt(1, cbFromSmall(io)) }
+    function cNegFn(f) {
+        return function(io) {
+            var v = f(io)
+            if (v == null) { return null }
+            return cNeg(v)
+        }
+    }
+    function cNotFn(f) {
+        return function(io) {
+            var v = f(io)
+            if (v == null) { return null }
+            return cNot(v)
+        }
+    }
+    function regCFn(pos, f) {
+        if (pos == undefined || pos == null) { return }
+        cFnByPos["p" + pos] = f
+    }
+    function cfnAt(pos) {
+        if (pos == undefined || pos == null) { return cFnNone }
+        var f = cFnByPos["p" + pos]
+        if (f == undefined) { return cFnNone }
+        return f
+    }
+    // goFoldConst's run, kept as a function of iota instead of evaluated once. Built
+    // whether or not the constant fold succeeded, because the reason it failed may be
+    // exactly that an operand was iota.
+    function goFoldCFn(items, ops, ty) {
+        if (ty != null) { return cFnNone }
+        var fs = [cfnAt(items[1].at)]
+        var k = 0
+        while (k < ops.length) {
+            fs.push(cfnAt(items[3 * k + 4].at))
+            k = k + 1
+        }
+        return function(io) {
+            var acc = fs[0](io)
+            if (acc == null) { return null }
+            var j = 0
+            while (j < ops.length) {
+                var rhs = fs[j + 1](io)
+                if (rhs == null) { return null }
+                var nx = cApply(ops[j], acc, rhs)
+                if (nx == null) { return null }
+                if (cTooBig(nx)) { return null }
+                acc = nx
+                j = j + 1
+            }
+            return acc
+        }
     }
     // The thunk is handed straight back; the point is the clear. Used by every unary
     // form whose value is NOT its operand's constant (!x, &x, *x, <-x).
@@ -3043,14 +3149,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // within its width instead, which is not a constant fold.
     function goComplC(items) {
         if (tyAt(items[1].at) != null) { return }
+        var inner = cfnAt(items[1].at)
         var c = constAt(items[1].at)
         if (c != null) { regConst(items[1].at, cNot(c)) }
+        else { regCFn(items[1].at, cNotFn(inner)) }
     }
     // -x and (x) do not move the END position of what they wrap (a prefix operator
     // and the group's ')' respectively), so both simply re-register at their own key.
     function goNegC(t, pos) {
+        var inner = cfnAt(pos)
         var c = constAt(pos)
-        if (c == null) { return makeNeg(t) }
+        if (c == null) { regCFn(pos, cNegFn(inner)); return makeNeg(t) }
         var nc = cNeg(c)
         regConst(pos, nc)
         // UNARY MINUS IS A FOLD SITE, and the reason is a value rather than a
@@ -3077,6 +3186,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goParenC(items, pos) {
         var c = constAt(items[1].at)
         if (c != null) { regConst(pos, c) }
+        else { regCFn(pos, cfnAt(items[1].at)) }
         return items[0]
     }
     function cFromRadixText(text) {
@@ -3146,8 +3256,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var cScopes = [{n: [], v: []}]
     var cPend = []
     var cSwMarks = []
-    var cIotaCount = 0
-    var cIotaMark = 0
     function cTop() { return cScopes[cScopes.length - 1] }
     // A parameter or receiver name is collected here and applied to the NEXT frame,
     // which is the function body: poisoning it where the tag fires would poison it in
@@ -3216,7 +3324,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function cSwCase() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks[cSwMarks.length - 1]) } }
     function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
-    function goIotaC() { cIotaCount = cIotaCount + 1 }
+    // The spec index INSIDE the current const group, which is what `iota` means, and
+    // the group's last seen expression list as functions of it. CGrpOn resets both at
+    // every `const`, grouped or not; CSpecOn steps the index once per spec.
+    var cIotaIdx = 0
+    var cLastFns = []
+    function cSpecVal(fns, n, ok, io) {
+        if (!ok) { return null }
+        return fns[n](io)
+    }
     // A bare name registers its constant against its own end position, exactly as a
     // literal does, so every fold above it reads names and literals the same way. The
     // thunk is UNCHANGED - the name still reads its variable - so a fold is the only
@@ -3224,7 +3340,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // before. The clear on the miss is the constByPos invariant: a node that ends where
     // an operand ends either re-registers or clears.
     function goNameC(name, pos) {
-        if (name === "iota") { goIotaC() }
+        if (name === "iota") {
+            // No CONSTANT (see cFnByPos: folding iota would poison the re-emitted
+            // thunk a repeating spec shares), but a fn channel entry, which is what
+            // gives `const ( R = iota; G; B )` its compile-time 0, 1, 2.
+            regConst(pos, null)
+            regCFn(pos, cIotaFn)
+            return makeVarRef(name)
+        }
         regConst(pos, cLookup(name))
         return makeVarRef(name)
     }
@@ -3248,10 +3371,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else { rest.push(items[k]) }
             k = k + 1
         }
-        var ok = !typed && cIotaCount === cIotaMark && ats.length === names.length && rest.length === names.length
+        // The spec's expression list AS FUNCTIONS OF IOTA. A spec that HAS one records
+        // it as the group's current list; a spec with no '=' at all repeats it, which
+        // is Go's rule and the whole reason the fn channel exists. Anything else (a
+        // name count that does not match the expression count) binds nothing, exactly
+        // as the old iota watermark did.
+        var fns = []
+        if (ats.length === names.length && rest.length === names.length) {
+            var af = 0
+            while (af < ats.length) { fns.push(cfnAt(ats[af])); af = af + 1 }
+            cLastFns = fns
+        } else if (ats.length === 0 && rest.length === 0 && cLastFns.length === names.length) {
+            fns = cLastFns
+        }
+        var okn = fns.length === names.length
         var n = 0
         while (n < names.length) {
-            cBindConst(names[n], ok ? constAt(ats[n]) : null)
+            cBindConst(names[n], typed ? null : cSpecVal(fns, n, okn, cIotaIdx))
             n = n + 1
         }
         // A TYPED const is deliberately NOT an untyped folding constant (cBindConst
@@ -3262,10 +3398,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // value. Flat rather than scoped, which is the one thing it gives up: a
         // function-local typed const shadowing a package-level one of the same name
         // would take the inner value for both. docs/todo.md 2.7.
-        if (typed && cIotaCount === cIotaMark && ats.length === names.length) {
+        if (typed) {
             var tn = 0
             while (tn < names.length) {
-                var td = goConstIntText(constAt(ats[tn]))
+                var td = goConstIntText(cSpecVal(fns, tn, okn, cIotaIdx))
                 if (td.length > 0) { cArrLenTbl["$" + names[tn]] = td }
                 tn = tn + 1
             }
@@ -3369,9 +3505,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             i += 3
         }
         if (ops.length == 0) { return ts[0] }
+        // Built BEFORE the clear below: this run ends where its last operand does, so
+        // regConst(pos, null) would erase the very entry the composition reads.
+        var cfn = goFoldCFn(items, ops, ty)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
         regConst(pos, null)
+        regCFn(pos, cfn)
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -4041,6 +4181,127 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // thunks that read the text run afterwards, when every frame but the top-level one
     // has been popped. `[string]` of a map type and `[...]` of an inferred array
     // resolve to nothing and are left exactly as they were. docs/todo.md 2.7.
+    // ----- a constant EXPRESSION as an array length -----
+    //
+    // goArrConstLen below substitutes a bare NAME. `var a [B+1]int` is just as ordinary
+    // Go and was the empty array in all three engines, so this evaluates the whole
+    // bracket text over the same folded constants when it is more than a name. It is
+    // deliberately tiny - integer literals, names, unary +/-, parentheses, and Go's two
+    // binary levels (* / % << >> & | ^ and + -) - because anything it cannot read
+    // answers null and the text is then left EXACTLY as it was, which is the behaviour
+    // that was already there. It never touches the folder: the value it computes is
+    // spliced into a TYPE TEXT and nowhere else. docs/todo.md 1.5.
+    var aeSrc = ""
+    var aePos = 0
+    function aeSkip() {
+        while (aePos < aeSrc.length && aeSrc.charCodeAt(aePos) == 32) { aePos = aePos + 1 }
+    }
+    function aeAt(k) {
+        if (aePos + k >= aeSrc.length) { return "" }
+        return aeSrc.charAt(aePos + k)
+    }
+    function aeEval(t) {
+        if (t.length == 0 || t.length > 200) { return null }
+        aeSrc = t
+        aePos = 0
+        var v = aeAdd()
+        if (v == null) { return null }
+        aeSkip()
+        if (aePos != aeSrc.length) { return null }
+        return v
+    }
+    function aeAdd() {
+        var l = aeMul()
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (l == null) { return null }
+            aeSkip()
+            var c = aeAt(0)
+            if (c != "+" && c != "-" && c != "|" && c != "^") { return l }
+            aePos = aePos + 1
+            var r = aeMul()
+            if (r == null) { return null }
+            var nx = cApply(c, l, r)
+            if (nx == null || cTooBig(nx)) { return null }
+            l = nx
+        }
+        return null
+    }
+    function aeMul() {
+        var l = aeUnary()
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (l == null) { return null }
+            aeSkip()
+            var c = aeAt(0)
+            var op = ""
+            if (c == "*" || c == "/" || c == "%" || c == "&") { op = c }
+            if ((c == "<" && aeAt(1) == "<") || (c == ">" && aeAt(1) == ">")) { op = c + c }
+            if (op.length == 0) { return l }
+            aePos = aePos + op.length
+            var r = aeUnary()
+            if (r == null) { return null }
+            var nx = cApply(op, l, r)
+            if (nx == null || cTooBig(nx)) { return null }
+            l = nx
+        }
+        return null
+    }
+    function aeUnary() {
+        aeSkip()
+        var c = aeAt(0)
+        if (c == "+") { aePos = aePos + 1; return aeUnary() }
+        if (c == "-") {
+            aePos = aePos + 1
+            var v = aeUnary()
+            if (v == null) { return null }
+            return cNeg(v)
+        }
+        return aePrim()
+    }
+    function aePrim() {
+        aeSkip()
+        var c = aeAt(0)
+        if (c == "(") {
+            aePos = aePos + 1
+            var v = aeAdd()
+            if (v == null) { return null }
+            aeSkip()
+            if (aeAt(0) != ")") { return null }
+            aePos = aePos + 1
+            return v
+        }
+        var start = aePos
+        var cc = aePos < aeSrc.length ? aeSrc.charCodeAt(aePos) : 0
+        if (cc >= 48 && cc <= 57) {
+            while (aePos < aeSrc.length) {
+                var dc = aeSrc.charCodeAt(aePos)
+                if (dc < 48 || dc > 57) { break }
+                aePos = aePos + 1
+            }
+            return cFromIntText(aeSrc.substring(start, aePos), 10, 0)
+        }
+        if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95) {
+            while (aePos < aeSrc.length) {
+                var ic = aeSrc.charCodeAt(aePos)
+                if (!((ic >= 48 && ic <= 57) || (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) || ic == 95)) { break }
+                aePos = aePos + 1
+            }
+            return aeName(aeSrc.substring(start, aePos))
+        }
+        return null
+    }
+    // A name in an array length: the folded constant, or the typed-const side table
+    // goArrConstLen already consults. Answers null for anything else, which is what
+    // leaves a `[n]` over a variable untouched.
+    function aeName(n) {
+        var c = cLookup(n)
+        if (c != null && goConstIntText(c).length > 0) { return c }
+        if (typeof cArrLenTbl["$" + n] == "string") { return cFromIntText(cArrLenTbl["$" + n], 10, 0) }
+        return null
+    }
     // Integer values of TYPED constants, for goArrConstLen only - see cBindSpec.
     var cArrLenTbl = {}
     function goArrConstLen(t) {
@@ -4062,6 +4323,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var ct = goConstIntText(cLookup(inner))
                 if (ct.length == 0 && typeof cArrLenTbl["$" + inner] == "string") { ct = cArrLenTbl["$" + inner] }
                 if (ct.length > 0) { rep = ct }
+            } else {
+                var ce = goConstIntText(aeEval(inner))
+                if (ce.length > 0) { rep = ce }
             }
             out += "[" + rep + "]"
             i = close + 1
@@ -4126,15 +4390,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeCompElem(items) {
         var i = 0
         var key = null
+        var keyn = null
         var ktext = null
         if (items[0] != undefined && typeof items[0] != "function" && items[0].ckey != undefined) {
-            key = items[0].ckey
+            // An ELIDED struct key arrives as a nest rather than a thunk; buildLit
+            // builds it against the map's key type. See CompKey.
+            if (typeof items[0].ckey == "function") { key = items[0].ckey }
+            else { keyn = items[0].ckey.cnested.celems }
             ktext = items[0].ktext
             i = 1
         }
         var v = items[i]
-        if (typeof v == "function") { return {ekey: key, ektext: ktext, eval: v} }
-        return {ekey: key, ektext: ktext, enest: v.cnested.celems}
+        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eval: v} }
+        return {ekey: key, ekeyn: keyn, ektext: ktext, enest: v.cnested.celems}
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
     function zeroOfType2(t) { return goZeroTy(t) }
@@ -4200,7 +4468,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // type - a text parse here measured as unrecoverable, not merely awkward.
         if (w == "map") { return newNilMap(goZeroTy(mapValText(t))) }
         if (w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
-        var cls = hasOwn(structs, w) ? structs[w] : undefined
+        // `var x pkga.Item`: goTyWord stops at the '.', so the qualified spelling used
+        // to read as the type `pkga` and zero to null. docs/todo.md 1.5.
+        var qz = goQualTy(t)
+        if (qz != null) {
+            var qu = resolveDefined(t)
+            if (qu != t) { return goZeroTy(qu) }
+            var qc2 = goQualClass(qz)
+            if (qc2 != undefined) { return goZeroStruct(qc2) }
+            return null
+        }
+        // The BINDING first: a struct name resolves through the scope chain, which is
+        // per package, while the table below is only reached for a name the current
+        // chain does not hold.
+        if (hasVar(w)) {
+            var bv = getVar(w)
+            if (bv != undefined && bv != null && bv.__isclass == true) { return goZeroStruct(bv) }
+        }
+        var cls = structAt(curPkgName, w)
         if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStruct(cls) }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
         // over `type L []int` is an empty SLICE (append/len/range all work) rather
@@ -4226,6 +4511,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (szIs(cur) && (typeof v == "number" || szIs(v))) { return szConv(v, cur.w, cur.u) }
         return v
     }
+    // One map-literal KEY: the ordinary key thunk, or an elided brace group built
+    // against the map's declared KEY type (map[Pair]string{{1, 2}: "p"}).
+    function litKeyOf(e, kty) {
+        if (e.ekeyn == undefined || e.ekeyn == null) { return e.ekey() }
+        return buildLit(descOfTypeText(kty), e.ekeyn)
+    }
     // Builds one composite literal value. `desc` is the type descriptor pushed by
     // CompType; `elems` are the {ekey, ektext, eval|enest} records of its body. A
     // nested brace group is built recursively against the element type.
@@ -4233,7 +4524,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (desc.ckind == "map") {
             var m = newMap(zeroOfType(desc.czero))
             for (var i = 0; i < elems.length; i++) {
-                mapSet(m, elems[i].ekey(), elemValue(elems[i], desc.czero))
+                mapSet(m, litKeyOf(elems[i], desc.ckeyt), elemValue(elems[i], desc.czero))
             }
             return m
         }
@@ -4264,8 +4555,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (isCompositeText(rn)) { return buildLit(descOfTypeText(rn), elems) }
                 return buildLit({ckind: "struct", cname: rn}, elems)
             }
-            cls = getVar(desc.cname)
-            if (cls == undefined || cls == null || cls.__isclass != true) { fail("unknown struct type: " + desc.cname) }
+            // pkga.Item{...}: another package's type. Its descriptor is not in this
+            // file's scope chain - it is that package's own, which is also what its
+            // methods were attached to. docs/todo.md 1.5.
+            var qq = goQualTy(desc.cname)
+            if (qq != null) {
+                var qcls = goQualClass(qq)
+                if (qcls == undefined) { fail("unknown struct type: " + desc.cname) }
+                cls = qcls
+            } else {
+                cls = getVar(desc.cname)
+                if (cls == undefined || cls == null || cls.__isclass != true) { fail("unknown struct type: " + desc.cname) }
+            }
         }
         var obj = {__class: cls}
         var fs = cls.__fields
@@ -4311,6 +4612,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // `map[string]map[string]int` answered "" and a doubly nested literal died with
     // "unknown struct type" (docs/todo.md 1.9, and the compiler half's mapValTy has
     // the same shape). lastIndexOf is not in this dialect anyway.
+    // The KEY type of a map type text: everything between the "map[" and the ']' that
+    // CLOSES it, by the same bracket-depth walk mapValText uses for the other half.
+    function mapKeyText(t) {
+        var mi = t.indexOf("map[")
+        if (mi < 0) { return "" }
+        var d = 0
+        for (var i = mi + 3; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            if (cc == 91) { d = d + 1 }
+            else if (cc == 93) { d = d - 1; if (d == 0) { return t.substring(mi + 4, i) } }
+        }
+        return ""
+    }
     function mapValText(t) {
         var mi = t.indexOf("map[")
         if (mi < 0) { return "" }
@@ -4338,7 +4652,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // length that is a constant NAME is still unreadable from the text alone.
             return {ckind: "array", cet: inner, clen: constLenThunk(t.substring(1, close))}
         }
-        if (t.indexOf("map[") == 0) { return {ckind: "map", czero: mapValText(t)} }
+        // ckeyt as well as czero: a DEFINED map type reaches buildLit through here
+        // (`type Named map[Pair]string; Named{{1, 2}: "p"}`), and an elided key is
+        // built against the map's declared KEY type. See litKeyOf.
+        if (t.indexOf("map[") == 0) { return {ckind: "map", czero: mapValText(t), ckeyt: mapKeyText(t)} }
         return {ckind: "struct", cname: t}
     }
     // Anonymous struct types get one descriptor per literal site, cached on the desc.
@@ -4712,6 +5029,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // ----- const blocks and iota -----
     var iotaVal = 0
     function makeIota() { return function() { return iotaVal } }
+    // iota is a RULE of its own in this half (the compiler half reads it as an ordinary
+    // name), so its fn-channel entry is registered here rather than in goNameC. No
+    // CONSTANT: see cFnByPos for why folding iota would poison a repeating spec.
+    function goIotaLit(pos) {
+        regConst(pos, null)
+        regCFn(pos, cIotaFn)
+        return makeIota()
+    }
     // A spec keeps its names and its own initializer list (empty when it repeats).
     function makeConstSpec(items) {
         var names = []
@@ -4972,6 +5297,47 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (w.charAt(i) == "[") { return w.substring(0, i) }
         }
         return w
+    }
+    // The named type at a composite literal's head, keeping at most ONE package
+    // qualifier and dropping any type arguments: "pkga.Item", "Point", "pair16".
+    function compTypeName(s) {
+        var out = ""
+        var dots = 0
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95) {
+                out += s.charAt(i)
+                continue
+            }
+            if (cc == 46 && out.length > 0 && dots == 0) { dots = 1; out += "."; continue }
+            if (out.length > 0) { break }
+        }
+        if (out.length > 0 && out.charAt(out.length - 1) == ".") { return out.substring(0, out.length - 1) }
+        return out
+    }
+    // `pkg.Name` as a type text: {p, n}, or null for anything else. The twin is
+    // goQualTy in languages/go-to-llvm-ir.abnf.
+    function goQualTy(t) {
+        if (t == undefined || t == null) { return null }
+        var d = t.indexOf(".")
+        if (d <= 0 || d == t.length - 1) { return null }
+        var p = t.substring(0, d)
+        var n = t.substring(d + 1)
+        if (!goIsIdentText(p) || !goIsIdentText(n)) { return null }
+        return {p: p, n: n}
+    }
+    // The struct DESCRIPTOR an imported package exports under this name, or undefined.
+    // The package's own scope holds the very object its methods were attached to, so a
+    // value built from it answers those methods.
+    function goQualClass(q) {
+        var c = structAt(q.p, q.n)
+        if (c != undefined && c != null && c.__isclass == true) { return c }
+        if (!hasVar(q.p)) { return undefined }
+        var pv = getVar(q.p)
+        if (pv == undefined || pv == null || typeof pv != "object") { return undefined }
+        var qc = pv[q.n]
+        if (qc != undefined && qc != null && qc.__isclass == true) { return qc }
+        return undefined
     }
     // The dynamic type name of a runtime value, in the spelling a case label uses.
     function goTypeName(v) {
@@ -5488,7 +5854,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // otherwise (type Int = int) it falls through to the defined-type conversion.
         if (items.length > 2 && typeof items[1] == "object" && items[1] != null && items[1].alias == true) {
             var tgt = (typeof last == "object" && last != null && last.under != undefined) ? last.under : ""
-            if (tgt != "" && hasOwn(structs, tgt)) { structs[items[0]] = structs[tgt] }
+            if (tgt != "" && structAt(curPkgName, tgt) != undefined) {
+                structs[sKeyI(curPkgName, items[0])] = structAt(curPkgName, tgt)
+            }
             if (tgt != "" && hasOwn(globalScope, tgt)) { globalScope[items[0]] = globalScope[tgt]; return }
             var alias = [items[0]]
             for (var ai = 2; ai < items.length; ai++) { alias.push(items[ai]) }
@@ -5515,6 +5883,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // underlying text is the whole answer: a composite literal of a defined
             // type is a literal of what it is defined over.
             definedUnder[items[0]] = last.under
+            // ... and under the package-qualified key, so `pkga.L{1, 2}` and
+            // `var x pkga.L` resolve exactly as the unqualified form does inside the
+            // package. Both keys, so every existing flat reader is unchanged.
+            if (curPkgName != null) { definedUnder[sKeyI(curPkgName, items[0])] = last.under }
             globalScope[items[0]] = makeDefinedConv(last.under)
             notePkgType(items[0])
             return
@@ -5528,7 +5900,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Functions, methods and structs -----
 
+    // STRUCT DESCRIPTORS ARE PER PACKAGE. The table is keyed "pkg.Name" for an imported
+    // declaration and by the bare name in the main file, because two packages may each
+    // declare `type Vec struct` - and this table is what METHODS are attached to. Flat,
+    // the second import overwrote the first and every method of both landed on ONE
+    // descriptor, so mathbox.NewVec(3, 4).Len2() died with `unknown method 'Len2' on
+    // Vec`: the VALUE carries its own package's descriptor (the package scope keeps a
+    // copy made when the import finished) and that one never got the method. The
+    // compiler half has the mirror-image defect in structFields; see the note there.
+    // docs/todo.md 1.5.
     var structs = {}
+    function sKeyI(pkg, name) { return pkg == null ? name : pkg + "." + name }
+    function structAt(pkg, name) {
+        if (pkg != null && hasOwn(structs, sKeyI(pkg, name))) { return structs[sKeyI(pkg, name)] }
+        if (hasOwn(structs, name)) { return structs[name] }
+        return undefined
+    }
     // Defined type name -> the type text it is defined OVER (`type L []int` -> "[]int",
     // `type Q Point` -> "Point"). buildTypeDecl fills it; buildLit and goZeroTy read it.
     var definedUnder = {}
@@ -5559,7 +5946,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // An embedded field leaves its name without a following type.
         for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
         var cls = {__isclass: true, __name: items[0], __fields: fields, __ftypes: ftypes}
-        structs[items[0]] = cls
+        structs[sKeyI(curPkgName, items[0])] = cls
         globalScope[items[0]] = cls
         notePkgType(items[0])
     }
@@ -5598,7 +5985,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var body = items[i]
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
-            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes, env: pkgEnv()})
+            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes, env: pkgEnv(), pkg: curPkgName})
         } else {
             curGlobals()[name] = makeFunClosure(params, body, rets, rtys, variadic, ptypes)
             // In an imported package, an exported (capitalized) function is ALSO reached
@@ -5834,11 +6221,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The named-constant scope goes with them - an import is a different package, and
         // its constants reach this file as pkg.Name, which is a selector and never folds.
         var savedConsts = constByPos
+        var savedCFns = cFnByPos
         var savedConvs = convByPos
         var savedScopes = cScopes
         var savedPend = cPend
         var savedSwMarks = cSwMarks
         constByPos = {}
+        cFnByPos = {}
         convByPos = {}
         cScopes = [{n: [], v: []}]
         cPend = []
@@ -5859,6 +6248,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         scopes = savedRun
         curPkgScope = savedPkgScope
         constByPos = savedConsts
+        cFnByPos = savedCFns
         convByPos = savedConvs
         cScopes = savedScopes
         cPend = savedPend
@@ -5897,7 +6287,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var recvVar = mm.recvName[0]
         var byPtr = mm.recvName.length > 2
         var recvType = mm.recvName[mm.recvName.length - 1]
-        var cls = hasOwn(structs, recvType) ? structs[recvType] : undefined
+        var cls = structAt(mm.pkg, recvType)
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls["__ptr$" + mm.name] = byPtr
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
