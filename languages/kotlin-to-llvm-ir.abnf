@@ -4319,53 +4319,58 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_set", [pV, emitStr(b, "second"), secondV])
         return pV
     }
-    // A range value in operand position, materialized as a list. items alternates
-    // operands and {rop} markers: from, {rop}, to [, {rop:"step"}, step].
+    // A range value in operand position. items alternates operands and {rop}
+    // markers: from, {rop}, to [, {rop:"step"}, step].
+    //
+    // This used to emit a LOOP here and hand back a materialized list, and
+    // first/last/step/start/endInclusive were then recovered from the elements
+    // downstream. That is unrecoverable for an EMPTY progression - `(5..1).first`
+    // is 5 in Kotlin, where both compiled halves read kotlin.Unit - and for
+    // toString, which is "5..1" and read "[]" (todo.md 1.8 / 1.10). A progression
+    // is now the first-class {__range, from, to, st, down, ch, fl} value the
+    // interpreter half has always had; js_ktrange builds it and js_ktiter
+    // materializes the elements at the one place a `for` needs them. The `for`
+    // loop's OWN range form is lowered separately below and is untouched, so no
+    // counting loop pays for this.
+    // The fold is LEFT TO RIGHT, exactly as makeRange is in the interpreter half,
+    // so `0..6 step 2` builds the 0..6 range and then re-steps it - and so does a
+    // range that arrives in a variable, `r step 2`, which the old shape read as
+    // `r..2` and got wrong in this half alone.
     function makeRange(items, pos) {
         if (items.length == 1) { return items[0] }
-        var fromT = items[0]
-        var rop = items[1].rop
-        var toT = items[2]
-        var stepT = (items.length > 4) ? items[4] : null
-        if (items.length > 5 || (items.length == 5 && items[3].rop != "step")) {
-            notImpl("chained range expression", pos)
+        // `1..2..3` is not a Kotlin program, and it is rejected HERE rather than
+        // left to fail at run time with "range bound is not a number" - the
+        // interpreter half's fold answers 1..2..NaN for it, so a compile-time
+        // refusal is the only answer the two can share.
+        var nops = 0
+        for (var g = 1; g < items.length; g += 2) {
+            if (items[g].rop != "step") { nops = nops + 1 }
         }
+        if (nops > 1) { notImpl("chained range expression", pos) }
         return function(b) {
-            var rf = fromT(b)
-            b = rf.b
-            var rt = toT(b)
-            b = rt.b
-            var modelV = rf.v
-            var boundV = callExt(b, "js_char_code", [rt.v])
-            if (rop == "until" || rop == "..<") { boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)]) }
-            var stepV = emitNum(b, 1)
-            if (stepT != null) {
-                var rs = stepT(b)
-                b = rs.b
-                stepV = rs.v
+            var r0 = items[0](b)
+            b = r0.b
+            var v = r0.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rop = items[i].rop
+                var rr = items[i + 1](b)
+                b = rr.b
+                if (rop == "step") {
+                    v = callExt(b, "js_ktrestep", [v, rr.v])
+                } else {
+                    var boundV = rr.v
+                    // `..<` and until are the half-open forms: the INCLUSIVE bound
+                    // the range value carries is one less, computed here exactly
+                    // as it was when this emitted the element loop itself.
+                    if (rop == "until" || rop == "..<") {
+                        boundV = callExt(b, "js_sub",
+                            [callExt(b, "js_char_code", [boundV]), emitNum(b, 1)])
+                    }
+                    var downV = emitNum(b, (rop == "downTo") ? 1 : 0)
+                    v = callExt(b, "js_ktrange", [v, boundV, emitNum(b, 1), downV])
+                }
             }
-            hidCount++
-            var iName = "$rg" + hidCount
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            var arrV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), callExt(b, "js_char_code", [rf.v])])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var condExt = (rop == "downTo") ? "js_ge" : "js_le"
-            headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, boundV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            // Char bounds make a Char range: each element is boxed back like the bound.
-            callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_char_like", [modelV, iV2])])
-            var stepExt = (rop == "downTo") ? "js_sub" : "js_jadd"
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                            callExt(bodyB, stepExt, [iV2, stepV])])
-            bodyB.NewBr(headB)
-            curScopeV = saved
-            return {b: exitB, v: arrV}
+            return {b: b, v: v}
         }
     }
     // x in coll / x !in coll -> coll.contains(x) via js_mcall (the same call the

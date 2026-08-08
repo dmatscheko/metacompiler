@@ -3448,8 +3448,12 @@ NotMemberKw = :script(~~
     // bounds were Chars, so iterating yields Chars again. Because it is a value, the
     // same object serves `for (i in r)`, `x in r` (rangeHas) and a range stored in a
     // variable - the for-loop no longer needs its own range syntax.
+    // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
+    // and no iteration for one, and its contains is the BOUNDS test alone; every
+    // engine answered `1.5 in 1.0..2.0` FALSE before, agreeing and all wrong.
     function kRange(from, to, down) {
-        return {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down, ch: kIsChar(from)}
+        return {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
+                ch: kIsChar(from), fl: kIsFlo(from)}
     }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__range === true }
     // items alternates operand thunks and {rop} markers; the fold is left to right, so
@@ -3467,19 +3471,75 @@ NotMemberKw = :script(~~
                 if (rop == "step") {
                     if (!isRange(v)) { fail("step applied to a non-range") }
                     if (r <= 0) { fail("range step must be positive") }
-                    v = {__range: true, from: v.from, to: v.to, st: r, down: v.down, ch: v.ch}
-                } else if (rop == "downTo") { v = kRange(v, r, true) }
+                    v = {__range: true, from: v.from, to: v.to, st: r, down: v.down, ch: v.ch, fl: v.fl}
+                } else if (isRange(v)) { fail("chained range expression") }
+                else if (rop == "downTo") { v = kRange(v, r, true) }
                 else if (rop == "..") { v = kRange(v, r, false) }
                 else { var e = kRange(v, r, false); e.to = (e.to - 1) | 0; v = e }   // ..< / until
             }
             return v
         }
     }
-    // x in range: the inclusive membership test (the step is not consulted, matching
-    // IntRange.contains for the plain forms this subset builds).
+    // x in range. A plain IntRange declares contains(value) and consults the bounds
+    // only; a STEPPED progression declares none, so `in` is Iterable.contains - a
+    // LINEAR membership test, and 3 is NOT in (1..10 step 4). Both are the one test
+    // below. The step used to be ignored outright, which made this half answer true
+    // where both compiled halves (searching the materialized elements) answered
+    // false: a live halves divergence, and this half was the wrong one.
     function rangeHas(rg, x) {
+        // A ClosedFloatingPointRange consults the bounds and nothing else.
+        if (rg.fl === true) {
+            if (kIsChar(x)) { return false }
+            return kNum(x) >= rg.from && kNum(x) <= rg.to
+        }
+        if (rg.ch !== kIsChar(x)) { return false }
         var n = kNum(x)
-        return rg.down ? (n <= rg.from && n >= rg.to) : (n >= rg.from && n <= rg.to)
+        if (rg.down) {
+            if (n > rg.from || n < rg.to) { return false }
+            return (rg.from - n) % rg.st == 0
+        }
+        if (n < rg.from || n > rg.to) { return false }
+        return (n - rg.from) % rg.st == 0
+    }
+    // An element of a progression, boxed back into whatever the bounds were.
+    function rangeEl(rg, n) {
+        if (rg.ch) { return kChar(n) }
+        if (rg.fl === true) { return kFlo(n) }
+        return n
+    }
+    function rangeEmpty(rg) { return rg.down ? (rg.from < rg.to) : (rg.from > rg.to) }
+    function rangeSigned(rg) { return rg.down ? -rg.st : rg.st }
+    // IntRange.toString is "$first..$last"; IntProgression.toString is
+    // "$first..$last step $step" for a positive step and
+    // "$first downTo $last step ${-step}" for a negative one. CharRange overrides
+    // with the IntRange form. Every engine printed the ELEMENT LIST before -
+    // todo.md 1.10's `mr.range.toString()`.
+    function rangeStr(rg) {
+        // ClosedFloatingPointRange.toString is "$start..$endInclusive".
+        if (rg.fl === true) { return kstr(kFlo(rg.from)) + ".." + kstr(kFlo(rg.to)) }
+        var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
+        var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
+        if (rg.down) { return a + " downTo " + b + " step " + rg.st }
+        if (rg.st != 1) { return a + ".." + b + " step " + rg.st }
+        return a + ".." + b
+    }
+    // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
+    // and two non-empty ones agree when first, LAST ELEMENT and step agree. The old
+    // test read `a.step`, a field no range has (it is `st`), so every pair of
+    // progressions compared their steps as undefined === undefined.
+    function rangeEqK(a, b) {
+        if (rangeEmpty(a)) { return rangeEmpty(b) }
+        if (rangeEmpty(b)) { return false }
+        if (a.from !== b.from) { return false }
+        if (rangeLastEl(a) !== rangeLastEl(b)) { return false }
+        return rangeSigned(a) === rangeSigned(b)
+    }
+    // hashCode is -1 for an empty progression, which is what makes it agree with the
+    // equals above; otherwise 31 * (31 * first + last) + step.
+    function rangeHashK(rg) {
+        if (rangeEmpty(rg)) { return -1 }
+        var h = (Math.imul(31, rg.from | 0) + (rangeLastEl(rg) | 0)) | 0
+        return (Math.imul(31, h) + (rangeSigned(rg) | 0)) | 0
     }
     // The LAST ELEMENT of a progression, which is what IntProgression.last answers -
     // getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1 it
@@ -3487,6 +3547,8 @@ NotMemberKw = :script(~~
     // not 10. An EMPTY progression answers the bound, exactly as
     // getProgressionLastElement does when first and last are already crossed.
     function rangeLastEl(rg) {
+        // A floating range has no elements, so its endInclusive IS the bound.
+        if (rg.fl === true) { return rg.to }
         if (rg.down) {
             if (rg.from <= rg.to) { return rg.to }
             return rg.to + ((rg.from - rg.to) % rg.st)
@@ -3519,7 +3581,7 @@ NotMemberKw = :script(~~
         var out = []
         var step = rg.down ? -rg.st : rg.st
         for (var i = rg.from; rg.down ? i >= rg.to : i <= rg.to; i += step) {
-            out.push(rg.ch ? kChar(i) : i)
+            out.push(rangeEl(rg, i))
         }
         return out
     }
@@ -4257,7 +4319,10 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    function krxRange(from, to) { return {first: from, last: to} }
+    // MatchResult.range is a real kotlin.ranges.IntRange, so it prints "1..3" and
+    // answers first / last / step / isEmpty / in like any other progression. It was
+    // a bare {first, last} object and printed "[object Object]" - todo.md 1.10.
+    function krxRange(from, to) { return kRange(from, to, false) }
     // A group that took no part reads as null; an index or a name that does not exist
     // at all is an error, as it is on the JVM (IndexOutOfBounds / IllegalArgument).
     function krxGroupAt(md, key) {
@@ -4487,11 +4552,10 @@ NotMemberKw = :script(~~
         // reading: ULong.MAX_VALUE is 18446744073709551615, not -1. "" + v would
         // print [object Object] and szNum rounds above 2^53.
         if (szIs(v)) return szStr(v)
-        // A range renders as the list of its elements. Real Kotlin prints an IntRange
-        // as "1..3", but the COMPILED half has no first-class range value at all (a
-        // range is materialised into a list at the point of use), so this is the only
-        // answer the two halves can share; the divergence is deliberate.
-        if (isRange(v)) { return kstr(rangeList(v)) }
+        // A range renders as its BOUNDS - "1..3", "10 downTo 1 step 1" - which is
+        // IntRange.toString / IntProgression.toString. Both halves do this now: the
+        // compiled one grew the first-class range value this half always had.
+        if (isRange(v)) { return rangeStr(v) }
         // A list (and an array, which this value model cannot tell apart from a list)
         // renders as java.util.AbstractCollection.toString does: "[1, 2]", elements
         // separated by a comma and a space, a String element unquoted. Falling through
@@ -6363,6 +6427,14 @@ NotMemberKw = :script(~~
         tgt = target
         if (isRange(tgt)) {
             if (name == "contains") return rangeHas(tgt, args[0])
+            // The members whose answer IS the range. toString / hashCode / equals
+            // fell through to the materialized list here and answered "[1, 2, 3]",
+            // the list fold and element-wise equality - all three different from
+            // what the compiled halves answer now, and from Kotlin.
+            if (name == "toString") return rangeStr(tgt)
+            if (name == "hashCode") return rangeHashK(tgt)
+            if (name == "isEmpty") return rangeEmpty(tgt)
+            if (name == "equals") { return isRange(args[0]) ? rangeEqK(tgt, args[0]) : false }
             tgt = rangeList(tgt)
         }
         if (Array.isArray(tgt)) {
@@ -6522,7 +6594,7 @@ NotMemberKw = :script(~~
             for (var i = 0; i < v.length; i++) { lh = (Math.imul(31, lh) + kHash(v[i])) | 0 }
             return lh
         }
-        if (isRange(v)) { return (Math.imul(31, v.from) + v.to) | 0 }
+        if (isRange(v)) { return rangeHashK(v) }
         // java.util.AbstractSet.hashCode is the plain SUM of the element hashes, which
         // is what makes it order-independent. Verified against java (JDK 24):
         // Set.of(1, 2).hashCode() is 3, where the LIST fold answers 994.
@@ -6810,9 +6882,7 @@ NotMemberKw = :script(~~
         }
         if (isRange(a) || isRange(b)) {
             if (!isRange(a) || !isRange(b)) { return -1 }
-            var astep = (a.step == undefined || a.step == null) ? 1 : a.step
-            var bstep = (b.step == undefined || b.step == null) ? 1 : b.step
-            return (a.from === b.from && a.to === b.to && astep === bstep) ? 1 : -1
+            return rangeEqK(a, b) ? 1 : -1
         }
         // Pair/Triple are data classes in Kotlin; here they are the plain {first,
         // second[, third]} shape, which no descriptor covers.
@@ -9550,25 +9620,23 @@ NotMemberKw = :script(~~
             var rx = anytype
             rx = kIdxExt(o, name)
             if (rx !== undefined) { return rx }
-            if (name == "first") { return o.ch ? kChar(o.from) : o.from }
+            if (name == "first") { return rangeEl(o, o.from) }
             // IntProgression.last is "the last element in the progression", NOT the
             // bound it was built from: (1..10 step 4).last is 9, and this answered 10.
             // IntProgression.step carries the DIRECTION - kotlin.ranges.downTo is
             // documented as "a progression ... with the step -1" - and this answered
             // +1 for every downTo. Both were wrong against the stdlib in this half and
             // unanswerable (kotlin.Unit) in the other; found sweeping todo.md 1.8.
-            if (name == "last") { return o.ch ? kChar(rangeLastEl(o)) : rangeLastEl(o) }
+            if (name == "last") { return rangeEl(o, rangeLastEl(o)) }
             // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS the range was
             // built from, not the last ELEMENT - the two coincide for every plain
-            // `a..b`, and a stepped progression declares neither in Kotlin. Answered
-            // kotlin.Unit in this half and in both compiled ones.
-            if (name == "start") { return o.ch ? kChar(o.from) : o.from }
-            if (name == "endInclusive") { return o.ch ? kChar(o.to) : o.to }
+            // `a..b`, and a stepped progression declares neither in Kotlin.
+            if (name == "start") { return rangeEl(o, o.from) }
+            if (name == "endInclusive") { return rangeEl(o, o.to) }
             if (name == "step") { return o.down ? -o.st : o.st }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
-            // Collection), but the compiler half MATERIALIZES a range as a list, where
-            // it answers the element count - so this half answers the same rather than
-            // kotlin.Unit. A pre-existing halves divergence, found asserting `indices`.
+            // Collection), but both halves answer the element count rather than
+            // kotlin.Unit, so they agree on a spelling no valid program uses.
             if (name == "size") { return rangeList(o).length }
             return extPropGet(o, name)
         }
@@ -9758,7 +9826,24 @@ NotMemberKw = :script(~~
             if (t == "Any" || t == "Comparable" || t == "Number") { return true }
             return t == "Int"
         }
-        if (isRange(v)) { return t == "IntRange" || t == "CharRange" || t == "IntProgression" }
+        // A plain a..b is an IntRange (a CharRange when the bounds were Chars) and
+        // therefore an IntProgression too; a STEPPED or downTo progression is an
+        // IntProgression and NOT an IntRange. A range is an Iterable, never a List.
+        // A LongRange is not distinguishable: a Long bound reduces to its numeric
+        // value here, so `1L..5L` and `1..5` are the same value.
+        if (isRange(v)) {
+            if (t == "Any") { return true }
+            // A floating range is a ClosedRange and NOT an Iterable.
+            if (v.fl === true) { return t == "ClosedFloatingPointRange" || t == "ClosedRange" }
+            if (t == "Iterable") { return true }
+            var plain = v.st == 1 && !v.down
+            if (v.ch) {
+                if (t == "CharProgression") { return true }
+                return t == "CharRange" && plain
+            }
+            if (t == "IntProgression") { return true }
+            return t == "IntRange" && plain
+        }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
             if (clsNamed(v.__class, t)) { return true }
             // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class is
@@ -10001,6 +10086,16 @@ NotMemberKw = :script(~~
         if (!hasOwn(hostGlobals, name)) {
             for (var cj = 0; cj < chain.length; cj++) {
                 if (typeof chain[cj] == "string") { return {v: kBoundBuiltin(chain[cj], name)} }
+            }
+            // toString(), hashCode() and equals() are members of kotlin.Any, so EVERY implicit
+            // receiver has them whatever its shape - a Pair, a Map.Entry, a number, a
+            // range. recvLookup walks the class descriptors first, so a class that
+            // OVERRIDES either has already answered; what reaches here is a receiver
+            // with no descriptor at all, and `with(p) { toString() }` aborted with
+            // "unknown name: toString" in this half and "unknown list method
+            // 'toString'" in the compiled ones - todo.md 1.10.
+            if (name == "toString" || name == "hashCode" || name == "equals") {
+                if (chain.length > 0) { return {v: kBoundBuiltin(chain[0], name)} }
             }
         }
         return null

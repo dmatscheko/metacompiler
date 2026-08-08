@@ -109,7 +109,7 @@ fun s04() {
     // fix has a layer-2 arm (languages/lib/kotlin-rt.metajs) the matrix cannot see.
     val rl = listOf(10, 20, 30)
     var h = 0; for (i in rl.indices) { h = h * 10 + i }
-    check("rng7", h == 12 && rl.lastIndex == 2 && rl.indices.toString() == "[0, 1, 2]")
+    check("rng7", h == 12 && rl.lastIndex == 2 && rl.indices.toString() == "0..2")
     val rs = "abcd"
     var k = ""; for (i in rs.indices) { k += rs[i] }
     check("rng8", k == "abcd" && rs.lastIndex == 3)
@@ -127,7 +127,83 @@ fun s04() {
     // as well. Only `length` was answered, in BOTH halves - agreement, and both wrong.
     val rb = StringBuilder("abcd")
     var t = 0; for (i in rb.indices) { t += i }
-    check("rng11", t == 6 && rb.lastIndex == 3 && rb.indices.toString() == "[0, 1, 2, 3]")
+    check("rng11", t == 6 && rb.lastIndex == 3 && rb.indices.toString() == "0..3")
+    // A PROGRESSION IS A VALUE, NOT A MATERIALIZED LIST - todo.md 1.8.
+    // `(5..1).first` is 5 on the JVM: an IntRange keeps the bounds it was DECLARED
+    // with, only isEmpty() reports the emptiness, and `first()` - the FUNCTION - is
+    // the one that throws NoSuchElementException. Both compiled halves materialized
+    // the elements and recovered first/last/step from them, so an EMPTY progression
+    // answered kotlin.Unit for all five members while this half answered 5; there
+    // was no expected value the two could share and the item was left unasserted.
+    // The compiled halves now carry the same {__range, from, to, st, down, ch}
+    // value this one always had, so the whole surface is one answer everywhere.
+    // These are in the ratchet because ONLY the ratchet is built NATIVELY, and the
+    // fix has a layer-2 arm (languages/lib/kotlin-rt.metajs) no other gate sees.
+    val re = listOf(5..1, 1 until 1, 'e'..'a', 3 downTo 7)
+    var u = ""
+    for (p in re) { u += "" + p.first + "/" + p.last + "/" + p.start + "/" + p.endInclusive + "/" + p.step + " " }
+    check("rng12", u == "5/1/5/1/1 1/0/1/0/1 e/a/e/a/1 3/7/3/7/-1 ")
+    check("rng13", (5..1).isEmpty() && (5..1).count() == 0 && (5..1).toList().toString() == "[]")
+    // IntRange.toString is "$first..$last" and IntProgression.toString is
+    // "$first..$last step $step" / "$first downTo $last step ${-step}". Every engine
+    // printed the ELEMENT LIST instead - todo.md 1.10's `mr.range.toString()`, which
+    // read "[object Object]" in the compiled halves.
+    check("rng14", (1..5).toString() == "1..5" && (5..1).toString() == "5..1" &&
+        (1 until 5).toString() == "1..4" && ('a'..'e').toString() == "a..e")
+    check("rng15", (1..10 step 4).toString() == "1..9 step 4" &&
+        (10 downTo 1).toString() == "10 downTo 1 step 1" &&
+        (10 downTo 1 step 3).toString() == "10 downTo 1 step 3" && "" + (2..4) == "2..4")
+    // `in` on a STEPPED progression is Iterable.contains, a LINEAR membership test -
+    // IntProgression declares no contains at all. This half ignored the step and
+    // answered true where the compiled halves (searching the materialized elements)
+    // answered false: a live halves divergence, and THIS half was the wrong one.
+    check("rng16", 3 !in (1..10 step 4) && 5 in (1..10 step 4) && 5 !in (10 downTo 1 step 3) &&
+        7 in (10 downTo 1 step 3))
+    // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
+    // and hashCode is -1 for either. The old test here compared `a.step`, a field no
+    // range has (it is `st`), so every pair compared undefined with undefined.
+    check("rng17", (5..1) == (7..3) && (1..5) == (1..5) && (1..5) != (1..5 step 2) &&
+        (1..5).equals(1..5) && !(1..5).equals(listOf(1, 2, 3, 4, 5)))
+    // IntProgression.hashCode is 31 * (31 * first + last) + step, and -1 when the
+    // progression is empty. `.hashCode()` on a range fell through to the
+    // materialized list in this half and answered the LIST fold.
+    val rh = listOf(1..5, 5..1, 1..10 step 4, 'a'..'c')
+    var v = ""
+    for (p in rh) { v += "" + p.hashCode() + " " }
+    check("rng17b", v == "1117 -1 1244 96287 " && (5..1).hashCode() == (7..3).hashCode())
+    // A range is an IntRange / IntProgression and NOT a List; a STEPPED or downTo
+    // progression is an IntProgression and not an IntRange.
+    val ri: Any = 1..5
+    val rj: Any = 1..10 step 4
+    check("rng18", ri is IntRange && ri is IntProgression && rj is IntProgression &&
+        rj !is IntRange && ('a'..'c') is CharRange)
+    // A MatchResult's range is a real IntRange - it rendered "[object Object]".
+    val rm = Regex("b+").find("abbbc")
+    check("rng19", rm != null && rm!!.range.toString() == "1..3" && rm.range.first == 1 &&
+        rm.range.last == 3 && rm.range.count() == 3)
+    // toString() and hashCode() are members of kotlin.Any, so an UNQUALIFIED call
+    // resolves against the implicit receiver whatever its shape. `with(p)
+    // { toString() }` aborted with "unknown name: toString" in this half and
+    // "unknown list method 'toString'" in the compiled ones - todo.md 1.10.
+    val rpair = Pair(1, "a")
+    check("rng20", with(rpair) { toString() } == "(1, a)" && with(5) { toString() } == "5" &&
+        with(listOf(1, 2)) { toString() } == "[1, 2]" && with(1..3) { toString() } == "1..3")
+    check("rng21", with(rpair) { hashCode() } == rpair.hashCode() &&
+        with(mapOf("k" to 1)) { entries.toString() } == "[k=1]")
+    // equals(other) is the third Any member and is the same comparison `==` makes.
+    // `listOf(1, 2).equals(listOf(1, 2))` aborted with "unknown list method
+    // 'equals'" in BOTH compiled halves while this one answered true.
+    check("rng21b", listOf(1, 2).equals(listOf(1, 2)) && !listOf(1, 2).equals(3) &&
+        mapOf(1 to 2).equals(mapOf(1 to 2)) && setOf(1).equals(setOf(1)) &&
+        with(rpair) { equals(Pair(1, "a")) })
+    // A ClosedFloatingPointRange - `1.0..2.0` - declares no step and no iteration,
+    // and its contains is the BOUNDS test alone. Materializing it stepped 1 and
+    // answered `1.5 in 1.0..2.0` FALSE in every engine: agreement, and all three
+    // wrong. Its toString is "$start..$endInclusive", which prints the .0.
+    val rf = listOf(1.5, 0.5, 2.0)
+    check("rng22", rf[0] in 1.0..2.0 && rf[1] !in 1.0..2.0 && rf[2] in 1.0..2.0 &&
+        (1.0..2.0).toString() == "1.0..2.0" && (1.0..2.0).start == 1.0 &&
+        (1.0..2.0).endInclusive == 2.0)
     // NOT ASSERTED HERE, and the reason is worth knowing: an EXTENSION PROPERTY of one
     // of those names WINS over the runtime's answer (the compiler resolves `extp$name`
     // in the EMITTER, before js_ktfget is called at all, so the interpreter had to be
@@ -1956,9 +2032,9 @@ fun sec48() {
     //     method". The interpreter has always read it as a field.
     check("rcv5", with(setOf(1, 2, 2)) { size } == 2 && with(setOf(1, 2)) { contains(1) })
     check("rcv6", with("abcd") { substring(1) } == "bcd" && with("abcd") { uppercase() } == "ABCD")
-    check("rcv7", with("abcd") { lastIndex } == 3 && with("abcd") { "" + indices } == "[0, 1, 2, 3]")
+    check("rcv7", with("abcd") { lastIndex } == 3 && with("abcd") { "" + indices } == "0..3")
     check("rcv8", with(listOf(1, 2, 3)) { lastIndex } == 2 &&
-        with(listOf(1, 2, 3)) { "" + indices } == "[0, 1, 2]" &&
+        with(listOf(1, 2, 3)) { "" + indices } == "0..2" &&
         with(listOf(1, 2, 3)) { size } == 3)
 }
 
@@ -3515,9 +3591,9 @@ fun sec76() {
     val xs = listOf(1, 2, 3)
     check("kr5", xs.mid76 == 2)
     check("kr6", "abc".midc76 == 'b')
-    check("kr7", xs.li76() == 2 && "abcd".idx76() == "[0, 1, 2, 3]")
+    check("kr7", xs.li76() == 2 && "abcd".idx76() == "0..3")
     check("kr8", with(xs) { size } == 3 && with(xs) { lastIndex } == 2 &&
-                 with(xs) { indices.toString() } == "[0, 1, 2]")
+                 with(xs) { indices.toString() } == "0..2")
     // A builtin receiver's METHODS stay methods. Reading `first` as a property here
     // would answer the number 1 and the call would then abort.
     check("kr9", with(xs) { first() } == 1 && with(xs) { last() } == 3 && with(xs) { sum() } == 6)

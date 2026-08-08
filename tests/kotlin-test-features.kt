@@ -423,9 +423,11 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     var idxSum = 0
     for (i in idxSrc.indices) { idxSum = idxSum * 10 + i }
     check("indices-list", idxSum == 12)
-    check("indices-list-value", idxSrc.indices.toString() == "[0, 1, 2]")
+    check("indices-list-value", idxSrc.indices.toString() == "0..2")
     check("indices-lastIndex", idxSrc.lastIndex == 2 && idxSrc.indices.size == 3)
-    check("indices-empty", listOf<Int>().indices.toString() == "[]" &&
+    // An EMPTY IntRange still carries the bounds it was DECLARED with, so
+    // `listOf<Int>().indices` is 0..-1 and not "[]" - todo.md 1.8.
+    check("indices-empty", listOf<Int>().indices.toString() == "0..-1" &&
         listOf<Int>().lastIndex == -1)
     val idxStr = listOf("abcd")[0]
     var idxChars = ""

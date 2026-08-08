@@ -684,6 +684,11 @@ func init() {
 			// element of the given collection. Before this it fell through to the
 			// numeric tail, so `listOf(1, 2, 3) - 1` answered 0 in BOTH halves.
 			if op == "-" {
+				if rg, isRg := ktRangeOf(l); isRg {
+					if v, ok := rt.ktSeqMethod(&jsArray{elems: ktRangeList(rg)}, "minus", []interface{}{r}); ok {
+						return w(v)
+					}
+				}
 				if la, isArr := l.(*jsArray); isArr {
 					if v, ok := rt.ktSeqMethod(la, "minus", []interface{}{r}); ok {
 						return w(v)
@@ -786,6 +791,11 @@ func init() {
 			// of another collection, or the single element. Before this it fell through
 			// to the runtime's JavaScript `+` and `listOf(1, 2) + listOf(3)` answered
 			// the string "1,23" here and 0 in the interpreter half.
+			if rg, isRg := ktRangeOf(l); isRg {
+				if v, ok := rt.ktSeqMethod(&jsArray{elems: ktRangeList(rg)}, "plus", []interface{}{r}); ok {
+					return w(v)
+				}
+			}
 			if la, isArr := l.(*jsArray); isArr {
 				if v, ok := rt.ktSeqMethod(la, "plus", []interface{}{r}); ok {
 					return w(v)
@@ -1028,6 +1038,17 @@ func init() {
 			switch v.(type) {
 			case jsGInt, jsJFlo, float64:
 			default:
+				// A PROGRESSION is an IntRange / CharRange / IntProgression and
+				// NOT a List - the shared probe has no arm for it and answered
+				// false for all three, while the materialized list it replaced
+				// answered `is List` true.
+				if rg, isRg := ktRangeOf(v); isRg {
+					t := rt.toString(u(a[1]))
+					if i := strings.IndexByte(t, '<'); i >= 0 {
+						t = t[:i]
+					}
+					return boolH(ktRangeIsType(rg, strings.TrimSuffix(t, "?")))
+				}
 				if r := baseIs(a); u(r) == interface{}(true) {
 					return r
 				}
@@ -1267,6 +1288,30 @@ func init() {
 			if v, handled := rt.ktScopeMethod(recv, mname, arr.elems); handled {
 				return rt.wrap(v)
 			}
+			// A PROGRESSION. The members whose answer IS the range are answered
+			// from the bounds; everything else is a Collection/Iterable extension
+			// and runs on the materialized elements. `contains` is answered
+			// arithmetically, so `x in 1..1000000` costs nothing - the old
+			// representation materialized a million cells at the construction
+			// site alone.
+			if rg, isRg := ktRangeOf(recv); isRg {
+				switch mname {
+				case "toString":
+					return rt.wrapStr(rt.ktRangeStr(rg))
+				case "contains":
+					return boolH(ktRangeHas(rg, argAt(arr.elems, 0)))
+				case "isEmpty":
+					return boolH(ktRangeEmpty(rg))
+				case "hashCode":
+					return rt.wrap(float64(ktRangeHash(rg)))
+				case "equals":
+					if org, ok := ktRangeOf(argAt(arr.elems, 0)); ok {
+						return boolH(ktRangeEq(rg, org))
+					}
+					return boolH(false)
+				}
+				recv = &jsArray{elems: ktRangeList(rg)}
+			}
 			// kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a
 			// NULL receiver answers them rather than throwing (java's
 			// Objects.hashCode(null) is 0, String.valueOf(null) is "null"), and a
@@ -1399,6 +1444,31 @@ func init() {
 						return boolH(rt.strictEq(recv, argAt(arr.elems, 0)))
 					}
 				}
+			}
+			// toString() / hashCode() are members of kotlin.Any, so EVERY receiver
+			// has them - and after every branch above has declined, nothing else
+			// can. An unqualified `with(p) { toString() }` reached "unknown list
+			// method 'toString'" / "unknown name: toString" in all three engines
+			// (todo.md 1.10), and so did the same call on a Pair, a Map.Entry, a
+			// number and a range. A class that OVERRIDES either has it on its
+			// descriptor chain and is dispatched by baseMcall below, which is why
+			// the chain is asked first - the same guard the `equals` arm uses.
+			// A Regex / MatchResult receiver reaches its own toString through
+			// ktpObj, so routing it here answers exactly what the rx chain would.
+			if len(arr.elems) == 0 && (mname == "toString" || mname == "hashCode") &&
+				!ktChainDeclares(recv, mname) {
+				if mname == "toString" {
+					return rt.wrapStr(rt.ktpRender(recv, 0))
+				}
+				return rt.wrap(float64(int32(ktElemHash(rt, recv))))
+			}
+			// equals(other) is the third Any member, and it is the SAME comparison
+			// `==` makes - js_kteq. `listOf(1, 2).equals(listOf(1, 2))` aborted
+			// with "unknown list method 'equals'" in both compiled halves while
+			// the interpreter answered true: a live divergence, found sweeping
+			// todo.md 1.10.
+			if len(arr.elems) == 1 && mname == "equals" && !ktChainDeclares(recv, mname) {
+				return m["js_kteq"]([]uint64{w(recv), w(argAt(arr.elems, 0))})
 			}
 			if next := m["js_rxktmcall"]; next != nil {
 				return next(a)
@@ -1939,9 +2009,46 @@ func init() {
 		// what kIterable does in the other half) and a SET its elements, neither of
 		// which has a `length` for the index loop the grammar emits. It replaced an
 		// inline __dict probe at the emit site, which ran a set's for-loop zero times.
+		// js_ktrange builds a progression: `down` is 1 for downTo and 0 otherwise,
+		// and the `..<` / until subtraction on the bound is the emitter's, exactly
+		// as it was when the emitter materialized the list itself.
+		m["js_ktrange"] = func(a []uint64) uint64 {
+			from, to, st := u(a[0]), u(a[1]), u(a[2])
+			fn, fok := ktRangeNum(from)
+			tn, tok := ktRangeNum(to)
+			sn, sok := ktRangeNum(st)
+			if !fok || !tok || !sok {
+				rt.fail("range bound is not a number")
+			}
+			if sn <= 0 {
+				rt.fail("range step must be positive")
+			}
+			_, isCh := from.(jsChar)
+			_, isFl := from.(jsJFlo)
+			return w(ktMakeRange(ktRange{from: fn, to: tn, st: sn,
+				down: rt.toNumber(u(a[3])) != 0, ch: isCh, fl: isFl}))
+		}
+		// `r step k` re-steps an existing progression, keeping bounds and direction.
+		m["js_ktrestep"] = func(a []uint64) uint64 {
+			rg, isRg := ktRangeOf(u(a[0]))
+			if !isRg {
+				rt.fail("step applied to a non-range")
+			}
+			sn, sok := ktRangeNum(u(a[1]))
+			if !sok || sn <= 0 {
+				rt.fail("range step must be positive")
+			}
+			rg.st = sn
+			return w(ktMakeRange(rg))
+		}
 		m["js_ktiter"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if o, isObj := v.(*jsObject); isObj {
+				// A PROGRESSION is a value, not a list: the loop runs over its
+				// elements.
+				if rg, isRg := ktRangeOf(o); isRg {
+					return w(&jsArray{elems: ktRangeList(rg)})
+				}
 				if _, _, isDict := dictParts(o); isDict {
 					return w(&jsArray{elems: ktElems(rt, o)})
 				}
@@ -2206,63 +2313,51 @@ func init() {
 			// undefined" while the interpreter half ran it - todo.md 1.8. `.size` was
 			// never affected because of the `.length` rewrite below it.
 			//
-			// A range is MATERIALIZED as a list in this half (kotlin-to-llvm-ir.abnf's
-			// makeRange records the deviation in full), so `indices` answers the
-			// materialized IntRange - an ordinary list of the index values - which is
-			// what makes the for-loop, `i in vs.indices` and `vs.indices.reversed()`
-			// all work with the machinery that is already here.
+			// `indices` answers a real IntRange, which is what makes the for-loop,
+			// `i in vs.indices` and `vs.indices.reversed()` all work with the
+			// machinery that is already here.
 			//
-			// first / last / step are that materialized progression's OWN properties,
-			// recovered from its elements. Kotlin declares them on IntProgression
-			// only; on a List `first`/`last` are member FUNCTIONS and need
-			// parentheses, so a valid program reaches this arm with a range and
-			// nothing else. RESIDUE, and it is not recoverable from a materialized
-			// list: an EMPTY range answers none of the three and a ONE-element range
-			// cannot answer `step` (1 is assumed). The interpreter half keeps a real
-			// {__range} object and answers all of them exactly.
+			// first / last / start / endInclusive / step are the PROGRESSION's own
+			// properties, read off its bounds - which is how an EMPTY progression
+			// answers all five (todo.md 1.8). Kotlin declares them on
+			// IntProgression / ClosedRange only; on a List `first`/`last` are
+			// member FUNCTIONS and need parentheses, so a valid program reaches
+			// this arm with a range and nothing else.
+			if rg, isRg := ktRangeOf(o); isRg && isUndefOrNull(u(r)) {
+				switch name {
+				case "first":
+					return w(ktRangeEl(rg, rg.from))
+				// IntProgression.last is the last ELEMENT, not the bound it was
+				// built from: (1..10 step 4).last is 9.
+				case "last":
+					return w(ktRangeEl(rg, ktRangeLastEl(rg)))
+				// ClosedRange.start / ClosedRange.endInclusive are the BOUNDS -
+				// they coincide with first/last for every plain a..b, and a
+				// stepped progression declares neither in Kotlin.
+				case "start":
+					return w(ktRangeEl(rg, rg.from))
+				case "endInclusive":
+					return w(ktRangeEl(rg, rg.to))
+				case "step":
+					return w(ktRangeSigned(rg))
+				// `.size` on a progression is not Kotlin (IntRange is an Iterable,
+				// not a Collection), but the interpreter half answers the element
+				// count, so this one does too rather than diverge.
+				case "size":
+					return w(float64(len(ktRangeList(rg))))
+				case "indices":
+					return w(ktMakeRange(ktRange{from: 0, to: float64(len(ktRangeList(rg)) - 1), st: 1}))
+				case "lastIndex":
+					return w(float64(len(ktRangeList(rg)) - 1))
+				}
+			}
 			if arr, isArr := o.(*jsArray); isArr && isUndefOrNull(u(r)) {
 				n := len(arr.elems)
 				switch name {
 				case "indices":
-					idx := make([]interface{}, n)
-					for i := 0; i < n; i++ {
-						idx[i] = float64(i)
-					}
-					return w(&jsArray{elems: idx})
+					return w(ktMakeRange(ktRange{from: 0, to: float64(n - 1), st: 1}))
 				case "lastIndex":
 					return w(float64(n - 1))
-				case "first":
-					if n > 0 {
-						return w(arr.elems[0])
-					}
-				case "last":
-					if n > 0 {
-						return w(arr.elems[n-1])
-					}
-				// IntRange.start / IntRange.endInclusive - the ClosedRange members.
-				// Both answered kotlin.Unit in ALL THREE engines. On the materialized
-				// list they are the first and the last element, which for a plain
-				// `a..b` is the pair it was built from; a stepped progression has no
-				// such members in Kotlin, so no valid program sees the difference.
-				case "start":
-					if n > 0 {
-						return w(arr.elems[0])
-					}
-				case "endInclusive":
-					if n > 0 {
-						return w(arr.elems[n-1])
-					}
-				case "step":
-					if n >= 2 {
-						x0, ok0 := ktProgNum(arr.elems[0])
-						x1, ok1 := ktProgNum(arr.elems[1])
-						if ok0 && ok1 {
-							return w(x1 - x0)
-						}
-					}
-					if n == 1 {
-						return w(float64(1))
-					}
 				}
 			}
 			// A StringBuilder IS a CharSequence, so the same two properties apply to
@@ -2271,12 +2366,7 @@ func init() {
 				if txt, isStr := sb.props["s"].(string); isStr {
 					switch name {
 					case "indices":
-						n := rt.strLen(txt)
-						idx := make([]interface{}, n)
-						for i := 0; i < n; i++ {
-							idx[i] = float64(i)
-						}
-						return w(&jsArray{elems: idx})
+						return w(ktMakeRange(ktRange{from: 0, to: float64(rt.strLen(txt) - 1), st: 1}))
 					case "lastIndex":
 						return w(float64(rt.strLen(txt) - 1))
 					}
@@ -2285,12 +2375,7 @@ func init() {
 			if s, isStr := o.(string); isStr && isUndefOrNull(u(r)) {
 				switch name {
 				case "indices":
-					n := rt.strLen(s)
-					idx := make([]interface{}, n)
-					for i := 0; i < n; i++ {
-						idx[i] = float64(i)
-					}
-					return w(&jsArray{elems: idx})
+					return w(ktMakeRange(ktRange{from: 0, to: float64(rt.strLen(s) - 1), st: 1}))
 				case "lastIndex":
 					return w(float64(rt.strLen(s) - 1))
 				}
@@ -2309,6 +2394,17 @@ func init() {
 		// in the compiler while the interpreter said true. Everything else falls through
 		// to js_rxktindex (js_kindex plus the MatchResult group readers).
 		m["js_ktindex"] = func(a []uint64) uint64 {
+			// A progression has no `get`, but elementAt and every list builtin
+			// reaches it through the materialized elements, so the indexed read
+			// answers from them too.
+			if rg, isRg := ktRangeOf(u(a[0])); isRg {
+				es := ktRangeList(rg)
+				i := int(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(es) {
+					return w(jsUndef)
+				}
+				return w(es[i])
+			}
 			if mo, isObj := u(a[0]).(*jsObject); isObj {
 				if keys, _, isDict := dictParts(mo); isDict && rt.ktMapFind(keys, u(a[1])) < 0 {
 					return w(jsNull)
@@ -2849,6 +2945,13 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 // ktpObj renders the object shapes the Kotlin compiler grammar builds. It reports
 // false for a shape it does not know, which falls back to the generic ToString.
 func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
+	// A PROGRESSION prints its BOUNDS - "1..5", "10 downTo 1 step 1",
+	// "1..9 step 4" - which is IntRange.toString / IntProgression.toString. It
+	// printed the materialized element list before, in every engine (todo.md
+	// 1.10's `mr.range.toString()`, which read "[object Object]" here).
+	if rg, isRg := ktRangeOf(o); isRg {
+		return rt.ktRangeStr(rg), true
+	}
 	// A KClass. java.lang.Class.toString() is "class Box" too, which is why .java
 	// answers the same handle. The twin is the __kclass arm of kstr.
 	if co, isCls := ktIsClassLit(o); isCls {
@@ -3014,6 +3117,20 @@ func ktMakeMap() *jsObject {
 // ktHasMethod reports whether v is a class instance whose descriptor chain declares
 // a callable member `name`. The twin of lookupMethod's delegate use in
 // kotlin-interpreter.abnf, and the test js_ktdcheck applies to a `by` expression.
+// ktChainDeclares reports whether a class descriptor chain declares `name` - the
+// guard the Any-member fallbacks owe a user class that overrides toString() or
+// hashCode().
+func ktChainDeclares(v interface{}, name string) bool {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return false
+	}
+	if _, hasCls := o.props["__class"]; !hasCls {
+		return false
+	}
+	return ktClassChainHas(o, name)
+}
+
 func ktHasMethod(v interface{}, name string) bool {
 	o, isObj := v.(*jsObject)
 	if !isObj {
@@ -3329,6 +3446,17 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 // `setOf(2, 1) == setOf(1, 2)` is false and `listOf(1) == setOf(1)` is true. That
 // is the setOf-is-listOf collapse, not this function.
 func (rt *jsrt) ktStructEq(a, b interface{}) (bool, bool) {
+	// A PROGRESSION, whose equals is kotlin.ranges.IntProgression's: two EMPTY
+	// progressions are equal whatever their bounds, and a progression is never
+	// equal to a List.
+	arg, aIsRg := ktRangeOf(a)
+	brg, bIsRg := ktRangeOf(b)
+	if aIsRg || bIsRg {
+		if !aIsRg || !bIsRg {
+			return false, true
+		}
+		return ktRangeEq(arg, brg), true
+	}
 	// A SET first, so a Set never reaches the element-WISE array branch: two sets
 	// are equal when they hold the same elements in ANY order, and a Set is never
 	// equal to a List (java: Set.of(1, 2).equals(Set.of(2, 1)) is true and
@@ -4499,6 +4627,11 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	// A NESTED collection hashes element-wise, exactly as kHash does in the other
 	// half: before this every object answered 1 here, so listOf(listOf(1, 2)) hashed
 	// to 32 in the compiler and to 1025 - java's answer - in the interpreter.
+	// A PROGRESSION hashes by its bounds, not its elements - and an EMPTY one
+	// hashes to -1, which is what makes (5..1) and (7..3) agree with their equals.
+	if rg, ok := ktRangeOf(v); ok {
+		return int64(ktRangeHash(rg))
+	}
 	switch t := v.(type) {
 	case *jsArray:
 		var h int32 = 1
@@ -4664,6 +4797,9 @@ func ktIsCollection(v interface{}) bool {
 	if _, isArr := v.(*jsArray); isArr {
 		return true
 	}
+	if ktIsRange(v) {
+		return true
+	}
 	if ktIsSet(v) {
 		return true
 	}
@@ -4712,6 +4848,9 @@ func ktSumOf(rt *jsrt, es []interface{}, f interface{}) interface{} {
 func ktElems(rt *jsrt, v interface{}) []interface{} {
 	if a, ok := v.(*jsArray); ok {
 		return a.elems
+	}
+	if rg, ok := ktRangeOf(v); ok {
+		return ktRangeList(rg)
 	}
 	if s, ok := v.(string); ok {
 		return rt.ktChars(s)
@@ -5058,12 +5197,83 @@ func ktRecvProp(name string) bool {
 	return false
 }
 
-// ktProgNum reads the numeric value of a materialized progression's element, so
-// js_ktfget can recover a range's `step` from the distance between its first two.
-// A Char range steps in code points ('a'..'e' step 2), which is what makes the
-// Char arm necessary; anything else is not a progression and answers no step.
-// The twin is k4ProgNum in languages/lib/kotlin-rt.metajs.
-func ktProgNum(v interface{}) (float64, bool) {
+// ----------------------------------------------------------------------------
+// PROGRESSIONS - a range is a VALUE, not a materialized list
+//
+// `a..b`, `a..<b`, `a until b`, `a downTo b` and `... step k` used to be
+// MATERIALIZED into a *jsArray by the emitter's own loop, and first / last /
+// step / start / endInclusive were recovered from the elements. That recovery
+// cannot answer an EMPTY progression at all - `(5..1).first` is 5 in Kotlin (an
+// IntRange keeps the bounds it was DECLARED with; only isEmpty() reports the
+// emptiness, and `first()`, the FUNCTION, is the one that throws) and it read
+// kotlin.Unit in both compiled halves - and it cannot answer toString either,
+// which is "5..1" in Kotlin and was "[]". todo.md 1.8 / 1.10.
+//
+// A progression is now the same first-class value kotlin-interpreter.abnf has
+// always had, field for field: {__range, from, to, st, down, ch, fl}. `from` and
+// `to` are the INCLUSIVE numeric bounds (..< / until subtract one when the range
+// is BUILT), `st` is the POSITIVE step, `down` the direction and `ch` remembers
+// that the bounds were Chars - and `fl` that they were Doubles - so an element
+// boxes back into whatever the bounds were.
+//
+// It is a plain *jsObject on purpose: layer 2 has to be able to build the same
+// value out of the C floor's primitives, and an object with properties is the
+// one shape both engines can hold. Every Kotlin entry point that can receive one
+// materializes it with ktRangeList - js_ktiter, js_ktsmcall (after the scope
+// functions, so `(1..5).let` still sees the range), js_ktindex, ktElems - while
+// the ones where the range-ness IS the answer (js_ktfget, ktpRender, ktIsType,
+// ktStructEq, ktElemHash) answer from the bounds. Nothing outside those sites
+// sees the object, which is why the shared js_* of abnf/jsrt.go need no arm.
+// ----------------------------------------------------------------------------
+
+type ktRange struct {
+	from, to, st float64
+	down, ch     bool
+	// fl marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
+	// and no iteration for one, and its contains is the BOUNDS test alone; the
+	// old representation materialized it by stepping 1 and answered
+	// `1.5 in 1.0..2.0` FALSE in every engine, agreeing and all wrong.
+	fl bool
+}
+
+func ktRangeOf(v interface{}) (ktRange, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return ktRange{}, false
+	}
+	if b, ok := o.props["__range"].(bool); !ok || !b {
+		return ktRange{}, false
+	}
+	rg := ktRange{}
+	rg.from, _ = o.props["from"].(float64)
+	rg.to, _ = o.props["to"].(float64)
+	rg.st, _ = o.props["st"].(float64)
+	rg.down, _ = o.props["down"].(bool)
+	rg.ch, _ = o.props["ch"].(bool)
+	rg.fl, _ = o.props["fl"].(bool)
+	return rg, true
+}
+
+func ktIsRange(v interface{}) bool {
+	_, ok := ktRangeOf(v)
+	return ok
+}
+
+func ktMakeRange(rg ktRange) *jsObject {
+	o := newJSObject()
+	o.set("__range", true)
+	o.set("from", rg.from)
+	o.set("to", rg.to)
+	o.set("st", rg.st)
+	o.set("down", rg.down)
+	o.set("ch", rg.ch)
+	o.set("fl", rg.fl)
+	return o
+}
+
+// ktRangeNum is the numeric reading of a bound: a Char bound progresses in code
+// points and a sized integer in its own value. The twin is k4RangeNum.
+func ktRangeNum(v interface{}) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
 		return t, true
@@ -5074,8 +5284,181 @@ func ktProgNum(v interface{}) (float64, bool) {
 			return float64(uint64(t.v)), true
 		}
 		return float64(t.v), true
+	case jsJFlo:
+		return t.f, true
 	}
 	return 0, false
+}
+
+func ktRangeEl(rg ktRange, n float64) interface{} {
+	if rg.ch {
+		return jsChar{code: int32(n)}
+	}
+	if rg.fl {
+		return jvmMkFlo(n)
+	}
+	return n
+}
+
+// The LAST ELEMENT of a progression, which is what IntProgression.last answers -
+// getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1
+// it is the bound; for `1..10 step 4` the elements are 1, 5, 9 and the answer is
+// 9. An EMPTY progression answers the bound, exactly as
+// getProgressionLastElement does when first and last are already crossed.
+func ktRangeLastEl(rg ktRange) float64 {
+	// A floating range has no elements, so its endInclusive IS the bound.
+	if rg.fl {
+		return rg.to
+	}
+	if rg.down {
+		if rg.from <= rg.to {
+			return rg.to
+		}
+		return rg.to + math.Mod(rg.from-rg.to, rg.st)
+	}
+	if rg.from >= rg.to {
+		return rg.to
+	}
+	return rg.to - math.Mod(rg.to-rg.from, rg.st)
+}
+
+func ktRangeEmpty(rg ktRange) bool {
+	if rg.down {
+		return rg.from < rg.to
+	}
+	return rg.from > rg.to
+}
+
+func ktRangeList(rg ktRange) []interface{} {
+	out := []interface{}{}
+	step := rg.st
+	if rg.down {
+		step = -step
+	}
+	for i := rg.from; ktRangeGoes(rg, i); i += step {
+		out = append(out, ktRangeEl(rg, i))
+	}
+	return out
+}
+
+func ktRangeGoes(rg ktRange, i float64) bool {
+	if rg.down {
+		return i >= rg.to
+	}
+	return i <= rg.to
+}
+
+// `x in r`. A plain IntRange declares contains(value) and consults the bounds
+// only; a STEPPED progression is an Iterable and `in` is its linear membership,
+// so 3 is NOT in (1..10 step 4). Both are the one test below.
+func ktRangeHas(rg ktRange, x interface{}) bool {
+	// A ClosedFloatingPointRange consults the bounds and nothing else.
+	if rg.fl {
+		if _, isCh := x.(jsChar); isCh {
+			return false
+		}
+		n, ok := ktRangeNum(x)
+		return ok && n >= rg.from && n <= rg.to
+	}
+	if _, isCh := x.(jsChar); rg.ch != isCh {
+		return false
+	}
+	n, ok := ktRangeNum(x)
+	if !ok {
+		return false
+	}
+	if rg.down {
+		if n > rg.from || n < rg.to {
+			return false
+		}
+		return math.Mod(rg.from-n, rg.st) == 0
+	}
+	if n < rg.from || n > rg.to {
+		return false
+	}
+	return math.Mod(n-rg.from, rg.st) == 0
+}
+
+func ktRangeSigned(rg ktRange) float64 {
+	if rg.down {
+		return -rg.st
+	}
+	return rg.st
+}
+
+// IntRange.toString is "$first..$last"; IntProgression.toString is
+// "$first..$last step $step" when the step is positive and
+// "$first downTo $last step ${-step}" when it is negative. CharRange overrides
+// with the IntRange form. A plain a..b IS an IntRange, so the bare form is the
+// one a step-less, non-downTo progression prints.
+func (rt *jsrt) ktRangeStr(rg ktRange) string {
+	// ClosedFloatingPointRange.toString is "$start..$endInclusive" - the declared
+	// BOUND, not a last element, since it has no step and no elements.
+	if rg.fl {
+		return rt.ktpRender(jvmMkFlo(rg.from), 1) + ".." + rt.ktpRender(jvmMkFlo(rg.to), 1)
+	}
+	a := rt.ktpRender(ktRangeEl(rg, rg.from), 1)
+	b := rt.ktpRender(ktRangeEl(rg, ktRangeLastEl(rg)), 1)
+	if rg.down {
+		return a + " downTo " + b + " step " + rt.ktpRender(rg.st, 1)
+	}
+	if rg.st != 1 {
+		return a + ".." + b + " step " + rt.ktpRender(rg.st, 1)
+	}
+	return a + ".." + b
+}
+
+// IntRange.equals: two EMPTY progressions are equal whatever their bounds, and
+// two non-empty ones agree when first, last and step agree.
+func ktRangeEq(a, b ktRange) bool {
+	if ktRangeEmpty(a) {
+		return ktRangeEmpty(b)
+	}
+	if ktRangeEmpty(b) {
+		return false
+	}
+	return a.from == b.from && ktRangeLastEl(a) == ktRangeLastEl(b) &&
+		ktRangeSigned(a) == ktRangeSigned(b)
+}
+
+// hashCode is -1 for an empty progression - kotlin.ranges.IntProgression's own
+// contract, and what makes it agree with the equals above.
+func ktRangeHash(rg ktRange) int32 {
+	if ktRangeEmpty(rg) {
+		return -1
+	}
+	h := int32(31)*int32(rg.from) + int32(ktRangeLastEl(rg))
+	return int32(31)*h + int32(ktRangeSigned(rg))
+}
+
+// `r is T`. A plain a..b is an IntRange (a CharRange when the bounds were Chars)
+// and therefore an IntProgression too; a STEPPED or downTo progression is an
+// IntProgression and NOT an IntRange, which is what `10 downTo 1 is IntRange`
+// answers false to on the JVM. A range is an Iterable and is NOT a List.
+// A LongRange is not distinguishable here: ktRangeNum reduces a Long bound to
+// its numeric value, so `1L..5L` and `1..5` are the same value.
+func ktRangeIsType(rg ktRange, t string) bool {
+	if t == "Any" {
+		return true
+	}
+	if rg.fl {
+		// A floating range is a ClosedRange and NOT an Iterable.
+		return t == "ClosedFloatingPointRange" || t == "ClosedRange"
+	}
+	if t == "Iterable" {
+		return true
+	}
+	plain := rg.st == 1 && !rg.down
+	if rg.ch {
+		if t == "CharProgression" {
+			return true
+		}
+		return t == "CharRange" && plain
+	}
+	if t == "IntProgression" {
+		return true
+	}
+	return t == "IntRange" && plain
 }
 
 // ktIsBuiltinRecv reports a receiver whose members come from the runtime rather
@@ -5104,6 +5487,10 @@ func ktIsBuiltinRecv(v interface{}) bool {
 		}
 		if _, isClsDesc := t.props["__isclass"]; isClsDesc {
 			return false
+		}
+		// A PROGRESSION: first / last / step / start / endInclusive are members.
+		if ktIsRange(t) {
+			return true
 		}
 		if _, _, isDict := dictParts(t); isDict {
 			return true
@@ -5193,6 +5580,18 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 					}
 				}
 			}
+		}
+		// toString(), hashCode() and equals() are members of kotlin.Any, so an
+		// unqualified CALL of one resolves against the implicit receiver whatever
+		// its shape - a Pair, a Map.Entry, a number. `with(p) { toString() }`
+		// aborted with
+		// "unknown name: toString" here (todo.md 1.10); js_ktsmcall's own Any arm
+		// answers it once the name resolves at all.
+		if (name == "toString" || name == "hashCode" || name == "equals") && iscall && ktMemberCall != nil {
+			self := recv
+			return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return ktMemberCall(self, name, args)
+			}), true
 		}
 		return nil, false
 	}
