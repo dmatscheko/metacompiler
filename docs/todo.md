@@ -4,7 +4,7 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-05 at `e284185`; **~109 items closed since**, in ten rounds.
+Rebuilt 2026-08-05 at `e284185`; **~119 items closed since**, in eleven rounds.
 Chapter 1 has been emptied and refilled every round; chapter 9 keeps only what
 those rounds taught.
 
@@ -34,6 +34,13 @@ Two conventions, and they are the point of the file:
 >   emitter does trivially.
 > - **The work is wrong and every gate says green.** Two agents shipped a NEW
 >   halves divergence that their own probes and all seven gates called green.
+> - **The item's own EXAMPLE does not reproduce.** New on the eleventh round, and
+>   twice: swift's nested-type example passes at base (the labels have to
+>   collide), and 3.2's stated blocker — the SHOULD-ABORT rows pinning
+>   `js_scope_get` — does not exist at all; every one of the 30 `variable not
+>   defined` references in the tree is a comment. **Reproduce the item before you
+>   fix it**, and if it does not reproduce, the defect is usually still there in a
+>   shape the item did not find.
 >
 > **Treat an item as a place to start probing, never as a specification.**
 >
@@ -45,11 +52,11 @@ Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial`
 small machine):
 
 ```
-matrix 351/351 · --full 7,766 assertions, 0 halves disagree · --cross 119/0
+matrix 357/357 · --full 8,123 assertions, 0 halves disagree · --cross 121/0
 clang-check 16/16 none held · go test ok · gen-all 15/15 clean
-native-full 15 languages / 29 native programs (ratchet AND feature matrix), 0 held
+native-full 20 languages / 37 native programs (ratchet AND feature matrix), 0 held
 shape-scan 15 groups / 481 recoverable · -freeze a fixed point
-bench: 15 rows, no row outside its spread
+bench: 15 rows, no row outside its spread · tests/coro-poc/build.sh byte-identical
 ```
 
 **Run `tests/gates.sh --bench` for anything that touches layer 2 or the floor.**
@@ -97,79 +104,102 @@ language whose count is `-`. **Running `./test.sh --full` by hand still needs
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give. Each has a toolchain here that settles
-it. Everything below is what closing the previous round turned up, all **[V]** on
-`4d54d60` — and on that round the item was TOO SMALL nine times out of ten, so
-sweep the surface around an item rather than fixing its example.
+it. **Section 1 was emptied for the tenth time** — all eight items, plus 2.2 and
+4.1, are closed in `d945bb9..d0f4db3`. What follows is what closing them turned
+up, all **[V]** on `5cb4d9f`.
 
-### 1.1 `Math`'s MEMBERS diverge: a live run-vs-native defect in three languages **[V]**
-The floor seeds eleven methods; the grammar host and the Go twin also carry
-`sin cos tan exp log log2 log10 cbrt atan2 hypot`. lua, ruby and php read the
-**host** `Math` out of the root scope, so `puts Math.sin(1)` answers
-`0.8414709848078965` under `llvm.Run` and **`js runtime error: unknown method
-'sin'` in the native binary** — reproduced at `1367c23`. Converging means either
-soft-float transcendentals in the floor or trimming the two upper engines. This is
-the largest remaining live divergence in the tree.
+**The failure mode this round: the item was too small EVERY TIME, and twice its
+own example did not reproduce.** swift's nested-type example passes at base (the
+labels have to COLLIDE), and 3.2's stated blocker — that the SHOULD-ABORT rows pin
+`js_scope_get` — turned out not to exist: all 30 `variable not defined` references
+in the tree are comments and no test asserts on that abort. One item named 1 defect
+of 9, one named 6 String methods of 78, one named 3 `fail` sites of 4. Five items
+turned up live halves divergences `--cross` had never reached.
 
-### 1.2 java: a read past the end of an array answers `undefined` **[V]**
-Instead of throwing `ArrayIndexOutOfBoundsException`, in all four engines. It is
-the real root of the closed 1.2 — converging the *value* on NaN was the cheap fix
-and is done; **throwing is the correct one**, and needs the emitter's index path
-plus the twin. C#'s equivalent errors natively with a raw *"list index out of
-range"* rather than an `IndexOutOfRangeException`.
+### 1.1 C# typed catch does not exist in EITHER half — and probably not in five more **[V]**
+`catch (FormatException e) {…} catch (InvalidOperationException e) {…}` runs the
+*FormatException* body on an `InvalidOperationException`, in both engines, so it is
+a spec divergence rather than a halves one. **This is why the new
+`IndexOutOfRangeException` / `ArgumentOutOfRangeException` / `KeyNotFoundException`
+/ `OverflowException` are only distinguishable by `.Message`.** The blocker is
+structural: BCL exceptions are `{__excname, Message}` plain objects with no
+`__class`/`__super`, so a type test has nothing to walk. The fix is real
+descriptors with a parent chain (the shape java's `emitBuiltinExc` already has),
+a `js_csexcmatch`, and the `jCatchDispatch` built for java in `d945bb9`, which
+ports almost verbatim — ~200 lines across four files.
+**The same gap likely exists in kotlin, swift, dart, php and python**: every
+compiler half whose `makeTry` keeps only `items[i].catchbody` when
+`catchT == undefined`. Worth one sweep across all of them, and that sweep is the
+item, not the C# half alone.
 
-### 1.3 ruby residue, two of them live halves divergences **[V]**
-- **`super(m)` inside a user `Exception` subclass' `initialize` aborts both
-  compiled halves** (`unknown super method 'initialize'`) while the interpreter
-  runs it. Common code.
-- **A top-level `return` ends the program in the compiled halves (as MRI does) and
-  does not in the interpreter.**
-- The modifier `rescue` does not catch in any engine: `raise "a" rescue 7` still
-  raises, `Integer("z") rescue 5` yields the *exception object*.
-- `Exception#inspect` / `p exc` is unimplemented; MRI says `#<RuntimeError: m>`.
-- A bare `puts` on the line after a `{ }` block takes the block as its argument.
-- Two-argument index **assignment** (`a[1, 2] = 9`) writes one element where MRI
-  replaces the slice; the read path is fixed, the write path goes through
-  `makeTargetRef`/`js_rset`, which carry one key.
-- A bounded range with a **negative endpoint in a variable** (`r = 1..-1; s[r]`)
-  is approximate in the compiled halves — 5 of 91 probe rows, against 91 of 91
-  before `8ae225b`; closing it needs a representation change for Range.
-- `bytes`, `tr`, `center`, `ljust`/`rjust`, `count`, `delete` are missing from all
-  three engines.
+### 1.2 A nested swift type shadows a same-named TOP-LEVEL type **[V]**
+```swift
+struct Inner { func who() -> String { return "top" } }
+struct A { struct Inner { func who() -> String { return "nested" } } }
+print(Inner().who(), A.Inner().who())   // ours "nested nested", swiftc "top nested"
+```
+Wrong in all three engines. The compiler half can be fixed alone (it resolves bare
+type names statically through `typeKeyOf`), but **the interpreter cannot follow** —
+it resolves a bare type name at *run* time through the scope chain with no static
+type context, so removing the bare binding breaks its superclass and protocol
+lookups. Doing only the compiler half ships a NEW halves divergence, which is why
+`69d8e17` stopped here. The interpreter needs a qualified `__qname` on each
+descriptor plus resolution outward through `ownerStack`.
 
-### 1.4 python: a bound builtin's `__name__`, all three engines wrong **[V]**
-`getattr([1,2], "count").__name__` is `<lambda>` in the interpreter and
-`None`/`False` in both compiled halves; CPython says `'count'`. Same family as the
-closed 1.9 but a different table — `pyBoundBuiltin` mints a fresh closure that
-neither table knows.
+### 1.3 `obj.is_a?(SomeModule)` after `include M` — a live halves divergence **[V]**
+False in both ruby compiled halves, true in the interpreter. The compiler flattens
+`include` at build time and never records the module on the class object; the fix
+is a `$mix$<Name>` marker in `makeClassStmt` checked by `rubyIsA`/`rbIsA`.
+Pre-existing, verified against base.
 
-### 1.5 kotlin range surface residue **[V]**
-`"abcdef".substring(1..3)` ignores the range and answers `"abcdef"` (Kotlin:
-`"bcd"`); `"abcdef".slice(1..3)` answers the *list* `[b, c, d]` (Kotlin: `"bcd"`);
-`(1..5).reversed()` answers a `List` where Kotlin answers an `IntProgression`;
-`(1..5).random()` exists in no engine. All pre-existing, all three engines agree.
+### 1.4 Calling a non-function is uncatchable, and the halves word it differently **[V]**
+`xs[1]()` with `undefined` in the slot: the js interpreter says *call of a non
+function value (method '1')*, `llvm.Run` says *unknown list method '1'*. node says
+`xs[1] is not a function`, which needs the source expression text no engine keeps.
+The site (`js_call`'s `die2` / `rt.call`) is used by every language's layer-2
+internals, so making it throw risks masking engine bugs — a fourth
+`js_rt_miss*`-style hook would work, and `d0f4db3` established that pattern.
 
-### 1.6 csharp: `v[0].Equals((object) v[1])` aborts the compiler half **[V]**
-*unknown method 'equals' on an instance*, while the interpreter accepts it. Found
-while writing the operator section; the assertion was dropped rather than shipped
-red.
+### 1.5 A non-empty bounded ruby Range is not a value **[V]**
+`p (1..3)` prints `[1, 2, 3]`, and `.begin`/`.end`/`.exclude_end?` abort with
+*unknown Array method*. `d0f4db3`'s predecessor fixed the SLICING half without a
+representation change (10 of 10 rows now match MRI against 5 of 10), but the range
+as a VALUE needs `{__rrange}` for *all* bounded ranges plus the whole consumption
+surface — for-in, each/map/sum/step/splat/===/inspect — in the emitter and both
+compiled runtimes.
 
-### 1.7 swift: `typeInfo` is keyed by the BARE type name **[V]**
-`struct A { struct Inner {…} }` and `struct B { struct Inner {…} }` share one
-record, so the second `Inner`'s memberwise initializer lands on a key nothing
-looks up — the compiler half aborts where the interpreter and `swiftc` are fine.
-Pre-existing and deliberately not widened by `adf8a77`. Needs a qualified type key
-threaded through `typeRec`/`superName`/`superMethGroup`.
+### 1.6 python's static binding analysis is absent **[V]**
+`def h(): print(w); w = 1` raises `UnboundLocalError` in CPython and `NameError`
+in all three engines here, because the name is a local by CPython's *static*
+analysis, which no engine performs. Both halves agree, so `--cross` is blind.
+Related and cheaper: `type(re.compile(…)).__name__` is `'object'` where CPython
+says `'Pattern'` — not fixed because CPython's *AttributeError* for the same value
+says `'re.Pattern'`, a different string, so a one-line arm trades one wrong answer
+for another.
 
-### 1.8 js/ts: three `fail` aborts where node throws a catchable error **[V]**
-A member read on `null`/`undefined`, an undefined variable, and
-`fail("TypeError: Promise resolver is not a function")` are uncatchable host
-aborts. **The blocker is gone** — `4d54d60` gave js/ts a real Error hierarchy — so
-what remains is deciding which `fail` sites become throws. See 3.2, which this
-unblocks. Related and pre-existing: the BigInt mix message keeps an
-`(operator '+')` suffix node does not print, and `typeof` a class descriptor is
-`"object"` where node says `"function"`.
+### 1.7 python's missing module and descriptor surface **[V]**
+`import math` binds nothing (`math` is undefined in all three engines; `re` is the
+only module with a bound object), `open` likewise; `staticmethod` and
+`classmethod` are undefined; `list.count` as an unbound descriptor raises where
+CPython answers `<method 'count' of 'list' objects>` (~40 lines per engine on the
+`pyBoundInfo` record `9a64f07` added); and `len.__self__` needs a `builtins`
+module object.
 
----
+### 1.8 bash: three divergences from real bash 5.3, all found by the new feature file **[V]**
+`${s^^[bn]}` ignores the pattern operand entirely (bash `BaNaNa`, ours `BANANA`);
+**`-f` is a hard-coded path whitelist** because `rt_fskind` has no `stat()`, so
+`[ -f /dev/null ]` is true here and false in bash, and `-f` on any real regular
+file is false here and true in bash; and `$(( 10#$num ))` dies with *command not
+found* because `base#digits` is only recognised when the prefix is not built by
+expansion. Also **bash drops empty fields under a non-whitespace IFS** —
+`IFS=:` on `a:b::c` gives 4 fields in bash and 3 here — which needs the POSIX
+delimiter rule in `rt_splitifs` and touches every unquoted expansion, so it wants
+its own ratchet section.
+
+### 1.9 Compiled bash discards stderr entirely **[V]**
+`rt_putc` drops every channel but 0, so `set -u` failures, bad regexes and `[[ ]]`
+errors print NOTHING under `-exe` where real bash prints to fd 2. `rt_estr` in
+`bash-rt.c` is now a working fd-2 writer the grammar could reuse (`4a2facd`).
 
 # 2. Cross-engine defects and latent traps
 
@@ -192,17 +222,17 @@ answer, so the whole mechanism came out; `itc20`/`itc24` pin the gap with the re
 beside them. **Any future attempt needs a per-coroutine stack, not a per-program
 one.**
 
-### 2.2 `rt_bump` walks off the end of the arena instead of aborting **[V]**
-`languages/lib/bash-rt.c`'s `arena[4194304]` and `batch-rt.c`'s `AR[2097152]` are
-bump-allocated with **no bounds check** and never freed. Measured: `tests/bench/mod.sh`
-at 40,000 iterations exits **139 having printed nothing** (~202 bytes/iteration —
-`$(( ))` re-parses the accumulator's decimal text and `rt_int2str` writes a fresh
-arena string per assignment); last count that runs ~20,750. `mod.sh` therefore
-runs 10,000, and `mod.bat` keeps 40,000 at only a **1.6×** margin (~32
-bytes/iteration, ceiling ~65,468). A bounds-checked `rt_bump` that aborts with a
-message would turn a silent segfault into a diagnosis — and this is exactly the
-manual's "a crashing binary looks fast" trap, which fired live while the bench row
-was being added.
+### 2.2 The emitters write `frame`/`nvars`/`gvars` with no depth check **[V]**
+`4a2facd` bounds-checked all nine ALLOCATION paths in `bash-rt.c`/`batch-rt.c`
+(the `rt_limit` flag guarding four of them was written at four sites and read
+nowhere), but the EMITTED code can still walk off two fixed arrays that no runtime
+can defend: `batch-to-llvm-ir.abnf`'s `makeCall` increments `frame` past
+`DEPTH=256` into `args[2560]`, and bash's emitter fills `gvars[1024]`/
+`varnames[1024]` with no cap. `bat_shift` now refuses to compound the batch one.
+Related and smaller: `%VAR:~N,M%` in batch is wrong for N past ~1184
+(`%big:~11834,6%` is empty on an 11,840-byte value while `%big:~-6%` is right) —
+likely the emitter's offset handling, not `rt_substr`; and whether `exit /b`
+implicitly pops an open `setlocal` is unsettled here with no cmd.exe to ask.
 
 ### 2.3 `with` is the one js construct that cannot be lowered honestly **[V]**
 ~170 lines, and size is not the blocker. The INTERPRETER can implement it exactly
@@ -360,15 +390,14 @@ by having done B: the extern surface is identical.
 
 The suite's blind spots, in the order they are likely to hurt.
 
-### 4.1 Three native programs are still not covered **[V]**
-`tests/bash-test-features.sh` **does not exist** — bash is the only native-full
-language with no feature file, and its layer 2 is a C runtime (`bash-rt.c`) that
-only the ratchet exercises. `batch` has never been in `native-full.sh`'s ROWS at
-all despite having `exePath` and a ratchet (`clang-check` does native-run it, so it
-is an undocumented asymmetry rather than a hole). And the four toys (brainfuck,
-calculator, lisp, tinyc) have feature files never run natively — deliberately, as
-they do not follow the `"…checks, N failures"` + `exit(fails)` protocol and have no
-layer 2, so covering them needs expected-output comparison instead.
+### 4.1 The `.expected` fixture path is used by ONE program **[V]**
+`c11e9c5` took `native-full.sh` from 15 languages / 29 native programs to
+**20 / 37** and added the expected-output mode the toys needed. Only brainfuck
+uses a fixture and only calculator uses `exit-only`; lisp and tinyc turned out to
+already follow the `"…checks, N failures"` protocol. The mechanism is therefore
+barely exercised — if a third fixture is ever added, check `--bless` still does
+the right thing, and note the sabotage recipe that proved the whole thing works is
+in that commit message.
 
 ### 4.2 The goja full-case-mapping fix is pinned in metajs only **[V]**
 `1367c23` routed goja's `toUpperCase`/`toLowerCase` through the same
@@ -502,14 +531,10 @@ discovered by a confusing failure. A `-verify` pass over `lib/*.metajs` that nam
 them would pay for itself immediately. (`docs/abnf-dialect-gotchas.md` lists them;
 nothing enforces them.)
 
-### 7.5 Confirm the matrix job count on a second machine **[V]**
-`1fd6293` made the matrix default to `2 * ncpu` on a sign test of six
-interleaved A/B pairs (6 of 6 wins, p = 0.031) — but every timing was taken
-under load 40-70 from other agents, and twelve matrix runs at the new setting
-were 351/351 with no flakiness **on this machine only**. Confirm on a second one.
-Related, from the same commit: on glibc < 2.34 `dlopen`/`dlsym` live in `libdl`
-and `pthread_create` in `libpthread`, so such a system needs `-ldl -lpthread`
-beside the new `-rdynamic`. Recorded in the code comment rather than guessed at.
+### 7.5 On glibc < 2.34, the native link needs `-ldl -lpthread` **[U]**
+`dlopen`/`dlsym` live in `libdl` and `pthread_create` in `libpthread` there, so
+such a system needs both beside the new `-rdynamic`. Recorded in the code comment
+rather than guessed at, and untestable here — this machine is darwin.
 
 # 8. Reference-corpus gaps
 
