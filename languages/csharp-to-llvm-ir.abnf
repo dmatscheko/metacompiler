@@ -772,8 +772,14 @@ BitXor      <~~ push(foldBinary(takeAll())) ~~>
 BitAnd      <~~ push(foldBinary(takeAll())) ~~>
             = EqExpr { "&" !"&" <~~ push("&") ~~> EqExpr } ;
 
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+// csFoldEq, not the overridden foldBinary: an `(object)` cast on either side of a
+// `==`/`!=` suppresses the user-defined operator (see csIsObjCastOperand).
+// EqOperand exists only to carry each operand's own matched TEXT up to csFoldEq,
+// which is what lets it ask whether that operand IS an object cast.
+EqExpr      <~~ push(csFoldEq(takeAll())) ~~>
+            = EqOperand { ( "==" | "!=" ) <~~ push(up.in) ~~> EqOperand } ;
+EqOperand   <~~ push({eqt: pop(), eqin: up.in}) ~~>
+            = RelExpr ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeTest { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTest } ;
@@ -1591,6 +1597,100 @@ KwLet       = "let" KwEnd ;
         if (op == "<=") return callExt(b, "js_cscmp", [emitStr(b, "<="), l, r])
         if (op == ">=") return callExt(b, "js_cscmp", [emitStr(b, ">="), l, r])
         return coreEmitBin(b, op, l, r)
+    }
+
+    // ----- `(object) x` suppresses a user-defined operator (docs/todo.md 1.3) -----
+    //
+    // THE DEFECT: `public static bool operator ==(V a, V b) { if ((object)a == null)
+    // ... }` - THE idiomatic C# null guard - recursed until the stack died, in BOTH
+    // engines and at `d473319` too, so it is pre-existing rather than anything the
+    // operator work introduced. `(object)a == null` re-entered the very operator it
+    // is written to escape.
+    //
+    // WHY IT CANNOT BE FIXED ON THE VALUE. ECMA-334 12.4.5 selects an operator from
+    // the STATIC types of the operands: with `object` on the left the candidate set
+    // holds only the predefined reference-equality operator (12.12.6), because
+    // `object` has no implicit conversion to `V`. There is no static type on a value
+    // here and there never will be - but the cast is right there in the SOURCE, so
+    // the one side that can see it is the parser. EqOperand carries each equality
+    // operand's own matched TEXT up to csFoldEq, which is the one place holding the
+    // operands separately at all.
+    //
+    // WHAT IT COSTS AT RUN TIME: nothing. No layer-2 call, no floor primitive, no
+    // extern - the operator probe is simply not emitted for that operand pair, so
+    // `(object)a == null` is the same `js_eq` a program with no operators emits. The
+    // whole test runs once per operand at COMPILE time.
+    //
+    // WHY NOT MARK THE THUNK. The first version of this fix registered the thunk an
+    // `(object)` cast produced and recognised it later by identity. That is a
+    // GOJA-vs-FROZEN DIVERGENCE and it was measured, not feared: `push` is bound as
+    // func(v interface{}), goja EXPORTS a JS function as a fresh Go closure and
+    // pop() re-wraps it, so the identity test answered true under -frozen and false
+    // under goja - the frozen half printed the right answers while goja still hung.
+    // A plain object's PROPERTIES survive that round trip (it is how {castty} works)
+    // and a string is a string in both, so the marker is text.
+    //
+    // SCOPE: `==` and `!=` only. Those are the operators the predefined
+    // reference-equality form exists for and the only ones the idiom uses; for
+    // `(object)a + b` C# has no predefined `object + object` at all, so declining
+    // there would trade a wrong answer for a different wrong answer. The interpreter
+    // twin is the same two helpers in csharp-interpreter.abnf.
+
+    // Is this equality OPERAND written as an `(object)` cast? The test is on the
+    // operand's OWN matched text, which the parser hands over with its layout
+    // already collapsed - `( object ) a` arrives as `(object)a` - so a literal scan
+    // is exact rather than approximate.
+    //
+    // REDUNDANT PARENTHESES ARE SKIPPED: `((object)a) == null` is the same C# as
+    // `(object)a == null`, parentheses do not change a static type, and it hung just
+    // as hard. Only a LEADING run of `(` is walked, so `f((object)x) == y` is not
+    // matched - there the operand is the call's result.
+    //
+    // WHAT THE LEADING-RUN RULE OVER-ACCEPTS, and why it does not matter:
+    // `((object)a + 1) == b` reads as an object cast here although the operand's
+    // type is really the sum's. C# has no predefined `object + int` at all and a
+    // user `operator +` is exactly what the object cast suppresses, so that operand
+    // cannot occur in a program that compiles.
+    function csIsObjCastOperand(text) {
+        var i = 0
+        while (i < text.length) {
+            var c = text.charAt(i)
+            if (c == " " || c == "\t" || c == "\n" || c == "\r") { i = i + 1; continue }
+            if (c != "(") { return false }
+            var w = stripWs(text.substring(i + 1, i + 40))
+            if (w.substring(0, 7) == "object)" || w.substring(0, 7) == "Object)") { return true }
+            i = i + 1
+        }
+        return false
+    }
+    // The equality fold. Only slot 0 is a left operand - in `a == b == c` the left
+    // operand of the second step is the first step's RESULT, which no cast wrote.
+    function csFoldEq(items) {
+        var ts = []
+        var objs = []
+        var k
+        for (k = 0; k < items.length; k += 2) {
+            ts.push(items[k].eqt)
+            objs.push(csIsObjCastOperand(items[k].eqin))
+        }
+        if (items.length == 1) { return ts[0] }
+        return function(b) {
+            var r = ts[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = ts[(i + 1) / 2](b)
+                b = rr.b
+                if ((i == 1 && objs[0]) || objs[(i + 1) / 2]) {
+                    v = emitBin(b, items[i], v, rr.v)
+                } else {
+                    var d = emitBinDyn(b, items[i], v, rr.v)
+                    b = d.b
+                    v = d.v
+                }
+            }
+            return {b: b, v: v}
+        }
     }
 
     // Binary and unary steps route through the operator dispatch (emitBinDyn / emitUnDyn),

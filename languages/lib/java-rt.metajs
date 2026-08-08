@@ -952,6 +952,7 @@ function jvBoxType(name) {
         o["MIN_VALUE"] = 0 - 2147483648
         jvAddCommon(o, 32, 32, 4)
         o["parseInt"] = function(s) { return jvParseInt(jpStr(s), 32) }
+        o["toHexString"] = function(v) { return jvToHex32(v) }
         return o
     }
     if (name == "Long") {
@@ -959,6 +960,7 @@ function jvBoxType(name) {
         o["MIN_VALUE"] = jlMinL()
         jvAddCommon(o, 64, 64, 8)
         o["parseLong"] = function(s) { return jvParseInt(jpStr(s), 64) }
+        o["toHexString"] = function(v) { return jvToHex64(v) }
         return o
     }
     if (name == "Byte") {
@@ -1015,6 +1017,23 @@ function jvBoxType(name) {
         o["BYTES"] = 2
         return o
     }
+    // Double / Boolean carry only what todo.md 1.10 asked for. A member NOT on one
+    // of these descriptors reads as null in both halves rather than aborting -
+    // Character has been that way since it was added - so a partial descriptor is
+    // the existing shape here, not a new failure mode.
+    if (name == "Double") {
+        o["NaN"] = flo(NaN, 0)
+        o["SIZE"] = 64
+        o["BYTES"] = 8
+        return o
+    }
+    if (name == "Boolean") {
+        o["TRUE"] = true
+        o["FALSE"] = false
+        o["valueOf"] = function(v) { return jvBoolOf(v) }
+        o["parseBoolean"] = function(v) { return jvBoolOf(v) }
+        return o
+    }
     return o
 }
 
@@ -1036,6 +1055,44 @@ function jvAddCommon(o, width, size, bytes) {
         if (jvCmp("<", a, b)) { return jvNarrow(a, width) }
         return jvNarrow(b, width)
     }
+}
+
+// Integer.toHexString / Long.toHexString (todo.md 1.10): the UNSIGNED hex reading
+// of the value AT ITS OWN WIDTH, lowercase, with no leading zeros -
+// Integer.toHexString(-1) is "ffffffff" and not "-1". java 24.0.2 is the oracle.
+//
+// The digits come from an explicit loop because `(255).toString(16)` works under
+// goja and ABORTS under -frozen with "call of a non function value"
+// (docs/working-on-this-project.md chapter 7.10).
+function jvHexDigits(n) {
+    if (n == 0) { return "0" }
+    var out = ""
+    var x = n
+    while (x > 0) {
+        var r = x % 16
+        out = "0123456789abcdef".charAt(r) + out
+        x = (x - r) / 16
+    }
+    return out
+}
+function jvToHex32(v) { return jvHexDigits(jvLow32(v)) }
+// The 64 bit form is the two halves concatenated with the low one zero-padded to
+// eight digits - one jvHexDigits call cannot see past 2^53.
+function jvToHex64(v) {
+    var t = jvToLongBox(v)
+    var hi = sintHi(t)
+    if (hi == 0) { return jvHexDigits(sintLo(t)) }
+    var lo = jvHexDigits(sintLo(t))
+    while (lo.length < 8) { lo = "0" + lo }
+    return jvHexDigits(hi) + lo
+}
+
+// Boolean.valueOf / Boolean.parseBoolean (todo.md 1.10). java.lang.Boolean:
+// a STRING argument is true iff it equalsIgnoreCase("true") - so "TrUe" is true
+// and "no" is false rather than an error - and anything else is its own truth.
+function jvBoolOf(v) {
+    if (typeof v == "string") { return v.toLowerCase() == "true" }
+    return v === true
 }
 
 // Integer.parseInt / Long.parseLong: a decimal digit run with an optional sign,

@@ -2173,9 +2173,42 @@ HasStatic   = :script(~~
         if (neg) { p = i64Neg(p) }
         return jNarrow(szMake(p, 64, jNoU), w)
     }
+    // Integer.toHexString / Long.toHexString (docs/todo.md 1.10): the UNSIGNED hex
+    // reading AT THE VALUE'S OWN WIDTH, lowercase, no leading zeros, so
+    // Integer.toHexString(-1) is "ffffffff" and not "-1". java 24.0.2 is the
+    // oracle. The twins are jvToHex32 / jvToHex64 in languages/lib/java-rt.metajs
+    // and jvHexOf in abnf/jsrtjava.go.
+    function jHexDigits(n) {
+        if (n == 0) return "0"
+        var out = ""
+        var x = n
+        while (x > 0) {
+            var r = x % 16
+            out = "0123456789abcdef".charAt(r) + out
+            x = (x - r) / 16
+        }
+        return out
+    }
+    function jToHex(v, w) {
+        // i64Make normalises both halves with >>> 0, so p.h and p.l are already
+        // the UNSIGNED 32 bit readings and no sign fixup is needed.
+        var p = szPair(jNarrow(v, 64))
+        if (w == 32) { return jHexDigits(p.l) }
+        if (p.h == 0) { return jHexDigits(p.l) }
+        var ls = jHexDigits(p.l)
+        while (ls.length < 8) { ls = "0" + ls }
+        return jHexDigits(p.h) + ls
+    }
+    // Boolean.valueOf / Boolean.parseBoolean (docs/todo.md 1.10): a STRING argument
+    // is true iff it equalsIgnoreCase("true"), anything else is its own truth.
+    function jBoolOf(v) {
+        if (typeof v == "string") return v.toLowerCase() == "true"
+        return v === true
+    }
     hostGlobals["Integer"] = {
         MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE: 32, BYTES: 4,
         parseInt: function(s) { return jParseInt(s, 32) },
+        toHexString: function(v) { return jToHex(v, 32) },
         valueOf: function(v) { return jNarrow(v, 32) },
         toString: function(v) { return jstr(v) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
@@ -2187,6 +2220,7 @@ HasStatic   = :script(~~
         MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false),
         SIZE: 64, BYTES: 8,
         parseLong: function(s) { return jParseInt(s, 64) },
+        toHexString: function(v) { return jToHex(v, 64) },
         valueOf: function(v) { return jNarrow(v, 64) },
         toString: function(v) { return jstr(v) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
@@ -2202,6 +2236,18 @@ HasStatic   = :script(~~
     hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
                             MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2}
     hostGlobals["Character"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE: 16, BYTES: 2}
+    // Double / Boolean carry only what docs/todo.md 1.10 asked for. A member NOT on
+    // one of these descriptors reads as null rather than aborting - Character has
+    // been that way since it was added - so a partial descriptor is the existing
+    // shape here, not a new failure mode.
+    // Spelled inline, not as jFlo(0 / jZeroF): jFlo and jZeroF are declared BELOW
+    // this point and only the included lib is textually in scope at script body
+    // time, which is the same reason Byte/Short above build their pairs by hand.
+    var jZeroDiv = 0
+    hostGlobals["Double"] = {NaN: {__flo: 0 / jZeroDiv}, SIZE: 64, BYTES: 8}
+    hostGlobals["Boolean"] = {TRUE: true, FALSE: false,
+                              valueOf: function(v) { return jBoolOf(v) },
+                              parseBoolean: function(v) { return jBoolOf(v) }}
 
     // ----- char: a boxed {__char: code} value -----
     // Java's char is an integral type that renders as a glyph, so it can be neither a
@@ -3282,6 +3328,25 @@ HasStatic   = :script(~~
             if (op == "&" || op == "|" || op == "^") { return jArith(op, l, r) }
             if (op == "<<" || op == ">>" || op == ">>>") { return jShift(op, l, r) }
             if (hasOwn(jCmpOps, op) || op == "==" || op == "!=") { return jCmp(op, l, r) }
+        }
+        // An `undefined` operand is not a Java value at all - it is what a read past
+        // the end of an array answers in this engine, where java 24.0.2 throws
+        // ArrayIndexOutOfBoundsException. BOTH compiled halves read it as NaN
+        // (rtjNum in lib/runtime-jvm.metajs, rt.toNumber in abnf/jsrt.go); this half
+        // reached the host's own `+` and answered `a[5] + 1 == 1`. That was a live
+        // halves divergence --cross had never reached, and it is the java half of
+        // docs/todo.md 1.2. The string form is left alone: "x" + a[5] renders "null"
+        // in all three engines already.
+        //
+        // `+` ONLY, and that is measured rather than tidy. `+` is the one operator
+        // whose compiled path reads the operand as a DOUBLE; `-` `*` `/` `%` and the
+        // relations go through the integral path, which answers 0 / false outright
+        // for an operand that is not integral - so both compiled halves say
+        // `1 - a[5] == 0` and `!(a[5] < 1)`, and so does this one. Widening this arm
+        // past `+` was tried and made the interpreter the odd one out in the other
+        // direction. tests/java-test-full.java SECTION 34 pins all of them.
+        if (l === undefined || r === undefined) {
+            if (op == "+" && typeof l != "string" && typeof r != "string") { return 0 / jZeroF }
         }
         if (op == "&") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "|") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }

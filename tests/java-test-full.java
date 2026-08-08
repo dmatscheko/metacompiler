@@ -77,6 +77,7 @@ class Main {
         S31.run(); // SECTION-CALL 31
         S32.run(); // SECTION-CALL 32
         S33.run(); // SECTION-CALL 33
+        S34.run(); // SECTION-CALL 34
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1913,5 +1914,94 @@ class S33 {
         Object x = new Ctr33();
         Main.check("ob12", x instanceof Ctr33);
         Main.check("ob13", ((Ctr33) x).read() == 7);
+    }
+}
+
+// ===== SECTION 34: Integer/Long.toHexString, Double.NaN, Boolean.valueOf, and
+// the double reading of a value that is not one =====
+//
+// docs/todo.md 1.10 (the java bullets) and 1.2. Every value in the first three
+// groups was EXECUTED against `java` 24.0.2 on this machine, so they are oracle
+// values and not spec citations.
+//
+// WHAT WAS BROKEN. Integer.toHexString, Long.toHexString, Double.NaN,
+// Boolean.valueOf and Boolean.parseBoolean did not exist in ANY of the four
+// engines: the descriptors java.lang.Integer / Long carried no toHexString at all
+// and java.lang.Double / Boolean were not descriptors, so the program aborted with
+// "unknown method 'toHexString'" / "unknown class". java.lang.Integer#toHexString
+// is the UNSIGNED reading at the value's own width, which is why -1 is "ffffffff"
+// and not "-1".
+//
+// THE LAST GROUP IS docs/todo.md 1.2 AND IT IS NOT JAVA'S ANSWER. A read past the
+// end of an array throws ArrayIndexOutOfBoundsException in real java; this engine
+// answers `undefined`, and the three engines then DISAGREED about what that is
+// worth in arithmetic - the interpreter said `a[5] + 1 == 1`, llvm.Run said NaN,
+// and the native binary said 1. rtjNum (languages/lib/runtime-jvm.metajs) now
+// reads it as NaN in layer 2, which is what abnf/jsrt.go's rt.toNumber always
+// answered, and java-interpreter.abnf's binOp agrees. The value asserted here is
+// therefore ENGINE BEHAVIOUR, deliberately, and the point of asserting it is that
+// all four engines say the same thing. `-` `*` `/` `%` `<` `>` reach jvLow32
+// instead of rtjNum and read the same operand as 0, in all four engines; those are
+// asserted too, so a future widening of the NaN arm cannot pass silently.
+//
+// Every operand is read out of an ARRAY so no constant folder can answer early.
+class S34 {
+    static void run() {
+        int[] n = { 255, -1, 0, 305419896 };
+        long[] l = { -1L, 1234605616436508552L, 255L, 0L };
+        String[] w = { "true", "TrUe", "no", "TRUE", "" };
+
+        // ----- Integer.toHexString: unsigned, at 32 bits -----
+        Main.check("hx1", Integer.toHexString(n[0]).equals("ff"));
+        Main.check("hx2", Integer.toHexString(n[1]).equals("ffffffff"));
+        Main.check("hx3", Integer.toHexString(n[2]).equals("0"));
+        Main.check("hx4", Integer.toHexString(n[3]).equals("12345678"));
+
+        // ----- Long.toHexString: unsigned, at 64 bits, so the low half is
+        // zero-padded to eight digits when the high half is not zero -----
+        Main.check("hx5", Long.toHexString(l[0]).equals("ffffffffffffffff"));
+        Main.check("hx6", Long.toHexString(l[1]).equals("1122334455667788"));
+        Main.check("hx7", Long.toHexString(l[2]).equals("ff"));
+        Main.check("hx8", Long.toHexString(l[3]).equals("0"));
+
+        // ----- Double.NaN: a double, unequal to itself, and it PRINTS "NaN" -----
+        double d = Double.NaN;
+        Main.check("nan1", d != d);
+        Main.check("nan2", ("" + d).equals("NaN"));
+        Main.check("nan3", !(d < 1.0) && !(d > 1.0) && !(d == 1.0));
+
+        // ----- Boolean.valueOf / parseBoolean: equalsIgnoreCase("true") -----
+        Main.check("bv1", Boolean.valueOf(w[0]));
+        Main.check("bv2", Boolean.valueOf(w[1]));
+        Main.check("bv3", !Boolean.valueOf(w[2]));
+        Main.check("bv4", !Boolean.valueOf(w[4]));
+        Main.check("bv5", Boolean.parseBoolean(w[3]));
+        Main.check("bv6", !Boolean.parseBoolean(w[2]));
+        Main.check("bv7", Boolean.TRUE && !Boolean.FALSE);
+
+        // ----- docs/todo.md 1.2: the reading of a value that is not a number.
+        // ENGINE BEHAVIOUR, not java's - see the note above the class.
+        //
+        // THE try/catch IS LOAD-BEARING AND IT IS FOR THE REAL TOOLCHAIN, not for
+        // us: `java tests/java-test-full.java` runs this whole file green, and it
+        // must keep doing so. Real java throws at the first `a[5]` and skips the
+        // eight checks; no engine here throws, so all four run them and must agree.
+        int[] a = new int[2];
+        Main.check("un0", a[0] + 1 == 1);          // the control: in range, still 0
+        try {
+            Main.check("un1", ("" + (a[5] + 1)).equals("NaN"));
+            Main.check("un2", ("" + (1 + a[5])).equals("NaN"));
+            Main.check("un3", ("" + a[5]).equals("null"));
+            // The five that do NOT reach rtjNum, in every engine. `-` `*` `/` `%`
+            // and the relations route through the integral path, which answers 0
+            // outright when an operand is not integral - so `1 - a[5]` is 0, not 1.
+            Main.check("un4", 1 - a[5] == 0);
+            Main.check("un5", a[5] * 2 == 0);
+            Main.check("un6", !(a[5] < 1));
+            Main.check("un7", !(a[5] > 1));
+            Main.check("un8", a[5] % 2 == 0);
+        } catch (ArrayIndexOutOfBoundsException e) {
+            // Only real java gets here.
+        }
     }
 }

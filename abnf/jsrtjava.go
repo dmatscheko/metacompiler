@@ -50,6 +50,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -339,6 +340,34 @@ func (rt *jsrt) jvParseInt(s string, width uint8) interface{} {
 	return jvNarrow(rt, jvBox(v), width)
 }
 
+// jvHexOf is Integer.toHexString / Long.toHexString (todo.md 1.10): the UNSIGNED
+// hex reading of the value AT THE GIVEN WIDTH, lowercase, no leading zeros - so
+// Integer.toHexString(-1) is "ffffffff". The twin is jvToHex32 / jvToHex64 in
+// languages/lib/java-rt.metajs.
+func jvHexOf(rt *jsrt, v interface{}, w uint8) string {
+	var p int64
+	if f, isFlo := v.(jsJFlo); isFlo {
+		p = jvNarrowFloat(f.f, w)
+	} else {
+		p = jvToLong(rt, v)
+	}
+	if w == 32 {
+		return strconv.FormatUint(uint64(uint32(p)), 16)
+	}
+	return strconv.FormatUint(uint64(p), 16)
+}
+
+// jvBoolOf is Boolean.valueOf / Boolean.parseBoolean: a STRING argument is true
+// iff it equalsIgnoreCase("true"), anything else is its own truth. The twin is
+// jvBoolOf in languages/lib/java-rt.metajs.
+func jvBoolOf(v interface{}) bool {
+	if s, ok := v.(string); ok {
+		return strings.EqualFold(s, "true")
+	}
+	b, _ := v.(bool)
+	return b
+}
+
 // jvBoxType builds one of java.lang's boxed-primitive types.
 func (rt *jsrt) jvBoxType(name string) *jsObject {
 	o := newJSObject()
@@ -386,12 +415,18 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("parseInt", jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32)
 		}))
+		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvHexOf(rt, argAt(args, 0), 32)
+		}))
 	case "Long":
 		o.set("MAX_VALUE", jvBox(math.MaxInt64))
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
 		addCommon(64, 64, 8)
 		o.set("parseLong", jsHostFunc("parseLong", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64)
+		}))
+		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvHexOf(rt, argAt(args, 0), 64)
 		}))
 	case "Byte":
 		o.set("MAX_VALUE", jsGInt{v: 127, w: 8})
@@ -406,6 +441,20 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jsChar{code: 0})
 		o.set("SIZE", float64(16))
 		o.set("BYTES", float64(2))
+	// Double / Boolean carry only what todo.md 1.10 asked for; see the note on the
+	// layer-2 twin in languages/lib/java-rt.metajs.
+	case "Double":
+		o.set("NaN", jsJFlo{f: math.NaN(), sty: floJava})
+		o.set("SIZE", float64(64))
+		o.set("BYTES", float64(8))
+	case "Boolean":
+		o.set("TRUE", true)
+		o.set("FALSE", false)
+		bv := jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvBoolOf(argAt(args, 0))
+		})
+		o.set("valueOf", bv)
+		o.set("parseBoolean", bv)
 	}
 	return o
 }

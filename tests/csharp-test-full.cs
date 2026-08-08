@@ -1991,6 +1991,103 @@ b";                                                   // verbatim keeps the newl
 
         // ===== END SECTIONS =====
 
+
+        // ===== SECTION 33: `(object)` suppresses a user operator, and the reading
+        // of a value that is not a number =====
+        //
+        // docs/todo.md 1.3 and 1.2.
+        //
+        // 1.3. ECMA-334 12.4.5 builds the candidate set for a user-defined operator
+        // from the STATIC types of the operands and resolves it like a method call
+        // (12.6.4). With `object` on one side, `V.operator ==(V, V)` is not a
+        // candidate at all - there is no implicit conversion from object to V - and
+        // the PREDEFINED reference-equality operator of 12.12.6 stands. That is
+        // exactly why `(object)a == null` is THE idiomatic null guard inside a user
+        // `operator ==`, and here it recursed until the stack died, in both engines
+        // and at `d473319` too. There are no static types in this value model, so
+        // the suppression is read off the SOURCE by the parser (csIsObjCastOperand
+        // in both csharp grammars); it costs nothing at run time, because the
+        // operator probe is simply not emitted for that operand pair.
+        //
+        // 1.2. `dynamic d = o; d.Missing + 1` printed NaN under the interpreter and
+        // llvm.Run and **1** natively, because rtjNum in
+        // languages/lib/runtime-jvm.metajs answered 0 for undefined where
+        // abnf/jsrt.go's rt.toNumber answers NaN. C#'s own answer is a
+        // RuntimeBinderException, which no engine here can raise, so the value below
+        // is ENGINE BEHAVIOUR asserted for CONVERGENCE - the point is that all four
+        // engines say the same thing, and NaN is what three of them already said.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every C#-semantic claim here
+        // is spec-cited rather than executed. Every operand is read out of an ARRAY
+        // so the grammars' constant folders cannot answer at compile time.
+        class S33V
+        {
+            public int N;
+            public S33V(int n) { this.N = n; }
+            // THE IDIOMATIC NULL GUARD. Every one of these four `(object)` casts
+            // used to re-enter this very operator.
+            public static bool operator ==(S33V a, S33V b)
+            {
+                if ((object)a == null) { return (object)b == null; }
+                if (((object)b) == null) { return false; }
+                return a.N == b.N;
+            }
+            public static bool operator !=(S33V a, S33V b) { return !(a == b); }
+            // The two shapes an earlier round of this work REGRESSED, kept as
+            // controls: a null operand must still select operator ==(V, V), and an
+            // implicit numeric conversion must still select a `double` parameter.
+            public static bool operator ==(S33V a, double d) { return a.N == d; }
+            public static bool operator !=(S33V a, double d) { return a.N != d; }
+            public static S33V operator +(S33V a, S33V b) { return new S33V(a.N + b.N); }
+            public override bool Equals(object o) { return o is S33V && ((S33V) o).N == this.N; }
+            public override int GetHashCode() { return this.N; }
+            public override string ToString() { return "V" + this.N; }
+        }
+
+        static void S33()
+        {
+            int[] n = {1, 2, 3};
+            S33V[] v = { new S33V(1), new S33V(1), new S33V(2), null };
+
+            // ----- the user operator still applies where C# says it does -----
+            Program.Check("s33oc1", v[0] == v[1]);
+            Program.Check("s33oc2", !(v[0] == v[2]));
+            Program.Check("s33oc3", v[0] != v[2]);
+            Program.Check("s33oc4", !(v[0] != v[1]));
+            // A null operand: ECMA-334 10.2.7 makes null convertible to any
+            // reference type, so operator ==(V, V) IS the candidate and answers.
+            Program.Check("s33oc5", !(v[0] == v[3]));
+            Program.Check("s33oc6", !(v[3] == v[0]));
+            Program.Check("s33oc7", v[3] == null);
+            // An implicit numeric conversion still reaches the `double` overload.
+            Program.Check("s33oc8", v[0] == 1.0);
+            Program.Check("s33oc9", v[2] != 1.0);
+            // The operator's own body ran to completion - which is the whole point.
+            Program.Check("s33oc10", (v[0] + v[1]).ToString() == "V" + n[1]);
+
+            // ----- `(object)` DECLINES it: 12.12.6 reference equality -----
+            Program.Check("s33oc11", !((object) v[0] == (object) v[1]));
+            Program.Check("s33oc12", (object) v[0] == v[0]);
+            Program.Check("s33oc13", (object) v[0] != v[1]);
+            Program.Check("s33oc14", (object) v[3] == null);
+            Program.Check("s33oc15", (object) v[0] != null);
+            // Redundant parentheses do not change a static type.
+            Program.Check("s33oc16", ((object) v[3]) == null);
+            Program.Check("s33oc17", !(((object) v[0]) == null));
+
+            // ----- docs/todo.md 1.2: ENGINE BEHAVIOUR, see the note above -----
+            dynamic d = new S33V(n[0]);
+            Program.Check("s33un1", ("" + (d.Missing + 1)) == "NaN");
+            Program.Check("s33un2", ("" + (1 + d.Missing)) == "NaN");
+            // The reads that do NOT go through rtjNum answer 0 in every engine.
+            Program.Check("s33un3", 1 - d.Missing == 0);
+            Program.Check("s33un4", d.Missing * 2 == 0);
+            Program.Check("s33un5", !(d.Missing < 1));
+            Program.Check("s33un6", !(d.Missing > 1));
+            // The control: a member that IS there still reads.
+            Program.Check("s33un7", d.N + 1 == n[1]);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2025,6 +2122,7 @@ b";                                                   // verbatim keeps the newl
             Program.S30(); // SECTION-CALL 30
             Program.S31(); // SECTION-CALL 31
             Program.S32(); // SECTION-CALL 32
+            Program.S33(); // SECTION-CALL 33
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

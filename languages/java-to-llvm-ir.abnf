@@ -5014,7 +5014,7 @@ HasStatic   = :script(~~
         // the few static methods a program reaches for. Long.MAX_VALUE cannot be
         // written as a plain number at all, which is why they arrive as runtime
         // objects (js_jvboxtype in abnf/jsrtjava.go) rather than emitted literals.
-        var jvBoxTypes = ["Integer", "Long", "Byte", "Short", "Character"]
+        var jvBoxTypes = ["Integer", "Long", "Byte", "Short", "Character", "Double", "Boolean"]
         for (var jb = 0; jb < jvBoxTypes.length; jb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, jvBoxTypes[jb]),
                                          callExt(b, "js_jvboxtype", [emitStr(b, jvBoxTypes[jb])])])

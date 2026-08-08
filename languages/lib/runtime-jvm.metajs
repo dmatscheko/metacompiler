@@ -96,6 +96,41 @@ function rtjIsIntegral(v) {
 }
 
 // The double reading of anything numeric.
+//
+// THE LAST TWO ARMS ARE rt.toNumber's (abnf/jsrt.go:1473) AND THAT IS THE FIX for
+// todo.md 1.2, which stood as a live run-vs-native divergence in BOTH languages:
+// this body answered 0 for undefined where the Go twin answers NaN, so C#'s
+// `dynamic d = obj; d.Missing + 1` printed NaN under the interpreter and llvm.Run
+// and **1** natively, and java's `new int[2][5] + 1` printed NaN under llvm.Run
+// and 1 in the other two.
+//
+// THE DECISION THE ITEM ASKED FOR - java moves WITH csharp, the body is NOT split:
+//
+//   - The divergence is not csharp's alone. It reproduces in java at `a[5] + 1`,
+//     where the interpreter half agreed with the native binary (1) and llvm.Run
+//     did not (NaN). A split that fixed only csharp would leave java's halves
+//     disagreeing.
+//   - Neither answer is the language's. C# would raise a RuntimeBinderException
+//     for a missing `dynamic` member and Java an ArrayIndexOutOfBoundsException,
+//     and no engine here can raise either; what the engines CAN do is agree, and
+//     NaN is the answer two of the three already gave.
+//   - Nothing in java produces an `undefined` in a WELL-FORMED program, probed
+//     against java 24.0.2: an uninitialized `int` field reads 0, a `double` field
+//     0.0, a reference field and an unassigned `Object[]` element read null, and
+//     null is still 0 here. So the change is a no-op for every java program that
+//     compiles, and it is only the malformed ones that move - to the louder of
+//     two wrong answers.
+//   - There is a PRECEDENT and it went this way: kotlin's ktNum
+//     (lib/kotlin-rt.metajs:264) carries the same two arms with a comment saying
+//     answering 0 for undefined made `size + f()` of a Unit-returning `f` print
+//     the size where the twin printed NaN. And lib/runtime.metajs's js_jadd note
+//     6 already recorded, before this, that "csNum's fallback should be NaN, not
+//     0" - it was left as csharp-rt.metajs's own bug. It was runtime-jvm's.
+//
+// Confidence: HIGH for the CONVERGENCE (the twin is the oracle for what these two
+// engines must agree on, and it is unambiguous), LOW for either value being C#'s
+// or Java's - both languages' real answer is an exception. Spec-derived, and no
+// C# toolchain exists on this machine.
 function rtjNum(v) {
     if (floIs(v)) { return floNum(v) }
     if (rtIsCharBox(v)) { return v["__char"] }
@@ -104,7 +139,8 @@ function rtjNum(v) {
     if (v === true) { return 1 }
     if (v === false) { return 0 }
     if (typeof v == "string") { return parseFloat(v) }
-    return 0
+    if (v === null) { return 0 }
+    return NaN
 }
 
 // new T[n] / new T[n] with a default element.
