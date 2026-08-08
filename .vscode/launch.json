@@ -1169,6 +1169,42 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-complete.swift", "-q"]
         },
         {
+            "name": "Bash features (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-test-features.sh", "-q"]
+        },
+        {
+            "name": "Bash features (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-test-features.sh", "-q"]
+        },
+        {
+            "name": "Bash native binary, feature matrix (compiler, -exe + languages/lib/bash-rt.ll)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-test-features.sh", "-q", "-exe", "tests/bash-native.out"]
+        },
+        {
+            "name": "Batch features (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/batch-interpreter.abnf", "tests/batch-test-features.cmd", "-q"]
+        },
+        {
+            "name": "Batch features (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/batch-to-llvm-ir.abnf", "tests/batch-test-features.cmd", "-q"]
+        },
+        {
+            "name": "Batch native binary, feature matrix (compiler, -exe + languages/lib/batch-rt.ll)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/batch-to-llvm-ir.abnf", "tests/batch-test-features.cmd", "-q", "-exe", "tests/batch-native.out"]
+        },
+        {
             "name": "Brainfuck features (interpreter)",
             "type": "go",
             "request": "launch",
