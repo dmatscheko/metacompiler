@@ -1212,7 +1212,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isDict(v)) { return hostGlobals["dict"] }
         if (typeof v == "function") { return hostGlobals["function"] }
         if (v.__isclass == true) { return hostGlobals["type"] }
-        return hostGlobals["object"] 
+        // A CURSOR names its own type - CPython's list_iterator /
+        // str_ascii_iterator / dict_keyiterator / map / filter / zip /
+        // enumerate / reversed. type(it).__name__ reads it, and so does the
+        // AttributeError the cursor arm of mcall raises: CPython says
+        // "'list_iterator' object has no attribute 'send'", not "'object' ...".
+        // Built rather than looked up in hostGlobals, which holds only the
+        // fourteen NAMED builtin types. docs/todo.md 1.4.
+        if (isPyIt(v)) { return {__isclass: true, __name: v.__pyit, __bases: [], __builtin: true} }
+        return hostGlobals["object"]
     }
     // float("inf") - CPython's float_from_string accepts the three non-finite
     // SPELLINGS, case-insensitively and with an optional sign, after stripping
@@ -1388,10 +1396,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         it.__i = it.__a.length
         return out
     }
+    // The CPython type NAME of the cursor iter() answers. type(it).__name__ reads
+    // it and the AttributeError a cursor raises interpolates it, so the names are
+    // CPython 3.14's and not invented: a str whose code units are all ASCII gets
+    // str_ascii_iterator and any other str str_iterator (CPython splits the two
+    // implementations), a dict gets dict_keyiterator and a set set_iterator.
+    // Before docs/todo.md 1.4 a dict and a set both answered the bare "iterator".
+    // The twins are pyIterKind in abnf/jsrt.go and in lib/python-rt.metajs.
+    function pyItKind(v) {
+        if (typeof v == "string") {
+            for (var ci = 0; ci < v.length; ci++) {
+                if (v.charCodeAt(ci) > 127) { return "str_iterator" }
+            }
+            return "str_ascii_iterator"
+        }
+        if (Array.isArray(v)) { return "list_iterator" }
+        if (isSet(v)) { return "set_iterator" }
+        if (isDict(v)) { return "dict_keyiterator" }
+        return "iterator"
+    }
     hostGlobals["iter"] = function(v) {
         if (isGen(v) || isPyIt(v)) { return v }
-        return pyMkIter(typeof v == "string" ? "str_iterator" :
-                        (Array.isArray(v) ? "list_iterator" : "iterator"), iterToList(v).slice(0))
+        return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // next(it[, default]). The COMPILER half had no `next` at all (`variable not
     // defined: next`), which is docs/todo.md 1.4's sharpest gap - next(g) is the
@@ -1618,6 +1644,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // while the attribute worked in all three (docs/todo.md 1.8), so this is that
     // one line, over the same pyattr the `.` operator uses.
     hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
+
+    // ----- the BUILTIN render table (docs/todo.md 1.4) ----------------------
+    //
+    // print(len) said "<function <lambda>>" in ALL THREE engines where CPython
+    // says "<built-in function len>", and print(map) the same where CPython says
+    // "<class 'map'>" - the six builtins that really are types. A builtin is a
+    // host function with no `def` to record a name in fnNames, so it gets a
+    // table of its own, filled here in one pass over the bindings above.
+    //
+    // The names that are BUILTIN TYPE OBJECTS (str, int, list, ...) are not
+    // here: they already render <class 'str'> through prender's class arm. The
+    // twins are js_pybfn in abnf/jsrt.go and in languages/lib/python-rt.metajs,
+    // filled by python-to-llvm-ir.abnf's declBind - and there, as here, what is
+    // stored is the FULL TEXT, so the two-form split lives in one place per half.
+    var bfnFns = []
+    var bfnTexts = []
+    function bfnText(f) {
+        for (var bi = 0; bi < bfnFns.length; bi++) { if (bfnFns[bi] === f) { return bfnTexts[bi] } }
+        return undefined
+    }
+    var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
+                        "max", "min", "ord", "chr", "iter", "next", "sorted", "all", "any",
+                        "bin", "hex", "oct", "divmod", "round", "pow", "callable", "ascii",
+                        "getattr", "hasattr", "setattr", "vars"]
+    var pyBClassNames = ["range", "enumerate", "zip", "map", "filter", "reversed"]
+    for (var bn0 = 0; bn0 < pyBFuncNames.length; bn0++) {
+        if (typeof hostGlobals[pyBFuncNames[bn0]] == "function") {
+            bfnFns.push(hostGlobals[pyBFuncNames[bn0]])
+            bfnTexts.push("<built-in function " + pyBFuncNames[bn0] + ">")
+        }
+    }
+    for (var bn1 = 0; bn1 < pyBClassNames.length; bn1++) {
+        if (typeof hostGlobals[pyBClassNames[bn1]] == "function") {
+            bfnFns.push(hostGlobals[pyBClassNames[bn1]])
+            bfnTexts.push("<class '" + pyBClassNames[bn1] + "'>")
+        }
+    }
+
     function pyHasAttrOf(o, name) {
         if (o === null || o === undefined) { return name == "__class__" }
         if (typeof o == "object" && o.__pysup == true) {
@@ -2043,7 +2107,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // same short form. Without it this half printed the function's METAJS
         // SOURCE TEXT (the host's own Function#toString) and both compiled halves
         // the C floor's [function] - a live halves divergence. docs/todo.md 1.8.
-        if (typeof v == "function") { return "<function " + fnName(v) + ">" }
+        // A BUILTIN prints its own way, and its table is asked FIRST: a user
+        // `def len(...)` records its own name against its own function object,
+        // so the two tables cannot collide by identity even when they collide
+        // by name. docs/todo.md 1.4.
+        if (typeof v == "function") {
+            var bft = bfnText(v)
+            if (bft !== undefined) { return bft }
+            return "<function " + fnName(v) + ">"
+        }
         return "" + v
     }
     // A user object renders through its dunders, else like Python's default
@@ -3551,6 +3623,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (target.__pymod == "re") { return pyReModCall(name, args) }
             if (target.__pyre === true) { return pyReMethod(target, name, args) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
+        }
+        // A CURSOR (iter(), map(), zip(), ...) is NOT a generator. This half's
+        // isGen is a __gen tag so it never thought otherwise - layer 2's
+        // structural pyIsGen did, which is docs/todo.md 1.4 - but the arm still
+        // has to exist, because without it `it.__next__()` fell all the way
+        // through to "method call .__next__() on <list_iterator object>" and
+        // ABORTED, where CPython steps the cursor and the native binary already
+        // did. CPython's list_iterator carries __next__ and __iter__ and nothing
+        // else, so send / close / throw - and every other name - are a catchable
+        // AttributeError rather than a hard stop.
+        if (isPyIt(target)) {
+            if (name == "__next__") {
+                var itst = pyItStep(target)
+                // pyStopIter, not a bare pyMakeExc: it also sets .value, which
+                // is what `except StopIteration as e: e.value` reads and what
+                // layer 2's pyGenValue does on this path.
+                if (itst.done == true) { pyRaise(pyStopIter(undefined)) }
+                return itst.value
+            }
+            // iter(it) is it, and so is it.__iter__() - CPython's rule for every
+            // iterator, and what makes `for x in it` after a partial drain walk
+            // the REST of it.
+            if (name == "__iter__") { return target }
+            pyAttrErr(target, name)
         }
         if (isGen(target)) {
             if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
@@ -5335,6 +5431,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var f = clsFind(r.__class, "__contains__")
             if (f != null) { return pytruthy(f(r, l)) }
         }
+        // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
+        // rule. Neither is an array, so the scan below read a `length` of
+        // undefined and answered a SILENT False, where both compiled halves
+        // aborted with "'in' needs a list, a string, a dict or an object with
+        // __contains__". The scan STOPS at the match rather than draining, so
+        // `it = iter(xs); 1 in it; list(it)` leaves the rest. docs/todo.md 1.4.
+        if (isPyIt(r)) {
+            while (true) {
+                var s = pyItStep(r)
+                if (s.done == true) { return false }
+                if (pyEq(s.value, l)) { return true }
+            }
+        }
+        if (isGen(r)) {
+            while (true) {
+                var g = genStep(r, undefined)
+                if (!g.yielded) { return false }
+                if (pyEq(g.value, l)) { return true }
+            }
+        }
         for (var i = 0; i < r.length; i++) {
             if (pyEq(r[i], l)) return true
         }
@@ -5760,8 +5876,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // does it.
     function pyDelegOf(v) {
         if (isGen(v) || isPyIt(v)) { return v }
-        return pyMkIter(typeof v == "string" ? "str_iterator" :
-                        (Array.isArray(v) ? "list_iterator" : "iterator"), iterToList(v).slice(0))
+        return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // One step of a delegate, in the {done, value} shape. When it reports done the
     // value is the delegate's RETURN value, which is what `yield from` evaluates to.
@@ -5769,6 +5884,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isGen(d)) {
             var r = genStep(d, sent)
             return {done: !r.yielded, value: r.value}
+        }
+        // PEP 380's resume is `if _s is None: _y = _i.__next__()` else
+        // `_y = _i.send(_s)`, and a CURSOR has no send: `g.send(7)` over
+        // `yield from [1,2,3]` raises AttributeError inside the generator, which
+        // ends it. Forwarding the value to the cursor's next() - which ignores
+        // it - answered 2 instead, in ALL THREE engines, so --cross and the
+        // matrix were blind to it by construction and only the oracle could see
+        // it. docs/todo.md 1.4; the twin is js_pyyfsend, emitted by
+        // python-to-llvm-ir.abnf's makeYield at the same point.
+        if (sent !== undefined && sent !== null) {
+            pyRaise(pyMakeExc("AttributeError",
+                ["'" + d.__pyit + "' object has no attribute 'send'"]))
         }
         var s = pyItStep(d)
         return {done: s.done, value: s.value}
@@ -5873,7 +6000,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             st.done = true
         } catch (e) {
             if (e != undefined && e != null && e.__genYield == true) { yielded = true; out = e.v }
-            else { scopes = saved; genRuns.pop(); throw e }
+            // A generator whose body RAISES is FINISHED, so the next next() gets
+            // StopIteration and not the same exception again. This half is a
+            // REPLAY engine: without the done flag the failing run was replayed
+            // from the top on every subsequent step and re-raised for ever, where
+            // CPython and both compiled halves say StopIteration - a live halves
+            // divergence --cross never reached, found while closing
+            // docs/todo.md 1.4 (the delegated send() raises AttributeError
+            // INSIDE the body, and that is what made the difference visible).
+            // The close/throw signals are excluded: genClose and genThrow set the
+            // flag themselves and read st.ret afterwards.
+            else { st.done = true; scopes = saved; genRuns.pop(); throw e }
         }
         scopes = saved
         genRuns.pop()

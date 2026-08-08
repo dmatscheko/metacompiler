@@ -1570,5 +1570,55 @@ check("function-lambda-str", str(lambda vz: vz), "<function <lambda>>")
 check("function-name", vfn.__name__, "vfn")
 check("lambda-name", (lambda vz: vz).__name__, "<lambda>")
 
+
+# ----- iterator cursors, delegated send, builtin repr (docs/todo.md 1.4) -----
+# The full assertion set is tests/python-test-full.py SECTION 39: most of what
+# these cover lives in languages/lib/python-rt.metajs, and the matrix's native
+# rows only BUILD (docs/todo.md 4.3), so only the ratchet runs them natively.
+itv = [[1, 2, 3, 4], "ab", {"a": 1}]
+itc = iter(itv[0])
+check("cursor-dunder-next", itc.__next__(), 1)
+check_true("cursor-dunder-iter", itc.__iter__() is itc)
+check("cursor-rest", str(list(itc)), "[2, 3, 4]")
+
+
+def it_denied(f):
+    try:
+        f()
+    except AttributeError as e:
+        return str(e)
+    return "no error"
+
+
+itc2 = iter(itv[0])
+check("cursor-send-denied", it_denied(lambda: itc2.send(7)),
+      "'list_iterator' object has no attribute 'send'")
+check("cursor-close-denied", it_denied(lambda: itc2.close()),
+      "'list_iterator' object has no attribute 'close'")
+check("cursor-kind-list", type(iter(itv[0])).__name__, "list_iterator")
+check("cursor-kind-str", type(iter(itv[1])).__name__, "str_ascii_iterator")
+check("cursor-kind-dict", type(iter(itv[2])).__name__, "dict_keyiterator")
+check("cursor-sum", sum(iter(itv[0])), 10)
+check_true("cursor-in", 3 in iter(itv[0]))
+itsl = [9, 9, 9, 9]
+itsl[1:3] = iter([5, 6])
+check("cursor-slice-assign", str(itsl), "[9, 5, 6, 9]")
+
+
+def it_over_list():
+    yield from itv[0]
+
+
+itg = it_over_list()
+check("yieldfrom-first", next(itg), 1)
+check("yieldfrom-send-denied", it_denied(lambda: itg.send(7)),
+      "'list_iterator' object has no attribute 'send'")
+check("builtin-str-len", str(len), "<built-in function len>")
+check("builtin-str-sorted", str(sorted), "<built-in function sorted>")
+check("builtin-str-map", str(map), "<class 'map'>")
+check("builtin-str-range", str(range), "<class 'range'>")
+check("builtin-str-type-name", str(str), "<class 'str'>")
+
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

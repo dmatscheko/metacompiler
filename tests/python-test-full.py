@@ -2411,6 +2411,163 @@ def s38():
     check("su23", sc.anything == 1)
 
 
+# ===== SECTION 39: iterator cursors, delegated send, and builtin repr =====
+#
+# A CURSOR (what iter/map/zip/enumerate/filter/reversed answer) is NOT a
+# generator, and this project's layer 2 used to think it was: pyIsGen asks
+# structurally for a callable `next` and pyMkIter sets one, so `it.send(7)`
+# stepped the cursor where CPython raises AttributeError and `it.close()`
+# aborted the native binary outright. docs/todo.md 1.4.
+#
+# This section is a RATCHET section and not only a feature-matrix one on
+# purpose: the feature matrix's native rows only BUILD (docs/todo.md 4.3), and
+# most of what is asserted here lives in languages/lib/python-rt.metajs, which
+# only a native RUN can see.
+def s39():
+    vals = [[1, 2, 3, 4], "ab", {"a": 1, "b": 2}, {7, 8}]
+
+    # ----- a cursor carries __next__ and __iter__ and nothing else -----
+    it = iter(vals[0])
+    check("it01", it.__next__() == 1)
+    check("it02", it.__iter__() is it)
+    check("it03", next(it) == 2)
+    # What is LEFT of it, and the read exhausts it.
+    check("it04", list(it) == [3, 4])
+    check("it05", list(it) == [])
+
+    def denied(f):
+        try:
+            f()
+        except AttributeError:
+            return 1
+        except Exception:
+            return 2
+        return 0
+
+    it2 = iter(vals[0])
+    check("it06", denied(lambda: it2.send(None)) == 1)
+    check("it07", denied(lambda: it2.send(7)) == 1)
+    check("it08", denied(lambda: it2.close()) == 1)
+    check("it09", denied(lambda: it2.throw(ValueError("x"))) == 1)
+    check("it10", denied(lambda: it2.nosuch()) == 1)
+    # The message names the CURSOR's own type, not "object".
+    msg = ""
+    try:
+        it2.send(7)
+    except AttributeError as e:
+        msg = str(e)
+    check("it11", msg == "'list_iterator' object has no attribute 'send'")
+
+    # CPython's own cursor type names, which type(it).__name__ reads.
+    check("it12", type(iter(vals[0])).__name__ == "list_iterator")
+    check("it13", type(iter(vals[1])).__name__ == "str_ascii_iterator")
+    check("it14", type(iter(vals[2])).__name__ == "dict_keyiterator")
+    check("it15", type(iter(vals[3])).__name__ == "set_iterator")
+    check("it16", type(iter("\u00e4b")).__name__ == "str_iterator")
+    check("it17", type(map(lambda x: x, vals[0])).__name__ == "map")
+    check("it18", type(iter(iter(vals[0]))).__name__ == "list_iterator")
+
+    # An exhausted cursor raises StopIteration from __next__, not a hard stop.
+    it3 = iter([])
+    stopped = 0
+    try:
+        it3.__next__()
+    except StopIteration:
+        stopped = 1
+    check("it19", stopped == 1)
+
+    # ----- the sites a cursor used to reach only through pyIsGen -----
+    check("it20", sum(iter(vals[0])) == 10)
+    check("it21", max(iter(vals[0])) == 4)
+    xs = [9, 9, 9, 9]
+    xs[1:3] = iter([5, 6])
+    check("it22", xs == [9, 5, 6, 9])
+    # `in` CONSUMES a cursor up to the match and leaves the rest.
+    it4 = iter(vals[0])
+    check("it23", 2 in it4)
+    check("it24", list(it4) == [3, 4])
+    check("it25", 99 not in iter(vals[0]))
+
+    # ----- `yield from`: a non-generator delegate has no send() -----
+    def over_list():
+        yield from vals[0]
+
+    g = over_list()
+    check("it26", next(g) == 1)
+    check("it27", denied(lambda: g.send(7)) == 1)
+    # The AttributeError was raised INSIDE the generator, so it is finished.
+    ended = 0
+    try:
+        g.send(None)
+    except StopIteration:
+        ended = 1
+    check("it28", ended == 1)
+    # None still delegates, one value at a time.
+    g2 = over_list()
+    check("it29", [next(g2), g2.send(None), g2.send(None)] == [1, 2, 3])
+
+    # A GENERATOR delegate does receive the sent value.
+    def inner():
+        got = yield 10
+        yield got
+
+    def outer():
+        yield from inner()
+
+    g3 = outer()
+    check("it30", next(g3) == 10)
+    check("it31", g3.send(5) == 5)
+
+    # A generator whose body RAISES is finished: the next step is StopIteration
+    # and not the same exception replayed.
+    def boom():
+        yield 1
+        raise ValueError("bang")
+
+    g4 = boom()
+    check("it32", next(g4) == 1)
+    raised = 0
+    try:
+        next(g4)
+    except ValueError:
+        raised = 1
+    check("it33", raised == 1)
+    again = 0
+    try:
+        next(g4)
+    except StopIteration:
+        again = 1
+    check("it34", again == 1)
+
+    # ----- how a BUILTIN prints -----
+    fns = [len, abs, sorted, print, isinstance, getattr]
+    fnames = ["len", "abs", "sorted", "print", "isinstance", "getattr"]
+    ok = 0
+    for i in range(len(fns)):
+        if str(fns[i]) == "<built-in function " + fnames[i] + ">":
+            ok += 1
+    check("it35", ok == 6)
+    # The six builtins that really are TYPES print as classes.
+    clss = [range, enumerate, zip, map, filter, reversed]
+    cnames = ["range", "enumerate", "zip", "map", "filter", "reversed"]
+    ok2 = 0
+    for i in range(len(clss)):
+        if str(clss[i]) == "<class '" + cnames[i] + "'>":
+            ok2 += 1
+    check("it36", ok2 == 6)
+    check("it37", str(str) == "<class 'str'>")
+    check("it38", repr(len) == "<built-in function len>")
+
+    # A USER function keeps its own name: the two tables are keyed by identity,
+    # so a def that SHADOWS a builtin name renders as the user's function.
+    def sorted_like(q):
+        return q
+
+    check("it39", "sorted_like" in str(sorted_like) and "built-in" not in str(sorted_like))
+    lam = lambda q: q
+    check("it40", "<lambda>" in str(lam))
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -2450,5 +2607,6 @@ def main():
     s36() # SECTION-CALL 36
     s37() # SECTION-CALL 37
     s38() # SECTION-CALL 38
+    s39() # SECTION-CALL 39
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

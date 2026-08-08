@@ -437,6 +437,10 @@ type jsrt struct {
 	// for every grammar that never compiles Python.
 	pyTypes     map[string]*jsObject
 	pyFuncNames map[interface{}]string
+	// pyBuiltinRender is how a BUILTIN prints, keyed by the closure the emitter
+	// bound the name to and filled by js_pybfn. Separate from pyFuncNames on
+	// purpose: that one answers f.__name__ and holds only what a def recorded.
+	pyBuiltinRender map[interface{}]string
 	pySigs      map[interface{}]*pySig
 	pyEllipsis  *jsObject
 	// pyAliases memoizes the list[int]-style generic aliases, so the same written
@@ -3481,6 +3485,15 @@ func (rt *jsrt) pyString(v interface{}) string {
 // fills; CPython calls an unnamed one <lambda>, and so does every engine here.
 // docs/todo.md 1.8.
 func (rt *jsrt) pyFuncRender(v interface{}) string {
+	// A BUILTIN prints its own way, and its table is asked FIRST: a user
+	// `def len(...)` records its own name against its own closure object, so the
+	// two tables cannot collide by identity even when they collide by name.
+	if c, ok := rt.pyBuiltinRender[v]; ok {
+		if strings.HasPrefix(c, "*") {
+			return "<class '" + c[1:] + "'>"
+		}
+		return "<built-in function " + c + ">"
+	}
 	if n, ok := rt.pyFuncNames[v]; ok {
 		return "<function " + n + ">"
 	}
@@ -12422,7 +12435,50 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if pyIterName(rt, v) != "" {
 				return a[0]
 			}
-			return w(rt.pyMkIter(pyIterKind(v), rt.pyElemsOf(v)))
+			return w(rt.pyMkIter(pyIterKind(rt, v), rt.pyElemsOf(v)))
+		},
+		// The `yield from` RESUME GUARD, emitted once per delegated turn by
+		// python-to-llvm-ir.abnf's makeYield just before it steps the delegate.
+		// PEP 380 spells the resume out: `if _s is None: _y = _i.__next__()` else
+		// `_y = _i.send(_s)`. A CURSOR has no send, so sending a non-None value
+		// into a `yield from` over a list, a string or a dict raises
+		// AttributeError INSIDE the generator, which ends it. Every engine here
+		// forwarded the value to the cursor's next() instead, which ignores it:
+		// `g.send(7)` over `yield from [1,2,3]` answered 2 in all three where
+		// CPython raises. All three AGREED, so --cross and the matrix were blind
+		// to it by construction and only the oracle could see it.
+		// docs/todo.md 1.4. Twin: js_pyyfsend in languages/lib/python-rt.metajs.
+		"js_pyyfsend": func(a []uint64) uint64 {
+			sent := u(a[1])
+			if isUndefOrNull(sent) {
+				return jsHUndefined
+			}
+			if n := pyIterName(rt, u(a[0])); n != "" {
+				panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+					"'"+n+"' object has no attribute 'send'")})
+			}
+			return jsHUndefined
+		},
+		// The BUILTIN render table (docs/todo.md 1.4): print(len) said
+		// "<function <lambda>>" in all three engines where CPython says
+		// "<built-in function len>", and print(map) the same where CPython says
+		// "<class 'map'>". A builtin has no def to record a name, so the emitter
+		// registers one entry per builtin at boot.
+		//
+		// What is stored is a CODE - the builtin's name, with a leading "*" when
+		// CPython prints it as a class - so the two-form split lives in the
+		// emitter (pyClassBuiltin), in one place per half, instead of three
+		// copies of the same list. It is a code rather than the finished text
+		// because layer 2's copy of this table is in the GC heap and the finished
+		// text cost python 4.8%; the measurement is recorded at the table in
+		// languages/lib/python-rt.metajs. The def-name table rt.pyFuncNames is
+		// left alone, so f.__name__ still reads exactly what a def recorded.
+		"js_pybfn": func(a []uint64) uint64 { // (closure, code) -> closure
+			if rt.pyBuiltinRender == nil {
+				rt.pyBuiltinRender = map[interface{}]string{}
+			}
+			rt.pyBuiltinRender[u(a[0])] = rt.toString(u(a[1]))
+			return a[0]
 		},
 		// next(it[, default]): the generator protocol, or one step of a cursor.
 		// Missing HERE only - the interpreter had hostGlobals["next"] - and it is
@@ -13678,6 +13734,14 @@ func (rt *jsrt) pySeqElems(v interface{}) []interface{} {
 	if g, ok := v.(*jsGenerator); ok {
 		return append([]interface{}{}, g.drain(rt).elems...)
 	}
+	// A CURSOR gives what is LEFT of it, and the read exhausts it - the rule
+	// pyElemsOf follows. Without this arm `xs[1:3] = iter([5, 6])` failed with
+	// "cannot assign a object to a slice" HERE while the native binary and the
+	// interpreter half both answered [9, 5, 6, 9]: a live halves divergence,
+	// found while closing docs/todo.md 1.4.
+	if pyIterName(rt, v) != "" {
+		return rt.pyElemsOf(v)
+	}
 	if str, ok := v.(string); ok {
 		out := []interface{}{}
 		for i, n := 0, rt.strLen(str); i < n; i++ {
@@ -14334,6 +14398,27 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// instance's MRO, and the instance is prepended as self.
 	if sup, isSup := pySuperObj(target); isSup {
 		return rt.pySuperMCall(sup, name, args, kw)
+	}
+	// A CURSOR (iter(), map(), zip(), ...) is NOT a generator - here it never was,
+	// because the arm below is a real type test, but layer 2's pyIsGen is
+	// STRUCTURAL and answered true for one, so this arm exists to keep the three
+	// engines saying the same thing. CPython's list_iterator carries __next__ and
+	// __iter__ and nothing else; every other name is AttributeError, and `it.send`
+	// and `it.__iter__` used to abort with "unknown method" here instead of
+	// raising something an `except AttributeError:` can catch. docs/todo.md 1.4.
+	if pyIterName(rt, target) != "" {
+		it, _ := target.(*jsObject)
+		switch name {
+		case "__next__":
+			return rt.pyGenValue(rt.pyItStep(it))
+		case "__iter__":
+			// iter(it) is it, and so is it.__iter__() - CPython's rule for
+			// every iterator, and what makes `for x in it` after a partial
+			// drain walk the REST of it.
+			return target
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+pyIterName(rt, target)+"' object has no attribute '"+name+"'")})
 	}
 	// A generator's own protocol. Python's send()/next() answer the YIELDED value
 	// and raise StopIteration - carrying the body's return value - at the end,
@@ -15310,12 +15395,31 @@ func pyIsGenerator(v interface{}) bool {
 }
 
 // pyIterKind is the CPython name of the iterator iter() answers for a value.
-func pyIterKind(v interface{}) string {
-	switch v.(type) {
+// pyIterKind is the CPython type NAME of the cursor iter() answers for a value.
+// It is what type(it).__name__ reads and what the AttributeError a cursor raises
+// interpolates, so the names are CPython 3.14's and not invented: a str whose
+// code points are all ASCII gets str_ascii_iterator and any other str
+// str_iterator (CPython splits the two implementations), a dict gets
+// dict_keyiterator and a set set_iterator. Before docs/todo.md 1.4 a dict and a
+// set both answered the bare "iterator". The twins are pyIterKind in
+// languages/lib/python-rt.metajs and pyItKind in languages/python-interpreter.abnf.
+func pyIterKind(rt *jsrt, v interface{}) string {
+	switch t := v.(type) {
 	case string:
-		return "str_iterator"
+		for _, r := range t {
+			if r > 127 {
+				return "str_iterator"
+			}
+		}
+		return "str_ascii_iterator"
 	case *jsArray:
 		return "list_iterator"
+	}
+	if _, ok := pySetElems(v); ok {
+		return "set_iterator"
+	}
+	if _, _, ok := dictParts(v); ok {
+		return "dict_keyiterator"
 	}
 	return "iterator"
 }
@@ -15546,6 +15650,15 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if _, _, isDict := dictParts(t); isDict {
 			return "dict"
 		}
+		// A CURSOR names its own type - CPython's list_iterator /
+		// str_ascii_iterator / dict_keyiterator / map / filter / zip /
+		// enumerate / reversed. type(it).__name__ reads it (js_pytype hands the
+		// name to pyBuiltinClass) and so does the AttributeError pyMethodCall's
+		// cursor arm raises: CPython says "'list_iterator' object has no
+		// attribute 'send'", not "'object' ...". docs/todo.md 1.4.
+		if n := pyIterName(rt, t); n != "" {
+			return n
+		}
 		return "object"
 	case *jsClosure, *hostFunc, *boundMethod:
 		return "function"
@@ -15595,6 +15708,36 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 	}
 	if keys, _, ok := dictParts(y); ok {
 		return rt.pyDictFind(keys, x) >= 0
+	}
+	// A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
+	// rule, and `3 in iter(xs)` aborted with the message below in both compiled
+	// halves while the interpreter answered a silent False. docs/todo.md 1.4.
+	// The scan STOPS at the match rather than draining, so
+	// `it := iter(xs); 1 in it; list(it)` leaves the rest, as CPython does.
+	if g, isG := y.(*jsGenerator); isG {
+		for {
+			st, _ := g.step(rt, jsUndef).(*jsObject)
+			if st == nil {
+				return false
+			}
+			if done, _ := st.props["done"].(bool); done {
+				return false
+			}
+			if rt.pyEqual(st.props["value"], x) {
+				return true
+			}
+		}
+	}
+	if it, isIt := y.(*jsObject); isIt && pyIterName(rt, y) != "" {
+		for {
+			st := rt.pyItStep(it)
+			if done, _ := st.props["done"].(bool); done {
+				return false
+			}
+			if rt.pyEqual(st.props["value"], x) {
+				return true
+			}
+		}
 	}
 	rt.fail("'in' needs a list, a string, a dict or an object with __contains__")
 	return false

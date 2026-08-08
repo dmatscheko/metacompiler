@@ -3080,6 +3080,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             raiseB.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             // next(sent): the sent value is FORWARDED, which is what makes
             // g.send(x) reach the delegate of a `yield from` at all.
+            //
+            // PEP 380's resume is `if _s is None: _y = _i.__next__()` else
+            // `_y = _i.send(_s)`, and a CURSOR has no send: `g.send(7)` over
+            // `yield from [1,2,3]` raises AttributeError inside the generator,
+            // which ends it. Forwarding a non-None value to a cursor's next()
+            // answered 2 instead, in ALL THREE engines - so the matrix and
+            // --cross were blind to it by construction and only the oracle could
+            // see it. js_pyyfsend is the guard and it raises; it is a call and
+            // not an inline test because "is this a cursor" is a value-model
+            // question, which is layer 2's and the Go twin's to answer.
+            // docs/todo.md 1.4.
+            callExt(stepB, "js_pyyfsend", [dV, sentV])
             var nxV = callExt(stepB, "js_get", [dV, emitStr(stepB, "next")])
             var nxArgsV = callExt(stepB, "js_arr_new", [])
             callExt(stepB, "js_arr_push", [nxArgsV, sentV])
@@ -3834,6 +3846,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // <class 'type'> in the interpreter and in CPython. Calling it still runs the
     // same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
+    // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
+    // above: they answer a cursor rather than convert, so binding them to a class
+    // object would change what CALLING them does, and only their RENDERING is at
+    // stake. Everything else declBind binds prints as <built-in function NAME>.
+    //
+    // This list is the whole two-form split, and it lives HERE - once per half -
+    // rather than in the Go twin and layer 2 and the interpreter, which is why
+    // js_pybfn stores the finished text instead of a name. docs/todo.md 1.4.
+    var pyClassBuiltin = {}
+    pyClassBuiltin["$range"] = true
+    pyClassBuiltin["$enumerate"] = true
+    pyClassBuiltin["$zip"] = true
+    pyClassBuiltin["$map"] = true
+    pyClassBuiltin["$filter"] = true
+    pyClassBuiltin["$reversed"] = true
+    // The CODE the builtin render table stores: the builtin's NAME, with a
+    // leading "*" when CPython prints it as a class. Keeping the split HERE means
+    // the list of the six class-like builtins is written once per half instead of
+    // three times. What this table costs, and why no shape of it is free on
+    // tests/bench/mod.py, is measured and recorded at the table itself in
+    // languages/lib/python-rt.metajs.
+
+    function pyBFnCode(name) {
+        if (pyClassBuiltin["$" + name] == true) { return "*" + name }
+        return name
+    }
     function declBind(b, name, cloV) {
         if (pyTypeBuiltin["$" + name] == true) {
             var cls = callExt(b, "js_pybuiltincls", [emitStr(b, name)])
@@ -3841,6 +3879,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cls])
             return b
         }
+        // print(len) said "<function <lambda>>" in all three engines where CPython
+        // says "<built-in function len>": a builtin has no `def` to record a name
+        // in the js_pyfnname table, so it gets one of its own, filled here.
+        callExt(b, "js_pybfn", [cloV, emitStr(b, pyBFnCode(name))])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cloV])
         return b
     }
@@ -3887,7 +3929,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pb = pf.NewBlock("entry")
         pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
         pb.NewRet(hUndef)
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
+        b = declBind(b, "print", callExt(b, "js_closure", [handle(prIdx), curScopeV]))
         // len(x): strings, lists and dicts via js_pylen.
         funcCount++
         var lenIdx = funcCount
@@ -3895,7 +3937,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lb = lf.NewBlock("entry")
         var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
         lb.NewRet(lb.NewCall(getExtern("js_pylen", 1), [lArg]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "len"), callExt(b, "js_closure", [handle(lenIdx), curScopeV])])
+        b = declBind(b, "len", callExt(b, "js_closure", [handle(lenIdx), curScopeV]))
         // list(x): a fresh list from any iterable, via js_pylist.
         funcCount++
         var listIdx = funcCount
@@ -3912,7 +3954,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rA = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(0)])
         var rB = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(1)])
         rb.NewRet(rb.NewCall(getExtern("js_pyrange", 2), [rA, rB]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "range"), callExt(b, "js_closure", [handle(rgIdx), curScopeV])])
+        b = declBind(b, "range", callExt(b, "js_closure", [handle(rgIdx), curScopeV]))
         // abs(). Bound straight from JS Math it answered NaN on a boxed float
         // and lost precision on an arbitrary precision int; js_pyabs keeps both.
         b = declBuiltin(b, "abs", "js_pyabs", 1)

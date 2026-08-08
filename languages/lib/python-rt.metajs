@@ -207,8 +207,23 @@ function pyIsClass(v) {
 
 // A GENERATOR is a floor cell (tag 15). Layer 2 has no tag test, so the question is
 // answered structurally: the floor answers exactly ONE member on a generator, "next"
-// (runtime.c:2868), and none of the objects this value model builds carries a
-// callable "next" of its own.
+// (runtime.c:2868).
+//
+// THE __pyit LINE IS LOAD-BEARING and was missing (docs/todo.md 1.4). The comment
+// here used to claim "none of the objects this value model builds carries a
+// callable next of its own", and pyMkIter contradicts it - a CURSOR is a plain
+// object built to look exactly like a generator, callable "next" and all. So
+// pyIsGen answered TRUE for one, this half alone: the Go twin asks
+// `target.(*jsGenerator)`, a real type test, and the interpreter half asks for a
+// __gen tag. Three engines, and only this one thought a list_iterator was a
+// generator. What it reached: pyDMethodCall's generator arm made `it.send(7)`
+// step the cursor where CPython raises AttributeError and `it.close()` abort
+// natively with "member 'apply' of undefined", and pyMemberCall's arm reported
+// "unknown method '__iter__' ON A GENERATOR".
+//
+// Every site that used to be served by the accident now names pyIsIter itself:
+// pySeqElems and js_pysum grew the arm the Go twin already had, and
+// pyDMethodCall grew the CURSOR arm below.
 function pyIsGen(v) {
     if (v === null) { return false }
     if (v === undefined) { return false }
@@ -218,6 +233,7 @@ function pyIsGen(v) {
     if (v["__set"] === true) { return false }
     if (v["__cplx"] === true) { return false }
     if (v["__pybig"] === true) { return false }
+    if (v["__pyit"] !== undefined) { return false }
     if (v["__mro"] !== undefined) { return false }
     if (v["__class"] !== undefined) { return false }
     return typeof v["next"] == "function"
@@ -458,6 +474,11 @@ function pyStr(v) {
 }
 
 function pyFuncRender(v) {
+    // A BUILTIN prints its own way, and its table is asked FIRST: a user
+    // `def len(...)` records its own name against its own closure object, so the
+    // two tables cannot collide by identity even when they collide by name.
+    var bc = rtPairGet(pyBBFnObjs, pyBBFnCodes, v)
+    if (bc !== undefined) { return pyBBFnRender(pyToStr(bc)) }
     var n = rtPairGet(pyBFnObjs, pyBFnNames, v)
     if (n === undefined) { return "<function <lambda>>" }
     return "<function " + pyToStr(n) + ">"
@@ -648,6 +669,13 @@ function pyTypeName(v) {
     if (pyIsObj(v)) {
         if (pySetElemsOf(v) != null) { return "set" }
         if (pyIsDict(v)) { return "dict" }
+        // A CURSOR names its own type: CPython's list_iterator / str_iterator /
+        // dict_keyiterator / map / filter / zip / enumerate / reversed. It is
+        // what type(it).__name__ answers (js_pytype hands this name to
+        // pyBuiltinClass) and what the AttributeError pyDMethodCall's cursor arm
+        // raises interpolates - CPython says "'list_iterator' object has no
+        // attribute 'send'", not "'object' ...".
+        if (pyIsIter(v)) { return pyToStr(v["__pyit"]) }
         return "object"
     }
     return "object"
@@ -1136,6 +1164,13 @@ function pySeqElems(v) {
         return a
     }
     if (pyIsGen(v)) { return pyDrainGen(v) }
+    // A CURSOR gives what is LEFT of it, and the read exhausts it - the same rule
+    // js_pylist and js_pyiter follow. This arm used to be reached by accident,
+    // through pyIsGen answering true for a cursor (see pyIsGen), and the Go twin's
+    // pySeqElems had no cursor arm at all: `xs[1:3] = iter([5, 6])` was
+    // [9, 5, 6, 9] natively and in the interpreter and "cannot assign a object to
+    // a slice" under llvm.Run. A live halves divergence, found while closing 1.4.
+    if (pyIsIter(v)) { return pyIterRest(v) }
     if (typeof v == "string") {
         var s = []
         var n = pyStrLen(v)
@@ -2356,6 +2391,20 @@ function pyAContains(x, y) {
     }
     if (typeof y == "string") { return y.indexOf(pyToStr(x)) >= 0 }
     if (pyIsDict(y)) { return pyDictFind(y["keys"], x) >= 0 }
+    // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
+    // rule, and `3 in iter(xs)` aborted with the message below in both compiled
+    // halves while the interpreter answered a silent False. The scan STOPS at the
+    // match rather than draining, so `it = iter(xs); 1 in it; list(it)` leaves
+    // the rest. docs/todo.md 1.4.
+    if (pyIsIter(y) || pyIsGen(y)) {
+        var nx = y["next"]
+        while (true) {
+            var st = nx.apply(y, [undefined])
+            if (st === undefined || st === null) { return false }
+            if (st["done"] === true) { return false }
+            if (pyAEqual(st["value"], x)) { return true }
+        }
+    }
     pyFail("'in' needs a list, a string, a dict or an object with __contains__")
     return false
 }
@@ -2682,6 +2731,10 @@ function js_pysum(v) {
     var it = anytype
     it = v
     if (pyIsGen(it)) { it = pyADrainGen(it) }
+    // An ITERATOR object is materialized too, so sum(map(f, xs)) works. The Go
+    // twin has had this arm all along (its pyIterName test); here it was reached
+    // by accident, through pyIsGen answering true for a cursor.
+    if (pyIsIter(it)) { it = pyIterRest(it) }
     var els = pySetElemsOf(it)
     if (els !== null) { it = els }
     var total = 0
@@ -2863,15 +2916,53 @@ function pyElemsOf(v) {
     throw pyExcInstance("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
 }
 
+// The CPython type NAME of the cursor iter() answers for a value. It is what
+// type(it).__name__ reads and what the AttributeError a cursor raises
+// interpolates, so the names are CPython 3.14's and not invented: a str whose
+// code points are all ASCII gets str_ascii_iterator and any other str
+// str_iterator (CPython splits the two implementations), a dict gets
+// dict_keyiterator and a set set_iterator. Before docs/todo.md 1.4 a dict and a
+// set both answered the bare "iterator".
 function pyIterKind(v) {
-    if (typeof v == "string") { return "str_iterator" }
+    if (typeof v == "string") {
+        var ci = 0
+        while (ci < v.length) {
+            if (v.charCodeAt(ci) > 127) { return "str_iterator" }
+            ci = ci + 1
+        }
+        return "str_ascii_iterator"
+    }
     if (pyIsArr(v)) { return "list_iterator" }
+    if (pySetElemsOf(v) !== null && pySetElemsOf(v) !== undefined) { return "set_iterator" }
+    if (pyIsDict(v)) { return "dict_keyiterator" }
     return "iterator"
 }
 
 function js_pyiterfn(v) {
     if (pyIsGen(v) || pyIsIter(v)) { return v }
     return pyMkIter(pyIterKind(v), pyCCopyArr(pyElemsOf(v)))
+}
+
+// The `yield from` RESUME GUARD, emitted once per delegated turn by
+// python-to-llvm-ir.abnf's makeYield just before it steps the delegate.
+//
+// PEP 380 spells the resume out: `if _s is None: _y = _i.__next__()` else
+// `_y = _i.send(_s)`. A CURSOR has no send, so sending a non-None value into a
+// `yield from` over a list, a string, a dict or any other materialized delegate
+// raises AttributeError INSIDE the generator - which ends it, so the next
+// send() answers StopIteration. Every engine here forwarded the value to the
+// cursor's next() instead, which ignores it: `g.send(7)` over
+// `yield from [1,2,3]` answered 2 in all three, where CPython raises. All three
+// agreed, so --cross and the matrix were blind to it by construction; only the
+// oracle could see it. docs/todo.md 1.4.
+//
+// Delegating to a real GENERATOR is untouched - that is what makes send() reach
+// the delegate at all - and so is the first turn, which sends undefined.
+function js_pyyfsend(d, sent) {
+    if (sent === undefined || sent === null) { return undefined }
+    if (!pyIsIter(d)) { return undefined }
+    throw pyExcInstance("AttributeError",
+                        "'" + pyToStr(d["__pyit"]) + "' object has no attribute 'send'")
 }
 
 // next(it[, default]). The COMPILER half had no `next` at all, which is
@@ -3334,6 +3425,53 @@ function js_pyfnname(fn, name) {
     return fn
 }
 
+// ----- the BUILTIN render table (docs/todo.md 1.4) --------------------------
+//
+// `print(len)` said "<function <lambda>>" in all three engines where CPython
+// says "<built-in function len>", and `print(map)` the same where CPython says
+// "<class 'map'>". A builtin has no `def` to record a name in the table above,
+// so it gets one of its own: the emitter fills this at boot, once per builtin,
+// with js_pybfn(closure, code).
+//
+// The CODE is the builtin's NAME with a leading "*" when CPython prints it as a
+// class, and the "*" split lives in the EMITTER (python-to-llvm-ir.abnf's
+// pyClassBuiltin) so the list of the six class-like builtins is written once per
+// half rather than three times. The def-name table above is left alone, so
+// f.__name__ still reads exactly what a `def` recorded and nothing else.
+//
+// WHAT THIS COSTS, because it is not free and the numbers are worth keeping.
+// Forty-two entries are ~3.2 KB of LIVE data, and tests/bench/mod.py sits on an
+// ARENA GROWTH THRESHOLD: the heap goes 9,530,224 -> 11,627,376 bytes, and since
+// that program collects 3,574 times and the sweep walks the HEAP, the bench row
+// reads +2.67% (33.28 G -> 34.12 G, median over 21 draws, two paired runs
+// agreeing to 0.01%, spread 7.5-8.9%). The EXACT counters settle the cause:
+// collections=3574 either way and the program prints the same answer, so no
+// executed work changed - only the heap the sweep walks.
+//
+// AND THE FLOOR IS NOT ZERO, which is the part worth knowing before optimising
+// this. A control experiment at the base commit - one UNUSED 1 KB string global
+// added to this file and NOTHING else - moves the same row +2.40% and steps the
+// arena to 10,578,544. So on this benchmark a kilobyte of anything costs ~2.4%,
+// this table is within ~0.3% of that floor, and no shape of it can be free.
+// Shapes tried and measured before settling here: the finished text instead of
+// the code (11.63 MB, the same), a joined-code string plus an array (12.68 MB,
+// WORSE - two more module globals), the codes pushed into the def-name table
+// above (11.63 MB, the same). The clearest shape was kept.
+var pyBBFnObjs = []      // the builtin closures (identity scan)
+var pyBBFnCodes = []     // the code for each one, same index
+
+function js_pybfn(fn, code) {
+    pyBBFnObjs.push(fn)
+    pyBBFnCodes.push(pyToStr(code))
+    return fn
+}
+
+// How a builtin prints, from its code. "*name" is one of the six builtins that
+// really are TYPES (range/enumerate/zip/map/filter/reversed).
+function pyBBFnRender(c) {
+    if (c.charAt(0) == "*") { return "<class '" + c.substring(1, c.length) + "'>" }
+    return "<built-in function " + c + ">"
+}
 
 // ===================================================== print / repr =========
 //
@@ -5283,6 +5421,28 @@ function pyDMethodCall(target, name, args, kw) {
     if (typeof target == "string") {
         if (pySIsStrMethod(name)) { return pyStrMethod(target, name, args, kw) }
     }
+    // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, and this arm is
+    // what says so. It used to fall into the generator arm below, because
+    // pyIsGen answered true for one - a plain object carrying a callable "next"
+    // is exactly what pyMkIter builds. docs/todo.md 1.4.
+    //
+    // CPython's list_iterator carries __next__ and __iter__ and NOTHING else, so
+    // send / close / throw - and every other name - are AttributeError. All three
+    // are answered here rather than left to fall through, because falling through
+    // reached pyMemberCall and aborted the process instead of raising something an
+    // `except AttributeError:` can catch.
+    if (pyIsIter(target)) {
+        // pyItStep answers the same {value, done} record a generator step does,
+        // so the StopIteration protocol is pyGenValue's, unchanged. An exhausted
+        // cursor has no return value, so the record's value is undefined and the
+        // StopIteration carries no argument - CPython's answer too.
+        if (name == "__next__") { return pyGenValue(pyItStep(target)) }
+        // iter(it) is it, and so is it.__iter__() - CPython's rule for every
+        // iterator, and what makes `for x in it` after a partial drain work.
+        if (name == "__iter__") { return target }
+        throw pyExcInstance("AttributeError",
+                            "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
+    }
     // A generator's own protocol. Python's send()/next() answer the YIELDED
     // value and raise StopIteration - carrying the body's return value - at the
     // end, where JavaScript's next() answers a {value, done} record. There is no
@@ -6940,12 +7100,11 @@ function js_pymcall(target, name, args, kw) { return pyDMethodCall(target, name,
 // Ports abnf/jsrt.go:2761  func (rt *jsrt) memberCall(target, name, args)
 // and the helpers it reaches that the prelude does not already provide:
 //   argAt            (jsrt.go:4311)
-//   rt.strictEq      (jsrt.go:1164)
-//   rt.truthy        (jsrt.go:909)
 //   rt.typeOf        (jsrt.go:1523)
-//   substringRange / clampSubstringIndex (jsrt.go:4661 / 4683)
-//   jsToInt          (jsrt.go:8486)
 //   dictParts        (jsrt.go:2322)
+//
+// Five more were ported and are GONE again - see the note where they used to
+// stand, below, for the deadness proof (docs/todo.md 2.9).
 //
 // The entry point is deliberately NOT prefixed: chunk D's pyDMethodCall calls
 // it by exactly this name as its final fall-through
@@ -6974,70 +7133,29 @@ function pyFArgAt(args, i) {
     return undefined
 }
 
-// rt.strictEq (jsrt.go:1164), reduced to the cases a Python value can take.
-// The boxed-number arms of the Go twin (Kotlin's Char, Java's jsJFlo, the sized
-// integer jsGInt, Dart's jsDartFlo) are other languages' and cannot occur in a
-// Python heap, so they are left out rather than guessed at.
+// rt.strictEq, rt.truthy and their two bignum helpers (pyFStrictEq, pyFTruthy,
+// pyFBigEq, pyFBigIsZero) USED TO LIVE HERE, and so did clampSubstringIndex
+// (pyFClampSub), jsToInt (pyFToInt), rt.call-of-one-argument (pyFCall1) and the
+// int32 truncation (pyFWrap32). All eight were ports of memberCall arms that
+// 6eec533 deleted, and every one of them was DEAD: the only callers left were
+// each other (pyFStrictEq -> pyFBigEq, pyFTruthy -> pyFBigIsZero), a closed
+// cluster with no entry point.
 //
-// Go's *jsBigInt arm compares by VALUE (at.v.Cmp(bt.v) == 0) and requires BOTH
-// sides to be big, so a big is never strictly equal to a plain number - that is
-// reproduced here. Everything else - undefined, null, bool, number, string, and
-// objects/arrays/closures by identity - is exactly JavaScript's ===, including
-// undefined !== null (Go's jsUndefT and jsNullT are distinct types).
-function pyFStrictEq(a, b) {
-    if (pyIsBig(a)) {
-        if (!pyIsBig(b)) { return false }
-        return pyFBigEq(a, b)
-    }
-    if (pyIsBig(b)) { return false }
-    return a === b
-}
-
-// at.v.Cmp(bt.v) == 0 over chunk A's NORMALIZED representation: two bigs are
-// equal exactly when their signs and their limb arrays match (normalization
-// pins zero to neg == false, so -0 cannot arise). Done structurally rather than
-// through pyACompare so that strict equality does not depend on the comparison
-// path having a bignum arm.
-function pyFBigEq(a, b) {
-    if (a["neg"] !== b["neg"]) { return false }
-    var x = a["limbs"]
-    var y = b["limbs"]
-    if (x.length != y.length) { return false }
-    var i = 0
-    while (i < x.length) {
-        if (x[i] != y[i]) { return false }
-        i = i + 1
-    }
-    return true
-}
-
-// rt.truthy (jsrt.go:909) - JAVASCRIPT truthiness, not Python's. This is what
-// the shared filter/count/any predicates below use, so 0, "" and NaN are falsy
-// here even though an empty list is truthy (Python would disagree about the
-// empty list; the Go twin is the specification).
-function pyFTruthy(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v == "boolean") { return v }
-    if (typeof v == "number") {
-        if (v == 0) { return false }
-        return v == v
-    }
-    if (typeof v == "string") { return byteLen(v) > 0 }
-    // A __pybig is truthy unless it is zero (Go: t.v.Sign() != 0). Tested
-    // structurally against the NORMALIZED limb array (chunk A's invariant: zero
-    // is exactly the single limb 0) rather than through pyACompare, so this does
-    // not depend on the comparison path knowing about bignums.
-    if (pyIsBig(v)) { return !pyFBigIsZero(v) }
-    return true
-}
-
-// Zero over chunk A's normalized {__pybig, neg, limbs} representation.
-function pyFBigIsZero(v) {
-    var ls = v["limbs"]
-    if (ls.length == 0) { return true }
-    return ls.length == 1 && ls[0] == 0
-}
+// PROVED BEFORE DELETING, because docs/todo.md 5.2 records that an item calling
+// code dead has already been wrong once (floExt was live). Two proofs:
+//
+//   1. grep for each name over BOTH grammars, all of languages/lib/*.metajs,
+//      abnf/jsrt*.go and lib/*-core.js - the only hits were the definitions and
+//      the two intra-cluster calls above.
+//   2. a FATAL PROBE - fail("PROBE-DEAD <name>") as the first statement of each
+//      of the eight bodies, python-rt.ll regenerated, and every python program
+//      this repository has built NATIVELY and run: python-test-1, -complete,
+//      -features, -full, -try, -widen, -multifile, tests/bench/mod.py and
+//      tests/probe/python-intarith.py. ZERO of the eight fired.
+//
+// The arms that would have called them are gone: pyDForeign denies the six
+// Java-style string builtins before pyFStrMethod is reached, and Python's own
+// method surface (chunks D and E) answers everything else first.
 
 // rt.typeOf (jsrt.go:1523), for the final failure message only. The one place
 // it differs from the floor's own `typeof` is the arbitrary-precision integer:
@@ -7048,36 +7166,11 @@ function pyFTypeOf(v) {
     return typeof v
 }
 
-// clampSubstringIndex (jsrt.go:4683): NaN and negatives clamp to 0, anything
-// past the length clamps to the length.
-function pyFClampSub(f, length) {
-    if (f != f) { return 0 }
-    if (f < 0) { return 0 }
-    if (f > length) { return length }
-    return Math.trunc(f)
-}
-
-// jsToInt (jsrt.go:8486): NaN becomes 0, everything else truncates toward zero.
-// The MaxInt64/MinInt64 saturation of the Go original is unreachable here - the
-// only consumer is charAt, whose result is an out-of-range failure either way.
-function pyFToInt(f) {
-    if (f != f) { return 0 }
-    return Math.trunc(f)
-}
-
 // A fresh copy of an array - Go's append([]interface{}{}, xs...), which the
 // dict keys/values arms use so the caller cannot mutate the dict through the
 // answer. There is no Array.prototype.slice in this dialect. pyFCopyArr is
-// SHARED as rtCopyArr - lib/runtime.metajs, one of seven copies in six languages.
-// pyFCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
-// languages, ZERO differences).
-
-// rt.call(f, jsUndef, [e]) - the one-argument lambda call the higher-order list
-// methods make.
-function pyFCall1(f, a) { return f.apply(undefined, [a]) }
-
-// int32 truncation, which MetaJS's own `| 0` already is.
-function pyFWrap32(n) { return n | 0 }
+// SHARED as rtCopyArr - lib/runtime.metajs, one of seven copies in six
+// languages, ZERO differences.
 
 // ---------------------------------------------------------------- strings ---
 
