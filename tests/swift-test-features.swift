@@ -399,6 +399,61 @@ class StatOv {
     static func g(_ a: String) -> String { return "S" }
 }
 
+// ----- NESTED TYPES (docs/todo.md 1.7) -----
+// typeInfo used to be keyed by the BARE type name, so two same-named nested types
+// shared one record. The memberwise initializer's overload slot is taken from that
+// record at walk time while the descriptor installs it at a per-declaration index,
+// so the SECOND Inner's `init` landed on a key nothing looked up and the compiler
+// half aborted with `call of a non function value` where the interpreter and
+// swiftc 6.1.2 both print the answer. It needs the LABELS to collide to show, which
+// is why the item's own `{var x}` beside `{var y}` example survived.
+struct NA { struct Inner { var x: Int; func t() -> Int { return x } }
+    enum E: Int { case a = 1, b = 2 }
+    static func mk() -> Int { return Inner(x: 4).x } }
+struct NB { struct Inner { var x: Int; func t() -> Int { return x * 10 } }
+    enum E: Int { case a = 10, b = 20 } }
+// Three levels, and the same leaf name at two depths.
+struct NC { struct B { struct C { var v: Int } } }
+struct ND { struct B { struct C { var v: Int } } }
+struct NE { struct Inner { var x: Int
+        struct Inner { var x: Int; func k() -> Int { return x + 100 } } } }
+// Overloaded initializers on two same-named nested types: the sig LISTS must not
+// merge either, or the second type's call site picks the first type's overload.
+struct NF { struct Inner { var v = 0
+        init(x: Int) { v = x }
+        init(y: String) { v = y.count } } }
+struct NG { struct Inner { var v = 0
+        init(z: Int) { v = z + 100 } } }
+// extension of a NESTED type: baseTypeName keeps the dot, so `A.Inner` matched no
+// registered type and the block installed NOTHING - `unknown method` in the
+// interpreter, `extension of an unknown type` in the compiler.
+struct NH { struct Inner { var x: Int } }
+extension NH.Inner { func dbl() -> Int { return x * 2 }
+    static func s() -> Int { return 77 }
+    init(twice t: Int) { self.x = t * 2 }
+    subscript(i: Int) -> Int { return x + i } }
+// A type nested in an ENUM lives on the enum's MEMBER TABLE, not on the descriptor,
+// so a field read of it answered nil in the interpreter alone.
+enum NI { enum Mode: Int { case fast = 3, slow = 4 } }
+extension NI.Mode { func tag() -> Int { return self.rawValue + 10 } }
+// A static method reading its own type's static member UNQUALIFIED: sw_kget
+// answers an unqualified name from `this`, and a static was emitted with no `this`,
+// so the compiler half aborted with `variable not defined` for every type.
+struct NJ { static var sv = 5
+    static func f() -> Int { return sv + 1 }
+    struct Inner { static var sv = 50
+        static func f() -> Int { return sv + 1 } } }
+// A nested type as a protocol witness, as a declared type and as an element type,
+// plus a STATIC SUBSCRIPT on two same-named nested types.
+protocol NTag { func tag() -> String }
+struct NK { struct Inner: NTag { var x: Int
+        func tag() -> String { return "K\(x)" }
+        static subscript(i: Int) -> Int { return i * 2 } } }
+struct NL { struct Inner: NTag { var x: Int
+        func tag() -> String { return "L\(x)" }
+        static subscript(i: Int) -> Int { return i * 3 } } }
+func ntake(_ p: NTag) -> String { return p.tag() }
+
 func main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
@@ -878,6 +933,23 @@ func main() {
     let ovs = OvSub()
     check("inherited-overload-group", ovs.pick(ovInts[0]) == "sI" && ovs.pick(ovStrs[0]) == "bS")
     check("static-overloads", StatOv.g(ovInts[0]) == "I" && StatOv.g(ovStrs[0]) == "S")
+
+    // ----- nested types (docs/todo.md 1.7) -----
+    check("nested-same-name-memberwise", NA.Inner(x: 3).t() == 3 && NB.Inner(x: 3).t() == 30)
+    check("nested-bare-inside-outer", NA.mk() == 4)
+    check("nested-enum-same-name", NA.E.a.rawValue == 1 && NB.E.b.rawValue == 20)
+    check("nested-three-levels", NC.B.C(v: 1).v == 1 && ND.B.C(v: 2).v == 2)
+    check("nested-same-leaf-two-depths", NE.Inner(x: 1).x == 1 && NE.Inner.Inner(x: 2).k() == 102)
+    check("nested-init-overloads", NF.Inner(x: 1).v == 1 && NF.Inner(y: "abcd").v == 4
+                                    && NG.Inner(z: 2).v == 102)
+    check("extension-of-nested", NH.Inner(x: 5).dbl() == 10 && NH.Inner.s() == 77
+                                  && NH.Inner(twice: 3).x == 6 && NH.Inner(x: 5)[2] == 7)
+    check("nested-enum-in-enum", NI.Mode.slow.rawValue == 4 && NI.Mode.fast.tag() == 13)
+    check("static-reads-own-static", NJ.f() == 6 && NJ.Inner.f() == 51)
+    let nkv: NK.Inner = NK.Inner(x: 1)
+    let nlv: [NL.Inner] = [NL.Inner(x: 2)]
+    check("nested-as-type-and-witness", ntake(nkv) == "K1" && ntake(nlv[0]) == "L2")
+    check("nested-static-subscript", NK.Inner[4] == 8 && NL.Inner[4] == 12)
 
     print("features: \(checks) checks, \(fails) failures")
 }

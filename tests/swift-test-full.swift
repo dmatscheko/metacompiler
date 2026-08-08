@@ -738,6 +738,34 @@ struct Outer22 {
     struct Inner { let tag = "in" } // nested types
     enum Mode { case fast, slow }
 }
+// A SECOND type nesting the SAME leaf names. The compiler half kept typeInfo under
+// the BARE name, so both Inners shared one record and the second one's memberwise
+// initializer landed on a key nothing looked up - `call of a non function value`
+// where the interpreter and swiftc 6.1.2 both answer (docs/todo.md 1.7).
+struct Peer22 {
+    struct Inner { let tag = "peer" }
+    enum Mode { case fast, slow }
+}
+struct Deep22 { struct Mid { struct Leaf { var v: Int } }
+    struct Inner { var v: Int
+        struct Inner { var v: Int } } }
+struct Other22 { struct Mid { struct Leaf { var v: Int } } }
+// Two same-named nested types with COLLIDING memberwise labels and, separately,
+// with overloaded initializers: both pick their slot from the type's own record.
+struct Lhs22 { struct Cell { var n: Int
+        init(n: Int) { self.n = n }
+        init(text t: String) { self.n = t.count } } }
+struct Rhs22 { struct Cell { var n: Int
+        init(dbl d: Int) { self.n = d * 2 } } }
+// extension of a NESTED type, and a static that reads its own static unqualified.
+extension Deep22.Mid.Leaf {
+    func twice() -> Int { v * 2 }
+    static var origin = 9
+    static func base() -> Int { origin + 1 }
+    subscript(k: Int) -> Int { v + k }
+}
+enum Wrap22 { enum Mode: Int { case fast = 7, slow = 8 } }
+extension Wrap22.Mode { func bumped() -> Int { self.rawValue + 1 } }
 typealias Words22 = [String]
 typealias Duo22<T> = (T, T) // generic typealias
 func fetch22() async -> Int { 41 } // async syntax: defined, never awaited (no executor here)
@@ -764,6 +792,19 @@ func s22() {
     _ = handle
     _ = Till22()
     check("mis6", true) // async funcs + actor are define-only in this harness
+    // nested types: two outers with the same leaf names, three levels, and the same
+    // leaf name at two depths
+    check("mis7", Outer22.Inner().tag == "in" && Peer22.Inner().tag == "peer")
+    var pm = Peer22.Mode.fast
+    pm = .slow
+    check("mis8", pm == .slow && Outer22.Mode.fast != Outer22.Mode.slow)
+    check("mis9", Deep22.Mid.Leaf(v: 1).v == 1 && Other22.Mid.Leaf(v: 2).v == 2)
+    check("mis10", Deep22.Inner(v: 3).v == 3 && Deep22.Inner.Inner(v: 4).v == 4)
+    check("mis11", Lhs22.Cell(n: 5).n == 5 && Lhs22.Cell(text: "abc").n == 3
+                    && Rhs22.Cell(dbl: 6).n == 12)
+    check("mis12", Deep22.Mid.Leaf(v: 5).twice() == 10 && Deep22.Mid.Leaf.base() == 10
+                    && Deep22.Mid.Leaf(v: 5)[3] == 8)
+    check("mis13", Wrap22.Mode.slow.rawValue == 8 && Wrap22.Mode.fast.bumped() == 8)
 }
 
 // ===== SECTION 23: value description and value-type equality =====

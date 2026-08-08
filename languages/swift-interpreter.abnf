@@ -2857,6 +2857,19 @@ KwContinue  = "continue" KwEnd ;
             }
         }
         if (hasOwn(o, name)) { return o[name] }
+        // A nested type declared inside an ENUM is installed on the enum's MEMBER
+        // TABLE, not on the descriptor, so `Outer.Mode` read as a field found nothing
+        // and `Outer.Mode.b` failed with `field .b of nil` where the compiler half and
+        // swiftc both answer. Only a type descriptor is answered here - an instance
+        // method reached the same way would change what `Type.m` means.
+        if (typeof o == "object" && o.__isenum === true && o.__members != undefined && o.__members !== null) {
+            var mt = o.__members
+            if (hasOwn(mt, name)) {
+                var mv = mt[name]
+                if (mv != undefined && mv !== null && typeof mv == "object"
+                    && (mv.__isclass === true || mv.__isenum === true || mv.__isprotocol === true)) { return mv }
+            }
+        }
         // A computed property (or an observed stored one) is read through the
         // generated getter on the value's member table.
         var g = findAccessor(o, "__get_" + name)
@@ -2966,6 +2979,10 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Method dispatch (the js_mcall equivalent) -----
     function mcall(target, name, args) {
+        // The call site's argument LABELS, before any dispatcher below consumes them:
+        // `Outer.Inner(twice: 3)` is a construction, and its initializer overload is
+        // picked by label exactly as a top-level `Inner(twice: 3)` is.
+        var mcLabels = pendingLabels
         // A method an `extension Int { ... }` / `extension String { ... }` added lives
         // in the builtin's side table; it wins over nothing but is tried first because
         // the builtin method lists below abort on an unknown name.
@@ -3024,7 +3041,7 @@ KwContinue  = "continue" KwEnd ;
             // Outer.Inner(...): a NESTED type reached through its enclosing one.
             var nt = tt == null ? null : classFind(tt, name)
             if (nt != undefined && nt !== null && typeof nt == "object" && nt.__isclass === true) {
-                return constructInstance(nt, args, null)
+                return constructInstance(nt, args, mcLabels)
             }
         }
         if (target.__class != undefined) {
@@ -3818,6 +3835,22 @@ KwContinue  = "continue" KwEnd ;
     // defaults itself.
     var sigReg = {}
     function regSig(name, params) { scopePut(sigReg, "$" + name, params) }
+    // A TYPE's initializer signature, registered under the type's BARE name. Two
+    // same-named nested types (`A.Inner` and `B.Inner`) therefore land on one entry,
+    // and planArgs then filled `Inner(x: 4)` against the OTHER type's `init(z:)` -
+    // `nil` in all three engines where swiftc 6.1.2 constructs the value. There is no
+    // type context at this point in the walk to key it by, so an ambiguous name is
+    // simply UNREGISTERED: with no signature the arguments stay positional and the
+    // callee prologue fills the trailing defaults, which is the documented fallback.
+    var sigOwner = {}
+    function regTypeSig(key, name, params) {
+        if (hasOwn(sigOwner, "$" + name) && sigOwner["$" + name] != key) {
+            scopePut(sigReg, "$" + name, null)
+            return
+        }
+        scopePut(sigOwner, "$" + name, key)
+        regSig(name, params)
+    }
     function lookupSig(name) { return hasOwn(sigReg, "$" + name) ? sigReg["$" + name] : null }
 
     function makeParam(items) {
@@ -3995,7 +4028,13 @@ KwContinue  = "continue" KwEnd ;
         return function() {
             var ea = evalArgs(recs)
             var argv = ea.argv
-            var f = getVar(name)
+            // A bare type name inside an enclosing type means THAT type's NESTED one.
+            // A nested type is also declared into the surrounding scope under its bare
+            // name, so a second `struct B { struct Inner {...} }` made `Inner(...)`
+            // inside A construct B's Inner - in this engine and in the compiler half,
+            // which resolves the same rule statically through typeKeyOf.
+            var f = ownNestedType(name)
+            if (f == null) { f = getVar(name) }
             // E(rawValue: r): the failable initializer every raw-value enum gets for
             // free - the case whose raw value is r, or nil.
             if (f != undefined && f !== null && f.__isenum === true) {
@@ -5096,15 +5135,20 @@ KwContinue  = "continue" KwEnd ;
     // that both halves make the same decision from the same information - the
     // compiler half has no choice but to decide it at walk time.
     var declaredClasses = {}
+    // One number per type DECLARATION, so regTypeSig can tell a type re-registering
+    // its own signature from a second, same-named type overwriting it.
+    var typeDeclSeq = 0
     function makeTypeStmt(items, isStruct) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        typeDeclSeq = typeDeclSeq + 1
+        var typeSigKey = typeDeclSeq
         // A property WRAPPER is recognised by what it declares - a wrappedValue
         // member - rather than by its @propertyWrapper attribute, so the attribute
         // stays parse-and-drop like every other one.
         if (declaresWrappedValue(mem)) { scopePut(wrapperNames, "$" + name, 1) }
         for (var i = 0; i < mem.methods.length; i++) {
-            if (mem.methods[i].name == "init") { regSig(name, mem.methods[i].params) }
+            if (mem.methods[i].name == "init") { regTypeSig(typeSigKey, name, mem.methods[i].params) }
         }
         // SWIFT'S CLASS RULE IS NOT THE STRUCT RULE. A class never gets a memberwise
         // initializer at all - that is structs. A class gets a DEFAULT `init()` only
@@ -5127,12 +5171,12 @@ KwContinue  = "continue" KwEnd ;
         }
         var inheritInit = !mem.hasInit && superName != null
         var mparams = []
-        if (!mem.hasInit && !inheritInit) { mparams = memberwiseParams(mem.fields); regSig(name, mparams) }
+        if (!mem.hasInit && !inheritInit) { mparams = memberwiseParams(mem.fields); regTypeSig(typeSigKey, name, mparams) }
         // The inherited initializer's argument LABELS are the superclass's, so the
         // call site plans its arguments against that signature.
         if (inheritInit) {
             var ssig = lookupSig(superName)
-            if (ssig != null) { regSig(name, ssig) }
+            if (ssig != null) { regTypeSig(typeSigKey, name, ssig) }
         }
         var fieldNames = []
         for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
@@ -5266,16 +5310,50 @@ KwContinue  = "continue" KwEnd ;
             || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
             || n == "Bool" || n == "Array" || n == "Dictionary"
     }
+    function swSplitDots(str) {
+        var out = []
+        var cur = ""
+        for (var i = 0; i < str.length; i++) {
+            var ch = str.charAt(i)
+            if (ch == ".") { out.push(cur); cur = "" } else { cur = cur + ch }
+        }
+        out.push(cur)
+        return out
+    }
+    // `extension A.Inner { ... }`: a NESTED type is installed as a member of its
+    // enclosing descriptor, so a dotted extension name is resolved one component at a
+    // time from the scope. baseTypeName keeps the dot, so the whole path used to miss
+    // the scope, miss isBuiltinTypeName and install NOTHING - `unknown method 'dbl'`
+    // where swiftc prints the answer, and an outright compile abort in the other half.
+    function extTargetOf(path) {
+        var parts = swSplitDots(path)
+        var h = lookupOrNull(parts[0])
+        if (h == null) { return null }
+        var v = h.v
+        for (var i = 1; i < parts.length; i++) {
+            if (v == undefined || v === null || typeof v != "object") { return null }
+            if (hasOwn(v, parts[i])) { v = v[parts[i]]; continue }
+            // A type nested in an ENUM lives on the enum's member table.
+            var at = accTable(v)
+            if (at == null || !hasOwn(at, parts[i])) { return null }
+            v = at[parts[i]]
+        }
+        return v
+    }
     function makeExtensionStmt(items) {
         var tname = ""
         var k = 0
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].extname != undefined) { tname = items[i].extname; k = i + 1 }
         }
-        var base = baseTypeName(tname)
+        var path = baseTypeName(tname)
+        var parts0 = swSplitDots(path)
+        var base = parts0[parts0.length - 1]
         var mem = splitMembers(items, k)
         return function() {
-            var h = lookupOrNull(base)
+            var h = null
+            var tv = extTargetOf(path)
+            if (tv != undefined) { h = {v: tv} }
             var target = null
             if (h != null && h.v != undefined && h.v !== null && typeof h.v == "object") {
                 if (h.v.__isprotocol === true) { target = h.v.__members }
@@ -5327,6 +5405,17 @@ KwContinue  = "continue" KwEnd ;
     // `super` resolves against (self's own type would loop on an inherited method).
     var ownerStack = []
     function curOwner() { return ownerStack.length > 0 ? ownerStack[ownerStack.length - 1] : null }
+    // The type descriptor the enclosing type declares under this name, or null. Only
+    // a TYPE is answered - a static property or method of the same name must keep
+    // going through the ordinary scope path.
+    function ownNestedType(name) {
+        var ow = curOwner()
+        if (ow == undefined || ow === null) { return null }
+        var nt = classFind(ow, name)
+        if (nt == undefined || nt === null || typeof nt != "object") { return null }
+        if (nt.__isclass === true || nt.__isenum === true || nt.__isprotocol === true) { return nt }
+        return null
+    }
     function superBase() {
         var o = curOwner()
         if (o == null || o.__super == undefined || o.__super === null) { return null }

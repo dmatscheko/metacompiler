@@ -319,7 +319,10 @@ Member      = PoundIfMember | MemberDirective | MemberSemi | MemberType | [ Memb
 MemberSemi  <~~ push({}) ~~> = ";" ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
-MemberType  <~~ push({nested: pop()}) ~~>
+// nrec carries the WALK-time record of the type just declared, which is how the
+// enclosing declaration re-keys it to its qualified path (see typeInfo). A
+// TypeAliasDecl clears lastDeclRec, so it contributes none.
+MemberType  <~~ push({nested: pop(), nrec: lastDeclRec}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
@@ -436,7 +439,7 @@ ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: types are parsed and ignored, so an alias needs nothing at run time.
-TypeAliasDecl <~~ push(function(b) { return b }) ~~>
+TypeAliasDecl <~~ push(makeTypeAliasStmt()) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
@@ -3676,7 +3679,7 @@ KwContinue  = "continue" KwEnd ;
                     var ea0 = emitArgRecsInto(b, s0.args, sargs)
                     b = ea0.b
                     var mkeyV = emitStr(b, s0.name)
-                    if (s0.name == "init") { mkeyV = emitOverloadKey(b, "init", typeRec(sname).inits, s0.args, sargs, 1) }
+                    if (s0.name == "init") { mkeyV = emitOverloadKey(b, "init", superRec(sname) == null ? [] : superRec(sname).inits, s0.args, sargs, 1) }
                     cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, mkeyV]), hUndef, sargs])
                 } else {
                     var gargs = callExt(b, "js_arr_new", [])
@@ -3712,10 +3715,17 @@ KwContinue  = "continue" KwEnd ;
             recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
         }
         var eTy0 = recvETy
+        // The bare name the chain starts with, when that name is a TYPE: it seeds the
+        // qualified path A.Inner(...) is resolved against.
+        var headName = swRecvName(txt)
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
+            var pathKey = null
+            if (headName != "" && (classNames[headName] == 1 || enumNames[headName] == 1)) {
+                pathKey = typeKeyOf(headName)
+            }
             // Optional chaining: every ?. adds a block that leaves the chain with nil.
             var nilExits = []
             for (var i = 0; i < suffixes.length; i++) {
@@ -3741,7 +3751,13 @@ KwContinue  = "continue" KwEnd ;
                     emitWriteBacks(b, eab.boxes)
                 } else if (s.kind == "mcall" && classNames[s.name] == 1) {
                     // Outer.Inner(...): a NESTED type reached through its enclosing one.
-                    var rc = emitConstruct(b, s.name, callExt(b, "js_get", [cur, emitStr(b, s.name)]), s.args)
+                    // pathKey tracks the qualified type the prefix names so far, so
+                    // A.Inner and B.Inner reach their OWN records; it falls back to
+                    // the bare resolution when the prefix is not a static type path.
+                    var nk = pathKey == null ? typeKeyOf(s.name) : pathKey + "." + s.name
+                    if (typeAt(nk) == null) { nk = typeKeyOf(s.name) }
+                    pathKey = nk
+                    var rc = emitConstruct(b, nk, callExt(b, "js_get", [cur, emitStr(b, s.name)]), s.args)
                     b = rc.b
                     cur = rc.v
                 } else if (s.kind == "mcall") {
@@ -3751,21 +3767,29 @@ KwContinue  = "continue" KwEnd ;
                     // self.init(...) picks the initializer overload by its labels and
                     // arity here, and among the survivors by argument type at run time.
                     if (s.name == "init" && curType() != null) {
-                        mnameV = emitOverloadKey(b, "init", typeRec(curType().name).inits, s.args, ea.v, 0)
+                        mnameV = emitOverloadKey(b, "init", typeRec(curType().key).inits, s.args, ea.v, 0)
                     }
                     cur = callExt(b, "js_swmcall", [cur, mnameV, ea.v])
                     emitWriteBacks(b, ea.boxes)
+                    pathKey = null
                 } else if (s.kind == "call") {
                     var eac = emitArgRecs(b, s.args)
                     b = eac.b
                     cur = callExt(b, "js_call", [cur, hUndef, eac.v])
                     emitWriteBacks(b, eac.boxes)
+                    pathKey = null
                 } else if (s.kind == "field") {
+                    // `A.B.C(...)`: the intermediate `.B` is a plain member read of a
+                    // nested descriptor, so the qualified path advances through it.
+                    if (pathKey != null && typeAt(pathKey + "." + s.name) != null) {
+                        pathKey = pathKey + "." + s.name
+                    } else { pathKey = null }
                     cur = emitFieldRead(b, cur, s.name)
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
                     cur = emitIndexRead(b, cur, ir2.v)
+                    pathKey = null
                 }
             }
             if (nilExits.length == 0) { return {b: b, v: cur} }
@@ -3886,6 +3910,24 @@ KwContinue  = "continue" KwEnd ;
     // trailing defaults. Mirrors planArgs/swBindArgs in swift-interpreter.abnf.
     var sigReg = {}
     function regSig(name, params) { sigReg["$" + name] = params }
+    // A TYPE's initializer signature, registered under the type's BARE name. Two
+    // same-named nested types (`A.Inner` and `B.Inner`) therefore land on one entry,
+    // and planArgs then filled `Inner(x: 4)` against the OTHER type's `init(z:)` -
+    // `nil` in all three engines where swiftc 6.1.2 constructs the value. There is no
+    // type context at this point in the walk to key it by (a call site is a bare name
+    // and the enclosing type is only known at EMIT time), so an ambiguous name is
+    // simply UNREGISTERED: with no signature the arguments stay positional and the
+    // callee prologue fills the trailing defaults, which is the documented fallback.
+    // The interpreter's regTypeSig is the twin and unregisters on the same condition.
+    var sigOwner = {}
+    function regTypeSig(key, name, params) {
+        if (hasOwn(sigOwner, "$" + name) && sigOwner["$" + name] != key) {
+            sigReg["$" + name] = null
+            return
+        }
+        sigOwner["$" + name] = key
+        regSig(name, params)
+    }
     function lookupSig(name) { return hasOwn(sigReg, "$" + name) ? sigReg["$" + name] : null }
     function hasOwn(o, n) { return Object.prototype.hasOwnProperty.call(o, n) }
 
@@ -4013,8 +4055,11 @@ KwContinue  = "continue" KwEnd ;
     // HERE, where the argument labels and count are known - overloads are stored under
     // init, init$1, ... A failable initializer that returned nil makes the whole
     // construction nil.
-    function emitConstruct(b, tname, clsV, args) {
-        var rec = typeRec(tname)
+    // tkey is the QUALIFIED key of the type being constructed - typeKeyOf(name) for a
+    // bare name, and the resolved path for `A.Inner(...)`. Passing the bare name here
+    // is what made two same-named nested types share one initializer sig list.
+    function emitConstruct(b, tkey, clsV, args) {
+        var rec = typeRec(tkey)
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
         var ctorArgs = callExt(b, "js_arr_new", [])
@@ -4103,8 +4148,14 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_pyget", [ear.v, emitNum(b, 0)])])}
             }
             if (classNames[name] == 1) {
-                var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
-                return emitConstruct(b, name, clsV, args)
+                // A bare type name inside an enclosing type means THAT type's nested
+                // one, which is why the descriptor is read under the qualified alias:
+                // every nested type is also declared into the surrounding scope under
+                // its bare name, so a second `struct B { struct Inner {...} }` made
+                // `Inner(...)` inside A construct B's Inner in all three engines.
+                var ck = typeKeyOf(name)
+                var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
+                return emitConstruct(b, ck, clsV, args)
             }
             var ea = emitArgRecs(b, args)
             b = ea.b
@@ -4733,7 +4784,14 @@ KwContinue  = "continue" KwEnd ;
     // functions bind arg 0 to both this and self so implicit property access works.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    function emitFunc(params, body, isInstance, isCtl, rlabels, rtype) {
+    // selfName, when given, is the SCOPE NAME of the type descriptor a STATIC method
+    // stands in. Swift lets a static method read the type's own static members
+    // unqualified (`static func f() { return s + 1 }`), and sw_kget answers an
+    // unqualified name from `this` - but a static was emitted with no `this` at all,
+    // so the probe walked out to the enclosing scope and the name aborted with
+    // `variable not defined: s`. An outright abort in this half where the interpreter
+    // and swiftc 6.1.2 both print the answer, for EVERY type, nested or not.
+    function emitFunc(params, body, isInstance, isCtl, rlabels, rtype, selfName) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4755,6 +4813,10 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), thisV])
             off = 1
+        } else if (selfName != undefined && selfName != null && selfName != "") {
+            var selfTV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, selfName)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), selfTV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), selfTV])
         }
         // The parameter prologue. A plain closure parameter is a bare name; a
         // function/method parameter is a record that may be variadic, have a default
@@ -5178,7 +5240,7 @@ KwContinue  = "continue" KwEnd ;
     // to it: MemberModifiers pushes its markers, in source order, ahead of the
     // member's record.
     function splitMembers(items, from) {
-        var mem = {raw: "", inherits: [], cases: [], nested: [], fields: [], initProps: [],
+        var mem = {raw: "", inherits: [], cases: [], nested: [], nestedRecs: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
                    lazies: [], wrapped: [], hasInit: false}
         var isStatic = false
@@ -5190,7 +5252,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.mstatic != undefined) { isStatic = true; continue }
             if (it.mlazy != undefined) { isLazy = true; continue }
             if (it.mattr != undefined) { attr = it.mattr; continue }
-            if (it.nested != undefined) { mem.nested.push(it.nested); continue }
+            if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedRecs.push(it.nrec); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
@@ -5254,8 +5316,9 @@ KwContinue  = "continue" KwEnd ;
     function makeWrapperInit(wname, dflt) {
         var recs = dflt == null ? [] : [{lbl: "wrappedValue", t: dflt, ref: null, dflt: null}]
         return function(b) {
-            var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, wname)])
-            return emitConstruct(b, wname, clsV, recs)
+            var wk = typeKeyOf(wname)
+            var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, wk)])
+            return emitConstruct(b, wk, clsV, recs)
         }
     }
     function memberwiseParams(fields) {
@@ -5275,10 +5338,132 @@ KwContinue  = "continue" KwEnd ;
     // Overloaded members (two inits, two subscripts of different arity) are stored
     // under name, name$1, name$2 ... and picked at the CALL SITE, where the argument
     // labels and count are known statically.
+    //
+    // typeInfo is keyed by the type's QUALIFIED PATH, not by its bare name:
+    // `struct A { struct Inner {...} }` registers `A.Inner`, so a second
+    // `struct B { struct Inner {...} }` gets a record of its own. Keying it by the
+    // bare name used to merge the two, and because the memberwise initializer's
+    // overload slot is `rec.inits.length` at WALK time while the descriptor installs
+    // it at a per-declaration index, the second Inner's `init` landed on a key
+    // nothing looked up: `call of a non function value: undefined`, an outright abort
+    // in this half where the interpreter and swiftc both print the answer
+    // (docs/todo.md 1.7). It needs the labels to COLLIDE to show - the item's own
+    // example, `{var x}` beside `{var y}`, happens to survive because the merged
+    // sig list still picks distinct slots.
+    //
+    // A nested declaration is walked BEFORE its enclosing one (the tag actions
+    // reduce bottom-up), so a record is registered under its bare name and then
+    // RE-KEYED by the parent, restoring whatever the bare key held. Everything that
+    // reads a record therefore goes through typeAt/typeKeyOf rather than indexing
+    // typeInfo directly, and a stale bare entry is recognised by `rec.key != k`.
+    // A nested type is STILL declared into the surrounding scope under its bare name,
+    // which is what keeps the interpreter and this half agreeing on every shape they
+    // already agreed on; the qualified key is additionally declared as an ALIAS, and
+    // that alias is what `Outer.Inner`, `extension A.Inner` and a bare `Inner` inside
+    // Outer are resolved through. A program with no nested type emits an unchanged
+    // module.
     var typeInfo = {}
-    function typeRec(name) {
-        if (!hasOwn(typeInfo, "$" + name)) { typeInfo["$" + name] = {inits: [], superName: null, meths: {}} }
-        return typeInfo["$" + name]
+    var typeUid = 0
+    var deadRec = {inits: [], superName: null, meths: {}, key: "", bname: "", kids: [], prev: null, uid: -1, adopted: 1}
+    // The record at this exact key, or null. A record whose own `key` has moved on
+    // is a stale bare entry left behind by a re-key.
+    function typeAt(k) {
+        if (!hasOwn(typeInfo, "$" + k)) { return null }
+        var r = typeInfo["$" + k]
+        return r.key == k ? r : null
+    }
+    function typeRec(k) {
+        var r = typeAt(k)
+        if (r != null) { return r }
+        typeUid = typeUid + 1
+        typeInfo["$" + k] = {inits: [], superName: null, meths: {}, key: k, bname: k, kids: [], prev: null, uid: typeUid, adopted: 0}
+        return typeInfo["$" + k]
+    }
+    // The record a type DECLARATION owns. Always fresh, so two same-named types never
+    // share one, and it remembers what sat at its bare key so a re-key can put it back.
+    function newTypeRec(name) {
+        var prev = hasOwn(typeInfo, "$" + name) ? typeInfo["$" + name] : null
+        typeUid = typeUid + 1
+        var r = {inits: [], superName: null, meths: {}, key: name, bname: name, kids: [], prev: prev, uid: typeUid, adopted: 0}
+        typeInfo["$" + name] = r
+        return r
+    }
+    // The record of the type declaration most recently WALKED, so MemberType can hand
+    // it to the enclosing declaration (the emit-time twin is lastTypeName).
+    //
+    // It travels as an INDEX, not as the object. A value pushed onto the tag stack is
+    // DEEP-COPIED by the engine, so a record handed up that way arrives as a clone:
+    // re-keying it moved the clone and the declaration's own closure still read the
+    // bare key, with no symptom other than the fix silently not working.
+    var declRecs = []
+    var lastDeclRec = -1
+    function noteDeclRec(rec) {
+        declRecs.push(rec)
+        lastDeclRec = declRecs.length - 1
+        return lastDeclRec
+    }
+    function declRecAt(i) {
+        if (i == undefined || i == null || i < 0 || i >= declRecs.length) { return null }
+        return declRecs[i]
+    }
+    function rekeyRec(rec, prefix) {
+        if (rec == null) { return }
+        var old = rec.key
+        // Only put the bare key back if this record is still the one standing there.
+        // `struct Outer { struct Inner { struct Inner {...} } }` registers the inner
+        // Inner, then the middle Inner OVERWRITES $Inner with its own record, and an
+        // unguarded restore then wiped the middle one - Outer.Inner lost its
+        // descriptor and `Outer.Inner.Inner(x:)` aborted on `member '__ctor' of
+        // undefined`.
+        if (old == rec.bname && hasOwn(typeInfo, "$" + old) && typeInfo["$" + old].uid == rec.uid) {
+            typeInfo["$" + old] = rec.prev == null ? deadRec : rec.prev
+        }
+        rec.key = prefix + "." + old
+        typeInfo["$" + rec.key] = rec
+        for (var i = 0; i < rec.kids.length; i++) { rekeyRec(rec.kids[i], prefix) }
+    }
+    function adoptNested(rec, mem) {
+        for (var i = 0; i < mem.nestedRecs.length; i++) {
+            var kid = declRecAt(mem.nestedRecs[i])
+            // `adopted` guards a PEG re-walk of the same member list: adopting one
+            // record twice would prefix it twice (`A.A.Inner`).
+            if (kid == null || kid.adopted == 1) { continue }
+            kid.adopted = 1
+            rec.kids.push(kid)
+            rekeyRec(kid, rec.key)
+        }
+    }
+    // EMIT-time name resolution, in Swift's order: a member of the innermost
+    // enclosing type first, then the type itself, then outwards, then file scope.
+    function typeKeyOf(name) {
+        for (var i = typeStack.length - 1; i >= 0; i--) {
+            var k = typeStack[i].key
+            if (k == undefined || k == null || k == "") { continue }
+            if (typeAt(k + "." + name) != null) { return k + "." + name }
+            if (typeStack[i].name == name) { return k }
+        }
+        return name
+    }
+    // A dotted path spelled in the source (`extension A.Inner`, `A.B.C`), resolved
+    // one component at a time from the enclosing scope.
+    function typeKeyOfPath(path) {
+        var parts = swSplitDots(path)
+        var k = typeKeyOf(parts[0])
+        for (var i = 1; i < parts.length; i++) {
+            if (typeAt(k + "." + parts[i]) == null) { return null }
+            k = k + "." + parts[i]
+        }
+        return k
+    }
+    function swSplitDots(s) {
+        var out = []
+        var cur = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == ".") { out.push(cur); cur = "" } else { cur = cur + ch }
+        }
+        out.push(cur)
+        return out
     }
     // The overload GROUP a type accumulates under one member name, across the type's
     // own declaration AND every later `extension T`. It carries the next free slot
@@ -5434,22 +5619,30 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < params.length; i++) { s = s + params[i].label + "" + params[i].type + "" }
         return s
     }
+    // A superclass is named BARE in the inheritance clause, so its record is looked
+    // up by name first and only then through the enclosing nesting path.
+    function superRec(sn) {
+        var r = typeAt(sn)
+        if (r != null) { return r }
+        return typeAt(typeKeyOf(sn))
+    }
     function superMethGroup(sn0, nm) {
         var sn = sn0
         var guard = 0
         while (sn != null && guard < 64) {
             guard++
-            if (!hasOwn(typeInfo, "$" + sn)) { return null }
-            var r = typeInfo["$" + sn]
+            var r = superRec(sn)
+            if (r == null) { return null }
             if (r.meths != undefined && r.meths != null && hasOwn(r.meths, "$" + nm)) { return r.meths["$" + nm] }
             sn = r.superName
         }
         return null
     }
-    function emitInheritOverloads(b, tblV, names, cands, tname) {
-        if (tname == undefined || tname == null || tname == "") { return b }
-        if (!hasOwn(typeInfo, "$" + tname)) { return b }
-        var sn0 = typeInfo["$" + tname].superName
+    function emitInheritOverloads(b, tblV, names, cands, tkey) {
+        if (tkey == undefined || tkey == null || tkey == "") { return b }
+        var trec = typeAt(tkey)
+        if (trec == null) { return b }
+        var sn0 = trec.superName
         if (sn0 == null) { return b }
         for (var i = 0; i < names.length; i++) {
             var nm = names[i]
@@ -5474,9 +5667,26 @@ KwContinue  = "continue" KwEnd ;
     // The FINAL storage key of every candidate, after emitOverloadSlots has decided
     // whether a dispatcher displaced the plain name: with a dispatcher, candidate 0
     // lives at `name$0`; without one, at `name` itself.
+    // The RUNTIME scope name of a type: a nested type is keyed `A.Inner` here but is
+    // still declared into the surrounding scope under `Inner`, and `owner` below is
+    // read back with js_scope_get.
+    // The scope name a static method reads its own descriptor back under: the
+    // qualified alias for a nested type, the bare name otherwise, and "" for a type
+    // that has no descriptor in scope at all (an `extension Int { static ... }`).
+    function statSelfName(tkey) {
+        if (tkey == undefined || tkey == null || tkey == "") { return "" }
+        var bare = rtNameOf(tkey)
+        if (classNames[bare] != 1 && enumNames[bare] != 1 && protoNames[bare] != 1) { return "" }
+        return tkey
+    }
+    function rtNameOf(key) {
+        var parts = swSplitDots(key)
+        return parts[parts.length - 1]
+    }
     function recordMeths(tname, names, cands) {
         if (tname == undefined || tname == null || tname == "") { return }
         var rec = typeRec(tname)
+        var rtn = rtNameOf(tname)
         if (rec.meths == undefined || rec.meths == null) { rec.meths = {} }
         for (var i = 0; i < names.length; i++) {
             var nm = names[i]
@@ -5487,7 +5697,7 @@ KwContinue  = "continue" KwEnd ;
             for (var k = 0; k < lst.length; k++) {
                 var key = lst[k].key
                 if (lst.length < 2 && key == nm + "$0") { key = nm }
-                out.push({key: key, params: lst[k].params, owner: tname})
+                out.push({key: key, params: lst[k].params, owner: rtn})
             }
             rec.meths["$" + nm] = out
         }
@@ -5587,14 +5797,13 @@ KwContinue  = "continue" KwEnd ;
         return idx
     }
 
-    // isDecl marks the type's OWN declaration, as against an extension of it. It
-    // clears the overload groups, because typeInfo is keyed by the BARE type name:
-    // `struct A { struct Inner {...} }` and `struct B { struct Inner {...} }` share
-    // one record, and without the reset the second Inner's members would number
-    // themselves after the first's and land on keys nothing looks up. (That sharing
-    // is a pre-existing defect in its own right - the memberwise initializer already
-    // collides through rec.inits, and both trees abort on the same line of the same
-    // probe - but an extension must not be the thing that widens it.)
+    // isDecl marks the type's OWN declaration, as against an extension of it, and it
+    // clears the overload groups so a re-declaration starts from zero. It used to be
+    // load-bearing for a different reason - typeInfo was keyed by the BARE type name,
+    // so `struct A { struct Inner {...} }` and `struct B { struct Inner {...} }` SHARED
+    // one record and the reset was all that kept their member numbering apart. The
+    // keys are qualified now (see typeInfo), so the two records are distinct and this
+    // reset only has to do its own job.
     function emitInstallMembers(b, tblV, statV, mem, tname, isDecl) {
         if (isDecl) {
             var rc = typeRec(tname == undefined || tname == null ? "" : tname)
@@ -5629,7 +5838,7 @@ KwContinue  = "continue" KwEnd ;
             // A static subscript is reached through the same [i] path as an instance
             // one, which passes the receiver first, so it is emitted as an instance
             // function whose `this` is the type descriptor.
-            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels, st.rtype)
+            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels, st.rtype, statSelfName(tname))
             var skey = st.name.slice(0, 6) == "__sub_" ? "__static_" + st.name : st.name
             if (isOperatorName(st.name)) { skey = st.name }
             // Two `static func g` of the same name are an OVERLOAD exactly as two
@@ -5668,10 +5877,11 @@ KwContinue  = "continue" KwEnd ;
         // installed on the enclosing descriptor, so Outer.Inner() resolves.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastTypeName = null
+            lastTypeKey = null
             b = mem.nested[nt](b)
             if (lastTypeName != null) {
                 callExt(b, "js_set", [statV, emitStr(b, lastTypeName),
-                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, lastTypeName)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, lastTypeKey)])])
             }
         }
         return b
@@ -5790,7 +6000,15 @@ KwContinue  = "continue" KwEnd ;
 
     // The name of the type a declaration statement most recently created, so an
     // enclosing type builder can pick a nested declaration up without enumerating.
+    // lastTypeKey is its QUALIFIED key, which is the scope name the enclosing builder
+    // reads the descriptor back under: `struct Outer { struct Inner { struct Inner
+    // {...} } }` declares two `Inner`s into the same surrounding scope, so a read by
+    // the bare name got the innermost one for BOTH and `Outer.Inner(x:)` aborted with
+    // `member '__ctor' of undefined`. The interpreter installs the descriptor VALUE
+    // and was right; a value cannot be carried across the nested statement's basic
+    // blocks here, so the scope carries a qualified alias instead.
     var lastTypeName = null
+    var lastTypeKey = null
 
     function makeStructStmt(items) { return makeTypeStmt(items, true) }
     function makeClassStmt(items) { return makeTypeStmt(items, false) }
@@ -5799,9 +6017,10 @@ KwContinue  = "continue" KwEnd ;
         var mem = splitMembers(items, 1)
         if (declaresWrappedValue(mem)) { wrapperNames["$" + name] = 1 }
         if (isStruct) { hasStructs = true }
-        var rec = typeRec(name)
+        var rec = newTypeRec(name)
+        adoptNested(rec, mem)
         for (var i = 0; i < mem.methods.length; i++) {
-            if (mem.methods[i].name == "init") { rec.inits.push(mem.methods[i].params); regSig(name, mem.methods[i].params) }
+            if (mem.methods[i].name == "init") { rec.inits.push(mem.methods[i].params); regTypeSig(rec.uid, name, mem.methods[i].params) }
         }
         var superName = null
         for (var h = 0; h < mem.inherits.length; h++) {
@@ -5819,38 +6038,39 @@ KwContinue  = "continue" KwEnd ;
         // synthesises here (with the struct memberwise list, which is wider than
         // swiftc's `init()` but only accepts programs swiftc rejects outright).
         var inhCount = 0
-        var inheritInit = !mem.hasInit && !isStruct && superName != null && hasOwn(typeInfo, "$" + superName)
+        var inheritInit = !mem.hasInit && !isStruct && superName != null && typeAt(superName) != null
         if (inheritInit) {
             // The superclass's overload SLOTS are copied wholesale, so `init$1` on
             // this descriptor is the same initializer `init$1` names on the super and
             // pickOverload needs no special case. A two-level chain works because the
             // middle class carries the copies by the time this runs.
-            var srec = typeInfo["$" + superName]
+            var srec = typeAt(superName)
             inhCount = srec.inits.length
             for (var si = 0; si < inhCount; si++) { rec.inits.push(srec.inits[si]) }
             var ssig = lookupSig(superName)
-            if (ssig != null) { regSig(name, ssig) }
+            if (ssig != null) { regTypeSig(rec.uid, name, ssig) }
         }
         // The memberwise initializer's overload slot is fixed HERE, at walk time: an
         // extension declared further down appends to the same list.
         if (!mem.hasInit && !inheritInit) {
             mparams = memberwiseParams(mem.fields)
-            regSig(name, mparams)
+            regTypeSig(rec.uid, name, mparams)
             mwIndex = rec.inits.length
             rec.inits.push(mparams)
         }
         var fieldNames = []
         for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
-        if (superName != null && hasOwn(typeInfo, "$" + superName)) {
-            var sf = typeInfo["$" + superName].fields
+        if (superName != null && typeAt(superName) != null) {
+            var sf = typeAt(superName).fields
             if (sf != undefined && sf != null) {
                 for (var q2 = 0; q2 < sf.length; q2++) { fieldNames.push(sf[q2]) }
             }
         }
         rec.fields = fieldNames
         classNames[name] = 1
+        noteDeclRec(rec)
         return function(b) {
-            typeStack.push({name: name, superName: superName})
+            typeStack.push({name: name, key: rec.key, superName: superName})
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
@@ -5861,6 +6081,7 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, "__fields"), fa])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV]) }
             if (superName != null) {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                       b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])])
@@ -5875,7 +6096,7 @@ KwContinue  = "continue" KwEnd ;
             }
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
-            b = emitInstallMembers(b, clsV, clsV, mem, name, true)
+            b = emitInstallMembers(b, clsV, clsV, mem, rec.key, true)
             if (inheritInit) {
                 // js_get does NOT walk __super for a plain property - only accessors
                 // and method calls do - so the inherited initializers are COPIED onto
@@ -5902,6 +6123,7 @@ KwContinue  = "continue" KwEnd ;
             }
             typeStack.pop()
             lastTypeName = name
+            lastTypeKey = rec.key
             return b
         }
     }
@@ -5979,34 +6201,55 @@ KwContinue  = "continue" KwEnd ;
             for (var z = 0; z < inks.length; z++) { mine.push(inks[z]) }
             protoMembers["$" + name] = mine
         }
+        var rec = newTypeRec(name)
+        adoptNested(rec, mem)
+        noteDeclRec(rec)
         return function(b) {
-            typeStack.push({name: name, superName: null})
+            typeStack.push({name: name, key: rec.key, superName: null})
             var pV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [pV, emitStr(b, "__isprotocol"), hTrue])
             callExt(b, "js_set", [pV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), pV])
+            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), pV]) }
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] == 1) { b = emitAdoptProtocol(b, pV, pn) }
             }
-            b = emitInstallMembers(b, pV, pV, mem, name, true)
+            b = emitInstallMembers(b, pV, pV, mem, rec.key, true)
             typeStack.pop()
             lastTypeName = name
+            lastTypeKey = rec.key
             return b
         }
     }
+    // A typealias needs nothing at run time, but it must not leave lastDeclRec
+    // pointing at the type declared before it - MemberType would then adopt that
+    // record as a nested one and re-key it under the wrong parent.
+    function makeTypeAliasStmt() {
+        lastDeclRec = -1
+        return function(b) { return b }
+    }
     // extension T { ... } installs its members on the existing descriptor (a struct,
     // class, enum or protocol). Extending a BUILTIN is not lowered.
+    //
+    // `extension A.Inner { ... }` extends a NESTED type: the dotted path is resolved
+    // against the qualified keys, and the descriptor is still reached in the scope
+    // under the leaf's bare name (which is where a nested declaration puts it). It
+    // used to fall through to "extension of an unknown type" because baseTypeName
+    // keeps the dot and no bare `A.Inner` is ever registered.
     function makeExtensionStmt(items) {
         var tname = ""
         var k = 0
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].extname != undefined) { tname = items[i].extname; k = i + 1 }
         }
-        var base = baseTypeName(tname)
+        var path = baseTypeName(tname)
+        var parts = swSplitDots(path)
+        var base = parts[parts.length - 1]
         var mem = splitMembers(items, k)
         if (protoNames[base] == 1) { noteProtoKeys(base, mem) }
-        var rec = typeRec(base)
+        var pathKey = typeKeyOfPath(path)
+        var rec = pathKey == null ? typeRec(base) : typeRec(pathKey)
         // Each initializer an extension adds takes the next overload slot, decided at
         // walk time so the emitter and the call sites agree.
         var initIdxs = []
@@ -6035,21 +6278,24 @@ KwContinue  = "continue" KwEnd ;
             builtinExtTbl["$" + base] = 1
             return function(b) {
                 var tV = extTable(b, base, firstBlock)
-                typeStack.push({name: base, superName: null})
-                b = emitExtMembers(b, tV, tV, mem, base, initIdxs)
+                typeStack.push({name: base, key: rec.key, superName: null})
+                b = emitExtMembers(b, tV, tV, mem, rec.key, initIdxs)
                 typeStack.pop()
                 return b
             }
         }
         return function(b) {
-            typeStack.push({name: base, superName: rec.superName})
-            var tV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, base)])
+            typeStack.push({name: base, key: rec.key, superName: rec.superName})
+            // Under the QUALIFIED alias, not the bare leaf: `extension Deep.Mid.Leaf`
+            // must reach Deep's Leaf even when a later `Other.Mid.Leaf` has taken the
+            // bare scope name, which is where every nested type is also declared.
+            var tV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, rec.key)])
             var instV = tV
             if (enumNames[base] == 1) { instV = callExt(b, "js_get", [tV, emitStr(b, "__members")]) }
             if (protoNames[base] == 1) { instV = tV }
             // The instance members of an extension keep the overload numbering the
             // type already has, so a second init does not clobber the first.
-            b = emitExtMembers(b, instV, tV, mem, base, initIdxs)
+            b = emitExtMembers(b, instV, tV, mem, rec.key, initIdxs)
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
@@ -6146,8 +6392,11 @@ KwContinue  = "continue" KwEnd ;
         var kind = rawKind(mem.raw)
         enumNames[name] = 1
         hasRichEnum = true
+        var rec = newTypeRec(name)
+        adoptNested(rec, mem)
+        noteDeclRec(rec)
         return function(b) {
-            typeStack.push({name: name, superName: null})
+            typeStack.push({name: name, key: rec.key, superName: null})
             var eV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [eV, emitStr(b, "__isenum"), hTrue])
             callExt(b, "js_set", [eV, emitStr(b, "__enum"), hTrue])
@@ -6156,13 +6405,14 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [tblV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_set", [eV, emitStr(b, "__members"), tblV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), eV])
+            if (rec.key != name) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), eV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$etbl$" + name), tblV])
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
                 b = emitAdoptProtocol(b, tblV, pn)
             }
-            b = emitInstallMembers(b, tblV, eV, mem, name, true)
+            b = emitInstallMembers(b, tblV, eV, mem, rec.key, true)
             var namesArr = callExt(b, "js_arr_new", [])
             var nrName = "$nr$" + name
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nrName), emitNum(b, 0)])
@@ -6192,6 +6442,7 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [eV, emitStr(b, "__cases"), namesArr])
             typeStack.pop()
             lastTypeName = name
+            lastTypeKey = rec.key
             return b
         }
     }
