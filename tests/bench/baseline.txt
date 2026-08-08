@@ -51,6 +51,46 @@
 # believing it. Three separate agents flagged python and each concluded something
 # different about whose fault it was; only the measurement at 4f2e6e4 settled it.
 #
+#
+# ===========================================================================
+# 2026-08-08, the ten-item round bed05be..468f2eb. TWO ROWS TO READ CAREFULLY,
+# and one correction to how this file says to read ANY row.
+#
+# THE MEDIAN IS THE WRONG STATISTIC ON A BIMODAL SAMPLE, and these samples are
+# bimodal. Layout lands in one of two clusters, not on a continuum; with draws
+# split between them the median is decided by which side the middle element falls
+# on and can jump the whole gap while the code is unchanged. bench.sh now prints
+# the MEAN beside the median and says "BIMODAL" when it detects this, and it has
+# a `--paired OTHERTREE` mode that builds both checkouts to the same paths and
+# reports a SIGN TEST over matched pairs. Reach for --paired whenever a delta is
+# smaller than the row's own spread. It settled two questions this round, in
+# OPPOSITE directions:
+#
+#   swift   read +2.73% on 21-draw medians and is 12-of-14 pairs IDENTICAL.
+#           Not a cost at all. Corroborated by an exact counter: the emitted
+#           module for mod.swift is md5-identical to the parent's, and the binary
+#           grows 464 bytes (+0.11%), which cannot produce +2.7%.
+#
+#   python  read +2.67% on medians and IS REAL - slower in 11 of 12 paired draws
+#           on one path family and 8 of 8 on another. Row re-recorded here,
+#           33,229,483,369 -> 34,121,176,976.
+#
+# WHY PYTHON MOVED, and it is not executed work. MEC_GC_STATS, an exact counter:
+#
+#     before  collections=3574  live=234112  heap=9530224   pinned=13
+#     after   collections=3574  live=237296  heap=11627376  pinned=14
+#
+# Identical collection COUNT. `live` grew 3,184 bytes for the builtin-render
+# table 1.4 needed - and `heap` grew 2,097,152, EXACTLY ONE 2 MiB ARENA DOUBLING,
+# which the sweep then walks 3,574 times.
+#
+# SO tests/bench/mod.py SITS ESSENTIALLY ON AN ARENA THRESHOLD. A control at the
+# round's base - one UNUSED 1 KB string global added to python-rt.metajs and
+# nothing else - moves this row +2.40%. The next person to add a kilobyte to
+# python's layer 2 will be taxed ~2.4% for free and it will not be their change.
+# This is recorded as an item in docs/todo.md rather than smoothed away here.
+# ===========================================================================
+#
 # WHY A MEDIAN OVER DRAWS AND NOT A NUMBER. A binary's instruction count depends on
 # its CODE LAYOUT, and layout is perturbed by things that change no semantics. One
 # unchanged kotlin source, varying only the length of the -exe output path:
@@ -75,6 +115,67 @@
 # does. csharp is here because it shares rtjIsIntegral with java and only java's
 # side was measured; a shared hot body needs ALL its callers in this file.
 #
+# js was ADDED BY HAND for the same reason go was, and the reason it had to exist
+# is docs/todo.md 7.7: 673a8b1 cost ~20% on a yield*-heavy js workload (5.35 s ->
+# 6.40 s over 300,000 steps) and NO GATE IN THIS PROJECT COULD SEE IT, because
+# tests/bench/ had no js or typescript program at all. It does now.
+#
+# 1309000000 is the median over 21 DRAWS with the 2.5/2.6 round present, spread
+# 5.33%. The same 21 draws in a clean `git archive` of the parent d473319, with
+# only tests/bench/mod.js copied in, read 1,305,760,425 at a 6.58% spread - so the
+# round is +0.25%, a fifth of the row's own spread and not a measurement. An
+# earlier 15-draw pair read 1,306,580,684 base / 1,309,259,740, the same answer.
+# The number here is rounded to seven significant figures ON PURPOSE: this row's
+# spread is the widest in the file except ruby's, and quoting nine digits of a
+# number that moves 5% between builds invites someone to read a 0.01% delta as
+# real. `--record` will replace it with a full-precision one; that is fine, but do
+# not then treat the extra digits as information.
+#
+# WHY THIS ROW IS SO WIDE. mod.js is the same 40,000-iteration `s + i % 7` loop
+# every other row runs, but js reaches it through the handle-IR value model with
+# BigInt wrappers in front of `+`, `%` and `===` (js_jsadd and friends), so the
+# module is large and its layout is drawn from a correspondingly wide
+# distribution. Read a js delta against the 5-6% spread, never against 2.5%.
+#
+# typescript has no row: mod.ts would compile the SAME loop through a grammar that
+# shares layer 2 and the Go twin with js, so it would measure the same code twice
+# and double the gate's runtime. If a change ever lands in only ONE of the two
+# emitters, add it then.
+#
+# swift was ADDED BY HAND, and its absence was itself a finding: docs/todo.md 1.2
+# had to close a defect whose fix puts js_swadoptdeep on a per-call path - the
+# documented +10.3% charAt trap of a68e16d - and NO GATE IN THIS PROJECT LOADED
+# languages/lib/swift-rt.ll AT ALL, because tests/bench/ had no swift program.
+#
+# 4516900000 is the median over 21 DRAWS with the 1.2 round present, spread 3.42%.
+# This row is unusually REPRODUCIBLE for a handle-IR language - four separate
+# 21-draw and 9-draw runs of the same tree read 4,516,802,998 / 4,516,803,640 /
+# 4,516,805,038 / 4,516,809,798, agreeing to 0.0002% - so unlike java or ruby it
+# CAN resolve an effect well below its own spread, and the three-way attribution
+# below is real rather than a draw:
+#
+#   d473319 + only tests/bench/mod.swift        4,396,925,479   4,397,348,379
+#   ... + the ADOPTION work of docs/todo.md 1.2 4,396,660,675   (-0.006%)
+#   ... + Array.insert(_:at:)                   4,516,80x,xxx   (+2.73%)
+#
+# THE ADOPTION WORK COSTS NOTHING, and not by luck: the emitted module for
+# tests/bench/mod.swift is md5-IDENTICAL between d473319 and this tree, which is an
+# exact counter and settles it outright. The a68e16d trap was avoided by deciding
+# the adoption AT EMIT TIME - the parameter gate is swAdoptNeeded, which asks
+# whether any identifier token in the annotation text names a type that adopts, so
+# an annotation with no adoptable leaf emits no call and mod.swift (which has no
+# annotated parameter at all) emits exactly the IR it did. Gating on swTyIsDeep
+# instead would have put a js_swadoptdeep call on every structurally annotated
+# parameter in every program.
+#
+# THE WHOLE +2.73% IS Array.insert(_:at:), which mod.swift never calls: 197 lines
+# of layer 2 that are dead on this program. That is the module-SIZE mechanism the
+# python note above records (2,917 dead lines benched +4.53%), not a hot path -
+# the arm sits inside js_swmcall's non-float branch, so no call on mod.swift's path
+# even tests for it. It is the standing tax on any layer-2 addition, and it is here
+# so the next person does not attribute it to the adoption work. Rounded to seven
+# significant figures on purpose, as the js row is.
+#
 # go was ADDED BY HAND (not by --record, which would have deleted everything
 # above): 844,097,409, the median over 9 draws, spread 2.36%. Measured with the
 # go grammars of the commit that added it, whose emitted module for
@@ -86,7 +187,9 @@ c          11087591
 csharp     21293689255
 go         844921947
 java       8625680206
+js         1309000000
 kotlin     18318579476
 lua        1529985212
-python     33229483369
+python     34121176976
 ruby       5708270489
+swift      4516900000
