@@ -4,49 +4,25 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-05 at `e284185`; **~119 items closed since**, in eleven rounds.
-Chapter 1 has been emptied and refilled every round; chapter 9 keeps only what
-those rounds taught.
+Rebuilt 2026-08-05 at `e284185`; **~129 items closed since**, in twelve rounds.
 
 Two conventions, and they are the point of the file:
 
 > **[V]** — a probe or grep was run for this list, on this commit.
 > **[U]** — inherited from an older note and NOT re-checked. A lead, not a fact.
 
-> ## Re-verify before you act — and probe the FIX as well as the DEFECT
+> ## Treat an item as a place to start probing, never as a specification
 >
-> Across eight rounds the failure mode kept moving, and every stage of it is still
-> possible:
+> Twelve rounds, five recurring failure modes: the item is **wrong** (six of ten
+> once; "this gap exists in five more languages" was true of none), **too small**
+> (the common case — 1 defect of 6, of 9, of 14, the extras usually live halves
+> divergences `--cross` never reached), its **prescription** wrong or heavier than
+> needed while the diagnosis is right, its **example** non-reproducing (as can the
+> note saying so), or **the work is wrong and every gate says green**. Reproduce
+> first, probe the neighbourhood, and probe the FIX as well as the DEFECT.
 >
-> - **The item is wrong.** Six of ten on the first round. Three items later were
->   wrong about *which engine* was broken; two named a defect already fixed.
-> - **The item is too small** — now the common case, and on the ninth round it was
->   NINE items of ten. An extension did not lose a type's static overloads, it
->   REPLACED all of them including methods and subscripts; one csharp item named
->   one language of two; one ruby bullet named one String method of seventeen; go's
->   four residues came with six more on the same code path; kotlin's one range
->   defect came with eight. Many of those extras were live halves divergences
->   `--cross` had never reached.
-> - **The item's PRESCRIPTION is wrong while its diagnosis is right.** Four items
->   in one round told you how to fix them and were wrong: one regressed two shapes
->   when implemented as written, one gave a false reason, one prescribed a design
->   the value model cannot express, and one declared a bullet impossible that the
->   emitter does trivially.
-> - **The work is wrong and every gate says green.** Two agents shipped a NEW
->   halves divergence that their own probes and all seven gates called green.
-> - **The item's own EXAMPLE does not reproduce.** New on the eleventh round, and
->   twice: swift's nested-type example passes at base (the labels have to
->   collide), and 3.2's stated blocker — the SHOULD-ABORT rows pinning
->   `js_scope_get` — does not exist at all; every one of the 30 `variable not
->   defined` references in the tree is a comment. **Reproduce the item before you
->   fix it**, and if it does not reproduce, the defect is usually still there in a
->   shape the item did not find.
->
-> **Treat an item as a place to start probing, never as a specification.**
->
-> **Item NUMBERS are re-assigned every rebuild.** Code comments of the form
-> `docs/todo.md 1.4` are provenance pointing at the numbering of the day they were
-> written — do not "fix" them, and do not trust them to name today's item.
+> **Item NUMBERS are re-assigned every rebuild** — a code comment citing
+> `docs/todo.md 1.4` is provenance, not today's numbering.
 
 Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial` on a
 small machine):
@@ -590,29 +566,9 @@ ranges.
 
 # 9. Closed — do not re-open
 
-**~109 items over ten rounds** (`e284185`..`4d54d60`), ratchet to 7,766
-assertions: the value model and numbers, coroutines and iterators, the six object
-models, the python/ruby/kotlin library surfaces, and the tooling (`gates.sh`,
-`probe.sh`, `bench.sh`, `shape-scan`, `gen-all.sh`, `-O2` — 2.2× on every native
-binary — and a `scope_find` hash index worth 20–42%). Order and dates no longer
-matter; per-item detail is in git history and in the commit messages, which are
-written to be read.
-
-## The lessons worth carrying — each paid for once
-
-- **The instrument itself was wrong twice**: a single build cannot measure below
-  ~2% (the layout lottery), and the MEDIAN is the wrong statistic on a bimodal
-  sample. Both fixes are in `bench.sh`; the rules are at the top of this file.
-- **Whenever a gate reports "nothing", ask what it would do if the thing WERE
-  there** — three instruments were wrong that way, including a recorded fatal
-  probe that was a tautology and could not fire.
-- **Four regressions were invisible to every correctness gate**, one of them
-  python +41% for four commits. That is why `--bench` exists and why 5.1 warns.
-- **Deleting "dead" code needs a fatal probe that fires zero times, not an
-  argument** — the one item that skipped it was wrong, and deleting as written
-  would have introduced a defect.
-- **Both halves agreeing is not evidence**; the largest class of defect closed
-  here is "both halves agree and both are wrong", invisible to `--cross`. Two
-  defects were found only by running a binary BY HAND, and two test files had been
-  relying on defects — when a fix makes a test fail, establish which of the two is
-  wrong before touching either.
+**~129 items over twelve rounds** (`e284185`..HEAD): the value model and numbers,
+coroutines and iterators, the six object models, the python/ruby/kotlin/csharp
+library surfaces, and the tooling (`gates.sh`, `probe.sh`, `bench.sh`,
+`shape-scan`, `gen-all.sh`, `-O2` at 2.2×, `scope_find`'s hash index at 20–42%).
+Detail is in git history and the commit messages, which are written to be read;
+durable lessons are in the manual's chapter 4.
