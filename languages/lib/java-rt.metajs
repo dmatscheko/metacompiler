@@ -288,24 +288,48 @@ function jvNarrow(v, w) {
 }
 
 
-// ===================================================== ArithmeticException ==
+// ============================================ the runtime-raised exceptions ==
 
-// The class descriptor js_jvexc hands over once at module init, so a divide by
-// zero can THROW rather than abort. The arithmetic externs have no access to the
-// program's scope, which is exactly why the emitter passes it in.
+// The class descriptors js_jvexc hands over once each at module init, so that a
+// divide by zero, an out-of-range index and a negative array length can THROW
+// rather than abort. None of these externs has access to the program's scope,
+// which is exactly why the emitter passes the descriptors in. Four separate
+// module-level slots rather than a dictionary: the lookup is on a THROW path in
+// three cases and on the array-index path in the fourth, and in MetaJS a call is
+// a scope frame (docs/todo.md 5.1). Five slots, counting the NullPointerException
+// a null array reference raises.
 var jvArithExcCls = undefined
+var jvAioobeCls = undefined
+var jvSioobeCls = undefined
+var jvNegArrCls = undefined
+var jvNpeCls = undefined
 
-function jvThrowArith(msg) {
-    if (jvArithExcCls === undefined) {
+function jvThrowCls(cls, msg) {
+    if (cls === undefined) {
         fail("java: " + msg)
         return undefined
     }
     var o = {}
-    o["__class"] = jvArithExcCls
+    o["__class"] = cls
     // __msg is the field the emitted builtin exception constructor writes and
     // getMessage() reads (emitBuiltinExc in java-to-llvm-ir.abnf).
     o["__msg"] = msg
     throw o
+}
+
+function jvThrowArith(msg) { jvThrowCls(jvArithExcCls, msg) }
+
+// The three bounds messages are java 24.0.2's, verified against the real
+// toolchain; java-interpreter.abnf's jArrIdx/jStrIdx/jSubstr and the three
+// rt.jvThrow* in abnf/jsrtjava.go spell the same three.
+function jvThrowAioobe(i, n) {
+    jvThrowCls(jvAioobeCls, "Index " + i + " out of bounds for length " + n)
+}
+function jvThrowSioobe(i, n) {
+    jvThrowCls(jvSioobeCls, "Index " + i + " out of bounds for length " + n)
+}
+function jvThrowRange(b, e, n) {
+    jvThrowCls(jvSioobeCls, "Range [" + b + ", " + e + ") out of bounds for length " + n)
 }
 
 // ===================================================== the operators ========
@@ -1193,10 +1217,9 @@ function js_jband(l, r) {
 function js_jcharat(target, args) {
     if (typeof target == "string") {
         var i = rtjNum(args[0])
-        if (i < 0 || i >= target.length) {
-            fail("string index " + i + " out of range for \"" + target + "\"")
-            return undefined
-        }
+        // THROWS StringIndexOutOfBoundsException; it used to fail() the run, which
+        // no program could catch. See jStrIdx in java-interpreter.abnf.
+        if (i < 0 || i >= target.length) { jvThrowSioobe(i, target.length) }
         return jvChar(target.charCodeAt(i))
     }
     return js_mcall(target, "charAt", args)
@@ -1235,16 +1258,18 @@ function js_mcall(recv, name, args) {
         if (name == "length") { return recv.length }
         if (name == "charAt") {
             var ci = rtjNum(args[0])
-            if (ci < 0 || ci >= recv.length) {
-                fail("charAt(" + ci + ") out of range for \"" + recv + "\"")
-                return undefined
-            }
+            if (ci < 0 || ci >= recv.length) { jvThrowSioobe(ci, recv.length) }
             return recv.charAt(ci)
         }
         if (name == "equals") { return rtjStrictEq(recv, args[0]) }
         if (name == "substring") {
             var b = args.length > 0 ? rtjNum(args[0]) : 0
             var e = args.length > 1 ? rtjNum(args[1]) : recv.length
+            // java.lang.String.substring checks the RANGE, so begin > end is out of
+            // bounds too - which is why the message names a range and not one index.
+            // rtSubstring CLAMPS (the Go twin's substringRange), so both halves used
+            // to answer a truncated string where java throws.
+            if (b < 0 || e > recv.length || b > e) { jvThrowRange(b, e, recv.length) }
             return rtSubstring(recv, b, e)
         }
         if (name == "indexOf") { return recv.indexOf(jpStr(args[0])) }
@@ -1311,11 +1336,88 @@ function js_mcall(recv, name, args) {
 
 // ----- Java's own sixteen ---------------------------------------------------
 
-// The ArithmeticException class descriptor, handed over once at module init so a
-// divide by zero can THROW rather than abort.
-function js_jvexc(cls) {
-    if (cls !== undefined && cls !== null && typeof cls == "object") { jvArithExcCls = cls }
+// One runtime-raised exception class descriptor, handed over by NAME at module
+// init so that the externs below can THROW rather than abort.
+function js_jvexc(name, cls) {
+    if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
+    if (name == "ArithmeticException") { jvArithExcCls = cls }
+    else if (name == "ArrayIndexOutOfBoundsException") { jvAioobeCls = cls }
+    else if (name == "StringIndexOutOfBoundsException") { jvSioobeCls = cls }
+    else if (name == "NegativeArraySizeException") { jvNegArrCls = cls }
+    else if (name == "NullPointerException") { jvNpeCls = cls }
     return undefined
+}
+
+// `a[i]`, read or written. EVERY array access is bounds-checked in Java (JLS
+// 10.4) and a violation throws ArrayIndexOutOfBoundsException - it does not
+// answer a default and it does not extend the array on a write. The emitter
+// emits this for both halves: the write site discards the value and keeps only
+// the check (emitRefPath in java-to-llvm-ir.abnf).
+//
+// A NON-array receiver keeps the old js_get behaviour: `this.f[i]` walks through
+// object steps that are not arrays, and a null one is Java's NullPointerException.
+function js_jvidx(o, i) {
+    if (Array.isArray(o)) {
+        var n = rtjNum(i)
+        if (n < 0 || n >= o.length) { jvThrowAioobe(n, o.length) }
+        return o[n]
+    }
+    if (o === undefined || o === null) {
+        // `int[] z = null; z[0]` - the interpreter half throws the same NPE with a
+        // null message (real java's text names the local, which no engine here can).
+        jvThrowCls(jvNpeCls, null)
+        return undefined
+    }
+    // The RAW key, not rtjNum(i): the Go twin's fallback is rt.getMember with the
+    // key as it arrived, and this arm is only reachable for a receiver Java has no
+    // syntax for at all - the two must not answer differently if it ever is.
+    return o[i]
+}
+
+// Does a thrown value match ONE catch-clause type name? The emitter emits one
+// call per name, so a multi-catch `catch (A | B e)` is two calls and nothing here
+// has to split a string. The twin of core.excMatches in java-interpreter.abnf.
+//
+// A value OUTSIDE the Throwable hierarchy - this subset lets a program throw any
+// object - is caught by the four general types, which is how `catch (Exception e)`
+// is written in practice.
+function jvIsThrowable(v) {
+    if (v === null || v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    var c = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (c === undefined || c === null) { return false }
+        if (typeof c != "object") { return false }
+        if (c["__name"] === "Throwable") { return true }
+        c = c["__super"]
+    }
+    return false
+}
+function js_jvexcmatch(v, n) {
+    if (js_is_type(v, n)) { return true }
+    if (n == "Exception" || n == "Throwable" || n == "RuntimeException" || n == "Error") {
+        return !jvIsThrowable(v)
+    }
+    return false
+}
+
+// java.lang.String.substring. A SEPARATE EXTERN rather than a wrapper on js_mcall
+// because the Go extern table is filled ONCE for every language: overriding
+// js_mcall in abnf/jsrtjava.go made a C# `Substring` raise java's "Range [10, 6)
+// out of bounds for length 6" (observed). js_ktsmcall and js_swmcall are the same
+// pattern for the same reason. Only the java emitter emits this, and only for the
+// name `substring`; the range check itself lives in js_mcall's arm below, which is
+// java's own copy.
+function js_jvsub(target, args) { return js_mcall(target, "substring", args) }
+
+// One dimension of `new T[n]`: answers it, and raises NegativeArraySizeException
+// on a negative one (JLS 15.10.1). The message is the offending size, nothing else.
+function js_jvnewlen(n) {
+    var v = rtjNum(n)
+    if (v < 0) { jvThrowCls(jvNegArrCls, "" + v) }
+    return v
 }
 
 // One binary integral operator. A double operand keeps the FLOAT path, which is

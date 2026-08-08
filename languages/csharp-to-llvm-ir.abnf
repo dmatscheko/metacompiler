@@ -1518,8 +1518,12 @@ KwLet       = "let" KwEnd ;
         return false
     }
 
-    // Index reads (arr[i], dict[k], s[i]) go through js_pyget (array/dict/string aware).
-    core.indexExt = "js_pyget"
+    // Index reads (arr[i], dict[k], s[i]) go through js_csidx, NOT python's js_pyget:
+    // python's indexer WRAPS a negative index, so `a[-1]` answered the LAST element in
+    // this half while the interpreter aborted - a live halves divergence --cross had
+    // never reached - and an out-of-range read raised python's IndexError rather than
+    // the BCL IndexOutOfRangeException. See js_csidx in languages/lib/csharp-rt.metajs.
+    core.indexExt = "js_csidx"
 
     // The bitwise / shift operators reuse the runtime externals (they already truncate to
     // 32 bit through wrapNum(toInt32(...)), so they need no extra intWrap). Added to the
@@ -2212,7 +2216,7 @@ KwLet       = "let" KwEnd ;
         // a list, a dictionary or a string does not, and is left alone.
         var dv = callExt(liveB, "js_get", [v, emitStr(liveB, "__class")])
         liveB.NewCondBr(truthy(liveB, callExt(liveB, "js_eq", [dv, hUndef])), skipB, callB)
-        callExt(callB, "js_mcall", [v, emitStr(callB, "Dispose"), callExt(callB, "js_arr_new", [])])
+        callExt(callB, "js_csmcall", [v, emitStr(callB, "Dispose"), callExt(callB, "js_arr_new", [])])
         callB.NewBr(skipB)
         return skipB
     }
@@ -2352,7 +2356,7 @@ KwLet       = "let" KwEnd ;
             [callExt(b, "js_get", [v, emitStr(b, "__tuple")]), hNull])])
         b.NewCondBr(truthy(b, isTup), tupB, callB)
         tupB.NewBr(mergeB)
-        var dv = callExt(callB, "js_mcall", [v, emitStr(callB, "__deconstruct"),
+        var dv = callExt(callB, "js_csmcall", [v, emitStr(callB, "__deconstruct"),
                                              callExt(callB, "js_arr_new", [])])
         callB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, tupB), llvm.ir.NewIncoming(dv, callB)])}
@@ -2532,7 +2536,7 @@ KwLet       = "let" KwEnd ;
         callExt(wrapB, "js_set", [eV, emitStr(wrapB, "g"), srcV])
         callExt(wrapB, "js_set", [eV, emitStr(wrapB, "cur"), hUndef])
         wrapB.NewBr(mergeB)
-        var oV = callExt(objB, "js_mcall", [cur, emitStr(objB, "GetEnumerator"), argsV])
+        var oV = callExt(objB, "js_csmcall", [cur, emitStr(objB, "GetEnumerator"), argsV])
         objB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(eV, wrapB), llvm.ir.NewIncoming(oV, objB)])}
     }
@@ -2553,7 +2557,7 @@ KwLet       = "let" KwEnd ;
         callExt(ourB, "js_set", [cur, emitStr(ourB, "cur"), callExt(ourB, "js_get", [stV, emitStr(ourB, "value")])])
         var okV = callExt(ourB, "js_not", [callExt(ourB, "js_get", [stV, emitStr(ourB, "done")])])
         ourB.NewBr(mergeB)
-        var oV = callExt(objB, "js_mcall", [cur, emitStr(objB, "MoveNext"), argsV])
+        var oV = callExt(objB, "js_csmcall", [cur, emitStr(objB, "MoveNext"), argsV])
         objB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(okV, ourB), llvm.ir.NewIncoming(oV, objB)])}
     }
@@ -3211,7 +3215,7 @@ KwLet       = "let" KwEnd ;
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_pyget", [o, r.v])
+                o = callExt(b, "js_csidx", [o, r.v])
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -3230,7 +3234,7 @@ KwLet       = "let" KwEnd ;
             var p = emitRefPath(b, ref)
             b = p.b
             if (p.isField) { return {b: b, v: callExt(b, "js_get", [p.obj, p.key])} }
-            return {b: b, v: callExt(b, "js_pyget", [p.obj, p.key])}
+            return {b: b, v: callExt(b, "js_csidx", [p.obj, p.key])}
         }
     }
     function makeAssign(items, pos) {
@@ -3328,11 +3332,11 @@ KwLet       = "let" KwEnd ;
                     b = emitIndexSet(b, p.obj, p.key, v)
                 } else {
                     if (op != "=") {
-                        var oldm = callExt(b, "js_pyget", [p.obj, p.key])
+                        var oldm = callExt(b, "js_csidx", [p.obj, p.key])
                         v = emitNarrowLike(b, oldm, emitBin(b, op, oldm, v))
                     }
                     if (elty != "") { v = emitAdopt(b, elty, v) }
-                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                    callExt(b, "js_csidxset", [p.obj, p.key, v])
                 }
             }
             return {b: b, v: v}
@@ -3369,9 +3373,9 @@ KwLet       = "let" KwEnd ;
                 callExt(b, "js_set", [p.obj, p.key, newM])
                 return {b: b, v: pre ? newM : oldM}
             }
-            var oldI = callExt(b, "js_pyget", [p.obj, p.key])
+            var oldI = callExt(b, "js_csidx", [p.obj, p.key])
             var newI = callExt(b, "js_csstep", [oldI, oneV])
-            callExt(b, "js_pyset", [p.obj, p.key, newI])
+            callExt(b, "js_csidxset", [p.obj, p.key, newI])
             return {b: b, v: pre ? newI : oldI}
         }
     }
@@ -3490,7 +3494,7 @@ KwLet       = "let" KwEnd ;
                 // 12.8.10.2). The interpreter half reaches the same fallback through
                 // mcall0 (docs/todo.md 1.1).
                 if (csDataNames[name] === true) { return emitDelegFieldCall(b, thisV, name, argsV) }
-                return {b: b, v: callExt(b, "js_mcall", [thisV, emitStr(b, name), argsV])}
+                return {b: b, v: callExt(b, "js_csmcall", [thisV, emitStr(b, name), argsV])}
             }
             if (kind == "static") {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defClass)])
@@ -3625,7 +3629,10 @@ KwLet       = "let" KwEnd ;
         return function(b) {
             var r = sizeT(b)
             b = r.b
-            return {b: b, v: callExt(b, "js_arr_new_n", [r.v, emitNum(b, 0)])}
+            // ECMA-335 III.4.16: newarr throws OverflowException on a negative count.
+            // Without the check `new int[-1]` killed this half with a Go panic
+            // (`runtime error: makeslice: len out of range`).
+            return {b: b, v: callExt(b, "js_arr_new_n", [callExt(b, "js_csnewlen", [r.v]), emitNum(b, 0)])}
         }
     }
     // 'x' -> the char value of its single (possibly escaped) character. js_char boxes the
@@ -3969,7 +3976,11 @@ KwLet       = "let" KwEnd ;
         if (name == "Contains") return "contains"
         if (name == "Substring") return "substring"
         if (name == "IndexOf") return "indexOf"
-        if (name == "Equals") return "equals"
+        // "Equals" is NOT lowered to the runtime's "equals" any more: it is one of
+        // System.Object's four inherited members (ECMA-334 8.2.3) and js_mcall now
+        // answers it for EVERY receiver, dispatching to a user override first. The
+        // rename hid a user `public override bool Equals(object o)` from the walk,
+        // because a declared method is stored under its own name (docs/todo.md 1.6).
         return name
     }
     // ----- method-group conversion (docs/todo.md 1.1) -----
@@ -3995,7 +4006,7 @@ KwLet       = "let" KwEnd ;
         return function(b) {
             var argsP = curF.Params[1]
             var recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$mgself")])
-            b.NewRet(callExt(b, "js_mcall", [recvV, emitStr(b, name), argsP]))
+            b.NewRet(callExt(b, "js_csmcall", [recvV, emitStr(b, name), argsP]))
             return deadBlock()
         }
     }
@@ -4041,7 +4052,7 @@ KwLet       = "let" KwEnd ;
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [fV, hUndef])), mB, dB)
         var dr = emitDelegCall(dB, fV, argsV)
         dr.b.NewBr(mergeB)
-        var mv = callExt(mB, "js_mcall", [recvV, emitStr(mB, csMName(name)), argsV])
+        var mv = callExt(mB, "js_csmcall", [recvV, emitStr(mB, csMName(name)), argsV])
         mB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(mv, mB)])}
     }
@@ -4187,8 +4198,8 @@ KwLet       = "let" KwEnd ;
                     } else if (s.name == "ContainsKey") {
                         var ea = emitArgs(b, sfxArgs[i])
                         b = ea.b
-                        var keysV = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
-                        cur = callExt(b, "js_mcall", [keysV, emitStr(b, "contains"), ea.v])
+                        var keysV = callExt(b, "js_csmcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
+                        cur = callExt(b, "js_csmcall", [keysV, emitStr(b, "contains"), ea.v])
                     } else if (s.name == "Invoke" && csMethNames["Invoke"] !== true) {
                         // `d.Invoke(x)` is `d(x)`: ECMA-334 20.2 gives every delegate
                         // type an Invoke method with the delegate's own signature. A
@@ -4208,7 +4219,7 @@ KwLet       = "let" KwEnd ;
                     } else {
                         var ea2 = emitArgs(b, sfxArgs[i])
                         b = ea2.b
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, csMName(s.name)), ea2.v])
+                        cur = callExt(b, "js_csmcall", [cur, emitStr(b, csMName(s.name)), ea2.v])
                     }
                 } else if (s.kind == "call") {
                     var eac = emitArgs(b, sfxArgs[i])
@@ -4224,9 +4235,9 @@ KwLet       = "let" KwEnd ;
                     } else if (s.name == "Count" || s.name == "Length") {
                         cur = callExt(b, "js_cslen", [cur])
                     } else if (s.name == "Keys") {
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
+                        cur = callExt(b, "js_csmcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
                     } else if (s.name == "Values") {
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])])
+                        cur = callExt(b, "js_csmcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])])
                     } else if (csPropAcc[s.name] != undefined) {
                         var cpr = emitPropGet(b, cur, s.name)
                         b = cpr.b
@@ -5347,7 +5358,7 @@ KwLet       = "let" KwEnd ;
             return callExt(b, "js_call", [callExt(b, "js_get", [cur, emitStr(b, "__get_" + name)]),
                                           hUndef, callExt(b, "js_arr_new", [])])
         }
-        return callExt(b, "js_mcall", [cur, emitStr(b, "__get_" + name), callExt(b, "js_arr_new", [])])
+        return callExt(b, "js_csmcall", [cur, emitStr(b, "__get_" + name), callExt(b, "js_arr_new", [])])
     }
     // Indexing. A program that declares no indexer emits exactly the built-in container
     // step it did before; one that does gets a runtime branch, because only an instance of
@@ -5360,14 +5371,14 @@ KwLet       = "let" KwEnd ;
         b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, "__class")])), userB, stdB)
         var uargs = callExt(userB, "js_arr_new", [])
         callExt(userB, "js_arr_push", [uargs, iv])
-        var uv = callExt(userB, "js_mcall", [cur, emitStr(userB, "__index"), uargs])
+        var uv = callExt(userB, "js_csmcall", [cur, emitStr(userB, "__index"), uargs])
         userB.NewBr(mergeB)
         var sv = callExt(stdB, core.indexExt, [cur, iv])
         stdB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(uv, userB), llvm.ir.NewIncoming(sv, stdB)])}
     }
     function emitIndexSet(b, cur, iv, val) {
-        if (!csHasIndexer) { callExt(b, "js_pyset", [cur, iv, val]); return b }
+        if (!csHasIndexer) { callExt(b, "js_csidxset", [cur, iv, val]); return b }
         var userB = curF.NewBlock("")
         var stdB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
@@ -5375,9 +5386,9 @@ KwLet       = "let" KwEnd ;
         var uargs = callExt(userB, "js_arr_new", [])
         callExt(userB, "js_arr_push", [uargs, iv])
         callExt(userB, "js_arr_push", [uargs, val])
-        callExt(userB, "js_mcall", [cur, emitStr(userB, "__setindex"), uargs])
+        callExt(userB, "js_csmcall", [cur, emitStr(userB, "__setindex"), uargs])
         userB.NewBr(mergeB)
-        callExt(stdB, "js_pyset", [cur, iv, val])
+        callExt(stdB, "js_csidxset", [cur, iv, val])
         stdB.NewBr(mergeB)
         return mergeB
     }
@@ -5408,7 +5419,7 @@ KwLet       = "let" KwEnd ;
             callExt(b, "js_call", [callExt(b, "js_get", [cur, emitStr(b, key + name)]), hUndef, argsV])
             return b
         }
-        callExt(b, "js_mcall", [cur, emitStr(b, key + name), argsV])
+        callExt(b, "js_csmcall", [cur, emitStr(b, key + name), argsV])
         return b
     }
     function emitPropSet(b, cur, name, v) {
@@ -5429,7 +5440,7 @@ KwLet       = "let" KwEnd ;
             callExt(b, "js_call", [callExt(b, "js_get", [cur, emitStr(b, "__set_" + name)]), hUndef, argsV])
             return b
         }
-        callExt(b, "js_mcall", [cur, emitStr(b, "__set_" + name), argsV])
+        callExt(b, "js_csmcall", [cur, emitStr(b, "__set_" + name), argsV])
         return b
     }
 

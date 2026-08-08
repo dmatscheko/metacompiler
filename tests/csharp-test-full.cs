@@ -2088,6 +2088,173 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s33un7", d.N + 1 == n[1]);
         }
 
+        // ===== SECTION 34: System.Object's inherited members, and the index bounds
+        // =====
+        //
+        // docs/todo.md 1.6 and 1.2's C# half.
+        //
+        // 1.6. ECMA-334 8.2.3: EVERY type inherits Equals, GetHashCode, GetType and
+        // ToString from object. Only ToString was routed, so
+        // `v[0].Equals((object) v[1])` aborted BOTH halves - "unknown method
+        // 'Equals'" in the interpreter and "method call 'equals' on a number" in the
+        // compiler - and so did GetHashCode and GetType on a number, a bool, a char
+        // or a long. Only string.Equals worked, through the string arm of mcall. The
+        // item said the interpreter accepted it; it did not, and the assertion it
+        // says was dropped from this file was never in it - the commit message of
+        // `1260832` recorded the defect instead.
+        //
+        // Equals is NOT `==`. `==` promotes (5 == 5L is true, 16777216f == 16777217
+        // is true); Int32.Equals(object) requires an Int32, so `5.Equals(5L)` is
+        // FALSE. Double.Equals answers TRUE for two NaNs, where `==` answers false -
+        // documented on System.Double.Equals, and the one place the two differ.
+        //
+        // GetHashCode's VALUES are ENGINE BEHAVIOUR, deliberately: .NET does not
+        // specify them and String.GetHashCode is documented to differ between
+        // processes. What is asserted is the contract - two values Equals() calls
+        // equal hash the same.
+        //
+        // 1.2's C# half. Index reads went through PYTHON's js_pyget in the compiled
+        // halves, which WRAPS a negative index: `a[-1]` answered the LAST element
+        // there while the interpreter aborted with "index out of range: -1" - a live
+        // halves divergence ./test.sh --cross had never reached. An out-of-range read
+        // raised python's IndexError, a write past the end of an array GREW it in the
+        // interpreter and reported a raw "list assignment index out of range" in the
+        // compiler, and `new int[-1]` answered a zero-length array in one half and
+        // killed the other with a Go panic. The exception CLASS is spec-grounded -
+        // ECMA-335 III.4.4 (ldelem / stelem raise IndexOutOfRangeException), III.4.16
+        // (newarr raises OverflowException on a negative count), ECMA-334 12.8.11.3
+        // for the string indexer - and the MESSAGES are .NET BCL text.
+        //
+        // KNOWN SIMPLIFICATION, shared by all three engines: a List<T> and an array
+        // are the same value in this model, so a List index out of range also raises
+        // IndexOutOfRangeException where real .NET raises ArgumentOutOfRangeException.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every claim here is
+        // spec-cited rather than executed. Every operand is read out of an ARRAY so
+        // the grammars' constant folders cannot answer at compile time.
+        class S34R
+        {
+            public int N;
+            public S34R(int n) { this.N = n; }
+            public override bool Equals(object o) { return o is S34R && ((S34R) o).N == this.N + 100; }
+            public override int GetHashCode() { return 4242; }
+        }
+
+        static string S34Idx(int[] a, int i)
+        {
+            try { return "" + a[i]; } catch (Exception e) { return e.Message; }
+        }
+        static string S34Wr(int[] a, int i)
+        {
+            try { a[i] = 9; return "no throw"; } catch (Exception e) { return e.Message; }
+        }
+        static string S34Str(string s, int i)
+        {
+            try { return "" + s[i]; } catch (Exception e) { return e.Message; }
+        }
+        static string S34Sub(string s, int b, int n)
+        {
+            try { return s.Substring(b, n); } catch (Exception e) { return e.Message; }
+        }
+        static string S34New(int n)
+        {
+            try { int[] q = new int[n]; return "len " + q.Length; }
+            catch (Exception e) { return e.Message; }
+        }
+
+        static void S34()
+        {
+            object[] v = { 5, 5, "a", "a" };
+            int[] iv = { 3, 3 };
+            long[] lv = { 5L, 5L };
+            double[] dv = { 1.5, 1.5 };
+            bool[] bv = { true, true };
+            char[] cv = { 'a', 'a' };
+            int[] idx = { 0, 2, 3, -1 };
+            int[] a = { 10, 20, 30 };
+            string s = "abc";
+
+            // ----- Equals on every value kind. THE LINE THE ITEM NAMES IS FIRST.
+            Program.Check("s34eq1", v[0].Equals((object) v[1]));
+            Program.Check("s34eq2", v[2].Equals((object) v[3]));
+            Program.Check("s34eq3", iv[0].Equals(iv[1]));
+            Program.Check("s34eq4", lv[0].Equals(lv[1]));
+            Program.Check("s34eq5", dv[0].Equals(dv[1]));
+            Program.Check("s34eq6", bv[0].Equals(bv[1]));
+            Program.Check("s34eq7", cv[0].Equals(cv[1]));
+            // TYPE-STRICT where `==` promotes: an Int32 is not an Int64.
+            Program.Check("s34eq8", !iv[0].Equals(lv[0]) && iv[0] == lv[0] - 2);
+            Program.Check("s34eq9", !iv[0].Equals(v[2]));
+            Program.Check("s34eq10", !v[0].Equals(iv[0]));
+            // A user override wins, and it is genuinely consulted (this one is
+            // deliberately asymmetric, so a fallback to value equality would fail).
+            Program.Check("s34eq11", new S34R(iv[0]).Equals(new S34R(iv[0] + 100)));
+            Program.Check("s34eq12", !new S34R(iv[0]).Equals(new S34R(iv[0])));
+            // Double.Equals answers TRUE for two NaNs where `==` answers false -
+            // documented on System.Double.Equals, and the one place the two differ.
+            double[] nn = { 0.0 / 0.0, 0.0 / 0.0, 0.0, -0.0 };
+            Program.Check("s34eq13", nn[0].Equals(nn[1]) && !(nn[0] == nn[1]));
+            Program.Check("s34eq14", nn[2].Equals(nn[3]));
+
+            // ----- GetHashCode: the CONTRACT, never a value -----
+            Program.Check("s34hc1", v[0].GetHashCode() == v[1].GetHashCode());
+            Program.Check("s34hc2", v[2].GetHashCode() == v[3].GetHashCode());
+            Program.Check("s34hc3", cv[0].GetHashCode() == cv[1].GetHashCode());
+            Program.Check("s34hc4", lv[0].GetHashCode() == lv[1].GetHashCode());
+            Program.Check("s34hc5", new S34R(iv[0]).GetHashCode() == 4242);
+            // The same reference hashes the same twice.
+            object same = v[0];
+            Program.Check("s34hc6", same.GetHashCode() == v[0].GetHashCode());
+
+            // ----- GetType: the .NET type name of the value -----
+            Program.Check("s34gt1", iv[0].GetType().Name == "Int32");
+            Program.Check("s34gt2", iv[0].GetType().FullName == "System.Int32");
+            Program.Check("s34gt3", v[2].GetType().Name == "String");
+            Program.Check("s34gt4", dv[0].GetType().Name == "Double");
+            Program.Check("s34gt5", cv[0].GetType().Name == "Char");
+            Program.Check("s34gt6", bv[0].GetType().Name == "Boolean");
+            Program.Check("s34gt7", lv[0].GetType().Name == "Int64");
+            Program.Check("s34gt8", iv.GetType().Name == "Int32[]");
+            Program.Check("s34gt9", new S34R(iv[0]).GetType().Name == "S34R");
+
+            // ----- the index bounds: a READ, a NEGATIVE index and a WRITE -----
+            Program.Check("s34ix1", S34Idx(a, idx[1]) == "30");
+            Program.Check("s34ix2", S34Idx(a, idx[2]) == "Index was outside the bounds of the array.");
+            // The one that WRAPPED in the compiled half and aborted in the other.
+            Program.Check("s34ix3", S34Idx(a, idx[3]) == "Index was outside the bounds of the array.");
+            Program.Check("s34ix4", S34Wr(a, idx[2]) == "Index was outside the bounds of the array.");
+            Program.Check("s34ix5", S34Wr(a, idx[3]) == "Index was outside the bounds of the array.");
+            // The array did NOT grow: the write threw before it stored.
+            Program.Check("s34ix6", a.Length == 3);
+            Program.Check("s34ix7", S34Wr(a, idx[1]) == "no throw" && a[idx[1]] == 9);
+            // The string indexer, both directions.
+            Program.Check("s34ix8", S34Str(s, idx[2]) == "Index was outside the bounds of the array.");
+            Program.Check("s34ix9", S34Str(s, idx[3]) == "Index was outside the bounds of the array.");
+            Program.Check("s34ix10", S34Str(s, idx[1]) == "c");
+            // new T[n] with a negative length.
+            Program.Check("s34ix11", S34New(idx[3]) == "Arithmetic operation resulted in an overflow.");
+            Program.Check("s34ix12", S34New(idx[1]) == "len 2");
+
+            // ----- String.Substring takes a LENGTH, not an end index -----
+            // System.String.Substring(int startIndex, int length). Both halves
+            // lowered it to a JS slice(start, END), so this answered "bc" - one
+            // wrong answer BOTH halves agreed on, which --cross cannot see by
+            // construction. And every out-of-range argument CLAMPED silently.
+            string t = "abcdef";
+            Program.Check("s34sb1", t.Substring(idx[0] + 1, idx[2]) == "bcd");
+            Program.Check("s34sb2", t.Substring(idx[0] + 1) == "bcdef");
+            Program.Check("s34sb3", t.Substring(idx[0]) == "abcdef");
+            Program.Check("s34sb4", t.Substring(idx[1], idx[0]) == "");
+            Program.Check("s34sb5", S34Sub(t, idx[3], 0) ==
+                "StartIndex cannot be less than zero. (Parameter 'startIndex')");
+            Program.Check("s34sb6", S34Sub(t, 10, 0) ==
+                "startIndex cannot be larger than length of string. (Parameter 'startIndex')");
+            Program.Check("s34sb7", S34Sub(t, idx[0], idx[3]) ==
+                "Length cannot be less than zero. (Parameter 'length')");
+            Program.Check("s34sb8", S34Sub(t, idx[0], 10) ==
+                "Index and length must refer to a location within the string. (Parameter 'length')");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2123,6 +2290,7 @@ b";                                                   // verbatim keeps the newl
             Program.S31(); // SECTION-CALL 31
             Program.S32(); // SECTION-CALL 32
             Program.S33(); // SECTION-CALL 33
+            Program.S34(); // SECTION-CALL 34
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

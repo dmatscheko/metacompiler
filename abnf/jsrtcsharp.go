@@ -85,6 +85,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode/utf16"
 )
 
 // ----------------------------------------------------------------------------
@@ -1106,6 +1107,146 @@ func init() {
 			}
 			return w(jsUndef)
 		}
+		// ----- the index bounds (docs/todo.md 1.2's C# half) -----
+		//
+		// These used to be python's js_pyget / js_pyset, which WRAP a negative
+		// index - so `a[-1]` answered the LAST element here while the interpreter
+		// aborted, a live halves divergence --cross had never reached - and which
+		// raise python's IndexError rather than the BCL exception the spec names.
+		// The CLASS is spec-grounded (ECMA-335 III.4.4 for ldelem/stelem, ECMA-334
+		// 12.8.11.3 for the string indexer); the MESSAGES are BCL text and there is
+		// no dotnet here to settle them. The layer-2 twins are js_csidx /
+		// js_csidxset / js_csnewlen in languages/lib/csharp-rt.metajs and
+		// csGetIndex / csIdxChk in languages/csharp-interpreter.abnf.
+		//
+		// KNOWN SIMPLIFICATION, shared by all three engines: a List<T> and an array
+		// are the same value here, so a List index out of range also raises
+		// IndexOutOfRangeException where real .NET raises ArgumentOutOfRangeException.
+		csIdxOob := func() {
+			rt.csThrow("IndexOutOfRangeException", "Index was outside the bounds of the array.")
+		}
+		csNullRef := func() {
+			rt.csThrow("NullReferenceException", "Object reference not set to an instance of an object.")
+		}
+		basePyGet := m["js_pyget"]
+		basePySet := m["js_pyset"]
+		m["js_csidx"] = func(a []uint64) uint64 {
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				i := jsToInt(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(o.elems) {
+					csIdxOob()
+				}
+				return w(o.elems[i])
+			case string:
+				i := jsToInt(rt.toNumber(u(a[1])))
+				n := rt.strLen(o)
+				if i < 0 || i >= n {
+					csIdxOob()
+				}
+				return rt.wrapStr(rt.strAt(o, i))
+			}
+			if isUndefOrNull(u(a[0])) {
+				csNullRef()
+			}
+			if keys, vals, ok := dictParts(u(a[0])); ok {
+				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+					return w(vals.elems[i])
+				}
+				rt.csThrow("KeyNotFoundException",
+					"The given key '"+rt.cspStr(u(a[1]))+"' was not present in the dictionary.")
+			}
+			return basePyGet(a)
+		}
+		m["js_csidxset"] = func(a []uint64) uint64 {
+			if arr, isArr := u(a[0]).(*jsArray); isArr {
+				i := jsToInt(rt.toNumber(u(a[1])))
+				// A WRITE past the end THROWS; it does not grow the array.
+				if i < 0 || i >= len(arr.elems) {
+					csIdxOob()
+				}
+				arr.elems[i] = u(a[2])
+				return 0
+			}
+			if isUndefOrNull(u(a[0])) {
+				csNullRef()
+			}
+			// A dictionary write INSERTS, so it is deliberately not bounds-checked.
+			return basePySet(a)
+		}
+		// ECMA-335 III.4.16: newarr throws OverflowException on a negative count.
+		// Without this `new int[-1]` killed the run with a Go panic
+		// (`runtime error: makeslice: len out of range`).
+		m["js_csnewlen"] = func(a []uint64) uint64 {
+			if jsToInt(rt.toNumber(u(a[0]))) < 0 {
+				rt.csThrow("OverflowException", "Arithmetic operation resulted in an overflow.")
+			}
+			return a[0]
+		}
+		// ----- the three System.Object members no receiver could answer (1.6) -----
+		// ECMA-334 8.2.3: every type inherits Equals, GetHashCode, GetType and
+		// ToString from object. Only ToString was routed, so
+		// `v[0].Equals((object) v[1])` aborted with "method call 'equals' on a
+		// number". A user override still wins. The twins are the same three arms in
+		// languages/lib/csharp-rt.metajs and mcall0 in csharp-interpreter.abnf.
+		// A SEPARATE EXTERN, not a wrapper on js_mcall: rxExtraExterns fills ONE
+		// map for every language, so overriding js_mcall here would give every
+		// other language C#'s answer for these three names. js_ktsmcall and
+		// js_swmcall are the same pattern for the same reason.
+		baseCsMcall := m["js_mcall"]
+		m["js_csmcall"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			// System.String.Substring(int startIndex, int length) takes a LENGTH,
+			// not an end index; the shared memberCall reads a range and CLAMPS, so
+			// `"abcdef".Substring(1, 3)` answered "bc" where C# answers "bcd" - one
+			// wrong answer BOTH halves agreed on. The twins are csSubstr in
+			// csharp-interpreter.abnf and the substring arm of js_mcall in
+			// languages/lib/csharp-rt.metajs.
+			if str, isStr := u(a[0]).(string); isStr && name == "substring" {
+				args, _ := u(a[2]).(*jsArray)
+				n := rt.strLen(str)
+				b := 0
+				if args != nil && len(args.elems) > 0 {
+					b = jsToInt(rt.toNumber(args.elems[0]))
+				}
+				if b < 0 {
+					rt.csThrow("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')")
+				}
+				if b > n {
+					rt.csThrow("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')")
+				}
+				end := n
+				if args != nil && len(args.elems) > 1 {
+					ln := jsToInt(rt.toNumber(args.elems[1]))
+					if ln < 0 {
+						rt.csThrow("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')")
+					}
+					if b+ln > n {
+						rt.csThrow("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')")
+					}
+					end = b + ln
+				}
+				return rt.wrapStr(rt.strRange(str, b, end))
+			}
+			if name == "Equals" || name == "GetHashCode" || name == "GetType" {
+				recv := u(a[0])
+				if rt.csUserMethod(recv, name) == nil {
+					args, _ := u(a[2]).(*jsArray)
+					switch name {
+					case "Equals":
+						var other interface{} = jsUndef
+						if args != nil {
+							other = argAt(args.elems, 0)
+						}
+						return boolH(rt.csObjEquals(recv, other))
+					case "GetHashCode":
+						return rt.wrapNum(float64(rt.csHash(recv)))
+					}
+					return w(rt.csTypeOfVal(recv))
+				}
+			}
+			return baseCsMcall(a)
+		}
 		// One of the integral type NAMES as an expression primary.
 		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }
 		// The whole Console object, built here rather than in the grammar so that
@@ -1146,6 +1287,9 @@ func init() {
 			return a[0]
 		}
 	})
+	// js_csmcall reads its argument array in position 2, exactly like the
+	// js_mcall it delegates to: the handle must arrive as the array itself.
+	jsThroughArgs["js_csmcall"] = 1 << 2
 }
 
 // cspBoolStr is System.Boolean.ToString(): Boolean.TrueString / Boolean.FalseString.
@@ -1267,6 +1411,13 @@ func cspElemName(e interface{}) string {
 			return "System.Int64"
 		case t.w == 32 && t.u:
 			return "System.UInt32"
+		case t.w == 32:
+			// UNREACHABLE TODAY and kept only so the three engines agree if it ever
+			// is: csNorm unboxes a signed 32-bit value to a plain number, so no
+			// jsGInt has w 32 and u false. Without this arm the switch fell through
+			// to System.SByte here, while layer 2 said System.Int32 and
+			// csharp-interpreter.abnf said System.UInt32 - three answers.
+			return "System.Int32"
 		case t.w == 16 && t.u:
 			return "System.UInt16"
 		case t.w == 16:
@@ -1294,4 +1445,227 @@ func cspElemName(e interface{}) string {
 		return "System.Int32"
 	}
 	return ""
+}
+
+// ============ System.Object.Equals / GetHashCode / GetType (docs/todo.md 1.6) ==
+//
+// The Go twins of csObjEquals / csHash / csTypeOfVal in
+// languages/lib/csharp-rt.metajs and of the same three in
+// languages/csharp-interpreter.abnf; the comments there are the specification
+// half. Equals is NOT ==: `==` promotes (5 == 5L is true), while
+// Int32.Equals(object) requires an Int32, so `5.Equals(5L)` is FALSE. cspElemName
+// is the value's own .NET type name, so type-strictness is one comparison.
+
+// csUserMethod answers a user-declared method of that name along the
+// __class/__super chain, or nil. A declared override always wins over the three
+// inherited members below.
+func (rt *jsrt) csUserMethod(recv interface{}, name string) interface{} {
+	o, ok := recv.(*jsObject)
+	if !ok {
+		return nil
+	}
+	cls := o.props["__class"]
+	for guard := 0; guard < 64; guard++ {
+		co, isObj := cls.(*jsObject)
+		if !isObj {
+			return nil
+		}
+		if m, found := co.props[name]; found && isCallable(m) {
+			return m
+		}
+		cls = co.props["__super"]
+	}
+	return nil
+}
+
+func (rt *jsrt) csObjEquals(a, b interface{}) bool {
+	if an := cspElemName(a); an != "" {
+		if an != cspElemName(b) {
+			return false
+		}
+		switch x := a.(type) {
+		case jsChar:
+			y, _ := b.(jsChar)
+			return x.code == y.code
+		case jsJFlo:
+			// Double.Equals is NOT ==: it answers TRUE for two NaNs (documented on
+			// System.Double.Equals), which is the one place the two differ.
+			p, q := rt.toNumber(a), rt.toNumber(b)
+			if math.IsNaN(p) {
+				return math.IsNaN(q)
+			}
+			return p == q
+		case jsGInt:
+			return rt.csCmp("==", a, b)
+		case string:
+			y, _ := b.(string)
+			return x == y
+		case bool:
+			y, _ := b.(bool)
+			return x == y
+		case float64:
+			y, _ := b.(float64)
+			return x == y
+		}
+		return false
+	}
+	if isUndefOrNull(a) {
+		return isUndefOrNull(b)
+	}
+	if rt.csIsRecVal(a) && rt.csIsRecVal(b) {
+		return rt.csRecEqVal(a, b)
+	}
+	return a == b
+}
+
+// A record or a ValueTuple: C# gives both VALUE semantics.
+func (rt *jsrt) csIsRecVal(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	if _, isTup := o.props["__tuple"]; isTup {
+		return true
+	}
+	c, isObj := o.props["__class"].(*jsObject)
+	if !isObj {
+		return false
+	}
+	r, _ := c.props["__isrecord"].(bool)
+	return r
+}
+
+func (rt *jsrt) csRecKeys(o *jsObject) []string {
+	if n, isTup := o.props["__tuple"]; isTup {
+		out := []string{}
+		for i := 0; i < int(rt.toNumber(n)); i++ {
+			out = append(out, fmt.Sprintf("Item%d", i+1))
+		}
+		return out
+	}
+	c, isObj := o.props["__class"].(*jsObject)
+	if !isObj {
+		return nil
+	}
+	names, isArr := c.props["__fieldNames"].(*jsArray)
+	if !isArr {
+		return nil
+	}
+	out := []string{}
+	for _, e := range names.elems {
+		s, _ := e.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+func (rt *jsrt) csRecEqVal(a, b interface{}) bool {
+	ao, _ := a.(*jsObject)
+	bo, _ := b.(*jsObject)
+	if _, isTup := ao.props["__tuple"]; isTup {
+		if rt.toNumber(ao.props["__tuple"]) != rt.toNumber(bo.props["__tuple"]) {
+			return false
+		}
+	} else if ao.props["__class"] != bo.props["__class"] {
+		return false
+	}
+	for _, k := range rt.csRecKeys(ao) {
+		if !rt.csObjEquals(ao.props[k], bo.props[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// GetHashCode. ENGINE BEHAVIOUR, deliberately: .NET does not specify these numbers
+// and String.GetHashCode is documented to differ between processes, so no
+// assertion can name a value. What IS a contract - and what is asserted - is that
+// two values Equals() calls equal hash the same.
+func (rt *jsrt) csHash(v interface{}) int32 {
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return 1
+		}
+		return 0
+	case jsChar:
+		return t.code
+	case string:
+		h := int32(0)
+		for _, u := range utf16.Encode([]rune(t)) {
+			h = h*31 + int32(u)
+		}
+		return h
+	case float64:
+		return int32(int64(math.Trunc(t)))
+	case jsGInt, jsJFlo:
+		return int32(int64(math.Trunc(rt.toNumber(v))))
+	}
+	if isUndefOrNull(v) {
+		return 0
+	}
+	if rt.csIsRecVal(v) {
+		o, _ := v.(*jsObject)
+		h := int32(0)
+		for _, k := range rt.csRecKeys(o) {
+			h = h*31 + rt.csHash(o.props[k])
+		}
+		return h
+	}
+	return rt.csIdHash(v)
+}
+
+// A per-run identity number for a reference: the k-th distinct object asked gets
+// 0x2b3c4d00+k. Reproducible within a run; no assertion may depend on the digits.
+// One compile runs one program, so a package-level counter is per-program - the
+// same reasoning jvpIdent records in abnf/jsrtjava.go.
+var csIdSeq int32
+
+func (rt *jsrt) csIdHash(v interface{}) int32 {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return 0
+	}
+	if h, found := o.props["__idhash"]; found {
+		return int32(rt.toNumber(h))
+	}
+	csIdSeq++
+	h := int32(725896960) + csIdSeq
+	o.set("__idhash", float64(h))
+	return h
+}
+
+// GetType(): a System.Type token with the same two members typeof(T) answers.
+func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
+	full := cspElemName(v)
+	if full == "" {
+		switch t := v.(type) {
+		case *jsArray:
+			full = cspArrayName(t)
+		case *jsObject:
+			if c, isObj := t.props["__class"].(*jsObject); isObj {
+				if n, isStr := c.props["__name"].(string); isStr {
+					full = n
+				}
+			}
+			if full == "" {
+				if b, _ := t.props["__isclass"].(bool); b {
+					if n, isStr := t.props["__name"].(string); isStr {
+						full = n
+					}
+				}
+			}
+		}
+		if full == "" {
+			full = "System.Object"
+		}
+	}
+	o := newJSObject()
+	o.set("FullName", full)
+	name := full
+	if i := strings.LastIndex(full, "."); i >= 0 {
+		name = full[i+1:]
+	}
+	o.set("Name", name)
+	return o
 }

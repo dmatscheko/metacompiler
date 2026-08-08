@@ -574,7 +574,12 @@ namespace Demo
             Program.Check("str-length", "hello".Length == 5 && "".Length == 0);
             Program.Check("str-unicode-len", "héllo".Length == 5);
             Program.Check("str-substring-tail", "hello".Substring(3) == "lo");
-            Program.Check("str-substring-slice", "metacompiler".Substring(4, 8) == "comp");
+            // Substring's SECOND argument is a LENGTH, not an end index
+            // (System.String.Substring(int startIndex, int length)). This assertion
+            // used to expect "comp" - the JS slice(4, 8) answer - and both halves
+            // agreed with it, which is exactly the class ./test.sh --cross cannot
+            // see. See SECTION 34 of tests/csharp-test-full.cs.
+            Program.Check("str-substring-slice", "metacompiler".Substring(4, 8) == "compiler");
             Program.Check("str-indexof", "hello".IndexOf("ll") == 2 && "hello".IndexOf("z") == -1);
             Program.Check("str-eq", "abc" == "abc" && "abc" != "abd");
             Program.Check("str-equals-method", "abc".Equals("abc") && !"abc".Equals("abd"));

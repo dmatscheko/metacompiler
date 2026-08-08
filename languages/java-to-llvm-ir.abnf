@@ -622,8 +622,15 @@ ResDecl     <~~ push(makeResDecl(takeAll())) ~~>
 ResRef      <~~ push({res: stripWs(up.in), rinit: null}) ~~> = Id ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch "(" { Annotation | "final" KwEnd } CatchType Id <~~ push(up.in) ~~> ")" Block ;
+CatchClause <~~ push(jCatch(takeAll())) ~~>
+            = KwCatch "(" { Annotation | "final" KwEnd } CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
+// The declared type(s) of the catch parameter, kept as the source wrote them
+// ("AErr|BErr" for a multi-catch). Until this rule existed the type never
+// reached makeTry at all: every clause but the FIRST was discarded and that one
+// caught everything, so `catch (NumberFormatException e)` ran on an
+// IllegalStateException. See jCatchDispatch.
+CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
+            = CatchType ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
@@ -769,7 +776,7 @@ PlaceAhead  = :script(~~
 ~~) ;
 PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TIndex      <~~ push({idx: pop()}) ~~>
+TIndex      <~~ push(jNoteIdx({idx: pop()})) ~~>
             = "[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
@@ -943,10 +950,10 @@ MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
             = "." KwNew [ SkipAngle ] { Annotation } Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
               "(" [ Expression { "," Expression } ] ")" [ "{" { Member } "}" ] ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push(jNoteMSfx({kind:"mcall", name: popName(), args: takeAll()})) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+IndexSfx    <~~ push(jNoteIdx({kind:"index", idx: pop()})) ~~>
             = "[" Expression "]" ;
 
 // A switch EXPRESSION: the same case forms as the statement, but every arm supplies
@@ -2241,12 +2248,19 @@ HasStatic   = :script(~~
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_get", [o, r.v])
+                o = callExt(b, "js_jvidx", [o, r.v])
             }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key)}
         var kr = last.idx(b)
+        // The WRITE half of the bounds check, and it is here rather than at the
+        // three js_set call sites because makeAssign, makeIncDec and makePreIncDec
+        // all resolve their place through this one function. js_jvidx is reused as
+        // the CHECK - reading an element has no effect and the value is discarded -
+        // so one extern serves both halves in all three engines. Without it `a[3]=5`
+        // GREW an int[3] to length 4, in every engine.
+        callExt(kr.b, "js_jvidx", [o, kr.v])
         return {b: kr.b, obj: o, key: kr.v}
     }
     // The WRITE half of the unqualified-field branch (see makeVarRef and
@@ -3140,6 +3154,15 @@ HasStatic   = :script(~~
         return function(b) { return hNull }
     }
     function emitArrDims(b, dimVs, idx, fillFn) {
+        // JLS 15.10.1: EVERY dimension expression is validated BEFORE any array is
+        // allocated, so `new int[0][-1]` throws even though the inner allocation
+        // would never run. js_jvnewlen answers its argument and raises
+        // NegativeArraySizeException on a negative one. Without it `new int[-1]`
+        // answered a zero-length array in the interpreter and killed the compiled
+        // halves outright (`runtime error: makeslice: len out of range`).
+        if (idx == 0) {
+            for (var d = 0; d < dimVs.length; d++) { callExt(b, "js_jvnewlen", [dimVs[d]]) }
+        }
         if (idx == dimVs.length - 1) {
             return {b: b, v: callExt(b, "js_arr_new_n", [dimVs[idx], fillFn(b)])}
         }
@@ -3163,6 +3186,7 @@ HasStatic   = :script(~~
         return {b: doneB, v: arrV}
     }
     function makeNewArray(items) {
+        jUsesNewArr = true
         var ty = ""
         var dims = []
         var hasEmpty = false
@@ -3268,6 +3292,10 @@ HasStatic   = :script(~~
         // allocates a one-dimensional array of the length it is handed, ::clone is
         // unbound and copies its first argument.
         if (tgtPath.indexOf("[") >= 0) {
+            // `String[]::new` allocates too, so it needs the descriptor as much as
+            // `new String[n]` does - and this is the WALK, which is where the flag
+            // has to be set (emitBuiltinExc runs before the body thunks).
+            jUsesNewArr = true
             var fillFn = arrFillOf(jStripArr(tgtPath), false)
             var arrName = methodPart
             var arrBody = function(b) {
@@ -3428,7 +3456,14 @@ HasStatic   = :script(~~
                     // equals and otherwise keeps Object's identity. So an
                     // override is unaffected in both cases and no class needs a
                     // generated method. Only the exact arities are Object's.
-                    var mv = (s.name == "charAt")
+                    // String.substring checks the RANGE (begin > end is out of
+                    // bounds too, JLS java.lang.String) where the shared js_mcall
+                    // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
+                    // Go extern table is SHARED across languages, so a wrapper on
+                    // js_mcall would make a C# Substring raise java's message.
+                    var mv = (s.name == "substring")
+                             ? callExt(mcallB, "js_jvsub", [cur, ea.v])
+                             : ((s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
                              : ((s.name == "hashCode" && s.args.length == 0)
                                 ? callExt(mcallB, "js_jhash", [cur])
@@ -3436,7 +3471,7 @@ HasStatic   = :script(~~
                                    ? callExt(mcallB, "js_jvstr", [cur])
                                    : ((s.name == "equals" && s.args.length == 1)
                                       ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))))
+                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -3452,7 +3487,10 @@ HasStatic   = :script(~~
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = callExt(b, core.indexExt, [cur, ir2.v])
+                    // js_jvidx, not core.indexExt's js_get: every array access is
+                    // bounds-checked and throws ArrayIndexOutOfBoundsException
+                    // (JLS 10.4). See the note at jArrIdx in java-interpreter.abnf.
+                    cur = callExt(b, "js_jvidx", [cur, ir2.v])
                 }
             }
             return {b: b, v: cur}
@@ -3499,15 +3537,64 @@ HasStatic   = :script(~~
             return excDispatch(b, callExt(b, "js_try", [tryClo, hUndef, finClo]))
         }
     }
+    // A catch clause, with the DECLARED type(s) of its parameter. The twin of
+    // jCatch in java-interpreter.abnf.
+    function jCatch(items) {
+        return {catchtype: items[0].ctypes, catchname: items[1], catchbody: items[2]}
+    }
+    // "java.io.IOException" / "List<E>" -> "IOException" / "List": js_jvexcmatch
+    // compares a class descriptor's __name, which is the simple name.
+    function jCatchTyName(t) {
+        var s = t.split("<")[0]
+        var parts = s.split(".")
+        return parts[parts.length - 1]
+    }
+    // ONE catch closure that dispatches over the clauses in source order, which is
+    // what a Java try/catch actually is (JLS 14.20.1). This half used to keep only
+    // the FIRST clause and ignore its type entirely - a live halves divergence
+    // --cross never reached, because every test program had one catch clause whose
+    // type matched: `catch (NumberFormatException e) {} catch (IllegalStateException e) {}`
+    // ran the NumberFormatException body on an IllegalStateException, and the
+    // second clause was not emitted at all.
+    //
+    // A value that matches nothing is RE-THROWN, so an outer try still sees it -
+    // excTryTyped in lib/interp-core.js does the same, and the finally closure
+    // handed to js_try runs either way.
+    function jCatchDispatch(clauses) {
+        return function(bb) {
+            var caughtV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "__caught")])
+            var endB = curF.NewBlock("")
+            for (var i = 0; i < clauses.length; i++) {
+                var c = clauses[i]
+                var hitB = curF.NewBlock("")
+                var tys = (c.catchtype == undefined) ? [] : c.catchtype.split("|")
+                for (var t = 0; t < tys.length; t++) {
+                    var nextB = curF.NewBlock("")
+                    var okV = callExt(bb, "js_jvexcmatch", [caughtV, emitStr(bb, jCatchTyName(tys[t]))])
+                    bb.NewCondBr(truthy(bb, okV), hitB, nextB)
+                    bb = nextB
+                }
+                if (tys.length == 0) { bb.NewBr(hitB) }
+                if (c.catchname != undefined) {
+                    callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, c.catchname), caughtV])
+                }
+                var doneB = c.catchbody(hitB)
+                doneB.NewBr(endB)
+            }
+            // No clause matched: re-raise, so an enclosing try can catch it.
+            callExt(bb, "js_throw", [caughtV])
+            bb.NewRet(hUndef)
+            return endB
+        }
+    }
     function makeTry(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var tryT = anytype, finallyT = anytype
+        var clauses = []
         var resources = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].resources != undefined) { resources = items[i].resources }
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
-            }
+            else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         if (resources != null) {
@@ -3516,9 +3603,10 @@ HasStatic   = :script(~~
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, null, null, null, true)), curScopeV])
             var catchClo = hUndef
-            if (catchT != undefined) {
-                var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, null, null, null, true)), curScopeV])
+            if (clauses.length > 0) {
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitFunc(["__caught"], jCatchDispatch(clauses), false, null, null, null, true)),
+                                    curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
@@ -4562,8 +4650,10 @@ HasStatic   = :script(~~
                            "IllegalArgumentException", "IllegalStateException",
                            "NullPointerException", "ArithmeticException",
                            "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
+                           "StringIndexOutOfBoundsException", "NegativeArraySizeException",
                            "ClassCastException", "UnsupportedOperationException",
-                           "NumberFormatException", "InterruptedException", "IOException"]
+                           "NumberFormatException", "InterruptedException", "IOException",
+                           "StackOverflowError", "AssertionError"]
     var builtinExcParent = {"$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
                             "$RuntimeException": "Exception",
                             "$IllegalArgumentException": "RuntimeException",
@@ -4572,16 +4662,67 @@ HasStatic   = :script(~~
                             "$ArithmeticException": "RuntimeException",
                             "$IndexOutOfBoundsException": "RuntimeException",
                             "$ArrayIndexOutOfBoundsException": "IndexOutOfBoundsException",
+                            "$StringIndexOutOfBoundsException": "IndexOutOfBoundsException",
+                            "$NegativeArraySizeException": "RuntimeException",
+                            "$StackOverflowError": "Error", "$AssertionError": "Error",
                             "$ClassCastException": "RuntimeException",
                             "$UnsupportedOperationException": "IllegalArgumentException",
                             "$NumberFormatException": "IllegalArgumentException",
                             "$InterruptedException": "Exception", "$IOException": "Exception"}
-    // ArithmeticException is needed whether or not the program names it: an
-    // integer divide by zero throws one (JLS 15.17.2), and js_jvarith raises it
-    // through the descriptor js_jvexc registers. So it, and its ancestors, are
+    // ----- what the RUNTIME can raise, decided at WALK time -----
+    //
+    // A descriptor the runtime raises has to exist before the raise, so it cannot
+    // be emitted on demand the way `noteTypeUse` emits the ones a program NAMES.
+    // Emitting all five unconditionally is what the first version did, and the
+    // exact counters said no: on tests/bench/mod.java - a program with no array
+    // indexing at all - the emitted module went 24,978 -> 40,196 bytes, the native
+    // binary 427K -> 464K and the GC's live set 129,296 -> 139,856 bytes, for five
+    // class descriptors it could never reach. (Collections were unchanged at 1,054,
+    // and the instruction count moved +2.6% against java's own 3.21% spread, i.e.
+    // not measurable there - chapter 4.)
+    //
+    // So each is gated on the FEATURE, not on the type name: the flags below are
+    // set by the grammar actions, which run while the file is walked and are
+    // therefore complete before emitBuiltinExc runs.
+    var jUsesIdx = false        // any `a[i]`      -> AIOOBE + NullPointerException
+    var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
+    var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
+    function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
+    function jNoteMSfx(sfx) {
+        if (sfx.name == "charAt" || sfx.name == "substring") { jUsesStrIdx = true }
+        return sfx
+    }
+    // Four of these are needed whether or not the program names them, because the
+    // RUNTIME raises them from code that has no access to the program's scope:
+    // ArithmeticException on an integer divide by zero (JLS 15.17.2, js_jvarith),
+    // ArrayIndexOutOfBoundsException on every out-of-range array access (JLS 10.4,
+    // js_jvidx), StringIndexOutOfBoundsException from charAt/substring and
+    // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen).
+    // js_jvexc registers each descriptor by NAME; so they, and their ancestors, are
     // always emitted.
+    // ArithmeticException alone is unconditional: an integer divide by zero is
+    // reachable from arithmetic the emitter cannot see around (JLS 15.17.2).
     var neededExc = {"$ArithmeticException": true, "$RuntimeException": true,
                      "$Exception": true, "$Throwable": true}
+    // The names handed to the runtime by js_jvexc. jNoteRuntimeExc, called once
+    // the whole file has been walked, adds the feature-gated ones.
+    var runtimeExc = {"$ArithmeticException": true}
+    function jNoteRuntimeExc() {
+        if (jUsesIdx) {
+            runtimeExc["$ArrayIndexOutOfBoundsException"] = true
+            runtimeExc["$NullPointerException"] = true
+            noteTypeUse("ArrayIndexOutOfBoundsException")
+            noteTypeUse("NullPointerException")
+        }
+        if (jUsesStrIdx) {
+            runtimeExc["$StringIndexOutOfBoundsException"] = true
+            noteTypeUse("StringIndexOutOfBoundsException")
+        }
+        if (jUsesNewArr) {
+            runtimeExc["$NegativeArraySizeException"] = true
+            noteTypeUse("NegativeArraySizeException")
+        }
+    }
     var userDeclared = {}
     for (var bx = 0; bx < builtinExcOrder.length; bx++) { classNames["$" + builtinExcOrder[bx]] = true }
     // Records that `name` is used as a type, so its builtin descriptor (and every
@@ -4594,6 +4735,7 @@ HasStatic   = :script(~~
         }
     }
     function emitBuiltinExc(b) {
+        jNoteRuntimeExc()
         var ctor1 = emitFunc([], function(bb) {
             var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
             callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])])
@@ -4629,11 +4771,14 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
                                   callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
-            // Hand ArithmeticException to the runtime once, so that a divide by
-            // zero can THROW a catchable exception from inside js_jvarith - which
-            // has no access to the program's scope. The interpreter half throws
-            // the same shape from jThrowExc.
-            if (name == "ArithmeticException") { callExt(b, "js_jvexc", [clsV]) }
+            // Hand the four runtime-raised descriptors over once each, BY NAME, so
+            // that a divide by zero, an out-of-range index and a negative array
+            // length can THROW a catchable exception from inside js_jvarith /
+            // js_jvidx / js_jvnewlen - none of which has access to the program's
+            // scope. The interpreter half throws the same shape from jThrowExc.
+            if (runtimeExc["$" + name] == true) {
+                callExt(b, "js_jvexc", [emitStr(b, name), clsV])
+            }
         }
         return b
     }

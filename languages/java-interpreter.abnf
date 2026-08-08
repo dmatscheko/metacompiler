@@ -2445,6 +2445,50 @@ HasStatic   = :script(~~
     function jThrowExc(clsName, msg) {
         throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
     }
+    // ----- the bounds checks (JLS 10.4, 15.10.4 and java.lang.String) -----
+    //
+    // EVERY array access is bounds-checked in Java and a violation THROWS
+    // ArrayIndexOutOfBoundsException - it does not answer a default value, and it
+    // does not extend the array on a write. This engine used to answer `undefined`
+    // for a read past the end and to GROW the array on a write past the end, in all
+    // four engines; the closed docs/todo.md 1.2 converged the *value* on NaN, which
+    // was the cheap fix. This is the correct one.
+    //
+    // The message text is java 24.0.2's, verified against the real toolchain:
+    //   a[3]   on int[3]    Index 3 out of bounds for length 3
+    //   "abc".charAt(3)     Index 3 out of bounds for length 3     (StringIndex...)
+    //   "abc".substring(-1) Range [-1, 3) out of bounds for length 3
+    //   new int[-1]         -1                                     (NegativeArraySize...)
+    // The COMPILED halves raise the same four from jvThrowAioobe / jvThrowSioobe /
+    // jvThrowRange in languages/lib/java-rt.metajs and abnf/jsrtjava.go.
+    function jArrIdx(a, iv) {
+        var i = jNum(iv)
+        if (i < 0 || i >= a.length) {
+            jThrowExc("ArrayIndexOutOfBoundsException",
+                      "Index " + i + " out of bounds for length " + a.length)
+        }
+        return i
+    }
+    function jStrIdx(s, iv) {
+        var i = jNum(iv)
+        if (i < 0 || i >= s.length) {
+            jThrowExc("StringIndexOutOfBoundsException",
+                      "Index " + i + " out of bounds for length " + s.length)
+        }
+        return i
+    }
+    // String.substring(begin[, end]): end defaults to the length, and the range is
+    // checked as a whole - begin > end is out of bounds too, which is why the
+    // message names a range rather than one index.
+    function jSubstr(s, args) {
+        var b = jNum(args[0])
+        var e = args.length > 1 ? jNum(args[1]) : s.length
+        if (b < 0 || e > s.length || b > e) {
+            jThrowExc("StringIndexOutOfBoundsException",
+                      "Range [" + b + ", " + e + ") out of bounds for length " + s.length)
+        }
+        return s.slice(b, e)
+    }
     // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62
     // bits and a double keeps only 53, so the low bits - the only ones that
     // survive - are already gone by the time |0 runs. Splitting into 16 bit halves
@@ -3039,14 +3083,14 @@ HasStatic   = :script(~~
         if (typeof target == "string") {
             if (name == "length") return target.length
             if (name == "charCodeAt") return target.charCodeAt(args[0])
-            if (name == "charAt") return jChar(target.charCodeAt(jNum(args[0])))
+            if (name == "charAt") return jChar(target.charCodeAt(jStrIdx(target, args[0])))
             if (name == "equals") return target === args[0]
             // Object#toString on a String is the String (java.lang.String
             // overrides it with `return this`). The compiler half gets this from
             // js_jvstr, which renders every value; here the String arm comes
             // BEFORE the Object fallback further down, so it has to say so.
             if (name == "toString") return target
-            if (name == "substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
+            if (name == "substring") return jSubstr(target, args)
             if (name == "indexOf") return target.indexOf(args[0])
             if (name == "isEmpty") return target.length == 0
             fail("unknown String method: " + name)
@@ -3552,7 +3596,16 @@ HasStatic   = :script(~~
         return null
     }
     function jAllocArr(ns, i, leaf) {
-        var n = ns[i]
+        // JLS 15.10.1: a negative dimension throws NegativeArraySizeException, whose
+        // message is the offending size and nothing else. EVERY dimension is checked
+        // before anything is allocated, so `new int[0][-1]` throws as well.
+        if (i == 0) {
+            for (var d = 0; d < ns.length; d++) {
+                var nd = jNum(ns[d])
+                if (nd < 0) { jThrowExc("NegativeArraySizeException", "" + nd) }
+            }
+        }
+        var n = jNum(ns[i])
         var a = []
         for (var k = 0; k < n; k++) {
             if (i + 1 < ns.length) { a.push(jAllocArr(ns, i + 1, leaf)) }
@@ -3850,6 +3903,7 @@ HasStatic   = :script(~~
                     "IndexOutOfBoundsException", "RuntimeException",
                     "ArrayIndexOutOfBoundsException", "IndexOutOfBoundsException",
                     "StringIndexOutOfBoundsException", "IndexOutOfBoundsException",
+                    "NegativeArraySizeException", "RuntimeException",
                     "NumberFormatException", "IllegalArgumentException",
                     "StackOverflowError", "Error",
                     "AssertionError", "Error"]
@@ -5085,7 +5139,13 @@ HasStatic   = :script(~~
         }
         var last = ref.path[ref.path.length - 1]
         if (o === undefined || o === null) fail(core.nullWord + " in assignment path")
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+        if (last.key != undefined) { return {obj: o, key: last.key} }
+        // The WRITE half of the bounds check. `a[3] = 5` on an int[3] used to GROW
+        // the array here (and in both compiled halves); java throws. Every writer -
+        // makeAssign, makeIncDec, makePreIncDec - goes through this one place.
+        var ki = last.idx()
+        if (Array.isArray(o)) { return {obj: o, key: jArrIdx(o, ki)} }
+        return {obj: o, key: ki}
     }
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "java"
@@ -5093,6 +5153,16 @@ HasStatic   = :script(~~
     core.getField = function(o, name) {
         if (name == "length" && Array.isArray(o)) { return o.length }
         if (hasOwn(o, name)) { return o[name] }
+        return undefined
+    }
+    // `a[i]` on an array is bounds-checked (jArrIdx). A null reference throws
+    // NullPointerException rather than reaching hasOwn, which used to abort the
+    // whole run with the HOST's "Cannot convert undefined or null to object" -
+    // uncatchable, and reachable from `m[3][0]` on any int[2][3].
+    core.getIndex = function(o, i) {
+        if (Array.isArray(o)) { return o[jArrIdx(o, i)] }
+        if (o === undefined || o === null) { jThrowExc("NullPointerException", null) }
+        if (hasOwn(o, i)) { return o[i] }
         return undefined
     }
 

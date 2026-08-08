@@ -2106,6 +2106,87 @@ KwLet       = "let" KwEnd ;
         if (csIsTuple(l) && csIsTuple(r)) { return csTupEq(l, r) }
         return false
     }
+    // ----- System.Object.Equals / GetHashCode / GetType (docs/todo.md 1.6) -----
+    //
+    // Equals is NOT ==. `==` promotes (5 == 5L is true, 16777216f == 16777217 is
+    // true); Int32.Equals(object) requires an Int32, so `5.Equals(5L)` is FALSE.
+    // csElemName is the value's own .NET type name, so type-strictness is one
+    // comparison. A reference type keeps object's identity, except a record and a
+    // tuple, which C# gives value semantics.
+    function csObjEquals(a, b) {
+        var an = csElemName(a)
+        if (an != "") {
+            if (an !== csElemName(b)) { return false }
+            // Double.Equals answers TRUE for two NaNs where `==` answers false -
+            // documented on System.Double.Equals, and the one place the two differ.
+            if (csIsFlo(a)) {
+                var x = csNumD(a)
+                var y = csNumD(b)
+                if (x !== x) { return y !== y }
+                return x === y
+            }
+            return csEq(a, b)
+        }
+        if (a === null || a === undefined) { return b === null || b === undefined }
+        return csEq(a, b)
+    }
+    // GetHashCode. ENGINE BEHAVIOUR, deliberately: .NET does not specify these
+    // numbers and String.GetHashCode is documented to differ between processes, so
+    // no assertion can name a value. What IS a contract - and what is asserted - is
+    // that two values Equals() calls equal hash the same. The twin is csHash in
+    // languages/lib/csharp-rt.metajs and abnf/jsrtcsharp.go.
+    function csHash(v) {
+        if (v === null || v === undefined) { return 0 }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (csIsChar(v)) { return v.__char }
+        if (typeof v == "string") {
+            var h = 0
+            for (var i = 0; i < v.length; i++) { h = (jMul32Cs(h, 31) + v.charCodeAt(i)) | 0 }
+            return h
+        }
+        if (csIsFlo(v)) { return csNumD(v) | 0 }
+        if (csIsSz(v)) { return csNumD(v) | 0 }
+        if (typeof v == "number") { return v | 0 }
+        if (csIsRecObj(v) || csIsTuple(v)) {
+            var rh = 0
+            var ks = csIsTuple(v) ? [] : v.__class.__fieldNames
+            if (csIsTuple(v)) { for (var t = 0; t < v.__tuple; t++) { ks.push("Item" + (t + 1)) } }
+            for (var k = 0; k < ks.length; k++) { rh = (jMul32Cs(rh, 31) + csHash(v[ks[k]])) | 0 }
+            return rh
+        }
+        return csIdHash(v)
+    }
+    // (a * b) mod 2^32 without losing the low bits to a double's 53 (see jMul32 in
+    // java-interpreter.abnf, which is the same body for the same reason).
+    function jMul32Cs(a, b) {
+        var ah = (a >>> 16) & 65535
+        var al = a & 65535
+        var bh = (b >>> 16) & 65535
+        var bl = b & 65535
+        return (((ah * bl + al * bh) << 16) + al * bl) | 0
+    }
+    // A per-run identity number for a reference, the same device java's renderer
+    // uses: the k-th distinct object asked gets 0x2b3c4d00+k. Reproducible within a
+    // run, and no assertion may depend on the digits.
+    var csIdSeq = 0
+    function csIdHash(v) {
+        if (!hasOwn(v, "__idhash")) { csIdSeq = csIdSeq + 1; v.__idhash = 725896960 + csIdSeq }
+        return v.__idhash
+    }
+    // GetType(): a System.Type token with the same two members typeof(T) answers.
+    function csTypeOfVal(v) {
+        var full = csElemName(v)
+        if (full == "") {
+            if (Array.isArray(v)) { full = csArrayName(v) }
+            else if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined
+                     && typeof v.__class.__name == "string") { full = v.__class.__name }
+            else if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true
+                     && typeof v.__name == "string") { full = v.__name }
+            else { full = "System.Object" }
+        }
+        var parts = full.split(".")
+        return {Name: parts[parts.length - 1], FullName: full}
+    }
     function csIsRecObj(v) {
         return v !== null && v !== undefined && typeof v == "object"
             && v.__class != undefined && v.__class.__isrecord === true
@@ -2174,7 +2255,11 @@ KwLet       = "let" KwEnd ;
         // the one array kind whose element type is not a guess.
         if (csIsSz(e)) {
             if (e.w == 64) { return e.u ? "System.UInt64" : "System.Int64" }
-            if (e.w == 32) { return "System.UInt32" }
+            // UNREACHABLE TODAY and kept only so the three engines agree if it ever
+            // is: a signed 32-bit value is a plain number here, never a box. This
+            // arm used to answer System.UInt32 for BOTH signednesses, where layer 2
+            // says System.Int32 and the Go twin fell through to System.SByte.
+            if (e.w == 32) { return e.u ? "System.UInt32" : "System.Int32" }
             if (e.w == 16) { return e.u ? "System.UInt16" : "System.Int16" }
             return e.u ? "System.Byte" : "System.SByte"
         }
@@ -2271,16 +2356,59 @@ KwLet       = "let" KwEnd ;
         }
         if (isDict(o)) {
             var di = dictFind(o, i)
-            if (di < 0) fail("KeyError: " + i)
+            if (di < 0) { csThrowExc("KeyNotFoundException", csKeyMsg(i)) }
             return o.vals[di]
         }
         if (typeof o == "string") {
-            if (i < 0 || i >= o.length) fail("string index out of range: " + i)
+            if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
             return o.charAt(i)
         }
-        if (o === undefined || o === null) fail("index of null")
-        if (i < 0 || i >= o.length) fail("index out of range: " + i)
+        if (o === undefined || o === null) { csThrowExc("NullReferenceException", csNullMsg) }
+        if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
         return o[i]
+    }
+    // ----- the index bounds checks (docs/todo.md 1.2's C# half) -----
+    //
+    // Every one of these used to fail() the run, which no program could catch, and
+    // the COMPILED half was worse: it inherited python's js_pyget, so a[-1] answered
+    // the LAST element in the compiled half and aborted here - a live halves
+    // divergence --cross had never reached. They now throw the BCL exception the
+    // spec names, in all three engines (csIdxChk / csThrowExc / js_csidx).
+    //
+    // The MESSAGES are .NET BCL text and there is no dotnet on this machine to
+    // settle them (manual chapter 7.9) - the CLASS is the part that is spec-grounded:
+    // ECMA-335 III.4.4 (ldelem/stelem throw IndexOutOfRangeException), III.4.16
+    // (newarr throws OverflowException on a negative count), and ECMA-334 12.8.11.3
+    // for the string indexer.
+    //
+    // KNOWN SIMPLIFICATION, shared by all three engines: a `List<T>` and an array are
+    // the same value here, so a List index out of range also raises
+    // IndexOutOfRangeException where real .NET raises ArgumentOutOfRangeException.
+    // Distinguishing them needs a List box in the value model.
+    var csIdxMsg = "Index was outside the bounds of the array."
+    var csNullMsg = "Object reference not set to an instance of an object."
+    var csOvfMsg = "Arithmetic operation resulted in an overflow."
+    function csKeyMsg(k) { return "The given key '" + csStr(k) + "' was not present in the dictionary." }
+    function csIdxChk(o, i) {
+        if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
+    }
+    // ----- String.Substring, and TWO defects in one line -----
+    //
+    // System.String.Substring(int startIndex, int length) takes a LENGTH, not an end
+    // index. Both halves lowered it to a JS slice(start, end), so
+    // `"abcdef".Substring(1, 3)` answered "bc" where C# answers "bcd" - one wrong
+    // answer BOTH halves agreed on, which is the class --cross cannot see by
+    // construction. And an out-of-range argument CLAMPED silently where C# raises
+    // ArgumentOutOfRangeException; the four messages are the BCL's, uncheckable here.
+    function csSubstr(s, args) {
+        var b = csNumD(args[0])
+        if (b < 0) { csThrowExc("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')") }
+        if (b > s.length) { csThrowExc("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')") }
+        if (args.length < 2) { return s.slice(b) }
+        var n = csNumD(args[1])
+        if (n < 0) { csThrowExc("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')") }
+        if (b + n > s.length) { csThrowExc("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')") }
+        return s.slice(b, b + n)
     }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
@@ -2530,6 +2658,28 @@ KwLet       = "let" KwEnd ;
         if (name == "ToString" && args.length == 0 && !csHasMethod(target, "ToString")) {
             return csStr(target)
         }
+        // ----- the other three members of the System.Object contract (docs/todo.md 1.6)
+        //
+        // ECMA-334 8.2.3: EVERY type inherits Equals, GetHashCode, GetType and
+        // ToString from object. Only ToString was answered here, so
+        // `v[0].Equals((object) v[1])` aborted with "unknown method 'Equals'" in this
+        // half and "method call 'equals' on a number" in the compiled one, and so did
+        // GetHashCode and GetType on a number, a bool, a char or a long. Only
+        // string.Equals worked, through the string arm below. A user override always
+        // wins - csHasMethod is the same guard ToString uses.
+        //
+        // JAVA WAS CHECKED FOR THE SAME DEFECT and does not have it: js_jvaleq /
+        // js_jhash / js_jvstr already intercept equals/hashCode/toString for every
+        // receiver in both halves (see the mcall arm in java-to-llvm-ir.abnf).
+        if (name == "Equals" && args.length == 1 && !csHasMethod(target, "Equals")) {
+            return csObjEquals(target, args[0])
+        }
+        if (name == "GetHashCode" && args.length == 0 && !csHasMethod(target, "GetHashCode")) {
+            return csHash(target)
+        }
+        if (name == "GetType" && args.length == 0 && !csHasMethod(target, "GetType")) {
+            return csTypeOfVal(target)
+        }
         // `d.Invoke(x)` is `d(x)`: ECMA-334 20.2 gives every delegate type an Invoke
         // method with the delegate's own signature, and 12.8.10.2 invokes it. A user
         // type declaring its own Invoke wins, which is what csHasMethod tests
@@ -2538,7 +2688,7 @@ KwLet       = "let" KwEnd ;
             return csDelegInvoke(target, args)
         }
         if (typeof target == "string") {
-            if (name == "Substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
+            if (name == "Substring") return csSubstr(target, args)
             if (name == "IndexOf") return target.indexOf(args[0])
             if (name == "Equals") return target === args[0]
             fail("unknown string method: " + name)
@@ -2725,6 +2875,11 @@ KwLet       = "let" KwEnd ;
             var wh = csStaticHolder(o, lk)
             if (wh != null) { o = wh }
         }
+        // The WRITE half of the bounds check: `a[3] = 5` on an int[3] used to GROW the
+        // array here and to abort the compiled half with a raw "list assignment index
+        // out of range". A dictionary write INSERTS and must not be checked, and a
+        // user indexer is not an array, so the Array.isArray guard is exactly right.
+        if (last.key == undefined && Array.isArray(o)) { csIdxChk(o, lk) }
         return {obj: o, key: lk, isIndex: last.key == undefined}
     }
     // Reads the current value of an assignment target (for '??=', which must not assign
@@ -3139,6 +3294,11 @@ KwLet       = "let" KwEnd ;
     function makeNewArray(sizeT) {
         return function() {
             var n = sizeT()
+            // ECMA-335 III.4.16: newarr throws OverflowException when the element
+            // count is negative. `new int[-1]` used to answer a zero-length array
+            // here and to kill the compiled half with a Go panic (`runtime error:
+            // makeslice: len out of range`).
+            if (csNumD(n) < 0) { csThrowExc("OverflowException", csOvfMsg) }
             var a = []
             for (var i = 0; i < n; i++) a.push(0)
             return a

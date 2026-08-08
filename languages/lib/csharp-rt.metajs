@@ -804,6 +804,144 @@ function cpObjStr(o, depth) {
     return undefined
 }
 
+// ================================== System.Object.Equals / GetHashCode / GetType ==
+//
+// The twins of csObjEquals / csHash / csTypeOfVal in csharp-interpreter.abnf; the
+// comments there are the specification half. Equals is NOT ==: `==` promotes
+// (5 == 5L is true), while Int32.Equals(object) requires an Int32, so
+// `5.Equals(5L)` is FALSE. cpElemName is the value's own .NET type name, so
+// type-strictness is one comparison.
+function csUserMethod(recv, name) {
+    if (recv === undefined || recv === null) { return undefined }
+    if (typeof recv != "object") { return undefined }
+    var cls = recv["__class"]
+    if (cls === undefined) { return undefined }
+    var mm = rtFindMethod(cls, name)
+    if (csIsFn(mm)) { return mm }
+    return undefined
+}
+function csObjEquals(a, b) {
+    var an = cpElemName(a)
+    if (an != "") {
+        if (an !== cpElemName(b)) { return false }
+        if (csIsChar(a)) { return a["__char"] === b["__char"] }
+        if (floIs(a)) {
+            var x = rtjNum(a)
+            var y = rtjNum(b)
+            // Double.Equals is NOT ==: it answers TRUE for two NaNs (documented on
+            // System.Double.Equals), which is the one place the two differ.
+            if (x !== x) { return y !== y }
+            return x === y
+        }
+        if (sintIs(a) || sintIs(b)) { return csCmp("==", a, b) }
+        return a === b
+    }
+    if (a === undefined || a === null) { return b === undefined || b === null }
+    if (csIsRecVal(a) && csIsRecVal(b)) { return csRecEqVal(a, b) }
+    return a === b
+}
+// A record or a ValueTuple: C# gives both VALUE semantics.
+function csIsRecVal(v) {
+    if (v === null || v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (v["__tuple"] !== undefined) { return true }
+    var c = v["__class"]
+    if (c === undefined || c === null) { return false }
+    if (typeof c != "object") { return false }
+    return c["__isrecord"] === true
+}
+function csRecKeys(v) {
+    if (v["__tuple"] !== undefined) {
+        var ks = []
+        var n = v["__tuple"]
+        var i = 0
+        while (i < n) { ks.push("Item" + (i + 1)); i = i + 1 }
+        return ks
+    }
+    var fn = v["__class"]["__fieldNames"]
+    if (fn === undefined || fn === null) { return [] }
+    return fn
+}
+function csRecEqVal(a, b) {
+    if (a["__tuple"] !== undefined) {
+        if (a["__tuple"] !== b["__tuple"]) { return false }
+    } else if (a["__class"] !== b["__class"]) { return false }
+    var ks = csRecKeys(a)
+    var i = 0
+    while (i < ks.length) {
+        if (!csObjEquals(a[ks[i]], b[ks[i]])) { return false }
+        i = i + 1
+    }
+    return true
+}
+// GetHashCode. ENGINE BEHAVIOUR, deliberately: .NET does not specify these numbers
+// and String.GetHashCode is documented to differ between processes, so no assertion
+// can name a value. What IS a contract - and what is asserted - is that two values
+// Equals() calls equal hash the same.
+function csHash(v) {
+    if (v === undefined || v === null) { return 0 }
+    if (typeof v == "boolean") { return v ? 1 : 0 }
+    if (csIsChar(v)) { return v["__char"] }
+    if (typeof v == "string") {
+        var h = 0
+        var i = 0
+        while (i < v.length) { h = rtWrap32(csMul32(h, 31) + v.charCodeAt(i)); i = i + 1 }
+        return h
+    }
+    if (typeof v == "number") { return rtWrap32(Math.trunc(rtjNum(v))) }
+    if (csIsRecVal(v)) {
+        var rh = 0
+        var ks = csRecKeys(v)
+        var k = 0
+        while (k < ks.length) { rh = rtWrap32(csMul32(rh, 31) + csHash(v[ks[k]])); k = k + 1 }
+        return rh
+    }
+    return csIdHash(v)
+}
+// (a * b) mod 2^32 without losing the low bits to a double's 53 significant bits.
+function csMul32(a, b) {
+    var ah = (a >>> 16) & 65535
+    var al = a & 65535
+    var bh = (b >>> 16) & 65535
+    var bl = b & 65535
+    return (((ah * bl + al * bh) << 16) + al * bl) | 0
+}
+// A per-run identity number for a reference: the k-th distinct object asked gets
+// 0x2b3c4d00+k. Reproducible within a run; no assertion may depend on the digits.
+var csIdSeq = 0
+function csIdHash(v) {
+    var h = v["__idhash"]
+    if (h !== undefined) { return h }
+    csIdSeq = csIdSeq + 1
+    v["__idhash"] = 725896960 + csIdSeq
+    return v["__idhash"]
+}
+// GetType(): a System.Type token with the same two members typeof(T) answers.
+function csTypeOfVal(v) {
+    var full = cpElemName(v)
+    if (full == "") {
+        if (Array.isArray(v)) { full = cpArrayName(v) }
+        else if (v !== undefined && v !== null && typeof v == "object") {
+            var c = v["__class"]
+            if (c !== undefined && c !== null && typeof c["__name"] == "string") { full = c["__name"] }
+            else if (v["__isclass"] === true && typeof v["__name"] == "string") { full = v["__name"] }
+            else { full = "System.Object" }
+        } else { full = "System.Object" }
+    }
+    var o = {}
+    o["FullName"] = full
+    o["Name"] = csLastSeg(full)
+    return o
+}
+function csLastSeg(s) {
+    var i = s.length - 1
+    while (i >= 0) {
+        if (s.charAt(i) == ".") { return s.substring(i + 1) }
+        i = i - 1
+    }
+    return s
+}
+
 // cspArrayName is Object.ToString() of an array: the element type's full name plus
 // "[]". The DECLARED element type is not carried by this value model, so it is
 // INFERRED from the elements - see the header of abnf/jsrtcsharp.go for the rule
@@ -1213,15 +1351,49 @@ function js_jchareq(l, r) {
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go) is
 // a LANGUAGE-NEUTRAL dispatcher; only the arms csharp-to-llvm-ir.abnf can reach are
 // here, and the ones it cannot are named at the fallthrough rather than guessed at.
+// C#'s method-call entry point. It exists for the same reason js_ktsmcall and
+// js_swmcall do: the Go extern table is filled ONCE for every language, so a
+// wrapper on js_mcall itself would give the other fifteen C#'s answers - observed,
+// with a C# Substring raising java's "Range [10, 6) out of bounds for length 6".
+//
+// It adds the three members of the System.Object contract that no receiver could
+// answer (docs/todo.md 1.6). ECMA-334 8.2.3: EVERY type inherits Equals,
+// GetHashCode, GetType and ToString from object. Only ToString was routed, so
+// `v[0].Equals((object) v[1])` aborted this half with "method call 'equals' on a
+// number" and the interpreter with "unknown method 'Equals'". A user override still
+// wins - csUserMethod is the __class/__super walk js_mcall does anyway. The twin is
+// mcall0 in languages/csharp-interpreter.abnf.
+function js_csmcall(recv, name, args) {
+    if (name == "Equals" || name == "GetHashCode" || name == "GetType") {
+        if (csUserMethod(recv, name) === undefined) {
+            if (name == "Equals") { return csObjEquals(recv, args[0]) }
+            if (name == "GetHashCode") { return csHash(recv) }
+            return csTypeOfVal(recv)
+        }
+    }
+    return js_mcall(recv, name, args)
+}
+
 function js_mcall(recv, name, args) {
     if (typeof recv == "string") {
         if (name == "length") { return recv.length }
         if (name == "charAt") { return recv.charAt(rtjNum(args[0])) }
         if (name == "equals") { return rtjStrictEq(recv, args[0]) }
+        // System.String.Substring(int startIndex, int length) takes a LENGTH, not
+        // an end index; this lowered to rtSubstring(start, END), so
+        // `"abcdef".Substring(1, 3)` answered "bc" where C# answers "bcd" - one
+        // wrong answer BOTH halves agreed on, which --cross cannot see. And an
+        // out-of-range argument CLAMPED where C# raises ArgumentOutOfRangeException.
+        // The twin is csSubstr in languages/csharp-interpreter.abnf.
         if (name == "substring") {
             var b = args.length > 0 ? rtjNum(args[0]) : 0
-            var e = args.length > 1 ? rtjNum(args[1]) : recv.length
-            return rtSubstring(recv, b, e)
+            if (b < 0) { csThrow("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')") }
+            if (b > recv.length) { csThrow("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')") }
+            if (args.length < 2) { return rtSubstring(recv, b, recv.length) }
+            var n = rtjNum(args[1])
+            if (n < 0) { csThrow("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')") }
+            if (b + n > recv.length) { csThrow("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')") }
+            return rtSubstring(recv, b, b + n)
         }
         if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
         if (name == "contains") { return recv.indexOf(cpToString(args[0])) >= 0 }
@@ -1796,6 +1968,73 @@ function js_cseq(l, r, pre) {
     }
     if (csFloPromotes(l, r)) { return csF32Round(rtjNum(l)) == csF32Round(rtjNum(r)) }
     return pre
+}
+
+// ===================================================== the index bounds ======
+//
+// docs/todo.md 1.2's C# half. These used to be python's js_pyget / js_pyset, which
+// WRAP a negative index - so `a[-1]` answered the LAST element in this half while
+// the interpreter aborted with "index out of range: -1", a live halves divergence
+// --cross had never reached - and which raise python's IndexError / a raw "list
+// assignment index out of range" rather than the BCL exception the spec names.
+//
+// The CLASS is spec-grounded: ECMA-335 III.4.4 (ldelem / stelem throw
+// IndexOutOfRangeException), ECMA-334 12.8.11.3 for the string indexer, and
+// System.Collections.Generic.Dictionary's indexer for the key miss. The MESSAGES
+// are .NET BCL text with no dotnet on this machine to settle them (manual 7.9).
+//
+// KNOWN SIMPLIFICATION, shared by all three engines: a `List<T>` and an array are
+// the same value here, so a List index out of range also raises
+// IndexOutOfRangeException where real .NET raises ArgumentOutOfRangeException.
+function csIdxOob() { csThrow("IndexOutOfRangeException", "Index was outside the bounds of the array.") }
+function csNullRef() { csThrow("NullReferenceException", "Object reference not set to an instance of an object.") }
+
+function js_csidx(o, i) {
+    if (Array.isArray(o)) {
+        var n = rtjNum(i)
+        if (n < 0 || n >= o.length) { csIdxOob() }
+        return o[n]
+    }
+    if (typeof o == "string") {
+        var si = rtjNum(i)
+        if (si < 0 || si >= o.length) { csIdxOob() }
+        return o.charAt(si)
+    }
+    if (o === undefined || o === null) { csNullRef() }
+    if (csIsDict(o)) {
+        var d = csDictFind(o["keys"], i)
+        if (d < 0) {
+            csThrow("KeyNotFoundException",
+                    "The given key '" + cpStr(i) + "' was not present in the dictionary.")
+        }
+        return o["vals"][d]
+    }
+    return js_pyget(o, i)
+}
+
+function js_csidxset(o, i, v) {
+    if (Array.isArray(o)) {
+        var n = rtjNum(i)
+        // A WRITE past the end THROWS; it does not grow the array, which is what
+        // js_pyset's list arm reported as "list assignment index out of range" and
+        // what the interpreter half silently did.
+        if (n < 0 || n >= o.length) { csIdxOob() }
+        o[n] = v
+        return undefined
+    }
+    if (o === undefined || o === null) { csNullRef() }
+    // A dictionary write INSERTS (ECMA-334's Dictionary indexer setter), so it is
+    // deliberately NOT bounds-checked.
+    return js_pyset(o, i, v)
+}
+
+// ECMA-335 III.4.16: newarr throws OverflowException when the element count is
+// negative. Without this `new int[-1]` killed the compiled half outright with a Go
+// panic (`runtime error: makeslice: len out of range`).
+function js_csnewlen(n) {
+    var v = rtjNum(n)
+    if (v < 0) { csThrow("OverflowException", "Arithmetic operation resulted in an overflow.") }
+    return v
 }
 
 // One of the integral type NAMES as an expression primary.

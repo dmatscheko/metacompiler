@@ -1979,29 +1979,160 @@ class S34 {
         Main.check("bv6", !Boolean.parseBoolean(w[2]));
         Main.check("bv7", Boolean.TRUE && !Boolean.FALSE);
 
-        // ----- docs/todo.md 1.2: the reading of a value that is not a number.
-        // ENGINE BEHAVIOUR, not java's - see the note above the class.
+        // ----- docs/todo.md 1.2: OUT OF BOUNDS THROWS, in all four engines.
         //
-        // THE try/catch IS LOAD-BEARING AND IT IS FOR THE REAL TOOLCHAIN, not for
-        // us: `java tests/java-test-full.java` runs this whole file green, and it
-        // must keep doing so. Real java throws at the first `a[5]` and skips the
-        // eight checks; no engine here throws, so all four run them and must agree.
+        // This group USED to assert the opposite - that a read past the end
+        // answered `undefined`, read as NaN in arithmetic - because converging the
+        // VALUE was the cheap half of the fix and all four engines agreed on it.
+        // They now throw, which is java's actual answer, and every message below is
+        // java 24.0.2's own text, diffed against the real toolchain four ways with
+        // tests/probe.sh. The whole group is therefore an ORACLE test now, not an
+        // engine-behaviour test: `java tests/java-test-full.java` runs it green.
         int[] a = new int[2];
         Main.check("un0", a[0] + 1 == 1);          // the control: in range, still 0
+
+        // A READ past the end, a NEGATIVE index and a far index all throw, and the
+        // message names the index and the length.
+        Main.check("un1", S34.aioobe(a, 5).equals("Index 5 out of bounds for length 2"));
+        Main.check("un2", S34.aioobe(a, -1).equals("Index -1 out of bounds for length 2"));
+        Main.check("un3", S34.aioobe(a, 1000).equals("Index 1000 out of bounds for length 2"));
+        // A WRITE past the end throws too - it does not GROW the array, which is
+        // what every engine here used to do.
+        Main.check("un4", S34.aioobeW(a, 5).equals("Index 5 out of bounds for length 2"));
+        Main.check("un5", S34.aioobeW(a, -1).equals("Index -1 out of bounds for length 2"));
+        Main.check("un6", a.length == 2);
+        // The compound and step forms go through the same place.
+        Main.check("un7", S34.aioobeS(a, 5).equals("Index 5 out of bounds for length 2"));
+        // A multi-dimensional array checks the OUTER index first.
+        int[][] m = new int[2][3];
+        Main.check("un8", S34.aioobe2(m, 5, 0).equals("Index 5 out of bounds for length 2"));
+        Main.check("un9", S34.aioobe2(m, 0, 5).equals("Index 5 out of bounds for length 3"));
+
+        // ----- String: charAt is an INDEX, substring is a RANGE, and the two
+        // messages are different because of it. substring used to CLAMP in both
+        // compiled halves and slice from the end in the interpreter.
+        String s = "abc";
+        Main.check("un10", S34.sioobe(s, 3).equals("Index 3 out of bounds for length 3"));
+        Main.check("un11", S34.sioobe(s, -1).equals("Index -1 out of bounds for length 3"));
+        Main.check("un12", S34.srange(s, 0, 100).equals("Range [0, 100) out of bounds for length 3"));
+        Main.check("un13", S34.srange(s, -1, 3).equals("Range [-1, 3) out of bounds for length 3"));
+        Main.check("un14", S34.srange1(s, -1).equals("Range [-1, 3) out of bounds for length 3"));
+        // begin > end is out of bounds even though both are inside the string.
+        Main.check("un15", S34.srange(s, 2, 0).equals("Range [2, 0) out of bounds for length 3"));
+        Main.check("un16", s.substring(1, 3).equals("bc"));   // the control
+
+        // ----- new T[n] with a negative length: NegativeArraySizeException, whose
+        // message is the offending size and nothing else. EVERY dimension is
+        // checked before anything is allocated, so [0][-1] throws as well.
+        Main.check("un17", S34.nase(-1).equals("-1"));
+        Main.check("un18", S34.nase2(0, -3).equals("-3"));
+
+        // ----- the TYPE of the throw is observable, and the clauses are tried in
+        // source order. Until this section existed the compiled half kept only the
+        // FIRST catch clause and ignored its type, so these four could not have
+        // been written at all.
+        Main.check("un19", S34.which(1).equals("AIOOBE"));
+        Main.check("un20", S34.which(2).equals("SIOOBE"));
+        Main.check("un21", S34.which(3).equals("NASE"));
+        Main.check("un22", S34.which(4).equals("ARITH"));
+        // Every one of them is an IndexOutOfBoundsException / RuntimeException /
+        // Exception / Throwable as well, and a multi-catch clause takes either.
+        Main.check("un23", S34.wide(1).equals("IOOBE"));
+        Main.check("un24", S34.wide(2).equals("IOOBE"));
+        Main.check("un25", S34.wide(3).equals("RTE"));
+        Main.check("un26", S34.multi(1).equals("multi"));
+        Main.check("un27", S34.multi(3).equals("multi"));
+        // An unmatched clause RE-THROWS, so an enclosing try still sees it.
+        Main.check("un28", S34.nested().equals("outer:Index 5 out of bounds for length 2"));
+        // finally runs whether the clause matched or not.
+        Main.check("un29", S34.fin().equals("f1f2"));
+    }
+
+    // Each helper returns the MESSAGE of the exception it provoked, so the
+    // assertion above is one string comparison against java's own text.
+    static String aioobe(int[] a, int i) {
+        try { return "" + a[i]; } catch (ArrayIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String aioobeW(int[] a, int i) {
+        try { a[i] = 9; return "no throw"; } catch (ArrayIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String aioobeS(int[] a, int i) {
+        try { a[i]++; return "no throw"; } catch (ArrayIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String aioobe2(int[][] m, int i, int j) {
+        try { return "" + m[i][j]; } catch (ArrayIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String sioobe(String s, int i) {
+        try { return "" + s.charAt(i); } catch (StringIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String srange(String s, int b, int e2) {
+        try { return s.substring(b, e2); } catch (StringIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String srange1(String s, int b) {
+        try { return s.substring(b); } catch (StringIndexOutOfBoundsException e) { return e.getMessage(); }
+    }
+    static String nase(int n) {
+        try { int[] d = new int[n]; return "len " + d.length; }
+        catch (NegativeArraySizeException e) { return e.getMessage(); }
+    }
+    static String nase2(int n, int k) {
+        try { int[][] d = new int[n][k]; return "len " + d.length; }
+        catch (NegativeArraySizeException e) { return e.getMessage(); }
+    }
+    // The clause the throw lands in, with three clauses that do NOT match it in
+    // front of the one that does.
+    static String which(int k) {
+        int[] a = new int[2];
+        String s = "abc";
         try {
-            Main.check("un1", ("" + (a[5] + 1)).equals("NaN"));
-            Main.check("un2", ("" + (1 + a[5])).equals("NaN"));
-            Main.check("un3", ("" + a[5]).equals("null"));
-            // The five that do NOT reach rtjNum, in every engine. `-` `*` `/` `%`
-            // and the relations route through the integral path, which answers 0
-            // outright when an operand is not integral - so `1 - a[5]` is 0, not 1.
-            Main.check("un4", 1 - a[5] == 0);
-            Main.check("un5", a[5] * 2 == 0);
-            Main.check("un6", !(a[5] < 1));
-            Main.check("un7", !(a[5] > 1));
-            Main.check("un8", a[5] % 2 == 0);
-        } catch (ArrayIndexOutOfBoundsException e) {
-            // Only real java gets here.
-        }
+            if (k == 1) { int x = a[5]; }
+            if (k == 2) { char c = s.charAt(9); }
+            if (k == 3) { int[] d = new int[-2]; }
+            if (k == 4) { int z = a.length - 2; int q = 1 / z; }
+            return "none";
+        } catch (NumberFormatException e) { return "NFE";
+        } catch (ArrayIndexOutOfBoundsException e) { return "AIOOBE";
+        } catch (StringIndexOutOfBoundsException e) { return "SIOOBE";
+        } catch (NegativeArraySizeException e) { return "NASE";
+        } catch (ArithmeticException e) { return "ARITH"; }
+    }
+    static String wide(int k) {
+        int[] a = new int[2];
+        String s = "abc";
+        try {
+            if (k == 1) { int x = a[5]; }
+            if (k == 2) { char c = s.charAt(9); }
+            if (k == 3) { int[] d = new int[-2]; }
+            return "none";
+        } catch (IndexOutOfBoundsException e) { return "IOOBE";
+        } catch (RuntimeException e) { return "RTE"; }
+    }
+    static String multi(int k) {
+        int[] a = new int[2];
+        try {
+            if (k == 1) { int x = a[5]; }
+            if (k == 3) { int[] d = new int[-2]; }
+            return "none";
+        } catch (NegativeArraySizeException | ArrayIndexOutOfBoundsException e) { return "multi"; }
+    }
+    static String nested() {
+        int[] a = new int[2];
+        try {
+            try { int x = a[5]; return "none"; }
+            catch (NumberFormatException e) { return "inner"; }
+        } catch (ArrayIndexOutOfBoundsException e) { return "outer:" + e.getMessage(); }
+    }
+    static String fin() {
+        int[] a = new int[2];
+        String r = "";
+        try {
+            try { int x = a[5]; }
+            catch (NumberFormatException e) { r = r + "c"; }
+            finally { r = r + "f1"; }
+        } catch (ArrayIndexOutOfBoundsException e) { }
+        try { int y = a[5]; }
+        catch (ArrayIndexOutOfBoundsException e) { }
+        finally { r = r + "f2"; }
+        return r;
     }
 }

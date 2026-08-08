@@ -52,6 +52,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // ----------------------------------------------------------------------------
@@ -112,27 +113,73 @@ func jvW(l, r interface{}) uint8 {
 // jvI is the int reading of an integral operand: the low 32 bits of its value.
 func jvI(rt *jsrt, v interface{}) int32 { return int32(giVal(rt, v)) }
 
-// jvThrowArith raises Java's ArithmeticException("/ by zero"), catchable by the
-// emitted try/catch. The class descriptor is registered once by js_jvexc at
-// module init, because the arithmetic externs have no access to the program's
-// scope; without it the divide aborts the run instead of throwing.
-// One compile runs one program, so a package-level holder is per-program - the
-// same reasoning the jvpIdent counter below records, and it keeps this out of
-// the shared jsrt struct.
+// The five runtime-raised exception class descriptors, each registered by NAME
+// by js_jvexc at module init, because the externs that raise them have no access
+// to the program's scope; without one the raise aborts the run instead of
+// throwing. One compile runs one program, so a package-level holder is
+// per-program - the same reasoning the jvpIdent counter below records, and it
+// keeps this out of the shared jsrt struct.
+//
+// ArithmeticException is "/ by zero" (JLS 15.17.2). The other four: an out-of-range array
+// access, an out-of-range string index or range, a negative array length and a
+// null array reference all THROW rather than abort. Same reasoning, same
+// per-program lifetime; the layer-2 twin is the block of jv*Cls slots in
+// languages/lib/java-rt.metajs.
 var jvArithExcCls *jsObject
+var jvAioobeCls *jsObject
+var jvSioobeCls *jsObject
+var jvNegArrCls *jsObject
+var jvNpeCls *jsObject
 
-func (rt *jsrt) jvThrowArith(msg string) {
-	if jvArithExcCls == nil {
-		rt.fail("java: / by zero")
+func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
+	if cls == nil {
+		rt.fail("java: %v", msg)
 		return
 	}
 	o := newJSObject()
-	o.set("__class", jvArithExcCls)
+	o.set("__class", cls)
 	// __msg is the field the emitted builtin exception constructor writes and
 	// getMessage() reads (see emitBuiltinExc in java-to-llvm-ir.abnf).
 	o.set("__msg", msg)
 	// jsThrown carries the VALUE, not its handle - js_throw stores u(a[0]).
 	panic(&jsThrown{value: o})
+}
+
+func (rt *jsrt) jvThrowArith(msg string) { rt.jvThrowCls(jvArithExcCls, msg) }
+
+// Is the value part of the java.lang Throwable hierarchy at all? The 64-deep cap
+// is the one every __class/__super walk here carries (manual chapter 7.9).
+func jvIsThrowable(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	cls := o.props["__class"]
+	for guard := 0; guard < 64; guard++ {
+		co, isObj := cls.(*jsObject)
+		if !isObj {
+			return false
+		}
+		if nm, _ := co.props["__name"].(string); nm == "Throwable" {
+			return true
+		}
+		cls = co.props["__super"]
+	}
+	return false
+}
+
+// The three bounds messages are java 24.0.2's, verified against the real
+// toolchain. jArrIdx/jStrIdx/jSubstr in languages/java-interpreter.abnf and
+// jvThrowAioobe/jvThrowSioobe/jvThrowRange in languages/lib/java-rt.metajs spell
+// the same three, and tests/java-test-full.java SECTION 34 pins them.
+func (rt *jsrt) jvThrowAioobe(i, n int) {
+	rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("Index %d out of bounds for length %d", i, n))
+}
+func (rt *jsrt) jvThrowSioobe(i, n int) {
+	rt.jvThrowCls(jvSioobeCls, fmt.Sprintf("Index %d out of bounds for length %d", i, n))
+}
+func (rt *jsrt) jvThrowRange(b, e, n int) {
+	rt.jvThrowCls(jvSioobeCls, fmt.Sprintf("Range [%d, %d) out of bounds for length %d", b, e, n))
 }
 
 // jvArith is one binary arithmetic or bitwise operator on two INTEGRAL operands.
@@ -487,13 +534,117 @@ func init() {
 		}
 		opOf := func(h uint64) string { return rt.toString(u(h)) }
 
-		// The ArithmeticException class descriptor, handed over once at module
-		// init so a divide by zero can THROW rather than abort.
+		// One runtime-raised exception class descriptor, handed over BY NAME at
+		// module init so that the externs below can THROW rather than abort.
 		m["js_jvexc"] = func(a []uint64) uint64 {
-			if o, ok := u(a[0]).(*jsObject); ok {
+			o, ok := u(a[1]).(*jsObject)
+			if !ok {
+				return 0
+			}
+			switch rt.toString(u(a[0])) {
+			case "ArithmeticException":
 				jvArithExcCls = o
+			case "ArrayIndexOutOfBoundsException":
+				jvAioobeCls = o
+			case "StringIndexOutOfBoundsException":
+				jvSioobeCls = o
+			case "NegativeArraySizeException":
+				jvNegArrCls = o
+			case "NullPointerException":
+				jvNpeCls = o
 			}
 			return 0
+		}
+		// `a[i]`, read or written. EVERY array access is bounds-checked in Java
+		// (JLS 10.4) and a violation throws ArrayIndexOutOfBoundsException - it
+		// does not answer a default and it does not extend the array on a write.
+		// The emitter emits this for both halves; the write site discards the
+		// value and keeps only the check (emitRefPath in java-to-llvm-ir.abnf).
+		m["js_jvidx"] = func(a []uint64) uint64 {
+			o := u(a[0])
+			if arr, isArr := o.(*jsArray); isArr {
+				i := jsToInt(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(arr.elems) {
+					rt.jvThrowAioobe(i, len(arr.elems))
+				}
+				return w(arr.elems[i])
+			}
+			if isUndefOrNull(o) {
+				// `int[] z = null; z[0]` - a catchable NullPointerException with a
+				// null message, exactly as the interpreter half throws it.
+				rt.jvThrowCls(jvNpeCls, jsNull)
+			}
+			return w(rt.getMember(o, u(a[1])))
+		}
+		// Does a thrown value match ONE catch-clause type name? The emitter emits
+		// one call per name, so a multi-catch `catch (A | B e)` is two calls. The
+		// twin of core.excMatches in java-interpreter.abnf and of js_jvexcmatch in
+		// languages/lib/java-rt.metajs. A value outside the Throwable hierarchy -
+		// this subset lets a program throw any object - is caught by the four
+		// general types, which is how `catch (Exception e)` is written in practice.
+		m["js_jvexcmatch"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			n := rt.toString(u(a[1]))
+			if rt.isTypeName(v, n) {
+				return jsHTrue
+			}
+			switch n {
+			case "Exception", "Throwable", "RuntimeException", "Error":
+				return boolH(!jvIsThrowable(v))
+			}
+			return jsHFalse
+		}
+		// One dimension of `new T[n]`: answers it, and raises
+		// NegativeArraySizeException on a negative one (JLS 15.10.1). The message
+		// is the offending size and nothing else.
+		m["js_jvnewlen"] = func(a []uint64) uint64 {
+			n := jsToInt(rt.toNumber(u(a[0])))
+			if n < 0 {
+				rt.jvThrowCls(jvNegArrCls, strconv.Itoa(n))
+			}
+			return a[0]
+		}
+		// java.lang.String.charAt THROWS StringIndexOutOfBoundsException where the
+		// shared arm in abnf/jsrt.go fails the run uncatchably. Only the java
+		// grammar emits js_jcharat, so overriding it here is a java-only change -
+		// rxExtraExterns runs after the base table is filled.
+		baseCharAt := m["js_jcharat"]
+		m["js_jcharat"] = func(a []uint64) uint64 {
+			if str, isStr := u(a[0]).(string); isStr {
+				args, ok := u(a[1]).(*jsArray)
+				if ok {
+					i := jsToInt(rt.toNumber(argAt(args.elems, 0)))
+					units := utf16.Encode([]rune(str))
+					if i < 0 || i >= len(units) {
+						rt.jvThrowSioobe(i, len(units))
+					}
+				}
+			}
+			return baseCharAt(a)
+		}
+		// java.lang.String.substring checks the RANGE - begin > end is out of
+		// bounds too - where the shared memberCall CLAMPS through substringRange.
+		// A SEPARATE EXTERN, not a wrapper on js_mcall: rxExtraExterns fills ONE
+		// map for every language, so overriding js_mcall here made a C# Substring
+		// raise java's "Range [10, 6) out of bounds" (observed). js_ktsmcall and
+		// js_swmcall are the same pattern for the same reason. Only the java
+		// emitter emits js_jvsub, and only for the name `substring`.
+		baseMcall := m["js_mcall"]
+		m["js_jvsub"] = func(a []uint64) uint64 {
+			if str, isStr := u(a[0]).(string); isStr {
+				if args, ok := u(a[1]).(*jsArray); ok {
+					units := utf16.Encode([]rune(str))
+					bi := jsToInt(rt.toNumber(argAt(args.elems, 0)))
+					ei := len(units)
+					if len(args.elems) > 1 {
+						ei = jsToInt(rt.toNumber(argAt(args.elems, 1)))
+					}
+					if bi < 0 || ei > len(units) || bi > ei {
+						rt.jvThrowRange(bi, ei, len(units))
+					}
+				}
+			}
+			return baseMcall([]uint64{a[0], w("substring"), a[1]})
 		}
 		// One binary integral operator: (op, left, right). A double operand keeps
 		// the FLOAT path of jsrtjvm.go, which is where the two boxes meet.
@@ -864,6 +1015,9 @@ func init() {
 			return w(rt.jsAdd(l, r))
 		}
 	})
+	// js_jvsub reads its argument array in position 1, so the handle must arrive
+	// as the array itself rather than as a value.
+	jsThroughArgs["js_jvsub"] = 1 << 1
 }
 
 // jvEqKind is the java TYPE of a primitive value, for Object#equals: 0 means "not
