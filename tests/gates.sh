@@ -97,12 +97,17 @@ done
 # grow. Growing it is a one-line edit and the script tells you the new number.
 FULL_TIMEOUT=600
 #
-# 2026-08-08: this working tree measures 7720, but the number recorded here is
-# the 6f60337 baseline of 7625 ON PURPOSE - other agents' ratchet additions were
-# in flight and uncommitted when it was measured, and a floor must not be set from
-# a tree that may not be the one that gets committed. The gate says "+95, RAISE
-# FULL_ASSERTIONS" until someone does; that message IS the ratchet doing its job.
-FULL_ASSERTIONS=7766      # recorded 2026-08-08 after the ten-item round
+# SET IT FROM A COMMITTED TREE, NOT A WORKING ONE. On 2026-08-08 this was
+# deliberately left at the parent's 7625 while the tree measured 7720, because
+# other agents' ratchet additions were in flight and uncommitted - a floor must not
+# be set from a tree that may not be the one that gets committed. The gate says
+# "+N, RAISE FULL_ASSERTIONS" until someone does, and that message IS the ratchet
+# doing its job rather than a nag.
+#
+# 2026-08-09: raised to 8123 AFTER the ten-item round was committed
+# (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
+# correctly refused to raise it themselves for the reason above.
+FULL_ASSERTIONS=8123      # recorded 2026-08-09 at d0f4db3, the ten-item round
 
 # The shape ratchet: layer-2 bodies in languages/lib/*.metajs that are identical
 # modulo names, ACROSS FILES, at the default -min 140. It is the only measure of

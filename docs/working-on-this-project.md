@@ -296,6 +296,43 @@ hand-picked values gave 170 differing lines and an outright abort. Sample the
 boundaries — 17-significant-digit values, subnormals, `MIN_VALUE`, the exponent
 thresholds — not the space.
 
+**A value pushed onto the ABNF tag stack is DEEP-COPIED, and the symptom is that
+there is no symptom.** Handing a walk-time record up to an enclosing declaration
+as `push({nested: pop(), nrec: lastDeclRec})` delivers a *clone*: re-keying moved
+the clone while the declaration's own emit closure still read the original, and
+the fix simply, silently did not work — while a subset of probes passed for an
+unrelated reason. It took an instrumented emit to see it. **Pass an INDEX into a
+script-side array, not the record.** (`swift-to-llvm-ir.abnf`, `declRecs`.)
+
+**MetaJS's string literal has no `\f` and no `\v` — it drops the backslash**, so
+`ch == "\f"` compiles to `ch == "f"`. This ate the `f`s of `Integer("0xff")` **in
+the native binary only**: goja and the Go twin were green, so the matrix, `--full`
+and `--cross` were all blind to it, and only a native `-exe` probe found it. Test
+whitespace by character code.
+
+**`rxExtraExterns` fills ONE extern map for EVERY language.** Wrapping a *shared*
+extern in a language's own twin file therefore leaks across languages: overriding
+`m["js_mcall"]` in `jsrtjava.go` made a **C# `Substring`** raise java's
+*"Range [10, 6) out of bounds for length 6"*. Observed, not theorised. The correct
+pattern is a new language-specific name (`js_jvsub`, `js_csmcall`, `js_ktsmcall`).
+
+**`host_call` is a linear `if`-chain and its MIDDLE is not a free place to
+insert.** Twenty-three arms added in the middle cost java **+7.08%** — every
+`sint`/`flo`/`scope` call paid the extra compares. Add at the cold end. The fix is
+verifiable *without* a benchmark: the first ~70 `icmp eq i64` sites of `host_call`
+in `runtime.ll` must stay register-for-register identical to the base module's.
+
+**Go's arm64 backend contracts `a*b+c` into FMA inside `math`, and our C does
+not.** That is the whole of the residual one-ulp difference between `llvm.Run` and
+a native binary on transcendentals — 21 of 6,734 probe rows. Go does *not*
+contract on amd64, so the Go twin's digits are already architecture-dependent and
+no spelling matches both. Note also that **assigning the product to a local does
+not stop Go fusing it; only an explicit `float64()` conversion does.**
+
+**`(float)x` in the C subset is a silent no-op.** `c-to-llvm-ir.abnf` compiles the
+cast and narrows nothing, so a float32 round-trip written that way is measurably
+absent. Narrow on the bit pattern.
+
 **Only the NATIVE leg sees some IR errors.** Building a phi inline inside a
 `js_scope_set` argument list compiled, verified and ran correctly under
 `llvm.Run`, then failed `clang` with *PHI nodes not grouped at top of basic
