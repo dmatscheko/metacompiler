@@ -44,10 +44,14 @@ char unset_marker[1];
 char *gvars[1024];
 int nvars;
 
-/* Raised when a fixed-size table refused a write rather than running off its
- * end. Nothing in tests/ comes near any of these; the flag exists so that an
- * overflow is a bounded, observable event instead of a smashed neighbour. */
-int rt_limit;
+/* THE FIXED-SIZE TABLES BELOW USED TO REFUSE A WRITE AND SET `int rt_limit`,
+ * described as making an overflow "a bounded, observable event". IT WAS NOT
+ * OBSERVABLE: rt_limit was written at four sites and READ NOWHERE - not here,
+ * not in languages/bash-to-llvm-ir.abnf, not in tests/. A refused write is a
+ * silently wrong answer, and one of the four was worse than that: rt_cap_begin
+ * refused the 17th nested $( ) without incrementing cap_depth, while the
+ * matching rt_cap_end still decremented it, so cap_buf[-1] was then read and
+ * written. Every one of them now calls rt_die, so the limit is a diagnosis. */
 
 /* The {name, slot} table: varnames[i] is the source name of gvars[i]. The
  * emitter fills it in main's entry block, in the same loop that marks every
@@ -166,17 +170,123 @@ int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
 int putchar(int c);
 
+/* ---- fail-stop -----------------------------------------------------------
+ * The two libc names languages/lib/runtime.c already uses for the same job.
+ *
+ * NEITHER IS AVAILABLE TO `llvm.Run`, DELIBERATELY, and that is fine here.
+ * abnf/llvmmap.go's libcExterns lists only what the IR interpreter can
+ * implement EXACTLY, and it can implement neither (no unwind path out of
+ * ma.call for exit; write's fd is not the interpreter's output). Its comment
+ * settles the trade: "Loud-and-absent beats listed-and-wrong". So an arena
+ * overflow under llvm.Run stops the run with
+ *
+ *     IR interpreter: call to undefined external function @write
+ *
+ * and a nonzero status, and under a clang-built -exe binary it prints the
+ * diagnostic below on stderr and exits 70. Both are a diagnosis; neither is
+ * the silent SIGSEGV that this replaced. If you are reading that interpreter
+ * message, you are out of arena - see rt_die.
+ *
+ * They are NOT reached on any successful path, so no test program depends on
+ * them and no matrix row ever calls one. */
+long write(int fd, const char *buf, unsigned long n);
+void exit(int code);
+
+/* One byte to fd 2. A char[1] on the stack rather than a pointer into the
+ * arena, because the arena is exactly what is gone when this runs (the same
+ * shape as runtime.c's o_ch). */
+int rt_ech(int c)
+{
+    char b[1];
+    b[0] = (char)c;
+    write(2, b, (unsigned long)1);
+    return 0;
+}
+
+int rt_estr(char *s)
+{
+    int i = 0;
+    while (s[i] != 0) {
+        rt_ech((int)(unsigned char)s[i]);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* A decimal on fd 2 WITHOUT rt_int2str, which allocates. */
+int rt_enum(int v)
+{
+    char b[16];
+    int a = v < 0 ? 0 - v : v;
+    int i = 0;
+    int k;
+    if (v < 0) rt_ech(45);
+    if (a == 0) { rt_ech(48); return 0; }
+    while (a > 0) {
+        b[i] = (char)(48 + (a % 10));
+        i = i + 1;
+        a = a / 10;
+    }
+    k = i - 1;
+    while (k >= 0) {
+        rt_ech((int)b[k]);
+        k = k - 1;
+    }
+    return 0;
+}
+
+/* The one exit from a fixed-size table that has run out. `what` names the
+ * table, so the message says which of the six it was; `want` is the request,
+ * `used` and `cap` the state of the table in its own units (bytes for the
+ * arena, entries for the rest).
+ *
+ * 70 is EX_SOFTWARE. It is deliberately not 139: a shell script that segfaults
+ * is indistinguishable from the compiler having produced a broken binary, and
+ * that confusion is the whole reason this function exists. */
+void rt_die(char *what, int want, int used, int cap)
+{
+    rt_estr("bash-rt: ");
+    rt_estr(what);
+    rt_estr(" exhausted: request ");
+    rt_enum(want);
+    rt_estr(", used ");
+    rt_enum(used);
+    rt_estr(" of ");
+    rt_enum(cap);
+    rt_estr(" - the compiled program allocates and never frees ");
+    rt_estr("(languages/lib/bash-rt.c). Shorten the run or raise the limit there.\n");
+    exit(70);
+}
+
 /* ---- the string heap ------------------------------------------------------
  * One byte arena plus a bump offset; rt_bump hands out slices and nothing is
- * ever freed. Same 4 MB the hand-emitted runtime reserved.
+ * ever freed (manual 7.8 - the arena is a decision, not an omission).
+ *
+ * THE BOUNDS CHECK IS NEW AND IT IS THE POINT OF THIS FUNCTION. Until now
+ * rt_bump added to arena_pos and returned, so a program that outran 4 MiB
+ * wrote over gvars, argv, arr_v, re_prog and then off the end of the data
+ * segment. Measured, before the check: tests/bench/mod.sh at 40,000 iterations
+ * exited 139 HAVING PRINTED NOTHING. That is the manual chapter 4 trap - "a
+ * crashing binary looks fast" - with `/usr/bin/time` reporting happily on a
+ * process that died. It now prints
+ *
+ *   bash-rt: string arena exhausted: request 16, used 4194297 of 4194304 ...
+ *
+ * on stderr and exits 70.
+ *
+ * The comparison is written `n > 4194304 - p` and not `p + n > 4194304` so it
+ * cannot itself overflow: p is always in [0, 4194304] and n >= 0.
  */
 char arena[4194304];
 int arena_pos;
 
 char *rt_bump(int n) {
-    char *p = &arena[arena_pos];
-    arena_pos = arena_pos + n;
-    return p;
+    int p = arena_pos;
+    if (n < 0 || n > 4194304 - p) {
+        rt_die("string arena", n, p, 4194304);
+    }
+    arena_pos = p + n;
+    return &arena[p];
 }
 
 /* i32 rt_strlen(i8* s) */
@@ -239,12 +349,28 @@ int rt_strcmp(char *a, char *b) {
     return 0;
 }
 
-/* rt_strcat: fresh arena string = a followed by b. */
+/* rt_strcat: fresh arena string = a followed by b.
+ *
+ * CONCATENATING WITH "" IS THE COMMON CASE AND IT USED TO COST A COPY. Every
+ * accumulator in this file starts at `empty` and is grown one rt_strcat at a
+ * time, and the emitter's word builder concatenates an empty `open` part on
+ * every expansion, so a large fraction of all calls had an empty operand. An
+ * arena string is never written after it is built - the only mutation in this
+ * file is rt_putc into a capture buffer, which comes straight from rt_bump - so
+ * handing the other operand back is safe.
+ *
+ * The `la == 0 && lb == 0` arm returns the shared `empty` and NOT `a`, because
+ * `a` may be `unset_marker`: that pointer is compared by IDENTITY in rt_nounset
+ * to answer ${v-default}, and a concatenation result must never be it. Every
+ * other arm returns an operand of nonzero length, which cannot be the marker. */
 char *rt_strcat(char *a, char *b) {
     int la = rt_strlen(a);
     int lb = rt_strlen(b);
-    char *dst = rt_bump(la + lb + 1);
+    char *dst;
     int i = 0, d = 0;
+    if (lb == 0) return la == 0 ? &empty[0] : a;
+    if (la == 0) return b;
+    dst = rt_bump(la + lb + 1);
     while (a[i] != 0) { dst[d] = a[i]; d = d + 1; i = i + 1; }
     i = 0;
     while (b[i] != 0) { dst[d] = b[i]; d = d + 1; i = i + 1; }
@@ -252,11 +378,17 @@ char *rt_strcat(char *a, char *b) {
     return dst;
 }
 
-/* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr). */
+/* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr).
+ *
+ * It used to bump a flat 16 bytes whatever the value, so "0" cost 16 and the
+ * five-digit counters of a loop cost 16 apiece. The digits are formed in a
+ * stack buffer first anyway, so the length is known before anything is bumped
+ * and the allocation can be exact. INT_MIN still answers "-", exactly as it did
+ * before: 0 - INT_MIN is still negative, so no digit is produced. */
 char *rt_int2str(int n) {
     char tmp[16];
-    char *dst = rt_bump(16);
-    if (n == 0) { dst[0] = 48; dst[1] = 0; return dst; }
+    char *dst;
+    if (n == 0) { dst = rt_bump(2); dst[0] = 48; dst[1] = 0; return dst; }
     int neg = n < 0;
     int a = neg ? 0 - n : n;
     int t = 15;
@@ -266,6 +398,7 @@ char *rt_int2str(int n) {
         a = a / 10;
     }
     int d = 0;
+    dst = rt_bump((15 - t) + (neg ? 1 : 0) + 1);
     if (neg) { dst[0] = 45; d = 1; }
     int j = t + 1;
     while (j <= 15) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
@@ -392,6 +525,12 @@ char *rt_substr(char *s, int off, int n)
     rest = len - o;
     nn = n < 0 ? rest : n;
     nn = nn > rest ? rest : nn;
+    /* The WHOLE of s is a very common "slice": ${v#} / ${v%} walk it, rt_strip
+     * builds it on every trial length, and rt_getfield takes it for a one-field
+     * list. Arena strings are immutable (see rt_strcat), so s itself is the
+     * answer. The len > 0 guard keeps `unset_marker` from ever being returned as
+     * a computed value - rt_nounset compares that pointer by identity. */
+    if (o == 0 && nn == len && len > 0) return s;
     dst = rt_bump(nn + 1);
     i = 0;
     while (i < nn) {
@@ -1226,29 +1365,57 @@ char *rt_wordjoin(char *v) {
     return op;
 }
 
-/* rt_splitifs: an unquoted expansion split into a field list. */
+/* rt_splitifs: an unquoted expansion split into a field list.
+ *
+ * ONE PASS TO SIZE IT, ONE TO FILL IT. This used to build the list with
+ * rt_strcat(rt_strcat(op, rt_substr(...)), "\x01") per field, which is three
+ * allocations per field and quadratic in the total: a one-field value of length
+ * L cost 2L+5 bytes of arena where the answer is L+3. Every unquoted expansion
+ * in an emitted program calls this, so it is the single largest per-word cost in
+ * the runtime - see tests/bench/mod.sh's header for the measurement. */
 char *rt_splitifs(char *v, char *ifs) {
     int len = rt_strlen(v);
-    char *op = "\x02";
-    int i = 0, s = 0, in = 0;
+    int i = 0, in = 0, nf = 0, tot = 0, o;
+    char *dst;
     while (i < len) {
         int ch = (int)(unsigned char)v[i];
         if (rt_haschar(ifs, ch) != 0) {
-            /* close the field that ends here */
-            if (in != 0) {
-                op = rt_strcat(rt_strcat(op, rt_substr(v, s, i - s)), "\x01");
-                in = 0;
-            }
+            in = 0;
         } else {
-            if (in == 0) {
-                in = 1;
-                s = i;
-            }
+            if (in == 0) { in = 1; nf = nf + 1; }
+            tot = tot + 1;
         }
         i = i + 1;
     }
-    if (in != 0) op = rt_strcat(rt_strcat(op, rt_substr(v, s, len - s)), "\x01");
-    return op;
+    /* no fields at all: the empty list is a module literal, as it was before. */
+    if (nf == 0) return "\x02";
+    /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the commonest
+     * case, and it needs no allocation, because a plain string IS a one-field
+     * list in this protocol: rt_nfields answers 1 for it, rt_getfield(v, 0)
+     * answers v, rt_wordjoin returns it unchanged, and rt_bnd_acc/rt_bnd_open
+     * both go through rt_nfields. The only value that must not take this path
+     * is one whose first byte is already the 0x02 list marker, which would then
+     * be re-read as a list. */
+    if (nf == 1 && tot == len && (int)(unsigned char)v[0] != 2) return v;
+    dst = rt_bump(1 + tot + nf + 1);
+    dst[0] = 2;
+    o = 1;
+    in = 0;
+    i = 0;
+    while (i < len) {
+        int ch = (int)(unsigned char)v[i];
+        if (rt_haschar(ifs, ch) != 0) {
+            if (in != 0) { dst[o] = 1; o = o + 1; in = 0; }
+        } else {
+            in = 1;
+            dst[o] = (char)ch;
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    if (in != 0) { dst[o] = 1; o = o + 1; }
+    dst[o] = 0;
+    return dst;
 }
 
 /* Appending a field list to a word under construction:
@@ -1310,11 +1477,11 @@ int rt_arr_set(char *nm, char *k, char *v) {
     int n = arr_n;
     /* ARRMAX = 4096. There was no test here at all, so the 4097th distinct
      * (array, key) pair wrote past arr_nm / arr_k / arr_v into whatever the
-     * linker had put next. A refused write is a bounded loss; the smashed
-     * neighbour was not. */
+     * linker had put next. Refusing the write replaced that with a silently
+     * missing array element - `${a[k]}` reads "" and the script carries on -
+     * because the rt_limit it set was read nowhere. */
     if (n >= 4096) {
-        rt_limit = 1;
-        return 0;
+        rt_die("array store", 1, n, 4096);
     }
     arr_nm[n] = nm;
     arr_k[n] = k;
@@ -1509,8 +1676,7 @@ int rt_argpush(char *v) {
     while (i < n) {
         int t = argv_top;
         if (t >= 4096) {           /* ARGVMAX; there was no test here either */
-            rt_limit = 1;
-            return 0;
+            rt_die("positional-parameter stack", 1, t, 4096);
         }
         argv[t] = rt_getfield(v, i);
         argv_top = t + 1;
@@ -1617,9 +1783,12 @@ int rt_cap_begin(int u)
     int d;
     char *buf;
     d = cap_depth;
-    if (d >= 16) {                 /* CAPMAX: 17 nested $( ) used to write past cap_buf */
-        rt_limit = 1;
-        return 0;
+    /* CAPMAX: 17 nested $( ) used to write past cap_buf. Refusing the push was
+     * WORSE than the overflow it prevented - the matching rt_cap_end still
+     * decremented cap_depth, so the 17th substitution read and wrote
+     * cap_buf[-1] / cap_len[-1], i.e. the globals in front of them. */
+    if (d >= 16) {
+        rt_die("command-substitution nesting", 1, d, 16);
     }
     buf = rt_bump(8192);
     cap_buf[d] = buf;
@@ -1668,6 +1837,15 @@ int rt_ss_save(int u)
     int base;
     int i;
     d = ss_depth;
+    /* SSDEPTH = 8, and this path had NO CHECK OF ANY KIND - the item that
+     * produced this commit named rt_bump only. ss_save is 8 * NVARS pointers,
+     * so the NINTH nested subshell wrote gvars[0..nvars) starting at
+     * ss_save[8192] - straight over stdin_buf, the option flags and whatever
+     * else the linker had put after it, with no symptom until one of them was
+     * next read. */
+    if (d >= 8) {
+        rt_die("subshell nesting", 1, d, 8);
+    }
     base = d * 1024;
     i = 0;
     while (i < nvars) {
@@ -1700,9 +1878,12 @@ int rt_push_local(int id)
 {
     int t;
     t = ls_top;
-    if (t >= 512) {                /* LSMAX: deep recursion with `local` used to run off it */
-        rt_limit = 1;
-        return 0;
+    /* LSMAX: deep recursion with `local` used to run off it. Refusing the push
+     * left the caller's value unsaved, so returning from that call restored
+     * nothing and the "local" leaked into the caller - a wrong answer, not a
+     * bounded one. */
+    if (t >= 512) {
+        rt_die("local save stack", 1, t, 512);
     }
     ls_id[t] = id;
     ls_val[t] = gvars[id];

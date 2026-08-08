@@ -219,6 +219,45 @@
 # collected (manual 7.8) - a per-iteration allocation regression there is exactly
 # what an instruction count sees.
 #
+# ===========================================================================
+# 2026-08-08, docs/todo.md 2.2: THE TWO ARENA ROWS, RE-RECORDED BY HAND.
+#
+#   bash    54970000 -> 147629302   spread 0.09% over 9 draws  (+168.56%)
+#   batch   32880000 ->  34199417   spread 0.23% over 9 draws    (+4.01%)
+#
+# Recorded in a clean `git archive 69d8e17` tree with ONLY languages/lib/bash-rt.c,
+# languages/lib/batch-rt.c, their .ll and tests/bench/mod.{sh,bat} copied in - not
+# with `--record`, which would have deleted every other row of this file and all
+# of the text above it (see the NOTE at the top). The other thirteen rows are
+# UNCHANGED and were not re-measured.
+#
+# THE PARENT WAS MEASURED FIRST, because this file's own history says a flagged
+# row is as likely to be baseline drift as code. At 69d8e17, unmodified, 9 draws:
+# batch 32,937,571 (+0.18% against the recorded baseline, inside its 0.26%
+# spread) and bash 55,033,957 (+0.12%, inside its 0.76% spread). The baseline had
+# not drifted, so both deltas below are the change.
+#
+# WHY bash MOVES 168% AND IS NOT A REGRESSION: mod.sh now runs 40,000 iterations
+# instead of 10,000, the standard shape of every other program here. PER
+# ITERATION it got CHEAPER, by a third: 55,033,957/10,000 = 5,503 instructions
+# before, 147,629,302/40,000 = 3,691 after, -32.9%. The arena cost fell further,
+# 204.8 -> 69.6 bytes an iteration, which is what let the count go back up - the
+# 4 MiB ceiling was 20,750 iterations and is now 55,898 (bisected: 55,898 runs,
+# 56,015 does not).
+#
+# WHY batch MOVES +4.01% AND IS ACCEPTED. It is a real increase, four times its
+# own 0.23% spread, and it is the price of the bounds checks. Attributed by
+# measuring an intermediate tree with the bounds checks and NONE of the cost
+# reductions: 33,851,689, i.e. +2.77% against the parent. So the checks are
+# +2.77% and the three allocation reductions add the remaining ~1.05% of
+# instructions while removing 59% of the ALLOCATION (31.95 -> 13.1 bytes an
+# iteration, ceiling 65,468 -> 160,351, and mod.bat's margin 1.6x -> 4.0x).
+# A 4% instruction cost to turn `rt_bump` walking off the end of a 2 MiB array
+# into a named diagnostic and a distinct exit code is a trade this file records
+# rather than argues: counters are exact, and the counter says 4%.
+#
+# WHAT USED TO BE HERE, kept because it is the measurement that started this:
+#
 # AND IT PAID OFF ON THE FIRST RUN: the 40,000-iteration mod.sh SEGFAULTS. bash's
 # `arena[4194304]` is 4 MiB, `rt_bump` has no bounds check and nothing is freed,
 # and this loop costs ~202 bytes an iteration because `$(( ))` re-parses the
@@ -230,6 +269,10 @@
 # `AR[2097152]` is 2 MiB at ~32 bytes an iteration and its ceiling is ~65,468, so
 # mod.bat keeps the standard 40,000 at a 1.6x margin. Neither ceiling was changed:
 # languages/ was not this round's to touch, and both are recorded as findings.
+# (Both findings were acted on on 2026-08-08 - see the re-record above. The
+# ceilings themselves are UNCHANGED; what changed is that crossing one is now a
+# diagnostic instead of a segfault, and that it takes 2.9x / 2.4x more work to
+# reach one.)
 #
 # WHY THERE IS STILL NO mod.ts. typescript-to-llvm-ir.abnf links lib/js-rt.ll -
 # the same layer 2 and the same Go twin as js - so mod.ts would run mod.js's code
@@ -249,8 +292,8 @@
 # directly. It is also the tightest handle-IR row here at 0.76%, which makes it
 # the most sensitive instrument in the file after `c`.
 # ===========================================================================
-bash          54970000
-batch         32880000
+bash         147629302
+batch         34199417
 c          11087591
 csharp     21293689255
 dart       3903000000

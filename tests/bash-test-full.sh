@@ -1115,6 +1115,88 @@ s26() {
   check cap2 "${s26big:11999:1}" a
 }
 
+# ===== SECTION 27: arena aliasing, field splitting, and the nesting limits =====
+# These are FIX PROBES, not defect finders, and the distinction is worth stating:
+# every one of them passes on the runtime as it stood before the arena work of
+# 2026-08-08 too. They exist because that work made rt_strcat, rt_substr and
+# rt_splitifs RETURN AN OPERAND instead of a fresh arena copy whenever the copy
+# would have been redundant - which is what took tests/bench/mod.sh from 204.8 to
+# 69.6 bytes of arena per iteration - and every one of those returns is an
+# ALIASING decision that a later change could get wrong in a way no existing
+# assertion sees.
+#
+# The two properties they fence:
+#   1. An arena string is IMMUTABLE once built. If any future helper writes
+#      through a char* it did not itself bump, ali5..ali8 turn red.
+#   2. A computed value is never the `unset_marker` pointer. rt_nounset compares
+#      that pointer by IDENTITY to answer ${v-default}, so "" and unset must stay
+#      distinguishable however the "" was arrived at - ali1..ali4.
+# Settled against GNU bash 5.3.15(1)-release (aarch64-apple-darwin25.4.0).
+s27() {
+  # -- 1. "" reached by concatenation is still SET, not unset.
+  v=
+  check ali1 "${v-unset}" ""
+  w="$v$v"
+  check ali2 "${w-unset}" ""
+  check ali3 "${w:+nonempty}" ""
+  unset u
+  check ali4 "${u-unset}" unset
+
+  # -- 2. immutability. Each of these aliases a string that a later assignment
+  #    to the SOURCE variable must not be able to reach.
+  x=abc
+  y="${x:0:3}"          # a whole-string slice: rt_substr returns x itself
+  x=xyz
+  check ali5 "$y" abc
+  a=abc
+  b="$a"
+  a="${a}d"             # rt_strcat over a value something else still holds
+  check ali6 "$b" abc
+  check ali7 "$a" abcd
+  e=""
+  f="q$e"               # rt_strcat with an empty right operand returns the left
+  g="${e}q"             # ... and with an empty left operand returns the right
+  check ali8 "$f$g" qq
+
+  # -- 3. field splitting, which rt_splitifs now sizes in one pass and skips
+  #    entirely for a single separator-free field.
+  set -- $(printf '%s' "  p  q  ")
+  check spl1 $# 2
+  check spl2 "$1$2" pq
+  h="   "
+  set -- $h
+  check spl3 $# 0
+  oIFS=$IFS
+  IFS=:
+  j=a:b:c
+  set -- $j
+  check spl4 $# 3
+  check spl5 "$3" c
+  IFS=$oIFS
+  m=solo
+  set -- $m
+  check spl6 $# 1
+  check spl7 "$1" solo
+
+  # -- 4. the fixed-size tables, driven to just below their caps. bash-rt.c's
+  #    subshell snapshot stack (SSDEPTH 8), capture stack (CAPMAX 16) and local
+  #    save stack (LSMAX 512) used to have, respectively, no check at all and two
+  #    checks that silently REFUSED the write; all three now call rt_die. These
+  #    assertions pin the caps as real, so lowering one turns them red rather
+  #    than aborting a program that used to work.
+  n=outer
+  ( ( ( ( ( ( ( n=inner ) ) ) ) ) ) )
+  check nst1 "$n" outer
+  check nst2 "$(echo "$(echo "$(echo "$(echo "$(echo "$(echo deep)")")")")")" deep
+  s27rec() {
+    local d="$1"
+    if [ "$1" -ge 100 ]; then echo "$1"; return; fi
+    s27rec $(( $1 + 1 ))
+    check rec$d "$d" "$1"
+  }
+  check lcl1 "$(s27rec 1)" 100
+}
+
 
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
@@ -1142,5 +1224,6 @@ s23   # SECTION-CALL 23
 s24   # SECTION-CALL 24
 s25   # SECTION-CALL 25
 s26   # SECTION-CALL 26
+s27   # SECTION-CALL 27
 echo "full: $checks checks, $fails failures"
 exit $fails

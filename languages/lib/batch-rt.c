@@ -32,22 +32,97 @@
  *     the module, and checks that @__mec_ginit is empty - which is why NO global
  *     in this file has an initializer: an initialized global emits a store into
  *     __mec_ginit, and nothing would call it once main is gone.
- *   - There is no bounds check on the arena, exactly as the hand-emitted IR had
- *     none. It is 2 MB and a batch program that outruns it walks off the end.
+ *   - The arena IS bounds-checked now. This header used to say "There is no
+ *     bounds check on the arena, exactly as the hand-emitted IR had none. It is
+ *     2 MB and a batch program that outruns it walks off the end" - and that is
+ *     precisely what happened: tests/bench/mod.bat runs 40,000 iterations at
+ *     ~32 bytes each against a 2 MiB arena, a 1.6x margin, and past the ceiling
+ *     the binary exits 139 having printed nothing. See rt_bump and rt_die.
  */
 
 int putchar(int c);
 int bat_shift(int from);
+
+/* ---- fail-stop -----------------------------------------------------------
+ * The two libc names languages/lib/runtime.c already uses for the same job.
+ *
+ * NEITHER IS AVAILABLE TO `llvm.Run`, deliberately: abnf/llvmmap.go's
+ * libcExterns lists only what the IR interpreter can implement EXACTLY, and it
+ * can implement neither. Its comment settles the trade - "Loud-and-absent beats
+ * listed-and-wrong" - so a limit crossed under llvm.Run stops the run with
+ *
+ *     IR interpreter: call to undefined external function @write
+ *
+ * and a nonzero status, while a clang-built -exe prints the diagnostic on
+ * stderr and exits 70. Both are a diagnosis; the SIGSEGV they replaced was not.
+ * If you are reading that interpreter message from a batch program, you are out
+ * of arena.
+ *
+ * Neither is reached on any successful path. */
+long write(int fd, const char *buf, unsigned long n);
+void exit(int code);
+
+/* One byte to fd 2, out of a stack char[1] - the arena is exactly what is gone
+ * when this runs. Same shape as runtime.c's o_ch. */
+int rt_ech(int c) {
+    char b[1];
+    b[0] = (char)c;
+    write(2, b, (unsigned long)1);
+    return 0;
+}
+
+int rt_estr(char *s) {
+    int i = 0;
+    while (s[i] != 0) { rt_ech((int)(unsigned char)s[i]); i = i + 1; }
+    return 0;
+}
+
+/* A decimal on fd 2 WITHOUT rt_int2str, which allocates. */
+int rt_enum(int v) {
+    char b[16];
+    int a = v < 0 ? 0 - v : v;
+    int i = 0;
+    int k;
+    if (v < 0) { rt_ech(45); }
+    if (a == 0) { rt_ech(48); return 0; }
+    while (a > 0) { b[i] = (char)(48 + a % 10); i = i + 1; a = a / 10; }
+    k = i - 1;
+    while (k >= 0) { rt_ech((int)b[k]); k = k - 1; }
+    return 0;
+}
+
+/* The one exit from a fixed-size table that has run out. 70 is EX_SOFTWARE, and
+ * it is deliberately not 139: a compiled batch script that segfaults is
+ * indistinguishable from the compiler having emitted a broken binary, and that
+ * confusion is the whole reason this function exists. */
+void rt_die(char *what, int want, int used, int cap) {
+    rt_estr("batch-rt: ");
+    rt_estr(what);
+    rt_estr(" exhausted: request ");
+    rt_enum(want);
+    rt_estr(", used ");
+    rt_enum(used);
+    rt_estr(" of ");
+    rt_enum(cap);
+    rt_estr(" - the compiled program allocates and never frees ");
+    rt_estr("(languages/lib/batch-rt.c). Shorten the run or raise the limit there.\n");
+    exit(70);
+}
 
 /* ---------------------------------------------------------------- the arena */
 
 static char AR[2097152];
 static int APOS;
 
+/* The comparison is `n > 2097152 - p` and not `p + n > 2097152` so that it
+ * cannot itself overflow: p is always in [0, 2097152] and n >= 0. */
 char *rt_bump(int n) {
-    char *p = &AR[APOS];
-    APOS = APOS + n;
-    return p;
+    int p = APOS;
+    if (n < 0 || n > 2097152 - p) {
+        rt_die("string arena", n, p, 2097152);
+    }
+    APOS = p + n;
+    return &AR[p];
 }
 
 /* A real "" at a nonzero address: the IR interpreter traps a load at address 0. */
@@ -102,12 +177,23 @@ int rt_streqi(char *a, char *b) {
     return 0;
 }
 
+/* Concatenating with "" is the common case and it used to cost a copy: every
+ * accumulator in this file starts at EMPTY and grows one rt_strcat at a time,
+ * and `set /a` rebuilds a variable's decimal text on every assignment. An arena
+ * string is never written after it is built - the only mutation is rt_println
+ * into a capture buffer, which comes straight from rt_bump - so handing the
+ * other operand back is safe. Nothing in batch compares string pointers by
+ * identity (there is no unset marker as in bash-rt.c), so there is no aliasing
+ * question to answer here. */
 char *rt_strcat(char *a, char *b) {
     int la = rt_strlen(a);
     int lb = rt_strlen(b);
-    char *dst = rt_bump(la + lb + 1);
+    char *dst;
     int d = 0;
     int i = 0;
+    if (lb == 0) { return la == 0 ? EMPTY : a; }
+    if (la == 0) { return b; }
+    dst = rt_bump(la + lb + 1);
     while (a[i] != 0) { dst[d] = a[i]; d = d + 1; i = i + 1; }
     i = 0;
     while (b[i] != 0) { dst[d] = b[i]; d = d + 1; i = i + 1; }
@@ -171,10 +257,14 @@ int rt_findstr(char *s, char *nd, int f) {
 
 /* --------------------------------------------------------- the 32-bit ints */
 
+/* The digits are formed in a stack buffer anyway, so the length is known before
+ * anything is bumped: this used to take a flat 16 bytes of arena whatever the
+ * value, which for a `set /a` counter is three to four times what it needs. */
 char *rt_int2str(int n) {
     char tmp[16];
-    char *dst = rt_bump(16);
+    char *dst;
     if (n == 0) {
+        dst = rt_bump(2);
         dst[0] = 48;
         dst[1] = 0;
         return dst;
@@ -188,6 +278,7 @@ char *rt_int2str(int n) {
         av = av / 10;
     }
     int di = 0;
+    dst = rt_bump((15 - ti) + (neg ? 1 : 0) + 1);
     if (neg) { dst[0] = 45; di = 1; }
     int j = ti + 1;
     while (j <= 15) {
@@ -226,13 +317,25 @@ int rt_prints(char *s) {
     return 0;
 }
 
+/* The capture stack for `for /f ... in ('CMD')`. CAP_SZ is new: the buffers used
+ * to be a flat 8192 bytes with NO length check anywhere, so a captured command
+ * producing more than that walked out of its buffer and over the rest of the
+ * arena - and got the right answer whenever nothing else had been bumped since,
+ * which is why no test caught it. bash-rt.c's rt_putc had the identical defect
+ * and the identical fix: the buffer GROWS, because truncating would be a
+ * regression on exactly the cases that used to work by luck. */
 static char *CAP_BUFS[8];
 static int CAP_LENS[8];
+static int CAP_SZ[8];
 static int CAP_SP;
 
 int rt_capstart(void) {
+    if (CAP_SP >= 8) {
+        rt_die("capture nesting", 1, CAP_SP, 8);
+    }
     CAP_BUFS[CAP_SP] = rt_bump(8192);
     CAP_LENS[CAP_SP] = 0;
+    CAP_SZ[CAP_SP] = 8192;
     CAP_SP = CAP_SP + 1;
     return 0;
 }
@@ -253,7 +356,19 @@ int rt_println(char *s) {
     int top = CAP_SP - 1;
     char *buf = CAP_BUFS[top];
     int len = CAP_LENS[top];
+    int need = len + rt_strlen(s) + 2;   /* the line, its newline, and a NUL */
     int i = 0;
+    if (need > CAP_SZ[top]) {
+        int nsz = CAP_SZ[top];
+        char *nb;
+        int t = 0;
+        while (nsz < need) { nsz = nsz * 2; }
+        nb = rt_bump(nsz);
+        while (t < len) { nb[t] = buf[t]; t = t + 1; }
+        CAP_BUFS[top] = nb;
+        CAP_SZ[top] = nsz;
+        buf = nb;
+    }
     while (s[i] != 0) {
         buf[len + i] = s[i];
         i = i + 1;
@@ -270,7 +385,11 @@ char *rt_stripq(char *s) {
     int big = n >= 2;
     int lastIdx = big ? n - 1 : 0;
     int ok = big && s[0] == 34 && s[lastIdx] == 34;
-    return rt_sub(s, ok ? 1 : 0, ok ? n - 1 : n);
+    /* The unquoted case is the whole string, and an arena string is immutable,
+     * so it needs no copy. rt_mods calls this on every ~ modifier and rt_fskind
+     * on every `if exist`. */
+    if (ok == 0) { return s; }
+    return rt_sub(s, 1, n - 1);
 }
 
 char *rt_substr(char *s, int st0, int ln, int hl) {
@@ -509,6 +628,14 @@ int bat_shift(int from)
 {
     int base;
     int i;
+    /* args is DEPTH (256) frames of ARGN (10), and `frame` is written by the
+     * EMITTED program, not here - batch-to-llvm-ir.abnf's makeCall increments it
+     * with no depth check, so a batch script that recurses 256 deep indexes past
+     * args. This runtime cannot stop that store, but it can refuse to compound
+     * it, and the diagnostic names the real cause. */
+    if (frame < 0 || frame >= 256) {
+        rt_die("call nesting", 1, frame, 256);
+    }
     base = frame * 10;
     i = from;
     while (i < 9) {

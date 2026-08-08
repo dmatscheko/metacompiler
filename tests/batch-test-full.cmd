@@ -1092,6 +1092,45 @@ echo:here
 echo/here
 goto :eof
 
+rem ===== SECTION 26: a captured command larger than the capture buffer =====
+rem languages/lib/batch-rt.c's rt_capstart bumps an 8192-byte block and rt_println
+rem used to copy into it with NO length check of any kind, so a captured command
+rem producing more than that walked out of the buffer and over the rest of the
+rem arena. It got the right answer whenever nothing else had been bumped since,
+rem which is exactly why no test caught it - the same defect, and now the same
+rem fix, as bash-rt.c's rt_putc: the buffer GROWS by doubling, because truncating
+rem would be a regression on the cases that used to work by luck.
+rem
+rem MEASURED discriminating power: 16 lines of 592 bytes is 9,488 bytes, 1.16
+rem buffers. Against a clean `git archive` build of the parent this section
+rem reports capb1 = 15 rather than 16 - the sixteenth line lands on top of the
+rem loop's own state - and capb2 is wrong with it. Both pass here.
+:s26
+set s26u=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789
+set s26h=%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%
+set /a s26n=0
+set s26last=none
+for /f "delims=" %%v in ('echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%& echo %s26h%') do (
+  set /a s26n=s26n+1
+  set s26last=%%v
+)
+set cid=capb1
+set got=%s26n%
+set want=16
+call :check
+set cid=capb2
+set got=%s26last%
+set want=%s26h%
+call :check
+rem A SHORTER capture after the grown one: the stack must hand out a fresh
+rem 8192-byte block rather than still pointing at the grown one.
+for /f "delims=" %%v in ('echo tiny') do set s26t=%%v
+set cid=capb3
+set got=%s26t%
+set want=tiny
+call :check
+exit /b 0
+
 rem ===== END SECTIONS =====
 
 :main
@@ -1120,5 +1159,6 @@ call :s22 SECTION-CALL 22
 call :s23 SECTION-CALL 23
 call :s24 SECTION-CALL 24
 call :s25 SECTION-CALL 25
+call :s26 SECTION-CALL 26
 echo full: %checks% checks, %fails% failures
 exit /b %fails%
