@@ -28,7 +28,7 @@ Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial`
 small machine):
 
 ```
-matrix 357/357 · --full 8,123 assertions, 0 halves disagree · --cross 121/0
+matrix 357/357 · --full 8,311 assertions, 0 halves disagree · --cross 121/0
 clang-check 16/16 none held · go test ok · gen-all 15/15 clean
 native-full 20 languages / 37 native programs (ratchet AND feature matrix), 0 held
 shape-scan 15 groups / 481 recoverable · -freeze a fixed point
@@ -79,103 +79,12 @@ language whose count is `-`. **Running `./test.sh --full` by hand still needs
 
 # 1. Correctness, with an oracle on this machine
 
-These change answers real programs give. Each has a toolchain here that settles
-it. **Section 1 was emptied for the tenth time** — all eight items, plus 2.2 and
-4.1, are closed in `d945bb9..d0f4db3`. What follows is what closing them turned
-up, all **[V]** on `5cb4d9f`.
+These change answers real programs give, and each has a toolchain here that
+settles it.
 
-**The failure mode this round: the item was too small EVERY TIME, and twice its
-own example did not reproduce.** swift's nested-type example passes at base (the
-labels have to COLLIDE), and 3.2's stated blocker — that the SHOULD-ABORT rows pin
-`js_scope_get` — turned out not to exist: all 30 `variable not defined` references
-in the tree are comments and no test asserts on that abort. One item named 1 defect
-of 9, one named 6 String methods of 78, one named 3 `fail` sites of 4. Five items
-turned up live halves divergences `--cross` had never reached.
-
-### 1.1 C# typed catch does not exist in EITHER half — and probably not in five more **[V]**
-`catch (FormatException e) {…} catch (InvalidOperationException e) {…}` runs the
-*FormatException* body on an `InvalidOperationException`, in both engines, so it is
-a spec divergence rather than a halves one. **This is why the new
-`IndexOutOfRangeException` / `ArgumentOutOfRangeException` / `KeyNotFoundException`
-/ `OverflowException` are only distinguishable by `.Message`.** The blocker is
-structural: BCL exceptions are `{__excname, Message}` plain objects with no
-`__class`/`__super`, so a type test has nothing to walk. The fix is real
-descriptors with a parent chain (the shape java's `emitBuiltinExc` already has),
-a `js_csexcmatch`, and the `jCatchDispatch` built for java in `d945bb9`, which
-ports almost verbatim — ~200 lines across four files.
-**The same gap likely exists in kotlin, swift, dart, php and python**: every
-compiler half whose `makeTry` keeps only `items[i].catchbody` when
-`catchT == undefined`. Worth one sweep across all of them, and that sweep is the
-item, not the C# half alone.
-
-### 1.2 A nested swift type shadows a same-named TOP-LEVEL type **[V]**
-```swift
-struct Inner { func who() -> String { return "top" } }
-struct A { struct Inner { func who() -> String { return "nested" } } }
-print(Inner().who(), A.Inner().who())   // ours "nested nested", swiftc "top nested"
-```
-Wrong in all three engines. The compiler half can be fixed alone (it resolves bare
-type names statically through `typeKeyOf`), but **the interpreter cannot follow** —
-it resolves a bare type name at *run* time through the scope chain with no static
-type context, so removing the bare binding breaks its superclass and protocol
-lookups. Doing only the compiler half ships a NEW halves divergence, which is why
-`69d8e17` stopped here. The interpreter needs a qualified `__qname` on each
-descriptor plus resolution outward through `ownerStack`.
-
-### 1.3 `obj.is_a?(SomeModule)` after `include M` — a live halves divergence **[V]**
-False in both ruby compiled halves, true in the interpreter. The compiler flattens
-`include` at build time and never records the module on the class object; the fix
-is a `$mix$<Name>` marker in `makeClassStmt` checked by `rubyIsA`/`rbIsA`.
-Pre-existing, verified against base.
-
-### 1.4 Calling a non-function is uncatchable, and the halves word it differently **[V]**
-`xs[1]()` with `undefined` in the slot: the js interpreter says *call of a non
-function value (method '1')*, `llvm.Run` says *unknown list method '1'*. node says
-`xs[1] is not a function`, which needs the source expression text no engine keeps.
-The site (`js_call`'s `die2` / `rt.call`) is used by every language's layer-2
-internals, so making it throw risks masking engine bugs — a fourth
-`js_rt_miss*`-style hook would work, and `d0f4db3` established that pattern.
-
-### 1.5 A non-empty bounded ruby Range is not a value **[V]**
-`p (1..3)` prints `[1, 2, 3]`, and `.begin`/`.end`/`.exclude_end?` abort with
-*unknown Array method*. `d0f4db3`'s predecessor fixed the SLICING half without a
-representation change (10 of 10 rows now match MRI against 5 of 10), but the range
-as a VALUE needs `{__rrange}` for *all* bounded ranges plus the whole consumption
-surface — for-in, each/map/sum/step/splat/===/inspect — in the emitter and both
-compiled runtimes.
-
-### 1.6 python's static binding analysis is absent **[V]**
-`def h(): print(w); w = 1` raises `UnboundLocalError` in CPython and `NameError`
-in all three engines here, because the name is a local by CPython's *static*
-analysis, which no engine performs. Both halves agree, so `--cross` is blind.
-Related and cheaper: `type(re.compile(…)).__name__` is `'object'` where CPython
-says `'Pattern'` — not fixed because CPython's *AttributeError* for the same value
-says `'re.Pattern'`, a different string, so a one-line arm trades one wrong answer
-for another.
-
-### 1.7 python's missing module and descriptor surface **[V]**
-`import math` binds nothing (`math` is undefined in all three engines; `re` is the
-only module with a bound object), `open` likewise; `staticmethod` and
-`classmethod` are undefined; `list.count` as an unbound descriptor raises where
-CPython answers `<method 'count' of 'list' objects>` (~40 lines per engine on the
-`pyBoundInfo` record `9a64f07` added); and `len.__self__` needs a `builtins`
-module object.
-
-### 1.8 bash: three divergences from real bash 5.3, all found by the new feature file **[V]**
-`${s^^[bn]}` ignores the pattern operand entirely (bash `BaNaNa`, ours `BANANA`);
-**`-f` is a hard-coded path whitelist** because `rt_fskind` has no `stat()`, so
-`[ -f /dev/null ]` is true here and false in bash, and `-f` on any real regular
-file is false here and true in bash; and `$(( 10#$num ))` dies with *command not
-found* because `base#digits` is only recognised when the prefix is not built by
-expansion. Also **bash drops empty fields under a non-whitespace IFS** —
-`IFS=:` on `a:b::c` gives 4 fields in bash and 3 here — which needs the POSIX
-delimiter rule in `rt_splitifs` and touches every unquoted expansion, so it wants
-its own ratchet section.
-
-### 1.9 Compiled bash discards stderr entirely **[V]**
-`rt_putc` drops every channel but 0, so `set -u` failures, bad regexes and `[[ ]]`
-errors print NOTHING under `-exe` where real bash prints to fd 2. `rt_estr` in
-`bash-rt.c` is now a working fd-2 writer the grammar could reuse (`4a2facd`).
+**Section 1 is EMPTY for the twelfth time** — all nine items, plus 2.2, are closed
+in `0907c7f..40a8f4f`. What that round found is folded into the box at the top of
+this file; the per-item detail is in those six commit messages.
 
 # 2. Cross-engine defects and latent traps
 
@@ -198,18 +107,6 @@ answer, so the whole mechanism came out; `itc20`/`itc24` pin the gap with the re
 beside them. **Any future attempt needs a per-coroutine stack, not a per-program
 one.**
 
-### 2.2 The emitters write `frame`/`nvars`/`gvars` with no depth check **[V]**
-`4a2facd` bounds-checked all nine ALLOCATION paths in `bash-rt.c`/`batch-rt.c`
-(the `rt_limit` flag guarding four of them was written at four sites and read
-nowhere), but the EMITTED code can still walk off two fixed arrays that no runtime
-can defend: `batch-to-llvm-ir.abnf`'s `makeCall` increments `frame` past
-`DEPTH=256` into `args[2560]`, and bash's emitter fills `gvars[1024]`/
-`varnames[1024]` with no cap. `bat_shift` now refuses to compound the batch one.
-Related and smaller: `%VAR:~N,M%` in batch is wrong for N past ~1184
-(`%big:~11834,6%` is empty on an 11,840-byte value while `%big:~-6%` is right) —
-likely the emitter's offset handling, not `rt_substr`; and whether `exit /b`
-implicitly pops an open `setlocal` is unsettled here with no cmd.exe to ask.
-
 ### 2.3 `with` is the one js construct that cannot be lowered honestly **[V]**
 ~170 lines, and size is not the blocker. The INTERPRETER can implement it exactly
 (`scopes.push(o)` — scopes there are plain objects). Both compiled engines cannot:
@@ -228,9 +125,8 @@ Surfaced by `44dbd04` while routing java's `equals`, and stated in both
 `:description` blocks rather than guessed at. Same family as **kotlin's mixed
 Float/Double set key** (closed in `1b54644`), **swift's `Int` vs `Int64`** (which
 normalise to one representation so `8 as Int64 is Int` is true where `swiftc` says
-false, recorded at the site in `a68e16d`), and **kotlin's empty-range `first`**
-(item 1.8). All four would likely be closed by one mechanism: a nominal type on
-the value.
+false, recorded at the site in `a68e16d`), and **kotlin's empty-range `first`**.
+All four would likely be closed by one mechanism: a nominal type on the value.
 
 ### 2.5 A Python `set` member that is unhashable **[U]**
 Compared with `==` in the compiled halves and `===` in the interpreter
@@ -300,12 +196,21 @@ and its two surprises (key aliasing needs two hops; `is` under-reads, so the box
 must be a pointer) are the reusable half.
 
 ### 3.2 A catchable `NameError` under the compiler — **NOW UNBLOCKED** **[V]**
-The site is `js_scope_get`, shared by all sixteen languages and pinned by
-clang-check and the SHOULD-ABORT rows. **The ceiling that blocked it is gone**:
-`4d54d60` gave js/ts a real Error class hierarchy, and python and ruby already had
-one, so a raised value can now BE a `ReferenceError`/`NameError` rather than a
-string. What remains is deciding which `fail` sites become throws in each
-language, and doing it without moving the SHOULD-ABORT rows. See 1.8.
+The site is `js_scope_get`, shared by all sixteen languages. **Both things that
+blocked it are gone.** `4d54d60` gave js/ts a real Error class hierarchy, and
+python and ruby already had one, so a raised value can now BE a
+`ReferenceError`/`NameError` rather than a string — and **the "pinned by the
+SHOULD-ABORT rows" blocker does not exist**: all 30 `variable not defined`
+references in the tree are comments, and no test asserts on that abort.
+
+**`d0f4db3` then did it for js/ts and python, and `018c693` did the same for the
+CALL side in js/ts** — `js_rt_misscall`, the fourth `js_rt_miss*` hook, where a
+language REGISTERS a miss and the fourteen that do not keep the abort untouched.
+So the pattern is established twice over and the remaining work is mechanical:
+**the other fourteen languages still abort uncatchably on an unknown name and an
+unknown method**, with a different wording per engine per site, and `llvm.Run`
+still prints Go type names (`(*abnf.jsArray)`) into those messages where the
+native binary does not — a live halves divergence in the text.
 
 ### 3.3 Part B: moving floor bodies into layer 2 has no landed move **[U]**
 The floor→layer-2 upcall costs **120 ns** and is affordable; a nine-iteration
