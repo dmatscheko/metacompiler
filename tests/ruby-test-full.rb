@@ -1915,7 +1915,51 @@ def s40
   w[3].each_char { |c| ecs = ecs + c + "-" }
   check("ab34", ecs == "a-b-c-")
 end
+# ===== SECTION 41: the Math module =====
+# docs/todo.md 1.1. `Math` was in ruby-interpreter.abnf's builtin-class list and
+# carried NOTHING, so `Math.sin(1)` aborted that half with "unknown class method
+# 'sin'"; it was NOT in ruby-to-llvm-ir.abnf's list, so the name fell through to
+# the root scope's JavaScript Math - which answered the integer 2 for
+# Math.sqrt(4) where Ruby answers 2.0, answered nil for Math::PI, and, for every
+# member the C floor did not carry, worked under llvm.Run and killed the native
+# binary with `unknown method 'sin'`. Four engines: rubyMathCall in
+# abnf/jsrt.go, rbMathCall in languages/lib/ruby-rt.metajs, the "$s$" methods on
+# hostGlobals["Math"] in ruby-interpreter.abnf, and the Math the C floor seeds.
+#
+# Every row is /usr/bin/ruby 2.6.10's answer (Math is unchanged in 3.x). Every
+# operand is read out of an array so no constant folder can answer at compile
+# time. THE POINT OF EVERY ROW IS THE ".0": Ruby's Math always answers a Float.
+def s41
+  a = [4, 2, 8, 1, 0.5, 3, 27, 100, 0, 16, 10]
+  check("rmath1", Math.sqrt(a[0]) == 2.0 && Math.sqrt(a[0]).to_s == "2.0")
+  check("rmath2", Math.sqrt(a[1]) == 1.4142135623730951)
+  check("rmath3", Math.cbrt(a[2]).to_s == "2.0" && Math.cbrt(a[6]).to_s == "3.0")
+  check("rmath4", Math.sin(a[3]) == 0.8414709848078965 && Math.cos(a[3]) == 0.5403023058681398)
+  # GO-vs-MRI: Math.asin(0.5) is 0.5235987755982988 under /usr/bin/ruby (the
+  # platform libm) and ...89 in all four engines here, which are all Go's math
+  # package. Math.atanh(0.5) below is the same one-ulp story (MRI ...549). Both
+  # are older than this section and are the reason those two rows are asserted
+  # against OUR answer with the divergence written down rather than dropped.
+  check("rmath5", Math.asin(a[4]) == 0.5235987755982989 && Math.atan(a[3]) == 0.7853981633974483)
+  check("rmath6", Math.sinh(a[3]) == 1.1752011936438014 && Math.cosh(a[3]) == 1.5430806348152437)
+  check("rmath7", Math.tanh(a[3]) == 0.7615941559557649 && Math.atanh(a[4]) == 0.5493061443340548)
+  check("rmath8", Math.asinh(a[3]) == 0.881373587019543 && Math.acosh(a[3]).to_s == "0.0")
+  check("rmath9", Math.exp(a[8]).to_s == "1.0" && Math.exp(a[3]) == 2.718281828459045)
+  check("rmath10", Math.log(a[3]).to_s == "0.0" && Math.log(Math::E).to_s == "1.0")
+  # The optional BASE, which JavaScript's Math.log does not have.
+  check("rmath11", Math.log(a[2], a[1]).to_s == "3.0" && Math.log(a[7], a[10]).to_s == "2.0")
+  check("rmath12", Math.log2(a[2]).to_s == "3.0" && Math.log2(a[9]).to_s == "4.0")
+  check("rmath13", Math.log10(a[7]).to_s == "2.0")
+  check("rmath14", Math.hypot(a[5], a[0]).to_s == "5.0")
+  check("rmath15", Math.atan2(a[3], a[1]) == 0.4636476090008061)
+  # The two module constants, which read as scoped constants (Math::PI), not as
+  # method calls, and answered nil in both compiled halves.
+  check("rmath16", Math::PI == 3.141592653589793 && Math::E == 2.718281828459045)
+  check("rmath17", Math::PI.class == Float && Math.sqrt(a[0]).class == Float)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
+s41() # SECTION-CALL 41
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

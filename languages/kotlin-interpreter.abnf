@@ -3451,11 +3451,103 @@ NotMemberKw = :script(~~
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone; every
     // engine answered `1.5 in 1.0..2.0` FALSE before, agreeing and all wrong.
+    // `pg` marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
+    // and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
+    // and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" while
+    // IntRange.toString never does - so `(1..5) step 1` is "1..5 step 1" and
+    // `(5 downTo 1).reversed()` is "1..5 step 1", neither of which the direction and
+    // the step alone can tell apart from the plain "1..5". It is also what
+    // `x is IntRange` must answer false to.
     function kRange(from, to, down) {
         return {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
-                ch: kIsChar(from), fl: kIsFlo(from)}
+                ch: kIsChar(from), fl: kIsFlo(from), pg: false}
+    }
+    // IntProgression.reversed(): "a progression that goes over the same range in the
+    // opposite direction with the same step" - IntProgression.fromClosedRange(last,
+    // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
+    // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
+    function rangeRev(rg) {
+        return {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
+                down: !rg.down, ch: rg.ch, fl: false, pg: true}
     }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__range === true }
+    // ----- kotlin.random -----
+    // THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
+    // engines agree on byte-for-byte - the same argument Kernel#rand is settled by in
+    // ruby-interpreter.abnf. So `random()` draws from a DETERMINISTIC generator with a
+    // fixed default seed: a program sees a varying sequence (two draws from 1..1000000
+    // differ, which is what distinguishes this from ruby's "always the front element"),
+    // every run of every engine sees the SAME sequence, and the matrix's byte-identity
+    // requirement is met by construction. The particular values are ours, not the
+    // JVM's - Kotlin's Random(seed) is XorWowRandom and reproducing its stream is not
+    // something a program can check without a JVM. Assert membership and bounds.
+    //
+    // xorshift32, in 32-bit arithmetic only: `|0` after every shift because the tag
+    // engine's integers do not wrap on their own.
+    function kRndBox(seed) {
+        var x = (kNum(seed) | 0) ^ 1640531527
+        x = x | 0
+        if (x == 0) { x = 1 }
+        var b = {__ktrnd: true, s: x}
+        kRndNext(b)
+        kRndNext(b)
+        return b
+    }
+    function kIsRnd(v) { return v !== null && v !== undefined && typeof v == "object" && v.__ktrnd === true }
+    function kRndNext(box) {
+        var x = box.s | 0
+        x = (x ^ ((x << 13) | 0)) | 0
+        x = (x ^ (x >>> 17)) | 0
+        x = (x ^ ((x << 5) | 0)) | 0
+        if (x == 0) { x = 1 }
+        box.s = x
+        return x
+    }
+    // A non-negative draw below n. The 30-bit mask is what keeps this off `>>> 0`,
+    // whose answer for a negative operand is the one shift the three engines are
+    // least likely to spell the same way.
+    function kRndBelow(box, n) {
+        if (n <= 1) { return 0 }
+        return (kRndNext(box) & 1073741823) % n
+    }
+    // The default generator, kotlin.random.Random.Default. One per program run.
+    var kRndDefault = kRndBox(20260808)
+    function kRndOf(args) {
+        if (args.length > 0 && kIsRnd(args[0])) { return args[0] }
+        return kRndDefault
+    }
+    // The kotlin.random.Random member surface. The twins are ktRndMethod in
+    // abnf/jsrtkotlin.go and k4RndMethod in languages/lib/kotlin-rt.metajs.
+    function kRndMethod(box, name, args) {
+        if (name == "nextInt" || name == "nextLong") {
+            if (args.length == 0) { return {v: kRndNext(box)} }
+            var rlo = 0
+            var rhi = kNum(args[0])
+            if (args.length > 1) { rlo = rhi; rhi = kNum(args[1]) }
+            if (rhi <= rlo) { kThrowExc("IllegalArgumentException", "Random range is empty: [" + rlo + ", " + rhi + ").") }
+            return {v: rlo + kRndBelow(box, rhi - rlo)}
+        }
+        if (name == "nextBoolean") { return {v: (kRndNext(box) & 1) == 1} }
+        if (name == "nextDouble") {
+            var rd = kRndBelow(box, 1073741824) / 1073741824
+            if (args.length == 1) { return {v: kFlo(rd * kNumD(args[0]))} }
+            if (args.length > 1) { return {v: kFlo(kNumD(args[0]) + rd * (kNumD(args[1]) - kNumD(args[0])))} }
+            return {v: kFlo(rd)}
+        }
+        if (name == "toString") { return {v: "Random"} }
+        return null
+    }
+    // The number of elements in a progression, arithmetically - a `random()` on
+    // `1..1000000` must not materialize a million cells to pick one.
+    function rangeCount(rg) {
+        if (rangeEmpty(rg)) { return 0 }
+        var span = rg.down ? (rg.from - rangeLastEl(rg)) : (rangeLastEl(rg) - rg.from)
+        return Math.floor(span / rg.st) + 1
+    }
+    function rangeAt(rg, i) {
+        var off = rg.st * i
+        return rangeEl(rg, rg.down ? (rg.from - off) : (rg.from + off))
+    }
     // items alternates operand thunks and {rop} markers; the fold is left to right, so
     // `0..6 step 2` builds the 0..6 range and then re-steps it. A range-less RangeExpr
     // is a pass-through: its single AddExpr thunk is returned unchanged.
@@ -3470,8 +3562,14 @@ NotMemberKw = :script(~~
                 r = items[i + 1]()
                 if (rop == "step") {
                     if (!isRange(v)) { fail("step applied to a non-range") }
-                    if (r <= 0) { fail("range step must be positive") }
-                    v = {__range: true, from: v.from, to: v.to, st: r, down: v.down, ch: v.ch, fl: v.fl}
+                    // kNum, not the raw operand: `1L..5L step 2L` handed a {__sz} box
+                    // straight into `st` here and the range printed "1..NaN step
+                    // [object Object]" while both compiled halves (which run the
+                    // bound through k4RangeNum) answered "1..5 step 2".
+                    var stn = kNum(r)
+                    if (stn <= 0) { fail("range step must be positive") }
+                    v = {__range: true, from: v.from, to: v.to, st: stn, down: v.down,
+                         ch: v.ch, fl: v.fl, pg: true}
                 } else if (isRange(v)) { fail("chained range expression") }
                 else if (rop == "downTo") { v = kRange(v, r, true) }
                 else if (rop == "..") { v = kRange(v, r, false) }
@@ -3520,7 +3618,7 @@ NotMemberKw = :script(~~
         var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
         var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
         if (rg.down) { return a + " downTo " + b + " step " + rg.st }
-        if (rg.st != 1) { return a + ".." + b + " step " + rg.st }
+        if (rg.st != 1 || rg.pg === true) { return a + ".." + b + " step " + rg.st }
         return a + ".." + b
     }
     // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
@@ -3942,6 +4040,13 @@ NotMemberKw = :script(~~
     // answered by mcall.
     hostGlobals["StringBuilder"] = function(init) {
         return {__sb: true, s: (init === undefined || init === null) ? "" : kstr2(init)}
+    }
+    // kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument is
+    // not a Kotlin spelling (Random.Default is), so a missing seed takes the default
+    // stream. See kRndBox for why the stream is deterministic in all three engines.
+    hostGlobals["Random"] = function(seed) {
+        if (seed === undefined || seed === null) { return kRndDefault }
+        return kRndBox(seed)
     }
     hostGlobals["buildString"] = function(f) {
         var b = {__sb: true, s: ""}
@@ -4584,6 +4689,13 @@ NotMemberKw = :script(~~
         // A Map.Entry renders as a=1 (java.util.AbstractMap's entry toString), NOT as
         // the Pair it also destructures as - so `println(m.entries)` is [a=1, b=2].
         if (kIsEntry(v)) { return kstr(v.key) + "=" + kstr(v.value) }
+        // An IndexedValue is a DATA class, so its toString is the generated one:
+        // "IndexedValue(index=0, value=10)", not the Pair "(0, 10)" every engine
+        // printed. The first/second slots stay on the value so destructuring is
+        // unchanged; only the render moved.
+        if (typeof v == "object" && v.__ktiv === true) {
+            return "IndexedValue(index=" + kstr(v.index) + ", value=" + kstr(v.value) + ")"
+        }
         // A Pair / Triple renders as (a, b) / (a, b, c) - kotlin.Pair.toString.
         if (kIsPair(v)) {
             var po = "(" + kstr(v.first) + ", " + kstr(v.second)
@@ -5052,8 +5164,57 @@ NotMemberKw = :script(~~
         }
         if (name == "subSequence") { return {v: sv.substring(kNum(args[0]), kNum(args[1]))} }
         if (name == "trimIndent") { return {v: kTrimIndent(sv)} }
+        // ----- the STRING family of _Strings.kt -----
+        // kotlin.text generates the collection operators for CharSequence from the
+        // same templates as kotlin.collections, but the ones that SELECT characters
+        // answer a String (`public inline fun String.filter(predicate: (Char) ->
+        // Boolean): String`), not a List<Char>; chunked and windowed answer
+        // List<String>; partition answers Pair<String, String>. Everything that
+        // TRANSFORMS - map, flatMap, groupBy, zip, sorted, distinct, withIndex -
+        // answers a List in Kotlin too and keeps falling through below. Every one of
+        // these printed "[a, b, d]" in all three engines. todo.md 1.5.
+        if (name == "slice") {
+            // String.slice(IntRange) is substring(range) - the BOUNDS, not the
+            // elements; String.slice(Iterable<Int>) picks the chars at those indices.
+            // Both answered the char LIST.
+            if (isRange(args[0])) {
+                if (rangeEmpty(args[0])) { return {v: ""} }
+                return {v: sv.substring(args[0].from, args[0].to + 1)}
+            }
+            return {v: kCharsStr(kSeqMethod(kChars(sv), name, args).v)}
+        }
+        if (name == "filter" || name == "filterNot" || name == "filterIndexed" ||
+            name == "takeWhile" || name == "dropWhile" || name == "onEach") {
+            return {v: kCharsStr(kSeqMethod(kChars(sv), name, args).v)}
+        }
+        if (name == "partition") {
+            var pp = kSeqMethod(kChars(sv), name, args).v
+            return {v: kPair(kCharsStr(pp.first), kCharsStr(pp.second))}
+        }
+        if (name == "chunked" || name == "windowed") {
+            // The transform of the String overloads receives a CharSequence, so it
+            // runs on the joined piece rather than on the char list.
+            var sxf = null
+            var sargs = []
+            for (var si = 0; si < args.length; si++) {
+                if (typeof args[si] == "function") { sxf = args[si] } else { sargs.push(args[si]) }
+            }
+            var pieces = kSeqMethod(kChars(sv), name, sargs).v
+            var sout = []
+            for (var pi = 0; pi < pieces.length; pi++) {
+                var ptxt = kCharsStr(pieces[pi])
+                sout.push(sxf == null ? ptxt : sxf(ptxt))
+            }
+            return {v: sout}
+        }
         // Everything a String shares with a List of Char.
         return kSeqMethod(kChars(sv), name, args)
+    }
+    // A list of Char boxes back to the text it came from.
+    function kCharsStr(a) {
+        var out = ""
+        for (var i = 0; i < a.length; i++) { out += String.fromCharCode(a[i].__char) }
+        return out
     }
     // kotlin.text.trimIndent: drop a leading and a trailing BLANK line, then remove the
     // common indent of every non-blank line. The twin is ktTrimIndent in
@@ -5481,19 +5642,43 @@ NotMemberKw = :script(~~
             }
             return {v: out}
         }
+        // chunked(size[, transform]) and windowed(size, step = 1, partialWindows =
+        // false[, transform]). The TRANSFORM used to be dropped on the floor in every
+        // engine - `listOf(1,2,3,4).chunked(2) { it.sum() }` answered the chunks
+        // themselves - and windowed's partialWindows was ignored, so the tail windows
+        // it asks for were never produced. todo.md 1.5.
         if (name == "chunked" || name == "windowed") {
             var sz = kNum(args[0])
             var step = 1
-            if (name == "chunked") { step = sz }
-            else if (args.length > 1) { step = kNum(args[1]) }
+            var partial = name == "chunked"
+            var xf = null
+            if (name == "chunked") {
+                step = sz
+                if (args.length > 1 && typeof args[1] == "function") { xf = args[1] }
+            } else {
+                if (args.length > 1 && typeof args[1] != "function") { step = kNum(args[1]) }
+                if (args.length > 2 && typeof args[2] != "function") { partial = args[2] === true }
+                for (var wa = 1; wa < args.length; wa++) {
+                    if (typeof args[wa] == "function") { xf = args[wa] }
+                }
+            }
             if (sz <= 0 || step <= 0) { fail(name + "() size and step must be positive") }
             out = []
-            for (i = 0; (name == "chunked" ? i < es.length : i + sz <= es.length); i = i + step) {
+            for (i = 0; partial ? i < es.length : i + sz <= es.length; i = i + step) {
                 var piece = []
                 for (var w = i; w < i + sz && w < es.length; w++) { piece.push(es[w]) }
-                out.push(piece)
+                out.push(xf == null ? piece : xf(piece))
             }
             return {v: out}
+        }
+        // kotlin.collections.random / randomOrNull. See kRndBox: the generator is
+        // deterministic, which is the only thing three engines can agree on.
+        if (name == "random" || name == "randomOrNull") {
+            if (es.length == 0) {
+                if (name == "randomOrNull") { return {v: null} }
+                kThrowExc("NoSuchElementException", "Collection is empty.")
+            }
+            return {v: es[kRndBelow(kRndOf(args), es.length)]}
         }
         // distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
         // deduplication is the same, the SHAPE is not (kotlin.collections declares
@@ -5582,7 +5767,7 @@ NotMemberKw = :script(~~
         if (name == "withIndex") {
             out = []
             for (i = 0; i < es.length; i++) {
-                out.push({index: i, value: es[i], first: i, second: es[i]})
+                out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
             }
             return {v: out}
         }
@@ -5789,7 +5974,10 @@ NotMemberKw = :script(~~
             for (i = 0; i < oth2.length; i++) { kSetAdd(uout, oth2[i]) }
             return {v: uout}
         }
-        if (name == "slice" || name == "subList") {
+        // sliceArray is slice under the Array name (Kotlin gives it a separate name
+        // because it answers an Array); here the two shapes are one, so it is the
+        // same operator. It aborted with "unknown list method" in all three engines.
+        if (name == "slice" || name == "sliceArray" || name == "subList") {
             var idxs = anytype
             idxs = (name == "subList") ? null : (isRange(f) ? rangeList(f) : kElems(f))
             out = []
@@ -6170,6 +6358,14 @@ NotMemberKw = :script(~~
             // outside the string instead of yielding "".
             if (name == "length") return target.length
             if (name == "equals") return target === args[0]
+            // kotlin.text.substring(range: IntRange) is substring(range.start,
+            // range.endInclusive + 1). The range argument used to reach kNum, which
+            // reads an object as NaN, so `"abcdef".substring(1..3)` answered the whole
+            // string in all three engines. todo.md 1.5.
+            if (name == "substring" && args.length == 1 && isRange(args[0])) {
+                if (rangeEmpty(args[0])) { return "" }
+                return target.substring(args[0].from, args[0].to + 1)
+            }
             if (name == "substring") return args.length > 1 ? target.substring(kNum(args[0]), kNum(args[1])) : target.substring(kNum(args[0]))
             if (name == "indexOf") return target.indexOf(kstr2(args[0]))
             if (name == "isEmpty") return target.length == 0
@@ -6198,6 +6394,18 @@ NotMemberKw = :script(~~
         // numeric conversions, so there is no cast syntax to carry them. They are
         // shared by every numeric receiver, so they are answered before the
         // per-receiver branches below. The twin is ktNumMethod in abnf/jsrtkotlin.go.
+        // rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
+        // `downTo` are the infix operators makeRange folds, but kotlin.ranges declares
+        // each as an ordinary member/extension too, and `1.rangeTo(5)` aborted with
+        // "unknown Int method: rangeTo" in all three engines. Char is here rather than
+        // in kCharMethod because the three share one body.
+        if ((name == "rangeTo" || name == "until" || name == "downTo") && args.length == 1 &&
+            (kIsFlo(target) || szIs(target) || typeof target == "number" || kIsChar(target))) {
+            if (name == "downTo") { return kRange(target, args[0], true) }
+            var rtr = kRange(target, args[0], false)
+            if (name == "until") { rtr.to = rtr.to - 1 }
+            return rtr
+        }
         if (kIsFlo(target) || szIs(target) || typeof target == "number") {
             var cn = kConvName(name)
             var cw = kDeclWidth[cn]
@@ -6263,6 +6471,14 @@ NotMemberKw = :script(~~
         // A function value: f.invoke(args) is the call itself (slot?.invoke(1)).
         if (typeof target == "function") {
             if (name == "invoke") { kSetNamed(sp.named); return target.apply(undefined, args) }
+            // kotlin.random.Random's COMPANION OBJECT: `Random.nextInt(10)`.
+            // `Random` itself is the seeded-constructor hostGlobal, so the companion
+            // spelling arrives as a member call on that function VALUE, which is why
+            // the receiver is matched by identity against the global.
+            if (target === hostGlobals["Random"]) {
+                var rcm = kRndMethod(kRndDefault, name, args)
+                if (rcm != null) { return rcm.v }
+            }
             fail("unknown function method: " + name)
         }
         // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so they are
@@ -6419,6 +6635,12 @@ NotMemberKw = :script(~~
             if (name == "isInitialized") { return target.done }
         }
         // The Job / Deferred an `async` or `launch` answers (see kJob).
+        // A kotlin.random.Random receiver. The twin is ktRndMethod in
+        // abnf/jsrtkotlin.go and k4RndMethod in languages/lib/kotlin-rt.metajs.
+        if (kIsRnd(target)) {
+            var rnm = kRndMethod(target, name, args)
+            if (rnm != null) { return rnm.v }
+        }
         if (kIsJob(target)) {
             var jm = kJobMethod(target, name)
             if (jm != null) { return jm.v }
@@ -6435,6 +6657,29 @@ NotMemberKw = :script(~~
             if (name == "hashCode") return rangeHashK(tgt)
             if (name == "isEmpty") return rangeEmpty(tgt)
             if (name == "equals") { return isRange(args[0]) ? rangeEqK(tgt, args[0]) : false }
+            // IntProgression.reversed() is an IntProgression, not a List - every
+            // engine answered the materialized "[5, 4, 3, 2, 1]" here, and the
+            // `.first`/`.last`/`.step` of the answer were then kotlin.Unit in both
+            // compiled halves. todo.md 1.5.
+            if (name == "reversed" && tgt.fl !== true) { return rangeRev(tgt) }
+            // IntProgression.step(k) in its function spelling; the infix `step` is
+            // folded by makeRange and never reaches a method call.
+            if (name == "step" && args.length == 1 && tgt.fl !== true) {
+                var sn2 = kNum(args[0])
+                if (sn2 <= 0) { fail("range step must be positive") }
+                return {__range: true, from: tgt.from, to: tgt.to, st: sn2,
+                        down: tgt.down, ch: tgt.ch, fl: tgt.fl, pg: true}
+            }
+            // kotlin.random: `(1..5).random()` throws NoSuchElementException on an
+            // empty progression and randomOrNull() answers null.
+            if (name == "random" || name == "randomOrNull") {
+                var rc = rangeCount(tgt)
+                if (rc == 0) {
+                    if (name == "randomOrNull") { return null }
+                    kThrowExc("NoSuchElementException", "Cannot get random in empty range: " + rangeStr(tgt))
+                }
+                return rangeAt(tgt, kRndBelow(kRndOf(args), rc))
+            }
             tgt = rangeList(tgt)
         }
         if (Array.isArray(tgt)) {
@@ -9528,6 +9773,12 @@ NotMemberKw = :script(~~
             if (ep0 != undefined) { return ep0(o) }
             fail("property ." + name + " of null")
         }
+        // kotlin.random.Random.Default - the companion object, which IS the default
+        // generator here. `Random` is the seeded-constructor hostGlobal, so this is a
+        // member read on that function value.
+        if (name == "Default" && typeof o == "function" && o === hostGlobals["Random"]) {
+            return kRndDefault
+        }
         // ::topLevelFun is the function value itself, and KFunction.name is its name.
         if (typeof o == "function") {
             if (name == "name") { return fnRefName(o) }
@@ -9836,7 +10087,7 @@ NotMemberKw = :script(~~
             // A floating range is a ClosedRange and NOT an Iterable.
             if (v.fl === true) { return t == "ClosedFloatingPointRange" || t == "ClosedRange" }
             if (t == "Iterable") { return true }
-            var plain = v.st == 1 && !v.down
+            var plain = v.st == 1 && !v.down && v.pg !== true
             if (v.ch) {
                 if (t == "CharProgression") { return true }
                 return t == "CharRange" && plain

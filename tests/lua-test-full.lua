@@ -947,6 +947,120 @@ s21() -- SECTION-CALL 21
 s22() -- SECTION-CALL 22
 s23() -- SECTION-CALL 23
 s24() -- SECTION-CALL 24
+-- ===== SECTION 26: the math library =====
+-- docs/todo.md 1.1. Lua's math table carried ten of its twenty-nine members:
+-- `math.sqrt(2)` was "attempt to call a nil value" in BOTH halves, and so were
+-- sin cos tan asin acos exp log deg rad atan modf ult pi and huge. The item that
+-- sent me here claimed lua read the host Math out of the root scope and died
+-- natively on Math.sin; it does not - the only host Math lua ever reached was
+-- Math.pow for the `^` operator, which the C floor already had. The real gap was
+-- that the library was simply missing, identically in both halves, so --cross
+-- could never see it.
+--
+-- What made it cheap to close is the OTHER half of that item: the C floor's Math
+-- now has the same thirty-four members as the Go twin and as goja, so the
+-- float-only functions are a method call on the root Math and cost no extern at
+-- all (libMath1 in lua-to-llvm-ir.abnf). Only atan/log/modf/ult need one, because
+-- an argument COUNT or the integer SUBTYPE decides their answer.
+--
+-- EVERY ROW BELOW IS lua 5.5.0's OWN ANSWER, which is installed on this machine.
+-- A 641-row differential probe over 31 arguments puts all four legs (both
+-- interpreter hosts, llvm.Run and the native binary) on the same output, and 68
+-- of those rows differ from real lua in the last ulp because every engine here
+-- uses Go's math package where lua uses the platform libm - a pre-existing class,
+-- and the values chosen here deliberately avoid it.
+--
+-- THE POINT OF HALF THESE ROWS IS THE SUBTYPE: math.sqrt(4) is the FLOAT 2.0 and
+-- not the integer 2, and math.modf's first result is an integer while its second
+-- is always a float.
+local function s26()
+    local a = {0, 1, 2, 3, 4, 0.5, 0.1, 8, 10, 27, 100, 1000, 0.25, 3.7, -3.7, 2.5}
+
+    check("lmath01", math.sqrt(a[5]), 2.0)
+    check("lmath02", math.type(math.sqrt(a[5])), "float")
+    check("lmath03", math.sqrt(a[3]), 1.4142135623730951)
+    check("lmath04", math.sqrt(a[13]), 0.5)
+    check("lmath05", math.sqrt(a[1]), 0.0)
+
+    check("lmath06", math.sin(a[1]), 0.0)
+    check("lmath07", math.sin(a[2]), 0.8414709848078965)
+    check("lmath08", math.cos(a[1]), 1.0)
+    check("lmath09", math.cos(a[2]), 0.54030230586813977)
+    check("lmath10", math.tan(a[1]), 0.0)
+    check("lmath11", math.tan(a[2]), 1.5574077246549021)
+    check("lmath12", math.asin(a[1]), 0.0)
+    check("lmath13", math.asin(a[2]), 1.5707963267948966)
+    check("lmath14", math.acos(a[2]), 0.0)
+    check("lmath15", math.acos(a[1]), 1.5707963267948966)
+    check("lmath16", math.atan(a[2]), 0.78539816339744828)
+    check("lmath17", math.atan(a[3]), 1.1071487177940904)
+    -- math.atan(y, x) IS atan2, and the one-argument form is atan2(y, 1.0).
+    check("lmath18", math.atan(a[2], a[3]), 0.46364760900080609)
+    check("lmath19", math.atan(a[2], a[2]), math.atan(a[2]))
+
+    check("lmath20", math.exp(a[1]), 1.0)
+    check("lmath21", math.exp(a[2]), 2.7182818284590451)
+    check("lmath22", math.exp(a[3]), 7.38905609893065)
+    check("lmath23", math.log(a[2]), 0.0)
+    check("lmath24", math.log(a[8]), 2.0794415416798357)
+    -- The BASE. lmathlib.c routes base 2 and base 10 to log2/log10 rather than
+    -- dividing, which is what makes these exact.
+    check("lmath25", math.log(a[8], a[3]), 3.0)
+    check("lmath26", math.log(a[11], a[9]), 2.0)
+    check("lmath27", math.log(a[13], a[3]), -2.0)
+    -- A base that is NEITHER 2 NOR 10 goes through Log(x)/Log(base), and there
+    -- the last ulp of Go's math.Log shows: math.log(27, 3) is exactly 3.0 in real
+    -- lua (platform libm) and 3.0000000000000004 in all four engines here. Node
+    -- agrees with us, python3 with lua. Asserted as the QUOTIENT of the two logs
+    -- rather than as a literal, which is true in every engine and still pins that
+    -- the base arm exists and divides.
+    check("lmath28", math.log(a[10], a[4]) == math.log(a[10]) / math.log(a[4]), true)
+
+    -- deg/rad are one multiplication by a folded constant, which is why this is
+    -- exactly 180.0 and not 180.00000000000003.
+    check("lmath29", math.deg(math.pi), 180.0)
+    check("lmath30", math.rad(180), math.pi)
+    check("lmath31", math.deg(a[2]), 57.295779513082323)
+    check("lmath32", math.rad(a[2]), 0.017453292519943295)
+
+    check("lmath33", math.pi, 3.1415926535897931)
+    check("lmath34", math.type(math.pi), "float")
+    check("lmath35", math.huge > 0 and math.huge == math.huge + 1, true)
+    check("lmath36", -math.huge < 0 and math.type(math.huge), "float")
+
+    -- modf TRUNCATES toward zero (math.floor does not), its first result keeps
+    -- the integer subtype when the value has one, and its second is always float.
+    local i1, f1 = math.modf(a[14])
+    check("lmath37", i1, 3)
+    check("lmath38", f1, 0.70000000000000018)
+    check("lmath39", math.type(i1), "integer")
+    check("lmath40", math.type(f1), "float")
+    local i2, f2 = math.modf(a[15])
+    check("lmath41", i2, -3)
+    check("lmath42", f2, -0.70000000000000018)
+    local i3, f3 = math.modf(a[16])
+    check("lmath43", i3 .. " " .. f3, "2 0.5")
+    local i4, f4 = math.modf(math.huge)
+    check("lmath44", i4 .. " " .. f4 .. " " .. math.type(i4), "inf 0.0 float")
+
+    -- ult compares two integers as UNSIGNED, so a negative is the largest.
+    check("lmath45", math.ult(a[2], a[3]), true)
+    check("lmath46", math.ult(-1, a[3]), false)
+    check("lmath47", math.ult(a[3], -1), true)
+    check("lmath48", math.ult(a[1], a[1]), false)
+    check("lmath49", math.ult(math.mininteger, a[1]), false)
+    check("lmath50", math.ult(math.maxinteger, math.mininteger), true)
+
+    -- A numeric STRING coerces in a math argument exactly as it does in
+    -- arithmetic, and the answer is still a float.
+    check("lmath51", math.sqrt("16"), 4.0)
+    check("lmath52", math.type(math.sqrt("16")), "float")
+    -- sqrt of a negative is a NaN, which is not equal to itself.
+    check("lmath53", math.sqrt(-1) ~= math.sqrt(-1), true)
+    check("lmath54", math.log(a[1]), -math.huge)
+end
+
 s25() -- SECTION-CALL 25
+s26() -- SECTION-CALL 26
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

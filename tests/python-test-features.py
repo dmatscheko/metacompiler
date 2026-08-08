@@ -1002,6 +1002,58 @@ setattr(ab, "y", bn[0])
 check("setattr", ab.y, 10)
 check("hasattr-after-setattr", hasattr(ab, "y"), True)
 
+# A BOUND METHOD knows its own name (docs/todo.md 1.4): getattr([1,2], "count")
+# is a FRESH closure that neither the def-name table nor the builtin-render table
+# is keyed to find, so __name__ was '<lambda>' in the interpreter and None in
+# both compiled halves where CPython says 'count'. Every name is read out of a
+# list so the constant folder cannot answer it.
+mnm = ["count", "upper", "m"]
+blc = getattr([3, 1, 2], mnm[0])
+check("bound-builtin-name", blc.__name__, "count")
+check("bound-builtin-qualname", blc.__qualname__, "list.count")
+check("bound-builtin-str-name", getattr("ab", mnm[1]).__name__, "upper")
+check("bound-builtin-type", type(blc).__name__, "builtin_function_or_method")
+check("bound-builtin-repr", str(blc), "<built-in method count of list object>")
+check("bound-builtin-hasattr", hasattr(blc, "__name__"), True)
+check("bound-builtin-call", blc(1), 1)
+check("builtin-fn-type", type(len).__name__, "builtin_function_or_method")
+check("class-obj-type", type(int).__name__, "type")
+check("user-fn-type", type(lambda v: v).__name__, "function")
+
+class Bnd:
+    def m(self, q):
+        return q + 1
+
+bo = Bnd()
+bm2 = getattr(bo, mnm[2])
+check("bound-method-name", bm2.__name__, "m")
+check("bound-method-qualname", bm2.__qualname__, "Bnd.m")
+check("bound-method-type", type(bm2).__name__, "method")
+check("bound-method-self", bm2.__self__ is bo, True)
+check("bound-method-func", bm2.__func__ is Bnd.m, True)
+check("bound-method-repr", str(bm2), "<bound method Bnd.m of <Bnd object>>")
+
+# A missing attribute RAISES, catchably, with CPython's exact text. Both compiled
+# halves answered None for a builtin value and ABORTED for a class object.
+def attr_miss(o):
+    try:
+        getattr(o, "nope_xyz")
+        return "no-raise"
+    except AttributeError as ex:
+        return str(ex)
+
+check("attr-miss-list", attr_miss([1, 2]), "'list' object has no attribute 'nope_xyz'")
+check("attr-miss-inst", attr_miss(bo), "'Bnd' object has no attribute 'nope_xyz'")
+check("attr-miss-class", attr_miss(Bnd), "type object 'Bnd' has no attribute 'nope_xyz'")
+
+# An except HANDLER BODY IS NOT A SCOPE: a name first bound inside one was lost
+# at the closing brace in the interpreter half and kept in both compiled halves.
+try:
+    raise ValueError(mnm[0])
+except ValueError as exv:
+    hbound = "caught " + str(exv)
+check("except-handler-not-a-scope", hbound, "caught count")
+
 # issubclass(), and the builtin hierarchy under it. issubclass was missing from
 # the compiler half entirely; bool-derives-from-int and object-is-the-base were
 # wrong in EVERY engine (isinstance(1, object) was even a live halves split).

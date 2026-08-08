@@ -490,6 +490,15 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		return nil, false
 	}
 	switch name {
+	// rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
+	// `downTo` are the infix operators the emitter lowers to js_ktrange, but
+	// kotlin.ranges declares each as an ordinary member/extension too, and
+	// `1.rangeTo(5)` aborted with "unknown Int method: rangeTo" in all three
+	// engines. ktRangeMake is shared with the Char receiver.
+	case "rangeTo", "until", "downTo":
+		if len(args) == 1 {
+			return ktRangeMake(target, args[0], name), true
+		}
 	case "toByte":
 		return rt.ktConv(target, 8, false), true
 	case "toShort":
@@ -1310,6 +1319,40 @@ func init() {
 					}
 					return boolH(false)
 				}
+				if !rg.fl {
+					switch mname {
+					// IntProgression.reversed() is an IntProgression, not a List -
+					// every engine answered the materialized "[5, 4, 3, 2, 1]", and
+					// the `.first`/`.last`/`.step` of that answer were kotlin.Unit
+					// here. todo.md 1.5.
+					case "reversed":
+						return w(ktMakeRange(ktRangeRev(rg)))
+					// IntProgression.step(k) in its function spelling; the infix
+					// `step` is lowered by the emitter and never arrives here.
+					case "step":
+						if len(arr.elems) == 1 {
+							sn, sok := ktRangeNum(arr.elems[0])
+							if !sok || sn <= 0 {
+								rt.fail("range step must be positive")
+							}
+							rg.st = sn
+							rg.pg = true
+							return w(ktMakeRange(rg))
+						}
+					// kotlin.random: random() throws NoSuchElementException on an
+					// empty progression, randomOrNull() answers null.
+					case "random", "randomOrNull":
+						cnt := ktRangeCount(rg)
+						if cnt == 0 {
+							if mname == "randomOrNull" {
+								return w(jsNull)
+							}
+							rt.ktRaise("NoSuchElementException",
+								"Cannot get random in empty range: "+rt.ktRangeStr(rg))
+						}
+						return w(ktRangeAt(rg, ktRndBelow(rt.ktRndOf(arr.elems), cnt)))
+					}
+				}
 				recv = &jsArray{elems: ktRangeList(rg)}
 			}
 			// kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a
@@ -1376,7 +1419,23 @@ func init() {
 					return rt.wrap(v)
 				}
 			}
+			// kotlin.random.Random's COMPANION OBJECT: `Random.nextInt(10)` and
+			// `Random.Default`. `Random` itself is the seeded-constructor host
+			// function (js_ktglobal), so the companion spellings arrive as a member
+			// call on that function value - which is why the receiver is matched by
+			// its host-function NAME rather than by a marker on an object.
+			if hf, isHF := recv.(*hostFunc); isHF && hf.name == "Random" {
+				if v, handled := rt.ktRndMethod(rt.ktRndDefault(), mname, arr.elems); handled {
+					return rt.wrap(v)
+				}
+			}
 			if mo, isObj := recv.(*jsObject); isObj {
+				// A kotlin.random.Random receiver.
+				if ktIsRnd(mo) {
+					if v, handled := rt.ktRndMethod(mo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
@@ -2039,6 +2098,10 @@ func init() {
 				rt.fail("range step must be positive")
 			}
 			rg.st = sn
+			// `step` answers an IntProgression, never an IntRange, whatever the
+			// step is: `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is
+			// false for it.
+			rg.pg = true
 			return w(ktMakeRange(rg))
 		}
 		m["js_ktiter"] = func(a []uint64) uint64 {
@@ -2176,6 +2239,12 @@ func init() {
 			o, name := u(a[0]), rt.toString(u(a[1]))
 			if p, isPkg := ktIsPkg(o); isPkg {
 				return w(rt.ktPkgMember(p, name))
+			}
+			// kotlin.random.Random.Default - the companion object, which IS the
+			// default generator here. `Random` is the seeded-constructor host
+			// function, so this is a member read on that function value.
+			if hf, isHF := o.(*hostFunc); isHF && hf.name == "Random" && name == "Default" {
+				return w(rt.ktRndDefault())
 			}
 			// A callable reference: KCallable.name. The twin is the __propref arm of
 			// kGetField in kotlin-interpreter.abnf.
@@ -2699,12 +2768,95 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "trimIndent":
 		return ktTrimIndent(s), true
 	}
+	// ----- the STRING family of _Strings.kt -----
+	// kotlin.text generates the collection operators for CharSequence from the same
+	// templates as kotlin.collections, but the ones that SELECT characters answer a
+	// String (`public inline fun String.filter(predicate: (Char) -> Boolean):
+	// String`), not a List<Char>; chunked and windowed answer List<String>;
+	// partition answers Pair<String, String>. Everything that TRANSFORMS - map,
+	// flatMap, groupBy, zip, sorted, distinct, withIndex - answers a List in Kotlin
+	// too and keeps falling through below. All of these printed "[a, b, d]" in every
+	// engine. todo.md 1.5.
+	switch name {
+	case "substring", "slice":
+		// String.substring(IntRange) is substring(range.start, range.endInclusive+1)
+		// and String.slice(IntRange) is substring(range); the range argument used to
+		// reach the shared js_mcall's toNumber, which reads an object as NaN, so
+		// `"abcdef".substring(1..3)` answered the whole string. slice over an
+		// Iterable<Int> picks the chars at those indices and answers a String too.
+		if len(args) == 1 {
+			if rg, isRg := ktRangeOf(args[0]); isRg {
+				if ktRangeEmpty(rg) {
+					return "", true
+				}
+				return rt.strRange(s, int(rg.from), int(rg.to)+1), true
+			}
+			if name == "slice" {
+				v, _ := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+				return ktCharsStr(v), true
+			}
+		}
+	case "filter", "filterNot", "filterIndexed", "takeWhile", "dropWhile", "onEach":
+		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+		if handled {
+			return ktCharsStr(v), true
+		}
+	case "partition":
+		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+		if handled {
+			po := v.(*jsObject)
+			p := newJSObject()
+			p.set("first", ktCharsStr(po.props["first"]))
+			p.set("second", ktCharsStr(po.props["second"]))
+			return p, true
+		}
+	case "chunked", "windowed":
+		// The transform of the String overloads receives a CharSequence, so it runs
+		// on the joined piece rather than on the char list.
+		var xf interface{}
+		rest := []interface{}{}
+		for _, a := range args {
+			if isCallable(a) {
+				xf = a
+			} else {
+				rest = append(rest, a)
+			}
+		}
+		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, rest)
+		if handled {
+			out := []interface{}{}
+			for _, piece := range v.(*jsArray).elems {
+				txt := ktCharsStr(piece)
+				if xf != nil {
+					out = append(out, rt.ktCall(xf, txt))
+				} else {
+					out = append(out, txt)
+				}
+			}
+			return &jsArray{elems: out}, true
+		}
+	}
 	// Everything a String shares with a List of Char - map/filter/forEach/any/all/
 	// count/fold/joinToString/... - goes through the collection surface.
 	if v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args); handled {
 		return v, true
 	}
 	return nil, false
+}
+
+// A list of Char boxes back to the text it came from.
+func ktCharsStr(v interface{}) string {
+	a, isArr := v.(*jsArray)
+	if !isArr {
+		return ""
+	}
+	out := ""
+	for _, e := range a.elems {
+		if c, isCh := e.(jsChar); isCh {
+			out += string(rune(c.code))
+		}
+	}
+	return out
 }
 
 // ktTrimIndent is kotlin.text.trimIndent: drop a leading and a trailing BLANK
@@ -2989,6 +3141,11 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	// Pair it also destructures as - so `println(m.entries)` is [a=1, b=2].
 	if ktIsEntry(o) {
 		return rt.ktpRender(o.props["key"], depth+1) + "=" + rt.ktpRender(o.props["value"], depth+1), true
+	}
+	// An IndexedValue is a data class, so its toString is the generated one.
+	if iv, _ := o.props["__ktiv"].(bool); iv {
+		return "IndexedValue(index=" + rt.ktpRender(o.props["index"], depth+1) +
+			", value=" + rt.ktpRender(o.props["value"], depth+1) + ")", true
 	}
 	// A Pair / Triple renders as (a, b) / (a, b, c) - kotlin.Pair.toString.
 	if po, isPair := ktIsPair(o); isPair {
@@ -3613,6 +3770,10 @@ func (rt *jsrt) ktScopeMethod(target interface{}, name string, args []interface{
 func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interface{}, bool) {
 	r := rune(c.code)
 	switch name {
+	case "rangeTo", "until", "downTo":
+		if len(args) == 1 {
+			return ktRangeMake(c, args[0], name), true
+		}
 	case "code":
 		return float64(c.code), true
 	case "toString":
@@ -3973,34 +4134,63 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			out = append(out, p)
 		}
 		return arr(out), true
-	case "chunked":
+	// chunked(size[, transform]) and windowed(size, step = 1, partialWindows =
+	// false[, transform]). The TRANSFORM used to be dropped on the floor in all
+	// three engines - `listOf(1,2,3,4).chunked(2) { it.sum() }` answered the chunks
+	// themselves - and windowed's partialWindows was ignored, so the tail windows it
+	// asks for were never produced. todo.md 1.5.
+	case "chunked", "windowed":
 		k := jsToInt(rt.toNumber(argAt(args, 0)))
-		if k <= 0 {
-			rt.fail("chunked() size must be positive")
+		step, partial := k, true
+		var xf interface{}
+		if name == "windowed" {
+			step, partial = 1, false
+			if len(args) > 1 && !isCallable(args[1]) {
+				step = jsToInt(rt.toNumber(args[1]))
+			}
+			if len(args) > 2 && !isCallable(args[2]) {
+				partial = rt.truthy(args[2])
+			}
+		}
+		for _, a := range args[1:] {
+			if isCallable(a) {
+				xf = a
+			}
+		}
+		if k <= 0 || step <= 0 {
+			rt.fail("%s() size and step must be positive", name)
 		}
 		out := []interface{}{}
-		for i := 0; i < len(es); i += k {
+		for i := 0; ; i += step {
+			if partial {
+				if i >= len(es) {
+					break
+				}
+			} else if i+k > len(es) {
+				break
+			}
 			j := i + k
 			if j > len(es) {
 				j = len(es)
 			}
-			out = append(out, arr(append([]interface{}{}, es[i:j]...)))
+			piece := arr(append([]interface{}{}, es[i:j]...))
+			if xf != nil {
+				out = append(out, rt.ktCall(xf, piece))
+			} else {
+				out = append(out, piece)
+			}
 		}
 		return arr(out), true
-	case "windowed":
-		k := jsToInt(rt.toNumber(argAt(args, 0)))
-		step := 1
-		if len(args) > 1 {
-			step = jsToInt(rt.toNumber(args[1]))
+	// kotlin.collections.random / randomOrNull. See the kotlin.random block: the
+	// generator is deterministic, which is the only thing three engines can agree on.
+	case "random", "randomOrNull":
+		if len(es) == 0 {
+			if name == "randomOrNull" {
+				return jsNull, true
+			}
+			rt.ktRaise("NoSuchElementException", "Collection is empty.")
 		}
-		if k <= 0 || step <= 0 {
-			rt.fail("windowed() size and step must be positive")
-		}
-		out := []interface{}{}
-		for i := 0; i+k <= len(es); i += step {
-			out = append(out, arr(append([]interface{}{}, es[i:i+k]...)))
-		}
-		return arr(out), true
+		return es[ktRndBelow(rt.ktRndOf(args), len(es))], true
 	case "distinct":
 		// distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
 		// deduplication is the same, the SHAPE is not (kotlin.collections declares
@@ -4107,6 +4297,13 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		out := make([]interface{}, len(es))
 		for i, e := range es {
 			p := newJSObject()
+			// __ktiv marks the value as kotlin.collections.IndexedValue, a DATA
+			// class whose toString is "IndexedValue(index=0, value=10)" - not the
+			// Pair "(0, 10)" every engine printed, agreeing and all wrong. The
+			// first/second slots stay so that `for ((i, v) in xs.withIndex())` and
+			// `associate` keep destructuring it, exactly as before; only the render
+			// changes, and the `__` prefix keeps the marker out of keysOf.
+			p.set("__ktiv", true)
 			p.set("index", float64(i))
 			p.set("value", e)
 			p.set("first", float64(i))
@@ -4411,7 +4608,10 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			rt.ktSetAdd(out, e)
 		}
 		return out, true
-	case "slice":
+	// sliceArray is slice under the Array name (Kotlin gives it its own name
+	// because it answers an Array); here the two shapes are one, so it is the same
+	// operator. It aborted with "unknown list method" in all three engines.
+	case "slice", "sliceArray":
 		out := []interface{}{}
 		for _, ix := range ktElems(rt, f) {
 			out = append(out, es[jsToInt(rt.toNumber(ix))])
@@ -5234,6 +5434,174 @@ type ktRange struct {
 	// old representation materialized it by stepping 1 and answered
 	// `1.5 in 1.0..2.0` FALSE in every engine, agreeing and all wrong.
 	fl bool
+	// pg marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
+	// and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
+	// and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" where
+	// IntRange.toString never does - so `(1..5) step 1` is "1..5 step 1" and
+	// `(5 downTo 1).reversed()` is "1..5 step 1", neither of which the direction
+	// and the step alone can tell apart from a plain "1..5". It is also what
+	// `x is IntRange` has to answer false to.
+	pg bool
+}
+
+// IntProgression.reversed(): "a progression that goes over the same range in the
+// opposite direction with the same step" - IntProgression.fromClosedRange(last,
+// first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
+// to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
+// The function spelling of rangeTo / until / downTo, shared by the number and Char
+// receivers. The `..<` / until subtraction is on the BOUND, exactly as the
+// emitter's own lowering does it.
+func ktRangeMake(from, to interface{}, name string) *jsObject {
+	fn, _ := ktRangeNum(from)
+	tn, _ := ktRangeNum(to)
+	_, isCh := from.(jsChar)
+	_, isFl := from.(jsJFlo)
+	if name == "until" {
+		tn = tn - 1
+	}
+	return ktMakeRange(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
+		ch: isCh, fl: isFl})
+}
+
+func ktRangeRev(rg ktRange) ktRange {
+	return ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
+		down: !rg.down, ch: rg.ch, pg: true}
+}
+
+// The number of elements in a progression, arithmetically: `(1..1000000).random()`
+// must not materialize a million cells to pick one.
+func ktRangeCount(rg ktRange) int {
+	if ktRangeEmpty(rg) {
+		return 0
+	}
+	span := ktRangeLastEl(rg) - rg.from
+	if rg.down {
+		span = rg.from - ktRangeLastEl(rg)
+	}
+	return int(math.Floor(span/rg.st)) + 1
+}
+
+func ktRangeAt(rg ktRange, i int) interface{} {
+	off := rg.st * float64(i)
+	if rg.down {
+		return ktRangeEl(rg, rg.from-off)
+	}
+	return ktRangeEl(rg, rg.from+off)
+}
+
+// ----------------------------------------------------------------------------
+// kotlin.random
+//
+// THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
+// engines agree on byte-for-byte - the same argument Kernel#rand is settled by in
+// ruby-interpreter.abnf. So `random()` draws from a DETERMINISTIC generator with a
+// fixed default seed: a program sees a varying sequence (two draws from 1..1000000
+// differ, which is what distinguishes this from ruby's "always the front
+// element"), every run of every engine sees the SAME sequence, and the matrix's
+// byte-identity requirement holds by construction. The particular values are ours,
+// not the JVM's - Kotlin's Random(seed) is XorWowRandom - so assert membership and
+// bounds, never the value.
+//
+// xorshift32 in 32-bit arithmetic. The twins are kRndBox in
+// kotlin-interpreter.abnf and k4RndBox in languages/lib/kotlin-rt.metajs; all
+// three must produce the identical stream, which is why the shifts are spelled
+// with an explicit 32-bit reduction rather than the host's own word size.
+func ktRndMake(seed float64) *jsObject {
+	x := int32(jsToInt(seed)) ^ 1640531527
+	if x == 0 {
+		x = 1
+	}
+	o := newJSObject()
+	o.set("__ktrnd", true)
+	o.set("s", float64(x))
+	ktRndNext(o)
+	ktRndNext(o)
+	return o
+}
+
+func ktIsRnd(v interface{}) bool {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return false
+	}
+	b, ok := o.props["__ktrnd"].(bool)
+	return ok && b
+}
+
+func ktRndNext(o *jsObject) int32 {
+	f, _ := o.props["s"].(float64)
+	x := int32(f)
+	x = x ^ int32(uint32(x)<<13)
+	x = x ^ int32(uint32(x)>>17)
+	x = x ^ int32(uint32(x)<<5)
+	if x == 0 {
+		x = 1
+	}
+	o.set("s", float64(x))
+	return x
+}
+
+// A non-negative draw below n. The 30-bit mask is what keeps this off an unsigned
+// shift, whose answer for a negative operand is the one spelling the three engines
+// are least likely to agree on.
+func ktRndBelow(o *jsObject, n int) int {
+	if n <= 1 {
+		return 0
+	}
+	return int(ktRndNext(o)&1073741823) % n
+}
+
+func (rt *jsrt) ktRndOf(args []interface{}) *jsObject {
+	if len(args) > 0 && ktIsRnd(args[0]) {
+		return args[0].(*jsObject)
+	}
+	return rt.ktRndDefault()
+}
+
+// The default generator, kotlin.random.Random.Default. One per jsrt, so the stream
+// a program sees does not depend on how many jsrt values the engine happened to
+// build.
+func (rt *jsrt) ktRndDefault() *jsObject {
+	if rt.ktRndDef == nil {
+		rt.ktRndDef = ktRndMake(20260808)
+	}
+	return rt.ktRndDef
+}
+
+// ktRndMethod is the kotlin.random.Random member surface. The twins are the
+// kIsRnd branch of mcall in kotlin-interpreter.abnf and k4RndMethod in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktRndMethod(o *jsObject, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "nextInt", "nextLong":
+		if len(args) == 0 {
+			return float64(ktRndNext(o)), true
+		}
+		lo, hi := float64(0), rt.toNumber(argAt(args, 0))
+		if len(args) > 1 {
+			lo, hi = hi, rt.toNumber(argAt(args, 1))
+		}
+		if hi <= lo {
+			rt.ktRaise("IllegalArgumentException",
+				"Random range is empty: ["+rt.ktpRender(lo, 1)+", "+rt.ktpRender(hi, 1)+").")
+		}
+		return lo + float64(ktRndBelow(o, int(hi-lo))), true
+	case "nextBoolean":
+		return ktRndNext(o)&1 == 1, true
+	case "nextDouble":
+		d := float64(ktRndBelow(o, 1073741824)) / 1073741824
+		if len(args) == 1 {
+			return jvmMkFlo(d * rt.toNumber(argAt(args, 0))), true
+		}
+		if len(args) > 1 {
+			a, b := rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))
+			return jvmMkFlo(a + d*(b-a)), true
+		}
+		return jvmMkFlo(d), true
+	case "toString":
+		return "Random", true
+	}
+	return nil, false
 }
 
 func ktRangeOf(v interface{}) (ktRange, bool) {
@@ -5251,6 +5619,7 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.down, _ = o.props["down"].(bool)
 	rg.ch, _ = o.props["ch"].(bool)
 	rg.fl, _ = o.props["fl"].(bool)
+	rg.pg, _ = o.props["pg"].(bool)
 	return rg, true
 }
 
@@ -5268,6 +5637,7 @@ func ktMakeRange(rg ktRange) *jsObject {
 	o.set("down", rg.down)
 	o.set("ch", rg.ch)
 	o.set("fl", rg.fl)
+	o.set("pg", rg.pg)
 	return o
 }
 
@@ -5402,7 +5772,7 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 	if rg.down {
 		return a + " downTo " + b + " step " + rt.ktpRender(rg.st, 1)
 	}
-	if rg.st != 1 {
+	if rg.st != 1 || rg.pg {
 		return a + ".." + b + " step " + rt.ktpRender(rg.st, 1)
 	}
 	return a + ".." + b
@@ -5448,7 +5818,7 @@ func ktRangeIsType(rg ktRange, t string) bool {
 	if t == "Iterable" {
 		return true
 	}
-	plain := rg.st == 1 && !rg.down
+	plain := rg.st == 1 && !rg.down && !rg.pg
 	if rg.ch {
 		if t == "CharProgression" {
 			return true
@@ -5920,6 +6290,18 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				return ktMakeSb("")
 			}
 			return ktMakeSb(rt.ktStr2(init))
+		})
+	// kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument
+	// is not a Kotlin spelling (Random.Default is), so a missing seed answers the
+	// default stream. See the kotlin.random block for why the stream is
+	// deterministic in all three engines.
+	case "Random":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			seed := argAt(args, 0)
+			if isUndefOrNull(seed) {
+				return rt.ktRndDefault()
+			}
+			return ktRndMake(rt.toNumber(seed))
 		})
 	// ----- The kotlin stdlib top-level functions the subset was missing. Each aborted
 	// the run with "unknown name" in BOTH halves; the twins are the hostGlobals block

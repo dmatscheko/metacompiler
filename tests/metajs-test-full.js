@@ -1720,6 +1720,40 @@ function s31() {
     check("hg24", typeof String === "object" && typeof Array === "object")
     check("hg25", typeof String.fromCharCode === "function" && typeof Array.isArray === "function")
 
+    // ----- Math's MEMBERS, docs/todo.md 1.1 -----
+    // hg23 above says `typeof Math === "object"` and says nothing about what is
+    // IN it, and for a long time the three engines disagreed wildly: the C floor
+    // seeded eleven methods and two properties, abnf/jsrt.go thirty-two and
+    // eight, and goja - the grammar host THIS half runs on - thirty-five and
+    // eight. abnf/hostglobals_test.go's TestMathMembersAgree is the source-parse
+    // half of the statement (and the only place goja's own set can be read);
+    // these rows are the runtime half, and they are what makes the assertion
+    // reach the C FLOOR, which no Go test can run.
+    check("hg25a", typeof Math.sin === "function" && typeof Math.cos === "function")
+    check("hg25b", typeof Math.tan === "function" && typeof Math.atan2 === "function")
+    check("hg25c", typeof Math.asin === "function" && typeof Math.acos === "function")
+    check("hg25d", typeof Math.sinh === "function" && typeof Math.cosh === "function")
+    check("hg25e", typeof Math.tanh === "function" && typeof Math.asinh === "function")
+    check("hg25f", typeof Math.acosh === "function" && typeof Math.atanh === "function")
+    check("hg25g", typeof Math.exp === "function" && typeof Math.expm1 === "function")
+    check("hg25h", typeof Math.log === "function" && typeof Math.log1p === "function")
+    check("hg25i", typeof Math.log2 === "function" && typeof Math.log10 === "function")
+    check("hg25j", typeof Math.cbrt === "function" && typeof Math.hypot === "function")
+    check("hg25k", typeof Math.clz32 === "function" && typeof Math.fround === "function")
+    check("hg25l", typeof Math.LN2 === "number" && typeof Math.LN10 === "number")
+    check("hg25m", typeof Math.LOG2E === "number" && typeof Math.LOG10E === "number")
+    check("hg25n", typeof Math.SQRT2 === "number" && typeof Math.SQRT1_2 === "number")
+    // And the ANSWERS, which is the part that makes the C floor's port of Go's
+    // math package a measurement rather than a claim. Read out of an array so no
+    // constant folder can answer at compile time.
+    var mv = [1, 8, 27, 0.5, 3, 4, 100]
+    check("hg25o", Math.sin(mv[0]) === 0.8414709848078965 && Math.cos(mv[0]) === 0.5403023058681398)
+    check("hg25p", Math.log2(mv[1]) === 3 && Math.log10(mv[6]) === 2 && Math.cbrt(mv[2]) === 3)
+    check("hg25q", Math.exp(mv[0]) === 2.718281828459045 && Math.expm1(mv[0]) === 1.718281828459045)
+    check("hg25r", Math.hypot(mv[4], mv[5]) === 5 && Math.atan2(mv[0], mv[3]) === 1.1071487177940904)
+    check("hg25s", Math.clz32(mv[0]) === 31 && Math.fround(mv[3]) === 0.5)
+    check("hg25t", Math.LN2 === 0.6931471805599453 && Math.SQRT2 === 1.4142135623730951)
+
     // The six names the interpreter half gained, exercised rather than named.
     check("hg26", Infinity - 1 === Infinity && 0 - Infinity < 0)
     check("hg27", NaN !== NaN && !(NaN === NaN))

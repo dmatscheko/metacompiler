@@ -1593,7 +1593,12 @@ fun sec37() {
     check("col33", listOf(1, 1, 2, 2, 3).distinct().toString() == "[1, 2, 3]")
     check("col34", xs.joinToString("-") == "1-2-3-4-5")
     check("col35", xs.joinToString(", ", "[", "]") == "[1, 2, 3, 4, 5]")
-    check("col36", xs.withIndex().toString() == "[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]")
+    // IndexedValue is a data class, so withIndex() prints the generated toString -
+    // NOT the Pair form this used to pin in every engine. todo.md 1.5, sec78/rp38.
+    check("col36", xs.withIndex().toString() ==
+        "[IndexedValue(index=0, value=1), IndexedValue(index=1, value=2), " +
+        "IndexedValue(index=2, value=3), IndexedValue(index=3, value=4), " +
+        "IndexedValue(index=4, value=5)]")
     // java.util.List.hashCode: 31*h + element, starting at 1.
     check("col37", listOf(1, 2, 3).hashCode() == 30817)
     check("col38", listOf<Int>().hashCode() == 1 && listOf(1, 2, 3).hashCode() == listOf(1, 2, 3).hashCode())
@@ -1644,7 +1649,10 @@ fun sec38() {
     check("chr17", 'a'.hashCode() == 97)
     // A String is a sequence of Char, so the collection operations apply to it.
     check("chr18", s.map { it.code }.toString() == "[97, 66, 99]")
-    check("chr19", s.filter { it.isUpperCase() }.toString() == "[B]")
+    // kotlin.text declares `String.filter(predicate): String` - the char-SELECTING
+    // operators of _Strings.kt answer a String, not the List<Char> this used to
+    // pin in every engine. todo.md 1.5.
+    check("chr19", s.filter { it.isUpperCase() } == "B")
     check("chr20", s.count { it.isLetter() } == 3)
     check("chr21", s.any { it == 'B' } && !s.any { it == 'z' })
     // The rest of the kotlin.text surface both halves were missing.
@@ -3749,6 +3757,183 @@ fun sec77() {
                   with(prog) { helper77() } == 5 && with(ch) { helper77() } == 5)
 }
 
+
+// ===== SECTION 78: THE RANGE / PROGRESSION / STRING-SLICE SURFACE =====
+// todo.md 1.5. The previous round made a range a first-class PROGRESSION instead of
+// a materialized list; this is the surface that did not get converted with it, swept
+// rather than fixed at its four named examples. Every fact below is
+// kotlin.ranges / kotlin.text / kotlin.collections as documented - there is no
+// kotlinc on this machine (manual chapter 5), so the stdlib declarations and
+// IntProgression's own toString/equals/reversed contracts are the oracle:
+//
+//   IntProgression.reversed(): IntProgression   = fromClosedRange(last, first, -step)
+//   IntProgression.toString()                   = "$first..$last step $step", and the
+//                                                 downTo form for a negative step -
+//                                                 IntRange.toString has NO " step"
+//   String.substring(range: IntRange): String   = substring(start, endInclusive + 1)
+//   String.slice(indices: IntRange): String     = substring(indices)
+//   String.slice(indices: Iterable<Int>): String
+//   String.filter/filterNot/filterIndexed/takeWhile/dropWhile/onEach: String
+//   String.partition: Pair<String, String>; String.chunked/windowed: List<String>
+//   IntRange.random() / Collection.random() / randomOrNull()
+//
+// EVERY OPERAND IS READ OUT OF AN ARRAY so the grammar's constant folder cannot
+// answer any of it at compile time.
+fun sec78() {
+    val n = arrayOf(1, 10, 3, 5, 0, 2, 4)
+    val txt = arrayOf("abcdef", "ac", "bcd")
+    val cs = arrayOf('a', 'f', 'c')
+    val ls = arrayOf(1L, 5L, 2L)
+
+    // ----- reversed(), on all four progression shapes -----
+    val prog = n[0]..n[1] step n[2]                    // 1, 4, 7, 10
+    val rev = prog.reversed()
+    check("rp1", rev.toString() == "10 downTo 1 step 3")
+    check("rp2", rev.first == 10 && rev.last == 1 && rev.step == -3)
+    check("rp3", rev.toList().toString() == "[10, 7, 4, 1]" && rev.count() == 4)
+    check("rp4", rev.reversed() == prog && rev.reversed().toString() == "1..10 step 3")
+    // A plain a..b reverses to a downTo progression, and a downTo back up. Both keep
+    // the " step 1" IntProgression.toString prints and IntRange.toString does not.
+    check("rp5", (n[0]..n[3]).reversed().toString() == "5 downTo 1 step 1")
+    check("rp6", (n[3] downTo n[0]).reversed().toString() == "1..5 step 1")
+    check("rp7", (cs[0]..cs[1]).reversed().toString() == "f downTo a step 1" &&
+                 (cs[0]..cs[1]).reversed().first == 'f' && (cs[0]..cs[1]).reversed().last == 'a')
+    check("rp8", (ls[0]..ls[1] step ls[2]).reversed().toString() == "5 downTo 1 step 2")
+    // An EMPTY progression reverses to an empty one, whose bounds are still the ones
+    // fromClosedRange was handed.
+    check("rp9", (n[3]..n[0]).reversed().isEmpty() &&
+                 (n[3]..n[0]).reversed().toString() == "1 downTo 5 step 1")
+    // A reversed progression is an IntProgression and is NOT an IntRange.
+    check("rp10", rev is IntProgression && !(rev is IntRange) && (n[0]..n[3]) is IntRange)
+    check("rp11", (cs[0]..cs[1]).reversed() is CharProgression &&
+                  !((cs[0]..cs[1]).reversed() is CharRange))
+    // A LIST and a STRING keep the answers they always had - Iterable.reversed() is a
+    // List and String.reversed() a String.
+    check("rp12", listOf(n[0], n[2], n[3]).reversed().toString() == "[5, 3, 1]" &&
+                  txt[0].reversed() == "fedcba")
+
+    // ----- step, rangeTo, until, downTo in their FUNCTION spellings -----
+    // `step` answers an IntProgression whatever the step is: `(1..5) step 1` is
+    // "1..5 step 1" where the plain 1..5 is "1..5".
+    check("rp13", ((n[0]..n[3]) step n[0]).toString() == "1..5 step 1" &&
+                  !(((n[0]..n[3]) step n[0]) is IntRange))
+    check("rp14", (n[0]..n[3]).step(n[5]).toString() == "1..5 step 2" &&
+                  (n[0]..n[1]).step(n[2]).toString() == "1..10 step 3")
+    check("rp15", n[0].rangeTo(n[3]).toString() == "1..5" &&
+                  n[0].until(n[3]).toString() == "1..4" &&
+                  n[3].downTo(n[0]).toString() == "5 downTo 1 step 1")
+    check("rp16", cs[0].rangeTo(cs[2]).toString() == "a..c" &&
+                  ls[0].rangeTo(ls[1]).toString() == "1..5")
+    // A Long step reached the interpreter half's `st` slot unconverted and printed
+    // "1..NaN step [object Object]" there while the compiled halves said "1..5 step 2".
+    check("rp17", (ls[0]..ls[1] step ls[2]).toString() == "1..5 step 2" &&
+                  (ls[0]..ls[1] step ls[2]).toList().toString() == "[1, 3, 5]")
+
+    // ----- the bounds surface a progression answers WITHOUT materializing -----
+    check("rp18", (n[3]..n[0]).first == 5 && (n[3]..n[0]).last == 1 &&
+                  (n[3]..n[0]).isEmpty() && (n[3]..n[0]).count() == 0)
+    check("rp19", (n[0]..n[3]).sum() == 15 && (n[0]..n[3]).count() == 5 &&
+                  !(n[0]..n[3]).isEmpty())
+    check("rp20", (n[5] in n[0]..n[3]) && (n[1] !in n[0]..n[3]) &&
+                  (cs[2] in cs[0]..cs[1]) && (n[5] !in n[0]..n[1] step n[2]))
+    check("rp21", (n[0]..n[3]).withIndex().toList().size == 5 &&
+                  listOf(n[0], n[3]).indices.toString() == "0..1")
+
+    // ----- substring / slice / subList -----
+    check("rp22", txt[0].substring(n[0]..n[2]) == "bcd" && txt[0].slice(n[0]..n[2]) == "bcd")
+    check("rp23", txt[0].slice(listOf(n[4], n[5])) == "ac" &&
+                  txt[0].substring(n[2]..n[4]) == "" && txt[0].slice(n[2]..n[4]) == "")
+    check("rp24", txt[0].substring(n[0]) == "bcdef" && txt[0].substring(n[0], n[2]) == "bc")
+    check("rp25", listOf(n[1], n[5], n[2]).slice(n[4]..n[0]).toString() == "[10, 2]" &&
+                  listOf(n[1], n[5], n[2]).subList(n[4], n[5]).toString() == "[10, 2]" &&
+                  arrayOf(n[1], n[5], n[2]).sliceArray(n[4]..n[0]).toList().toString() == "[10, 2]")
+
+    // ----- the _Strings.kt family that answers a String, not a List<Char> -----
+    check("rp26", txt[0].filter { it != cs[2] } == "abdef" &&
+                  txt[0].filterNot { it == cs[2] } == "abdef" &&
+                  txt[0].filterIndexed { i, _ -> i % 2 == 0 } == "ace")
+    check("rp27", txt[0].takeWhile { it < cs[2] } == "ab" &&
+                  txt[0].dropWhile { it < cs[2] } == "cdef" && txt[0].onEach { } == "abcdef")
+    check("rp28", txt[0].partition { it < cs[2] }.toString() == "(ab, cdef)" &&
+                  txt[0].partition { it < cs[2] }.first == "ab")
+    check("rp29", txt[0].chunked(n[5]).toString() == "[ab, cd, ef]" &&
+                  txt[0].windowed(n[5]).toString() == "[ab, bc, cd, de, ef]" &&
+                  txt[0].chunked(n[5]) { it.length }.toString() == "[2, 2, 2]" &&
+                  txt[0].windowed(n[5], n[5]) { it }.toString() == "[ab, cd, ef]")
+    // The TRANSFORMING half of the same generated family still answers a List, in
+    // Kotlin too - this is the guard against over-converting the branch above.
+    check("rp30", txt[0].map { it }.toString() == "[a, b, c, d, e, f]" &&
+                  txt[0].toList().size == 6 && txt[0].distinct().size == 6 &&
+                  txt[0].zip(txt[1]).toString() == "[(a, a), (b, c)]" &&
+                  txt[0].groupBy { it }.size == 6)
+
+    // ----- chunked / windowed on a COLLECTION: the transform and partialWindows -----
+    val xs = listOf(n[1], n[5] * 10, n[2] * 10, n[6] * 10, n[3] * 10)   // 10,20,30,40,50
+    check("rp31", xs.chunked(n[5]) { it.sum() }.toString() == "[30, 70, 50]" &&
+                  xs.chunked(n[5]).toString() == "[[10, 20], [30, 40], [50]]")
+    check("rp32", xs.windowed(n[5], n[5]).toString() == "[[10, 20], [30, 40]]" &&
+                  xs.windowed(n[5], n[5], true).toString() == "[[10, 20], [30, 40], [50]]" &&
+                  xs.windowed(n[5], n[5], true) { it.size }.toString() == "[2, 2, 1]")
+
+    // ----- kotlin.random -----
+    // THE VALUES ARE OURS, NOT THE JVM'S. There is no random source in this project
+    // that three engines can agree on byte-for-byte (the argument Kernel#rand is
+    // settled by in ruby-interpreter.abnf), so `random()` draws from a deterministic
+    // xorshift32 with a fixed default seed. Only the INVARIANTS can be asserted:
+    // membership, bounds, the empty cases, that a seed is reproducible, that two
+    // seeds differ and that consecutive draws are not a constant.
+    var inBounds = true
+    var sawHigh = false
+    var sawLow = false
+    for (t in 1..128) {
+        val v = (n[0]..n[3]).random()
+        if (v < 1 || v > 5) { inBounds = false }
+        if (v == 5) { sawHigh = true }
+        if (v == 1) { sawLow = true }
+        if (!xs.contains(xs.random())) { inBounds = false }
+        if (('a'..'f').random() !in 'a'..'f') { inBounds = false }
+        if ((n[3] downTo n[0] step n[5]).random() !in listOf(5, 3, 1)) { inBounds = false }
+    }
+    check("rp33", inBounds && sawHigh && sawLow)
+    check("rp34", (n[3]..n[0]).randomOrNull() == null && listOf<Int>().randomOrNull() == null &&
+                  txt[0].random() in txt[0])
+    // A seeded generator is reproducible, and two different seeds are not the same
+    // stream. Neither statement names a value.
+    val gA = kotlin.random.Random(n[6])
+    val gB = kotlin.random.Random(n[6])
+    val gC = kotlin.random.Random(n[2])
+    var sA = ""
+    var sB = ""
+    var sC = ""
+    for (t in 1..12) {
+        sA += (n[0]..n[3]).random(gA).toString()
+        sB += (n[0]..n[3]).random(gB).toString()
+        sC += (n[0]..n[3]).random(gC).toString()
+    }
+    check("rp35", sA == sB && sA != sC && sA.length == 12)
+    val gD = kotlin.random.Random(n[6])
+    check("rp36", gD.nextInt(n[1]) in 0..9 && gD.nextInt(n[1], n[1] * 2) in 10..19 &&
+                  gD.nextDouble() < 1.0 && gD.nextDouble() >= 0.0)
+    check("rp37", (gD.nextBoolean() || true) && (n[0]..1000000).random() != (n[0]..1000000).random())
+    // Random's COMPANION OBJECT spellings: `Random.nextInt(n)`, `Random.Default`.
+    // `Random` is the seeded-constructor function here, so each is a member
+    // read/call on that function value, matched by identity in all three engines.
+    check("rp39", kotlin.random.Random.nextInt(n[1]) in 0..9 &&
+                  kotlin.random.Random.Default.nextInt(n[1], n[1] * 2) in 10..19 &&
+                  (n[0]..n[3]).random(kotlin.random.Random.Default) in n[0]..n[3] &&
+                  (kotlin.random.Random.nextBoolean() || true))
+    // withIndex() answers Iterable<IndexedValue<T>>, and IndexedValue is a DATA
+    // class - its toString is the generated "IndexedValue(index=0, value=10)", not
+    // the Pair "(0, 10)" every engine printed. Destructuring, .index and .value are
+    // unchanged, which is what the second half of this asserts.
+    var wiTxt = ""
+    for ((wi, wv) in xs.withIndex()) { wiTxt += "" + wi + ":" + wv + " " }
+    check("rp38", xs.withIndex().toList()[n[4]].toString() == "IndexedValue(index=0, value=10)" &&
+                  wiTxt == "0:10 1:20 2:30 3:40 4:50 " &&
+                  xs.withIndex().first().index == 0 && xs.withIndex().first().value == 10 &&
+                  txt[0].withIndex().toList()[n[0]].toString() == "IndexedValue(index=1, value=b)")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3827,6 +4012,7 @@ fun main() {
     sec75() // SECTION-CALL 75
     sec76() // SECTION-CALL 76
     sec77() // SECTION-CALL 77
+    sec78() // SECTION-CALL 78
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -19,16 +19,32 @@ rem     it back, so like mod.sh this loop exercises the runtime's int/string
 rem     conversion where mod.c does not.
 rem
 rem THE ARENA CEILING, measured, because a crash here will look like something
-rem else. `AR[2097152]` in batch-rt.c is 2 MiB, `rt_bump` has no bounds check
-rem (its own header says so) and nothing is freed. This loop costs ~32 bytes of
-rem arena per iteration; bisected on this machine the last count that runs is
-rem ~65,468 and the first that does not is ~65,625, past which the binary
-rem SEGFAULTS (exit 139) printing nothing. 40,000 is only a 1.6x margin - so if
-rem this row ever reads RAN AND FAILED, suspect arena exhaustion from a change to
-rem batch-rt.c's per-assignment allocation BEFORE suspecting the emitter, and
-rem lower the count here rather than deleting the row. (mod.sh had to be cut to
-rem 10,000 for exactly this reason; bash's arena is 4 MiB but costs ~202 bytes an
-rem iteration.)
+rem else. `AR[2097152]` in batch-rt.c is 2 MiB and nothing is ever freed, so the
+rem question "how many iterations fit" has an exact answer. Two things changed
+rem since this row was added and both are measured:
+rem
+rem   * rt_bump IS BOUNDS-CHECKED NOW. Running out of arena prints
+rem       batch-rt: string arena exhausted: request 16, used 2097152 of 2097152 ...
+rem     on stderr and exits 70. It used to exit 139 printing nothing, which is
+rem     the manual chapter 4 trap ("a crashing binary looks fast"): the ceiling
+rem     was 1.6x away and the next person to add a few bytes an iteration would
+rem     have got a segfault with no diagnosis in a checked-in bench row.
+rem
+rem   * THE LOOP COSTS 13.1 BYTES AN ITERATION, DOWN FROM 31.95. Measured as the
+rem     slope of maximum RSS against iteration count (the arena is BSS, so only
+rem     the pages actually bumped become resident, which makes RSS exact here):
+rem     10,000 and 50,000 iterations, 1,802,240 -> 3,080,192 bytes before,
+rem     1,572,864 -> 2,097,152 after. Three changes to batch-rt.c did it, none of
+rem     them to this file: rt_strcat no longer copies when an operand is empty,
+rem     rt_int2str bumps the digits it needs instead of a flat 16, and rt_stripq
+rem     returns an unquoted string unchanged instead of copying it.
+rem
+rem So the ceiling is now 160,351 iterations - bisected on this machine, 160,351
+rem runs and 160,497 does not - and the standard 40,000 sits under it at a 4.0x
+rem margin, up from 1.6x. If this row ever reads RAN AND FAILED, read the exit
+rem code: 70 is arena exhaustion from a change to batch-rt.c's per-assignment
+rem allocation, and it is to be suspected BEFORE the emitter. Lower the count
+rem here rather than deleting the row.
 set /a s=0
 set /a i=0
 :loop

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/bits"
 	"os"
 	"reflect"
 	"sort"
@@ -288,6 +289,39 @@ func (s *jsScope) pinType(name, tc string) {
 type hostFunc struct {
 	name string
 	fn   func(rt *jsrt, this uint64, args []interface{}) interface{}
+	// pybm is set only on the closures python's pyBoundBuiltin / pyBindMethod
+	// mint, and is what makes them introspectable - see pyBoundInfo. nil for
+	// every other host function in every other language, so this costs one
+	// pointer per host function and nothing else.
+	pybm *pyBoundInfo
+}
+
+// pyBoundInfo is what a python BOUND METHOD knows about itself. Neither of the
+// two name tables (rt.pyFuncNames for a `def`, rt.pyBuiltinRender for a builtin)
+// can hold it: both are keyed by the closure VALUE and a bound method is a fresh
+// closure minted at the attribute read, so getattr([1,2], "count").__name__ was
+// None here and '<lambda>' in the interpreter where CPython says 'count'
+// (docs/todo.md 1.4). Keep in step with the pyBM* table in
+// languages/lib/python-rt.metajs and pyBMSet/pyBMFind in
+// languages/python-interpreter.abnf.
+//
+//	name  the method name           -> __name__
+//	self  the receiver              -> __self__
+//	fn    the underlying function   -> __func__, nil for a builtin method
+//	typ   the receiver's type name  -> the __qualname__ prefix and the repr
+type pyBoundInfo struct {
+	name string
+	self interface{}
+	fn   interface{}
+	typ  string
+}
+
+// pyBoundOf answers the bound-method record of v, or nil.
+func pyBoundOf(v interface{}) *pyBoundInfo {
+	if h, ok := v.(*hostFunc); ok {
+		return h.pybm
+	}
+	return nil
 }
 
 // boundMethod is a builtin method of a string or array value, e.g. "abc".charCodeAt.
@@ -364,6 +398,11 @@ type jsrt struct {
 	// inside a method is visible everywhere, and a read of a never-assigned one
 	// answers nil. Only js_rgset / js_rgget (ruby-to-llvm-ir.abnf) touch it.
 	rubyGlobals map[string]interface{}
+
+	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
+	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
+	// deterministic on purpose, see the kotlin.random block there.
+	ktRndDef *jsObject
 
 	// rubyLambdas remembers which closures came from a lambda literal (->) or
 	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
@@ -3522,10 +3561,25 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if n := pyIterName(rt, t); n != "" {
 			return "<" + n + " object>"
 		}
+		// A compiled PATTERN and a MATCH render the way CPython's repr does. The
+		// interpreter half has had both since the regex engine landed and this
+		// one printed [object Object] for each: a live halves divergence found by
+		// the docs/todo.md 1.4 repr sweep.
+		if s, ok := rxPyRepr(t); ok {
+			return s
+		}
 		return rt.toString(v)
 	default:
 		if isCallable(v) {
 			return rt.pyFuncRender(v)
+		}
+		// A GENERATOR. CPython says <generator object gen at 0x...>; neither the
+		// address nor the generating function's name is recoverable from the
+		// value, so the short form is printed - the same rule <map object> above
+		// follows. Both halves printed a raw host dump before: [object Object]
+		// in the interpreter and a Go STRUCT LITERAL under llvm.Run.
+		if _, isGen := v.(*jsGenerator); isGen {
+			return "<generator object>"
 		}
 		return rt.toString(v)
 	}
@@ -3540,6 +3594,15 @@ func (rt *jsrt) pyString(v interface{}) string {
 // fills; CPython calls an unnamed one <lambda>, and so does every engine here.
 // docs/todo.md 1.8.
 func (rt *jsrt) pyFuncRender(v interface{}) string {
+	// A BOUND METHOD prints as one (docs/todo.md 1.4). CPython appends the
+	// receiver's ADDRESS in both forms; the address is its own and cannot be
+	// matched, so it is left off here exactly as it is for <function f> above.
+	if bi := pyBoundOf(v); bi != nil {
+		if bi.fn == nil {
+			return "<built-in method " + bi.name + " of " + bi.typ + " object>"
+		}
+		return "<bound method " + bi.typ + "." + bi.name + " of " + rt.pyRepr(bi.self) + ">"
+	}
 	// A BUILTIN prints its own way, and its table is asked FIRST: a user
 	// `def len(...)` records its own name against its own closure object, so the
 	// two tables cannot collide by identity even when they collide by name.
@@ -3790,7 +3853,7 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		return rt.rubyBigNarrow(new(big.Int).Mul(x, y)), true
 	case "/", "%":
 		if y.Sign() == 0 {
-			rt.fail("divided by 0")
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
 		}
 		q, m := new(big.Int), new(big.Int)
 		q.QuoRem(x, y, m)
@@ -4578,12 +4641,12 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		return rt.rubyBigPromote(op, x, y)
 	case "/":
 		if y == 0 {
-			rt.fail("divided by 0")
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
 		}
 		return math.Floor(x / y)
 	case "%":
 		if y == 0 {
-			rt.fail("divided by 0")
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
 		}
 		// math.FMA AND NOT `x - math.Floor(x/y)*y`, which is the same value only by
 		// ACCIDENT on this machine. Go fuses that expression into a single arm64
@@ -5014,8 +5077,47 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	c.set("__isclass", true)
 	c.set("__rbuiltin", name)
 	c.set("__name", name)
+	// Math::PI and Math::E. A scoped constant is a "$c$"-prefixed slot on the
+	// namespace object (makeScopedConst in ruby-to-llvm-ir.abnf, lookupConst in
+	// ruby-interpreter.abnf), and Math had none, so `Math::PI' answered nil in
+	// both compiled halves and printed an empty line.
+	if name == "Math" {
+		c.set("$c$PI", jsFlo{f: math.Pi})
+		c.set("$c$E", jsFlo{f: math.E})
+	}
 	rt.rubyClasses[name] = c
 	return c
+}
+
+// rubyMathCall is Ruby's Math module: every method answers a FLOAT, which is the
+// whole reason it cannot simply be JavaScript's Math (Ruby's Math.sqrt(4) is 2.0,
+// JavaScript's is 2). Math.log takes an optional base, which JavaScript's does
+// not. The other two engines are rbMathCall in languages/lib/ruby-rt.metajs and
+// the "$s$" methods on hostGlobals["Math"] in languages/ruby-interpreter.abnf.
+func rubyMathCall(name string, rt *jsrt, args []interface{}) (interface{}, bool) {
+	a := func(i int) float64 { return rt.toNumber(argAt(args, i)) }
+	one := map[string]func(float64) float64{
+		"sqrt": math.Sqrt, "cbrt": math.Cbrt, "sin": math.Sin, "cos": math.Cos,
+		"tan": math.Tan, "asin": math.Asin, "acos": math.Acos, "atan": math.Atan,
+		"sinh": math.Sinh, "cosh": math.Cosh, "tanh": math.Tanh, "asinh": math.Asinh,
+		"acosh": math.Acosh, "atanh": math.Atanh, "exp": math.Exp,
+		"log2": math.Log2, "log10": math.Log10,
+	}
+	if fn, ok := one[name]; ok {
+		return jsFlo{f: fn(a(0))}, true
+	}
+	switch name {
+	case "atan2":
+		return jsFlo{f: math.Atan2(a(0), a(1))}, true
+	case "hypot":
+		return jsFlo{f: math.Hypot(a(0), a(1))}, true
+	case "log":
+		if len(args) > 1 {
+			return jsFlo{f: math.Log(a(0)) / math.Log(a(1))}, true
+		}
+		return jsFlo{f: math.Log(a(0))}, true
+	}
+	return nil, false
 }
 
 // ----- Ruby ranges -----
@@ -5083,6 +5185,33 @@ func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
 	return out
 }
 
+// rubyRangeValue is what a range LITERAL becomes. A closed range is materialized
+// as an Array, because that is what everything downstream expects - but a range
+// with a NEGATIVE endpoint (1..-1) materializes EMPTY and the endpoints are then
+// the only thing that mattered: `r = 1..-1; s[r]' has to mean "from 1 to the last"
+// and answered "" in both compiled halves while the interpreter half, where a
+// Range is a real object, was right. Those ranges therefore keep the same
+// {__rrange} object the open-ended ones already use; as a SEQUENCE they are empty
+// in MRI too, so the method table above delegates to the empty Array.
+// docs/todo.md 1.3.
+func (rt *jsrt) rubyRangeValue(lo, hi interface{}, excl bool) interface{} {
+	arr := rt.rubyRangeArr(lo, hi, excl)
+	if len(arr.elems) == 0 && (rubyNegBound(lo) || rubyNegBound(hi)) {
+		return rubyOpenRange(lo, hi, excl)
+	}
+	return arr
+}
+
+func rubyNegBound(v interface{}) bool {
+	if n, isNum := v.(float64); isNum {
+		return n < 0
+	}
+	if f, isFlo := v.(jsFlo); isFlo {
+		return f.f < 0
+	}
+	return false
+}
+
 // rubyOpenRange builds the object standing for a range with a missing bound.
 func rubyOpenRange(lo, hi interface{}, excl bool) *jsObject {
 	o := newJSObject()
@@ -5116,6 +5245,15 @@ func (rt *jsrt) rubyOpenRangeCover(o *jsObject, v interface{}) bool {
 
 // rubyExcObj answers whether v is an exception instance: a user object carrying
 // the `args' slot every raise path fills in (rubyExc / the default initialize).
+// rubyExcInst is "v is an EXCEPTION instance", which rubyExcObj alone is not:
+// makeClassStmt of ruby-to-llvm-ir.abnf gives every body-less class a default
+// initialize that stores its arguments under `args', so an ordinary instance has
+// the same shape. Without the class-chain test a plain object rendered as its
+// class NAME (Exception#to_s) where MRI writes "#<Name>". docs/todo.md 1.3.
+func rubyExcInst(v interface{}) bool {
+	return rubyExcObj(v) && rubyExcIsA(v, "Exception")
+}
+
 func rubyExcObj(v interface{}) bool {
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -5233,6 +5371,882 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 
 // rubyExc builds an exception instance: {__class: <class>, args: [message]}, the
 // shape the message reader and the rescue type test below both understand.
+// rubyRaiseErr raises a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue
+// "d"' and `begin; 1/0; rescue ZeroDivisionError; end' work. A plain rt.fail is an
+// ENGINE abort: no rescue clause in any of the three engines could see it, which
+// made every runtime error uncatchable. docs/todo.md 1.3.
+func (rt *jsrt) rubyRaiseErr(cls, msg string) {
+	panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})})
+}
+
+
+// ---------------------------------------------------------------------------
+// Kernel#Integer / #Float / #String / #Array. Integer and Float are STRICT -
+// MRI raises ArgumentError on anything the whole string is not - which is what
+// makes `Integer(s) rescue default' the idiom it is. Mirrored line for line by
+// rbKernelConv of lib/ruby-rt.metajs and kernelConv of ruby-interpreter.abnf.
+// docs/todo.md 1.3.
+
+// rubyConvDigit is the value of one base-36 digit, -1 when it is not one. (Not
+// rubyDigitVal: that one answers 0 for a non-digit and is uppercase-blind.)
+func rubyConvDigit(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'z':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'Z':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
+func rubyTrimSpace(s string) string {
+	i, j := 0, len(s)
+	for i < j && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f' || s[i] == '\v') {
+		i++
+	}
+	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r' || s[j-1] == '\f' || s[j-1] == '\v') {
+		j--
+	}
+	return s[i:j]
+}
+
+// rubyStrToInt is MRI's Integer(String[, base]): surrounding whitespace, an
+// optional sign, a 0x/0b/0o/0d or bare-0 base prefix, and underscores BETWEEN
+// digits. Answers ok=false for anything the whole string is not.
+func rubyStrToInt(s string, base int) (float64, bool) {
+	s = rubyTrimSpace(s)
+	neg := false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		neg = s[0] == '-'
+		s = s[1:]
+	}
+	if len(s) >= 2 && s[0] == '0' {
+		p := s[1] | 0x20
+		nb := 0
+		switch p {
+		case 'x':
+			nb = 16
+		case 'b':
+			nb = 2
+		case 'o':
+			nb = 8
+		case 'd':
+			nb = 10
+		}
+		if nb != 0 && (base == 0 || base == nb) {
+			base = nb
+			s = s[2:]
+		} else if nb == 0 && base == 0 {
+			base = 8
+			s = s[1:]
+		}
+	}
+	if base == 0 {
+		base = 10
+	}
+	if len(s) == 0 {
+		return 0, false
+	}
+	acc := 0.0
+	digits := 0
+	prevUnd := true // a leading underscore is not allowed
+	for i := 0; i < len(s); i++ {
+		if s[i] == '_' {
+			if prevUnd {
+				return 0, false
+			}
+			prevUnd = true
+			continue
+		}
+		d := rubyConvDigit(s[i])
+		if d < 0 || d >= base {
+			return 0, false
+		}
+		acc = acc*float64(base) + float64(d)
+		digits++
+		prevUnd = false
+	}
+	if digits == 0 || prevUnd {
+		return 0, false
+	}
+	if neg {
+		acc = -acc
+	}
+	return acc, true
+}
+
+// rubyStrToFloat is MRI's Float(String): the whole string must be a decimal
+// literal, with underscores allowed between digits.
+func rubyStrToFloat(s string) (float64, bool) {
+	s = rubyTrimSpace(s)
+	clean := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '_' {
+			if i == 0 || i+1 >= len(s) || rubyConvDigit(s[i-1]) < 0 || rubyConvDigit(s[i+1]) < 0 {
+				return 0, false
+			}
+			continue
+		}
+		clean += string(s[i])
+	}
+	i := 0
+	if i < len(clean) && (clean[i] == '+' || clean[i] == '-') {
+		i++
+	}
+	intDigits := 0
+	for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
+		i++
+		intDigits++
+	}
+	if intDigits == 0 {
+		return 0, false
+	}
+	if i < len(clean) && clean[i] == '.' {
+		i++
+		fd := 0
+		for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
+			i++
+			fd++
+		}
+		if fd == 0 {
+			return 0, false
+		}
+	}
+	if i < len(clean) && (clean[i] == 'e' || clean[i] == 'E') {
+		i++
+		if i < len(clean) && (clean[i] == '+' || clean[i] == '-') {
+			i++
+		}
+		ed := 0
+		for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
+			i++
+			ed++
+		}
+		if ed == 0 {
+			return 0, false
+		}
+	}
+	if i != len(clean) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(clean, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
+	var v interface{} = jsNull
+	if len(args) > 0 {
+		v = args[0]
+	}
+	switch name {
+	case "String":
+		return rt.rubyStr(v)
+	case "Array":
+		if isUndefOrNull(v) {
+			return &jsArray{}
+		}
+		if arr, isArr := v.(*jsArray); isArr {
+			return arr
+		}
+		if o, isObj := v.(*jsObject); isObj {
+			if keys, vals, isDict := dictParts(o); isDict {
+				out := &jsArray{}
+				for i := range keys.elems {
+					out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
+				}
+				return out
+			}
+		}
+		return &jsArray{elems: []interface{}{v}}
+	case "Integer":
+		if isUndefOrNull(v) {
+			rt.rubyRaiseErr("TypeError", "can't convert nil into Integer")
+		}
+		if s, isStr := v.(string); isStr {
+			base := 0
+			if len(args) > 1 {
+				base = int(rt.toNumber(args[1]))
+			}
+			if n, ok := rubyStrToInt(s, base); ok {
+				return n
+			}
+			rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
+		}
+		if f, isFlo := v.(jsFlo); isFlo {
+			return math.Trunc(f.f)
+		}
+		if n, isNum := v.(float64); isNum {
+			return math.Trunc(n)
+		}
+		return v
+	case "Float":
+		if isUndefOrNull(v) {
+			rt.rubyRaiseErr("TypeError", "can't convert nil into Float")
+		}
+		if s, isStr := v.(string); isStr {
+			if f, ok := rubyStrToFloat(s); ok {
+				return jsFlo{f: f}
+			}
+			rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
+		}
+		return jsFlo{f: rubyToF(v)}
+	}
+	return v
+}
+
+
+
+// rubyIndexSet is js_rset's body, factored out so rubySetSlice can reuse the
+// one-element rule (a user class dispatches its own []=, a missing Hash key is
+// APPENDED and an Array GROWS, filling the gap with nil).
+func (rt *jsrt) rubyIndexSet(t, k, v interface{}) {
+	if rubyUserObj(t) {
+		rt.rubyMethod(t, "[]=", []interface{}{k, v})
+		return
+	}
+	if keys, vals, ok := dictParts(t); ok {
+		if i := rt.rubyDictFind(keys, k); i >= 0 {
+			vals.elems[i] = v
+		} else {
+			dictAppend(keys, vals, k, v)
+		}
+		return
+	}
+	arr, ok := t.(*jsArray)
+	if !ok {
+		rt.fail("item assignment on a %s", rt.typeOf(t))
+	}
+	idx := int(rt.toNumber(k))
+	if idx < 0 {
+		idx += len(arr.elems)
+	}
+	if idx < 0 {
+		rt.fail("index %d too small for array", idx)
+	}
+	arr.dropIdx()
+	for len(arr.elems) <= idx {
+		arr.elems = append(arr.elems, jsNull)
+	}
+	arr.elems[idx] = v
+}
+
+// rubySliceBounds resolves a Ruby subscript pair to (start, length) against a
+// receiver of size n. k2 absent means a ONE-element write, unless k1 is a
+// materialized range (an Array - see rubyRangeSubseq), whose first element is the
+// low bound and whose length is the count. docs/todo.md 1.3.
+func rubySliceBounds(n int, k1, k2 interface{}) (int, int) {
+	if !isUndefOrNull(k2) {
+		s := int(math.Trunc(rubyToF(k1)))
+		if s < 0 {
+			s += n
+		}
+		l := int(math.Trunc(rubyToF(k2)))
+		if l < 0 {
+			l = 0
+		}
+		return s, l
+	}
+	if arr, isArr := k1.(*jsArray); isArr {
+		if len(arr.elems) == 0 {
+			return n, 0
+		}
+		s := int(math.Trunc(rubyToF(arr.elems[0])))
+		if s < 0 {
+			s += n
+		}
+		return s, len(arr.elems)
+	}
+	s := int(math.Trunc(rubyToF(k1)))
+	if s < 0 {
+		s += n
+	}
+	return s, 1
+}
+
+// rubySetSlice is js_rsetsl: see the extern's comment. It answers the container.
+func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
+	if rubyUserObj(o) {
+		args := []interface{}{k1, v}
+		if !isUndefOrNull(k2) {
+			args = []interface{}{k1, k2, v}
+		}
+		rt.rubyMethod(o, "[]=", args)
+		return o
+	}
+	if _, _, isDict := dictParts(o); isDict {
+		rt.rubyIndexSet(o, k1, v)
+		return o
+	}
+	if str, isStr := o.(string); isStr {
+		n := rt.strLen(str)
+		s, l := rubySliceBounds(n, k1, k2)
+		if s < 0 || s > n {
+			rt.rubyRaiseErr("IndexError", "index "+jsNumString(float64(s))+" out of string")
+		}
+		if s+l > n {
+			l = n - s
+		}
+		return rt.strRange(str, 0, s) + rt.rubyStr(v) + rt.strRange(str, s+l, n)
+	}
+	arr, isArr := o.(*jsArray)
+	if !isArr {
+		rt.fail("item assignment on a %s", rt.typeOf(o))
+	}
+	// A plain one-element write keeps js_rset's own growth rule.
+	if isUndefOrNull(k2) {
+		if _, isRng := k1.(*jsArray); !isRng {
+			rt.rubyIndexSet(arr, k1, v)
+			return arr
+		}
+	}
+	s, l := rubySliceBounds(len(arr.elems), k1, k2)
+	if s < 0 {
+		rt.fail("index %d too small for array", s)
+	}
+	arr.dropIdx()
+	for len(arr.elems) < s {
+		arr.elems = append(arr.elems, jsNull)
+	}
+	if s+l > len(arr.elems) {
+		l = len(arr.elems) - s
+	}
+	ins := []interface{}{v}
+	if va, isArr2 := v.(*jsArray); isArr2 {
+		ins = append([]interface{}{}, va.elems...)
+	}
+	tail := append([]interface{}{}, arr.elems[s+l:]...)
+	arr.elems = append(append(arr.elems[:s:s], ins...), tail...)
+	return arr
+}
+
+
+// ===== the String surface shared with lib/ruby-rt.metajs and ==================
+// ruby-interpreter.abnf (smMethod / smUtf8Bytes / smSetExpand / ...).
+//
+// The item named six missing String methods (bytes, tr, center, ljust/rjust,
+// count, delete). A sweep of MRI's whole String surface found SEVENTY-EIGHT that
+// aborted every engine with *unknown String method*, so these are the six plus
+// their families plus the cheap remainder. docs/todo.md 1.3.
+
+// The receiver as a list of UTF-16-unit characters, which is what rt.strAt hands
+// out and therefore what the other two engines see.
+func (rt *jsrt) rubySmChars(o string) []string {
+	n := rt.strLen(o)
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, rt.strAt(o, i))
+	}
+	return out
+}
+
+// MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze:
+// a leading ^ negates, `a-z` is a range, a backslash escapes the next character.
+func rubySmSetExpand(spec string) (bool, []string) {
+	cs := []rune(spec)
+	neg := false
+	i := 0
+	if len(cs) > 1 && cs[0] == '^' {
+		neg = true
+		i = 1
+	}
+	out := []string{}
+	for i < len(cs) {
+		if cs[i] == '\\' && i+1 < len(cs) {
+			out = append(out, string(cs[i+1]))
+			i += 2
+			continue
+		}
+		if i+2 < len(cs) && cs[i+1] == '-' {
+			for k := cs[i]; k <= cs[i+2]; k++ {
+				out = append(out, string(k))
+			}
+			i += 3
+			continue
+		}
+		out = append(out, string(cs[i]))
+		i++
+	}
+	return neg, out
+}
+
+func rubySmHas(list []string, ch string) int {
+	for i, c := range list {
+		if c == ch {
+			return i
+		}
+	}
+	return -1
+}
+
+// Is ch in EVERY one of the given set specs? MRI intersects them.
+func rubySmInSets(specs []string, ch string) bool {
+	for _, sp := range specs {
+		neg, chars := rubySmSetExpand(sp)
+		found := rubySmHas(chars, ch) >= 0
+		if neg {
+			found = !found
+		}
+		if !found {
+			return false
+		}
+	}
+	return len(specs) > 0
+}
+
+// String#tr / #tr_s.
+func (rt *jsrt) rubySmTr(o, from, to string, sq bool) string {
+	fneg, fchars := rubySmSetExpand(from)
+	_, tchars := rubySmSetExpand(to)
+	last := ""
+	if len(tchars) > 0 {
+		last = tchars[len(tchars)-1]
+	}
+	out := ""
+	prev := ""
+	for _, ch := range rt.rubySmChars(o) {
+		k := rubySmHas(fchars, ch)
+		rep := ch
+		did := false
+		if fneg {
+			if k < 0 {
+				rep = last
+				did = true
+			}
+		} else if k >= 0 {
+			if len(tchars) == 0 {
+				rep = ""
+			} else if k >= len(tchars) {
+				rep = last
+			} else {
+				rep = tchars[k]
+			}
+			did = true
+		}
+		if rep == "" {
+			prev = ""
+			continue
+		}
+		if sq && did && rep == prev {
+			continue
+		}
+		out += rep
+		if did {
+			prev = rep
+		} else {
+			prev = ""
+		}
+	}
+	return out
+}
+
+func (rt *jsrt) rubySmSqueeze(o string, specs []string) string {
+	out := ""
+	prev := ""
+	for _, ch := range rt.rubySmChars(o) {
+		if ch == prev && (len(specs) == 0 || rubySmInSets(specs, ch)) {
+			continue
+		}
+		out += ch
+		prev = ch
+	}
+	return out
+}
+
+// String#center / #ljust / #rjust: mode 0 centres, 1 pads right, 2 pads left.
+// MRI counts CHARACTERS here, unlike printf's %10s, which counts bytes.
+func (rt *jsrt) rubySmPad(o string, width int, pad string, mode int) string {
+	n := rt.strLen(o)
+	if rt.strLen(pad) == 0 || width <= n {
+		return o
+	}
+	total := width - n
+	left := 0
+	if mode == 0 {
+		left = total / 2
+	} else if mode == 2 {
+		left = total
+	}
+	return rt.rubySmRepeatTo(pad, left) + o + rt.rubySmRepeatTo(pad, total-left)
+}
+
+func (rt *jsrt) rubySmRepeatTo(pad string, n int) string {
+	units := rt.rubySmChars(pad)
+	out := ""
+	for i := 0; i < n; i++ {
+		out += units[i%len(units)]
+	}
+	return out
+}
+
+func (rt *jsrt) rubySmSwapcase(o string) string {
+	out := ""
+	for _, ch := range rt.rubySmChars(o) {
+		up := strings.ToUpper(ch)
+		if ch == up {
+			out += strings.ToLower(ch)
+		} else {
+			out += up
+		}
+	}
+	return out
+}
+
+// String#lines: split after each newline, keeping it.
+func (rt *jsrt) rubySmLines(o string) []string {
+	out := []string{}
+	cur := ""
+	for _, ch := range rt.rubySmChars(o) {
+		cur += ch
+		if ch == "\n" {
+			out = append(out, cur)
+			cur = ""
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func rubySmIsStrip(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' || c == 0
+}
+
+func rubySmLstrip(o string) string {
+	i := 0
+	for i < len(o) && rubySmIsStrip(o[i]) {
+		i++
+	}
+	return o[i:]
+}
+
+func rubySmRstrip(o string) string {
+	j := len(o)
+	for j > 0 && rubySmIsStrip(o[j-1]) {
+		j--
+	}
+	return o[:j]
+}
+
+// String#hex / #oct: the LEADING numeral, 0 when there is none. Unlike
+// Kernel#Integer these never raise.
+func rubySmBasePrefix(o string, base int) float64 {
+	i := 0
+	neg := false
+	if i < len(o) && (o[i] == '+' || o[i] == '-') {
+		neg = o[i] == '-'
+		i++
+	}
+	b := base
+	if i+1 < len(o) && o[i] == '0' {
+		p := o[i+1] | 0x20
+		if p == 'x' && (base == 16 || base == 0) {
+			b, i = 16, i+2
+		} else if p == 'b' && (base == 2 || base == 0) {
+			b, i = 2, i+2
+		} else if p == 'o' {
+			b, i = 8, i+2
+		} else if p == 'd' {
+			b, i = 10, i+2
+		}
+	}
+	if b == 0 {
+		b = 8
+	}
+	acc := 0.0
+	for i < len(o) {
+		if o[i] == '_' {
+			i++
+			continue
+		}
+		d := rubyConvDigit(o[i])
+		if d < 0 || d >= b {
+			break
+		}
+		acc = acc*float64(b) + float64(d)
+		i++
+	}
+	if neg {
+		return -acc
+	}
+	return acc
+}
+
+func rubySmNumArr(bs []byte) *jsArray {
+	out := &jsArray{}
+	for _, b := range bs {
+		out.elems = append(out.elems, float64(b))
+	}
+	return out
+}
+
+func rubySmStrArr(ss []string) *jsArray {
+	out := &jsArray{}
+	for _, e := range ss {
+		out.elems = append(out.elems, e)
+	}
+	return out
+}
+
+
+// The BANG forms of the case / trim / translate methods. A Ruby String is a VALUE
+// in this model, so the in-place effect is unrepresentable (the same limitation
+// sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
+// string, or nil when nothing changed. Mirrors smBangBase of the other two
+// engines. docs/todo.md 1.3.
+func rubySmBangBase(name string) string {
+	if len(name) < 2 || name[len(name)-1] != '!' {
+		return ""
+	}
+	b := name[:len(name)-1]
+	switch b {
+	case "upcase", "downcase", "capitalize", "swapcase", "reverse", "strip",
+		"lstrip", "rstrip", "chomp", "chop", "squeeze", "tr", "tr_s", "delete",
+		"succ", "next":
+		return b
+	}
+	return ""
+}
+
+// String#upto: every string from the receiver to limit by #succ.
+func rubySmUptoList(s, limit string, excl bool) []string {
+	out := []string{}
+	cur := s
+	for guard := 0; guard < 100000; guard++ {
+		if len(cur) > len(limit) {
+			return out
+		}
+		if len(cur) == len(limit) && cur > limit {
+			return out
+		}
+		if excl && cur == limit {
+			return out
+		}
+		out = append(out, cur)
+		if cur == limit {
+			return out
+		}
+		cur = rubyStrSucc(cur)
+	}
+	return out
+}
+
+// rubySmMethod is smMethod of lib/ruby-rt.metajs and ruby-interpreter.abnf. It
+// answers ok=false for a name it does not know, so the caller's own
+// "unknown String method" abort still happens.
+func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (interface{}, bool) {
+	num := func(i int) int {
+		if i < len(nargs) {
+			return int(math.Trunc(nargs[i]))
+		}
+		return 0
+	}
+	sarg := func(i int) string {
+		if i < len(sargs) {
+			return sargs[i]
+		}
+		return ""
+	}
+	switch name {
+	case "bytesize":
+		return float64(len(o)), true
+	case "bytes":
+		return rubySmNumArr([]byte(o)), true
+	case "getbyte":
+		bs := []byte(o)
+		gi := num(0)
+		if gi < 0 {
+			gi += len(bs)
+		}
+		if gi < 0 || gi >= len(bs) {
+			return jsNull, true
+		}
+		return float64(bs[gi]), true
+	case "sum":
+		acc := 0.0
+		for _, b := range []byte(o) {
+			acc += float64(b)
+		}
+		return acc, true
+	case "codepoints":
+		out := &jsArray{}
+		for _, r := range o {
+			out.elems = append(out.elems, float64(r))
+		}
+		return out, true
+	case "tr", "tr!":
+		return rt.rubySmTr(o, sarg(0), sarg(1), false), true
+	case "tr_s", "tr_s!":
+		return rt.rubySmTr(o, sarg(0), sarg(1), true), true
+	case "squeeze", "squeeze!":
+		return rt.rubySmSqueeze(o, sargs), true
+	case "count":
+		n := 0.0
+		for _, ch := range rt.rubySmChars(o) {
+			if rubySmInSets(sargs, ch) {
+				n++
+			}
+		}
+		return n, true
+	case "delete", "delete!":
+		out := ""
+		for _, ch := range rt.rubySmChars(o) {
+			if !rubySmInSets(sargs, ch) {
+				out += ch
+			}
+		}
+		return out, true
+	case "center", "ljust", "rjust":
+		pad := " "
+		if len(sargs) > 1 {
+			pad = sargs[1]
+		}
+		mode := 0
+		if name == "ljust" {
+			mode = 1
+		} else if name == "rjust" {
+			mode = 2
+		}
+		return rt.rubySmPad(o, num(0), pad, mode), true
+	case "chop", "chop!":
+		if strings.HasSuffix(o, "\r\n") {
+			return o[:len(o)-2], true
+		}
+		if n := rt.strLen(o); n > 0 {
+			return rt.strRange(o, 0, n-1), true
+		}
+		return o, true
+	case "chomp", "chomp!":
+		if len(sargs) > 0 {
+			if sargs[0] != "" && strings.HasSuffix(o, sargs[0]) {
+				return o[:len(o)-len(sargs[0])], true
+			}
+			return o, true
+		}
+		if strings.HasSuffix(o, "\r\n") {
+			return o[:len(o)-2], true
+		}
+		if strings.HasSuffix(o, "\n") || strings.HasSuffix(o, "\r") {
+			return o[:len(o)-1], true
+		}
+		return o, true
+	case "chr":
+		if rt.strLen(o) == 0 {
+			return "", true
+		}
+		return rt.strAt(o, 0), true
+	case "lstrip", "lstrip!":
+		return rubySmLstrip(o), true
+	case "rstrip", "rstrip!":
+		return rubySmRstrip(o), true
+	case "strip!":
+		return rubySmLstrip(rubySmRstrip(o)), true
+	case "swapcase", "swapcase!":
+		return rt.rubySmSwapcase(o), true
+	case "lines":
+		return rubySmStrArr(rt.rubySmLines(o)), true
+	case "partition", "rpartition":
+		sep := sarg(0)
+		at := -1
+		if name == "partition" {
+			at = rt.strIndexOf(o, sep)
+		} else {
+			at = rubySmRindexUnits(rt, o, sep)
+		}
+		if at < 0 {
+			if name == "partition" {
+				return rubySmStrArr([]string{o, "", ""}), true
+			}
+			return rubySmStrArr([]string{"", "", o}), true
+		}
+		n := rt.strLen(o)
+		return rubySmStrArr([]string{rt.strRange(o, 0, at), sep,
+			rt.strRange(o, at+rt.strLen(sep), n)}), true
+	case "delete_prefix", "delete_prefix!":
+		if sarg(0) != "" && strings.HasPrefix(o, sarg(0)) {
+			return o[len(sarg(0)):], true
+		}
+		return o, true
+	case "delete_suffix", "delete_suffix!":
+		if sarg(0) != "" && strings.HasSuffix(o, sarg(0)) {
+			return o[:len(o)-len(sarg(0))], true
+		}
+		return o, true
+	case "casecmp":
+		la, lb := strings.ToLower(o), strings.ToLower(sarg(0))
+		if la < lb {
+			return float64(-1), true
+		}
+		if la > lb {
+			return float64(1), true
+		}
+		return float64(0), true
+	case "casecmp?":
+		return strings.ToLower(o) == strings.ToLower(sarg(0)), true
+	case "rindex":
+		if i := rubySmRindexUnits(rt, o, sarg(0)); i >= 0 {
+			return float64(i), true
+		}
+		return jsNull, true
+	case "insert":
+		n := rt.strLen(o)
+		at := num(0)
+		if at < 0 {
+			at += n + 1
+		}
+		if at < 0 || at > n {
+			return nil, false
+		}
+		return rt.strRange(o, 0, at) + sarg(1) + rt.strRange(o, at, n), true
+	case "prepend":
+		return sarg(0) + o, true
+	case "concat", "<<":
+		acc := o
+		for _, a := range sargs {
+			acc += a
+		}
+		return acc, true
+	case "hex":
+		return rubySmBasePrefix(o, 16), true
+	case "oct":
+		return rubySmBasePrefix(o, 0), true
+	case "clear":
+		return "", true
+	case "b", "scrub", "unicode_normalize", "force_encoding", "encode":
+		return o, true
+	case "unicode_normalized?", "valid_encoding?":
+		return true, true
+	case "ascii_only?":
+		for i := 0; i < len(o); i++ {
+			if o[i] > 127 {
+				return false, true
+			}
+		}
+		return true, true
+	}
+	return nil, false
+}
+
+// The LAST index of sub in UTF-16 units, or -1.
+func rubySmRindexUnits(rt *jsrt, o, sub string) int {
+	n := rt.strLen(o)
+	m := rt.strLen(sub)
+	if m == 0 {
+		return n
+	}
+	for i := n - m; i >= 0; i-- {
+		if rt.strRange(o, i, i+m) == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 func (rt *jsrt) rubyExc(cls *jsObject, args []interface{}) *jsObject {
 	inst := newJSObject()
 	inst.set("__class", cls)
@@ -5524,10 +6538,29 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		}
 		// An exception instance renders as its message, like Exception#to_s in MRI
 		// (so `"log " + e' and "#{e}" read the way a Ruby program expects).
-		if _, isExc := t.props["args"]; isExc {
+		if rubyExcInst(t) {
 			if msg, ok := rt.rubyExcMessage(t); ok {
 				return rt.toString(msg)
 			}
+		}
+		// A Range that kept its endpoints (an open one, or a bounded one that
+		// materialized empty) renders as `lo..hi', not as "[object Object]".
+		// docs/todo.md 1.3.
+		if _, isRng := t.props["__rrange"]; isRng {
+			dots := ".."
+			if b, _ := t.props["excl"].(bool); b {
+				dots = "..."
+			}
+			return rt.rubyStr(t.props["begin"]) + dots + rt.rubyStr(t.props["end"])
+		}
+		// A plain instance with no #to_s of its own. MRI writes
+		// `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched,
+		// so the address and the instance variables are left off rather than
+		// invented - the same rule the Proc renderer above follows. Without this
+		// the compiled halves printed "[object Object]" and the interpreter half
+		// aborted with *unknown method 'to_s'*. docs/todo.md 1.3.
+		if n := rubyInstClassName(t); n != "" {
+			return "#<" + n + ">"
 		}
 	}
 	if isCallable(v) {
@@ -5629,8 +6662,43 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 			}
 			return "{" + strJoin(parts, ", ") + "}"
 		}
+		// Exception#inspect / a plain instance's #inspect. MRI answers
+		// `#<RuntimeError: boom>' - the CLASS NAME and #to_s - and the bare class
+		// name when #to_s is empty. It was unimplemented in all three engines:
+		// `p exc' printed the message alone here and aborted the interpreter half.
+		// A class of its own that defines #inspect stays in charge. docs/todo.md 1.3.
+		if m, ok := rubyFindMethod(t, "inspect"); ok {
+			return rt.rubyStr(rt.call(m, jsUndef, []interface{}{t}))
+		}
+		if rubyExcInst(t) {
+			return rubyExcInspect(rubyInstClassName(t), rt.rubyStr(t))
+		}
 	}
 	return rt.rubyStr(v)
+}
+
+// rubyInstClassName is the __name of an instance's class, "" when it has none.
+func rubyInstClassName(o *jsObject) string {
+	if cls, ok := o.props["__class"].(*jsObject); ok {
+		if n, isStr := cls.props["__name"].(string); isStr {
+			return n
+		}
+	}
+	return ""
+}
+
+// rubyExcInspect is MRI's Exception#inspect: "#<Class: to_s>", or the bare class
+// name when to_s is empty (`class E < StandardError; def to_s; ""; end; end'
+// inspects as "E"). Mirrored by rbExcInspect of lib/ruby-rt.metajs and
+// excInspect of ruby-interpreter.abnf.
+func rubyExcInspect(name, msg string) string {
+	if name == "" {
+		return msg
+	}
+	if msg == "" {
+		return name
+	}
+	return "#<" + name + ": " + msg + ">"
 }
 
 // rubyEq is Ruby's ==: numeric across the whole tower (2.0 == 2, 1r/2r == 0.5), a
@@ -6395,6 +7463,18 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return "false"
 		}
+		// A user INSTANCE with no to_s / inspect of its own: `e.inspect' and
+		// `obj.to_s' aborted with *unknown method ... on an instance* here and in
+		// the interpreter half. rubyUserObj excludes a Hash / Enumerator (neither
+		// carries __class), so their own arms below still answer. docs/todo.md 1.3.
+		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if name == "inspect" {
+					return rt.rubyInspect(o)
+				}
+				return rt.rubyStr(o)
+			}
+		}
 	// Exception#backtrace: MRI's frame list. Only the RAISE SITE is modelled here
 	// (js_rraiseat records it), so the answer is that one frame, in MRI's own
 	// spelling - "prog.rb:2:in `<main>'". An exception raised by the runtime rather
@@ -6419,6 +7499,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if o, isObj := target.(*jsObject); isObj {
 			if _, isCls := o.props["__isclass"]; !isCls {
 				if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+					// MRI's Exception#message IS #to_s, so a subclass that
+					// overrides to_s changes its message too. rubyStr prefers a
+					// user to_s and falls back to the raise argument.
+					if rubyExcInst(o) {
+						return rt.rubyStr(o)
+					}
 					if msg, ok := rt.rubyExcMessage(o); ok {
 						return msg
 					}
@@ -6660,6 +7746,64 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			// compiler models a String as a value, which makes the copy the value.
 			return o
 		}
+		// The String surface the item's six names belong to (bytes / tr / center /
+		// ljust / rjust / count / delete and their families). docs/todo.md 1.3.
+		spos, sblk := rubyBlockArgs(args)
+		switch name {
+		case "upto":
+			lim := o
+			if len(spos) > 0 {
+				lim = rt.rubyStr(spos[0])
+			}
+			ul := rubySmUptoList(o, lim, len(spos) > 1 && rubyTruthy(spos[1]))
+			if sblk == nil {
+				return rubySmStrArr(ul)
+			}
+			for _, e := range ul {
+				rt.call(sblk, jsUndef, []interface{}{e})
+			}
+			return o
+		case "dump":
+			return rubyStrInspect(o)
+		// String#slice! answers the REMOVED part; the removal itself is
+		// unrepresentable (a Ruby String is a value here), so the value is
+		// String#slice's.
+		case "slice!":
+			return rt.rubyMethod(o, "slice", args)
+		case "each_byte", "each_codepoint", "each_line":
+			if sblk != nil {
+				var list []interface{}
+				if name == "each_byte" {
+					list = rubySmNumArr([]byte(o)).elems
+				} else if name == "each_codepoint" {
+					for _, r := range o {
+						list = append(list, float64(r))
+					}
+				} else {
+					list = rubySmStrArr(rt.rubySmLines(o)).elems
+				}
+				for _, e := range list {
+					rt.call(sblk, jsUndef, []interface{}{e})
+				}
+			}
+			return o
+		}
+		sargs := make([]string, 0, len(spos))
+		nargs := make([]float64, 0, len(spos))
+		for _, a := range spos {
+			sargs = append(sargs, rt.rubyStr(a))
+			nargs = append(nargs, rubyToF(a))
+		}
+		if bb := rubySmBangBase(name); bb != "" {
+			bv := rt.rubyMethod(o, bb, args)
+			if bs, isStr := bv.(string); isStr && bs == o {
+				return jsNull
+			}
+			return bv
+		}
+		if v, ok := rt.rubySmMethod(o, name, sargs, nargs); ok {
+			return v
+		}
 		rt.fail("unknown String method: %s", name)
 	case *jsArray:
 		return rt.rubyArrayMethod(o, name, args)
@@ -6678,6 +7822,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return o.props["end"]
 			case "exclude_end?":
 				return o.props["excl"]
+			}
+			// A BOUNDED range that materialized EMPTY (1..-1) is kept as this
+			// object so its raw endpoints survive into a[r] - see rubyRangeArr.
+			// As a SEQUENCE such a range is empty in MRI too, so every other
+			// method is the empty Array's. docs/todo.md 1.3.
+			if !isUndefOrNull(o.props["begin"]) && !isUndefOrNull(o.props["end"]) {
+				switch name {
+				case "size", "count", "length":
+					return float64(0)
+				case "to_s", "inspect":
+					x := ".."
+					if b, _ := o.props["excl"].(bool); b {
+						x = "..."
+					}
+					return rt.rubyStr(o.props["begin"]) + x + rt.rubyStr(o.props["end"])
+				}
+				return rt.rubyMethod(&jsArray{}, name, args)
 			}
 			rt.fail("unknown method on an endless Range: %s", name)
 		}
@@ -6752,18 +7913,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "instance_of?":
 			return o.props["__class"] == argAt(args, 0)
 		case "is_a?", "kind_of?":
-			want := argAt(args, 0)
-			for cls := o.props["__class"]; cls != nil; {
-				if cls == want {
-					return true
-				}
-				clsObj, ok := cls.(*jsObject)
-				if !ok {
-					break
-				}
-				cls = clsObj.props["__super"]
-			}
-			return false
+			// rubyIsA, not a bare identity walk of __super. A builtin class object
+			// carries no __super (the hierarchy is rubyExcParent, by NAME), so the
+			// walk alone answered false for `raise "x" rescue e; e.is_a?(Exception)'
+			// and for every user exception subclass tested against Exception - a
+			// live halves divergence the interpreter half never had.
+			// docs/todo.md 1.3.
+			return rt.rubyIsA(o, argAt(args, 0))
 		}
 		// A singleton (class) method: `def self.m` / `class << self` stores the
 		// method on the class descriptor under a "$s$" prefixed key, so it cannot
@@ -6798,6 +7954,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return rt.rubyFormatArgs(args)
 			case "rand":
 				return rubyRand(argAt(args, 0))
+			}
+		}
+		// Math.sqrt / Math.sin / ... - see rubyMathCall. `Math' used to be absent
+		// from ruby-to-llvm-ir.abnf's builtin-class list, so the name fell all the
+		// way through to the ROOT scope's JavaScript Math: `Math.sqrt(4)' answered
+		// the integer 2 where Ruby answers 2.0, `Math::PI' answered nil, and every
+		// method the C floor did not carry (Math.sin) worked under llvm.Run and
+		// died in the native binary. docs/todo.md 1.1.
+		if bn, isBuiltin := o.props["__rbuiltin"].(string); isBuiltin && bn == "Math" {
+			if v, ok := rubyMathCall(name, rt, args); ok {
+				return v
 			}
 		}
 		// A class instance or class object: the generic dispatch handles it.
@@ -9301,39 +10468,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rget": func(a []uint64) uint64 {
 			return w(rt.rubyIndexGet(u(a[0]), u(a[1])))
 		},
+		// a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
+		// (possibly new) CONTAINER, because a Ruby String is a VALUE in this model
+		// and the emitter has to write the result back - exactly what `s << "x"'
+		// already does. Two-argument index assignment used to write ONE element
+		// (TIndex kept only the first subscript), a range key was coerced with
+		// toNumber and wrote index 0 in the compiled halves while doing nothing in
+		// the interpreter half - a live halves divergence - and a String element
+		// assignment aborted every engine. docs/todo.md 1.3.
+		"js_rsetsl": func(a []uint64) uint64 {
+			return w(rt.rubySetSlice(u(a[0]), u(a[1]), u(a[2]), u(a[3])))
+		},
 		// Ruby index assignment: a[i] = v, h[k] = v, obj[i] = v. Like js_pyset except
 		// that a user class dispatches its own `def []=`, a missing Hash key is
 		// APPENDED and an Array GROWS (filling the gap with nil) - all three Ruby.
 		"js_rset": func(a []uint64) uint64 {
-			t := u(a[0])
-			if rubyUserObj(t) {
-				rt.rubyMethod(t, "[]=", []interface{}{u(a[1]), u(a[2])})
-				return 0
-			}
-			if keys, vals, ok := dictParts(t); ok {
-				if i := rt.rubyDictFind(keys, u(a[1])); i >= 0 {
-					vals.elems[i] = u(a[2])
-				} else {
-					dictAppend(keys, vals, u(a[1]), u(a[2]))
-				}
-				return 0
-			}
-			arr, ok := t.(*jsArray)
-			if !ok {
-				rt.fail("item assignment on a %s", rt.typeOf(t))
-			}
-			idx := int(rt.toNumber(u(a[1])))
-			if idx < 0 {
-				idx += len(arr.elems)
-			}
-			if idx < 0 {
-				rt.fail("index %d too small for array", idx)
-			}
-			arr.dropIdx()
-			for len(arr.elems) <= idx {
-				arr.elems = append(arr.elems, jsNull)
-			}
-			arr.elems[idx] = u(a[2])
+			rt.rubyIndexSet(u(a[0]), u(a[1]), u(a[2]))
 			return 0
 		},
 		"js_supercall": func(a []uint64) uint64 { // (super class, this, method name, args array)
@@ -9919,12 +11069,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Mirrors js_rrangearr's slot in lib/ruby-rt.metajs; ruby-interpreter.abnf
 		// needs none, a Range being a real object there. docs/todo.md 1.10.
 		"js_rrangearr": func(a []uint64) uint64 {
-			arr := rt.rubyRangeArr(u(a[0]), u(a[1]), rt.truthy(u(a[2])))
-			rt.rubyLastRange = arr
-			rt.rubyLastRangeLo = u(a[0])
-			rt.rubyLastRangeHi = u(a[1])
-			rt.rubyLastRangeEx = rt.truthy(u(a[2]))
-			return w(arr)
+			v := rt.rubyRangeValue(u(a[0]), u(a[1]), rt.truthy(u(a[2])))
+			if arr, isArr := v.(*jsArray); isArr {
+				rt.rubyLastRange = arr
+				rt.rubyLastRangeLo = u(a[0])
+				rt.rubyLastRangeHi = u(a[1])
+				rt.rubyLastRangeEx = rt.truthy(u(a[2]))
+			}
+			return w(v)
 		},
 		// s[lo..hi] / a[lo...hi] written as a RANGE LITERAL at the subscript: the
 		// endpoints arrive RAW, because a materialized range cannot carry them -
@@ -10496,6 +11648,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(arr.elems[0])
 			}
 			return w(&jsArray{elems: append([]interface{}{}, arr.elems...)})
+		},
+		// Kernel#Integer / #Float / #String / #Array, the conversion functions. They
+		// existed in no engine: the name resolved to the builtin CLASS object, so
+		// `Integer("5")' built an instance of Integer in the interpreter half and
+		// aborted both compiled halves with *call of a non function value*.
+		// docs/todo.md 1.3.
+		"js_rkconv": func(a []uint64) uint64 {
+			arr, ok := u(a[1]).(*jsArray)
+			if !ok {
+				arr = &jsArray{}
+			}
+			return w(rt.rubyKernelConv(rt.toString(u(a[0])), arr.elems))
 		},
 		// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
 		// strings (or of symbols when the flag is set).
@@ -11682,6 +12846,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if rubyIsEnum(u(a[0])) {
 				if items, isArr := u(a[0]).(*jsObject).props["items"].(*jsArray); isArr {
 					return rt.wrapNum(float64(len(items.elems)))
+				}
+			}
+			// Likewise a ruby Range that kept its endpoints (1..-1): it is empty as
+			// a sequence, and only ruby builds a __rrange object. docs/todo.md 1.3.
+			if o, isObj := u(a[0]).(*jsObject); isObj {
+				if _, isRng := o.props["__rrange"]; isRng {
+					return rt.wrapNum(0)
 				}
 			}
 			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
@@ -13330,9 +14501,14 @@ func (rt *jsrt) printArgs(args []interface{}) []interface{} {
 // see the difference (docs/todo.md 4.1). abnf/hostglobals_test.go now can.
 func standardJSBindings() map[string]interface{} {
 	mathObj := newJSObject()
+	// ToInt32 is a MODULO, not a range test, and `int32(int64(f))` outside the
+	// int64 range is implementation defined in Go - so Math.imul(1, 1e300)
+	// answered -1 here against 0 in node and 0 in the C floor, whose to_int32 does
+	// the reduction with bit arithmetic. rt.toInt32 is the arm that already knew
+	// this; the two callers below were written before it existed.
 	mathObj.set("imul", jsHostFunc("imul", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		a := int32(int64(rt.toNumber(argAt(args, 0))))
-		b := int32(int64(rt.toNumber(argAt(args, 1))))
+		a := rt.toInt32(argAt(args, 0))
+		b := rt.toInt32(argAt(args, 1))
 		return float64(a * b)
 	}))
 	mathObj.set("floor", jsHostFunc("floor", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -13405,13 +14581,64 @@ func standardJSBindings() map[string]interface{} {
 	mathObj.set("atan2", jsHostFunc("atan2", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return math.Atan2(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
 	}))
+	// Math.hypot is variadic, so it cannot simply be math.Hypot - but it must not
+	// be the naive sum of squares either, which is what it was: Math.hypot(1e300,
+	// 1e300) answered Infinity here and 1.4142135623730952e+300 in goja and in
+	// node, and Math.hypot(1e-300, 1e-300) answered 0 against 1.41...e-300. That
+	// was a live goja-vs-`-frozen` divergence in the js, typescript and metajs
+	// INTERPRETER halves (whose Math is the grammar host's) that nothing in the
+	// suite reached, on top of a run-vs-native one. ECMA-262 asks implementations
+	// to avoid exactly this overflow.
+	//
+	// Scaling by the largest magnitude first is what goja and V8 do, and for TWO
+	// arguments it is bit for bit Go's own math.Hypot, because (max/max)*(max/max)
+	// is exactly 1. The identical loop is host id 91 of languages/lib/runtime.c.
+	// The special-case ORDER is ECMA-262's: an infinity wins over a NaN.
 	mathObj.set("hypot", jsHostFunc("hypot", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		sum := 0.0
-		for _, a := range args {
+		mx, sawInf, sawNaN := 0.0, false, false
+		vals := make([]float64, len(args))
+		for i, a := range args {
 			v := rt.toNumber(a)
-			sum += v * v
+			vals[i] = v
+			if math.IsInf(v, 0) {
+				sawInf = true
+			}
+			if math.IsNaN(v) {
+				sawNaN = true
+			}
+			if av := math.Abs(v); av > mx {
+				mx = av
+			}
 		}
-		return math.Sqrt(sum)
+		switch {
+		case sawInf:
+			return math.Inf(1)
+		case sawNaN:
+			return math.NaN()
+		case mx == 0:
+			return 0.0
+		}
+		sum := 0.0
+		for _, v := range vals {
+			t := v / mx
+			// `sum += t * t` is FUSED into an FMA by the Go compiler on arm64 (and
+			// not on amd64), which made this loop answer one ulp away from the C
+			// floor's identical loop for 4 of 6,734 probe rows. Assigning the
+			// product to a local does NOT stop it - measured; only the explicit
+			// float64() conversion the Go spec names as "explicitly rounded" does.
+			sum += float64(t * t)
+		}
+		return mx * math.Sqrt(sum)
+	}))
+	// clz32 and fround are goja's Math and were missing here, so a program that
+	// called either worked under goja and died under -frozen with "call of a non
+	// function value" - the same latent frozen-diff hypot had. Host ids 92 and 93
+	// of languages/lib/runtime.c are the third engine.
+	mathObj.set("clz32", jsHostFunc("clz32", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(bits.LeadingZeros32(uint32(rt.toInt32(argAt(args, 0)))))
+	}))
+	mathObj.set("fround", jsHostFunc("fround", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(float32(rt.toNumber(argAt(args, 0))))
 	}))
 	mathObj.set("PI", math.Pi)
 	mathObj.set("E", math.E)
@@ -14660,7 +15887,7 @@ func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
 			"'super' object has no attribute '"+name+"'")})
 	}
 	if isCallable(m) {
-		return rt.pyBindMethod(s.props["__sobj"], m)
+		return rt.pyBindMethod(s.props["__sobj"], m, name)
 	}
 	return m
 }
@@ -14684,11 +15911,24 @@ func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw in
 // back the raw function and died with "member 'v' of undefined" where the
 // interpreter half (pyattr's bindMethod) answered - a live halves divergence,
 // found by the docs/todo.md 1.9 sweep. Layer 2: pyDBindMethod.
-func (rt *jsrt) pyBindMethod(self, m interface{}) interface{} {
-	return jsHostFunc("pymethod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+func (rt *jsrt) pyBindMethod(self, m interface{}, name string) interface{} {
+	h := jsHostFunc("pymethod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		full := append([]interface{}{self}, args...)
 		return rt.call(m, jsUndef, rt.pyBindCall(m, full, jsUndef))
 	})
+	h.pybm = &pyBoundInfo{name: name, self: self, fn: m, typ: rt.pyOwnerName(self)}
+	return h
+}
+
+// pyOwnerName is the type name a bound method's __qualname__ and repr are
+// prefixed with: an INSTANCE names its class, everything else names its builtin
+// type. pyTypeName answers "object" for an instance (it has no class arm and
+// several callers depend on that), so the two cannot be merged.
+func (rt *jsrt) pyOwnerName(self interface{}) string {
+	if _, cls, ok := pyInstance(self); ok {
+		return rt.toString(cls.props["__name"])
+	}
+	return pyTypeName(rt, self)
 }
 
 // pyIsDescriptor reports whether v is an instance whose class defines the given
@@ -14712,7 +15952,10 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	}
 	if cls, ok := pyClassObj(obj); ok {
 		switch name {
-		case "__name__":
+		// __qualname__ of a class is its __name__ for every class this subset can
+		// write: CPython qualifies only a NESTED class, and a nested `class` here
+		// is bound by the same name as a top-level one. docs/todo.md 1.4.
+		case "__name__", "__qualname__":
 			return cls.props["__name"]
 		case "__mro__":
 			return cls.props["__mro"]
@@ -14725,7 +15968,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		if v, found := pyLookup(cls, name); found {
 			return v
 		}
-		rt.fail("type object '%s' has no attribute '%s'", rt.toString(cls.props["__name"]), name)
+		// docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises. This
+		// was rt.fail, an uncatchable host abort, so `try: getattr(C, "nope")
+		// except AttributeError:` ended the program in both compiled halves
+		// while the interpreter half caught it.
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"type object '"+rt.toString(cls.props["__name"])+"' has no attribute '"+name+"'")})
 	}
 	if inst, cls, ok := pyInstance(obj); ok {
 		switch name {
@@ -14743,17 +15991,56 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			}
 			// A METHOD read off an instance comes back BOUND - see pyBindMethod.
 			if isCallable(v) {
-				return rt.pyBindMethod(obj, v)
+				return rt.pyBindMethod(obj, v, name)
 			}
 			return v
 		}
-		rt.fail("'%s' object has no attribute '%s'", rt.toString(cls.props["__name"]), name)
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")})
 	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
 	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
 		return m
 	}
-	if name == "__name__" {
+	// A BOUND METHOD knows its own name, receiver and underlying function -
+	// docs/todo.md 1.4. Asked before the two name tables because a bound method
+	// is in neither of them. __qualname__ is answered HERE and nowhere else on
+	// purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
+	// fall out of the record, while a plain function's qualname would need the
+	// DEFINING scope recorded at every def site in four places - see the note on
+	// pyBoundInfo and the declined rows in tests/python-test-full.py.
+	if bi := pyBoundOf(obj); bi != nil {
+		switch name {
+		case "__name__":
+			return bi.name
+		case "__qualname__":
+			return bi.typ + "." + bi.name
+		case "__self__":
+			return bi.self
+		case "__func__":
+			if bi.fn == nil {
+				// CPython: a built-in method has no __func__.
+				panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+					"'builtin_function_or_method' object has no attribute '__func__'")})
+			}
+			return bi.fn
+		}
+	}
+	// DECLINED, and it is worth saying where: __doc__ and __module__ stay
+	// unanswered (an AttributeError, like any other absent attribute). __doc__
+	// needs a def's leading string statement recorded in three engines AND
+	// CPython's own text for every builtin, which this project will never carry;
+	// __module__ needs a builtin-vs-user marker on a CLASS object, and neither
+	// compiled half has one - a builtin exception class is indistinguishable
+	// from a user class here, so 'builtins' could not be told from '__main__'.
+	// __qualname__ rides with __name__ everywhere below. It is EXACT for a
+	// module-level def, a lambda, a builtin function and a builtin type, and it
+	// is wrong for exactly one shape: a function read off a class body, where
+	// CPython says 'C.m' and this says 'm'. Closing that one needs the DEFINING
+	// scope recorded at every def site in the emitter, the interpreter and layer
+	// 2; the bound-method arm above already answers 'C.m' because a bound method
+	// knows its receiver. docs/todo.md 1.4.
+	if name == "__name__" || name == "__qualname__" {
 		// A synthetic class object for a BUILTIN type (what type(3) hands out)
 		// carries only its name, and a closure carries none of its own - the name
 		// its def bound it under was recorded by js_pyfnname.
@@ -14783,7 +16070,24 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	if name == "__class__" {
 		return rt.pyBuiltinClass(pyTypeName(rt, obj))
 	}
-	return rt.getMember(obj, name)
+	// docs/todo.md 1.4: an attribute a builtin value does NOT have raises, as
+	// CPython does. This used to fall into getMember and answer None - so
+	// `[1,2].nope` and getattr([1,2], "nope") were None in both compiled halves
+	// where the interpreter half raised AttributeError. A live halves
+	// divergence. An OWN property is still answered first, because a value that
+	// really holds None must not be mistaken for a missing one (a compiled regex
+	// and a match object are read this way).
+	if o, ok := obj.(*jsObject); ok {
+		if v, has := o.props[name]; has {
+			return v
+		}
+	}
+	v := rt.getMember(obj, name)
+	if isUndefOrNull(v) {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+pyTypeName(rt, obj)+"' object has no attribute '"+name+"'")})
+	}
+	return v
 }
 
 // pyInstanceDict renders an instance's own attributes as a Python dict.
@@ -15619,7 +16923,7 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 // getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
 // the direct call is.
 func (rt *jsrt) pyBoundBuiltin(target interface{}, name string) interface{} {
-	return jsHostFunc("pybound."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+	h := jsHostFunc("pybound."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		// A STRING's methods are NOT in pyMethodCall: abnf/pystrmethod.go's
 		// registrar installs them by WRAPPING the js_pymcall extern, so
 		// re-entering pyMethodCall directly reaches the shared member table and
@@ -15635,6 +16939,10 @@ func (rt *jsrt) pyBoundBuiltin(target interface{}, name string) interface{} {
 		}
 		return rt.pyMethodCall(target, name, args, jsUndef)
 	})
+	// A builtin method has no underlying python function, and that nil is what
+	// tells __func__ to raise and the repr to say <built-in method ...>.
+	h.pybm = &pyBoundInfo{name: name, self: target, fn: nil, typ: pyTypeName(rt, target)}
+	return h
 }
 
 // pyExternMaps remembers the extern table each run installed. The table is
@@ -15970,7 +17278,7 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		return found
 	}
 	if cls, ok := pyClassObj(obj); ok {
-		if name == "__name__" || name == "__mro__" || name == "__bases__" {
+		if name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" {
 			return true
 		}
 		_, found := pyLookup(cls, name)
@@ -15991,7 +17299,15 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 	if name == "__class__" || rt.pyBuiltinAttr(obj, name) {
 		return true
 	}
-	if name == "__name__" {
+	if bi := pyBoundOf(obj); bi != nil {
+		switch name {
+		case "__name__", "__qualname__", "__self__":
+			return true
+		case "__func__":
+			return bi.fn != nil
+		}
+	}
+	if name == "__name__" || name == "__qualname__" {
 		if o, ok := obj.(*jsObject); ok {
 			if _, has := o.props["__name"]; has {
 				return true
@@ -16161,6 +17477,18 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 	case *jsArray:
 		return "list"
 	case *jsObject:
+		// type(C) is 'type' for a class object - a BUILTIN one (what type(3)
+		// hands out, which carries only __name and no __mro) as well as a user
+		// class. The interpreter half already answered 'type' here and this one
+		// said 'object': a live halves divergence, docs/todo.md 1.4.
+		if _, isCls := pyClassObj(t); isCls {
+			return "type"
+		}
+		if _, hasName := t.props["__name"]; hasName {
+			if _, isInst := t.props["__class"]; !isInst {
+				return "type"
+			}
+		}
 		if _, isSet := pySetElems(t); isSet {
 			return "set"
 		}
@@ -16177,7 +17505,25 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 			return n
 		}
 		return "object"
+	case *jsGenerator:
+		// CPython's type(gen).__name__, and the name its AttributeError uses.
+		return "generator"
 	case *jsClosure, *hostFunc, *boundMethod:
+		// docs/todo.md 1.4: a BOUND method and a BUILTIN are their own CPython
+		// types, and the interpreter half already said 'type' for a class object
+		// where this one said 'object' - a live halves divergence.
+		if bi := pyBoundOf(v); bi != nil {
+			if bi.fn == nil {
+				return "builtin_function_or_method"
+			}
+			return "method"
+		}
+		if c, ok := rt.pyBuiltinRender[v]; ok {
+			if strings.HasPrefix(c, "*") {
+				return "type" // range / enumerate / zip / map / filter / reversed.
+			}
+			return "builtin_function_or_method"
+		}
 		return "function"
 	}
 	if _, _, ok := dictParts(v); ok {

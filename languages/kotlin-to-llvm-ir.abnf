@@ -8073,6 +8073,9 @@ KwContract  = "contract" KwEnd ;
                           "compareBy", "compareByDescending", "Comparator", "compareValues",
                           // kotlin.properties.Delegates - observable / vetoable / notNull.
                           "Delegates",
+                          // kotlin.random.Random(seed) - the seeded generator a
+                          // `random(...)` draw takes its stream from.
+                          "Random",
                           "maxOf", "minOf", "require", "check", "requireNotNull",
                           "checkNotNull", "error", "TODO", "runCatching", "lazy",
                           "List", "MutableList", "Array", "arrayOfNulls", "IntArray",

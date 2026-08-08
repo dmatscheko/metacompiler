@@ -465,6 +465,90 @@ long bm_new(long nblk) {
 	return bm;
 }
 
+/* ---- THE CHUNK INDEX ------------------------------------------------------
+ *
+ * A sorted array of (payloadLo, payloadHi, chunk) triples, binary searched.
+ * It exists because "which chunk holds this address" is THE HOTTEST QUESTION IN
+ * THE COLLECTOR and it used to be a linear walk of the chunk list: gc_try below
+ * asks it for EVERY WORD of the conservatively scanned C stack, of every raw
+ * buffer, and of every field of every traced cell - and the overwhelming
+ * majority of those are not pointers at all, so they walked the WHOLE list
+ * before answering 0.
+ *
+ * That made the collector's cost O(chunks) per candidate word, and chunks are
+ * not few: ar_block below takes 1 MB PER PARTITION, of which there are up to
+ * 130, so a 10 MB heap is a dozen chunks and a big program many more. It showed
+ * up as a step function - seeding twenty-nine more Math members on the root
+ * scope (docs/todo.md 1.1) added 4.8 KB of permanently live data, which pushed
+ * java's heap into two more chunks, which cost 6.87% of the whole benchmark. The
+ * fix pays that back and keeps paying: see the measurements at the Math seeding
+ * in boot() and in the report for this item.
+ *
+ * WHY AN ARRAY AND NOT A HASH. Chunk payloads are DISJOINT ADDRESS RANGES, not
+ * keys - a candidate word points into the middle of one, never at its base - so
+ * a hash of base addresses cannot answer the question at all without also
+ * knowing the alignment, and chunk bases come from malloc and are not aligned to
+ * anything useful. A sorted range array answers it in log2(chunks) with no
+ * assumptions. Insertion is O(chunks) at CHUNK CREATION, which happens once per
+ * megabyte of heap.
+ *
+ * The old index array is not freed when the array doubles: there are at most
+ * log2(chunks) of them, the largest is 24 bytes per chunk, and this is a
+ * malloc'd side table the collector must be able to read at any moment - the
+ * same argument the mark bitmaps are allocated under. */
+long AR_IX;          /* malloc'd triples lo,hi,chunk - sorted ascending by lo */
+long AR_IX_N;
+long AR_IX_CAP;
+
+void ar_ix_add(long c, long lo, long hi) {
+	long *a;
+	long i;
+	if (AR_IX_N >= AR_IX_CAP) {
+		long ncap = (AR_IX_CAP == 0) ? 64 : AR_IX_CAP * 2;
+		long na = (long)malloc(ncap * 24);
+		long *dst = (long *)na;
+		long k = 0;
+		if (AR_IX_N > 0) {
+			long *src = (long *)AR_IX;
+			while (k < AR_IX_N * 3) { dst[k] = src[k]; k = k + 1; }
+		}
+		AR_IX = na;
+		AR_IX_CAP = ncap;
+	}
+	a = (long *)AR_IX;
+	i = AR_IX_N;
+	while (i > 0 && a[(i - 1) * 3] > lo) {
+		a[i * 3] = a[(i - 1) * 3];
+		a[i * 3 + 1] = a[(i - 1) * 3 + 1];
+		a[i * 3 + 2] = a[(i - 1) * 3 + 2];
+		i = i - 1;
+	}
+	a[i * 3] = lo;
+	a[i * 3 + 1] = hi;
+	a[i * 3 + 2] = c;
+	AR_IX_N = AR_IX_N + 1;
+}
+
+/* The chunk whose PAYLOAD contains v, or 0. The ranges are disjoint (each is one
+ * malloc), so the answer is the last range whose lo is <= v, if v is inside it.
+ * An address in a chunk's 128 byte HEADER is inside no payload and answers 0,
+ * exactly as the linear walk did. */
+long ar_ix_find(long v) {
+	long *a;
+	long lo = 0;
+	long hi = AR_IX_N;
+	if (AR_IX_N == 0) { return 0; }
+	a = (long *)AR_IX;
+	while (lo < hi) {
+		long mid = (lo + hi) / 2;
+		if (a[mid * 3] <= v) { lo = mid + 1; } else { hi = mid; }
+	}
+	if (lo == 0) { return 0; }
+	lo = lo - 1;
+	if (v < a[lo * 3 + 1]) { return a[lo * 3 + 2]; }
+	return 0;
+}
+
 /* A chunk of `nblk` blocks of `bsize` bytes each, all of one kind. */
 long chunk_new(long bsize, long nblk, long kind) {
 	long c = (long)malloc(bsize * nblk + 128);
@@ -479,21 +563,14 @@ long chunk_new(long bsize, long nblk, long kind) {
 	w[7] = 0;
 	AR_CHUNKS = c;
 	GC_HEAP = GC_HEAP + bsize * nblk;
+	/* The linked list stays: the SWEEP wants every chunk in some order and does
+	 * not care which. Only the address LOOKUP moves to the index. */
+	ar_ix_add(c, c + 128, c + 128 + bsize * nblk);
 	return c;
 }
 
-/* Which chunk holds address v, or 0. The chunk list is walked linearly, as it
- * was before: a heap of a few megabytes is a handful of chunks. */
-long chunk_of(long v) {
-	long c = AR_CHUNKS;
-	while (c != 0) {
-		long *w = (long *)c;
-		long off = v - c - 128;
-		if (off >= 0 && off < w[1] * w[2]) { return c; }
-		c = w[0];
-	}
-	return 0;
-}
+/* Which chunk holds address v, or 0. */
+long chunk_of(long v) { return ar_ix_find(v); }
 
 /* A block of exactly `need` bytes and kind `kind`: the partition's free list,
  * then a bump in the partition's current chunk, then a new chunk. A block over
@@ -579,6 +656,7 @@ char *ar_alloc(long n) { return ar_alloc_k(n, 0); }
 void ar_init(void) {
 	long i = 0;
 	AR_CHUNKS = 0; GC_BIG = 0; GC_ON = 0;
+	AR_IX = 0; AR_IX_N = 0; AR_IX_CAP = 0;
 	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
 	/* The same floor a collection leaves behind, so a short program still gets
 	 * one collection instead of running the whole matrix without ever entering
@@ -707,22 +785,25 @@ void gc_mark(long c, long idx, int deep) {
  * pointer, and that bet does not hold.
  *
  * Resolving one is now EXACT and needs no start bitmap: a chunk holds one size
- * class, so the slot is `(v - base) / bsize` and the block is that slot. */
+ * class, so the slot is `(v - base) / bsize` and the block is that slot.
+ *
+ * THIS IS THE HOTTEST FUNCTION IN THE COLLECTOR: it is asked about every word of
+ * the conservatively scanned C stack and of every raw buffer, and most of those
+ * are not pointers. It used to walk the chunk LIST, which made the whole
+ * collector O(chunks) per candidate word; ar_ix_find above is the binary search
+ * that replaced it, and the header there has the measurement. */
 void gc_try(long v, int deep) {
 	long c;
 	long *w;
 	long off;
 	if (v < 4096) { return; }
-	c = AR_CHUNKS;
-	while (c != 0) {
-		w = (long *)c;
-		off = v - c - 128;
-		if (off >= 0 && off < w[1] * w[2]) {
-			long idx = off / w[1];
-			if (idx < w[3]) { gc_mark(c, idx, deep); }
-			return;
-		}
-		c = w[0];
+	c = ar_ix_find(v);
+	if (c == 0) { return; }
+	w = (long *)c;
+	off = v - c - 128;
+	{
+		long idx = off / w[1];
+		if (idx < w[3]) { gc_mark(c, idx, deep); }
 	}
 }
 
@@ -4440,6 +4521,653 @@ long d_pow(long xb, long yb) {
 	return ur.l;
 }
 
+/* ----- the transcendentals: sin cos tan asin acos atan sinh cosh tanh
+ * asinh acosh atanh expm1 log1p log2 log10 cbrt atan2 hypot -----
+ *
+ * WHY THEY ARE HERE AND WHY THEY ARE PORTS. Math's MEMBERS used to diverge
+ * between the three engines: seed_root("Math", ...) below offered eleven methods
+ * and two properties, while abnf/jsrt.go's standardJSBindings offers thirty-two
+ * and eight, and the grammar host offers the host's own Math. So a js, ts or
+ * ruby program calling Math.sin answered 0.8414709848078965 under llvm.Run and
+ * died with `unknown method 'sin'` in the native binary - the largest live
+ * run-vs-native divergence in the tree (docs/todo.md 1.1).
+ *
+ * Converging DOWNWARD (trimming the Go twin to eleven) loses capability in every
+ * language, so these converge upward, and the only honest way to do that is the
+ * one d_pow / d_exp / d_log already took: a FAITHFUL PORT of Go's own math
+ * package - the same constants, the same polynomials, the same order of
+ * operations - because the native binary and llvm.Run have to print the SAME
+ * DIGITS. An implementation that is merely accurate is a run-vs-native
+ * divergence one ulp wide, which is worse than the missing method it replaced.
+ * Every function below is $GOROOT/src/math/<name>.go line for line; the
+ * measurement is in the differential probe, not in the reading.
+ *
+ * WHAT THE PORT CANNOT REACH, AND WHY llvm.fma.f64 IS NOT THE ANSWER. 21 of a
+ * 6,734 row probe still differ from llvm.Run by ONE ULP, in six expressions:
+ * `(x - y*PI4A)` and its two continuations in sin/cos/tan, tan's `z + z*q`,
+ * xatan's `x*z + x`, asin's `1 - x*x`, and log2's `Log(frac)*(1/Ln2) + exp`. The
+ * cause is not the port: THE GO COMPILER CONTRACTS `a*b + c` INTO AN FMA ON
+ * arm64 and the C here emits a separate fmul and fadd. Proved three ways -
+ * math.Tan's source replicated in Go gives ...399, the same source in C gives
+ * ...400, and Python's math.fma of the same two operands gives ...399.
+ *
+ * Emitting an FMA here to match was considered and declined, for three reasons
+ * and in this order:
+ *
+ *   1. IT WOULD BE WRONG ON amd64. Go contracts on arm64/ppc64/s390x/riscv64/
+ *      loong64 and NOT on amd64/386, so the TWIN's digits are already
+ *      architecture-dependent. Fusing here pins the floor to arm64-Go and makes
+ *      it disagree with amd64-Go by the same 21 rows in the other direction.
+ *      There is no spelling that matches both.
+ *   2. IT IS A PER-EXPRESSION AUDIT, NOT A FLAG. LLVM only contracts under the
+ *      `contract` fast-math flag, so each of the six sites would have to be
+ *      identified against Go's arm64 SSA output by hand and re-audited on every
+ *      Go release - the fusion decisions belong to the Go compiler and are
+ *      specified nowhere.
+ *   3. THIS FILE IS NOT COMPILED BY CLANG. c-to-llvm-ir.abnf has no intrinsic
+ *      syntax, so reaching llvm.fma.f64 means either changing that grammar
+ *      (shared with bash, batch and c) or declaring libm's fma() - which breaks
+ *      the standing property that `nm -u` on a native binary shows libc alone.
+ *
+ * The alternative of making the TWIN unfused instead (Go ports with explicit
+ * float64() conversions, which do defeat contraction - measured) only MOVES the
+ * divergence: standardJSBindings is also the frozen grammar host, so it would
+ * diverge from goja's Math in every interpreter half. The price of leaving it is
+ * one ulp on 0.3% of arguments in functions that were a hard abort before.
+ *
+ * The one that is not a straight transliteration is trigReduce's 128-bit
+ * arithmetic: Go writes it with math/bits, and the C subset here has no 128-bit
+ * type, so u_mul64 / u_add64 / u_lzc64 do it in 32-bit halves. mPi4 is a
+ * FUNCTION rather than a table because runtime.c has no other global array
+ * initialiser and a global initialiser needs __mec_ginit to have run, which the
+ * floor's link has no call site for. */
+
+/* Logical (unsigned) right shift by 0..64. Go defines a shift at or past the
+ * width as zero; LLVM's lshr is poison there, and trigReduce shifts by
+ * `64 - bitshift` with bitshift possibly 0. */
+long u_shr64(long v, long n) {
+	unsigned long u;
+	if (n <= 0) { return v; }
+	if (n >= 64) { return 0; }
+	u = (unsigned long)v;
+	return (long)(u >> n);
+}
+int u_lt64(long a, long b) { return (unsigned long)a < (unsigned long)b; }
+/* The 128-bit product of two unsigned 64-bit values: the high half is returned,
+ * the low half is written to lo[0]. bits.Mul64. */
+long u_mul64(long a, long b, long *lo) {
+	long a0 = a & 4294967295L;
+	long a1 = u_shr64(a, 32);
+	long b0 = b & 4294967295L;
+	long b1 = u_shr64(b, 32);
+	long p00 = a0 * b0;
+	long p01 = a0 * b1;
+	long p10 = a1 * b0;
+	long mid = u_shr64(p00, 32) + (p01 & 4294967295L) + (p10 & 4294967295L);
+	lo[0] = (p00 & 4294967295L) | (mid << 32);
+	return a1 * b1 + u_shr64(p01, 32) + u_shr64(p10, 32) + u_shr64(mid, 32);
+}
+/* bits.Add64: the sum, with the carry out written to cout[0]. */
+long u_add64(long a, long b, long cin, long *cout) {
+	long s = a + b;
+	long c = u_lt64(s, a) ? 1 : 0;
+	long s2 = s + cin;
+	if (u_lt64(s2, s)) { c = 1; }
+	cout[0] = c;
+	return s2;
+}
+long u_lzc64(long v) {
+	unsigned long u = (unsigned long)v;
+	long n = 0;
+	if (v == 0) { return 64; }
+	while ((u >> 63) == 0UL) { u = u << 1; n = n + 1; }
+	return n;
+}
+
+double d_fabs(double x) { union DB u; u.d = x; u.l = u.l & 9223372036854775807L; return u.d; }
+double d_copysign(double x, double y) {
+	union DB a;
+	union DB b;
+	a.d = x;
+	b.d = y;
+	a.l = (a.l & 9223372036854775807L) | (b.l & (0 - 9223372036854775807L - 1L));
+	return a.d;
+}
+double d_nan_d(void) { union DB u; u.l = DNAN; return u.d; }
+int d_isnan_d(double x) { union DB u; u.d = x; return d_is_nan(u.l); }
+int d_isinf_d(double x) { union DB u; u.d = x; return d_is_inf(u.l); }
+double d_bits_to_d(long b) { union DB u; u.l = b; return u.d; }
+long d_d_to_bits(double x) { union DB u; u.d = x; return u.l; }
+
+/* mPi4: the binary digits of 4/pi, Go's trig_reduce.go table. Read three
+ * consecutive entries per reduction, so the linear chain costs nothing that
+ * matters on a path taken only for |x| >= 2^29. */
+long m_pi4(long i) {
+	if (i == 0) { return 1L; }
+	if (i == 1) { return 5040379952546458195L; } /* 0x45f306dc9c882a53 */
+	if (i == 2) { return -554312585572664447L; } /* 0xf84eafa3ea69bb81 */
+	if (i == 3) { return -5276763892624187261L; } /* 0xb6c52b3278872083 */
+	if (i == 4) { return -242412250269775165L; } /* 0xfca2c757bd778ac3 */
+	if (i == 5) { return 7946843935494350272L; } /* 0x6e48dc74849ba5c0 */
+	if (i == 6) { return 905889640498799673L; } /* 0x0c925dd413a32439 */
+	if (i == 7) { return -271387810574676355L; } /* 0xfc3bd63962534e7d */
+	if (i == 8) { return -3385462365541201655L; } /* 0xd1046bea5d768909 */
+	if (i == 9) { return -3226582509936509822L; } /* 0xd338e04d68befc82 */
+	if (i == 10) { return 8296664548579374057L; } /* 0x7323ac7306a673e9 */
+	if (i == 11) { return 4109744767560208502L; } /* 0x3908bf177bf25076 */
+	if (i == 12) { return 4607516669194743839L; } /* 0x3ff12fffbc0b301f */
+	if (i == 13) { return -2423460969061230018L; } /* 0xde5e2316b414da3e */
+	if (i == 14) { return -2707510419574615186L; } /* 0xda6cfd9e4f96136e */
+	if (i == 15) { return -7022098299024845734L; } /* 0x9e8c7ecd3cbfd45a */
+	if (i == 16) { return -1562901285013036298L; } /* 0xea4f758fd7cbe2f6 */
+	if (i == 17) { return 8795094592981902804L; } /* 0x7a0e73ef14a525d4 */
+	if (i == 18) { return -2884908082597807600L; } /* 0xd7f6bf623f1aba10 */
+	return -6051042886442100905L;        /* 0xac06608df8f6d757 */
+}
+
+/* Payne-Hanek reduction, trig_reduce.go. j is written to jout[0]. */
+double d_trig_reduce(double x, long *jout) {
+	long ix;
+	long exp;
+	long digit;
+	long bitshift;
+	long z0; long z1; long z2;
+	long z2hi; long z1hi; long z1lo; long z0lo;
+	long lo; long hi; long c[1]; long dummy[1];
+	long j; long lz; long e;
+	double z;
+	if (x < 0.7853981633974483) { jout[0] = 0; return x; }
+	ix = d_d_to_bits(x);
+	exp = ((u_shr64(ix, 52)) & 2047) - 1023 - 52;
+	ix = ix & 4503599627370495L;
+	ix = ix | 4503599627370496L;
+	digit = (exp + 61) / 64;
+	bitshift = (exp + 61) - digit * 64;
+	z0 = (m_pi4(digit) << bitshift) | u_shr64(m_pi4(digit + 1), 64 - bitshift);
+	z1 = (m_pi4(digit + 1) << bitshift) | u_shr64(m_pi4(digit + 2), 64 - bitshift);
+	z2 = (m_pi4(digit + 2) << bitshift) | u_shr64(m_pi4(digit + 3), 64 - bitshift);
+	z2hi = u_mul64(z2, ix, dummy);
+	z1hi = u_mul64(z1, ix, dummy);
+	z1lo = dummy[0];
+	z0lo = z0 * ix;
+	lo = u_add64(z1lo, z2hi, 0, c);
+	hi = u_add64(z0lo, z1hi, c[0], dummy);
+	j = u_shr64(hi, 61);
+	hi = (hi << 3) | u_shr64(lo, 61);
+	lz = u_lzc64(hi);
+	e = 1023 - (lz + 1);
+	hi = (hi << (lz + 1)) | u_shr64(lo, 64 - (lz + 1));
+	hi = u_shr64(hi, 64 - 52);
+	hi = hi | (e << 52);
+	z = d_bits_to_d(hi);
+	if ((j & 1) == 1) { j = j + 1; j = j & 7; z = z - 1.0; }
+	jout[0] = j;
+	return z * 0.7853981633974483;
+}
+
+/* sin.c's coefficients, Go's _sin and _cos arrays. */
+double d_sin(double x) {
+	double y; double z; double zz;
+	long j;
+	long jo[1];
+	int sign = 0;
+	if (x == 0.0 || d_isnan_d(x)) { return x; }
+	if (d_isinf_d(x)) { return d_nan_d(); }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x >= 536870912.0) {
+		z = d_trig_reduce(x, jo);
+		j = jo[0];
+		y = 0.0;
+	} else {
+		j = (long)(x * 1.2732395447351628);
+		y = (double)j;
+		if ((j & 1) == 1) { j = j + 1; y = y + 1.0; }
+		j = j & 7;
+		z = ((x - y * 7.85398125648498535156e-1) - y * 3.77489470793079817668e-8)
+		    - y * 2.69515142907905952645e-15;
+	}
+	if (j > 3) { sign = !sign; j = j - 4; }
+	zz = z * z;
+	if (j == 1 || j == 2) {
+		y = 1.0 - 0.5 * zz + zz * zz * ((((((-1.13585365213876817300e-11 * zz) + 2.08757008419747316778e-9) * zz
+		    + -2.75573141792967388112e-7) * zz + 2.48015872888517045348e-5) * zz
+		    + -1.38888888888730564116e-3) * zz + 4.16666666666665929218e-2);
+	} else {
+		y = z + z * zz * ((((((1.58962301576546568060e-10 * zz) + -2.50507477628578072866e-8) * zz
+		    + 2.75573136213857245213e-6) * zz + -1.98412698295895385996e-4) * zz
+		    + 8.33333333332211858878e-3) * zz + -1.66666666666666307295e-1);
+	}
+	if (sign) { y = 0.0 - y; }
+	return y;
+}
+double d_cos(double x) {
+	double y; double z; double zz;
+	long j;
+	long jo[1];
+	int sign = 0;
+	if (d_isnan_d(x) || d_isinf_d(x)) { return d_nan_d(); }
+	x = d_fabs(x);
+	if (x >= 536870912.0) {
+		z = d_trig_reduce(x, jo);
+		j = jo[0];
+		y = 0.0;
+	} else {
+		j = (long)(x * 1.2732395447351628);
+		y = (double)j;
+		if ((j & 1) == 1) { j = j + 1; y = y + 1.0; }
+		j = j & 7;
+		z = ((x - y * 7.85398125648498535156e-1) - y * 3.77489470793079817668e-8)
+		    - y * 2.69515142907905952645e-15;
+	}
+	if (j > 3) { j = j - 4; sign = !sign; }
+	if (j > 1) { sign = !sign; }
+	zz = z * z;
+	if (j == 1 || j == 2) {
+		y = z + z * zz * ((((((1.58962301576546568060e-10 * zz) + -2.50507477628578072866e-8) * zz
+		    + 2.75573136213857245213e-6) * zz + -1.98412698295895385996e-4) * zz
+		    + 8.33333333332211858878e-3) * zz + -1.66666666666666307295e-1);
+	} else {
+		y = 1.0 - 0.5 * zz + zz * zz * ((((((-1.13585365213876817300e-11 * zz) + 2.08757008419747316778e-9) * zz
+		    + -2.75573141792967388112e-7) * zz + 2.48015872888517045348e-5) * zz
+		    + -1.38888888888730564116e-3) * zz + 4.16666666666665929218e-2);
+	}
+	if (sign) { y = 0.0 - y; }
+	return y;
+}
+double d_tan(double x) {
+	double y; double z; double zz;
+	long j;
+	long jo[1];
+	int sign = 0;
+	if (x == 0.0 || d_isnan_d(x)) { return x; }
+	if (d_isinf_d(x)) { return d_nan_d(); }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x >= 536870912.0) {
+		z = d_trig_reduce(x, jo);
+		j = jo[0];
+		y = 0.0;
+	} else {
+		j = (long)(x * 1.2732395447351628);
+		y = (double)j;
+		if ((j & 1) == 1) { j = j + 1; y = y + 1.0; }
+		z = ((x - y * 7.85398125648498535156e-1) - y * 3.77489470793079817668e-8)
+		    - y * 2.69515142907905952645e-15;
+	}
+	zz = z * z;
+	if (zz > 1e-14) {
+		y = z + z * (zz * (((-1.30936939181383777646e4 * zz) + 1.15351664838587416140e6) * zz
+		    + -1.79565251976484877988e7)
+		    / ((((zz + 1.36812963470692954678e4) * zz + -1.32089234440210967447e6) * zz
+		    + 2.50083801823357915839e7) * zz + -5.38695755929454629881e7));
+	} else {
+		y = z;
+	}
+	if ((j & 2) == 2) { y = -1.0 / y; }
+	if (sign) { y = 0.0 - y; }
+	return y;
+}
+
+/* atan.go: xatan / satan / atan. */
+double d_xatan(double x) {
+	double z = x * x;
+	z = z * ((((-8.750608600031904122785e-01 * z + -1.615753718733365076637e+01) * z
+	    + -7.500855792314704667340e+01) * z + -1.228866684490136173410e+02) * z
+	    + -6.485021904942025371773e+01)
+	    / (((((z + 2.485846490142306297962e+01) * z + 1.650270098316988542046e+02) * z
+	    + 4.328810604912902668951e+02) * z + 4.853903996359136964868e+02) * z
+	    + 1.945506571482613964425e+02);
+	z = x * z + x;
+	return z;
+}
+double d_satan(double x) {
+	if (x <= 0.66) { return d_xatan(x); }
+	if (x > 2.41421356237309504880) {
+		return 1.5707963267948966 - d_xatan(1.0 / x) + 6.123233995736765886130e-17;
+	}
+	return 0.7853981633974483 + d_xatan((x - 1.0) / (x + 1.0)) + 0.5 * 6.123233995736765886130e-17;
+}
+double d_atan(double x) {
+	if (x == 0.0) { return x; }
+	if (x > 0.0) { return d_satan(x); }
+	return 0.0 - d_satan(0.0 - x);
+}
+double d_asin(double x) {
+	double temp;
+	int sign = 0;
+	if (x == 0.0) { return x; }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x > 1.0) { return d_nan_d(); }
+	temp = d_sqrt_d(1.0 - x * x);
+	if (x > 0.7) { temp = 1.5707963267948966 - d_satan(temp / x); }
+	else { temp = d_satan(x / temp); }
+	if (sign) { temp = 0.0 - temp; }
+	return temp;
+}
+double d_acos(double x) { return 1.5707963267948966 - d_asin(x); }
+double d_atan2(double y, double x) {
+	double q;
+	if (d_isnan_d(y) || d_isnan_d(x)) { return d_nan_d(); }
+	if (y == 0.0) {
+		if (x >= 0.0 && !d_sign(d_d_to_bits(x))) { return d_copysign(0.0, y); }
+		return d_copysign(3.141592653589793, y);
+	}
+	if (x == 0.0) { return d_copysign(1.5707963267948966, y); }
+	if (d_isinf_d(x)) {
+		if (!d_sign(d_d_to_bits(x))) {
+			if (d_isinf_d(y)) { return d_copysign(0.7853981633974483, y); }
+			return d_copysign(0.0, y);
+		}
+		if (d_isinf_d(y)) { return d_copysign(2.356194490192345, y); }
+		return d_copysign(3.141592653589793, y);
+	}
+	if (d_isinf_d(y)) { return d_copysign(1.5707963267948966, y); }
+	q = d_atan(y / x);
+	if (x < 0.0) {
+		if (q <= 0.0) { return q + 3.141592653589793; }
+		return q - 3.141592653589793;
+	}
+	return q;
+}
+
+/* sinh.go / tanh.go. */
+double d_sinh(double x) {
+	double temp; double sq; double ex;
+	int sign = 0;
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x > 21.0) { temp = d_exp(x) * 0.5; }
+	else if (x > 0.5) { ex = d_exp(x); temp = (ex - 1.0 / ex) * 0.5; }
+	else {
+		sq = x * x;
+		temp = (((-0.2630563213397497062819489e+2 * sq + -0.2894211355989563807284660366e+4) * sq
+		    + -0.8991272022039509355398013511e+5) * sq + -0.6307673640497716991184787251e+6) * x;
+		temp = temp / (((sq + -0.173678953558233699533450911e+3) * sq
+		    + 0.1521517378790019070696485176e+5) * sq + -0.6307673640497716991212077277e+6);
+	}
+	if (sign) { temp = 0.0 - temp; }
+	return temp;
+}
+double d_cosh(double x) {
+	double ex;
+	x = d_fabs(x);
+	if (x > 21.0) { return d_exp(x) * 0.5; }
+	ex = d_exp(x);
+	return (ex + 1.0 / ex) * 0.5;
+}
+double d_tanh(double x) {
+	double z = d_fabs(x);
+	double s;
+	if (z > 0.5 * 8.8029691931113054295988e+01) {
+		if (x < 0.0) { return -1.0; }
+		return 1.0;
+	}
+	if (z >= 0.625) {
+		s = d_exp(2.0 * z);
+		z = 1.0 - 2.0 / (s + 1.0);
+		if (x < 0.0) { z = 0.0 - z; }
+		return z;
+	}
+	if (x == 0.0) { return x; }
+	s = x * x;
+	return x + x * s * ((-9.64399179425052238628e-1 * s + -9.92877231001918586564e1) * s
+	    + -1.61468768441708447952e3)
+	    / (((s + 1.12811678491632931402e2) * s + 2.23548839060100448583e3) * s
+	    + 4.84406305325125486048e3);
+}
+
+/* log1p.go, then the three inverse hyperbolics that are written on top of it. */
+double d_log1p(double x) {
+	double absx; double f; double c; double u; double hfsq; double s; double R; double z;
+	long iu;
+	long k;
+	if (x < -1.0 || d_isnan_d(x)) { return d_nan_d(); }
+	if (x == -1.0) { return -1.0 / 0.0; }
+	if (d_isinf_d(x) && !d_sign(d_d_to_bits(x))) { return x; }
+	absx = d_fabs(x);
+	f = 0.0;
+	iu = 0;
+	c = 0.0;
+	k = 1;
+	if (absx < 4.142135623730950488017e-01) {
+		if (absx < 1.862645149230957e-09) {                /* 2**-29 */
+			if (absx < 5.551115123125783e-17) { return x; }  /* 2**-54 */
+			return x - x * x * 0.5;
+		}
+		if (x > -2.928932188134524755992e-01) { k = 0; f = x; iu = 1; }
+	}
+	if (k != 0) {
+		if (absx < 9007199254740992.0) {
+			u = 1.0 + x;
+			iu = d_d_to_bits(u);
+			k = (u_shr64(iu, 52)) - 1023;
+			if (k > 0) { c = 1.0 - (u - x); } else { c = x - (u - 1.0); }
+			c = c / u;
+		} else {
+			u = x;
+			iu = d_d_to_bits(u);
+			k = (u_shr64(iu, 52)) - 1023;
+			c = 0.0;
+		}
+		iu = iu & 4503599627370495L;
+		if (u_lt64(iu, 1865452045155277L)) {           /* 0x0006a09e667f3bcd */
+			u = d_bits_to_d(iu | 4607182418800017408L);   /* | 0x3ff0000000000000 */
+		} else {
+			k = k + 1;
+			u = d_bits_to_d(iu | 4602678819172646912L);   /* | 0x3fe0000000000000 */
+			iu = u_shr64(4503599627370496L - iu, 2);
+		}
+		f = u - 1.0;
+	}
+	hfsq = 0.5 * f * f;
+	if (iu == 0) {
+		if (f == 0.0) {
+			if (k == 0) { return 0.0; }
+			c = c + (double)k * 1.90821492927058770002e-10;
+			return (double)k * 6.93147180369123816490e-01 + c;
+		}
+		R = hfsq * (1.0 - 0.66666666666666666 * f);
+		if (k == 0) { return f - R; }
+		return (double)k * 6.93147180369123816490e-01
+		    - ((R - ((double)k * 1.90821492927058770002e-10 + c)) - f);
+	}
+	s = f / (2.0 + f);
+	z = s * s;
+	R = z * (6.666666666666735130e-01 + z * (3.999999999940941908e-01
+	    + z * (2.857142874366239149e-01 + z * (2.222219843214978396e-01
+	    + z * (1.818357216161805012e-01 + z * (1.531383769920937332e-01
+	    + z * 1.479819860511658591e-01))))));
+	if (k == 0) { return f - (hfsq - s * (hfsq + R)); }
+	return (double)k * 6.93147180369123816490e-01
+	    - ((hfsq - (s * (hfsq + R) + ((double)k * 1.90821492927058770002e-10 + c))) - f);
+}
+double d_asinh(double x) {
+	double temp;
+	int sign = 0;
+	if (d_isnan_d(x) || d_isinf_d(x)) { return x; }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x > 268435456.0) { temp = d_log(x) + 6.93147180559945286227e-01; }
+	else if (x > 2.0) { temp = d_log(2.0 * x + 1.0 / (d_sqrt_d(x * x + 1.0) + x)); }
+	else if (x < 3.725290298461914e-09) { temp = x; }
+	else { temp = d_log1p(x + x * x / (1.0 + d_sqrt_d(1.0 + x * x))); }
+	if (sign) { temp = 0.0 - temp; }
+	return temp;
+}
+double d_acosh(double x) {
+	double t;
+	if (x < 1.0 || d_isnan_d(x)) { return d_nan_d(); }
+	if (x == 1.0) { return 0.0; }
+	if (x >= 268435456.0) { return d_log(x) + 0.6931471805599453; }
+	if (x > 2.0) { return d_log(2.0 * x - 1.0 / (x + d_sqrt_d(x * x - 1.0))); }
+	t = x - 1.0;
+	return d_log1p(t + d_sqrt_d(2.0 * t + t * t));
+}
+double d_atanh(double x) {
+	double temp;
+	int sign = 0;
+	if (x < -1.0 || x > 1.0 || d_isnan_d(x)) { return d_nan_d(); }
+	if (x == 1.0) { return 1.0 / 0.0; }
+	if (x == -1.0) { return -1.0 / 0.0; }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	if (x < 3.725290298461914e-09) { temp = x; }
+	else if (x < 0.5) { temp = x + x; temp = 0.5 * d_log1p(temp + temp * x / (1.0 - x)); }
+	else { temp = 0.5 * d_log1p((x + x) / (1.0 - x)); }
+	if (sign) { temp = 0.0 - temp; }
+	return temp;
+}
+
+/* expm1.go. The three `Float64frombits(Float64bits(y) + k<<52)` steps are exponent
+ * arithmetic on the bit pattern, which is why this cannot be written in MetaJS
+ * either (manual 7.7). */
+double d_expm1(double x) {
+	double absx; double c; double hi; double lo; double t; double hfx; double hxs;
+	double r1; double e; double y;
+	long k;
+	int sign = 0;
+	if (d_isnan_d(x)) { return x; }
+	if (d_isinf_d(x)) { if (d_sign(d_d_to_bits(x))) { return -1.0; } return x; }
+	absx = x;
+	if (x < 0.0) { absx = 0.0 - absx; sign = 1; }
+	if (absx >= 3.88162421113569373274e+01) {
+		if (sign) { return -1.0; }
+		if (absx >= 7.09782712893383973096e+02) { return 1.0 / 0.0; }
+	}
+	c = 0.0;
+	k = 0;
+	if (absx > 3.46573590279972654709e-01) {
+		if (absx < 1.03972077083991796413e+00) {
+			if (!sign) { hi = x - 6.93147180369123816490e-01; lo = 1.90821492927058770002e-10; k = 1; }
+			else { hi = x + 6.93147180369123816490e-01; lo = 0.0 - 1.90821492927058770002e-10; k = -1; }
+		} else {
+			if (!sign) { k = (long)(1.44269504088896338700e+00 * x + 0.5); }
+			else { k = (long)(1.44269504088896338700e+00 * x - 0.5); }
+			t = (double)k;
+			hi = x - t * 6.93147180369123816490e-01;
+			lo = t * 1.90821492927058770002e-10;
+		}
+		x = hi - lo;
+		c = (hi - x) - lo;
+	} else if (absx < 5.551115123125783e-17) {              /* 2**-54 */
+		return x;
+	}
+	hfx = 0.5 * x;
+	hxs = x * hfx;
+	r1 = 1.0 + hxs * (-3.33333333333331316428e-02 + hxs * (1.58730158725481460165e-03
+	    + hxs * (-7.93650757867487942473e-05 + hxs * (4.00821782732936239552e-06
+	    + hxs * -2.01099218183624371326e-07))));
+	t = 3.0 - r1 * hfx;
+	e = hxs * ((r1 - t) / (6.0 - x * t));
+	if (k == 0) { return x - (x * e - hxs); }
+	e = x * (e - c) - c;
+	e = e - hxs;
+	if (k == -1) { return 0.5 * (x - e) - 0.5; }
+	if (k == 1) {
+		if (x < -0.25) { return -2.0 * (e - (x + 0.5)); }
+		return 1.0 + 2.0 * (x - e);
+	}
+	if (k <= -2 || k > 56) {
+		y = 1.0 - (e - x);
+		y = d_bits_to_d(d_d_to_bits(y) + (k << 52));
+		return y - 1.0;
+	}
+	if (k < 20) {
+		t = d_bits_to_d(4607182418800017408L - u_shr64(9007199254740992L, k));  /* 1-2**-k */
+		y = t - (e - x);
+		y = d_bits_to_d(d_d_to_bits(y) + (k << 52));
+		return y;
+	}
+	t = d_bits_to_d((1023 - k) << 52);                       /* 2**-k */
+	y = x - (e + t);
+	y = y + 1.0;
+	y = d_bits_to_d(d_d_to_bits(y) + (k << 52));
+	return y;
+}
+
+/* log10.go: Log10 and Log2. Log2's frac == 0.5 arm is what makes Math.log2 of a
+ * power of two EXACT, which the plain Log(x)/Ln2 is not. */
+double d_log10(double x) { return d_log(x) * 0.4342944819032518; }
+double d_log2(double x) {
+	double frac;
+	long e[1];
+	frac = d_frexp(x, e);
+	if (frac == 0.5) { return (double)(e[0] - 1); }
+	return d_log(frac) * 1.4426950408889634 + (double)e[0];
+}
+
+/* cbrt.go. */
+double d_cbrt(double x) {
+	double t; double r; double s; double w;
+	int sign = 0;
+	if (x == 0.0 || d_isnan_d(x) || d_isinf_d(x)) { return x; }
+	if (x < 0.0) { x = 0.0 - x; sign = 1; }
+	t = d_bits_to_d((long)((unsigned long)d_d_to_bits(x) / 3UL) + 3071306043645493248L); /* B1<<32 */
+	if (x < 2.22507385850720138309e-308) {
+		t = 18014398509481984.0;                              /* 2**54 */
+		t = t * x;
+		t = d_bits_to_d((long)((unsigned long)d_d_to_bits(t) / 3UL) + 2990241250352824320L); /* B2<<32 */
+	}
+	r = t * t / x;
+	s = 5.42857142857142815906e-01 + r * t;
+	t = t * (3.57142857142857150787e-01 + 1.60714285714285720630e+00
+	    / (s + 1.41428571428571436819e+00 + -7.05306122448979611050e-01 / s));
+	t = d_bits_to_d((d_d_to_bits(t) & (68719476732L << 28)) + 1073741824L);
+	s = t * t;
+	r = x / s;
+	w = t + t;
+	r = (r - t) / (w + r);
+	t = t + t * r;
+	if (sign) { t = 0.0 - t; }
+	return t;
+}
+
+/* Math.fround: the double nearest x that a float32 can hold. `float` is ACCEPTED
+ * by c-to-llvm-ir.abnf and silently means `double` - `(float)0.1` came back as
+ * plain 0.1, measured - so the narrowing is done on the bit pattern here.
+ * Round to nearest, ties to even, over the 24-bit significand, with the float32
+ * subnormal range and the overflow to infinity both explicit. */
+double d_fround(double x) {
+	union DB u;
+	long b; long sgn; long e; long m; long full; long sh; long q; long r; long half; long E;
+	u.d = x;
+	b = u.l;
+	sgn = b & (0 - 9223372036854775807L - 1L);
+	e = (b >> 52) & 2047;
+	m = b & 4503599627370495L;
+	if (e == 2047) { return x; }                        /* NaN and +-Inf pass through */
+	if (e == 0) { u.l = sgn; return u.d; }              /* +-0 and every double subnormal */
+	full = m | 4503599627370496L;                       /* the 53-bit significand */
+	E = e - 1023;
+	if (E > 127) { u.l = sgn | DINF; return u.d; }
+	sh = (E >= -126) ? 29 : 29 + (-126 - E);
+	if (sh > 62) { u.l = sgn; return u.d; }
+	q = full >> sh;
+	r = full - (q << sh);
+	half = 1L << (sh - 1);
+	if (r > half || (r == half && (q & 1) == 1)) { q = q + 1; }
+	if (E >= -126) {
+		if (E == 127 && q == 16777216L) { u.l = sgn | DINF; return u.d; }
+		u.d = d_ldexp((double)q, E - 23);
+	} else {
+		u.d = d_ldexp((double)q, -149);
+	}
+	u.l = u.l | sgn;
+	return u.d;
+}
+/* Math.clz32: the leading zero count of ToUint32(x); 0 has all 32. */
+long d_clz32(long v) {
+	long u = v & 4294967295L;
+	long n = 0;
+	if (u == 0) { return 32; }
+	while ((u & 2147483648L) == 0) { u = u << 1; n = n + 1; }
+	return n;
+}
+
+/* Math.hypot is VARIADIC in JavaScript, so it cannot be Go's two-argument
+ * math.Hypot; the loop lives in host_call below and its twin is jsrt.go's
+ * mathObj "hypot". Both were the naive sum of squares until this change, which
+ * makes Math.hypot(1e300, 1e300) Infinity where node answers 1.41...e+300 -
+ * ECMA-262 asks implementations to avoid exactly that overflow. Both engines now
+ * scale by the largest magnitude first, which for TWO arguments is bit for bit
+ * Go's own math.Hypot (p*Sqrt(1+(q/p)^2), since (p/p)^2 is exactly 1). */
+
 /* UTF-8 encode one code unit, the strFromUnits of abnf/jsrt.go for everything
  * that is not half of a surrogate pair. */
 long from_char_code(long args) {
@@ -4524,6 +5252,12 @@ long js_parse_float(long h) {
 
 long js_keys(long o);          /* the keysOf builtin below is exactly this */
 long js_del(long o, long key); /* and delKey is exactly this */
+
+/* Every number in this file travels as its IEEE-754 bit pattern in a long (see
+ * the C SUBSET NOTES at the top), so the transcendental host arms need the two
+ * conversions in one place rather than a `union DB` per arm. */
+long mk_dnum(double v) { union DB u; u.d = v; return mk_num(u.l); }
+double arg_d(long args, long i) { union DB u; u.l = arg_num(args, i); return u.d; }
 
 long host_call(long id, long self, long args) {
 	long n = arr_len(args);
@@ -4837,6 +5571,114 @@ long host_call(long id, long self, long args) {
 		o = o + int_digits(d_from_long(e10), out + o);
 		return mk_str(out, o);
 	}
+	/* THE MATH TRANSCENDENTALS LIVE AT THE COLD END OF THIS CHAIN, ON PURPOSE.
+	 * host_call dispatches on a LINEAR if-chain, so twenty-three new arms placed
+	 * next to their neighbours (after id 20) put twenty-three extra integer
+	 * compares in front of every sint / flo / scope call - and java's benchmark,
+	 * which is nothing but boxed doubles and sized integers, measured +7.08%
+	 * against a 4.07% spread for exactly that, with every correctness gate green
+	 * (isolated: base + only this item's files, tests/bench.sh --draws 5).
+	 *
+	 * With the block moved here the effect is not merely inside the spread, it is
+	 * STRUCTURALLY ZERO, and that is checkable without a benchmark at all: the
+	 * first seventy `icmp eq i64` sites of host_call in languages/lib/runtime.ll
+	 * are register-for-register identical to the base module's (%13 through
+	 * %1206); the new arms are appended after all of them. No pre-existing host id pays one
+	 * extra compare. Manual chapter 4 says a single build cannot measure 2%; this
+	 * is the kind of question to answer by diffing the module instead.
+	 *
+	 * Ids 71..93 are the coldest names in the runtime; the hot ones keep their old
+	 * position.
+	 *
+	 * WHAT THE SEEDING COST, AND WHY IT WAS NOT WHERE ANYONE WOULD LOOK. It is paid
+	 * back several times over by the chunk index at gc_try (see ar_ix_find), which
+	 * this very measurement is what found - but the mechanism stays written down,
+	 * because ANY change that adds a few kilobytes to the live set can trip it.
+	 * Twenty-nine more members on the Math object is twenty-nine more cells plus
+	 * their key strings, held by the root scope forever - about 4.8 KB. Measured
+	 * against a clean `git archive` of the base with only this item's files copied
+	 * in (manual chapter 6), on tests/bench/mod.js and tests/bench/mod.java:
+	 *
+	 *              collections   live            heap                instructions
+	 *   js  base   131           162528          10528880            1314265222
+	 *   js  new    131           168304 (+3.6%)  11577456 (+1 chunk) 1330180183 (+1.21%)
+	 *   java base  1054          129296           8411264            8643313419
+	 *   java new   1054          134144 (+3.8%)  10508416 (+2 chunks) 9236746858 (+6.87%)
+	 *
+	 *   MEC_GC=off  js  991068525 -> 993023645 (+0.20%)
+	 *               java 6551630122 -> 6553712635 (+0.03%)
+	 *   --paired    js SLOWER 14/15 pairs mean +2.53%; java 15/15 mean +4.50%
+	 *
+	 * With the collector off the cost was ZERO, so all of it was the GC - and NOT
+	 * the extra marking, which is only 3.8%: java's heap crossed into TWO more
+	 * 1 MB chunks, and gc_try walked the chunk LIST linearly for every candidate
+	 * word of the conservatively scanned stack. Twenty-five percent more chunks is
+	 * what the 6.87% was. That was a PRE-EXISTING O(chunks) factor in the hottest
+	 * loop in the collector, not a property of these twenty-nine members, and it
+	 * is now gone: ar_ix_find is a binary search over a sorted array of chunk
+	 * ranges, and the six benchmark languages are 5.69% to 21.22% FASTER than the
+	 * base, 15 of 15 pairs each. The numbers and the validation are in that
+	 * header.
+	 *
+	 * What the seeding buys: twenty-one methods and six constants that used to abort the
+	 * native binary outright, in four languages, plus three latent goja-vs-frozen
+	 * divergences. Making the seeding lazy needs a property-miss hook the floor
+	 * does not have. (docs/todo.md 1.1.)
+	 */
+	/* The transcendental members of Math, host ids 71..91 - the set
+	 * standardJSBindings in abnf/jsrt.go has offered all along and this floor did
+	 * not, so `Math.sin(1)` answered under llvm.Run and died in the native binary
+	 * (docs/todo.md 1.1). Each body is Go's own math package, ported above. */
+	if (id == 71) { return mk_dnum(d_sin(arg_d(args, 0))); }
+	if (id == 72) { return mk_dnum(d_cos(arg_d(args, 0))); }
+	if (id == 73) { return mk_dnum(d_tan(arg_d(args, 0))); }
+	if (id == 74) { return mk_dnum(d_asin(arg_d(args, 0))); }
+	if (id == 75) { return mk_dnum(d_acos(arg_d(args, 0))); }
+	if (id == 76) { return mk_dnum(d_atan(arg_d(args, 0))); }
+	if (id == 77) { return mk_dnum(d_sinh(arg_d(args, 0))); }
+	if (id == 78) { return mk_dnum(d_cosh(arg_d(args, 0))); }
+	if (id == 79) { return mk_dnum(d_tanh(arg_d(args, 0))); }
+	if (id == 80) { return mk_dnum(d_asinh(arg_d(args, 0))); }
+	if (id == 81) { return mk_dnum(d_acosh(arg_d(args, 0))); }
+	if (id == 82) { return mk_dnum(d_atanh(arg_d(args, 0))); }
+	if (id == 83) { return mk_dnum(d_exp(arg_d(args, 0))); }
+	if (id == 84) { return mk_dnum(d_expm1(arg_d(args, 0))); }
+	if (id == 85) { return mk_dnum(d_log(arg_d(args, 0))); }
+	if (id == 86) { return mk_dnum(d_log1p(arg_d(args, 0))); }
+	if (id == 87) { return mk_dnum(d_log2(arg_d(args, 0))); }
+	if (id == 88) { return mk_dnum(d_log10(arg_d(args, 0))); }
+	if (id == 89) { return mk_dnum(d_cbrt(arg_d(args, 0))); }
+	if (id == 90) { return mk_dnum(d_atan2(arg_d(args, 0), arg_d(args, 1))); }
+	if (id == 91) {
+		/* Math.hypot, variadic and scaled - see the note where d_hypot used to be.
+		 * ECMA-262 orders the special cases: an infinity wins over a NaN. */
+		double mx = 0.0;
+		double sum = 0.0;
+		double t;
+		int sawinf = 0;
+		int sawnan = 0;
+		while (i < n) {
+			t = arg_d(args, i);
+			if (d_isinf_d(t)) { sawinf = 1; }
+			if (d_isnan_d(t)) { sawnan = 1; }
+			t = d_fabs(t);
+			if (t > mx) { mx = t; }
+			i = i + 1;
+		}
+		if (sawinf) { return mk_dnum(1.0 / 0.0); }
+		if (sawnan) { return mk_dnum(d_nan_d()); }
+		if (mx == 0.0) { return mk_dnum(0.0); }
+		i = 0;
+		while (i < n) { t = arg_d(args, i) / mx; sum = sum + t * t; i = i + 1; }
+		return mk_dnum(mx * d_sqrt_d(sum));
+	}
+	/* clz32 and fround exist in goja's Math and did not exist in the other two
+	 * engines, so `Math.clz32(1)` answered 31 in the js interpreter half under
+	 * goja and aborted with `call of a non function value` under -frozen: a live
+	 * FROZEN-DIFF that no test reached. Math.random is the third goja-only member
+	 * and is DELIBERATELY not converged - see abnf/hostglobals_test.go. */
+	if (id == 92) { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
+	if (id == 93) { return mk_dnum(d_fround(arg_d(args, 0))); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -5605,12 +6447,55 @@ void boot(void) {
 	seed_host(math, "sign", 18);
 	seed_host(math, "sqrt", 19);
 	seed_host(math, "pow", 20);
+	/* THE MEMBERS OF Math ARE PINNED IN THREE PLACES, and they used to disagree:
+	 * this list, standardJSBindings in abnf/jsrt.go (the Go twin, llvm.Run) and
+	 * the grammar host's own Math that languages/metajs-interpreter.abnf binds.
+	 * The floor had eleven methods and two properties against the twin's
+	 * thirty-two and eight, so `Math.sin(1)` was a live run-vs-native divergence
+	 * in js, typescript and ruby (docs/todo.md 1.1). abnf/hostglobals_test.go's
+	 * TestMathMembersAgree now reads all three out of their own sources and fails
+	 * if one of them gains or loses a member. */
+	seed_host(math, "sin", 71);
+	seed_host(math, "cos", 72);
+	seed_host(math, "tan", 73);
+	seed_host(math, "asin", 74);
+	seed_host(math, "acos", 75);
+	seed_host(math, "atan", 76);
+	seed_host(math, "sinh", 77);
+	seed_host(math, "cosh", 78);
+	seed_host(math, "tanh", 79);
+	seed_host(math, "asinh", 80);
+	seed_host(math, "acosh", 81);
+	seed_host(math, "atanh", 82);
+	seed_host(math, "exp", 83);
+	seed_host(math, "expm1", 84);
+	seed_host(math, "log", 85);
+	seed_host(math, "log1p", 86);
+	seed_host(math, "log2", 87);
+	seed_host(math, "log10", 88);
+	seed_host(math, "cbrt", 89);
+	seed_host(math, "atan2", 90);
+	seed_host(math, "hypot", 91);
+	seed_host(math, "clz32", 92);
+	seed_host(math, "fround", 93);
 	{
 		union DB p;
 		p.d = 3.141592653589793;
 		obj_put(math, mk_cstr("PI"), mk_num(p.l));
 		p.d = 2.718281828459045;
 		obj_put(math, mk_cstr("E"), mk_num(p.l));
+		p.d = 0.6931471805599453;
+		obj_put(math, mk_cstr("LN2"), mk_num(p.l));
+		p.d = 2.302585092994046;
+		obj_put(math, mk_cstr("LN10"), mk_num(p.l));
+		p.d = 1.4426950408889634;
+		obj_put(math, mk_cstr("LOG2E"), mk_num(p.l));
+		p.d = 0.4342944819032518;
+		obj_put(math, mk_cstr("LOG10E"), mk_num(p.l));
+		p.d = 1.4142135623730951;
+		obj_put(math, mk_cstr("SQRT2"), mk_num(p.l));
+		p.d = 0.7071067811865476;
+		obj_put(math, mk_cstr("SQRT1_2"), mk_num(p.l));
 	}
 	seed_root("Math", math);
 

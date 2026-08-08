@@ -445,8 +445,108 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     var progTxt = ""
     for (p in progs) { progTxt += "" + p.first + "/" + p.last + "/" + p.step + " " }
     check("progression-props", progTxt == "1/5/1 1/9/4 5/1/-1 5/3/-2 0/2/1 ")
-    check("indices-reversed", idxSrc.indices.reversed().toString() == "[2, 1, 0]" &&
+    // IntProgression.reversed() answers a PROGRESSION, not a List: it is declared
+    // `public fun IntProgression.reversed(): IntProgression` and returns
+    // fromClosedRange(last, first, -step), so (0..2).reversed() prints "2 downTo 0
+    // step 1" and NOT "[2, 1, 0]" - which is what this assertion used to pin, in
+    // every engine, wrongly. todo.md 1.5.
+    check("indices-reversed", idxSrc.indices.reversed().toString() == "2 downTo 0 step 1" &&
         2 in idxSrc.indices && 9 !in idxSrc.indices)
+    // ----- todo.md 1.5: the range / progression / string-slice surface -----
+    // A reversed progression keeps the STEP and starts at the old LAST ELEMENT:
+    // (1..10 step 3) runs 1,4,7,10 so its reverse is 10 downTo 1 step 3, and
+    // reversing twice is the identity. All four were a materialized List before,
+    // whose .first/.last/.step then answered kotlin.Unit in both compiled halves.
+    val revSrc = listOf(1, 10, 3, 5)
+    val revProg = (revSrc[0]..revSrc[1] step revSrc[2]).reversed()
+    check("prog-reversed", revProg.toString() == "10 downTo 1 step 3" &&
+        revProg.first == 10 && revProg.last == 1 && revProg.step == -3 &&
+        revProg.toList().toString() == "[10, 7, 4, 1]" &&
+        revProg.reversed() == (revSrc[0]..revSrc[1] step revSrc[2]))
+    // reversed() of a downTo goes back up, of a CharRange stays a CharProgression,
+    // and of an EMPTY range is still empty. `is IntRange` is false for every one of
+    // them: a progression is not a range (IntRange.toString has no " step").
+    check("prog-reversed-kinds",
+        (revSrc[1] downTo revSrc[0]).reversed().toString() == "1..10 step 1" &&
+        ('a'..'f').reversed().toString() == "f downTo a step 1" &&
+        (revSrc[1]..revSrc[0]).reversed().isEmpty() &&
+        revProg is IntProgression && !(revProg is IntRange) &&
+        (revSrc[0]..revSrc[1]) is IntRange)
+    // `step` answers an IntProgression whatever the step is, so `(1..5) step 1`
+    // prints "1..5 step 1" where the plain 1..5 prints "1..5"; the method spelling
+    // is the same operator. rangeTo/until/downTo as FUNCTIONS aborted with
+    // "unknown Int method: rangeTo" in all three engines.
+    check("prog-step-forms", ((revSrc[0]..revSrc[3]) step revSrc[0]).toString() == "1..5 step 1" &&
+        (revSrc[0]..revSrc[3]).step(revSrc[2]).toString() == "1..4 step 3" &&
+        revSrc[0].rangeTo(revSrc[3]).toString() == "1..5" &&
+        revSrc[0].until(revSrc[3]).toString() == "1..4" &&
+        revSrc[3].downTo(revSrc[0]).toString() == "5 downTo 1 step 1" &&
+        'a'.rangeTo('c').toString() == "a..c")
+    // A Long step used to reach the interpreter half's `st` slot unconverted, so
+    // `1L..5L step 2L` printed "1..NaN step [object Object]" there while both
+    // compiled halves answered "1..5 step 2" - a live halves divergence.
+    val longSrc = listOf(1L, 5L, 2L)
+    check("prog-long-step", (longSrc[0]..longSrc[1] step longSrc[2]).toString() == "1..5 step 2" &&
+        (longSrc[0]..longSrc[1] step longSrc[2]).reversed().toString() == "5 downTo 1 step 2")
+    // kotlin.text: substring(IntRange) and slice(IntRange) are substring(start,
+    // endInclusive + 1) and answer a STRING; slice(Iterable<Int>) picks characters
+    // and answers a String too. All three answered the whole string or a char list.
+    val sliceSrc = listOf("abcdef")
+    val sliceIx = listOf(1, 3, 0, 2)
+    check("string-slice", sliceSrc[0].substring(sliceIx[0]..sliceIx[1]) == "bcd" &&
+        sliceSrc[0].slice(sliceIx[0]..sliceIx[1]) == "bcd" &&
+        sliceSrc[0].slice(listOf(sliceIx[2], sliceIx[3])) == "ac" &&
+        sliceSrc[0].substring(sliceIx[1]..sliceIx[2]) == "")
+    // The _Strings.kt family that SELECTS characters answers a String, not a
+    // List<Char>: filter/filterNot/filterIndexed/takeWhile/dropWhile/onEach, and
+    // partition answers Pair<String, String>. chunked/windowed answer List<String>
+    // and honour their transform. Every one of these printed "[a, b, d]".
+    check("string-select-family",
+        sliceSrc[0].filter { it != 'c' } == "abdef" &&
+        sliceSrc[0].filterNot { it == 'c' } == "abdef" &&
+        sliceSrc[0].filterIndexed { i, _ -> i % 2 == 0 } == "ace" &&
+        sliceSrc[0].takeWhile { it < 'c' } == "ab" &&
+        sliceSrc[0].dropWhile { it < 'c' } == "cdef" &&
+        sliceSrc[0].onEach { } == "abcdef" &&
+        sliceSrc[0].partition { it < 'c' }.toString() == "(ab, cdef)" &&
+        sliceSrc[0].chunked(sliceIx[3]).toString() == "[ab, cd, ef]" &&
+        sliceSrc[0].windowed(sliceIx[3]).toString() == "[ab, bc, cd, de, ef]" &&
+        sliceSrc[0].chunked(sliceIx[3]) { it.length }.toString() == "[2, 2, 2]" &&
+        sliceSrc[0].map { it }.size == 6)
+    // The collection halves of the same two: chunked's transform was dropped on the
+    // floor and windowed's partialWindows was ignored, so the tail window it asks
+    // for was never produced. sliceArray aborted outright.
+    val chSrc = listOf(10, 20, 30, 40, 50)
+    check("chunked-windowed", chSrc.chunked(sliceIx[3]) { it.sum() }.toString() == "[30, 70, 50]" &&
+        chSrc.windowed(sliceIx[3], sliceIx[3]).toString() == "[[10, 20], [30, 40]]" &&
+        chSrc.windowed(sliceIx[3], sliceIx[3], true).toString() == "[[10, 20], [30, 40], [50]]" &&
+        arrayOf(10, 20, 30).sliceArray(sliceIx[2]..sliceIx[0]).toList().toString() == "[10, 20]")
+    // kotlin.random. THE VALUES ARE OURS, NOT THE JVM'S - there is no random source
+    // in this project that three engines can agree on byte-for-byte, so `random()`
+    // draws from a deterministic xorshift32 with a fixed default seed (see kRndBox
+    // in kotlin-interpreter.abnf). Only the INVARIANTS are asserted: membership,
+    // bounds, that an empty receiver answers null through randomOrNull, that a
+    // seeded generator is reproducible and that two seeds differ.
+    var randOk = true
+    for (t in 1..64) {
+        if ((revSrc[0]..revSrc[3]).random() !in revSrc[0]..revSrc[3]) { randOk = false }
+        if (!chSrc.contains(chSrc.random())) { randOk = false }
+        if (('a'..'f').random() !in 'a'..'f') { randOk = false }
+    }
+    check("random-bounds", randOk)
+    check("random-empty", (revSrc[3]..revSrc[0]).randomOrNull() == null &&
+        listOf<Int>().randomOrNull() == null)
+    val seedA = kotlin.random.Random(sliceIx[1])
+    val seedB = kotlin.random.Random(sliceIx[1])
+    var drawA = ""
+    var drawB = ""
+    for (t in 1..8) {
+        drawA += (revSrc[0]..revSrc[3]).random(seedA).toString()
+        drawB += (revSrc[0]..revSrc[3]).random(seedB).toString()
+    }
+    check("random-seeded", drawA == drawB && drawA.length == 8 &&
+        kotlin.random.Random(sliceIx[0]).nextInt(chSrc[0]) in 0..9 &&
+        kotlin.random.Random(sliceIx[0]).nextInt(chSrc[0], chSrc[1]) in 10..19)
     var brk = ""
     for (i in 0..5) {
         if (i == 2) { break }

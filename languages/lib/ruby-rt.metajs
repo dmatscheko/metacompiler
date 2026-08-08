@@ -856,7 +856,7 @@ function rbABigStep(op, x, y) {
     if (op == "-") { return rbABigNarrow(rbABigSub(x, y)) }
     if (op == "*") { return rbABigNarrow(rbABigMul(x, y)) }
     if (op == "/" || op == "%") {
-        if (rbABigIsZero(y)) { fail("divided by 0") }
+        if (rbABigIsZero(y)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
         var dm = rbABigDivMod(x, y)
         if (op == "/") { return rbABigNarrow(dm["q"]) }
         return rbABigNarrow(dm["r"])
@@ -956,7 +956,7 @@ function rbABigMethod(t, name, args) {
     if (name == "divmod") {
         var d = rbABigOperand(rbArgAt(args, 0))
         if (d != null) {
-            if (rbABigIsZero(d)) { fail("divided by 0") }
+            if (rbABigIsZero(d)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
             var dm = rbABigDivMod(t, d)
             return [rbABigNarrow(dm["q"]), rbABigNarrow(dm["r"])]
         }
@@ -1129,12 +1129,12 @@ function rbAsRat(v) {
 
 // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
 function rbIDiv(a, b) {
-    if (b == 0) { fail("divided by 0") }
+    if (b == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
     return Math.floor(a / b)
 }
 
 function rbIMod(a, b) {
-    if (b == 0) { fail("divided by 0") }
+    if (b == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
     return rbFmaSub(a, Math.floor(a / b), b)
 }
 
@@ -1391,10 +1391,25 @@ function rbStr(v) {
         var m = rbFindMethod(v, "to_s")
         if (m !== undefined) { return rbStr(m.apply(undefined, [v])) }
         // An exception instance renders as its message, like Exception#to_s.
-        if (v["args"] !== undefined) {
+        if (rbExcInst(v)) {
             var msg = rbExcMessage(v)
             if (msg !== undefined) { return "" + msg }
         }
+        // A Range that kept its endpoints (an open one, or a bounded one that
+        // materialized empty) renders as `lo..hi`, not as "[object Object]".
+        // docs/todo.md 1.3.
+        if (rbIsRange(v)) {
+            var rdots = v["excl"] === true ? "..." : ".."
+            return rbStr(v["begin"]) + rdots + rbStr(v["end"])
+        }
+        // A plain instance with no #to_s of its own. MRI writes
+        // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
+        // the address and the instance variables are left off rather than invented -
+        // the same rule rbFuncRender below follows. Without this the native binary
+        // printed "[object Object]" and the interpreter half aborted with
+        // *unknown method 'to_s'*. docs/todo.md 1.3.
+        var cn = rbInstClassName(v)
+        if (cn != "") { return "#<" + cn + ">" }
     }
     if (typeof v == "function") { return rbFuncRender(v) }
     return "" + v
@@ -1482,7 +1497,38 @@ function rbInspect(v) {
         }
         return s + "}"
     }
+    // Exception#inspect / a plain instance's #inspect. MRI answers
+    // `#<RuntimeError: boom>' - the CLASS NAME and #to_s - and the bare class name
+    // when #to_s is empty. It was unimplemented in all three engines: `p exc'
+    // printed the message alone here and aborted the interpreter half. A class that
+    // defines #inspect of its own stays in charge. Mirrors rubyExcInspect of
+    // abnf/jsrt.go and excInspect of ruby-interpreter.abnf. docs/todo.md 1.3.
+    if (rbIsObj(v)) {
+        if (v["__isclass"] !== true && v["__class"] !== undefined) {
+            var im = rbFindMethod(v, "inspect")
+            if (im !== undefined) { return rbStr(im.apply(undefined, [v])) }
+            if (rbExcInst(v)) { return rbExcInspect(rbInstClassName(v), rbStr(v)) }
+        }
+    }
     return rbStr(v)
+}
+
+// The __name of an instance's class, "" when it has none.
+function rbInstClassName(o) {
+    var cls = o["__class"]
+    if (rbIsObj(cls)) {
+        var n = cls["__name"]
+        if (typeof n == "string") { return n }
+    }
+    return ""
+}
+
+// MRI's Exception#inspect: "#<Class: to_s>", or the bare class name when to_s is
+// empty. Mirrors rubyExcInspect of abnf/jsrt.go.
+function rbExcInspect(name, msg) {
+    if (name == "") { return msg }
+    if (msg == "") { return name }
+    return "#<" + name + ": " + msg + ">"
 }
 
 // ===================================================== format ===============
@@ -2450,8 +2496,55 @@ function rbBuiltinClass(name) {
     var got = rbClassTable[k]
     if (got !== undefined) { return got }
     var c = {__isclass: true, __rbuiltin: name, __name: name}
+    // Math::PI and Math::E: a scoped constant is a "$c$"-prefixed slot on the
+    // namespace object (makeScopedConst in ruby-to-llvm-ir.abnf), and Math had
+    // none, so `Math::PI' printed an empty line. The twin is rubyBuiltinClass in
+    // abnf/jsrt.go.
+    if (name == "Math") {
+        c["$c$PI"] = rbMkFlo(Math.PI)
+        c["$c$E"] = rbMkFlo(Math.E)
+    }
     rbClassTable[k] = c
     return c
+}
+
+// rbMathCall: Ruby's Math module. Every method answers a FLOAT - Ruby's
+// Math.sqrt(4) is 2.0 where JavaScript's is 2 - and Math.log takes an optional
+// base. Answers undefined for a name it does not carry, so the caller falls
+// through to the ordinary member dispatch. The other two engines are
+// rubyMathCall in abnf/jsrt.go and the "$s$" methods on hostGlobals["Math"] in
+// languages/ruby-interpreter.abnf.
+//
+// Every name below is a member of the host Math, which languages/lib/runtime.c
+// seeds and abnf/jsrt.go's standardJSBindings binds - the SAME set in both, since
+// docs/todo.md 1.1 converged them. Before that the floor had eleven members and
+// this table could not have existed natively at all.
+function rbMathCall(name, args) {
+    var x = rbToF(rbArgAt(args, 0))
+    if (name == "sqrt") { return rbMkFlo(Math.sqrt(x)) }
+    if (name == "cbrt") { return rbMkFlo(Math.cbrt(x)) }
+    if (name == "sin") { return rbMkFlo(Math.sin(x)) }
+    if (name == "cos") { return rbMkFlo(Math.cos(x)) }
+    if (name == "tan") { return rbMkFlo(Math.tan(x)) }
+    if (name == "asin") { return rbMkFlo(Math.asin(x)) }
+    if (name == "acos") { return rbMkFlo(Math.acos(x)) }
+    if (name == "atan") { return rbMkFlo(Math.atan(x)) }
+    if (name == "sinh") { return rbMkFlo(Math.sinh(x)) }
+    if (name == "cosh") { return rbMkFlo(Math.cosh(x)) }
+    if (name == "tanh") { return rbMkFlo(Math.tanh(x)) }
+    if (name == "asinh") { return rbMkFlo(Math.asinh(x)) }
+    if (name == "acosh") { return rbMkFlo(Math.acosh(x)) }
+    if (name == "atanh") { return rbMkFlo(Math.atanh(x)) }
+    if (name == "exp") { return rbMkFlo(Math.exp(x)) }
+    if (name == "log2") { return rbMkFlo(Math.log2(x)) }
+    if (name == "log10") { return rbMkFlo(Math.log10(x)) }
+    if (name == "atan2") { return rbMkFlo(Math.atan2(x, rbToF(rbArgAt(args, 1)))) }
+    if (name == "hypot") { return rbMkFlo(Math.hypot(x, rbToF(rbArgAt(args, 1)))) }
+    if (name == "log") {
+        if (args.length > 1) { return rbMkFlo(Math.log(x) / Math.log(rbToF(rbArgAt(args, 1)))) }
+        return rbMkFlo(Math.log(x))
+    }
+    return undefined
 }
 
 // rubyExcParent: the ancestry of the builtin exception classes - the part of
@@ -2544,6 +2637,17 @@ function rbExc(cls, args) {
 }
 
 // Exception#message / #to_s: the first constructor argument, or the class name.
+// rbExcInst is "v is an EXCEPTION instance", which "has args" alone is not: the
+// emitter gives every body-less class a default initialize that stores its
+// arguments under `args`, so an ordinary instance has the same shape. Without the
+// class-chain test a plain object rendered as its class NAME where MRI writes
+// "#<Name>". Mirrors rubyExcInst of abnf/jsrt.go. docs/todo.md 1.3.
+function rbExcInst(v) {
+    if (!rbIsObj(v) || v["__isclass"] === true) { return false }
+    if (v["args"] === undefined || v["__class"] === undefined) { return false }
+    return rbIsA(v, rbBuiltinClass("Exception"))
+}
+
 function rbExcMessage(o) {
     var arr = o["args"]
     if (rbIsArr(arr) && arr.length > 0) { return rbStr(arr[0]) }
@@ -4693,12 +4797,25 @@ function rbMethod(target, name, args) {
     if (name == "to_s" || name == "inspect") {
         if (target === true) { return "true" }
         if (target === false) { return "false" }
+        // A user INSTANCE with no to_s / inspect of its own: `e.inspect' and
+        // `obj.to_s' aborted with *unknown method ... on an instance*. A Hash or an
+        // Enumerator carries no __class, so their own arms still answer.
+        // docs/todo.md 1.3.
+        if (rbIsObj(target) && target["__class"] !== undefined && target["__isclass"] !== true) {
+            if (rbFindMethod(target, name) === undefined) {
+                if (name == "inspect") { return rbInspect(target) }
+                return rbStr(target)
+            }
+        }
     }
     if (name == "message" || name == "full_message") {
         // Exception#message, only for an INSTANCE that defines no message method
-        // of its own, so a user class named message stays in charge.
+        // of its own, so a user class named message stays in charge. MRI's
+        // Exception#message IS #to_s, so a subclass that overrides to_s changes its
+        // message too - rbStr prefers that to_s. docs/todo.md 1.3.
         if (rbIsObj(target) && target["__isclass"] !== true) {
             if (rbFindMethod(target, name) === undefined) {
+                if (rbExcInst(target)) { return rbStr(target) }
                 var msg = rbExcMessage(target)
                 if (msg !== undefined) { return msg }
             }
@@ -4856,6 +4973,10 @@ function rbMethod(target, name, args) {
         }
         if (name == "dup" || name == "clone" || name == "freeze") { return target }
         if (name == "to_str" || name == "+@" || name == "-@" || name == "itself") { return target }
+        // The String surface the item's six names belong to (bytes / tr / center /
+        // ljust / rjust / count / delete and their families). docs/todo.md 1.3.
+        var sx = rbStrExtra(target, name, args)
+        if (sx["ok"]) { return sx["v"] }
         fail("unknown String method: " + name)
     }
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
@@ -4868,6 +4989,18 @@ function rbMethod(target, name, args) {
             if (name == "begin" || name == "first") { return target["begin"] }
             if (name == "end" || name == "last") { return target["end"] }
             if (name == "exclude_end?") { return target["excl"] }
+            // A BOUNDED range that materialized EMPTY (1..-1) is kept as this
+            // object so its raw endpoints survive into a[r] - see js_rrangearr. As
+            // a SEQUENCE such a range is empty in MRI too, so every other method is
+            // the empty Array's. docs/todo.md 1.3.
+            if (!rbIsNil(target["begin"]) && !rbIsNil(target["end"])) {
+                if (name == "size" || name == "count" || name == "length") { return 0 }
+                if (name == "to_s" || name == "inspect") {
+                    var xs = target["excl"] === true ? "..." : ".."
+                    return rbStr(target["begin"]) + xs + rbStr(target["end"])
+                }
+                return rbMethod([], name, args)
+            }
             fail("unknown method on an endless Range: " + name)
         }
         if (rbIsDict(target)) {
@@ -4928,16 +5061,11 @@ function rbMethod(target, name, args) {
             if (c0 !== undefined) { return c0 }
         }
         if (name == "instance_of?") { return target["__class"] === rbArgAt(args, 0) }
-        if (name == "is_a?" || name == "kind_of?") {
-            var want = rbArgAt(args, 0)
-            var cls = target["__class"]
-            while (cls !== undefined && cls !== null) {
-                if (cls === want) { return true }
-                if (!rbIsObj(cls)) { break }
-                cls = cls["__super"]
-            }
-            return false
-        }
+        // rbIsA, not a bare identity walk of __super. A builtin class object carries
+        // no __super (the hierarchy is a name table), so the walk alone answered
+        // false for `raise "x" rescue e; e.is_a?(Exception)' and for every user
+        // exception subclass tested against Exception. docs/todo.md 1.3.
+        if (name == "is_a?" || name == "kind_of?") { return rbIsA(target, rbArgAt(args, 0)) }
         // A singleton (class) method: `def self.m` / `class << self` stores the
         // method on the class descriptor under a "$s$" prefixed key, so it cannot
         // collide with the INSTANCE method of the same name.
@@ -4976,6 +5104,11 @@ function rbMethod(target, name, args) {
                 return js_rformat(kf)
             }
             if (name == "rand") { return rbRand(rbArgAt(args, 0)) }
+        }
+        // Math.sqrt / Math.sin / ... - see rbMathCall.
+        if (target["__rbuiltin"] === "Math") {
+            var mv = rbMathCall(name, args)
+            if (mv !== undefined) { return mv }
         }
         return rbMemberCall(target, name, args)
     }
@@ -5069,6 +5202,9 @@ function js_pylen(v) {
     // lowered to js_pylen rather than to a method call (ruby-to-llvm-ir.abnf's
     // smcall / field arms), so it never reaches rbEnumMethod.
     if (rbIsEnum(v)) { return v["items"].length }
+    // Likewise a Range that kept its endpoints (1..-1): it is empty as a sequence.
+    // docs/todo.md 1.3.
+    if (rbIsRange(v)) { return 0 }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -5164,10 +5300,28 @@ function js_rcmp(l, r) {
 // abnf/jsrt.go; ruby-interpreter.abnf needs none, a Range being a real object there.
 // docs/todo.md 1.10.
 var rbLastRange = []
+// What a range LITERAL becomes. A closed range is materialized as an Array,
+// because that is what everything downstream expects - but a range with a
+// NEGATIVE endpoint (1..-1) materializes EMPTY and the endpoints are then the only
+// thing that mattered: `r = 1..-1; s[r]` has to mean "from 1 to the last" and
+// answered "" in both compiled halves while the interpreter half, where a Range is
+// a real object, was right. Those ranges therefore keep the same {__rrange} object
+// the open-ended ones already use; as a SEQUENCE they are empty in MRI too, so the
+// Range method table delegates to the empty Array. Mirrors rubyRangeValue of
+// abnf/jsrt.go. docs/todo.md 1.3.
 function js_rrangearr(lo, hi, excl) {
     var a = rbRangeArr(lo, hi, rbTruthy(excl))
+    if (a.length == 0 && (rbNegBound(lo) || rbNegBound(hi))) {
+        return js_rrangeopen(lo, hi, excl)
+    }
     rbLastRange = [a, lo, hi, rbTruthy(excl)]
     return a
+}
+
+function rbNegBound(v) {
+    if (typeof v == "number") { return v < 0 }
+    if (rbIsFlo(v)) { return v["f"] < 0 }
+    return false
 }
 
 // (5..) / (..9): no array to build, so the range stays an object that answers
@@ -5358,6 +5512,72 @@ function js_rsubrange(o, lo, hi, excl) {
     return js_rget(o, js_rrangearr(lo, hi, excl))
 }
 
+// rbSliceBounds resolves a Ruby subscript pair to {s, l} against a receiver of
+// size n. An absent second subscript means a ONE-element write, unless the key is a
+// materialized range (an Array - a closed range reaches the compiled halves as
+// one), whose first element is the low bound and whose length is the count.
+// Mirrors rubySliceBounds of abnf/jsrt.go. docs/todo.md 1.3.
+function rbSliceBounds(n, k1, k2) {
+    var st = 0
+    var ln = 1
+    if (!rbIsNil(k2)) {
+        st = Math.trunc(rbToF(k1))
+        ln = Math.trunc(rbToF(k2))
+        if (ln < 0) { ln = 0 }
+    } else if (rbIsArr(k1)) {
+        if (k1.length == 0) { return {s: n, l: 0} }
+        st = Math.trunc(rbToF(k1[0]))
+        ln = k1.length
+    } else {
+        st = Math.trunc(rbToF(k1))
+    }
+    if (st < 0) { st = st + n }
+    return {s: st, l: ln}
+}
+
+// a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
+// (possibly NEW) container, because a Ruby String is a VALUE in this model and the
+// emitter writes the result back - exactly what `s << "x"` already does. Two-
+// argument index assignment used to write ONE element, a range key wrote index 0,
+// and a String element assignment aborted. Mirrors rubySetSlice of abnf/jsrt.go
+// and rsetSlice of ruby-interpreter.abnf. docs/todo.md 1.3.
+function js_rsetsl(o, k1, k2, v) {
+    if (rbUserObj(o)) {
+        if (rbIsNil(k2)) { rbMethod(o, "[]=", [k1, v]) } else { rbMethod(o, "[]=", [k1, k2, v]) }
+        return o
+    }
+    if (rbIsDict(o)) { rbDictSet(o, k1, v); return o }
+    if (typeof o == "string") {
+        var sb = rbSliceBounds(o.length, k1, k2)
+        if (sb["s"] < 0 || sb["s"] > o.length) {
+            rbRaiseErr("IndexError", "index " + sb["s"] + " out of string")
+        }
+        var ls = sb["l"]
+        if (sb["s"] + ls > o.length) { ls = o.length - sb["s"] }
+        return o.substring(0, sb["s"]) + rbStr(v) + o.substring(sb["s"] + ls, o.length)
+    }
+    if (!rbIsArr(o)) { js_rset(o, k1, v); return o }
+    if (rbIsNil(k2) && !rbIsArr(k1)) { js_rset(o, k1, v); return o }
+    var ab = rbSliceBounds(o.length, k1, k2)
+    if (ab["s"] < 0) { fail("index " + ab["s"] + " too small for array") }
+    while (o.length < ab["s"]) { o.push(null) }
+    var al = ab["l"]
+    if (ab["s"] + al > o.length) { al = o.length - ab["s"] }
+    var ins = []
+    if (rbIsArr(v)) { ins = v } else { ins = [v] }
+    var out = []
+    var i = 0
+    while (i < ab["s"]) { out.push(o[i]); i = i + 1 }
+    var j = 0
+    while (j < ins.length) { out.push(ins[j]); j = j + 1 }
+    var k = ab["s"] + al
+    while (k < o.length) { out.push(o[k]); k = k + 1 }
+    o.length = 0
+    var q = 0
+    while (q < out.length) { o.push(out[q]); q = q + 1 }
+    return o
+}
+
 // Ruby index assignment: a user class dispatches `def []=`, a missing Hash key is
 // APPENDED and an Array GROWS, filling the gap with nil.
 function js_rset(o, k, v) {
@@ -5406,6 +5626,683 @@ function js_rnew(cls, args) {
 // Ruby's `raise` in one step. rbMakeExc turns a class / a string / a bare
 // re-raise into the exception object, which is then thrown exactly as js_throw
 // does - MetaJS's own `throw` compiles to the floor's js_throw.
+// Raise a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue "d"' works. A
+// plain fail() is an ENGINE abort no rescue clause can see, which made every
+// runtime error uncatchable. Mirrors rubyRaiseErr of abnf/jsrt.go and raiseErr of
+// ruby-interpreter.abnf. docs/todo.md 1.3.
+function rbRaiseErr(clsName, msg) {
+    js_rraise(rbBuiltinClass(clsName), msg)
+}
+
+
+// ----- Kernel#Integer / #Float / #String / #Array: the CONVERSION functions.
+// They existed in no engine - the name resolved to the builtin CLASS object, so
+// `Integer("5")` built an INSTANCE of Integer in the interpreter half and aborted
+// both compiled halves with *call of a non function value*. Integer and Float are
+// STRICT (MRI raises ArgumentError on anything the whole string is not), which is
+// what makes `Integer(s) rescue default` the idiom it is. Mirrors rubyKernelConv
+// of abnf/jsrt.go and kernelConv of ruby-interpreter.abnf. docs/todo.md 1.3.
+function rbConvDigit(ch) {
+    if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
+    if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
+    if (ch >= "A" && ch <= "Z") { return ch.charCodeAt(0) - 55 }
+    return 0 - 1
+}
+
+// BY CHARACTER CODE, not by comparing against "\f" / "\v". MetaJS's string
+// literal has no \f and no \v escape: it drops the backslash, so `ch == "\f"'
+// is `ch == "f"' and rbConvTrim ATE the f's of Integer("0xff"). Green under goja
+// and in the Go twin, wrong only in the native binary, which is exactly the class
+// of defect only clang-check / native-full can see. docs/todo.md 1.3.
+function rbIsConvSpace(ch) {
+    var cc = ch.charCodeAt(0)
+    return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 12 || cc == 11
+}
+
+function rbConvTrim(s) {
+    var i = 0
+    var j = s.length
+    while (i < j && rbIsConvSpace(s.charAt(i))) { i = i + 1 }
+    while (j > i && rbIsConvSpace(s.charAt(j - 1))) { j = j - 1 }
+    return s.substring(i, j)
+}
+
+// Answers {ok, v}: MRI's Integer(String[, base]).
+function rbConvStrToInt(s0, base0) {
+    var s = rbConvTrim(s0)
+    var base = base0
+    var neg = false
+    if (s.length > 0 && (s.charAt(0) == "+" || s.charAt(0) == "-")) {
+        neg = s.charAt(0) == "-"
+        s = s.substring(1, s.length)
+    }
+    if (s.length >= 2 && s.charAt(0) == "0") {
+        var p = s.charAt(1).toLowerCase()
+        var nb = 0
+        if (p == "x") { nb = 16 }
+        else if (p == "b") { nb = 2 }
+        else if (p == "o") { nb = 8 }
+        else if (p == "d") { nb = 10 }
+        if (nb != 0 && (base == 0 || base == nb)) { base = nb; s = s.substring(2, s.length) }
+        else if (nb == 0 && base == 0) { base = 8; s = s.substring(1, s.length) }
+    }
+    if (base == 0) { base = 10 }
+    if (s.length == 0) { return {ok: false, v: 0} }
+    var acc = 0
+    var digits = 0
+    var prevUnd = true
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        i = i + 1
+        if (ch == "_") {
+            if (prevUnd) { return {ok: false, v: 0} }
+            prevUnd = true
+            continue
+        }
+        var d = rbConvDigit(ch)
+        if (d < 0 || d >= base) { return {ok: false, v: 0} }
+        acc = acc * base + d
+        digits = digits + 1
+        prevUnd = false
+    }
+    if (digits == 0 || prevUnd) { return {ok: false, v: 0} }
+    if (neg) { return {ok: true, v: -acc} }
+    return {ok: true, v: acc}
+}
+
+// Answers {ok, v}: MRI's Float(String).
+function rbConvStrToFloat(s0) {
+    var s = rbConvTrim(s0)
+    var clean = ""
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) == "_") {
+            if (i == 0 || i + 1 >= s.length
+                || rbConvDigit(s.charAt(i - 1)) < 0 || rbConvDigit(s.charAt(i + 1)) < 0) {
+                return {ok: false, v: 0}
+            }
+            i = i + 1
+            continue
+        }
+        clean = clean + s.charAt(i)
+        i = i + 1
+    }
+    var k = 0
+    if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
+    var nd = 0
+    while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; nd = nd + 1 }
+    if (nd == 0) { return {ok: false, v: 0} }
+    if (k < clean.length && clean.charAt(k) == ".") {
+        k = k + 1
+        var fd = 0
+        while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; fd = fd + 1 }
+        if (fd == 0) { return {ok: false, v: 0} }
+    }
+    if (k < clean.length && (clean.charAt(k) == "e" || clean.charAt(k) == "E")) {
+        k = k + 1
+        if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
+        var ed = 0
+        while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; ed = ed + 1 }
+        if (ed == 0) { return {ok: false, v: 0} }
+    }
+    if (k != clean.length) { return {ok: false, v: 0} }
+    return {ok: true, v: parseFloat(clean)}
+}
+
+function rbTrunc0(x) {
+    if (x < 0) { return 0 - Math.floor(0 - x) }
+    return Math.floor(x)
+}
+
+function js_rkconv(name, args) {
+    var v = null
+    if (rbIsArr(args) && args.length > 0) { v = args[0] }
+    if (name == "String") { return rbStr(v) }
+    if (name == "Array") {
+        if (rbIsNil(v)) { return [] }
+        if (rbIsArr(v)) { return v }
+        if (rbIsDict(v)) {
+            var out = []
+            var keys = v["keys"]
+            var vals = v["vals"]
+            var q = 0
+            while (q < keys.length) { out.push([keys[q], vals[q]]); q = q + 1 }
+            return out
+        }
+        return [v]
+    }
+    if (name == "Integer") {
+        if (rbIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Integer") }
+        if (typeof v == "string") {
+            var base = 0
+            if (rbIsArr(args) && args.length > 1) { base = rbToF(args[1]) }
+            var ri = rbConvStrToInt(v, base)
+            if (ri["ok"]) { return ri["v"] }
+            rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
+        }
+        if (rbIsFlo(v)) { return rbTrunc0(v["f"]) }
+        if (typeof v == "number") { return rbTrunc0(v) }
+        return v
+    }
+    if (name == "Float") {
+        if (rbIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Float") }
+        if (typeof v == "string") {
+            var rf = rbConvStrToFloat(v)
+            if (rf["ok"]) { return rbMkFlo(rf["v"]) }
+            rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
+        }
+        return rbMkFlo(rbToF(v))
+    }
+    return v
+}
+
+// ===== String methods shared by all three engines ==========================
+//
+// The item named six missing String methods (bytes, tr, center, ljust/rjust,
+// count, delete). A sweep of MRI's whole String surface found SEVENTY-EIGHT that
+// aborted every engine with *unknown String method*, so these are the six plus
+// their families plus the cheap remainder. Everything here is a pure function of
+// strings and numbers, so the three copies (abnf/jsrt.go, lib/ruby-rt.metajs and
+// ruby-interpreter.abnf) are line-for-line the same. docs/todo.md 1.3.
+
+// The UTF-8 bytes of a string whose units are UTF-16, surrogate pairs included.
+// String#bytes / #bytesize / #getbyte / #each_byte / #sum all read this.
+function smUtf8Bytes(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        i = i + 1
+        if (c >= 55296 && c <= 56319 && i < s.length) {
+            var lo = s.charCodeAt(i)
+            if (lo >= 56320 && lo <= 57343) {
+                c = 65536 + (c - 55296) * 1024 + (lo - 56320)
+                i = i + 1
+            }
+        }
+        if (c < 128) { out.push(c) }
+        else if (c < 2048) {
+            out.push(192 + Math.floor(c / 64))
+            out.push(128 + (c % 64))
+        } else if (c < 65536) {
+            out.push(224 + Math.floor(c / 4096))
+            out.push(128 + (Math.floor(c / 64) % 64))
+            out.push(128 + (c % 64))
+        } else {
+            out.push(240 + Math.floor(c / 262144))
+            out.push(128 + (Math.floor(c / 4096) % 64))
+            out.push(128 + (Math.floor(c / 64) % 64))
+            out.push(128 + (c % 64))
+        }
+    }
+    return out
+}
+
+// The Unicode code points of a string: String#codepoints / #each_codepoint.
+function smCodePoints(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        i = i + 1
+        if (c >= 55296 && c <= 56319 && i < s.length) {
+            var lo = s.charCodeAt(i)
+            if (lo >= 56320 && lo <= 57343) {
+                c = 65536 + (c - 55296) * 1024 + (lo - 56320)
+                i = i + 1
+            }
+        }
+        out.push(c)
+    }
+    return out
+}
+
+// MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze:
+// a leading ^ negates, `a-z` is a range, and a backslash escapes the next
+// character. Answers {neg, chars} with every range expanded.
+function smSetExpand(spec) {
+    var neg = false
+    var i = 0
+    if (spec.length > 1 && spec.charAt(0) == "^") { neg = true; i = 1 }
+    var chars = ""
+    while (i < spec.length) {
+        var ch = spec.charAt(i)
+        if (ch == "\\" && i + 1 < spec.length) {
+            chars = chars + spec.charAt(i + 1)
+            i = i + 2
+            continue
+        }
+        if (i + 2 < spec.length && spec.charAt(i + 1) == "-") {
+            var a = spec.charCodeAt(i)
+            var b = spec.charCodeAt(i + 2)
+            var k = a
+            while (k <= b) { chars = chars + String.fromCharCode(k); k = k + 1 }
+            i = i + 3
+            continue
+        }
+        chars = chars + ch
+        i = i + 1
+    }
+    return {neg: neg, chars: chars}
+}
+
+// Is ch in EVERY one of the given set specs? MRI intersects the sets of
+// count / delete / squeeze when more than one is given.
+function smInSets(specs, ch) {
+    var i = 0
+    while (i < specs.length) {
+        var st = smSetExpand(specs[i])
+        var found = st["chars"].indexOf(ch) >= 0
+        if (st["neg"]) { found = !found }
+        if (!found) { return false }
+        i = i + 1
+    }
+    return specs.length > 0
+}
+
+// String#tr / #tr_s. An empty `to` DELETES; a shorter one repeats its last
+// character; a negated `from` maps everything outside the set to that last
+// character. tr_s additionally squeezes the runs it produced.
+function smTr(s, from, to, sq) {
+    var f = smSetExpand(from)
+    var t = smSetExpand(to)
+    var last = t["chars"].length > 0 ? t["chars"].charAt(t["chars"].length - 1) : ""
+    var out = ""
+    var prev = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        i = i + 1
+        var hit = f["chars"].indexOf(ch) >= 0
+        var rep = ch
+        var did = false
+        if (f["neg"]) {
+            if (!hit) { rep = last; did = true }
+        } else if (hit) {
+            var k = f["chars"].indexOf(ch)
+            if (t["chars"].length == 0) { rep = "" } else if (k >= t["chars"].length) { rep = last }
+            else { rep = t["chars"].charAt(k) }
+            did = true
+        }
+        if (rep == "") { prev = ""; continue }
+        if (sq && did && rep == prev) { continue }
+        out = out + rep
+        prev = did ? rep : ""
+    }
+    return out
+}
+
+// String#squeeze: collapse a run of the same character, restricted to the sets
+// when any are given.
+function smSqueeze(s, specs) {
+    var out = ""
+    var prev = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        i = i + 1
+        if (ch == prev && (specs.length == 0 || smInSets(specs, ch))) { continue }
+        out = out + ch
+        prev = ch
+    }
+    return out
+}
+
+function smCount(s, specs) {
+    var n = 0
+    var i = 0
+    while (i < s.length) {
+        if (smInSets(specs, s.charAt(i))) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+function smDelete(s, specs) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (!smInSets(specs, ch)) { out = out + ch }
+        i = i + 1
+    }
+    return out
+}
+
+// String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
+// left. MRI counts CHARACTERS here (unlike printf's %10s, which counts bytes),
+// and a width at or below the receiver's length answers the receiver.
+function smPad(s, width, pad, mode) {
+    if (pad.length == 0 || width <= s.length) { return s }
+    var total = width - s.length
+    var left = 0
+    if (mode == 0) { left = Math.floor(total / 2) } else if (mode == 2) { left = total }
+    var right = total - left
+    return smRepeatTo(pad, left) + s + smRepeatTo(pad, right)
+}
+
+function smRepeatTo(pad, n) {
+    var out = ""
+    var i = 0
+    while (out.length < n) {
+        out = out + pad.charAt(i % pad.length)
+        i = i + 1
+    }
+    return out
+}
+
+function smSwapcase(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        var up = ch.toUpperCase()
+        if (ch == up) { out = out + ch.toLowerCase() } else { out = out + up }
+        i = i + 1
+    }
+    return out
+}
+
+// String#lines: split after each newline, keeping it.
+function smLines(s) {
+    var out = []
+    var cur = ""
+    var i = 0
+    while (i < s.length) {
+        cur = cur + s.charAt(i)
+        if (s.charAt(i) == "\n") { out.push(cur); cur = "" }
+        i = i + 1
+    }
+    if (cur.length > 0) { out.push(cur) }
+    return out
+}
+
+// String#chomp: the trailing record separator, "\r\n" counting as one.
+function smChomp(s) {
+    if (s.length >= 2 && s.substring(s.length - 2, s.length) == "\r\n") { return s.substring(0, s.length - 2) }
+    if (s.length >= 1) {
+        var c = s.charAt(s.length - 1)
+        if (c == "\n" || c == "\r") { return s.substring(0, s.length - 1) }
+    }
+    return s
+}
+
+// String#chop: the last character, "\r\n" counting as one.
+function smChop(s) {
+    if (s.length >= 2 && s.substring(s.length - 2, s.length) == "\r\n") { return s.substring(0, s.length - 2) }
+    if (s.length == 0) { return s }
+    return s.substring(0, s.length - 1)
+}
+
+function smIsStrip(cc) {
+    return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 12 || cc == 11 || cc == 0
+}
+
+function smLstrip(s) {
+    var i = 0
+    while (i < s.length && smIsStrip(s.charCodeAt(i))) { i = i + 1 }
+    return s.substring(i, s.length)
+}
+
+function smRstrip(s) {
+    var j = s.length
+    while (j > 0 && smIsStrip(s.charCodeAt(j - 1))) { j = j - 1 }
+    return s.substring(0, j)
+}
+
+// String#rindex: the LAST index of sub, or -1. indexOf ignores its second
+// argument in this dialect, so the scan is written out.
+function smRindex(s, sub) {
+    if (sub.length == 0) { return s.length }
+    var i = s.length - sub.length
+    while (i >= 0) {
+        if (s.substring(i, i + sub.length) == sub) { return i }
+        i = i - 1
+    }
+    return 0 - 1
+}
+
+// String#hex / #oct: the LEADING numeral, 0 when there is none. Unlike
+// Kernel#Integer these never raise.
+function smBasePrefix(s, base) {
+    var i = 0
+    var neg = false
+    if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+        neg = s.charAt(i) == "-"
+        i = i + 1
+    }
+    var b = base
+    if (i + 1 < s.length && s.charAt(i) == "0") {
+        var p = s.charAt(i + 1).toLowerCase()
+        if (p == "x" && (base == 16 || base == 0)) { b = 16; i = i + 2 }
+        else if (p == "b" && (base == 2 || base == 0)) { b = 2; i = i + 2 }
+        else if (p == "o") { b = 8; i = i + 2 }
+        else if (p == "d") { b = 10; i = i + 2 }
+    }
+    if (b == 0) { b = 8 }
+    var acc = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "_") { i = i + 1; continue }
+        var d = smDigitVal(ch)
+        if (d < 0 || d >= b) { break }
+        acc = acc * b + d
+        i = i + 1
+    }
+    return neg ? -acc : acc
+}
+
+function smDigitVal(ch) {
+    if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
+    if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
+    if (ch >= "A" && ch <= "Z") { return ch.charCodeAt(0) - 55 }
+    return 0 - 1
+}
+
+// The String methods above, as one dispatcher. `sargs` is the argument list with
+// every element already rendered as a Ruby String and `nargs` the same list as
+// numbers, so this function stays free of any one engine's conversions. Answers
+// {ok: false} for a name it does not know, so each engine's own table keeps
+// priority and its `unknown String method' abort still happens.
+function smMethod(s, name, sargs, nargs) {
+    if (name == "bytesize") { return {ok: true, v: smUtf8Bytes(s).length} }
+    if (name == "bytes") { return {ok: true, v: smUtf8Bytes(s)} }
+    if (name == "getbyte") {
+        var bs = smUtf8Bytes(s)
+        var gi = Math.trunc(nargs[0])
+        if (gi < 0) { gi = gi + bs.length }
+        if (gi < 0 || gi >= bs.length) { return {ok: true, v: null} }
+        return {ok: true, v: bs[gi]}
+    }
+    if (name == "sum") {
+        var sb = smUtf8Bytes(s)
+        var acc = 0
+        var si = 0
+        while (si < sb.length) { acc = acc + sb[si]; si = si + 1 }
+        return {ok: true, v: acc}
+    }
+    if (name == "codepoints") { return {ok: true, v: smCodePoints(s)} }
+    if (name == "tr" || name == "tr!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], false)} }
+    if (name == "tr_s" || name == "tr_s!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], true)} }
+    if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: smSqueeze(s, sargs)} }
+    if (name == "count") { return {ok: true, v: smCount(s, sargs)} }
+    if (name == "delete" || name == "delete!") { return {ok: true, v: smDelete(s, sargs)} }
+    if (name == "center") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
+    if (name == "ljust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
+    if (name == "rjust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
+    if (name == "chop" || name == "chop!") { return {ok: true, v: smChop(s)} }
+    if (name == "chomp" || name == "chomp!") {
+        if (sargs.length > 0) {
+            var suf = sargs[0]
+            if (suf.length > 0 && s.length >= suf.length
+                && s.substring(s.length - suf.length, s.length) == suf) {
+                return {ok: true, v: s.substring(0, s.length - suf.length)}
+            }
+            return {ok: true, v: s}
+        }
+        return {ok: true, v: smChomp(s)}
+    }
+    if (name == "chr") { return {ok: true, v: s.length > 0 ? s.charAt(0) : ""} }
+    if (name == "lstrip" || name == "lstrip!") { return {ok: true, v: smLstrip(s)} }
+    if (name == "rstrip" || name == "rstrip!") { return {ok: true, v: smRstrip(s)} }
+    if (name == "strip!") { return {ok: true, v: smLstrip(smRstrip(s))} }
+    if (name == "swapcase" || name == "swapcase!") { return {ok: true, v: smSwapcase(s)} }
+    if (name == "lines") { return {ok: true, v: smLines(s)} }
+    if (name == "partition" || name == "rpartition") {
+        var sep = sargs[0]
+        var at = name == "partition" ? s.indexOf(sep) : smRindex(s, sep)
+        if (at < 0) {
+            if (name == "partition") { return {ok: true, v: [s, "", ""]} }
+            return {ok: true, v: ["", "", s]}
+        }
+        return {ok: true, v: [s.substring(0, at), sep, s.substring(at + sep.length, s.length)]}
+    }
+    if (name == "delete_prefix" || name == "delete_prefix!") {
+        var pf = sargs[0]
+        if (pf.length > 0 && s.substring(0, pf.length) == pf) { return {ok: true, v: s.substring(pf.length, s.length)} }
+        return {ok: true, v: s}
+    }
+    if (name == "delete_suffix" || name == "delete_suffix!") {
+        var sf = sargs[0]
+        if (sf.length > 0 && s.length >= sf.length && s.substring(s.length - sf.length, s.length) == sf) {
+            return {ok: true, v: s.substring(0, s.length - sf.length)}
+        }
+        return {ok: true, v: s}
+    }
+    if (name == "casecmp") {
+        var la = s.toLowerCase()
+        var lb = sargs[0].toLowerCase()
+        if (la < lb) { return {ok: true, v: 0 - 1} }
+        if (la > lb) { return {ok: true, v: 1} }
+        return {ok: true, v: 0}
+    }
+    if (name == "casecmp?") { return {ok: true, v: s.toLowerCase() == sargs[0].toLowerCase()} }
+    if (name == "rindex") {
+        var ri = smRindex(s, sargs[0])
+        if (ri < 0) { return {ok: true, v: null} }
+        return {ok: true, v: ri}
+    }
+    if (name == "insert") {
+        var at2 = Math.trunc(nargs[0])
+        if (at2 < 0) { at2 = at2 + s.length + 1 }
+        if (at2 < 0 || at2 > s.length) { return {ok: false, v: null} }
+        return {ok: true, v: s.substring(0, at2) + sargs[1] + s.substring(at2, s.length)}
+    }
+    if (name == "prepend") { return {ok: true, v: sargs[0] + s} }
+    if (name == "concat" || name == "<<") {
+        var acc2 = s
+        var ci = 0
+        while (ci < sargs.length) { acc2 = acc2 + sargs[ci]; ci = ci + 1 }
+        return {ok: true, v: acc2}
+    }
+    if (name == "hex") { return {ok: true, v: smBasePrefix(s, 16)} }
+    if (name == "oct") { return {ok: true, v: smBasePrefix(s, 0)} }
+    if (name == "clear") { return {ok: true, v: ""} }
+    if (name == "b" || name == "scrub" || name == "unicode_normalize" || name == "force_encoding"
+        || name == "encode") {
+        return {ok: true, v: s}
+    }
+    if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }
+    if (name == "ascii_only?") {
+        var ai = 0
+        while (ai < s.length) {
+            if (s.charCodeAt(ai) > 127) { return {ok: true, v: false} }
+            ai = ai + 1
+        }
+        return {ok: true, v: true}
+    }
+    return {ok: false, v: null}
+}
+
+// The engine glue for smMethod: render every argument as a Ruby String and as a
+// number once, then dispatch. The block-taking members are handled beside it.
+function rbStrExtra(target, name, args) {
+    var sargs = []
+    var nargs = []
+    var i = 0
+    var pos = rbPosArgs(args)
+    while (i < pos.length) {
+        sargs.push(rbStr(pos[i]))
+        nargs.push(rbToF(pos[i]))
+        i = i + 1
+    }
+    if (nargs.length == 0) { nargs.push(0) }
+    if (name == "each_byte" || name == "each_codepoint") {
+        var blk = rbBlockOf(args)
+        var list = name == "each_byte" ? smUtf8Bytes(target) : smCodePoints(target)
+        if (blk !== null) {
+            var k = 0
+            while (k < list.length) { rbCall1(blk, list[k]); k = k + 1 }
+        }
+        return {ok: true, v: target}
+    }
+    if (name == "each_line") {
+        var blk2 = rbBlockOf(args)
+        var ls = smLines(target)
+        if (blk2 !== null) {
+            var m = 0
+            while (m < ls.length) { rbCall1(blk2, ls[m]); m = m + 1 }
+        }
+        return {ok: true, v: target}
+    }
+    if (name == "upto") {
+        var blk3 = rbBlockOf(args)
+        var ul = smUptoList(target, sargs.length > 0 ? sargs[0] : target,
+                            pos.length > 1 && rbTruthy(pos[1]))
+        if (blk3 !== null) {
+            var u = 0
+            while (u < ul.length) { rbCall1(blk3, ul[u]); u = u + 1 }
+            return {ok: true, v: target}
+        }
+        return {ok: true, v: ul}
+    }
+    if (name == "dump") { return {ok: true, v: rbStrInspect(target)} }
+    // String#slice! answers the REMOVED part; the removal itself is unrepresentable
+    // (a Ruby String is a value here), so the value is String#slice's.
+    if (name == "slice!") { return {ok: true, v: rbMethod(target, "slice", args)} }
+    var bb = smBangBase(name)
+    if (bb != "") {
+        var bv = rbMethod(target, bb, args)
+        if (typeof bv == "string" && bv == target) { return {ok: true, v: null} }
+        return {ok: true, v: bv}
+    }
+    return smMethod(target, name, sargs, nargs)
+}
+
+
+// The BANG forms of the case / trim / translate methods. A Ruby String is a VALUE
+// in this model, so the in-place effect is unrepresentable (the same limitation
+// sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
+// string, or nil when nothing changed, and that is what these produce.
+// docs/todo.md 1.3.
+function smBangBase(name) {
+    if (name.length < 2 || name.charAt(name.length - 1) != "!") { return "" }
+    var b = name.substring(0, name.length - 1)
+    if (b == "upcase" || b == "downcase" || b == "capitalize" || b == "swapcase"
+        || b == "reverse" || b == "strip" || b == "lstrip" || b == "rstrip"
+        || b == "chomp" || b == "chop" || b == "squeeze" || b == "tr" || b == "tr_s"
+        || b == "delete" || b == "succ" || b == "next") { return b }
+    return ""
+}
+
+// String#upto: every string from the receiver to limit by #succ.
+function smUptoList(s, limit, excl) {
+    var out = []
+    var cur = s
+    var guard = 0
+    while (guard < 100000) {
+        if (cur.length > limit.length) { return out }
+        if (cur.length == limit.length && cur > limit) { return out }
+        if (excl && cur == limit) { return out }
+        out.push(cur)
+        if (cur == limit) { return out }
+        cur = rbStrSucc(cur)
+        guard = guard + 1
+    }
+    return out
+}
+
 function js_rraise(v, msg) {
     throw rbMakeExc(v, msg)
 }

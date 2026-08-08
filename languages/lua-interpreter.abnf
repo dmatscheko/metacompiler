@@ -1875,6 +1875,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // through which Lua 5.3+ makes the integer subtype visible to a program, so they
     // belong with it: math.type(3) is "integer", math.type(3.0) is "float" and
     // math.type("3") is nil (a string is not a number at all).
+    // The math library's shared argument check: Lua coerces a numeric STRING in an
+    // arithmetic position and every math function does the same, and a value that
+    // is no number at all is an error rather than a silent NaN. The compiler
+    // half's twin is lua_num plus rt.luArgNum in abnf/jsrtlua.go.
+    function mathArg(x, fn) {
+        var a = anytype
+        a = toNumV(x)
+        if (a === undefined) { fail("bad argument to '" + fn + "' (number expected)") }
+        return numOf(a)
+    }
+    // math.ult wants an exact integer, not a double reading of one.
+    function mathArgInt(x, fn) {
+        var a = anytype
+        a = toNumV(x)
+        if (a === undefined) { fail("bad argument to '" + fn + "' (number expected)") }
+        if (!isInt(a)) { fail("bad argument to '" + fn + "' (number has no integer representation)") }
+        return a
+    }
+    // 180/PI and PI/180, folded once exactly as lmathlib.c folds them.
+    var LUA_DEG = 180 / Math.PI
+    var LUA_RAD = Math.PI / 180
+
     globalScope["math"] = {
         // floor/ceil answer an INTEGER. An operand that already is one is handed back
         // untouched - Math.floor of math.maxinteger would round it.
@@ -1905,6 +1927,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (n - n !== 0 || Math.floor(n) !== n) { return undefined }
             return luaI64(n)
         },
+        // ----- the float-only half of the library, docs/todo.md 1.1 -----
+        // Every one of these answers a FLOAT whatever its argument's subtype was
+        // (math.sqrt(4) is 2.0), so none of them touches the integer subtype. They
+        // were MISSING ENTIRELY from both halves - `math.sqrt(2)` was "attempt to
+        // call a nil value" - because the C floor's Math had eleven members and a
+        // native binary calling Math.sin died outright. The compiler half routes
+        // the same calls through the same host Math (libMath1 in
+        // lua-to-llvm-ir.abnf). Checked against lua 5.5.0, which is installed.
+        sqrt: function(x) { return mkFlt(Math.sqrt(mathArg(x, "sqrt"))) },
+        sin: function(x) { return mkFlt(Math.sin(mathArg(x, "sin"))) },
+        cos: function(x) { return mkFlt(Math.cos(mathArg(x, "cos"))) },
+        tan: function(x) { return mkFlt(Math.tan(mathArg(x, "tan"))) },
+        asin: function(x) { return mkFlt(Math.asin(mathArg(x, "asin"))) },
+        acos: function(x) { return mkFlt(Math.acos(mathArg(x, "acos"))) },
+        exp: function(x) { return mkFlt(Math.exp(mathArg(x, "exp"))) },
+        // deg/rad are ONE multiplication by a folded constant, which is what
+        // lmathlib.c does - and it is why math.deg(math.pi) is exactly 180.0.
+        deg: function(x) { return mkFlt(mathArg(x, "deg") * LUA_DEG) },
+        rad: function(x) { return mkFlt(mathArg(x, "rad") * LUA_RAD) },
+        // math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument
+        // means Atan": lmathlib.c passes the default through atan2.
+        atan: function(y, x) {
+            var xv = anytype
+            xv = (x === undefined || x === null) ? 1 : mathArg(x, "atan")
+            return mkFlt(Math.atan2(mathArg(y, "atan"), xv))
+        },
+        // math.log(x [, base]). lmathlib.c routes base 2 and base 10 to log2/log10
+        // rather than dividing, and the difference is visible: math.log(8, 2) is
+        // exactly 3.0 that way and 3.0000000000000004 at some arguments the other.
+        log: function(x, b) {
+            var xv = mathArg(x, "log")
+            if (b === undefined || b === null) { return mkFlt(Math.log(xv)) }
+            var bv = mathArg(b, "log")
+            if (bv === 2) { return mkFlt(Math.log2(xv)) }
+            if (bv === 10) { return mkFlt(Math.log10(xv)) }
+            return mkFlt(Math.log(xv) / Math.log(bv))
+        },
+        // math.modf(x): the integral part and the fractional part, as TWO values.
+        // The integral part goes through lmathlib's pushnumint - an INTEGER when it
+        // has an exact integer representation and a float otherwise, so
+        // math.modf(3.7) is `3  0.7` and math.modf(math.huge) is `inf  0.0`. It
+        // truncates toward ZERO, which is why math.floor cannot stand in for it at
+        // a negative argument.
+        modf: function(x) {
+            var n = mathArg(x, "modf")
+            var ip = Math.trunc(n)
+            var fp = 0 / (n < 0 ? 0 - 1 : 1)
+            if (n - n === 0) { fp = n - ip }
+            var iv = anytype
+            iv = (ip - ip === 0) ? luaI64(ip) : undefined
+            return mkMulti([iv === undefined ? mkFlt(ip) : iv, mkFlt(fp)])
+        },
+        // math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
+        // math.ult(-1, 2) is false where -1 < 2 is true.
+        ult: function(a, b) {
+            return szCmp(szConv(mathArgInt(a, "ult"), 64, true),
+                         szConv(mathArgInt(b, "ult"), 64, true)) < 0
+        },
         // math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which
         // is where it differs from the '%' operator.
         fmod: function(a, b) {
@@ -1915,7 +1995,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return mkFlt(numOf(a) % numOf(b))
         },
         maxinteger: luaMaxInt(),
-        mininteger: luaMinInt()
+        mininteger: luaMinInt(),
+        // math.pi and math.huge are FLOAT VALUES, not functions. The dialect has no
+        // exponent literal, so the infinity is built by division (manual chapter 4).
+        pi: mkFlt(Math.PI),
+        huge: 1 / 0
     }
 
     // One end of a Lua string range, normalised to an inclusive 1-based index.

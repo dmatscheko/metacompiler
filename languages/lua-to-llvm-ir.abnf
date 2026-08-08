@@ -1265,15 +1265,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // a ^ b: always a float in Lua. There is no js_pow external and none is needed - the
-    // host's Math lives in the same runtime, so the power is a method call on it.
-    function emitPow(b, l, r) {
+    // a ^ b, and every float-only member of the math library: there is no js_pow
+    // external and none is needed - the host's Math lives in the same runtime, so
+    // the operation is a method call on it. Since docs/todo.md 1.1 that Math is
+    // the SAME object in all three engines (thirty-four methods and eight
+    // constants in languages/lib/runtime.c, abnf/jsrt.go and goja alike), which is
+    // what makes math.sqrt / math.sin / ... below cost no extern at all: they were
+    // simply absent before, because the C floor had eleven members and a native
+    // binary calling Math.sin died with `unknown method 'sin'`.
+    function emitMathN(b, name, argVs) {
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         var argsV = callExt(b, "js_arr_new", [])
-        callExt(b, "js_arr_push", [argsV, l])
-        callExt(b, "js_arr_push", [argsV, r])
-        return callExt(b, "js_mcall", [mathV, emitStr(b, "pow"), argsV])
+        for (var mi = 0; mi < argVs.length; mi++) { callExt(b, "js_arr_push", [argsV, argVs[mi]]) }
+        return callExt(b, "js_mcall", [mathV, emitStr(b, name), argsV])
     }
+    function emitPow(b, l, r) { return emitMathN(b, "pow", [l, r]) }
     function makePow(items) {
         if (items.length == 1) { return items[0] }
         var l = items[0]
@@ -1986,6 +1992,52 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: bb, v: callExt(bb, "js_lufmod", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
     }
 
+    // The FLOAT-ONLY half of Lua's math library: sqrt sin cos tan asin acos exp,
+    // and the two angle conversions. Every one of them answers a float whatever
+    // its argument's subtype was (math.sqrt(4) is 2.0), so none of them needs to
+    // know about the integer subtype and none needs an extern - lua_num coerces
+    // the argument the way arithmetic does (a numeric STRING converts), the root
+    // Math does the work, and lua_mkflt puts the float subtype back on.
+    //
+    // They were MISSING ENTIRELY from both halves until now: `math.sqrt(2)` was
+    // "attempt to call a nil value". Checked against lua 5.5.0, which is installed
+    // on this machine, in tests/lua-test-full.lua SECTION 21.
+    function libMath1(name) {
+        return function(bb, argsH) {
+            var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
+            return {b: bb, v: callLua(bb, "lua_mkflt", [emitMathN(bb, name, [x])])}
+        }
+    }
+    // math.deg / math.rad are ONE multiplication by a folded constant, which is
+    // what lmathlib.c does (x * (180/PI) and x * (PI/180)) - and it is why
+    // math.deg(math.pi) is exactly 180.0 rather than 180.00000000000003.
+    function libScale(k) {
+        return function(bb, argsH) {
+            var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
+            return {b: bb, v: callLua(bb, "lua_mkflt", [callExt(bb, "js_mul", [x, emitNum(bb, k)])])}
+        }
+    }
+    // math.atan(y [, x]) is atan2 with a default x of 1.0, math.log(x [, base])
+    // takes an optional base, math.modf answers TWO values whose first keeps the
+    // integer subtype, and math.ult compares two integers as UNSIGNED. Those four
+    // are the ones that cannot be a bare Math call - an argument count or the
+    // integer subtype decides the answer - so they are externs, exactly like the
+    // five above them.
+    function libAtan(bb, argsH) {
+        return {b: bb, v: callExt(bb, "js_luatan", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
+    }
+    function libLog(bb, argsH) {
+        return {b: bb, v: callExt(bb, "js_lulog", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
+    }
+    // js_lumodf answers a plain two-element ARRAY; lua_mk turns it into the
+    // multiple-value form the call site unpacks (the same shape libPairs uses).
+    function libModf(bb, argsH) {
+        return {b: bb, v: callLua(bb, "lua_mk", [callExt(bb, "js_lumodf", [libArg(bb, argsH, 0)])])}
+    }
+    function libUlt(bb, argsH) {
+        return {b: bb, v: callExt(bb, "js_luult", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
+    }
+
     // string.*: len via the host string's .length; upper/lower via the string methods;
     // sub is 1-based inclusive lowered to JS slice(i-1, j) (a nil j reaches the end);
     // rep concatenates n copies in a scoped while loop.
@@ -2212,6 +2264,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, mt, "fmod", emitLibFunc(libFmod))
             b = libSet(b, mt, "type", emitLibFunc(libType))
             b = libSet(b, mt, "tointeger", emitLibFunc(libToInt))
+            b = libSet(b, mt, "sqrt", emitLibFunc(libMath1("sqrt")))
+            b = libSet(b, mt, "sin", emitLibFunc(libMath1("sin")))
+            b = libSet(b, mt, "cos", emitLibFunc(libMath1("cos")))
+            b = libSet(b, mt, "tan", emitLibFunc(libMath1("tan")))
+            b = libSet(b, mt, "asin", emitLibFunc(libMath1("asin")))
+            b = libSet(b, mt, "acos", emitLibFunc(libMath1("acos")))
+            b = libSet(b, mt, "exp", emitLibFunc(libMath1("exp")))
+            b = libSet(b, mt, "deg", emitLibFunc(libScale(180 / Math.PI)))
+            b = libSet(b, mt, "rad", emitLibFunc(libScale(Math.PI / 180)))
+            b = libSet(b, mt, "atan", emitLibFunc(libAtan))
+            b = libSet(b, mt, "log", emitLibFunc(libLog))
+            b = libSet(b, mt, "modf", emitLibFunc(libModf))
+            b = libSet(b, mt, "ult", emitLibFunc(libUlt))
+            // math.pi and math.huge are FLOAT VALUES, not functions. The dialect has
+            // no exponent literal, so the infinity is built by division (manual
+            // chapter 4); js_luflo boxes a raw double as a Lua float.
+            callExt(b, "js_set", [mt, emitStr(b, "pi"), callLua(b, "lua_mkflt", [emitNum(b, Math.PI)])])
+            callExt(b, "js_set", [mt, emitStr(b, "huge"), callLua(b, "lua_mkflt", [emitNum(b, 1 / 0)])])
             // The two ends of the integer range are VALUES, not functions, and neither
             // survives a double - they are built from their bit pattern in Go.
             callExt(b, "js_set", [mt, emitStr(b, "maxinteger"), callExt(b, "js_lumaxint", [])])

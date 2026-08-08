@@ -1210,7 +1210,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) { return hostGlobals["list"] }
         if (isSet(v)) { return hostGlobals["set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
-        if (typeof v == "function") { return hostGlobals["function"] }
+        // CPython's type(gen).__name__, and the name its AttributeError uses.
+        if (isGen(v)) { return pyBuiltinTypeObj("generator") }
+        if (typeof v == "function") {
+            // docs/todo.md 1.4: a BOUND method and a BUILTIN are their own
+            // CPython types. The three names are not in the fourteen hostGlobals
+            // type objects, so they are built the way a cursor's type is below.
+            var bml = pyBMFind(v)
+            if (bml >= 0) {
+                if (pyBMTab[bml + 3] === null) { return pyBuiltinTypeObj("builtin_function_or_method") }
+                return pyBuiltinTypeObj("method")
+            }
+            var bfc = bfnCode(v)
+            if (bfc !== undefined) {
+                // range / enumerate / zip / map / filter / reversed really ARE
+                // types, and the leading "*" of the code is what says so.
+                if (bfc.charAt(0) == "*") { return hostGlobals["type"] }
+                return pyBuiltinTypeObj("builtin_function_or_method")
+            }
+            return hostGlobals["function"]
+        }
         if (v.__isclass == true) { return hostGlobals["type"] }
         // A CURSOR names its own type - CPython's list_iterator /
         // str_ascii_iterator / dict_keyiterator / map / filter / zip /
@@ -1219,8 +1238,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // "'list_iterator' object has no attribute 'send'", not "'object' ...".
         // Built rather than looked up in hostGlobals, which holds only the
         // fourteen NAMED builtin types. docs/todo.md 1.4.
-        if (isPyIt(v)) { return {__isclass: true, __name: v.__pyit, __bases: [], __builtin: true} }
+        if (isPyIt(v)) { return pyBuiltinTypeObj(v.__pyit) }
         return hostGlobals["object"]
+    }
+    // A builtin type object that is not one of the fourteen NAMED ones above -
+    // a cursor's type, and the two callable types of docs/todo.md 1.4.
+    function pyBuiltinTypeObj(n) {
+        return {__isclass: true, __name: n, __bases: [], __builtin: true}
     }
     // float("inf") - CPython's float_from_string accepts the three non-finite
     // SPELLINGS, case-insensitively and with an optional sign, after stripping
@@ -1711,7 +1735,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySuperFind(o, name) != null
         }
         if (typeof o == "object" && o.__isclass == true) {
-            if (name == "__name__" || name == "__mro__" || name == "__bases__") { return true }
+            if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__") { return true }
             return clsFind(o, name) != null
         }
         // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
@@ -1732,7 +1756,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__dict__" || name == "__class__") { return true }
             return clsFind(o.__class, name) != null
         }
-        if (typeof o == "function" && name == "__name__") { return true }
+        if (typeof o == "function") {
+            if (name == "__name__" || name == "__qualname__") { return true }
+            var bmk = pyBMFind(o)
+            if (bmk >= 0) {
+                if (name == "__qualname__" || name == "__self__") { return true }
+                if (name == "__func__") { return pyBMTab[bmk + 3] !== null }
+            }
+        }
         return false
     }
     // docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
@@ -1761,11 +1792,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
     // the direct call is.
     function pyBoundBuiltin(target, name) {
-        return function() {
+        var f = function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             return mcall(target, name, args, undefined)
         }
+        return pyBMSet(f, name, target, null)
+    }
+    // ----- what a BOUND METHOD knows about itself (docs/todo.md 1.4) ----------
+    //
+    // getattr([1,2], "count").__name__ was '<lambda>' here and None in both
+    // compiled halves where CPython says 'count'. Neither of the two name tables
+    // can answer it: fnNames holds what a `def` bound and bfnFns holds the
+    // builtins, and both are keyed by the function VALUE, while a bound method is
+    // a FRESH closure minted at the attribute read. So it gets a third table, in
+    // the identity-scan shape the other two use because function objects have no
+    // expando slot under the frozen engine.
+    //
+    // ONE flat array with a stride of four - closure, method name, receiver,
+    // underlying function (null for a builtin method) - rather than four
+    // parallel arrays, because the twin in languages/lib/python-rt.metajs pays
+    // for every module-level global it declares (see the arena note there).
+    // It GROWS with the number of bound methods a program creates, exactly as
+    // fnNames grows with the number of times a `def` runs; the scan is only ever
+    // walked by introspection (__name__, repr, type), never by a call.
+    //
+    // Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
+    // family in languages/lib/python-rt.metajs.
+    var pyBMTab = []
+    function pyBMSet(f, name, self, fn) {
+        pyBMTab.push(f)
+        pyBMTab.push(name)
+        pyBMTab.push(self)
+        pyBMTab.push(fn)
+        return f
+    }
+    // The index of f's record, or -1.
+    function pyBMFind(f) {
+        for (var i = pyBMTab.length - 4; i >= 0; i -= 4) {
+            if (pyBMTab[i] === f) { return i }
+        }
+        return 0 - 1
+    }
+    // The type name a bound method's __qualname__ and repr are prefixed with: an
+    // INSTANCE names its class, everything else its builtin type.
+    function pyBMOwner(self) {
+        if (pyUser(self)) { return self.__class.__name }
+        return pyTypeOf(self).__name
+    }
+    // How a bound method prints. CPython appends the receiver's ADDRESS to both
+    // forms; the address is its own and cannot be matched, so it is left off here
+    // exactly as it is for <function f> and <map object>.
+    function pyBMRender(i) {
+        var nm = pyBMTab[i + 1]
+        var self = pyBMTab[i + 2]
+        if (pyBMTab[i + 3] === null) {
+            return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
+        }
+        return "<bound method " + pyBMOwner(self) + "." + nm + " of " + prepr(self) + ">"
     }
     function pyOrdOf(s) {
         if (typeof s != "string") {
@@ -2123,6 +2207,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // is its own and cannot be matched, so it is left off rather than
         // invented - and all three engines print this same short form.
         if (isPyIt(v)) { return "<" + v.__pyit + " object>" }
+        // A GENERATOR, on the same rule. CPython says <generator object gen at
+        // 0x...>; neither the address nor the generating function's name is
+        // recoverable from the value, so the short form is printed. Both halves
+        // printed a raw host dump before - [object Object] here and a Go STRUCT
+        // LITERAL under llvm.Run. docs/todo.md 1.4.
+        if (isGen(v)) { return "<generator object>" }
         // A FUNCTION. CPython prints <function fn at 0x...>; the address is its own
         // and cannot be matched, so it is left off rather than invented - the same
         // rule the iterator line above follows, and all three engines print this
@@ -2134,6 +2224,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // so the two tables cannot collide by identity even when they collide
         // by name. docs/todo.md 1.4.
         if (typeof v == "function") {
+            // A BOUND METHOD prints as one - docs/todo.md 1.4.
+            var bmi = pyBMFind(v)
+            if (bmi >= 0) { return pyBMRender(bmi) }
             var bft = bfnText(v)
             if (bft !== undefined) { return bft }
             return "<function " + fnName(v) + ">"
@@ -7027,12 +7120,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         throw e
     }
+    // An except HANDLER BODY IS NOT A SCOPE in Python. This used to push a fresh
+    // scope and pop it again, so every name FIRST bound inside a handler was lost
+    // at the closing brace: `except E: r = 1` followed by `print(r)` died with
+    // "name 'r' is not defined" here while both compiled halves - which emit
+    // js_scope_decl into the enclosing scope - printed 1, like CPython. A live
+    // halves divergence `--cross` never reached because no test assigned a NEW
+    // name inside a handler; a name that ALREADY existed outside was written
+    // through by pySet's outward walk, which is why the bug hid. Found by the
+    // docs/todo.md 1.4 sweep. The `as NAME` binding therefore lands in the
+    // enclosing scope too, exactly as js_scope_decl puts it in the other two
+    // engines - see the deliberate non-convergence noted there: CPython DELETES
+    // that name when the handler exits and all three engines keep it.
     function runHandler(cl, val) {
         pyCurExc.push(val)
-        scopes.push({})
-        if (cl.hname != undefined) { declVar(cl.hname, val) }
+        var sc = scopes[scopes.length - 1]
+        var had = false
+        var prev = anytype
+        if (cl.hname != undefined) {
+            if (hasOwn(sc, cl.hname)) { had = true; prev = sc[cl.hname] }
+            declVar(cl.hname, val)
+        }
         var r = anytype
-        try { r = cl.handler() } finally { scopes.pop(); pyCurExc.pop() }
+        try { r = cl.handler() } finally {
+            if (cl.hname != undefined) {
+                if (had) { scopePut(sc, cl.hname, prev) } else { scopePut(sc, cl.hname, pyDeleted) }
+            }
+            pyCurExc.pop()
+        }
         return r
     }
     // except*: the raised ExceptionGroup is split, and every clause that matches at
@@ -7227,7 +7342,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // and a function found there comes back bound to the instance.
         if (typeof o == "object" && o.__pysup == true) { return pySuperAttr(o, name) }
         if (typeof o == "object" && o.__isclass == true) {
-            if (name == "__name__") { return o.__name }
+            // __qualname__ of a class is its __name__ for every class this subset
+            // can write: CPython qualifies only a NESTED class, and a nested
+            // `class` here is bound by the same name as a top-level one.
+            if (name == "__name__" || name == "__qualname__") { return o.__name }
             // The resolution order, as the two compiled halves already answered it
             // (pyGetAttr in abnf/jsrt.go and in languages/lib/python-rt.metajs).
             // It was missing HERE only - AttributeError in the interpreter half
@@ -7244,7 +7362,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (bcm != null) { return bcm }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
-            fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")
+            // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises,
+            // and as the two compiled halves now do - this was fail(), an
+            // uncatchable abort, in all three engines.
+            pyRaise(pyMakeExc("AttributeError",
+                              ["type object '" + o.__name + "' has no attribute '" + name + "'"]))
         }
         // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1)
         // is the 1 CPython answers. Ahead of the own-property arm because a dict
@@ -7267,20 +7389,57 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var g = clsFind(m.__class, "__get__")
                     if (g != null) { return g(m, o, o.__class) }
                 }
-                if (typeof m == "function") { return bindMethod(o, m) }
+                if (typeof m == "function") { return bindMethod(o, m, name) }
                 return m
+            }
+        }
+        // A BOUND METHOD knows its own name, receiver and underlying function
+        // (docs/todo.md 1.4). __qualname__ is answered HERE and nowhere else on
+        // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
+        // fall out of the record, while a plain function's qualname would need
+        // the DEFINING scope recorded at every def site in four places.
+        if (typeof o == "function") {
+            var bmj = pyBMFind(o)
+            if (bmj >= 0) {
+                if (name == "__name__") { return pyBMTab[bmj + 1] }
+                if (name == "__qualname__") { return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyBMTab[bmj + 1] }
+                if (name == "__self__") { return pyBMTab[bmj + 2] }
+                if (name == "__func__") {
+                    if (pyBMTab[bmj + 3] === null) {
+                        // CPython: a built-in method has no __func__.
+                        pyRaise(pyMakeExc("AttributeError",
+                            ["'builtin_function_or_method' object has no attribute '__func__'"]))
+                    }
+                    return pyBMTab[bmj + 3]
+                }
             }
         }
         // docs/todo.md 1.9: the BUILTIN table is asked first, exactly as prender
         // asks it, so len.__name__ is 'len' rather than the '<lambda>' fnName
         // answers for a function no `def` ever named. The two tables are keyed
         // by identity, so a user `def len(...)` still answers its own name.
-        if (typeof o == "function" && name == "__name__") {
+        // DECLINED, and it is worth saying where: __doc__ and __module__ stay
+        // unanswered (an AttributeError, like any other absent attribute).
+        // __doc__ needs a def's leading string statement recorded in three
+        // engines AND CPython's own text for every builtin, which this project
+        // will never carry; __module__ needs a builtin-vs-user marker on a CLASS
+        // object, and neither compiled half has one.
+        // __qualname__ rides with __name__ here. It is EXACT for a module-level
+        // def, a lambda, a builtin function and a builtin type, and wrong for
+        // exactly one shape: a function read off a class body, where CPython
+        // says 'C.m' and this says 'm'. Closing that one needs the DEFINING
+        // scope recorded at every def site in three engines and the emitter; the
+        // bound-method arm above already answers 'C.m'. docs/todo.md 1.4.
+        if (typeof o == "function" && (name == "__name__" || name == "__qualname__")) {
             var bfnm = bfnName(o)
             if (bfnm !== undefined) { return bfnm }
             return fnName(o)
         }
-        pyRaise(pyMakeExc("AttributeError", ["'" + name + "'"]))
+        // CPython names the TYPE as well as the attribute: "'list' object has no
+        // attribute 'nope'", not "'nope'". Both compiled halves say the long
+        // form. docs/todo.md 1.4.
+        pyRaise(pyMakeExc("AttributeError",
+                          ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"]))
     }
     // The instance attribute dict. pySetAttr records the order it created names in.
     function instDict(o) {
@@ -7289,12 +7448,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var k = 0; k < ks.length; k++) { if (hasOwn(o, ks[k])) { dictSet(d, ks[k], o[ks[k]]) } }
         return d
     }
-    function bindMethod(self, f) {
-        return function() {
+    function bindMethod(self, f, name) {
+        var b = function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             return f.apply(undefined, concat2impl([self], args))
         }
+        return pyBMSet(b, name, self, f)
     }
     // BaseException.__init__ as a callable, for `Base.__init__(self, ...)` and for
     // `super().__init__(...)` inside a class deriving from a builtin exception -
@@ -7390,7 +7550,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r == null) {
             pyRaise(pyMakeExc("AttributeError", ["'super' object has no attribute '" + name + "'"]))
         }
-        if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v) }
+        if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
     }
     function pySuperMCall(s, name, args, kw) {

@@ -291,7 +291,21 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
-            = SimpleStmt [ SameLine ModKw ModCond ] ;
+            = StmtRescue [ SameLine ModKw ModCond ] ;
+// STMT rescue STMT: the STATEMENT modifier form of rescue, which is where MRI
+// really puts it. It used to live inside the expression chain alone, and that was
+// wrong in both directions: `raise "a" rescue 7' did not parse at all (the raise
+// is a statement, not an expression), `g 1/0 rescue 9' bound the rescue to g's
+// ARGUMENT and called g, and `x = f rescue "c"' rescued the ASSIGNMENT so x was
+// never written. MRI's own grammar allows the modifier at exactly three places -
+// a statement, an assignment's right-hand side and a parenthesised body - and
+// REJECTS `f(a rescue b)' outright, so the tail moved out of the expression chain
+// to here and to AssignRhs; `(a rescue b)' reaches it through ParenBody.
+// NotAfterSemi is what keeps a one-line `def f; raise "x"; rescue; 1; end' intact:
+// ExprStmt consumes the `;', so without it this rule would steal the def's own
+// rescue CLAUSE. docs/todo.md 1.3.
+StmtRescue  <~~ push(makeRescueMod(takeAll())) ~~>
+            = SimpleStmt [ SameLine NotAfterSemi KwRescue SimpleStmt ] ;
 // `remove_method :m if method_defined? :m` - the condition of a modifier is a full
 // statement-level expression, so a paren-less call is one of the forms it may take.
 ModCond     = CommandForm | Expression ;
@@ -364,8 +378,15 @@ MGroup      <~~ push({group: takeAll()}) ~~>
             = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
+// SameLine is what makes the no-argument form a no-argument form. Without it the
+// optional Expression reached ACROSS the newline and a bare `puts' swallowed the
+// start of the next statement: `puts' followed by `p x' parsed as `puts p' (the
+// bare name `p' is a method reference, so it printed "#<Proc>") and left `x' as a
+// dead statement, while `puts' followed by `f x' called `f' with no arguments.
+// CommandForm already spells the same guard for exactly this reason.
+// docs/todo.md 1.3.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
-            = KwPuts <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] ;
+            = KwPuts <~~ push({cmd: up.in}) ~~> [ SameLine Expression { "," Expression } ] ;
 
 ExprStmt    = Expression [ ";" ] ;
 
@@ -384,11 +405,7 @@ LowNot      = LowNotOp | PatTest ;
 // EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
 // `case SUBJ` newline `in ...' clause from being read as a test on the subject.
 PatTest     <~~ push(makePatTest(takeAll())) ~~>
-            = RescueMod [ SameLine KwIn Pattern ] ;
-// EXPR rescue FALLBACK: the expression modifier form of rescue. SameLine keeps it
-// clear of a def-level `rescue` clause that opens the next line.
-RescueMod   <~~ push(makeRescueMod(takeAll())) ~~>
-            = AssignExpr [ SameLine KwRescue AssignExpr ] ;
+            = AssignExpr [ SameLine KwIn Pattern ] ;
 LowNotOp    <~~ push(makeNot(pop())) ~~>
             = NotWord LowNot ;
 OrWord      = "or" KwEnd ;
@@ -404,7 +421,12 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // `x = *arr` copies the array (and wraps a non-array in one); `x = f a, b` is a
 // paren-less call. Both are tried before the ordinary expression, and both fail on
 // the very first token when the right side is anything else.
-AssignRhs   = SplatRhs | CommandForm | AssignExpr ;
+// The right-hand side carries the rescue modifier (`x = f rescue "c"'), because
+// in Ruby `rescue' binds TIGHTER than `=': the fallback is what gets assigned.
+// docs/todo.md 1.3.
+AssignRhs   <~~ push(makeRescueMod(takeAll())) ~~>
+            = RhsCore [ SameLine KwRescue RhsCore ] ;
+RhsCore     = SplatRhs | CommandForm | AssignExpr ;
 SplatRhs    <~~ push(makeSplatRhs(pop())) ~~>
             = "*" !"*" AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
@@ -422,6 +444,18 @@ AssignOp    = "||=" | "&&=" | "**=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" 
 NotColonGlued = :script(~~
     (function() {
         if (c.peek(0) === 58) { return abnf.newToken("\x01coloncolon", 0) }
+    })()
+~~) ;
+// NotAfterSemi succeeds (matching empty) only when the token just before the
+// current position is NOT a ';'. StmtRescue needs it because ExprStmt swallows the
+// separator: without it `def f; raise "x"; rescue; 1; end' read the def's rescue
+// CLAUSE as a statement modifier on the raise.
+NotAfterSemi = :script(~~
+    (function() {
+        var i = -1
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 59) { return abnf.newToken("\x01semi", 0) }
     })()
 ~~) ;
 NotTilde = :script(~~
@@ -510,7 +544,10 @@ ParenTargetAhead = :script(~~
 // A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
 // user-defined `[]=` with three). Only the first is lowered; the rest are parsed so
 // the surrounding file is understood, which is what a multi-key []= costs here.
-TIndex      <~~ var n = takeAll(); push({idx: n[0]}) ~~>
+// The SECOND subscript is kept: `a[1, 2] = 9' replaces two elements in MRI and
+// used to write one here, because this action dropped everything after n[0].
+// docs/todo.md 1.3.
+TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = "[" Arg { "," Arg } "]" ;
 
 // The RIGHT operand of && / || may be an ASSIGNMENT: `true && false && x = 1` and
@@ -3232,9 +3269,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.path.length == 0) { return emitHeadSet(b, ref, v) }
         var p = emitRefPath(b, ref)
         b = p.b
-        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]) }
-        else { callExt(b, "js_rset", [p.obj, p.key, v]) }
-        return b
+        return emitPathSet(b, ref, p, v)
     }
     function forVarSet(b, name, v) {
         if (name.charAt(0) != "@" && name.charAt(0) != "$") {
@@ -3385,9 +3420,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, core.indexExt, [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), dict: true} }
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), key2: hUndef, dict: true} }
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v, dict: false}
+        b = kr.b
+        var k2V = hUndef
+        if (last.idx2 != undefined && last.idx2 != null) {
+            var kr2 = last.idx2(b)
+            b = kr2.b
+            k2V = kr2.v
+        }
+        return {b: b, obj: o, key: kr.v, key2: k2V, dict: false}
+    }
+    // The index-assignment tail, shared by every write site. js_rsetsl answers the
+    // (possibly NEW) container, because a Ruby String is a VALUE in this model, so
+    // `s[0] = "H"' has to be written back to the variable - exactly what
+    // makeAppendStmt already does for `s << "x"'. The write-back is emitted only for
+    // a one-step path with an assignable head; a deeper path would have to re-walk
+    // itself and re-run its side effects. docs/todo.md 1.3.
+    function emitPathSet(b, ref, p, v) {
+        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]); return b }
+        var nv = callExt(b, "js_rsetsl", [p.obj, p.key, p.key2, v])
+        if (ref.path.length == 1 && ref.texpr == undefined) { return emitHeadSet(b, ref, nv) }
+        return b
     }
     // Bind the raised value to a rescue clause's `=> TARGET`. A bare local name
     // DECLARES in the handler's own scope (Ruby); everything else - an @ivar, a
@@ -3403,9 +3457,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var p = emitRefPath(b, ref)
         b = p.b
-        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]) }
-        else { callExt(b, "js_rset", [p.obj, p.key, v]) }
-        return b
+        return emitPathSet(b, ref, p, v)
     }
     function makeAssign(items, pos) {
         var ref = items[0]
@@ -3441,7 +3493,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var oldm = callExt(b, core.indexExt, [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
-                    callExt(b, "js_rset", [p.obj, p.key, v])
+                    b = emitPathSet(b, ref, p, v)
                 }
             }
             return {b: b, v: v}
@@ -4048,9 +4100,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.path.length == 0) { return emitHeadSet(b, ref, v) }
         var p = emitRefPath(b, ref)
         b = p.b
-        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]) }
-        else { callExt(b, "js_rset", [p.obj, p.key, v]) }
-        return b
+        return emitPathSet(b, ref, p, v)
     }
     // a, b = ... : the right-hand side becomes ONE runtime array (a lone array value is
     // unpacked positionally), which emitDestructure spreads over the targets. A splat
@@ -4471,6 +4521,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // recorded only the missing interpreter half. p writes INSPECT one
         // argument per line and answers the argument; the whole of it is js_rp, so
         // both engines agree on that return value too.
+        // Kernel#Integer / #Float / #String / #Array: the CONVERSION functions, which
+        // are ordinary Kernel methods that happen to be spelled like the classes.
+        // They existed in no engine: the name resolved to the builtin CLASS object,
+        // so `Integer("5")' built an INSTANCE of Integer in the interpreter half and
+        // aborted both compiled halves with *call of a non function value*. Integer
+        // and Float are STRICT (MRI raises ArgumentError on trailing junk, which is
+        // what makes `Integer("z") rescue 5' the idiom it is) - js_rkconv is that
+        // parse, shared by all three engines. docs/todo.md 1.3.
+        if ((name == "Integer" || name == "Float" || name == "String" || name == "Array")
+            && args.length > 0 && !hasBlockArg(args)) {
+            var cargs = args
+            var cname = name
+            var convT = function(b) {
+                var eca = emitArgs(b, cargs)
+                b = eca.b
+                return {b: b, v: callExt(b, "js_rkconv", [emitStr(b, cname), eca.v])}
+            }
+            var convFallbackT = makePlainCall(cname, cargs)
+            return function(b) {
+                if (rubyAllMethods["$" + cname] === true) { return convFallbackT(b) }
+                if (selfMethod(curClsName, cname)) { return convFallbackT(b) }
+                return convT(b)
+            }
+        }
         if ((name == "printf" || name == "p") && args.length > 0 && !hasBlockArg(args)) {
             var kargs = args
             var kname = name
@@ -5955,6 +6029,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_arr_push", [cbArgs, clsV])
                 lastV = callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
             }
+            // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
+            // The superclass is a BUILTIN, which carries no compiled `initialize'
+            // for js_supercall to find, so both compiled halves aborted with
+            // *unknown super method 'initialize'* on code the interpreter half ran.
+            // A synthetic ancestor is spliced in between the class and the builtin
+            // to carry the SAME default `initialize' a body-less subclass already
+            // gets - it stores the constructor arguments under `args', which is
+            // where Exception#message reads the message from. The shim is an
+            // ordinary class object with no __rbuiltin, so rubyExcIsA / rbIsA walk
+            // straight through it to the builtin and `rescue StandardError' is
+            // unaffected. docs/todo.md 1.3.
+            var builtinSuper = (superName == "" || classMethods["$" + superName] == undefined)
+            var hasShim = false
+            if (baseSet && hasInit && builtinSuper) {
+                var shimV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [shimV, emitStr(b, "__isclass"), hTrue])
+                callExt(b, "js_set", [shimV, emitStr(b, "__name"), emitStr(b, name + "$builtin")])
+                callExt(b, "js_set", [shimV, emitStr(b, "__super"), baseV])
+                baseV = shimV
+                hasShim = true
+            }
             // With a prepend the class's OWN methods move one level down.
             var ownDstV = clsV
             if (front.length > 0) {
@@ -5983,7 +6078,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // compiled initialize for js_rnew / super to find. The default stores the
             // constructor arguments under `args', which is where Exception#message
             // reads the message from - so a user exception class needs no body at all.
-            if (!hasInit && (superName == "" || classMethods["$" + superName] == undefined)) {
+            if (builtinSuper && (!hasInit || hasShim)) {
                 var emptyBody = function(bb) {
                     var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
                     callExt(bb, "js_set", [sV, emitStr(bb, "args"),
@@ -5991,7 +6086,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return {b: bb, v: hNull}
                 }
                 var iidx = emitFunc([], emptyBody, true)
-                callExt(b, "js_set", [ownDstV, emitStr(b, "initialize"),
+                var initDstV = hasShim ? baseV : ownDstV
+                callExt(b, "js_set", [initDstV, emitStr(b, "initialize"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
             // A class body is an EXPRESSION: its value is its last statement's.
@@ -6160,6 +6256,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "String", "Symbol", "Array", "Hash", "Range", "Proc", "NilClass", "TrueClass",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
         "Enumerator",
+        // Math is a MODULE, and it belongs here for the same reason the classes do:
+        // without it the name fell through to the ROOT scope's JavaScript Math, so
+        // Math.sqrt(4) answered the integer 2 where Ruby answers 2.0, Math::PI
+        // answered nil, and every member the C floor did not carry (Math.sin) worked
+        // under llvm.Run and aborted the native binary. docs/todo.md 1.1.
+        "Math",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError"]

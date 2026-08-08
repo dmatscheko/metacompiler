@@ -335,6 +335,29 @@ func luParseDec(s string) (interface{}, bool) {
 
 // luToNum is Lua's automatic coercion in an arithmetic or bitwise context: a
 // number passes, a string that spells a numeral converts, anything else fails.
+// luArgNum / luArgInt are the argument checks the math library shares: Lua
+// coerces a numeric STRING in an arithmetic position and so does every math
+// function, and a value that is no number at all is an error rather than a NaN.
+// luArgInt additionally demands an exact integer, which is what math.ult wants.
+func (rt *jsrt) luArgNum(v interface{}, fn string) float64 {
+	n, ok := luToNum(v)
+	if !ok {
+		rt.fail("bad argument to '%s' (number expected)", fn)
+	}
+	return luNumOf(n)
+}
+
+func (rt *jsrt) luArgInt(v interface{}, fn string) int64 {
+	n, ok := luToNum(v)
+	if !ok {
+		rt.fail("bad argument to '%s' (number expected)", fn)
+	}
+	if !luIsInt(n) {
+		rt.fail("bad argument to '%s' (number has no integer representation)", fn)
+	}
+	return luInt64(n)
+}
+
 func luToNum(v interface{}) (interface{}, bool) {
 	if luIsNum(v) {
 		return v, true
@@ -907,6 +930,71 @@ func init() {
 				return w(giNorm(luInt64(l)%b, 64, false))
 			}
 			return w(luMkFlo(math.Mod(luNumOf(l), luNumOf(r))))
+		}
+		// ---- the four math members whose answer is not a bare Math call ----
+		// docs/todo.md 1.1: the rest of Lua's math library needs no extern at all
+		// now that the host Math carries the same thirty-four members in all three
+		// engines, so lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight through
+		// it. These four cannot: an argument COUNT or the integer SUBTYPE decides
+		// what they answer. The layer-2 twins are in languages/lib/lua-rt.metajs.
+		//
+		// math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument
+		// means Atan": lmathlib.c passes the default through atan2, and the two
+		// disagree on the sign of a zero.
+		m["js_luatan"] = func(a []uint64) uint64 {
+			y := rt.luArgNum(u(a[0]), "atan")
+			x := 1.0
+			if !isUndefOrNull(u(a[1])) {
+				x = rt.luArgNum(u(a[1]), "atan")
+			}
+			return w(luMkFlo(math.Atan2(y, x)))
+		}
+		// math.log(x [, base]). lmathlib.c special-cases base 2 and base 10 to
+		// l_mathop(log2)/log10 instead of dividing, and the difference is VISIBLE:
+		// math.log(8, 2) is exactly 3.0 through Log2 and 3.0000000000000004 at
+		// some arguments through Log(x)/Log(2).
+		m["js_lulog"] = func(a []uint64) uint64 {
+			x := rt.luArgNum(u(a[0]), "log")
+			if isUndefOrNull(u(a[1])) {
+				return w(luMkFlo(math.Log(x)))
+			}
+			b := rt.luArgNum(u(a[1]), "log")
+			if b == 2 {
+				return w(luMkFlo(math.Log2(x)))
+			}
+			if b == 10 {
+				return w(luMkFlo(math.Log10(x)))
+			}
+			return w(luMkFlo(math.Log(x) / math.Log(b)))
+		}
+		// math.modf(x) answers TWO values, so the extern hands back a plain array
+		// and the emitter wraps it with lua_mk. The integral part goes through
+		// lmathlib's pushnumint - an INTEGER when it has an exact integer
+		// representation and a float otherwise, so math.modf(3.7) is `3  0.7` and
+		// math.modf(math.huge) is `inf  0.0`. It truncates toward zero, which is
+		// why math.floor cannot stand in for it at a negative argument, and the
+		// fractional part of an infinity is +-0.0 rather than NaN.
+		m["js_lumodf"] = func(a []uint64) uint64 {
+			n := rt.luArgNum(u(a[0]), "modf")
+			ip := math.Trunc(n)
+			fp := math.Copysign(0, n)
+			if !math.IsInf(n, 0) {
+				fp = n - ip
+			}
+			var first interface{}
+			if iv, fits := luI64(ip); fits && !math.IsNaN(ip) {
+				first = iv
+			} else {
+				first = luMkFlo(ip)
+			}
+			return w(&jsArray{elems: []interface{}{first, luMkFlo(fp)}})
+		}
+		// math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
+		// math.ult(-1, 2) is false where -1 < 2 is true.
+		m["js_luult"] = func(a []uint64) uint64 {
+			l := rt.luArgInt(u(a[0]), "ult")
+			r := rt.luArgInt(u(a[1]), "ult")
+			return w(uint64(l) < uint64(r))
 		}
 		m["js_lumaxint"] = func(a []uint64) uint64 { return w(giNorm(math.MaxInt64, 64, false)) }
 		m["js_luminint"] = func(a []uint64) uint64 { return w(giNorm(math.MinInt64, 64, false)) }

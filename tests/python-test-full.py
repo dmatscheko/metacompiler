@@ -2595,6 +2595,144 @@ def s39():
     check("it47", hasattr(str, "__name__") and getattr(str, "__name__", "NOPE") == "str")
     check("it48", getattr(sorted_like, "__name__", "NOPE") == "sorted_like")
 
+    # ----- a BOUND METHOD's introspection (docs/todo.md 1.4) -----
+    # getattr([1,2], "count").__name__ was '<lambda>' in the interpreter and None
+    # in both compiled halves where CPython 3.14.6 says 'count': a bound method is
+    # a FRESH closure and neither name table is keyed to find it. Every name below
+    # is read out of a LIST so the constant folder cannot answer it.
+    mnames = ["count", "upper", "keys", "m"]
+    bl = getattr([3, 1, 2], mnames[0])
+    bs = getattr("ab", mnames[1])
+    bd = getattr({"a": 1}, mnames[2])
+    check("it49", bl.__name__ == "count" and bs.__name__ == "upper" and bd.__name__ == "keys")
+    # __qualname__ is CPython's exactly, because a bound method knows its receiver.
+    check("it50", bl.__qualname__ == "list.count" and bs.__qualname__ == "str.upper")
+    check("it51", bd.__qualname__ == "dict.keys")
+    # __self__ IS the receiver, by identity for the list.
+    gl2 = [3, 1, 2]
+    check("it52", getattr(gl2, mnames[0]).__self__ is gl2 and bs.__self__ == "ab")
+    # A BUILT-IN method has no __func__ - CPython raises AttributeError, and so
+    # does every engine here now that the miss is catchable rather than a host abort.
+    nof = 0
+    try:
+        bl.__func__
+    except AttributeError:
+        nof = 1
+    check("it53", nof == 1)
+    # hasattr has to agree with getattr on every one of them.
+    check("it54", hasattr(bl, "__name__") and hasattr(bl, "__self__") and not hasattr(bl, "__func__"))
+    # type() names the two CPython callable types, which all three engines used to
+    # answer 'function' for.
+    check("it55", type(bl).__name__ == "builtin_function_or_method")
+    check("it56", type(len).__name__ == "builtin_function_or_method")
+    check("it57", type(sorted_like).__name__ == "function" and type(lam).__name__ == "function")
+    # ... and 'type' for a class object, which the compiled halves said 'object' to.
+    check("it58", type(str).__name__ == "type" and type(map).__name__ == "type")
+
+    class Bm:
+        def mth(self, q):
+            return q + 1
+
+    bi = Bm()
+    bnd = getattr(bi, mnames[3] + "th")
+    # CPython qualifies a class defined inside a function as
+    # 's39.<locals>.Bm.mth'; no engine here records the DEFINING scope, so the
+    # row asserts the SUFFIX, which is exact in CPython and in all three engines.
+    check("it59", bnd.__name__ == "mth" and bnd.__qualname__.endswith("Bm.mth"))
+    check("it60", bnd.__self__ is bi and type(bnd).__name__ == "method")
+    check("it61", bnd.__func__ is Bm.mth and bnd(1) == 2)
+    # How the two forms PRINT. CPython appends the receiver's address to both and
+    # the address cannot be matched, so it is left off - the same rule <function f>
+    # and <map object> already follow. The rest is byte-for-byte CPython.
+    check("it62", str(bl).startswith("<built-in method count of list object"))
+    check("it63", str(bnd).startswith("<bound method ") and "Bm.mth of <" in str(bnd))
+    # __qualname__ of a plain function and of a class: EXACT for a module-level
+    # def, a lambda, a builtin and a builtin type. The one shape it is wrong for
+    # is a function read off a class body - CPython says 'Bm.mth' and this says
+    # 'mth' - because no engine records the DEFINING scope at a def site.
+    check("it64", sorted_like.__qualname__.endswith("sorted_like") and lam.__qualname__.endswith("<lambda>"))
+    check("it65", len.__qualname__ == "len" and str.__qualname__ == "str" and map.__qualname__ == "map")
+    check("it66", Bm.__qualname__.endswith("Bm") and Bm.mth.__qualname__.endswith("mth"))
+
+    # ----- an attribute a value does NOT have raises, catchably -----
+    # Both compiled halves answered None for a missing attribute on a builtin
+    # value and ABORTED THE PROGRAM on a missing attribute of a class object;
+    # the interpreter half raised, but with just "'nope'" as the message. All
+    # three now raise CPython's exact text, and it is catchable.
+    misses = [[3, 1, 2], "ab", {"a": 1}, bi, Bm, 5]
+    mwant = ["'list' object has no attribute 'nope_xyz'",
+             "'str' object has no attribute 'nope_xyz'",
+             "'dict' object has no attribute 'nope_xyz'",
+             "'Bm' object has no attribute 'nope_xyz'",
+             "type object 'Bm' has no attribute 'nope_xyz'",
+             "'int' object has no attribute 'nope_xyz'"]
+    mok = 0
+    for i in range(len(misses)):
+        try:
+            getattr(misses[i], "nope_xyz")
+        except AttributeError as ex:
+            if str(ex) == mwant[i]:
+                mok += 1
+    check("it67", mok == 6)
+    check("it68", getattr(misses[0], "nope_xyz", "dflt") == "dflt" and not hasattr(misses[4], "nope_xyz"))
+
+    # ----- an except HANDLER BODY IS NOT A SCOPE -----
+    # A name FIRST bound inside a handler was lost at the closing brace in the
+    # interpreter half - `except E: r = 1` then print(r) died with "name 'r' is
+    # not defined" - while both compiled halves and CPython kept it. A live
+    # halves divergence no test reached because every test assigned a name that
+    # already existed outside. docs/todo.md 1.4.
+    try:
+        raise ValueError(mnames[0])
+    except ValueError as ex2:
+        hv1 = "caught " + str(ex2)
+    check("it69", hv1 == "caught count")
+
+    def handler_scope():
+        try:
+            raise KeyError("k")
+        except KeyError:
+            hv2 = 41
+        return hv2 + 1
+
+    check("it70", handler_scope() == 42)
+    # The `as` name does NOT escape the handler, in any engine. CPython DELETES
+    # it (so an outer binding of the same name is deleted too and a later read is
+    # a NameError); the compiled halves scope it to the handler and leave an
+    # outer binding standing, and the interpreter half now restores it the same
+    # way. A DELIBERATE non-convergence: doing it CPython's way needs the emitter
+    # to unbind a name in an enclosing scope on every exit path out of a handler.
+    ex2 = "outer"
+    try:
+        raise ValueError("v")
+    except ValueError as ex2:
+        pass
+    try:
+        after_as = ex2
+    except Exception:
+        after_as = "DELETED"        # CPython lands here, and only CPython
+    check("it71", after_as == "outer")
+
+    # ----- repr() of the three host-backed shapes -----
+    # A GENERATOR printed a raw host dump in every engine: "[object Object]" in
+    # the interpreter and a Go STRUCT LITERAL under llvm.Run. A compiled PATTERN
+    # and a MATCH printed CPython's form in the interpreter and "[object Object]"
+    # in both compiled halves - js_pyrxstr answered str()/print() and repr() went
+    # straight past it. Two live halves divergences, docs/todo.md 1.4. CPython
+    # appends an address to all three and names the generating function; neither
+    # is recoverable here, so the short form is printed, as <map object> already is.
+    def gsrc():
+        yield 1
+
+    gob = gsrc()
+    check("it72", repr(gob).startswith("<generator object") and type(gob).__name__ == "generator")
+    rpat = re.compile("a(b)")
+    rmat = rpat.search("ab")
+    check("it73", repr(rpat) == "re.compile('a(b)')")
+    check("it74", repr(rmat) == "<re.Match object; span=(0, 2), match='ab'>")
+    # ... and as a CONTAINER element, which is the path str() never reached.
+    check("it75", repr([rpat]) == "[re.compile('a(b)')]")
+
 
 def main():
     s01() # SECTION-CALL 01

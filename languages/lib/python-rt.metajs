@@ -462,6 +462,18 @@ function pyStr(v) {
     // its own and cannot be matched, so it is left off rather than invented, and
     // all three engines print this same short form.
     if (pyIsIter(v)) { return "<" + pyToStr(v["__pyit"]) + " object>" }
+    // A GENERATOR, on the same rule. CPython says <generator object gen at
+    // 0x...>; neither the address nor the generating function's name is
+    // recoverable from the value, so the short form is printed. Every engine
+    // printed a raw host dump before. docs/todo.md 1.4.
+    if (pyIsGen(v)) { return "<generator object>" }
+    // A compiled PATTERN and a MATCH render the way CPython's repr does. The
+    // interpreter half has had both since the regex engine landed and both
+    // compiled halves printed [object Object]: a live halves divergence found by
+    // the docs/todo.md 1.4 repr sweep. js_pyrxstr already answered them for
+    // str()/print(); repr() and every CONTAINER element went past it.
+    var rxr = pyERxRepr(v)
+    if (rxr["ok"]) { return rxr["s"] }
     // A FUNCTION, on the same rule as the iterator line above: CPython prints
     // <function fn at 0x...> and the address cannot be matched, so it is left off
     // rather than invented. Without it this half and the native binary printed the
@@ -474,6 +486,9 @@ function pyStr(v) {
 }
 
 function pyFuncRender(v) {
+    // A BOUND METHOD prints as one - docs/todo.md 1.4.
+    var bmi = pyBMFind(v)
+    if (bmi >= 0) { return pyBMRender(bmi) }
     // A BUILTIN prints its own way, and its table is asked FIRST: a user
     // `def len(...)` records its own name against its own closure object, so the
     // two tables cannot collide by identity even when they collide by name.
@@ -665,8 +680,32 @@ function pyTypeName(v) {
     // boxed in the first place.
     if (typeof v == "number") { return "int" }
     if (Array.isArray(v)) { return "list" }
-    if (typeof v == "function") { return "function" }
+    // CPython's type(gen).__name__, and the name its AttributeError uses.
+    if (pyIsGen(v)) { return "generator" }
+    if (typeof v == "function") {
+        // docs/todo.md 1.4: a BOUND method and a BUILTIN are their own CPython
+        // types, and both compiled halves answered 'function' for all three.
+        var bml = pyBMFind(v)
+        if (bml >= 0) {
+            if (pyBMTab[bml + 3] === null) { return "builtin_function_or_method" }
+            return "method"
+        }
+        var bfk = rtPairGet(pyBBFnObjs, pyBBFnCodes, v)
+        if (bfk !== undefined) {
+            // range / enumerate / zip / map / filter / reversed really ARE
+            // types, and the leading "*" of the code is what says so.
+            if (pyToStr(bfk).charAt(0) == "*") { return "type" }
+            return "builtin_function_or_method"
+        }
+        return "function"
+    }
     if (pyIsObj(v)) {
+        // type(C) is 'type' for a class object - a BUILTIN one (what type(3)
+        // hands out, which carries only __name and no __mro) as well as a user
+        // class. The interpreter half already answered 'type' here and this one
+        // said 'object': a live halves divergence, docs/todo.md 1.4.
+        if (pyIsClass(v)) { return "type" }
+        if (v["__name"] !== undefined && pyInstClassOf(v) === null) { return "type" }
         if (pySetElemsOf(v) != null) { return "set" }
         if (pyIsDict(v)) { return "dict" }
         // A CURSOR names its own type: CPython's list_iterator / str_iterator /
@@ -856,7 +895,10 @@ function pyInstanceDict(inst) {
 function pyGetAttr(obj, name) {
     if (pyIsSuper(obj)) { return pySuperAttr(obj, name) }
     if (pyIsClass(obj)) {
-        if (name == "__name__") { return obj["__name"] }
+        // __qualname__ of a class is its __name__ for every class this subset can
+        // write: CPython qualifies only a NESTED class, and a nested `class` here
+        // is bound by the same name as a top-level one.
+        if (name == "__name__" || name == "__qualname__") { return obj["__name"] }
         if (name == "__mro__") { return obj["__mro"] }
         if (name == "__bases__") {
             var bl = obj["__basesl"]
@@ -864,7 +906,12 @@ function pyGetAttr(obj, name) {
             return []
         }
         if (pyLookupHas(obj, name)) { return pyLookupVal(obj, name) }
-        fail("type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
+        // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises. This
+        // was fail(), which layer 2 cannot catch at all, so `try: getattr(C,
+        // "nope") except AttributeError:` ended the program in both compiled
+        // halves while the interpreter half caught it.
+        pyRaiseExc("AttributeError",
+                   "type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
     }
     var cls = pyInstClassOf(obj)
     if (cls != null) {
@@ -880,15 +927,48 @@ function pyGetAttr(obj, name) {
             // the raw function and died with "member 'v' of undefined" where the
             // interpreter half (pyattr's bindMethod) answered - a live halves
             // divergence, found by the docs/todo.md 1.9 sweep.
-            if (pyIsCallable(v)) { return pyDBindMethod(obj, v) }
+            if (pyIsCallable(v)) { return pyDBindMethod(obj, v, name) }
             return v
         }
-        fail("'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
+        pyRaiseExc("AttributeError",
+                   "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(obj, name)
     if (bcm !== undefined) { return bcm }
-    if (name == "__name__") {
+    // A BOUND METHOD knows its own name, receiver and underlying function
+    // (docs/todo.md 1.4). __qualname__ is answered HERE and nowhere else on
+    // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
+    // fall out of the record, while a plain function's qualname would need the
+    // DEFINING scope recorded at every def site in four places.
+    if (typeof obj == "function") {
+        var bmj = pyBMFind(obj)
+        if (bmj >= 0) {
+            if (name == "__name__") { return pyBMTab[bmj + 1] }
+            if (name == "__qualname__") { return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyToStr(pyBMTab[bmj + 1]) }
+            if (name == "__self__") { return pyBMTab[bmj + 2] }
+            if (name == "__func__") {
+                if (pyBMTab[bmj + 3] === null) {
+                    // CPython: a built-in method has no __func__.
+                    pyRaiseExc("AttributeError",
+                        "'builtin_function_or_method' object has no attribute '__func__'")
+                }
+                return pyBMTab[bmj + 3]
+            }
+        }
+    }
+    // DECLINED, and it is worth saying where: __doc__ and __module__ stay
+    // unanswered (an AttributeError, like any other absent attribute). __doc__
+    // needs a def's leading string statement recorded in three engines AND
+    // CPython's own text for every builtin; __module__ needs a builtin-vs-user
+    // marker on a CLASS object, which neither compiled half has.
+    // __qualname__ rides with __name__ below. It is EXACT for a module-level
+    // def, a lambda, a builtin function and a builtin type, and wrong for exactly
+    // one shape: a function read off a class body, where CPython says 'C.m' and
+    // this says 'm'. Closing that one needs the DEFINING scope recorded at every
+    // def site in three engines and the emitter; the bound-method arm above
+    // already answers 'C.m'. docs/todo.md 1.4.
+    if (name == "__name__" || name == "__qualname__") {
         // A synthetic class object for a BUILTIN type (what type(3) hands out)
         // carries only its name, and a function carries none of its own - the name
         // its def bound it under was recorded by js_pyfnname (chunk B).
@@ -912,7 +992,21 @@ function pyGetAttr(obj, name) {
     // x.__class__ for a value that is not a user instance - the same synthetic
     // class object type(x) hands out, so `[].__class__ is list` holds.
     if (name == "__class__") { return js_pytype(obj) }
-    return pyGetMember(obj, name)
+    // docs/todo.md 1.4: an attribute a builtin value does NOT have raises, as
+    // CPython does. This used to fall into pyGetMember and answer None - so
+    // `[1,2].nope` and getattr([1,2], "nope") were None in both compiled halves
+    // where the interpreter half raised AttributeError. An OWN property is still
+    // answered first, because a value that really holds None must not be
+    // mistaken for a missing one (a compiled regex and a match are read so).
+    if (pyIsObj(obj)) {
+        if (obj[name] !== undefined) { return obj[name] }
+    }
+    var mv = pyGetMember(obj, name)
+    if (mv === undefined || mv === null) {
+        pyRaiseExc("AttributeError",
+                   "'" + pyTypeName(obj) + "' object has no attribute '" + name + "'")
+    }
+    return mv
 }
 
 // rt.getMember for the shapes this value model builds. A dict answers its own
@@ -3324,7 +3418,7 @@ function pyDHasAttr(obj, name) {
         return pySuperFind(obj, name) !== undefined
     }
     if (pyIsClass(obj)) {
-        if (name == "__name__" || name == "__mro__" || name == "__bases__") { return true }
+        if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__") { return true }
         return pyLookupHas(obj, name)
     }
     var cls = pyInstClassOf(obj)
@@ -3344,10 +3438,17 @@ function pyDHasAttr(obj, name) {
     // carries only its name and has no __isclass, so the arm above misses it -
     // hasattr(str, "__name__") was False here and True in the Go twin, which has
     // had this line all along. A layer-2-only gap, found by the 1.9 probe.
-    if (name == "__name__") {
+    if (name == "__name__" || name == "__qualname__") {
         if (pyIsObj(obj) && obj["__name"] !== undefined) { return true }
         if (rtPairGet(pyBBFnObjs, pyBBFnCodes, obj) !== undefined) { return true }
         if (rtPairGet(pyBFnObjs, pyBFnNames, obj) !== undefined) { return true }
+    }
+    if (typeof obj == "function") {
+        var bmk = pyBMFind(obj)
+        if (bmk >= 0) {
+            if (name == "__name__" || name == "__qualname__" || name == "__self__") { return true }
+            if (name == "__func__") { return pyBMTab[bmk + 3] !== null }
+        }
     }
     if (typeof obj != "object") { return false }
     if (Array.isArray(obj)) { return false }
@@ -4936,13 +5037,13 @@ function pySuperAttr(s, name) {
     if (m === undefined) {
         pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
     }
-    if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m) }
+    if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m, name) }
     return m
 }
 // A method read off an instance (or off a super() proxy) is BOUND to it, which
 // is what makes `f = a.m; f()` the call CPython makes. Go: rt.pyBindMethod.
-function pyDBindMethod(self, m) {
-    return function() {
+function pyDBindMethod(self, m, name) {
+    var b = function() {
         var args = []
         var i = 0
         while (i < arguments.length) {
@@ -4951,6 +5052,74 @@ function pyDBindMethod(self, m) {
         }
         return pyCall(m, pyBindCall(m, rtPrepend(self, args), undefined))
     }
+    return pyBMSet(b, name, self, m)
+}
+
+// ----- what a BOUND METHOD knows about itself (docs/todo.md 1.4) ------------
+//
+// getattr([1,2], "count").__name__ was None in both compiled halves and
+// '<lambda>' in the interpreter where CPython says 'count'. Neither of the two
+// name tables above can answer it: pyBFnObjs holds what a `def` bound and
+// pyBBFnObjs the builtins, and both are keyed by the closure VALUE, while a
+// bound method is a FRESH closure minted at the attribute read.
+//
+// ONE flat array with a stride of four - closure, method name, receiver,
+// underlying function (null for a builtin method) - and not four parallel
+// arrays, because every module-level global in this file costs (see the arena
+// note on pyBBFnObjs above). It starts EMPTY, so it adds no live bytes to a
+// program that never reads a method off a value; it then grows with the number
+// of bound methods created, exactly as pyBFnObjs grows with the number of times
+// a `def` runs. The scan is walked only by introspection, never by a call.
+//
+// WHAT IT COSTS, measured, because the arena note above says a kilobyte of
+// anything on tests/bench/mod.py is worth ~2.4%. It is NOT on a threshold this
+// time and the exact counters say so: collections=3574 and heap=11,627,376 are
+// IDENTICAL before and after (the live set moves 237,440 -> 243,392 bytes, all
+// of it boot-time code, and the arena does not step). The binary grows 1,205,064
+// -> 1,241,736 bytes. `tests/bench.sh python --paired <base> --draws 21`, run
+// with ONLY this file's change in the tree so no other agent's work is in it,
+// reads -0.23% - "no difference".
+//
+// Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
+// family in languages/python-interpreter.abnf.
+var pyBMTab = []
+
+function pyBMSet(f, name, self, fn) {
+    pyBMTab.push(f)
+    pyBMTab.push(pyToStr(name))
+    pyBMTab.push(self)
+    pyBMTab.push(fn)
+    return f
+}
+
+// The index of f's record, or -1.
+function pyBMFind(f) {
+    var i = pyBMTab.length - 4
+    while (i >= 0) {
+        if (pyBMTab[i] === f) { return i }
+        i = i - 4
+    }
+    return 0 - 1
+}
+
+// The type name a bound method's __qualname__ and repr are prefixed with: an
+// INSTANCE names its class, everything else its builtin type.
+function pyBMOwner(self) {
+    var c = pyInstClassOf(self)
+    if (c !== null && c !== undefined) { return pyToStr(c["__name"]) }
+    return pyTypeName(self)
+}
+
+// How a bound method prints. CPython appends the receiver's ADDRESS to both
+// forms; the address is its own and cannot be matched, so it is left off here
+// exactly as it is for <function f> and <map object>.
+function pyBMRender(i) {
+    var nm = pyToStr(pyBMTab[i + 1])
+    var self = pyBMTab[i + 2]
+    if (pyBMTab[i + 3] === null) {
+        return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
+    }
+    return "<bound method " + pyBMOwner(self) + "." + nm + " of " + pyRepr(self) + ">"
 }
 function pySuperMCall(s, name, args, kw) {
     pySuperCheck(s)
@@ -6126,7 +6295,7 @@ function pyDBuiltinAttr(obj, name) {
 // through it, so getattr(xs, "sort")(reverse=True) is not the same as
 // xs.sort(reverse=True); the direct call is.
 function pyDBoundBuiltin(target, name) {
-    return function() {
+    var f = function() {
         var args = []
         var i = 0
         while (i < arguments.length) {
@@ -6135,6 +6304,9 @@ function pyDBoundBuiltin(target, name) {
         }
         return pyDMethodCall(target, name, args, undefined)
     }
+    // null in the fourth slot is what says "a BUILTIN method": it is why
+    // __func__ raises and why the repr is <built-in method ...>.
+    return pyBMSet(f, name, target, null)
 }
 
 // docs/todo.md 5.2 and 2.4. pyMemberCall is layer 2's copy of the SHARED

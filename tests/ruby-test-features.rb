@@ -1108,5 +1108,178 @@ check("argc-required", argc_msg, "wrong number of arguments (given 0, expected 1
 check("argc-optional", argc_msg2, "wrong number of arguments (given 0, expected 1..2)")
 check("argc-splat", argc_msg3, "wrong number of arguments (given 0, expected 1+)")
 
+
+# ----- docs/todo.md 1.3: the ruby residue -----------------------------------
+# Every value here was measured against /usr/bin/ruby 2.6.10, whose behaviour on
+# all of it is unchanged in 3.x.
+
+# super(m) inside a user Exception subclass' initialize. The superclass is a
+# BUILTIN and carries no compiled `initialize', so both compiled halves aborted
+# with *unknown super method 'initialize'* while this half ran it.
+class T13Err < StandardError
+  def initialize(m)
+    super("wrapped: " + m)
+  end
+end
+def t13_super
+  begin
+    raise T13Err, "boom"
+  rescue => e
+    e.message
+  end
+end
+check("t13-super-init", t13_super, "wrapped: boom")
+check("t13-super-isa", (T13Err.new("x").is_a?(Exception)), true)
+check("t13-plain-isa", (RuntimeError.new("x").is_a?(Exception)), true)
+
+# Exception#inspect / #message / #to_s. MRI's #message IS #to_s, and #inspect is
+# "#<Class: to_s>" - or the bare class name when to_s is empty.
+class T13Sub < StandardError
+  def to_s
+    "TS"
+  end
+end
+check("t13-inspect-plain", RuntimeError.new("nm").inspect, "#<RuntimeError: nm>")
+check("t13-inspect-sub", T13Sub.new("m").inspect, "#<T13Sub: TS>")
+check("t13-message-is-to-s", T13Sub.new("m").message, "TS")
+check("t13-inspect-noarg", StandardError.new.inspect, "#<StandardError: StandardError>")
+class T13Plain
+end
+check("t13-obj-to-s", T13Plain.new.to_s, "#<T13Plain>")
+
+# The modifier rescue. It binds TIGHTER than `=' (so the FALLBACK is assigned),
+# and it applies to a whole statement, so `raise "a" rescue 7' is caught.
+def t13_boom
+  raise "e"
+end
+t13_a = t13_boom rescue "c"
+check("t13-rescue-rhs", t13_a, "c")
+t13_b = (raise "a" rescue 7)
+check("t13-rescue-stmt", t13_b, 7)
+t13_c = 1 / 0 rescue "div"
+check("t13-rescue-zerodiv", t13_c, "div")
+def t13_zde
+  begin
+    1 / 0
+  rescue ZeroDivisionError => e
+    e.message
+  end
+end
+check("t13-zerodiv-catchable", t13_zde, "divided by 0")
+
+# Kernel#Integer / #Float / #String / #Array: the conversion functions, which
+# resolved to the CLASS object in every engine.
+check("t13-kernel-int", Integer("0x1f"), 31)
+check("t13-kernel-int-base", Integer("ff", 16), 255)
+check("t13-kernel-int-under", Integer("1_000"), 1000)
+t13_d = Integer("z") rescue 5
+check("t13-kernel-int-raise", t13_d, 5)
+check("t13-kernel-float", Float("1_0.5"), 10.5)
+check("t13-kernel-string", String(5), "5")
+check("t13-kernel-array", Array(nil), [])
+
+# A bare `puts' must not read the next line's statement as its argument.
+t13_e = 5
+puts
+check("t13-bare-puts", t13_e, 5)
+
+# Two-argument and range index ASSIGNMENT, and String element assignment.
+t13_f = [1, 2, 3, 4, 5]
+t13_f[1, 2] = 9
+check("t13-idx2-assign", t13_f, [1, 9, 4, 5])
+t13_g = [1, 2, 3, 4, 5]
+t13_g[1, 2] = [7, 8, 9]
+check("t13-idx2-splice", t13_g, [1, 7, 8, 9, 4, 5])
+t13_h = [1, 2, 3, 4, 5]
+t13_h[1..2] = 0
+check("t13-range-assign", t13_h, [1, 0, 4, 5])
+t13_i = "hello world"
+t13_i[0, 5] = "HI"
+check("t13-str-slice-assign", t13_i, "HI world")
+t13_j = "hello"
+t13_j[0] = "H"
+check("t13-str-elem-assign", t13_j, "Hello")
+t13_k = [1, 2, 3]
+t13_k[5, 0] = 9
+check("t13-idx2-grow", t13_k, [1, 2, 3, nil, nil, 9])
+
+# A bounded range with a NEGATIVE endpoint, held in a VARIABLE.
+t13_r = 1..-1
+t13_s = "abcdefgh"
+t13_t = [1, 2, 3, 4, 5, 6, 7, 8]
+check("t13-negrange-str", t13_s[t13_r], "bcdefgh")
+check("t13-negrange-arr", t13_t[t13_r], [2, 3, 4, 5, 6, 7, 8])
+t13_r2 = 2..-2
+check("t13-negrange-mid", t13_s[t13_r2], "cdefg")
+t13_r3 = 1...-1
+check("t13-negrange-excl", t13_s[t13_r3], "bcdefg")
+check("t13-negrange-size", t13_r.size, 0)
+check("t13-negrange-toa", t13_r.to_a, [])
+check("t13-negrange-str-of", t13_r.to_s, "1..-1")
+t13_r4 = 1..3
+check("t13-range-size", t13_r4.size, 3)
+check("t13-range-min-empty", t13_r.min, nil)
+
+# The String surface. bytes / tr / center / ljust / rjust / count / delete were
+# the six the item named; seventy-eight were missing.
+check("t13-bytes", "caf\u00e9".bytes, [99, 97, 102, 195, 169])
+check("t13-bytesize", "caf\u00e9".bytesize, 5)
+check("t13-getbyte", "hello".getbyte(1), 101)
+check("t13-codepoints", "hi".codepoints, [104, 105])
+check("t13-sum", "hello".sum, 532)
+check("t13-tr-range", "abcdef".tr("a-c", "x"), "xxxdef")
+check("t13-tr-pair", "hello".tr("el", "ip"), "hippo")
+check("t13-tr-neg", "hello".tr("^aeiou", "*"), "*e**o")
+check("t13-tr-shift", "hello".tr("a-y", "b-z"), "ifmmp")
+check("t13-tr-s", "hello".tr_s("l", "r"), "hero")
+check("t13-squeeze", "aaabbbccc".squeeze, "abc")
+check("t13-squeeze-set", "aaabbbccc".squeeze("a"), "abbbccc")
+check("t13-count", "hello world".count("lo"), 5)
+check("t13-count-two", "hello world".count("lo", "o"), 2)
+check("t13-count-neg", "hello".count("^l"), 3)
+check("t13-delete", "hello world".delete("l"), "heo word")
+check("t13-center", "hi".center(10), "    hi    ")
+check("t13-center-pad", "hi".center(10, "12"), "1212hi1212")
+check("t13-center-narrow", "hi".center(1), "hi")
+check("t13-ljust", "hi".ljust(6, "."), "hi....")
+check("t13-rjust", "hi".rjust(6, "."), "....hi")
+check("t13-center-chars", "caf\u00e9".center(8, "-"), "--caf\u00e9--")
+check("t13-chop", "hello".chop, "hell")
+check("t13-chomp", "hello\n".chomp, "hello")
+check("t13-chomp-crlf", "abc\r\n".chomp, "abc")
+check("t13-chr", "hello".chr, "h")
+check("t13-hex", "0x1f".hex, 31)
+check("t13-oct", "17".oct, 15)
+check("t13-swapcase", "HeLLo".swapcase, "hEllO")
+check("t13-insert", "hello".insert(1, "X"), "hXello")
+check("t13-insert-neg", "hello".insert(-1, "X"), "helloX")
+check("t13-prepend", "hello".prepend("X"), "Xhello")
+check("t13-partition", "hello".partition("l"), ["he", "l", "lo"])
+check("t13-rpartition", "hello".rpartition("l"), ["hel", "l", "o"])
+check("t13-partition-miss", "hello".partition("z"), ["hello", "", ""])
+check("t13-delete-prefix", "hello".delete_prefix("he"), "llo")
+check("t13-delete-suffix", "hello".delete_suffix("lo"), "hel")
+check("t13-casecmp", "abc".casecmp("ABD"), -1)
+check("t13-casecmp-q", "hello".casecmp?("HELLO"), true)
+check("t13-lines", "a\nb\n".lines, ["a\n", "b\n"])
+check("t13-rindex", "hello".rindex("l"), 3)
+check("t13-lstrip", "  hi  ".lstrip, "hi  ")
+check("t13-rstrip", "  hi  ".rstrip, "  hi")
+check("t13-ascii-only", "caf\u00e9".ascii_only?, false)
+check("t13-dump", "hello".dump, "\"hello\"")
+# The BANG forms answer the new string, or nil when nothing changed. The in-place
+# effect is unrepresentable: a Ruby String is a VALUE in this model, the same
+# limitation sub! / gsub! already have.
+check("t13-upcase-bang", "hello".upcase!, "HELLO")
+check("t13-upcase-bang-nil", "HELLO".upcase!, nil)
+check("t13-strip-bang-nil", "hello".strip!, nil)
+check("t13-tr-bang-nil", "hello".tr!("z", "Z"), nil)
+t13_bytes = []
+"hi".each_byte { |b| t13_bytes << b }
+check("t13-each-byte", t13_bytes, [104, 105])
+t13_up = []
+"ab".upto("ad") { |x| t13_up << x }
+check("t13-upto", t13_up, ["ab", "ac", "ad"])
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)

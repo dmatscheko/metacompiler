@@ -1954,6 +1954,71 @@ function s38(): void {
 }
 function* s38deleg(): Generator<number> { yield* [3, 4] }
 
+// ===== SECTION 39: the Math object =====
+// docs/todo.md 1.1. Math's MEMBERS diverged across the three engines that
+// implement a host global (manual 7.2): languages/lib/runtime.c seeded eleven
+// methods and two properties, abnf/jsrt.go's standardJSBindings offered
+// thirty-two and eight, and goja - the grammar host both interpreter halves run
+// on - thirty-five and eight. So `Math.sin(1)` answered under llvm.Run and died
+// with `unknown method 'sin'` in the NATIVE binary, `Math.clz32` existed only
+// under goja, and Math.hypot overflowed in two of the three. The floor now
+// carries Go's own math package, ported (runtime.c, "the transcendentals"), and
+// abnf/hostglobals_test.go's TestMathMembersAgree pins the member set.
+//
+// Every row is node v24's answer except the two marked GO-vs-V8: Go's math
+// package and V8 differ in the last ulp there, both engines here are Go's, and
+// that divergence is older than this section.
+//
+// Every operand is read out of an array so the constant folders cannot answer
+// at compile time (manual chapter 3).
+function s39(): void {
+    const a: number[] = [1, 2, 0.5, 8, 100, 3, 4, 0, 27, 0.001, 1e300, 1e-300, -1, 16, 0.1, 4294967295];
+
+    check("math01", Math.sin(a[0]) === 0.8414709848078965);
+    check("math02", Math.cos(a[0]) === 0.5403023058681398);
+    check("math03", Math.tan(a[0]) === 1.557407724654902);          // GO-vs-V8: node 1.5574077246549023
+    check("math04", Math.asin(a[2]) === 0.5235987755982989);
+    check("math05", Math.acos(a[2]) === 1.0471975511965976);        // GO-vs-V8: node 1.0471975511965979
+    check("math06", Math.atan(a[0]) === 0.7853981633974483);
+    check("math07", Math.sinh(a[0]) === 1.1752011936438014);
+    check("math08", Math.cosh(a[0]) === 1.5430806348152437);
+    check("math09", Math.tanh(a[0]) === 0.7615941559557649);
+    check("math10", Math.asinh(a[0]) === 0.881373587019543);
+    check("math11", Math.acosh(a[0]) === 0 && Math.atanh(a[2]) === 0.5493061443340548);
+    check("math12", Math.exp(a[0]) === 2.718281828459045);
+    check("math13", Math.expm1(a[0]) === 1.718281828459045);
+    check("math14", Math.log(a[0]) === 0 && Math.log1p(a[0]) === 0.6931471805599453);
+    // log2 of a power of two is EXACT, which Log(x)/Ln2 is not - Go's Log2 has a
+    // frac == 0.5 arm for it and the port carries it.
+    check("math15", Math.log2(a[3]) === 3 && Math.log2(a[13]) === 4);
+    check("math16", Math.log10(a[4]) === 2 && Math.log10(a[9]) === -3);
+    check("math17", Math.cbrt(a[8]) === 3 && Math.cbrt(a[12]) === -1);
+    check("math18", Math.atan2(a[0], a[1]) === 0.4636476090008061);
+
+    // hypot: variadic, and it must overflow only when the RESULT does. The naive
+    // sum of squares answered Infinity for the first row and 0 for the second.
+    check("math19", Math.hypot(a[3], a[5]) === 8.54400374531753);
+    check("math20", Math.hypot(a[10], a[10]) === 1.4142135623730952e+300);
+    check("math21", Math.hypot(a[11], a[11]) === 1.4142135623730952e-300);
+    check("math22", Math.hypot(a[5], a[6]) === 5 && Math.hypot(a[5], a[6], a[13]) === 16.76305461424021);
+
+    // clz32 and fround existed ONLY in goja until this item.
+    check("math23", Math.clz32(a[0]) === 31 && Math.clz32(a[7]) === 32);
+    check("math24", Math.clz32(a[15]) === 0 && Math.clz32(a[1]) === 30);
+    check("math25", Math.fround(a[14]) === 0.10000000149011612);
+    check("math26", Math.fround(a[0]) === 1 && Math.fround(a[10]) === Infinity);
+
+    check("math27", Math.imul(a[5], a[6]) === 12 && Math.imul(a[12], a[15]) === 1);
+    check("math28", Math.LN2 === 0.6931471805599453 && Math.LN10 === 2.302585092994046);
+    check("math29", Math.LOG2E === 1.4426950408889634 && Math.LOG10E === 0.4342944819032518);
+    check("math30", Math.SQRT2 === 1.4142135623730951 && Math.SQRT1_2 === 0.7071067811865476);
+    check("math31", Math.PI === 3.141592653589793 && Math.E === 2.718281828459045);
+
+    check("math32", Math.log2(a[10]) === 996.5784284662087);
+    check("math33", Math.exp(a[12]) === 0.36787944117144233 && Math.sinh(a[12]) === -1.1752011936438014);
+    check("math34", Math.atanh(a[12]) === -Infinity);
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1993,6 +2058,7 @@ function main(): number {
     s36(); // SECTION-CALL 36
     s37(); // SECTION-CALL 37
     s38(); // SECTION-CALL 38
+    s39(); // SECTION-CALL 39
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

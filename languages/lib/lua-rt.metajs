@@ -1004,6 +1004,72 @@ function js_lufmod(a, b) {
     return luMkFlo(luNumOf(l) % luNumOf(r))
 }
 
+// ---- the four math members whose answer is not a bare Math call ----
+// docs/todo.md 1.1: the rest of Lua's math library needs no extern at all now
+// that the host Math carries the same thirty-four members in all three engines,
+// so lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight through it. These four
+// cannot: an argument COUNT or the integer SUBTYPE decides what they answer. The
+// Go twins are in abnf/jsrtlua.go and every line below matches one of them.
+
+// The shared argument check: Lua coerces a numeric STRING in an arithmetic
+// position and so does every math function.
+function luArgNum(v, fn) {
+    var n = luToNum(v)
+    if (n === undefined) { luFail("bad argument to '" + fn + "' (number expected)") }
+    return luNumOf(n)
+}
+function luArgInt(v, fn) {
+    var n = luToNum(v)
+    if (n === undefined) { luFail("bad argument to '" + fn + "' (number expected)") }
+    if (!luIsInt(n)) { luFail("bad argument to '" + fn + "' (number has no integer representation)") }
+    return luPair(n)
+}
+
+// math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument means
+// Atan": lmathlib.c passes the default through atan2.
+function js_luatan(y, x) {
+    var xv = 1
+    if (x !== undefined && x !== null) { xv = luArgNum(x, "atan") }
+    return luMkFlo(Math.atan2(luArgNum(y, "atan"), xv))
+}
+
+// math.log(x [, base]). lmathlib.c routes base 2 and base 10 to log2/log10
+// rather than dividing, and the difference is visible: math.log(8, 2) is exactly
+// 3.0 that way and 3.0000000000000004 at some arguments the other.
+function js_lulog(x, b) {
+    var xv = luArgNum(x, "log")
+    if (b === undefined || b === null) { return luMkFlo(Math.log(xv)) }
+    var bv = luArgNum(b, "log")
+    if (bv === 2) { return luMkFlo(Math.log2(xv)) }
+    if (bv === 10) { return luMkFlo(Math.log10(xv)) }
+    return luMkFlo(Math.log(xv) / Math.log(bv))
+}
+
+// math.modf(x) answers TWO values, so this hands back a plain two-element ARRAY
+// and the emitter wraps it with lua_mk. The integral part goes through
+// lmathlib's pushnumint - an INTEGER when it has an exact integer representation
+// and a float otherwise, so math.modf(3.7) is `3  0.7` and math.modf(math.huge)
+// is `inf  0.0`. It truncates toward ZERO, which is why math.floor cannot stand
+// in for it at a negative argument, and the fractional part of an infinity keeps
+// the argument's sign rather than being NaN.
+function js_lumodf(v) {
+    var n = luArgNum(v, "modf")
+    var ip = Math.trunc(n)
+    var fp = 0 / (n < 0 ? 0 - 1 : 1)
+    if (n - n === 0) { fp = n - ip }
+    var iv = undefined
+    if (ip - ip === 0) { iv = luI64(ip) }
+    var first = iv
+    if (iv === undefined) { first = luMkFlo(ip) }
+    return [first, luMkFlo(fp)]
+}
+
+// math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
+// math.ult(-1, 2) is false where -1 < 2 is true.
+function js_luult(a, b) {
+    return i64CmpU(luArgInt(a, "ult"), luArgInt(b, "ult")) < 0
+}
+
 function js_lumaxint() { return luNorm(luMaxPair()) }
 function js_luminint() { return luNorm(luMinPair()) }
 

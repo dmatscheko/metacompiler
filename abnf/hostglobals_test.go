@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dop251/goja"
 )
 
 // TestMetaJSHostGlobalsAgree pins the MetaJS HOST-GLOBAL SET across the three
@@ -165,4 +167,91 @@ func diffNames(t *testing.T, aName string, a []string, bName string, b []string)
 		"hostGlobals in languages/metajs-interpreter.abnf. Add it to all three, or\n"+
 		"write down at the site why it can only exist in one.",
 		aName, len(a), bName, len(b), aName, missing, bName, extra)
+}
+
+// TestMathMembersAgree pins the MEMBERS of Math across the same three engines,
+// and it exists because TestMetaJSHostGlobalsAgree above could not see them: the
+// three engines all bound the NAME `Math` and then offered wildly different
+// objects behind it. At 1367c23 the C floor seeded eleven methods and two
+// properties, standardJSBindings offered thirty-two and eight, and goja - the
+// grammar host the interpreter halves run on - offered thirty-five and eight. So
+//
+//	Math.sin(1)     0.8414709848078965 under llvm.Run, and
+//	                `js runtime error: unknown method 'sin'` in the native binary
+//	Math.hypot(...) Infinity for (1e300, 1e300) under -frozen, and
+//	                1.4142135623730952e+300 under goja
+//	Math.clz32(1)   31 under goja, and "call of a non function value" under -frozen
+//
+// were all live, and no gate in this project could see any of them (docs/todo.md
+// 1.1). The sets are equal now, up to the two documented exceptions below.
+func TestMathMembersAgree(t *testing.T) {
+	floor := floorMathMemberNames(t)
+	twin := twinMathMemberNames()
+	goja := gojaMathMemberNames(t)
+
+	if len(floor) < 30 {
+		t.Fatalf("parsed only %d Math members from runtime.c - the parse broke, not the code", len(floor))
+	}
+	diffNames(t, "languages/lib/runtime.c (seed_host/obj_put on math)", floor,
+		"abnf/jsrt.go (standardJSBindings mathObj)", twin)
+	diffNames(t, "abnf/jsrt.go (standardJSBindings mathObj)", twin,
+		"goja's own Math (the grammar host of every interpreter half)", goja)
+}
+
+// gojaOnlyMathMembers are the members goja's Math has that the other two engines
+// deliberately do not. Adding an entry here is a DECISION, not a fix.
+//
+//	random  a nondeterministic member CANNOT be converged: the matrix demands
+//	        byte-identical output from goja and -frozen, so any Math.random that
+//	        actually answered differently per run would fail it by construction,
+//	        and a deterministic one would agree with neither goja nor any real
+//	        toolchain. `Math.random` therefore stays a goja-only name: a program
+//	        that calls it works in an interpreter half under goja and aborts
+//	        under -frozen, which is the honest report of the situation.
+var gojaOnlyMathMembers = map[string]bool{"random": true}
+
+var seedHostMathRe = regexp.MustCompile(`seed_host\(math, "([^"]+)"`)
+var objPutMathRe = regexp.MustCompile(`obj_put\(math, mk_cstr\("([^"]+)"\)`)
+
+func floorMathMemberNames(t *testing.T) []string {
+	src := readRepoFile(t, "../languages/lib/runtime.c")
+	out := []string{}
+	for _, re := range []*regexp.Regexp{seedHostMathRe, objPutMathRe} {
+		for _, m := range re.FindAllStringSubmatch(src, -1) {
+			out = append(out, m[1])
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func twinMathMemberNames() []string {
+	m, _ := standardJSBindings()["Math"].(*jsObject)
+	out := []string{}
+	if m != nil {
+		for k := range m.props {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// gojaMathMemberNames asks goja itself rather than reading a source file, which
+// is the only way to get this set: goja's Math is native to the library.
+func gojaMathMemberNames(t *testing.T) []string {
+	vm := goja.New()
+	v, err := vm.RunString(`Object.getOwnPropertyNames(Math).join(",")`)
+	if err != nil {
+		t.Fatalf("goja: %v", err)
+	}
+	out := []string{}
+	for _, n := range strings.Split(v.String(), ",") {
+		if n == "" || gojaOnlyMathMembers[n] {
+			continue
+		}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
