@@ -134,6 +134,28 @@ FULL_ASSERTIONS=8585      # thirteenth round, +274: js +17, typescript +17,
 SHAPE_GROUPS=15           # recorded 2026-08-08 at 6f60337
 SHAPE_LINES=481           # recoverable lines, same commit
 
+# The matrix ENTRY COUNT, for the same reason FULL_ASSERTIONS exists: the matrix
+# is .vscode/launch.json, so a row that is deleted, renamed out of its mode, or
+# commented out makes the suite SMALLER and still prints "all green". That is the
+# failure mode this whole file is written against, and until now the matrix was
+# the one gate with no recorded number at all.
+#
+# It matters more since the abort-text rows landed (docs/todo.md 4.1), because
+# those rows are the ONLY thing in the suite that can see an abort message: a
+# "SHOULD ABORT" row silently losing its "ALL HALVES" token, or an -exe row
+# losing the "SHOULD ABORT" words, downgrades a real comparison to "does this
+# link" without failing anything.
+#
+# A FLOOR, not an equality - rows are added often, and the gate says so.
+MATRIX_ENTRIES=383        # 2026-08-09: 357 + 26 abort-text rows (13 languages x
+                          # {interpreter SHOULD FAIL, native SHOULD ABORT}); the
+                          # three MetaJS SHOULD ABORT rows were promoted in place.
+# And the abort rows specifically, since the count above cannot tell WHICH 383.
+ABORT_ROWS=16             # rows whose name says SHOULD ABORT
+ABORT_ALL_ROWS=10         # of those, the ones that also compare the interpreter
+                          # half (ALL HALVES). Raising this is how a language
+                          # closes its interpreter-vs-compiler abort divergence.
+
 FAILED=()
 pass() { printf '  %-24s %s\n' "$1" "$2"; }
 fail() { printf '  %-24s %s\n' "$1" "$2"; FAILED+=("$1"); }
@@ -183,9 +205,25 @@ fi
 # doing it. It runs after the wait, below.
 wait
 
-# 1. The matrix. Its own summary line is trustworthy.
+# 1. The matrix. Its own summary line is trustworthy about PASS/FAIL - but not
+#    about SIZE, so the recorded counts above are checked here too.
 m=$(grep -E '^matrix: ' "$log/matrix" | tail -1)
-if grep -q '^all green' "$log/matrix"; then pass matrix "${m:-ok}"; else fail matrix "${m:-NO SUMMARY} - see $log/matrix"; cp "$log/matrix" /tmp/gates-matrix.log; fi
+me=$(printf '%s\n' "$m" | sed -n 's/^matrix: \([0-9][0-9]*\) entries run.*/\1/p')
+ar=$(grep -c '"name": ".*SHOULD ABORT' .vscode/launch.json)
+aa=$(grep -c '"name": ".*SHOULD ABORT.*ALL HALVES' .vscode/launch.json)
+if ! grep -q '^all green' "$log/matrix"; then
+    fail matrix "${m:-NO SUMMARY} - see $log/matrix"; cp "$log/matrix" /tmp/gates-matrix.log
+elif [ -z "$me" ]; then
+    fail matrix "all green, but NO ENTRY COUNT in the summary - the run did not finish"
+elif [ "$me" -lt "$MATRIX_ENTRIES" ]; then
+    fail matrix "$m - SHORT: $((MATRIX_ENTRIES - me)) rows FEWER than the recorded $MATRIX_ENTRIES. A smaller suite is not a green one."
+elif [ "$ar" -lt "$ABORT_ROWS" ] || [ "$aa" -lt "$ABORT_ALL_ROWS" ]; then
+    fail matrix "$m - ABORT ROWS SHRANK: $ar SHOULD ABORT ($ABORT_ROWS recorded), $aa of them ALL HALVES ($ABORT_ALL_ROWS recorded). Those rows are the only abort-text check in the suite."
+elif [ "$me" -gt "$MATRIX_ENTRIES" ] || [ "$ar" -gt "$ABORT_ROWS" ] || [ "$aa" -gt "$ABORT_ALL_ROWS" ]; then
+    pass matrix "$m; abort rows $ar/$aa (over the recorded $MATRIX_ENTRIES entries, $ABORT_ROWS/$ABORT_ALL_ROWS abort rows - RAISE them in tests/gates.sh)"
+else
+    pass matrix "$m; abort rows $ar SHOULD ABORT, $aa of them ALL HALVES"
+fi
 
 # 2. The ratchet. Informational by design - it ALWAYS exits 0 - so the summary
 #    line is not a verdict and the grep is the actual gate.

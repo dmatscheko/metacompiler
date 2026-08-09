@@ -16,8 +16,13 @@
 #      and infinite-loop grammar guards) must exit non-zero on both engines.
 #   3. expect-nonzero NATIVE rows: `-exe PATH` only builds, so an entry that names
 #      SHOULD ABORT is built (which must succeed), then the built BINARY is run and
-#      must exit non-zero with the same stderr as the same program under llvm.Run.
-#      That is how the C floor's abort path is reached by a test rather than by hand.
+#      must exit non-zero with the same OUTPUT AND ABORT TEXT as the same program
+#      under llvm.Run. That is how the C floor's abort path is reached by a test
+#      rather than by hand. An entry that also says ALL HALVES adds the third
+#      implementation - the language's own *-interpreter.abnf - so all three must
+#      agree on the diagnostic. See abort_norm() for exactly what is normalised
+#      (the engine naming itself, and nothing else) and why this is compared
+#      engine-against-engine rather than against a checked-in .expected fixture.
 #
 # It exits 0 iff the whole matrix is green.
 #
@@ -454,14 +459,13 @@ fi
 # warning and the program output is not comparable across the halves anyway (one
 # warns during compilation, the other during the run), but PRESENCE is exactly
 # what this group wants to see.
-cross_strip() {
-    # A NUL byte reaches here from grammars that embed one in a string constant;
-    # command substitution drops it anyway and warns about it on stderr, so drop
-    # it explicitly and identically for both halves.
-    local all; all="$(LC_ALL=C tr -d '\000')"
-    printf '%s\n' "$all" | grep -E '^warning: ' || true
-    printf '%s\n' "$all" | grep -vE '^warning: ' \
-    | awk '
+
+# strip_module drops a compiler grammar's emitted LLVM module from the FRONT of a
+# run's stdout, leaving the program's own output. It is shared by cross_strip
+# (group three) and abort_norm (the SHOULD ABORT rows of the matrix) - one
+# implementation, so the two groups cannot disagree about where a module ends.
+strip_module() {
+    awk '
         # Drop the emitted module, keep the program output that follows it.
         #
         # This used to search for the LAST line that looked like the end of IR
@@ -488,7 +492,17 @@ cross_strip() {
                 $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { next }
             if ($0 ~ /^[ \t]*$/ && !seenout) { next }
             done = 1; seenout = 1; print
-        }' \
+        }'
+}
+
+cross_strip() {
+    # A NUL byte reaches here from grammars that embed one in a string constant;
+    # command substitution drops it anyway and warns about it on stderr, so drop
+    # it explicitly and identically for both halves.
+    local all; all="$(LC_ALL=C tr -d '\000')"
+    printf '%s\n' "$all" | grep -E '^warning: ' || true
+    printf '%s\n' "$all" | grep -vE '^warning: ' \
+    | strip_module \
     | grep -Ev '^[a-z#+-]+ (interpreter|compiler): |^  ==> Fail$|^[a-z#+-]+ (interpreter|compiler) error: ' \
     | grep -Ev '^(js runtime error: |jsmain\(\) returned )' \
     | grep -Ev '^[a-z0-9-]+: (exit status|main\(\) returned|program value is) [0-9-]+$' \
@@ -496,6 +510,65 @@ cross_strip() {
     | grep -Ev '^IR interpreter: ' \
     | awk 'NF { blank = 0; for (i = 1; i <= held; i++) print ""; held = 0; print; seen = 1; next }
            seen { held++ }'
+}
+
+# ----------------------------------------------------------------------------
+# abort_norm - the normaliser behind the SHOULD ABORT rows (docs/todo.md 4.1).
+#
+# WHY THIS EXISTS. Until now nothing in the suite could ratchet an ABORT TEXT.
+# The matrix compares each engine against ITSELF (goja vs -frozen), so a
+# wrong-but-consistent message passes; --cross deliberately DELETES abort lines
+# before diffing (see cross_strip's comment) so the two halves aborting for the
+# same cause do not read as a divergence; and an -exe row only BUILDS. That is
+# how b56c2b0 came to find five halves divergences in abort messages by hand,
+# one of them llvm.Run leaking a Go type name ((*abnf.jsArray)) into
+# user-visible output.
+#
+# The property that was missing is ENGINE AGAINST ENGINE on the diagnostic
+# itself, and it is deliberately NOT a checked-in .expected fixture: a stderr
+# fixture has to be blessed every time a message legitimately changes, whereas
+# "the three implementations of this language must say the same thing" is
+# self-maintaining and is exactly the invariant that was broken.
+#
+# WHAT IS NORMALISED, and nothing else. An over-normalised comparison that can
+# never fail is worse than no gate at all, so this list is short and every entry
+# is the ENGINE IDENTIFYING ITSELF, never part of the program's diagnostic:
+#
+#   * the emitted module (strip_module) - only a compiler leg has one, and it is
+#     that grammar's output, not the program's.
+#   * llvm.Run's own "  ==> Fail" verdict line and its "--- Executed with the
+#     built-in IR interpreter" banner - the METACOMPILER saying the module
+#     returned non-zero, which a native binary has no analogue for.
+#   * the harness sign-offs: "<lang> interpreter: program ran to completion" and
+#     its three sibling wordings, "jsmain() returned N", "<name>: exit status N".
+#   * the leading engine tag ONLY - "js runtime error: " and
+#     "<lang> interpreter error: " / "<lang> compiler error: " - keeping the
+#     whole diagnostic that follows it. This is the one substitution that could
+#     hide something, and it cannot hide a message, only the name of the engine
+#     that printed it.
+#
+# NOT normalised, on purpose: file names, line numbers, quoted values, class
+# names, exception spelling. Every leg is handed the SAME source path, so a
+# ruby diagnostic naming "tests/ruby-abort-test.rb:6" is comparable as-is - and
+# the moment two engines disagree about a name or a number, that IS the finding.
+#
+# stdout and stderr are concatenated (stdout first) rather than compared
+# separately, because WHICH STREAM the diagnostic uses is itself a difference
+# between the legs: the interpreter halves print it on stdout, llvm.Run and the
+# native binaries on stderr. Concatenating per leg is deterministic and keeps
+# the program's own pre-abort output in the comparison too.
+#
+#   abort_norm <stdout-file> <stderr-file>
+abort_norm() {
+    cat "$1" "$2" \
+    | LC_ALL=C tr -d '\000' \
+    | strip_module \
+    | grep -Ev '^  ==> Fail$' \
+    | grep -Ev '^--- Executed with the built-in IR interpreter, output:$' \
+    | grep -Ev '^[a-z#+._-]+ (interpreter|compiler): ' \
+    | grep -Ev '^jsmain\(\) returned -?[0-9]+$' \
+    | grep -Ev '^[A-Za-z0-9#+._-]+: (exit status|main\(\) returned|program value is) -?[0-9]+$' \
+    | sed -E 's/^js runtime error: //; s/^[a-z#+._-]+ (interpreter|compiler) error: //'
 }
 
 # cross_one diffs the two halves of one language on one program, writing its
@@ -645,30 +718,49 @@ run_entry() {
     # of its name, or the rule above would demand the opposite), and then the
     # built BINARY must be run and must exit non-zero.
     #
-    # And the binary's stderr is compared against the SAME program under
+    # And the binary's OUTPUT is compared against the SAME program under
     # llvm.Run - the Go twin, the same entry minus `-exe PATH`. That is the check
     # with the teeth: it pins the floor's diagnostic wording to the Go runtime's,
     # in a place where the two implementations are completely separate code. A
     # bare "it exited non-zero" would pass on a segfault.
-    local abort_exe=0 exe="" i
+    #
+    # A name that ALSO says ALL HALVES adds the third implementation: the same
+    # program under languages/<lang>-interpreter.abnf. Three independent
+    # implementations of one language's abort text, compared against each other
+    # (see abort_norm above for exactly what is normalised and what is not).
+    # It is a separate token because it is not universally green yet - several
+    # languages have a live interpreter-vs-compiler divergence in their abort
+    # text, and those rows carry the two-leg form until their owner closes it.
+    # Promoting a row is a one-word edit in .vscode/launch.json.
+    local abort_exe=0 abort_all=0 exe="" i
     case "$name" in *"SHOULD ABORT"*) abort_exe=1 ;; esac
-    local twin=()
+    case "$name" in *"ALL HALVES"*) abort_all=1 ;; esac
+    local twin=() interp=()
     if [ "$abort_exe" -eq 1 ]; then
         i=0
         while [ "$i" -lt "${#args[@]}" ]; do
             if [ "${args[$i]}" = "-exe" ]; then exe="${args[$((i + 1))]}"; i=$((i + 2)); continue; fi
             twin+=("${args[$i]}"); i=$((i + 1))
         done
+        # The interpreter half of the same language, if this row names a
+        # compiler grammar and that half exists.
+        interp=("${twin[@]}")
+        interp[0]="${interp[0]/-to-llvm-ir.abnf/-interpreter.abnf}"
+        [ "${interp[0]}" = "${twin[0]}" ] && interp=()
+        [ "${#interp[@]}" -gt 0 ] && [ ! -f "${interp[0]}" ] && interp=()
     fi
-    local ng="$RESDIR/$idx.ng" nf="$RESDIR/$idx.nf" nt="$RESDIR/$idx.nt"
-    local rc_ng=0 rc_nf=0
+    local ng="$RESDIR/$idx.ng" nf="$RESDIR/$idx.nf" nt="$RESDIR/$idx.nt" ni="$RESDIR/$idx.ni"
+    local rc_ng=0 rc_nf=0 rc_ni=0
 
     local rc_g rc_f
     RUN "$BIN" "${args[@]}"          >"$og" 2>"$eg"; rc_g=$?
-    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >/dev/null 2>"$ng"; rc_ng=$?; }
+    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >"$ng.o" 2>"$ng"; rc_ng=$?; }
     RUN "$BIN" "${args[@]}" -frozen  >"$of" 2>"$ef"; rc_f=$?
-    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >/dev/null 2>"$nf"; rc_nf=$?; }
-    [ "$abort_exe" -eq 1 ] && RUN "$BIN" "${twin[@]}" >/dev/null 2>"$nt"
+    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >"$nf.o" 2>"$nf"; rc_nf=$?; }
+    [ "$abort_exe" -eq 1 ] && RUN "$BIN" "${twin[@]}" >"$nt.o" 2>"$nt"
+    if [ "$abort_exe" -eq 1 ] && [ "$abort_all" -eq 1 ] && [ "${#interp[@]}" -gt 0 ]; then
+        RUN "$BIN" "${interp[@]}" >"$ni.o" 2>"$ni"; rc_ni=$?
+    fi
 
     local problems=()
     if [ "$should_fail" -eq 1 ]; then
@@ -687,12 +779,31 @@ run_entry() {
             [ "$rc_ng" -eq 0 ] && problems+=("the goja-built native binary exited 0 but should abort")
             [ "$rc_nf" -eq 0 ] && problems+=("the frozen-built native binary exited 0 but should abort")
             cmp -s "$ng" "$nf" || problems+=("goja-built vs frozen-built native stderr differ")
-            # llvm.Run prefixes its own "  ==> Fail" verdict line, which is the
-            # METACOMPILER reporting that the run returned non-zero, not the
-            # PROGRAM's diagnostic. Everything after it is the diagnostic, and
-            # that is what the floor has to reproduce word for word.
-            grep -v '^  ==> Fail$' "$nt" > "$nt.d"
-            cmp -s "$ng" "$nt.d" || problems+=("native binary stderr differs from llvm.Run's")
+            cmp -s "$ng.o" "$nf.o" || problems+=("goja-built vs frozen-built native stdout differ")
+            # The ABORT TEXT COMPARISON (docs/todo.md 4.1). abort_norm strips the
+            # emitted module and each engine's own self-identification and
+            # nothing else, so what is compared here IS the program's diagnostic,
+            # and it is compared between implementations that share no code.
+            abort_norm "$ng.o" "$ng" > "$ng.n"
+            abort_norm "$nt.o" "$nt" > "$nt.n"
+            if ! cmp -s "$ng.n" "$nt.n"; then
+                problems+=("ABORT TEXT: the native binary and llvm.Run disagree
+             native:   $(head -3 "$ng.n" | tr '\n' '|')
+             llvm.Run: $(head -3 "$nt.n" | tr '\n' '|')")
+            fi
+            if [ "$abort_all" -eq 1 ]; then
+                if [ "${#interp[@]}" -eq 0 ]; then
+                    problems+=("ALL HALVES row, but no interpreter grammar for it")
+                else
+                    [ "$rc_ni" -eq 0 ] && problems+=("the interpreter half exited 0 but should abort")
+                    abort_norm "$ni.o" "$ni" > "$ni.n"
+                    if ! cmp -s "$ni.n" "$ng.n"; then
+                        problems+=("ABORT TEXT: the interpreter half and the native binary disagree
+             interp:   $(head -3 "$ni.n" | tr '\n' '|')
+             native:   $(head -3 "$ng.n" | tr '\n' '|')")
+                    fi
+                fi
+            fi
         fi
     fi
     if [ "$has_q" -eq 1 ] && ! cmp -s "$og" "$of"; then
@@ -740,7 +851,8 @@ run_entry() {
         printf '%s\n' "$block" > "$RESDIR/$idx.fail"
         printf '%s\n' "$block"
     fi
-    rm -f "$og" "$of" "$eg" "$ef" "$ng" "$nf" "$nt" "$nt.d"
+    rm -f "$og" "$of" "$eg" "$ef" \
+          "$ng" "$ng.o" "$ng.n" "$nf" "$nf.o" "$nt" "$nt.o" "$nt.n" "$ni" "$ni.o" "$ni.n"
     [ "$VERBOSE" -eq 0 ] && printf '.' >&2
     return 0
 }

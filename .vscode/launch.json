@@ -179,19 +179,19 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test-anytype.js", "-q"]
         },
         {
-            "name": "MetaJS type violation, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "name": "MetaJS type violation, native binary SHOULD ABORT, ALL HALVES (compiler, -exe + the C floor runtime)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test.js", "-q", "-exe", "tests/metajs-native-fail.out"]
         },
         {
-            "name": "MetaJS undeclared assignment, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "name": "MetaJS undeclared assignment, native binary SHOULD ABORT, ALL HALVES (compiler, -exe + the C floor runtime)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test-undeclared.js", "-q", "-exe", "tests/metajs-native-fail-undeclared.out"]
         },
         {
-            "name": "MetaJS anytype assignment, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "name": "MetaJS anytype assignment, native binary SHOULD ABORT, ALL HALVES (compiler, -exe + the C floor runtime)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test-anytype.js", "-q", "-exe", "tests/metajs-native-fail-anytype.out"]
@@ -2168,6 +2168,204 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/swift-to-llvm-ir.abnf", "tests/swift-test-multifile.swift", "-q", "-exe", "tests/swift-native-multi.out"]
+        },
+        {
+            "name": "--------- ABORT TEXT (docs/todo.md 4.1): every row below is SUPPOSED to die ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- ...(interpreter, SHOULD FAIL) pins one language's abort text goja vs -frozen; ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- a row named SHOULD-ABORT builds AND RUNS the native binary, comparing its abort ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- text with llvm.Run's; ALL HALVES adds the *-interpreter.abnf half, i.e. all ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- THREE implementations of the language must say the same thing. Rows without ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- ALL HALVES name the live divergence that keeps them off it. See abort_norm() ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "--------- in test.sh for exactly what is normalised (the engine naming itself; no more) ---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "Python abort probe, list index out of range (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-abort-test.py", "-q"]
+        },
+        {
+            "name": "Python abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-abort-test.py", "-q", "-exe", "tests/python-abort.out"]
+        },
+        {
+            "name": "JavaScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-abort-test.js", "-q"]
+        },
+        {
+            "name": "JavaScript abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-abort-test.js", "-q", "-exe", "tests/js-abort.out"]
+        },
+        {
+            "name": "TypeScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-abort-test.ts", "-q"]
+        },
+        {
+            "name": "TypeScript abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test.ts", "-q", "-exe", "tests/typescript-abort.out"]
+        },
+        {
+            "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-abort-test.rb", "-q"]
+        },
+        {
+            "name": "Ruby abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-abort-test.rb", "-q", "-exe", "tests/ruby-abort.out"]
+        },
+        {
+            "name": "Go abort probe, panic (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-test.go", "-q"]
+        },
+        {
+            "name": "Go abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-test.go", "-q", "-exe", "tests/go-abort.out"]
+        },
+        {
+            "name": "Java abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-abort-test.java", "-q"]
+        },
+        {
+            "name": "Java abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-abort-test.java", "-q", "-exe", "tests/java-abort.out"]
+        },
+        {
+            "name": "C# abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-abort-test.cs", "-q"]
+        },
+        {
+            "name": "C# abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-abort-test.cs", "-q", "-exe", "tests/csharp-abort.out"]
+        },
+        {
+            "name": "PHP abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-abort-test.php", "-q"]
+        },
+        {
+            "name": "PHP abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half stringifies the exception as [object Object])",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-abort-test.php", "-q", "-exe", "tests/php-abort.out"]
+        },
+        {
+            "name": "Kotlin abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-abort-test.kt", "-q"]
+        },
+        {
+            "name": "Kotlin abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half stringifies the exception as [object Object])",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-abort-test.kt", "-q", "-exe", "tests/kotlin-abort.out"]
+        },
+        {
+            "name": "Dart abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-abort-test.dart", "-q"]
+        },
+        {
+            "name": "Dart abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half says 'Exception: boom', the compiler half says 'boom')",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-abort-test.dart", "-q", "-exe", "tests/dart-abort.out"]
+        },
+        {
+            "name": "Lua abort probe, index a nil value (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-abort-test.lua", "-q"]
+        },
+        {
+            "name": "Lua abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half says 'attempt to index a nil value', the compiler half 'member x of undefined')",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-abort-test.lua", "-q", "-exe", "tests/lua-abort.out"]
+        },
+        {
+            "name": "Swift abort probe, array index out of range (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half dumps the engine stack, differently per host)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-throw.swift", "-q", "-exe", "tests/swift-abort.out"]
+        },
+        {
+            "name": "Bash abort probe, command not found (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test.sh", "-q"]
+        },
+        {
+            "name": "Bash abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half prefixes 'bash interpreter error:', the native binary the grammar name)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test.sh", "-q", "-exe", "tests/bash-abort.out"]
         },
         {
             "name": "Speed Test",
