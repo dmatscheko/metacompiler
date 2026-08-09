@@ -101,11 +101,14 @@ GuardedItems = Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
               [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] ;
 // def self.m: a method of the class object itself, not of its instances.
-SelfRecv    <~~ push({selfrecv: true}) ~~>
+SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
             = SelfRecvHead "." ;
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
-SelfRecvHead = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
+// The receiver TEXT is carried up so that anything but `self` becomes a def on that
+// one OBJECT (docs/todo.md 1.3); ScopedName already accepts a plain local name.
+SelfRecvHead <~~ push(up.in) ~~>
+            = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault
             | BGroup | ParamSimple ;
@@ -3957,6 +3960,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isUserObj(l)) { return mcall(l, "<=>", [r], null) }
         if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
         if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
+        // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
+        // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI and
+        // raised *comparison of Symbol with :a failed* in every engine here. It is
+        // the name comparison and nothing else: `:a <=> 1' is nil, which is the
+        // `return null' below. Measured on /usr/bin/ruby 2.6.10; Symbol#<=> is a
+        // Ruby-2 method. docs/todo.md 1.3.
+        if (isSym(l) && isSym(r)) { return l.s < r.s ? -1 : (l.s > r.s ? 1 : 0) }
         if (Array.isArray(l) && Array.isArray(r)) {
             for (var si = 0; si < l.length && si < r.length; si++) {
                 var sc = spaceship(l[si], r[si])
@@ -6074,6 +6084,44 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
         if (isEnum(target)) { return enumMethod(target, name, args, blk) }
         if (target.__class != undefined) {
+            // The SINGLETON table comes first: `def obj.m', `class << obj' and an
+            // extended module all sit in front of the object's own class.
+            // docs/todo.md 1.3.
+            // The two slot reads come first and the CALL only when one of them is
+            // set: this sits on the method-dispatch path of every user object.
+            if (target.__sing != undefined || target.__sext != undefined) {
+                var gm = anytype
+                gm = singFind(target, name)
+                if (typeof gm == "function") { return applyMethod(gm, target, args, blk) }
+            }
+            // NOTE: these four are answered AHEAD of a user class's own method of
+            // the same name. MRI would let the user method win (Object#extend and
+            // friends are ordinary, overridable methods); `method' below is guarded
+            // because a user `method' is plausible. All three engines do the same
+            // thing, so this is not a halves divergence - but it is a divergence
+            // from MRI.
+            if (name == "extend") {
+                for (var xi = 0; xi < args.length; xi++) { singExtend(target, args[xi]) }
+                return target
+            }
+            if (name == "define_singleton_method") {
+                return singDefine(target, args, blk)
+            }
+            if (name == "singleton_methods") { return singNames(target) }
+            if (name == "respond_to?") { return singRespond(target, rstr(args[0])) }
+            // Object#method with an explicit receiver. Kernel#method (no receiver)
+            // was already here; `o.method(:m)' aborted in every engine, and it is
+            // the one way a singleton method is reachable as a value.
+            if (name == "method" && lookupMethod(target.__class, "method") == undefined) {
+                var bm = anytype
+                bm = singFind(target, rstr(args[0]))
+                if (typeof bm != "function") { bm = lookupMethod(target.__class, rstr(args[0])) }
+                if (typeof bm != "function") {
+                    throw {__exc: true, v: mkExc(hostGlobals["NameError"],
+                                                 "undefined method '" + rstr(args[0]) + "' for class '" + target.__class.__name + "'")}
+                }
+                return bindSelfMethod(target, rstr(args[0]), bm)
+            }
             if (name == "class") { return target.__class }
             // The lookup walks prepends, the class, its mixins and then the
             // superclass chain (own-property reads throughout: a bare [name] would
@@ -6102,6 +6150,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // docs/todo.md 1.3.
                 if (name == "inspect") { return rinspect(target) }
                 if (name == "to_s") { return rstr(target) }
+                // Object#dup / #clone: a SHALLOW copy of the instance variables, and
+                // the two differ in exactly one thing - #clone carries the singleton
+                // class over and #dup does not. Both aborted in every engine.
+                // Reached only when the class defines neither, so a user #dup wins.
+                if (name == "dup" || name == "clone") { return singCopy(target, name == "clone") }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
@@ -6166,6 +6219,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "<" || name == "<=" || name == ">" || name == ">=") {
                 if (isClassObj(args[0])) { return modRel(target, args[0], name) }
             }
+            // A class OBJECT has a singleton table of its own: `def C.m', a
+            // `class << C' written outside the class body and `C.extend(M)' with an
+            // explicit receiver all install there. The BARE `extend M' directive
+            // inside a class body still goes through extendOnto - it is a build-time
+            // form in the compiler half, and only the receiver form has to agree
+            // between the engines at run time. docs/todo.md 1.3.
+            if (target.__sing != undefined || target.__sext != undefined) {
+                var cgm = anytype
+                cgm = singFind(target, name)
+                if (typeof cgm == "function") { return applyMethod(cgm, target, args, blk) }
+            }
+            if (name == "extend") {
+                for (var cxi = 0; cxi < args.length; cxi++) { singExtend(target, args[cxi]) }
+                return target
+            }
+            if (name == "define_singleton_method") { return singDefine(target, args, blk) }
+            if (name == "singleton_methods") { return singNames(target) }
+            if (name == "respond_to?") { return singRespond(target, rstr(args[0])) }
             // A class method is stored under a "$s$" prefix so it cannot collide with
             // an instance method of the same name; `extend M` puts M's methods there.
             var sm = anytype
@@ -7488,6 +7559,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return getVar(ref.name)
     }
+    // One instance-variable write, recording the NAME. The frozen engine cannot
+    // enumerate an object's keys (the same reason a module scope keeps __names), so
+    // Object#dup / #clone would have nothing to copy without this list. It is
+    // __-prefixed, so it stays out of every other reader. The compiled halves need
+    // no list: keysOf / o.keys answer exactly the same set there. docs/todo.md 1.3.
+    function ivarPut(s, name, v) {
+        if (!hasOwn(s, name)) {
+            if (s.__ivn == undefined) { s.__ivn = [] }
+            s.__ivn.push(name)
+        }
+        scopePut(s, name, v)
+        return null
+    }
     function writeTarget(ref, v) {
         // A parenthesised head is only ever a target THROUGH a path ((...).a = 1);
         // writing the parenthesised value itself is not an assignable form in Ruby.
@@ -7498,7 +7582,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.ivar != undefined) {
             var s = findSelf()
             if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
-            scopePut(s, ref.ivar, v)
+            ivarPut(s, ref.ivar, v)
             return
         }
         rubySet(ref.name, v)
@@ -7685,14 +7769,43 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var params = []
         var body = null
         var singleton = false
+        var srecv = ""
         for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].selfrecv === true) { singleton = true }
+            if (items[i] != undefined && items[i].selfrecv === true) {
+                singleton = true
+                srecv = srecvText(items[i].srecv)
+            }
             else if (typeof items[i] == "string") { name = items[i] }
             else if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].param != undefined) { params.push(items[i]) }
         }
-        return {name: name, params: params, singleton: singleton, owner: null,
+        return {name: name, params: params, singleton: singleton, owner: null, srecv: srecv,
                 body: body != null ? body : makeBody([])}
+    }
+    // The receiver of a `def X.m', with the whitespace the token match may have
+    // carried stripped. "self" (and the class-body `def self.m') keeps the class-method
+    // path; anything else names an object whose singleton table the def writes.
+    function srecvText(t) {
+        if (typeof t != "string") { return "" }
+        var s = ""
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charCodeAt(i)
+            if (ch == 32 || ch == 9 || ch == 10 || ch == 13) { continue }
+            s += t.charAt(i)
+        }
+        if (s == "self") { return "" }
+        return s
+    }
+    // A thunk for that receiver: @@classvar, @ivar, $global, or a name that
+    // makeVarRef already resolves (a local, a constant, a scoped constant).
+    function srecvThunk(t) {
+        if (t.length > 2 && t.charAt(0) == "@" && t.charAt(1) == "@") { return makeCvarRef(t.slice(2)) }
+        if (t.length > 1 && t.charAt(0) == "@") { return makeIvarRef(t.slice(1)) }
+        if (t.length > 1 && t.charAt(0) == "$") { return makeGvarRef(t.slice(1)) }
+        for (var i = 0; i + 1 < t.length; i++) {
+            if (t.charAt(i) == ":" && t.charAt(i + 1) == ":") { return makeScopedConst(t) }
+        }
+        return makeVarRef(t)
     }
     function runProgram(items) {
         // A raise that escapes the top level is reported the way MRI reports it -
@@ -7764,12 +7877,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (it.method != undefined) {
                     var fn = it.method
                     fn.owner = mod
-                    if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)) }
+                    if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
                     else {
                         scopePut(mod, fn.name, makeMethodClosure(fn))
                         mod.__methodNames.push(fn.name)
                         // module_function: the method is ALSO callable on the module.
-                        if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)) }
+                        if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
                     }
                 } else if (it.alias != undefined) { doAlias(mod, it.alias[0], it.alias[1]) }
                 else if (it.nested != undefined) { it.nested() }
@@ -8036,6 +8149,178 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return undefined
     }
+    // ----- The PER-OBJECT singleton method table (docs/todo.md 1.3) -----
+    // Ruby gives every object a singleton ("eigen") class that sits IN FRONT of its
+    // own class, and three source forms write into it: `def obj.m', `class << obj'
+    // and #define_singleton_method. `obj.extend(M)' inserts a module there instead.
+    // The two are separate tiers because MRI keeps them apart: `def a.hi' followed by
+    // `a.extend(M)' still answers the def (checked against /usr/bin/ruby), so an
+    // extended module can never overwrite a direct singleton def.
+    //
+    // Both slots are __-prefixed, which is what keeps them out of keysOf's answer
+    // (manual 7.9) and therefore out of #inspect and the dict-key machinery. The name
+    // LIST is kept beside the table for the same reason module objects keep
+    // __methodNames: the frozen engine has no for..in over an object.
+    // singFind is called on the user-object and class-object arms of mcall only, so
+    // no number, string or array pays for it - manual 5.1, a call is a scope frame.
+    function singFind(o, name) {
+        var t = o.__sing
+        if (t != undefined && hasOwn(t, name)) { return t[name] }
+        var xs = o.__sext
+        if (xs != undefined) {
+            for (var i = xs.length - 1; i >= 0; i--) {
+                var m = anytype
+                m = lookupMethod(xs[i], name)
+                if (typeof m == "function") { return m }
+            }
+        }
+        return undefined
+    }
+    // One method invocation with the receiver in front and the block both on
+    // blockStack (so `yield' in the body finds it) and appended in the block marker.
+    // It is the tail mcall already ran for a class-chain method, hoisted so the
+    // singleton arm calls the SAME code rather than a second copy of it.
+    function applyMethod(m, target, args, blk) {
+        blockStack.push(blk)
+        var mr = anytype
+        mr = m.apply(undefined, blk == null ? concat2impl([target], args)
+                                            : concat2impl([target], concat2impl(args, [mkBlkArg(blk)])))
+        blockStack.pop()
+        return mr
+    }
+    // Object#define_singleton_method(:name) { }: the block becomes a singleton method
+    // and the answer is the name as a Symbol, which is what MRI returns.
+    function singDefine(o, args, blk) {
+        var nm = rstr(args[0])
+        var body = anytype
+        body = blk
+        if (body == null && args.length > 1) { body = args[1] }
+        singPut(o, nm, function() {
+            var a = []
+            for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+            return blockCall(body, a)
+        })
+        return mkSym(nm)
+    }
+    // A module's instance-method names, its own included modules' first - the same
+    // list ruby-to-llvm-ir.abnf emits onto a module object as __mnames.
+    function modNamesOf(m, out) {
+        if (m.__mixins != undefined) {
+            for (var i = 0; i < m.__mixins.length; i++) { modNamesOf(m.__mixins[i], out) }
+        }
+        var ns = moduleMethodNames(m)
+        for (var j = 0; j < ns.length; j++) { out.push(ns[j]) }
+        return out
+    }
+    // Object#dup / Object#clone. Both are SHALLOW: a fresh instance of the same
+    // class with the same instance variables (__ivn here, keysOf in layer 2, which
+    // hides every __-prefixed slot - manual 7.9 - so the copy cannot pick up the
+    // singleton slots by accident, which is the trap the Go twin's generic clone
+    // falls into: it walks o.keys RAW). The ONE difference is that #clone carries
+    // the singleton class over and #dup does not; the tables are COPIED, not
+    // shared, so a def on the clone does not reach the original. Measured on /usr/bin/ruby 2.6.10.
+    // `clone(freeze: false)' is not modelled and does not need to be: nothing here
+    // has a frozen bit to clear (Object#frozen? answers true only for the immediate
+    // values), so the keyword would be a no-op in every engine.
+    // Twins: rubySingCopy of abnf/jsrt.go, rbSingCopy of languages/lib/ruby-rt.metajs.
+    function singCopy(o, withSing) {
+        var out = {__class: o.__class}
+        if (o.__ivn != undefined) {
+            var ks = o.__ivn
+            for (var i = 0; i < ks.length; i++) { ivarPut(out, ks[i], o[ks[i]]) }
+        }
+        if (!withSing) { return out }
+        if (o.__sing != undefined) {
+            var t = {}
+            var ns = []
+            for (var j = 0; j < o.__singn.length; j++) {
+                scopePut(t, o.__singn[j], o.__sing[o.__singn[j]])
+                ns.push(o.__singn[j])
+            }
+            out.__sing = t
+            out.__singn = ns
+        }
+        if (o.__sext != undefined) {
+            var xs = []
+            for (var k = 0; k < o.__sext.length; k++) { xs.push(o.__sext[k]) }
+            out.__sext = xs
+        }
+        return out
+    }
+    // A CLASS object's own class-method names, beside the "$s$"-prefixed closures:
+    // `C.singleton_methods' has to answer them and there is no way to enumerate a
+    // "$s$" key (keysOf hides nothing here, and the frozen engine has no for..in).
+    // The compiler half emits the same list as __snames from its build-time
+    // classSMethods record. docs/todo.md 1.3.
+    function snamePut(cls, name) {
+        if (cls.__snames == undefined) { cls.__snames = [] }
+        for (var i = 0; i < cls.__snames.length; i++) { if (cls.__snames[i] == name) { return null } }
+        cls.__snames.push(name)
+        return null
+    }
+    function singPut(o, name, fn) {
+        if (o === null || o === undefined || typeof o != "object") {
+            fail("can't define singleton method on " + rstr(o))
+        }
+        if (o.__sing == undefined) { o.__sing = {}; o.__singn = [] }
+        if (!hasOwn(o.__sing, name)) { o.__singn.push(name) }
+        scopePut(o.__sing, name, fn)
+        return null
+    }
+    // obj.extend(M): the module goes in front of the object's class. A module that
+    // includes others brings them along, exactly as extendOnto does for a class.
+    function singExtend(o, m) {
+        if (m == undefined || m == null) { return null }
+        if (o.__sext == undefined) { o.__sext = [] }
+        if (mixinListHas(o.__sext, m)) { return null }
+        o.__sext.push(m)
+        return null
+    }
+    // Object#singleton_methods: the direct defs first, then every extended module's
+    // instance methods NEAREST FIRST (the order singFind searches), each name once.
+    // MRI's own order inside one module is its method-table hash order - measured
+    // `[:twice, :hi]` for a module written hi-then-twice - so only the tier order is
+    // settleable against the oracle and a test must sort.
+    function singNames(o) {
+        var out = []
+        if (o.__singn != undefined) {
+            for (var i = 0; i < o.__singn.length; i++) { out.push(mkSym(o.__singn[i])) }
+        }
+        // A class object's own `def self.' / `class << self' methods are singleton
+        // methods of that object, and MRI lists them: `C.singleton_methods' answers
+        // [:sm] for `class C; def self.sm; end'. docs/todo.md 1.3.
+        if (o.__snames != undefined) {
+            for (var s0 = 0; s0 < o.__snames.length; s0++) {
+                var dup0 = false
+                for (var q0 = 0; q0 < out.length; q0++) { if (out[q0].s == o.__snames[s0]) { dup0 = true } }
+                if (!dup0) { out.push(mkSym(o.__snames[s0])) }
+            }
+        }
+        if (o.__sext != undefined) {
+            for (var j = o.__sext.length - 1; j >= 0; j--) {
+                // A module the extended one INCLUDES contributes its methods too,
+                // which is what the compiler half's __mnames array records.
+                var ns = modNamesOf(o.__sext[j], [])
+                for (var k = 0; k < ns.length; k++) {
+                    var seen = false
+                    for (var q = 0; q < out.length; q++) { if (out[q].s == ns[k]) { seen = true } }
+                    if (!seen) { out.push(mkSym(ns[k])) }
+                }
+            }
+        }
+        return out
+    }
+    // Object#respond_to?: the singleton table, then the class chain (an instance) or
+    // the $s$ / $x$ class-method tables (a class object). It was absent from all four
+    // engines, so `o.respond_to?(:m)' aborted everywhere and --cross never saw it.
+    function singRespond(o, name) {
+        if (typeof singFind(o, name) == "function") { return true }
+        if (o.__isclass === true) {
+            if (typeof lookupMethod(o, "$s$" + name) == "function") { return true }
+            return typeof lookupMethod(o, "$x$" + name) == "function"
+        }
+        return typeof lookupMethod(o.__class, name) == "function"
+    }
     // The owner of a method is the class whose body defined it - that is what `super`
     // starts its search above. A prepended module counts as sitting BELOW the class.
     function ownerOf(cls, name) {
@@ -8110,6 +8395,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() { t(); return mkSym(nm) }
     }
     function makeDefStmt(fn) {
+        // `def obj.m' - a def on ONE object, wherever it is written. The receiver is
+        // read at run time and the closure lands in its singleton table; before this
+        // the receiver was ignored and the def became a plain method of that name, so
+        // `def o.greet' left `o.greet' aborting. docs/todo.md 1.3.
+        if (fn.srecv != "") {
+            var recvT = srecvThunk(fn.srecv)
+            return function() { return singPut(recvT(), fn.name, makeMethodClosure(fn)) }
+        }
         rubyMethods["$" + fn.name] = true
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
     }
@@ -8281,14 +8574,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var it = ordered[st]
                 if (it.method != undefined) {
                     var sm = it.method
-                    if (isCls) { sm.singleton = true }
-                    declareMethods(cls, [sm])
+                    // `class << obj' on an ORDINARY VALUE writes the object's own
+                    // singleton table. It used to install on the value's CLASS, so
+                    // the method leaked to every other instance of it - the same
+                    // wall that made the emitter refuse a def here.
+                    // docs/todo.md 1.3.
+                    if (isCls) { sm.singleton = true; declareMethods(cls, [sm]) }
+                    else { sm.owner = cls; singPut(obj, sm.name, makeMethodClosure(sm)) }
                 }
                 else if (it.attr != undefined) {
                     var a = it.attr
                     for (var j = 0; j < a.names.length; j++) {
-                        if (a.kind == "attr_reader" || a.kind == "attr_accessor") { declareMethods(cls, [attrGetterFn(a.names[j])]) }
-                        if (a.kind == "attr_writer" || a.kind == "attr_accessor") { declareMethods(cls, [attrSetterFn(a.names[j])]) }
+                        if (a.kind == "attr_reader" || a.kind == "attr_accessor") { singDeclare(isCls, cls, obj, attrGetterFn(a.names[j])) }
+                        if (a.kind == "attr_writer" || a.kind == "attr_accessor") { singDeclare(isCls, cls, obj, attrSetterFn(a.names[j])) }
                     }
                 }
                 else if (it.alias != undefined) { doAlias(cls, it.alias[0], it.alias[1]) }
@@ -8309,6 +8607,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return last
         }
     }
+    // One attr_ / def descriptor from a `class << X' body: onto the class when X is a
+    // class object, into X's own singleton table otherwise.
+    function singDeclare(isCls, cls, obj, fn) {
+        if (isCls) { declareMethods(cls, [fn]); return null }
+        fn.owner = cls
+        return singPut(obj, fn.name, makeMethodClosure(fn))
+    }
     // Install a list of method descriptors on a class: `def self.m` lands on the class
     // object itself, every other def on the instance-method table (the same object -
     // an instance looks its methods up through __class, a class through itself).
@@ -8316,7 +8621,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var m2 = 0; m2 < methods.length; m2++) {
             var fn = methods[m2]
             fn.owner = cls
-            if (fn.singleton === true) { scopePut(cls, "$s$" + fn.name, makeMethodClosure(fn)) }
+            if (fn.singleton === true) { scopePut(cls, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(cls, fn.name) }
             else {
                 scopePut(cls, fn.name, makeMethodClosure(fn))
                 if (curVis != "public" && curClass === cls) { scopePut(cls, "$v$" + fn.name, curVis) }
@@ -8398,7 +8703,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var s = findSelf()
             if (s === null || s === undefined) { fail("@" + n + " outside of a method") }
             var v = getVar("v")
-            s[n] = v
+            ivarPut(s, n, v)
             return v
         }
         return {name: n + "=", params: ["v"], body: body}
@@ -9177,9 +9482,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (v.__extends != undefined) {
                 for (var e = 0; e < v.__extends.length; e++) { if (v.__extends[e] === cls) { return true } }
             }
+            // `C.extend(M)' with an explicit receiver writes the per-object table
+            // rather than the build-time __extends record. docs/todo.md 1.3.
+            if (v.__sext != undefined) {
+                for (var cx = 0; cx < v.__sext.length; cx++) {
+                    if (v.__sext[cx] === cls) { return true }
+                    var cxm = v.__sext[cx].__mixins
+                    if (cxm == undefined) { continue }
+                    for (var cxj = 0; cxj < cxm.length; cxj++) { if (cxm[cxj] === cls) { return true } }
+                }
+            }
             return false
         }
         if (!isUserObj(v)) { return false }
+        // An INSTANCE that was `extend'ed is a member of that module too, and of
+        // every module THAT one includes - `o.extend(B)' where `module B; include A'
+        // makes o an A as well. The per-object twin of the class case above.
+        // docs/todo.md 1.3.
+        if (v.__sext != undefined) {
+            for (var x = 0; x < v.__sext.length; x++) {
+                if (v.__sext[x] === cls) { return true }
+                var xm = v.__sext[x].__mixins
+                if (xm == undefined) { continue }
+                for (var xj = 0; xj < xm.length; xj++) { if (xm[xj] === cls) { return true } }
+            }
+        }
         var c = v.__class
         while (c != undefined && c != null) {
             if (c === cls) { return true }
@@ -9315,7 +9642,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var self = arguments[0]
         var m = anytype
         m = arguments.length > 1 ? arguments[1] : undefined
-        scopePut(self, "message", (m !== undefined && m !== null) ? rstr(m) : self.__class.__name)
+        ivarPut(self, "message", (m !== undefined && m !== null) ? rstr(m) : self.__class.__name)
         return null
     }
     function excMessageFn() {
@@ -9404,7 +9731,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var k = 0; k < m.__mixins.length; k++) { extendOnto(c, m.__mixins[k]) }
         }
         var names = moduleMethodNames(m)
-        for (var j = 0; j < names.length; j++) { scopePut(c, "$x$" + names[j], m[names[j]]) }
+        for (var j = 0; j < names.length; j++) { scopePut(c, "$x$" + names[j], m[names[j]]); snamePut(c, names[j]) }
         if (c.__extends == undefined) { c.__extends = [] }
         if (!mixinListHas(c.__extends, m)) { c.__extends.push(m) }
     }

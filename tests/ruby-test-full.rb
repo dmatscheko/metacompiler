@@ -2017,8 +2017,142 @@ def s41
   check("rmath17", Math::PI.class == Float && Math.sqrt(a[0]).class == Float)
 end
 
+# ===== SECTION 42: the per-object singleton method table =====
+# docs/todo.md 1.3. Every object has a singleton ("eigen") class in front of its
+# own class; `def obj.m', `class << obj', #define_singleton_method write it and
+# #extend inserts a module into it. NONE of that existed: `o.extend(M)' was
+# "unknown method 'extend'" in all three engines and a def inside a
+# `class << VALUE' was notImplemented in the emitter outright, because there was
+# no per-object table to check ahead of the __class chain.
+#
+# Every row is /usr/bin/ruby 2.6.10's answer; all five forms are Ruby-2 syntax.
+# ORDER is the point of several of them: a direct `def obj.m' beats a module
+# extended AFTER it (checked against MRI), a later extend beats an earlier one,
+# and the object's class never sees any of it. singleton_methods is compared as
+# a SORTED string list because MRI's order inside one module is its method-table
+# hash order - a module written hi-then-twice answers [:twice, :hi].
+module S42Greet
+  def hi; "G#hi"; end
+  def twice; hi + hi; end
+end
+module S42Loud
+  def hi; "L#hi"; end
+  def shout; "!" + tag; end
+end
+module S42Wrap
+  include S42Greet
+  def wrapped; "W(" + hi + ")"; end
+end
+class S42Base
+  def hi; "B#hi"; end
+  def tag; "B"; end
+end
+class S42Kid < S42Base
+  def tag; "K"; end
+end
+class S42Vec
+  attr_accessor :n
+  def initialize(n); @n = n; end
+end
+class S42WithS
+  def self.sm; "SM"; end
+end
+def s42_names(o)
+  o.singleton_methods.map { |s| s.to_s }.sort
+end
+def s42
+  a = S42Kid.new
+  check("sing1", a.hi == "B#hi")
+  # #extend answers the RECEIVER: a singleton def on the answer is visible on `a`.
+  ax = a.extend(S42Greet)
+  def ax.same42; "S"; end
+  check("sing2", a.same42 == "S")
+  check("sing3", a.hi == "G#hi")
+  # A module method reaching another method of the same module, and one reaching
+  # a method of the class the object belongs to.
+  check("sing4", a.twice == "G#hiG#hi")
+  a.extend(S42Loud)
+  check("sing5", a.hi == "L#hi" && a.shout == "!K")
+  # None of it leaks to the class: a fresh instance is untouched.
+  check("sing6", S42Kid.new.hi == "B#hi" && S42Kid.new.respond_to?(:shout) == false)
+  check("sing7", a.is_a?(S42Greet) && a.is_a?(S42Loud) && a.class == S42Kid)
+  check("sing8", S42Kid.new.is_a?(S42Greet) == false)
+  check("sing9", s42_names(a) == ["hi", "same42", "shout", "twice"])
+  check("sing10", a.respond_to?(:shout) && a.respond_to?(:nope) == false)
+  # A DIRECT def wins over a module extended after it - MRI keeps the two tiers
+  # apart, and a flat copy-on-extend table would answer "G#hi" here.
+  b = S42Kid.new
+  def b.hi; "D#hi"; end
+  b.extend(S42Greet)
+  check("sing11", b.hi == "D#hi" && s42_names(b) == ["hi", "twice"])
+  # ... and a def written after the extend wins as well.
+  c = S42Kid.new
+  c.extend(S42Greet)
+  def c.hi; "D2"; end
+  check("sing12", c.hi == "D2")
+  # class << obj: the def lands on THAT object only.
+  d = S42Kid.new
+  class << d
+    def hi; "E#hi"; end
+    def solo(x); "solo" + x.to_s; end
+  end
+  check("sing13", d.hi == "E#hi" && d.solo(3) == "solo3")
+  check("sing14", S42Kid.new.hi == "B#hi")
+  e = S42Kid.new
+  e.define_singleton_method(:dyn) { "DYN" }
+  check("sing15", e.dyn == "DYN" && s42_names(e) == ["dyn"])
+  # A module that INCLUDES another brings it along.
+  f = S42Kid.new.extend(S42Wrap)
+  check("sing16", f.wrapped == "W(G#hi)" && f.hi == "G#hi" && f.is_a?(S42Wrap))
+  # A singleton method as a VALUE, and one with parameters.
+  g = S42Kid.new
+  def g.pair(x, y); "p" + x.to_s + y.to_s; end
+  check("sing17", g.pair(1, 2) == "p12" && g.method(:pair).call(4, 5) == "p45")
+  check("sing18", g.method(:tag).call == "K")
+  # Extending twice is idempotent.
+  h = S42Kid.new
+  h.extend(S42Greet)
+  h.extend(S42Greet)
+  check("sing19", s42_names(h) == ["hi", "twice"])
+  # #dup and #clone differ in EXACTLY ONE thing: the singleton class. Both are
+  # shallow copies of the instance variables (independent afterwards), both keep
+  # the class, and #clone carries the singleton table and the extended modules
+  # while #dup drops them. All of it aborted in every engine before, which is why
+  # the semantics could still be settled rather than preserved.
+  # `clone(freeze: false)' is not modelled: nothing here has a frozen bit.
+  k = S42Kid.new
+  def k.only; "K1"; end
+  k.extend(S42Greet)
+  kd = k.dup
+  kc = k.clone
+  check("sing21", kd.hi == "B#hi" && kd.respond_to?(:only) == false && kd.is_a?(S42Greet) == false)
+  check("sing22", kc.hi == "G#hi" && kc.only == "K1" && kc.is_a?(S42Greet))
+  check("sing23", s42_names(kd) == [] && s42_names(kc) == ["hi", "only", "twice"])
+  check("sing24", kd.class == S42Kid && kc.class == S42Kid)
+  # The copies are INDEPENDENT: a def on the clone does not reach the original.
+  def kc.only; "K2"; end
+  check("sing25", k.only == "K1" && kc.only == "K2")
+  # Instance variables come across and are independent afterwards.
+  v = S42Vec.new(3)
+  vd = v.dup
+  vd.n = 9
+  check("sing26", v.n == 3 && vd.n == 9 && v.clone.n == 3)
+  # A CLASS object lists its own class methods, which live under a "$s$" key and
+  # cannot be found by enumeration - the emitter records the names.
+  check("sing27", s42_names(S42Kid) == [])
+  check("sing28", s42_names(S42WithS) == ["sm"])
+  S42WithS.extend(S42Greet)
+  check("sing29", s42_names(S42WithS) == ["hi", "sm", "twice"] && S42WithS.hi == "G#hi")
+  check("sing30", S42WithS.sm == "SM" && S42WithS.is_a?(S42Greet))
+  # A $global and a CONSTANT receiver, which the def receiver rule also accepts.
+  $s42g = S42Kid.new
+  def $s42g.gm; "GM"; end
+  check("sing20", $s42g.gm == "GM")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
+s42() # SECTION-CALL 42
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

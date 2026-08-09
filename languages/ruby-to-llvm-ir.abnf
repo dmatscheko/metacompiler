@@ -103,11 +103,14 @@ GuardedItems = Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
               [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] ;
 // def self.m: a method of the class object itself, not of its instances.
-SelfRecv    <~~ push({selfrecv: true}) ~~>
+SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
             = SelfRecvHead "." ;
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
-SelfRecvHead = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
+// The receiver TEXT is carried up so that anything but `self` becomes a def on that
+// one OBJECT (docs/todo.md 1.3); ScopedName already accepts a plain local name.
+SelfRecvHead <~~ push(up.in) ~~>
+            = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault
             | BGroup | ParamSimple ;
@@ -4894,9 +4897,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var params = []
         var body = null
         var singleton = false
+        var srecv = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] == undefined) { continue }
-            if (items[i].selfrecv === true) { singleton = true }
+            if (items[i].selfrecv === true) { singleton = true; srecv = srecvText(items[i].srecv) }
             else if (typeof items[i] == "string") { name = items[i] }
             else if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].param != undefined || items[i].splat === true
@@ -4904,8 +4908,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 params.push(paramDesc(items[i]))
             }
         }
-        return {name: name, params: params, singleton: singleton,
+        return {name: name, params: params, singleton: singleton, srecv: srecv,
                 body: body != null ? body : makeBody([])}
+    }
+    // The receiver of a `def X.m', with the whitespace the token match may have
+    // carried stripped. "self" keeps the class-method path; anything else names an
+    // object whose own singleton table the def writes at RUN time. docs/todo.md 1.3.
+    function srecvText(t) {
+        if (typeof t != "string") { return "" }
+        var s = ""
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charCodeAt(i)
+            if (ch == 32 || ch == 9 || ch == 10 || ch == 13) { continue }
+            s += t.charAt(i)
+        }
+        if (s == "self") { return "" }
+        return s
+    }
+    // A thunk for that receiver: @@classvar, @ivar, $global, a scoped constant, or a
+    // name makeVarRef already resolves (a local or a constant).
+    function srecvThunk(t) {
+        if (t.length > 2 && t.charAt(0) == "@" && t.charAt(1) == "@") { return makeCvarRef(t.slice(2)) }
+        if (t.length > 1 && t.charAt(0) == "@") { return makeIvarRef(t.slice(1)) }
+        if (t.length > 1 && t.charAt(0) == "$") { return makeGvarRef(t.slice(1)) }
+        for (var i = 0; i + 1 < t.length; i++) {
+            if (t.charAt(i) == ":" && t.charAt(i + 1) == ":") { return makeScopedConst(t) }
+        }
+        return makeVarRef(t)
+    }
+    // One `def obj.m' / `class << obj; def m' closure, installed in the receiver's own
+    // singleton table at run time. The build-time class machinery cannot hold it: the
+    // receiver is a VALUE, not a class name, which is exactly why a def in a
+    // `class << VALUE' body used to be notImplemented. docs/todo.md 1.3.
+    function emitSingletonDef(b, targetV, m) {
+        var savedMeth = curMethName
+        var savedParams = curMethParams
+        curMethName = m.name
+        curMethParams = paramNames(m.params)
+        var idx = emitFunc(m.params, m.body, true, false, false, true)
+        curMethName = savedMeth
+        curMethParams = savedParams
+        var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
+        callExt(b, "js_rsingdef", [targetV, emitStr(b, m.name), fnV])
+        return b
     }
     function makeMethodInfo(fn) { return fn }
 
@@ -5652,8 +5697,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function selfMethod(clsName, name) {
         for (var p = 0; p < curMethParams.length; p++) { if (curMethParams[p] == name) { return false } }
-        return classHasMethod(clsName, name)
+        if (classHasMethod(clsName, name)) { return true }
+        // THE MODULE OBJECT's copy of its own instance methods is now reachable:
+        // `obj.extend(M)' dispatches to it, where before only a module_function did.
+        // A mixin method routinely calls a method of the class it is mixed INTO
+        // (`def who; "M:" + tag; end'), and that class is not known while the module
+        // is emitted - the copy folded into an `include'ing class resolves it because
+        // it is emitted with THAT class's name. So inside a module-object body an
+        // unqualified name that is an instance method of ANY class or module in the
+        // file is an implicit-self call. The residual risk is a LOCAL variable that
+        // shares a name with some class's method, which is the same risk the
+        // class-scoped test above already takes, narrowed here to module bodies.
+        // docs/todo.md 1.3.
+        if (curModObjBody == "") { return false }
+        return anyClassHasMethod(name)
     }
+    // The instance-method names of every class and module the file declares, as a
+    // flat set: the per-class lists live in a dict this dialect cannot iterate.
+    function anyClassHasMethod(name) { return anyMethodNames["$" + name] === true }
+    function noteMethodNames(list) {
+        for (var i = 0; i < list.length; i++) { anyMethodNames["$" + list[i]] = true }
+        return null
+    }
+    var anyMethodNames = {}
+    // Set to the module's name while its module-OBJECT method copies are emitted.
+    var curModObjBody = ""
     function classHasMethod(clsName, name) {
         var c = clsName
         var hops = 0
@@ -5677,6 +5745,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     function makeDefStmt(fn) {
+        // `def obj.m' - a def on ONE object. The receiver is read at run time and the
+        // closure lands in its singleton table; before this the receiver was ignored
+        // and the def became a plain method of that name. docs/todo.md 1.3.
+        if (fn.srecv != "") {
+            var recvT = srecvThunk(fn.srecv)
+            return function(b) {
+                var r = recvT(b)
+                b = r.b
+                b = emitSingletonDef(b, r.v, fn)
+                return {b: b, v: hNull}
+            }
+        }
         rubyMethods["$" + fn.name] = true
         rubyAllMethods["$" + fn.name] = true
         return function(b) {
@@ -5997,6 +6077,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return b
     }
 
+    // A STRING-array slot on a class or module object. Two of them exist:
+    // __snames (a class object's own `def self.' / `class << self' / build-time
+    // `extend M' method names) and __mnames (a module's instance-method names).
+    // `singleton_methods' has to answer the first for a class object and the second
+    // for every module an object was extended with, and neither is enumerable at
+    // run time - keysOf would also hand back $s$/$c$/$mix$ keys, and the frozen
+    // engine has no for..in. The interpreter half keeps the same two lists as
+    // __snames and __methodNames. docs/todo.md 1.3.
+    function emitNameList(b, dstV, names, slot) {
+        var listV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < names.length; i++) {
+            callExt(b, "js_arr_push", [listV, emitStr(b, names[i])])
+        }
+        callExt(b, "js_set", [dstV, emitStr(b, slot), listV])
+        return b
+    }
+
     function makeDefineMethod(items) {
         var name = items[0]
         var params = blockParams(items)
@@ -6051,6 +6148,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         for (var m2 = 0; m2 < front.length; m2++) { mnames.push(front[m2].name) }
         classMethods["$" + name] = mnames
+        noteMethodNames(mnames)
         declaredClassNames.push(name)
         var snames = []
         for (var m3 = 0; m3 < sdefs.length; m3++) { snames.push(sdefs[m3].name) }
@@ -6080,6 +6178,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMixRecord(b, clsV, incAnc, "$mix$", "__mixorder")
             b = emitMixRecord(b, clsV, preAnc, "$mix$", "__preorder")
             b = emitMixRecord(b, clsV, extAnc, "$xmix$", "__extorder")
+            b = emitNameList(b, clsV, snames, "__snames")
             var savedCls = curClsName
             curClsName = name
             // A NESTED class or module is declared in the ENCLOSING scope, not inside the
@@ -6181,24 +6280,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // class << VALUE ... end - the singleton class of a value. The class machinery here
-    // is BUILD time (a class name maps to a method table decided while walking), and the
-    // target of a `class << EXPR` is only known at run time, so a def inside one has no
-    // table to land on: those are notImplemented. The target and the ordinary body
-    // statements are still emitted, with `self` bound to the target, so the surrounding
-    // file compiles and its side effects happen.
+    // is BUILD time (a class name maps to a method table decided while walking) and the
+    // target of a `class << EXPR` is only known at run time, so a def inside one used to
+    // be notImplemented outright. It is not any more: the def is emitted as an ordinary
+    // method closure and js_rsingdef installs it in THAT ONE OBJECT's singleton table -
+    // the per-object table docs/todo.md 1.3 is about. The target and the ordinary body
+    // statements are still emitted, with `self` bound to the target.
     function makeSingletonStmt(items, pos) {
         var targetT = null
         var isSelf = false
         var cstmts = []
-        var hasDef = false
+        var defs = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].cguard != undefined) { notImpl("rescue/ensure on a singleton class body", pos); continue }
             if (items[i].sgself != undefined) { isSelf = true }
             else if (items[i].sgexpr != undefined) { targetT = items[i].sgexpr }
             else if (items[i].cstmt != undefined) { cstmts.push(items[i].cstmt) }
-            else { hasDef = true }
+            else if (items[i].attr != undefined) {
+                var a = items[i].attr
+                for (var j = 0; j < a.names.length; j++) {
+                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { defs.push(attrGetterMethod(a.names[j])) }
+                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { defs.push(attrSetterMethod(a.names[j])) }
+                }
+            }
+            else if (items[i].method != undefined) { defs.push(items[i].method) }
+            else if (items[i].alias != undefined) { notImpl("alias inside class << VALUE", pos) }
         }
-        if (hasDef) { notImpl("def inside class << VALUE", pos) }
         return function(b) {
             var selfV = hNull
             if (isSelf) { selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]) }
@@ -6207,6 +6314,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = r.b
                 selfV = r.v
             }
+            for (var d = 0; d < defs.length; d++) { b = emitSingletonDef(b, selfV, defs[d]) }
             var v = hNull
             if (cstmts.length > 0) {
                 var cbIdx = emitFunc([], makeBody(cstmts), true)
@@ -6246,6 +6354,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var q3 = 0; q3 < mixDefs.length; q3++) { mnames.push(mixDefs[q3].name) }
         for (var m1 = 0; m1 < r.methods.length; m1++) { mnames.push(r.methods[m1].name) }
         classMethods["$" + name] = mnames
+        noteMethodNames(mnames)
         var snames = []
         for (var m3 = 0; m3 < r.sdefs.length; m3++) { snames.push(r.sdefs[m3].name) }
         classSMethods["$" + name] = snames
@@ -6279,8 +6388,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
                 }
             }
+            var savedModObj = curModObjBody
+            curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])
             b = emitMethods(b, modV, r.methods, "", name, [])
+            curModObjBody = savedModObj
+            // The module's instance-method NAMES, which is what
+            // `obj.extend(M); obj.singleton_methods' has to answer. keysOf would not
+            // do: the module object also carries $s$ / $c$ / __ slots, and the frozen
+            // engine has no for..in - the same reason the interpreter half's module
+            // objects keep __methodNames. docs/todo.md 1.3.
+            b = emitNameList(b, modV, mnames, "__mnames")
+            b = emitNameList(b, modV, snames, "__snames")
             b = emitMethods(b, modV, r.sdefs, "$s$", name, [])
             for (var ai = 0; ai < r.aliases.length; ai++) {
                 callExt(b, "js_set", [modV, emitStr(b, r.aliases[ai].to),

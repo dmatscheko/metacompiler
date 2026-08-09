@@ -4846,11 +4846,188 @@ func rubyUserObj(v interface{}) bool {
 	return has
 }
 
-// rubyFindMethod walks the __class / __super chain of an instance for a method.
+// ----- The PER-OBJECT singleton method table (docs/todo.md 1.3) -----
+//
+// Ruby gives every object a singleton ("eigen") class in front of its own class.
+// `def obj.m', `class << obj' and #define_singleton_method write the __sing slot
+// (a plain object, name -> closure, with __singn holding the names in definition
+// order); `obj.extend(M)' pushes the module onto __sext instead. The two tiers are
+// separate because MRI keeps them apart - `def a.hi' then `a.extend(M)' still
+// answers the def. Both slots are __-prefixed, so keysOf hides them (manual 7.9).
+// Twins: singFind/singPut/singExtend of languages/ruby-interpreter.abnf and
+// rbSingFind/rbSingPut/rbSingExtend of languages/lib/ruby-rt.metajs.
+func rubySingFind(o *jsObject, name string) (interface{}, bool) {
+	if t, isObj := o.props["__sing"].(*jsObject); isObj {
+		if m, has := t.props[name]; has && isCallable(m) {
+			return m, true
+		}
+	}
+	if xs, isArr := o.props["__sext"].(*jsArray); isArr {
+		for i := len(xs.elems) - 1; i >= 0; i-- {
+			mod, isObj := xs.elems[i].(*jsObject)
+			if !isObj {
+				continue
+			}
+			if m, has := mod.props[name]; has && isCallable(m) {
+				return m, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func rubySingPut(o *jsObject, name string, fn interface{}) {
+	t, isObj := o.props["__sing"].(*jsObject)
+	if !isObj {
+		t = newJSObject()
+		o.set("__sing", t)
+		o.set("__singn", &jsArray{})
+	}
+	if _, has := t.props[name]; !has {
+		if ns, isArr := o.props["__singn"].(*jsArray); isArr {
+			ns.elems = append(ns.elems, name)
+		}
+	}
+	t.set(name, fn)
+}
+
+func rubySingExtend(o *jsObject, m interface{}) {
+	mod, isObj := m.(*jsObject)
+	if !isObj {
+		return
+	}
+	xs, isArr := o.props["__sext"].(*jsArray)
+	if !isArr {
+		xs = &jsArray{}
+		o.set("__sext", xs)
+	}
+	for _, e := range xs.elems {
+		if e == interface{}(mod) {
+			return
+		}
+	}
+	xs.elems = append(xs.elems, mod)
+}
+
+// Object#singleton_methods: the direct defs, then each extended module's instance
+// methods (the names the emitter records on the module object as __mnames), once each.
+func (rt *jsrt) rubySingNames(o *jsObject) *jsArray {
+	out := &jsArray{}
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			out.elems = append(out.elems, jsSym{s: n})
+		}
+	}
+	if ns, isArr := o.props["__singn"].(*jsArray); isArr {
+		for _, e := range ns.elems {
+			if s, isStr := e.(string); isStr {
+				add(s)
+			}
+		}
+	}
+	// A class object's own `def self.` / `class << self` methods are singleton
+	// methods of that object and MRI lists them; the names come from the emitter's
+	// build-time record because a "$s$" key cannot be found by enumeration.
+	if ns, isArr := o.props["__snames"].(*jsArray); isArr {
+		for _, e := range ns.elems {
+			if s, isStr := e.(string); isStr {
+				add(s)
+			}
+		}
+	}
+	if xs, isArr := o.props["__sext"].(*jsArray); isArr {
+		// NEAREST FIRST, the order rubySingFind searches. MRI's own order inside one
+		// module is its method-table hash order, so only the tier order is settleable.
+		for i := len(xs.elems) - 1; i >= 0; i-- {
+			mod, isObj := xs.elems[i].(*jsObject)
+			if !isObj {
+				continue
+			}
+			if mn, isArr2 := mod.props["__mnames"].(*jsArray); isArr2 {
+				for _, n := range mn.elems {
+					if s, isStr := n.(string); isStr {
+						add(s)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// Object#dup / Object#clone. Both are SHALLOW: a fresh instance of the same class
+// with the same instance variables. THE HIDDEN SLOTS ARE HANDLED DELIBERATELY here
+// rather than by a generic key walk - manual 7.9 warns that this twin's `clone`
+// walks o.keys RAW and copies __class by accident, which would carry __sing and
+// __sext into a #dup and make it a #clone. The one difference between the two IS
+// those slots: #clone keeps the singleton class, #dup drops it, and the tables are
+// COPIED rather than shared so a def on the clone does not reach the original.
+// Measured on /usr/bin/ruby 2.6.10. `clone(freeze: false)` is not modelled and does
+// not need to be: nothing here has a frozen bit to clear (Object#frozen? answers
+// true only for the immediate values), so the keyword would be a no-op.
+// Twins: singCopy of ruby-interpreter.abnf, rbSingCopy of lib/ruby-rt.metajs.
+func rubySingCopy(o *jsObject, withSing bool) *jsObject {
+	out := newJSObject()
+	out.set("__class", o.props["__class"])
+	for _, k := range o.keys {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+			continue
+		}
+		out.set(k, o.props[k])
+	}
+	if !withSing {
+		return out
+	}
+	if t, isObj := o.props["__sing"].(*jsObject); isObj {
+		nt := newJSObject()
+		for _, k := range t.keys {
+			nt.set(k, t.props[k])
+		}
+		out.set("__sing", nt)
+		if ns, isArr := o.props["__singn"].(*jsArray); isArr {
+			out.set("__singn", &jsArray{elems: append([]interface{}{}, ns.elems...)})
+		}
+	}
+	if xs, isArr := o.props["__sext"].(*jsArray); isArr {
+		out.set("__sext", &jsArray{elems: append([]interface{}{}, xs.elems...)})
+	}
+	return out
+}
+
+// Object#respond_to?: the singleton table, then the class chain (an instance) or
+// the $s$ class-method chain (a class object). It was absent from all four engines.
+func rubySingRespond(o *jsObject, name string) bool {
+	if _, ok := rubySingFind(o, name); ok {
+		return true
+	}
+	if isCls, _ := o.props["__isclass"].(bool); isCls {
+		for cls := interface{}(o); cls != nil; {
+			clsObj, isObj := cls.(*jsObject)
+			if !isObj {
+				break
+			}
+			if m, has := clsObj.props["$s$"+name]; has && isCallable(m) {
+				return true
+			}
+			cls = clsObj.props["__super"]
+		}
+		return false
+	}
+	_, ok := rubyFindMethod(o, name)
+	return ok
+}
+
+// rubyFindMethod walks the singleton table and then the __class / __super chain of
+// an instance for a method.
 func rubyFindMethod(v interface{}, name string) (interface{}, bool) {
 	o, ok := v.(*jsObject)
 	if !ok {
 		return nil, false
+	}
+	if m, has := rubySingFind(o, name); has {
+		return m, true
 	}
 	for cls := o.props["__class"]; cls != nil; {
 		clsObj, ok := cls.(*jsObject)
@@ -5675,6 +5852,20 @@ func rubyMixIsA(v interface{}, clsObj *jsObject) bool {
 	nm, hasName := clsObj.props["__name"].(string)
 	if !hasName {
 		return false
+	}
+	// An INSTANCE that was `extend'ed is a member of that module too, and of every
+	// module THAT one includes - `o.extend(B)' where `module B; include A' makes o
+	// an A as well ($mix$<Name> is the module object's own ancestry record). The
+	// per-object twin of the class case below. docs/todo.md 1.3.
+	if xs, isArr := o.props["__sext"].(*jsArray); isArr {
+		for _, e := range xs.elems {
+			if e == interface{}(clsObj) {
+				return true
+			}
+			if mo, isObj := e.(*jsObject); isObj && mo.props["$mix$"+nm] == interface{}(clsObj) {
+				return true
+			}
+		}
 	}
 	if isCls, _ := o.props["__isclass"].(bool); isCls {
 		return o.props["$xmix$"+nm] == interface{}(clsObj)
@@ -7435,6 +7626,22 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 			return 0, true
 		}
 	}
+	// A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
+	// `[:b, :a].sort`, #min, #max, #between? and `:a < :b` all work in MRI and
+	// raised *comparison of Symbol with :a failed* in every engine here. It is the
+	// name comparison and nothing else: `:a <=> 1` is nil, i.e. the ok=false at the
+	// bottom. Measured on /usr/bin/ruby 2.6.10. docs/todo.md 1.3.
+	if lsym, ok := l.(jsSym); ok {
+		if rsym, ok2 := r.(jsSym); ok2 {
+			switch {
+			case lsym.s < rsym.s:
+				return -1, true
+			case lsym.s > rsym.s:
+				return 1, true
+			}
+			return 0, true
+		}
+	}
 	if la, ok := l.(*jsArray); ok {
 		if ra, ok2 := r.(*jsArray); ok2 {
 			// ONE incomparable element pair makes the WHOLE comparison nil -
@@ -8052,6 +8259,15 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 			}
 		}
+	// Object#dup / #clone on a user INSTANCE, only when the class defines neither -
+	// so a user #dup still wins, exactly as the to_s / inspect arm above works. A
+	// String / Array / Hash keeps its own arm further down. docs/todo.md 1.3.
+	case "dup", "clone":
+		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				return rubySingCopy(o, name == "clone")
+			}
+		}
 	case "frozen?":
 		_, isStr := target.(string)
 		return isStr || rubyIsNum(target)
@@ -8415,6 +8631,73 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return v
 			}
 			rt.fail("unknown Hash method: %s", name)
+		}
+		// The SINGLETON table comes first: `def obj.m', `class << obj' and an
+		// extended module all sit in front of the object's own class, for an
+		// instance and for a class object alike. docs/todo.md 1.3.
+		_, objIsCls := o.props["__isclass"]
+		_, objHasCls := o.props["__class"]
+		if objIsCls || objHasCls {
+			if m, has := rubySingFind(o, name); has {
+				return rt.call(m, jsUndef, append([]interface{}{o}, args...))
+			}
+			// NOTE: these four are answered AHEAD of a user class's own method
+			// of the same name. MRI would let the user method win (Object#extend
+			// and friends are ordinary, overridable methods); `method' below is
+			// guarded because a user `method' is plausible. All three engines do
+			// the same thing, so this is not a halves divergence - but it is a
+			// divergence from MRI, and it is here rather than in a note.
+			switch name {
+			case "extend":
+				pos, _ := rubyBlockArgs(args)
+				for _, m := range pos {
+					rubySingExtend(o, m)
+				}
+				return o
+			case "define_singleton_method":
+				pos, blk := rubyBlockArgs(args)
+				if len(pos) == 0 {
+					rt.fail("no method name given")
+				}
+				body := blk
+				if body == nil && len(pos) > 1 {
+					body = pos[1]
+				}
+				nm := rt.rubyStr(pos[0])
+				fn := body
+				rubySingPut(o, nm, &hostFunc{name: "singleton:" + nm,
+					fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+						// The receiver is prepended by the dispatch above, exactly
+						// as it is for a compiled method; the block body does not
+						// take it (it closes over its defining scope instead).
+						if len(a) > 0 {
+							a = a[1:]
+						}
+						return rt.call(fn, jsUndef, a)
+					}})
+				return jsSym{s: nm}
+			case "singleton_methods":
+				return rt.rubySingNames(o)
+			case "respond_to?":
+				return rubySingRespond(o, rt.rubyStr(argAt(args, 0)))
+			case "method":
+				// Object#method with an explicit RECEIVER (Kernel#method with none
+				// is js_rmethodval above). It aborted in every engine, and it is the
+				// one way a singleton method is reachable as a value. A user class
+				// that defines `method' itself still wins - the singleton table was
+				// searched first and the class chain is asked here.
+				if _, userHas := rubyFindMethod(o, "method"); !userHas {
+					nm := rt.rubyStr(argAt(args, 0))
+					if _, found := rubyFindMethod(o, nm); !found {
+						rt.fail("undefined method '%s'", nm)
+					}
+					recv := interface{}(o)
+					return &hostFunc{name: "method:" + nm,
+						fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+							return rt.rubyMethod(recv, nm, a)
+						}}
+				}
+			}
 		}
 		// Ruby's type predicates. is_a?/kind_of? walk the __super chain of the
 		// instance's class; instance_of? compares the exact class.
@@ -11035,6 +11318,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_rmcall args must be an array")
 			}
 			return w(rt.rubyMethod(u(a[0]), rt.toString(u(a[1])), args.elems))
+		},
+		// `def obj.m' and a def inside `class << obj': install ONE closure in the
+		// receiver's own singleton table. The class machinery of ruby-to-llvm-ir.abnf
+		// is build time and the receiver of these two forms is only known at run
+		// time, which is why a def here used to be notImplemented outright.
+		// docs/todo.md 1.3.
+		"js_rsingdef": func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("can't define singleton method on %s", rt.typeOf(u(a[0])))
+			}
+			rubySingPut(o, rt.toString(u(a[1])), u(a[2]))
+			return 0
 		},
 		// Ruby indexing: a[i], h[k], s[i]. Identical to js_pyget except that a missing
 		// Hash key and an out-of-range index answer NIL instead of raising - which is

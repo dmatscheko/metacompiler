@@ -2425,6 +2425,18 @@ function rbSpaceship(l, r) {
         if (r < l) { return 1 }
         return 0
     }
+    // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
+    // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI and
+    // raised *comparison of Symbol with :a failed* in every engine here. It is the
+    // name comparison and nothing else: `:a <=> 1' is nil, the `return null' below.
+    // Measured on /usr/bin/ruby 2.6.10. docs/todo.md 1.3.
+    if (rbIsSym(l) && rbIsSym(r)) {
+        var ln = l["s"]
+        var rn = r["s"]
+        if (ln < rn) { return 0 - 1 }
+        if (rn < ln) { return 1 }
+        return 0
+    }
     // ONE incomparable element pair makes the WHOLE comparison nil - skipping it
     // and carrying on made `[1, "a"] <=> [1, 2]` answer 0 where MRI answers nil -
     // and the answer is NORMALISED to -1/0/1, so `[1,2,3] <=> [1]` is 1, not 2.
@@ -2474,9 +2486,189 @@ function rbCmp(l, r) {
 
 // ===================================================== classes ==============
 
-// rubyFindMethod: walk the __class / __super chain of an INSTANCE for a method.
+// ----- The PER-OBJECT singleton method table (docs/todo.md 1.3) -----
+//
+// Ruby gives every object a singleton ("eigen") class in front of its own class.
+// `def obj.m', a def inside `class << obj' and #define_singleton_method write the
+// __sing slot (name -> closure, with __singn holding the names in definition
+// order); `obj.extend(M)' pushes the module object onto __sext instead. The two
+// tiers are separate because MRI keeps them apart - `def a.hi' then `a.extend(M)'
+// still answers the def. Both slots are __-prefixed, so keysOf hides them
+// (manual 7.9). Twins: singFind / singPut / singExtend of
+// languages/ruby-interpreter.abnf, rubySingFind and friends of abnf/jsrt.go.
+function rbSingFind(o, name) {
+    var t = o["__sing"]
+    if (t !== undefined && t !== null) {
+        var m = t[name]
+        if (m !== undefined && rbIsFn(m)) { return m }
+    }
+    var xs = o["__sext"]
+    if (xs !== undefined && xs !== null) {
+        var i = xs.length - 1
+        while (i >= 0) {
+            var xm = xs[i][name]
+            if (xm !== undefined && rbIsFn(xm)) { return xm }
+            i = i - 1
+        }
+    }
+    return undefined
+}
+function rbSingPut(o, name, fn) {
+    if (!rbIsObj(o)) { fail("can't define singleton method on " + rbStr(o)) }
+    var t = anytype
+    t = o["__sing"]
+    if (t === undefined || t === null) {
+        t = {}
+        o["__sing"] = t
+        o["__singn"] = []
+    }
+    if (t[name] === undefined) { o["__singn"].push(name) }
+    t[name] = fn
+    return undefined
+}
+// A #define_singleton_method body as a method closure: the dispatch prepends the
+// receiver exactly as it does for a compiled method, and the block does not take
+// it (it closes over its defining scope instead).
+function rbSingWrap(body) {
+    return function() {
+        var a = []
+        var i = 1
+        while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+        return body.apply(undefined, a)
+    }
+}
+function rbSingExtend(o, m) {
+    if (!rbIsObj(m)) { return undefined }
+    var xs = anytype
+    xs = o["__sext"]
+    if (xs === undefined || xs === null) {
+        xs = []
+        o["__sext"] = xs
+    }
+    var i = 0
+    while (i < xs.length) {
+        if (xs[i] === m) { return undefined }
+        i = i + 1
+    }
+    xs.push(m)
+    return undefined
+}
+// Object#singleton_methods: the direct defs, then each extended module's instance
+// methods (the __mnames array the emitter records on the module object), once each.
+function rbSingNames(o) {
+    var out = []
+    var seen = []
+    var ns = o["__singn"]
+    if (ns !== undefined && ns !== null) {
+        var i = 0
+        while (i < ns.length) {
+            if (!rtHas(seen, ns[i])) { seen.push(ns[i]); out.push(rbSym(ns[i])) }
+            i = i + 1
+        }
+    }
+    // A class object's own `def self.' / `class << self' methods are singleton
+    // methods of that object and MRI lists them; the names come from the emitter's
+    // build-time record because a "$s$" key cannot be found by enumeration.
+    var sn = o["__snames"]
+    if (sn !== undefined && sn !== null) {
+        var si = 0
+        while (si < sn.length) {
+            if (!rtHas(seen, sn[si])) { seen.push(sn[si]); out.push(rbSym(sn[si])) }
+            si = si + 1
+        }
+    }
+    var xs = o["__sext"]
+    if (xs !== undefined && xs !== null) {
+        // NEAREST FIRST, the order rbSingFind searches. MRI's own order inside one
+        // module is its method-table hash order, so only the tier order is settleable.
+        var j = xs.length - 1
+        while (j >= 0) {
+            var mn = xs[j]["__mnames"]
+            if (mn !== undefined && mn !== null) {
+                var k = 0
+                while (k < mn.length) {
+                    if (!rtHas(seen, mn[k])) { seen.push(mn[k]); out.push(rbSym(mn[k])) }
+                    k = k + 1
+                }
+            }
+            j = j - 1
+        }
+    }
+    return out
+}
+// Object#dup / Object#clone. Both are SHALLOW: a fresh instance of the same class
+// with the same instance variables. keysOf answers exactly those - it hides every
+// __-prefixed slot (manual 7.9) - so the copy cannot pick the singleton slots up by
+// accident, which is the trap the Go twin's generic clone falls into: it walks
+// o.keys RAW. The one difference between the two IS those slots: #clone keeps the
+// singleton class, #dup drops it, and the tables are COPIED rather than shared so a
+// def on the clone does not reach the original. Measured on /usr/bin/ruby 2.6.10.
+// `clone(freeze: false)' is not modelled and does not need to be: nothing here has
+// a frozen bit to clear (Object#frozen? answers true only for the immediate
+// values), so the keyword would be a no-op.
+// Twins: singCopy of ruby-interpreter.abnf, rubySingCopy of abnf/jsrt.go.
+function rbSingCopy(o, withSing) {
+    var out = {}
+    out["__class"] = o["__class"]
+    var ks = keysOf(o)
+    var i = 0
+    while (i < ks.length) {
+        out[ks[i]] = o[ks[i]]
+        i = i + 1
+    }
+    if (!withSing) { return out }
+    var t = o["__sing"]
+    if (t !== undefined && t !== null) {
+        var nt = {}
+        var ns = o["__singn"]
+        var nn = []
+        var j = 0
+        while (j < ns.length) {
+            nt[ns[j]] = t[ns[j]]
+            nn.push(ns[j])
+            j = j + 1
+        }
+        out["__sing"] = nt
+        out["__singn"] = nn
+    }
+    var xs = o["__sext"]
+    if (xs !== undefined && xs !== null) {
+        var nx = []
+        var k = 0
+        while (k < xs.length) {
+            nx.push(xs[k])
+            k = k + 1
+        }
+        out["__sext"] = nx
+    }
+    return out
+}
+
+// Object#respond_to?: the singleton table, then the class chain (an instance) or
+// the $s$ class-method chain (a class object). It was absent from all four engines.
+function rbSingRespond(o, name) {
+    if (rbSingFind(o, name) !== undefined) { return true }
+    if (o["__isclass"] === true) {
+        var sc = o
+        while (sc !== undefined && sc !== null && rbIsObj(sc)) {
+            var sm = sc["$s$" + name]
+            if (sm !== undefined && rbIsFn(sm)) { return true }
+            sc = sc["__super"]
+        }
+        return false
+    }
+    return rbFindMethod(o, name) !== undefined
+}
+
+// rubyFindMethod: walk the singleton table and then the __class / __super chain of
+// an INSTANCE for a method.
 function rbFindMethod(v, name) {
     if (!rbIsObj(v)) { return undefined }
+    // Two slot reads, and the CALL only when one of them is set - manual 5.1.
+    if (v["__sing"] !== undefined || v["__sext"] !== undefined) {
+        var gm = rbSingFind(v, name)
+        if (gm !== undefined) { return gm }
+    }
     var cls = v["__class"]
     while (cls !== undefined && cls !== null) {
         if (!rbIsObj(cls)) { return undefined }
@@ -2638,6 +2830,19 @@ function rbMixIsA(v, cls) {
     if (!rbIsObj(v)) { return false }
     var nm = cls["__name"]
     if (typeof nm != "string") { return false }
+    // An INSTANCE that was `extend'ed is a member of that module too, and of every
+    // module THAT one includes - `o.extend(B)' where `module B; include A' makes o
+    // an A as well ($mix$<Name> is the module object's own ancestry record). The
+    // per-object twin of the class case below. docs/todo.md 1.3.
+    var xs = v["__sext"]
+    if (xs !== undefined && xs !== null) {
+        var xi = 0
+        while (xi < xs.length) {
+            if (xs[xi] === cls) { return true }
+            if (xs[xi]["$mix$" + nm] === cls) { return true }
+            xi = xi + 1
+        }
+    }
     if (v["__isclass"] === true) { return v["$xmix$" + nm] === cls }
     var key = "$mix$" + nm
     var c = v["__class"]
@@ -5161,6 +5366,14 @@ function rbMethod(target, name, args) {
             return null
         }
     }
+    // Object#dup / #clone on a user INSTANCE, only when the class defines neither -
+    // so a user #dup still wins, exactly as the to_s / inspect arm above works. A
+    // String / Array / Hash keeps its own arm further down. docs/todo.md 1.3.
+    if (name == "dup" || name == "clone") {
+        if (rbUserObj(target) && rbFindMethod(target, name) === undefined) {
+            return rbSingCopy(target, name == "clone")
+        }
+    }
     if (name == "frozen?") {
         if (typeof target == "string") { return true }
         return rbIsNum(target)
@@ -5361,6 +5574,61 @@ function rbMethod(target, name, args) {
             var hres = rbHashMethod(target, keys, vals, name, args)
             if (hres !== rbHashUnknown) { return hres }
             fail("unknown Hash method: " + name)
+        }
+        // The SINGLETON table comes first: `def obj.m', `class << obj' and an
+        // extended module all sit in front of the object's own class, for an
+        // instance and for a class object alike. docs/todo.md 1.3.
+        // The two slot reads come first and the CALL only when one of them is set:
+        // in MetaJS a call is a scope frame (manual 5.1) and this sits on the
+        // method-dispatch path of every user object.
+        if (target["__sing"] !== undefined || target["__sext"] !== undefined) {
+            var gm = rbSingFind(target, name)
+            if (gm !== undefined) {
+                var gargv = [target]
+                var gi = 0
+                while (gi < args.length) {
+                    gargv.push(args[gi])
+                    gi = gi + 1
+                }
+                return gm.apply(undefined, gargv)
+            }
+        }
+        // NOTE: these four are answered AHEAD of a user class's own method of the
+        // same name. MRI would let the user method win (Object#extend and friends
+        // are ordinary, overridable methods); `method' below is guarded because a
+        // user `method' is plausible. All three engines do the same thing, so this
+        // is not a halves divergence - but it is a divergence from MRI.
+        if (target["__isclass"] === true || target["__class"] !== undefined) {
+            if (name == "extend") {
+                var xn = rbNPos(args)
+                var xi = 0
+                while (xi < xn) {
+                    rbSingExtend(target, rbArgAt(args, xi))
+                    xi = xi + 1
+                }
+                return target
+            }
+            if (name == "define_singleton_method") {
+                var dnm = rbStr(rbArgAt(args, 0))
+                var dbody = anytype
+                dbody = rbBlockOf(args)
+                if (dbody === null && rbNPos(args) > 1) { dbody = rbArgAt(args, 1) }
+                rbSingPut(target, dnm, rbSingWrap(dbody))
+                return rbSym(dnm)
+            }
+            if (name == "singleton_methods") { return rbSingNames(target) }
+            if (name == "respond_to?") { return rbSingRespond(target, rbStr(rbArgAt(args, 0))) }
+            // Object#method with an explicit RECEIVER (Kernel#method with none is
+            // js_rmethodval). It aborted in every engine, and it is the one way a
+            // singleton method is reachable as a value. A user class that defines
+            // `method' itself still wins - the singleton table was searched first
+            // and the class chain is asked here.
+            if (name == "method" && rbFindMethod(target, "method") === undefined) {
+                var mnm = rbStr(rbArgAt(args, 0))
+                var mm = rbFindMethod(target, mnm)
+                if (mm === undefined) { fail("undefined method '" + mnm + "'") }
+                return rbBindMethod(target, mnm, mm)
+            }
         }
         // Ruby's type predicates on an INSTANCE.
         if (name == "class") {
@@ -5951,6 +6219,15 @@ function js_rset(o, k, v) {
     if (idx < 0) { fail("index " + idx + " too small for array") }
     while (o.length <= idx) { o.push(null) }
     o[idx] = v
+    return undefined
+}
+
+// `def obj.m' and a def inside `class << obj': install ONE closure in the
+// receiver's own singleton table. The class machinery of ruby-to-llvm-ir.abnf is
+// build time and the receiver of these two forms is only known at run time, which
+// is why a def here used to be notImplemented outright. docs/todo.md 1.3.
+function js_rsingdef(obj, name, fn) {
+    rbSingPut(obj, rbStr(name), fn)
     return undefined
 }
 

@@ -1526,5 +1526,62 @@ check("rng-beginless-include", rng_bl.include?(1), true)
 check("rng-beginless-include-no", rng_bl.include?(9), false)
 check("rng-beginless-slice", "hello"[..4], "hello")
 
+# ----- the per-object singleton method table (docs/todo.md 1.3) -----
+# `o.extend(M)' was "unknown method 'extend'" in all three engines and a def
+# inside `class << VALUE' was notImplemented in the emitter: there was no
+# per-object table to check ahead of the __class chain. Every want is
+# /usr/bin/ruby 2.6.10's answer; all the forms here are Ruby-2 syntax. The
+# ratchet's SECTION 42 carries the ordering rules; these are the rows the ratchet
+# does not repeat - a module that includes another, and a CLASS object as the
+# receiver, where `extend' has to reach the class-method side.
+module SgA
+  def sg_am; "A"; end
+end
+module SgB
+  include SgA
+  def sg_bm; "B"; end
+end
+class SgC
+  def sg_cm; "C"; end
+end
+class SgD
+  def self.sg_sm; "SM"; end
+end
+sg_o = SgC.new
+sg_o.extend(SgB)
+check("sing-obj-mixin", sg_o.sg_am + sg_o.sg_bm + sg_o.sg_cm, "ABC")
+check("sing-obj-names", sg_o.singleton_methods.map { |s| s.to_s }.sort, ["sg_am", "sg_bm"])
+check("sing-obj-isa", sg_o.is_a?(SgA) && sg_o.is_a?(SgB), true)
+check("sing-obj-clean", SgC.new.respond_to?(:sg_am), false)
+SgD.extend(SgA)
+check("sing-cls-names", SgD.singleton_methods.map { |s| s.to_s }.sort, ["sg_am", "sg_sm"])
+check("sing-cls-extend", SgD.sg_am, "A")
+check("sing-cls-isa", SgD.is_a?(SgA), true)
+check("sing-cls-own", SgD.sg_sm, "SM")
+check("sing-cls-respond", SgD.respond_to?(:sg_sm), true)
+sg_e = SgC.new
+def sg_e.sg_only; "only"; end
+check("sing-def-obj", sg_e.sg_only, "only")
+check("sing-def-clean", SgC.new.respond_to?(:sg_only), false)
+sg_f = SgC.new
+class << sg_f
+  def sg_cm; "override"; end
+end
+check("sing-eigen", sg_f.sg_cm + SgC.new.sg_cm, "overrideC")
+# ----- Symbol is Comparable (docs/todo.md 1.3) -----
+# Symbol#<=> compares the NAMES, so #sort / #min / #max / #between? and the four
+# relational operators all work on symbols. Every engine here raised
+# *comparison of Symbol with :a failed* instead, which made `h.keys.sort'
+# unusable. `:a <=> 1' is nil, which is what makes the mixed pair still raise.
+# Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's answer.
+check("sym-sort", [:b, :a, :c].sort, [:a, :b, :c])
+check("sym-cmp", [(:a <=> :b), (:b <=> :a), (:a <=> :a)], [-1, 1, 0])
+check("sym-cmp-num", (:a <=> 1), nil)
+check("sym-lt", (:a < :b), true)
+check("sym-minmax", [[:b, :a].min, [:b, :a].max], [:a, :b])
+check("sym-prefix", [:abc, :ab].sort, [:ab, :abc])
+check("sym-between", :a.between?(:a, :z), true)
+check("sym-keys-sort", {:b => 1, :a => 2}.keys.sort, [:a, :b])
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)
