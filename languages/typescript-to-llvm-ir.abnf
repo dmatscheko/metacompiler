@@ -10,6 +10,35 @@ meaning: enums, namespaces, parameter properties and decorators.
 tests/typescript-test-full.ts (the full-syntax ratchet, ./test.sh --full) passes
 completely.
 
+
+THE GOAL SYMBOL IS Script, and being explicit about it is what decides the meaning of
+'this' at the top level - node gives three different answers for it and only one of them
+is ours:
+
+  node f.js             CommonJS   typeof this is 'object';    this is module.exports
+  vm.runInThisContext   Script     typeof this is 'object';    this === globalThis
+  node f.mjs            Module     typeof this is 'undefined'
+
+The evidence that it is Script is in this grammar rather than in a preference. The Annex
+B HTML-like comments ('<!--', '-->') are accepted, and B.1.3 admits them in the Script
+goal ONLY - node answers 'HTML comments are not allowed in modules'. The code is SLOPPY
+unless a 'use strict' directive says otherwise: an assignment to an undeclared name is an
+implicit global and '01' is a legacy octal literal, both of which a Module - always
+strict - refuses. And top level 'return' is a syntax error here, which is what rules out
+the CommonJS wrapper, since node legalises it inside one (this is also why 'node --check'
+is the wrong oracle for a file written for this grammar: it wraps the file in that
+function - use 'new vm.Script(src)' or vm.runInThisContext). 'import'/'export' are
+accepted ON TOP of the Script goal as an extension - an import runs the named file into
+the shared global scope - rather than switching it.
+
+So the top level 'this' is the GLOBAL OBJECT and 'globalThis' names the same object. It
+is a plain object, not a live view of the scope chain: 'globalThis.x = 1' does not create
+a global variable, and ''' + this' is '[object Object]' where node says '[object global]'.
+Two neighbouring rows are deliberately NOT converged, because both need a per-function
+strict-mode flag that no engine here carries: a plain call's 'this' is undefined where a
+sloppy Script's would be the global object, and 'f.call(null)' keeps the null instead of
+substituting it.
+
 THE JAVASCRIPT LAYER is the practical ECMAScript 2022 syntax: the numeric literal forms
 (hex/binary/octal/separators/leading dot/BigInt - and BigInt is REAL: arbitrary precision,
 its own type for typeof and ===, the spec's mixed-operand TypeError, the mathematical ==
@@ -4866,6 +4895,16 @@ NotFuncHead = :script(~~
         if (isInstance) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
+        } else {
+            // A STATIC method. Its receiver is not prepended to the arguments (only an
+            // instance method's is), so `this` has to come from the call's own receiver
+            // channel exactly as an ordinary function's does - js_this, fed by
+            // js_jssetthis at the call site (manual 7.3). It used to be declared here at
+            // all, so `this` inside `static s() {}` walked OUT of the method and found
+            // the top level binding: `typeof this` answered "undefined" where node and
+            // the interpreter half both say "function". A live halves divergence
+            // --cross never reached. docs/todo.md 1.4.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
         }
         b = bindParams(b, params, f.Params[1], off)
         if (implicitSuper != undefined && implicitSuper != null) {
@@ -6099,10 +6138,20 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
-        // The top level 'this'. A sloppy script's would be the global object, which this
-        // runtime has no value for, so it is undefined - and declaring it here is what
-        // keeps a top level 'this' from raising "variable not defined".
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), hUndef])
+        // THE GLOBAL OBJECT, and with it the top level 'this'. This grammar implements
+        // the SCRIPT goal symbol (see the :description), whose top level 'this' IS the
+        // global object: node's `vm.runInThisContext` answers `object` for
+        // `typeof this` and true for `this === globalThis`. It used to be hUndef here
+        // and bound nowhere at all in the interpreter half, which answered
+        // "ReferenceError: this is not defined" for a bare top level `this` - a live
+        // halves divergence --cross never reached. docs/todo.md 1.4.
+        //
+        // It is a PLAIN object, not a live view of the scope chain: `globalThis.x = 1`
+        // does not create a global variable. Both names are the SAME handle, which is
+        // what makes `this === globalThis` true.
+        var globalObjV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), globalObjV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "globalThis"), globalObjV])
         // The RegExp global, so a bare RegExp(src, flags) call (and 'typeof RegExp') work
         // the way 'new RegExp' does. It is declared in the PROGRAM's own scope, not in the
         // runtime's root, so no other language's compiler can see the name.

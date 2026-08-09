@@ -2204,6 +2204,69 @@ function s41() {
     check("nfn33", msg(function () { return new SB().go() }) === "true|true|(intermediate value).zz is not a function")
 }
 
+// ===== SECTION 42: the top-level 'this' is the global object (the Script goal) =====
+// docs/todo.md 1.4. These grammars parse the SCRIPT goal symbol - the Annex B
+// HTML-like comments are accepted (B.1.3 admits them in a Script only), the code
+// is sloppy unless a "use strict" directive says otherwise, and top-level `return`
+// is a syntax error, which rules out the CommonJS wrapper node's `--check` puts
+// around a file. So the top-level `this` is the GLOBAL OBJECT, and every value
+// below is `node -e 'vm.runInThisContext(src)'`'s, except where a comment says
+// otherwise. It used to be bound nowhere at all in the interpreter half (a bare
+// top-level `this` raised "ReferenceError: this is not defined") and to undefined
+// in the compiler half: a live halves divergence no test program reached.
+var s42this = this
+var s42arrow = () => this
+var s42nested = () => (() => this)()
+function s42plain() { return this }
+class S42C {
+    static tag = "S42"
+    static who() { return this }
+    static viaThis() { return this.tag }
+}
+
+function s42() {
+    // The top level.
+    check("gthis1", typeof s42this === "object")
+    check("gthis2", (s42this === undefined) === false)
+    check("gthis3", (s42this === null) === false)
+    check("gthis4", typeof globalThis === "object")
+    check("gthis5", s42this === globalThis)
+    check("gthis6", !!s42this)
+    // An arrow at the top level binds no `this` of its own, so it walks out to the
+    // global object - at any nesting depth.
+    check("gthis7", s42arrow() === s42this)
+    check("gthis8", s42nested() === s42this)
+    // The global object is a PLAIN object here, not a live view of the scope chain:
+    // a global variable is not a property of it. node's is (`globalThis.s42this` is
+    // the same value), and closing that gap needs an object identity for the root
+    // scope in all four engines.
+    check("gthis9", globalThis.s42this === undefined)
+    // `"" + this` is "[object global]" in node and "[object Object]" here, for the
+    // same reason: nothing in the value model marks this object as the global one.
+    check("gthis10", ("" + s42this) === "[object Object]")
+
+    // A STATIC method's `this` is the class. The compiler half declared no `this`
+    // in a static method at all, so this used to answer the top-level binding.
+    check("gthis11", S42C.who() === S42C)
+    check("gthis12", S42C.viaThis() === "S42")
+    check("gthis13", typeof S42C.who() === "function")
+    // An instance method's and a constructor's are unchanged by any of that.
+    class D { constructor() { this.v = 1 } m() { return this } }
+    var d = new D()
+    check("gthis14", d.m() === d && d.v === 1)
+    var lit = {t: "L", m: function () { return this.t }}
+    check("gthis15", lit.m() === "L")
+
+    // DELIBERATELY NOT CONVERGED, and both rows need the same missing piece - a
+    // per-function strict-mode flag, which no engine here carries. A sloppy
+    // Script's OrdinaryCallBindThis substitutes the global object for an
+    // undefined or null receiver; these engines behave as a STRICT function does
+    // and keep it. node's Script goal answers the global object for both.
+    check("gthis16", s42plain() === undefined)
+    var detached = lit.m
+    check("gthis17", typeof detached === "function")
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -2246,6 +2309,7 @@ function main(): number {
     s39(); // SECTION-CALL 39
     s40(); // SECTION-CALL 40
     s41(); // SECTION-CALL 41
+    s42(); // SECTION-CALL 42
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

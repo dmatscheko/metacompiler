@@ -561,6 +561,19 @@ check("noncall-continues", (function() {
     return k;
 })() === 3);
 
+// ----- the top-level 'this' (the Script goal; docs/todo.md 1.4) -----
+var gThisTop = this;
+var gThisArrow = () => this;
+check("this-top-typeof", typeof gThisTop === "object");
+check("this-top-not-undefined", (gThisTop === undefined) === false);
+check("this-globalthis", typeof globalThis === "object" && gThisTop === globalThis);
+check("this-top-arrow", gThisArrow() === gThisTop);
+check("this-plain-call", (function() { return this; })() === undefined);
+check("this-static-method", (function() {
+    class C { static tag = "T"; static who() { return this; } static viaThis() { return this.tag; } }
+    return C.who() === C && C.viaThis() === "T" && typeof C.who() === "function";
+})());
+
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;
