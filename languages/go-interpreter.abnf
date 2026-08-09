@@ -1707,7 +1707,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // %d on a SIZED integer has to go through szStr, not through a double: a
         // uint64 above 2^63 prints unsigned, and a 64 bit value above 2^53 has no
         // exact double to render from.
-        if (verb == "d") { if (szIs(a)) { return szStr(a) }; var n = gNumF(a); return "" + (n - (n % 1)) }
+        // A FLOAT HAS NO %d FORM AT ALL: `go run` writes the bad-verb note for it,
+        // exactly as it already does here for %x, %o and %b. Truncating the double
+        // and handing the result to `"" + n` was the LAST place this grammar took a
+        // double's digits from the host printer, and it was a live goja-vs--frozen
+        // divergence: fmt.Sprintf("%d", 1.7385704740834339e92) printed the sixteen
+        // digit "1.738570474083434e+92" under goja and the seventeen digit form
+        // under -frozen, because goja's Number-to-String is not always the shortest
+        // round-tripping form (see gDigOf). gstr renders the value through gDigOf,
+        // so the note itself carries exact digits in both hosts.
+        if (verb == "d") {
+            if (szIs(a)) { return szStr(a) }
+            if (isFlo(a)) { return "%!" + verb + "(" + gstr(a) + ")" }
+            var n = gNumF(a)
+            return "" + (n - (n % 1))
+        }
         if (verb == "t") { return a === true ? "true" : "false" }
         if (verb == "c") { return fromCodePoint(szNum(gNumF(a))) }
         if (verb == "q") {

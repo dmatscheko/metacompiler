@@ -720,6 +720,24 @@ b";                                                   // verbatim keeps the newl
             double[] sd = {0.0013060363926342689, 359000550.0};
             Program.Check("flt8a", Program.S23S(sd[0]) == "0.0013060363926342689");
             Program.Check("flt8b", Program.S23S(sd[1] / 274877906944.0) == "0.0013060363926342689");
+            // The two OTHER shapes goja gets wrong, pinned here as a ratchet. A
+            // 200,000-value random sweep of the whole double space finds ~22 where
+            // goja's `"" + n` does not read back (sd2[0] and the double one ulp
+            // above it BOTH come out "1.738570474083434E+92" there), and a sweep
+            // of the subnormal band finds a further class where it emits a
+            // non-digit character outright - goja renders sd2[1] as
+            // "<.950476795525063e-309", the '<' being '0' + 12.
+            //
+            // MEASURED NULL RESULT, and it is worth saying plainly: this grammar
+            // was already immune. Every csFloStr / csF32Str / interpolation /
+            // concat / Dictionary-key path takes its digits from csDecDigits, and
+            // the remaining `"" + x` sites in csharp-interpreter.abnf all hold an
+            // int, a small int or a string. These two rows fail in NEITHER engine
+            // at ea28a1a - zero discriminating power today, ratchet value only.
+            double[] sd2 = {1.7385704740834339e92, 1.2950476795525063e-308, 1.738570474083434e92};
+            Program.Check("flt8c", Program.S23S(sd2[0]) == "1.7385704740834339E+92");
+            Program.Check("flt8d", Program.S23S(sd2[1]) == "1.2950476795525063E-308");
+            Program.Check("flt8e", Program.S23S(sd2[2]) == "1.738570474083434E+92" && sd2[0] != sd2[2]);
             double inf = 1.0 / 0.0;
             double nan = 0.0 / 0.0;
             Program.Check("flt9", Program.S23S(inf) == "Infinity" && Program.S23S(-1.0 / 0.0) == "-Infinity");

@@ -446,6 +446,49 @@ check("flostr-window-17-plain", "" .. gflo[10], "1234567890123456.0")
 check("flostr-min-subnormal", "" .. gflo[11], "4.94065645841247e-324")
 check("flostr-1e16", "" .. gflo[12], "1e+16")
 
+-- ----- float TABLE KEYS: the key TEXT has to round-trip as well -----
+-- The same goja defect one level down, and it needs no print of a number to
+-- show. A table addresses its keys by their string form, so a float key's text
+-- must name exactly ONE double - and `"" + n` did not. goja renders both
+-- 1.7385704740834339e+92 and the double one ulp above it as the sixteen-digit
+-- "1.738570474083434e+92", so the two landed in ONE slot under goja while
+-- -frozen, the compiled half and lua 5.5.0 all kept them apart; at the subnormal
+-- boundary the text was not even a number ("<.950476795525063e-309"). luaKey
+-- spells a float key with the shortest ROUND-TRIPPING decimal now (luaFloKey
+-- over floPrec), so all four legs agree.
+--
+-- Every operand is read out of THIS TABLE, never written as a literal at the
+-- check, so the constant folder cannot answer in the key's place.
+local fkey = {
+    1.7385704740834339e+92,   -- goja: "1.738570474083434e+92"
+    1.738570474083434e+92,    -- goja: THE SAME TEXT - the collision
+    -7.209885073274179e-254,  -- goja: "-7.20988507327418e-254"
+    -7.20988507327418e-254,   -- goja: the same text again
+    1.2950476795525063e-308,  -- goja: "<.950476795525063e-309", a non-digit
+    2.0,                      -- an integral float addresses the INTEGER key
+    0.5,
+}
+-- The pairs have to be DISTINCT doubles for the rest to mean anything: if the
+-- literal reader folded them together the collision checks would pass vacuously.
+check("flokey-operands-differ-1", fkey[1] == fkey[2], false)
+check("flokey-operands-differ-2", fkey[3] == fkey[4], false)
+local ftab = {}
+ftab[fkey[1]] = "a"
+ftab[fkey[2]] = "b"
+ftab[fkey[3]] = "c"
+ftab[fkey[4]] = "d"
+ftab[fkey[5]] = "e"
+ftab[fkey[6]] = "f"
+ftab[fkey[7]] = "g"
+check("flokey-collide-1", ftab[fkey[1]], "a")
+check("flokey-collide-2", ftab[fkey[2]], "b")
+check("flokey-collide-3", ftab[fkey[3]], "c")
+check("flokey-collide-4", ftab[fkey[4]], "d")
+check("flokey-nondigit", ftab[fkey[5]], "e")
+-- t[2.0] IS t[2] in Lua, and a plain fractional key still reaches its own slot.
+check("flokey-int-normalize", ftab[2], "f")
+check("flokey-fraction", ftab[0.5], "g")
+
 -- ----- done -----
 print("features: " .. checks .. " checks, " .. fails .. " failures")
 exit(fails)

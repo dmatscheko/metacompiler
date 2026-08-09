@@ -1001,17 +1001,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // which is Lua's own rule, not an accident of the string form. A 64 bit integer past
     // 2^53 has to spell itself EXACTLY or two neighbouring keys would collide, so a box
     // goes through szStr rather than through its double reading.
+    //
+    // A FLOAT KEY'S TEXT COMES FROM luaFloKey AND NOT FROM `"" + n`, for the same
+    // reason luaGStr's digits do (see its comment): goja's Number-to-String is not
+    // always the shortest round-tripping form, and a key text that does not
+    // round-trip is not an injective name for the double. Both symptoms were live
+    // here, and neither needed a print of the number itself:
+    //   - TWO DISTINCT DOUBLES COLLIDED IN ONE SLOT. goja renders both
+    //     1.7385704740834339e+92 and its neighbour 1.738570474083434e+92 as
+    //     "1.738570474083434e+92", so t[a] and t[b] were the same key under goja
+    //     and different keys under -frozen and under lua 5.5.0.
+    //   - pairs() HANDED BACK THE WRONG NUMBER. luaKeyBack re-reads the key text,
+    //     so the key came back as the double the truncated text names, and at the
+    //     subnormal boundary it came back as the STRING "<.950476795525063e-309" -
+    //     goja emits a non-digit character there outright.
     function luaKey(k) {
         if (szIs(k)) { return szStr(k) }
         if (isNum(k)) {
             var n = numOf(k)
             // An integral float that names an exact 64 bit integer addresses the INTEGER
             // key: t[2.0^53 + 0.0] and the integer next to it must not both spell "1e+16".
-            if (isFlt(k) && n - n === 0 && Math.floor(n) === n) {
-                var iv = luaI64(n)
-                if (iv !== undefined) { return szStr(iv) }
+            if (n - n === 0 && Math.floor(n) === n) {
+                if (isFlt(k)) {
+                    var iv = luaI64(n)
+                    if (iv !== undefined) { return szStr(iv) }
+                } else {
+                    // A Lua INTEGER small enough to be an unboxed number spells its own
+                    // exact digits; only the boxed ones above 2^53 need szStr.
+                    return "" + n
+                }
             }
-            return "" + n
+            // nan and the infinities have no digits to search for; real Lua rejects a
+            // nan key outright, so their spelling only has to be stable.
+            if (n !== n || n - n !== 0) { return "" + n }
+            return luaFloKey(n)
         }
         return "" + k
     }
@@ -1090,6 +1113,36 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var frac = ds.substring(1)
         if (frac == "") { frac = "0" }
         return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+    }
+    // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
+    // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
+    // round-trip a binary64, so the loop terminates with an exact answer. The
+    // reference is jDecDigits in languages/java-interpreter.abnf; floPrec's
+    // contract is "exactly n significant digits", so asking for a small n and
+    // parsing the answer back IS the shortest-form search.
+    function luaDecDigits(a) {
+        var n = 1
+        while (n < 17) {
+            var c = floPrec(a, n)
+            if (luaSigVal(c) === a) { return c }
+            n = n + 1
+        }
+        return floPrec(a, 17)
+    }
+    // The text a float table key is addressed by: the shortest round-tripping
+    // decimal, in the "D.DDDeEXP" spelling luaNumVal reads back - luaKeyBack turns
+    // a key text back into the number pairs() hands the program, and that only
+    // works when the text names exactly one double. floPrec answers the digits of
+    // |a|, so the sign is carried here.
+    function luaFloKey(n) {
+        var neg = n < 0
+        var s = luaDecDigits(neg ? 0 - n : n)
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        var body = ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1)
+        return neg ? "-" + body : body
     }
     // C's %g on a POSITIVE finite double, at the precision lua picked. %g is
     // exponential exactly when exp < -4 || exp >= P, with P the precision that was
