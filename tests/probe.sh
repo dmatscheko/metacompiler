@@ -25,9 +25,12 @@
 #   tests/probe.sh ruby   p.rb --oracle '/usr/bin/ruby %s'    # 2.6.10: floats only
 #   tests/probe.sh java   p.java --oracle 'cd %d && javac Main.java && java Main'
 #   tests/probe.sh kotlin p.kt                                # no kotlinc here: 3 ways
+#   tests/probe.sh bash   p.sh --oracle 'bash %s'
 #
-#   --keep DIR   keep the four outputs (default: a temp dir, removed)
-#   --legs L     comma-separated subset of interp,run,native,oracle
+#   --keep DIR    keep the four outputs (default: a temp dir, removed)
+#   --legs L      comma-separated subset of interp,run,native,oracle
+#   --timeout N   seconds per leg (default 300). A leg that overruns is KILLED
+#                 and reported as broken - never diffed.
 #
 # WHEN YOU WRITE THE PROGRAM: read every operand out of an ARRAY. A probe over
 # literals tests the grammar's constant folder, not the runtime, and this project
@@ -40,26 +43,75 @@
 # syntax; it once produced nine false "hidden defects". Float formatting and
 # Float#% are unchanged in 3.x, so FLOAT rows are settleable there and little else.
 #
-# Exit 0 iff every leg that ran agrees.
+# ---------------------------------------------------------------------------
+# A LEG THAT DID NOT RUN IS NOT A LEG THAT AGREED.
+#
+# This script used to compare whatever legs happened to produce a file and then
+# print "all N legs agree". That is the one thing this project treats as worst:
+# green for a comparison that was never made. The manual has the general form
+# twice - "A DIFF OF TWO RUNS IS NOT A MEASUREMENT UNLESS BOTH RAN TO
+# COMPLETION" (a -frozen leg truncated at the step brake and the diff faithfully
+# reported the truncation), and gates.sh's "a short read is a FAILURE" (a killed
+# first run made two halves record `-`, therefore AGREE, and print a smaller
+# number as if it were the answer).
+#
+# So every leg is now in exactly one of two states. It either produced output
+# that is compared, or it is BROKEN, named with its reason, and the script exits
+# non-zero. A leg is broken when it is requested and:
+#
+#   - its grammar file does not exist;
+#   - the compiler grammar declares no c.exePath, so there is no native leg;
+#   - the -exe build failed;
+#   - the oracle command does not exist on this machine (exit 127);
+#   - it was killed by the timeout, or died on a signal;
+#   - the IR interpreter hit its step brake, so the output is TRUNCATED;
+#   - it produced NO OUTPUT AT ALL.
+#
+# The last one is the case that was live: see the -q/-qq note below.
+#
+# `tests/probe/selftest.sh` VERIFIES ALL OF THAT BY SABOTAGE, positive case
+# included. Run it after touching this file; it takes about twenty seconds.
+#
+# One language is genuinely unprobeable through stdout and says so rather than
+# passing: `calculator`'s result IS its exit code, it has no
+# `calculator-interpreter.abnf` (the interpreter grammars are
+# calculator-global-stack, -local-stacks, -scientific, -latex), and the probe
+# reports both facts instead of comparing two empty files, which is what it used
+# to do.
+# ---------------------------------------------------------------------------
+#
+# Exit 0 iff every requested leg ran AND every leg that ran agrees.
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-[ $# -ge 2 ] || { sed -n '2,40p' "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,50p' "$0"; exit 2; }
 LANG_NAME="$1"; PROG="$2"; shift 2
-ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"
+ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"; TIMEOUT=300
 while [ $# -gt 0 ]; do
     case "$1" in
-        --oracle) ORACLE="$2"; shift ;;
-        --keep)   KEEP="$2"; shift ;;
-        --legs)   LEGS="$2"; shift ;;
+        --oracle)  ORACLE="$2"; shift ;;
+        --keep)    KEEP="$2"; shift ;;
+        --legs)    LEGS="$2"; shift ;;
+        --timeout) TIMEOUT="$2"; shift ;;
         *) echo "probe.sh: unknown flag $1" >&2; exit 2 ;;
     esac
     shift
 done
 [ -f "$PROG" ] || { echo "probe.sh: no such program: $PROG" >&2; exit 2; }
 
+# A MISSPELLED LEG NAME MUST NOT QUIETLY REMOVE A LEG. `--legs nativ` used to
+# mean "run three legs and say nothing", which is the same silent-degradation
+# class this script exists to refuse.
+for l in ${LEGS//,/ }; do
+    case "$l" in
+        interp|run|native|oracle) ;;
+        *) echo "probe.sh: --legs: unknown leg '$l' (want interp,run,native,oracle)" >&2; exit 2 ;;
+    esac
+done
 want() { case ",$LEGS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+case "$TIMEOUT" in ''|*[!0-9]*) echo "probe.sh: --timeout wants seconds" >&2; exit 2 ;; esac
 
 [ -x ./mec ] || go build -o mec . || exit 2
 
@@ -76,15 +128,59 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 #
 #   interpreter half: the program's output IS the grammar's default output, so
 #                     -qq erases everything and -q is the flag you want.
-#   compiler half:    the grammar's default output is the LLVM MODULE, and the
-#                     program's prints come from llvm.Run on a side channel. So
-#                     -qq drops the module and keeps exactly the program - which
-#                     is what a differential probe wants, with no parsing at all.
+#   compiler half:    the grammar's default output is the LLVM MODULE, and for a
+#                     HANDLE-IR language the program's prints come from llvm.Run
+#                     on a side channel. So -qq drops the module and keeps
+#                     exactly the program - with no parsing at all.
 #
-# (Do not try to separate the module from the output by eye instead. "The last
-# line that looks like IR" is a trap: var_dump prints a bare `}` and PHP will fool
-# you. clang-check.sh's module_only() brace-depth scan is the reference for the
-# cases that genuinely need it - here -qq means we never do.)
+# ...AND THAT LAST SENTENCE IS FALSE FOR A SELF-CONTAINED-IR LANGUAGE, which is
+# the defect this script carried. bash, batch, c and the four toys emit IR that
+# calls libc directly; there is no js_* side channel, llvm.Run's write stub goes
+# through the same output channel -qq gates, and so `-qq` on those seven
+# compiler halves prints NOTHING AT ALL. The run leg was empty, the empty file
+# was diffed like any other, and a probe whose interpreter leg was also quiet
+# reported "all legs agree" having compared two empty files.
+#
+# So the flavour decides the flag:
+#
+#   handle IR (13 languages)   -qq, exactly as before.
+#   self-contained IR (7)      -q, then CUT THE MODULE off the front.
+#
+# and the flavour is read off the grammar rather than a hard-coded name list:
+# a handle-IR grammar links the C floor, `libPath("runtime.ll")`, and a
+# self-contained one does not. (c.exePath cannot be used for this - clang-check's
+# comment predates the native migration and every one of the twenty compiler
+# grammars declares exePath today, so it answers "does this link natively",
+# which is now yes for all of them.) The classification is checked, not trusted:
+# if it is wrong in either direction the leg comes out empty or full of IR, and
+# an empty leg is now a loud failure.
+#
+# Cutting the module is the case the manual warns about: do NOT look for the
+# last line that looks like IR, because var_dump prints a bare `}` and PHP will
+# fool you. Scan FORWARD tracking brace depth - clang-check.sh's module_only()
+# is the reference implementation, and module_lines() below is its complement.
+handle_ir() { grep -q 'libPath("runtime.ll")' "$COMPILE" 2>/dev/null; }
+
+# How many leading lines of $1 are the emitted module. The module is a prefix: at
+# depth 0 only @globals, declare, define and blanks belong to it, and the first
+# line at depth 0 that is none of those starts the program's output.
+#
+# awk TRUNCATES A STRING AT A NUL (docs chapter 7.10: a probe printing a control
+# character reported a phantom defect this exact way), so the count is computed
+# on a NUL-free copy and applied to the raw bytes with `tail -n +K`.
+module_lines() {
+    tr -d '\000' <"$1" | awk '
+        BEGIN { depth = 0; n = 0 }
+        {
+            if (depth > 0) { n = NR; if ($0 ~ /^}/) depth = 0; next }
+            if ($0 ~ /^define /) { n = NR; depth = 1; if ($0 ~ /}[ \t]*$/) depth = 0; next }
+            if ($0 ~ /^@/ || $0 ~ /^declare / || $0 ~ /^[ \t]*$/ ||
+                $0 ~ /^source_filename/ || $0 ~ /^target / || $0 ~ /^;/ ||
+                $0 ~ /^!/ || $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { n = NR; next }
+            exit
+        }
+        END { print n + 0 }'
+}
 
 # Under -q an engine still signs off on stdout. That is the ENGINE talking, not
 # the program, and no real toolchain says it - so it has to go before comparing
@@ -102,46 +198,184 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 # leg does. A program that deliberately prints such a line is the only false
 # positive available, and it would have to start the line with its own language's
 # name to collide.
-strip_engine() { grep -v -E '^[a-z0-9#+-]+ (interpreter|compiler): '; }
+#
+# The self-contained grammars added a second shape, which only became visible
+# once the run leg stopped being empty: bash and batch sign off as
+# `bash-to-llvm-ir: exit status 0`, and lisp and tinyc as `lisp: program value
+# is 0` / `tinyc: main() returned 0` - the GRAMMAR FILE's own basename, or the
+# bare language name, with no `interpreter`/`compiler` word at all. That is
+# still not an enumeration of WORDINGS: it is the three names this invocation
+# was given (the language and its two grammar basenames), so it stays exact
+# whatever the sign-off goes on to say.
+GNAMES="$(basename "$COMPILE" .abnf)|$(basename "$INTERP" .abnf)|$LANG_NAME"
+#
+# `-a` is load-bearing and it is the awk-truncates-at-NUL trap wearing a
+# different hat: a probe whose output contains a NUL byte (brainfuck's cell dump
+# does) makes grep decide the stream is BINARY, print `Binary file (standard
+# input) matches`, and discard every real line. Both legs then held that one
+# sentence and the probe reported them identical.
+strip_engine() { grep -a -v -E "^([a-z0-9#+-]+ (interpreter|compiler)|$GNAMES): "; }
 
-declare -a RAN
-report() { printf '  %-8s %6s lines, exit %s\n' "$1" "$(wc -l <"$work/$1.out" 2>/dev/null | tr -d ' ')" "$2"; }
+# One more piece of engine chatter, and it only exists between the module and
+# the program: brainfuck's compiler grammar announces the handover with
+#     --- Executed with the built-in IR interpreter, output:
+# There is no `<name>: ` in it, so the shape above cannot reach it, and leaving
+# it in makes every brainfuck probe permanently red - which destroys the row's
+# own signal (clang-check.sh's held-row note is the same argument).
+#
+# The narrowest rule that removes it: drop AT MOST ONE line, only if it is the
+# FIRST line after the module in the RUN leg, and only if it is a dashed banner
+# ending in a colon. A program line would have to be in exactly that position
+# and exactly that shape to be eaten. If a second grammar ever grows a banner of
+# a different shape, the run leg reads one line long and the probe says so
+# loudly - which is the whole point of the rest of this file.
+#
+# Tested with head/tr/grep rather than awk, because the line after it may well
+# be binary: awk truncates a string at a NUL and brainfuck prints NULs.
+is_handover_banner() {   # is_handover_banner FILE LINENO
+    tail -n "+$2" "$1" | head -1 | tr -d '\000' | grep -qE '^-{2,}[ \t].*:$'
+}
+
+declare -a RAN=()
+declare -a BROKEN=()
+
+reject() {   # reject NAME REASON
+    printf '  %-8s BROKEN: %s\n' "$1" "$2"
+    BROKEN+=("$1: $2")
+}
+
+# Run one leg under a watchdog. stdout -> NAME.raw, stderr -> NAME.err, and the
+# exit status -> NAME.rc. A leg that overruns is killed and flagged, because a
+# killed leg that leaves a short file behind is exactly how a truncation gets
+# diffed as if it were an answer.
+run_leg() {
+    local name="$1"; shift
+    rm -f "$work/$name.timeout"
+    "$@" >"$work/$name.raw" 2>"$work/$name.err" &
+    local pid=$!
+    { sleep "$TIMEOUT"; if kill -0 "$pid" 2>/dev/null; then : >"$work/$name.timeout"; kill -9 "$pid" 2>/dev/null; fi; } >/dev/null 2>&1 &
+    local wd=$!
+    wait "$pid" 2>/dev/null; local rc=$?
+    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    printf '%s\n' "$rc" >"$work/$name.rc"
+}
+
+# Validate one leg's raw output and, if it is sound, turn it into NAME.out and
+# enrol it for comparison. Anything else is BROKEN and never diffed.
+accept_leg() {   # accept_leg NAME [module]
+    local name="$1" cut="${2:-}"
+    local rc; rc="$(cat "$work/$name.rc" 2>/dev/null || echo '?')"
+
+    if [ -f "$work/$name.timeout" ]; then
+        reject "$name" "KILLED after ${TIMEOUT}s - a truncated leg is not a measurement"
+        return 1
+    fi
+    if [ "$rc" -ge 128 ] 2>/dev/null; then
+        reject "$name" "died on signal $((rc - 128)) (exit $rc) - a crashing leg is not a measurement"
+        return 1
+    fi
+    # The IR interpreter's endless-loop brake stops mid-program and leaves a
+    # PARTIAL file. The manual's most expensive diff was one of these.
+    if grep -q 'step limit exceeded' "$work/$name.err" "$work/$name.raw" 2>/dev/null; then
+        reject "$name" "hit the IR step brake - output is TRUNCATED (raise -max-steps)"
+        return 1
+    fi
+
+    if [ "$cut" = module ]; then
+        local k; k="$(module_lines "$work/$name.raw")"
+        is_handover_banner "$work/$name.raw" "$((k + 1))" && k=$((k + 1))
+        tail -n "+$((k + 1))" "$work/$name.raw" | strip_engine >"$work/$name.out"
+    else
+        strip_engine <"$work/$name.raw" >"$work/$name.out"
+    fi
+
+    local lines; lines="$(wc -l <"$work/$name.out" | tr -d ' ')"
+    if [ "$lines" -eq 0 ]; then
+        reject "$name" "produced NO OUTPUT (exit $rc) - nothing to compare, so this is not agreement"
+        [ -s "$work/$name.err" ] && sed -n '1,3p' "$work/$name.err" | sed 's/^/           /'
+        return 1
+    fi
+
+    printf '  %-8s %6s lines, exit %s\n' "$name" "$lines" "$rc"
+    RAN+=("$name")
+    return 0
+}
 
 echo "probe: $LANG_NAME $PROG"
 
-if want interp && [ -f "$INTERP" ]; then
-    ./mec "$INTERP" "$PROG" -q 2>"$work/interp.err" | strip_engine >"$work/interp.out"; r=${PIPESTATUS[0]}
-    report interp "$r"; RAN+=(interp)
-fi
-
-if want run && [ -f "$COMPILE" ]; then
-    ./mec "$COMPILE" "$PROG" -qq 2>"$work/run.err" | strip_engine >"$work/run.out"; r=${PIPESTATUS[0]}
-    report run "$r"; RAN+=(run)
-fi
-
-if want native && [ -f "$COMPILE" ] && grep -q 'exePath' "$COMPILE" 2>/dev/null; then
-    if ./mec "$COMPILE" "$PROG" -q -exe "$work/a.out" >/dev/null 2>"$work/native.err"; then
-        "$work/a.out" >"$work/native.out" 2>>"$work/native.err"; r=$?
-        report native "$r"; RAN+=(native)
+# ---- leg 1: the interpreter half -----------------------------------------
+if want interp; then
+    if [ ! -f "$INTERP" ]; then
+        reject interp "no $INTERP (name the real grammar, or --legs without interp)"
     else
-        echo "  native   BUILD FAILED:"; sed -n '1,3p' "$work/native.err" | sed 's/^/           /'
+        run_leg interp ./mec "$INTERP" "$PROG" -q
+        accept_leg interp
     fi
 fi
 
+# ---- leg 2: llvm.Run over the emitted module ------------------------------
+if want run; then
+    if [ ! -f "$COMPILE" ]; then
+        reject run "no $COMPILE"
+    elif handle_ir; then
+        run_leg run ./mec "$COMPILE" "$PROG" -qq
+        accept_leg run
+    else
+        # Self-contained IR: -qq would erase the module AND the program. Take
+        # -q and cut the module off the front instead.
+        run_leg run ./mec "$COMPILE" "$PROG" -q
+        accept_leg run module
+    fi
+fi
+
+# ---- leg 3: the native -exe binary ----------------------------------------
+if want native; then
+    if [ ! -f "$COMPILE" ]; then
+        reject native "no $COMPILE"
+    elif ! grep -q 'exePath' "$COMPILE" 2>/dev/null; then
+        # main.go greps for the same literal and refuses -exe without it, so
+        # this is the grammar saying it has no native path - say so, do not
+        # quietly drop to three legs.
+        reject native "$COMPILE declares no c.exePath - no native leg exists"
+    elif ! ./mec "$COMPILE" "$PROG" -q -exe "$work/a.out" >/dev/null 2>"$work/build.err"; then
+        reject native "the -exe BUILD FAILED"
+        sed -n '1,3p' "$work/build.err" | sed 's/^/           /'
+    else
+        run_leg native "$work/a.out"
+        accept_leg native
+    fi
+fi
+
+# ---- leg 4: the real toolchain --------------------------------------------
 if want oracle && [ -n "$ORACLE" ]; then
     # %s -> the program, %d -> its directory. A toolchain that insists on a
     # particular filename (javac) wants the %d form and a `cd`.
     cmd="${ORACLE//%s/$PROG}"; cmd="${cmd//%d/$(dirname "$PROG")}"
-    eval "$cmd" >"$work/oracle.out" 2>"$work/oracle.err"; r=$?
-    report oracle "$r"; printf '           [%s]\n' "$cmd"
-    RAN+=(oracle)
+    run_leg oracle bash -c "$cmd"
+    orc="$(cat "$work/oracle.rc")"
+    if [ "$orc" = 127 ]; then
+        # "command not found" is the one oracle failure that reads like a result.
+        # dart, kotlinc and dotnet are absent from this machine on purpose.
+        reject oracle "the oracle command is NOT INSTALLED here (exit 127): $cmd"
+    else
+        accept_leg oracle && printf '           [%s]\n' "$cmd"
+    fi
 fi
 
-[ ${#RAN[@]} -ge 2 ] || { echo "probe: fewer than two legs ran - nothing to compare"; exit 2; }
+# ---- the verdict -----------------------------------------------------------
+rc=0
+[ ${#BROKEN[@]} -eq 0 ] || rc=1
+
+if [ ${#RAN[@]} -lt 2 ]; then
+    echo
+    echo "probe: fewer than two legs produced output - THERE WAS NO COMPARISON."
+    [ ${#BROKEN[@]} -eq 0 ] || for b in "${BROKEN[@]}"; do echo "  $b"; done
+    [ -n "$KEEP" ] && echo "outputs kept in $KEEP"
+    exit 2
+fi
 
 echo
 ref="${RAN[0]}"
-rc=0
 for leg in "${RAN[@]:1}"; do
     if diff -q "$work/$ref.out" "$work/$leg.out" >/dev/null 2>&1; then
         printf '  %-8s == %-8s identical\n' "$ref" "$leg"
@@ -153,7 +387,26 @@ for leg in "${RAN[@]:1}"; do
     fi
 done
 
+# The exit status is part of the answer, not decoration. `/usr/bin/time` reports
+# happily on a process that died, and a leg that printed the right lines and
+# then exited 1 has not agreed with one that exited 0.
+refrc="$(cat "$work/$ref.rc")"
+for leg in "${RAN[@]:1}"; do
+    legrc="$(cat "$work/$leg.rc")"
+    if [ "$legrc" != "$refrc" ]; then
+        printf '  %-8s != %-8s EXIT STATUS %s vs %s\n' "$ref" "$leg" "$refrc" "$legrc"
+        rc=1
+    fi
+done
+
 echo
+if [ ${#BROKEN[@]} -ne 0 ]; then
+    echo "LEGS DID NOT RUN - this probe is NOT a four-way comparison:"
+    for b in "${BROKEN[@]}"; do echo "  $b"; done
+    echo "  (${#RAN[@]} legs were compared: ${RAN[*]})"
+    echo
+fi
+
 if [ "$rc" = 0 ]; then
     echo "all ${#RAN[@]} legs agree (${RAN[*]})"
     if ! want oracle || [ -z "$ORACLE" ]; then
@@ -161,7 +414,7 @@ if [ "$rc" = 0 ]; then
         echo "      defect class that has paid out most here - both halves wrong together."
     fi
 else
-    echo "LEGS DISAGREE - and which pair disagrees tells you where to look:"
+    echo "LEGS DISAGREE OR DID NOT RUN - and which pair disagrees tells you where to look:"
     echo "  interp vs run     ... the grammars, or the Go twin"
     echo "  run vs native     ... layer 2 (languages/lib/*-rt.metajs) or the C floor"
     echo "  ours vs oracle    ... a real specification gap, in however many engines agree"
