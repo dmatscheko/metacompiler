@@ -10630,6 +10630,54 @@ NotMemberKw = :script(~~
         return false
     }
 
+    // The text an uncaught throw is reported with, and the twin of exc_text in
+    // languages/lib/runtime.c (the native binary) and excText in abnf/jsrt.go
+    // (llvm.Run). It used to be a bare `"" + e.v`, which for a Throwable INSTANCE
+    // is "[object Object]" - so `throw RuntimeException("abort probe")` read
+    // `uncaught exception: [object Object]` here while both compiled halves read
+    // `uncaught exception: abort probe`. docs/todo.md 1.13.
+    //
+    // kstr is deliberately NOT the stringifier used. The compiled halves do not
+    // reach a Kotlin toString here at all: exc_text reads two RAW slots off the
+    // object and, failing those, falls to the floor's to_string, which answers a
+    // flat "[object Object]" for every tag-6 object. So this reads the same two
+    // slots, raw, and combines them by exc_text's own rule - a string `message`
+    // wins, prefixed by `name` when that is a non-empty string, the name alone
+    // when the message is empty. `installThrowables` puts `message` on the
+    // instance directly, which is the slot both compiled halves read.
+    //
+    // exc_text's third arm, `args[0]` when `args` is a floor ARRAY, is the
+    // python/ruby exception shape and no Kotlin value has it; it is left unported
+    // rather than guessed at.
+    //
+    // The fallback stays `"" + v`, which is what makes `throw 5` / `throw "s"`
+    // agree with both compiled halves. It does NOT agree with llvm.Run for a
+    // thrown non-Throwable OBJECT - `data class P(val x: Int); throw P(1)` reads
+    // "P(x=1)" there and "[object Object]" from the native binary, because
+    // jsvString calls the object's toString and the floor's to_string does not.
+    // That divergence is between the two COMPILED halves, predates this and lives
+    // in files this grammar does not own; `[object Object]` is the answer that
+    // matches the native binary, and `throw P(1)` does not compile in real Kotlin
+    // (a throw operand must be a Throwable), so nothing valid reaches it.
+    function kExcSlot(o, name) {
+        if (hasOwn(o, name)) { return o[name] }
+        return undefined
+    }
+    function kExcText(v) {
+        if (v !== null && v !== undefined && typeof v == "object") {
+            var msg = kExcSlot(v, "message")
+            if (typeof msg == "string") {
+                var nm = kExcSlot(v, "name")
+                if (typeof nm == "string" && nm.length > 0) {
+                    if (msg.length == 0) { return nm }
+                    return nm + ": " + msg
+                }
+                return msg
+            }
+        }
+        return "" + v
+    }
+
     c.compile(c.asg)
 
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it.
@@ -10644,7 +10692,7 @@ NotMemberKw = :script(~~
         try {
             ret = runMainSnippet(mainName, "Statement")
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + kExcText(e.v)) }
             throw e
         }
         println("kotlin interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
@@ -10656,7 +10704,7 @@ NotMemberKw = :script(~~
         try {
             ret = globalScope[mainName]()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + kExcText(e.v)) }
             throw e
         }
         println("kotlin interpreter: " + mainName + "() returned " + (ret === undefined ? 0 : ret))

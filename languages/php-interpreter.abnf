@@ -4030,6 +4030,56 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return notImplStmt("namespace", pos)
     }
+    // The text an uncaught throw is reported with, and the twin of exc_text in
+    // languages/lib/runtime.c (the native binary) and excText in abnf/jsrt.go
+    // (llvm.Run). It used to be a bare `"" + e.v`, which for an Exception INSTANCE
+    // is "[object Object]" - so `throw new Exception("abort probe")` read
+    // `uncaught exception: [object Object]` here while both compiled halves read
+    // `uncaught exception: abort probe`. docs/todo.md 1.13.
+    //
+    // phpStr is deliberately NOT the stringifier used: an object with no
+    // __toString is a fatal in phpStr ("could not be converted to string"), which
+    // is right for `echo $e` and wrong for a diagnostic. The compiled halves read
+    // the two RAW slots instead, so this reads the same two, raw - no __get hook,
+    // no getMessage() - and combines them by exc_text's own rule: a string
+    // `message` wins, prefixed by `name` when that is a non-empty string, and the
+    // name alone when the message is empty.
+    //
+    // exc_text has a third arm, `args[0]` when `args` is a floor ARRAY. It is
+    // deliberately not ported: a PHP array is an ordered dict here, never a floor
+    // array (tag 5), so the arm is unreachable in both compiled halves - verified,
+    // `class A { public $args = [7, 8]; } throw new A();` prints
+    // "[object Object]" from llvm.Run AND from the native binary. Porting it would
+    // MAKE a divergence rather than close one.
+    function phpExcSlot(o, name) {
+        var i = dictFind(o.p, phpKey(name))
+        if (i >= 0) { return deref(o.p.vals[i]) }
+        return undefined
+    }
+    function phpExcText(v) {
+        if (isObj(v)) {
+            var msg = phpExcSlot(v, "message")
+            if (typeof msg == "string") {
+                var nm = phpExcSlot(v, "name")
+                if (typeof nm == "string" && nm.length > 0) {
+                    if (msg.length == 0) { return nm }
+                    return nm + ": " + msg
+                }
+                return msg
+            }
+        }
+        // Everything else falls through to the host's own text, which is what
+        // to_string()/jsvString() give the compiled halves for a scalar: `throw 5`,
+        // `throw "txt"`, `throw true`, `throw null` and `throw [1,2]` already read
+        // identically in all three engines. The one non-object that does not is a
+        // FLOAT - the interpreter's float is a {__flo} box and prints
+        // "[object Object]" where the compiled halves print "1.5" - and it is left
+        // alone: `throw 1.5` is "Can only throw objects" in real PHP, so the
+        // divergence is unreachable from a valid program, and matching the floor
+        // would mean matching its JS shortest-digits rendering rather than PHP's
+        // own precision=14 floStr.
+        return "" + v
+    }
     function runProgram(items) {
         // A user exception (throw) that escapes the whole program is reported like any
         // other runtime error. The wrap sits here, not around c.compile, because the
@@ -4039,7 +4089,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         try {
             for (var i = 0; i < items.length; i++) { if (typeof items[i] == "function") { items[i]() } }
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + phpExcText(e.v)) }
             throw e
         }
     }
