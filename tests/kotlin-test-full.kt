@@ -3934,6 +3934,169 @@ fun sec78() {
                   txt[0].withIndex().toList()[n[0]].toString() == "IndexedValue(index=1, value=b)")
 }
 
+
+// ============================================================================
+// SECTION 79 - THE SCOPE CHAIN: what an emitter could not see
+// ============================================================================
+//
+// Ten of Kotlin's externs take a SCOPE HANDLE, and for as long as a scope was the
+// C floor's private storage they were lowered into ~500 lines of IR in
+// languages/kotlin-to-llvm-ir.abnf that could reach the INNERMOST binding and the
+// INNERMOST `this` and no further. The scope host builtins (scopeNew /
+// scopeParent / scopeGet / scopeHas / scopeDecl, ids 64..68) moved the chain walk
+// into languages/lib/kotlin-rt.metajs SECTION 6, and this section is what that
+// bought. Every assertion here is a shape the OLD lowering got wrong, and the two
+// marked NATIVE-ABORT did not merely answer wrongly - they killed the native
+// binary while the interpreter and llvm.Run were green, which is the exact blind
+// spot docs/working-on-this-project.md chapter 3 warns about.
+//
+// There is no kotlinc on this machine (manual chapter 5), so the expected values
+// are cited from the Kotlin specification: `for`/`with`/`apply` receivers and
+// this@Label are all defined by the implicit-receiver STACK, innermost first,
+// with an enclosing member's receivers still in scope inside a lambda.
+fun s79Unit(): Unit { }
+
+class S79Del(val tag: String) {
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): String =
+        tag + ":" + (if (thisRef == null) "null" else "obj") + ":" + property.name
+}
+
+class S79Outer(val oname: String) {
+    val shared = "outer"
+    inner class S79Mid(val mname: String) {
+        val shared = "mid"
+        inner class S79Inn(val iname: String) {
+            fun who(): String = this@S79Outer.oname + "/" + this@S79Mid.mname + "/" + iname
+            fun deep(): String {
+                var r = ""
+                run { run { r = this@S79Outer.shared + "|" + this@S79Mid.shared } }
+                return r
+            }
+        }
+    }
+}
+
+class S79Side(val sn: Int)
+
+class S79Host(val base: Int) {
+    val boxed: String by S79Del("H")
+    fun Int.scaled(): Int = this * base
+    val Int.s79Doubled: Int get() = this * 2 * base
+    // NATIVE-ABORT before the conversion: `an` is a member of the ENCLOSING class
+    // read from inside an apply block, so the innermost `this` is the S79Side and
+    // the answer is one frame further out.
+    fun viaApply(): Int {
+        var r = 0
+        S79Side(5).apply { r = base + sn }
+        return r
+    }
+    // A member extension reached from THREE lambdas deep. The dispatch receiver is
+    // the frame's, not the innermost one's.
+    fun deepMext(): Int {
+        var acc = 0
+        val s79outer = { a: Int -> val s79inner = { b: Int -> acc = acc + b.scaled(); acc }; s79inner(a) }
+        s79outer(3)
+        return acc + 7.s79Doubled
+    }
+    fun boxedFromNest(): String {
+        var out = ""
+        run { run { out = boxed } }
+        return out
+    }
+}
+
+fun sec79() {
+    val n = arrayOf(1, 2, 3, 4, 5)
+
+    // ----- a slot that HOLDS undefined is BOUND, and that is not "absent" -----
+    // NATIVE-ABORT before the conversion. A Unit-valued local is a scope slot
+    // holding undefined; js_scope_typeof answers "undefined" for that and for an
+    // absent name alike, and js_scope_has does not walk, so a read from an
+    // ENCLOSING scope had no way to resolve and the native binary died with
+    // "js_ktget(u) needs to WALK a scope chain". scopeHas + scopeParent is exactly
+    // the question it could not ask. This is the same defect that made python's
+    // comprehensions answer [NaN, NaN, NaN, NaN] (manual 7.3).
+    val u: Unit = s79Unit()
+    var uOut = ""
+    run { uOut = "" + u }
+    check("sc01", uOut == "kotlin.Unit" && "" + u == "kotlin.Unit")
+    var uOut2 = ""
+    run { run { run { uOut2 = "" + u } } }
+    check("sc02", uOut2 == "kotlin.Unit")
+
+    // ----- an enclosing class member from inside an implicit-receiver lambda -----
+    // NATIVE-ABORT before the conversion.
+    check("sc03", S79Host(n[3]).viaApply() == 9)
+
+    // ----- this@Label past a nested `this`, and from inside lambdas -----
+    val inn = S79Outer("O").S79Mid("M").S79Inn("I")
+    check("sc04", inn.who() == "O/M/I")
+    check("sc05", inn.deep() == "outer|mid")
+
+    // ----- a member extension, and a member extension PROPERTY, from depth -----
+    check("sc06", S79Host(n[2]).deepMext() == 9 + 42)
+
+    // ----- a DELEGATED property read from a nested scope: js_ktdthis is the
+    // thisRef, and it is the first `this` up the chain, not the innermost frame.
+    check("sc07", S79Host(n[0]).boxedFromNest() == "H:obj:boxed")
+
+    // ----- var reassignment through nested closures, and shadowing at depth -----
+    var acc = 0
+    val s79l1 = { val a = n[0]
+        val s79l2 = { val b = n[1]
+            val s79l3 = { acc = acc + a + b }
+            s79l3() }
+        s79l2() }
+    s79l1()
+    check("sc08", acc == 3)
+    val x = "outer-x"
+    var trail = x
+    run {
+        val x = "inner-x"
+        trail = trail + "," + x
+        run { val x = "inner2-x"; trail = trail + "," + x }
+        trail = trail + "," + x
+    }
+    check("sc09", trail + "," + x == "outer-x,inner-x,inner2-x,inner-x,outer-x")
+
+    // ----- ::name and Base::name still resolve, including the TYPE-name arm the
+    // emitter decides statically (String::length must not bind the String builder).
+    val r1 = ::s79Unit
+    check("sc10", r1.name == "s79Unit")
+    check("sc11", String::length.get("abcd") == 4 && String::class.simpleName == "String")
+
+    // ----- a `for` loop variable is a FRESH binding each iteration, so a lambda
+    // that captures it keeps THAT iteration's value. The Kotlin specification
+    // defines the loop by desugaring to `val <v> = iterator.next()` INSIDE the body.
+    // Every engine here answered "3 3 3" before, and nothing asserted it.
+    val fs = mutableListOf<() -> Int>()
+    for (i in n[0]..n[2]) { fs.add({ i }) }
+    var fsOut = ""
+    for (s79a in fs) { fsOut = fsOut + s79a() + " " }
+    check("sc12", fsOut.trim() == "1 2 3")
+    val gs = mutableListOf<() -> String>()
+    for (w in listOf("a", "b", "c")) { gs.add({ w }) }
+    var gsOut = ""
+    for (s79b in gs) { gsOut = gsOut + s79b() }
+    check("sc13", gsOut == "abc")
+    val hs = mutableListOf<() -> Int>()
+    for (j in n[2] downTo n[0]) { hs.add({ j * 10 }) }
+    var hsOut = 0
+    for (s79c in hs) { hsOut = hsOut * 100 + s79c() }
+    check("sc14", hsOut == 302010)
+    // A destructuring for-loop binds both components per iteration.
+    val ps = mutableListOf<() -> String>()
+    for ((k, v) in listOf(Pair("a", 1), Pair("b", 2))) { ps.add({ k + v }) }
+    var psOut = ""
+    for (s79d in ps) { psOut = psOut + s79d() }
+    check("sc15", psOut == "a1b2")
+    // The loop variable is NOT visible after the loop and a nested loop's inner
+    // variable does not leak into the outer body.
+    var nested = ""
+    for (a in n[0]..n[1]) { for (b in n[0]..n[1]) { nested = nested + a + b } }
+    check("sc16", nested == "11122122")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4013,6 +4176,7 @@ fun main() {
     sec76() // SECTION-CALL 76
     sec77() // SECTION-CALL 77
     sec78() // SECTION-CALL 78
+    sec79() // SECTION-CALL 79
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

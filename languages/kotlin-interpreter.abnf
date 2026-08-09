@@ -5297,9 +5297,41 @@ NotMemberKw = :script(~~
         var frac = scaled - whole * scale
         var fs = "" + frac
         while (fs.length < prec) { fs = "0" + fs }
-        var outs = "" + whole
+        // THE WHOLE PART'S DIGITS COME FROM kDecDigits AND NOT FROM `"" + whole`.
+        // `whole` is a double, and for a big argument it is the argument itself -
+        // "%f".format(1.7385704740834339e92) printed "1.738570474083434e+92.000000"
+        // under goja and the seventeen-digit form under -frozen, a live halves
+        // divergence, because goja's Number-to-String is not always the shortest
+        // round-tripping form. See kDecDigits' comment; the fraction below is an
+        // integer under 10^prec and spells itself.
+        var outs = kIntText(whole)
         if (prec > 0) { outs = outs + "." + fs }
         return neg ? "-" + outs : outs
+    }
+    // The integer text of a NON-NEGATIVE INTEGRAL double: its shortest
+    // round-tripping digits, padded with zeros out to the decimal point. Every
+    // digit of an integral double is significant-or-zero, so the point never lands
+    // inside the digit run.
+    //
+    // This is HOST-INDEPENDENT but not EXACT - 1.3379870716132959e18 comes out
+    // "1337987071613295900" where the value is 1337987071613295872, which is what
+    // java's %f prints and what the compiled half already answers. That gap is
+    // kFixed's own (its Math.floor(x*10^p + 0.5) cannot reach past 2^53 either)
+    // and is unchanged here; closing it needs the exact decimal expansion, i.e.
+    // rtFixed in languages/lib/runtime.metajs, not a bigger printf.
+    function kIntText(t) {
+        if (t === 0) { return "0" }
+        if (t !== t || t - t !== 0) { return "" + t }
+        var sig = kDecDigits(t)
+        var ei = sig.indexOf("e")
+        var digits = sig.substring(0, ei)
+        var pt = parseInt(sig.substring(ei + 1), 10) + 1
+        if (pt <= 0) { return "0" }
+        if (pt <= digits.length) { return digits.substring(0, pt) }
+        var z = ""
+        var q = digits.length
+        while (q < pt) { z = z + "0"; q = q + 1 }
+        return digits + z
     }
     function kPadNum(sv, width, left, zero) {
         var out = sv
@@ -7842,10 +7874,21 @@ NotMemberKw = :script(~~
             var arr = kIterable(subjT())
             var res = undefined
             scopes.push({})
-            declVar(name, undefined)
             for (var i = 0; i < arr.length; i++) {
-                setVar(name, arr[i])
+                // A FRESH SCOPE OBJECT per iteration, holding just the loop variable.
+                // A lambda captures scopes.slice(0), an array of REFERENCES, so one
+                // shared cell made every closure read the last value: `for (i in 1..3)
+                // { fs.add({ i }) }` answered "3 3 3" where Kotlin answers "1 2 3".
+                // The Kotlin specification defines the for statement by desugaring to
+                // `val <name> = iterator.next()` INSIDE the body, so the binding is a
+                // new one per iteration. All four legs agreed and were wrong together;
+                // the compiler half's twin is makeForRange/makeForList/makeForDestruct
+                // in kotlin-to-llvm-ir.abnf. (No kotlinc here - manual chapter 5 - so
+                // this is spec-cited.)
+                scopes.push({})
+                declVar(name, arr[i])
                 var r = kLoopBody(bodyT)
+                scopes.pop()
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break
@@ -9743,10 +9786,12 @@ NotMemberKw = :script(~~
             var arr = kIterable(collT())
             var res = undefined
             scopes.push({})
-            for (var n = 0; n < names.length; n++) { declVar(dNameOf(names[n]), undefined) }
             for (var i = 0; i < arr.length; i++) {
-                for (var d = 0; d < names.length; d++) { setVar(dNameOf(names[d]), dValueOf(arr[i], names[d], d)) }
+                // Per-iteration bindings, exactly as in makeForIn above.
+                scopes.push({})
+                for (var d = 0; d < names.length; d++) { declVar(dNameOf(names[d]), dValueOf(arr[i], names[d], d)) }
                 var r = kLoopBody(bodyT)
+                scopes.pop()
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break

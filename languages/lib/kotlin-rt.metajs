@@ -8966,49 +8966,283 @@ function js_rxktnew(pat, opts) { return ktRxNew(pat, opts) }
 
 function js_rxktglobal(name) { return ktRxGlobal(name) }
 // ============================================================================
-// SECTION 6 - THE SCOPE-TAKING EXTERNS, WHICH LAYER 2 CANNOT WRITE
+// SECTION 6 - THE SCOPE-TAKING EXTERNS
 // ============================================================================
 //
-// Ten of Kotlin's externs take a SCOPE HANDLE. A scope is the C floor's PRIVATE
-// storage: languages/lib/runtime.c seeds no accessor for one (the seed_root list
-// is println/print/eprintln/parseInt/parseFloat/exit/byteLen/sprintf/printf/
-// sprint/fail/sint*/flo*/keysOf/sintRaw/Infinity/NaN/anytype/Math/String/Array
-// and nothing else), and layer 2 cannot call a js_* extern either. So none of
-// these can be implemented here at all - which is the same position php's
-// js_phthis, swift's and dart's js_kget/js_kset and go's js_gounctl were in.
+// Ten of Kotlin's externs take a SCOPE HANDLE, and until the floor grew the
+// scope builtins layer 2 could do NOTHING with one: a scope is the C floor's
+// private storage and MetaJS has no way to open a cell. Kotlin's answer was to
+// lower each probe into the EMITTER (languages/kotlin-to-llvm-ir.abnf), which
+// from emitted IR can reach the INNERMOST binding and the INNERMOST `this` and
+// nothing further out. This section is docs/todo.md 6.1's conversion.
 //
-// Kotlin's answer is the same as theirs and it is in the EMITTER
-// (languages/kotlin-to-llvm-ir.abnf, the rtKtGet / rtKSet / rtVarSet helpers):
-// an emitter MAY call js_scope_typeof / js_scope_get / js_scope_set, so the
-// INNERMOST binding, the INNERMOST `this` and the INNERMOST `__dispatch` are all
-// reachable and are lowered into IR. What is NOT reachable is
+// WHAT THE SCOPE API ACTUALLY IS, because the item said otherwise and it matters
+// to anyone reading it next. scopeNew / scopeParent / scopeGet / scopeHas /
+// scopeDecl (host ids 64..68; languages/lib/runtime.c, abnf/jsrtint.go's
+// scopeBindings and metajs-interpreter.abnf's scNew/scParent/scGet/scHas/scDecl)
+// are MetaJS HOST BUILTINS. They are reachable from a layer-2 file and NOT from
+// emitted IR - the extern set is js_scope_{new,get,set,set_or_create,decl,has,
+// typeof} and there is no js_scope_parent among them. So these helpers could
+// never "come out of the emitter" into the emitter: the chain walk belongs HERE.
+// languages/lib/ruby-rt.metajs's js_rmethodval is the same shape and shipped
+// first; this is the second.
 //
-//   * any frame FURTHER OUT than the innermost one carrying `this` - the floor
-//     seeds no scope-PARENT accessor, so the chain cannot be walked; and
-//   * Kotlin's implicit-receiver STACK, which ktWithRecv pushes inside the
-//     runtime for with / run / apply / buildString / buildList / buildMap and
-//     for every `T.() -> R` lambda, and which js_ktget consults after the two
-//     probes above.
+// THE SPLIT WITH THE EMITTER, and why it is deliberately not all-or-nothing. In
+// MetaJS a call is a scope frame (docs/working-on-this-project.md 5.1, where one
+// merge of this shape cost python 41%), and kt_ktgetp is the compiler half's
+// hottest name resolution. So the emitter KEEPS the arms it could already reach
+// - the innermost binding, the innermost `this`, the innermost `__dispatch` -
+// and calls in here only when all of them miss. Everything below therefore runs
+// on a COLD path and is a strict SUPERSET of what the emitter tried: the walks
+// start at the same scope in the same order, so the first hit is the same
+// binding, and what is new is only the frames FURTHER OUT.
 //
-// Those two residues are what the functions below stand for. Each aborts with
-// the same message, naming the primitive that would remove it, so a native run
-// that reaches one says exactly what is missing instead of dying obscurely.
-// See the KOTLIN section of docs/runtime-next-plan.md for the measurement.
+// THIS IS NOT A REFACTOR. Three defects, none of which any gate in this project
+// could see, and all three asserted in tests/kotlin-test-full.kt:
+//
+//   * A Unit-valued local read from an ENCLOSING scope ABORTED THE NATIVE BINARY
+//     ("js_ktget(u) needs to WALK a scope chain") while the interpreter and
+//     llvm.Run printed kotlin.Unit. js_scope_typeof cannot tell "holds
+//     undefined" from "absent" and js_scope_has does not walk, so from emitted
+//     IR the question was unaskable. scopeHas + scopeParent IS that question,
+//     and it is exactly the shape that bit python's comprehension targets
+//     (docs/working-on-this-project.md 7.3).
+//   * An outer-class member read from inside `apply { }` - `Other(5).apply { r =
+//     an + on }` inside a member of A - aborted natively for the same reason.
+//   * A member extension of the ENCLOSING class called through `with`:
+//     `with(Other(9)) { 2.tripled() }`. The receiver-stack walk below answers it
+//     natively. It is still WRONG in the other two engines, and the fix for
+//     those is not in this file - see js_ktmextcall's header.
 
-function k6NoScope(name) {
-    fail("kotlin layer 2: " + name + " needs to WALK a scope chain, which the C floor keeps private. " +
-         "A scopeParent(scope) / scopeGet(scope, name) host builtin would let this move back into layer 2 " +
-         "- see the KOTLIN section of docs/runtime-next-plan.md part 3.")
+// ----- the two walks everything below is written on -----
+
+// The innermost scope of the chain that BINDS `name`, or undefined. scopeHas is
+// the OWN-scope test and scopeParent the step, and the pair answers the one
+// question js_scope_typeof cannot: a slot HOLDING undefined is bound, an absent
+// name is not, and both are "undefined" to a typeof.
+function k6Owner(env, name) {
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, name)) { return s }
+        s = scopeParent(s)
+    }
+    return undefined
 }
 
-function js_ktget(env, name, iscall) { k6NoScope("js_ktget(" + name + ")") }
-// The WRITE twin of the js_ktglobal arm above. By the time the emitted kt_kset /
-// kt_varset helpers give up, the name is neither a local nor a property of the
-// innermost `this` nor of the innermost `__dispatch`, and the Go twin's remaining
-// arms all walk the chain. One of them IS reachable from here, and it is the one
-// that matters in practice: a write to a property of an IMPLICIT RECEIVER, which
-// is `with(node) { tag = "x" }`. ktRecvStack is layer 2's own, so the walk is an
-// ordinary loop. Anything else is the residue the message names.
+// The value bound to `name` anywhere up the chain, or KT_MISS. This is
+// js_scope_get made ASKABLE - js_scope_get aborts on a miss, which is why the
+// emitter has to probe with js_scope_typeof first and why a slot holding
+// undefined defeated it.
+function k6Find(env, name) {
+    var s = k6Owner(env, name)
+    if (s === undefined) { return KT_MISS }
+    return scopeGet(s, name)
+}
+
+// A LOCAL or top-level DELEGATED property binds a BOX, not a value, so every
+// read goes through the delegate's getValue. The box is an ordinary object
+// ({__pdeleg, d, owner, pname}).
+function k6DelegRead(v) {
+    if (ktIsObj(v)) {
+        if (v["__pdeleg"] !== undefined) {
+            return js_ktdget(v["d"], v["owner"], v["pname"])
+        }
+    }
+    return v
+}
+
+// js_ktget's class-instance arm, kept out of line because js_kset and
+// js_ktvarset need the same three tests in the same order. The Go twin is the
+// `if obj, isObj := t.(*jsObject)` branch of jsrtkotlin.go's js_ktget: an OWN
+// property (lateinit-checked), then a property with an ACCESSOR - which lives on
+// the DESCRIPTOR chain (js_defprop) and never on the instance, so the own-property
+// test above misses it - and then a MISS, because a method name must fall
+// through to the receiver stack rather than bind here.
+function k6InstRead(t, name) {
+    if (k4Own(t, name)) {
+        var own = anytype
+        own = t[name]
+        k4LateinitCheck(t, name, own)
+        return own
+    }
+    var acc = k4bFindAcc(t, name)
+    if (acc !== undefined) {
+        if (acc["get"] === undefined) { return undefined }
+        return k4bCallAcc(acc["get"], t, [])
+    }
+    return KT_MISS
+}
+
+// ----- js_ktget -----
+
+// jsrtkotlin.go:2131's js_ktget, walk for walk. `iscall` is the SYNTACTIC
+// POSITION the emitter recorded - true for `name(...)`, false for a bare `name`
+// - and it is what lets `with(1..7 step 2) { first }` read the property while
+// `with(listOf(4, 5)) { first() }` still binds the method.
+function js_ktget(env, name, iscall) {
+    var s = anytype
+    var v = anytype
+    var t = anytype
+    // 1. the innermost BINDING, delegate-unwrapped.
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, name)) {
+            v = scopeGet(s, name)
+            return k6DelegRead(v)
+        }
+        s = scopeParent(s)
+    }
+    // 2. EVERY `this` up the chain, innermost first. Kotlin's implicit receivers
+    //    form a STACK and an unqualified name the innermost one does not answer
+    //    falls through to the next one OUT, so this deliberately does not stop at
+    //    the first frame carrying a `this` - that is the arm that reads this@Q.tag
+    //    from inside `with(P(1)) { tag }` written in a member of Q, and the arm
+    //    the emitter could not have.
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            t = scopeGet(s, "this")
+            if (ktIsObj(t) && t["__class"] !== undefined) {
+                var iv = anytype
+                iv = k6InstRead(t, name)
+                if (!ktMiss(iv)) { return iv }
+            } else {
+                if (!ktIsNullish(t)) {
+                    var mv = anytype
+                    mv = ktRecvMember(t, name, iscall)
+                    if (!ktMiss(mv)) {
+                        if (!k4Nullish(mv)) { return mv }
+                    }
+                }
+            }
+        }
+        s = scopeParent(s)
+    }
+    // 3. Inside a MEMBER extension function `this` is the EXTENSION receiver, so
+    //    a name belonging to the DECLARING class resolves against the dispatch
+    //    receiver the frame carries - Kotlin's second implicit receiver. The Go
+    //    twin stops at the FIRST frame carrying one; so does this.
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "__dispatch")) {
+            var dv = anytype
+            dv = ktRecvMember(scopeGet(s, "__dispatch"), name, iscall)
+            if (!ktMiss(dv)) { return dv }
+            s = undefined
+        } else {
+            s = scopeParent(s)
+        }
+    }
+    // 4. The implicit-receiver STACK and the stdlib. js_ktglobal is the emitter's
+    //    own last-but-one arm, so natively this is normally already spent; it is
+    //    repeated because js_ktget is also called directly (kt_bareref's fallback).
+    var g = anytype
+    g = js_ktglobal(name, iscall)
+    if (g !== undefined) { return g }
+    fail("unknown name: " + name)
+    return undefined
+}
+
+// ----- the two WRITE externs -----
+
+// abnf/jsrt.go:10855's js_kset: the innermost BINDING, else a property of the
+// first `this` up the chain, else an abort. There is no scopeSet builtin on
+// purpose - "walk with scopeHas/scopeParent, then scopeDecl" is it, and scopeDecl
+// binds in the scope handed to it, which is the owning one here.
+function js_kset(env, name, v) {
+    var s = k6Owner(env, name)
+    if (s !== undefined) {
+        scopeDecl(s, name, v)
+        return 0
+    }
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var t = anytype
+            t = scopeGet(s, "this")
+            if (ktIsObj(t)) {
+                if (k4Own(t, name)) {
+                    t[name] = v
+                    return 0
+                }
+                // The write twin of js_ktget's accessor arm: a property with a
+                // SETTER is a js_defprop pair on the DESCRIPTOR, so the own-property
+                // test missed it. Unreachable under llvm.Run, where rt.setMember
+                // honours the pair itself; natively the floor's member write cannot
+                // see it. js_ktset is the write that does.
+                var acc = k4bFindAcc(t, name)
+                if (acc !== undefined) {
+                    js_ktset(t, name, v)
+                    return 0
+                }
+            }
+            s = undefined
+        } else {
+            s = scopeParent(s)
+        }
+    }
+    // The IMPLICIT RECEIVER: `with(node) { tag = "x" }`. ktRecvStack is layer 2's
+    // own, so this arm has always been reachable and it stays.
+    return k6RecvWrite(name, v, "js_kset")
+}
+
+// jsrtkotlin.go:2008's js_ktvarset: js_kset made DELEGATE-aware, plus the
+// __dispatch write arm. A binding holding a delegate box is written through its
+// setValue.
+function js_ktvarset(env, name, v) {
+    var s = k6Owner(env, name)
+    if (s !== undefined) {
+        var cur = anytype
+        cur = scopeGet(s, name)
+        if (ktIsObj(cur)) {
+            if (cur["__pdeleg"] !== undefined) {
+                js_ktdset(cur["d"], cur["owner"], cur["pname"], v)
+                return 0
+            }
+        }
+        scopeDecl(s, name, v)
+        return 0
+    }
+    // The dispatch receiver of a MEMBER extension is a write target too:
+    // `fun String.emit() { out += this }` assigns the declaring class's own
+    // property while `this` is the String. js_kset stops at the first frame
+    // carrying a `this`, so this has to be tried before falling into it.
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var t = anytype
+            t = scopeGet(s, "this")
+            if (ktIsObj(t)) {
+                if (k4Own(t, name)) {
+                    t[name] = v
+                    return 0
+                }
+                var acc = k4bFindAcc(t, name)
+                if (acc !== undefined) {
+                    js_ktset(t, name, v)
+                    return 0
+                }
+            }
+        }
+        if (scopeHas(s, "__dispatch")) {
+            var d = anytype
+            d = scopeGet(s, "__dispatch")
+            if (ktIsObj(d)) {
+                if (k4Own(d, name)) {
+                    d[name] = v
+                    return 0
+                }
+            }
+        }
+        s = scopeParent(s)
+    }
+    return k6RecvWrite(name, v, "js_ktvarset")
+}
+
+// The write that reaches an IMPLICIT RECEIVER - `with(node) { tag = "x" }`.
+// ktRecvStack is layer 2's own, so the walk is an ordinary loop over it. This is
+// the one arm of the write path that was reachable before the scope API.
 function k6RecvWrite(name, v, who) {
     var i = ktRecvStack.length - 1
     while (i >= 0) {
@@ -9021,48 +9255,173 @@ function k6RecvWrite(name, v, who) {
         }
         i = i - 1
     }
-    k6NoScope(who + "(" + name + ")")
+    fail("assignment to unknown name: " + name)
     return 0
 }
 
-function js_kset(env, name, v) { return k6RecvWrite(name, v, "js_kset") }
-function js_ktvarset(env, name, v) { return k6RecvWrite(name, v, "js_ktvarset") }
-function js_ktouter(env, name) { k6NoScope("js_ktouter(" + name + ")") }
-// js_ktrefbase is the ONE scope extern that still has a native answer, because
-// the emitter reaches it only where the scope does not matter. kt_refbase in
-// languages/kotlin-to-llvm-ir.abnf lowers the scope walk and the `this` probe;
-// what is left is jsrtkotlin.go's FIRST arm - a builtin TYPE name, which the
-// emitter decides statically - and its LAST arm, "nothing carries this name, so
-// it names a type". Both answer a ktTypeName marker in the Go twin. Layer 2
-// cannot make a Go type, so the marker is the NAME ITSELF as a string, which is
-// exactly the shape js_ktref reads as "the base named a type".
-function js_ktrefbase(env, name) { return name }
-function js_ktbareref(env, name) { k6NoScope("js_ktbareref(" + name + ")") }
-function js_ktdthis(env) { k6NoScope("js_ktdthis") }
-// The three MEMBER-EXTENSION externs. The emitter (kt_mextfind) already tried the
-// innermost `this` and the innermost `__dispatch` and missed, so what is left is
-// the IMPLICIT-RECEIVER STACK: in `with(i) { 7.scaled() }` the Go twin's
-// ktWithRecv binds the receiver in a fresh SCOPE, which layer 2 cannot make, so
-// the same receiver is on ktRecvStack instead and the walk is an ordinary loop
-// over it. The fallback below each is the Go twin's own.
-function k6MextFind(mangled) {
+// ----- this@Outer, ::name and the delegate's thisRef -----
+
+// jsrtkotlin.go:1126's js_ktouter: `this@Outer`. Walk the scope chain for a
+// `this` whose own __class / __super chain declares that name. The emitter's
+// lowering walked the innermost instance's __outer chain instead, which is the
+// same answer only when the qualified receiver is an enclosing INSTANCE; this is
+// the exact test.
+function js_ktouter(env, name) {
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var t = anytype
+            t = scopeGet(s, "this")
+            if (ktIsObj(t)) {
+                var cls = anytype
+                cls = t["__class"]
+                var guard = 0
+                while (guard < 64) {
+                    guard = guard + 1
+                    if (!ktIsObj(cls)) { guard = 99 } else {
+                        if (cls["__name"] === name) { return t }
+                        cls = cls["__super"]
+                    }
+                }
+            }
+        }
+        s = scopeParent(s)
+    }
+    return undefined
+}
+
+// jsrtkotlin.go:1564's js_ktrefbase, minus its FIRST arm: a builtin TYPE name is
+// decided at EMIT time (makeQualRef in kotlin-to-llvm-ir.abnf), because the
+// extern's ktTypeNames test runs before its scope walk and so cannot be lowered
+// under it. What is left is the binding walk, the `this` walk, and "nothing
+// carries this name, so it names a type". Layer 2 cannot make a Go ktTypeName
+// marker, so the marker is the NAME ITSELF as a string - which is exactly the
+// shape js_ktref reads as "the base named a type".
+function js_ktrefbase(env, name, istype) {
+    // The ktTypeNames arm, and why it arrives as a FLAG rather than a fourth copy
+    // of the list. The Go twin tests `ktTypeNames[name]` BEFORE its scope walk, so
+    // `String::length` is an unbound reference even though a same-named String
+    // builder is in scope. The emitter already makes that decision statically -
+    // makeQualRef in kotlin-to-llvm-ir.abnf, over ktTypeNameSet, because the base
+    // name is a literal at the call site - so it hands the answer over instead of
+    // this file keeping a fourth copy of a list that abnf/jsrtkotlin.go:5926,
+    // kotlin-interpreter.abnf and the emitter must already keep in step. The Go
+    // twin ignores the extra argument and re-decides from its own table, which is
+    // the same table, so the two engines agree by construction.
+    if (istype === true) { return name }
+    var v = anytype
+    v = k6Find(env, name)
+    if (!ktMiss(v)) { return v }
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var t = anytype
+            t = scopeGet(s, "this")
+            if (ktIsObj(t)) {
+                if (k4Own(t, name)) { return t }
+            }
+        }
+        s = scopeParent(s)
+    }
+    return name
+}
+
+// jsrtkotlin.go:1619's js_ktbareref: a bare `::name`. A scope binding is the
+// value itself, except that a CLASS descriptor becomes a constructor reference
+// (js_ktctorref decides); a name the scope does not carry but an enclosing `this`
+// DOES becomes a BOUND property reference, which is what makes `::prop` inside a
+// member a KProperty0; anything else falls through to ordinary name resolution.
+// js_ktnameval is how the name is remembered so KFunction.name still answers.
+function js_ktbareref(env, name) {
+    var v = anytype
+    v = k6Find(env, name)
+    if (!ktMiss(v)) { return js_ktctorref(js_ktnameval(v, name)) }
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var t = anytype
+            t = scopeGet(s, "this")
+            if (ktIsObj(t)) {
+                if (k4Own(t, name)) { return js_ktref(t, name) }
+            }
+        }
+        s = scopeParent(s)
+    }
+    return js_ktctorref(js_ktnameval(js_ktget(env, name, false), name))
+}
+
+// jsrtkotlin.go:1895's js_ktdthis: the thisRef a delegated property is declared
+// against - the FIRST `this` up the chain, null when there is none.
+function js_ktdthis(env) {
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) { return scopeGet(s, "this") }
+        s = scopeParent(s)
+    }
+    return null
+}
+
+// ----- the three MEMBER-EXTENSION externs -----
+
+// jsrtkotlin.go:3328's ktMemberExtFind, with one deliberate difference that is a
+// FIX and not a port error, and it is the third defect in this section's header.
+//
+// The Go twin collects ONE start per key: the first scope carrying a `this` and
+// the first carrying a `__dispatch`, and then walks each start's own
+// __class/__outer graph. So inside a member of A, `with(Other(9)) { 2.tripled() }`
+// - where `fun Int.tripled()` is a member extension declared in A - finds only
+// the `with` receiver and reports the name unresolved. Both the Go twin and
+// languages/kotlin-interpreter.abnf's memberExtLookup do this, which is why that
+// program fails in llvm.Run ("method call 'tripled' on a number") and in the
+// interpreter ("unknown Int method: tripled") while the native binary answers 24.
+// Per the Kotlin specification `with` takes a `T.() -> R` extension lambda, which
+// ADDS an implicit receiver rather than replacing the enclosing member's dispatch
+// receiver, so the call resolves and 24 is right. (There is no kotlinc on this
+// machine - docs/working-on-this-project.md chapter 5 - so this is spec-cited.)
+// Closing it in the other two engines is a change to abnf/jsrtkotlin.go's
+// ktMemberExtFind and to memberExtLookup: collect EVERY frame's this/__dispatch
+// instead of breaking at the first. Not done here, because those files were not
+// this round's to change; the assertion is therefore written at the shape all
+// three engines DO agree on.
+//
+// EVERY frame's `this` and `__dispatch`, innermost first, then the implicit
+// receiver stack that ktWithRecv pushes for with / run / apply / buildString /
+// buildList / buildMap and for every T.() -> R lambda.
+function k6MextFind(env, mangled) {
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            var r0 = k4bMextWalk(scopeGet(s, "this"), mangled)
+            if (r0 !== undefined) { return r0 }
+        }
+        if (scopeHas(s, "__dispatch")) {
+            var r1 = k4bMextWalk(scopeGet(s, "__dispatch"), mangled)
+            if (r1 !== undefined) { return r1 }
+        }
+        s = scopeParent(s)
+    }
     var i = ktRecvStack.length - 1
     while (i >= 0) {
-        var r = k4bMextWalk(ktRecvStack[i], mangled)
-        if (r !== undefined) { return r }
+        var r2 = k4bMextWalk(ktRecvStack[i], mangled)
+        if (r2 !== undefined) { return r2 }
         i = i - 1
     }
     return undefined
 }
 
 function js_ktmextget(env, recv, name) {
-    var r = k6MextFind("extget$" + name)
+    var r = k6MextFind(env, "extget$" + name)
     if (r !== undefined) { return ktCall(r["fn"], [r["disp"], recv]) }
     return js_ktfget(recv, name)
 }
 
 function js_ktmextset(env, recv, name, v) {
-    var r = k6MextFind("extset$" + name)
+    var r = k6MextFind(env, "extset$" + name)
     if (r !== undefined) {
         ktCall(r["fn"], [r["disp"], recv, v])
         return v
@@ -9072,7 +9431,7 @@ function js_ktmextset(env, recv, name, v) {
 }
 
 function js_ktmextcall(env, recv, name, args) {
-    var r = k6MextFind("ext$" + name)
+    var r = k6MextFind(env, "ext$" + name)
     if (r !== undefined) {
         var a = [r["disp"], recv]
         var i = 0
