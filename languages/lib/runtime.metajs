@@ -807,3 +807,768 @@ function rtIsObjNotArr(v) {
     if (!rtIsObj(v)) { return false }
     return !Array.isArray(v)
 }
+
+// ====================================== the SIXTH pass (2026-08-09) =========
+//
+// THE THREE SPLIT MODULES, FOLDED BACK. runtime-bignum.metajs (263 lines, python
+// + ruby), runtime-decimal.metajs (188, python + ruby + swift) and
+// runtime-jvm.metajs (212, csharp + java) were separate FILES for exactly one
+// reason, stated in all three of their heads and reproduced verbatim below: a
+// top-level declaration in front of an importer that cannot call it was charged
+// for by `scope_find`'s LINEAR SCAN of the module scope, ~+2.2% on kotlin for the
+// 14 declarations of decimal+bignum together. The hash index in
+// languages/lib/runtime.c (`scope_find`, and the `n >= 32` arm above it) removed
+// that scan for every module scope in the project - a module scope has hundreds
+// of entries, so it takes the indexed arm always - and with it the whole reason
+// for the split. The fifth pass above already recorded the tax as re-measured at
+// ZERO; this pass acts on it. Folding moves DECLARATIONS, which are now free, and
+// adds no call depth, so 5.1's warning (size the CALL SITE, not the body) does
+// not apply: nothing here became a delegation.
+//
+// MEASURED, not assumed. tests/bench.sh --draws 9, all fifteen rows, built in a
+// tree that is a clean `git archive` of 455ce39 plus this fold and nothing else,
+// against the checked-in baseline - which the same run confirms is current for
+// 455ce39 (base itself reads lua +0.01% at a 0.03% spread, python +0.01%):
+//
+//   csharp +0.48 (spread 0.44)   php    +0.26 (0.59)   dart   -0.16 (0.44)
+//   ruby   +0.39 (0.31)          go     +0.11 (0.25)   js     -0.36 (0.38)
+//   bash   +0.20 (0.10)          java   +0.10 (0.40)   kotlin -0.37 (0.78)
+//   lua    -0.01 (0.01)          metajs -0.02 (0.07)   python -0.43 (1.73)
+//   swift  -0.38 (1.97)          batch  -0.20 (0.22)   c      -0.75 (0.35)
+//
+// NOT ONE ROW IS OUTSIDE THE INSTRUMENT. Read `c`, `bash` and `batch` first, as
+// tests/bench/baseline.txt says to: they are self-contained IR with no js_*
+// extern and cannot see this change at all, and they read -0.75, +0.20 and -0.20.
+// That band IS the instrument, and csharp's +0.48 and ruby's +0.39 sit inside it.
+//
+// THE ONE EXACT COUNTER THAT MOVES, and it is the honest cost: MEC_GC_STATS
+// `heap` steps ~+1.0 MiB (1,048,560 B of big-block traffic) on csharp, dart, go,
+// java, kotlin, php and swift - the seven that gained bodies they cannot call.
+// The COLLECTION COUNT is unmoved in all fifteen rows, and python, ruby, lua, js
+// and metajs do not step at all. baseline.txt's ARENA OCCUPANCY section measured
+// what a step costs: +0.20% over 45 paired builds, slower in 26 of 45, i.e.
+// nothing - which is what the timing rows above independently say.
+//
+// THE EVIDENCE THAT IT IS A PURE REFACTOR, which no gate in this project gives
+// you (the matrix, --full and --cross cannot see layer 2 at all - manual ch. 3):
+//
+//   - NATIVE BEFORE vs AFTER. Every affected language's ratchet AND feature file
+//     built with -exe from a clean archive of 455ce39 and from the folded tree,
+//     run, and compared including the exit code: 24 programs across 12 languages,
+//     ALL BYTE-IDENTICAL. lua and js are the controls - they import neither this
+//     file nor the split ones, and their <lang>-rt.ll is byte-identical too.
+//   - EVERY FUNCTION BODY SURVIVES. Splitting both <lang>-rt.ll files into
+//     `define` blocks and normalising the three things renumbering moves (the
+//     jsf_N/str.N global ids, the funcId literals and the `deadN` block labels),
+//     every body present in the base module is present unchanged in the folded
+//     one, in all twelve languages. Exactly TWO bodies differ per module, and
+//     they are the two that must: `jsrtlib_run`, which is the declaration and
+//     binding sequence, and `jsdispatch_ext`, which is the funcId switch.
+//     Net additions are the 18 folded functions plus each module's newly interned
+//     number constants (+7 python/ruby, +14 csharp/java, +18 swift, +20 kotlin,
+//     +21 dart, +23 go/php/metajs, +0 lua/js).
+//
+// FOLDING RE-GENERATES TEN .ll FILES, not five: go-rt.ll, php-rt.ll,
+// kotlin-rt.ll, dart-rt.ll and metajs-rt.ll change too, because they import this
+// file and now carry its new bodies. tests/gen-all.sh --check is what says so.
+//
+// THE ONE REAL COST, and it is a soft one. runtime.metajs's hook contract now
+// nominally covers rtkFloDigits (rtFloStr's one knob) and rtjkCmp /
+// rtjkFloOperand (rtjStrictEq / rtjRel / rtjArith's two), which only the
+// languages that used to import the split files define. A layer-2 call is a
+// SCOPE LOOKUP BY NAME - the emitted module carries the string "rtkFloDigits",
+// not a relocation - so a module that never calls rtFloStr never resolves it and
+// nothing breaks at link time or at boot. Verified: java-rt.ll and go-rt.ll
+// build, link and run with no rtkFloDigits anywhere. What an importer must not
+// do is CALL one of these bodies without defining its hooks; that is a runtime
+// "variable not defined", not a link error, so it is stated here rather than
+// enforced by the toolchain.
+//
+// runtime-dartswift.metajs is NOT folded in this pass: dart-rt.metajs was owned
+// by another agent in the round this landed. It is the same argument and the
+// same answer.
+
+
+// ---------------------------------------------------------------------------
+// the exact decimal bignum -- the EXACT decimal expansion of a double, and
+// strconv.FormatInt, used by python and ruby alone.
+//
+// WAS lib/runtime-bignum.metajs, folded in by the sixth pass above. Its head is
+// kept verbatim below, including the "why its own file" argument, because the
+// MEASUREMENTS in it are the record of what the split cost and are still the
+// numbers to quote; only the conclusion has expired.
+// ---------------------------------------------------------------------------
+//
+// Split out of runtime-decimal.metajs because swift wants the float RENDERING
+// above (rtSplit10 / rtSciText / rtFixText / rtFloStr) and never calls this
+// bignum. Two languages want it, so two languages import it.
+//
+// The cost of NOT splitting was measured as +17-24% wall on a swift loop that
+// never formats a float (400,000 x `s = s + i % 7`, native -exe: 3.16-3.20 s ->
+// 3.70-3.94 s, live 103,536 -> 105,072, heap 9.44 -> 10.49 MB, collections
+// 3,841 -> 4,097) and was ATTRIBUTED to the collector walking a permanently-live
+// body. The attribution is mostly wrong; see runtime-decimal.metajs's head and
+// docs/runtime-merge-plan.md, "the tax is DECLARATIONS, not data and not code",
+// where the same experiment re-run on kotlin in instructions retired shows the
+// collector's share does not move at all and the cost is `scope_find`'s linear
+// scan of the module scope, charged per TOP-LEVEL DECLARATION. The one part of
+// the swift row that is a genuine collector effect is the collection COUNT,
+// 3,841 -> 4,097 (+6.7%): more module-init allocation, more collections. The
+// kotlin control holds its collection count at 1,880 across every variant, so
+// that component is swift's and not a general rule. The split stays either way -
+// it is free, and it is the right shape - but the number to quote for it is the
+// kotlin one, +2.2% for the 14 declarations of decimal+bignum together.
+//
+// python-rt.metajs said at its own copy of this code: "Copied verbatim from
+// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
+// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
+// rbByteCut), renamed to the pyB prefix. The comments are theirs." A shape scan
+// confirmed nine of the ten byte-identical and the tenth different only in the
+// NAME of its digit alphabet (PYB_DIGITS vs RB_DIGITS, same 36 characters), so
+// this merge took ZERO knobs - which is the finding: two rounds of formatter
+// work in two files had not drifted, and nothing was stopping them.
+
+function rtDigitAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c < 48 || c > 57) { return 0 - 1 }
+    return c - 48
+}
+
+// ----- EXACT decimal expansion of a double ---------------------------------
+//
+// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
+// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
+// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
+// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
+// measured on the differential probe.
+//
+// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
+// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
+// multiplied by 5 exactly -e times with the point placed -e digits from the
+// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
+// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
+// 50000 + 10000, which a double holds exactly.
+
+function rtBigFromNum(n) {
+    var limbs = []
+    var x = n
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    return limbs
+}
+
+function rtBigMulSmall(limbs, k) {
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        limbs[i] = v - carry * 10000
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        limbs.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return limbs
+}
+
+function rtBigStr(limbs) {
+    var out = "" + limbs[limbs.length - 1]
+    var i = limbs.length - 2
+    while (i >= 0) {
+        var s = "" + limbs[i]
+        while (s.length < 4) { s = "0" + s }
+        out = out + s
+        i = i - 1
+    }
+    return out
+}
+
+// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
+function rtExactDec(a) {
+    if (a == 0) { return {i: "0", f: ""} }
+    var m = a
+    var e = 0
+    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
+    // most 1074 of them.
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    // And back under 2^53, which only an already-integral value can be above.
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = rtBigFromNum(m)
+    if (e >= 0) {
+        var k = 0
+        while (k < e) {
+            rtBigMulSmall(limbs, 2)
+            k = k + 1
+        }
+        return {i: rtBigStr(limbs), f: ""}
+    }
+    var n = 0 - e
+    var j = 0
+    while (j < n) {
+        rtBigMulSmall(limbs, 5)
+        j = j + 1
+    }
+    var all = rtBigStr(limbs)
+    while (all.length <= n) { all = "0" + all }
+    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
+}
+
+// Round the digit string `digits` (an integer written out) to `keep` digits,
+// half to EVEN, and answer the kept digits - one longer when the rounding
+// carried all the way (999 -> 1000), which the caller detects by the length.
+function rtRoundHalfEven(digits, keep) {
+    if (keep >= digits.length) {
+        var out = digits
+        while (out.length < keep) { out = out + "0" }
+        return out
+    }
+    var head = digits.substring(0, keep)
+    var d = digits.charCodeAt(keep) - 48
+    var up = false
+    if (d > 5) { up = true }
+    if (d == 5) {
+        var rest = false
+        var i = keep + 1
+        while (i < digits.length) {
+            if (digits.charAt(i) != "0") {
+                rest = true
+                break
+            }
+            i = i + 1
+        }
+        if (rest) { up = true } else if (keep > 0) {
+            var last = head.charCodeAt(keep - 1) - 48
+            up = last - Math.floor(last / 2) * 2 == 1
+        }
+    }
+    if (!up) {
+        if (head == "") { return "0" }
+        return head
+    }
+    // Propagate the carry through the kept digits.
+    var codes = []
+    var k = 0
+    while (k < head.length) {
+        codes.push(head.charCodeAt(k) - 48)
+        k = k + 1
+    }
+    var at = codes.length - 1
+    var carry = 1
+    while (at >= 0 && carry == 1) {
+        var v = codes[at] + 1
+        if (v == 10) {
+            codes[at] = 0
+        } else {
+            codes[at] = v
+            carry = 0
+        }
+        at = at - 1
+    }
+    var res = ""
+    var q = 0
+    while (q < codes.length) {
+        res = res + ("" + codes[q])
+        q = q + 1
+    }
+    if (carry == 1) { res = "1" + res }
+    return res
+}
+
+// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
+// cut to prec fraction digits with half-to-even rounding.
+function rtFixed(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
+    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    var dec = rtExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var joined = ip + fp
+    var kept = rtRoundHalfEven(joined, ip.length + prec)
+    // A carry out of the leading digit lengthens the integer part by one.
+    var ilen = ip.length
+    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
+    var ints = kept.substring(0, ilen)
+    var fracs = kept.substring(ilen, kept.length)
+    if (ints == "") { ints = "0" }
+    var body = ints
+    if (prec > 0) { body = ints + "." + fracs }
+    return (neg ? "-" : "") + body
+}
+
+// ----- strconv.FormatInt(int64(x), base) ------------------------------------
+//
+// Two things the naive loop got wrong, both measured: the digit alphabet is 36
+// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
+// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
+// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
+// taken with the floor's sized-integer tag (tag 13), which is exact int64
+// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
+// negation is exact for int64's minimum too, which is the trick java-rt.metajs
+// records.
+//
+// Python's own callers always hand this an int32 (pyFormatBody converts with
+// rt.toInt32 first), so the saturating branches are unreachable from
+// js_pyformat; they are kept because Ruby's Integer#to_s(base) does reach them.
+var RT_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+function rtBaseStr(n, base) {
+    var v = Math.trunc(n)
+    if (v !== v) { v = 0 }
+    if (v == 0) { return "0" }
+    var neg = false
+    var mag = sintRaw(0, 0, 64, true)
+    if (v >= 9223372036854775808) {
+        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
+    } else if (v <= 0 - 9223372036854775808) {
+        neg = true
+        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
+    } else {
+        neg = v < 0
+        var a = neg ? -v : v
+        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
+    }
+    var b = sintRaw(0, base, 64, true)
+    var zero = sintRaw(0, 0, 64, true)
+    var out = ""
+    while (sintCmp(mag, zero) != 0) {
+        var d = sintNum(sintOp(4, mag, b))
+        out = RT_DIGITS.charAt(d) + out
+        mag = sintOp(3, mag, b)
+    }
+    return (neg ? "-" : "") + out
+}
+
+// ---------------------------------------------------------------------------
+// the shared float rendering -- the SHARED float-to-string rendering, used by
+// python, ruby and swift.
+//
+// WAS lib/runtime-decimal.metajs, folded in by the sixth pass above. Its head is
+// kept verbatim below, including the "why its own file" argument, because the
+// MEASUREMENTS in it are the record of what the split cost and are still the
+// numbers to quote; only the conclusion has expired.
+// ---------------------------------------------------------------------------
+//
+// WHY IT IS A SEPARATE FILE: a body put into runtime.metajs is paid for by all
+// TEN importers, including the seven that cannot call a line of it. Ten files
+// import runtime.metajs; three of them want this. So it is imported, not shared.
+//
+// The ORIGINAL justification here said the cost was the collector walking a
+// permanently-live body, and gave "+7-11% wall, +2,304 live bytes x 18,798
+// collections". THAT EXPLANATION IS WRONG, re-measured 2026-08-04 in instructions
+// retired rather than wall clock (wall clock on this machine varies +-8% between
+// runs of the SAME binary; instruction counts reproduce to 0.02%). The collector's
+// share does not move at all: with MEC_GC=off subtracted it is 5.09 G instructions
+// whether or not the merged bodies are there. The real cost is MUTATOR work in
+// runtime.c's `scope_find` (2755), a LINEAR scan of the module scope's name array,
+// and it is charged PER TOP-LEVEL DECLARATION - not per byte of live data and not
+// per line of code, which is exactly free.
+//
+// The honest number for THIS file plus runtime-bignum.metajs is 14 declarations
+// prepended to a kotlin module: +2.2%, measured (kotlin, 40,000 x `s = s + i % 7`,
+// no float in it, 30.506 G -> 31.193 G instructions). Smaller than was claimed,
+// still real, and still worth the split. The full derivation, the code-vs-data
+// controls and the rule are in docs/runtime-merge-plan.md, "the tax is
+// DECLARATIONS, not data and not code".
+//
+// The MetaJS rules and the rtk* hook convention are runtime.metajs's; this file
+// defines one hook of its own, rtkFloDigits, which renders a strictly positive
+// finite double the language's own way and is the only part of float-to-string
+// that is not shared.
+
+// ============================================ the decimal bignum ===========
+//
+// THE LARGEST SINGLE DUPLICATION IN LAYER 2, and the extern table could never
+// see it. python-rt.metajs and ruby-rt.metajs each carry a complete exact-decimal
+// float formatter, reached through pyBFloStr and rbFloStr respectively, and
+// swift-rt.metajs carries the splitter as well. No js_* name collides, so the
+// 29-name extern census counted these as nine separate private helpers in three
+// separate files; a shape scan (normalise every identifier to a positional token,
+// then group by the resulting string) puts them in one bucket, 267 lines of it.
+//
+// python-rt.metajs:2214 SAYS SO at the site - "Copied verbatim from
+// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
+// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
+// rbByteCut), renamed to the pyB prefix. The comments are theirs." - which is the
+// honest record of a copy and also the reason no gate could have found it.
+//
+// THE DIFFERENCE LIST, mechanically taken (extract each body, strip the language
+// prefix, diff). Ten functions, and the diff is EMPTY for nine of them:
+//
+//   rtSplit10        py == rb == sw   byte-identical bar swift's three comments
+//   rtZeros          py == rb == sw   byte-identical
+//   rtDigitAt        py == rb         byte-identical
+//   rtBigFromNum     py == rb         byte-identical
+//   rtBigMulSmall    py == rb         byte-identical
+//   rtBigStr         py == rb         byte-identical
+//   rtExactDec       py == rb         byte-identical
+//   rtRoundHalfEven  py == rb         byte-identical (57 lines, twice)
+//   rtFixed          py == rb         byte-identical
+//   rtBaseStr        py == rb         byte-identical bar the name of the digit
+//                                     alphabet constant, PYB_DIGITS vs RB_DIGITS,
+//                                     whose VALUES are the same 36 characters.
+//
+// ZERO KNOBS, and that is itself the finding: the two copies could have drifted
+// at any point in two separate rounds of formatter work and did not, so nothing
+// was hiding here - but nothing was stopping it either, and a fix to one would
+// have missed the other in silence. See js_dict_new for the same outcome at
+// one-tenth the size.
+//
+// The float rendering ABOVE this bignum (FloDigits / FloStr) does NOT merge to a
+// single body and is handled separately at rtSciText below.
+
+// strconv.FormatFloat(a, 'e', -1, 64), recovered from the engine's own shortest
+// rendering: turn a > 0 into {d: the significant digits with no point and no
+// leading or trailing zero, e: the SCIENTIFIC exponent}, so that the value is
+// 0.d1d2... * 10^(e+1). The input "" + a is either a plain decimal ("1234.5",
+// "0.00012") or an exponent form ("1e+21", "1.5e-7"), and both are jsNumString
+// in the Go half and d_num_str in the floor, which are the same shortest form
+// strconv produces.
+function rtSplit10(a) {
+    var s = "" + a
+    var mant = s
+    var e10 = 0
+    var ei = s.indexOf("e")
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var es = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+        else if (es.charAt(0) == "-") {
+            eneg = true
+            es = es.substring(1, es.length)
+        }
+        e10 = parseInt(es)
+        if (eneg) { e10 = 0 - e10 }
+    }
+    // Split the mantissa at its point; `pt` is how many digits precede it.
+    var pt = mant.length
+    var di = mant.indexOf(".")
+    var digits = mant
+    if (di >= 0) {
+        pt = di
+        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+    }
+    // A leading zero run does not count as significant, and each one shifts the
+    // point right by one place.
+    var lead = 0
+    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead, digits.length)
+    pt = pt - lead
+    // A trailing zero run is not significant either, and does not move the point.
+    var end = digits.length
+    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+    digits = digits.substring(0, end)
+    if (digits.length == 0) { return {d: "0", e: 0} }
+    return {d: digits, e: e10 + pt - 1}
+}
+
+// rtZeros MOVED to lib/runtime.metajs (fifth pass): php had the same nine lines
+// as phZeros and has no decimal bignum to import this file for.
+
+// The exponential half of a float rendering, shared by python, ruby and swift:
+// one digit, the rest as a fraction, then a SIGNED exponent zero-padded to two
+// digits. `dot` forces a fraction digit onto a one-digit mantissa, which is
+// Ruby's rule (1.0e+20) and not Python's or Swift's (1e+20).
+//
+// This, and not the whole of FloDigits, is what the three languages share. The
+// BOUNDARY between exponential and plain form is three genuinely different rules
+// and stays in the three files: Python's is `decpt <= -4 || decpt > 16`, Ruby's
+// is numeric.c flo_to_s's `decpt < -3 || decpt > DBL_DIG(15)`, and Swift's is on
+// the VALUE rather than the exponent - SwiftDtoa goes scientific above 2^53, so
+// 9007199254740992.0 is the last plain one. The two low bounds are the SAME
+// predicate spelled twice (decpt <= -4 and decpt < -3 both mean e10 <= -5); only
+// the high bound really differs, and it differs three ways.
+function rtSciText(digits, e10, dot) {
+    var out = digits.substring(0, 1)
+    if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+    else if (dot) { out = out + ".0" }
+    var sign = "+"
+    var ex = e10
+    if (ex < 0) {
+        sign = "-"
+        ex = 0 - ex
+    }
+    if (ex < 10) { return out + "e" + sign + "0" + ex }
+    return out + "e" + sign + ex
+}
+
+// The plain half, with `decpt` digits before the point and a forced ".0" when
+// there is no fraction left. Byte-identical in all three, down to the spelling.
+function rtFixText(digits, decpt) {
+    if (decpt <= 0) { return "0." + rtZeros(0 - decpt) + digits }
+    if (decpt >= digits.length) { return digits + rtZeros(decpt - digits.length) + ".0" }
+    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
+}
+
+// The whole of a language's float-to-string, above rtkFloDigits (which renders a
+// strictly positive finite double and is the one part that differs). python and
+// ruby had this body twice and swift a third time; the DIFFERENCE LIST is three
+// string literals and nothing else:
+//
+//   nan / inf / -inf        python (repr(float('nan')) is "nan"), swift
+//   NaN / Infinity / -Inf…  ruby (Float::NAN.to_s is "NaN", INFINITY "Infinity")
+//
+// so they are parameters rather than hooks. KNOB, and a real one: it is what the
+// language prints, not how it computes. Everything else agreed, including the
+// two spellings of the sign test - python's `x < 0` after the zero arm and
+// swift's swSignBit + unary minus reach the same two answers, because the zero
+// arm has already taken every value whose sign a comparison cannot see.
+//
+// -0.0 keeps its sign, which needs 1 / x: `-0.0 < 0` is false, Math.abs of it is
+// +0.0, and `"" + -0.0` is "0" in every engine here.
+function rtFloStr(x, nanS, infS, ninfS) {
+    if (x !== x) { return nanS }
+    // The infinities without naming the Infinity global, which the interpreter
+    // half spells 1 / 0 too (languages/metajs-interpreter.abnf): Inf - Inf is NaN.
+    if (x - x !== 0) {
+        if (x > 0) { return infS }
+        return ninfS
+    }
+    if (x == 0) {
+        if (1 / x < 0) { return "-0.0" }
+        return "0.0"
+    }
+    if (x < 0) { return "-" + rtkFloDigits(0 - x) }
+    return rtkFloDigits(x)
+}
+
+// ---------------------------------------------------------------------------
+// the JVM-family bodies -- the bodies csharp-rt.metajs and java-rt.metajs share,
+// and NOBODY ELSE DOES.
+//
+// WAS lib/runtime-jvm.metajs, folded in by the sixth pass above. Its head is
+// kept verbatim below, including the "why its own file" argument, because the
+// MEASUREMENTS in it are the record of what the split cost and are still the
+// numbers to quote; only the conclusion has expired.
+// ---------------------------------------------------------------------------
+//
+// WHY ITS OWN FILE, and not lib/runtime.metajs. A layer-2 body is permanently
+// live: every function in a <lang>-rt.ll is a pinned closure the conservative
+// collector walks on every collection, so a body put in front of ten importers
+// to serve two taxes the other eight. That tax was MEASURED at two scales
+// (2026-08-04, swift, 400,000 x `s = s + i % 7`, native -exe, MEC_GC_STATS,
+// dead code-only bodies added to swift-rt.metajs and never called):
+//
+//     added lines   live objects        wall (min of 3)
+//         0         104,016             3.40 s
+//       182         105,168  (+1,152)   3.52 s   +3.5%
+//       720         109,072  (+5,056)   3.71 s   +9.1%
+//
+// - so it is ~7 pinned objects and ~+1.3% per 100 lines of dead shared CODE,
+// linear, and with heap and collection COUNT unmoved (9,442,688 B and 4,097 in
+// all three runs). The decimal bignum's larger +17-24% came from its DATA as
+// well: it moved heap 9.44 -> 10.49 MB and collections 3,841 -> 4,097. Two
+// components, then: the live walk tracks code, the collection count tracks data.
+//
+// The number that matters here is the SLOPE. The ~50 lines below would cost the
+// eight other importers ~0.6% if they were in runtime.metajs - which is real but
+// under the noise floor of a single timing run, and exactly zero here, because
+// only csharp and java import this file. The tax is an argument about hundreds
+// of lines, not tens; it is not a reason to leave a ten-line body duplicated.
+//
+// WHY MERGE AT ALL, given it is fifty lines. Because of what the duplication has
+// already cost twice at this very site. `js_cscmp` and `js_jvcmp` are one body.
+// The NaN sentinel - rtCompare answers 2 when either operand coerces to NaN, and
+// that means "every relation is false" - was found and fixed in the C# copy in
+// Part A, and the java copy was still wrong MONTHS later, in BOTH engines, in two
+// DIFFERENT directions (see runtime-merge-plan.md, third pass, item 2). The same
+// defect, twice, because the same body was written twice. One body cannot do
+// that again.
+//
+// THE DIFFERENCE LIST, taken before merging, and what it came to:
+//
+//   csNum / jvNum             TWO differences, BOTH IDENTITY. The char test is
+//                             csIsChar / jvIsChar and both are `rtIsCharBox(v)`.
+//                             The string coercion is `parseFloat(v)` / `jpStrNum(v)`
+//                             and jpStrNum's whole body is `var t = parseFloat(s);
+//                             return t`. runtime-merge-plan.md recorded this pair
+//                             as "2 hooks"; the code has ZERO.
+//   csIsIntegral/jvIsIntegral ZERO differences, same reason (rtIsCharBox).
+//   js_arr_new_n              ZERO differences once csNum == jvNum.
+//   csStrictEq / jvStrictEq   ONE: csCmp vs jvCmp.
+//   js_cscmp / js_jvcmp       ONE: the same csCmp vs jvCmp.
+//   csFloArith / jvmArith     ONE: csFloOperand vs jvmOperand.
+//
+// So: two knobs, `rtjkCmp` and `rtjkFloOperand`, and both are REAL.
+//
+//   rtjkCmp - csCmp promotes with csPromote and compares two csBox cells with
+//     sintCmp; jvCmp switches on jvW (JLS 5.6.2: long when either side is long,
+//     int otherwise) and compares two plain int32s below 64 bits. Two integer
+//     models, not one spelled twice.
+//   rtjkFloOperand - csFloOperand converts only the {__char} box and lets a tag
+//     13 cell through, because a C# long is an honest SIGNED cell; jvmOperand
+//     sends everything non-float through jvNum, because Java's long box is marked
+//     UNSIGNED and the floor's to_number would read it as a magnitude. Recorded at
+//     both sites already; the merge did not create the difference, it named it.
+
+// ----- the two knobs, defined by the importer -------------------------------
+//
+//   rtjkCmp(op, l, r)       the ordered/equality comparison of two INTEGRAL
+//                           operands at the promoted type. csharp: csCmp.
+//                           java: jvCmp.
+//   rtjkFloOperand(v)       a value made safe for the floor's floOp.
+//                           csharp: csFloOperand. java: jvmOperand.
+
+// An operand of INTEGER arithmetic. A char is one - it is an integral type in
+// both languages - and a double is not.
+//
+// lib/runtime.metajs exports this body as rtIsIntegral, for kotlin, which had it
+// TWICE (ktIsInt, k4bIsIntegral) and cannot import this file. **THIS COPY IS
+// DELIBERATELY NOT A DELEGATION TO IT**, and the fifth pass made it one:
+//
+//   tests/bench.sh --draws 5, java, against the recorded 4b594c1 baseline:
+//     4b594c1 (body here)        8.940 G   +3.16%   spread 3.18%
+//     120ba0f (delegating)       9.448 G   +5.63%   spread 3.99%
+//
+// +5.7% for one extra MetaJS call, because csharp and java ask this at fifteen
+// sites inside their arithmetic dispatch. It is the same mistake, at a second
+// site, as pyIsObj in lib/python-rt.metajs - which cost python 41% - and the rule
+// is written up there: A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT
+// SUFFICIENT. Size the CALL SITE, not the body.
+//
+// kotlin's ktIsInt is left delegating on purpose: its own row measured -0.64%
+// against a 3.05% spread, so its call sites are not hot and the sharing is free
+// THERE. That asymmetry is the point - the body is identical, the call sites are
+// not, and only the call sites decide.
+function rtjIsIntegral(v) {
+    if (rtIsCharBox(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+// The double reading of anything numeric.
+//
+// THE LAST TWO ARMS ARE rt.toNumber's (abnf/jsrt.go:1473) AND THAT IS THE FIX for
+// todo.md 1.2, which stood as a live run-vs-native divergence in BOTH languages:
+// this body answered 0 for undefined where the Go twin answers NaN, so C#'s
+// `dynamic d = obj; d.Missing + 1` printed NaN under the interpreter and llvm.Run
+// and **1** natively, and java's `new int[2][5] + 1` printed NaN under llvm.Run
+// and 1 in the other two.
+//
+// THE DECISION THE ITEM ASKED FOR - java moves WITH csharp, the body is NOT split:
+//
+//   - The divergence is not csharp's alone. It reproduces in java at `a[5] + 1`,
+//     where the interpreter half agreed with the native binary (1) and llvm.Run
+//     did not (NaN). A split that fixed only csharp would leave java's halves
+//     disagreeing.
+//   - Neither answer is the language's. C# would raise a RuntimeBinderException
+//     for a missing `dynamic` member and Java an ArrayIndexOutOfBoundsException,
+//     and no engine here can raise either; what the engines CAN do is agree, and
+//     NaN is the answer two of the three already gave.
+//   - Nothing in java produces an `undefined` in a WELL-FORMED program, probed
+//     against java 24.0.2: an uninitialized `int` field reads 0, a `double` field
+//     0.0, a reference field and an unassigned `Object[]` element read null, and
+//     null is still 0 here. So the change is a no-op for every java program that
+//     compiles, and it is only the malformed ones that move - to the louder of
+//     two wrong answers.
+//   - There is a PRECEDENT and it went this way: kotlin's ktNum
+//     (lib/kotlin-rt.metajs:264) carries the same two arms with a comment saying
+//     answering 0 for undefined made `size + f()` of a Unit-returning `f` print
+//     the size where the twin printed NaN. And lib/runtime.metajs's js_jadd note
+//     6 already recorded, before this, that "csNum's fallback should be NaN, not
+//     0" - it was left as csharp-rt.metajs's own bug. It was runtime-jvm's.
+//
+// Confidence: HIGH for the CONVERGENCE (the twin is the oracle for what these two
+// engines must agree on, and it is unambiguous), LOW for either value being C#'s
+// or Java's - both languages' real answer is an exception. Spec-derived, and no
+// C# toolchain exists on this machine.
+function rtjNum(v) {
+    if (floIs(v)) { return floNum(v) }
+    if (rtIsCharBox(v)) { return v["__char"] }
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (typeof v == "string") { return parseFloat(v) }
+    if (v === null) { return 0 }
+    return NaN
+}
+
+// new T[n] / new T[n] with a default element.
+function js_arr_new_n(n, fill) {
+    var out = []
+    var i = 0
+    var c = rtjNum(n)
+    while (i < c) {
+        out.push(fill)
+        i = i + 1
+    }
+    return out
+}
+
+// == / != . A double on either side is compared as a double; two integrals are
+// compared at the promoted type; anything else is identity.
+//
+// THE SIZED INTEGER ARM IS A FIX, and the merge is what found it. floEq is the
+// floor's jf_num_eq / the twin's jvmNumEq, and NEITHER has a tag 13 arm: a
+// `long` against a `double` answered FALSE in both compiler engines, in both
+// languages, while both INTERPRETER halves answered true. `long x = 0; double
+// y = 0.0; x == y` is true - JLS 15.21.1 and ECMA-334 12.12.9 both promote the
+// integral operand to double first - and java 24.0.2 confirms it. --cross could
+// not see it because nothing in the matrix ever compared a long to a double, and
+// the comment that used to stand here called the asymmetry deliberate ("a boxed
+// double against a SIZED INTEGER is false ... reproduced rather than smoothed
+// over"), which is how it survived. rtjNum is the promotion, and it is the same
+// reading rtjArith already gives the very same pair of operands.
+function rtjStrictEq(l, r) {
+    if (floIs(l) || floIs(r)) {
+        if (sintIs(l) || sintIs(r)) { return rtjNum(l) == rtjNum(r) }
+        return floEq(l, r)
+    }
+    if (sintIs(l) || sintIs(r)) {
+        if (!rtjIsIntegral(l)) { return false }
+        if (!rtjIsIntegral(r)) { return false }
+        return rtjkCmp("==", l, r)
+    }
+    return l === r
+}
+
+// < > <= >= . Two integral operands compare at the promoted type; everything
+// else goes through rtCompare (lib/runtime.metajs), which answers the SENTINEL 2
+// when either operand coerces to NaN.
+//
+// THE SENTINEL MEANS "EVERY RELATION IS FALSE", and that is the rule in both
+// languages: ECMA-334 12.12.1 for C#, JLS 15.20.1 for Java. Read as an ORDERING
+// it makes `>` and `>=` true (so `double.NaN > 0.0` answered true), and read as 0
+// it makes `<=` and `>=` true - wrong in the other direction. Both wrong answers
+// have been shipped here. abnf/jsrtcsharp.go:477 and abnf/jsrtjava.go:467 carry
+// the same three lines and have to move with this one, or --cross reports it.
+function rtjRel(op, l, r) {
+    if (rtjIsIntegral(l) && rtjIsIntegral(r) && !floIs(l) && !floIs(r)) { return rtjkCmp(op, l, r) }
+    var c = rtCompare(l, r)
+    if (c == 2) { return false }
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    return c >= 0
+}
+
+// Arithmetic with a double on either side: the whole operation is floating point
+// and its result is a double. floOp is the floor's own tag 14 arm of exactly
+// this, by operator INDEX: 0 + 1 - 2 * 3 / 4 %.
+function rtjArith(op, l, r) {
+    var code = 0
+    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
+    return floOp(code, rtjkFloOperand(l), rtjkFloOperand(r))
+}

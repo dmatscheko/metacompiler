@@ -114,14 +114,12 @@
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
+// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
+// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
+// only to keep scope_find's linear module-scope scan off non-callers and the
+// hash index in runtime.c removed that scan. One import, not three.)
 
-// The bodies csharp and java share and NOBODY ELSE DOES, in their own module so
-// the other eight importers of runtime.metajs pay nothing for them. The measured
-// slope of the live-body tax, and the difference list that made the merge two
-// knobs, are both at the head of that file.
-import "./runtime-jvm.metajs"
-
-// ----- runtime-jvm.metajs's two knobs ----------------------------------------
+// ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
 function rtjkFloOperand(v) { return csFloOperand(v) }
 
@@ -150,7 +148,7 @@ function csIsChar(v) { return rtIsCharBox(v) }
 
 // rtjIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
 // C#'s char being an integral type; a double is not. SHARED with java -
-// lib/runtime-jvm.metajs; the two copies had ZERO differences.
+// lib/runtime.metajs's JVM-family section; the two copies had ZERO differences.
 
 // csRaw hands the sint* builtins something they can read. si_val knows tag 3, tag
 // 13 and tag 14 - it does NOT know the {__char} object box, which would read as
@@ -194,7 +192,7 @@ function csBox(v, w, u) {
 }
 
 // The double reading of anything numeric is rtjNum - SHARED with java,
-// lib/runtime-jvm.metajs. The two copies differed in the char test and the string
+// lib/runtime.metajs's JVM-family section. The two copies differed in the char test and the string
 // coercion and BOTH differences were identity: csIsChar and jvIsChar are each
 // `rtIsCharBox(v)`, and java's jpStrNum was a one-line wrapper on parseFloat.
 
@@ -537,7 +535,7 @@ function csFromUDouble(v) {
 // ===================================================== the boxed double =====
 
 // jvmArith (abnf/jsrtjvm.go), reached whenever a double is on either side, is
-// rtjArith - SHARED with java, lib/runtime-jvm.metajs. Its ONE knob is the
+// rtjArith - SHARED with java, lib/runtime.metajs's JVM-family section. Its ONE knob is the
 // operand mapper below, reached through rtjkFloOperand.
 
 // floOp reads its operands with the floor's to_number, which knows tag 13 and tag
@@ -1288,7 +1286,7 @@ function csTypeObject(name0) {
 // and they are here only because the C floor does not have them - see the extern
 // split in docs/runtime-next-plan.md part 3.
 
-// js_arr_new_n is SHARED with java - lib/runtime-jvm.metajs. Once csNum and jvNum
+// js_arr_new_n is SHARED with java - lib/runtime.metajs's JVM-family section. Once csNum and jvNum
 // turned out to be the same function, the two copies had zero differences.
 
 // js_char and js_char_code are SHARED - lib/runtime.metajs. js_char was the same
@@ -1511,7 +1509,7 @@ function js_jchareq(l, r) {
 }
 
 // The floor's === with the two number boxes taught to it is rtjStrictEq - SHARED
-// with java, lib/runtime-jvm.metajs, its ONE knob being rtjkCmp. Its sized-integer
+// with java, lib/runtime.metajs's JVM-family section, its ONE knob being rtjkCmp. Its sized-integer
 // arm is a FIX the merge found: floEq (jf_num_eq / jvmNumEq) has no tag 13 case,
 // so `long == double` answered false in BOTH compiler engines while both
 // interpreter halves answered true. See the note at the shared body.
@@ -1837,7 +1835,7 @@ function js_csarith(op, l, r) {
 
 function js_csshift(op, l, r) { return csShift(op, l, r) }
 
-// The body is rtjRel - SHARED with java's js_jvcmp, lib/runtime-jvm.metajs. The
+// The body is rtjRel - SHARED with java's js_jvcmp, lib/runtime.metajs's JVM-family section. The
 // NaN sentinel it carries (ECMA-334 12.12.1: every floating point relation with a
 // NaN operand is false) was fixed HERE in Part A and was still wrong in java's
 // copy months later, in both engines, in two different directions. That is why

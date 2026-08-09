@@ -101,14 +101,12 @@
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
+// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
+// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
+// only to keep scope_find's linear module-scope scan off non-callers and the
+// hash index in runtime.c removed that scan. One import, not three.)
 
-// The bodies java and csharp share and NOBODY ELSE DOES, in their own module so
-// the other eight importers of runtime.metajs pay nothing for them. The measured
-// slope of the live-body tax, and the difference list that made the merge two
-// knobs, are both at the head of that file.
-import "./runtime-jvm.metajs"
-
-// ----- runtime-jvm.metajs's two knobs ----------------------------------------
+// ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
 function rtjkFloOperand(v) { return jvmOperand(v) }
 
@@ -189,7 +187,7 @@ function jvIsChar(v) { return rtIsCharBox(v) }
 
 // rtjIsIntegral - an operand of INTEGER arithmetic; a char is one (Java's char is
 // an integral type) and a double is not - is SHARED with csharp,
-// lib/runtime-jvm.metajs. The two copies had ZERO differences.
+// lib/runtime.metajs's JVM-family section. The two copies had ZERO differences.
 
 // jvW: JLS 5.6.2 binary numeric promotion for two integral operands - long when
 // either side is long, int otherwise. So byte + byte is an int.
@@ -264,7 +262,7 @@ function jvI(v) {
 }
 
 // rtjNum, the double reading of anything numeric, is SHARED with csharp -
-// lib/runtime-jvm.metajs. The two copies differed in the char test and the string
+// lib/runtime.metajs's JVM-family section. The two copies differed in the char test and the string
 // coercion and BOTH differences were identity: jvIsChar and csIsChar are each
 // `rtIsCharBox(v)`, and jpStrNum - deleted with this merge - was a one-line
 // wrapper on parseFloat. Its sintIs arm reads a SIGNED 64 bit cell with sintNum
@@ -429,7 +427,7 @@ function jvCmp(op, l, r) {
 
 // rtjArith (abnf/jsrtjvm.go) - a double on either side makes the whole operation
 // floating point and its result a double, two integral operands keep the 32 bit
-// wrap - is SHARED with csharp, lib/runtime-jvm.metajs. Its ONE knob is the
+// wrap - is SHARED with csharp, lib/runtime.metajs's JVM-family section. Its ONE knob is the
 // operand mapper below, reached through rtjkFloOperand.
 
 // floOp reads its operands with the floor's to_number, which knows tag 13 and
@@ -1167,7 +1165,7 @@ function jvParseInt(s, width) {
 // them, and they are here only because the C floor does not have them - see the
 // extern split in docs/runtime-next-plan.md part 3.
 
-// js_arr_new_n is SHARED with csharp - lib/runtime-jvm.metajs. Once jvNum and
+// js_arr_new_n is SHARED with csharp - lib/runtime.metajs's JVM-family section. Once jvNum and
 // csNum turned out to be the same function, the two copies had zero differences.
 
 // js_char is SHARED - lib/runtime.metajs; it was the same one-line delegation to
@@ -1197,7 +1195,7 @@ function jvParseInt(s, width) {
 //
 // So the four lines are shared in every sense but the text, and merging them
 // still costs more than they are worth: kotlin does not import
-// lib/runtime-jvm.metajs (it has neither rtjkCmp nor rtjkFloOperand and wants
+// lib/runtime.metajs's JVM-family section (it has neither rtjkCmp nor rtjkFloOperand and wants
 // none of that file's six bodies), and a home in lib/runtime.metajs would need an
 // ELEVENTH rtk* hook declared in all ten importers to carry a coercion that is
 // dead in both callers. Re-judged in the fifth pass, after the declaration tax
@@ -1244,7 +1242,7 @@ function js_jchareq(l, r) {
 // The floor's === with the two boxes taught to it - a sized integer and a boxed
 // double are both `typeof "number"`, and MetaJS's own === on two boxes is
 // identity, so the numeric cases are spelled out - is rtjStrictEq, SHARED with
-// csharp in lib/runtime-jvm.metajs, its ONE knob being rtjkCmp. Its sized-integer
+// csharp in lib/runtime.metajs's JVM-family section, its ONE knob being rtjkCmp. Its sized-integer
 // arm is a FIX the merge found: floEq (jf_num_eq / jvmNumEq) has no tag 13 case,
 // so `long == double` answered false in BOTH compiler engines while both
 // interpreter halves answered true. See the note at the shared body.
@@ -1468,7 +1466,7 @@ function js_jvshift(op, l, r) { return jvShift(op, l, r) }
 // it and was not looked at. abnf/jsrtjava.go:467 takes the same three lines.
 // Smoothing the 2 to 0 in rtCompare is still wrong and still must not be done:
 // 0 makes `<=` and `>=` true.
-// The body is rtjRel - SHARED with csharp's js_cscmp, lib/runtime-jvm.metajs, so
+// The body is rtjRel - SHARED with csharp's js_cscmp, lib/runtime.metajs's JVM-family section, so
 // that the fix below cannot be made in one language and not the other a third
 // time.
 // A float operand promotes the other side to float too (JLS 5.6.2), so

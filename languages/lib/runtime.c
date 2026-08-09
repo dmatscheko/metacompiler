@@ -2964,7 +2964,24 @@ long G_ROOT;
  * A FATTER SLOT WAS TRIED AND IS WORSE. Carrying the name handle beside the
  * index makes a hit one memory access instead of two (the slot, then
  * names[idx]), which looked like the reason a small module lost. Measured: lua
- * +6.1% against +3.9%, kotlin -40.4% against -42.1%. */
+ * +6.1% against +3.9%, kotlin -40.4% against -42.1%.
+ *
+ * RE-MEASURED 2026-08-09 (docs/todo.md 7.2) BECAUSE THOSE WERE SINGLE BUILDS,
+ * and the verdict SURVIVES. Built as `return cap * 4` here plus a two-word slot
+ * (name, idx+1) in scope_hput and scope_find, against a clean archive of
+ * 455ce39, 9 draws for medians and 13 paired builds:
+ *
+ *     lua      -0.20%   faster in 13 of 13 pairs   (own spread 0.05%)
+ *     python   +0.66%   SLOWER in 11 of 13 pairs   (2.66%)
+ *     kotlin   +0.83%   no difference              (2.21%)
+ *     c        -0.08%   no difference              - the semantic control
+ *
+ * It buys lua back 0.20 points of the ~4 the index costs it, charges python for
+ * them, and it is the only variant tried here that moves an EXACT counter the
+ * wrong way: the table doubles, so MEC_GC_STATS heap steps +5,120 B on lua and
+ * +37,376 B on kotlin and python. Declined a second time, on numbers that can
+ * now carry the word. The arm that DID buy lua back is the out-of-line one at
+ * scope_find. */
 long scope_hwords(long cap) {
 	if (cap < 32) { return 0; }
 	return cap * 2;
@@ -3032,31 +3049,51 @@ long scope_of(long h) { if (h == 0) { return G_ROOT; } return h; }
  * gave this scope a table.
  *
  * THE ARM IS NOT FREE FOR A LANGUAGE THAT CANNOT USE IT, and the reason is
- * inlining. At HEAD this function is small enough that clang inlines it into
- * scope_get, scope_put and js_tdecl; a second arm makes it too big, and lua -
+ * inlining. When the hash arm was written INLINE here, this function was too big
+ * for clang to keep inlining into scope_get, scope_put and js_tdecl, and lua -
  * whose 84-declaration module scope is the smallest of the sixteen and whose
- * benchmark is dominated by SMALL scopes - pays +3.9%. Isolated: a bare
- * `if (n >= 1000000) return <call>` that never fires already costs it +2.8%, so
- * it is the shape of the function and not the hashing. Splitting the arm into
- * its own function was measured and is WORSE (+4.7%), as is carrying the name
- * handle in the slot (+6.1%). It is kept because the other side of the trade is
- * -41% on python, ruby and kotlin. */
+ * benchmark is dominated by SMALL scopes - paid +3.9%. Isolated: a bare
+ * `if (n >= 1000000) return <call>` that never fires already cost it +2.8%, so
+ * it is the shape of the function and not the hashing.
+ *
+ * 2026-08-09, docs/todo.md 7.2: THAT IS WHY THE HASH ARM IS NOW OUT OF LINE, in
+ * scope_find_hashed below. It had been measured as WORSE (+4.7%) and the number
+ * was a SINGLE BUILD against a row whose own spread is larger than the effect -
+ * the trap in the manual's chapter 4. Re-measured properly, 9 draws for the
+ * medians and 13 paired builds for the sign test, against a clean `git archive`
+ * of 455ce39, `tests/bench.sh`:
+ *
+ *     lua      -2.31%   faster in 13 of 13 pairs   (own 9-draw spread 0.08%)
+ *     python   -1.52%   faster in 13 of 13 pairs   (0.54%)
+ *     kotlin   -1.48%   faster in 12 of 13 pairs   (1.91%)
+ *     c        -0.10%   no difference              - the semantic control
+ *
+ * So it is a win for the language the index HURT and for the two it helps most,
+ * and MEC_GC_STATS heap and collection count are unmoved in every row (exact
+ * counters, exempt from the layout lottery), which is what says this is codegen
+ * and not allocation. The mechanism is the one the paragraph above names: with
+ * the hash arm gone from the body, scope_find is small again and clang inlines
+ * it back into its three callers, so the small-scope path stops paying for an
+ * arm it never takes.
+ *
+ * THE OTHER PROPOSED BUY-BACK, carrying the name handle beside the index in the
+ * slot, WAS RE-MEASURED THE SAME WAY AND REMAINS A LOSS - see scope_hwords. */
+long scope_find_hashed(long *names, long cap, long name) {
+	long *tab = names + cap * 3;
+	long m = cap * 2 - 1;
+	long slot = str_hash(name) & m;
+	while (tab[slot] != 0) {
+		long idx = tab[slot] - 1;
+		if (str_eq(names[idx], name)) { return idx; }
+		slot = (slot + 1) & m;
+	}
+	return -1;
+}
 long scope_find(long s, long name) {
 	long *names = (long *)fa(s);
 	long n = fd(s);
 	long i = 0;
-	if (n >= 32) {
-		long cap = fe(s);
-		long *tab = names + cap * 3;
-		long m = cap * 2 - 1;
-		long slot = str_hash(name) & m;
-		while (tab[slot] != 0) {
-			long idx = tab[slot] - 1;
-			if (str_eq(names[idx], name)) { return idx; }
-			slot = (slot + 1) & m;
-		}
-		return -1;
-	}
+	if (n >= 32) { return scope_find_hashed(names, fe(s), name); }
 	while (i < n) { if (str_eq(names[i], name)) { return i; } i = i + 1; }
 	return -1;
 }

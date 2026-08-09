@@ -124,8 +124,10 @@ import "./regex.js"
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below.
 import "./runtime.metajs"
-import "./runtime-decimal.metajs"
-import "./runtime-bignum.metajs"
+// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
+// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
+// only to keep scope_find's linear module-scope scan off non-callers and the
+// hash index in runtime.c removed that scan. One import, not three.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rbJStr(v) }
@@ -246,7 +248,7 @@ function rbSym(name) {
 // of them on every run and tests/probe.sh runs all four legs.
 //
 // Sign and magnitude, the magnitude a little endian array of base 10000 limbs -
-// the same representation runtime-bignum.metajs already uses for the exact
+// the same representation runtime.metajs's bignum section already uses for the exact
 // decimal expansion of a double, so rtBigStr renders one unchanged. A limb
 // product stays below 1e8, well inside a double's exact range.
 //
