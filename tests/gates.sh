@@ -107,9 +107,14 @@ FULL_TIMEOUT=600
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=8311      # twelfth round: csharp +31, bash +56, batch +3,
-                          # js +33, typescript +33, ruby +17+15 (python's and swift's
-                          # additions are in the FEATURE files, which --full does not count)
+FULL_ASSERTIONS=8585      # thirteenth round, +274: js +17, typescript +17,
+                          # csharp +3, swift +17, ruby +30, dart +87, kotlin +16,
+                          # bash +86, lua +1. (php's 16 and the lua float-key
+                          # checks are in the FEATURE files, which --full does not
+                          # count - the matrix and native-full run those.)
+                          # Every agent this round correctly refused to raise this
+                          # itself, which is the rule working: six of them reported
+                          # "+N, RAISE FULL_ASSERTIONS" and none of them did.
 
 # The shape ratchet: layer-2 bodies in languages/lib/*.metajs that are identical
 # modulo names, ACROSS FILES, at the default -min 140. It is the only measure of
