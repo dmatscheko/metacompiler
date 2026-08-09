@@ -374,9 +374,15 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
-// (`: Int`, `: String`); anything else there is a protocol and is ignored.
-EnumConform = EnumRawType { "," Type } ;
+// (`: Int`, `: String`); every entry there may equally be a PROTOCOL, and both
+// halves used to drop the trailing ones on the floor - `enum E: Greet` adopted
+// nothing at all, so a default implementation from `extension Greet` was
+// `unknown method` in every engine where swiftc 6.1.2 answers (docs/todo.md 1.1).
+// The first entry is recorded BOTH ways: rawKind decides whether it is really a
+// raw-value type, and the adoption ignores a name that is no protocol.
+EnumConform = EnumRawType { "," EnumProto } ;
 EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = Type ;
+EnumProto   <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
 // case a, b  /  case two = "II"  /  case circle(r: Int)  /  case rect(Int, Int)
 CaseDecl    = KwCase ECase { "," ECase } [ ";" ] ;
 ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
@@ -400,10 +406,17 @@ ImportPath  <~~ push(stripWs(up.in)) ~~>
             = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
-// A protocol is a named member table: its REQUIREMENTS are recorded and dropped
-// (this front end does no conformance checking), and the default implementations an
-// extension of the protocol adds are what a conforming type inherits. A type's
-// inheritance clause adopts every protocol it names.
+// A protocol is a named member table: its REQUIREMENT NAMES are recorded (that is
+// all a requirement contributes - this front end does no conformance checking) and
+// the default implementations an extension of the protocol adds are what a
+// conforming type inherits. A type's inheritance clause adopts every protocol it
+// names, and the adoption also records the conformance, which is what makes
+// `x is P` answerable (docs/todo.md 1.1).
+//
+// THE NAMES MATTER, and they used to be thrown away with the rest: Swift dispatches
+// a call made from inside a protocol extension DYNAMICALLY only for a name the
+// protocol declares. A member the extension alone introduces is bound statically to
+// the extension's own implementation even when the conforming type declares one.
 ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
             = KwProtocol Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
               "{" { ProtoMember } "}" ;
@@ -422,10 +435,12 @@ ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | Proto
 AssocTypeDecl <~~ push({}) ~~>
             = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
 ProtoVar    <~~ push({}) ~~>
-            = ( "let" | "var" ) KwEnd Id [ ":" Type ] "{" ProtoAcc { ProtoAcc } "}" ;
+            = ( "let" | "var" ) KwEnd Id <~~ push({preq: up.in}) ~~> [ ":" Type ]
+              "{" ProtoAcc { ProtoAcc } "}" ;
 ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
 ProtoFunc   <~~ push({}) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
+            = KwFunc FuncName <~~ push({preq: stripWs(up.in)}) ~~> [ SkipAngle ] ParamList
+              [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
 ProtoInit   <~~ push({}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] [ ";" ] ;
 ProtoSubscript <~~ push({}) ~~>
@@ -2994,6 +3009,17 @@ KwContinue  = "continue" KwEnd ;
         // `Outer.Inner(twice: 3)` is a construction, and its initializer overload is
         // picked by label exactly as a top-level `Inner(twice: 3)` is.
         var mcLabels = pendingLabels
+        // `self.m()` from inside a protocol extension, where m is NOT a requirement:
+        // Swift binds it to the extension's own member, not to the conforming type's
+        // override (docs/todo.md 1.1). Only a call on the RECEIVER takes the test.
+        // protoStatic FIRST, because it answers null on one property read when the
+        // running method was not declared in a protocol - which is every call in a
+        // program with no protocol extension in it - while findThis() walks the whole
+        // scope chain.
+        var psm = protoStatic(name)
+        if (psm != null && target !== null && target !== undefined && target === findThis()) {
+            return psm.apply(undefined, concat2impl([target], args))
+        }
         // A method an `extension Int { ... }` / `extension String { ... }` added lives
         // in the builtin's side table; it wins over nothing but is tried first because
         // the builtin method lists below abort on an unknown name.
@@ -3117,10 +3143,39 @@ KwContinue  = "continue" KwEnd ;
     // e is T answers the dynamic type test, e as? T answers the value or nil, and
     // e as / e as! T pass the value through - this value model has one representation
     // per value, so an upcast and a forced downcast are both identities.
+    // `A & B` is a protocol COMPOSITION and every component has to match. Both
+    // halves used to look the whole spelling up as one name, find nothing and answer
+    // false - and once `is P` started working, testing only the first component
+    // would have answered TRUE for a type conforming to A alone. swiftc 6.1.2
+    // settles it: `U2() is A2 & B2` is false with `struct U2: A2`. The twin is
+    // swSplitAmp in swift-to-llvm-ir.abnf's emitIsType.
+    function swSplitAmp(t) {
+        var out = []
+        var cur = ""
+        // Only a spelling that HAS an & is taken apart: every other type name must
+        // reach the tests below exactly as it was written, whitespace included.
+        var amp = false
+        for (var k = 0; k < t.length; k++) { if (t.charAt(k) == "&") { amp = true } }
+        if (!amp) { out.push(t); return out }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "&") { out.push(stripWs(cur)); cur = "" } else { cur = cur + ch }
+        }
+        out.push(stripWs(cur))
+        return out
+    }
     function swIsType(v, tname) {
+        var comps = swSplitAmp(tname)
+        if (comps.length > 1) {
+            for (var ci = 0; ci < comps.length; ci++) {
+                if (!swIsType(v, comps[ci])) { return false }
+            }
+            return true
+        }
         if (isCaseVal(v)) {
             var t = tname
             if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+            if (protoNames["$" + t] == 1) { return swConforms(v, t) }
             return t == "Any" || t == "Error" || v.__etype === t
         }
         return swIsNamed(v, tname)
@@ -3151,6 +3206,10 @@ KwContinue  = "continue" KwEnd ;
     // abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
     function swIsNamed(v, tname) {
         var t = swBaseTy(tname)
+        // A user PROTOCOL is answered by the conformance marker adoptProtocol wrote,
+        // not by the name walk below - a conforming type's descriptor is named for
+        // itself, never for the protocol (docs/todo.md 1.1).
+        if (protoNames["$" + t] == 1) { return swConforms(v, t) }
         var opt = tname.length > 0 &&
                   (tname.charAt(tname.length - 1) == "?" || tname.charAt(tname.length - 1) == "!")
         var iw = swIntWidthOf(t)
@@ -3438,17 +3497,18 @@ KwContinue  = "continue" KwEnd ;
     // cannot be asked about:
     //  - EVERY value a Swift program can throw conforms to Error, and Any matches
     //    anything, so both always match. swiftc would not compile the throw otherwise.
-    //  - a user PROTOCOL is not testable at all here: conformance is recorded on
-    //    NEITHER half's values, so `x is P` is false for a conforming type in all
-    //    three engines (found while building this, not fixed - it needs a conformance
-    //    marker on the descriptor in both engines plus an emitter arm). Matching keeps
-    //    the clause's pre-existing behaviour instead of turning a caught error into an
-    //    UNCAUGHT one, which is what filtering on a false answer would do.
-    // The twin is the same three-way test in swift-to-llvm-ir.abnf's emitMatchPat.
+    //  - a user PROTOCOL used to be exempt too - conformance was recorded on no
+    //    value in either engine, so filtering on the false answer it gave would have
+    //    turned a caught error into an UNCAUGHT one. adoptProtocol now records it
+    //    (docs/todo.md 1.1) and swIsType answers, so the exemption is GONE and the
+    //    clause filters: `catch let e as Recoverable` no longer catches a thrown
+    //    value that does not conform. Asserted both directions, in SECTION 33 of
+    //    tests/swift-test-full.swift and catch-filters-on-a-user-protocol in
+    //    tests/swift-test-features.swift.
+    // The twin is the same two-way test in swift-to-llvm-ir.abnf's emitMatchPat.
     function swCatchTyMatch(v, t0) {
         var t = swBaseTy(t0)
         if (t == "Error" || t == "Any") { return true }
-        if (protoNames["$" + t] == 1) { return true }
         return swIsType(v, t0)
     }
     function matchCore(k, v, binding) {
@@ -5045,7 +5105,7 @@ KwContinue  = "continue" KwEnd ;
     function splitMembers(items, from) {
         var mem = {raw: "", inherits: [], cases: [], nested: [], nestedIdx: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
-                   lazies: [], wrapped: [], hasInit: false}
+                   lazies: [], wrapped: [], hasInit: false, reqs: []}
         var isStatic = false
         var isLazy = false
         var attr = null
@@ -5058,6 +5118,10 @@ KwContinue  = "continue" KwEnd ;
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedIdx.push(it.nidx); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
+            // A protocol REQUIREMENT: the name only, which is what decides whether a
+            // call from inside a protocol extension dispatches DYNAMICALLY (see
+            // adoptProtocol / emitExtMembers).
+            if (it.preq != undefined) { mem.reqs.push(it.preq); continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
                 var f = {name: it.prop, store: it.prop, ty: it.ty, hasInit: it.hasInit, init: it.init}
@@ -5255,11 +5319,18 @@ KwContinue  = "continue" KwEnd ;
             // The inheritance clause: a name that resolves to a class is the
             // SUPERCLASS (its members are found by walking __super); a name that
             // resolves to a protocol contributes its default implementations.
+            // The SUPERCLASS is decided here because installMembers below needs it
+            // (inheritOverloads walks it); the protocols are adopted AFTER, because
+            // adopting first put the protocol's default in the slot and the type's
+            // own declaration then read as an OVERLOAD of it - `A().tag()` answered
+            // the protocol's "?" where swiftc 6.1.2 answers A's own, in the
+            // interpreter half alone (docs/todo.md 1.1).
+            var myProtos = []
             for (var h = 0; h < mem.inherits.length; h++) {
                 var sup = swResolve(baseTypeName(mem.inherits[h]))
                 if (sup == null || sup.v == undefined || sup.v === null) { continue }
                 if (sup.v.__isclass === true) { cls.__super = sup.v }
-                else if (sup.v.__isprotocol === true) { adoptProtocol(cls, sup.v) }
+                else if (sup.v.__isprotocol === true) { myProtos.push(sup.v) }
             }
             if (cls.__super != undefined && cls.__super !== null) {
                 var inh = cls.__super.__fields
@@ -5288,6 +5359,7 @@ KwContinue  = "continue" KwEnd ;
                 scopes = saved
             }
             installMembers(cls, mem)
+            for (var pz = 0; pz < myProtos.length; pz++) { adoptProtocol(cls, myProtos[pz]) }
             // The inherited initializers are COPIED onto this descriptor rather than
             // left to classFind's __super walk, because an `extension Derived { init
             // ... }` further down installs an init on THIS descriptor and would
@@ -5338,9 +5410,56 @@ KwContinue  = "continue" KwEnd ;
             var p = {__isprotocol: true, __name: name, __inherits: mem.inherits}
             var tbl = {__name: name}
             installMembers(tbl, mem)
+            // WHICH names the protocol DECLARES is what decides dispatch inside its
+            // own extension (protoStatic): a requirement dispatches dynamically to
+            // the conforming type's override, and a member only the extension
+            // introduces does NOT - swiftc 6.1.2 answers `hi:?` for
+            // `extension P { func hi() { tag() }; func tag() {"?"} }` with a
+            // conforming type overriding tag(), and `hi:A` for the same program with
+            // `func tag() -> String` declared in the protocol body. Both halves used
+            // to ignore the requirement list entirely (docs/todo.md 1.1).
+            // The requirements a parent protocol declares count as this one's.
+            var reqs = {}
+            var reqKeys = []
+            for (var r = 0; r < mem.reqs.length; r++) { reqAdd(reqs, reqKeys, "$" + mem.reqs[r]) }
+            for (var q = 0; q < mem.inherits.length; q++) {
+                var up3 = swResolve(baseTypeName(mem.inherits[q]))
+                if (up3 == null || up3.v == undefined || up3.v === null) { continue }
+                if (up3.v.__isprotocol !== true) { continue }
+                var pt = up3.v.__members
+                var pr = (pt == undefined || pt === null) ? null : pt.__reqs
+                if (pr == undefined || pr == null) { continue }
+                var pk = pr.__rk
+                if (pk == undefined || pk == null) { continue }
+                for (var y = 0; y < pk.length; y++) { reqAdd(reqs, reqKeys, pk[y]) }
+            }
+            scopePut(reqs, "__rk", reqKeys)
+            scopePut(tbl, "__isprototbl", true)
+            scopePut(tbl, "__reqs", reqs)
             p.__members = tbl
             declType(name, p, isNestedDecl(myIdx))
         }
+    }
+    function reqAdd(reqs, keys, k) {
+        if (hasOwn(reqs, k)) { return }
+        keys.push(k)
+        scopePut(reqs, k, 1)
+    }
+    // The member a call from INSIDE a protocol extension binds to statically, or
+    // null when the call dispatches dynamically. curOwner() is the table the running
+    // method was DECLARED in, so this fires for a protocol default's own body and
+    // for nothing else. Twin: the emit-time protoCtx in swift-to-llvm-ir.abnf.
+    function protoStatic(name) {
+        var ow = curOwner()
+        if (ow == null || ow.__isprototbl !== true) { return null }
+        var bare = name
+        if (bare.substring(0, 6) == "__get_") { bare = bare.substring(6) }
+        else if (bare.substring(0, 6) == "__set_") { bare = bare.substring(6) }
+        var rq = ow.__reqs
+        if (rq != undefined && rq !== null && hasOwn(rq, "$" + bare)) { return null }
+        if (!hasOwn(ow, name)) { return null }
+        var f = ow[name]
+        return typeof f == "function" ? f : null
     }
     function copyDefaults(cls, tbl) {
         var ks = tbl.__keys
@@ -5349,6 +5468,14 @@ KwContinue  = "continue" KwEnd ;
             if (!hasOwn(cls, ks[i])) { scopePut(cls, ks[i], tbl[ks[i]]) }
         }
     }
+    // Adopting also RECORDS the conformance, under __conf_<name> on the very table a
+    // value reaches through accTable - which is what makes `x is P` answerable at all
+    // (docs/todo.md 1.1: it was false for every conforming type in all three engines,
+    // so --cross was blind to it). scopePut and not tput on purpose: the marker must
+    // stay out of __keys, or copyDefaults would carry one protocol's conformance into
+    // an unrelated type as if it were a member. Inherited protocols are marked by the
+    // recursion above, so `struct S: P` with `protocol P: Q` answers `S() is Q` true.
+    // The twins are js_swconf in abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
     function adoptProtocol(cls, p) {
         var inh = p.__inherits
         if (inh != undefined && inh != null) {
@@ -5359,7 +5486,21 @@ KwContinue  = "continue" KwEnd ;
                 }
             }
         }
+        scopePut(cls, "__conf_" + p.__name, true)
         copyDefaults(cls, p.__members)
+    }
+    // `v is P` for a user protocol P: the conformance marker, up the superclass chain
+    // (a subclass of a conforming class conforms too).
+    function swConforms(v, t) {
+        var c = accTable(v)
+        var key = "__conf_" + t
+        var n = 0
+        while (c != undefined && c !== null && n < 64) {
+            if (hasOwn(c, key)) { return true }
+            c = c.__super
+            n++
+        }
+        return false
     }
     // The member tables of the builtin types, so `extension Int { ... }` has
     // somewhere to put its members and mcall/getField somewhere to find them.
@@ -5649,6 +5790,21 @@ KwContinue  = "continue" KwEnd ;
             var e = {__isenum: true, __enum: true, __name: name}
             var tbl = {__name: name}
             installMembers(tbl, mem)
+            // An enum conforms to the protocols in its clause exactly as a struct
+            // does - the defaults land on the member table its case values carry as
+            // __class. This half adopted NOTHING here, so `E.one.hi()` from a
+            // protocol extension was `unknown method 'hi' on E` where the compiler
+            // half (which has always adopted) and swiftc both answer: a live halves
+            // divergence found while probing outward from docs/todo.md 1.1.
+            var eInh = [mem.raw]
+            for (var pe0 = 0; pe0 < mem.inherits.length; pe0++) { eInh.push(mem.inherits[pe0]) }
+            for (var pe = 0; pe < eInh.length; pe++) {
+                if (eInh[pe] == "") { continue }
+                var pv0 = swResolve(baseTypeName(eInh[pe]))
+                if (pv0 != null && pv0.v != undefined && pv0.v !== null && pv0.v.__isprotocol === true) {
+                    adoptProtocol(tbl, pv0.v)
+                }
+            }
             e.__members = tbl
             var order = []
             var nextRaw = 0
@@ -6013,11 +6169,27 @@ KwContinue  = "continue" KwEnd ;
     core.varMiss = function(name) {
         var self = findThis()
         if (self != undefined && self !== null) {
+            // A COMPUTED property the protocol does not declare binds to its own
+            // extension inside that extension, exactly as a method does - so the
+            // test comes before the receiver's own slot and its own accessor.
+            var pget = protoStatic("__get_" + name)
+            if (pget != null) { return {v: pget(self)} }
             if (hasOwn(self, name)) { return {v: self[name]} }
             var g = findAccessor(self, "__get_" + name)
             if (g != null) { return {v: g(self)} }
+            // The unqualified form of the same rule mcall applies to `self.m()`.
+            var pfn = protoStatic(name)
+            if (pfn != null) { return {v: bindSelf(pfn, self)} }
             var mm = self.__class == undefined ? null : classFind(self.__class, name)
             if (typeof mm == "function") { return {v: bindSelf(mm, self)} }
+            // `extension Int: P { ... }` conforms a BUILTIN, so the receiver of a
+            // protocol default's own body can be a number or a string, whose members
+            // live in the builtin side table and nowhere else.
+            var bt0 = builtinTableFor(self)
+            if (bt0 != null) {
+                var bm0 = classFind(bt0, name)
+                if (typeof bm0 == "function") { return {v: bindSelf(bm0, self)} }
+            }
         }
         return null
     }

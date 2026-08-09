@@ -1669,6 +1669,135 @@ func s32() {
               && Float(1) + Float.ulpOfOne > Float(1))
 }
 
+// ===== SECTION 33: protocol conformance, and dispatch inside an extension =====
+// docs/todo.md 1.1. Three rules no engine here implemented: `x is P` is TRUE for a
+// conforming type (conformance is recorded on no descriptor, so it answered false
+// in all three engines and --cross was blind); a call from inside a protocol
+// extension binds STATICALLY unless the protocol declares the name as a
+// REQUIREMENT; and an `extension Int { ... }` method must not hijack a user type's
+// member of the same name. Every operand is read out of an array so the constant
+// folder cannot decide any of it.
+protocol P33A {
+    func tag33() -> String
+}
+extension P33A {
+    func hi33() -> String { return "hi:" + tag33() }
+    func tag33() -> String { return "?" }
+    func plain33() -> String { return "p" }
+    func viaPlain33() -> String { return "v:" + plain33() }
+    func viaSelf33() -> String { return "s:" + self.plain33() }
+    var loud33: String { return tag33() + "!" }
+    func viaLoud33() -> String { return "l:" + loud33 }
+}
+protocol P33B: P33A { }
+protocol P33C { }
+struct S33A: P33A { func tag33() -> String { return "A" } }
+struct S33B: P33A { }
+class C33A: P33A { func tag33() -> String { return "C" } }
+class C33B: C33A { }
+enum E33: String, P33B { case one = "1"
+    func tag33() -> String { return "E" }
+}
+struct S33C { }
+extension S33C: P33A { func tag33() -> String { return "X" }
+    func plain33() -> String { return "own" }
+    var loud33: String { return "OWN" }
+}
+extension Int: P33A {
+    func tag33() -> String { return "I" }
+    func mine33() -> String { return "int" }
+}
+struct S33D { func mine33() -> String { return "struct" } }
+struct Boom33: Error, P33C { }
+struct Bang33: Error { }
+
+func thrower33(_ n: Int) throws -> Int {
+    if n == 0 { throw Boom33() }
+    throw Bang33()
+}
+
+func s33() {
+    let vals: [Any] = [S33A(), S33B(), C33A(), C33B(), E33.one, S33C(), 7, "z"]
+    var isP = ""
+    for v in vals { isP += (v is P33A) ? "1" : "0" }
+    check("33a", isP == "11111110")
+    var isB = ""
+    for v in vals { isB += (v is P33B) ? "1" : "0" }
+    check("33b", isB == "00001000")
+    var isC = ""
+    for v in vals { isC += (v is P33C) ? "1" : "0" }
+    check("33c", isC == "00000000")
+    // as? keeps the value, and its member call still dispatches on the real type.
+    var got = ""
+    for v in vals { if let p = v as? P33A { got += p.tag33() } else { got += "-" } }
+    check("33d", got == "A?CCEXI-")
+    // case is P, the same test through the pattern matcher.
+    var cs = ""
+    for v in vals {
+        switch v {
+        case is P33B: cs += "B"
+        case is P33A: cs += "A"
+        default: cs += "-"
+        }
+    }
+    check("33e", cs == "AAAABAA-")
+    // A REQUIREMENT dispatches to the conforming type; a member the extension alone
+    // introduces does not, even when the type declares its own.
+    let ps: [P33A] = [S33A(), S33B(), C33A(), E33.one, S33C()]
+    var his = ""
+    for p in ps { his += p.hi33() + "|" }
+    check("33f", his == "hi:A|hi:?|hi:C|hi:E|hi:X|")
+    let sc = [S33C()]
+    check("33g", sc[0].viaPlain33() == "v:p")
+    check("33h", sc[0].viaSelf33() == "s:p")
+    check("33i", sc[0].plain33() == "own")
+    // The same rule for a COMPUTED property: viaLoud33 reads the extension's loud33,
+    // whose tag33() IS a requirement and so reaches S33C's own.
+    check("33q", sc[0].viaLoud33() == "l:X!" && sc[0].loud33 == "OWN")
+    // A subclass conforms through its superclass, and inherits the default.
+    let cb: [Any] = [C33B()]
+    check("33j", (cb[0] as! C33B).hi33() == "hi:C" && cb[0] is P33A)
+    // extension Int: P33A - a builtin conforms, and its own extension method must
+    // not hijack a same-named member of a user type.
+    let ns = [7]
+    check("33k", ns[0].tag33() == "I" && ns[0].hi33() == "hi:I")
+    let sd = [S33D()]
+    check("33l", sd[0].mine33() == "struct" && ns[0].mine33() == "int")
+    // catch filtering on a user protocol: it FILTERS now, in both directions.
+    var caught = ""
+    for n in [0, 1] {
+        do { _ = try thrower33(n) }
+        catch is P33C { caught += "C" }
+        catch { caught += "g" }
+    }
+    check("33m", caught == "Cg")
+    // A protocol INHERITS another, and the parent's default arrives from an
+    // extension written after both declarations: the adoption has to reach the
+    // parent's own table, not a key list copied before the extension ran.
+    let ts: [Any] = [T33A(), T33B()]
+    var inh = ""
+    for t in ts {
+        if let a = t as? A33 { inh += a.a33() }
+        inh += (t is A33) ? "1" : "0"
+        inh += (t is B33) ? "1" : "0"
+    }
+    check("33n", inh == "a?11a?10")
+    check("33o", g33(T33A()) == "g:a?" && T33S.make33() == "m")
+    // A protocol COMPOSITION tests every component, not the first one.
+    var comp = ""
+    for t in ts { comp += (t is A33 & B33) ? "1" : "0" }
+    check("33p", comp == "10")
+}
+protocol A33 { }
+protocol B33 { }
+protocol C33: A33, B33 { }
+extension A33 { func a33() -> String { return "a?" } }
+struct T33A: C33 { }
+struct T33B: A33 { }
+protocol S33 { static func make33() -> String }
+struct T33S: S33 { static func make33() -> String { return "m" } }
+func g33<T: A33>(_ x: T) -> String { return "g:" + x.a33() }
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1704,6 +1833,7 @@ func main() {
     s30() // SECTION-CALL 30
     s31() // SECTION-CALL 31
     s32() // SECTION-CALL 32
+    s33() // SECTION-CALL 33
     print("full: \(checks) checks, \(fails) failures")
 }
 

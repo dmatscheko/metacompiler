@@ -377,9 +377,15 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
-// (`: Int`, `: String`); anything else there is a protocol and is ignored.
-EnumConform = EnumRawType { "," Type } ;
+// (`: Int`, `: String`); every entry there may equally be a PROTOCOL, and both
+// halves used to drop the trailing ones on the floor - `enum E: Greet` adopted
+// nothing at all, so a default implementation from `extension Greet` was
+// `unknown method` in every engine where swiftc 6.1.2 answers (docs/todo.md 1.1).
+// The first entry is recorded BOTH ways: rawKind decides whether it is really a
+// raw-value type, and the adoption ignores a name that is no protocol.
+EnumConform = EnumRawType { "," EnumProto } ;
 EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = Type ;
+EnumProto   <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
 CaseDecl    = KwCase ECase { "," ECase } [ ";" ] ;
 ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
             = Id <~~ push({cname: up.in}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
@@ -402,9 +408,16 @@ ImportPath  <~~ push(stripWs(up.in)) ~~>
             = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
-// A protocol is a named member table: its REQUIREMENTS are recorded and dropped
-// (this front end does no conformance checking), and the default implementations an
-// extension of the protocol adds are what a conforming type inherits.
+// A protocol is a named member table: its REQUIREMENT NAMES are recorded (that is
+// all a requirement contributes - this front end does no conformance checking) and
+// the default implementations an extension of the protocol adds are what a
+// conforming type inherits. Adoption also records the CONFORMANCE, which is what
+// makes `x is P` answerable (docs/todo.md 1.1).
+//
+// THE NAMES MATTER, and they used to be thrown away with the rest: Swift dispatches
+// a call made from inside a protocol extension DYNAMICALLY only for a name the
+// protocol declares. A member the extension alone introduces is bound statically to
+// the extension's own implementation even when the conforming type declares one.
 ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
             = KwProtocol Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
               "{" { ProtoMember } "}" ;
@@ -423,10 +436,12 @@ ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | Proto
 AssocTypeDecl <~~ push({}) ~~>
             = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
 ProtoVar    <~~ push({}) ~~>
-            = ( "let" | "var" ) KwEnd Id [ ":" Type ] "{" ProtoAcc { ProtoAcc } "}" ;
+            = ( "let" | "var" ) KwEnd Id <~~ push({preq: up.in}) ~~> [ ":" Type ]
+              "{" ProtoAcc { ProtoAcc } "}" ;
 ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
 ProtoFunc   <~~ push({}) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
+            = KwFunc FuncName <~~ push({preq: stripWs(up.in)}) ~~> [ SkipAngle ] ParamList
+              [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
 ProtoInit   <~~ push({}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] [ ";" ] ;
 ProtoSubscript <~~ push({}) ~~>
@@ -2376,7 +2391,63 @@ KwContinue  = "continue" KwEnd ;
     // `case is T:` PATTERN so the two cannot drift - the enum arm below is the
     // reason a pattern spelled with a bare js_swis would not have been the same
     // test (the interpreter's swIsType has that arm inside it).
+    // `A & B` is a protocol COMPOSITION and every component has to match. Both
+    // halves used to answer it with one lookup of the whole spelling, which found
+    // nothing and answered false - and once `is P` started working, testing only the
+    // first component would have answered TRUE for a type conforming to A alone.
+    // swiftc 6.1.2 settles it: `U2() is A2 & B2` is false with `struct U2: A2`.
+    function swSplitAmp(t) {
+        var out = []
+        var cur = ""
+        // Only a spelling that HAS an & is taken apart: every other type name must
+        // reach the tests below exactly as it was written, whitespace included.
+        var amp = false
+        for (var k = 0; k < t.length; k++) { if (t.charAt(k) == "&") { amp = true } }
+        if (!amp) { out.push(t); return out }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "&") { out.push(swTrimTy(cur)); cur = "" } else { cur = cur + ch }
+        }
+        out.push(swTrimTy(cur))
+        return out
+    }
+    function swTrimTy(s) {
+        var a = 0
+        var b2 = s.length
+        while (a < b2 && (s.charAt(a) == " " || s.charAt(a) == "\t")) { a = a + 1 }
+        while (b2 > a && (s.charAt(b2 - 1) == " " || s.charAt(b2 - 1) == "\t")) { b2 = b2 - 1 }
+        return s.substring(a, b2)
+    }
     function emitIsType(b, v, tname) {
+        var comps = swSplitAmp(tname)
+        if (comps.length > 1) {
+            var failB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            for (var ci = 0; ci < comps.length; ci++) {
+                var rc = emitIsType(b, v, comps[ci])
+                b = rc.b
+                var nxtB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, rc.v), nxtB, failB)
+                b = nxtB
+            }
+            var allB = b
+            allB.NewBr(joinB)
+            failB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hTrue, allB),
+                                               llvm.ir.NewIncoming(hFalse, failB)])}
+        }
+        // A user PROTOCOL is answered by the conformance marker every adoption site
+        // writes, not by a name walk: the descriptor is named for the conforming
+        // TYPE (docs/todo.md 1.1). protoNames and protoBuiltinConf are complete
+        // here - this runs at EMIT time, after the whole walk - so the builtin
+        // conformers are passed as a static list rather than looked up at run time.
+        var pt = baseTypeName(tname)
+        if (protoNames[pt] == 1) {
+            var bl = hasOwn(protoBuiltinConf, "$" + pt) ? protoBuiltinConf["$" + pt] : []
+            var ba = callExt(b, "js_arr_new", [])
+            for (var z = 0; z < bl.length; z++) { callExt(b, "js_arr_push", [ba, emitStr(b, bl[z])]) }
+            return {b: b, v: callExt(b, "js_swconf", [v, emitStr(b, pt), ba])}
+        }
         var isB = callExt(b, "js_swis", [v, emitStr(b, tname)])
         var elseB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
@@ -2735,7 +2806,19 @@ KwContinue  = "continue" KwEnd ;
             localB.NewBr(joinB)
             var selfV = selfB.NewCall(rtKGet(), [selfB == null ? curScopeV : curScopeV, emitStr(selfB, "self")])
             var sv
-            if (isComputedName(name)) { sv = selfB.NewCall(rtGetProp(), [selfV, emitStr(selfB, name)]) }
+            // A COMPUTED property the protocol does not declare is bound statically
+            // inside its own extension, exactly as a method is: `extension P { var
+            // shout: String { label + "!" }; func via() { "v:" + shout } }` reads
+            // P's shout under swiftc 6.1.2 even when the conforming type declares
+            // its own (docs/todo.md 1.1).
+            var pgets = protoStaticName("__get_" + name)
+            if (pgets != "") {
+                var pgV = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, typeKeyOf(pgets))])
+                var pga = callExt(selfB, "js_arr_new", [])
+                callExt(selfB, "js_arr_push", [pga, selfV])
+                sv = callExt(selfB, "js_call",
+                             [callExt(selfB, "js_get", [pgV, emitStr(selfB, "__get_" + name)]), hUndef, pga])
+            } else if (isComputedName(name)) { sv = selfB.NewCall(rtGetProp(), [selfV, emitStr(selfB, name)]) }
             else { sv = callExt(selfB, "js_get", [selfV, emitStr(selfB, name)]) }
             selfB.NewBr(joinB)
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
@@ -3088,6 +3171,23 @@ KwContinue  = "continue" KwEnd ;
     function rtEName() { return rtProbe("sw_ename", "__ename") }
     function rtVals()  { return rtProbe("sw_vals", "__vals") }
     function rtClassOf() { return rtProbe("sw_classof", "__class") }
+    // The property read of an `extension Int { var half: Int { ... } }`, chosen by
+    // the RECEIVER rather than by the name alone: an instance (anything with a
+    // __class of its own) takes the ordinary sw_getprop path, and only a builtin
+    // reaches the extension's table. See js_swextcall for the method half and the
+    // divergence both close.
+    function rtExtGet() {
+        return rtFunc("sw_extget", 3, function(b, ps) {
+            var extB = curF.NewBlock("")
+            var ownB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtClassOf(), [ps[0]])), ownB, extB)
+            ownB.NewRet(ownB.NewCall(rtGetProp(), [ps[0], ps[1]]))
+            var ta = callExt(extB, "js_arr_new", [])
+            callExt(extB, "js_arr_push", [ta, ps[0]])
+            var gk = callExt(extB, "js_jadd", [emitStr(extB, "__get_"), ps[1]])
+            extB.NewRet(callExt(extB, "js_call", [callExt(extB, "js_get", [ps[2], gk]), hUndef, ta]))
+        })
+    }
     // == over values that may be enum cases: two cases are equal when their case name
     // and their associated values are (which is what the __eqkey string encodes), and
     // anything else keeps the identity/value comparison js_seq gives.
@@ -3342,12 +3442,12 @@ KwContinue  = "continue" KwEnd ;
     function emitMatchPat(b, p, v, binding, failB) {
         if (p.opt > 0) { b = emitNotNil(b, v, failB) }
         // `catch let e as T`: the type test comes first, and only then the binding.
-        // Error and Any match every thrown value by Swift's own typing rule, and a
-        // user PROTOCOL is not testable (conformance is recorded on no value in either
-        // half, so `x is P` is false for a conforming type in all three engines) -
-        // matching keeps the clause's old behaviour rather than turning a caught error
-        // into an uncaught one. The twin is swCatchTyMatch in swift-interpreter.abnf.
-        // protoNames is complete here: this runs at EMIT time, after the whole walk.
+        // Error and Any match every thrown value by Swift's own typing rule. A user
+        // PROTOCOL used to be exempt as well, because conformance was recorded on no
+        // value in either half and filtering on the false answer would have turned a
+        // caught error into an UNCAUGHT one; emitConfMark records it now
+        // (docs/todo.md 1.1), so the exemption is GONE and the clause filters.
+        // The twin is swCatchTyMatch in swift-interpreter.abnf.
         if (p.asty != undefined && !catchTyAlways(p.asty)) {
             var ra = emitIsType(b, v, p.asty)
             var okA = curF.NewBlock("")
@@ -3358,7 +3458,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function catchTyAlways(t0) {
         var t = baseTypeName(t0)
-        return t == "Error" || t == "Any" || protoNames[t] == 1
+        return t == "Error" || t == "Any"
     }
     function emitMatchCore(b, k, v, binding, failB) {
         // `case is Double:` - the same js_swis the `is` operator emits.
@@ -3684,10 +3784,13 @@ KwContinue  = "continue" KwEnd ;
         if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
         var bt = builtinCompOf(name)
         if (bt != null) {
-            var ta = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [ta, cur])
+            // Which receivers can mean the extension's property is decided by NAME,
+            // so a user type with a member of the same name used to be HIJACKED by
+            // it - the read counterpart of js_swextcall's method case. sw_extget
+            // makes the decision at run time instead: only a value with no
+            // descriptor of its own reaches the $ext$ table.
             var tbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + bt)])
-            return callExt(b, "js_call", [callExt(b, "js_get", [tbl, emitStr(b, "__get_" + name)]), hUndef, ta])
+            return b.NewCall(rtExtGet(), [cur, emitStr(b, name), tbl])
         }
         if (isComputedName(name)) { return b.NewCall(rtGetProp(), [cur, emitStr(b, name)]) }
         // The three members a sized integer answers for itself. js_swget falls
@@ -3813,14 +3916,32 @@ KwContinue  = "continue" KwEnd ;
                     b = contB
                 } else if (s.kind == "force") {
                     // Force unwrap: the value is already the unwrapped one here.
+                } else if (s.kind == "mcall" && i == 0 && headName == "self"
+                           && protoStaticName(s.name) != "") {
+                    // `self.m()` inside a protocol extension, m not a requirement:
+                    // the qualified form of the unqualified rule above.
+                    var rps = emitProtoStatic(b, protoStaticName(s.name), s.name, s.args)
+                    b = rps.b
+                    cur = rps.v
                 } else if (s.kind == "mcall" && builtinMethOf(s.name) != null) {
-                    // A method an extension of a builtin type added.
+                    // A method an extension of a builtin type added. The decision is
+                    // by NAME, so it used to HIJACK every call site of that name in
+                    // the program: `extension Int { func pid() }` beside a
+                    // `struct S { func pid() }` made `S().pid()` answer the Int one,
+                    // in the compiler half alone, where the interpreter (whose mcall
+                    // consults builtinTableFor(target), null for an instance) and
+                    // swiftc both answer S's. Found probing outward from
+                    // docs/todo.md 1.1 - it needs no protocol to reach.
+                    //
+                    // js_swextcall makes the same decision the interpreter does, at
+                    // run time and in one extern: a value with a member table of its
+                    // own takes the ordinary member call, and only a builtin reaches
+                    // the $ext$ table.
                     var eb = callExt(b, "js_arr_new", [])
-                    callExt(b, "js_arr_push", [eb, cur])
                     var eab = emitArgRecsInto(b, s.args, eb)
                     b = eab.b
                     var btbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
-                    cur = callExt(b, "js_call", [callExt(b, "js_get", [btbl, emitStr(b, s.name)]), hUndef, eb])
+                    cur = callExt(b, "js_swextcall", [cur, emitStr(b, s.name), eb, btbl])
                     emitWriteBacks(b, eab.boxes)
                 } else if (s.kind == "mcall" && classNames[s.name] == 1) {
                     // Outer.Inner(...): a NESTED type reached through its enclosing one.
@@ -4244,8 +4365,29 @@ KwContinue  = "continue" KwEnd ;
                 var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
                 return withTypeCtx(ck, function() { return emitConstruct(b, ck, clsV, args) })
             }
+            var pstat = protoStaticName(name)
             var ea = emitArgRecs(b, args)
             b = ea.b
+            // Inside a protocol extension, a call to a member the protocol does not
+            // DECLARE binds to the extension's own implementation, statically - but a
+            // LOCAL of that name still wins, exactly as it does for the self probe
+            // below and in the interpreter's varMiss, so the same scope test decides.
+            if (pstat != "") {
+                var pv2 = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+                var plB = curF.NewBlock("")
+                var ppB = curF.NewBlock("")
+                var pjB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [pv2, emitStr(b, "undefined")])), ppB, plB)
+                var plv = callExt(plB, "js_call", [plB.NewCall(rtKGet(), [curScopeV, emitStr(plB, name)]), hUndef, ea.v])
+                plB.NewBr(pjB)
+                var ppV = ppB.NewCall(rtKGet(), [curScopeV, emitStr(ppB, typeKeyOf(pstat))])
+                var ppv = ppB.NewCall(rtPrependCall(),
+                                      [ppB.NewCall(rtKGet(), [curScopeV, emitStr(ppB, "this")]),
+                                       callExt(ppB, "js_get", [ppV, emitStr(ppB, name)]), ea.v])
+                ppB.NewBr(pjB)
+                emitWriteBacks(pjB, ea.boxes)
+                return {b: pjB, v: pjB.NewPhi([llvm.ir.NewIncoming(plv, plB), llvm.ir.NewIncoming(ppv, ppB)])}
+            }
             // An unqualified call inside a member body may name a METHOD of the
             // enclosing type, which lives on the type descriptor rather than in the
             // scope chain. Only names some type declares as a method take the probe.
@@ -4257,8 +4399,19 @@ KwContinue  = "continue" KwEnd ;
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), selfB, localB)
                 var lv = callExt(localB, "js_call", [localB.NewCall(rtKGet(), [curScopeV, emitStr(localB, name)]), hUndef, ea.v])
                 localB.NewBr(joinB)
-                var sv = callExt(selfB, "js_mcall", [selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")]),
-                                                    emitStr(selfB, name), ea.v])
+                // js_swextcall when an `extension Int { ... }` also declares the
+                // name: `extension Int: P` conforms a BUILTIN, so the receiver of a
+                // protocol default's own body can be a number, whose members live in
+                // the $ext$ table and nowhere else. js_swextcall picks the table by
+                // the receiver, so an instance receiver still takes the member call.
+                var selfRV = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")])
+                var sv
+                if (builtinMethOf(name) != null) {
+                    var sbt = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "$ext$" + builtinMethOf(name))])
+                    sv = callExt(selfB, "js_swextcall", [selfRV, emitStr(selfB, name), ea.v, sbt])
+                } else {
+                    sv = callExt(selfB, "js_mcall", [selfRV, emitStr(selfB, name), ea.v])
+                }
                 selfB.NewBr(joinB)
                 emitWriteBacks(joinB, ea.boxes)
                 return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
@@ -5329,7 +5482,7 @@ KwContinue  = "continue" KwEnd ;
     function splitMembers(items, from) {
         var mem = {raw: "", inherits: [], cases: [], nested: [], nestedRecs: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
-                   lazies: [], wrapped: [], hasInit: false}
+                   lazies: [], wrapped: [], hasInit: false, reqs: []}
         var isStatic = false
         var isLazy = false
         var attr = null
@@ -5342,6 +5495,10 @@ KwContinue  = "continue" KwEnd ;
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedRecs.push(it.nrec); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
+            // A protocol REQUIREMENT: the name only, which is what decides whether a
+            // call from inside a protocol extension dispatches DYNAMICALLY (see
+            // adoptProtocol / emitExtMembers).
+            if (it.preq != undefined) { mem.reqs.push(it.preq); continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
                 var f = {name: it.prop, store: it.prop, ty: it.ty, hasInit: it.hasInit, init: it.init}
@@ -6213,6 +6370,7 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, "__proto_" + pn),
                                       b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])])
                 b = emitAdoptProtocol(b, clsV, pn)
+                emitConfMark(b, clsV, pn)
             }
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
@@ -6278,7 +6436,19 @@ KwContinue  = "continue" KwEnd ;
             || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
             || n == "Bool" || n == "Array" || n == "Dictionary"
     }
-    function emitAdoptProtocol(b, clsV, pn) {
+    // Adopting P adopts everything P INHERITS first, from the parent's OWN table.
+    // The recursion is what makes a later `extension A1 { func a() }` reach a type
+    // that conforms to `protocol C1: A1` - protoMembers used to merge the parent's
+    // key list into the child at walk time instead, so the child's table was asked
+    // for a member the parent's extension had put on the PARENT's table, and every
+    // such call was `unknown method` in this half where the interpreter (whose
+    // adoptProtocol recurses at run time, after every extension has been installed)
+    // and swiftc both answer. Found probing outward from docs/todo.md 1.1.
+    function emitAdoptProtocol(b, clsV, pn) { return emitAdoptProtocolD(b, clsV, pn, 0) }
+    function emitAdoptProtocolD(b, clsV, pn, d) {
+        if (d > 16) { return b }
+        var ps0 = protoParentsOf(pn)
+        for (var q0 = 0; q0 < ps0.length; q0++) { b = emitAdoptProtocolD(b, clsV, ps0[q0], d + 1) }
         var keys = protoMembers["$" + pn]
         if (keys == undefined) { return b }
         var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])
@@ -6292,6 +6462,89 @@ KwContinue  = "continue" KwEnd ;
             b = joinB
         }
         return b
+    }
+    // Which protocols each protocol INHERITS, and which BUILTIN type names an
+    // `extension Int: P` conformed. Both are complete by the time any emitter
+    // closure runs, so an `is` far above the extension still sees it.
+    var protoParents = {}
+    var protoBuiltinConf = {}
+    // The names each protocol DECLARES as requirements, and the protocol whose
+    // extension body is being emitted right now. Together they are Swift's dispatch
+    // rule inside a protocol extension: a REQUIREMENT dispatches dynamically to the
+    // conforming type's override, and a member only the extension introduces does
+    // NOT - `extension P { func hi() { tag() }; func tag() {"?"} }` with a conforming
+    // type overriding tag() answers `hi:?` under swiftc 6.1.2, and `hi:A` only when
+    // the protocol BODY declares `func tag() -> String`. Both halves used to ignore
+    // the requirement list entirely and dispatch dynamically always
+    // (docs/todo.md 1.1). The interpreter's twin is protoStatic, which reads the same
+    // decision off ownerStack at run time; here it is an EMIT-time context, because
+    // emitFunc emits a body the moment emitExtMembers reaches it.
+    var protoReqs = {}
+    var protoCtx = null
+    function protoReqsOf(pn) { return hasOwn(protoReqs, "$" + pn) ? protoReqs["$" + pn] : [] }
+    function protoHasReq(pn, name) {
+        var rs = protoReqsOf(pn)
+        for (var i = 0; i < rs.length; i++) { if (rs[i] == name) { return true } }
+        return false
+    }
+    // The protocol member this call binds to statically, or "" for a dynamic call.
+    function protoStaticName(name) {
+        if (protoCtx == null) { return "" }
+        if (protoHasReq(protoCtx, name)) { return "" }
+        var ks = protoMembers["$" + protoCtx]
+        if (ks == undefined) { return "" }
+        for (var i = 0; i < ks.length; i++) { if (ks[i] == name) { return protoCtx } }
+        return ""
+    }
+    // The direct call to that member, with the running `this` as the receiver.
+    function emitProtoStatic(b, pn, name, args) {
+        var pV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])
+        var pa = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [pa, b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")])])
+        var ea = emitArgRecsInto(b, args, pa)
+        b = ea.b
+        var rv = callExt(b, "js_call", [callExt(b, "js_get", [pV, emitStr(b, name)]), hUndef, pa])
+        emitWriteBacks(b, ea.boxes)
+        return {b: b, v: rv}
+    }
+    // A member call with the receiver PREPENDED to an argument array that is already
+    // built. It exists so the unqualified form above can share ONE evaluation of the
+    // arguments with the local-variable arm beside it: a local of the same name still
+    // wins over the protocol member, which is what the interpreter's varMiss ordering
+    // does and what swiftc does, and evaluating the argument list twice to get there
+    // would run its side effects twice.
+    function rtPrependCall() {
+        return rtFunc("sw_pcall", 3, function(b, ps) {
+            var out = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [out, ps[0]])
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var lenV = callExt(b, "js_pylen", [ps[2]])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+            callExt(bodyB, "js_arr_push", [out, callExt(bodyB, "js_pyget", [ps[2], iV])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"),
+                                            callExt(bodyB, "js_jadd", [iV, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(callExt(doneB, "js_call", [ps[1], hUndef, out]))
+        })
+    }
+    function protoParentsOf(pn) {
+        return hasOwn(protoParents, "$" + pn) ? protoParents["$" + pn] : []
+    }
+    // The conformance MARKER, on the very table the value reaches through __class:
+    // __conf_<P> for P and for every protocol P inherits. js_swconf reads it, and
+    // without it `x is P` is false for every conforming type (docs/todo.md 1.1).
+    function emitConfMark(b, tblV, pn) { emitConfMarkD(b, tblV, pn, 0) }
+    function emitConfMarkD(b, tblV, pn, d) {
+        if (d > 16) { return }
+        callExt(b, "js_set", [tblV, emitStr(b, "__conf_" + pn), hTrue])
+        var ps = protoParentsOf(pn)
+        for (var i = 0; i < ps.length; i++) { emitConfMarkD(b, tblV, ps[i], d + 1) }
     }
     function protoKeys(pn) {
         if (!hasOwn(protoMembers, "$" + pn)) { protoMembers["$" + pn] = [] }
@@ -6311,15 +6564,24 @@ KwContinue  = "continue" KwEnd ;
         var mem = splitMembers(items, 1)
         protoNames[name] = 1
         noteProtoKeys(name, mem)
+        var rqs = []
+        for (var rq = 0; rq < mem.reqs.length; rq++) { rqs.push(mem.reqs[rq]) }
+        protoReqs["$" + name] = rqs
         // Protocol inheritance: the parent's defaults become this protocol's too, so
         // a type that conforms to the child inherits them in one copy.
+        var pars = []
         for (var pk = 0; pk < mem.inherits.length; pk++) {
             var pnm = baseTypeName(mem.inherits[pk])
             if (protoNames[pnm] != 1) { continue }
-            var inks = protoMembers["$" + pnm]
-            var mine = protoKeys(name)
-            for (var z = 0; z < inks.length; z++) { mine.push(inks[z]) }
-            protoMembers["$" + name] = mine
+            pars.push(pnm)
+            protoParents["$" + name] = pars
+            // A parent protocol's requirements are requirements of this one too.
+            var prq = protoReqsOf(pnm)
+            for (var pz2 = 0; pz2 < prq.length; pz2++) { rqs.push(prq[pz2]) }
+            protoReqs["$" + name] = rqs
+            // The parent's MEMBERS are not merged in here: emitAdoptProtocol
+            // recurses through protoParents instead, so a member an extension of the
+            // parent adds later is still reached.
         }
         var rec = newTypeRec(name)
         rec.kind = "proto"
@@ -6388,6 +6650,24 @@ KwContinue  = "continue" KwEnd ;
             if (!isBuiltinTypeName(base)) { return notImplStmt("extension of an unknown type", up.pos) }
             for (var ci = 0; ci < mem.comps.length; ci++) { builtinComp["$" + mem.comps[ci].name] = base }
             for (var mi = 0; mi < mem.methods.length; mi++) { builtinMeth["$" + mem.methods[mi].name] = base }
+            // `extension Int: P { ... }` conforms a BUILTIN. There is no descriptor
+            // to hang a __conf_ marker on, so the conformers are recorded here and
+            // emitIsType passes the list to js_swconf statically. The protocol's own
+            // defaults are copied onto the $ext$ table, which is where the interpreter
+            // half has always put them.
+            var bprotos = []
+            for (var bp = 0; bp < mem.inherits.length; bp++) {
+                var bpn = baseTypeName(mem.inherits[bp])
+                if (protoNames[bpn] != 1) { continue }
+                bprotos.push(bpn)
+                var lst = hasOwn(protoBuiltinConf, "$" + bpn) ? protoBuiltinConf["$" + bpn] : []
+                lst.push(base)
+                protoBuiltinConf["$" + bpn] = lst
+                var pks = protoMembers["$" + bpn]
+                if (pks != undefined) {
+                    for (var pz = 0; pz < pks.length; pz++) { builtinMeth["$" + pks[pz]] = base }
+                }
+            }
             // A SECOND `extension Int { ... }` used to declare a second, empty table
             // under the same $ext$Int name, and every member the first block added
             // became unreachable - `call of a non function value: undefined`, an
@@ -6400,6 +6680,7 @@ KwContinue  = "continue" KwEnd ;
                 var tV = extTable(b, base, firstBlock)
                 typeStack.push({name: base, key: rec.key, superName: null})
                 b = emitExtMembers(b, tV, tV, mem, rec.key, initIdxs)
+                for (var bq = 0; bq < bprotos.length; bq++) { b = emitAdoptProtocol(b, tV, bprotos[bq]) }
                 typeStack.pop()
                 return b
             }
@@ -6415,11 +6696,15 @@ KwContinue  = "continue" KwEnd ;
             if (protoNames[base] == 1) { instV = tV }
             // The instance members of an extension keep the overload numbering the
             // type already has, so a second init does not clobber the first.
+            var savedPC = protoCtx
+            if (protoNames[base] == 1) { protoCtx = base }
             b = emitExtMembers(b, instV, tV, mem, rec.key, initIdxs)
+            protoCtx = savedPC
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
                 b = emitAdoptProtocol(b, instV, pn)
+                emitConfMark(b, instV, pn)
             }
             typeStack.pop()
             return b
@@ -6530,10 +6815,13 @@ KwContinue  = "continue" KwEnd ;
             // is: two nested enums of the same name at different levels would
             // otherwise share one member table.
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$etbl$" + rec.key), tblV])
-            for (var pi = 0; pi < mem.inherits.length; pi++) {
-                var pn = baseTypeName(mem.inherits[pi])
+            var eInh = [mem.raw]
+            for (var pi0 = 0; pi0 < mem.inherits.length; pi0++) { eInh.push(mem.inherits[pi0]) }
+            for (var pi = 0; pi < eInh.length; pi++) {
+                var pn = baseTypeName(eInh[pi])
                 if (protoNames[pn] != 1) { continue }
                 b = emitAdoptProtocol(b, tblV, pn)
+                emitConfMark(b, tblV, pn)
             }
             b = emitInstallMembers(b, tblV, eV, mem, rec.key, true)
             var namesArr = callExt(b, "js_arr_new", [])

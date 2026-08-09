@@ -627,6 +627,86 @@ func init() {
 			// an Int at all - a fraction that reached here unboxed is a Double.
 			return boolH(math.Floor(n) == n && bits == 64 && !uns)
 		}
+		// js_swconf(v, "P", [builtin names]) is `v is P` for a USER PROTOCOL, which
+		// no name walk can answer: a conforming type's descriptor is named for
+		// itself, never for the protocol it adopts (docs/todo.md 1.1 - `x is P` was
+		// false for every conforming type in all THREE engines, so --cross was blind
+		// to it, and the swift catch clause had to exempt user protocols from
+		// filtering because filtering on a false answer turns a caught error into an
+		// uncaught one). The emitter writes a __conf_<P> marker on the very table a
+		// value reaches through __class at every adoption site, inherited protocols
+		// included, and the walk here is the same __class/__super walk swFindMember
+		// does - which is what makes a SUBCLASS of a conforming class conform too.
+		//
+		// The third argument is the statically known list of BUILTIN type names an
+		// `extension Int: P` conformed: a builtin value has no descriptor to hang a
+		// marker on, and the emitter knows the list at emit time, so it is passed in
+		// rather than kept in a runtime registry. Twins: swConforms in
+		// languages/swift-interpreter.abnf and js_swconf in lib/swift-rt.metajs.
+		m["js_swconf"] = func(a []uint64) uint64 {
+			key := "__conf_" + rt.toString(u(a[1]))
+			if o, ok := u(a[0]).(*jsObject); ok {
+				for cls, n := o.props["__class"], 0; cls != nil && n < 64; n++ {
+					clsObj, ok := cls.(*jsObject)
+					if !ok {
+						break
+					}
+					if v, ok := clsObj.props[key]; ok && v == true {
+						return boolH(true)
+					}
+					cls = clsObj.props["__super"]
+				}
+			}
+			if len(a) > 2 {
+				if arr, ok := u(a[2]).(*jsArray); ok {
+					for _, bn := range arr.elems {
+						s, ok := bn.(string)
+						if !ok {
+							continue
+						}
+						if m["js_swis"]([]uint64{a[0], w(s)}) == boolH(true) {
+							return boolH(true)
+						}
+					}
+				}
+			}
+			return boolH(false)
+		}
+		// js_swextcall(recv, name, args, tbl) is a method an `extension Int { ... }`
+		// added. The emitter decides by NAME which call sites can mean one, and that
+		// decision used to be FINAL: `extension Int { func pid() }` beside a
+		// `struct S { func pid() }` made `S().pid()` answer the Int one in the
+		// compiled halves, where the interpreter (whose mcall consults
+		// builtinTableFor(target), null for an instance) and swiftc both answer S's.
+		// The receiver decides here instead, by exactly the interpreter's rule: a
+		// value that HAS a builtin member table takes the $ext$ table and everything
+		// else takes the ordinary member call. Twin: js_swextcall in
+		// languages/lib/swift-rt.metajs.
+		m["js_swextcall"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			builtin := false
+			switch v.(type) {
+			case float64, string, bool, jsGInt, jsJFlo, *jsArray:
+				builtin = true
+			}
+			if o, ok := v.(*jsObject); ok {
+				if tag, has := o.props["__dict"]; has && tag == true {
+					builtin = true
+				}
+			}
+			if builtin {
+				if tbl, ok := u(a[3]).(*jsObject); ok {
+					if f, ok := tbl.props[rt.toString(u(a[1]))]; ok && isCallable(f) {
+						args := []interface{}{v}
+						if arr, ok := u(a[2]).(*jsArray); ok {
+							args = append(args, arr.elems...)
+						}
+						return w(rt.call(f, nil, args))
+					}
+				}
+			}
+			return m["js_swmcall"]([]uint64{a[0], a[1], a[2]})
+		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
 		// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is

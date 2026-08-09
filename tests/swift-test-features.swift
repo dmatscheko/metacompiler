@@ -474,10 +474,57 @@ struct NSOuter {
     static func cub() -> Int { return NSCub().f() }
 }
 // `catch let e as T` used to parse the `as T` and DISCARD it, so the clause bound e
-// and matched EVERY thrown value - the swift arm of docs/todo.md 1.1's sweep. Note
-// that `as Error` and `as SomeProtocol` still match everything, which for Error is
-// what swiftc does and for a user protocol is a recorded gap (conformance is not on
-// the value in either half).
+// and matched EVERY thrown value - the swift arm of docs/todo.md 1.1's sweep.
+// `as Error` still matches everything, which is what swiftc does. A user PROTOCOL
+// used to match everything too, because conformance was on no value in either half;
+// it is recorded now (docs/todo.md 1.1) and the clause filters - see PCat below.
+// ----- protocol conformance and dispatch inside an extension (docs/todo.md 1.1) --
+// `x is P` was FALSE for every conforming type in all three engines, so --cross was
+// blind to it and the catch clause above had to exempt user protocols. And the
+// dispatch rule inside a protocol extension is not "always dynamic": a REQUIREMENT
+// dispatches to the conforming type's override, a member only the extension
+// introduces does not. swiftc 6.1.2 settles every row here.
+//
+// ONE ROW IS DELIBERATELY NOT ASSERTED, and it is the value model rather than any
+// of this: reading an extension-only member off a variable whose DECLARED type is
+// the protocol (`let d: PGreet = PS3(); d.pplain()`) binds to the extension in
+// swiftc and to PS3's own here, because that decision needs the expression's static
+// type and this front end has none - the same wall that keeps `Optional(3)` out
+// (docs/working-on-this-project.md 7.9). Reached through the concrete type, which is
+// what pss[0] below is, every engine agrees with swiftc.
+protocol PGreet {
+    func ptag() -> String
+}
+extension PGreet {
+    func phi() -> String { return "hi:" + ptag() }
+    func ptag() -> String { return "?" }
+    func pplain() -> String { return "p" }
+    func pvia() -> String { return "v:" + pplain() + self.pplain() }
+}
+protocol PSub: PGreet { }
+struct PS1: PGreet { func ptag() -> String { return "A" } }
+struct PS2: PGreet { }
+class PC1: PGreet { func ptag() -> String { return "C" } }
+class PC2: PC1 { }
+enum PE: String, PSub { case one = "1"
+    func ptag() -> String { return "E" }
+}
+struct PS3 { }
+extension PS3: PGreet { func ptag() -> String { return "X" }
+                        func pplain() -> String { return "own" } }
+extension Int: PGreet { func ptag() -> String { return "I" }
+                        func pmine() -> String { return "int" } }
+struct PS4 { func pmine() -> String { return "struct" } }
+struct PCat: Error, PSub { }
+struct PDog: Error { }
+func pthrow(_ n: Int) throws -> Int {
+    if n == 0 { throw PCat() }
+    throw PDog()
+}
+func pcatch(_ n: Int) -> String {
+    do { _ = try pthrow(n) } catch is PSub { return "sub" } catch { return "any" }
+    return "none"
+}
 // Two nested types of the same name at different depths AND of different KINDS.
 // classNames/enumNames are keyed by the bare name, so `Mode()` inside Sub took the
 // enum rawValue arm and aborted with `list index out of range` in both compiled
@@ -1058,6 +1105,36 @@ func main() {
           ccatchAny(0) == "any" && ccatchAny(3) == "any" && ccatchAny(4) == "ok")
     check("catch-as-type-rethrows-to-outer",
           ccatchOuter(2) == "inner-disk" && ccatchOuter(0) == "outer" && ccatchOuter(4) == "ok")
+
+    // ----- protocol conformance / extension dispatch (docs/todo.md 1.1) -----
+    let pvals: [Any] = [PS1(), PS2(), PC1(), PC2(), PE.one, PS3(), 7, "z"]
+    var pIs = ""
+    var pSub = ""
+    for v in pvals {
+        pIs += (v is PGreet) ? "1" : "0"
+        pSub += (v is PSub) ? "1" : "0"
+    }
+    check("protocol-is-conforming-type", pIs == "11111110" && pSub == "00001000")
+    var pAs = ""
+    for v in pvals { if let p = v as? PGreet { pAs += p.ptag() } else { pAs += "-" } }
+    check("protocol-as-optional-cast", pAs == "A?CCEXI-")
+    let pps: [PGreet] = [PS1(), PS2(), PC1(), PE.one, PS3()]
+    var pHi = ""
+    for p in pps { pHi += p.phi() + "|" }
+    check("protocol-requirement-dispatches-dynamically", pHi == "hi:A|hi:?|hi:C|hi:E|hi:X|")
+    let pss = [PS3()]
+    check("protocol-extension-only-member-is-static",
+          pss[0].pvia() == "v:pp" && pss[0].pplain() == "own")
+    let pns = [7]
+    check("protocol-conformance-of-a-builtin",
+          pns[0].ptag() == "I" && pns[0].phi() == "hi:I")
+    check("builtin-extension-does-not-hijack-a-type-member",
+          [PS4()][0].pmine() == "struct" && pns[0].pmine() == "int")
+    check("catch-filters-on-a-user-protocol",
+          pcatch(0) == "sub" && pcatch(1) == "any")
+    // A COMPOSITION tests every component: PS1 conforms to PGreet alone.
+    check("protocol-composition-tests-every-component",
+          (pvals[4] is PGreet & PSub) && !(pvals[0] is PGreet & PSub))
 
     print("features: \(checks) checks, \(fails) failures")
 }

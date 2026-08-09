@@ -1030,6 +1030,64 @@ function js_swis(v, tname) {
     return Math.floor(v) == v && bits == 64 && !swAdoptUns(t)
 }
 
+// js_swconf(v, "P", [builtin names]) is `v is P` for a USER PROTOCOL. No name walk
+// can answer it - a conforming type's descriptor is named for itself, never for the
+// protocol - so every adoption site writes a __conf_<P> marker on the very table a
+// value reaches through __class, inherited protocols included, and this is the same
+// __class/__super walk swFindMember does (which is what makes a SUBCLASS of a
+// conforming class conform too). docs/todo.md 1.1: `x is P` was false for every
+// conforming type in all three engines, so --cross could not see it.
+//
+// The third argument is the statically known list of BUILTIN type names an
+// `extension Int: P` conformed. A builtin value has no descriptor to hold a marker
+// and the emitter knows the list at emit time, so it is passed in rather than kept
+// in a runtime registry. Twins: swConforms in languages/swift-interpreter.abnf,
+// js_swconf in abnf/jsrtswift.go.
+function js_swconf(v, pname, bnames) {
+    var key = "__conf_" + pname
+    if (swIsObj(v)) {
+        var c = v["__class"]
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (!swIsObj(c)) { break }
+            if (c[key] === true) { return true }
+            c = c["__super"]
+        }
+    }
+    var n = 0
+    while (n < bnames.length) {
+        if (js_swis(v, bnames[n]) === true) { return true }
+        n = n + 1
+    }
+    return false
+}
+
+// A method an `extension Int { ... }` / `extension String { ... }` added. The
+// emitter decides by NAME which call sites can mean one, and that decision used to
+// be FINAL: `extension Int { func pid() }` beside a `struct S { func pid() }` made
+// `S().pid()` answer the Int one in this half, where the interpreter (whose mcall
+// consults builtinTableFor(target), null for an instance) and swiftc both answer
+// S's. So the receiver decides here, at run time, by exactly the interpreter's
+// rule: a value that HAS a builtin member table takes the $ext$ table, and
+// everything else takes the ordinary member call. Twin: js_swextcall in
+// abnf/jsrtswift.go.
+function swHasBuiltinTbl(v) {
+    if (typeof v == "number") { return true }
+    if (typeof v == "string") { return true }
+    if (typeof v == "boolean") { return true }
+    if (rtIsArr(v)) { return true }
+    if (rtIsDictObj(v)) { return true }
+    return false
+}
+function js_swextcall(recv, name, args, tbl) {
+    if (swHasBuiltinTbl(recv)) {
+        var f = tbl[name]
+        if (typeof f == "function") { return f.apply(undefined, rtPrepend(recv, args)) }
+    }
+    return js_swmcall(recv, name, args)
+}
+
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // swift-to-llvm-ir.abnf emits it for &+ (Swift's wrapping add) AND for its own
 // loop counters and string builders. The float arm needs the boxed double, which
