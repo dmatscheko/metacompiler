@@ -115,13 +115,19 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
             = KwElse CompoundList ;
 
 // case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
+// EVERY WORD HERE IS AN NsWord, and so is every operand of [[ ]] below. bash does NOT
+// field-split the subject of a `case`, its patterns, or either side of a [[ ]] test -
+// they are the same "unquoted but unsplit" context an assignment's right hand side is
+// (docs/todo.md 1.7, found by probing outward from it). With plain `Word` here,
+// x="  a   b  " made `case $x in "  a   b  ")` take the *) arm and
+// `[[ $x == "  a   b  " ]]` false, in BOTH halves and therefore invisibly to --cross.
 // The body of a clause is an ordinary statement list, except that its separator run must not
 // swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
 CaseStmt    <~~ push(makeCase(takeAll())) ~~>
-            = KwCase Word KwIn CaseSepOpt { CaseClause } KwEsac ;
+            = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
-CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = NsWord { "|" NsWord } ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -196,7 +202,7 @@ CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | Un
 PrefixCommand <~~ push(makePrefixCmd(takeAll())) ~~>
             = AsgPrefix { AsgPrefix } NotReserved CWord { CmdSuffix } ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ Word ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
 AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
@@ -224,8 +230,12 @@ LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 // Spelled as its own production (rather than an ordinary command with word arguments)
 // because the declared NAME has to be known statically: the compiler needs it to pick a
 // variable slot, and `local` needs it to record the save entry for the current call frame.
-DeclCommand <~~ push(makeDecl(takeAll())) ~~>
-            = DeclKw { DeclFlag } { DeclItem } ;
+// The [ RedirList ] is what lets `declare -p missing 2>/dev/null` parse: this
+// production is not a SimpleCommand, so it did not inherit SimpleCommand's
+// redirections, and every redirected declaration was an outright parse failure.
+// It only started to matter when `declare -p` gained a diagnostic to silence.
+DeclCommand <~~ push(makeDeclR(takeAll())) ~~>
+            = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
 DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
@@ -247,11 +257,23 @@ AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 AsgIdx      <~~ push({aidx: 1}) ~~> = "[" IdxWord "]" ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
-AsgWord     = [ Word ] ;
+AsgWord     = [ NsWord ] ;
+// THE RIGHT HAND SIDE OF AN ASSIGNMENT IS NOT FIELD-SPLIT. `y=$x` with
+// x="  a   b  " assigns the value CHARACTER FOR CHARACTER; only the bare words of an
+// array literal - `A=($x)` - are split, and they go through CWord below. This used to
+// be `Word`, so every scalar assignment lost its leading and trailing blanks and
+// collapsed its internal runs, in both engines and therefore invisibly to --cross
+// (docs/todo.md 1.7). NsWord is the same segment list read in the mode a double-quoted
+// word already used: "$@" and "${a[@]}" still contribute several fields, which is what
+// makes `c=$@` join them with a space rather than concatenate them.
+NsWord      <~~ push(mkNsWord(takeAll())) ~~>
+            = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
 ArrayItem   = ArrayKV | CWord ;
-ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() Word ;
+// `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
+// unsplit exactly as it keeps `A=$x`.
+ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
 WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
@@ -620,19 +642,19 @@ CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 // [[ STR =~ ERE ]] : the right hand side is a REGEX, so ( ) | + ? { } are ordinary
 // characters there and need a word production of their own. Quoted parts stay literal and
 // $ expansions still happen, exactly as in bash.
-CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = Word CondMatchOp RegexWord ;
+CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = NsWord CondMatchOp RegexWord ;
 CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
-RegexWord   <~~ push(mkWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
+RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
 RegexSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | RegexBare ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
-CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp Word ;
+CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
 CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
-CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp PatWord ;
-PatWord     <~~ push(mkWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
+CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
+PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
@@ -642,7 +664,7 @@ PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | Ansi
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
-CondSingle  <~~ push(mkCondSingle(pop())) ~~> = Word ;
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -1334,6 +1356,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrDel = rtDecl("rt_arr_del", false, [1, 1])
     var rtArrCount = rtDecl("rt_arr_count", false, [1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
+    // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
+    var rtScGet = rtDecl("rt_sc_get", true, [1, 1])
+    var rtScHas = rtDecl("rt_sc_has", false, [1, 1])
+    var rtScCount = rtDecl("rt_sc_count", false, [1])
+    var rtScList = rtDecl("rt_sc_list", true, [1, 1, 0, 0])
+    var rtDeclp = rtDecl("rt_declp", false, [1, 1, 0])
     var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
@@ -1451,7 +1479,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExit = subEnd
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
+            var undoBase = attrUndo.length
+            subDepth = subDepth + 1
             var eb = bodyT(b)
+            subDepth = subDepth - 1
+            attrUnwind(undoBase)
             eb.NewBr(subEnd)
             curExit = savedExit
             var myTraps = trapList
@@ -1553,8 +1585,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
-                        b.NewCall(rtInt2str, b.NewCall(rtArrCount, nmOf(b))),
-                        b.NewCall(rtInt2str, b.NewCall(rtCharLen, b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)]))))}
+                        b.NewCall(rtInt2str, b.NewCall(rtScCount, nmOf(b))),
+                        b.NewCall(rtInt2str, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)]))))}
                 }}
             }
             if (pe == "ind") {
@@ -1562,7 +1594,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var rs = subOf(b); b = rs.b
                     var k = kindOf(b, rs.v)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    return {b: b, v: b.NewCall(rtArrList, [nmOf(b), ifsFirstValue(b),
+                    return {b: b, v: b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b),
                         b.NewZExt(star, i32), one])}
                 }}
             }
@@ -1574,7 +1606,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    var all = b.NewCall(rtArrList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                    var all = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
                     var ro = offT(b); b = ro.b
                     var rlv = null
                     if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
@@ -1587,7 +1619,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // list slice was emitted for a plain index too, so ${a[2]:1:2}
                     // answered the whole joined array while the interpreter (and
                     // bash) answered two characters of a[2].
-                    var ev = b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)])
+                    var ev = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
                     var elen = b.NewCall(rtCharLen, ev)
                     var eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(elen, ro.v), ro.v)
                     eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, eoff, zero), zero, eoff)
@@ -1601,13 +1633,46 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return {b: b, v: b.NewSelect(whole, lstV, elV)}
                 }}
             }
+            // ${a[k]-default} and its siblings: the subscript branch used to answer the
+            // ELEMENT and drop OP on the floor, so a missing element expanded to "" where
+            // bash 5.3 expands the default (docs/todo.md 1.8). The arms are the scalar
+            // ones of mkParamExp below, with "is it set" asked of the element through
+            // rt_sc_has instead of of the unset marker.
+            var idxColon = (op != "") && (op.charAt(0) == ":")
+            var idxO = idxColon ? op.slice(1) : op
+            var idxWordT = wordT
             return {f: true, c: undefined, fn: function(b) {
                 var rs = subOf(b); b = rs.b
                 var k = kindOf(b, rs.v)
                 var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                 var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                var lst = b.NewCall(rtArrList, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32), zero])
-                var one1 = b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)])
+                var lst = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32), zero])
+                var one1 = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
+                if (op != "") {
+                    var kk = keyOf(b, rs.v)
+                    var blankE = b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtScHas, [nmOf(b), kk]), zero)
+                    if (idxColon) { blankE = b.NewOr(blankE, isEmptyStr(b, one1)) }
+                    // ${a[@]-D} tests whether the array has ANY element, and the ":" form
+                    // additionally tests the JOINED value: `d=(""); echo "${d[@]-D}"` is
+                    // empty while "${d[@]:-D}" is D. See listOpValue in
+                    // languages/bash-interpreter.abnf, which is the same two tests.
+                    var blankL = b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtScCount, nmOf(b)), zero)
+                    if (idxColon) {
+                        blankL = b.NewOr(blankL, isEmptyStr(b,
+                            b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), one, zero])))
+                    }
+                    var de = emptyPtr(b)
+                    if (idxWordT != null) { var rw = evalWord(b, idxWordT); b = rw.b; de = rw.v }
+                    var pickedE = b.NewSelect(blankE, de, one1)
+                    var pickedL = b.NewSelect(blankL, de, lst)
+                    if (idxO == "+") {
+                        pickedE = b.NewSelect(blankE, emptyPtr(b), de)
+                        pickedL = b.NewSelect(blankL, emptyPtr(b), de)
+                    }
+                    if (idxO == "=") { b.NewCall(rtArrSet, [nmOf(b), kk, pickedE]) }
+                    one1 = pickedE
+                    lst = pickedL
+                }
                 var sel = b.NewSelect(whole, lst, one1)
                 // ${a[i]@Q} and friends: the transform applies to the ELEMENT, exactly as
                 // it does to a scalar. Without this the array path silently dropped it.
@@ -1880,6 +1945,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])}
         }}
     }
+
+    // The same segment list, read WITHOUT field splitting - the mode an assignment's
+    // right hand side and a double-quoted word share (docs/todo.md 1.7). An unquoted
+    // expansion is marked by mkSplittable; dropping the mark is the whole difference,
+    // so this delegates rather than duplicating mkDqWord's boundary handling.
+    function unSplit(segs) {
+        var out = []
+        var i
+        for (i = 0; i < segs.length; i++) {
+            if (segs[i].sp != undefined) { out.push(segs[i].sp) } else { out.push(segs[i]) }
+        }
+        return out
+    }
+    function mkNsWord(segs) { return mkDqWord(unSplit(segs)) }
 
     // A word is the concatenation of its segment objects. All static -> one interned constant.
     function mkWord(segs) {
@@ -2292,6 +2371,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // but they must not be read as `declare NAME`, which below would make the name a
         // fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
+        var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var k
         // The ASSOCIATIVE flag alone stays a walk-time, whole-program fact: it decides how a
         // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
@@ -2301,12 +2381,40 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function(b) {
             var j
-            if (query) { storeStatusI(b, 0); return b }
+            if (query) {
+                // `declare -p NAME` PRINTS - it used to be classed with -f/-F as a query
+                // that is not modelled, so it printed nothing at all (docs/todo.md 1.8).
+                // The attribute letter is decided HERE because -i/-u/-l are compile-time
+                // facts in this grammar; rt_declp asks the runtime for array-ness and the
+                // value. The bare `declare -p` with no names stays silent in both engines:
+                // bash lists every variable in the shell, most of which neither engine has.
+                if (isPrint && names.length > 0) {
+                    var acc = zero
+                    for (j = 0; j < names.length; j++) {
+                        var lt = "-"
+                        if (attrOn(intVars, names[j])) { lt = "i" }
+                        else if (attrOn(upVars, names[j])) { lt = "u" }
+                        else if (attrOn(loVars, names[j])) { lt = "l" }
+                        var isAs = hasOwn(assocArrays, "$" + names[j]) ? one : zero
+                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), isAs])
+                        acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
+                    }
+                    storeStatus(b, acc)
+                    return b
+                }
+                storeStatusI(b, 0); return b
+            }
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
             // function declare a function-local name (value AND attributes restored on
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             for (j = 0; j < names.length; j++) {
+                // The attribute undo record is owed to a SUBSHELL as well as to a function
+                // body: `n=5; ( declare -i n; n=2+3 )` must leave n a plain string
+                // afterwards (docs/todo.md 1.8). -g does not exempt it - a subshell
+                // isolates a global declaration too - which is why subDepth is tested
+                // beside `localize` and not inside it.
+                if (subDepth > 0 && !(localize && curFrame != null)) { attrPushUndo(names[j]) }
                 if (localize && curFrame != null) {
                     attrPushUndo(names[j])
                     b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
@@ -2330,6 +2438,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             storeStatusI(b, 0)
             return b
         }
+    }
+    // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
+    // makeDecl understands; anything else on the stack is a redirection record and is
+    // handed to mkRedirected, exactly as makeSubshellR / makeGroupR do it.
+    function makeDeclR(items) {
+        var core = []
+        var reds = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { core.push(it) }
+            else { reds.push(it) }
+        }
+        if (reds.length == 0) { return makeDecl(core) }
+        var wrapped = [makeDecl(core)]
+        for (i = 0; i < reds.length; i++) { wrapped.push(reds[i]) }
+        return mkRedirected(wrapped)
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
     // ---- variable attributes -------------------------------------------------------------
@@ -2358,7 +2483,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(m, k)) { return false }
         return m[k]
     }
-    // The undo log makeFuncDef unwinds. One entry per name declared inside a function body.
+    // The undo log makeFuncDef unwinds. One entry per name declared inside a function body -
+    // and, since docs/todo.md 1.8, one per name declared inside a ( LIST ) or a $( LIST ),
+    // which subDepth counts. The ASSOCIATIVE flag is deliberately NOT in it: assocArrays is
+    // a whole-program fact by design (see makeDecl), and languages/bash-interpreter.abnf
+    // matches that with assocSeen rather than the other way round.
+    var subDepth = 0
     var attrUndo = []
     function attrPushUndo(name) {
         attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name)})
@@ -2644,7 +2774,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             trapList = []
             var subEnd = curF.NewBlock("")
             curExit = subEnd
+            var undoBase = attrUndo.length
+            subDepth = subDepth + 1
             var eb = bodyT(b)
+            subDepth = subDepth - 1
+            attrUnwind(undoBase)
             eb.NewBr(subEnd)
             curExit = savedExit
             var myTraps = trapList

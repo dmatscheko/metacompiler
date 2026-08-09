@@ -650,6 +650,59 @@ check ifsv3 "${IFS-unset}" "$IFS"
 check str7 "$(( 2#1010 + 1 ))" 11
 check str8 "$(( -0 ))" 0
 
+# ----- an assignment's RHS is NOT field-split; a scalar IS a one-element array;
+# ----- an element takes a default; a subshell isolates arrays and attributes;
+# ----- declare -p prints (docs/todo.md 1.7 and 1.8) -----
+# All five were "both halves agree and both are wrong", so every line here was
+# settled against bash 5.3. tests/bash-test-full.sh SECTION 32 has the wide
+# version and lists what is deliberately not asserted.
+nsp="  a   b  "
+nsy=$nsp
+check nsp1 "[$nsy]" "[  a   b  ]"
+nsr=$( echo "  cs  " )
+check nsp2 "[$nsr]" "[  cs  ]"
+nsa=("  p q  " r)
+nsi=0
+nsv=${nsa[$nsi]}
+check nsp3 "[$nsv]" "[  p q  ]"
+nsb=([0]=$nsp)
+check nsp4 "[${nsb[0]}]" "[  a   b  ]"
+nsc=($nsp)
+check nsp5 "${#nsc[@]}" 2
+scq=Q
+check sca1 "${scq[@]}|${scq[0]}|${#scq[@]}|${!scq[@]}" "Q|Q|1|0"
+sce=(p q)
+check scd1 "${sce[9]-dflt}|${sce[0]-dflt}|${sce[9]+plus}|${sce[0]+plus}" "dflt|p||plus"
+declare -A scf=([k]=v)
+check scd2 "${scf[zz]-dd}|${scf[k]-dd}" "dd|v"
+scg=()
+check scd3 "${scg[@]-D}" D
+ssi=(p q)
+( ssi[0]=Z; ssi+=(r) )
+check ssa1 "[${ssi[*]}]" "[p q]"
+declare -A ssj=([k]=v)
+( ssj[k]=W; ssj[n]=X )
+check ssa2 "[${ssj[k]}][${ssj[n]-unset}]" "[v][unset]"
+ssk=(1 2)
+ssl=$( ssk[0]=9; echo "${ssk[0]}" )
+check ssa3 "$ssl ${ssk[0]}" "9 1"
+ssn=5
+( declare -i ssn; ssn=2+3 )
+ssn=2+3
+check ssa4 "$ssn" "2+3"
+dpp=hello
+check dpa1 "$(declare -p dpp)" 'declare -- dpp="hello"'
+declare -i dpq=7
+check dpa2 "$(declare -p dpq)" 'declare -i dpq="7"'
+dpr=(p q)
+check dpa3 "$(declare -p dpr)" 'declare -a dpr=([0]="p" [1]="q")'
+declare -A dps=([k]=v)
+check dpa4 "$(declare -p dps)" 'declare -A dps=([k]="v" )'
+dpt=$'a\tb'
+check dpa5 "$(declare -p dpt)" "declare -- dpt=\$'a\\tb'"
+declare -p nosuchname 2>/dev/null
+check dpa6 "$?" 1
+
 # ----- done -----
 echo "features: $checks checks, $fails failures"
 exit $fails

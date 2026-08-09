@@ -1509,6 +1509,144 @@ s31() {
   check pf42 "$(( $sp31 * 2 ))" 24
 }
 
+# ===== SECTION 32: an assignment is not field-split; scalars as arrays,
+# ===== element defaults, subshell isolation and declare -p =====
+# docs/todo.md 1.7 and 1.8. All five were "both halves agree and both are
+# wrong" - the class --cross cannot see by construction - so every assertion
+# here was settled against bash 5.3 and nothing else.
+#
+# NOT asserted, on purpose:
+#   * `declare -p` of an EMPTY array (`a=(); declare -p a`): bash answers
+#     `declare -a a=()`, both engines answer `not found`, because the compiler's
+#     array store keeps no record of a declared-but-empty INDEXED array. The
+#     rule is written identically into both halves; see rt_declp in
+#     languages/lib/bash-rt.c.
+#   * `declare -p` of a name with more than one attribute (bash prints -ai,
+#     both engines print one letter), and -x / -r, which neither engine models.
+#   * `declare -p` with NO names, which in bash lists the whole shell.
+#   * an ASSOCIATIVE array with more than one key anywhere its ORDER would
+#     show: bash iterates in hash order, both halves in insertion order.
+#   * `declare -p` of an associative array whose KEY needs quoting: bash prints
+#     ["a b"]="y" and both halves print [a b]="y". bash quotes a subscript only
+#     when the shell would need it (a.b, a-b and 9x stay bare), and that rule is
+#     not modelled.
+s32() {
+  local x="  a   b  "
+  # --- 1.7: the right hand side of an assignment keeps its blanks
+  local y=$x
+  check as1 "[$y]" "[  a   b  ]"
+  local r=$( echo "  cs  " )
+  check as2 "[$r]" "[  cs  ]"
+  local A=("  p q  " "r")
+  local i=0
+  local v=${A[$i]}
+  check as3 "[$v]" "[  p q  ]"
+  local c=x$x
+  check as4 "[$c]" "[x  a   b  ]"
+  local d=${x}
+  check as5 "[$d]" "[  a   b  ]"
+  local e=${nosuchvar32-  de f  }
+  check as6 "[$e]" "[  de f  ]"
+  local g=${x:+  yes  }
+  check as7 "[$g]" "[  yes  ]"
+  local nl="a
+b"
+  local m=$nl
+  check as8 "[$m]" "[a
+b]"
+  # a NON-default IFS is just as inert on an assignment
+  local h="a:b::c"
+  local IFS=:
+  local k=$h
+  check as9 "[$k]" "[a:b::c]"
+  IFS=$' \t\n'
+  # `[k]=v` inside an array literal is an assignment too
+  local B=([0]=$x [1]=z)
+  check as10 "[${B[0]}][${B[1]}]" "[  a   b  ][z]"
+  # ...and the BARE words of an array literal still ARE split, which is the
+  # whole reason the two forms have to be separate rules
+  local C=($x)
+  check as11 "${#C[@]}" 2
+  local D=("$x")
+  check as12 "${#D[@]}" 1
+  # --- 1.8a: a set scalar is a one-element array
+  local q=Q
+  check sc1 "${q[@]}" Q
+  check sc2 "${q[*]}" Q
+  check sc3 "${q[0]}" Q
+  check sc4 "${#q[@]}" 1
+  check sc5 "${!q[@]}" 0
+  check sc6 "[${q[1]}]" "[]"
+  check sc7 "[${q[@]:0:1}]" "[Q]"
+  unset unsetname32
+  check sc8 "[${unsetname32[@]}][${#unsetname32[@]}]" "[][0]"
+  # --- 1.8b: a default word on a MISSING element
+  local E=(p q)
+  check el1 "${E[9]-dflt}" dflt
+  check el2 "${E[0]-dflt}" p
+  check el3 "${E[9]+plus}" ""
+  check el4 "${E[0]+plus}" plus
+  E[7]=""
+  check el5 "[${E[7]-D}][${E[7]:-D}]" "[][D]"
+  check el6 "${E[8]=SET}${E[8]}" SETSET
+  local -A F=([k]=v)
+  check el7 "${F[zz]-dd}" dd
+  check el8 "${F[k]-dd}" v
+  # the whole-array forms take the default when there is NO element at all
+  local G=()
+  check el9 "${G[@]-D}" D
+  local H=("")
+  check el10 "[${H[@]-D}][${H[@]:-D}]" "[][D]"
+  # --- 1.8c: a subshell isolates arrays and attributes, not just scalars
+  local I=(p q)
+  ( I[0]=Z; I+=(r) )
+  check ss1 "[${I[*]}]" "[p q]"
+  local -A J=([k]=v)
+  ( J[k]=W; J[n]=X )
+  check ss2 "[${J[k]}][${J[n]-unset}]" "[v][unset]"
+  local K=(1 2)
+  local L=$( K[0]=9; echo "${K[0]}" )
+  check ss3 "$L ${K[0]}" "9 1"
+  ( unset I )
+  check ss4 "[${I[*]}]" "[p q]"
+  ( declare -A M32=([z]=1) )
+  check ss5 "${M32[z]-none}" none
+  local n32=5
+  ( declare -i n32; n32=2+3 )
+  n32=2+3
+  check ss6 "$n32" "2+3"
+  local u32=abc
+  ( declare -u u32; u32=xyz )
+  u32=def
+  check ss7 "$u32" def
+  # --- 1.8d: declare -p
+  local P32=hello
+  check dp1 "$(declare -p P32)" 'declare -- P32="hello"'
+  local -i Q32=7
+  check dp2 "$(declare -p Q32)" 'declare -i Q32="7"'
+  local R32=(p q r)
+  check dp3 "$(declare -p R32)" 'declare -a R32=([0]="p" [1]="q" [2]="r")'
+  local -A S32=([k]=v)
+  check dp4 "$(declare -p S32)" 'declare -A S32=([k]="v" )'
+  local -u T32=abc
+  check dp5 "$(declare -p T32)" 'declare -u T32="ABC"'
+  local -l U32=ABC
+  check dp6 "$(declare -p U32)" 'declare -l U32="abc"'
+  local V32=""
+  check dp7 "$(declare -p V32)" 'declare -- V32=""'
+  check dp8 "$(declare -p P32 Q32)" 'declare -- P32="hello"
+declare -i Q32="7"'
+  local W32="a b'c"
+  check dp9 "$(declare -p W32)" 'declare -- W32="a b'"'"'c"'
+  local X32='q"$b`c\d'
+  check dp10 "$(declare -p X32)" 'declare -- X32="q\"\$b\`c\\d"'
+  local Y32=$'a\tb\nc'
+  check dp11 "$(declare -p Y32)" "declare -- Y32=\$'a\\tb\\nc'"
+  declare -p nosuchname32 2>/dev/null
+  check dp12 "$?" 1
+  check dp13 "$(declare -p nosuchname32 2>/dev/null)" ""
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1540,5 +1678,6 @@ s28   # SECTION-CALL 28
 s29   # SECTION-CALL 29
 s30   # SECTION-CALL 30
 s31   # SECTION-CALL 31
+s32   # SECTION-CALL 32
 echo "full: $checks checks, $fails failures"
 exit $fails

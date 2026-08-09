@@ -42,12 +42,24 @@
 #     returns the value untouched when it is a single separator-free field, which
 #     a plain string already is in that protocol).
 #
-# So the ceiling is now 55,898 iterations - bisected on this machine, 55,898
-# runs and 56,015 does not - and 40,000 sits under it at a 1.40x margin. That is
-# thinner than the 2x this file used to keep, and it is deliberate: the reason a
+# So the ceiling was 55,898 iterations - bisected on this machine, 55,898 runs
+# and 56,015 does not - and 40,000 sat under it at a 1.40x margin. That was
+# thinner than the 2x this file used to keep, and it was deliberate: the reason a
 # thin margin was dangerous was that crossing it was SILENT, and it no longer is.
 # Read a nonzero exit from this row as arena exhaustion first, and the message on
 # stderr will say so outright.
+#
+# THE SLOPE HALVED AGAIN, TO 30.0 BYTES AN ITERATION, when the right hand side of
+# an assignment stopped being field-split (docs/todo.md 1.7). Measured the same
+# way, 2,000 and 14,000 iterations: 1,687,552 -> 2,523,136 bytes before,
+# 1,622,016 -> 1,982,464 after. `s=$(( ... ))` no longer calls rt_splitifs,
+# rt_bnd_acc, rt_bnd_open or rt_wordjoin at all - a scalar assignment builds its
+# value in the non-splitting mode "$x" already used - so the arena ceiling is now
+# ~2.3x further out and 40,000 iterations sit at roughly a 3.2x margin. The same
+# change is most of why this row's instruction count fell 47.8%: 152,205,742 ->
+# 79,468,279, median of 9 layout draws, spread 0.23%. The other part is
+# rt_splitifs' pre-scan, worth 3.4% on its own and measured separately as
+# instructions per iteration at two loop sizes (3,604.35 -> 3,482.74).
 #
 # IF YOU RAISE bash's PER-ITERATION ARENA COST, this row crosses the ceiling
 # before it gets 40% slower, and it will say `RAN AND FAILED (exit 70)`. Lower

@@ -87,6 +87,32 @@ int cap_depth;
 char *ss_save[8192];
 int ss_depth;
 
+/* ...AND THE WHOLE ARRAY STORE, which it did not (docs/todo.md 1.8). The snapshot
+ * covered gvars only, so `a=(p q); ( a[0]=Z; a+=(r) )` left the caller looking at
+ * "Z q r" where bash 5.3 shows "p q", and `r=$( b[0]=9 )` was just as leaky - a
+ * command substitution takes the same snapshot. The store is a flat triple table
+ * (arr_nm / arr_k / arr_v, NARR = 4096) whose entries are arena pointers that are
+ * never rewritten in place, so saving the three pointer arrays and arr_n is a
+ * complete copy: a subshell that mutates an element writes a NEW arena string and
+ * stores the pointer, which the restore below discards.
+ *
+ * SSDEPTH * NARR pointers, three of them - 786 KB of BSS. It is BSS and it is
+ * written only as far as arr_n, so only the pages a program with subshells AND
+ * arrays actually touches become resident; tests/bench/mod.sh has neither and its
+ * RSS slope is unchanged.
+ *
+ * ATTRIBUTES ARE NOT HERE, and that is not an omission: languages/bash-to-llvm-ir.abnf
+ * keeps -i/-u/-l/-A in COMPILE-TIME maps (intVars/upVars/loVars/assocArrays) and
+ * emits the conversion at each store site, so a subshell isolates them by unwinding
+ * the emitter's attribute log around the body, exactly as a function body already
+ * did. languages/bash-interpreter.abnf holds the same four at run time and restores
+ * them in restoreState. Both engines therefore isolate all four kinds of state, which
+ * is what keeps this out of --cross. */
+char *ss_anm[32768];
+char *ss_ak[32768];
+char *ss_av[32768];
+int ss_an[8];
+
 /* Standard input for `read`: the buffer and the read position. */
 char *stdin_buf;
 int stdin_pos;
@@ -168,6 +194,14 @@ int rt_arr_has(char *nm, char *k);
 int rt_arr_del(char *nm, char *k);
 int rt_arr_count(char *nm);
 char *rt_arr_list(char *nm, char *sep, int star, int keys);
+int rt_sc_count(char *nm);
+int rt_declp(char *nm, char *flag, int assoc);
+int rt_dq(char *v);
+int rt_ansiq(char *v);
+int rt_octd(int k);
+char *rt_sc_get(char *nm, char *k);
+int rt_sc_has(char *nm, char *k);
+char *rt_sc_list(char *nm, char *sep, int star, int keys);
 int rt_arr_nextidx(char *nm);
 int rt_arr_clear(char *nm);
 int rt_arr_append(char *nm, char *f);
@@ -1646,6 +1680,7 @@ int rt_ifsws(char *ifs, int ch) {
 
 char *rt_splitifs(char *v, char *ifs) {
     int len = rt_strlen(v);
+    int q = 0;
     int nf = 0;
     int tot = 0;
     int i;
@@ -1667,7 +1702,31 @@ char *rt_splitifs(char *v, char *ifs) {
      *
      * TWO PASSES over one walk: pass 0 sizes the buffer (this is the single
      * largest per-word cost in the runtime - see tests/bench/mod.sh - and the
-     * shape that made it linear rather than quadratic is kept), pass 1 fills it. */
+     * shape that made it linear rather than quadratic is kept), pass 1 fills it.
+     *
+     * AND ONE SCAN BEFORE EITHER OF THEM, WHICH IS WORTH +3.3% OF THE WHOLE bash
+     * ROW (docs/todo.md 7.1). The POSIX rule above replaced a single flat loop
+     * with a nest of four - leading whitespace, the field, trailing whitespace,
+     * one non-whitespace delimiter - and the per-CHARACTER work is the same, so
+     * the cost is not in the walk: it is that the delimiter nest is no longer a
+     * shape clang can keep in registers across the two passes, and mod.sh calls
+     * this four times an iteration on a five-character integer that contains no
+     * separator at all. Measured as instructions per iteration at two loop sizes
+     * (which is immune to the layout lottery of manual chapter 4), 9 draws each:
+     * 3,604.35 with the nest alone, 3,483.90 with this scan, against 3,481.48 at
+     * 0907c7f - i.e. the whole of the regression, and none of the semantics.
+     *
+     * The scan answers exactly the fast path pass 0 already had, one loop
+     * earlier: no IFS character anywhere means one field spanning the whole
+     * value, and a plain string IS a one-field list in this protocol. The two
+     * guards are the same two: an empty value has NO fields (the "\x02" literal
+     * below), and a value already carrying the 0x02 marker must not be returned
+     * as itself or it would be re-read as a list. A value that DOES contain a
+     * separator pays one extra scan as far as that separator and nothing more. */
+    if (len > 0 && (int)(unsigned char)v[0] != 2) {
+        while (q < len && rt_haschar(ifs, (int)(unsigned char)v[q]) == 0) { q = q + 1; }
+        if (q == len) return v;
+    }
     pass = 0;
     while (pass < 2) {
         i = 0;
@@ -1885,6 +1944,194 @@ int rt_arr_clear(char *nm) {
         i = i + 1;
     }
     arr_n = o;
+    return 0;
+}
+
+/* ---- a SET SCALAR IS A ONE-ELEMENT ARRAY ----------------------------------
+ * bash 5.3 answers Q for "${x[@]}" with x=Q, Q for "${x[0]}", 1 for ${#x[@]}
+ * and 0 for ${!x[@]}: a plain scalar occupies index 0 of an array of one. This
+ * runtime answered nothing at all for every one of those (docs/todo.md 1.8).
+ *
+ * WHY FOUR NEW NAMES AND NOT A CHANGE TO rt_arr_count. rt_arr_count IS the test
+ * `is this name an array` everywhere else in the emitted program - varString
+ * picks between rt_arr_get(name, "0") and the scalar slot with it, `[[ -v x ]]`
+ * asks it, and every assignment path asks it. Making it answer 1 for a scalar
+ * would make all of those read a plain variable as an array, which is a much
+ * larger claim than the one bash makes. So the fallback lives in four functions
+ * that ONLY the ${name[...]} expansion sites call, exactly as
+ * languages/bash-interpreter.abnf keeps scKeyList/scValList/scGet/scHas beside
+ * arrKeyList/arrValList/arrGet/arrHas rather than inside them.
+ *
+ * The scalar is found BY NAME with rt_getvar_byname, which is the same lookup
+ * the emitted `${!ref}` uses, so no new plumbing crosses the boundary: the
+ * emitter passes the name it already passes to rt_arr_get. */
+int rt_sc_count(char *nm) {
+    char *v;
+    int c = rt_arr_count(nm);
+    if (c > 0) return c;
+    v = rt_getvar_byname(nm);
+    return v != &unset_marker[0] ? 1 : 0;
+}
+
+char *rt_sc_get(char *nm, char *k) {
+    char *v;
+    if (rt_arr_count(nm) > 0) return rt_arr_get(nm, k);
+    v = rt_getvar_byname(nm);
+    if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return v;
+    return &empty[0];
+}
+
+int rt_sc_has(char *nm, char *k) {
+    char *v;
+    if (rt_arr_count(nm) > 0) return rt_arr_has(nm, k);
+    v = rt_getvar_byname(nm);
+    if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return 1;
+    return 0;
+}
+
+/* The one-element form of rt_arr_list: "\x02" v "\x01" as a field list, or the
+ * bare value when `star` asked for the joined form. `keys` makes the single
+ * key "0" the payload, which is what ${!x[@]} reports. */
+char *rt_sc_list(char *nm, char *sep, int star, int keys) {
+    char *v;
+    if (rt_arr_count(nm) > 0) return rt_arr_list(nm, sep, star, keys);
+    v = rt_getvar_byname(nm);
+    if (v == &unset_marker[0]) return star != 0 ? &empty[0] : "\002";
+    if (keys != 0) v = "0";
+    if (star != 0) return v;
+    return rt_strcat(rt_strcat("\002", v), "\001");
+}
+
+/* ---- declare -p ------------------------------------------------------------
+ * `declare -p NAME` reproduces the declaration bash would need to recreate the
+ * variable, and it used to print NOTHING in either engine (docs/todo.md 1.8).
+ * Measured against bash 5.3:
+ *
+ *     declare -- x="hello"    declare -i n="7"    declare -a a=([0]="p" [1]="q")
+ *     declare -A m=([k]="v" )      <- the trailing space is bash's, indexed has none
+ *     bash: declare: nosuchvar: not found          (fd 2, status 1)
+ *
+ * The ATTRIBUTE LETTER comes from the emitter, because -i/-u/-l live in
+ * compile-time maps in languages/bash-to-llvm-ir.abnf; array-ness and the value
+ * are asked here. languages/bash-interpreter.abnf's declLine is the same text,
+ * character for character, from its own tables.
+ *
+ * IS IT AN ARRAY: "at least one element, or the emitter knows it associative".
+ * There is no record of a declared-but-EMPTY indexed array in this flat triple
+ * store, so `a=(); declare -p a` says `not found` in BOTH engines where bash
+ * says `declare -a a=()`; the interpreter's declIsArr is deliberately written to
+ * the same rule, because a fifth table plus a subshell snapshot entry for that
+ * one line was judged not worth it. Recorded, not hidden. */
+int rt_octd(int k) {
+    int n = k;
+    int d0 = (n / 64) % 8;
+    int d1 = (n / 8) % 8;
+    int d2 = n % 8;
+    rt_putc(48 + d0);
+    rt_putc(48 + d1);
+    rt_putc(48 + d2);
+    return 0;
+}
+
+/* The $'...' form, with bash's escape table - the same one shellQuote uses in
+ * languages/bash-interpreter.abnf. */
+int rt_ansiq(char *v) {
+    int n = rt_strlen(v);
+    int i = 0;
+    rt_prints("$'");
+    while (i < n) {
+        int c = (int)(unsigned char)v[i];
+        if (c == 39) { rt_prints("\\'"); }
+        else if (c == 92) { rt_prints("\\\\"); }
+        else if (c == 7) { rt_prints("\\a"); }
+        else if (c == 8) { rt_prints("\\b"); }
+        else if (c == 9) { rt_prints("\\t"); }
+        else if (c == 10) { rt_prints("\\n"); }
+        else if (c == 11) { rt_prints("\\v"); }
+        else if (c == 12) { rt_prints("\\f"); }
+        else if (c == 13) { rt_prints("\\r"); }
+        else if (c == 27) { rt_prints("\\E"); }
+        else if (c < 32 || c == 127) { rt_prints("\\"); rt_octd(c); }
+        else { rt_putc(c); }
+        i = i + 1;
+    }
+    rt_prints("'");
+    return 0;
+}
+
+/* "..." unless the value holds a control character. A byte >= 128 is not one:
+ * in a UTF-8 locale bash prints the accented byte intact. */
+int rt_dq(char *v) {
+    int n = rt_strlen(v);
+    int ctl = 0;
+    int i = 0;
+    while (i < n) {
+        int c = (int)(unsigned char)v[i];
+        if (c < 32 || c == 127) { ctl = 1; }
+        i = i + 1;
+    }
+    if (ctl != 0) return rt_ansiq(v);
+    rt_prints("\"");
+    i = 0;
+    while (i < n) {
+        int c = (int)(unsigned char)v[i];
+        if (c == 34 || c == 92 || c == 36 || c == 96) rt_prints("\\");
+        rt_putc(c);
+        i = i + 1;
+    }
+    rt_prints("\"");
+    return 0;
+}
+
+int rt_declp(char *nm, char *flag, int assoc) {
+    int n = rt_arr_count(nm);
+    int isarr = (n > 0 || assoc != 0) ? 1 : 0;
+    char *v;
+    int i;
+    int c;
+    int saved;
+    if (isarr == 0) {
+        v = rt_getvar_byname(nm);
+        if (v == &unset_marker[0]) {
+            /* On the standard error CHANNEL, so a 2>/dev/null silences it exactly
+             * as the shell does - the same rule rt_nounset follows. */
+            saved = sink_out;
+            sink_out = sink_err;
+            rt_prints("bash: declare: ");
+            rt_prints(nm);
+            rt_prints(": not found\n");
+            sink_out = saved;
+            return 1;
+        }
+        rt_prints("declare -");
+        rt_prints(flag);
+        rt_prints(" ");
+        rt_prints(nm);
+        rt_prints("=");
+        rt_dq(v);
+        rt_prints("\n");
+        return 0;
+    }
+    rt_prints("declare -");
+    rt_prints(assoc != 0 ? "A" : "a");
+    rt_prints(" ");
+    rt_prints(nm);
+    rt_prints("=(");
+    c = 0;
+    i = 0;
+    while (i < arr_n) {
+        if (rt_streq(nm, arr_nm[i]) != 0) {
+            if (c > 0) rt_prints(" ");
+            rt_prints("[");
+            rt_prints(arr_k[i]);
+            rt_prints("]=");
+            rt_dq(arr_v[i]);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if (assoc != 0 && c > 0) rt_prints(" ");
+    rt_prints(")\n");
     return 0;
 }
 
@@ -2178,6 +2425,7 @@ int rt_ss_save(int u)
 {
     int d;
     int base;
+    int abase;
     int i;
     d = ss_depth;
     /* SSDEPTH = 8, and this path had NO CHECK OF ANY KIND - the item that
@@ -2195,6 +2443,16 @@ int rt_ss_save(int u)
         ss_save[base + i] = gvars[i];
         i = i + 1;
     }
+    /* NARR = 4096 entries per depth, the same ceiling rt_arr_set enforces. */
+    abase = d * 4096;
+    i = 0;
+    while (i < arr_n) {
+        ss_anm[abase + i] = arr_nm[i];
+        ss_ak[abase + i] = arr_k[i];
+        ss_av[abase + i] = arr_v[i];
+        i = i + 1;
+    }
+    ss_an[d] = arr_n;
     ss_depth = d + 1;
     return 0;
 }
@@ -2204,6 +2462,8 @@ int rt_ss_restore(int u)
 {
     int d;
     int base;
+    int abase;
+    int n;
     int i;
     d = ss_depth - 1;
     ss_depth = d;
@@ -2213,6 +2473,16 @@ int rt_ss_restore(int u)
         gvars[i] = ss_save[base + i];
         i = i + 1;
     }
+    abase = d * 4096;
+    n = ss_an[d];
+    i = 0;
+    while (i < n) {
+        arr_nm[i] = ss_anm[abase + i];
+        arr_k[i] = ss_ak[abase + i];
+        arr_v[i] = ss_av[abase + i];
+        i = i + 1;
+    }
+    arr_n = n;
     return 0;
 }
 

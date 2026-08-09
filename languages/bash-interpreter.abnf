@@ -100,13 +100,19 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
             = KwElse CompoundList ;
 
 // case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
+// EVERY WORD HERE IS AN NsWord, and so is every operand of [[ ]] below. bash does NOT
+// field-split the subject of a `case`, its patterns, or either side of a [[ ]] test -
+// they are the same "unquoted but unsplit" context an assignment's right hand side is
+// (docs/todo.md 1.7, found by probing outward from it). With plain `Word` here,
+// x="  a   b  " made `case $x in "  a   b  ")` take the *) arm and
+// `[[ $x == "  a   b  " ]]` false, in BOTH halves and therefore invisibly to --cross.
 // The body of a clause is an ordinary statement list, except that its separator run must not
 // swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
 CaseStmt    <~~ push(makeCase(takeAll())) ~~>
-            = KwCase Word KwIn CaseSepOpt { CaseClause } KwEsac ;
+            = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
-CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = NsWord { "|" NsWord } ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -182,7 +188,7 @@ CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | Un
 PrefixCommand <~~ push(makePrefixCmd(takeAll())) ~~>
             = AsgPrefix { AsgPrefix } NotReserved CWord { CmdSuffix } ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ Word ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
 AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
@@ -210,8 +216,12 @@ LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 // Spelled as its own production (rather than an ordinary command with word arguments)
 // because the declared NAME has to be known statically: the compiler needs it to pick a
 // variable slot, and `local` needs it to record the save entry for the current call frame.
-DeclCommand <~~ push(makeDecl(takeAll())) ~~>
-            = DeclKw { DeclFlag } { DeclItem } ;
+// The [ RedirList ] is what lets `declare -p missing 2>/dev/null` parse: this
+// production is not a SimpleCommand, so it did not inherit SimpleCommand's
+// redirections, and every redirected declaration was an outright parse failure.
+// It only started to matter when `declare -p` gained a diagnostic to silence.
+DeclCommand <~~ push(makeDeclR(takeAll())) ~~>
+            = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
 DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
@@ -233,11 +243,23 @@ AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 AsgIdx      <~~ push({aidx: 1}) ~~> = "[" IdxWord "]" ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
-AsgWord     = [ Word ] ;
+AsgWord     = [ NsWord ] ;
+// THE RIGHT HAND SIDE OF AN ASSIGNMENT IS NOT FIELD-SPLIT. `y=$x` with
+// x="  a   b  " assigns the value CHARACTER FOR CHARACTER; only the bare words of an
+// array literal - `A=($x)` - are split, and they go through CWord below. This used to
+// be `Word`, so every scalar assignment lost its leading and trailing blanks and
+// collapsed its internal runs, in both engines and therefore invisibly to --cross
+// (docs/todo.md 1.7). NsWord is the same segment list read in the mode a double-quoted
+// word already used: "$@" and "${a[@]}" still contribute several fields, which is what
+// makes `c=$@` join them with a space rather than concatenate them.
+NsWord      <~~ push(mkNsWord(takeAll())) ~~>
+            = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
 ArrayItem   = ArrayKV | CWord ;
-ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() Word ;
+// `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
+// unsplit exactly as it keeps `A=$x`.
+ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
 WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
@@ -612,19 +634,19 @@ CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 // [[ STR =~ ERE ]] : the right hand side is a REGEX, so ( ) | + ? { } are ordinary
 // characters there and need a word production of their own. Quoted parts stay literal and
 // $ expansions still happen, exactly as in bash.
-CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = Word CondMatchOp RegexWord ;
+CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = NsWord CondMatchOp RegexWord ;
 CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
-RegexWord   <~~ push(mkWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
+RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
 RegexSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | RegexBare ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
-CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp Word ;
+CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
 CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
-CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp PatWord ;
-PatWord     <~~ push(mkWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
+CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
+PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
@@ -634,7 +656,7 @@ PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | Ansi
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
-CondSingle  <~~ push(mkCondSingle(pop())) ~~> = Word ;
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -1330,7 +1352,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return out + "'"
         }
+        return ansiQuote(v)
+    }
+    // The $'...' form on its own: ${v@Q} reaches it through shellQuote, `declare -p`
+    // through declQuote, and the escape table is bash's for both.
+    function ansiQuote(v) {
         var o2 = "$'"
+        var i
         for (i = 0; i < v.length; i++) {
             var c2 = v.charAt(i)
             var k = v.charCodeAt(i)
@@ -1358,8 +1386,76 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(loVars, name)) { return "l" }
         return ""
     }
+    // ---- declare -p ----------------------------------------------------------------
+    // `declare -p NAME` reproduces the declaration bash would need to recreate the
+    // variable, and it used to print NOTHING at all: -p was classed with -f/-F as a query
+    // that is "not modelled" (docs/todo.md 1.8). Measured against bash 5.3:
+    //
+    //     declare -- x="hello"      declare -i n="7"       declare -u U="ABC"
+    //     declare -a a=([0]="p" [1]="q")                   declare -A m=([k]="v" )
+    //     bash: declare: nosuchvar: not found              (fd 2, status 1)
+    //
+    // The trailing space before ")" on the ASSOCIATIVE form is bash's, not a slip - the
+    // indexed form has none - and it is reproduced here because it is free.
+    //
+    // TWO LIMITS, both inherited rather than introduced. varAttrs answers ONE letter, so
+    // `declare -ai x` prints `declare -a` where bash prints `declare -ai`; and -x/-r are
+    // not modelled anywhere in this grammar (see varAttrs), so `declare -x XX=1` prints
+    // `declare --`. The bare `declare -p` with NO names still prints nothing: bash lists
+    // every variable in the shell, most of which this engine does not have, so there is no
+    // output that could be right.
+    // bash quotes a `declare -p` value with "..." unless it holds a CONTROL character, and
+    // with the ANSI-C form $'...' when it does - the same switch ${v@Q} makes, and the
+    // same escape table, which is why this calls ansiQuote rather than carrying a second
+    // copy. (An earlier draft of this block carried its own `octal3` too, which SILENTLY
+    // REPLACED the one above and made ${v@a} answer three NUL bytes - the manual's
+    // shared-helper trap, inside one file.) A byte >= 128 is NOT a control character: in a
+    // UTF-8 locale bash prints the accented byte of `declare -- q="aeb"` intact.
+    function declQuote(v) {
+        var ctl = false
+        var i
+        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
+        if (ctl) { return ansiQuote(v) }
+        var out = "\""
+        for (i = 0; i < v.length; i++) {
+            var ch = v.charAt(i)
+            if (ch == "\"" || ch == "\\" || ch == "$" || ch == "`") { out = out + "\\" }
+            out = out + ch
+        }
+        return out + "\""
+    }
+    // IS THIS NAME AN ARRAY, asked the way languages/bash-to-llvm-ir.abnf has to ask it:
+    // "it holds at least one element, or it is known associative". That runtime is a flat
+    // triple table with no record of a declared-but-EMPTY indexed array, so `a=();
+    // declare -p a` answers `not found` in both engines where bash answers
+    // `declare -a a=()`. Keeping the rule identical here is what keeps the two halves
+    // byte-identical; giving the compiler a fifth table and a subshell snapshot entry for
+    // that one line was judged not worth it, and it is recorded rather than hidden.
+    function declIsArr(name) {
+        if (!isArr(name)) { return false }
+        return arrKeyList(name).length > 0 || arrs[arrKey(name)].assoc
+    }
+    function declLine(name) {
+        var at = varAttrs(name)
+        if (declIsArr(name)) {
+            var assoc = arrs[arrKey(name)].assoc
+            var ks = arrKeyList(name)
+            var body = ""
+            var i
+            for (i = 0; i < ks.length; i++) {
+                if (i > 0) { body = body + " " }
+                body = body + "[" + ks[i] + "]=" + declQuote(arrGet(name, ks[i]))
+            }
+            if (assoc && ks.length > 0) { body = body + " " }
+            return "declare -" + (assoc ? "A" : "a") + " " + name + "=(" + body + ")"
+        }
+        if (!isSetVar(name)) { return "" }
+        return "declare -" + ((at == "") ? "-" : at) + " " + name + "=" + declQuote(getVarVal(name))
+    }
+
     // `unset` drops the attributes with the value, in bash and here.
     function dropAttrs(name) {
+        touchState(name)
         intVars["$" + name] = false
         upVars["$" + name] = false
         loVars["$" + name] = false
@@ -1495,14 +1591,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pe == "len") {
                 return function() {
                     var sub = readIdx()
-                    if (sub == "@" || sub == "*") { return numToStr(arrKeyList(name).length) }
-                    return numToStr(charLen(arrGet(name, sub)))
+                    if (sub == "@" || sub == "*") { return numToStr(scKeyList(name).length) }
+                    return numToStr(charLen(scGet(name, sub)))
                 }
             }
             if (pe == "ind") {
                 return function() {
                     var sub = readIdx()
-                    var ks = arrKeyList(name)
+                    var ks = scKeyList(name)
                     if (sub == "@") { return encFields(ks) }
                     return joinList(ks, ifsFirst())
                 }
@@ -1513,8 +1609,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var lenT = (args.length > 1) ? args[1] : null
                 return function() {
                     var sub = readIdx()
-                    if (sub != "@" && sub != "*") { return sliceStr(arrGet(name, sub), offT, lenT) }
-                    var vals = arrValList(name)
+                    if (sub != "@" && sub != "*") { return sliceStr(scGet(name, sub), offT, lenT) }
+                    var vals = scValList(name)
                     var off = offT()
                     if (off < 0) { off = vals.length + off; if (off < 0) { off = 0 } }
                     var n = (lenT != null) ? lenT() : (vals.length - off)
@@ -1533,8 +1629,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var idxName = name
                 return function() {
                     var sub = readIdx()
-                    if (sub != "@" && sub != "*") { return xformOne(arrGet(idxName, sub), idxXf, idxName) }
-                    var vals = arrValList(idxName)
+                    if (sub != "@" && sub != "*") { return xformOne(scGet(idxName, sub), idxXf, idxName) }
+                    var vals = scValList(idxName)
                     var outv = []
                     var q
                     for (q = 0; q < vals.length; q++) { outv.push(xformOne(vals[q], idxXf, idxName)) }
@@ -1542,11 +1638,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return joinList(outv, ifsFirst())
                 }
             }
+            var idxOp = op
+            var idxWordT = wordT
             return function() {
                 var sub = readIdx()
-                if (sub == "@") { return encFields(arrValList(name)) }
-                if (sub == "*") { return joinList(arrValList(name), ifsFirst()) }
-                return arrGet(name, sub)
+                if (sub == "@" || sub == "*") { return listOpValue(name, sub, idxOp, idxWordT) }
+                return elemOpValue(name, sub, idxOp, idxWordT)
             }
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
@@ -1656,14 +1753,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // but they must not be read as `declare NAME`, which below would make the name a
         // fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
+        var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         return function() {
             var k
-            if (query) { setStatus(0); return 0 }
+            if (query) {
+                // -p with names PRINTS; -p bare and -f/-F stay silent (declLine's comment
+                // says why), and a name that is not set is a diagnostic and status 1.
+                if (isPrint && names.length > 0) {
+                    var pst = 0
+                    for (k = 0; k < names.length; k++) {
+                        var line = declLine(names[k])
+                        if (line == "") { emitErr("bash: declare: " + names[k] + ": not found\n"); pst = 1 }
+                        else { emitOut(line + "\n") }
+                    }
+                    setStatus(pst)
+                    return pst
+                }
+                setStatus(0); return 0
+            }
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
             // function declare a function-local name (value AND attributes restored on
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
             for (k = 0; k < names.length; k++) {
+                touchState(names[k])
                 if (localize) {
                     declareLocal(names[k])
                     // A local declaration starts from a CLEAN SLATE. bash does not inherit
@@ -1676,9 +1789,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (integer) { intVars["$" + names[k]] = true }
                 if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
                 if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
-                if (isArray && asgs[k] == null) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
+                if (isArray && asgs[k] == null) { arrNew(names[k], assoc) }
                 if (asgs[k] != null) {
-                    if (isArray) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
+                    if (isArray) { arrNew(names[k], assoc) }
                     runAssign(asgs[k], assoc)
                 }
                 else if (localize && !isArray) { unsetVar(names[k]) }
@@ -1686,6 +1799,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(0)
             return 0
         }
+    }
+    // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
+    // makeDecl understands; anything else on the stack is a redirection record and is
+    // handed to mkRedirected, exactly as makeSubshellR / makeGroupR do it.
+    function makeDeclR(items) {
+        var core = []
+        var reds = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { core.push(it) }
+            else { reds.push(it) }
+        }
+        if (reds.length == 0) { return makeDecl(core) }
+        var wrapped = [makeDecl(core)]
+        for (i = 0; i < reds.length; i++) { wrapped.push(reds[i]) }
+        return mkRedirected(wrapped)
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
 
@@ -1954,17 +2084,79 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     var arrs = {}
     function arrKey(name) { return "$" + name }
+    // EVERY NAME THAT HAS EVER HELD AN ARRAY OR AN ATTRIBUTE, in creation order. The
+    // scalar table has `varNames` for exactly this reason - snapshotVars walks it - and
+    // the array and attribute tables had no equivalent, which is why a subshell restored
+    // the scalars and left the arrays and the attributes behind (docs/todo.md 1.8).
+    // Appending only, so an index into it stays valid: that is what lets restoreState
+    // below tell "existed before the subshell" from "created inside it".
+    var stNames = []
+    var stSeen = {}
+    function touchState(name) {
+        var k = "$" + name
+        if (hasOwn(stSeen, k)) { return }
+        stSeen[k] = true
+        stNames.push(name)
+    }
+    function snapshotState() {
+        var out = []
+        var i
+        for (i = 0; i < stNames.length; i++) {
+            var nm = stNames[i]
+            var ak = arrKey(nm)
+            var hadA = hasOwn(arrs, ak) && arrs[ak] != null
+            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}},
+                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm)})
+        }
+        return out
+    }
+    function restoreState(snap) {
+        var i
+        for (i = 0; i < snap.length; i++) {
+            var nm = stNames[i]
+            if (snap[i].hasArr) { arrs[arrKey(nm)] = snap[i].arr } else { arrs[arrKey(nm)] = null }
+            intVars["$" + nm] = snap[i].ai
+            upVars["$" + nm] = snap[i].au
+            loVars["$" + nm] = snap[i].al
+        }
+        // A name FIRST SEEN inside the subshell has no saved entry, and leaving it is
+        // the same leak the other way round: `( declare -A m=([z]=1) )` must not leave m
+        // behind. bash 5.3 agrees.
+        for (i = snap.length; i < stNames.length; i++) {
+            arrs[arrKey(stNames[i])] = null
+            dropAttrs(stNames[i])
+        }
+    }
     function isArr(name) {
         var k = arrKey(name)
         if (!hasOwn(arrs, k)) { return false }
         return arrs[k] != null
     }
+    // IS THIS NAME ASSOCIATIVE - AND IT IS A WHOLE-PROGRAM FACT, not a property of the
+    // current binding. languages/bash-to-llvm-ir.abnf decides a subscript's normalisation
+    // from `assocArrays`, which is filled once for the whole program at walk time and
+    // never unwound; without the same rule here, isolating the array store across a
+    // subshell (docs/todo.md 1.8) made `( declare -A m ); m[k]=v; m[j]=w` answer "w" in
+    // the interpreter and "v w" in the compiler - a live halves divergence created by the
+    // fix rather than by the defect. `assoc` is sticky here for exactly that reason.
+    var assocSeen = {}
+    function assocFact(name, assoc) {
+        var k = "$" + name
+        if (assoc) { assocSeen[k] = true; return true }
+        return hasOwn(assocSeen, k)
+    }
+    function arrNew(name, assoc) {
+        touchState(name)
+        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}}
+        return arrs[arrKey(name)]
+    }
     function arrEnsure(name, assoc) {
         var k = arrKey(name)
+        touchState(name)
         // An UNSET array is a null in this map, not a missing key (`unset a`, and a `local`
         // declaration hiding an outer array), so both have to be tested.
-        if (!hasOwn(arrs, k) || arrs[k] == null) { arrs[k] = {assoc: assoc, keys: [], vals: {}} }
-        else if (assoc) { arrs[k].assoc = true }
+        if (!hasOwn(arrs, k) || arrs[k] == null) { arrNew(name, assoc) }
+        else if (assocFact(name, assoc)) { arrs[k].assoc = true }
         return arrs[k]
     }
     function arrNorm(a, key) {
@@ -2045,9 +2237,77 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < ks.length; i++) { out.push(arrGet(name, ks[i])) }
         return out
     }
+    // A SET SCALAR IS A ONE-ELEMENT ARRAY, and it was not one here: `x=Q` answered
+    // nothing at all for "${x[@]}", "${x[0]}" and "${!x[@]}" and 0 for ${#x[@]}, where
+    // bash 5.3 answers Q, Q, 0 and 1 - the scalar occupies index 0 (docs/todo.md 1.8).
+    //
+    // These four live BESIDE arrGet/arrHas/arrKeyList/arrValList rather than inside
+    // them, and that is deliberate: the fallback belongs to the ${name[...]} EXPANSION
+    // SITES only. Folding it into the store would make isArr, runAssign, `unset` and
+    // every `local` save read a plain scalar as an array, which is a much larger claim
+    // than the one bash makes. languages/bash-to-llvm-ir.abnf reaches the same four
+    // through rt_sc_get / rt_sc_has / rt_sc_count / rt_sc_list in
+    // languages/lib/bash-rt.c, which are expansion-site-only for the same reason.
+    function scKeyList(name) {
+        if (isArr(name)) { return arrKeyList(name) }
+        if (isSetVar(name)) { return ["0"] }
+        return []
+    }
+    function scValList(name) {
+        if (isArr(name)) { return arrValList(name) }
+        if (isSetVar(name)) { return [getVarVal(name)] }
+        return []
+    }
+    function scGet(name, key) {
+        if (isArr(name)) { return arrGet(name, key) }
+        if (isSetVar(name) && key == "0") { return getVarVal(name) }
+        return ""
+    }
+    function scHas(name, key) {
+        if (isArr(name)) { return arrHas(name, key) }
+        return isSetVar(name) && key == "0"
+    }
+    // ${a[@]-default}: bash 5.3 tests whether the array has ANY element - `unset a;
+    // echo "${a[@]-D}"` is D - and the ":" forms additionally test the joined value, so
+    // `d=(""); echo "${d[@]-D}"` is empty while "${d[@]:-D}" is D.
+    function listOpValue(name, sub, op, wordT) {
+        var vals = scValList(name)
+        var joined = (sub == "@") ? encFields(vals) : joinList(vals, ifsFirst())
+        if (op == "") { return joined }
+        var colon = (op.charAt(0) == ":")
+        var o = colon ? op.slice(1) : op
+        var blank = (vals.length == 0)
+        if (colon && !blank) { blank = (joinList(vals, ifsFirst()) == "") }
+        if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
+        if (blank) { return (wordT != null) ? wordJoin(wordT()) : "" }
+        return joined
+    }
+    // ${a[k]-default} and its three siblings, which the subscript branch used to drop on
+    // the floor: every ${name[sub]OP word} answered the ELEMENT and ignored OP, so a
+    // missing element expanded to "" instead of to its default (docs/todo.md 1.8). The
+    // arms are the scalar ones with "is it set" asked of the ELEMENT.
+    function elemOpValue(name, sub, op, wordT) {
+        var v = scGet(name, sub)
+        if (op == "") { return v }
+        var colon = (op.charAt(0) == ":")
+        var o = colon ? op.slice(1) : op
+        var blank = colon ? (!scHas(name, sub) || v == "") : (!scHas(name, sub))
+        if (o == "-") { return blank ? ((wordT != null) ? wordJoin(wordT()) : "") : v }
+        if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
+        if (o == "=") {
+            if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; arrSet(name, sub, d); return d }
+            return v
+        }
+        if (o == "?") {
+            if (blank) { fail(name + "[" + sub + "]: " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
+            return v
+        }
+        return v
+    }
     function arrFromList(name, assoc, list) {
         var k = arrKey(name)
-        arrs[k] = {assoc: assoc, keys: [], vals: {}}
+        touchState(name)
+        arrNew(name, assoc)
         var i
         for (i = 0; i < list.length; i++) { arrSet(name, numToStr(i), list[i]) }
     }
@@ -2203,6 +2463,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return encFields(res)
         }
     }
+
+    // The same segment list, read WITHOUT field splitting - the mode an assignment's
+    // right hand side and a double-quoted word share (docs/todo.md 1.7). An unquoted
+    // expansion is marked by mkSplittable; dropping the mark is the whole difference,
+    // so this delegates rather than duplicating mkDqWord's boundary handling.
+    function unSplit(segThunks) {
+        var out = []
+        var i
+        for (i = 0; i < segThunks.length; i++) {
+            var sg = anytype
+            sg = segThunks[i]
+            if (typeof sg == "function") { out.push(sg) } else { out.push(sg.sp) }
+        }
+        return out
+    }
+    function mkNsWord(segThunks) { return mkDqWord(unSplit(segThunks)) }
 
     function mkWord(segThunks) {
         var canSplit = false
@@ -2496,7 +2772,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function applyArrayLit(name, pairs, append, assoc) {
-        if (!append) { arrs[arrKey(name)] = {assoc: assoc, keys: [], vals: {}} }
+        touchState(name)
+        if (!append) { arrNew(name, assoc) }
         else { arrEnsure(name, assoc) }
         var plain = []
         var i
@@ -3362,11 +3639,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Everything a subshell must restore: variables, positional parameters, call frames,
     // the shell options and the EXIT trap.
     function saveShellState() {
-        return {vars: snapshotVars(), pos: posParams, frames: localFrames,
+        return {vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, tr: exitTrap}
     }
     function restoreShellState(st) {
         restoreVars(st.vars)
+        restoreState(st.st)
         posParams = st.pos
         localFrames = st.frames
         optErrExit = st.e
