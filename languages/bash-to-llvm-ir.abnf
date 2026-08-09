@@ -1347,6 +1347,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSplitIfs = rtDecl("rt_splitifs", true, [1, 1])
     var rtBndAcc = rtDecl("rt_bnd_acc", true, [1, 1, 1])
     var rtBndOpen = rtDecl("rt_bnd_open", true, [1, 1])
+    var rtBndAcc2 = rtDecl("rt_bnd_acc2", true, [1, 1, 0, 1, 0, 0])
+    var rtBndOpen2 = rtDecl("rt_bnd_open2", true, [1, 0, 1, 0, 0])
+    var rtBndOpened2 = rtDecl("rt_bnd_opened2", false, [0, 1, 0, 0])
+    var rtIfsLead = rtDecl("rt_ifslead", false, [1, 1])
+    var rtIfsTrail = rtDecl("rt_ifstrail", false, [1, 1])
 
     // arrays: one flat store of (arrayName, key, value) triples with a linear scan.
     var rtArrFind = rtDecl("rt_arr_find", false, [1, 1])
@@ -1368,6 +1373,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
     var rtCatFields = rtDecl("rt_catfields", true, [1, 1])
+    var rtMapf = rtDecl("rt_mapf", true, [1, 0, 1, 1, 0, 1, 0])
 
     // the positional parameters.
     var rtArgPush = rtDecl("rt_argpush", false, [1])
@@ -1445,7 +1451,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "-") { return gepStr(b, "hB") }
         if (allDigits(name)) {
             var idx = parseDec(name)
-            if (idx == 0) { return gepStr(b, "bash") }
+            // $0 IS THE SCRIPT (docs/todo.md 1.13, 2.15): c.file is the program's path
+            // exactly as the metacompiler was given it, which is what a real shell holds.
+            if (idx == 0) { return gepStr(b, c.file) }
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
         // an array name expands to its element 0
@@ -1502,6 +1510,51 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArCmdSub(sub) {
         return function(b) { var r = evalWord(b, sub); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} }
     }
+    // The parameter-expansion operators that take a GLOB and rewrite the value: the two
+    // strips, the two case maps and the two replacements. They are the ones that also apply
+    // ELEMENT-WISE to a subscripted expansion, and rt_mapf takes the same (kind, mode) pair
+    // the three scalar runtime calls take - kind 0 rt_strip, 1 rt_replace, 2 rt_case.
+    // languages/bash-interpreter.abnf's isPatOp / applyPatOp are the same table.
+    function isPatOp(pe) {
+        if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") { return true }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return true }
+        return (pe == "/" || pe == "//")
+    }
+    function patOpKind(pe) {
+        if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") { return 0 }
+        if (pe == "/" || pe == "//") { return 1 }
+        return 2
+    }
+    function patOpMode(pe, anchor) {
+        if (pe == "##") { return 1 }
+        if (pe == "%") { return 2 }
+        if (pe == "%%") { return 3 }
+        if (pe == "^^") { return 1 }
+        if (pe == ",") { return 2 }
+        if (pe == ",,") { return 3 }
+        if (pe == "/" || pe == "//") {
+            if (anchor == "#") { return 2 }
+            if (anchor == "%") { return 3 }
+            return (pe == "//") ? 1 : 0
+        }
+        return 0
+    }
+
+    // The @-transforms rt_mapf can walk element-wise, as an (kind, mode) pair. -1 means
+    // "not one of them": @A and @a describe the VARIABLE rather than an element and @P is
+    // not modelled, so all three stay on the scalar path.
+    function xfMapKind(xf) {
+        if (xf == "U" || xf == "L" || xf == "u") { return 2 }
+        if (xf == "E") { return 4 }
+        if (xf == "Q" || xf == "K" || xf == "k") { return 3 }
+        return -1
+    }
+    function xfMapMode(xf) {
+        if (xf == "U") { return 1 }
+        if (xf == "L") { return 3 }
+        return 0
+    }
+
     // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, word objects / arithmetic thunks]
     function mkParamExp(items) {
         var pe = "", name = "", op = "", anchor = "", xf = ""
@@ -1633,6 +1686,43 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return {b: b, v: b.NewSelect(whole, lstV, elV)}
                 }}
             }
+            // A PATTERN OPERATOR ON A SUBSCRIPTED EXPANSION was parsed and then dropped on
+            // the floor in every engine: ${a[@]/x/Y} and ${a[1]#p} answered the untouched
+            // element or element list (docs/todo.md 2.15). Silently wrong, which is the
+            // worst kind.
+            //
+            // bash applies the operator to EVERY ELEMENT and only then joins - "${b[*]/a/Q}"
+            // for b=(aa ba) is "Qa bQ" and not the "Qa ba" a replace on the joined string
+            // would give - so the list arm goes through rt_mapf, which is that walk. The
+            // element arm is the plain scalar call. Which of the two the expansion is comes
+            // from the SUBSCRIPT, i.e. at run time, so both are emitted and selected.
+            if (isPatOp(pe)) {
+                var mOp = patOpKind(pe)
+                var mMode = patOpMode(pe, anchor)
+                var mPatW = (words.length > 0) ? words[0] : null
+                var mRepW = (words.length > 1) ? words[1] : null
+                var mOpC = llvm.constant.NewInt(i32, mOp)
+                var mModeC = llvm.constant.NewInt(i32, mMode)
+                return {f: true, c: undefined, fn: function(b) {
+                    var rs = subOf(b); b = rs.b
+                    var k = kindOf(b, rs.v)
+                    var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
+                    var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
+                    var pv = emptyPtr(b)
+                    if (mPatW != null) { var rp3 = evalWord(b, mPatW); b = rp3.b; pv = rp3.v }
+                    var rv3 = emptyPtr(b)
+                    if (mRepW != null) { var rr3 = evalWord(b, mRepW); b = rr3.b; rv3 = rr3.v }
+                    var allE = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                    var lstM = b.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC,
+                                                  ifsFirstValue(b), b.NewZExt(star, i32)])
+                    var evM = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
+                    var elM = evM
+                    if (mOp == 0) { elM = b.NewCall(rtStrip, [evM, pv, mModeC]) }
+                    else if (mOp == 1) { elM = b.NewCall(rtReplace, [evM, pv, rv3, mModeC]) }
+                    else { elM = b.NewCall(rtCase, [evM, mModeC, pv]) }
+                    return {b: b, v: b.NewSelect(whole, lstM, elM)}
+                }}
+            }
             // ${a[k]-default} and its siblings: the subscript branch used to answer the
             // ELEMENT and drop OP on the floor, so a missing element expanded to "" where
             // bash 5.3 expands the default (docs/todo.md 1.8). The arms are the scalar
@@ -1674,6 +1764,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     lst = pickedL
                 }
                 var sel = b.NewSelect(whole, lst, one1)
+                // ${a[@]@Q} TRANSFORMS EVERY ELEMENT and the result is still a field list -
+                // `a=(pa pb); echo "${a[@]@Q}"` is `'pa' 'pb'`. This handed rt_shquote the
+                // whole ENCODED list instead, so the 0x02 / 0x01 marker bytes came out as
+                // data: the native binary printed `$'\002pa\001pb\001'` where the
+                // interpreter half and bash 5.3.15 both print the two quoted elements.
+                // Found while probing the pattern-operator fix above, which is the same
+                // per-element walk (rt_mapf). @A and @a name the VARIABLE rather than an
+                // element, and @P is not modelled, so those three keep the scalar path.
+                if (xf != "" && op == "" && xfMapKind(xf) >= 0) {
+                    var allX = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                    var lstX = b.NewCall(rtMapf, [allX, llvm.constant.NewInt(i32, xfMapKind(xf)),
+                                                  emptyPtr(b), emptyPtr(b),
+                                                  llvm.constant.NewInt(i32, xfMapMode(xf)),
+                                                  ifsFirstValue(b), b.NewZExt(star, i32)])
+                    return {b: b, v: b.NewSelect(whole, lstX, applyXf(b, one1))}
+                }
                 // ${a[i]@Q} and friends: the transform applies to the ELEMENT, exactly as
                 // it does to a scalar. Without this the array path silently dropped it.
                 if (xf != "") { return {b: b, v: applyXf(b, sel)} }
@@ -1985,16 +2091,53 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: bb, v: v}
             }, c: undefined}
         }
+        // ONE UNQUOTED EXPANSION AND NOTHING ELSE - `$i`, `$@`, `${a[@]}` - IS ITS OWN FIELD
+        // LIST, and it is by far the commonest splittable word. There is no literal text for
+        // a boundary delimiter to separate it from, so neither flag can change the answer
+        // (a leading one finds nothing open, a trailing one closes the last field the word
+        // would have closed anyway), and the acc/open assembly below can only rebuild what
+        // rt_splitifs already returned.
+        //
+        // THIS IS A PERFORMANCE ARM AND IT IS MEASURED. Without it the boundary state
+        // machine costs five runtime calls per word where the old code cost two, and
+        // tests/bench/mod.sh - whose loop head is `[ $i -lt 40000 ]`, one such word per
+        // iteration - read +9.20% against a 0.66% spread, five draws. With it the row is
+        // FASTER than the baseline, because the old code paid rt_bnd_acc + rt_bnd_open +
+        // two rt_strcat to wrap a list that was already the answer.
+        if (segs.length == 1 && segs[0].sp != undefined) {
+            var only = segs[0].sp
+            return {s: anySub, f: true, c: undefined, fn: function(b) {
+                var r0 = only.fn(b)
+                b = r0.b
+                var isL0 = b.NewICmp(llvm.enum.IPredEQ,
+                            b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, r0.v, zero)), i32),
+                            llvm.constant.NewInt(i32, 2))
+                return {b: b, v: b.NewSelect(isL0, r0.v, b.NewCall(rtSplitIfs, [r0.v, ifsValue(b)]))}
+            }}
+        }
         // Some segment can produce several fields: build the list, joining at the boundaries.
-        // A word made only of expansions that produced nothing disappears entirely.
+        //
+        // A DELIMITER AT EITHER END OF AN UNQUOTED EXPANSION SEPARATES IT FROM THE LITERAL
+        // TEXT BESIDE IT (docs/todo.md 2.15): `x="  a   b  "; echo w:[$x]` is four words in
+        // bash 5.3.15 - `w:[`, `a`, `b`, `]` - and was one, `w:[a b]`. rt_splitifs throws
+        // the leading and trailing IFS whitespace away, which is right for the fields and
+        // loses exactly the fact that there was a boundary there, so the two flags are asked
+        // of the RAW value and `opened` - whether anything has gone into the field under
+        // construction since the last close - joins acc and open as loop-carried state.
+        // rt_bnd_acc2 in languages/lib/bash-rt.c has the rule and why only IFS WHITESPACE
+        // leads; bash-interpreter.abnf's mkWord is the same state machine. A word that
+        // ends with nothing open produces no final field, which is also what used to make
+        // the `lit`/empty special case necessary.
         return {s: anySub, f: true, c: undefined, fn: function(b) {
             var acc = gepStr(b, "\x02")
             var open = emptyPtr(b)
-            var lit = zero
+            var opened = zero
             var k
             for (k = 0; k < segs.length; k++) {
                 var sg = segs[k]
                 var fv = null
+                var lead = zero
+                var trail = zero
                 if (sg.sp != undefined) {
                     var r = sg.sp.fn(b)
                     b = r.b
@@ -2002,7 +2145,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var isL = b.NewICmp(llvm.enum.IPredEQ,
                                 b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, r.v, zero)), i32),
                                 llvm.constant.NewInt(i32, 2))
-                    fv = b.NewSelect(isL, r.v, b.NewCall(rtSplitIfs, [r.v, ifsValue(b)]))
+                    var ifsv = ifsValue(b)
+                    fv = b.NewSelect(isL, r.v, b.NewCall(rtSplitIfs, [r.v, ifsv]))
+                    // "$@" and ${a[@]} arrive as a list already and have no boundary of
+                    // their own; only a value this word had to split does.
+                    lead = b.NewSelect(isL, zero, b.NewCall(rtIfsLead, [r.v, ifsv]))
+                    trail = b.NewSelect(isL, zero, b.NewCall(rtIfsTrail, [r.v, ifsv]))
                 } else if (sg.f == true) {
                     var r2 = sg.fn(b)
                     b = r2.b
@@ -2010,20 +2158,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else {
                     var r3 = sg.fn(b)
                     b = r3.b
-                    lit = one
                     open = b.NewCall(rtStrcat, [open, r3.v])
+                    opened = one
                 }
                 if (fv != null) {
-                    var nacc = b.NewCall(rtBndAcc, [acc, open, fv])
-                    open = b.NewCall(rtBndOpen, [open, fv])
+                    var nacc = b.NewCall(rtBndAcc2, [acc, open, opened, fv, lead, trail])
+                    var nopen = b.NewCall(rtBndOpen2, [open, opened, fv, lead, trail])
+                    opened = b.NewCall(rtBndOpened2, [opened, fv, lead, trail])
+                    open = nopen
                     acc = nacc
                 }
             }
             var full = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])
-            // nothing literal AND every expansion empty -> no field at all
-            var empty = b.NewAnd(b.NewICmp(llvm.enum.IPredEQ, lit, zero),
-                                 b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStrlen, full), llvm.constant.NewInt(i32, 2)))
-            return {b: b, v: b.NewSelect(empty, gepStr(b, "\x02"), full)}
+            return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredNE, opened, zero), full, acc)}
         }}
     }
 
@@ -3008,6 +3155,99 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return c.compile(frag).stack[0]
     }
 
+    // ONE pass over the format, emitted into b. The operand of the j-th conversion comes
+    // from `vals[base + j]` when listV is null (the arity is known while emitting) and from
+    // rt_getfield(listV, baseV + j) when it is not - see emitPrintf.
+    // Answers {b, out, used, n}: `used` is false for a format with no conversion at all
+    // (which consumes nothing and must not be repeated), `n` the number consumed.
+    function emitPrintfPass(b, fmt, out, vals, base, listV, baseV) {
+        var used = false
+        var lit = ""
+        var nc = 0
+        var i = 0
+        while (i < fmt.length) {
+            var ch = fmt.charAt(i)
+            if (ch == "\\" && i + 1 < fmt.length) {
+                var e = fmt.charAt(i + 1)
+                i = i + 2
+                if (e == "n") { lit = lit + "\n" }
+                else if (e == "t") { lit = lit + "\t" }
+                else if (e == "r") { lit = lit + "\r" }
+                else if (e == "\\") { lit = lit + "\\" }
+                else { lit = lit + "\\" + e }
+            } else if (ch == "%") {
+                i = i + 1
+                if (fmt.charAt(i) == "%") { lit = lit + "%"; i = i + 1 }
+                else {
+                    if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]); lit = "" }
+                    var left = 0, zpad = 0, alt = 0
+                    var flagging = true
+                    while (flagging && i < fmt.length) {
+                        var fc = fmt.charAt(i)
+                        if (fc == "-") { left = 1; i = i + 1 }
+                        else if (fc == "0") { zpad = 1; i = i + 1 }
+                        else if (fc == "#") { alt = 1; i = i + 1 }
+                        else if (fc == "+" || fc == " ") { i = i + 1 }
+                        else { flagging = false }
+                    }
+                    var width = 0
+                    while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                        width = width * 10 + (fmt.charCodeAt(i) - 48)
+                        i = i + 1
+                    }
+                    var prec = -1
+                    if (fmt.charAt(i) == ".") {
+                        i = i + 1
+                        prec = 0
+                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                            prec = prec * 10 + (fmt.charCodeAt(i) - 48)
+                            i = i + 1
+                        }
+                    }
+                    var conv = fmt.charAt(i)
+                    i = i + 1
+                    var av = emptyPtr(b)
+                    if (listV == null) {
+                        if (base + nc < vals.length) { av = vals[base + nc] }
+                    } else {
+                        av = b.NewCall(rtGetField,
+                                       [listV, b.NewAdd(baseV, llvm.constant.NewInt(i32, nc))])
+                    }
+                    nc = nc + 1
+                    used = true
+                    var piece = av
+                    var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
+                    var altC = llvm.constant.NewInt(i32, alt)
+                    if (conv == "d" || conv == "i") { piece = b.NewCall(rtInt2str, b.NewCall(rtStr2int, av)) }
+                    else if (conv == "c") { piece = b.NewCall(rtSubstr, [av, zero, one]) }
+                    else if (conv == "u") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 10), zero, zero]) }
+                    else if (conv == "o") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 8), zero, altC]) }
+                    else if (conv == "x") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), zero, altC]) }
+                    else if (conv == "X") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), one, altC]) }
+                    else if (conv == "b") { piece = b.NewCall(rtUnescape, av) }
+                    else if (conv == "q") { piece = b.NewCall(rtPfq, av) }
+                    else if (conv == "s" && prec >= 0) {
+                        piece = b.NewCall(rtSubstr, [av, zero, llvm.constant.NewInt(i32, prec)])
+                    }
+                    // A precision on an integer is a minimum DIGIT count and it cancels
+                    // the 0 flag, exactly as in the interpreter half.
+                    if (isNum && prec >= 0) {
+                        zpad = 0
+                        piece = b.NewCall(rtIntPrec, [piece, llvm.constant.NewInt(i32, prec)])
+                    }
+                    if (width > 0) {
+                        piece = b.NewCall(rtPad, [piece, llvm.constant.NewInt(i32, width),
+                                                  llvm.constant.NewInt(i32, left),
+                                                  llvm.constant.NewInt(i32, zpad)])
+                    }
+                    out = b.NewCall(rtStrcat, [out, piece])
+                }
+            } else { lit = lit + ch; i = i + 1 }
+        }
+        if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]) }
+        return {b: b, out: out, used: used, n: nc}
+    }
+
     // printf FORMAT [ARG...] : the format is a compile-time literal, so it is parsed here and
     // the passes over the argument list are unrolled. The result is built with rt_strcat and
     // then printed, or stored when -v NAME was given.
@@ -3025,96 +3265,110 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a[0].c == undefined) { fail("printf needs a literal format string in this compiler") }
         var fmt = a[0].c
         var rest = a.slice(1)
-        var vals = []
-        var i
-        for (i = 0; i < rest.length; i++) { var rv = evalWord(b, rest[i]); b = rv.b; vals.push(rv.v) }
         var out = emptyPtr(b)
-        var ai = 0
-        var pass = 0
-        while (pass == 0 || ai < vals.length) {
-            pass = pass + 1
-            var used = false
-            var lit = ""
-            i = 0
-            while (i < fmt.length) {
-                var ch = fmt.charAt(i)
-                if (ch == "\\" && i + 1 < fmt.length) {
-                    var e = fmt.charAt(i + 1)
-                    i = i + 2
-                    if (e == "n") { lit = lit + "\n" }
-                    else if (e == "t") { lit = lit + "\t" }
-                    else if (e == "r") { lit = lit + "\r" }
-                    else if (e == "\\") { lit = lit + "\\" }
-                    else { lit = lit + "\\" + e }
-                } else if (ch == "%") {
-                    i = i + 1
-                    if (fmt.charAt(i) == "%") { lit = lit + "%"; i = i + 1 }
-                    else {
-                        if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]); lit = "" }
-                        var left = 0, zpad = 0, alt = 0
-                        var flagging = true
-                        while (flagging && i < fmt.length) {
-                            var fc = fmt.charAt(i)
-                            if (fc == "-") { left = 1; i = i + 1 }
-                            else if (fc == "0") { zpad = 1; i = i + 1 }
-                            else if (fc == "#") { alt = 1; i = i + 1 }
-                            else if (fc == "+" || fc == " ") { i = i + 1 }
-                            else { flagging = false }
-                        }
-                        var width = 0
-                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                            width = width * 10 + (fmt.charCodeAt(i) - 48)
-                            i = i + 1
-                        }
-                        var prec = -1
-                        if (fmt.charAt(i) == ".") {
-                            i = i + 1
-                            prec = 0
-                            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                                prec = prec * 10 + (fmt.charCodeAt(i) - 48)
-                                i = i + 1
-                            }
-                        }
-                        var conv = fmt.charAt(i)
-                        i = i + 1
-                        var av = (ai < vals.length) ? vals[ai] : emptyPtr(b)
-                        ai = ai + 1
-                        used = true
-                        var piece = av
-                        var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
-                        var altC = llvm.constant.NewInt(i32, alt)
-                        if (conv == "d" || conv == "i") { piece = b.NewCall(rtInt2str, b.NewCall(rtStr2int, av)) }
-                        else if (conv == "c") { piece = b.NewCall(rtSubstr, [av, zero, one]) }
-                        else if (conv == "u") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 10), zero, zero]) }
-                        else if (conv == "o") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 8), zero, altC]) }
-                        else if (conv == "x") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), zero, altC]) }
-                        else if (conv == "X") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), one, altC]) }
-                        else if (conv == "b") { piece = b.NewCall(rtUnescape, av) }
-                        else if (conv == "q") { piece = b.NewCall(rtPfq, av) }
-                        else if (conv == "s" && prec >= 0) {
-                            piece = b.NewCall(rtSubstr, [av, zero, llvm.constant.NewInt(i32, prec)])
-                        }
-                        // A precision on an integer is a minimum DIGIT count and it cancels
-                        // the 0 flag, exactly as in the interpreter half.
-                        if (isNum && prec >= 0) {
-                            zpad = 0
-                            piece = b.NewCall(rtIntPrec, [piece, llvm.constant.NewInt(i32, prec)])
-                        }
-                        if (width > 0) {
-                            piece = b.NewCall(rtPad, [piece, llvm.constant.NewInt(i32, width),
-                                                      llvm.constant.NewInt(i32, left),
-                                                      llvm.constant.NewInt(i32, zpad)])
-                        }
-                        out = b.NewCall(rtStrcat, [out, piece])
-                    }
-                } else { lit = lit + ch; i = i + 1 }
+        var i
+        // AN UNQUOTED OPERAND IS FIELD-SPLIT, AND THAT MAKES THE ARITY A RUN-TIME NUMBER.
+        // `x="  a   b  "; printf '%s|' $x` prints `a|b|` in bash and in this language's
+        // interpreter half, and printed `a b|` here (docs/todo.md 2.15): evalWord joins a
+        // field list back into one string, which is right for a builtin with a fixed
+        // argument list and wrong for the one builtin whose format is REUSED until the
+        // operands run out.
+        //
+        // Only a word that can produce several fields forces the run-time form, and the
+        // check is the same `.f` flag evalWord tests, so `printf '%s\n' "$x"` - every
+        // quoted or literal operand - keeps the fully unrolled emission it had.
+        var dyn = false
+        for (i = 0; i < rest.length; i++) { if (rest[i].f == true) { dyn = true } }
+        if (!dyn) {
+            var vals = []
+            for (i = 0; i < rest.length; i++) { var rv = evalWord(b, rest[i]); b = rv.b; vals.push(rv.v) }
+            var ai = 0
+            var pass = 0
+            while (pass == 0 || ai < vals.length) {
+                pass = pass + 1
+                var pr = emitPrintfPass(b, fmt, out, vals, ai, null, null)
+                b = pr.b
+                out = pr.out
+                if (pr.used) { ai = ai + pr.n } else { ai = vals.length }
             }
-            if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]) }
-            if (!used) { ai = vals.length }
+        } else {
+            // The operands as ONE field list, walked by a real loop. rt_getfield answers ""
+            // past the end, which is what a short last pass wants.
+            var listP = b.NewAlloca(i8ptr)
+            b.NewStore(gepStr(b, "\x02"), listP)
+            for (i = 0; i < rest.length; i++) {
+                var rw = rest[i].fn(b)
+                b = rw.b
+                b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), rw.v]), listP)
+            }
+            var listV = b.NewLoad(i8ptr, listP)
+            var nargs = b.NewCall(rtNFields, listV)
+            // How many conversions one pass consumes. Emitting a throwaway pass to count
+            // them would emit the calls too, so the format is scanned here.
+            var nconv = printfArity(fmt)
+            if (nconv == 0) {
+                var pr0 = emitPrintfPass(b, fmt, out, [], 0, null, null)
+                b = pr0.b
+                out = pr0.out
+            } else {
+                // out and the operand cursor are loop-carried, so they live in allocas of
+                // the block BEFORE the loop - an alloca inside the body would grow the
+                // frame once per pass.
+                var outP = b.NewAlloca(i8ptr)
+                b.NewStore(out, outP)
+                var aiP = b.NewAlloca(i32)
+                b.NewStore(zero, aiP)
+                var body = curF.NewBlock("")
+                var done = curF.NewBlock("")
+                b.NewBr(body)
+                var baseV = body.NewLoad(i32, aiP)
+                // The pass emits calls only, never a block, so it ends where it began and
+                // the back edge is body -> body.
+                var prd = emitPrintfPass(body, fmt, body.NewLoad(i8ptr, outP), [], 0, listV, baseV)
+                var bb = prd.b
+                bb.NewStore(prd.out, outP)
+                var nextAi = bb.NewAdd(baseV, llvm.constant.NewInt(i32, nconv))
+                bb.NewStore(nextAi, aiP)
+                bb.NewCondBr(bb.NewICmp(llvm.enum.IPredSLT, nextAi, nargs), body, done)
+                b = done
+                out = done.NewLoad(i8ptr, outP)
+            }
         }
         if (dest != null) { storeVar(b, dest, out) } else { b.NewCall(rtPrints, out) }
         storeStatusI(b, 0)
         return b
+    }
+
+    // The number of conversions one pass over `fmt` consumes: the same walk emitPrintfPass
+    // makes, with everything but the cursor removed. "%%" is a literal percent and consumes
+    // nothing.
+    function printfArity(fmt) {
+        var n = 0
+        var i = 0
+        while (i < fmt.length) {
+            var ch = fmt.charAt(i)
+            if (ch == "\\" && i + 1 < fmt.length) { i = i + 2 }
+            else if (ch == "%") {
+                i = i + 1
+                if (fmt.charAt(i) == "%") { i = i + 1 }
+                else {
+                    var flagging = true
+                    while (flagging && i < fmt.length) {
+                        var fc = fmt.charAt(i)
+                        if (fc == "-" || fc == "0" || fc == "#" || fc == "+" || fc == " ") { i = i + 1 }
+                        else { flagging = false }
+                    }
+                    while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { i = i + 1 }
+                    if (fmt.charAt(i) == ".") {
+                        i = i + 1
+                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { i = i + 1 }
+                    }
+                    i = i + 1
+                    n = n + 1
+                }
+            } else { i = i + 1 }
+        }
+        return n
     }
 
     // read [-r] NAME... : one line of standard input, split on IFS, the last name taking the
@@ -3132,13 +3386,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { names.push(a) }
             i = i + 1
         }
-        if (arrName == null && names.length == 0) { names.push("REPLY") }
+        // NO NAMES AT ALL: bash assigns the line to REPLY "without the ending delimiter but
+        // otherwise unmodified" - not field 0, and not stripped. This used to push "REPLY"
+        // onto `names` and take it through rt_field, so `read -r <<< "  hello  world  "`
+        // lost the leading blanks the interpreter half and bash both keep (docs/todo.md 2.15).
+        var rawReply = (arrName == null && names.length == 0)
         var line = b.NewCall(rtReadLine, zero)
         var eof = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gReadEof), zero)
         var eofB = curF.NewBlock(""), okB = curF.NewBlock(""), merge = curF.NewBlock("")
         b.NewCondBr(eof, eofB, okB)
         var k
         for (k = 0; k < names.length; k++) { storeVar(eofB, names[k], emptyPtr(eofB)) }
+        if (rawReply) { storeVar(eofB, "REPLY", emptyPtr(eofB)) }
         if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)) }
         eofB.NewStore(one, gStatus)
         eofB.NewBr(merge)
@@ -3148,6 +3407,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             okB.NewCall(rtArrClear, gepStr(okB, arrName))
             okB.NewCall(rtArrAppend, [gepStr(okB, arrName), okB.NewCall(rtSplitIfs, [line, ifs])])
         }
+        if (rawReply) { storeVar(okB, "REPLY", line) }
         for (k = 0; k < names.length; k++) {
             var isLast = (k == names.length - 1) ? 1 : 0
             storeVar(okB, names[k], okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k),
@@ -3416,7 +3676,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bbox2 = {b: b}
             evalArgs(bbox2, argTs)
             b = bbox2.b
-            b.NewCall(rtPrints, gepStr(b, "bash-to-llvm-ir: command not found: " + cmd + "\n"))
+            // Prefixed with $0, like every shell diagnostic, and NOT with the grammar's
+            // name - that was the engine naming itself, and it is what kept the abort row
+            // two-leg (docs/todo.md 1.13). bash-interpreter.abnf prints the same line and
+            // exits 127 too.
+            b.NewCall(rtPrints, gepStr(b, c.file + ": command not found: " + cmd + "\n"))
             b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
             b.NewStore(one, gExited)
             b.NewBr(curExit)

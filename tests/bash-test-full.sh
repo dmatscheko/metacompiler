@@ -1647,6 +1647,117 @@ declare -i Q32="7"'
   check dp13 "$(declare -p nosuchname32 2>/dev/null)" ""
 }
 
+# ===== SECTION 33: word-splitting boundaries, read's remainder, $0, and a
+#       pattern operator on a subscripted expansion (docs/todo.md 2.15, 1.13) =====
+# Every assertion here was settled against bash 5.3.15 before it was written,
+# and each one FAILED in at least one engine at ec39aef.
+s33() {
+  # --- a DELIMITER AT THE EDGE of an unquoted expansion separates it from the
+  # literal text beside it: `w:[` `a` `b` `]` is four words, not one.
+  local x="  a   b  "
+  check wb1 "$(printf '<%s>' w:[$x])" '<w:[><a><b><]>'
+  check wb2 "$(printf '<%s>' $x)" '<a><b>'
+  check wb3 "$(printf '<%s>' pre$x)" '<pre><a><b>'
+  check wb4 "$(printf '<%s>' $x post)" '<a><b><post>'
+  local y="a " z=" b"
+  check wb5 "$(printf '<%s>' $y$z)" '<a><b>'
+  check wb6 "$(printf '<%s>' ""$x)" '<><a><b>'
+  check wb7 "$(printf '<%s>' $x"")" '<a><b><>'
+  local ws33="   "
+  check wb8 "$(printf '<%s>' w:[$ws33])" '<w:[><]>'
+  local e33=""
+  check wb9 "$(printf '<%s>' w:[$e33])" '<w:[]>'
+  local h33="a  b"
+  check wb10 "$(printf '<%s>' pre$h33 post)" '<prea><b><post>'
+  # a LEADING non-whitespace delimiter already makes an empty first field, so it
+  # must not separate twice: three words here, not four
+  local c33=":a:"
+  IFS=: check wb11 "$(IFS=: ; printf '<%s>' w:[$c33])" '<w:[><a><]>'
+  IFS=$' \t\n'
+  # a QUOTED list inside a word joins at its boundaries and splits nowhere
+  local arr33=(one two)
+  check wb12 "$(printf '<%s>' x"${arr33[@]}"y)" '<xone><twoy>'
+  check wb13 "$(printf '<%s>' x${arr33[@]}y)" '<xone><twoy>'
+  set -- p q
+  check wb14 "$(printf '<%s>' a"$@"b)" '<ap><qb>'
+  check wb15 "$(printf '<%s>' "$@"z)" '<p><qz>'
+
+  # --- printf REUSES ITS FORMAT until the operands run out, and an unquoted
+  # operand is field-split first, so the number of passes is a run-time number.
+  check pf1 "$(printf '%s|' $x)" 'a|b|'
+  check pf2 "$(printf '[%s]' $x)" '[a][b]'
+  check pf3 "$(printf '%s|' "$x")" '  a   b  |'
+  local y33="p q r"
+  check pf4 "$(printf '%s-%s|' $y33)" 'p-q|r-|'
+  check pf5 "$(printf 'noconv' $y33)" 'noconv'
+  printf -v V33 '%s|' $y33
+  check pf6 "$V33" 'p|q|r|'
+  check pf7 "$(printf '%s|' $e33)" '|'
+
+  # --- what the LAST name of a `read` gets: the single remaining field, or the
+  # RAW remainder less trailing IFS WHITESPACE.
+  local a33 b33 c34
+  read -r a33 b33 <<< "  x   y   z  "
+  check rd1 "[$a33][$b33]" '[x][y   z]'
+  read -r a33 <<< "  hd  "
+  check rd2 "[$a33]" '[hd]'
+  IFS=: read -r a33 b33 <<< "p::q:r:"
+  check rd3 "[$a33][$b33]" '[p][:q:r:]'
+  IFS=: read -r a33 <<< "p:q:"
+  check rd4 "[$a33]" '[p:q:]'
+  IFS=: read -r a33 b33 <<< ":x:"
+  check rd5 "[$a33][$b33]" '[][x]'
+  IFS=: read -r a33 b33 <<< "p:q:"
+  check rd6 "[$a33][$b33]" '[p][q]'
+  IFS=: read -r a33 b33 <<< ":a:b:"
+  check rd7 "[$a33][$b33]" '[][a:b:]'
+  IFS=: read -r a33 b33 <<< "a::: "
+  check rd8 "[$a33][$b33]" '[a][:: ]'
+  read -r a33 b33 c34 <<< "1 2"
+  check rd9 "[$a33][$b33][$c34]" '[1][2][]'
+  # no names at all: the line unmodified, leading blanks included
+  read -r <<< "  hello  world  "
+  check rd10 "[$REPLY]" '[  hello  world  ]'
+  REPLY=keep
+  read -r </dev/null
+  check rd11 "[$REPLY]" '[]'
+
+  # --- a PATTERN OPERATOR on a subscripted expansion, applied per ELEMENT
+  local A33=(px1 px2 axe)
+  check pa1 "$(printf '<%s>' "${A33[@]/x/Y}")" '<pY1><pY2><aYe>'
+  check pa2 "${A33[*]/x/Y}" 'pY1 pY2 aYe'
+  check pa3 "${A33[1]/x/Y}" 'pY2'
+  check pa4 "$(printf '<%s>' "${A33[@]#p}")" '<x1><x2><axe>'
+  check pa5 "${A33[1]#p}" 'x2'
+  check pa6 "${A33[2]%e}" 'ax'
+  check pa7 "${A33[*]##*x}" '1 2 e'
+  check pa8 "${A33[*]^^}" 'PX1 PX2 AXE'
+  check pa9 "${A33[1]^^}" 'PX2'
+  check pa10 "${A33[*]/#p/Q}" 'Qx1 Qx2 axe'
+  check pa11 "${A33[*]/%e/Q}" 'px1 px2 axQ'
+  check pa12 "[${A33[9]#p}]" '[]'
+  # per ELEMENT and only then joined - the join-first answer would be "Qa ba"
+  local B33=(aa ba)
+  check pa13 "${B33[*]/a/Q}" 'Qa bQ'
+  local -A M33=([k1]=pAx)
+  check pa14 "${M33[k1],,}" 'pax'
+  # ...and the same walk for the @-transforms, which leaked the field-list
+  # marker bytes into the output in the compiled half
+  local C33=(pa pb)
+  check pa15 "$(printf '<%s>' "${C33[@]@Q}")" "<'pa'><'pb'>"
+  check pa16 "${C33[*]@U}" 'PA PB'
+  check pa17 "${C33[1]@Q}" "'pb'"
+
+  # --- $0 is the SCRIPT, not the engine. The --full runner copies this file to a
+  # temporary name, so the assertion is on what $0 must NOT be: every engine used
+  # to answer the literal "bash", and the compiled halves named the GRAMMAR in
+  # their diagnostics (docs/todo.md 1.13).
+  case "$0" in
+    ""|bash|*.abnf) check zr1 "$0" "the script's own path" ;;
+    *) check zr1 ok ok ;;
+  esac
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1679,5 +1790,6 @@ s29   # SECTION-CALL 29
 s30   # SECTION-CALL 30
 s31   # SECTION-CALL 31
 s32   # SECTION-CALL 32
+s33   # SECTION-CALL 33
 echo "full: $checks checks, $fails failures"
 exit $fails

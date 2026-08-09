@@ -1109,6 +1109,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var condDepth = 0        // >0 while a command runs as a CONDITION (set -e does not fire)
     var abortSignal = null   // set by a set -u failure during expansion
 
+    // $0 and the prefix on every diagnostic: the program's own path, exactly as this
+    // process was given it. Both are what a real shell answers, and both used to be the
+    // engine naming itself instead (docs/todo.md 1.13, 2.15).
+    var scriptName = c.file
+
     // There is no process environment behind a grammar run, so the few variables a script may
     // reasonably expect to exist get a fixed, documented default.
     vars["$HOME"] = "/home/user"; varsHas["$HOME"] = true; varNames.push("HOME")
@@ -1177,7 +1182,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "@") { return encFields(posParams) }
         if (allDigits(name)) {
             var idx = strToInt(name)
-            if (idx == 0) { return "bash" }
+            // $0 IS THE SCRIPT, and both halves answered the literal "bash" (docs/todo.md
+            // 1.13, 2.15). c.file is the program's path exactly as the metacompiler was
+            // given it, which is what a real shell's $0 holds.
+            if (idx == 0) { return scriptName }
             if (idx <= posParams.length) { return posParams[idx - 1] }
             return ""
         }
@@ -1547,6 +1555,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return p.slice(last + 1)
     }
 
+    // The parameter-expansion operators that take a GLOB and rewrite the value: the two
+    // strips, the two case maps and the two replacements. They are the ones that apply
+    // element-wise to a subscripted expansion, and one implementation serves both the
+    // scalar sites and that walk.
+    function isPatOp(pe) {
+        if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") { return true }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return true }
+        return (pe == "/" || pe == "//")
+    }
+    function applyPatOp(v, pe, anchor, pat, rep) {
+        if (pe == "/" || pe == "//") {
+            var rmode = (anchor != "") ? anchor : ((pe == "//") ? "all" : "one")
+            if (pat == "") { return v }
+            return replacePat(v, pat, rep, rmode)
+        }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return caseMap(v, pe, pat) }
+        if (pat == "") { return v }
+        return stripPat(v, pat, (pe == "#" || pe == "##"), (pe == "##" || pe == "%%"))
+    }
+
     function mkParamExp(items) {
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
@@ -1638,6 +1666,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return joinList(outv, ifsFirst())
                 }
             }
+            // A PATTERN OPERATOR ON A SUBSCRIPTED EXPANSION was parsed and then dropped on
+            // the floor in every engine: ${a[@]/x/Y} and ${a[1]#p} answered the untouched
+            // element or element list (docs/todo.md 2.15). Silently wrong, which is the
+            // worst kind.
+            //
+            // bash applies the operator to EVERY ELEMENT and only then joins, and the
+            // difference is observable rather than academic: `b=(aa ba); echo "${b[*]/a/Q}"`
+            // is "Qa bQ" in bash 5.3.15, where joining first and replacing once would give
+            // "Qa ba". The pattern and the replacement are evaluated ONCE, before the walk,
+            // so a command substitution in either runs once and not once per element.
+            if (isPatOp(pe)) {
+                var idxPe = pe
+                var idxAnch = anchor
+                var idxPat = (args.length > 0) ? args[0] : null
+                var idxRep = (args.length > 1) ? args[1] : null
+                var patName = name
+                return function() {
+                    var sub = readIdx()
+                    var pat = (idxPat != null) ? wordJoin(idxPat()) : ""
+                    var rep = (idxRep != null) ? wordJoin(idxRep()) : ""
+                    if (sub != "@" && sub != "*") {
+                        return applyPatOp(scGet(patName, sub), idxPe, idxAnch, pat, rep)
+                    }
+                    var pvals = scValList(patName)
+                    var pout = []
+                    var pq
+                    for (pq = 0; pq < pvals.length; pq++) {
+                        pout.push(applyPatOp(pvals[pq], idxPe, idxAnch, pat, rep))
+                    }
+                    if (sub == "@") { return encFields(pout) }
+                    return joinList(pout, ifsFirst())
+                }
+            }
             var idxOp = op
             var idxWordT = wordT
             return function() {
@@ -1679,35 +1740,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lenT0 = (args.length > 1) ? args[1] : null
             return function() { return sliceStr(getVarVal(nameOf()), offT0, lenT0) }
         }
-        if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") {
-            var isPre = (pe == "#" || pe == "##")
-            var lng = (pe == "##" || pe == "%%")
-            var patT = (args.length > 0) ? args[0] : null
-            return function() {
-                var v = getVarVal(nameOf())
-                var pat = (patT != null) ? wordJoin(patT()) : ""
-                if (pat == "") { return v }
-                return stripPat(v, pat, isPre, lng)
-            }
-        }
-        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") {
-            var cmode = pe
-            var cpT = (args.length > 0) ? args[0] : null
-            return function() {
-                var cpat = (cpT != null) ? wordJoin(cpT()) : ""
-                return caseMap(getVarVal(nameOf()), cmode, cpat)
-            }
-        }
-        if (pe == "/" || pe == "//") {
-            var rmode = (anchor != "") ? anchor : ((pe == "//") ? "all" : "one")
+        // The two strips, the two case maps and the two replacements, all through the one
+        // applyPatOp the subscripted branch above uses element-wise.
+        if (isPatOp(pe)) {
+            var sPe = pe
+            var sAnch = anchor
             var pT = (args.length > 0) ? args[0] : null
             var rT = (args.length > 1) ? args[1] : null
             return function() {
-                var v = getVarVal(nameOf())
                 var pat = (pT != null) ? wordJoin(pT()) : ""
                 var rep = (rT != null) ? wordJoin(rT()) : ""
-                if (pat == "") { return v }
-                return replacePat(v, pat, rep, rmode)
+                return applyPatOp(getVarVal(nameOf()), sPe, sAnch, pat, rep)
             }
         }
         if (op == "") { return function() { return getVarVal(nameOf()) } }
@@ -2484,36 +2527,100 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var canSplit = false
         var i
         for (i = 0; i < segThunks.length; i++) { if (typeof segThunks[i] != "function") { canSplit = true } }
+        // No segment is an UNQUOTED expansion, so nothing here is split - but a QUOTED
+        // "$@" or "${a[@]}" still contributes several fields, and concatenating its encoded
+        // form as if it were text was a live halves divergence `--cross` had never reached:
+        // `arr=(one two); printf '<%s>' x"${arr[@]}"y` printed `<x\x02one\x01two\x01y>` here,
+        // the 0x02 marker and all, where the compiled half and bash 5.3.15 both print
+        // `<xone><twoy>`; and `set -- p q; printf '<%s>' "$@"z` LOST the z entirely, because
+        // decFields discards a tail with no closing 0x01. Same boundary join as mkWord
+        // below, without the delimiter state - a quoted expansion has no boundary.
         if (!canSplit) {
             return function() {
-                var out = ""
+                var res = []
+                var open = ""
+                var opened = false
                 var k
-                for (k = 0; k < segThunks.length; k++) { out = out + segThunks[k]() }
-                return out
+                for (k = 0; k < segThunks.length; k++) {
+                    var v = segThunks[k]()
+                    if (isFields(v)) {
+                        var f = decFields(v)
+                        if (f.length > 0) {
+                            open = open + f[0]
+                            var j
+                            for (j = 1; j < f.length; j++) { res.push(open); open = f[j] }
+                            opened = true
+                        }
+                    } else { open = open + v; opened = true }
+                }
+                if (opened) { res.push(open) }
+                if (res.length == 1) { return res[0] }
+                return encFields(res)
             }
         }
+        // A DELIMITER AT EITHER END OF AN UNQUOTED EXPANSION SEPARATES IT FROM THE LITERAL
+        // TEXT BESIDE IT, and that was the whole of docs/todo.md 2.15's last case:
+        // `x="  a   b  "; echo w:[$x]` printed `w:[a b]` where bash 5.3.15 prints
+        // `w:[ a b ]` - four words, `w:[`, `a`, `b`, `]`. splitIFS throws leading and
+        // trailing IFS whitespace away, which is right for the fields and loses exactly the
+        // fact that the word had a boundary there.
+        //
+        // So the two boundaries are asked of the RAW value and the assembly becomes a small
+        // state machine: `open` is the field being built and `opened` says whether anything
+        // has been put in it since the last close. A boundary delimiter closes `open` IF one
+        // is open, and does nothing otherwise - which is what makes `echo $x` still two
+        // words, `$x$y` with x="a " and y=" b" still two, and `""$x` three (the empty
+        // literal IS an open field). Measured against bash 5.3.15 over twelve words.
+        //
+        // Only IFS WHITESPACE counts as a LEADING boundary: a leading non-whitespace
+        // delimiter already produces an empty first field, which does the same job, and
+        // counting it twice made `IFS=:; c=":a:"; echo w:[$c]` four words where bash says
+        // three. A TRAILING delimiter of either kind closes.
+        //
+        // languages/bash-to-llvm-ir.abnf's mkWord and rt_bnd_acc2 / rt_bnd_open2 /
+        // rt_bnd_opened2 in languages/lib/bash-rt.c are the same state machine.
         return function() {
-            var res = [""]
-            var hadLiteral = false
+            var res = []
+            var open = ""
+            var opened = false
             var k
             for (k = 0; k < segThunks.length; k++) {
                 var sg = segThunks[k]
-                var f = anytype
-                if (typeof sg == "function") { hadLiteral = true; f = [sg()] }
+                if (typeof sg == "function") { open = open + sg(); opened = true }
                 else {
                     var v = sg.sp()
-                    f = isFields(v) ? decFields(v) : splitIFS(v)
-                }
-                if (f.length > 0) {
-                    res[res.length - 1] = res[res.length - 1] + f[0]
-                    var j
-                    for (j = 1; j < f.length; j++) { res.push(f[j]) }
+                    var f = anytype
+                    var lead = false
+                    var trail = false
+                    if (isFields(v)) { f = decFields(v) }
+                    else { f = splitIFS(v); lead = ifsLead(v); trail = ifsTrail(v) }
+                    if (lead && opened) { res.push(open); open = ""; opened = false }
+                    if (f.length > 0) {
+                        open = open + f[0]
+                        var j
+                        for (j = 1; j < f.length; j++) { res.push(open); open = f[j] }
+                        opened = true
+                    }
+                    if (trail && opened) { res.push(open); open = ""; opened = false }
                 }
             }
-            if (!hadLiteral && res.length == 1 && res[0] == "") { return encFields([]) }
+            if (opened) { res.push(open) }
             if (res.length == 1) { return res[0] }
             return encFields(res)
         }
+    }
+    // Does this value BEGIN with a delimiter that separates it from the text before it?
+    // Only IFS whitespace does - see mkWord.
+    function ifsLead(v) {
+        if (v.length == 0) { return false }
+        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
+        return ifsIsWs(seps, chunkAt(v, 0))
+    }
+    // ...and END with one? Here any IFS character does.
+    function ifsTrail(v) {
+        if (v.length == 0) { return false }
+        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
+        return ifsHas(seps, v.charAt(v.length - 1))
     }
 
     // Unquoted \x : drop the backslash, keep the char (\  -> space, \$ -> $, \\ -> \).
@@ -3124,6 +3231,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (stdinPos >= stdinBuf.length) {
             var z
             for (z = 0; z < names.length; z++) { setVarVal(names[z], "") }
+            // At end of file bash CLEARS what it would have set, REPLY included:
+            // `REPLY=keep; read -r </dev/null; echo "[$REPLY]"` prints [].
+            if (arrName == null && names.length == 0) { setVarVal("REPLY", "") }
             if (arrName != null) { arrFromList(arrName, false, []) }
             return 1
         }
@@ -3131,21 +3241,43 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (e < stdinBuf.length && stdinBuf.charAt(e) != "\n") { e = e + 1 }
         var line = stdinBuf.slice(stdinPos, e)
         stdinPos = (e < stdinBuf.length) ? (e + 1) : e
-        var fields = splitIFS(line)
+        var rec = splitIFSRec(line)
+        var fields = rec.f
         if (arrName != null) { arrFromList(arrName, false, fields); return 0 }
         if (names.length == 0) { setVarVal("REPLY", line); return 0 }
         var k
         for (k = 0; k < names.length; k++) {
             if (k == names.length - 1) {
-                var rest = ""
-                var j
-                for (j = k; j < fields.length; j++) { if (j > k) { rest = rest + " " }; rest = rest + fields[j] }
-                setVarVal(names[k], rest)
+                setVarVal(names[k], readRest(line, rec, k))
             } else {
                 setVarVal(names[k], (k < fields.length) ? fields[k] : "")
             }
         }
         return 0
+    }
+    // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined".
+    // This used to join them with a single space, so `IFS=: read -r a b <<< "p::q:r:"`
+    // answered " q r" where bash 5.3.15 answers ":q:r:" and `read -r a b <<< "  x   y   z  "`
+    // answered "y z" where bash answers "y   z" (docs/todo.md 2.15). Measured against bash
+    // 5.3.15 over 26 cases, the rule is:
+    //
+    //   - EXACTLY ONE field left: that field, delimiters and all whitespace gone.
+    //     `read -r a <<< "  only  "` is "only"; `IFS=: read -r a b <<< "p:q:"` is "q".
+    //   - TWO OR MORE: the RAW text from the start of that field to the end of the line,
+    //     less trailing IFS WHITESPACE only. `IFS=: read -r a <<< "p:q:"` keeps its
+    //     trailing colon; `IFS=: read -r a b <<< ":a:b:"` is "a:b:"; and an IFS that does
+    //     not contain the space leaves a trailing space alone ("a::: " -> ":: ").
+    //   - NONE: the empty string.
+    //
+    // languages/lib/bash-rt.c's rt_field is the same three arms.
+    function readRest(line, rec, k) {
+        if (k >= rec.f.length) { return "" }
+        if (rec.f.length - k <= 1) { return rec.f[k] }
+        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
+        var s = rec.s[k]
+        var t = line.length
+        while (t > s && ifsIsWs(seps, line.charAt(t - 1))) { t = t - 1 }
+        return line.slice(s, t)
     }
     // FIELD SPLITTING, with the POSIX delimiter rule. This used to drop every empty field,
     // which is right only for the IFS WHITESPACE characters: measured against bash 5.3.15,
@@ -3170,13 +3302,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { return true } }
         return false
     }
-    function splitIFS(line) {
+    function splitIFS(line) { return splitIFSRec(line).f }
+    // The same walk, also reporting where each field STARTS in the line. `read`'s last name
+    // needs the raw text from one field's start (readRest), and nothing else does, so the
+    // offsets ride along rather than being recomputed by a second walk.
+    function splitIFSRec(line) {
         var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
         var out = []
+        var starts = []
         var i = 0
         while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
         while (i < line.length) {
             var cur = ""
+            starts.push(i)
             while (i < line.length && !ifsHas(seps, chunkAt(line, i))) {
                 var ch = chunkAt(line, i)
                 cur = cur + ch
@@ -3189,7 +3327,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
             }
         }
-        return out
+        return {f: out, s: starts}
     }
 
     function echoCmd(args) {
@@ -3442,7 +3580,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(st2)
             return st2
         }
-        fail("command not found: " + cmd)
+        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC. bash prefixes it with $0 and exits
+        // 127; this said `bash interpreter error: ...` and exited 2, while the compiled
+        // halves said `bash-to-llvm-ir: ...` and exited 127 - three engines, three answers,
+        // which is why the abort row is two-leg (docs/todo.md 1.13). All three now print
+        // `<script>: command not found: NAME` and exit 127. The word order still differs
+        // from bash's `<script>: line N: NAME: command not found`, which needs a line
+        // number no engine here carries to run time; and this language STOPS, where bash
+        // would carry on - that is what the abort probe is for.
+        println(scriptName + ": command not found: " + cmd)
+        exit(127)
         return 127
     }
 

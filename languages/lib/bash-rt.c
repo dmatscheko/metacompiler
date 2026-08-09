@@ -175,6 +175,7 @@ char *rt_ansic(char *ac);
 int rt_haschar(char *s, int ch);
 char *rt_read_line(int u);
 char *rt_field(char *l, char *ifs, int idx, int rest);
+int rt_nifs(char *l, char *ifs);
 char *rt_pad(char *s, int w, int left, int zero);
 char *rt_radix(char *s, int base, int upper, int alt);
 char *rt_intprec(char *s, int prec);
@@ -187,6 +188,11 @@ char *rt_splitifs(char *v, char *ifs);
 int rt_ifsws(char *ifs, int ch);
 char *rt_bnd_acc(char *acc, char *open, char *f);
 char *rt_bnd_open(char *open, char *f);
+int rt_ifslead(char *v, char *ifs);
+int rt_ifstrail(char *v, char *ifs);
+char *rt_bnd_acc2(char *acc, char *open, int opened, char *f, int lead, int trail);
+char *rt_bnd_open2(char *open, int opened, char *f, int lead, int trail);
+int rt_bnd_opened2(int opened, char *f, int lead, int trail);
 int rt_arr_find(char *nm, char *k);
 int rt_arr_set(char *nm, char *k, char *v);
 char *rt_arr_get(char *nm, char *k);
@@ -208,6 +214,7 @@ int rt_arr_append(char *nm, char *f);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
 char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
+char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star);
 int rt_argpush(char *v);
 char *rt_param(int n);
 char *rt_params(char *sep, int star);
@@ -1391,38 +1398,77 @@ char *rt_read_line(int u) {
 /* ================= frag-field.c ================= */
 /* ---- fields, padding, escapes, field lists -------------------------------- */
 
-/* rt_field: field `idx` of line `l` split on the characters of `ifs` (empty
- * fields dropped); with rest != 0 the whole remainder from that field on, which
- * is what the LAST name of a `read` gets. */
+/* rt_nifs: how many fields `l` splits into under the POSIX delimiter rule (the
+ * one rt_splitifs walks and bash-interpreter.abnf's splitIFS mirrors). Only
+ * rt_field needs it, to tell "one field left" from "several". */
+int rt_nifs(char *l, char *ifs) {
+    int len = rt_strlen(l);
+    int i = 0;
+    int n = 0;
+    while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
+    while (i < len) {
+        while (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) == 0) { i = i + 1; }
+        n = n + 1;
+        while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
+        if (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) != 0) {
+            i = i + 1;
+            while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
+        }
+    }
+    return n;
+}
+
+/* rt_field: field `idx` of line `l` under the POSIX delimiter rule; with
+ * rest != 0 what the LAST name of a `read` gets, which is not the same thing.
+ *
+ * BOTH HALVES OF THIS WERE WRONG, in different directions (docs/todo.md 2.15).
+ * The walk dropped every empty field, so `IFS=: read -r a b <<< ":x:"` put x in
+ * a where bash 5.3.15 leaves a empty and gives b "x"; and the remainder was the
+ * raw tail, so `read -r v <<< "  hd  "` kept the trailing blanks. Measured
+ * against bash 5.3.15 over 26 cases, the remainder has three arms:
+ *
+ *   no field there      ""
+ *   EXACTLY ONE left    that field - no delimiters, no whitespace, so
+ *                       `IFS=: read -r a b <<< "p:q:"` gives b "q"
+ *   TWO OR MORE left    the RAW text from that field's start to the end of the
+ *                       line, less trailing IFS WHITESPACE only, so
+ *                       `IFS=: read -r a b <<< ":a:b:"` gives b "a:b:" and
+ *                       `read -r a b <<< "  x   y   z  "` gives b "y   z"
+ *
+ * bash-interpreter.abnf's readRest is the same three arms. */
 char *rt_field(char *l, char *ifs, int idx, int rest) {
     int len = rt_strlen(l);
-    int i = 0;      /* scan index        */
-    int n = 0;      /* field number      */
+    int i = 0;      /* scan index          */
+    int n = 0;      /* field number        */
     int s = 0;      /* current field start */
-    int in = 0;     /* inside a field?   */
+    int e = 0;      /* current field end   */
+    int t = 0;
+    int left = 0;
+    if (rest != 0) left = rt_nifs(l, ifs) - idx;
+    while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
     while (i < len) {
-        int cch = (int)(unsigned char)l[i];
-        if (rt_haschar(ifs, cch) != 0) {
-            /* a separator closes the field we were in */
-            if (in != 0) {
-                if (n == idx && rest == 0) return rt_substr(l, s, i - s);
-                n = n + 1;
-                in = 0;
+        s = i;
+        while (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) == 0) { i = i + 1; }
+        e = i;
+        if (n == idx) {
+            if (rest == 0) return rt_substr(l, s, e - s);
+            if (left <= 1) return rt_substr(l, s, e - s);
+            t = len;
+            /* `t > s && ifsws(l[t-1])` would read l[-1] when both are 0: the IR
+             * evaluates BOTH operands of an And (see rt_eg in this file). */
+            while (t > s) {
+                if (rt_ifsws(ifs, (int)(unsigned char)l[t - 1]) == 0) break;
+                t = t - 1;
             }
-        } else {
-            /* a field character */
-            if (in == 0) {
-                in = 1;
-                s = i;
-                /* the wanted field starts here and the caller asked for the
-                 * whole remainder */
-                if (n == idx && rest != 0) return rt_substr(l, i, -1);
-            }
+            return rt_substr(l, s, t - s);
         }
-        i = i + 1;
+        n = n + 1;
+        while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
+        if (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) != 0) {
+            i = i + 1;
+            while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
+        }
     }
-    /* end of line: the last field may still be open */
-    if (in != 0 && n == idx) return rt_substr(l, s, -1);
     return &empty[0];
 }
 
@@ -1792,6 +1838,81 @@ char *rt_bnd_open(char *open, char *f) {
     if (n == 0) return open;
     if (n == 1) return rt_strcat(open, rt_getfield(f, 0));
     return rt_getfield(f, n - 1);
+}
+
+/* THE SAME APPEND, WITH THE TWO BOUNDARY DELIMITERS OF AN UNQUOTED EXPANSION.
+ *
+ * `x="  a   b  "; echo w:[$x]` is four words in bash 5.3.15 - `w:[`, `a`, `b`,
+ * `]` - and was one, `w:[a b]` (docs/todo.md 2.15). rt_splitifs throws the
+ * leading and trailing IFS whitespace away, which is right for the fields and
+ * loses exactly the fact that there was a boundary against the literal text.
+ *
+ * `opened` is the missing state: whether anything has gone into `open` since
+ * the last field was closed. A boundary delimiter closes `open` IF one is open
+ * and does nothing otherwise, which is what keeps `echo $x` two words and
+ * `$x$y` (x="a ", y=" b") two rather than three. rt_ifslead / rt_ifstrail
+ * answer the two flags from the RAW value, and only IFS WHITESPACE leads: a
+ * leading non-whitespace delimiter already produces an empty first field.
+ *
+ * Three entry points over one walk, the same shape rt_bnd_acc / rt_bnd_open
+ * already had, because C returns one value and the caller needs three.
+ * bash-interpreter.abnf's mkWord is the same state machine. */
+int rt_ifslead(char *v, char *ifs) {
+    if (v[0] == 0) return 0;
+    return rt_ifsws(ifs, (int)(unsigned char)v[0]);
+}
+
+int rt_ifstrail(char *v, char *ifs) {
+    int len = rt_strlen(v);
+    if (len == 0) return 0;
+    return rt_haschar(ifs, (int)(unsigned char)v[len - 1]) != 0 ? 1 : 0;
+}
+
+char *rt_bnd_acc2(char *acc, char *open, int opened, char *f, int lead, int trail) {
+    int n = rt_nfields(f);
+    char *op = acc;
+    char *cur = open;
+    int isopen = opened;
+    int i = 1;
+    if (lead != 0 && isopen != 0) {
+        op = rt_strcat(rt_strcat(op, cur), "\001");
+        cur = &empty[0];
+        isopen = 0;
+    }
+    if (n >= 2) {
+        op = rt_strcat(rt_strcat(rt_strcat(op, cur), rt_getfield(f, 0)), "\001");
+        while (i < n - 1) {
+            op = rt_strcat(rt_strcat(op, rt_getfield(f, i)), "\001");
+            i = i + 1;
+        }
+        cur = rt_getfield(f, n - 1);
+        isopen = 1;
+    } else if (n == 1) {
+        cur = rt_strcat(cur, rt_getfield(f, 0));
+        isopen = 1;
+    }
+    if (trail != 0 && isopen != 0) op = rt_strcat(rt_strcat(op, cur), "\001");
+    return op;
+}
+
+char *rt_bnd_open2(char *open, int opened, char *f, int lead, int trail) {
+    int n = rt_nfields(f);
+    char *cur = open;
+    int isopen = opened;
+    if (lead != 0 && isopen != 0) { cur = &empty[0]; isopen = 0; }
+    if (n >= 2) { cur = rt_getfield(f, n - 1); isopen = 1; }
+    else if (n == 1) { cur = rt_strcat(cur, rt_getfield(f, 0)); isopen = 1; }
+    if (trail != 0 && isopen != 0) cur = &empty[0];
+    return cur;
+}
+
+int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
+    int n = rt_nfields(f);
+    int isopen = opened;
+    if (lead != 0) isopen = 0;
+    if (n >= 1) isopen = 1;
+    if (trail != 0) isopen = 0;
+    return isopen;
 }
 
 /* ================= frag-arr.c ================= */
@@ -2192,6 +2313,45 @@ char *rt_globescape(char *s) {
     }
     dst[o] = 0;
     return dst;
+}
+
+/* i8* rt_mapf(i8* v, i32 op, i8* p, i8* r, i32 mode, i8* sep, i32 star): one
+ * pattern operator applied to EVERY FIELD of a field list.
+ *
+ * op 0 = rt_strip, 1 = rt_replace, 2 = rt_case, 3 = rt_shquote, 4 = rt_ansic,
+ * and `mode` is that function's own mode. The last two are the @-transforms,
+ * which are element-wise for the same reason and were corrupting the output
+ * outright: ${a[@]@Q} handed rt_shquote the whole ENCODED list and printed the
+ * 0x02 / 0x01 marker bytes as if they were data.
+ * With star != 0 the results are joined with `sep` (${a[*]/x/Y});
+ * otherwise they come back as a field list (${a[@]/x/Y}).
+ *
+ * THE MAP HAS TO BE PER ELEMENT, not on the joined string: bash 5.3.15 answers
+ * "Qa bQ" for `b=(aa ba); echo "${b[*]/a/Q}"` where replacing once in "aa ba"
+ * would answer "Qa ba". languages/bash-interpreter.abnf's applyPatOp is the
+ * same three arms, driven by the same walk. */
+char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) {
+    int n = rt_nfields(v);
+    int i = 0;
+    char *out;
+    if (star != 0) out = &empty[0]; else out = "\002";
+    while (i < n) {
+        char *f = rt_getfield(v, i);
+        char *g;
+        if (op == 0) g = rt_strip(f, p, mode);
+        else if (op == 1) g = rt_replace(f, p, r, mode);
+        else if (op == 3) g = rt_shquote(f);
+        else if (op == 4) g = rt_ansic(f);
+        else g = rt_case(f, mode, p);
+        if (star != 0) {
+            if (i > 0) out = rt_strcat(out, sep);
+            out = rt_strcat(out, g);
+        } else {
+            out = rt_strcat(rt_strcat(out, g), "\001");
+        }
+        i = i + 1;
+    }
+    return out;
 }
 
 /* i8* rt_catfields(i8* a, i8* b): concatenate two field lists. */
