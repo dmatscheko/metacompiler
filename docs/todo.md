@@ -54,6 +54,35 @@ guard measured **+9.5%** — and `*` needs the exact product, the expensive half
 `%d`/`%x`/`%o`/`%b` of a float past 2^53; negatives under `%x`/`%o`/`%b`, which
 need MRI's infinite two's-complement `..fb` notation; precision on an integer
 directive being ignored. **All three: both halves agree, so `--cross` is blind.**
+Before copying kotlin's `%f` fix (`0636ee6`) here or into go, note what it
+established: `floPrec` (host id 70) **clamps at 17 significant digits**, and
+java's `%f` renders from `Double.toString`'s shortest round-tripping digits with
+HALF_UP — *not* the exact decimal, so `rtExactDec`/`rtFixed` are the wrong tool.
+Whether ruby and go do the same is **unverified**; measure before assuming.
+
+### 1.12 swift's abort text disagrees three ways, and one leg leaks Go internals **[V]**
+Found by the new abort-text rows the moment they existed. The worst is a
+**goja-vs-`-frozen` divergence in USER-VISIBLE OUTPUT**: an uncaught `throw` in
+the swift interpreter prints `[object Object] at interp-core.js:143` under goja
+and `&{%!s(*abnf.jsObject=&{{4363 0x50b4…} map[__exc:true v:0x…]})}` under
+`-frozen` — a Go type name **and a heap address**, non-deterministic between runs.
+Same class as the `(*abnf.jsArray)` leak `b56c2b0` fixed elsewhere. Separately the
+native binary drops the `uncaught exception:` framing every other language has
+(`[1,2,3][7]`), and answers `KeyError: 9` where `llvm.Run` says `9`. Until these
+close, swift cannot get an `ALL HALVES` abort row — promoting it is a one-word
+edit in `.vscode/launch.json` plus raising `ABORT_ALL_ROWS` in `tests/gates.sh`.
+
+### 1.13 php's and kotlin's interpreters lose the abort message entirely **[V]**
+Both print `uncaught exception: [object Object]` where the compiled halves print
+the message. dart's interpreter is the one that matches real Dart, and bash's
+native binary uses the GRAMMAR name as `$0` where real bash uses the script name.
+Each is a two-leg abort row today; each becomes `ALL HALVES` when it closes.
+
+### 1.14 java, csharp and go abort text is agreed-and-wrong **[V]**
+java and csharp print `uncaught exception: [object Object]` in **all three
+engines**; real java says `Exception in thread "main" java.lang.RuntimeException:
+abort probe`. go never says `panic:`. Engine-vs-engine cannot see this class by
+construction — only an oracle can, and `java` 24.0.2 is installed.
 
 # 2. Cross-engine defects and latent traps
 
@@ -126,6 +155,42 @@ Without them "catchable" is vacuous, and the compiled halves' `member 'q' of
 undefined` cannot be brought onto the interpreter's `attempt to index a nil value`
 — routing through the miss hook would just produce a third wording. A real fix is
 a throw/catch surface: 2 grammars + layer 2 + twin.
+
+### 2.12 a generator body's `this` is wrong in the NATIVE build only **[V]**
+`function* g(){ yield this }` then `g().next().value` gives the GENERATOR OBJECT
+natively and `undefined` in the other two legs. `js_this` is one global slot in
+layer 2 and the emitter arms it with the receiver of the `.next()` call, so the
+body reads the wrong one. `--cross` cannot see it (it compares interp vs run).
+Closing it needs a **per-coroutine `this`** in the C floor's control block —
+manual 7.8's highest-risk area. Deliberately unasserted in both ratchets with the
+reason at the site: `e4c8659` made 2 of 3 legs correct, which WIDENS the gap, so
+an assertion there would turn `clang-check` and `native-full` red.
+
+### 2.13 two js receiver/namespace holes, all four engines **[V]**
+`(o.m)()` loses its receiver — node says `this === o`, we say `globalThis`. The
+parenthesized primary drops the Reference; the assignment path already has the
+machinery (`makeTargetRef`'s `parenref`), the call path does not. ~4 grammars.
+And a static and an instance member of the same name COLLIDE on the descriptor
+(`class C { static m(){} m(){} }`) — both `scopePut(cls,"m",…)`, second wins,
+where node keeps them on different objects. Needs a separate static namespace.
+
+### 2.14 dart: a typed pattern does not test its type **[V]**
+`switch (A()) { B _ => "b", A _ => "a" }` answers `"b"`, in both halves; so do
+`B b` and `if (o case B q)`. `PatVarLead`'s `TypeNamed` carries no tag, so
+`makeVarPat`/`emitPat` never see the type. **The hazard is why it was left**: a
+refutable position wants "no match" and an irrefutable one wants Dart's
+`TypeError`, a distinction `resolvePat`'s `mode` does not carry — and
+`makeForInPat` SILENTLY SKIPS a non-matching element, so a wrong cut turns a wrong
+answer into a short loop. Also, `o is Shape ? a : b` does not parse in either half.
+
+### 2.15 bash expansion residue, all pre-existing **[V]**
+A literal-prefixed unquoted word still drops leading/trailing IFS whitespace
+(`echo w:[$x]` with `x="  a   b  "` gives `[a b]`, bash gives `[ a b ]`) — fixing
+it means the field-list protocol reporting delimiters, i.e. the hottest code in
+the runtime. A pattern operator on a subscripted expansion is ignored entirely
+(`${a[@]/x/Y}`, `${a[1]#p}`). And **two live halves divergences `--cross` has
+never reached**: `printf '%s|' $x` does not field-split its operands in the
+compiler, and `read -r v <<< "  hd  "` keeps trailing blanks there.
 
 # 3. Costed designs, deliberately not started
 
@@ -239,6 +304,12 @@ each), swift/dart `sw_kget`/`sw_kset` (~40 each, the same body twice) and ruby
 `defined?` (~30). **Each needs the same judgement kotlin's did: keep the hot
 local-hit arm inline and route only the MISS paths**, or you pay a scope frame on
 the hottest name resolution in the language.
+
+### 5.5 `runtime-dartswift.metajs` is the one split left to fold **[V]**
+The other three went back into `runtime.metajs` in `dd6671b` on a measurement —
+the hook contract costs a non-caller nothing, because a layer-2 call is a scope
+lookup by NAME. This one was left only because `dart-rt.metajs` was another
+agent's file that round. Same argument, same expected answer, 50 lines.
 
 # 7. Tooling and developer experience
 
