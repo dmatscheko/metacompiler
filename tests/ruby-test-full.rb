@@ -226,6 +226,20 @@ def s06
   check("fmt28", "%.3x" % zed[1] == "0ff" && "%.3d" % neg[0] == "-001" && "%08.3x" % zed[2] == "     001")
   check("fmt29", "%.5x" % neg[0] == "..fff" && "%.5b" % neg[0] == "..111" && "%.3x" % neg[1] == "..fb" && "%#.5x" % zed[0] == "00000")
   check("fmt30", "%#.5o" % zed[1] == "00377" && "%#.1o" % zed[1] == "0377" && "%#.5x" % zed[1] == "0x000ff")
+  # A NON-FINITE float reaching an integer directive. MRI never gets here at all -
+  # its %d converts with to_i and Float::INFINITY.to_i raises FloatDomainError -
+  # but this engine's to_i answers Infinity in all three halves, so the value does
+  # reach the formatter. The INTERPRETER HUNG on %x/%o/%b (baseStr handed an
+  # infinity to bigFromDouble, which cannot terminate) where both compiled halves
+  # printed Go's int64() saturation: a hang against an answer, and --cross never
+  # reached it because nothing formatted an infinity. WHAT the saturation says is
+  # architecture-dependent - manual 7.9's giFromFloat note, +Inf is MaxInt64 on
+  # arm64 and MinInt64 on amd64 - so this pins that the row TERMINATES with digits,
+  # not what the digits are. %d is base ten, takes no int64 conversion in any half,
+  # and is therefore pinnable exactly.
+  inf = [1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0]
+  check("fmt31", ("%x" % inf[0]).length > 0 && ("%o" % inf[1]).length > 0 && ("%b" % inf[2]).length > 0)
+  check("fmt32", "%d" % inf[0] == "Infinity" && "%d" % inf[1] == "-Infinity" && "%d" % inf[2] == "NaN")
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40

@@ -4879,9 +4879,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return (a.sign < 0) ? ("-" + out) : out
     }
+    // int64 SATURATION digits, for the one operand that can have no digits at all:
+    // a NON-FINITE float reaching an integer directive. MRI never gets here -
+    // Float::INFINITY.to_i raises FloatDomainError and so does "%x" % it - but
+    // this engine's to_i answers Infinity rather than raising (in every half), so
+    // the value does reach baseStr. It used to reach bigFromDouble, which cannot
+    // terminate on an infinity, and THE INTERPRETER HUNG where both compiled
+    // halves printed Go's int64() saturation. A hang against an answer is a halves
+    // divergence, and --cross never reached it because no test formats an infinity
+    // with %x/%o/%b. Found by a 26-value x 26-format oracle probe for todo.md 1.10.
+    //
+    // The answer copied is THIS MACHINE's: Go's float64 -> int64 conversion is
+    // undefined for a non-finite operand, and arm64 saturates (+Inf -> MaxInt64,
+    // -Inf -> MinInt64, NaN -> 0) where amd64 answers MinInt64 for all three. That
+    // is manual 7.9's giFromFloat note, and it is why the ratchet asserts that
+    // these rows TERMINATE and not what they say. 2^63 is built by doubling
+    // because the tag dialect has no exponent literal and a 19-digit literal is
+    // not exact; MaxInt64 is then 2^63 minus one, which decOne does in any base.
+    function satInt64Str(n, base) {
+        if (n !== n) { return "0" }
+        var p63 = 1
+        for (var k63 = 0; k63 < 63; k63++) { p63 = p63 * 2 }
+        var mag = bigBaseStr(bigFromDouble(p63), base)
+        if (n < 0) { return "-" + mag }
+        return decOne(mag, base)
+    }
     function baseStr(n, base) {
         if (isBig(n)) { return bigBaseStr(n, base) }
         if (n == 0) { return "0" }
+        if (n !== n || n - n !== 0) { return satInt64Str(n, base) }
         // Past 2^53 `v % base` and `Math.floor(v / base)` no longer step through
         // the value's own digits, so the exact expansion does it instead.
         if (n > bigMaxNum || n < 0 - bigMaxNum) { return bigBaseStr(bigFromDouble(n), base) }
