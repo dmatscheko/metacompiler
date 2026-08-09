@@ -7,6 +7,16 @@
 // between two and nine implementations of the SAME function, costing 1,427 lines.
 // This file is where those merge.
 //
+// IF YOU ARRIVED HERE LOOKING FOR runtime-decimal.metajs, runtime-bignum.metajs
+// OR runtime-jvm.metajs, they are HERE. They were folded back into this file on
+// 2026-08-09 (docs/todo.md 5.2): the split existed only to keep scope_find's
+// linear module-scope scan off non-callers, and the hash index removed that cost,
+// so the three files bought nothing and cost an import edge each. Comments across
+// the repo still name them, and those names are PROVENANCE - they are accurate
+// about where a body lived when the comment was written, and repointing them here
+// would turn a true historical statement into a false one. Grep this file for the
+// body; runtime-dartswift.metajs is the one split that remains.
+//
 // The mechanism is the one ruby proved with `import "./regex.js"`: a layer-2 file
 // may import a shared MetaJS source, metajs-to-llvm-ir.abnf resolves the relative
 // path, and -rt-lib's lazy boot runs both into the SAME pinned scope. So a

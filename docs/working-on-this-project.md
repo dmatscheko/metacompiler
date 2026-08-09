@@ -895,15 +895,22 @@ side table.**
 ## 7.13 Who imports what
 
 ```
-runtime.metajs (804)      <- csharp go dart java php kotlin ruby python swift metajs-rt
-runtime-decimal (188)     <- python ruby swift
-runtime-bignum  (263)     <- python ruby
-runtime-jvm     (159)     <- csharp java
+runtime.metajs (1,574)    <- csharp go dart java php kotlin ruby python swift metajs-rt
 runtime-dartswift (50)    <- dart swift
 regex.js       (~1,265)   <- js python ruby kotlin
 lua-rt.metajs             <- imports NOTHING
 js-rt.metajs              <- imports regex.js ONLY
 ```
+
+**`runtime-decimal`, `runtime-bignum` and `runtime-jvm` were folded back into
+`runtime.metajs` on 2026-08-09** — they existed only to keep `scope_find`'s linear
+module-scope scan off non-callers, and the hash index removed that cost. The hook
+contract below grew by `rtkFloDigits`/`rtjkCmp`/`rtjkFloOperand`, and **that costs
+a non-caller nothing**, which is a measurement rather than an assumption: a layer-2
+call is a scope lookup by NAME (java's module carries the literal string
+`"rtkFloDigits"` as a `[12 x i8]` constant, not a relocation), so a module that
+never calls the body never resolves the hook. Comments across the repo still name
+the three files; those are provenance and were deliberately left as written.
 
 `runtime.metajs` requires seven `rtk*` hooks from each importer (`rtkStr`
 `rtkNum` `rtkIsChar` `rtkIsArr` `rtkCall` `rtkIsDict` `rtkDictFind`), plus
