@@ -1098,6 +1098,54 @@ function csLastSeg(s) {
     return s
 }
 
+// THE .NET HOST'S UNHANDLED-EXCEPTION OUTPUT, and the top of the program.
+//
+// Without this the exception left the module and the floor's uncaught-throw
+// handler rendered it with the generic object toString, so every uncaught `throw'
+// read "js runtime error: uncaught exception: [object Object]" - in BOTH compiled
+// halves and in the interpreter half. All three agreed and all three were wrong,
+// which is the defect class byte identity cannot see (manual chapter 5).
+// docs/todo.md 1.14.
+//
+// SPEC-CITED, NOT MEASURED - there is no C# toolchain on this machine (manual 7.9).
+// ECMA-334 13.11 leaves the behaviour of a throw with no enclosing catch
+// implementation-defined, so the text is the .NET runtime's documented output:
+//
+//     Unhandled exception. System.Exception: abort probe
+//        at Program.Main() in Program.cs:line 8
+//
+// "Unhandled exception. " with the full stop (.NET 5+; .NET Framework's older
+// "Unhandled Exception: " is a different string) followed by Exception.ToString(),
+// documented as the fully qualified type name plus, only when Message is neither
+// null nor EMPTY, ": " and the message. C# omits the colon for an empty message
+// where java prints it; that difference is real and both sides of it are asserted.
+//
+// Not reproduced: the "   at ..." frames (no call-site line table in any engine
+// here - manual 7.9 records the same wall for C#'s e.ToString(), and this change
+// deliberately leaves that alone), the namespace of a user exception type (this
+// subset flattens namespaces away), and .NET's abort()-derived 134 exit status,
+// which is a property of the CoreCLR host rather than of the language.
+//
+// Twins: csExcTopLine in languages/csharp-interpreter.abnf and js_cstop in
+// abnf/jsrtjvm.go. The shape - the entry call inside one js_try whose catch clause
+// calls this - is ruby's js_rtop, go's js_gotop and java's js_jvtop.
+function csExcTopLine(v) {
+    var head = "Unhandled exception. "
+    if (v === null || v === undefined) { return head + cpStr(v) }
+    if (typeof v != "object") { return head + cpStr(v) }
+    var name = csTypeOfVal(v)["FullName"]
+    var msg = v["Message"]
+    if (msg === undefined) { return head + name }
+    if (msg === null) { return head + name }
+    if (msg == "") { return head + name }
+    return head + name + ": " + cpStr(msg)
+}
+function js_cstop(exc) {
+    eprintln(csExcTopLine(exc))
+    exit(1)
+    return undefined
+}
+
 // cspArrayName is Object.ToString() of an array: the element type's full name plus
 // "[]". The DECLARED element type is not carried by this value model, so it is
 // INFERRED from the elements - see the header of abnf/jsrtcsharp.go for the rule

@@ -838,6 +838,15 @@ function jpObj(o, depth) {
     // knobs.
     var f = rtFindMethod(o["__class"], "toString")
     if (f !== undefined) { return jpRender(f.apply(undefined, [o]), depth + 1) }
+    // java.lang.Throwable#toString: the BINARY class name and, only when
+    // getMessage() is non-null, ": " and the message. Measured, java 24.0.2 -
+    // println(new RuntimeException("x")) is "java.lang.RuntimeException: x", not
+    // the Object default below ("RuntimeException@1a2b3c01", which all three
+    // engines agreed on and all three had wrong). Throwable#toString carries NO
+    // stack trace - printStackTrace() is the method that does - so unlike C#'s
+    // ToString (manual 7.9) there is nothing here this engine cannot produce.
+    // docs/todo.md 1.14.
+    if (jvIsThrowable(o)) { return jvThrowableStr(o) }
     // The class descriptor itself.
     if (o["__isclass"] === true) {
         var cn = o["__name"]
@@ -1399,6 +1408,64 @@ function js_jvexcmatch(v, n) {
         return !jvIsThrowable(v)
     }
     return false
+}
+
+// THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE, and the top of the program.
+//
+// Without this the exception left the module and the floor's uncaught-throw handler
+// rendered it with the generic object toString, so every uncaught `throw' in BOTH
+// compiled halves read "js runtime error: uncaught exception: [object Object]" - no
+// class, no message - and the interpreter half said the same thing. All three
+// engines AGREED and all three were wrong, which is the one defect class byte
+// identity cannot see (manual chapter 5).
+//
+// Measured against java 24.0.2 (stderr, exit status 1):
+//
+//     Exception in thread "main" java.lang.RuntimeException: abort probe
+//     Exception in thread "main" P2$MyExc: custom msg
+//     Exception in thread "main" P2$NoMsg           <- getMessage() == null
+//
+// The line is the fixed prefix plus Throwable#toString: the BINARY class name
+// (jpClassName, which reads the __bname the emitter writes - "java.lang.*" for the
+// built-in Throwables since docs/todo.md 1.14) and, only when getMessage() is
+// non-null, ": " and the message. The "\tat Main.main(Main.java:4)" frames that
+// follow in real java are NOT reproduced: there is no call-site line table here,
+// and inventing frames would be a worse divergence than omitting them.
+//
+// The message slot differs between the halves: the emitted builtin constructor
+// writes __msg (emitBuiltinExc in java-to-llvm-ir.abnf), the interpreter half's
+// jExcCtor writes `message`, and a user class extending one of them may have gone
+// through either. Both are read, in the same order, in all three engines.
+//
+// Twins: jExcTopLine / jReportUncaught in languages/java-interpreter.abnf and
+// js_jvtop in abnf/jsrtjvm.go. The shape - the whole entry call inside one js_try
+// whose catch clause calls this - is ruby's js_rtop and go's js_gotop.
+function jvExcMessageOf(v) {
+    var m = v["message"]
+    if (m === undefined) { m = v["__msg"] }
+    return m
+}
+// java.lang.Throwable#toString - the whole of the abort line after the fixed
+// prefix, and also what println(e) prints (jpRender's Throwable arm).
+function jvThrowableStr(v) {
+    var cls = v["__class"]
+    var name = "java.lang.Throwable"
+    if (cls !== undefined && cls !== null && typeof cls == "object") { name = jpClassName(cls) }
+    var msg = jvExcMessageOf(v)
+    if (msg === undefined) { return name }
+    if (msg === null) { return name }
+    return name + ": " + jpStr(msg)
+}
+function jvExcTopLine(v) {
+    var head = "Exception in thread \"main\" "
+    if (v === null || v === undefined) { return head + jpStr(v) }
+    if (typeof v != "object") { return head + jpStr(v) }
+    return head + jvThrowableStr(v)
+}
+function js_jvtop(exc) {
+    eprintln(jvExcTopLine(exc))
+    exit(1)
+    return undefined
 }
 
 // java.lang.String.substring. A SEPARATE EXTERN rather than a wrapper on js_mcall

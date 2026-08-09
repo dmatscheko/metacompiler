@@ -223,6 +223,30 @@ class Encl {
     }
 }
 
+// Throwable#toString, the text the launcher's uncaught-exception line is built
+// from (docs/todo.md 1.14). Two shapes the built-in hierarchy cannot cover: a
+// user exception with a message and one without.
+class TopExc extends RuntimeException {
+    TopExc(String m) { super(m); }
+}
+
+class NoMsgExc extends RuntimeException {
+}
+
+// A declared toString() outranks Throwable's, exactly as in real java.
+class OwnStr extends RuntimeException {
+    String tag;
+
+    OwnStr(String t) {
+        super("ignored");
+        this.tag = t;
+    }
+
+    public String toString() {
+        return "own:" + this.tag;
+    }
+}
+
 public class Main {
     static int fails = 0;
     static int checks = 0;
@@ -846,6 +870,62 @@ public class Main {
         float[] fEdge = {1.4E-45f, 1.0E20f, 0.1f};
         Main.check("flt-edges", ("" + fEdge[0]).equals("1.4E-45") && ("" + fEdge[1]).equals("1.0E20")
                                 && ("" + fEdge[2]).equals("0.1"));
+
+        // ----- Throwable#toString, i.e. the uncaught-exception text -----
+        // Measured against java 24.0.2, which prints exactly these strings. The
+        // ABORT LINE is "Exception in thread \"main\" " plus this, so asserting
+        // toString is how a ratchet (which has to exit 0) reaches the text of
+        // docs/todo.md 1.14 at all. Every row below read "RuntimeException@1a2b3c01"
+        // - the java.lang.Object default - in ALL THREE engines before that item:
+        // agreed and wrong, the class byte identity cannot see. Read out of an
+        // array so no constant folder can evaluate the concatenation.
+        Throwable[] thr = {new RuntimeException("abort probe"), new RuntimeException(),
+                           new RuntimeException(""), new IllegalStateException("ise"),
+                           new ArithmeticException("/ by zero"), new NullPointerException(),
+                           new NumberFormatException("nfe"), new Exception("checked"),
+                           new Error("err"), new AssertionError("ae"), new Throwable("thr"),
+                           new TopExc("top"), new NoMsgExc()};
+        Main.check("thr-tostring-builtin", ("" + thr[0]).equals("java.lang.RuntimeException: abort probe")
+                                           && ("" + thr[3]).equals("java.lang.IllegalStateException: ise")
+                                           && ("" + thr[4]).equals("java.lang.ArithmeticException: / by zero")
+                                           && ("" + thr[6]).equals("java.lang.NumberFormatException: nfe"));
+        // A null message drops the colon; an EMPTY one keeps it. That pair is the
+        // whole rule, and it is the half a "print the message if there is one"
+        // implementation gets wrong.
+        Main.check("thr-tostring-nomsg", ("" + thr[1]).equals("java.lang.RuntimeException")
+                                         && ("" + thr[5]).equals("java.lang.NullPointerException")
+                                         && ("" + thr[12]).equals("NoMsgExc"));
+        Main.check("thr-tostring-emptymsg", ("" + thr[2]).equals("java.lang.RuntimeException: "));
+        // Exception, Error, AssertionError and Throwable itself are java.lang too,
+        // and a class the PROGRAM declares keeps its own (unqualified) binary name.
+        Main.check("thr-tostring-roots", ("" + thr[7]).equals("java.lang.Exception: checked")
+                                         && ("" + thr[8]).equals("java.lang.Error: err")
+                                         && ("" + thr[9]).equals("java.lang.AssertionError: ae")
+                                         && ("" + thr[10]).equals("java.lang.Throwable: thr"));
+        Main.check("thr-tostring-user", ("" + thr[11]).equals("TopExc: top"));
+        // A RUNTIME-raised exception renders the same way, and this arm is the one
+        // that reaches the descriptors js_jvexc registers rather than the ones the
+        // program's `new` builds.
+        String caught0 = "none";
+        try {
+            int[] tz = new int[2];
+            Main.check("thr-unreachable", tz[5] == 0);
+        } catch (ArrayIndexOutOfBoundsException e) {
+            caught0 = "" + e;
+        }
+        Main.check("thr-tostring-runtime",
+                   caught0.equals("java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 2"));
+        String caught1 = "none";
+        try {
+            int zero = thr.length - thr.length;
+            Main.check("thr-unreachable2", 1 / zero == 0);
+        } catch (ArithmeticException e) {
+            caught1 = "" + e;
+        }
+        Main.check("thr-tostring-arith", caught1.equals("java.lang.ArithmeticException: / by zero"));
+        // A DECLARED toString() still wins over Throwable's - the same precedence
+        // real java has, and the arm the new one had to be inserted behind.
+        Main.check("thr-tostring-override", ("" + new OwnStr("q")).equals("own:q"));
 
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));

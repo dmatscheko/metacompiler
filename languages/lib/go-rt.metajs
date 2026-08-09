@@ -1950,6 +1950,34 @@ function js_gotry(fn) {
 // uncaught exception: ". This is the twin of runEntry in languages/go-interpreter.abnf
 // - same test, same two wordings, same stream and same exit code - so the three
 // engines now print an unrecovered panic identically. docs/todo.md 1.7.
+//
+// THE WORDING IS GO'S OWN SINCE docs/todo.md 1.14. Measured, go 1.26.5, on stderr
+// with exit status 2:
+//
+//     panic: abort probe
+//     panic: 42
+//     panic: runtime error: index out of range [5] with length 0
+//     panic: assignment to entry in nil map
+//
+// followed by a blank line and a "goroutine 1 [running]:" stack trace. "panic: "
+// prefixes BOTH kinds - a value the program panicked with and a runtime one - so
+// the two-branch test this used to need is gone: go itself does not distinguish
+// them at the top, and the reason the branch existed (not doubling the engine's
+// own "js runtime error: " wording) does not apply to a prefix go really prints.
+//
+// NOT reproduced, deliberately: the goroutine trace (no engine here has a
+// call-site line table, the same wall as dart's `catch (e, s)`, manual 7.9) and
+// the exact text of a RUNTIME panic - "js runtime error: index 5 out of range"
+// where go says "runtime error: index out of range [5] with length 3". That text
+// is the recovered value a program can read with recover(), it is byte-identical
+// in all three engines on purpose, and the `js ` prefix is the project-wide
+// wording recorded under docs/todo.md 1.9. Rewriting it only at the top line
+// would make the printed panic and the recovered value disagree with each other,
+// which is a worse defect than the one it would hide.
+//
+// Twins: runEntry in languages/go-interpreter.abnf and js_gotop in
+// abnf/jsrtgolang.go - same wording, same stream (stderr, where go puts it and
+// where this used to use println), same exit status.
 function js_gotop() {
     var n = goPanics.length - 1
     if (n < 0) { return undefined }
@@ -1958,14 +1986,10 @@ function js_gotop() {
     goPanics.pop()
     goPanicSet.pop()
     if (!had) { return undefined }
-    var t = gopStr(p)
-    if (typeof p == "string" && goHasRTPrefix(p)) { println(t) }
-    else { println("js runtime error: uncaught exception: " + t) }
-    exit(1)
+    eprintln("panic: " + gopStr(p))
+    exit(2)
     return undefined
 }
-// Does this panic value already carry the engine's runtime-error wording?
-function goHasRTPrefix(s) { return s.indexOf("js runtime error: ") == 0 }
 
 function js_gorepanic() {
     var n = goPanics.length - 1

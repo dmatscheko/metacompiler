@@ -6529,15 +6529,38 @@ KwLet       = "let" KwEnd ;
         // static method of Program.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "Main" }
-        if (mainIsSnippet(entry)) {
-            b = emitMainSnippet(b, entry, "Statement")
-            b.NewRet(emitNum(b, 0))
-        } else {
-            var progCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Program")])
-            var mainV = callExt(b, "js_get", [progCls, emitStr(b, entry)])
-            var argsV = callExt(b, "js_arr_new", [])
-            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        // THE WHOLE ENTRY CALL RUNS INSIDE ONE js_try, so an exception nobody caught
+        // is reported BY THE PROGRAM (js_cstop) instead of escaping the module. What
+        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
+        // which renders a value with the generic object toString, so every uncaught
+        // `throw' in both compiled halves read "js runtime error: uncaught
+        // exception: [object Object]" - no type and no message. This is exactly the
+        // shape ruby-to-llvm-ir.abnf (js_try + js_rtop), go-to-llvm-ir.abnf
+        // (js_gotry + js_gotop) and java-to-llvm-ir.abnf (js_try + js_jvtop) use;
+        // js_cstop prints the .NET host's own unhandled-exception line and exits 1.
+        // docs/todo.md 1.14.
+        var entryT = function(bb) {
+            if (mainIsSnippet(entry)) {
+                bb = emitMainSnippet(bb, entry, "Statement")
+                bb.NewRet(emitNum(bb, 0))
+                return deadBlock()
+            }
+            var progCls = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "Program")])
+            var mainV = callExt(bb, "js_get", [progCls, emitStr(bb, entry)])
+            var argsV = callExt(bb, "js_arr_new", [])
+            bb.NewRet(callExt(bb, "js_call", [mainV, hUndef, argsV]))
+            return deadBlock()
         }
+        var topCatchT = function(bb) {
+            callExt(bb, "js_cstop", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }
+        var entryIdx = emitFunc([], entryT, false, null)
+        var catchIdx = emitFunc(["$exc"], topCatchT, false, null)
+        b.NewRet(callExt(b, "js_try", [callExt(b, "js_closure", [handle(entryIdx), curScopeV]),
+                                       callExt(b, "js_closure", [handle(catchIdx), curScopeV]),
+                                       hUndef]))
     }
 
     c.compile(c.asg)

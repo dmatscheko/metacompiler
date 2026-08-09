@@ -1123,6 +1123,19 @@ func (rt *jsrt) jvpObj(o *jsObject, depth int) string {
 	if f, ok := jvpFindMember(o, "toString"); ok {
 		return rt.jvpRender(rt.call(f, o, []interface{}{o}), depth+1)
 	}
+	// java.lang.Throwable#toString: the BINARY class name and, only when
+	// getMessage() is non-null, ": " and the message. Measured, java 24.0.2 -
+	// println(new RuntimeException("x")) is "java.lang.RuntimeException: x", not
+	// the Object default at the bottom of this function, which all three engines
+	// agreed on and all three had wrong. Throwable#toString carries NO stack
+	// trace (printStackTrace() is the method that does), so unlike C#'s
+	// ToString (manual 7.9) nothing about it is unreproducible here. The twins
+	// are jThrowableStr in languages/java-interpreter.abnf and jvThrowableStr in
+	// languages/lib/java-rt.metajs, and jvmExcTopLine in abnf/jsrtjvm.go prints
+	// exactly this text after the launcher's fixed prefix. docs/todo.md 1.14.
+	if jvIsThrowable(o) {
+		return rt.jvmThrowableStr(o)
+	}
 	// The class descriptor itself (println(Box.class) has no spelling here, but
 	// the interpreter half renders one this way, so the two agree).
 	if tag, ok := o.props["__isclass"]; ok && tag == true {

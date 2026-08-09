@@ -6314,15 +6314,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return f()
         } catch (e) {
             if (e != undefined && e != null && e.__gopanic == true) {
-                // A RUNTIME panic already carries the engine wording (goRTPanic),
-                // and the compiler half reports one of those straight from rt.fail
-                // with no "uncaught exception" wrapper around it - so wrapping here
-                // would put the prefix on twice and diverge. A panic(v) the program
-                // wrote gets the wrapper, which is what both halves do for a throw.
-                var pv = gstr(e.v)
-                if (typeof e.v == "string" && e.v.indexOf("js runtime error: ") == 0) { println(pv) }
-                else { println("js runtime error: uncaught exception: " + pv) }
-                exit(1)
+                // AN UNRECOVERED PANIC IS REPORTED THE WAY GO REPORTS IT. Measured,
+                // go 1.26.5, on stderr with exit status 2:
+                //
+                //     panic: abort probe
+                //     panic: runtime error: index out of range [5] with length 0
+                //
+                // plus a blank line and a "goroutine 1 [running]:" trace, which no
+                // engine here can produce. "panic: " prefixes BOTH kinds, so the
+                // two-branch test that used to be here (print a runtime panic's
+                // "js runtime error: <msg>" value bare, to avoid doubling the
+                // engine's own wording, and wrap anything else in "uncaught
+                // exception: ") is gone: go does not distinguish them at the top
+                // either. The residual "js " on a runtime panic's text is
+                // docs/todo.md 1.9's recorded project-wide wording - it is the
+                // value recover() hands the program, byte-identical in all three
+                // engines, and rewriting it only here would make the printed panic
+                // disagree with the recovered one. The twins are js_gotop in
+                // languages/lib/go-rt.metajs and in abnf/jsrtgolang.go.
+                // docs/todo.md 1.14.
+                eprintln("panic: " + gstr(e.v))
+                exit(2)
             }
             throw e
         }

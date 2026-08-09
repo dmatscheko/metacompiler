@@ -6229,14 +6229,60 @@ KwLet       = "let" KwEnd ;
     // (c.mainName) can name any other static method of Program.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "Main" }
-    // A user exception that escapes the entry point is reported like any runtime error.
+    // AN EXCEPTION NOBODY CAUGHT IS REPORTED THE WAY THE .NET HOST REPORTS IT.
+    // All three engines used to print "uncaught exception: [object Object]" - the
+    // raw concatenation of an object - so all three agreed and all three were
+    // wrong, the one defect class engine-vs-engine byte identity cannot see
+    // (manual chapter 5). docs/todo.md 1.14.
+    //
+    // THIS ONE IS SPEC-CITED, NOT MEASURED: there is no C# toolchain on this
+    // machine (manual 7.9's C# caveat, and the same reason csExcParent above is
+    // spec-derived). ECMA-334 13.11 says only that a `throw` with no enclosing
+    // catch terminates the program in an implementation-defined way, so the text
+    // comes from the .NET runtime's documented unhandled-exception output:
+    //
+    //     Unhandled exception. System.Exception: abort probe
+    //        at Program.Main() in Program.cs:line 8
+    //
+    // i.e. "Unhandled exception. " (with the full stop - .NET Framework's older
+    // "Unhandled Exception: " form is not what .NET 5+ prints) followed by
+    // Exception.ToString(), which is documented as the fully qualified type name
+    // and, only when Message is neither null nor empty, ": " and the message.
+    // Note that C# omits the colon for an EMPTY message where java prints it -
+    // measured for java, documented for .NET, and the two really do differ.
+    //
+    // NOT reproduced: the "   at Program.Main()" frames (no call-site line table
+    // in any engine here - manual 7.9 already records that as the reason C#'s
+    // e.ToString() is left alone), the namespace qualification of a user
+    // exception type (this subset flattens `namespace N { }` away, so a declared
+    // MyExc is "MyExc" where .NET would say "N.MyExc"), and the exit status: .NET
+    // on Unix aborts the process, which a shell reports as 134, but that is the
+    // CoreCLR host calling abort(), not a language property, and this engine has
+    // no abort() - it exits 1, as every other uncaught-exception path here does.
+    //
+    // The twins are js_cstop in languages/lib/csharp-rt.metajs and in
+    // abnf/jsrtjvm.go, both reached from the one js_try the emitter wraps the
+    // entry call in (buildMain in csharp-to-llvm-ir.abnf).
+    function csExcTopLine(v) {
+        var head = "Unhandled exception. "
+        if (v === null || v === undefined || typeof v != "object") { return head + csStr(v) }
+        var name = csTypeOfVal(v).FullName
+        var msg = anytype
+        msg = v.Message
+        if (msg === undefined || msg === null || msg == "") { return head + name }
+        return head + name + ": " + csStr(msg)
+    }
+    function csReportUncaught(v) {
+        eprintln(csExcTopLine(v))
+        exit(1)
+    }
     var ret = anytype
     if (mainIsSnippet(entry)) {
         // A snippet (e.g. Program.Helper()) runs in the scope where the classes are bound.
         try {
             ret = runMainSnippet(entry, "Statement")
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { csReportUncaught(e.v) }
             throw e
         }
     } else {
@@ -6247,7 +6293,7 @@ KwLet       = "let" KwEnd ;
         try {
             ret = progCls[entry]()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { csReportUncaught(e.v) }
             throw e
         }
     }

@@ -3044,6 +3044,17 @@ HasStatic   = :script(~~
                 // A user toString() wins over every built-in rendering, as in Java.
                 var ts = jFindMember(v.__class, "toString")
                 if (typeof ts == "function") { return jstrD(ts.apply(undefined, [v]), depth + 1) }
+                // java.lang.Throwable#toString: the BINARY class name and, only
+                // when getMessage() is non-null, ": " and the message. Measured,
+                // java 24.0.2 - `System.out.println(new RuntimeException("x"))` is
+                // "java.lang.RuntimeException: x", not the Object default this used
+                // to fall through to ("RuntimeException@1a2b3c01" in all three
+                // engines, agreed and wrong). It is the SAME text the launcher's
+                // uncaught line prints, which is why jExcTopLine is one call to
+                // jThrowableStr. Unlike C#'s ToString (manual 7.9), Throwable's
+                // carries NO stack trace - printStackTrace() is the method that
+                // does - so nothing here is unreproducible. docs/todo.md 1.14.
+                if (jIsThrowable(v)) { return jThrowableStr(v) }
                 // An enum constant prints its name (java.lang.Enum#toString) and a
                 // record its canonical form P[x=1, y=2] (java.lang.Record) - with
                 // the SIMPLE name, which is what the generated toString uses.
@@ -3879,8 +3890,21 @@ HasStatic   = :script(~~
         }
     }
     function jExcGetMessage() { return arguments[0].message }
+    // THE PACKAGE-QUALIFIED (binary) NAME of a built-in Throwable. Measured against
+    // java 24.0.2: `new RuntimeException("x").getClass().getName()` is
+    // "java.lang.RuntimeException", and Throwable#toString - which is what the
+    // launcher's uncaught-exception line prints - spells the same name. Only
+    // IOException of the nineteen names jExcTree lists lives outside java.lang.
+    // The twin is jvExcFqcn in languages/lib/java-rt.metajs, and the emitter
+    // (emitBuiltinExc in java-to-llvm-ir.abnf) writes the same string as __bname,
+    // which is where the Go twin (javaClassBin in abnf/jsrtjava.go) reads it.
+    // docs/todo.md 1.14.
+    function jExcFqcn(name) {
+        if (name == "IOException") { return "java.io." + name }
+        return "java.lang." + name
+    }
     function jDefExc(name, superName) {
-        var cls = {__isclass: true, __name: name}
+        var cls = {__isclass: true, __name: name, __bname: jExcFqcn(name)}
         if (superName != null) { cls.__super = globalScope[superName] }
         cls.__ctor = jExcCtor(cls)
         cls.getMessage = jExcGetMessage
@@ -3909,6 +3933,52 @@ HasStatic   = :script(~~
                     "AssertionError", "Error"]
     for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
         jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])
+    }
+    // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE. Measured, java 24.0.2, on stderr,
+    // exit status 1:
+    //
+    //     Exception in thread "main" java.lang.RuntimeException: abort probe
+    //     Exception in thread "main" P2$MyExc: custom msg
+    //     Exception in thread "main" P2$NoMsg              <- getMessage() == null
+    //     Exception in thread "main" java.lang.RuntimeException:      <- message ""
+    //
+    // i.e. the fixed prefix plus Throwable#toString, which is the BINARY class name
+    // and, only when getMessage() is non-null, ": " and the message. An empty
+    // message still prints the colon and the space; a null one prints neither.
+    // All three engines printed "uncaught exception: [object Object]" before this -
+    // the defect class chapter 5 names, where engine-vs-engine byte identity is
+    // blind by construction and only an oracle can see it. docs/todo.md 1.14.
+    //
+    // WHAT IS DELIBERATELY NOT REPRODUCED: the "\tat Main.main(Main.java:4)" frames
+    // that follow. This engine has no call-site line table (the same wall as dart's
+    // `catch (e, s)`, manual 7.9), and inventing frames would be a divergence of a
+    // worse shape than omitting them.
+    //
+    // The twins are jvExcTopLine / js_jvtop in languages/lib/java-rt.metajs (the
+    // native build) and js_jvtop in abnf/jsrtjvm.go (llvm.Run). The message slot
+    // differs between the halves - this one writes `message`, the emitted builtin
+    // constructor writes `__msg` (emitBuiltinExc) - so both are read here and in
+    // both twins, and the three engines then answer the same string.
+    function jExcMessageOf(v) {
+        var m = anytype
+        m = v.message
+        if (m === undefined) { m = v.__msg }
+        return m
+    }
+    // java.lang.Throwable#toString - the whole of the abort line after the fixed
+    // prefix, and also what println(e) and "" + e print (jstrD's Throwable arm).
+    function jThrowableStr(v) {
+        var cls = v.__class
+        var name = "java.lang.Throwable"
+        if (cls != undefined && cls != null && typeof cls == "object") { name = jClassBin(cls) }
+        var msg = jExcMessageOf(v)
+        if (msg === undefined || msg === null) { return name }
+        return name + ": " + jstr(msg)
+    }
+    function jExcTopLine(v) {
+        var head = "Exception in thread \"main\" "
+        if (v === null || v === undefined || typeof v != "object") { return head + jstr(v) }
+        return head + jThrowableStr(v)
     }
     // A typed catch matches when the thrown value is an instance of ANY of the
     // clause's types (multi-catch is one clause with several).
@@ -5370,14 +5440,24 @@ HasStatic   = :script(~~
     // (c.mainName) can name any other static method of Main.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
-    // A user exception that escapes the entry point is reported like any runtime error.
+    // A user exception that escapes the entry point is reported the way the java
+    // LAUNCHER reports it - "Exception in thread "main" java.lang.RuntimeException:
+    // abort probe", on stderr, exit status 1 - and no longer as an engine error
+    // ("java interpreter error: uncaught exception: [object Object]", which was also
+    // on STDOUT here while both compiled halves put it on stderr). js_jvtop of
+    // languages/lib/java-rt.metajs and of abnf/jsrtjvm.go are the twins.
+    // docs/todo.md 1.14.
+    function jReportUncaught(v) {
+        eprintln(jExcTopLine(v))
+        exit(1)
+    }
     var ret = anytype
     if (mainIsSnippet(entry)) {
         // A snippet (e.g. Main.helper()) runs in the scope where the classes are bound.
         try {
             ret = runMainSnippet(entry, "Statement")
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { jReportUncaught(e.v) }
             throw e
         }
         println("java interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
@@ -5404,7 +5484,7 @@ HasStatic   = :script(~~
         try {
             ret = mainStatic ? mainCls[entry]([]) : mcall(mainInst, entry, [[]])
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { jReportUncaught(e.v) }
             throw e
         }
         println("java interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))

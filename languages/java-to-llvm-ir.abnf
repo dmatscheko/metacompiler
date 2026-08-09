@@ -4654,6 +4654,17 @@ HasStatic   = :script(~~
                            "ClassCastException", "UnsupportedOperationException",
                            "NumberFormatException", "InterruptedException", "IOException",
                            "StackOverflowError", "AssertionError"]
+    // The PACKAGE-QUALIFIED (binary) name of each, written on the descriptor as
+    // __bname - which is what java.lang.Class#getName answers, what jpClassName in
+    // languages/lib/java-rt.metajs and javaClassBin in abnf/jsrtjava.go read, and
+    // therefore what the uncaught-exception line prints. Measured, java 24.0.2:
+    // `new RuntimeException("x").getClass().getName()` is
+    // "java.lang.RuntimeException". Only IOException of the nineteen lives outside
+    // java.lang. The twin is jExcFqcn in java-interpreter.abnf. docs/todo.md 1.14.
+    function jExcFqcn(name) {
+        if (name == "IOException") { return "java.io." + name }
+        return "java.lang." + name
+    }
     var builtinExcParent = {"$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
                             "$RuntimeException": "Exception",
                             "$IllegalArgumentException": "RuntimeException",
@@ -4760,6 +4771,7 @@ HasStatic   = :script(~~
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_set", [clsV, emitStr(b, "__bname"), emitStr(b, jExcFqcn(name))])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var par = builtinExcParent["$" + name]
             if (par != "" && neededExc["$" + par] == true && userDeclared["$" + par] != true) {
@@ -5171,13 +5183,25 @@ HasStatic   = :script(~~
         // method of Main.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
-        if (mainIsSnippet(entry)) {
-            b = emitMainSnippet(b, entry, "Statement")
-            b.NewRet(emitNum(b, 0))
-        } else {
-            var mainCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Main")])
-            var mainV = callExt(b, "js_get", [mainCls, emitStr(b, entry)])
-            var argsV = callExt(b, "js_arr_new", [])
+        // THE WHOLE ENTRY CALL RUNS INSIDE ONE js_try, so an exception nobody caught
+        // is reported BY THE PROGRAM (js_jvtop) instead of escaping the module. What
+        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
+        // which renders a value with the generic object toString, so every uncaught
+        // `throw' in both compiled halves read "js runtime error: uncaught
+        // exception: [object Object]" - no class and no message. This is exactly the
+        // shape ruby-to-llvm-ir.abnf (js_try + js_rtop) and go-to-llvm-ir.abnf
+        // (js_gotry + js_gotop) already use; js_jvtop prints the java LAUNCHER's own
+        // line and exits 1, which is what real java does (measured, 24.0.2).
+        // docs/todo.md 1.14.
+        var entryT = function(bb) {
+            if (mainIsSnippet(entry)) {
+                bb = emitMainSnippet(bb, entry, "Statement")
+                bb.NewRet(emitNum(bb, 0))
+                return deadBlock()
+            }
+            var mainCls = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "Main")])
+            var mainV = callExt(bb, "js_get", [mainCls, emitStr(bb, entry)])
+            var argsV = callExt(bb, "js_arr_new", [])
             // JEP 512: the entry may be an INSTANCE method (`void main()` in an
             // implicitly declared class). An instance method sits on the class
             // descriptor like a static one, so the static-ness is read from
@@ -5185,17 +5209,28 @@ HasStatic   = :script(~~
             // instance built with the no-argument constructor, exactly as
             // java's own launcher does it.
             if (lookupMethodKind("Main", entry) == "instance") {
-                var selfV = callExt(b, "js_obj_new", [])
-                callExt(b, "js_set", [selfV, emitStr(b, "__class"), mainCls])
-                var ctorArgs = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [ctorArgs, selfV])
-                var ctorV = callExt(b, "js_get", [mainCls, emitStr(b, "__ctor")])
-                callExt(b, "js_call", [ctorV, hUndef, ctorArgs])
-                callExt(b, "js_arr_push", [argsV, selfV])
+                var selfV = callExt(bb, "js_obj_new", [])
+                callExt(bb, "js_set", [selfV, emitStr(bb, "__class"), mainCls])
+                var ctorArgs = callExt(bb, "js_arr_new", [])
+                callExt(bb, "js_arr_push", [ctorArgs, selfV])
+                var ctorV = callExt(bb, "js_get", [mainCls, emitStr(bb, "__ctor")])
+                callExt(bb, "js_call", [ctorV, hUndef, ctorArgs])
+                callExt(bb, "js_arr_push", [argsV, selfV])
             }
-            callExt(b, "js_arr_push", [argsV, callExt(b, "js_arr_new", [])])
-            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+            callExt(bb, "js_arr_push", [argsV, callExt(bb, "js_arr_new", [])])
+            bb.NewRet(callExt(bb, "js_call", [mainV, hUndef, argsV]))
+            return deadBlock()
         }
+        var topCatchT = function(bb) {
+            callExt(bb, "js_jvtop", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }
+        var entryIdx = emitFunc([], entryT, false, null)
+        var catchIdx = emitFunc(["$exc"], topCatchT, false, null)
+        b.NewRet(callExt(b, "js_try", [callExt(b, "js_closure", [handle(entryIdx), curScopeV]),
+                                       callExt(b, "js_closure", [handle(catchIdx), curScopeV]),
+                                       hUndef]))
     }
 
     c.compile(c.asg)

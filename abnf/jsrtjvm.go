@@ -30,7 +30,9 @@ package abnf
 // learn about in jsrt.go - each as one extra case for a type nothing else creates.
 
 import (
+	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -492,7 +494,116 @@ func init() {
 		m["js_jflo32"] = func(a []uint64) uint64 {
 			return rt.wrap(jsJFlo{f: jvmFround(rt.toNumber(rt.unwrap(a[0]))), sty: floJavaF})
 		}
+		// THE JAVA LAUNCHER'S UNCAUGHT-EXCEPTION LINE, called from the catch
+		// clause of the one js_try the emitter wraps the entry call in
+		// (buildMain in languages/java-to-llvm-ir.abnf). Without it the value
+		// left the module and runJSModule's uncaught-throw handler rendered it
+		// with excText - which finds neither the {name, message} nor the
+		// {__class, args} shape a Java exception has - so an uncaught `throw'
+		// read "js runtime error: uncaught exception: [object Object]" here,
+		// natively AND in the interpreter half. All three agreed and all three
+		// were wrong (manual chapter 5). docs/todo.md 1.14.
+		//
+		// Measured, java 24.0.2, on stderr with exit status 1:
+		//     Exception in thread "main" java.lang.RuntimeException: abort probe
+		//     Exception in thread "main" P2$NoMsg      <- getMessage() == null
+		// The "\tat Main.main(Main.java:4)" frames are deliberately not
+		// reproduced; no engine here has a call-site line table.
+		//
+		// The twins are jExcTopLine in languages/java-interpreter.abnf and
+		// jvExcTopLine in languages/lib/java-rt.metajs - same two message slots
+		// (`message` from the interpreter's jExcCtor, `__msg` from the emitted
+		// builtin constructor), same binary class name, same stream, same code.
+		m["js_jvtop"] = func(a []uint64) uint64 {
+			fmt.Fprint(warnWriter, wtf8Clean(rt.jvmExcTopLine(rt.unwrap(a[0]))+"\n"))
+			os.Exit(1)
+			return 0
+		}
+		// THE .NET HOST'S UNHANDLED-EXCEPTION LINE, the C# half of the same
+		// change and reached the same way (buildMain in
+		// languages/csharp-to-llvm-ir.abnf wraps the entry call in one
+		// js_try). SPEC-CITED, NOT MEASURED - no C# toolchain on this machine
+		// (manual 7.9). See csExcTopLine in languages/lib/csharp-rt.metajs for
+		// the citation and for what is deliberately not reproduced.
+		// docs/todo.md 1.14.
+		m["js_cstop"] = func(a []uint64) uint64 {
+			fmt.Fprint(warnWriter, wtf8Clean(rt.csharpExcTopLine(rt.unwrap(a[0]))+"\n"))
+			os.Exit(1)
+			return 0
+		}
 	})
+}
+
+// csharpExcTopLine is the text of js_cstop above; the twins are csExcTopLine in
+// languages/csharp-interpreter.abnf and in languages/lib/csharp-rt.metajs. Note
+// the EMPTY-message rule: C# drops the colon where java keeps it.
+func (rt *jsrt) csharpExcTopLine(v interface{}) string {
+	const head = "Unhandled exception. "
+	o, ok := v.(*jsObject)
+	if !ok {
+		return head + rt.cspStr(v)
+	}
+	name := "System.Object"
+	if t := rt.csTypeOfVal(o); t != nil {
+		if f, isStr := t.props["FullName"].(string); isStr {
+			name = f
+		}
+	}
+	msg := o.props["Message"]
+	if jvmNullish(msg) {
+		return head + name
+	}
+	if s, isStr := msg.(string); isStr && s == "" {
+		return head + name
+	}
+	return head + name + ": " + rt.cspStr(msg)
+}
+
+// jvmExcTopLine is the text of js_jvtop above. Kept out of the closure so that
+// the three engines' bodies read alike side by side.
+func (rt *jsrt) jvmExcTopLine(v interface{}) string {
+	const head = "Exception in thread \"main\" "
+	o, ok := v.(*jsObject)
+	if !ok {
+		return head + rt.jvpStr(v)
+	}
+	return head + rt.jvmThrowableStr(o)
+}
+
+// jvmThrowableStr is java.lang.Throwable#toString - the whole of the abort line
+// after the fixed prefix, and also what println(e) prints (the Throwable arm of
+// jvpObj in abnf/jsrtjava.go). The twins are jThrowableStr in
+// languages/java-interpreter.abnf and jvThrowableStr in
+// languages/lib/java-rt.metajs. The message slot differs between the halves - the
+// interpreter's jExcCtor writes `message`, the emitted builtin constructor writes
+// `__msg` (emitBuiltinExc) - so both are read, in that order, in all three.
+func (rt *jsrt) jvmThrowableStr(o *jsObject) string {
+	name := "java.lang.Throwable"
+	if cls, isObj := o.props["__class"].(*jsObject); isObj {
+		name = jvpClassName(cls)
+	}
+	msg := o.props["message"]
+	if jvmNullish(msg) {
+		msg = o.props["__msg"]
+	}
+	if jvmNullish(msg) {
+		return name
+	}
+	return name + ": " + rt.jvpStr(msg)
+}
+
+// jvmNullish is "absent, undefined or null" - the three ways a message slot can
+// say that getMessage() would answer null. An EMPTY message is not one of them:
+// real java prints the colon and the space for it (measured).
+func jvmNullish(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	switch v.(type) {
+	case jsUndefT, jsNullT:
+		return true
+	}
+	return false
 }
 
 // jvmMathObject is the `Math` a compiled Java program sees. The handle runtime's

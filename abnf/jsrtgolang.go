@@ -892,16 +892,31 @@ func init() {
 			if p == nil {
 				return 0
 			}
+			// THE WORDING IS GO'S OWN SINCE docs/todo.md 1.14. Measured,
+			// go 1.26.5, on stderr with exit status 2:
+			//
+			//     panic: abort probe
+			//     panic: runtime error: index out of range [5] with length 0
+			//
+			// plus a blank line and a "goroutine 1 [running]:" trace, which
+			// no engine here can produce. "panic: " prefixes BOTH kinds, so
+			// the string test that used to be here (print a runtime panic's
+			// own "js runtime error: <msg>" bare, wrap anything else in
+			// "uncaught exception: ") is gone - go does not distinguish them
+			// at the top. The residual "js " on a runtime panic's text is
+			// docs/todo.md 1.9's project-wide wording; it is what recover()
+			// hands the program in all three engines and rewriting it only
+			// here would make the printed panic disagree with it.
 			text := ""
 			if exc, ok := p.(*jsThrown); ok {
-				text = "js runtime error: uncaught exception: " + rt.gopStr(exc.value)
-			} else if s, ok := p.(string); ok && strings.HasPrefix(s, "js runtime error: ") {
+				text = rt.gopStr(exc.value)
+			} else if s, ok := p.(string); ok {
 				text = s
 			} else {
-				text = "js runtime error: uncaught exception: " + fmt.Sprint(p)
+				text = fmt.Sprint(p)
 			}
-			fmt.Fprint(outWriter, wtf8Clean(text+"\n"))
-			os.Exit(1)
+			fmt.Fprint(warnWriter, wtf8Clean("panic: "+text+"\n"))
+			os.Exit(2)
 			return 0
 		}
 		// The DIVISOR of an integer '/' or '%', checked before the operator runs.
