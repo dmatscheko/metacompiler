@@ -3752,7 +3752,17 @@ func (rt *jsrt) javaString(v interface{}) string {
 func (rt *jsrt) findClassAccessor(o *jsObject, name string) *jsAccessor {
 	cls, ok := o.props["__class"]
 	if !ok {
-		return nil
+		// A CLASS DESCRIPTOR has no __class of its own: its STATIC accessors are
+		// inherited along its own __super chain, which is this very walk one link
+		// further in. That is how `class D extends C {}` reaches C's `static get g()`
+		// and `static set g(v)`. docs/todo.md 1.2.
+		if isc, isClass := o.props["__isclass"]; !isClass || isc != true {
+			return nil
+		}
+		cls, ok = o.props["__super"]
+		if !ok {
+			return nil
+		}
 	}
 	for cls != nil {
 		clsObj, isObj := cls.(*jsObject)
@@ -11374,6 +11384,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					break
 				}
 				if m, ok := clsObj.props[name]; ok && isCallable(m) {
+					// `super.s(x)` inside a STATIC method: the parent's static
+					// member is a plain closure whose `this` comes from the
+					// receiver, not an instance method with the receiver
+					// PREPENDED, so handing it a[1] as arguments[0] shifted every
+					// argument by one. The two conventions are told apart by the
+					// __stat table the js/ts emitters write on the descriptor; no
+					// other language emits that slot, so this arm is inert for
+					// all of them. docs/todo.md 1.2.
+					if st, has := clsObj.props["__stat"].(*jsObject); has {
+						if _, isStatic := st.props[name]; isStatic {
+							return w(rt.call(m, u(a[1]), args.elems))
+						}
+					}
 					return w(rt.call(m, jsUndef, append([]interface{}{u(a[1])}, args.elems...)))
 				}
 				cls = clsObj.props["__super"]

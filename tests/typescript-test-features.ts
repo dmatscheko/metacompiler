@@ -568,11 +568,29 @@ check("this-top-typeof", typeof gThisTop === "object");
 check("this-top-not-undefined", (gThisTop === undefined) === false);
 check("this-globalthis", typeof globalThis === "object" && gThisTop === globalThis);
 check("this-top-arrow", gThisArrow() === gThisTop);
-check("this-plain-call", (function() { return this; })() === undefined);
 check("this-static-method", (function() {
     class C { static tag = "T"; static who() { return this; } static viaThis() { return this.tag; } }
     return C.who() === C && C.viaThis() === "T" && typeof C.who() === "function";
 })());
+
+// Static members are INHERITED: node walks the class object's own prototype chain
+// (docs/todo.md 1.2). Read out of an array so the folder cannot answer it.
+check("class-static-inherited", (function() {
+    var a: number[] = [1, 2, 3];
+    class C { static m(x: number): number { return x + a[0]; } static f: number = a[1]; static get g(): string { return "g" + this.f; } static who(): string { return "C"; } static callsWho(): string { return this.who(); } }
+    class D extends C { static who(): string { return "D"; } static viaSuper(x: number): number { return super.m(x); } }
+    class E extends D {}
+    return D.m(a[0]) === 2 && E.f === 2 && D.g === "g2" && E.callsWho() === "D"
+        && D.viaSuper(a[2]) === 4 && typeof E.m === "function";
+})());
+// A sloppy function's `this` is the global object; a strict one's is undefined,
+// and a function declared inside a strict one inherits the flag (docs/todo.md 1.1).
+check("this-plain-call-sloppy", (function() { return this; })() === globalThis);
+check("this-plain-call-strict", (function() { "use strict"; return this; })() === undefined);
+check("this-call-null-sloppy", (function() { return this; }).call(null) === globalThis);
+check("this-call-null-strict", (function() { "use strict"; return this; }).call(null) === null);
+check("this-strict-inherited", (function() { "use strict"; function inner() { return this; } return inner(); })() === undefined);
+check("this-class-body-strict", (function() { class K { m() { function inner() { return this; } return inner(); } } return (new K()).m(); })() === undefined);
 
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");

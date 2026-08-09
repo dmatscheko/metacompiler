@@ -32,10 +32,11 @@ the shared global scope - rather than switching it.
 So the top level 'this' is the GLOBAL OBJECT and 'globalThis' names the same object. It
 is a plain object, not a live view of the scope chain: 'globalThis.x = 1' does not create
 a global variable, and ''' + this' is '[object Object]' where node says '[object global]'.
-Two neighbouring rows are deliberately NOT converged, because both need a per-function
-strict-mode flag that no engine here carries: a plain call's 'this' is undefined where a
-sloppy Script's would be the global object, and 'f.call(null)' keeps the null instead of
-substituting it.
+A function's STRICTNESS is a per-function flag (UseStrictMark below): a sloppy function
+called with no receiver, or with 'call(null)', gets the global object as its 'this', a
+strict one keeps the undefined or the null. The one row still NOT converged is
+'f.call(7)' on a sloppy function - ToObject of a PRIMITIVE receiver needs wrapper
+objects, which this value model has none of, so the 7 arrives unwrapped.
 
 It covers the practical ECMAScript 2022 grammar (tests/js-test-full.js walks it):
 
@@ -212,8 +213,8 @@ The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
 // that one has to begin with a line terminator (see HtmlCloseComment), and the very first
 // line of the file has none in front of it. The start of the source counts as the start of
 // a line, so the form is allowed here instead.
-Program     <~~ pushg(makeSeq(takeAll())) ~~>
-            = [ HtmlCloseAtStart ] { TopStatement } ;
+Program     <~~ pushg(makeProgram(takeAll())) ~~>
+            = [ HtmlCloseAtStart ] [ UseStrictMark ] { TopStatement } ;
 HtmlCloseAtStart = "-->" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 
 // An import or an export is a MODULE ITEM, not a statement: it may only stand at the top
@@ -333,8 +334,8 @@ Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow NoLineBreak Expression StmtEnd ;
 
 // A function declaration binds the closure in the current scope when it executes.
-FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
-            = KwFunction NotBindName Id <~~ push(up.in) ~~> ParamList Block ;
+FuncDecl    <~~ push(makeFuncDecl(takeAll())) ~~>
+            = KwFunction NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -691,10 +692,10 @@ AsyncArrow  <~~ push(makeAsyncArrow(takeAll())) ~~>
 // 'async function [*] [name](...) {}' as an expression. The optional name is accepted
 // and, like a plain function expression's, not bound.
 AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] [ AsyncExprName ] ParamList Block ;
+            = KwAsync KwFunction [ GenMark ] [ AsyncExprName ] ParamList [ UseStrictMark ] Block ;
 AsyncExprName = NotExprName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
-            = KwFunction GenMark [ AsyncExprName ] ParamList Block ;
+            = KwFunction GenMark [ AsyncExprName ] ParamList [ UseStrictMark ] Block ;
 // 'var C = class { ... }' - a class as a VALUE, with or without a name. It builds the
 // same descriptor a declaration does; nothing is bound, the value is simply returned.
 // An anonymous class expression still supports super(), because a method finds its own
@@ -712,8 +713,8 @@ ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
             = KwClass [ ClassExprName ] KwExtends ClassExt "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
-FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
-            = KwFunction [ NotExprName Id ] ParamList Block ;
+FunctionExpr <~~ push(makeFunctionExprItems(takeAll())) ~~>
+            = KwFunction [ NotExprName Id ] ParamList [ UseStrictMark ] Block ;
 
 // The object literal, with the whole ES2022 property surface: 'key: value', spread
 // ('...o'), computed keys ('[k]: v'), getters and setters, shorthand methods (including
@@ -735,13 +736,13 @@ SpreadProp  <~~ push({spreadObj: true, t: pop()}) ~~>
 ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ComputedValue | ComputedMethod ) ;
 ComputedValue <~~ push({pval: pop()}) ~~> = ":" AssignExpr ;
-ComputedMethod <~~ push({pfn: makeFunctionExpr(pop(), pop())}) ~~> = ParamList Block ;
+ComputedMethod <~~ push({pfn: makeFunctionExprItems(takeAll())}) ~~> = ParamList [ UseStrictMark ] Block ;
 // A getter takes no parameter and a setter takes exactly one - that is in the grammar
 // of the accessor productions, not an early error, so it is enforced here. The accessor
 // is stored in the object's hidden getter/setter table (see makeObject), which is what
 // getMember and setMember consult before the plain slot.
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
-            = ( GetterHead PropKeyAny GetterParams | SetterHead PropKeyAny SetterParams ) Block ;
+            = ( GetterHead PropKeyAny GetterParams | SetterHead PropKeyAny SetterParams ) [ UseStrictMark ] Block ;
 GetterHead  <~~ push({acc: "get"}) ~~> = "get" KwEnd ;
 SetterHead  <~~ push({acc: "set"}) ~~> = "set" KwEnd ;
 GetterParams <~~ push([]) ~~> = "(" ")" ;
@@ -749,7 +750,7 @@ SetterParams <~~ push(takeAll()) ~~> = "(" Param ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
-            = [ AsyncMark ] [ GenMark ] PropKeyAny ParamList Block ;
+            = [ AsyncMark ] [ GenMark ] PropKeyAny ParamList [ UseStrictMark ] Block ;
 // The key of a method or accessor may be computed ('{get [a]() {}}', '{*[b]() {}}'), which
 // the plain PropKey has no room for - there the computed form is a member alternative of
 // its own (ComputedProp), because 'key: value' and '[key]: value' differ before the ':'.
@@ -1238,9 +1239,9 @@ Debugger    <~~ push(function() {}) ~~>
 // object (generator, and async generator - there being no event loop, an async generator
 // is just a generator).
 AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(up.in) ~~> ParamList Block ;
+            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
 GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
-            = KwFunction GenMark NotBindName Id <~~ push(up.in) ~~> ParamList Block ;
+            = KwFunction GenMark NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
@@ -2708,6 +2709,83 @@ NotStrict = :script(~~
         }
 
         return cur ? abnf.newToken("\x01strict-mode", 0) : undefined
+    })()
+~~) ;
+
+// ----- The per-function STRICT-MODE flag -----
+//
+// docs/todo.md 1.1: OrdinaryCallBindThis. A SLOPPY function called with no receiver
+// gets the GLOBAL OBJECT as its `this`, a strict one gets undefined - and until this
+// rule existed no engine here carried a per-function strict flag at all, so every
+// function behaved as a strict one.
+//
+// Strictness is lexical: a body is strict when the enclosing code is strict OR its own
+// directive prologue opens with "use strict". This guard answers the SECOND half only,
+// zero-width, at the position just before a function body (and at the top of the file),
+// and the first half is carried at run time instead - a closure is created while its
+// lexically enclosing body executes, so the enclosing flag is simply the one in scope
+// then (see strictAt / the "0strict" scope slot in the start script). That keeps the
+// scan LOCAL: NotStrict's backward walk is O(prefix) per call, which is affordable for
+// a legacy octal and is not affordable once per function in a 4,000-line file.
+//
+// Two deliberate approximations, both of the same family as NotStrict's:
+//   - a string that only LOOKS like a directive ('"use strict".length;') is read as one;
+//   - an escape inside the directive is not decoded, so '"use strict"' is correctly
+//     NOT a directive only because the raw bytes differ.
+UseStrictMark <~~ push({ustrict: true}) ~~> = UseStrictAhead ;
+UseStrictAhead = :script(~~
+    (function() {
+        var i = 0
+        // ':script' sees the RAW input, so the whitespace and comments in front of the
+        // body block are still ahead of the cursor and have to be stepped over here.
+        while (true) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            break
+        }
+        // A function BODY opens with '{'; at the top of the file the prologue starts
+        // right where the guard stands, so the brace is optional.
+        if (c.peek(i) === 123) { i = i + 1 }
+        // The directive prologue: a run of string literals, ';' and comments.
+        while (true) {
+            var wch = c.peek(i)
+            if (wch === 32 || wch === 9 || wch === 10 || wch === 13 || wch === 11 || wch === 12 || wch === 59) { i = i + 1; continue }
+            if (wch === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (wch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            if (wch !== 34 && wch !== 39) { break }
+            var q = wch
+            var j = i + 1
+            var body = ""
+            while (true) {
+                var sc = c.peek(j)
+                if (sc < 0) { break }
+                if (sc === 92) { body = body + "\\" + String.fromCharCode(c.peek(j + 1)); j = j + 2; continue }
+                if (sc === q) { break }
+                body = body + String.fromCharCode(sc)
+                j = j + 1
+            }
+            if (body === "use strict") { return undefined }
+            i = j + 1
+        }
+        return abnf.newToken("\x01not-strict", 0)
     })()
 ~~) ;
 
@@ -4333,13 +4411,72 @@ NotFuncHead = :script(~~
     var pendingThis = anytype     // The receiver may be any value at all,
     var pendingNewTarget = anytype // and new.target holds a function or undefined.
 
-    function makeClosure(params, bodyT, defScopes) {
+    // ----- Strict mode, per FUNCTION (docs/todo.md 1.1) -----
+    // Strictness is a lexical property of a function: strict when the enclosing code is
+    // strict OR its own directive prologue says "use strict". The UseStrictMark guard
+    // answers the second half at parse time; the first half rides the SCOPE CHAIN, under
+    // the key "0strict" - no source identifier can begin with a digit, so nothing can
+    // collide with it, and a scope entry is restored by every path that restores
+    // `scopes`, which a global flag would not be (an exception out of a body would
+    // strand it). A closure is created while its lexically enclosing body executes, so
+    // the flag in scope at creation time IS the enclosing function's.
+    var fileStrict = false // The Script's own prologue; set by makeProgram.
+    function strictAt(env) {
+        for (var i = env.length - 1; i >= 0; i--) {
+            if (hasOwn(env[i], "0strict")) { return env[i]["0strict"] }
+        }
+        return fileStrict
+    }
+    // OrdinaryCallBindThis (ES2023 10.2.1.2) step 3 for a SLOPPY function: an undefined
+    // or null receiver becomes the GLOBAL OBJECT. Step 3.b's ToObject of a PRIMITIVE
+    // receiver is NOT implemented - this value model has no wrapper objects, so
+    // `f.call(7)` keeps the 7 where node hands the body a Number wrapper. The same
+    // answer in all four engines, so no half diverges. docs/todo.md 1.1.
+    function bindThisSloppy(v) {
+        if (v === undefined || v === null) { return jsGlobalObj }
+        return v
+    }
+    // The Program tag: the file's own directive prologue decides the strictness every
+    // top-level function inherits. The mark is stripped before the statements reach the
+    // shared makeSeq, which would otherwise run it as one.
+    function makeProgram(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ustrict == true) { fileStrict = true; continue }
+            out.push(items[i])
+        }
+        return makeSeq(out)
+    }
+    // The UseStrictMark of a function production, and the same item list without it. The
+    // mark is optional and sits directly in front of the body thunk, which the builders
+    // below index either from the front or from the END - so it has to come out before
+    // any of that indexing happens.
+    function itemsStrict(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ustrict == true) { return true }
+        }
+        return false
+    }
+    function itemsNoStrict(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ustrict == true) { continue }
+            out.push(items[i])
+        }
+        return out
+    }
+
+    function makeClosure(params, bodyT, defScopes, ownStrict) {
         var env = defScopes.slice()
+        var strictHere = (ownStrict === true) || strictAt(env)
         return function() {
             var self = pendingThis
             var nt = pendingNewTarget
             pendingThis = undefined
             pendingNewTarget = undefined
+            // OrdinaryCallBindThis: a SLOPPY function's undefined/null receiver becomes
+            // the global object. docs/todo.md 1.1.
+            if (!strictHere) { self = bindThisSloppy(self) }
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
             var saved = scopes
@@ -4348,6 +4485,7 @@ NotFuncHead = :script(~~
             sc["this"] = self
             sc["new.target"] = nt
             sc["arguments"] = args
+            sc["0strict"] = strictHere
             // The parameter scope has to be ACTIVE while the parameters bind: a default
             // value may read an earlier parameter ('function f(a, b = a + 1)').
             scopes.push(sc)
@@ -4365,6 +4503,10 @@ NotFuncHead = :script(~~
     // the call that reached the arrow would leak into the next closure that runs.
     function makeArrowClosure(params, bodyT, defScopes) {
         var env = defScopes.slice()
+        // An arrow binds no `this`, so OrdinaryCallBindThis does not apply to it - but it
+        // still HAS a strictness, the one of the code that created it, and a function
+        // created inside the arrow inherits that. docs/todo.md 1.1.
+        var strictHere = strictAt(env)
         return function() {
             pendingThis = undefined
             pendingNewTarget = undefined
@@ -4373,6 +4515,7 @@ NotFuncHead = :script(~~
             var saved = scopes
             scopes = env.slice()
             var sc = {}
+            sc["0strict"] = strictHere
             scopes.push(sc)
             bindParams(sc, params, args)
             var r = bodyT()
@@ -4451,10 +4594,33 @@ NotFuncHead = :script(~~
                 // ... - which is what an array-LIKE object (a tagged template's chunk
                 // list) is built out of.
                 if (typeof k == "number" && hasOwn(o, "" + k)) { return o["" + k] }
+                // STATIC MEMBERS ARE INHERITED. `class D extends C {}` then `D.s()`
+                // was "TypeError: D.s is not a function" in all four engines, where
+                // node walks the class object's own prototype chain - which here is
+                // the descriptor's __super chain, one link out from the __class walk
+                // an instance does. Reached for a static method, a static field and
+                // a static accessor alike (the accessor arrives through findAccessor
+                // above, which starts at __super for a descriptor). docs/todo.md 1.2.
+                if (o.__isclass === true) { return classStaticFind(o, k) }
                 return undefined
             }
         }
         return o[k]
+    }
+    // The __super walk for an INHERITED STATIC member: the class descriptor's own
+    // chain, skipped for the engine's own __-prefixed slots (__ctor, __name, __super,
+    // ... are never inherited - every descriptor carries its own). The `guard` cap is
+    // the same 64 the rest of this project puts on a descriptor walk. Twins:
+    // jsvClassStatic in abnf/jsrtjsprint.go and jvStaticFind in
+    // languages/lib/js-rt.metajs. docs/todo.md 1.2.
+    function classStaticFind(cls, k) {
+        if (isInternalKey(k)) { return undefined }
+        var guard = 0
+        for (var cl = cls.__super; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, k)) { return cl[k] }
+            guard = guard + 1
+        }
+        return undefined
     }
     // getMember is getMemberRaw plus the METHODS. An instance keeps its methods on its
     // __class descriptor rather than as own properties, so a plain read found nothing
@@ -4547,7 +4713,14 @@ NotFuncHead = :script(~~
     function findAccessor(o, kind, k) {
         var name = kind + ":" + k
         if (hasOwn(o, "__acc") && hasOwn(o["__acc"], name)) { return o["__acc"][name] }
-        for (var cl = o.__class; cl != undefined && cl != null; cl = cl.__super) {
+        // A CLASS DESCRIPTOR has no __class of its own: its STATIC accessors are
+        // inherited along __super, which is the very same walk one link further in.
+        // That is what makes `class D extends C {}` see C's `static get g()` and its
+        // `static set g(v)` - the read through getMemberRaw and the write through
+        // setMember both come here. docs/todo.md 1.2.
+        var start = anytype // The chain head is a class descriptor or undefined.
+        start = (o.__isclass === true) ? o.__super : o.__class
+        for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], name)) { return cl["__acc"][name] }
         }
         return undefined
@@ -5947,16 +6120,20 @@ NotFuncHead = :script(~~
     }
     // items = [{acc}, key, params, bodyThunk]. The key is a name string (Id) or a thunk
     // (a string/number literal key), and is kept apart the same way makeProp does it.
-    function makeAccessorProp(items) {
+    function makeAccessorProp(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         var key = items[1]
-        var fn = makeFunctionExpr(items[3], items[2])
+        var fn = makeFunctionExpr(items[3], items[2], st)
         if (typeof key == "string") { return {acc: items[0].acc, k: key, fn: fn} }
         return {acc: items[0].acc, kt: key, fn: fn}
     }
     // items = [{isasync}?, {isgen}?, key, params, bodyThunk]. A shorthand method is an
     // ordinary property whose value is a function; the async and generator markers pick
     // which KIND of function value that is.
-    function makeMethodProp(items) {
+    function makeMethodProp(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         var isAsync = false
         var isGen = false
         var at = 0
@@ -5968,8 +6145,8 @@ NotFuncHead = :script(~~
         var key = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
-        var fn = isGen ? makeGenerator(params, body) : makeFunctionExpr(body, params)
-        if (isAsync) { fn = isGen ? makeAsyncGen(params, body) : makeAsyncFn(params, body) }
+        var fn = isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
+        if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st) : makeAsyncFn(params, body, st) }
         if (typeof key == "string") { return {k: key, t: fn} }
         return {kt: key, t: fn}
     }
@@ -5991,8 +6168,15 @@ NotFuncHead = :script(~~
         return []
     }
 
-    function makeFunctionExpr(bodyT, params) {
-        return function() { return makeClosure(params, bodyT, scopes) }
+    function makeFunctionExpr(bodyT, params, ownStrict) {
+        return function() { return makeClosure(params, bodyT, scopes, ownStrict) }
+    }
+    // items = [params, (UseStrictMark)?, bodyThunk] - the optional function-expression
+    // name pushes nothing.
+    function makeFunctionExprItems(items) {
+        var st = itemsStrict(items)
+        var a = itemsNoStrict(items)
+        return makeFunctionExpr(a[1], a[0], st)
     }
 
     // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
@@ -6453,11 +6637,13 @@ NotFuncHead = :script(~~
     }
     // The value a generator FUNCTION is: calling it runs nothing, it only captures the
     // arguments and hands back a fresh generator object.
-    function makeGenerator(params, bodyT) {
+    function makeGenerator(params, bodyT, ownStrict) {
         return function() {
             var env = scopes.slice()
+            var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
                 var self = pendingThis
+                if (!strictHere) { self = bindThisSloppy(self) }
                 pendingThis = undefined
                 pendingNewTarget = undefined
                 var args = []
@@ -6469,11 +6655,13 @@ NotFuncHead = :script(~~
     // The value an ASYNC function is: calling it creates the generator its body compiled
     // to, runs it to its first await and answers a promise for its completion. The whole
     // difference from makeGenerator is the driver - the body is compiled identically.
-    function makeAsyncFn(params, bodyT) {
+    function makeAsyncFn(params, bodyT, ownStrict) {
         return function() {
             var env = scopes.slice()
+            var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
                 var self = pendingThis
+                if (!strictHere) { self = bindThisSloppy(self) }
                 pendingThis = undefined
                 pendingNewTarget = undefined
                 var args = []
@@ -6489,11 +6677,13 @@ NotFuncHead = :script(~~
     // the request-queue driver instead of the one-shot async driver. Its yields and
     // its awaits share ONE suspension channel and are told apart by the {__awt} marker
     // makeAwait puts on every awaited operand (see jpAgStep).
-    function makeAsyncGen(params, bodyT) {
+    function makeAsyncGen(params, bodyT, ownStrict) {
         return function() {
             var env = scopes.slice()
+            var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
                 var self = pendingThis
+                if (!strictHere) { self = bindThisSloppy(self) }
                 pendingThis = undefined
                 pendingNewTarget = undefined
                 var args = []
@@ -6503,20 +6693,24 @@ NotFuncHead = :script(~~
         }
     }
     // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR.
-    function makeAsyncFuncDecl(items) {
+    function makeAsyncFuncDecl(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         var isGen = items[0] != undefined && items[0].isgen != undefined
         var name = items[items.length - 3]
-        var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1])
-                       : makeAsyncFn(items[items.length - 2], items[items.length - 1])
+        var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1], st)
+                       : makeAsyncFn(items[items.length - 2], items[items.length - 1], st)
         return function() { declVar(name, mk()) }
     }
     // The expression form: the optional name is accepted and, like a plain function
     // expression's, not bound.
-    function makeAsyncFuncExpr(items) {
+    function makeAsyncFuncExpr(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         if (items[0] != undefined && items[0].isgen != undefined) {
-            return makeAsyncGen(items[items.length - 2], items[items.length - 1])
+            return makeAsyncGen(items[items.length - 2], items[items.length - 1], st)
         }
-        return makeAsyncFn(items[items.length - 2], items[items.length - 1])
+        return makeAsyncFn(items[items.length - 2], items[items.length - 1], st)
     }
     // isAg says the body is an ASYNC generator's. It only reaches doYield, which
     // needs it for two things a plain generator has no driver for: unpacking a
@@ -6632,25 +6826,29 @@ NotFuncHead = :script(~~
     }
     // items = [{isgen}?, name, params, bodyThunk] for a declaration, and the same
     // without the name for an expression. The '*' picks a generator over a function.
-    function makeGenOrFuncDecl(items) {
+    function makeGenOrFuncDecl(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         var isGen = false
         var at = 0
         if (items[0] != undefined && items[0].isgen != undefined) { isGen = true; at = 1 }
         var name = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
-        var mk = isGen ? makeGenerator(params, body) : makeFunctionExpr(body, params)
+        var mk = isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
         return function() { declVar(name, mk()) }
     }
     // The expression form. The optional name is accepted and, like a plain function
     // expression's, not bound - so what is left after the marker is params and body.
-    function makeGenOrFuncExpr(items) {
+    function makeGenOrFuncExpr(itemsIn) {
+        var st = itemsStrict(itemsIn)
+        var items = itemsNoStrict(itemsIn)
         var isGen = false
         var at = 0
         if (items[0] != undefined && items[0].isgen != undefined) { isGen = true; at = 1 }
         var params = items[items.length - 2]
         var body = items[items.length - 1]
-        return isGen ? makeGenerator(params, body) : makeFunctionExpr(body, params)
+        return isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
     }
 
     // A destructuring binding. makeDField turns a parsed object field into
@@ -6820,6 +7018,7 @@ NotFuncHead = :script(~~
             var sc = {}
             sc["this"] = self
             sc["arguments"] = args
+            sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
             var r = bodyT()
@@ -6841,6 +7040,7 @@ NotFuncHead = :script(~~
             var sc = {}
             sc["this"] = self
             sc["arguments"] = args
+            sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
             // The implicit 'super()' of a default constructor. The parent is read off the
@@ -6998,16 +7198,36 @@ NotFuncHead = :script(~~
             // an anonymous class expression does not have.
             var clsScope = {}
             clsScope["__class__"] = cls
+            clsScope["0strict"] = true // A class body is strict code, always.
+            // The class's own NAME is bound INSIDE the class body too, and it is bound
+            // BEFORE the static initializers run: `class G { static { G.blk = 1 } }` was
+            // "ReferenceError: G is not defined" in this half only, because the
+            // declaration binds the descriptor after makeClassValue has returned - by
+            // which time the static block has already run. Both compiled halves emit the
+            // scope binding first and agreed with node; a live halves divergence, found
+            // while probing docs/todo.md 1.2 outward. The inner binding is also what
+            // makes a later reassignment of the outer name invisible to the body.
+            if (name != "") { clsScope[name] = cls }
             var mscopes = concat2impl(defScopes, [clsScope])
+            // __stat records which of the descriptor's method slots are STATIC. A static
+            // method is an ordinary closure that takes its `this` from the receiver slot,
+            // while an instance method has the receiver PREPENDED to its arguments, and
+            // super.m() cannot tell the two apart from the function value alone - it is
+            // the only reader of this table. Twins: the __stat slot emitJs/emitTs write in
+            // the two -to-llvm-ir grammars. docs/todo.md 1.2.
+            var stat = {}
+            var anyStat = false
             for (var mi = 0; mi < methods.length; mi++) {
                 var mm2 = methods[mi]
                 scopePut(cls, memberKey(mm2), classMemberFn(mm2, mscopes))
+                if (mm2.statik) { scopePut(stat, memberKey(mm2), true); anyStat = true }
             }
+            if (anyStat) { scopePut(cls, "__stat", stat) }
             // An accessor is called with the receiver in the one-shot slot, never as
             // arguments[0], so a static and an instance accessor are built the same way.
             for (var ai = 0; ai < accessors.length; ai++) {
                 var aa = accessors[ai]
-                addAccessor(cls, aa.acc, memberKey(aa), makeClosure(aa.params, aa.body, mscopes))
+                addAccessor(cls, aa.acc, memberKey(aa), makeClosure(aa.params, aa.body, mscopes, true))
             }
             if (ctorInfo != null) {
                 cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, false, false)
@@ -7019,9 +7239,9 @@ NotFuncHead = :script(~~
             for (var si = 0; si < inits.length; si++) {
                 var it = inits[si]
                 if (it.kind == "staticblock") {
-                    callWithThis(makeClosure([], it.body, mscopes), cls, [])
+                    callWithThis(makeClosure([], it.body, mscopes, true), cls, [])
                 } else {
-                    scopePut(cls, memberKey(it), (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes), cls, []) : undefined)
+                    scopePut(cls, memberKey(it), (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
                 }
             }
             return cls
@@ -7032,10 +7252,10 @@ NotFuncHead = :script(~~
     // generator method hands back a generator object instead of running the body.
     function classMemberFn(m, mscopes) {
         if (m.statik) {
-            if (m.isGen && m.isAsync) { return makeAsyncGen(m.params, m.body)() }
-            if (m.isGen) { return makeGenerator(m.params, m.body)() }
-            if (m.isAsync) { return makeAsyncFn(m.params, m.body)() }
-            return makeClosure(m.params, m.body, mscopes)
+            if (m.isGen && m.isAsync) { return makeAsyncGen(m.params, m.body, true)() }
+            if (m.isGen) { return makeGenerator(m.params, m.body, true)() }
+            if (m.isAsync) { return makeAsyncFn(m.params, m.body, true)() }
+            return makeClosure(m.params, m.body, mscopes, true)
         }
         if (m.isGen && m.isAsync) { return makeInstanceAsyncGen(m.params, m.body, mscopes) }
         if (m.isGen) { return makeInstanceGenerator(m.params, m.body, mscopes) }
@@ -7260,6 +7480,13 @@ NotFuncHead = :script(~~
         }
         return {dtype: "supertarget", skey: items[0].skey}
     }
+    // Is `name` a STATIC method of this class descriptor? See the __stat table
+    // makeClassValue builds. docs/todo.md 1.2.
+    function isStaticMember(cls, name) {
+        if (cls == undefined || cls == null) { return false }
+        if (!hasOwn(cls, "__stat")) { return false }
+        return hasOwn(cls["__stat"], name)
+    }
     function makeSuperCall(name, argThunks) {
         if (name == "") {
             return function() {
@@ -7274,10 +7501,17 @@ NotFuncHead = :script(~~
         return function() {
             var self = getVar("this")
             var m = undefined
-            for (var cl = getVar("__class__").__super; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
+            var owner = undefined
+            for (var cl = getVar("__class__").__super; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) { m = cl[name]; owner = cl } }
             // node's wording: it has no source text for a super receiver either,
               // and prints "(intermediate value).<name>". docs/todo.md 1.4.
             if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
+            // `super.s(x)` inside a STATIC method: the parent's static member is a plain
+            // closure whose `this` comes from the receiver slot, not an instance method
+            // with the receiver prepended, so handing it `self` as arguments[0] shifted
+            // every argument by one. __stat is what the two conventions are told apart
+            // by. docs/todo.md 1.2.
+            if (isStaticMember(owner, name)) { return callWithThis(m, self, evalArgs(argThunks)) }
             var argv = concat2impl([self], evalArgs(argThunks))
             return m.apply(undefined, argv)
         }
@@ -7889,8 +8123,14 @@ NotFuncHead = :script(~~
     }
 
     // Local stack = [name, [paramNames...], bodyThunk] -- binds the closure when executed.
-    function makeFuncDecl(bodyT, paramNames, name) {
-        return function() { declVar(name, makeClosure(paramNames, bodyT, scopes)) }
+    // items = [name, params, (UseStrictMark)?, bodyThunk].
+    function makeFuncDecl(items) {
+        var st = itemsStrict(items)
+        var a = itemsNoStrict(items)
+        var name = a[0]
+        var paramNames = a[1]
+        var bodyT = a[2]
+        return function() { declVar(name, makeClosure(paramNames, bodyT, scopes, st)) }
     }
 
     // Build the program thunk out of the parsed source.

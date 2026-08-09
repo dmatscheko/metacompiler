@@ -99,6 +99,54 @@ func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
+// jsvClassStatic is the __super walk for an INHERITED STATIC member. `class D
+// extends C {}` then `D.s()` was "TypeError: D.s is not a function" in all four
+// engines, where node walks the class object's own prototype chain: here that is the
+// DESCRIPTOR's __super chain, one link out from the __class chain an instance walks.
+// The engine's own __-prefixed slots are never inherited (every descriptor carries
+// its own __ctor, __name, __super), and the `guard` cap is the same 64 the rest of
+// this project puts on a descriptor walk. The answer is the RAW slot, so an accessor
+// box reaches its caller and can be invoked with the right receiver. Twins:
+// jvStaticFind in languages/lib/js-rt.metajs and classStaticFind in the two
+// interpreter grammars. docs/todo.md 1.2.
+func jsvClassStatic(o *jsObject, name string) (interface{}, bool) {
+	if isc, has := o.props["__isclass"]; !has || isc != true {
+		return nil, false
+	}
+	if jsvInternalKey(name) {
+		return nil, false
+	}
+	guard := 0
+	for cls := o.props["__super"]; cls != nil && guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if v, found := clsObj.props[name]; found {
+			return v, true
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil, false
+}
+
+// The value of an inherited static member, with an accessor box unwrapped against
+// the receiver the read started from (node runs `static get g()` with `this` bound
+// to the SUBCLASS). Answers false when the name is nowhere on the chain.
+func (rt *jsrt) jsvStaticValue(o *jsObject, name string) (uint64, bool) {
+	v, found := jsvClassStatic(o, name)
+	if !found {
+		return 0, false
+	}
+	if acc, isAcc := v.(*jsAccessor); isAcc {
+		if acc.get == nil {
+			return jsHUndefined, true
+		}
+		return rt.wrap(rt.call(acc.get, o, nil)), true
+	}
+	return rt.wrap(v), true
+}
+
 // jsvProtoTag is Object.prototype.toString's answer for a value.
 func jsvProtoTag(v interface{}) string {
 	switch v.(type) {
@@ -1516,6 +1564,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return rt.call(bound, jsUndef, append([]interface{}{recv}, args...))
 			}))
 		}
+		// An INHERITED STATIC member, read as a value: `class D extends C {}` then
+		// `D.f`, `typeof D.s`, `D.g` through C's static getter. Unlike an instance
+		// method this is NOT wrapped - a static is a plain closure and node hands
+		// back the very function object. docs/todo.md 1.2.
+		if sv, found := rt.jsvStaticValue(recv, name); found {
+			return sv
+		}
 		return r
 	}
 	// js_has plus the __class methods: an instance keeps its methods on its class
@@ -1561,7 +1616,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}))
 			}
 		}
-		return baseGet(a)
+		r := baseGet(a)
+		// An INHERITED STATIC member at a CALL site: `class D extends C {}` then
+		// `D.s()`. Only on the miss, so an ordinary member read pays one compare.
+		// docs/todo.md 1.2.
+		if isUndefOrNull(u(r)) {
+			if recv, isObj := u(a[0]).(*jsObject); isObj {
+				if sv, found := rt.jsvStaticValue(recv, rt.toString(u(a[1]))); found {
+					return sv
+				}
+			}
+		}
+		return r
 	}
 
 	// Wrap a compiled closure into an ASYNC function: calling the result runs the

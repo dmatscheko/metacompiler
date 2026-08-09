@@ -573,6 +573,41 @@ function jvFindClassAcc(o, name) {
     return undefined
 }
 
+// jvStaticFind is the __super walk for an INHERITED STATIC member. `class D extends
+// C {}` then `D.s()` was "TypeError: D.s is not a function" in all four engines,
+// where node walks the class object's own prototype chain: here that is the
+// DESCRIPTOR's __super chain, one link out from the __class chain an instance walks.
+// The engine's own __-prefixed slots are never inherited - every descriptor carries
+// its own __ctor, __name, __super - and the guard cap is the same 64 the rest of this
+// project puts on a descriptor walk. Answers the RAW slot, so an accessor box reaches
+// its caller and can be invoked with the right receiver. Twins: jsvClassStatic in
+// abnf/jsrtjsprint.go and classStaticFind in the two interpreter grammars.
+// docs/todo.md 1.2.
+function jvStaticFind(o, k) {
+    if (!jvIsObj(o)) { return undefined }
+    if (o["__isclass"] !== true) { return undefined }
+    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return undefined } }
+    var cls = o["__super"]
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        var v = cls[k]
+        if (v !== undefined) { return v }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return undefined
+}
+
+// The VALUE of an inherited static member, with an accessor box unwrapped against the
+// receiver the read started from (node runs `static get g()` with `this` bound to the
+// SUBCLASS). Kept out of line so an ordinary missing member pays one call.
+function jvStaticMiss(o, k) {
+    var v = anytype
+    v = jvStaticFind(o, k)
+    if (jvIsAcc(v)) { return jvAccGet(v, o) }
+    return v
+}
+
 function jvAccGet(acc, self) {
     var g = acc["g"]
     if (!jvIsCallable(g)) { return undefined }
@@ -795,11 +830,18 @@ function js_jsmget(o, key) {
                 if (cur === undefined) {
                     var acc = jvFindClassAcc(o, key)
                     if (acc !== undefined) { return jvAccGet(acc, o) }
+                    // An INHERITED STATIC member at a CALL site: `class D extends
+                    // C {}` then `D.s()`. Only on the miss. docs/todo.md 1.2.
+                    return jvStaticMiss(o, key)
                 }
                 return cur
             }
         }
         if (jvHides(o, key)) { return undefined }
+        var mv = anytype
+        mv = o[key]
+        if (mv === undefined) { return jvStaticMiss(o, key) }
+        return mv
     }
     return o[key]
 }
@@ -935,6 +977,11 @@ function jvValueMiss(o, key) {
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvBoundMethod(fn, o) }
+            // An INHERITED STATIC member read as a VALUE: `D.f`, `typeof D.s`, `D.g`
+            // through C's static getter. Unlike an instance method this is NOT
+            // wrapped - a static is a plain closure and node hands back the very
+            // function object. docs/todo.md 1.2.
+            return jvStaticMiss(o, key)
         }
     }
     return undefined
@@ -971,6 +1018,11 @@ function js_jsmset(o, key, v) {
             if (cur === undefined) {
                 var acc = jvFindClassAcc(o, k)
                 if (acc !== undefined) { return jvAccSet(acc, o, v) }
+                // An INHERITED STATIC setter: `class D extends C {}` then `D.g = 5`
+                // runs C's `static set g(v)` with `this` bound to D. docs/todo.md 1.2.
+                var sacc = anytype
+                sacc = jvStaticFind(o, k)
+                if (jvIsAcc(sacc)) { return jvAccSet(sacc, o, v) }
             }
         }
     }
@@ -1063,7 +1115,16 @@ function js_supercall(sup, self, name, args) {
     var cls = sup
     while (jvIsObj(cls)) {
         var m = cls[k]
-        if (jvIsCallable(m)) { return jvCallT(m, self, jvPrepend(self, args)) }
+        if (jvIsCallable(m)) {
+            // `super.s(x)` inside a STATIC method: the parent's static member is a
+            // plain closure whose `this` comes from the receiver, not an instance
+            // method with the receiver PREPENDED, so handing it `self` as
+            // arguments[0] shifted every argument by one. __stat is the table the
+            // emitter writes to tell the two conventions apart. docs/todo.md 1.2.
+            var st = cls["__stat"]
+            if (jvIsObj(st)) { if (st[k] === true) { return jvCallT(m, self, args) } }
+            return jvCallT(m, self, jvPrepend(self, args))
+        }
         cls = cls["__super"]
     }
     // Nothing on the __super chain: the sentinel, which the call site turns into

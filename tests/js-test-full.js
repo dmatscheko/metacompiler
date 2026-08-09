@@ -260,6 +260,54 @@ function s13() {
     check("cls8", dd instanceof Derived && dd instanceof Base)
     function NT() { this.viaNew = new.target !== undefined }
     check("cls9", (new NT()).viaNew === true)
+
+    // STATIC MEMBERS ARE INHERITED (docs/todo.md 1.2). `class D extends C {}` then
+    // `D.s()` was "TypeError: D.s is not a function" in all four engines, where node
+    // walks the class object's own prototype chain. Every value below is
+    // `new vm.Script(src)`'s. The operands come out of an ARRAY so the constant
+    // folder cannot answer any of it at compile time.
+    var sA = [1, 2, 3, 4, 5]
+    class SC {
+        static sm(x) { return "SC.sm:" + (x + sA[0]) }
+        static sf = sA[1] * 10
+        static get sg() { return "SC.sg:" + this.sf }
+        static set sg(v) { this.sf = v + sA[3] }
+        static who() { return "SC" }
+        static callsWho() { return "via " + this.who() }
+    }
+    class SD extends SC {
+        static own(x) { return "SD.own:" + (x + sA[4]) }
+        static viaSuper(x) { return "SD>" + super.sm(x) }
+        static who() { return "SD" }
+    }
+    class SE extends SD {}
+    class SF extends SC { static sm(x) { return "SF.sm:" + (x + sA[2]) } }
+    // A method, a field and a getter, one and two links up the chain.
+    check("cls10", SD.sm(sA[0]) === "SC.sm:2" && SE.sm(sA[1]) === "SC.sm:3")
+    check("cls11", SD.sf === 20 && SE.sf === 20)
+    check("cls12", SD.sg === "SC.sg:20" && SE.sg === "SC.sg:20")
+    check("cls13", typeof SD.sm === "function" && SD.nope === undefined)
+    // An OWN static wins over the inherited one, and the parent keeps its own.
+    check("cls14", SF.sm(sA[0]) === "SF.sm:4" && SC.sm(sA[0]) === "SC.sm:2")
+    // `this` inside an inherited static is the class the call named, so an override
+    // one link down still wins - the chain is walked from the RECEIVER.
+    check("cls15", SD.callsWho() === "via SD" && SE.callsWho() === "via SD"
+                   && SC.callsWho() === "via SC")
+    // super.staticM() inside a static method: the parent's static is a plain
+    // closure, not a receiver-prepended instance method, so the argument must not
+    // be shifted by one.
+    check("cls16", SD.viaSuper(sA[3]) === "SD>SC.sm:5")
+    // An inherited static SETTER runs with `this` bound to the SUBCLASS, so the
+    // write lands there and the parent's own value is untouched.
+    SD.sg = sA[0]
+    check("cls17", SD.sf === 5 && SC.sf === 20)
+    // The engine's own descriptor slots are never inherited.
+    check("cls18", SE.own(sA[0]) === "SD.own:6")
+    // A class's own NAME is bound inside its body, and bound BEFORE the static
+    // initializers run - this half used to raise "ReferenceError: SG is not
+    // defined" while both compiled halves and node answered.
+    class SG { static f = sA[2]; static { SG.blk = SG.f + sA[0] } }
+    check("cls19", SG.blk === 4)
 }
 
 // ===== SECTION 14: iteration statements =====
@@ -2155,6 +2203,13 @@ var s45this = this
 var s45arrow = () => this
 var s45nested = () => (() => this)()
 function s45plain() { return this }
+function s45strict() { "use strict"; return this }
+function s45outer() { "use strict"; function inner() { return this } return inner() }
+function s45sloppyOuter() { function inner2() { return this } return inner2() }
+function s45arrowIn() { var a = () => this; return a() }
+function s45arrowInStrict() { "use strict"; var a = () => this; return a() }
+class s45K { mk() { function inner3() { return this } return inner3() } }
+var s45litm = {q: function () { return this }}
 class S45C {
     static tag = "S45"
     static who() { return this }
@@ -2194,12 +2249,50 @@ function s45() {
     var lit = {t: "L", m: function () { return this.t }}
     check("gthis15", lit.m() === "L")
 
-    // DELIBERATELY NOT CONVERGED, and both rows need the same missing piece - a
-    // per-function strict-mode flag, which no engine here carries. A sloppy
-    // Script's OrdinaryCallBindThis substitutes the global object for an
-    // undefined or null receiver; these engines behave as a STRICT function does
-    // and keep it. node's Script goal answers the global object for both.
-    check("gthis16", s45plain() === undefined)
+    // OrdinaryCallBindThis (ES2023 10.2.1.2), the per-function STRICT-MODE flag.
+    // Every value below is `new vm.Script(src)`'s. Until docs/todo.md 1.1 these
+    // engines behaved as a STRICT function does at every one of them, because no
+    // engine carried a per-function strict flag at all.
+    check("gthis16", s45plain() === globalThis)
+    check("gthis18", s45plain.call(null) === globalThis)
+    check("gthis19", s45plain.call(undefined) === globalThis)
+    check("gthis20", s45plain.apply(null, []) === globalThis)
+    // A STRICT function keeps whatever the call site handed over, undefined and
+    // null included - which is what a flag that is per FUNCTION and not per file
+    // is for: this one sits in the same sloppy Script as the row above it.
+    check("gthis21", s45strict() === undefined)
+    check("gthis22", s45strict.call(null) === null)
+    check("gthis23", s45strict.call(7) === 7)
+    // Strictness is INHERITED lexically, in both directions: a plain function
+    // declared inside a strict one is strict, and one declared inside a CLASS
+    // BODY is strict too (class code always is).
+    check("gthis24", s45outer() === undefined)
+    check("gthis25", (new s45K()).mk() === undefined)
+    // ...while a function nested in an ordinary sloppy one stays sloppy.
+    check("gthis26", s45sloppyOuter() === globalThis)
+    // An ARROW binds no `this` of its own, so it reports the enclosing FUNCTION's -
+    // which is the global object when that function is sloppy and undefined when
+    // it is strict.
+    check("gthis27", s45arrowIn() === globalThis)
+    check("gthis28", s45arrowInStrict() === undefined)
+    // An object-literal method, and a getter, are functions of the enclosing code's
+    // strictness like any other.
+    check("gthis29", s45litm.q.call(null) === globalThis)
+    // A sloppy GENERATOR binds `this` the same way in the interpreter half and
+    // under llvm.Run - and NOT in the native build, which is why there is no
+    // assertion here. `js_this` is one global slot in layer 2, and the emitter arms
+    // it with the RECEIVER of the `g.next()` call, so a generator body reads the
+    // generator object instead of the receiver its function was called with. That
+    // predates docs/todo.md 1.1 (measured at 455ce39: the interpreter and llvm.Run
+    // answer undefined, the native binary answers the generator object) and closing
+    // it needs a per-coroutine `this` in the C floor's control block, not a
+    // strictness flag. Recorded rather than asserted, since clang-check and
+    // native-full run this file natively.
+    // DELIBERATELY NOT CONVERGED: OrdinaryCallBindThis step 3.b is ToObject of a
+    // PRIMITIVE receiver, and this value model has no wrapper objects - node hands
+    // a sloppy body a Number object where all four engines here hand it the 7.
+    // The rest of the rule is implemented; this row is the whole of what is left.
+    check("gthis31", s45plain.call(7) === 7);
     var detached = lit.m
     check("gthis17", typeof detached === "function")
 }
