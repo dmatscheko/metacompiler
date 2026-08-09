@@ -511,6 +511,72 @@ function transform($list) {
 }
 check("combined-pipeline", transform([1, 2, -3]), "o1e2x");
 
+// ----- the recoverable name / method errors (docs/todo.md 3.2) --------------
+//
+// Each of these ended the program with an UNCATCHABLE `js runtime error:` in all
+// three engines, worded differently in each; PHP 8 raises a catchable \Error and
+// these lines prove the program CONTINUES. get_class + getMessage pin the class
+// AND the exact text, because the text is what the two compiled halves used to
+// disagree on: `$s->nope()` said "unknown String method: nope" under llvm.Run and
+// "member 'apply' of undefined" in the native binary.
+class MissTarget { public $p = 1; function ok() { return 7; } }
+function missMsg($fn) {
+    try { $fn(); return "no-throw"; }
+    catch (Error $e) { return get_class($e) . "|" . $e->getMessage(); }
+}
+$missObj = new MissTarget();
+$missStr = "ab";
+$missInt = 7;
+$missNull = null;
+$missArr = [1, 2];
+check("miss-method-instance", missMsg(function () use ($missObj) { $missObj->nope(); }),
+      "Error|Call to undefined method MissTarget::nope()");
+check("miss-method-string", missMsg(function () use ($missStr) { $missStr->nope(); }),
+      "Error|Call to a member function nope() on string");
+check("miss-method-int", missMsg(function () use ($missInt) { $missInt->nope(); }),
+      "Error|Call to a member function nope() on int");
+check("miss-method-null", missMsg(function () use ($missNull) { $missNull->nope(); }),
+      "Error|Call to a member function nope() on null");
+check("miss-method-array", missMsg(function () use ($missArr) { $missArr->nope(); }),
+      "Error|Call to a member function nope() on array");
+check("miss-function", missMsg(function () { zzz_no_such_function(); }),
+      "Error|Call to undefined function zzz_no_such_function()");
+check("miss-constant", missMsg(function () { echo ZZZ_NO_SUCH_CONSTANT; }),
+      "Error|Undefined constant \"ZZZ_NO_SUCH_CONSTANT\"");
+// An Error is NOT an Exception in PHP 8 - the two hierarchies only meet at
+// Throwable - so a plain `catch (Exception)` must not see any of the above.
+$missEsc = "not-caught";
+try {
+    try { $missObj->nope(); } catch (Exception $e) { $missEsc = "wrongly-caught"; }
+} catch (Error $e) { $missEsc = "escaped-to-error"; }
+check("miss-error-is-not-exception", $missEsc, "escaped-to-error");
+// A generator, a closure stored in a PROPERTY (which PHP does not make callable
+// as a method) and a string callable naming nothing. The last two were live
+// divergences of their own: with `__call` declared anywhere in the module the two
+// compiled halves reported the miss against `__call` instead of the method asked
+// for, and `$s()` on a string naming no function aborted with the floor's
+// "call of a non function value: null" where the interpreter half raised.
+function missGen() { yield 1; }
+class MissMagic { function __call($n, $a) { return "magic:" . $n; } }
+class MissProp { public $f; }
+$missG = missGen();
+$missP = new MissProp();
+$missP->f = function () { return 5; };
+$missCallable = "zzz_no_such_callable";
+check("miss-method-generator", missMsg(function () use ($missG) { $missG->nope(); }),
+      "Error|Call to undefined method Generator::nope()");
+check("miss-method-closure-prop", missMsg(function () use ($missP) { $missP->f(); }),
+      "Error|Call to undefined method MissProp::f()");
+check("miss-string-callable", missMsg(function () use ($missCallable) { $missCallable(); }),
+      "Error|Call to undefined function zzz_no_such_callable()");
+// __call still wins where the class actually declares one.
+$missM = new MissMagic();
+check("miss-magic-call-still-wins", $missM->anything(), "magic:anything");
+// The method that IS declared still resolves, and a live class still wins over
+// the miss path - the guard against "fixed the error, broke the dispatch".
+check("miss-live-method", $missObj->ok(), 7);
+check("miss-live-prop", $missObj->p, 1);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

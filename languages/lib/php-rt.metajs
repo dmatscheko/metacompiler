@@ -693,15 +693,27 @@ function phToLong(v) {
 var phRtClasses = undefined
 
 function phRaise(clsName, msg) {
-    if (phRtClasses === undefined) { fail(msg) }
+    var o = phMkErr(clsName, msg)
+    if (o === undefined) { fail(msg) }
+    throw o
+}
+
+// phRaise minus the throw. The recoverable-name hook (js_phmissname below)
+// ANSWERS the value to throw rather than throwing it - the floor clears the hook
+// slot for the duration of the call and restores it before the throw, which is
+// what stops a hook that itself trips the same site from recursing - so it needs
+// the object without the raise. Answering undefined means "no class descriptor,
+// keep the fatal", exactly as phRaise's fail() arms did.
+function phMkErr(clsName, msg) {
+    if (phRtClasses === undefined) { return undefined }
     var cls = phRtClasses[clsName]
-    if (cls === undefined) { fail(msg) }
-    if (cls === null) { fail(msg) }
+    if (cls === undefined) { return undefined }
+    if (cls === null) { return undefined }
     var o = {}
     o["__class"] = cls
     o["message"] = msg
     o["code"] = 0
-    throw o
+    return o
 }
 
 // phArith: an int stays an int unless the exact 64 bit answer does not FIT, and
@@ -1681,7 +1693,11 @@ function phGenCall(g, name, args) {
     if (name == "valid") { return !st["done"] }
     if (name == "rewind") { return null }
     if (name == "getReturn") { return st["ret"] }
-    fail("unknown method '" + name + "' on a generator")
+    // PHP 8 makes this the same catchable Error as any other missing method:
+    // `Call to undefined method Generator::nope()`. It used to be a fatal, and one
+    // the INTERPRETER half spelled with a capital G - a third wording for one site.
+    // docs/todo.md 3.2.
+    phRaise("Error", "Call to undefined method Generator::" + name + "()")
     return null
 }
 
@@ -1721,7 +1737,14 @@ function phJavaStr(v) {
 // instance arm is the one that matters and it is the Go twin's exactly: walk the
 // __class/__super chain, and call the method with the TARGET as its first
 // argument and `this` undefined, which is how the emitter compiles a method.
-function js_mcall(recv, name, args) {
+// It is js_phmcall and not js_mcall because the two engines have to give the same
+// ANSWER on a method nothing claims, and llvm.Run's js_mcall is the shared,
+// language-neutral rt.memberCall in abnf/jsrt.go - which cannot raise a PHP Error
+// and which chapter 4 of the manual forbids overriding by name, since
+// rxExtraExterns fills ONE extern map for every language and a wrapped js_mcall
+// leaks into C# and java. So php-to-llvm-ir.abnf emits its own name and the twin
+// is the js_phmcall arm of abnf/jsrtphp.go. docs/todo.md 3.2.
+function js_phmcall(recv, name, args) {
     if (phIsGen(recv)) { return phGenCall(recv, name, args) }
     if (recv !== undefined && recv !== null && typeof recv == "object") {
         var cls = recv["__class"]
@@ -1730,11 +1753,56 @@ function js_mcall(recv, name, args) {
             // and so is the receiver prepend this used to spell inline.
             var mm = rtFindMethod(cls, name)
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
-            fail("unknown method '" + name + "' on an instance")
+            // PHP 8: `Error: Call to undefined method Foo::nope()`, and it is an
+            // Error rather than a fatal - `catch (Error $e)` recovers. This used to
+            // be an UNCATCHABLE abort in both compiled halves, worded differently in
+            // each ("unknown method 'nope' on an instance" here and in the twin).
+            phRaise("Error", "Call to undefined method " + phClassName(recv) + "::" + name + "()")
         }
+        var f = recv[name]
+        if (typeof f == "function") { return f.apply(recv, args) }
     }
-    var f = recv[name]
-    return f.apply(recv, args)
+    // Everything that is not an object: a string, an int, null, an array. PHP 8
+    // spells it `Call to a member function nope() on string`, with phDebugType's
+    // names (null / bool / int / float / string / array), and it is catchable.
+    // Both compiled halves were wrong here and wrong DIFFERENTLY - llvm.Run
+    // aborted with "unknown String method: nope" and this half with
+    // "member 'apply' of undefined", a live halves divergence nothing asserted on.
+    phRaise("Error", "Call to a member function " + name + "() on " + phDebugType(recv))
+    return undefined
+}
+
+// The RECOVERABLE-NAME hook's php half, registered through the floor's
+// js_rt_missvar by php-to-llvm-ir.abnf's boot block. It answers the value to
+// throw for a name that resolves nowhere, or undefined to keep the abort.
+//
+// TWO ANSWERS, and the split is the whole reason this is a php function rather
+// than a message baked into the emitted closure. php's one flat name space holds
+// both `$variables` and barewords, and PHP 8 treats them completely differently:
+//
+//   zzz()   Error: Call to undefined function zzz()   - CATCHABLE, and this is it
+//   $zzz    Warning: Undefined variable $zzz          - and the expression is NULL,
+//                                                       and the program CONTINUES
+//
+// The second one is declined here rather than approximated: the floor's hook can
+// only answer a value to THROW, never a value to RETURN, so warn-and-continue
+// needs a floor change - and a throw would be a new wrong answer rather than the
+// old one. `$` names therefore keep the `variable not defined` abort they had.
+// docs/todo.md 3.2 records the sizing.
+function js_phmissname(name) {
+    var s = phStr(name)
+    if (s.length == 0) { return undefined }
+    if (s.charAt(0) == "$") { return undefined }
+    return phMkErr("Error", "Call to undefined function " + s + "()")
+}
+
+// The emitter's door to phRaise, for a diagnostic it can word at COMPILE time and
+// that has no runtime shape to inspect: the undefined-constant site in
+// php-to-llvm-ir.abnf's makeConstRef. The twin is m["js_phraise"] in
+// abnf/jsrtphp.go.
+function js_phraise(cls, msg) {
+    phRaise(phStr(cls), phStr(msg))
+    return undefined
 }
 
 // The Go range bound: an int is its own bound, otherwise the element/entry count.

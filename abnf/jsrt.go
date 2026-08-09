@@ -365,7 +365,25 @@ type jsrt struct {
 	// nested runs.
 	retSlot interface{}
 
-	lastGets [][2]uint64 // The most recent member lookups (obj, key handles), for error messages.
+	// There used to be a `lastGets` trail here - the last eight (obj, key) member
+	// lookups, appended to the call-of-a-non-function diagnostic as
+	// `(last member lookups: nope (*abnf.jsObject) ...)`. It was a LIVE HALVES
+	// DIVERGENCE in the error text and the one docs/todo.md 3.2 names: the floor's
+	// die2 (languages/lib/runtime.c) prints `call of a non function value: undefined`
+	// and nothing else, so llvm.Run and the native binary disagreed on every lua and
+	// metajs program that called a nil/undefined value - and disagreed by printing
+	// GO TYPE NAMES, which no engine but this one can even spell. The trail cannot be
+	// given to the native binary either: the floor has no allocation-free place to
+	// keep it and it would cost a store on the js_get HOT PATH in the one engine that
+	// pays for it. So it is gone rather than replicated, and the message is now the
+	// floor's byte for byte.
+	//
+	// It is NOT ratcheted, and that is a limitation rather than an oversight: the
+	// site is an ABORT, lua and metajs have no catch surface to observe it from, and
+	// the only vehicle that compares llvm.Run's stderr with the native binary's is
+	// tests/probe.sh. The matrix compares each engine against ITSELF and the -exe
+	// matrix rows only BUILD. `tests/probe.sh lua <a program calling a nil value>`
+	// is the check.
 
 	// The three RECOVERABLE-ERROR HOOKS, the twins of RT_MISS_VAR / RT_MISS_MEM /
 	// RT_MISS_SET in languages/lib/runtime.c. scopeGet, getMember and setMember
@@ -1222,22 +1240,6 @@ func (rt *jsrt) drainMicrotasks() {
 type jsAccessor struct {
 	get interface{}
 	set interface{}
-}
-
-// noteGet records a member lookup cheaply; failure messages format them lazily.
-func (rt *jsrt) noteGet(obj, key uint64) {
-	if len(rt.lastGets) > 8 {
-		rt.lastGets = rt.lastGets[1:]
-	}
-	rt.lastGets = append(rt.lastGets, [2]uint64{obj, key})
-}
-
-func (rt *jsrt) formatLastGets() string {
-	out := ""
-	for _, g := range rt.lastGets {
-		out += fmt.Sprintf("%s (%T) ", rt.toString(rt.unwrap(g[1])), rt.unwrap(g[0]))
-	}
-	return out
 }
 
 // newJSRT creates a runtime. The bindings become the variables of the root
@@ -3031,7 +3033,10 @@ func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface
 		if rv.Kind() == reflect.Func {
 			return rt.reflectCall(rv, args)
 		}
-		rt.fail("call of a non function value: %s (last member lookups: %s)", rt.toString(callee), rt.formatLastGets())
+		// The wording is the floor's die2 in languages/lib/runtime.c, byte for byte:
+		// this message is reachable from a lua or metajs program and the two engines
+		// have to agree on it. docs/todo.md 3.2.
+		rt.fail("call of a non function value: %s", rt.toString(callee))
 		return nil
 	}
 }
@@ -11274,7 +11279,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(out)
 		},
 		"js_get": func(a []uint64) uint64 {
-			rt.noteGet(a[0], a[1])
 			v := rt.getMember(u(a[0]), u(a[1]))
 			if rt.traced {
 				rt.trMember("mread", a[0], u(a[1]), v)
@@ -12795,7 +12799,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(jsChar{code: int32([]rune(ch)[0])})
 			}
-			rt.noteGet(a[0], a[1])
 			return w(rt.getMember(u(a[0]), u(a[1])))
 		},
 		// Java's == when a char may be involved. Java's char reuses the jsChar type

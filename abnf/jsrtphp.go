@@ -737,9 +737,23 @@ func (rt *jsrt) phpNeg(v interface{}) interface{} {
 var phpMainScope = map[*jsrt]uint64{}
 
 func (rt *jsrt) phpRaise(clsName, msg string) {
+	o := rt.phpMkErr(clsName, msg)
+	if o == nil {
+		rt.fail("%s", msg)
+	}
+	panic(&jsThrown{value: o})
+}
+
+// phpMkErr is phpRaise minus the throw, and the twin of phMkErr in
+// languages/lib/php-rt.metajs. The floor's recoverable-name hook ANSWERS the
+// value to throw rather than throwing it - the slot is cleared for the duration
+// of the call so a hook that itself trips the same site cannot recurse - so
+// js_phmissname needs the object without the raise. nil means "no descriptor,
+// keep the fatal". docs/todo.md 3.2.
+func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 	h, has := phpMainScope[rt]
 	if !has {
-		rt.fail("%s", msg)
+		return nil
 	}
 	// TWO shapes, because layer 2 cannot open a scope (WALL 3 of
 	// docs/runtime-next-plan.md part 3). php-to-llvm-ir.abnf now hands over a PHP
@@ -754,23 +768,40 @@ func (rt *jsrt) phpRaise(clsName, msg string) {
 			}
 		}
 		if found == nil || isNullish(found) {
-			rt.fail("%s", msg)
+			return nil
 		}
 		o := newJSObject()
 		o.set("__class", found)
 		o.set("message", msg)
 		o.set("code", float64(0))
-		panic(&jsThrown{value: o})
+		return o
 	}
 	cls := rt.scopeGet(rt.scopeOf(h), clsName)
 	if cls == nil || isNullish(cls) {
-		rt.fail("%s", msg)
+		return nil
 	}
 	o := newJSObject()
 	o.set("__class", cls)
 	o.set("message", msg)
 	o.set("code", float64(0))
-	panic(&jsThrown{value: o})
+	return o
+}
+
+// phpFindMethod walks a class descriptor's __class/__super chain, the same single
+// inheritance chain rt.memberCall's instance arm walks. It exists so js_phmcall
+// can tell a MISS from a hit BEFORE the shared dispatcher aborts on it.
+func (rt *jsrt) phpFindMethod(cls interface{}, name string) interface{} {
+	for cls != nil {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			return nil
+		}
+		if m, ok := clsObj.props[name]; ok && isCallable(m) {
+			return m
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil
 }
 
 // ----- comparison ------------------------------------------------------------
@@ -1818,6 +1849,69 @@ func init() {
 			phpMainScope[rt] = a[0]
 			return 0
 		}
+		// ----- the two RECOVERABLE-ERROR arms (docs/todo.md 3.2) --------------
+		//
+		// js_phmcall is php's own name for the method dispatch, and it exists
+		// BECAUSE of chapter 4's rxExtraExterns trap: this map is filled once for
+		// every language, so overriding m["js_mcall"] here would make a C# or java
+		// method miss raise a PHP Error. The layer-2 twin is js_phmcall in
+		// languages/lib/php-rt.metajs and the two texts are byte for byte the same,
+		// which they were NOT before - llvm.Run aborted with the shared dispatcher's
+		// "unknown String method: nope" where the native binary said
+		// "member 'apply' of undefined".
+		m["js_phmcall"] = func(a []uint64) uint64 {
+			recv := u(a[0])
+			name := rt.phpStr(u(a[1]))
+			args, isArr := u(a[2]).(*jsArray)
+			if !isArr {
+				rt.fail("js_phmcall args must be an array")
+			}
+			if _, isGen := recv.(*jsGenerator); isGen {
+				// The shared rt.memberCall aborts on a generator method nothing
+				// claims, and this is php's own name precisely so it can raise
+				// instead. The member test is the same one memberCall makes.
+				if !isCallable(rt.getMember(recv, name)) {
+					rt.phpRaise("Error", "Call to undefined method Generator::"+name+"()")
+				}
+				return w(rt.memberCall(recv, name, args.elems))
+			}
+			if o, isObj := recv.(*jsObject); isObj {
+				if cls, has := o.props["__class"]; has && !isNullish(cls) {
+					if rt.phpFindMethod(cls, name) == nil {
+						// PHP 8, and CATCHABLE: `catch (Error $e)` recovers where both
+						// halves used to abort uncatchably.
+						rt.phpRaise("Error", "Call to undefined method "+rt.phpClassName(recv)+"::"+name+"()")
+					}
+					return w(rt.memberCall(recv, name, args.elems))
+				}
+				if f, has := o.props[name]; has && isCallable(f) {
+					return w(rt.memberCall(recv, name, args.elems))
+				}
+			}
+			// A string, an int, null, an array - everything PHP will not let you
+			// call a method on. phpDebugType spells the type as PHP 8 does.
+			rt.phpRaise("Error", "Call to a member function "+name+"() on "+rt.phpDebugType(recv))
+			return 0
+		}
+		// The emitter's door to phpRaise: a message it words at compile time.
+		m["js_phraise"] = func(a []uint64) uint64 {
+			rt.phpRaise(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
+			return 0
+		}
+		// The floor's js_rt_missvar hook, php half. See js_phmissname in
+		// languages/lib/php-rt.metajs for why a `$` name declines and a bareword
+		// does not.
+		m["js_phmissname"] = func(a []uint64) uint64 {
+			n := rt.phpStr(u(a[0]))
+			if n == "" || n[0] == '$' {
+				return w(jsUndef)
+			}
+			o := rt.phpMkErr("Error", "Call to undefined function "+n+"()")
+			if o == nil {
+				return w(jsUndef)
+			}
+			return w(o)
+		}
 		// The four that REPLACE a jsrt.go entry: each of them was 32 bit or
 		// double based and is now exact 64 bit.
 		m["js_phneg"] = func(a []uint64) uint64 { return w(rt.phpNeg(u(a[0]))) }
@@ -1986,4 +2080,7 @@ func init() {
 			return jsHFalse
 		}
 	})
+	// js_phmcall reads its argument array in position 2, exactly like the js_mcall
+	// it replaces: the handle must arrive as the array itself.
+	jsThroughArgs["js_phmcall"] = 1 << 2
 }

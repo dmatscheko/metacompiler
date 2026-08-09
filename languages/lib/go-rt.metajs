@@ -1880,8 +1880,34 @@ function goGetMember(o, key) {
 function goMemberCall(recv, name, args) {
     var f = goGetMember(recv, name)
     if (goIsFn(f)) { return f.apply(undefined, args) }
-    fail("unknown method '" + name + "'")
+    goMcallMiss(recv, name)
     return undefined
+}
+
+// A method call nothing claimed. THE WORDING IS abnf/jsrt.go's rt.memberCall,
+// shape for shape, and that is the whole point of this function: llvm.Run's
+// js_gomcall falls back to that shared member-call when rt.goMethod misses, this
+// half fell back to one flat "unknown method 'X'", and the two compiled halves
+// therefore printed DIFFERENT TEXT for the same program -
+//
+//   s.Nope()   llvm.Run: unknown String method: Nope     native: unknown method 'Nope'
+//   o.Nope()   llvm.Run: unknown method 'Nope' on an instance
+//                                                        native: unknown method 'Nope'
+//
+// - a live halves divergence in an error path, which no gate could see because
+// nothing asserted on the text. Go's own toolchain rejects both programs at
+// COMPILE time (`o.Nope undefined (type Foo has no field or method Nope)`), so
+// neither wording is Go's; agreeing is what is available. docs/todo.md 3.2.
+function goMcallMiss(recv, name) {
+    if (typeof recv == "string") { fail("unknown String method: " + name); return }
+    if (Array.isArray(recv)) { fail("unknown list method '" + name + "'"); return }
+    if (goIsDict(recv)) { fail("unknown dict method '" + name + "'"); return }
+    if (goIsObj(recv)) {
+        if (recv["__class"] !== undefined) { fail("unknown method '" + name + "' on an instance"); return }
+        fail("unknown method '" + name + "'")
+        return
+    }
+    fail("method call '" + name + "' on a " + typeof recv)
 }
 
 // ----- panic / defer / recover ----------------------------------------------

@@ -39,8 +39,9 @@ class of this, or the class a C::m() call named (late static binding).
 Locals, functions, methods and closures lower to the MetaJS handle runtime: scopes via
 js_scope_new / js_pyset_var (PHP create-on-assign) / js_scope_get, closures via js_closure
 + js_call, objects/properties via js_obj_new / js_get / js_set, method dispatch via
-js_mcall (instances carry a __class descriptor; new C() runs __construct with the instance
-bound to $this), arrays via js_pharr / js_phset / js_phpush, indexing via js_phget,
+js_phmcall (instances carry a __class descriptor; new C() runs __construct with the
+instance bound to $this; php's own name, because a method nothing claims must raise
+PHP's catchable Error and the shared js_mcall may not be overridden - manual ch.4), arrays via js_pharr / js_phset / js_phpush, indexing via js_phget,
 foreach via js_range_len / js_range_key / js_range_val over that same ordered map.
 '.' concatenation coerces via js_phcat; && || coerce to booleans with js_phbool. The whole program becomes phpmain(env,
 args); a self checking program ends with exit(failures). The same subset is interpreted
@@ -1673,9 +1674,15 @@ KwInstanceof = "instanceof" KwEnd ;
     // survive a forward reference - so reading it alone made an UNDEFINED constant
     // evaluate to null and the program run on, where PHP raises ("Undefined constant
     // NOPE") and the interpreter half fails. The null answer is ambiguous on its own,
-    // though: `const X = null;` looks the same. So the null arm re-reads the name with
-    // js_scope_get, which returns the declared null and ABORTS when the name really is
-    // not there - the two halves then stop on the same statement.
+    // though: `const X = null;` looks the same. So the null arm PROBES the scope
+    // (scopeProbe, which does not abort) and splits the two apart: a declared null is
+    // answered, and a name that is nowhere raises PHP 8's catchable
+    // `Error: Undefined constant "X"`. It used to re-read with js_scope_get and take
+    // the floor's uncatchable `variable not defined` abort. docs/todo.md 3.2.
+    // PHP 8 quotes the constant name in `Undefined constant "X"`. Spelled as a
+    // variable so the tag script never carries an escaped quote inside a string
+    // literal, which the two script hosts do not agree on.
+    var dq = String.fromCharCode(34)
     function makeConstRef(name) {
         if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(walkFnName) }
         if (name == "__CLASS__") {
@@ -1690,10 +1697,28 @@ KwInstanceof = "instanceof" KwEnd ;
             var haveB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), missB, haveB)
-            var mv = callExt(missB, "js_scope_get", [curScopeV, emitStr(missB, name)])
-            missB.NewBr(mergeB)
+            // The name is not a class descriptor. It is either a CONSTANT declared
+            // with a null value (js_phclslookup cannot tell those apart) or nothing
+            // at all - and the second one used to reach the shared js_scope_get and
+            // die in the floor with `variable not defined`, an UNCATCHABLE abort
+            // where PHP 8 raises `Error: Undefined constant "X"` that a
+            // `catch (Error $e)` recovers. The scope PROBE distinguishes the two
+            // without aborting, and it is affordable here because this whole block
+            // is cold: js_phclslookup already answered null. The bareword hook
+            // (js_phmissname) must not be the one to answer, because its message is
+            // the FUNCTION one. docs/todo.md 3.2.
+            var probed = scopeProbe(missB, emitStr(missB, name), hUndef)
+            var badB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            missB.NewCondBr(missB.NewICmp(llvm.enum.IPredEQ, probed, hUndef), badB, okB)
+            callExt(badB, "js_phraise", [emitStr(badB, "Error"),
+                                         emitStr(badB, "Undefined constant " + dq + name + dq)])
+            badB.NewBr(mergeB) // never reached: js_phraise throws
+            okB.NewBr(mergeB)
             haveB.NewBr(mergeB)
-            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(mv, missB), llvm.ir.NewIncoming(v, haveB)])}
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(hUndef, badB),
+                                                 llvm.ir.NewIncoming(probed, okB),
+                                                 llvm.ir.NewIncoming(v, haveB)])}
         }
     }
     // static $n = 0: one reference cell per declaration SITE, created where the program
@@ -2441,10 +2466,10 @@ KwInstanceof = "instanceof" KwEnd ;
     // running count when the yield had no key - PHP's auto-keys.
     // This shape is emitted only for a program that contains a yield somewhere;
     // everything else keeps the plain index loop.
-    // One step of a generator: {value, done}. js_mcall dispatches a generator's own
+    // One step of a generator: {value, done}. js_phmcall dispatches a generator's own
     // protocol (memberCall's *jsGenerator case), so this is an ordinary method call.
     function genNext(b, genV) {
-        return callExt(b, "js_mcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
+        return callExt(b, "js_phmcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
     }
     // 'yield from SRC': every element of SRC is yielded in turn, WITH ITS OWN KEY -
     // PHP forwards the inner keys, which is what makes a delegating generator
@@ -2774,7 +2799,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var fnB = curF.NewBlock("")
             var endI = curF.NewBlock("")
             b.NewCondBr(emitIsObj(b, rc.v), invB, fnB)
-            var iv = callExt(invB, "js_mcall", [rc.v, emitStr(invB, "__invoke"), argsV])
+            var iv = callExt(invB, "js_phmcall", [rc.v, emitStr(invB, "__invoke"), argsV])
             invB.NewBr(endI)
             var fv = callExt(fnB, "js_call", [rc.v, hUndef, argsV])
             fnB.NewBr(endI)
@@ -3106,7 +3131,7 @@ KwInstanceof = "instanceof" KwEnd ;
                         var fnB = curF.NewBlock("")
                         var endI = curF.NewBlock("")
                         b.NewCondBr(emitIsObj(b, rc2.v), invB, fnB)
-                        var iv = callExt(invB, "js_mcall", [rc2.v, emitStr(invB, "__invoke"), ea2.v])
+                        var iv = callExt(invB, "js_phmcall", [rc2.v, emitStr(invB, "__invoke"), ea2.v])
                         invB.NewBr(endI)
                         var fv = callExt(fnB, "js_call", [rc2.v, hUndef, ea2.v])
                         fnB.NewBr(endI)
@@ -3242,7 +3267,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var plainB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             b.NewCondBr(truthy(b, hm.v), hookB, plainB)
-            var hv = callExt(hookB, "js_mcall", [objV, hn, callExt(hookB, "js_arr_new", [])])
+            var hv = callExt(hookB, "js_phmcall", [objV, hn, callExt(hookB, "js_arr_new", [])])
             hookB.NewBr(joinB)
             var pr = emitPropGetPlain(plainB, objV, keyV)
             pr.b.NewBr(joinB)
@@ -3264,7 +3289,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_mcall", [objV, emitStr(magB, "__get"), argList(magB, [keyV])])
+        var magV = callExt(magB, "js_phmcall", [objV, emitStr(magB, "__get"), argList(magB, [keyV])])
         magB.NewBr(mergeB)
         var rr = phDeref(rawB, callExt(rawB, "js_get", [objV, keyV]))
         rr.b.NewBr(mergeB)
@@ -3282,7 +3307,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var plainB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             b.NewCondBr(truthy(b, hm.v), hookB, plainB)
-            callExt(hookB, "js_mcall", [objV, hn, argList(hookB, [valV])])
+            callExt(hookB, "js_phmcall", [objV, hn, argList(hookB, [valV])])
             hookB.NewBr(joinB)
             emitPropSetPlain(plainB, objV, keyV, valV).NewBr(joinB)
             return joinB
@@ -3330,7 +3355,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        callExt(magB, "js_mcall", [objV, emitStr(magB, "__set"), argList(magB, [keyV, valV])])
+        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__set"), argList(magB, [keyV, valV])])
         magB.NewBr(mergeB)
         emitPropStore(rawB, objV, keyV, valV).NewBr(mergeB)
         return mergeB
@@ -3346,7 +3371,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_mcall", [objV, emitStr(magB, "__isset"), argList(magB, [keyV])])])
+        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_phmcall", [objV, emitStr(magB, "__isset"), argList(magB, [keyV])])])
         magB.NewBr(mergeB)
         rawB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plain, b),
@@ -3356,7 +3381,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // $o->m(args), with __call($name, $args) as the fallback for a method the class
     // chain does not declare.
     function emitMethodCall(b, objV, nameV, argsV) {
-        if (!magicCall) { return {b: b, v: callExt(b, "js_mcall", [objV, nameV, argsV])} }
+        if (!magicCall) { return {b: b, v: callExt(b, "js_phmcall", [objV, nameV, argsV])} }
         // __call is a fallback for an INSTANCE only. A receiver that is not one - a
         // generator answering its own protocol, a string, a runtime object - goes
         // straight to the runtime's dispatch; without this guard a `$gen->next()` in a
@@ -3370,15 +3395,29 @@ KwInstanceof = "instanceof" KwEnd ;
         var directB = curF.NewBlock("")
         var magB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), directB, magB)
-        var dv = callExt(directB, "js_mcall", [objV, nameV, argsV])
+        var dv = callExt(directB, "js_phmcall", [objV, nameV, argsV])
         directB.NewBr(mergeB)
-        var mv = callExt(magB, "js_mcall", [objV, emitStr(magB, "__call"),
-                                            argList(magB, [nameV, phListOf(magB, argsV)])])
-        magB.NewBr(mergeB)
-        var ov = callExt(otherB, "js_mcall", [objV, nameV, argsV])
+        // __call is only a fallback when the class HAS one. Any program that spells
+        // __call anywhere sets magicCall for the whole module, so a class without one
+        // came through here too and reported the miss against the wrong name:
+        // `$d->f()` on a class with no __call and no f raised
+        // `Call to undefined method D::__call()` in both compiled halves where the
+        // interpreter half and PHP 8 name f. Falling back to js_phmcall with the
+        // ORIGINAL name puts the three engines back on one text. docs/todo.md 3.2.
+        var hc = emitHasMethod(magB, objV, emitStr(magB, "__call"))
+        var haveCallB = curF.NewBlock("")
+        var noCallB = curF.NewBlock("")
+        hc.b.NewCondBr(truthy(hc.b, hc.v), haveCallB, noCallB)
+        var mv = callExt(haveCallB, "js_phmcall", [objV, emitStr(haveCallB, "__call"),
+                                            argList(haveCallB, [nameV, phListOf(haveCallB, argsV)])])
+        haveCallB.NewBr(mergeB)
+        var ncv = callExt(noCallB, "js_phmcall", [objV, nameV, argsV])
+        noCallB.NewBr(mergeB)
+        var ov = callExt(otherB, "js_phmcall", [objV, nameV, argsV])
         otherB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dv, directB),
-                                             llvm.ir.NewIncoming(mv, magB),
+                                             llvm.ir.NewIncoming(mv, haveCallB),
+                                             llvm.ir.NewIncoming(ncv, noCallB),
                                              llvm.ir.NewIncoming(ov, otherB)])}
     }
 
@@ -4442,7 +4481,7 @@ KwInstanceof = "instanceof" KwEnd ;
         curScopeV = callExt(bb, "js_scope_new", [f.Params[0]])
         var selfV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, holder)])
         var res = anytype
-        if (ext == "mcall") { res = callExt(bb, "js_mcall", [selfV, emitStr(bb, name), f.Params[1]]) }
+        if (ext == "mcall") { res = callExt(bb, "js_phmcall", [selfV, emitStr(bb, name), f.Params[1]]) }
         else { res = callExt(bb, "js_phscall", [selfV, emitStr(bb, name), hUndef, phListOf(bb, f.Params[1])]) }
         bb.NewRet(res)
         curF = savedF
@@ -4513,7 +4552,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var pl = emitPlaceInto(bb, merged, sig)
         bb = pl.b
         var res = anytype
-        if (ext == "mcall") { res = callExt(bb, "js_mcall", [selfV, emitStr(bb, name), pl.v]) }
+        if (ext == "mcall") { res = callExt(bb, "js_phmcall", [selfV, emitStr(bb, name), pl.v]) }
         else if (ext == "scall") { res = callExt(bb, "js_phscall", [selfV, emitStr(bb, name), hUndef, phListOf(bb, pl.v)]) }
         else { res = callExt(bb, "js_call", [selfV, hUndef, pl.v]) }
         bb.NewRet(res)
@@ -4533,8 +4572,24 @@ KwInstanceof = "instanceof" KwEnd ;
         var mergeB = curF.NewBlock("")
         b.NewCondBr(isStr, strB, mergeB)
         var looked = phClsLookup(strB, v)
-        strB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(looked, strB)])}
+        // A STRING callable naming nothing. The probe answers null, which then
+        // reached js_call and died with the floor's `call of a non function value:
+        // null` - an uncatchable abort, and one the interpreter half did not make:
+        // it raises PHP 8's `Error: Call to undefined function x()`. One compare on
+        // a path that has already decided the callee is a string. docs/todo.md 3.2.
+        var badB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), badB, okB)
+        callExt(badB, "js_phraise",
+                [emitStr(badB, "Error"),
+                 callExt(badB, "js_phcat",
+                         [callExt(badB, "js_phcat", [emitStr(badB, "Call to undefined function "), v]),
+                          emitStr(badB, "()")])])
+        badB.NewBr(mergeB) // never reached: js_phraise throws
+        okB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, b),
+                                             llvm.ir.NewIncoming(hNull, badB),
+                                             llvm.ir.NewIncoming(looked, okB)])}
     }
 
     // ----- calls, defs, classes -----
@@ -5109,7 +5164,7 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             // Single inheritance: the __super chain is what the runtime's method
-            // dispatch (js_mcall / memberCall) walks, so `extends E` is one property.
+            // dispatch (js_phmcall / memberCall) walks, so `extends E` is one property.
             if (ext != "") {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, ext)])])
@@ -5318,12 +5373,32 @@ KwInstanceof = "instanceof" KwEnd ;
         // the scope. abnf/jsrtphp.go accepts either shape, so llvm.Run is unchanged
         // for a module built before this.
         var regV = callExt(b, "js_pharr", [])
-        var rtCls = ["DivisionByZeroError", "ArithmeticError"]
+        // "Error" is here for the METHOD and NAME misses (js_phmcall / js_phmissname
+        // in languages/lib/php-rt.metajs and abnf/jsrtphp.go), which PHP 8 raises as a
+        // catchable Error where both compiled halves used to abort. docs/todo.md 3.2.
+        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error"]
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])
         }
         callExt(b, "js_phrtinit", [regV])
+        // The floor's RECOVERABLE-NAME hook. js_scope_get is shared by all sixteen
+        // languages and used to end in an uncatchable `variable not defined` abort;
+        // the floor (languages/lib/runtime.c) and abnf/jsrt.go take a per-language
+        // closure that ANSWERS the value to throw, and a language that registers none
+        // is bit-for-bit unchanged. php's answer is js_phmissname's, which declines a
+        // `$variable` (PHP 8 WARNS there and evaluates to null - a value the hook
+        // cannot express, see the note at js_phmissname) and raises PHP's
+        // `Error: Call to undefined function zzz()` for a bareword. The registration
+        // has to come AFTER js_phrtinit, because the Error descriptor the hook builds
+        // its object from is the one handed over there. docs/todo.md 3.2.
+        funcCount++
+        var mnIdx = funcCount
+        var mnf = m.NewFunc("jsf_" + mnIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var mnb = mnf.NewBlock("entry")
+        mnb.NewRet(callExt(mnb, "js_phmissname",
+                           [callExt(mnb, "js_arg", [mnf.Params[1], handle(0)])]))
+        callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(mnIdx), curScopeV])])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeSeq(items)(b)
