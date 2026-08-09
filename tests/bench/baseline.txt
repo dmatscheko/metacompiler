@@ -1,17 +1,148 @@
-# tests/bench.sh baselines: instructions retired, MEDIAN OVER LAYOUT DRAWS (9 here),
-# native -exe binaries built from tests/bench/mod.*. Re-record with
-# tests/bench.sh --record when you land an intended change, and say in the commit
-# message which rows moved and why.
+# tests/bench.sh baselines. FOUR COLUMNS: language, instructions retired (the
+# MEDIAN OVER LAYOUT DRAWS, 9 here), then `heap` and `collections` from
+# MEC_GC_STATS - exact counters, see the ARENA OCCUPANCY section. Native -exe
+# binaries built from tests/bench/mod.*. Re-record with tests/bench.sh --record
+# when you land an intended change, and say in the commit message which rows
+# moved and why. c, bash and batch have no collector and record `-`.
 #
-# NOTE: `--record` REWRITES ONLY THE NUMBERS AND WILL DELETE THIS HEADER. It
-# emits a four-line stub saying "min of 3 runs", which is not what the harness
-# does. Restore this text by hand after recording - everything below was paid for
-# and is not re-derivable from the numbers.
+# `--record` USED TO DELETE THIS HEADER and emit a four-line stub saying "min of
+# 3 runs", which is not what the harness does; the instruction here was to
+# restore the text by hand, and it was carried out three times. Since 2026-08-09
+# --record carries every `#` line through verbatim and keeps any row the run did
+# not measure, so `tests/bench.sh --record python` no longer costs the other
+# fourteen rows. Everything below was paid for and is not re-derivable from the
+# numbers - which is why it is now the script's job to keep it.
 #
-# recorded at commit b086d07, in a clean `git archive` tree, at 9 DRAWS per row.
-# (Header restored by hand afterwards, exactly as the NOTE above says to.)
+# recorded at commit ea28a1a, in a clean `git archive` tree, at 9 DRAWS per row -
+# and VALIDATED AGAINST 9cd3272 paired, which is three commits later and is HEAD
+# as this is written. Columns 3 and 4 are 9cd3272's. See WHICH COMMIT THESE
+# NUMBERS BELONG TO below; the label is deliberate and is not a stale one.
 #
-# THE 2026-08-09 RE-RECORD, and the one row that needed settling. At 5 draws
+# ===========================================================================
+# 2026-08-09, THE ea28a1a RE-RECORD: FOURTEEN OF FIFTEEN ROWS MOVED AND NONE OF
+# THEM IS THE ROUND THAT RECORDED THEM. This round (docs/todo.md 2.9) changed
+# tests/bench.sh and this file and nothing else - no grammar, no layer 2, no
+# bench program. The numbers below are what ea28a1a has been reading all along
+# against a baseline last recorded at b086d07, thirty-odd commits earlier.
+#
+# THE MACHINE IS NOT THE EXPLANATION, and `c` is why we can say so: the semantic
+# control, self-contained IR with no js_* extern, reads +0.66% against its own
+# 0.88% spread. Read it first, exactly as this file says.
+#
+# ELEVEN OF THE TWELVE HANDLE-IR ROWS ARE FASTER, by 4x to 800x their own
+# spreads. The twelfth, metajs, is inside its spread and is the whole argument
+# below:
+#
+#     python  -19.78% (spread 1.70)   ruby   -10.91% (1.24)   java   -7.69% (0.05)
+#     kotlin  -16.62% (1.29)          swift   -9.39% (0.01)   lua    -5.73% (0.03)
+#     php     -11.66% (0.59)          go      -8.88% (0.27)   metajs -0.20% (0.06)
+#     js      -10.44% (0.39)          csharp  -8.86% (0.38)   dart   -8.02% (0.01)
+#
+# UNATTRIBUTED, deliberately: it accumulated over b086d07..ea28a1a and no round
+# re-recorded, so there is no single change to name and this file will not invent
+# one. What the shape DOES say is where it is not: metajs, the substrate row
+# whose program is compiled by the grammar every other layer 2 is compiled by,
+# moved -0.20% - inside its spread. A change in the C floor or in
+# metajs-to-llvm-ir.abnf would have moved that row with the others. This is
+# per-language layer 2 and the emitters, twelve times over.
+#
+# ONE ROW REGRESSED, AND IT IS ATTRIBUTED: bash +3.10% against a 0.08% spread,
+# 147,629,302 -> 152,205,742. Bisected over four `git archive` trees, 9 draws and
+# min-of-3 each, which for this row resolves to 0.03%:
+#
+#     4a2facd  147,611,606      0907c7f  147,600,146      eb78bd0  152,157,001
+#
+# So the whole +3.10% is eb78bd0 - bash field splitting, case patterns, dynamic
+# bases and a real stderr - and none of it is 4a2facd's arena work.
+#
+# AND IT IS PER-ITERATION, WHICH IS THE PART WORTH SOMEONE'S TIME. Built at two
+# iteration counts in both trees, min of 3, which separates the slope from the
+# fixed cost outright:
+#
+#              10,000 iters    40,000 iters    instr/iter    fixed
+#     0907c7f    43,203,244     147,774,903      3,485.72   8,346,024
+#     eb78bd0    44,378,141     152,334,231      3,598.54   8,392,777
+#                                                  +3.24%     +0.56%
+#
+# The whole cost is on the hot path of a loop that uses NONE of the features that
+# were added - mod.sh does no field splitting, matches no case pattern, names no
+# dynamic base and writes nothing to stderr. Two more counters localise it. The
+# emitted IR's CALL MIX IS IDENTICAL between the two trees - same callees, same
+# counts, rt_nounset 5, rt_splitifs 4, rt_str2int 5, rt_arr_get 5 - so the
+# grammar is not emitting more work per iteration; the runtime BODIES got more
+# expensive. And the arena is untouched: the max-RSS slope over 2,000 and 14,000
+# iterations is 71.0 bytes an iteration before and 69.6 after, so the 4 MiB
+# ceiling and mod.sh's 1.40x margin are NOT eroded and this is a speed question
+# only, with no correctness edge behind it.
+#
+# WHAT TO LOOK AT FIRST, if anyone does: rt_nounset, which gained two parameters
+# (`char *v` -> `char *v, char *name, int isarr`) and is called on every
+# parameter read, and rt_splitifs, which gained the rt_ifsws helper and is called
+# on every assignment. Both are on this loop's path and neither needs to do the
+# new work for a plain separator-free string. A short-circuit there is the shape
+# of the fix, and this file's own history says rt_splitifs has already been given
+# one once ("returns the value untouched when it is a single separator-free
+# field") - so the pattern is established and it may simply need extending.
+#
+# NOTE WHAT THE ROW MEANT, and it is about the gate rather than about bash: THE
+# BENCH GATE WAS RED AT HEAD AND NOBODY HAD RUN IT. +3.10% clears the 2.5%
+# tolerance and is 39x the row's own 0.08% spread, so it was not a lottery draw
+# and not a judgement call - `tests/gates.sh --bench` would have failed on it,
+# from eb78bd0 onwards, for as long as it took anyone to run it. It sat there
+# while fourteen other rows drifted 5-20% in the other direction against a
+# baseline last recorded thirty-odd commits earlier. The seven correctness gates
+# were green throughout, which is the exact scenario the WHAT THESE ROWS ARE FOR
+# note below was written about after 120ba0f. The lesson is not "bash regressed";
+# it is that a gate nobody runs is a gate that does not exist, and that a stale
+# baseline is what makes running it feel not worth doing.
+#
+# FULL PRECISION, all fifteen rows, unlike the earlier re-records that rounded js,
+# swift, dart and php to seven significant figures. Those roundings were right for
+# 4-6% spreads; this run's widest spread is python at 1.70% and ten rows are under
+# 0.6%. The spreads are quoted above so the digits cannot be mistaken for
+# resolution - a delta smaller than the row's spread is still nothing.
+#
+# RECORDED BY HAND, not with `--record`, for the ordinary reason: other work was
+# in flight in the working tree, so the run was made in a clean `git archive
+# ea28a1a` tree whose bench.sh predates the arena columns. Columns 3 and 4 come
+# from MEC_GC_STATS in that same clean tree - exact counters, one measurement.
+#
+# WHICH COMMIT THESE NUMBERS BELONG TO, stated plainly because the label matters
+# more than the digits. They were measured at ea28a1a. Three commits landed while
+# the run was queued - 2a59980 (js/ts top-level `this`), ae791e7 (goja doubles /
+# lua table keys) and 9cd3272 (swift protocol conformance) - so the three rows
+# those could touch were re-measured PAIRED, ea28a1a against 9cd3272, 15 matched
+# builds each on identical -exe paths:
+#
+#     js     -0.131%   9 / 6 split      no difference
+#     lua    +0.001%   6 / 9 split      no difference
+#     swift  -0.454%   15 of 15 pairs   REAL, and the only row that moved
+#
+# js and lua are coin flips and their rows stand. swift is a unanimous sign test:
+# 9cd3272 is genuinely 0.45% faster, so the swift row below is 0.45% HIGH. That
+# is a fifth of its own spread and a fifth of the tolerance, so it changes no
+# verdict, and it is left rather than scaled - a baseline derived by multiplying
+# a measurement is not a measurement.
+#
+# THIS ALSO RECONCILES A NUMBER YOU MAY HAVE BEEN SHOWN: swift's own agent read
+# its row at -9.88%. That is this -0.45% on top of the -9.39% of accumulated
+# drift recorded above, measured against the b086d07 baseline that this
+# re-record replaces. Two agents, one row, two numbers, no disagreement.
+#
+# THE TWO HALVES OF EACH ROW THEREFORE HAVE DIFFERENT PROVENANCE, ON PURPOSE.
+# Column 2 is a TIMING measured at ea28a1a and checked against 9cd3272 by the
+# paired runs above. Columns 3 and 4 are EXACT COUNTERS measured at 9cd3272 -
+# there is no reason to record a stale value of something that has no lottery in
+# it, and recording HEAD's is what makes the next step a real step rather than
+# an artefact of the label. One row differs between the two commits and it is
+# swift, 10,499,456 -> 10,509,696: 9cd3272's protocol-conformance work added
+# 5,680 bytes of live data and one big block of 10,240 bytes, its own size and
+# no chunk. Recorded at HEAD's value.
+# ===========================================================================
+#
+# WHAT THE HEADER USED TO SAY, kept because the lessons are the file's:
+#
+# THE b086d07 RE-RECORD, and the one row that needed settling. At 5 draws
 # csharp read +3.93% against a 2.59% spread and failed the gate. At 9 draws it
 # reads +1.98% - and the CLEAN BASE TREE of the same round reads +2.02% at 9
 # draws against the same old baseline. So the change is -0.04% against its own
@@ -81,14 +212,154 @@
 #     after   collections=3574  live=237296  heap=11627376  pinned=14
 #
 # Identical collection COUNT. `live` grew 3,184 bytes for the builtin-render
-# table 1.4 needed - and `heap` grew 2,097,152, EXACTLY ONE 2 MiB ARENA DOUBLING,
-# which the sweep then walks 3,574 times.
+# table 1.4 needed - and `heap` grew 2,097,152.
 #
-# SO tests/bench/mod.py SITS ESSENTIALLY ON AN ARENA THRESHOLD. A control at the
-# round's base - one UNUSED 1 KB string global added to python-rt.metajs and
-# nothing else - moves this row +2.40%. The next person to add a kilobyte to
-# python's layer 2 will be taxed ~2.4% for free and it will not be their change.
-# This is recorded as an item in docs/todo.md rather than smoothed away here.
+# THE PARAGRAPH THAT USED TO FOLLOW SAID mod.py "SITS ESSENTIALLY ON AN ARENA
+# THRESHOLD", AND THAT WAS WRONG IN BOTH HALVES. It became docs/todo.md 2.9 and
+# the item was settled on 2026-08-09 by dumping the arena chunk by chunk at
+# fc635bb, at 468f2eb and at HEAD. The correction and the real mechanism are the
+# ARENA OCCUPANCY section below; the two specific errors were:
+#
+#   - The step is NOT a "2 MiB doubling" and NOT an occupancy threshold. It is
+#     TWO SEPARATE 1 MiB CHUNKS, for the size classes 256 and 512, each touched
+#     for the FIRST time by that round. Every other class's occupancy is
+#     unchanged across the pair (32-byte 4023 -> 4023, 96-byte 4025 -> 4027,
+#     64-byte cell 11021 -> 11057). No class was near full then and none is now:
+#     at HEAD python has 10,262,416 free bytes in the classes it already uses.
+#
+#   - The "decisive control" does not step the arena AT ALL, so it was never
+#     evidence for the claim it was cited for. Reproduced twice, at ea28a1a and
+#     again at 9cd3272: one unused 1 KB string global added to python-rt.metajs
+#     moves `heap` by exactly +1,040 bytes, because a block over 1024 bytes gets
+#     a chunk of its OWN SIZE and never rounds up to a class. collections stays
+#     3574. Two more exact counters say the +2.40% is not the module-size tax
+#     either: python-rt.ll grows 1,393 bytes and the LINKED BINARY grows 72
+#     bytes, 1,333,000 -> 1,333,072. This file's own swift precedent two
+#     paragraphs up rules out far more than that - 464 bytes "cannot produce
+#     +2.7%" - so 72 bytes cannot produce +2.40% either. The control was a draw
+#     from the bimodal layout distribution, which is the failure mode this file
+#     documents at greater length than any other and which caught it anyway.
+#
+# ===========================================================================
+# ARENA OCCUPANCY, per row - 2026-08-09, docs/todo.md 2.9.
+#
+# Columns 3 and 4 of every row below are `heap` and `collections` from
+# MEC_GC_STATS, and bench.sh now prints them beside the instruction count and
+# says STEPPED when the heap moves. They are EXACT counters, exempt from the
+# layout lottery, and independent of the -exe path: measure once.
+#
+# HOW THE HEAP GROWS, which is the whole content of this section. The arena
+# (languages/lib/runtime.c) is a per-SIZE-CLASS bump allocator. A block of 16n
+# bytes comes from partition n, and a partition with no room mallocs a chunk of
+# ~1 MiB - 1048576/bsize blocks of it. So:
+#
+#   1. The FIRST allocation in a size class costs a whole 1,048,576-byte chunk,
+#      no matter that one 48-byte string goes into it. This is the only step
+#      anyone here has ever actually hit.
+#   2. A class already touched costs nothing until its chunk fills, and none of
+#      them is close (below).
+#   3. A block OVER 1024 bytes gets a chunk of exactly its own size - it steps
+#      the heap by its own bytes and never by a chunk.
+#
+# AND `heap` IS AN ADDRESS-SPACE NUMBER, NOT A RESIDENT ONE. ar_block says so at
+# its site: "the pages are only touched as the bump pointer reaches them, so an
+# unused class costs address space and no resident memory." That is why ten
+# near-empty 1 MiB chunks holding ~150 KB of live data is not the scandal the
+# raw number looks like, and it is half of why a step is free. Read `heap` as
+# "which size classes has this row touched", not as "how much memory is in use";
+# `live` is the one that answers that.
+#
+# WHAT A STEP COSTS: NOTHING MEASURABLE - +0.20% over 45 paired builds, A slower
+# in 26 of 45, which is a coin. This is the number the item most needed and it is
+# the opposite of what the item assumed.
+#
+# The pair is a natural experiment that isolates the CHUNK from the module SIZE:
+# two copies of mod.py differing by EIGHT characters, `_pad` of 72 chars (buffer
+# 80, a class python does not use, so +1,048,560 heap) against `_pad` of 80 chars
+# (buffer 96, a class it does use, so +0 heap). Everything else - the source, the
+# module, the executed work, collections=3574 - is the same.
+#
+# AND IT TOOK THREE RUNS TO BELIEVE, exactly as the todo header says it would.
+# Paired 15 at a time, on three disjoint families of -exe path lengths:
+#
+#     draws 1-15    +0.63%   A slower in 12 of 15   <- would have been "SLOWER"
+#     draws 16-30   -0.15%   A slower in  7 of 15
+#     draws 31-45   +0.13%   A slower in  7 of 15
+#
+# The first run alone clears bench.sh's own 0.8*n sign-test bar and would have
+# been reported as a real cost. Two more runs say it is not one. A PAIRED VERDICT
+# IS STILL A TIMING; the counters are what settle things, and here the source
+# settles it too: gc_clear_marks and gc_sweep both walk `slots bumped`, not chunk
+# size, so a near-empty chunk adds one turn of a per-chunk loop and nothing else.
+#
+# THE OCCUPANCY AT 9cd3272. Every handle-IR row touches the SAME ten classes -
+# buffers 16, 32, 64, 96, 128, 192, 256, 384, 512 and 64-byte cells - and js,
+# python and ruby touch an eleventh, the 48-byte buffer, with ONE block in it
+# (1 MiB of heap for 48 bytes of data). "free" is the unused bytes in the classes
+# a row already has - i.e. how far it is from a step of kind 2 - and "tightest"
+# is that same distance for the single class nearest to filling, which is the one
+# that decides. In EVERY row that class is the 64-byte cell class:
+#
+#     row      chunks  partition   big blk        live      free  tightest  x live
+#     csharp     17    10,485,376   24,320     145,872   9,293,008  352,064   2.4
+#     dart       15    10,485,376   12,800     108,000   9,331,824  397,504   3.7
+#     go         18    10,485,376   26,880     134,224   9,298,912  261,696   1.9
+#     java       16    10,485,376   23,040     136,272   9,306,672  349,568   2.6
+#     js         18    11,533,936   43,520     169,040  10,324,256  295,296   1.7
+#     kotlin     21    10,485,376   93,440     268,464   9,213,232  297,344   1.1
+#     lua        15    10,485,376   12,800     103,008   9,296,864  328,320   3.2
+#     metajs     13    11,533,952    3,840      83,776  10,401,776  970,304  11.6
+#     php        18    10,485,376   26,880     139,552   9,307,648  399,104   2.9
+#     python     22    11,533,936   93,440     250,928  10,262,416  330,752   1.3
+#     ruby       20    11,533,936   47,360     195,824  10,287,472  353,600   1.8
+#     swift      17    10,485,376   24,320     126,272   9,307,904  329,344   2.6
+#
+# The sweep was first taken at ea28a1a and retaken at 9cd3272, three commits
+# later, and TWO ROWS MOVED - which is itself the demonstration that the arena
+# line earns its place. swift's protocol-conformance work (9cd3272) added 5,680
+# bytes of live data and one more BIG BLOCK: heap 10,499,456 -> 10,509,696,
+# +10,240 bytes, its own size and no chunk. js gained 400 bytes of live data at
+# 2a59980 and its heap did not move at all. Neither is a chunk step, and neither
+# needed a benchmark to say so.
+#
+# NO ROW IS ON A THRESHOLD, and sweeping all twelve was the point of the item.
+# The last column is the answer to "how much layer-2 growth can this row absorb":
+# every row can more than DOUBLE its entire live set before the class nearest to
+# full takes a second chunk. python, the row the item was about, can absorb
+# 330,752 bytes of new cells - 1.3x everything it currently holds - and
+# 10,262,416 bytes across the classes it uses. The tightest row is KOTLIN at
+# 1.1x, not python, and it is still a doubling away.
+#
+# The only row that has ALREADY spilled a class into a second chunk is metajs
+# (64-byte cells, 16,384/16,384 full plus a second chunk at 1,223) - the one row
+# that has crossed is the one nobody was worried about, and it is the tightest
+# handle-IR row in this file at a 0.76% spread. That is the shape of the finding.
+#
+# SO NO ROW GETS HEADROOM, and mod.py in particular did not get any. The item
+# offered headroom as an option; it is neither implementable nor needed. Not
+# implementable: there is no scalar to add headroom TO, because the trigger is a
+# discrete size class, ~54 of the 64 buffer classes below 1024 bytes are
+# untouched, and pre-touching them from the bench program would cost ~54 MiB of
+# heap to defend against something that costs nothing. Not needed: a step costs
+# nothing (above), and the specific step the item was written about - classes 256
+# and 512 - was already PAID at 468f2eb and cannot recur; every row at HEAD has
+# both classes.
+#
+# WHAT WILL ACTUALLY STEP A ROW, stated so the next person recognises it rather
+# than chases it: a new INTERNED STRING in layer 2 whose length falls in a gap
+# between the touched classes. A string of length L takes a buffer of
+# round16(L + header), so lengths around 49-64 (-> class 80) and 81-96 (-> 112)
+# are the live edges for python today, while a 1 KB string is harmless. Expect
+# +1,048,576 on the heap and NO instruction cost. If the instruction column moves
+# in the same commit, the arena is not where it came from - look at module size,
+# which this file documents at +4.53% for 2,917 dead python lines.
+#
+# HOW TO REDO THIS - it takes about five minutes and needs no benchmark. In a
+# `git archive` tree, add to the MEC_GC_STATS block at the end of
+# languages/lib/runtime.c a walk of AR_CHUNKS printing w[1] (bsize), w[2] (nblk),
+# w[3] (slots bumped) and w[6] (kind); `MEC_BIN=./mec tests/gen-runtime-ll.sh`;
+# build any row with -exe and run it with MEC_GC_STATS=1. Do NOT do it in the
+# working tree - the instrumented runtime.ll is not the one the gate measures.
 # ===========================================================================
 #
 # WHY A MEDIAN OVER DRAWS AND NOT A NUMBER. A binary's instruction count depends on
@@ -292,18 +563,18 @@
 # directly. It is also the tightest handle-IR row here at 0.76%, which makes it
 # the most sensitive instrument in the file after `c`.
 # ===========================================================================
-bash         147629302
-batch         34199417
-c          11087591
-csharp     21293689255
-dart       3903000000
-go         844921947
-java       8625680206
-js         1309000000
-kotlin     18318579476
-lua        1529985212
-metajs       222990000
-php        8064800000
-python     34121176976
-ruby       5708270489
-swift      4516900000
+bash       152205742        -          -
+batch      34238010         -          -
+c          11160514         -          -
+csharp     19408021761      10509696   2345
+dart       3590057426       10498176   446
+go         769928513        10512256   75
+java       7962266163       10508416   1054
+js         1172391701       11577456   131
+kotlin     15274923569      10578816   1880
+lua        1442303330       10498176   121
+metajs     222534848        11537792   4
+php        7124158972       10512256   968
+python     27371977821      11627376   3574
+ruby       5085663199       11581296   465
+swift      4092598076       10509696   470

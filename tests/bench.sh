@@ -87,6 +87,20 @@
 # Exit 0 iff nothing regressed beyond the tolerance. A row that IMPROVES is
 # reported and does not fail the gate - but re-record the baseline when you land
 # the improvement, or the next person inherits a stale one.
+#
+# THE ARENA LINE, AND WHY THERE IS ONE. Every handle-IR row also prints `heap`
+# and `collections` from MEC_GC_STATS, and the baseline records them in columns 3
+# and 4. They are EXACT counters - they do not vary with the -exe path, so one
+# draw answers them - which makes them the one thing in this file that is exempt
+# from the layout lottery above. They are here because the arena's heap is a STEP
+# function - it grows a whole ~1 MiB chunk the first time a SIZE CLASS is
+# allocated in, however few bytes go into it - and a step used to be invisible,
+# so a commit that took one and also grew the module got the whole timing move
+# blamed on the arena. It happened: docs/todo.md 2.9 existed for a day on exactly
+# that mistake. A step costs NOTHING measurable (+0.20% over 45 paired builds,
+# slower in 26 of 45); printing it is what lets you say so instead of guessing.
+# tests/bench/baseline.txt's ARENA OCCUPANCY section has the per-row occupancy,
+# the measurement, and the recipe to redo it.
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
@@ -234,7 +248,7 @@ if [ -n "$PAIRED" ]; then
     exit $prc
 fi
 
-declare -a NAMES VALUES
+declare -a NAMES VALUES HEAPS COLLS
 rc=0
 printf '%-10s %16s %16s %9s  %s\n' language median baseline delta 'spread over draws'
 
@@ -274,6 +288,20 @@ for f in tests/bench/mod.*; do
             printf '%-10s %16s - /usr/bin/time -l reported no counter\n' "$lang" "NO COUNTER"
             bad_draw=1; break
         fi
+        # THE ARENA COUNTERS, taken once. `heap` and `collections` are EXACT and
+        # exempt from the layout lottery (manual chapter 4) - they do not vary
+        # with the -exe path, so one draw answers them - and they are what makes
+        # a heap STEP predictable instead of a mystery in the instruction column.
+        # See the ARENA OCCUPANCY section of tests/bench/baseline.txt for what a
+        # step is, what it costs, and what triggers one. The self-contained rows
+        # (c, bash, batch) have no collector and print nothing; they record "-".
+        if [ "$d" = 1 ]; then
+            gcline=$(MEC_GC_STATS=1 "$exe" 2>&1 >/dev/null | sed -n 's/^gc: //p')
+            heap=$(printf '%s\n' "$gcline" | tr ' ' '\n' | sed -n 's/^heap=//p')
+            coll=$(printf '%s\n' "$gcline" | tr ' ' '\n' | sed -n 's/^collections=//p')
+            [ -n "$heap" ] || heap="-"
+            [ -n "$coll" ] || coll="-"
+        fi
         echo "$n" >> "$work/$lang.draws"
         d=$((d + 1))
     done
@@ -304,7 +332,7 @@ for f in tests/bench/mod.*; do
     # spread AND it splits the sample rather than shaving off one outlier.
     bimodal=$(awk -v g="$gap" -v lo="$lo" -v hi="$hi" -v i="$gaplo" -v n="$DRAWS" \
         'BEGIN { print (hi > lo && g > 0.4 * (hi - lo) && i >= n/4 && i <= 3*n/4) ? 1 : 0 }')
-    NAMES+=("$lang"); VALUES+=("$n")
+    NAMES+=("$lang"); VALUES+=("$n"); HEAPS+=("$heap"); COLLS+=("$coll")
 
     old=$(awk -v l="$lang" '$1 == l {print $2}' "$BASE" 2>/dev/null)
     if [ -z "$old" ]; then
@@ -328,19 +356,82 @@ for f in tests/bench/mod.*; do
             rc=1
         fi
     fi
+
+    # THE ARENA LINE. Exact counters, printed beside the row they explain, so a
+    # heap STEP is visible as a step rather than being guessed at from the
+    # instruction column - which is how it was got wrong once already. It never
+    # fails the gate: a step is a legitimate thing for a change to cause, it
+    # costs nothing measurable, and the number above is the one under tolerance.
+    # What it buys is ATTRIBUTION - see baseline.txt's ARENA OCCUPANCY section
+    # for the three ways the heap grows and what each is worth.
+    oheap=$(awk -v l="$lang" '$1 == l {print $3}' "$BASE" 2>/dev/null)
+    ocoll=$(awk -v l="$lang" '$1 == l {print $4}' "$BASE" 2>/dev/null)
+    if [ "$heap" = "-" ]; then
+        printf '           arena  no collector in this row (self-contained IR against a C runtime)\n'
+    else
+        printf '           arena  heap=%s collections=%s' "$heap" "$coll"
+        if [ -n "$oheap" ] && [ "$oheap" != "-" ] && [ "$oheap" != "$heap" ]; then
+            read -r hd chunks rest < <(awk -v a="$heap" -v b="$oheap" \
+                'BEGIN { d = a - b; c = d / 1048576; printf "%+d %+d %d\n", d, (c < 0 ? -int(-c) : int(c)), (d % 1048576 + 1048576) % 1048576 }')
+            printf '  <- STEPPED %s bytes from the recorded %s\n' "$hd" "$oheap"
+            if [ "$chunks" != "+0" ] && [ "$chunks" != "-0" ]; then
+                printf '                  = %s arena chunk(s) of 1 MiB' "$chunks"
+                [ "$rest" != 0 ] && printf ' plus %s bytes of big blocks' "$rest"
+                printf '. A chunk is one SIZE CLASS\n'
+                printf '                  touched for the FIRST time, which is almost never a full arena -\n'
+                printf '                  every row has megabytes free in the classes it already uses. It\n'
+                printf '                  costs nothing measurable, so do not attribute the column above to\n'
+                printf '                  it. baseline.txt ARENA OCCUPANCY has this row and the measurement.\n'
+            else
+                printf '                  under one chunk, so this is big-block traffic (>1024 bytes a\n'
+                printf '                  block), which costs exactly its own bytes and no chunk.\n'
+            fi
+        else
+            printf '\n'
+        fi
+        if [ -n "$ocoll" ] && [ "$ocoll" != "-" ] && [ "$ocoll" != "$coll" ]; then
+            printf '                  collections %s -> %s: this row now EXECUTES different work,\n' "$ocoll" "$coll"
+            printf '                  which a pure layer-2 size change never does.\n'
+        fi
+    fi
 done
 
 if [ "$RECORD" = 1 ]; then
+    # --record USED TO DELETE THE HEADER, and the header is where every
+    # attribution this file has ever paid for is written - which row moved, at
+    # which commit, and why. It was restored by hand three times and the
+    # instruction to do so was itself a note in the file. It now carries every
+    # existing `#` line through verbatim, so re-recording is safe.
+    #
+    # A row NOT measured in this run keeps its recorded line: `bench.sh --record
+    # python` used to throw the other fourteen rows away.
     {
-        echo "# tests/bench.sh baselines: instructions retired, min of $RUNS runs,"
-        echo "# native -exe binaries built from tests/bench/mod.*. Re-record with"
-        echo "# tests/bench.sh --record when you land an intended change, and say"
-        echo "# in the commit message which rows moved and why."
-        echo "# recorded at commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-        for i in "${!NAMES[@]}"; do printf '%-10s %s\n' "${NAMES[$i]}" "${VALUES[$i]}"; done
-    } > "$BASE"
+        if grep -q '^#' "$BASE" 2>/dev/null; then
+            grep '^#' "$BASE"
+        else
+            echo "# tests/bench.sh baselines. Columns: language, instructions retired"
+            echo "# (MEDIAN over layout draws, min of $RUNS runs each), then the two EXACT"
+            echo "# arena counters heap and collections - see the ARENA OCCUPANCY section."
+            echo "# Native -exe binaries built from tests/bench/mod.*. Re-record with"
+            echo "# tests/bench.sh --record when you land an intended change, and say"
+            echo "# in the commit message which rows moved and why."
+        fi
+        echo "# recorded at commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown), $DRAWS draws, min of $RUNS runs."
+        {
+            for i in "${!NAMES[@]}"; do
+                printf '%-10s %-16s %-10s %s\n' \
+                    "${NAMES[$i]}" "${VALUES[$i]}" "${HEAPS[$i]}" "${COLLS[$i]}"
+            done
+            # Rows this run did not measure survive untouched.
+            awk -v keep=" $(printf '%s ' "${NAMES[@]}")" '
+                /^#/ || /^[ \t]*$/ { next }
+                index(keep, " " $1 " ") { next }
+                { print }' "$BASE" 2>/dev/null
+        } | sort
+    } > "$work/base.new"
+    mv "$work/base.new" "$BASE"
     echo
-    echo "baseline written to $BASE"
+    echo "baseline written to $BASE (header preserved, unmeasured rows kept)"
     exit 0
 fi
 
