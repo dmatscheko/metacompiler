@@ -57,17 +57,6 @@ directive being ignored. **All three: both halves agree, so `--cross` is blind.*
 
 # 2. Cross-engine defects and latent traps
 
-### 2.1 Closing an iterator on `throw` is BLOCKED, and the reason is worth reading **[V]**
-`ae0c62b` closes on `break`, `return`, `continue L` and a labeled break. **`throw`
-was built, passed every probe, and was reverted.** A per-loop iterator depth stack
-with save/unwind around every `js_try` was byte-identical to node on nine throw
-shapes — then **a depth-based stack cannot survive coroutines, because `for await`
-suspends INSIDE its own for-of.** A `try { await Promise.reject(…) } catch`
-recorded depth 0, suspended, and its catch later unwound past a *different*
-suspended `for await`. A wrong close is a silently wrong answer, so the whole
-mechanism came out; `itc20`/`itc24` pin the gap. **Any future attempt needs a
-per-coroutine stack, not a per-program one.**
-
 ### 2.2 `with` is the one js construct that cannot be lowered honestly **[V]**
 The INTERPRETER can implement it exactly (`scopes.push(o)` — scopes there are
 plain objects). Both compiled engines cannot: the floor's scope is a name/value
@@ -94,13 +83,6 @@ both grammars. Comparable to 3.1. Same wall as `Optional(3)` (manual 7.9).
 Compared with `==` in the compiled halves and `===` in the interpreter
 (`a=[1]; b=[1]; {a,b}` is 1 vs 2); CPython raises `TypeError`. Closing it means
 changing the shared `dictFind` contract, not Python.
-
-### 2.6 `i in arr` after `delete arr[i]` **[V]**
-`true` here, `false` in node. **Declined twice with the same finding**: a real
-hole cannot be expressed without changing the shared `*jsArray` in `abnf/jsrt.go`,
-the array type for *every* language, and a sentinel would need filtering at ~60
-read sites where one miss leaks garbage into `join()`. Listed so the third person
-to find it stops here.
 
 ### 2.7 Ruby and python residue **[V]**
 - **A bare `except:` will not catch python's `GeneratorExit`** — costed as 3.3.
@@ -144,25 +126,6 @@ Without them "catchable" is vacuous, and the compiled halves' `member 'q' of
 undefined` cannot be brought onto the interpreter's `attempt to index a nil value`
 — routing through the miss hook would just produce a third wording. A real fix is
 a throw/catch surface: 2 grammars + layer 2 + twin.
-
-### 2.11 Divergences recorded at their sites, each with a reason **[V]**
-Not defects to fix blind. **C#** `e.ToString()` prints `[object Object]`; .NET
-returns `FullName: Message` plus a stack trace this engine cannot produce.
-**ruby** `("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare
-`.size` to `js_pylen`, which is also for-in's trip count (implemented, measured,
-reverted); `p (x).m` parses as `(p(x)).m` here and `p((x).m)` in MRI, which has
-now bitten two people. **python** `repr(math)` names a machine-specific `.so`
-path; `import math as m` inside a function binds nothing. **swift** static
-initialisers are eager where Swift's are lazy; `x is Inner` cannot tell two
-same-named nested types apart. **dart** `catch (e, s)` drops the stack-trace
-binder — real frames are not reproducible here and `StackTrace.empty` would be a
-divergence of a different shape; an uncaught `__dexc` in the compiler half prints
-`bad` rather than `FormatException: bad`, and the handler is `runJSModule` in the
-shared `abnf/jsrt.go`. **bash** the compiler's attribute scope is LEXICAL where
-bash's is dynamic; `%x/%o/%u` of a negative renders 32-bit where bash is 64-bit;
-`printf '%d' 0x1f` is 0 where bash says 31 (bash routes operands through its
-arithmetic evaluator, which the compiler has none of at runtime); `readonly` is
-not enforced; `%e %f %g %a` need a double in `bash-rt.c`, which has none.
 
 # 3. Costed designs, deliberately not started
 
@@ -277,17 +240,6 @@ each), swift/dart `sw_kget`/`sw_kset` (~40 each, the same body twice) and ruby
 local-hit arm inline and route only the MISS paths**, or you pay a scope frame on
 the hottest name resolution in the language.
 
-# 6. Simplifications now unblocked
-
-### 6.1 The scope API is reachable from LAYER 2, not from the emitter **[V]**
-Recorded because this file said the opposite for a round and cost an agent a full
-pass. `scopeNew`/`scopeParent`/`scopeGet`/`scopeHas`/`scopeDecl` (host ids 64..68)
-are **MetaJS host builtins**, seeded by `seed_root` in `runtime.c` and
-`scopeBindings` in `jsrtint.go`: reachable only from a `lib/*-rt.metajs` file.
-Emitted IR calls `js_*` **externs**, and **there is no `js_scope_parent` extern**.
-This file also claimed "no emitter uses the new scope API yet" — ruby has shipped
-it through `js_rmethodval` since `018c693`, and kotlin since `a6df3a8`.
-
 # 7. Tooling and developer experience
 
 ### 7.3 Per-language coverage of the floor **[U]**
@@ -358,17 +310,17 @@ probably cheaper than thousands of ABNF ranges.
 
 ---
 
-# 9. Closed — do not re-open
+# 9. Settled — do not re-open
 
-**~153 items, fourteen rounds** (`e284185`..`5dba9b7`). Detail is in git history,
-lessons in the manual's chapter 4; nothing is summarised here, on purpose. Only
-NOT-WORTH-DOING verdicts stay, because the reason is what stops a re-open:
-**glibc < 2.34's `-ldl -lpthread`** (in the code comment, untestable on darwin);
-**a catchable unknown-name error in java/go/swift/csharp/metajs** (COMPILE-time in
-each real toolchain, so nothing runs to catch; the toys emit no `js_*` externs);
-**headroom for `tests/bench/mod.py`** (`e09a766` — a discrete size class, not a
-threshold); **kotlin's three `:script` peek guards becoming native `!"token"`**
-(they are used at 12+ sites across two grammars, the change is behaviour-preserving
-by *intention only*, and a whitespace mismatch would silently change what the
-grammar accepts — an unbounded silent-acceptance risk in a language at 91% corpus,
-bought for a cosmetic simplification that fixes no defect and moves no number).
+**~153 items closed in fourteen rounds** (`e284185`..`5dba9b7`); detail in git
+history, lessons in the manual's chapter 4. Only verdicts stay — the reason is the
+only part that stops a re-open. **`i in arr` after `delete`**: needs the shared
+`*jsArray` changed for every language, declined twice. **Iterator close on
+`throw`**: built, matched node, reverted — a depth stack cannot survive `for
+await`; needs a per-coroutine one, `itc20`/`itc24` pin it. **Catchable
+unknown-name error in java/go/swift/csharp/metajs**: COMPILE-time in each real
+toolchain, so nothing runs to catch. **kotlin's `:script` guards → `!"token"`**:
+equivalent by intention only, and a mismatch silently changes what parses.
+**glibc < 2.34's `-ldl -lpthread`**: untestable on darwin. **`mod.py` headroom**:
+a size class, not a threshold. The scope API note and the per-language recorded
+divergences moved to the manual (7.3, 7.9), which is where they belong.

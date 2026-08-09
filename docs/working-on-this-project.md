@@ -516,7 +516,11 @@ module against a clean `git archive` of the base commit**: one `git archive` plu
 one `diff` turns "will the matrix survive this" into a measurement.
 
 Two ceilings: **there is no scope-PARENT accessor reachable from an emitter** (why
-kotlin's chain walks stayed — though see §7.27, the floor has one now), and
+kotlin's chain walks stayed — though see §7.27, the floor has one now; the scope
+API `scopeNew`/`scopeParent`/`scopeGet`/`scopeHas`/`scopeDecl`, host ids 64..68,
+is a MetaJS HOST BUILTIN reachable only from a `lib/*-rt.metajs` file, and emitters
+have shipped against it through layer 2 since ruby's `018c693` and kotlin's
+`a6df3a8`), and
 **`js_scope_typeof` cannot distinguish "holds undefined" from "absent"**, which
 became a hard failure in python (`declCompNames` declares comprehension targets
 holding undefined, so `[i*i for i in range(4)]` answered `[NaN,NaN,NaN,NaN]`).
@@ -727,6 +731,25 @@ a decision was taken:
   corpus-derived, and `Record.toString` is explicitly unspecified in `dart:core`.
 - **Python**: a tuple prints as a list (see todo.md 3.1 for why a real tuple type
   is atomic and ~640 lines).
+
+**Recorded at their sites in the same way, moved here from todo.md 2.11 when that
+list was compressed.** **C#** `e.ToString()` prints `[object Object]`; .NET returns
+`FullName: Message` plus a stack trace this engine cannot produce. **Ruby**
+`("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare `.size`
+to `js_pylen`, which is also for-in's trip count (implemented, measured, reverted);
+`p (x).m` parses as `(p(x)).m` here and `p((x).m)` in MRI, which has now bitten two
+people. **Python** `repr(math)` names a machine-specific `.so` path; `import math
+as m` inside a function binds nothing. **Swift** static initialisers are eager
+where Swift's are lazy; `x is Inner` cannot tell two same-named nested types apart.
+**Dart** `catch (e, s)` drops the stack-trace binder — real frames are not
+reproducible here and `StackTrace.empty` would be a divergence of a different
+shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
+`FormatException: bad` (the handler is `runJSModule` in the shared `abnf/jsrt.go`).
+**Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic;
+`%x/%o/%u` of a negative renders 32-bit where bash is 64-bit; `printf '%d' 0x1f`
+is 0 where bash says 31, because bash routes operands through its arithmetic
+evaluator and the compiler has none at runtime; `readonly` is not enforced;
+`%e %f %g %a` need a double in `bash-rt.c`, which has none.
 
 Per-language divergences from real toolchains, recorded and permanent: Go byte-
 slicing a rune in half cannot be represented at all (the floor's strings are
