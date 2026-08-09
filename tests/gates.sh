@@ -107,30 +107,17 @@ FULL_TIMEOUT=600
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=8585      # thirteenth round, +274: js +17, typescript +17,
-                          # csharp +3, swift +17, ruby +30, dart +87, kotlin +16,
-                          # bash +86, lua +1. (php's 16 and the lua float-key
-                          # checks are in the FEATURE files, which --full does not
-                          # count - the matrix and native-full run those.)
-                          # Every agent this round correctly refused to raise this
-                          # itself, which is the rule working: six of them reported
-                          # "+N, RAISE FULL_ASSERTIONS" and none of them did.
+FULL_ASSERTIONS=8733      # fourteenth round, +148 over the thirteenth's 8585:
+                          # js+ts +46 (sloppy-mode `this` behind a per-function
+                          # strict flag, inherited statics), bash +50 (assignment
+                          # RHS field splitting, four declaration gaps), kotlin +26
+                          # (`with` receivers, two hijacks, an exact %f), dart +26
+                          # (implements/with/on recorded, IndexError -> RangeError).
+                          # Raised by the coordinator AFTER the round was committed,
+                          # from a committed tree: every one of the six agents
+                          # reported "+N, RAISE FULL_ASSERTIONS" and none of them
+                          # did it, which is the rule below working as intended.
 
-# The shape ratchet: layer-2 bodies in languages/lib/*.metajs that are identical
-# modulo names, ACROSS FILES, at the default -min 140. It is the only measure of
-# the duplication the extern-NAME view cannot see (manual 7.12), and until now
-# nothing ran it. A NEW cross-language copy-paste raises this and fails the gate.
-#
-# Note this is not "2". docs/todo.md 7.8 says `-max 2` and that number predates
-# a69a4fd, which fixed shape-scan's brace counting - it had been running one-line
-# function bodies on into the next function and mis-grouping the result. It sees
-# 2,191 top-level bodies today where it saw 1,713, and the honest current count is
-# 15 groups / 820 lines occupied / 481 recoverable. Lowering it is item 5.1's job.
-#
-# BOTH numbers, because the group count alone has a hole: a body copied into a
-# THIRD language joins an existing group and the count does not move. Measured -
-# pasting pyABigMul into lua-rt.metajs left it at 15 while recoverable went
-# 481 -> 511.
 SHAPE_GROUPS=15           # recorded 2026-08-08 at 6f60337
 SHAPE_LINES=481           # recoverable lines, same commit
 
