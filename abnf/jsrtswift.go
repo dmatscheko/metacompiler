@@ -986,6 +986,88 @@ func init() {
 		rel("js_swle", func(c int) bool { return c <= 0 })
 		rel("js_swgt", func(c int) bool { return c > 0 })
 		rel("js_swge", func(c int) bool { return c >= 0 })
+
+		// Every Swift subscript, and the reason it is not the shared js_pyget any
+		// more. js_pyget's Go twin is CPYTHON'S: a missing dictionary key raised a
+		// catchable KeyError and `nil[0]` said "'NoneType' object is not
+		// subscriptable", so llvm.Run answered a SWIFT program in Python while the
+		// native binary ran layer 2's own copy and said "list index out of range" /
+		// "KeyError: 9". Three engines, three answers (docs/todo.md 1.12).
+		//
+		// Rebinding m["js_pyget"] here instead of taking a new name would be chapter
+		// 4's rxExtraExterns trap - this map serves EVERY language, so python would
+		// have started reporting Swift's messages. The hits still delegate, so only
+		// the failure paths are Swift's.
+		//
+		// The four messages are swiftc 6.1.2's own, read off the toolchain, and the
+		// twins of js_swidx in languages/lib/swift-rt.metajs and swIndexFail in
+		// languages/swift-interpreter.abnf:
+		//
+		//	xs[7]  Swift/ContiguousArrayBuffer.swift:692: Fatal error: Index out of range
+		//	s[i]   Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
+		//	d[9]!  m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
+		//
+		// A missing key is the third one because this value model has no Optional
+		// (manual chapter 7.9): `d[k]` here IS Swift's `d[k]!`, and a nil base is the
+		// same force unwrap. They are rt.fail and not a throw on purpose - none of
+		// these is catchable in Swift, where they trap the process.
+		const swNilUnwrap = "Fatal error: Unexpectedly found nil while unwrapping an Optional value"
+		basePyget := m["js_pyget"]
+		m["js_swidx"] = func(a []uint64) uint64 {
+			base := u(a[0])
+			if keys, _, ok := dictParts(base); ok {
+				if rt.pyDictFind(keys, u(a[1])) < 0 {
+					rt.fail("%s", swNilUnwrap)
+				}
+				return basePyget(a)
+			}
+			if base == nil || base == jsNull {
+				rt.fail("%s", swNilUnwrap)
+			}
+			switch o := base.(type) {
+			case *jsArray:
+				idx := int(rt.toNumber(u(a[1])))
+				if idx < 0 {
+					idx += len(o.elems)
+				}
+				if idx < 0 || idx >= len(o.elems) {
+					rt.fail("Fatal error: Index out of range")
+				}
+			case string:
+				idx := int(rt.toNumber(u(a[1])))
+				n := rt.strLen(o)
+				if idx < 0 {
+					idx += n
+				}
+				if idx < 0 || idx >= n {
+					rt.fail("Fatal error: String index is out of bounds")
+				}
+			}
+			return basePyget(a)
+		}
+
+		// THE TOP OF THE PROGRAM: an error nobody caught. swift-to-llvm-ir.abnf
+		// wraps the whole program in one js_try whose catch calls this, so the
+		// value never reaches runJSModule's uncaught-throw handler (nor, natively,
+		// the floor's in languages/lib/runtime.c) - both render it through
+		// excText/exc_text, which knows the js {name,message} and python
+		// {__class,args} shapes and nothing else, so every uncaught Swift `throw'
+		// printed "uncaught exception: [object Object]" in both compiled halves.
+		// Teaching those handlers Swift is not an option: exc_text is the FLOOR,
+		// shared by all sixteen languages. Same shape as ruby's js_rtop.
+		//
+		// rt.fail's text is "js runtime error: " + this, which is what the floor's
+		// fail() host builtin prints too, so llvm.Run and the native binary are
+		// byte-identical; swRunTop in swift-interpreter.abnf prints the same line
+		// behind its own engine prefix. The wording is swiftc 6.1.2's
+		// ("Swift/ErrorType.swift:254: Fatal error: Error raised at top level:
+		// m.E.boom") minus the standard-library frame, with swDesc rendering the
+		// value - so `m.E.boom' reads `boom', this runtime having no module concept
+		// (manual chapter 7.9). docs/todo.md 1.12.
+		m["js_swtop"] = func(a []uint64) uint64 {
+			rt.fail("Fatal error: Error raised at top level: %s", rt.swDesc(u(a[0])))
+			return 0
+		}
 	})
 }
 

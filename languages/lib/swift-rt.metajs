@@ -926,24 +926,63 @@ function js_kindex(s, i) {
 
 // Sequence indexing (negative wraps) and dict lookup. Swift's emitter routes
 // every subscript through this (core.indexExt).
-function js_pyget(c, k) {
+//
+// THE NAME IS js_swidx, NOT js_pyget, and that is the point rather than tidiness:
+// the Go twin of js_pyget is CPython's, shared by every language, so llvm.Run used
+// to answer a Swift subscript in PYTHON - "'NoneType' object is not subscriptable"
+// for nil[0], a catchable KeyError for a missing dictionary key - while this file
+// answered "list index out of range" / "KeyError: 9" and the interpreter half a
+// third thing again. The four messages below are swiftc 6.1.2's OWN, read off the
+// toolchain, and abnf/jsrtswift.go's js_swidx and swIndexFail in
+// swift-interpreter.abnf print exactly these. docs/todo.md 1.12.
+//
+//     xs[7]  Swift/ContiguousArrayBuffer.swift:692: Fatal error: Index out of range
+//     s[i]   Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
+//     d[9]!  m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
+//
+// A missing dictionary key is the THIRD one because this value model has no
+// Optional (the manual's chapter 7.9): `d[k]` here IS Swift's `d[k]!`. A nil base
+// gets it for the same reason.
+function js_swidx(c, k) {
     if (rtIsDictObj(c)) {
         var i = swDictFind(c["keys"], k)
-        if (i < 0) { fail("KeyError: " + swDesc(k)) }
+        if (i < 0) { fail("Fatal error: Unexpectedly found nil while unwrapping an Optional value") }
         return c["vals"][i]
+    }
+    if (c === null || c === undefined) {
+        fail("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
     }
     var idx = swNum(k)
     if (rtIsArr(c)) {
         if (idx < 0) { idx = idx + c.length }
-        if (idx < 0 || idx >= c.length) { fail("list index out of range") }
+        if (idx < 0 || idx >= c.length) { fail("Fatal error: Index out of range") }
         return c[idx]
     }
     if (typeof c == "string") {
         if (idx < 0) { idx = idx + c.length }
-        if (idx < 0 || idx >= c.length) { fail("string index out of range") }
+        if (idx < 0 || idx >= c.length) { fail("Fatal error: String index is out of bounds") }
         return c.charAt(idx)
     }
-    fail("indexing a " + typeof c)
+    fail("Fatal error: cannot subscript a value of this type")
+    return undefined
+}
+
+// THE TOP OF THE PROGRAM: an error nobody caught. swift-to-llvm-ir.abnf wraps the
+// whole program in one js_try whose catch calls this, so the value never reaches
+// the floor's uncaught-throw handler in languages/lib/runtime.c - which renders it
+// with the generic object toString and printed "js runtime error: uncaught
+// exception: [object Object]" for every uncaught Swift `throw'. exc_text cannot be
+// taught Swift's rendering: it is the FLOOR, shared by all sixteen languages.
+//
+// fail() gives the floor's own "js runtime error: " prefix and exit 1, so the line
+// is byte for byte the one abnf/jsrtswift.go's js_swtop prints, and swRunTop in
+// swift-interpreter.abnf prints the same text behind its own engine prefix. The
+// wording is swiftc 6.1.2's, minus the standard-library frame it names and with the
+// value rendered by swDesc, so swiftc's `m.E.boom' reads `boom' - the module
+// qualification this runtime has no concept of (manual chapter 7.9).
+// docs/todo.md 1.12.
+function js_swtop(exc) {
+    fail("Fatal error: Error raised at top level: " + swDesc(exc))
     return undefined
 }
 

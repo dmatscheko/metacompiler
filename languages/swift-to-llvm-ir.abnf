@@ -46,7 +46,7 @@ Functions, methods, init and closures become IR functions jsf_N(env, args)
 implicit property access resolves through js_kget/js_kset). Classes and structs
 become descriptor objects with a __ctor (default property initializers) and an
 init closure; construction runs __ctor then init. Method calls dispatch through
-js_mcall, subscript through js_pyget/js_pyset, dictionaries through js_dict_new,
+js_mcall, subscript through js_swidx/js_pyset, dictionaries through js_dict_new,
 and ?? compiles to a null test branching around the right side (a phi merges).
 A binding condition compiles to a nil test branching to the clause's failure
 block, and a pattern to a chain of such tests. throw calls js_throw and do/catch
@@ -2530,7 +2530,7 @@ KwContinue  = "continue" KwEnd ;
             var r = t(b)
             var bb = r.b
             var iV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$packi")])
-            return {b: bb, v: callExt(bb, "js_pyget", [r.v, iV])}
+            return {b: bb, v: callExt(bb, "js_swidx", [r.v, iV])}
         }
     }
     function makePackRepeat(t) {
@@ -2976,11 +2976,11 @@ KwContinue  = "continue" KwEnd ;
             bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_ge", [cp, emitNum(bodyB, 0xC0)])), hiB, plainB)
             hiB.NewCondBr(truthy(hiB, callExt(hiB, "js_le", [cp, emitNum(hiB, 0xFF)])), inRangeB, plainB)
             var idx = callExt(inRangeB, "js_sub", [cp, emitNum(inRangeB, 0xC0)])
-            var bc = callExt(inRangeB, "js_pyget", [baseArr, idx])
+            var bc = callExt(inRangeB, "js_swidx", [baseArr, idx])
             inRangeB.NewCondBr(truthy(inRangeB, bc), splitB, plainB)
             var acc1 = callExt(splitB, "js_scope_get", [sc, emitStr(splitB, "o")])
             acc1 = callExt(splitB, "js_jadd", [acc1, callExt(splitB, "js_char", [bc])])
-            acc1 = callExt(splitB, "js_jadd", [acc1, callExt(splitB, "js_char", [callExt(splitB, "js_pyget", [markArr, idx])])])
+            acc1 = callExt(splitB, "js_jadd", [acc1, callExt(splitB, "js_char", [callExt(splitB, "js_swidx", [markArr, idx])])])
             callExt(splitB, "js_scope_set", [sc, emitStr(splitB, "o"), acc1])
             splitB.NewBr(headB)
             var acc2 = callExt(plainB, "js_scope_get", [sc, emitStr(plainB, "o")])
@@ -3240,7 +3240,7 @@ KwContinue  = "continue" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [names])])), bodyB, missB)
             var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var cv = callExt(bodyB, "js_get", [e, callExt(bodyB, "js_pyget", [names, iV2])])
+            var cv = callExt(bodyB, "js_get", [e, callExt(bodyB, "js_swidx", [names, iV2])])
             var hitB = curF.NewBlock("")
             bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [callExt(bodyB, "js_get", [cv, emitStr(bodyB, "__raw")]), raw])), hitB, stepB)
             hitB.NewRet(cv)
@@ -3273,7 +3273,7 @@ KwContinue  = "continue" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [flds])])), bodyB, doneB)
             var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var kk = callExt(bodyB, "js_pyget", [flds, iV2])
+            var kk = callExt(bodyB, "js_swidx", [flds, iV2])
             callExt(bodyB, "js_set", [dst, kk, callExt(bodyB, "js_get", [src, kk])])
             callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
             bodyB.NewBr(headB)
@@ -3302,7 +3302,7 @@ KwContinue  = "continue" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [flds])])), bodyB, doneB)
             var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var kk = callExt(bodyB, "js_pyget", [flds, iV2])
+            var kk = callExt(bodyB, "js_swidx", [flds, iV2])
             callExt(bodyB, "js_set", [out, kk, bodyB.NewCall(rtCopy(), [callExt(bodyB, "js_get", [v, kk])])])
             callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
             bodyB.NewBr(headB)
@@ -3316,7 +3316,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // The [i] read and the [i] = v write, once the program declares a subscript: an
     // object whose type carries __sub_get / __sub_set dispatches there, everything
-    // else keeps the js_pyget / js_pyset path.
+    // else keeps the js_swidx / js_pyset path.
     function rtSubGet() {
         return rtFunc("sw_subget", 2, function(b, ps) {
             var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_get"), b.NewCall(rtIdxArity(), [ps[1]])])])
@@ -3390,7 +3390,7 @@ KwContinue  = "continue" KwEnd ;
         var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [many])])), bodyB, joinB)
         var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-        callExt(bodyB, "js_arr_push", [args, callExt(bodyB, "js_pyget", [many, iV2])])
+        callExt(bodyB, "js_arr_push", [args, callExt(bodyB, "js_swidx", [many, iV2])])
         callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
         bodyB.NewBr(headB)
         callExt(oneB, "js_arr_push", [args, idxV])
@@ -3516,7 +3516,7 @@ KwContinue  = "continue" KwEnd ;
         if (k.pargs != null && k.pargs.length > 0) {
             var valsV = b.NewCall(rtVals(), [v])
             for (var j = 0; j < k.pargs.length; j++) {
-                b = emitMatchPat(b, k.pargs[j], callExt(b, "js_pyget", [valsV, emitNum(b, j)]), binding, failB)
+                b = emitMatchPat(b, k.pargs[j], callExt(b, "js_swidx", [valsV, emitNum(b, j)]), binding, failB)
             }
         }
         return b
@@ -3677,7 +3677,7 @@ KwContinue  = "continue" KwEnd ;
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
-            var elV = callExt(bodyB, "js_pyget", [sV2, iV2])
+            var elV = callExt(bodyB, "js_swidx", [sV2, iV2])
             var innerB = emitMatchPat(bodyB, pat, elV, false, postB)
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             if (whereT != null) {
@@ -3771,8 +3771,18 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // .count -> js_pylen (arrays, strings and dicts); other .name -> js_get;
-    // [i] -> js_pyget (core.indexExt); .m(args) -> js_mcall.
-    core.indexExt = "js_pyget"
+    // [i] -> js_swidx (core.indexExt); .m(args) -> js_mcall.
+    //
+    // js_swidx IS A NEW NAME, and it has to be one: this used to emit the SHARED
+    // js_pyget, whose Go twin is CPython's, so Swift's own subscript failures spoke
+    // PYTHON - `nil[0]` said "'NoneType' object is not subscriptable" and a missing
+    // dictionary key raised a catchable KeyError, which Swift has no concept of.
+    // The native binary meanwhile ran layer 2's own copy and said "list index out of
+    // range" / "KeyError: 9", so the two compiled halves disagreed as well, and the
+    // interpreter half said a third thing (docs/todo.md 1.12). Rebinding js_pyget in
+    // abnf/jsrtswift.go instead would be chapter 4's rxExtraExterns trap - ONE extern
+    // map serves every language, so it would have given PYTHON Swift's messages.
+    core.indexExt = "js_swidx"
     // A member read: a computed property (or an observed stored one) is reached
     // through the generated __get_x method, everything else is a plain js_get. The
     // decision is by NAME, over the set of names some type in this program computes.
@@ -4326,7 +4336,7 @@ KwContinue  = "continue" KwEnd ;
             return function(b) {
                 var ec2 = emitArgRecs(b, args)
                 b = ec2.b
-                return {b: b, v: callExt(b, convExt, [callExt(b, "js_pyget", [ec2.v, emitNum(b, 0)])])}
+                return {b: b, v: callExt(b, convExt, [callExt(b, "js_swidx", [ec2.v, emitNum(b, 0)])])}
             }
         }
         var swIt = swIntWidthOf(name)
@@ -4334,7 +4344,7 @@ KwContinue  = "continue" KwEnd ;
             return function(b) {
                 var ec = emitArgRecs(b, args)
                 b = ec.b
-                return {b: b, v: swEmitConv(b, callExt(b, "js_pyget", [ec.v, emitNum(b, 0)]), swIt)}
+                return {b: b, v: swEmitConv(b, callExt(b, "js_swidx", [ec.v, emitNum(b, 0)]), swIt)}
             }
         }
         return function(b) {
@@ -4356,7 +4366,7 @@ KwContinue  = "continue" KwEnd ;
                 var eV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
                 var ear = withTypeCtx(ck, function() { return emitArgRecs(b, args) })
                 b = ear.b
-                return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_pyget", [ear.v, emitNum(b, 0)])])}
+                return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_swidx", [ear.v, emitNum(b, 0)])])}
             }
             if (isClassT) {
                 // A bare type name inside an enclosing type means THAT type's nested
@@ -4425,7 +4435,7 @@ KwContinue  = "continue" KwEnd ;
 
     // Assignment: a plain name goes through js_kget/js_kset (locals, then the
     // properties of self); a .field path targets js_get/js_set; an [i] path
-    // targets js_pyget/js_pyset (arrays and dictionaries).
+    // targets js_swidx/js_pyset (arrays and dictionaries).
     function emitRefPath(b, ref) {
         var o = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -4550,7 +4560,7 @@ KwContinue  = "continue" KwEnd ;
                     b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
-                        var oldm = callExt(b, "js_pyget", [p.obj, p.key])
+                        var oldm = callExt(b, "js_swidx", [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
                     v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)])
@@ -4854,7 +4864,7 @@ KwContinue  = "continue" KwEnd ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            var rawV = callExt(bodyB, "js_pyget", [sV2, iV2])
+            var rawV = callExt(bodyB, "js_swidx", [sV2, iV2])
             var elV = rawV
             if (wantPair) {
                 // A tuple pattern over a dictionary iterates (key, value) pairs; over an
@@ -4869,7 +4879,7 @@ KwContinue  = "continue" KwEnd ;
                 var pairV = callExt(pDictB, "js_obj_new", [])
                 callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "__tuple"), emitNum(pDictB, 2)])
                 callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "0"), rawV])
-                callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "1"), callExt(pDictB, "js_pyget", [aV2, rawV])])
+                callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "1"), callExt(pDictB, "js_swidx", [aV2, rawV])])
                 pDictB.NewBr(pJoinB)
                 elV = pJoinB.NewPhi([llvm.ir.NewIncoming(rawV, pArrB), llvm.ir.NewIncoming(pairV, pDictB)])
                 bodyB = pJoinB
@@ -6526,7 +6536,7 @@ KwContinue  = "continue" KwEnd ;
             b.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
-            callExt(bodyB, "js_arr_push", [out, callExt(bodyB, "js_pyget", [ps[2], iV])])
+            callExt(bodyB, "js_arr_push", [out, callExt(bodyB, "js_swidx", [ps[2], iV])])
             callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"),
                                             callExt(bodyB, "js_jadd", [iV, emitNum(bodyB, 1)])])
             bodyB.NewBr(headB)
@@ -7002,8 +7012,32 @@ KwContinue  = "continue" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), emitExtFn(b, "js_swmin", 2)])
         // Imported declarations first (so the main file's code can use them), then the
         // main file's top level statements in source order.
-        b = emitImported(b)
-        b = makeSeq(items)(b)
+        //
+        // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an error nobody caught is
+        // reported BY THE PROGRAM (js_swtop) instead of escaping the module. What
+        // escaped before reached the floor's uncaught-throw handler in
+        // languages/lib/runtime.c (and runJSModule's in abnf/jsrt.go), which renders
+        // the value with the generic object toString - so every uncaught `throw' in
+        // both compiled halves read "js runtime error: uncaught exception:
+        // [object Object]", naming neither the error type nor its payload, where
+        // swiftc 6.1.2 prints "Fatal error: Error raised at top level: m.E.boom".
+        // Neither of those handlers can be taught Swift's rendering: runtime.c's
+        // exc_text is the FLOOR, shared by all sixteen languages. This is
+        // ruby-to-llvm-ir.abnf's shape (js_rtop), for the same reason and with the
+        // same two-closure cost - one js_try per program, not per statement.
+        // docs/todo.md 1.12.
+        var topBodyT = function(bb) {
+            bb = emitImported(bb)
+            return makeSeq(items)(bb)
+        }
+        var topCatchT = function(bb) {
+            callExt(bb, "js_swtop", [bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "error")])])
+            return bb
+        }
+        var topTryClo = callExt(b, "js_closure", [handle(emitFunc([], topBodyT, false, true)), curScopeV])
+        var topCatchClo = callExt(b, "js_closure",
+                                  [handle(emitFunc(["error"], topCatchT, false, true)), curScopeV])
+        callExt(b, "js_try", [topTryClo, topCatchClo, hUndef])
         b.NewRet(handle(0))
     }
     // A field read is where the range statics are spelled, and there is no other way

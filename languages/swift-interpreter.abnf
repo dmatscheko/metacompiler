@@ -147,8 +147,12 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 // finds, in order. The indirection is what lets a #if branch collect its items
 // WITHOUT running them - see PoundIfTop, which splices the live branch's thunks
 // into the enclosing item list.
+//
+// swRunTop, not the loop written out here, because an error NOBODY CAUGHT has to
+// be reported as a diagnostic rather than allowed to escape into the engine - see
+// its comment in the start script below. docs/todo.md 1.12.
 Program     = [ Hashbang ] { TopExec } ;
-TopExec     <~~ var xs = takeAll(); for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { xs[i]() } } ~~>
+TopExec     <~~ swRunTop(takeAll()) ~~>
             = TopItem ;
 TopItem     = PoundIfTop | OpDeclTop | FunTop | TypeTop | UnsupTop | TopStmt ;
 // An operator / precedencegroup declaration is matched BEFORE the modifier-led
@@ -2902,24 +2906,52 @@ KwContinue  = "continue" KwEnd ;
         if (g != null) { return g(o) }
         return undefined
     }
+    // A subscript that cannot answer. The four messages are swiftc 6.1.2's OWN,
+    // read off the toolchain, and the twins of js_swidx in lib/swift-rt.metajs and
+    // abnf/jsrtswift.go - all three engines used to say something different here
+    // (docs/todo.md 1.12), and one of the three leaked PYTHON: llvm.Run routed
+    // Swift's subscript through the shared js_pyget, so `nil[0]` answered
+    // "'NoneType' object is not subscriptable" and a missing dictionary key
+    // answered CPython's KeyError.
+    //
+    //     xs[7]     Swift/ContiguousArrayBuffer.swift:692: Fatal error: Index out of range
+    //     s[i]      Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
+    //     d[9]!     m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
+    //
+    // The dictionary case is the third one because THIS VALUE MODEL HAS NO OPTIONAL
+    // (manual chapter 7.9): `d[k]` here is Swift's `d[k]!`, so the force-unwrap
+    // message is the honest one. A base that is nil gets it for the same reason.
+    function swIndexFail(kind) {
+        if (kind == "dict" || kind == "nil") {
+            fail("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
+        }
+        if (kind == "string") { fail("Fatal error: String index is out of bounds") }
+        // The twins have a fourth arm, "cannot subscript a value of this type". This
+        // half cannot reach it: an object with numeric slots falls through to the
+        // array arm below, which is what it has always done.
+        fail("Fatal error: Index out of range")
+    }
     function swIndex(o, i) {
         var sg = subAccessor(o, "__sub_get")
         if (sg != null) { return sg.apply(undefined, concat2impl([o], idxArgs(i))) }
         if (isDict(o)) {
             var di = dictFind(o, i)
-            if (di < 0) { fail("no value for dictionary key") }
+            if (di < 0) { swIndexFail("dict") }
             return o.vals[di]
         }
         if (typeof o == "string") {
             var si = szNum(i)
             if (si < 0) { si += o.length }
-            if (si < 0 || si >= o.length) { fail("string index out of range") }
+            if (si < 0 || si >= o.length) { swIndexFail("string") }
             return o.charAt(si)
         }
-        if (o === null || o === undefined) { fail("index of nil") }
+        if (o === null || o === undefined) { swIndexFail("nil") }
+        // NOT guarded on Array.isArray: an object with numeric slots (a tuple) is
+        // indexable here and the length test below is inert for it, which is the
+        // behaviour this half has always had. Only the MESSAGES changed.
         var ai = szNum(i)
         if (ai < 0) { ai += o.length }
-        if (ai < 0 || ai >= o.length) { fail("array index out of range") }
+        if (ai < 0 || ai >= o.length) { swIndexFail("array") }
         return o[ai]
     }
     function setElem(o, k, v) {
@@ -3738,6 +3770,39 @@ KwContinue  = "continue" KwEnd ;
             return sig
         }
     }
+    // THE TOP OF THE PROGRAM: an error nobody caught. This is the body of the
+    // TopExec tag (see the Program rule), and it is a function rather than the loop
+    // written inline there because the loop is where an uncaught `throw` surfaces.
+    //
+    // Without the try, the thrown record left the tag as a HOST error and the ENGINE
+    // printed it - which is not a diagnostic at all, and, worse, not even the same
+    // text twice: goja rendered it "[object Object] at lib/interp-core.js:143" while
+    // -frozen rendered the Go value behind it,
+    // "&{%!s(*abnf.jsObject=&{{4363 0x50b4...} map[__exc:true v:0x...]})}" - a Go type
+    // name AND A HEAP ADDRESS, so the two script hosts disagreed on USER-VISIBLE
+    // OUTPUT and the -frozen half could not repeat itself between two runs. Same
+    // class as the (*abnf.jsArray) leak b56c2b0 removed from the Go twin.
+    //
+    // The wording is swiftc 6.1.2's own, read off the toolchain:
+    //
+    //     Swift/ErrorType.swift:254: Fatal error: Error raised at top level: m.E.boom
+    //
+    // minus the frame prefix (no Swift standard library source here) and with the
+    // value rendered by swstr, so `m.E.boom` reads `boom`. That last gap is the
+    // module-qualification divergence already recorded in the manual's chapter 7.9:
+    // this runtime has no module concept, and every other place a type name is
+    // printed drops the qualifier the same way. js_swtop in lib/swift-rt.metajs and
+    // abnf/jsrtswift.go print the IDENTICAL line, so all three engines agree.
+    // docs/todo.md 1.12.
+    function swRunTop(xs) {
+        try {
+            for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { xs[i]() } }
+        } catch (e) {
+            if (excIsUser(e)) { fail("Fatal error: Error raised at top level: " + swstr(e.v)) }
+            throw e
+        }
+    }
+
     // try? EXPR: nil instead of the thrown error.
     function makeTryOpt(t) {
         return function() {
@@ -6241,10 +6306,9 @@ KwContinue  = "continue" KwEnd ;
     c.compile(c.asg)
 
     // Top level code has already run (in source order) during c.compile; if it did
-    // not call exit(), succeed. (A user exception that escapes the top level unwinds
-    // out of c.compile as a host error and still exits nonzero: top level runs inside
-    // c.compile via tags - to keep "declare before use" - so a JS try around it here
-    // cannot intercept a tag-time throw. throws caught inside a do/catch are fine.)
+    // not call exit(), succeed. (Top level runs inside c.compile via tags - to keep
+    // "declare before use" - so a JS try around THIS call cannot intercept a
+    // tag-time throw; the interception is in swRunTop, which IS the tag.)
     exit(0)
 
 ~~) ;

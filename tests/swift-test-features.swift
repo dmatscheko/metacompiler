@@ -1139,5 +1139,43 @@ func main() {
     print("features: \(checks) checks, \(fails) failures")
 }
 
+// ----- The TOP LEVEL, deliberately outside main() -------------------------
+// Every other check in this file runs inside main(). These run where the program
+// itself does, and that is the environment docs/todo.md 1.12 changed: the
+// compiler half now emits the WHOLE program inside one js_try, whose catch calls
+// js_swtop, so that an error nobody caught is reported by the program instead of
+// escaping the module and being rendered "[object Object]" by the floor's generic
+// uncaught-throw handler. That wrapping puts the top level inside an IR CLOSURE,
+// so the four things it could plausibly have broken are pinned here: a top-level
+// binding stays visible to a top-level function, a top-level type is still
+// usable, a top-level do/catch still wins over the new outer try, and try? still
+// answers nil rather than being swallowed by it.
+//
+// DISCRIMINATING POWER AGAINST ec39aef: ZERO, and that is the honest number.
+// These four pass at base too - base simply had no wrapper to break them. They
+// are here because nothing else in the suite executes a do/catch at the top
+// level, so without them the wrapper's blast radius is untested. What DOES
+// discriminate is the abort text itself, and the only vehicle for that is a
+// SHOULD-ABORT row in .vscode/launch.json (see tests/swift-abort-test*.swift).
+enum TopErr: Error { case boom(Int) }
+let topLet = 7
+struct TopS { var v: Int }
+func topReads() -> Int { return topLet + 1 }
+func topThrows() throws -> Int { throw TopErr.boom(1) }
+var topLog = ""
+do {
+    throw TopErr.boom(3)
+} catch TopErr.boom(let n) {
+    topLog += "boom\(n);"
+} catch {
+    topLog += "other;"
+}
+for i in 0..<3 { topLog += "\(i)" }
+let topOpt = try? topThrows()
+check("top-level-binding-visible-to-a-top-level-func", topReads() == 8)
+check("top-level-struct-usable-at-top-level", TopS(v: 2).v == 2)
+check("top-level-do-catch-wins-over-the-program-wide-try", topLog == "boom3;012")
+check("top-level-try-optional-still-answers-nil", topOpt == nil)
+
 main()
 exit(fails)
