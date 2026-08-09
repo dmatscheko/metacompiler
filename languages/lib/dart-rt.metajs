@@ -403,6 +403,13 @@ function dtObjStr(o, seen, depth) {
         var cn = o["__name"]
         if (typeof cn == "string") { return cn }
     }
+    // One of dart:core's own errors or exceptions - see dtExcAnc below.
+    var dx = o["__dexc"]
+    if (typeof dx == "string") { return dtExcStr(dx, o) }
+    // A Type prints as its name, and the marker for one of those sixteen is no
+    // different.
+    var dxt = o["__dexcType"]
+    if (typeof dxt == "string") { return dxt }
     var els = dtSetElems(o)
     if (els !== undefined) {
         var so = "{"
@@ -714,15 +721,21 @@ function dtArith(op, l, r) {
         if (dtIsFlo(l) || dtIsFlo(r)) {
             var q = dtNumOf(l) / dtNumOf(r)
             if (q !== q || q === Infinity || q === 0 - Infinity) {
-                throw "Unsupported operation: Result of truncating division is " + dtFloStr(q)
+                // A real UnsupportedError rather than the rendered string, so
+                // `on UnsupportedError catch` claims it. Its toString prepends
+                // "Unsupported operation: " itself (errors.dart:584), so the text
+                // reaching stdout is byte-identical to what this used to raise.
+                throw dtExcNew("UnsupportedError", "", ["Result of truncating division is " + dtFloStr(q)])
             }
             return dtIntFromFloat(q)
         }
-        return dtIntOp("/", dtToInt(l), dtToInt(r))
+        var di = dtToInt(r)
+        if (di === 0) { throw dtExcNew("IntegerDivisionByZeroException", "", []) }
+        return dtIntOp("/", dtToInt(l), di)
     }
     if (op == ">>>") {
         var n = dtNumOf(r)
-        if (n < 0) { throw "Unsupported operation: negative shift amount" }
+        if (n < 0) { throw dtExcNew("UnsupportedError", "", ["negative shift amount"]) }
         if (n >= 64) { return 0 }
         return dtLsr(dtToInt(l), n)
     }
@@ -737,6 +750,19 @@ function dtArith(op, l, r) {
     var li = dtToInt(l)
     var ri = dtToInt(r)
     if (op == "%") {
+        // `~/` and `%` with an INT divisor of zero raise a CATCHABLE
+        // IntegerDivisionByZeroException (integers.dart:25-44, which spells out
+        // `(other is int) && (other == 0)` for both). The floor's sized-integer
+        // layer beneath (runtime.c:2573) aborts instead and cannot know which
+        // language is asking. A DOUBLE operand never reaches here - `1.5 % 0` took
+        // the dtModF branch above, and `1.5 ~/ 0` is _Double.~/.
+        //
+        // The test HAS to live in the two operator branches and not at the head of
+        // this function: written once at the top it cost `tests/bench/mod.dart`
+        // 9.61% (SLOWER in 15 of 15 paired draws) for two string compares and a
+        // dtNumOf on every `+`, `-`, `*` and `&` in the program. A sized integer is
+        // only ever built past 2^53, so a zero divisor is always the plain number.
+        if (ri === 0) { throw dtExcNew("IntegerDivisionByZeroException", "", []) }
         var m = dtIntOp("%", li, ri)
         if (sintCmp(m, 0) < 0) {
             var absr = ri
@@ -983,7 +1009,348 @@ function dtIsType(v, t) {
         return v["__set"] !== undefined
     }
     if (lt === "Function") { return typeof v == "function" }
+    // One of dart:core's errors or exceptions: its supertype set is dtExcAnc, which
+    // carries the `implements` edges the __class walk in dtTypeName cannot express.
+    if (dtIsObj(v)) {
+        var dx = v["__dexc"]
+        if (typeof dx == "string") { return dtExcAnc(dx).indexOf("|" + lt + "|") >= 0 }
+    }
     return dtTypeName(v, lt)
+}
+
+// ============================================ dart:core errors / exceptions ==
+//
+// The layer-2 twin of the dx* family in languages/dart-interpreter.abnf and of
+// dartExc* in abnf/jsrtdart.go. See the long comment at the first one for why an
+// exception is a plain object carrying __dexc rather than a class descriptor. THERE
+// IS NO dart TOOLCHAIN ON THIS MACHINE, so every signature and every toString text
+// is cited to sdk/lib/core/errors.dart and sdk/lib/core/exceptions.dart, which are
+// the documentation; the bare line numbers below are those two files'.
+//
+// The ancestor set is a FUNCTION rather than a table because MetaJS has no object
+// literal big enough to be pleasant here and the answer is a constant per name: each
+// class's own name followed by all of its supertypes, `implements` edges included.
+// Error and Exception are DISJOINT roots in Dart, which is the whole reason the
+// edges have to be written out: `on Exception catch` claims a FormatException and
+// must not claim a StateError.
+function dtExcAnc(n) {
+    if (n === "Error") { return "|Error|" }
+    if (n === "AssertionError") { return "|AssertionError|Error|" }
+    if (n === "TypeError") { return "|TypeError|Error|" }
+    if (n === "ArgumentError") { return "|ArgumentError|Error|" }
+    if (n === "RangeError") { return "|RangeError|ArgumentError|Error|" }
+    if (n === "IndexError") { return "|IndexError|ArgumentError|RangeError|Error|" }
+    if (n === "NoSuchMethodError") { return "|NoSuchMethodError|Error|" }
+    if (n === "UnsupportedError") { return "|UnsupportedError|Error|" }
+    if (n === "UnimplementedError") { return "|UnimplementedError|UnsupportedError|Error|" }
+    if (n === "StateError") { return "|StateError|Error|" }
+    if (n === "ConcurrentModificationError") { return "|ConcurrentModificationError|Error|" }
+    if (n === "OutOfMemoryError") { return "|OutOfMemoryError|Error|" }
+    if (n === "StackOverflowError") { return "|StackOverflowError|Error|" }
+    if (n === "Exception") { return "|Exception|" }
+    if (n === "FormatException") { return "|FormatException|Exception|" }
+    if (n === "IntegerDivisionByZeroException") {
+        return "|IntegerDivisionByZeroException|Exception|UnsupportedError|Error|"
+    }
+    return "|"
+}
+
+// Positional argument i, or null when it was not supplied.
+function dtExcArg(argv, i) {
+    if (i < argv.length) { return argv[i] }
+    return null
+}
+
+// A NAMED argument: the emitter appends one dict past the positional arguments.
+function dtExcOpt(argv, k, key) {
+    if (k >= argv.length) { return null }
+    var d = argv[k]
+    if (!rtIsDictObj(d)) { return null }
+    var i = rtDictFind(d["keys"], key)
+    if (i < 0) { return null }
+    return d["vals"][i]
+}
+
+function dtExcOr(v, d) {
+    if (v === undefined) { return d }
+    if (v === null) { return d }
+    return v
+}
+
+function dtExcNull(v) { return v === undefined || v === null }
+
+// Error.safeToString (:79): a num, a bool and null render with toString; a String
+// becomes a STRING LITERAL. UNCERTAIN: _stringToSafeString is `external` and
+// documented only as "convert string to a valid string literal with no control
+// characters", so the control-character spelling below is this project's reading.
+function dtExcSafe(v) {
+    if (typeof v == "string") { return dtExcQuote(v) }
+    return dtStr(v)
+}
+
+function dtExcQuote(s) {
+    var out = "\""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c == 34) { out = out + "\\\"" }
+        else if (c == 92) { out = out + "\\\\" }
+        else if (c == 10) { out = out + "\\n" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c == 9) { out = out + "\\t" }
+        else if (c < 32 || c == 127) { out = out + "\\x" + dtExcHex2(c) }
+        else { out = out + s.charAt(i) }
+        i = i + 1
+    }
+    return out + "\""
+}
+
+function dtExcHex2(c) {
+    var d = "0123456789abcdef"
+    return d.charAt(Math.trunc(c / 16)) + d.charAt(c % 16)
+}
+
+// indexable.length, for the deprecated IndexError constructor's default.
+function dtExcLen(v) {
+    if (typeof v == "string") { return v.length }
+    if (rtIsArr(v)) { return v.length }
+    if (rtIsDictObj(v)) { return v["keys"].length }
+    var els = dtSetElems(v)
+    if (els !== undefined) { return els.length }
+    return 0
+}
+
+// Construction. `ctor` is the named constructor's name, "" for the unnamed one.
+function dtExcNew(name, ctor, argv) {
+    if (name === "ArgumentError" || name === "RangeError" || name === "IndexError") {
+        return dtExcArgNew(name, ctor, argv)
+    }
+    var e = {__dexc: name, message: null}
+    if (name === "Exception") { e["message"] = dtExcArg(argv, 0); return e }        // :24
+    if (name === "FormatException") {                                              // :73
+        if (argv.length > 0) { e["message"] = argv[0] } else { e["message"] = "" }
+        e["source"] = dtExcArg(argv, 1)
+        e["offset"] = dtExcArg(argv, 2)
+        return e
+    }
+    if (name === "IntegerDivisionByZeroException") {                               // :177
+        e["message"] = "Division resulted in non-finite value"
+        return e
+    }
+    if (name === "ConcurrentModificationError") {                                  // :635
+        e["modifiedObject"] = dtExcArg(argv, 0)
+        return e
+    }
+    // AssertionError([message]) :133, UnsupportedError(message) :583,
+    // UnimplementedError([message]) :597, StateError(message) :622; Error(),
+    // TypeError(), OutOfMemoryError() and StackOverflowError() take nothing.
+    e["message"] = dtExcArg(argv, 0)
+    return e
+}
+
+// ArgumentError and its two subclasses share one field set (:163-547): _hasValue
+// (here __hasv, private in Dart and therefore hidden), invalidValue, name, message,
+// and RangeError's start / end.
+function dtExcArgNew(name, ctor, argv) {
+    var e = {__dexc: name, __hasv: false, invalidValue: null, name: null, message: null,
+             start: null, end: null}
+    if (name === "ArgumentError") {
+        if (ctor === "value") {                                                    // :204
+            e["__hasv"] = true
+            e["invalidValue"] = dtExcArg(argv, 0)
+            e["name"] = dtExcArg(argv, 1)
+            e["message"] = dtExcArg(argv, 2)
+        } else if (ctor === "notNull") {                                           // :209
+            e["name"] = dtExcArg(argv, 0)
+            e["message"] = "Must not be null"
+        } else {                                                                   // :188
+            e["message"] = dtExcArg(argv, 0)
+            e["name"] = dtExcArg(argv, 1)
+        }
+        return e
+    }
+    if (name === "RangeError") {
+        if (ctor === "value") {                                                    // :262
+            e["__hasv"] = true
+            e["invalidValue"] = dtExcArg(argv, 0)
+            e["name"] = dtExcArg(argv, 1)
+            e["message"] = dtExcOr(dtExcArg(argv, 2), "Value not in range")
+        } else if (ctor === "range") {                                             // :280
+            e["__hasv"] = true
+            e["invalidValue"] = dtExcArg(argv, 0)
+            e["start"] = dtExcArg(argv, 1)
+            e["end"] = dtExcArg(argv, 2)
+            e["name"] = dtExcArg(argv, 3)
+            e["message"] = dtExcOr(dtExcArg(argv, 4), "Invalid value")
+        } else if (ctor === "index") {
+            // `factory RangeError.index(...) = IndexError` (:299): the same
+            // positional signature, redirected to the deprecated IndexError one.
+            return dtExcArgNew("IndexError", "", argv)
+        } else {                                                                   // :255
+            e["message"] = dtExcArg(argv, 0)
+        }
+        return e
+    }
+    e["__hasv"] = true
+    if (ctor === "withLength") {                                                   // :483
+        e["invalidValue"] = dtExcArg(argv, 0)
+        e["__dlen"] = dtExcArg(argv, 1)
+        e["indexable"] = dtExcOpt(argv, 2, "indexable")
+        e["name"] = dtExcOpt(argv, 2, "name")
+        e["message"] = dtExcOr(dtExcOpt(argv, 2, "message"), "Index out of range")
+    } else {                                                                       // :465
+        e["invalidValue"] = dtExcArg(argv, 0)
+        e["indexable"] = dtExcArg(argv, 1)
+        e["name"] = dtExcArg(argv, 2)
+        e["message"] = dtExcOr(dtExcArg(argv, 3), "Index out of range")
+        var ln = dtExcArg(argv, 4)
+        if (dtExcNull(ln)) { e["__dlen"] = dtExcLen(e["indexable"]) } else { e["__dlen"] = ln }
+    }
+    // IndexError's start / end are getters over length (:532-533).
+    e["start"] = 0
+    e["end"] = dtNumOf(e["__dlen"]) - 1
+    return e
+}
+
+function dtExcStr(n, o) {
+    var msg = o["message"]
+    if (n === "Exception") {                                                       // :33-37
+        if (dtExcNull(msg)) { return "Exception" }
+        return "Exception: " + dtStr(msg)
+    }
+    if (n === "FormatException") { return dtExcFormatStr(o) }
+    if (n === "IntegerDivisionByZeroException") { return "IntegerDivisionByZeroException" }
+    if (n === "AssertionError") {                                                  // :135-140
+        if (dtExcNull(msg)) { return "Assertion failed" }
+        return "Assertion failed: " + dtExcSafe(msg)
+    }
+    if (n === "ArgumentError" || n === "RangeError" || n === "IndexError") {
+        return dtExcArgStr(n, o)
+    }
+    if (n === "UnsupportedError") { return "Unsupported operation: " + dtStr(msg) } // :584
+    if (n === "UnimplementedError") {                                              // :598-603
+        if (dtExcNull(msg)) { return "UnimplementedError" }
+        return "UnimplementedError: " + dtStr(msg)
+    }
+    if (n === "StateError") { return "Bad state: " + dtStr(msg) }                  // :623
+    if (n === "ConcurrentModificationError") {                                     // :637-643
+        var mo = o["modifiedObject"]
+        if (dtExcNull(mo)) { return "Concurrent modification during iteration." }
+        return "Concurrent modification during iteration: " + dtExcSafe(mo) + "."
+    }
+    if (n === "OutOfMemoryError") { return "Out of Memory" }                       // :650
+    if (n === "StackOverflowError") { return "Stack Overflow" }                    // :659
+    // Error (:72) and TypeError (:144) declare no toString, so Object's answer
+    // stands. NoSuchMethodError's IS overridden (:570) but the override is
+    // `external` - the VM builds it out of the failed Invocation, which this engine
+    // never constructs - and the class has no public generative constructor either.
+    return "Instance of '" + n + "'"
+}
+
+// ArgumentError.toString (:227-238) with the _errorName / _errorExplanation hooks
+// RangeError (:415-437) and IndexError (:535-546) override.
+function dtExcArgStr(n, o) {
+    var hasVal = o["__hasv"] === true
+    var errName = "RangeError"
+    if (n === "ArgumentError") {
+        if (hasVal) { errName = "Invalid argument" } else { errName = "Invalid argument(s)" }
+    }
+    var nameStr = ""
+    if (!dtExcNull(o["name"])) { nameStr = " (" + dtStr(o["name"]) + ")" }
+    var msgStr = ""
+    if (!dtExcNull(o["message"])) { msgStr = ": " + dtStr(o["message"]) }
+    var prefix = errName + nameStr + msgStr
+    if (!hasVal) { return prefix }
+    return prefix + dtExcExpl(n, o) + ": " + dtExcSafe(o["invalidValue"])
+}
+
+function dtExcExpl(n, o) {
+    if (n === "ArgumentError") { return "" }                                       // :225
+    if (n === "IndexError") {                                                      // :536-546
+        if (dtNumOf(o["invalidValue"]) < 0) { return ": index must not be negative" }
+        if (dtNumOf(o["__dlen"]) == 0) { return ": no indices are valid" }
+        return ": index should be less than " + dtStr(o["__dlen"])
+    }
+    var start = o["start"]                                                         // :416-437
+    var end = o["end"]
+    if (dtExcNull(start)) {
+        if (dtExcNull(end)) { return "" }
+        return ": Not less than or equal to " + dtStr(end)
+    }
+    if (dtExcNull(end)) { return ": Not greater than or equal to " + dtStr(start) }
+    var sn = dtNumOf(start)
+    var en = dtNumOf(end)
+    if (en > sn) { return ": Not in inclusive range " + dtStr(start) + ".." + dtStr(end) }
+    if (en < sn) { return ": Valid value range is empty" }
+    return ": Only valid value is " + dtStr(start)
+}
+
+// FormatException.toString, exceptions.dart:88-169, in full - including the branch
+// that quotes the offending LINE of a string source and marks the column. The floor's
+// strings are UTF-16 and Dart indexes a String in UTF-16 code units, so charCodeAt /
+// substring / length are exactly what the algorithm asks for.
+function dtExcFormatStr(o) {
+    var report = "FormatException"
+    var msg = o["message"]
+    if (!dtExcNull(msg) && msg !== "") { report = report + ": " + dtStr(msg) }
+    var rawOff = o["offset"]
+    var src = o["source"]
+    if (typeof src != "string") {
+        if (!dtExcNull(rawOff)) { report = report + " (at offset " + dtStr(rawOff) + ")" }
+        return report
+    }
+    // An absent offset and an out-of-range one take the same branch (:97-99).
+    var off = 0 - 1
+    if (!dtExcNull(rawOff)) { off = Math.trunc(dtNumOf(rawOff)) }
+    if (off > src.length) { off = 0 - 1 }
+    if (off < 0) {
+        var s0 = src
+        if (s0.length > 78) { s0 = s0.substring(0, 75) + "..." }
+        return report + "\n" + s0
+    }
+    var lineNum = 1
+    var lineStart = 0
+    var prevCR = false
+    var i = 0
+    while (i < off) {
+        var ch = src.charCodeAt(i)
+        if (ch == 10) {
+            if (lineStart != i || !prevCR) { lineNum = lineNum + 1 }
+            lineStart = i + 1
+            prevCR = false
+        } else if (ch == 13) {
+            lineNum = lineNum + 1
+            lineStart = i + 1
+            prevCR = true
+        }
+        i = i + 1
+    }
+    if (lineNum > 1) {
+        report = report + " (at line " + lineNum + ", character " + (off - lineStart + 1) + ")\n"
+    } else {
+        report = report + " (at character " + (off + 1) + ")\n"
+    }
+    var lineEnd = src.length
+    var j = off
+    while (j < src.length) {
+        var c2 = src.charCodeAt(j)
+        if (c2 == 10 || c2 == 13) { lineEnd = j; j = src.length } else { j = j + 1 }
+    }
+    var start = lineStart
+    var end = lineEnd
+    var prefix = ""
+    var postfix = ""
+    if (lineEnd - lineStart > 78) {
+        if (off - lineStart < 75) { end = start + 75; postfix = "..." }
+        else if (end - off < 75) { start = end - 75; prefix = "..." }
+        else { start = off - 36; end = off + 36; prefix = "..."; postfix = "..." }
+    }
+    var slice = src.substring(start, end)
+    var markOffset = off - start + prefix.length
+    var pad = ""
+    var k = 0
+    while (k < markOffset) { pad = pad + " "; k = k + 1 }
+    return report + prefix + slice + postfix + "\n" + pad + "^\n"
 }
 
 // rt.isTypeName, the language-neutral fallback: the JVM spellings, then the
@@ -1453,6 +1820,14 @@ function js_dartcanon(v) { return dtCanon(v, 0) }
 // A user class name still falls through to the shared __class walk.
 function js_dartis(v, t) { return dtIsType(v, t) }
 
+// One of dart:core's sixteen errors / exceptions: (class name, named constructor or
+// "", args array). See dtExcAnc.
+function js_dartexc(name, ctor, argv) { return dtExcNew(name, ctor, argv) }
+
+// The same sixteen used as a NAME rather than called: the receiver of a named
+// constructor, or a Type value. A marker object, not a class descriptor.
+function js_dartexctype(name) { return {__dexcType: name} }
+
 // A double literal, and the value of a `.toDouble()`-shaped conversion.
 function js_dartflo(v) { return flo(dtNum(v), 0) }
 
@@ -1582,6 +1957,12 @@ function js_dartnm(recv, name, args) {
     if (dtIsNum(recv)) {
         var hit = dtNumMember(recv, name, args)
         if (hit.hit) { return hit.v }
+    }
+    // A NAMED constructor of one of dart:core's errors, reached through the postfix
+    // chain: ArgumentError.value(7). js_dartexctype put the marker here.
+    if (dtIsObj(recv)) {
+        var tn = recv["__dexcType"]
+        if (typeof tn == "string") { return dtExcNew(tn, name, args) }
     }
     return dtMember(recv, name, args)
 }

@@ -982,6 +982,233 @@ void s30() {
   check("nt50", sv == 4611686018427387904 && tnIdD(2.0) == 2.0);
 }
 
+// ===== SECTION 31: dart:core's errors and exceptions =====
+// None of these sixteen names was BOUND before docs/todo.md 1.2 was closed:
+// `throw FormatException("x")` was `unknown name: FormatException` in the
+// interpreter and `variable not defined: FormatException` in the compiler. Every
+// expectation below is quoted from sdk/lib/core/errors.dart and
+// sdk/lib/core/exceptions.dart, which ARE the documentation - THERE IS NO dart
+// TOOLCHAIN ON THIS MACHINE, so none of this was run against a real Dart VM.
+// The bare line numbers are those two files'.
+//
+// Two deliberate divergences are asserted as such rather than hidden:
+//   - a failing `assert` raises the PUBLIC AssertionError text, not the VM's
+//     private _AssertionError with script URL, line, column and source text
+//     (sdk/lib/_internal/vm/lib/errors_patch.dart:76);
+//   - IndexError's `length` is stored hidden, so `e.length` is not readable
+//     (layer 2's rtIsArr would otherwise read the error as a List).
+String xkind(Object v) {
+  try {
+    throw v;
+  } on FormatException catch (e) { return "FormatException";
+  } on IndexError catch (e) { return "IndexError";
+  } on RangeError catch (e) { return "RangeError";
+  } on ArgumentError catch (e) { return "ArgumentError";
+  } on StateError catch (e) { return "StateError";
+  } on UnimplementedError catch (e) { return "UnimplementedError";
+  } on UnsupportedError catch (e) { return "UnsupportedError";
+  } on AssertionError catch (e) { return "AssertionError";
+  } on Exception catch (e) { return "Exception";
+  } on Error catch (e) { return "Error";
+  } catch (e) { return "other"; }
+}
+
+// The same dispatch over DART's own type names. The compiler half used to filter
+// with the shared js_is_type, which knows only the JVM spellings, so `on int`,
+// `on double`, `on num`, `on bool`, `on Map` and `on Set` never matched there
+// while the interpreter half claimed them - five of eight rows of a probe.
+String xprim(Object v) {
+  try {
+    throw v;
+  } on int catch (e) { return "int";
+  } on double catch (e) { return "double";
+  } on String catch (e) { return "String";
+  } on bool catch (e) { return "bool";
+  } on List catch (e) { return "List";
+  } on Map catch (e) { return "Map";
+  } on Set catch (e) { return "Set";
+  } catch (e) { return "other"; }
+}
+
+void s31() {
+  // ----- toString, exactly as the two dart:core files spell it -----
+  check("xe01", Exception().toString() == "Exception"); // :35
+  check("xe02", Exception("boom").toString() == "Exception: boom"); // :36
+  check("xe03", FormatException().toString() == "FormatException"); // :89
+  check("xe04", FormatException("bad").toString() == "FormatException: bad"); // :92
+  // A string source with no offset is appended on its own line (:101-105).
+  check("xe05", FormatException("bad", "abc").toString() == "FormatException: bad\nabc");
+  // A string source WITH an offset quotes the line and marks the column (:107-161).
+  check("xe06", FormatException("bad", "abc", 1).toString()
+                == "FormatException: bad (at character 2)\nabc\n ^\n");
+  check("xe07", FormatException("bad", "l1\nl2", 4).toString()
+                == "FormatException: bad (at line 2, character 2)\nl2\n ^\n");
+  // A non-string source only reports the offset (:162-168).
+  check("xe08", FormatException("bad", 12, 4).toString() == "FormatException: bad (at offset 4)");
+  // An out-of-range offset is dropped (:97-99).
+  check("xe09", FormatException("bad", "abc", 99).toString() == "FormatException: bad\nabc");
+  check("xe10", IntegerDivisionByZeroException().toString() == "IntegerDivisionByZeroException"); // :181
+  check("xe11", StateError("empty").toString() == "Bad state: empty"); // :623
+  check("xe12", UnsupportedError("no").toString() == "Unsupported operation: no"); // :584
+  check("xe13", UnimplementedError().toString() == "UnimplementedError"); // :602
+  check("xe14", UnimplementedError("soon").toString() == "UnimplementedError: soon"); // :601
+  check("xe15", OutOfMemoryError().toString() == "Out of Memory"); // :650
+  check("xe16", StackOverflowError().toString() == "Stack Overflow"); // :659
+  check("xe17", ConcurrentModificationError().toString()
+                == "Concurrent modification during iteration."); // :639
+  // Error.safeToString of a List is its ordinary rendering (:86, :641).
+  check("xe18", ConcurrentModificationError([1, 2]).toString()
+                == "Concurrent modification during iteration: [1, 2].");
+  // Error.safeToString of a STRING is a string LITERAL, quotes included (:83-85).
+  check("xe19", AssertionError().toString() == "Assertion failed"); // :139
+  check("xe20", AssertionError("nope").toString() == "Assertion failed: \"nope\""); // :137
+  check("xe21", AssertionError(42).toString() == "Assertion failed: 42");
+  // Error and TypeError declare no toString, so Object's answer stands (:72, :144).
+  check("xe22", Error().toString() == "Instance of 'Error'");
+  check("xe23", TypeError().toString() == "Instance of 'TypeError'");
+
+  // ----- ArgumentError's _errorName / _errorExplanation family (:224-238) -----
+  check("xe24", ArgumentError().toString() == "Invalid argument(s)");
+  check("xe25", ArgumentError("bad").toString() == "Invalid argument(s): bad");
+  check("xe26", ArgumentError("bad", "p").toString() == "Invalid argument(s) (p): bad");
+  check("xe27", ArgumentError.value(7).toString() == "Invalid argument: 7");
+  check("xe28", ArgumentError.value("s", "p", "why").toString() == "Invalid argument (p): why: \"s\"");
+  check("xe29", ArgumentError.notNull("p").toString() == "Invalid argument(s) (p): Must not be null"); // :211
+  check("xe30", RangeError("oops").toString() == "RangeError: oops"); // :255, :415
+  check("xe31", RangeError.value(9).toString() == "RangeError: Value not in range: 9"); // :265
+  check("xe32", RangeError.range(9, 0, 4).toString()
+                == "RangeError: Invalid value: Not in inclusive range 0..4: 9"); // :288, :429
+  check("xe33", RangeError.range(9, 4, 4).toString()
+                == "RangeError: Invalid value: Only valid value is 4: 9"); // :434
+  check("xe34", RangeError.range(9, 5, 4).toString()
+                == "RangeError: Invalid value: Valid value range is empty: 9"); // :431
+  check("xe35", RangeError.range(9, null, 4).toString()
+                == "RangeError: Invalid value: Not less than or equal to 4: 9"); // :423
+  check("xe36", RangeError.range(9, 0, null).toString()
+                == "RangeError: Invalid value: Not greater than or equal to 0: 9"); // :426
+  check("xe37", IndexError.withLength(5, 3).toString()
+                == "RangeError: Index out of range: index should be less than 3: 5"); // :489, :545
+  check("xe38", IndexError.withLength(-1, 3).toString()
+                == "RangeError: Index out of range: index must not be negative: -1"); // :540
+  check("xe39", IndexError.withLength(0, 0).toString()
+                == "RangeError: Index out of range: no indices are valid: 0"); // :543
+  // RangeError.index is a factory redirecting to IndexError (:299-305).
+  check("xe40", RangeError.index(5, [1, 2, 3]).toString()
+                == "RangeError: Index out of range: index should be less than 3: 5");
+
+  // ----- the documented fields read back -----
+  var ae = ArgumentError.value(7, "p", "why");
+  check("xe41", ae.message == "why" && ae.name == "p" && ae.invalidValue == 7);
+  var re = RangeError.range(9, 0, 4, "p");
+  check("xe42", re.start == 0 && re.end == 4 && re.invalidValue == 9 && re.name == "p");
+  var fe = FormatException("bad", "src", 1);
+  check("xe43", fe.message == "bad" && fe.source == "src" && fe.offset == 1);
+  check("xe44", StateError("e").message == "e" && UnsupportedError("u").message == "u");
+
+  // ----- the hierarchy: Error and Exception are DISJOINT roots -----
+  check("xe45", FormatException("x") is Exception && !(FormatException("x") is Error)); // :43
+  check("xe46", StateError("x") is Error && !(StateError("x") is Exception)); // :619
+  check("xe47", RangeError("x") is ArgumentError && RangeError("x") is Error); // :242
+  // IndexError extends ArgumentError and IMPLEMENTS RangeError (:445).
+  check("xe48", IndexError.withLength(1, 2) is RangeError
+                && IndexError.withLength(1, 2) is ArgumentError);
+  check("xe49", !(RangeError("x") is IndexError));
+  // UnimplementedError implements UnsupportedError (:595).
+  check("xe50", UnimplementedError() is UnsupportedError && UnimplementedError() is Error);
+  check("xe51", !(UnsupportedError("x") is UnimplementedError));
+  // IntegerDivisionByZeroException implements Exception AND UnsupportedError (:176),
+  // so it is under BOTH roots.
+  check("xe52", IntegerDivisionByZeroException() is Exception
+                && IntegerDivisionByZeroException() is UnsupportedError
+                && IntegerDivisionByZeroException() is Error);
+  check("xe53", AssertionError() is Error && TypeError() is Error
+                && OutOfMemoryError() is Error && StackOverflowError() is Error);
+  check("xe54", Exception("x") is Object && !(Exception("x") is String));
+
+  // ----- `on T catch` dispatch over the same hierarchy -----
+  check("xe55", xkind(FormatException("x")) == "FormatException");
+  check("xe56", xkind(IndexError.withLength(1, 2)) == "IndexError");
+  check("xe57", xkind(RangeError("x")) == "RangeError");
+  check("xe58", xkind(ArgumentError("x")) == "ArgumentError");
+  check("xe59", xkind(StateError("x")) == "StateError");
+  check("xe60", xkind(UnimplementedError()) == "UnimplementedError");
+  check("xe61", xkind(UnsupportedError("x")) == "UnsupportedError");
+  check("xe62", xkind(AssertionError()) == "AssertionError");
+  check("xe63", xkind(Exception("x")) == "Exception");
+  check("xe64", xkind(Error()) == "Error");
+  check("xe65", xkind(TypeError()) == "Error");
+  // IntegerDivisionByZeroException reaches the UnsupportedError clause, which is
+  // above the Exception one - the leftmost matching clause wins.
+  check("xe66", xkind(IntegerDivisionByZeroException()) == "UnsupportedError");
+  check("xe67", xkind("plain") == "other" && xkind(7) == "other");
+
+  // ----- `on T catch` over Dart's OWN type names (the compiler half filtered
+  // with the JVM spellings and matched none of int/double/bool/Map/Set) -----
+  check("xe68", xprim(1) == "int");
+  check("xe69", xprim(2.5) == "double");
+  check("xe70", xprim("s") == "String");
+  check("xe71", xprim(true) == "bool");
+  check("xe72", xprim([1, 2]) == "List");
+  check("xe73", xprim({"a": 1}) == "Map");
+  check("xe74", xprim({1, 2}) == "Set");
+
+  // ----- the constructs that RAISE one -----
+  // `~/` and `%` with an int divisor of zero throw a catchable
+  // IntegerDivisionByZeroException (integers.dart:25-44). Both halves aborted.
+  var zs = [0, 3];
+  var d0 = "";
+  try { d0 = "${7 ~/ zs[0]}"; } catch (e) { d0 = "$e"; }
+  check("xe75", d0 == "IntegerDivisionByZeroException");
+  var m0 = "";
+  try { m0 = "${7 % zs[0]}"; } on IntegerDivisionByZeroException catch (e) { m0 = "caught"; }
+  check("xe76", m0 == "caught");
+  check("xe77", 7 ~/ zs[1] == 2 && 7 % zs[1] == 1); // a non-zero divisor is untouched
+  // A DOUBLE operand takes the other branch: `_Double.~/` is (this/other).truncate(),
+  // whose Infinity is an UnsupportedError - now a real one, not the rendered string.
+  var f0 = "";
+  try { f0 = "${1.5 ~/ zs[0]}"; } on UnsupportedError catch (e) { f0 = "$e"; }
+  check("xe78", f0 == "Unsupported operation: Result of truncating division is Infinity");
+  // A failing `assert` raises a catchable AssertionError in BOTH halves; the
+  // interpreter used to abort and the compiler used to throw the message string.
+  var a0 = "";
+  try { assert(zs[0] == zs[1], "nope"); } on AssertionError catch (e) { a0 = "$e"; }
+  check("xe79", a0 == "Assertion failed: \"nope\"");
+  var a1 = "";
+  try { assert(zs[0] == zs[1]); } catch (e) { a1 = "$e"; }
+  check("xe80", a1 == "Assertion failed");
+
+  // ----- an initializing formal / initializer-list entry beats the DECLARED
+  // field initializer. Found while binding the sixteen above, because dart:core's
+  // own RangeError has declared `start`/`end` beside a `super(message)` chain.
+  // The declared initializer ran LAST in the compiler half and overwrote both, so
+  // `class XiA { int x = 7; XiA(this.x); }` answered 7 there and 1 here - four of
+  // four rows of a probe, and `--cross` had never reached the shape.
+  check("xe83", XiA(1).x == 1);
+  check("xe84", XiB().y == 5);
+  check("xe85", XiC(2).z == 2);
+  check("xe86", XiD(1, 8).w == 9);
+  check("xe87", XiA.plain().x == 7); // no formal, no init entry: the declared one stands
+
+  // A user class is NOT one of the sixteen, and does not become an Exception by
+  // being thrown: `implements Exception` is recorded on no value in either engine
+  // (the same wall as docs/todo.md 1.1 for swift's protocols).
+  check("xe81", MyException("z").toString() == "mine:z" && !(MyException("z") is Exception));
+  // A Type used as a value prints as its name.
+  check("xe82", "${FormatException}" == "FormatException");
+}
+
+class XiA { int x = 7; XiA(this.x); XiA.plain(); }
+class XiB { int y = 7; XiB() : y = 5; }
+class XiC { int z = 7; XiC(int v) : z = v; }
+class XiD { int w = 7; XiD(this.w, int q) : w = q + 1; }
+
+// A user class beside the sixteen. Shadowing one of them BY NAME works - every
+// call site searches the program's own scope / classNames first - but declaring a
+// `class StateError` here would make every check above ambiguous, so the shadowing
+// path is left to the grammars' own guards and this only proves that a user class
+// is untouched by the binding.
+class MyException { final String m; MyException(this.m); String toString() => "mine:$m"; }
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1013,6 +1240,7 @@ int main() {
   s28(); // SECTION-CALL 28
   s29(); // SECTION-CALL 29
   s30(); // SECTION-CALL 30
+  s31(); // SECTION-CALL 31
   print("full: $checks checks, $fails failures");
   return fails;
 }

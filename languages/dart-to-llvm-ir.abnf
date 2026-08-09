@@ -1304,6 +1304,52 @@ KwSuper     = "super" KwEnd ;
     var classNames = {}      // Known class names (bare-name construction).
     var factoryClasses = {}  // Classes whose UNNAMED constructor is a factory.
 
+    // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
+    //
+    // None of these sixteen was a bound name in either half: `throw
+    // FormatException("x")` was `variable not defined: FormatException` here and
+    // `unknown name: FormatException` in the interpreter. They are not declared by
+    // the program, so the engine provides them.
+    //
+    // Unlike java's builtin throwables - which the emitter BUILDS, as class
+    // descriptors with emitted constructor bodies (java-to-llvm-ir.abnf:4645) - these
+    // are built by the RUNTIME, in one extern. The reason is that the java shape
+    // needs a descriptor per name whose module bytes it then has to gate on use,
+    // while these sixteen carry sixteen different toString bodies and a supertype
+    // graph with `implements` edges in it: as IR that is several hundred lines a
+    // program can reach, and as one js_dartexc call it is nothing. The three engine
+    // implementations are dx* in languages/dart-interpreter.abnf, dartExc* in
+    // abnf/jsrtdart.go and dtExc* in languages/lib/dart-rt.metajs; the citations to
+    // sdk/lib/core/errors.dart and sdk/lib/core/exceptions.dart are at the first.
+    //
+    // The dispatch of `on T catch` and of `is T` needs nothing here either: it goes
+    // through js_dartis, which knows the supertype set.
+    var dartExcNames = {
+        "$Error": 1, "$AssertionError": 1, "$TypeError": 1, "$ArgumentError": 1,
+        "$RangeError": 1, "$IndexError": 1, "$NoSuchMethodError": 1,
+        "$UnsupportedError": 1, "$UnimplementedError": 1, "$StateError": 1,
+        "$ConcurrentModificationError": 1, "$OutOfMemoryError": 1,
+        "$StackOverflowError": 1, "$Exception": 1, "$FormatException": 1,
+        "$IntegerDivisionByZeroException": 1
+    }
+    // A program that declares one of those names keeps its own. A CLASS is caught by
+    // classNames; a top-level function or a variable is caught by dxDeclared, which
+    // the two declaration builders fill AT WALK TIME (so it is complete before any
+    // emit closure runs). Recording only the sixteen keeps the set at zero entries
+    // for every program that does not use one - and it is deliberately not scoped:
+    // the interpreter half resolves through the live scope chain, which is exact,
+    // while this half can only decide once, so it decides in favour of the program.
+    var dxDeclared = {}
+    function dxNoteDecl(n) { if (dartExcNames["$" + n] == 1) { dxDeclared["$" + n] = 1 } }
+    function dxIsName(n) {
+        return dartExcNames["$" + n] == 1 && classNames[n] != 1 && dxDeclared["$" + n] != 1
+    }
+    function emitDartExc(b, name, ctor, args) {
+        var argsV = callExt(b, "js_arr_new", [])
+        b = emitCallArgsInto(b, argsV, args)
+        return {b: b, v: callExt(b, "js_dartexc", [emitStr(b, name), emitStr(b, ctor), argsV])}
+    }
+
     // ----- Dart escapes -----
     // Dart's escape set is JS's plus \u{...} (a variable-length code point, surrogate
     // encoded so '\u{1F600}'.length is 2 like a real Dart string).
@@ -1546,7 +1592,19 @@ KwSuper     = "super" KwEnd ;
                     if (cl.catchtype != null) {
                         nextB = curF.NewBlock("")
                         var ev = b.NewCall(rtKGet(), [curScopeV, emitStr(b, bindName)])
-                        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ev, emitStr(b, cl.catchtype)])), bodyB, nextB)
+                        // js_dartis, not the shared js_is_type: the shared one knows
+                        // only the JVM spellings (Int, Double, Boolean, List), so
+                        // `on int catch`, `on double catch`, `on num catch`,
+                        // `on bool catch`, `on Map catch` and `on Set catch` all
+                        // answered FALSE here and fell through to the next clause,
+                        // while the interpreter half - which has always called
+                        // dartIsType - claimed them. Five of eight rows of a
+                        // thrown-value probe were a live halves divergence.
+                        // js_dartis also carries the supertype sets of dart:core's
+                        // errors and exceptions, so `on Exception catch` claims a
+                        // FormatException, and falls through to the shared __class
+                        // walk for a user class.
+                        b.NewCondBr(truthy(b, callExt(b, "js_dartis", [ev, emitStr(b, cl.catchtype)])), bodyB, nextB)
                     } else { b.NewBr(bodyB) }
                     // A clause with its own binder name aliases it to the closure's
                     // parameter, so `on T catch (e)` sees the caught value as `e`.
@@ -1846,6 +1904,7 @@ KwSuper     = "super" KwEnd ;
     }
     function makeFuncDecl(items) {
         var name = items[0].fname
+        dxNoteDecl(name)
         var params = items[1].params
         var bodyStmt = bodyToStmt(items[items.length - 1])
         if (isGenBody(items)) { bodyStmt = genWrap(bodyStmt) }
@@ -1906,6 +1965,8 @@ KwSuper     = "super" KwEnd ;
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
+            // dart:core's own errors and exceptions: FormatException("x"), ...
+            if (dxIsName(name)) { return emitDartExc(b, name, "", args) }
             var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
             var argsV2 = callExt(b, "js_arr_new", [])
             b = emitCallArgsInto(b, argsV2, args)
@@ -2512,6 +2573,13 @@ KwSuper     = "super" KwEnd ;
                 var gV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "get$" + name)])
                 return {b: b, v: callExt(b, "js_call", [gV, hUndef, callExt(b, "js_arr_new", [])])}
             }
+            // One of dart:core's errors or exceptions used as a NAME rather than
+            // called: `ArgumentError.value(7)` is a bare VarRef followed by an mcall
+            // suffix, because QualCall's rule requires TypeArgs. js_dartexctype
+            // yields the {__dexcType} marker js_dartnm spends.
+            if (dxIsName(name)) {
+                return {b: b, v: callExt(b, "js_dartexctype", [emitStr(b, name)])}
+            }
             // NOT core.scopeGetExt: that field names an EXTERN, and js_kget is no
             // longer one - it is the lowered dt_kget helper (see rtKGet above).
             return {b: b, v: b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])}
@@ -2672,8 +2740,28 @@ KwSuper     = "super" KwEnd ;
             var supV = callExt(b, "js_get", [clsRef(b, cls.name), emitStr(b, "__super")])
             b = emitCtorChain(b, thisV, supV, superName, superArgs != null ? superArgs : [], superFwd)
         }
+        // A field ALREADY written by an initializing formal (`A(this.x)`) or by an
+        // initializer-list entry (`: x = e`) does NOT get its declared initializer
+        // - dart:core's own classes rely on it (RangeError's `super(message)` over a
+        // declared `start`/`end`), and the language rule is that a variable
+        // initialized by an initializing formal or in the initializer list is not
+        // initialized again.
+        //
+        // Without this skip the declared initializer, which runs LAST here, silently
+        // overwrote both: `class A { int x = 7; A(this.x); }` made A(1).x SEVEN in
+        // this half while the interpreter half - and Dart - answer 1. Four of four
+        // rows of a probe, and `--cross` had never reached the shape.
+        var ctorWrote = {}
+        for (k = 0; k < params.length; k++) {
+            if (params[k].thisf != undefined) { ctorWrote["$" + params[k].thisf] = 1 }
+        }
+        for (k = 0; k < ctorDesc.inits.length; k++) {
+            if (ctorDesc.inits[k].cfinit != undefined) {
+                ctorWrote["$" + ctorDesc.inits[k].cfinit.name] = 1
+            }
+        }
         for (var fi = 0; fi < fields.length; fi++) {
-            if (fields[fi].init != null) {
+            if (fields[fi].init != null && ctorWrote["$" + fields[fi].field] != 1) {
                 var r = fields[fi].init(b)
                 b = r.b
                 callExt(b, "js_set", [thisV, emitStr(b, fields[fi].field), r.v])
@@ -3073,6 +3161,9 @@ KwSuper     = "super" KwEnd ;
         var nm = items[1].qname
         var args = items.slice(2)
         return function(b) {
+            // A NAMED constructor of one of dart:core's errors: ArgumentError.value(x),
+            // RangeError.range(v, 0, 9), IndexError.withLength(i, n).
+            if (dxIsName(base)) { return emitDartExc(b, base, nm, args) }
             var recv = makeVarRef(base)(b)
             b = recv.b
             var argsV = callExt(b, "js_arr_new", [])
@@ -3929,6 +4020,7 @@ KwSuper     = "super" KwEnd ;
     // ----- declarations, assignment, ++/-- -----
     function makeDecl(items) {
         var name = items[0]
+        dxNoteDecl(name)
         return function(b) {
             var v = hNull
             if (items.length > 1) {
@@ -4217,9 +4309,18 @@ KwSuper     = "super" KwEnd ;
             var okB = curF.NewBlock("")
             r.b.NewCondBr(truthy(r.b, r.v), okB, failB)
             var fb = failB
-            var msgV = emitStr(fb, "Assertion failed")
-            if (msgT != null) { var mr = msgT(fb); fb = mr.b; msgV = mr.v }
-            callExt(fb, "js_throw", [msgV])
+            // A real AssertionError, not the message string: `on AssertionError
+            // catch` has to claim it, and the interpreter half raises the same
+            // object. See makeAssert in dart-interpreter.abnf for the citation and
+            // for the one deliberate divergence from the VM's _AssertionError text.
+            var argsV = callExt(fb, "js_arr_new", [])
+            if (msgT != null) {
+                var mr = msgT(fb)
+                fb = mr.b
+                callExt(fb, "js_arr_push", [argsV, mr.v])
+            }
+            callExt(fb, "js_throw", [callExt(fb, "js_dartexc",
+                    [emitStr(fb, "AssertionError"), emitStr(fb, ""), argsV])])
             fb.NewBr(okB)
             return okB
         }

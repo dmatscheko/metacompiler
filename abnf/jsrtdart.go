@@ -52,6 +52,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 func init() {
@@ -123,6 +124,15 @@ func (rt *jsrt) dartObjStr(o *jsObject, seen []interface{}, depth int) string {
 		if n, isStr := o.props["__name"].(string); isStr {
 			return n
 		}
+	}
+	// One of dart:core's own errors or exceptions - see dartExcAnc below.
+	if n, ok := o.props["__dexc"].(string); ok {
+		return rt.dartExcStr(n, o)
+	}
+	// A Type prints as its name, and the marker for one of those sixteen is no
+	// different.
+	if n, ok := o.props["__dexcType"].(string); ok {
+		return n
 	}
 	if els, ok := pySetElems(o); ok {
 		parts := make([]string, 0, len(els.elems))
@@ -342,6 +352,24 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	// Map` and `{1, 2} is Set` were all FALSE here while dart-interpreter.abnf's
 	// dartIsType answered true for each. This is that function, in Go; user class
 	// names still fall through to the shared walk of the __class chain.
+	// One of dart:core's sixteen errors / exceptions: (class name, named
+	// constructor or "", args array). See dartExcAnc.
+	m["js_dartexc"] = func(a []uint64) uint64 {
+		name, _ := u(a[0]).(string)
+		ctor, _ := u(a[1]).(string)
+		argv := []interface{}{}
+		if arr, ok := u(a[2]).(*jsArray); ok {
+			argv = arr.elems
+		}
+		return w(rt.dartExcNew(name, ctor, argv))
+	}
+	// The same sixteen used as a NAME rather than called: the receiver of a named
+	// constructor, or a Type value. A marker object, not a class descriptor.
+	m["js_dartexctype"] = func(a []uint64) uint64 {
+		e := newJSObject()
+		e.set("__dexcType", u(a[0]))
+		return w(e)
+	}
 	m["js_dartis"] = func(a []uint64) uint64 {
 		t, _ := u(a[1]).(string)
 		if rt.dartIsType(u(a[0]), t) {
@@ -496,6 +524,13 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 				return w(v)
 			}
 		}
+		// A NAMED constructor of one of dart:core's errors, reached through the
+		// postfix chain: ArgumentError.value(7). js_dartexctype put the marker here.
+		if o, ok := recv.(*jsObject); ok {
+			if tn, isMarker := o.props["__dexcType"].(string); isMarker {
+				return w(rt.dartExcNew(tn, name, args.elems))
+			}
+		}
 		return w(rt.memberCall(recv, name, args.elems))
 	}
 }
@@ -557,7 +592,422 @@ func (rt *jsrt) dartIsType(v interface{}, t string) bool {
 	case "Function":
 		return isCallable(v)
 	}
+	// One of dart:core's errors or exceptions: its supertype set is dartExcAnc, which
+	// carries the `implements` edges the __class walk in isTypeName cannot express.
+	if o, ok := v.(*jsObject); ok {
+		if n, isExc := o.props["__dexc"].(string); isExc {
+			return strings.Contains(dartExcAnc[n], "|"+t+"|")
+		}
+	}
 	return rt.isTypeName(v, t)
+}
+
+// ===== dart:core's errors and exceptions =====
+//
+// The Go twin of the dx* family in languages/dart-interpreter.abnf; the third
+// implementation is dtExc* in languages/lib/dart-rt.metajs. See the long comment at
+// that first one for why an exception is a plain object carrying __dexc rather than
+// a class descriptor, and for the citations - THERE IS NO dart TOOLCHAIN ON THIS
+// MACHINE, so every signature and every toString text here comes from
+// sdk/lib/core/errors.dart and sdk/lib/core/exceptions.dart, which are the
+// documentation. The line numbers in the comments below are those two files'.
+//
+// dartExcAnc is each class's own name followed by ALL of its supertypes, flattened
+// at authoring time. It carries `implements` as well as `extends`, which is the
+// point: Error and Exception are DISJOINT roots in Dart, so `on Exception catch`
+// claims a FormatException and not a StateError.
+var dartExcAnc = map[string]string{
+	"Error":                          "|Error|",
+	"AssertionError":                 "|AssertionError|Error|",
+	"TypeError":                      "|TypeError|Error|",
+	"ArgumentError":                  "|ArgumentError|Error|",
+	"RangeError":                     "|RangeError|ArgumentError|Error|",
+	"IndexError":                     "|IndexError|ArgumentError|RangeError|Error|",
+	"NoSuchMethodError":              "|NoSuchMethodError|Error|",
+	"UnsupportedError":               "|UnsupportedError|Error|",
+	"UnimplementedError":             "|UnimplementedError|UnsupportedError|Error|",
+	"StateError":                     "|StateError|Error|",
+	"ConcurrentModificationError":    "|ConcurrentModificationError|Error|",
+	"OutOfMemoryError":               "|OutOfMemoryError|Error|",
+	"StackOverflowError":             "|StackOverflowError|Error|",
+	"Exception":                      "|Exception|",
+	"FormatException":                "|FormatException|Exception|",
+	"IntegerDivisionByZeroException": "|IntegerDivisionByZeroException|Exception|UnsupportedError|Error|",
+}
+
+// Positional argument i, or jsNull when it was not supplied.
+func dartExcArg(argv []interface{}, i int) interface{} {
+	if i < len(argv) {
+		return argv[i]
+	}
+	return jsNull
+}
+
+// A NAMED argument: the emitter appends one dict past the positional arguments.
+func dartExcOpt(argv []interface{}, k int, key string) interface{} {
+	if k >= len(argv) {
+		return jsNull
+	}
+	keys, vals, ok := dictParts(argv[k])
+	if !ok {
+		return jsNull
+	}
+	for i, kk := range keys.elems {
+		if s, isStr := kk.(string); isStr && s == key {
+			return vals.elems[i]
+		}
+	}
+	return jsNull
+}
+
+func dartExcOr(v interface{}, d interface{}) interface{} {
+	if isUndefOrNull(v) {
+		return d
+	}
+	return v
+}
+
+// Error.safeToString (errors.dart:79): a num, a bool and null render with toString;
+// a String becomes a STRING LITERAL. UNCERTAIN: _stringToSafeString is `external`
+// and documented only as "convert string to a valid string literal with no control
+// characters", so the control-character spelling below is this project's reading.
+func (rt *jsrt) dartExcSafe(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return dartExcQuote(s)
+	}
+	return rt.dartStr(v)
+}
+
+// Dart's String is indexed in UTF-16 CODE UNITS (codeUnitAt, substring, length),
+// which is what a FormatException's offset counts, so that walk works on units.
+func dartExcU16(s string) []uint16 { return utf16.Encode([]rune(s)) }
+func dartExcS16(u []uint16) string { return string(utf16.Decode(u)) }
+
+func dartExcQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"':
+			b.WriteString("\\\"")
+		case r == '\\':
+			b.WriteString("\\\\")
+		case r == '\n':
+			b.WriteString("\\n")
+		case r == '\r':
+			b.WriteString("\\r")
+		case r == '\t':
+			b.WriteString("\\t")
+		case r < 32 || r == 127:
+			b.WriteString(fmt.Sprintf("\\x%02x", r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// dartExcNew builds one instance. ctor is the named constructor's name, "" for the
+// unnamed one.
+func (rt *jsrt) dartExcNew(name, ctor string, argv []interface{}) *jsObject {
+	if name == "ArgumentError" || name == "RangeError" || name == "IndexError" {
+		return rt.dartExcArgNew(name, ctor, argv)
+	}
+	e := newJSObject()
+	e.set("__dexc", name)
+	e.set("message", jsNull)
+	switch name {
+	case "Exception": // :24
+		e.set("message", dartExcArg(argv, 0))
+	case "FormatException": // :73
+		if len(argv) > 0 {
+			e.set("message", argv[0])
+		} else {
+			e.set("message", "")
+		}
+		e.set("source", dartExcArg(argv, 1))
+		e.set("offset", dartExcArg(argv, 2))
+	case "IntegerDivisionByZeroException": // :177
+		e.set("message", "Division resulted in non-finite value")
+	case "ConcurrentModificationError": // :635
+		e.set("modifiedObject", dartExcArg(argv, 0))
+	default:
+		// AssertionError([message]) :133, UnsupportedError(message) :583,
+		// UnimplementedError([message]) :597, StateError(message) :622; Error(),
+		// TypeError(), OutOfMemoryError() and StackOverflowError() take nothing.
+		e.set("message", dartExcArg(argv, 0))
+	}
+	return e
+}
+
+// ArgumentError and its two subclasses share one field set (errors.dart:163-547):
+// _hasValue (here __hasv, private in Dart and therefore hidden), invalidValue, name,
+// message, and RangeError's start / end.
+func (rt *jsrt) dartExcArgNew(name, ctor string, argv []interface{}) *jsObject {
+	e := newJSObject()
+	e.set("__dexc", name)
+	e.set("__hasv", false)
+	e.set("invalidValue", jsNull)
+	e.set("name", jsNull)
+	e.set("message", jsNull)
+	e.set("start", jsNull)
+	e.set("end", jsNull)
+	switch name {
+	case "ArgumentError":
+		switch ctor {
+		case "value": // :204
+			e.set("__hasv", true)
+			e.set("invalidValue", dartExcArg(argv, 0))
+			e.set("name", dartExcArg(argv, 1))
+			e.set("message", dartExcArg(argv, 2))
+		case "notNull": // :209
+			e.set("name", dartExcArg(argv, 0))
+			e.set("message", "Must not be null")
+		default: // :188
+			e.set("message", dartExcArg(argv, 0))
+			e.set("name", dartExcArg(argv, 1))
+		}
+		return e
+	case "RangeError":
+		switch ctor {
+		case "value": // :262
+			e.set("__hasv", true)
+			e.set("invalidValue", dartExcArg(argv, 0))
+			e.set("name", dartExcArg(argv, 1))
+			e.set("message", dartExcOr(dartExcArg(argv, 2), "Value not in range"))
+		case "range": // :280
+			e.set("__hasv", true)
+			e.set("invalidValue", dartExcArg(argv, 0))
+			e.set("start", dartExcArg(argv, 1))
+			e.set("end", dartExcArg(argv, 2))
+			e.set("name", dartExcArg(argv, 3))
+			e.set("message", dartExcOr(dartExcArg(argv, 4), "Invalid value"))
+		case "index":
+			// `factory RangeError.index(...) = IndexError` (:299): the same
+			// positional signature, redirected to the deprecated IndexError one.
+			return rt.dartExcArgNew("IndexError", "", argv)
+		default: // :255
+			e.set("message", dartExcArg(argv, 0))
+		}
+		return e
+	}
+	e.set("__hasv", true)
+	if ctor == "withLength" { // :483
+		e.set("invalidValue", dartExcArg(argv, 0))
+		e.set("__dlen", dartExcArg(argv, 1))
+		e.set("indexable", dartExcOpt(argv, 2, "indexable"))
+		e.set("name", dartExcOpt(argv, 2, "name"))
+		e.set("message", dartExcOr(dartExcOpt(argv, 2, "message"), "Index out of range"))
+	} else { // :465
+		e.set("invalidValue", dartExcArg(argv, 0))
+		e.set("indexable", dartExcArg(argv, 1))
+		e.set("name", dartExcArg(argv, 2))
+		e.set("message", dartExcOr(dartExcArg(argv, 3), "Index out of range"))
+		if ln := dartExcArg(argv, 4); isUndefOrNull(ln) {
+			e.set("__dlen", float64(rt.dartExcLen(e.props["indexable"])))
+		} else {
+			e.set("__dlen", ln)
+		}
+	}
+	// IndexError's start / end are getters over length (:532-533).
+	e.set("start", float64(0))
+	e.set("end", rt.dartNumOf(e.props["__dlen"])-1)
+	return e
+}
+
+// indexable.length, for the deprecated IndexError constructor's default.
+func (rt *jsrt) dartExcLen(v interface{}) int {
+	switch t := v.(type) {
+	case string:
+		return len([]rune(t))
+	case *jsArray:
+		return len(t.elems)
+	case *jsObject:
+		if keys, _, ok := dictParts(t); ok {
+			return len(keys.elems)
+		}
+	}
+	return 0
+}
+
+func (rt *jsrt) dartExcStr(n string, o *jsObject) string {
+	msg := o.props["message"]
+	switch n {
+	case "Exception": // :33-37
+		if isUndefOrNull(msg) {
+			return "Exception"
+		}
+		return "Exception: " + rt.dartStr(msg)
+	case "FormatException":
+		return rt.dartExcFormatStr(o)
+	case "IntegerDivisionByZeroException":
+		return "IntegerDivisionByZeroException"
+	case "AssertionError": // :135-140
+		if isUndefOrNull(msg) {
+			return "Assertion failed"
+		}
+		return "Assertion failed: " + rt.dartExcSafe(msg)
+	case "ArgumentError", "RangeError", "IndexError":
+		return rt.dartExcArgStr(n, o)
+	case "UnsupportedError": // :584
+		return "Unsupported operation: " + rt.dartStr(msg)
+	case "UnimplementedError": // :598-603
+		if isUndefOrNull(msg) {
+			return "UnimplementedError"
+		}
+		return "UnimplementedError: " + rt.dartStr(msg)
+	case "StateError": // :623
+		return "Bad state: " + rt.dartStr(msg)
+	case "ConcurrentModificationError": // :637-643
+		mo := o.props["modifiedObject"]
+		if isUndefOrNull(mo) {
+			return "Concurrent modification during iteration."
+		}
+		return "Concurrent modification during iteration: " + rt.dartExcSafe(mo) + "."
+	case "OutOfMemoryError": // :650
+		return "Out of Memory"
+	case "StackOverflowError": // :659
+		return "Stack Overflow"
+	}
+	// Error (:72) and TypeError (:144) declare no toString, so Object's answer
+	// stands. NoSuchMethodError's IS overridden (:570) but the override is
+	// `external` - the VM builds it out of the failed Invocation, which this engine
+	// never constructs - and the class has no public generative constructor either.
+	return "Instance of '" + n + "'"
+}
+
+// ArgumentError.toString (:227-238) with the _errorName / _errorExplanation hooks
+// RangeError (:415-437) and IndexError (:535-546) override.
+func (rt *jsrt) dartExcArgStr(n string, o *jsObject) string {
+	hasVal := o.props["__hasv"] == true
+	errName := "RangeError"
+	if n == "ArgumentError" {
+		errName = "Invalid argument(s)"
+		if hasVal {
+			errName = "Invalid argument"
+		}
+	}
+	nameStr := ""
+	if v := o.props["name"]; !isUndefOrNull(v) {
+		nameStr = " (" + rt.dartStr(v) + ")"
+	}
+	msgStr := ""
+	if v := o.props["message"]; !isUndefOrNull(v) {
+		msgStr = ": " + rt.dartStr(v)
+	}
+	prefix := errName + nameStr + msgStr
+	if !hasVal {
+		return prefix
+	}
+	return prefix + rt.dartExcExpl(n, o) + ": " + rt.dartExcSafe(o.props["invalidValue"])
+}
+
+func (rt *jsrt) dartExcExpl(n string, o *jsObject) string {
+	if n == "ArgumentError" { // :225
+		return ""
+	}
+	if n == "IndexError" { // :536-546
+		if rt.dartNumOf(o.props["invalidValue"]) < 0 {
+			return ": index must not be negative"
+		}
+		if rt.dartNumOf(o.props["__dlen"]) == 0 {
+			return ": no indices are valid"
+		}
+		return ": index should be less than " + rt.dartStr(o.props["__dlen"])
+	}
+	start, end := o.props["start"], o.props["end"] // :416-437
+	if isUndefOrNull(start) {
+		if isUndefOrNull(end) {
+			return ""
+		}
+		return ": Not less than or equal to " + rt.dartStr(end)
+	}
+	if isUndefOrNull(end) {
+		return ": Not greater than or equal to " + rt.dartStr(start)
+	}
+	s, e := rt.dartNumOf(start), rt.dartNumOf(end)
+	if e > s {
+		return ": Not in inclusive range " + rt.dartStr(start) + ".." + rt.dartStr(end)
+	}
+	if e < s {
+		return ": Valid value range is empty"
+	}
+	return ": Only valid value is " + rt.dartStr(start)
+}
+
+// FormatException.toString, exceptions.dart:88-169, in full - including the branch
+// that quotes the offending LINE of a string source and marks the column. The source
+// is indexed in UTF-16 code units, which is what Dart's String.codeUnitAt and
+// String.substring count, so the walk below is over utf16 units and not over runes.
+func (rt *jsrt) dartExcFormatStr(o *jsObject) string {
+	report := "FormatException"
+	if msg := o.props["message"]; !isUndefOrNull(msg) && msg != "" {
+		report += ": " + rt.dartStr(msg)
+	}
+	rawOff := o.props["offset"]
+	src, isStr := o.props["source"].(string)
+	if !isStr {
+		if !isUndefOrNull(rawOff) {
+			report += " (at offset " + rt.dartStr(rawOff) + ")"
+		}
+		return report
+	}
+	u := dartExcU16(src)
+	// An absent offset and an out-of-range one take the same branch (:97-99).
+	off := -1
+	if !isUndefOrNull(rawOff) {
+		off = int(rt.dartNumOf(rawOff))
+	}
+	if off > len(u) {
+		off = -1
+	}
+	if off < 0 {
+		s0 := u
+		if len(s0) > 78 {
+			s0 = append(append([]uint16{}, s0[:75]...), dartExcU16("...")...)
+		}
+		return report + "\n" + dartExcS16(s0)
+	}
+	lineNum, lineStart, prevCR := 1, 0, false
+	for i := 0; i < off; i++ {
+		switch u[i] {
+		case 0x0a:
+			if lineStart != i || !prevCR {
+				lineNum++
+			}
+			lineStart, prevCR = i+1, false
+		case 0x0d:
+			lineNum++
+			lineStart, prevCR = i+1, true
+		}
+	}
+	if lineNum > 1 {
+		report += fmt.Sprintf(" (at line %d, character %d)\n", lineNum, off-lineStart+1)
+	} else {
+		report += fmt.Sprintf(" (at character %d)\n", off+1)
+	}
+	lineEnd := len(u)
+	for i := off; i < len(u); i++ {
+		if u[i] == 0x0a || u[i] == 0x0d {
+			lineEnd = i
+			break
+		}
+	}
+	start, end := lineStart, lineEnd
+	prefix, postfix := "", ""
+	if lineEnd-lineStart > 78 {
+		if off-lineStart < 75 {
+			end, postfix = start+75, "..."
+		} else if end-off < 75 {
+			start, prefix = end-75, "..."
+		} else {
+			start, end, prefix, postfix = off-36, off+36, "...", "..."
+		}
+	}
+	slice := dartExcS16(u[start:end])
+	return report + prefix + slice + postfix + "\n" +
+		strings.Repeat(" ", off-start+len(prefix)) + "^\n"
 }
 
 // ===== Dart's numbers: a 64-bit int and a separate double =====
@@ -662,15 +1112,26 @@ func (rt *jsrt) dartArith(op string, l, r interface{}) interface{} {
 		if dartIsFlo(l) || dartIsFlo(r) {
 			q := rt.dartNumOf(l) / rt.dartNumOf(r)
 			if math.IsNaN(q) || math.IsInf(q, 0) {
-				panic(&jsThrown{value: "Unsupported operation: Result of truncating division is " + dartFloStr(q)})
+				// A real UnsupportedError rather than the rendered string, so
+				// `on UnsupportedError catch` claims it. Its toString prepends
+				// "Unsupported operation: " itself (errors.dart:584), so the text
+				// reaching stdout is byte-identical to what this used to raise.
+				panic(&jsThrown{value: rt.dartExcNew("UnsupportedError", "",
+					[]interface{}{"Result of truncating division is " + dartFloStr(q)})})
 			}
 			return giNorm(giFromFloat(q), 64, false)
 		}
-		return rt.giArith("/", rt.dartToInt(l), rt.dartToInt(r))
+		di := rt.dartToInt(l)
+		dj := rt.dartToInt(r)
+		if dj == float64(0) {
+			panic(&jsThrown{value: rt.dartExcNew("IntegerDivisionByZeroException", "", nil)})
+		}
+		return rt.giArith("/", di, dj)
 	case ">>>":
 		n := rt.dartNumOf(r)
 		if n < 0 {
-			panic(&jsThrown{value: "Unsupported operation: negative shift amount"})
+			panic(&jsThrown{value: rt.dartExcNew("UnsupportedError", "",
+				[]interface{}{"negative shift amount"})})
 		}
 		if n >= 64 {
 			return float64(0)
@@ -692,6 +1153,21 @@ func (rt *jsrt) dartArith(op string, l, r interface{}) interface{} {
 	}
 	li, ri := rt.dartToInt(l), rt.dartToInt(r)
 	if op == "%" {
+		// `~/` and `%` with an INT divisor of zero raise a CATCHABLE
+		// IntegerDivisionByZeroException (integers.dart:25-44, which spells out
+		// `(other is int) && (other == 0)` for both). The shared sized-integer
+		// layer beneath (jsrtint.go:182) aborts instead and cannot know which
+		// language is asking. A DOUBLE operand never reaches here - `1.5 % 0` took
+		// the dartModF branch above, and `1.5 ~/ 0` is _Double.~/.
+		//
+		// The test belongs in the two operator branches and not at the head of
+		// this function; written once at the top, the layer-2 twin of it cost
+		// tests/bench/mod.dart 9.61% (slower in 15 of 15 paired draws) by running
+		// on every `+`, `-`, `*` and `&` in the program. A sized integer is only
+		// ever built past 2^53, so a zero divisor is always the plain number.
+		if ri == float64(0) {
+			panic(&jsThrown{value: rt.dartExcNew("IntegerDivisionByZeroException", "", nil)})
+		}
 		m := rt.giArith("%", li, ri)
 		if rt.giCmp(m, float64(0)) < 0 {
 			absr := ri

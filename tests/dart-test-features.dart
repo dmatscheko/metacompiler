@@ -572,6 +572,45 @@ int main() {
   check("finally-overrides-throw", finallyOverridesThrow() == "fin");
   check("rethrow-derived", rethrower() == "deeper");
 
+  // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
+  // Sixteen names that were bound in NEITHER half: `throw FormatException("x")`
+  // was `unknown name: FormatException`. The full battery - every constructor,
+  // every toString, the whole supertype graph - is SECTION 31 of
+  // tests/dart-test-full.dart, cited line by line to sdk/lib/core/errors.dart and
+  // sdk/lib/core/exceptions.dart. These are the shapes the matrix should see.
+  check("exc-bound-format", FormatException("bad").toString() == "FormatException: bad");
+  check("exc-bound-state", StateError("empty").toString() == "Bad state: empty");
+  check("exc-bound-named-ctor",
+        ArgumentError.value(7, "p").toString() == "Invalid argument (p): 7");
+  // Error and Exception are DISJOINT roots, and `on ... catch` has to say so.
+  check("exc-roots-disjoint",
+        FormatException("x") is Exception && !(FormatException("x") is Error)
+        && StateError("x") is Error && !(StateError("x") is Exception));
+  var excKind = "";
+  try { throw FormatException("x"); } on Error catch (e) { excKind = "error"; }
+  on Exception catch (e) { excKind = "exception"; }
+  check("exc-on-exception-claims-format", excKind == "exception");
+  // `on int catch` and friends: the compiler half filtered with the shared
+  // js_is_type, which knows only the JVM spellings, so none of int / double /
+  // bool / Map / Set ever matched there while the interpreter half claimed them.
+  var primKind = "";
+  try { throw 7; } on int catch (e) { primKind = "int"; } catch (e) { primKind = "other"; }
+  check("exc-on-int", primKind == "int");
+  var mapKind = "";
+  try { throw {"a": 1}; } on Map catch (e) { mapKind = "map"; } catch (e) { mapKind = "other"; }
+  check("exc-on-map", mapKind == "map");
+  // An int divisor of zero is a CATCHABLE IntegerDivisionByZeroException
+  // (sdk/lib/_internal/vm/lib/integers.dart:25-44); both halves used to abort.
+  var zeros = [0];
+  var divKind = "";
+  try { divKind = "${5 ~/ zeros[0]}"; }
+  on IntegerDivisionByZeroException catch (e) { divKind = "$e"; }
+  check("exc-int-div-by-zero", divKind == "IntegerDivisionByZeroException");
+  // A failing assert raises a catchable AssertionError in both halves.
+  var assertKind = "";
+  try { assert(zeros[0] == 1, "nope"); } on AssertionError catch (e) { assertKind = "$e"; }
+  check("exc-assert-catchable", assertKind == "Assertion failed: \"nope\"");
+
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");
 
