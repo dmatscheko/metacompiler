@@ -3217,28 +3217,102 @@ function k2Truthy(v) {
     return true
 }
 
-// k2Fixed is ktFixed (jsrtkotlin.go:5688). Java's %f rounds HALF UP, Go's
-// Sprintf rounds half to even, so String.format("%5.1f", 1.25) is "  1.3" on
-// java (JDK 24) and "  1.2" through Sprintf. This is the twin of kFixed in
-// kotlin-interpreter.abnf and gives both halves Java's answer.
+// k2Fixed is ktFixed (abnf/jsrtkotlin.go), and its twin in the interpreter half is
+// kFixed in languages/kotlin-interpreter.abnf, whose header carries the derivation
+// and the java 24.0.2 measurements. The two rules, both measured rather than
+// assumed:
+//
+//   - java.util.Formatter renders %f from Double.toString's SHORTEST round-tripping
+//     digits, zero-padded - NOT from the double's exact decimal. "%.20f" of 0.1 is
+//     "0.10000000000000000000"; "%.0f" of 1.3379870716132959e18 is
+//     1337987071613295900 and not the exact ...872. So rtFixed / rtExactDec in
+//     ./runtime.metajs, which are exact, are the wrong tool for this one - they are
+//     right for python / ruby / swift, whose formatters really are exact.
+//   - the tie rule is HALF_UP, away from zero, on those digits: "%.1f" of 0.15 is
+//     "0.2" where an exact half-even rounder answers "0.1".
+//
+// The old body was Math.floor(x*10^p + 0.5) over `"" + whole`, which could not
+// reach past 2^53, printed "1e+22" INSIDE a %f (the host's exponent form leaking
+// into the integer part), and dropped the sign of -0.0. docs/todo.md 1.11.
+//
+// k1DecDigits is the shortest-digits source; see its own header for why `"" + a`
+// is exact in this file and is not in a tag script.
 function k2Fixed(f, prec) {
+    if (f !== f) { return "NaN" }
+    if (f - f !== 0) {
+        if (f > 0) { return "Infinity" }
+        return "-Infinity"
+    }
     var neg = f < 0
+    if (f === 0 && 1 / f < 0) { neg = true }
     var x = f
     if (neg) { x = -x }
-    var scale = 1
-    var i = 0
-    while (i < prec) {
-        scale = scale * 10
-        i = i + 1
+    var digits = "0"
+    var e10 = 0
+    if (x !== 0) {
+        var sig = k1DecDigits(x)
+        var ei = sig.indexOf("e")
+        digits = sig.substring(0, ei)
+        e10 = parseInt(sig.substring(ei + 1), 10)
     }
-    var scaled = Math.floor(x * scale + 0.5)
-    var whole = Math.floor(scaled / scale)
-    var frac = Math.round(scaled - whole * scale)
-    var fs = "" + frac
-    while (fs.length < prec) { fs = "0" + fs }
-    var out = "" + whole
-    if (prec > 0) { out = out + "." + fs }
-    if (neg) { out = "-" + out }
+    var body = k2FixedBody(digits, e10, prec)
+    if (neg) { return "-" + body }
+    return body
+}
+
+// `digits` are the significant digits with no point and `e10` the decimal exponent
+// of the FIRST of them, so the value is digits[0] . digits[1..] * 10^e10. Lay them
+// out around the point and round the fraction to prec digits, half up.
+function k2FixedBody(digits, e10, prec) {
+    var ilen = e10 + 1
+    var ip = ""
+    var fp = ""
+    if (ilen <= 0) {
+        ip = "0"
+        fp = k2Zeros(0 - ilen) + digits
+    } else if (ilen >= digits.length) {
+        ip = digits + k2Zeros(ilen - digits.length)
+        fp = ""
+    } else {
+        ip = digits.substring(0, ilen)
+        fp = digits.substring(ilen, digits.length)
+    }
+    if (fp.length <= prec) {
+        fp = fp + k2Zeros(prec - fp.length)
+    } else {
+        var up = fp.charCodeAt(prec) >= 53
+        fp = fp.substring(0, prec)
+        if (up) {
+            var carried = k2Carry1(fp)
+            fp = carried.substring(carried.length - prec, carried.length)
+            if (carried.length > prec) { ip = k2Carry1(ip) }
+        }
+    }
+    if (prec > 0) { return ip + "." + fp }
+    return ip
+}
+
+function k2Zeros(n) {
+    var z = ""
+    var i = 0
+    while (i < n) { z = z + "0"; i = i + 1 }
+    return z
+}
+
+// The digit string plus one, one character longer when the carry runs off the
+// front ("999" -> "1000"), which is how the caller detects it.
+function k2Carry1(ds) {
+    var out = ""
+    var carry = 1
+    var i = ds.length - 1
+    while (i >= 0) {
+        var d = ds.charCodeAt(i) - 48 + carry
+        carry = 0
+        if (d == 10) { d = 0; carry = 1 }
+        out = "" + d + out
+        i = i - 1
+    }
+    if (carry == 1) { out = "1" + out }
     return out
 }
 
@@ -9426,7 +9500,16 @@ function js_ktmextset(env, recv, name, v) {
         ktCall(r["fn"], [r["disp"], recv, v])
         return v
     }
-    recv[name] = v
+    // NOTHING FOUND MEANS AN ORDINARY MEMBER WRITE, AND AN ORDINARY MEMBER WRITE IS
+    // NOT A RAW SLOT STORE. This used to be `recv[name] = v`, which writes an own
+    // field straight past any {__acc} accessor pair - so a program that declares
+    // `var Int.doubled` inside ANY class makes the emitter route every `x.doubled =`
+    // through here, and an unrelated `class Counted { var doubled get()/set(v) }`
+    // then had its setter skipped: `c.doubled = 10` left `c.raw` at 0 in the NATIVE
+    // binary where the interpreter and llvm.Run both said 5. The Go twin
+    // (jsrtkotlin.go's js_ktmextset) has always used rt.setMember here, whose
+    // accessor arm k4bSetMember is the port of. todo.md 1.4.
+    k4bSetMember(recv, name, v)
     return v
 }
 

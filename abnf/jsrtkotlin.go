@@ -3322,16 +3322,28 @@ func ktClsFind(cls interface{}, name string) interface{} {
 }
 
 // ktMemberExtFind looks a mangled member-extension name up on the enclosing receiver
-// chain of a frame: the innermost `this`, then the dispatch receiver of a member
-// extension we are already inside, each followed out through its __outer instances.
+// chain of a frame: EVERY frame's `this` and the dispatch receiver of every member
+// extension we are already inside, innermost first, each followed out through its
+// __outer instances.
 // It answers the function and the DISPATCH receiver to pass as its first argument.
+//
+// It used to collect ONE start per key - the first frame carrying a `this` and the
+// first carrying a `__dispatch` - and that lost the enclosing member's receiver the
+// moment anything added an implicit one. Inside a member of A, `with(Other(9)) {
+// 2.tripled() }` (where `fun Int.tripled()` is A's member extension) saw only the
+// `with` receiver and reported the name unresolved, while the native binary answered
+// 24. Per the Kotlin specification `with` takes a `T.() -> R` extension lambda, which
+// ADDS an implicit receiver rather than replacing the enclosing member's dispatch
+// receiver, so resolving it is right. (No kotlinc on this machine - manual chapter 5 -
+// so this is spec-cited.) languages/kotlin-interpreter.abnf's memberExtLookup and
+// lib/kotlin-rt.metajs's k6MextFind are the other two copies; all three must agree or
+// --cross goes red. todo.md 1.3.
 func (rt *jsrt) ktMemberExtFind(sc *jsScope, mangled string) (interface{}, interface{}, bool) {
 	var starts []interface{}
-	for _, key := range []string{"this", "__dispatch"} {
-		for s := sc; s != nil; s = s.parent {
+	for s := sc; s != nil; s = s.parent {
+		for _, key := range []string{"this", "__dispatch"} {
 			if v, ok := s.get(key); ok {
 				starts = append(starts, v)
-				break
 			}
 		}
 	}
@@ -6807,33 +6819,99 @@ func (rt *jsrt) ktLazyValue(o *jsObject) interface{} {
 	return o.props["v"]
 }
 
-// ktFixed renders a float with `prec` decimals, rounding HALF UP the way java's
-// %f does. The twin is kFixed in kotlin-interpreter.abnf.
+// ktFixed renders a float with `prec` decimals the way java.util.Formatter's %f
+// does. The twins are kFixed in languages/kotlin-interpreter.abnf and k2Fixed in
+// languages/lib/kotlin-rt.metajs; the full derivation, and the java 24.0.2
+// measurements it rests on, are in kFixed's header. In one line each:
+//
+//   - the digits are Double.toString's SHORTEST round-tripping decimal padded with
+//     zeros, not the double's exact expansion, so "%.20f" of 0.1 is
+//     "0.10000000000000000000" and "%.0f" of 1.3379870716132959e18 is
+//     1337987071613295900 and not the exact 1337987071613295872;
+//   - the tie rule is HALF_UP away from zero ON THOSE DIGITS, so "%.1f" of 0.15 is
+//     "0.2" where an exact rounder says "0.1".
+//
+// The old body was math.Floor(x*10^p + 0.5) plus int64(whole), which agreed with
+// neither: it truncated the value to int64 (so 1e22 printed 9223372036854775807
+// and its fraction digits were saturation garbage), it could not reach past 2^53,
+// and it dropped the sign of -0.0. docs/todo.md 1.11, whose expected values were
+// the wrong way round - see kFixed.
 func ktFixed(f float64, prec int) string {
-	neg := f < 0
-	x := f
-	if neg {
-		x = -x
+	if math.IsNaN(f) {
+		return "NaN"
 	}
-	scale := 1.0
-	for i := 0; i < prec; i++ {
-		scale *= 10
+	if math.IsInf(f, 1) {
+		return "Infinity"
 	}
-	scaled := math.Floor(x*scale + 0.5)
-	whole := math.Floor(scaled / scale)
-	frac := int64(scaled - whole*scale)
-	fs := fmt.Sprintf("%d", frac)
-	for len(fs) < prec {
-		fs = "0" + fs
+	if math.IsInf(f, -1) {
+		return "-Infinity"
 	}
-	out := fmt.Sprintf("%d", int64(whole))
-	if prec > 0 {
-		out = out + "." + fs
+	neg := math.Signbit(f)
+	x := math.Abs(f)
+	digits, e10 := "0", 0
+	if x != 0 {
+		// 'e' with precision -1 is the shortest round-tripping form, which is what
+		// Double.toString answers too.
+		s := strconv.FormatFloat(x, 'e', -1, 64)
+		at := strings.IndexByte(s, 'e')
+		e10, _ = strconv.Atoi(s[at+1:])
+		digits = strings.Replace(s[:at], ".", "", 1)
 	}
+	out := ktFixedBody(digits, e10, prec)
 	if neg {
 		out = "-" + out
 	}
 	return out
+}
+
+// ktFixedBody lays `digits` out around a decimal point whose first digit has place
+// value 10^e10 and rounds the fraction to prec digits, half up.
+func ktFixedBody(digits string, e10, prec int) string {
+	ilen := e10 + 1
+	var ip, fp string
+	if ilen <= 0 {
+		ip, fp = "0", strings.Repeat("0", -ilen)+digits
+	} else if ilen >= len(digits) {
+		ip, fp = digits+strings.Repeat("0", ilen-len(digits)), ""
+	} else {
+		ip, fp = digits[:ilen], digits[ilen:]
+	}
+	if len(fp) <= prec {
+		fp = fp + strings.Repeat("0", prec-len(fp))
+	} else {
+		up := fp[prec] >= '5'
+		fp = fp[:prec]
+		if up {
+			carried := ktCarry1(fp)
+			fp = carried[len(carried)-prec:]
+			if len(carried) > prec {
+				ip = ktCarry1(ip)
+			}
+		}
+	}
+	if prec > 0 {
+		return ip + "." + fp
+	}
+	return ip
+}
+
+// ktCarry1 adds one to a digit string, answering one character more when the carry
+// runs off the front ("999" -> "1000"), which is how the caller detects it.
+func ktCarry1(ds string) string {
+	out := []byte(ds)
+	carry := 1
+	for i := len(out) - 1; i >= 0 && carry == 1; i-- {
+		if out[i] == '9' {
+			out[i] = '0'
+		} else {
+			out[i]++
+			carry = 0
+		}
+	}
+	if carry == 1 {
+		return "1" + string(out)
+	}
+	return string(out)
 }
 
 // ktClassChainHas answers whether the instance's descriptor - or anything on its

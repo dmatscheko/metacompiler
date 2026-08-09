@@ -2879,6 +2879,43 @@ KwContract  = "contract" KwEnd ;
             lastB.NewRet(callExt(lastB, "js_ktget", [ps[0], ps[1], ps[2]]))
         })
     }
+    // kt_barecall(env, name, args) - the ONE call site that has to choose between a
+    // LOCAL binding of the name and a member method of the enclosing class, and cannot
+    // choose at emission time.
+    //
+    // classMethodNames (the test at the makeCall site that emits this) is a whole-FILE
+    // set: every method name every class and interface declares. So `val f = { x: Int
+    // -> x * 2 }; f(3)` written inside any member aborted with *unknown method 'f' on
+    // an instance* as soon as an unrelated `interface Shape { fun f(): Int }` appeared
+    // anywhere in the file - in llvm.Run and in the native binary both, while the
+    // interpreter half (whose makeCall resolves through getVar) was always right.
+    // Kotlin resolves a call name against the innermost scope that declares it and a
+    // local declaration sits INSIDE the class body's scope, so the local wins.
+    //
+    // The probe is rtKtGetP's own miss-path pair, for the reason given in its header:
+    // js_scope_typeof answers "undefined" both for a slot holding undefined and for an
+    // absent one, and js_scope_has (own scope only) separates them. A site with no
+    // local pays one js_scope_typeof and takes the member arm exactly as before.
+    //
+    // The local arm is js_call, not the makeCall tail's js_call-or-invoke-convention
+    // pair: reaching that would mean an `operator fun invoke` class AND a local
+    // shadowing a member-method name in the same file, and the arm it replaces was an
+    // outright abort. todo.md 1.4.
+    function rtBareCall() {
+        return rtFunc("kt_barecall", 3, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var memberB = curF.NewBlock("")
+            var undefB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), undefB, localB)
+            undefB.NewCondBr(truthy(undefB, callExt(undefB, "js_scope_has", [ps[0], ps[1]])), localB, memberB)
+            localB.NewRet(callExt(localB, "js_call",
+                [localB.NewCall(rtDelegRead(), [callExt(localB, "js_scope_get", [ps[0], ps[1]])]),
+                 hUndef, ps[2]]))
+            var selfV = memberB.NewCall(rtKtGet(), [ps[0], emitStr(memberB, "this")])
+            memberB.NewRet(callExt(memberB, "js_ktsmcall", [selfV, ps[1], ps[2]]))
+        })
+    }
     // kt_clsfind(cls, name) is jsrtkotlin.go's ktClsFind: the member of that name on a
     // class descriptor or on any of its __super chain, else undefined. swift's
     // sw_findm is the same loop; the mutable cursor lives in a throwaway scope,
@@ -5108,11 +5145,24 @@ KwContract  = "contract" KwEnd ;
             // the __super chain like any m() call. The emitClassTop test matters: some
             // OTHER class may declare a method of this name while the call sits at top
             // level, where it is an ordinary call on a value of that name.
+            //
+            // A LOCAL BINDING OF THE NAME WINS, AND ONLY THE RUN TIME KNOWS ABOUT ONE.
+            // classMethodNames is a WHOLE-FILE set - every method of every class and
+            // interface - so `val f = { x: Int -> x * 2 }; f(3)` inside any member
+            // aborted with *unknown method 'f' on an instance* the moment some
+            // unrelated `interface Shape { fun f(): Int }` existed, in llvm.Run and
+            // natively both (the interpreter half resolves through getVar and was
+            // always right). Kotlin resolves a call against the INNERMOST scope that
+            // declares the name, and a local declaration is inside the class body's
+            // scope, so the local shadows the member. Locals are not tracked at
+            // emission time (see classOwnProps' header), so the choice is deferred to
+            // kt_barecall, which is the same two-step scope probe rtKtGetP already
+            // makes on its miss path and costs nothing at a site with no local.
+            // todo.md 1.4.
             if (emitClassTop() != null && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
-                var selfV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
-                return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [selfV, emitStr(ma.b, name), ma.v])}
+                return {b: ma.b, v: ma.b.NewCall(rtBareCall(), [curScopeV, emitStr(ma.b, name), ma.v])}
             }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])

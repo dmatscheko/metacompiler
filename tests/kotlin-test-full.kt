@@ -4097,6 +4097,145 @@ fun sec79() {
     check("sc16", nested == "11122122")
 }
 
+// ============================================================================
+// SECTION 80 - MEMBER EXTENSIONS, NAME SHADOWING, and java.util.Formatter's %f
+// ============================================================================
+//
+// todo.md 1.3, 1.4 and 1.11. Three defects that shared one file set, and each of
+// them had at least one leg answering differently from the other two - which is
+// the class ./test.sh --cross exists for and, for the native-only one, cannot see
+// at all (manual chapter 3: the matrix, --full and --cross all run llvm.Run).
+//
+// There is no kotlinc on this machine (manual chapter 5). The receiver rules
+// below are cited from the Kotlin specification; the %f values are MEASURED
+// against `java` 24.0.2, which is the toolchain Kotlin/JVM's String.format is,
+// with the locale forced to ROOT so the separator is a point.
+interface S80Iface {
+    // Nothing calls this through the interface. It exists so that the name `f80`
+    // is a member-method name SOMEWHERE in the file, which is all the compiler
+    // half's whole-file classMethodNames set used to need to hijack the local
+    // `val f80 = { ... }` inside S80Local below - aborting llvm.Run and the native
+    // binary with *unknown method 'f80' on an instance* while the interpreter half
+    // was right. Kotlin resolves a call against the innermost scope declaring the
+    // name and a local declaration is inside the class body's scope.
+    fun f80(): Int
+}
+
+class S80Impl : S80Iface {
+    override fun f80(): Int = 111
+}
+
+class S80Other(val k: Int)
+
+class S80Local {
+    // A member of the same name as the local below, to prove the local wins over
+    // the class's OWN method too and not merely over the unrelated interface's.
+    fun f80(): Int = 999
+    fun useLocal(n: Int): Int {
+        val f80 = { x: Int -> x * 2 }
+        return f80(n)
+    }
+    fun useMember(): Int = f80()
+}
+
+// `with` takes a T.() -> R extension lambda, which ADDS an implicit receiver
+// rather than replacing the enclosing member's dispatch receiver, so a member
+// extension of the enclosing class still resolves inside it.
+class S80Recv {
+    fun Int.s80Tripled(): Int = this * 3
+    val Int.s80Quad: Int get() = this * 4
+    fun plain(n: Int): Int = n.s80Tripled()
+    fun viaWith(n: Int): Int = with(S80Other(9)) { n.s80Tripled() }
+    fun viaWithProp(n: Int): Int = with(S80Other(9)) { n.s80Quad }
+    fun viaApply(n: Int): Int { var r = 0; S80Other(9).apply { r = n.s80Tripled() }; return r }
+    fun viaRun(n: Int): Int = run { with(S80Other(9)) { n.s80Tripled() } }
+}
+
+// A member extension PROPERTY makes the emitter route EVERY write of that name
+// through the member-extension setter path, in every scope in the file. When the
+// lookup misses - as it does here, at top level, where there is no receiver at
+// all - the fall-back is an ordinary member write, and an ordinary member write
+// runs the accessor. Layer 2 used to do a raw slot store instead, so `c.s80Ctr =
+// 10` left `raw` at 0 in the NATIVE binary while the interpreter and llvm.Run
+// both said 5. Kotlin says members beat extensions, and here the extension's
+// receiver type (Int) does not even match.
+class S80Host {
+    var Int.s80Ctr: Int
+        get() = this * 2
+        set(v) { }
+    fun probe(n: Int): Int = n.s80Ctr
+}
+
+class S80Counted {
+    var raw: Int = 0
+    var s80Ctr: Int
+        get() = raw * 2
+        set(v) { raw = v / 2 }
+}
+
+fun sec80() {
+    val n = arrayOf(1, 2, 3, 4, 5)
+
+    // ----- todo.md 1.4, case 1: a local binding beats a member method -----
+    check("mx01", S80Impl().f80() == 111)
+    check("mx02", S80Local().useLocal(n[2]) == 6)
+    check("mx03", S80Local().useMember() == 999)
+
+    // ----- todo.md 1.3: an ADDED implicit receiver does not hide the member
+    // extension of the enclosing class. Before the fix the native binary answered
+    // and the interpreter and llvm.Run reported the name unresolved.
+    val r = S80Recv()
+    check("mx04", r.plain(n[1]) == 6)
+    check("mx05", r.viaWith(n[1]) == 6)
+    check("mx06", r.viaWithProp(n[4]) == 20)
+    check("mx07", r.viaApply(n[1]) == 6)
+    check("mx08", r.viaRun(n[1]) == 6)
+
+    // ----- todo.md 1.4, case 2: the member-extension write path's MISS still runs
+    // the unrelated class's setter. NATIVE-ONLY before the fix.
+    check("mx09", S80Host().probe(n[3]) == 8)
+    val c = S80Counted()
+    c.s80Ctr = n[4] * 2
+    check("mx10", c.raw == 5 && c.s80Ctr == 10)
+
+    // ----- todo.md 1.11: java.util.Formatter's %f -----
+    // Every value is read out of an array so the constant folder cannot answer
+    // these at compile time (manual chapter 3).
+    val fv = doubleArrayOf(1.3379870716132959e18, 0.1, 0.15, 0.25, 0.35, 2.675,
+                           1e22, 1e300, 4.9e-324, 1.0 / 3.0, 12345.6789, 2.5, -2.5)
+    // PAST 2^53, and the value the item had backwards: java's %f renders from
+    // Double.toString's SHORTEST round-tripping digits padded with zeros, so this
+    // is 1337987071613295900 and NOT the double's exact 1337987071613295872.
+    // Math.floor(x*10^p + 0.5) reached neither.
+    check("fx01", "%.0f".format(fv[0]) == "1337987071613295900")
+    check("fx02", "%.2f".format(fv[0]) == "1337987071613295900.00")
+    // Same rule at high precision: the padding is zeros, not the exact expansion.
+    check("fx03", "%.20f".format(fv[1]) == "0.10000000000000000000")
+    check("fx04", "%.17f".format(fv[9]) == "0.33333333333333330")
+    // HALF_UP on those digits, not half-to-even and not exact-value rounding: the
+    // exact double behind 0.15 is 0.1499999999999999944, which an exact rounder
+    // answers "0.1".
+    check("fx05", "%.1f".format(fv[2]) == "0.2")
+    check("fx06", "%.1f".format(fv[3]) == "0.3")
+    check("fx07", "%.1f".format(fv[4]) == "0.4")
+    check("fx08", "%.2f".format(fv[5]) == "2.68")
+    // HALF_UP is away from zero, so a negative tie goes down.
+    check("fx09", "%.0f".format(fv[11]) == "3" && "%.0f".format(fv[12]) == "-3")
+    // A magnitude the host prints in exponent form must not leak the "e+22" into
+    // the integer part, and prec 17 of 1e300 must not overflow to Infinity - the
+    // old scaled product did both.
+    check("fx10", "%.0f".format(fv[6]) == "10000000000000000000000")
+    check("fx11", "%.3f".format(fv[7]).length == 301 + 4)
+    check("fx12", "%.17f".format(fv[7]).substring(0, 4) == "1000")
+    // The smallest subnormal is all zeros at any reachable precision.
+    check("fx13", "%.30f".format(fv[8]) == "0." + "0".repeat(30))
+    check("fx14", "%.6f".format(fv[10]) == "12345.678900")
+    // -0.0 keeps its sign; the old body compared `f < 0` and lost it.
+    val negZero = 0.0 / (0.0 - 1.0)
+    check("fx15", "%.0f".format(negZero) == "-0" && "%.2f".format(negZero) == "-0.00")
+    check("fx16", "%.2f".format(0.0) == "0.00")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4177,6 +4316,7 @@ fun main() {
     sec77() // SECTION-CALL 77
     sec78() // SECTION-CALL 78
     sec79() // SECTION-CALL 79
+    sec80() // SECTION-CALL 80
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
