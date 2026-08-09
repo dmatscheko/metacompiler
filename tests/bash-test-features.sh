@@ -578,6 +578,40 @@ unset dv
 check dcl7 "${dv-gone}" gone
 check dcl8 "$(x=inline; echo $x)" inline
 
+# ----- the SCOPE of a declaration: rt_push_local saves the attributes and the
+# array too, not only the scalar (docs/todo.md 1.5) -----
+dsi=1
+dsfn1() { declare -i dsi; dsi=2+3; check dsc1 "$dsi" 5; }
+dsfn1
+check dsc2 "$dsi" 1
+dsi="3+4"
+check dsc3 "$dsi" "3+4"
+dsfn2() { local -i dsj=3; dsj+=4; check dsc4 "$dsj" 7; }
+dsfn2
+dsj="1+1"
+check dsc5 "$dsj" "1+1"
+dsfn3() { declare -g dsg=fromfn; export dse=ev; }
+dsfn3
+check dsc6 "$dsg" fromfn
+check dsc7 "$dse" ev
+dsa=(g0 g1)
+dsfn4() { local -a dsa=(l0); check dsc8 "${dsa[0]}/${#dsa[@]}" "l0/1"; }
+dsfn4
+check dsc9 "${dsa[0]}-${dsa[1]}-${#dsa[@]}" "g0-g1-2"
+declare -A dsm=([gk]=gv)
+dsfn5() { local -A dsm; dsm[lk]=lv; check dsc10 "${dsm[lk]}${dsm[gk]}" lv; }
+dsfn5
+check dsc11 "${dsm[gk]}${dsm[lk]}" gv
+declare -u dsu=aa
+check dsc12 "$dsu" AA
+dsu=bb
+check dsc13 "$dsu" BB
+check dsc14 "${dsu@a}" u
+check dsc15 "${dsa@a}" a
+unset dsu
+dsu=cc
+check dsc16 "$dsu" cc
+
 # ----- string helpers exercised through the shell surface -----
 check str1 "${#name}" 5
 concat="$name world"
@@ -591,6 +625,28 @@ check str6 "${rep:5:5}" hello
 # NOT asserted: $(( 10#$num )). Real bash 5.3 answers 123 for 10#00123; both our
 # engines abort with `command not found: 10#00123` - the base#digits form is only
 # recognised for a LITERAL base prefix, not one built by expansion. Reported.
+# ----- printf conversions: rt_radix / rt_intprec / rt_pfq -----
+# %x/%X were absent from the compiler half and %o from both halves.
+check pfc1 "$(printf '%x|%X|%o' 12 255 8)" "c|FF|10"
+check pfc2 "$(printf '%o|%u' 4095 42)" "7777|42"
+check pfc3 "$(printf '%#x|%#o|%#x' 255 8 0)" "0xff|010|0"
+check pfc4 "$(printf '[%.3d][%.5x][%.0d]' 7 255 0)" "[007][000ff][]"
+check pfc5 "$(printf '[%5x][%-5x][%05x]' 255 255 255)" "[   ff][ff   ][000ff]"
+check pfc6 "$(printf '[%.2s]' abcdef)" "[ab]"
+check pfc7 "$(printf '%b' 'a\tb')" "$(printf 'a\tb')"
+check pfc8 "$(printf '%q|%q' 'a b' '')" "a\\ b|''"
+pfv=""
+printf -v pfv '%04x' 255
+check pfc9 "$pfv" 00ff
+pfsp="  12"
+check pfc10 "$(printf '%d' "$pfsp")" 12
+check pfc11 "$(( pfsp + 1 ))" 13
+
+# IFS is an ordinary SET variable, in both halves (the compiler used to leave the
+# slot unset, so ${#IFS} read 0 there and 3 in the interpreter).
+check ifsv1 "${#IFS}" 3
+check ifsv2 "${IFS:0:1}" " "
+check ifsv3 "${IFS-unset}" "$IFS"
 check str7 "$(( 2#1010 + 1 ))" 11
 check str8 "$(( -0 ))" 0
 

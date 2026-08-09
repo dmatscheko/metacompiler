@@ -1138,7 +1138,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewGetElementPtr(gvarsTy, gVars, zero, idx)
     }
     function loadVar(b, name) { return b.NewLoad(i8ptr, varPtr(b, name)) }
-    function storeVar(b, name, v) { b.NewStore(v, varPtr(b, name)) }
+    // -u / -l are ATTRIBUTES, not a one-off transform of the declaring assignment: bash 5.3
+    // upper/lower-cases every later write to the name, including one made by `read` or a
+    // `for` head, so the case call belongs on the store funnel. It costs nothing for a name
+    // with no case attribute - the maps are compile-time and the call is simply not emitted.
+    function storeVar(b, name, v) { b.NewStore(attrCase(b, name, v), varPtr(b, name)) }
+    // The one store that must NOT be transformed: the unset marker is an identity, and
+    // rt_case would hand back a fresh string that no longer compares equal to it.
+    function storeVarRaw(b, name, v) { b.NewStore(v, varPtr(b, name)) }
+    function attrCase(b, name, v) {
+        if (attrOn(upVars, name)) { return b.NewCall(rtCase, [v, one, emptyPtr(b)]) }
+        if (attrOn(loVars, name)) { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3), emptyPtr(b)]) }
+        return v
+    }
 
     // The `local` save stack and the capture stack are private to the runtime now; only
     // their depths are read here.
@@ -1303,6 +1315,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // each terminated by "\x01".
     var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
     var rtPad = rtDecl("rt_pad", true, [1, 0, 0, 0])
+    var rtRadix = rtDecl("rt_radix", true, [1, 0, 0, 0])
+    var rtIntPrec = rtDecl("rt_intprec", true, [1, 0])
+    var rtPfq = rtDecl("rt_pfq", true, [1])
     var rtUnescape = rtDecl("rt_unescape", true, [1])
     var rtNFields = rtDecl("rt_nfields", false, [1])
     var rtGetField = rtDecl("rt_getfield", true, [1, 0])
@@ -1484,11 +1499,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (indp && bare) { pe = "ind" }
         // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shquote, @A is the
         // assignment that would recreate the variable and @E decodes the $'...' escapes at
-        // run time. @a answers the attribute letters, which for this compiler is "a" for a
-        // name it saw declared as an associative array and empty otherwise. @P (prompt
+        // run time. @a answers the attribute letters: A/a for the two array kinds and i/u/l
+        // for the scalar attributes, which is what the interpreter half answers too. -r and
+        // -x are modelled in neither half, so they are absent from both. Indexed-ness is a
+        // RUN-TIME question here (`q=(1 2)` declares nothing), hence the select. @P (prompt
         // expansion) is NOT modelled: it answers the value unchanged, which is right for
         // every value holding no backslash escape and wrong for one that does.
-        var xfIsArr = hasOwn(assocArrays, "$" + name)
         var xfName = name
         function applyXf(b, v) {
             if (xf == "U") { return b.NewCall(rtCase, [v, one, emptyPtr(b)]) }
@@ -1496,7 +1512,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (xf == "u") { return b.NewCall(rtCase, [v, zero, emptyPtr(b)]) }
             if (xf == "E") { return b.NewCall(rtAnsiC, v) }
             if (xf == "P") { return v }
-            if (xf == "a") { return gepStr(b, xfIsArr ? "a" : "") }
+            if (xf == "a") {
+                if (hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A") }
+                var scalarLetter = ""
+                if (attrOn(intVars, xfName)) { scalarLetter = "i" }
+                else if (attrOn(upVars, xfName)) { scalarLetter = "u" }
+                else if (attrOn(loVars, xfName)) { scalarLetter = "l" }
+                var isArrRt = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, xfName)), zero)
+                return b.NewSelect(isArrRt, gepStr(b, "a"), gepStr(b, scalarLetter))
+            }
             var q = b.NewCall(rtShQuote, v)
             if (xf == "A") { return b.NewCall(rtStrcat, [gepStr(b, xfName + "="), q]) }
             return q
@@ -2188,6 +2212,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCall(rtArrSet, [nm, key, v])
             return b
         }
+        // `declare -i n; n+=EXPR` is an arithmetic ADD in bash, not a string concatenation:
+        // n=3; n+=4 answers 7, where the string path answered "34".
+        if (a.op == "+=" && attrOn(intVars, a.name) && a.valT != null && a.valT.c != undefined) {
+            var fragA = c.parseFrom(c.agrammar, a.valT.c, "ArList")
+            var atA = c.compile(fragA).stack[0]
+            var raA = atA(b)
+            b = raA.b
+            storeVar(b, a.name, b.NewCall(rtInt2str,
+                b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), raA.v)))
+            return b
+        }
         if (a.op == "+=") {
             var isA = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nm), zero)
             var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
@@ -2200,7 +2235,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic. The right hand side is a
         // literal here, so it is parsed with this grammar and emitted as ordinary IR.
-        if (hasOwn(intVars, "$" + a.name) && a.valT != null && a.valT.c != undefined) {
+        if (attrOn(intVars, a.name) && a.valT != null && a.valT.c != undefined) {
             var frag = c.parseFrom(c.agrammar, a.valT.c, "ArList")
             var at = c.compile(frag).stack[0]
             var ra2 = at(b)
@@ -2252,32 +2287,90 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var upper = (flags.indexOf("u") >= 0)
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
+        var global = (flags.indexOf("g") >= 0)
+        // -p/-f/-F are QUERIES, not declarations. They are not modelled (nothing is printed),
+        // but they must not be read as `declare NAME`, which below would make the name a
+        // fresh unset local.
+        var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var k
+        // The ASSOCIATIVE flag alone stays a walk-time, whole-program fact: it decides how a
+        // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
+        // NAME[SUB] split), and a name is never both kinds in one program.
         for (k = 0; k < names.length; k++) {
-            if (integer) { intVars["$" + names[k]] = true }
-            if (assoc) { assocArrays["$" + names[k]] = true }
+            if (assoc && !query) { assocArrays["$" + names[k]] = true }
         }
         return function(b) {
             var j
+            if (query) { storeStatusI(b, 0); return b }
+            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
+            // function declare a function-local name (value AND attributes restored on
+            // return) unless -g is given; `export` and `readonly` always act on the global.
+            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             for (j = 0; j < names.length; j++) {
-                if (kw == "local" && curFrame != null) {
+                if (localize && curFrame != null) {
+                    attrPushUndo(names[j])
                     b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
+                    // A local declaration starts from a CLEAN SLATE. bash does not inherit
+                    // the global's attributes or its array: `declare -i g; f(){ local g;
+                    // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
+                    // one-element array. rt_push_local has just saved all of it for the return.
+                    intVars["$" + names[j]] = false
+                    upVars["$" + names[j]] = false
+                    loVars["$" + names[j]] = false
                 }
-                if (isArray) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+                if (integer) { intVars["$" + names[j]] = true }
+                if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
+                if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
+                if (isArray || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
                 if (asgs[j] != null) {
                     b = emitAssign(b, asgs[j], assoc)
-                    if (upper) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), one, emptyPtr(b)])) }
-                    if (lower) { storeVar(b, names[j], b.NewCall(rtCase, [loadVar(b, names[j]), llvm.constant.NewInt(i32, 3), emptyPtr(b)])) }
                 }
-                else if (kw == "local" && !isArray) { storeVar(b, names[j], unsetPtr(b)) }
+                else if (localize && !isArray) { storeVarRaw(b, names[j], unsetPtr(b)) }
             }
             storeStatusI(b, 0)
             return b
         }
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
+    // ---- variable attributes -------------------------------------------------------------
+    // These maps are COMPILE-TIME and they are filled at EMIT time, not at walk time, which
+    // is what makes them ordered: the emitter walks the program in source order, so a name
+    // becomes an integer at the `declare -i` and not for the whole file (`n="1+1"` written
+    // ABOVE the declaration used to be evaluated arithmetically, in the compiler half only -
+    // a live halves divergence).  makeFuncDef unwinds every attribute a function body set,
+    // because `declare -i` inside a function is function-local in bash (docs/todo.md 1.5).
+    //
+    // LIMIT, stated rather than hidden: bash's attributes are DYNAMICALLY scoped, so a
+    // function called from one that declared `-i n` also sees n as an integer. This compiler
+    // has no runtime attribute table and no runtime arithmetic evaluator (the right hand side
+    // of an integer assignment is parsed with this grammar and emitted as IR), so its
+    // attribute scope is LEXICAL. The interpreter half is dynamic; the two agree on every
+    // program that declares and uses an attribute in the same function, which is every use in
+    // the corpus.
     var intVars = {}      // names declared with `declare -i`
+    var upVars = {}       // `declare -u`
+    var loVars = {}       // `declare -l`
     var assocArrays = {}  // names declared with `declare -A` / `local -A`
+    // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
+    // a function body ending - so membership alone is not the answer.
+    function attrOn(m, name) {
+        var k = "$" + name
+        if (!hasOwn(m, k)) { return false }
+        return m[k]
+    }
+    // The undo log makeFuncDef unwinds. One entry per name declared inside a function body.
+    var attrUndo = []
+    function attrPushUndo(name) {
+        attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name)})
+    }
+    function attrUnwind(base) {
+        while (attrUndo.length > base) {
+            var e = attrUndo.pop()
+            intVars["$" + e.name] = e.i
+            upVars["$" + e.name] = e.u
+            loVars["$" + e.name] = e.l
+        }
+    }
 
     // After a call that might transitively `exit`, bail out to the current function's exit.
     function emitExitCheck(b) {
@@ -2784,6 +2877,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // printf FORMAT [ARG...] : the format is a compile-time literal, so it is parsed here and
     // the passes over the argument list are unrolled. The result is built with rt_strcat and
     // then printed, or stored when -v NAME was given.
+    //
+    // The conversion set and every rule below are the same ones printfBuiltin implements in
+    // languages/bash-interpreter.abnf - read the comment there for the 32-bit integer model
+    // and for what is deliberately absent (%e %f %g, which need a float model this runtime
+    // does not have). %x/%X used to be missing HERE ONLY, so `printf '%x' 12` answered 12 in
+    // this half and c in the other, and %o was absent from both.
     function emitPrintf(b, args) {
         var a = args
         var dest = null
@@ -2818,13 +2917,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (fmt.charAt(i) == "%") { lit = lit + "%"; i = i + 1 }
                     else {
                         if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]); lit = "" }
-                        var left = 0, zpad = 0
+                        var left = 0, zpad = 0, alt = 0
                         var flagging = true
                         while (flagging && i < fmt.length) {
                             var fc = fmt.charAt(i)
                             if (fc == "-") { left = 1; i = i + 1 }
                             else if (fc == "0") { zpad = 1; i = i + 1 }
-                            else if (fc == "+" || fc == " " || fc == "#") { i = i + 1 }
+                            else if (fc == "#") { alt = 1; i = i + 1 }
+                            else if (fc == "+" || fc == " ") { i = i + 1 }
                             else { flagging = false }
                         }
                         var width = 0
@@ -2832,9 +2932,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             width = width * 10 + (fmt.charCodeAt(i) - 48)
                             i = i + 1
                         }
+                        var prec = -1
                         if (fmt.charAt(i) == ".") {
                             i = i + 1
-                            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { i = i + 1 }
+                            prec = 0
+                            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                                prec = prec * 10 + (fmt.charCodeAt(i) - 48)
+                                i = i + 1
+                            }
                         }
                         var conv = fmt.charAt(i)
                         i = i + 1
@@ -2842,8 +2947,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         ai = ai + 1
                         used = true
                         var piece = av
+                        var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
+                        var altC = llvm.constant.NewInt(i32, alt)
                         if (conv == "d" || conv == "i") { piece = b.NewCall(rtInt2str, b.NewCall(rtStr2int, av)) }
                         else if (conv == "c") { piece = b.NewCall(rtSubstr, [av, zero, one]) }
+                        else if (conv == "u") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 10), zero, zero]) }
+                        else if (conv == "o") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 8), zero, altC]) }
+                        else if (conv == "x") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), zero, altC]) }
+                        else if (conv == "X") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), one, altC]) }
+                        else if (conv == "b") { piece = b.NewCall(rtUnescape, av) }
+                        else if (conv == "q") { piece = b.NewCall(rtPfq, av) }
+                        else if (conv == "s" && prec >= 0) {
+                            piece = b.NewCall(rtSubstr, [av, zero, llvm.constant.NewInt(i32, prec)])
+                        }
+                        // A precision on an integer is a minimum DIGIT count and it cancels
+                        // the 0 flag, exactly as in the interpreter half.
+                        if (isNum && prec >= 0) {
+                            zpad = 0
+                            piece = b.NewCall(rtIntPrec, [piece, llvm.constant.NewInt(i32, prec)])
+                        }
                         if (width > 0) {
                             piece = b.NewCall(rtPad, [piece, llvm.constant.NewInt(i32, width),
                                                       llvm.constant.NewInt(i32, left),
@@ -3117,8 +3239,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (argTs[uk].c == undefined) { fail("unset needs a literal name in this compiler") }
                     var sp0 = splitSubscript(argTs[uk].c)
                     if (sp0.key == null) {
-                        storeVar(b, sp0.name, unsetPtr(b))
+                        storeVarRaw(b, sp0.name, unsetPtr(b))
                         b.NewCall(rtArrClear, gepStr(b, sp0.name))
+                        // `unset` drops the attributes with the value, in bash and here.
+                        intVars["$" + sp0.name] = false
+                        upVars["$" + sp0.name] = false
+                        loVars["$" + sp0.name] = false
                     } else {
                         var kk = sp0.key
                         if (!hasOwn(assocArrays, "$" + sp0.name)) { kk = numToStr(parseDec(kk)) }
@@ -3554,12 +3680,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var dslot = entry.NewAlloca(i32)
             entry.NewStore(entry.NewLoad(i32, gLsTop), dslot)
             curFrame = {depth: dslot}
+            // Every attribute the body declares is function-local, exactly like the value.
+            var undoBase = attrUndo.length
             // $FUNCNAME: a local of the call, so the save stack restores it on return.
             entry.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId("FUNCNAME")))
             storeVar(entry, "FUNCNAME", gepStr(entry, fname))
             emitFnRet(curExit, curExit.NewLoad(i32, gStatus))
             var endb = bodyT(entry)
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
+            attrUnwind(undoBase)
             curF = savedF; curExit = savedExit; curFrame = savedFrame
             storeStatusI(b, 0)
             return b
@@ -3608,6 +3737,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // may reasonably expect to exist get a fixed, documented default.
         storeVar(entry, "HOME", gepStr(entry, "/home/user"))
         storeVar(entry, "PWD", gepStr(entry, "/home/user"))
+        // IFS is an ordinary SET variable in a real shell, which is what makes the
+        // saved=$IFS ... IFS=$saved idiom round-trip. ifsValue() already falls back to this
+        // exact default when the slot is unset, so seeding it changes no splitting - it
+        // changes what READING $IFS answers, which was "" here and " \t\n" in the
+        // interpreter half, an unasserted halves divergence found while probing todo.md 1.5.
+        storeVar(entry, "IFS", gepStr(entry, " \t\n"))
         // varIdList is FINAL only here - storeVar above can still mint a slot for a name the
         // script never mentioned - so the {name, slot} table is filled last, and it has to
         // cover every slot rt_getvar_byname will walk (it walks nvars of them, and a null

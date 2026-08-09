@@ -60,10 +60,21 @@ int nvars;
  * being generated as a chain over every name the program mentions. */
 char *varnames[1024];
 
-/* The `local` save stack: (slot id, previous value) pairs. LSMAX = 512. */
+/* The `local` save stack: (slot id, previous value) pairs. LSMAX = 512.
+ * A BINDING IS NOT JUST A SCALAR: an ARRAY of the same name lives in the flat
+ * (name, key, value) store below, and bash restores it on return too, so each
+ * entry also records how many of its rows were copied onto the array save
+ * stack. ls_acnt[t] is 0 for the usual scalar case and the pop then does
+ * nothing beyond clearing whatever the call created (docs/todo.md 1.5). */
 int ls_id[512];
 char *ls_val[512];
+int ls_acnt[512];
 int ls_top;
+
+/* The array save stack the entries above index into. LASMAX = 4096. */
+char *las_k[4096];
+char *las_v[4096];
+int las_top;
 
 /* Output capture for $( ) / ` `: a stack of fixed-size arena buffers.
  * CAPMAX = 16, CAPSZ = 8192. */
@@ -139,6 +150,9 @@ int rt_haschar(char *s, int ch);
 char *rt_read_line(int u);
 char *rt_field(char *l, char *ifs, int idx, int rest);
 char *rt_pad(char *s, int w, int left, int zero);
+char *rt_radix(char *s, int base, int upper, int alt);
+char *rt_intprec(char *s, int prec);
+char *rt_pfq(char *s);
 char *rt_unescape(char *s);
 int rt_nfields(char *v);
 char *rt_getfield(char *v, int k);
@@ -1394,6 +1408,135 @@ char *rt_pad(char *s, int w, int left, int zero) {
     return v;
 }
 
+/* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED value in
+ * `base`, with the # prefix when `alt` and the value is not zero.
+ *
+ * THE WIDTH IS 32 BITS, and it is the whole engine's width, not a shortcut
+ * here: rt_str2int and rt_int2str are i32 and bash's printf is 64-bit, so
+ * `printf '%x' -1` answers ffffffff here where bash 5.3 answers
+ * ffffffffffffffff. The interpreter half does exactly the same (radixStr adds
+ * 4294967296), so the two halves agree; nothing asserts the negative case.
+ *
+ * There is no 64-bit or unsigned type in this C subset, so the unsigned value
+ * is carried as two 16-bit halves and divided long-hand: with r < base <= 16,
+ * r * 65536 + lo stays below 2^20 and every intermediate fits in an int. */
+char *rt_radix(char *s, int base, int upper, int alt) {
+    int n = rt_str2int(s);
+    int hi = (n >> 16) & 65535;
+    int lo = n & 65535;
+    char tmp[40];
+    int t = 39;
+    char *dst;
+    int d;
+    int j;
+    int pre = 0;
+    if (hi == 0 && lo == 0) {
+        dst = rt_bump(2);
+        dst[0] = 48;
+        dst[1] = 0;
+        return dst;
+    }
+    while (hi != 0 || lo != 0) {
+        int r = hi % base;
+        int cur;
+        int dg;
+        hi = hi / base;
+        cur = r * 65536 + lo;
+        dg = cur % base;
+        lo = cur / base;
+        if (dg < 10) tmp[t] = (char)(48 + dg);
+        else if (upper != 0) tmp[t] = (char)(55 + dg);
+        else tmp[t] = (char)(87 + dg);
+        t = t - 1;
+    }
+    if (alt != 0 && base == 8) pre = 1;
+    if (alt != 0 && base == 16) pre = 2;
+    dst = rt_bump(pre + (39 - t) + 1);
+    d = 0;
+    if (pre == 1) { dst[0] = 48; d = 1; }
+    if (pre == 2) {
+        dst[0] = 48;
+        if (upper != 0) dst[1] = 88; else dst[1] = 120;
+        d = 2;
+    }
+    j = t + 1;
+    while (j <= 39) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
+    dst[d] = 0;
+    return dst;
+}
+
+/* rt_intprec: printf's PRECISION on an integer - a minimum DIGIT count, which a
+ * "-" sign is not part of. `%.3d` of 7 is 007 and `%.0d` of 0 is empty. */
+char *rt_intprec(char *s, int prec) {
+    int neg = s[0] == 45;
+    int off = 0;
+    int len;
+    int pad;
+    char *dst;
+    int d;
+    int i;
+    if (neg != 0) off = 1;
+    len = rt_strlen(s) - off;
+    if (prec == 0 && len == 1 && s[off] == 48) len = 0;
+    pad = prec - len;
+    if (pad < 0) pad = 0;
+    dst = rt_bump(off + pad + len + 1);
+    d = 0;
+    if (neg != 0) { dst[0] = 45; d = 1; }
+    i = 0;
+    while (i < pad) { dst[d] = 48; d = d + 1; i = i + 1; }
+    i = 0;
+    while (i < len) { dst[d] = s[off + i]; d = d + 1; i = i + 1; }
+    dst[d] = 0;
+    return dst;
+}
+
+/* rt_pfq: printf %q. This is bash's BACKSLASH form, NOT ${v@Q}'s single-quoted
+ * one - `printf %q "a b"` is `a\ b` while `${v@Q}` is `'a b'`. An empty operand
+ * is '' and a value holding a control character falls back to rt_shquote, which
+ * already emits the $'...' spelling. Mirrors printfQuote in
+ * languages/bash-interpreter.abnf. */
+char *rt_pfq(char *s) {
+    int len = rt_strlen(s);
+    int i;
+    int ctl = 0;
+    char *dst;
+    int o;
+    if (len == 0) {
+        dst = rt_bump(3);
+        dst[0] = 39;
+        dst[1] = 39;
+        dst[2] = 0;
+        return dst;
+    }
+    i = 0;
+    while (i < len) {
+        int c = (int)(unsigned char)s[i];
+        if (c < 32 || c == 127) ctl = 1;
+        i = i + 1;
+    }
+    if (ctl != 0) return rt_shquote(s);
+    dst = rt_bump(2 * len + 1);
+    o = 0;
+    i = 0;
+    while (i < len) {
+        int c = (int)(unsigned char)s[i];
+        int safe = 0;
+        if (c >= 48 && c <= 57) safe = 1;
+        if (c >= 65 && c <= 90) safe = 1;
+        if (c >= 97 && c <= 122) safe = 1;
+        if (c == 37 || c == 43 || c == 44 || c == 45 || c == 46 || c == 47) safe = 1;
+        if (c == 58 || c == 61 || c == 64 || c == 95) safe = 1;
+        if (c > 127) safe = 1;
+        if (safe == 0) { dst[o] = 92; o = o + 1; }
+        dst[o] = s[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
 /* rt_unescape: echo -e / printf backslash escapes. */
 char *rt_unescape(char *s) {
     int len = rt_strlen(s);
@@ -2087,6 +2230,27 @@ int rt_push_local(int id)
     }
     ls_id[t] = id;
     ls_val[t] = gvars[id];
+    /* Copy this name's array rows aside. The scan is skipped entirely when the
+     * program has no array live, which is the common case and is why `local`
+     * in a hot recursive function does not pay for this. */
+    int cnt = 0;
+    if (arr_n > 0) {
+        char *nm = varnames[id];
+        int i = 0;
+        while (i < arr_n) {
+            if (rt_streq(nm, arr_nm[i]) != 0) {
+                if (las_top >= 4096) {
+                    rt_die("local array save stack", 1, las_top, 4096);
+                }
+                las_k[las_top] = arr_k[i];
+                las_v[las_top] = arr_v[i];
+                las_top = las_top + 1;
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+    }
+    ls_acnt[t] = cnt;
     ls_top = t + 1;
     return 0;
 }
@@ -2100,6 +2264,17 @@ int rt_pop_locals(int d)
         t = t - 1;
         ls_top = t;
         gvars[ls_id[t]] = ls_val[t];
+        int cnt = ls_acnt[t];
+        if (arr_n > 0 || cnt > 0) {
+            char *nm = varnames[ls_id[t]];
+            rt_arr_clear(nm);
+            int i = las_top - cnt;
+            while (i < las_top) {
+                rt_arr_set(nm, las_k[i], las_v[i]);
+                i = i + 1;
+            }
+        }
+        las_top = las_top - cnt;
         t = ls_top;
     }
     return 0;

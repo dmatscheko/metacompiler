@@ -1282,16 +1282,17 @@ s29() {
   check bnm4 "$(( 62#Z ))" 61
   check bnm5 "$(( 16#FF ))" 255
   check bnm6 "$(( 16#ff ))" 255
-  # ... and either operand may be built by expansion
-  # NOT `num`: SECTION 22 does `declare -i num`, and this engine leaks that attribute
-  # out of the function where real bash keeps it local - so `local bnum=0012` here would
-  # be read as an octal arithmetic assignment. Sections must be self-contained.
-  local bnum=0012 bhx=ff bbase=2
-  check bnm7 "$(( 10#$bnum ))" 12
-  check bnm8 "$(( 10#$bnum + 1 ))" 13
-  check bnm9 "$(( 16#$bhx ))" 255
-  check bnm10 "$(( $bbase#101 ))" 5
-  check bnm11 "$(( ${bbase}#111 ))" 7
+  # ... and either operand may be built by expansion.
+  # `num` was renamed to `bnum` here for a while because SECTION 22's `declare -i num`
+  # LEAKED out of s22 and made `local num=0012` an octal arithmetic assignment
+  # (docs/todo.md 1.5). The attribute is function-local in both engines now, and the
+  # name is back - which is also what keeps this section honest about the fix.
+  local num=0012 hx=ff base=2
+  check bnm7 "$(( 10#$num ))" 12
+  check bnm8 "$(( 10#$num + 1 ))" 13
+  check bnm9 "$(( 16#$hx ))" 255
+  check bnm10 "$(( $base#101 ))" 5
+  check bnm11 "$(( ${base}#111 ))" 7
   check bnm12 "$(( 3 * 16#ff + 1 ))" 766
   # the file-kind model: /dev/null is a CHARACTER DEVICE, not a regular file
   if [ -f /dev/null ]; then check fsk1 yes no; else check fsk1 no no; fi
@@ -1319,6 +1320,193 @@ o"
   # an ARRAY name is set even though its scalar slot is not: set -u must not fire
   check err8 "$( set -u; a29=(11 22); echo "$a29"; echo after )" "11
 after"
+}
+
+# ===== SECTION 30: the scope and lifetime of a declaration =====
+# `declare -i n` inside a function used to stay in force after the return, so a
+# later `n="3+4"` in the caller answered 7 (docs/todo.md 1.5). Every attribute
+# and the array store are part of a `local` binding, not just the scalar value.
+# The globals this section restores to are declared here, inside the section, so
+# the SECTION-deletion probe takes them away with it.
+s30x=(g0 g1)
+declare -A s30m=([gk]=gv)
+declare -i s30i=1
+declare -u s30u=aa
+s30() {
+  # --- the reported case: an integer attribute does not outlive the function
+  s30f1() { declare -i lk1; lk1=5; }
+  s30f1
+  lk1="3+4"
+  check dsc1 "$lk1" "3+4"
+  # --- and neither does `local -i`
+  s30f2() { local -i lk2=1; }
+  s30f2
+  lk2="3+4"
+  check dsc2 "$lk2" "3+4"
+  # --- `declare` inside a function is LOCAL even without the word `local`
+  check dsc3 "$s30i" 1
+  s30f3() { declare s30i=inner; check dsc4 "$s30i" inner; }
+  s30f3
+  check dsc5 "$s30i" 1
+  # ... and the integer attribute it hides comes back with the value
+  s30i=2+3
+  check dsc6 "$s30i" 5
+  # --- a local declaration starts from a CLEAN SLATE: no inherited attribute
+  s30f4() { local s30i; s30i=2+3; check dsc7 "$s30i" "2+3"; }
+  s30f4
+  s30i=4+4
+  check dsc8 "$s30i" 8
+  # --- -g opts out: the name stays global
+  s30f5() { declare -g s30g=fromfn; local s30l=hidden; }
+  s30f5
+  check dsc9 "$s30g" fromfn
+  check dsc10 "${s30l-UNSET}" UNSET
+  # --- export and readonly are NOT local, unlike declare/typeset
+  s30f6() { export s30e=ev; readonly s30r=rv; typeset s30t=tv; }
+  s30f6
+  check dsc11 "$s30e" ev
+  check dsc12 "$s30r" rv
+  check dsc13 "${s30t-UNSET}" UNSET
+  # --- the ARRAY store is part of the binding too
+  # (element by element, not "${a[*]}": that joins with the first character of
+  # IFS, and this file's SECTION 27 leaves IFS empty in one of the two engines.)
+  s30f7() { declare -a s30x; s30x=(l0); check dsc14 "${s30x[0]}" l0; check dsc14b "${#s30x[@]}" 1; }
+  s30f7
+  check dsc15 "${s30x[0]}-${s30x[1]}" "g0-g1"
+  check dsc16 "${#s30x[@]}" 2
+  s30f8() { local -A s30m; s30m[lk]=lv; check dsc17 "${s30m[lk]}" lv; check dsc18 "${s30m[gk]}" ""; }
+  s30f8
+  check dsc19 "${s30m[gk]}" gv
+  check dsc20 "${s30m[lk]}" ""
+  # --- and it survives recursion, innermost frame first
+  s30f9() {
+    local -a s30x=("d$1")
+    if [ "$1" -gt 0 ]; then s30f9 $(( $1 - 1 )); fi
+    check dsc21 "${s30x[0]}/${#s30x[@]}" "d$1/1"
+  }
+  s30f9 2
+  check dsc22 "${s30x[0]}-${s30x[1]}" "g0-g1"
+  # --- -u and -l are ATTRIBUTES: every later assignment is transformed
+  s30f10() { local -u lu=ab; check dsc23 "$lu" AB; lu=cd; check dsc24 "$lu" CD; }
+  s30f10
+  check dsc25 "$s30u" AA
+  s30u=bb
+  check dsc26 "$s30u" BB
+  s30f11() { local s30u; s30u=cc; check dsc27 "$s30u" cc; }
+  s30f11
+  s30u=dd
+  check dsc28 "$s30u" DD
+  # ... including one made by a `for` head or by `read`
+  local ru
+  declare -u ru
+  for ru in ef; do check dsc29 "$ru" EF; done
+  check dsc30 "$( declare -u rr; echo gh | { read rr; echo "$rr"; } )" GH
+  # --- an integer variable ADDS on +=, it does not concatenate
+  local -i li=3
+  li+=4
+  check dsc31 "$li" 7
+  local ls=3
+  ls+=4
+  check dsc32 "$ls" 34
+  # --- `unset` drops the attributes with the value
+  local -i lu2=1
+  unset lu2
+  lu2=5+5
+  check dsc33 "$lu2" "5+5"
+  # --- ${v@a} reports the attribute letters
+  local -i la1=1
+  local -a la2=(1)
+  local -A la3
+  local -u la4=x
+  local la5=plain
+  local la6=(1 2)
+  check dsc34 "${la1@a}" i
+  check dsc35 "${la2@a}" a
+  check dsc36 "${la3@a}" A
+  check dsc37 "${la4@a}" u
+  check dsc38 "${la5@a}" ""
+  check dsc39 "${la6@a}" a
+  # --- a declaration in a nested call restores to the ENCLOSING local, not the global
+  s30f12() { local s30i=inner2; check dsc40 "$s30i" inner2; }
+  s30f13() { local s30i=inner1; s30f12; check dsc41 "$s30i" inner1; }
+  s30f13
+  check dsc42 "$s30i" 8
+}
+
+# ===== SECTION 31: printf conversions, flags, width and precision =====
+# %x/%X were missing from the COMPILER half only (`printf '%x' 12` answered 12
+# there and c in the interpreter) and %o was absent from both, which is the
+# "both halves agree and both are wrong" class --cross cannot see. Everything
+# here was settled against bash 5.3 with LC_ALL=C.
+#
+# NOT asserted, on purpose: %e/%f/%g (no float model in either engine - the
+# integer-only runtime is documented at printfBuiltin), a NEGATIVE operand under
+# %x/%X/%o/%u (this engine is 32-bit and bash's printf is 64-bit, so -1 reads
+# ffffffff here and ffffffffffffffff there), `%c` of an empty operand (bash
+# emits a NUL byte), and a base-prefixed operand such as 0x1f, which bash reads
+# through its arithmetic evaluator and neither half does.
+s31() {
+  # --- the two conversions this section exists for
+  check pf1 "$(printf '%x' 12)" c
+  check pf2 "$(printf '%X' 255)" FF
+  check pf3 "$(printf '%o' 8)" 10
+  check pf4 "$(printf '%o' 4095)" 7777
+  check pf5 "$(printf '%x|%X|%o' 12 255 8)" "c|FF|10"
+  check pf6 "$(printf '%x' 0)" 0
+  check pf7 "$(printf '%o' 0)" 0
+  # --- the rest of the integer family
+  check pf8 "$(printf '%d|%i|%u' 42 -7 9)" "42|-7|9"
+  check pf9 "$(printf '%u' 0)" 0
+  # --- # : the alternate form, which leaves a zero operand alone
+  check pf10 "$(printf '%#x' 255)" 0xff
+  check pf11 "$(printf '%#X' 255)" 0XFF
+  check pf12 "$(printf '%#o' 8)" 010
+  check pf13 "$(printf '%#x' 0)" 0
+  check pf14 "$(printf '%#o' 0)" 0
+  # --- width, the - and 0 flags
+  check pf15 "$(printf '[%5d][%-5d][%05d]' 42 42 42)" "[   42][42   ][00042]"
+  check pf16 "$(printf '[%5x][%-5x][%05x]' 255 255 255)" "[   ff][ff   ][000ff]"
+  check pf17 "$(printf '[%5s][%-5s]' ab ab)" "[   ab][ab   ]"
+  # a 0 flag on a STRING conversion pads with spaces, not zeros
+  check pf18 "$(printf '[%05s]' ab)" "[000ab]"
+  # --- precision: a minimum DIGIT count on an integer, a maximum on a string
+  check pf19 "$(printf '[%.3d]' 7)" "[007]"
+  check pf20 "$(printf '[%.0d]' 0)" "[]"
+  check pf21 "$(printf '[%.5x]' 255)" "[000ff]"
+  check pf22 "$(printf '[%.4o]' 8)" "[0010]"
+  check pf23 "$(printf '[%.2s][%.0s]' abcdef abc)" "[ab][]"
+  # a precision cancels the 0 flag
+  check pf24 "$(printf '[%8.3d][%-8.3d]' 7 7)" "[     007][007     ]"
+  check pf25 "$(printf '[%08.3d]' 7)" "[     007]"
+  # --- %b runs the backslash escapes, %s does not
+  check pf26 "$(printf '%b' 'a\tb')" "$(printf 'a\tb')"
+  check pf27 "$(printf '%s' 'a\tb')" 'a\tb'
+  check pf28 "$(printf '%b' 'x\\y')" 'x\y'
+  # --- %q is the BACKSLASH form, which is not ${v@Q}'s
+  check pf29 "$(printf '%q' ab)" ab
+  check pf30 "$(printf '%q' 'a b')" 'a\ b'
+  check pf31 "$(printf '%q' "a'b")" "a\\'b"
+  check pf32 "$(printf '%q' '')" "''"
+  local q31="a b"
+  check pf33 "${q31@Q}" "'a b'"
+  # --- %% and %c
+  check pf34 "$(printf '%d%%' 50)" "50%"
+  check pf35 "$(printf '%c%c' hello world)" hw
+  # --- the format is REUSED until the operands run out, and missing operands
+  # read as empty / zero
+  check pf36 "$(printf '[%s]' one two three)" "[one][two][three]"
+  check pf37 "$(printf '[%s:%d]' a)" "[a:0]"
+  check pf38 "$(printf 'x\n' )" x
+  # --- -v NAME stores instead of printing
+  local pv
+  printf -v pv '%04x' 255
+  check pf39 "$pv" 00ff
+  # --- leading blanks in a numeric operand are skipped (the interpreter half
+  # used to throw away the result of its own skip and answer 0)
+  local sp31="  12"
+  check pf40 "$(printf '%d' "$sp31")" 12
+  check pf41 "$(( sp31 + 1 ))" 13
+  check pf42 "$(( $sp31 * 2 ))" 24
 }
 
 s01   # SECTION-CALL 01
@@ -1350,5 +1538,7 @@ s26   # SECTION-CALL 26
 s27   # SECTION-CALL 27
 s28   # SECTION-CALL 28
 s29   # SECTION-CALL 29
+s30   # SECTION-CALL 30
+s31   # SECTION-CALL 31
 echo "full: $checks checks, $fails failures"
 exit $fails

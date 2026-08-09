@@ -943,8 +943,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         var n = s.length
         var c0 = anytype
-        while (i < n) { c0 = s.charCodeAt(i); if (c0 == 32 || c0 == 9) { i = i + 1 } else { i = n + 1 } }
-        if (i > n) { i = i - (n + 1) } else { i = 0 }
+        // THIS SKIP USED TO THROW ITS OWN RESULT AWAY. The loop ended by setting `i = n + 1`
+        // to stand in for a `break`, and the line after it recovered `i - (n + 1)` - which is
+        // 0, not the position it stopped at. So no leading blank was ever skipped and
+        // strToInt("  12") answered 0, while the compiler half's rt_str2int answered 12:
+        // `$(( v + 1 ))` with v="  12" was 1 in one engine and 13 in the other. Found by the
+        // printf conversion sweep, not by any gate.
+        var scanning = true
+        while (scanning && i < n) {
+            c0 = s.charCodeAt(i)
+            if (c0 == 32 || c0 == 9) { i = i + 1 } else { scanning = false }
+        }
         var neg = false
         if (i < n) {
             var c1 = s.charCodeAt(i)
@@ -1036,7 +1045,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function setVarVal(name, val) {
         if (isArr(name)) { arrSet(name, "0", val); return }
-        touchVar(name); vars["$" + name] = val; varsHas["$" + name] = true
+        touchVar(name); vars["$" + name] = attrCase(name, val); varsHas["$" + name] = true
+    }
+    // -u / -l are ATTRIBUTES, not a one-off transform of the declaring assignment: bash 5.3
+    // upper/lower-cases every later write too, including one made by `read` or a `for` head,
+    // which is why this sits in setVarVal rather than in makeDecl.
+    function attrCase(name, val) {
+        if (attrOn(upVars, name)) { return caseMap(val, "^^", "") }
+        if (attrOn(loVars, name)) { return caseMap(val, ",,", "") }
+        return val
     }
     function snapshotVars() {
         var snap = []
@@ -1092,13 +1109,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var e = fr[i]
             vars["$" + e.name] = e.val
             varsHas["$" + e.name] = e.had
+            intVars["$" + e.name] = e.ai
+            upVars["$" + e.name] = e.au
+            loVars["$" + e.name] = e.al
+            if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
         }
     }
     // Record NAME's current binding in the innermost call frame, so it is restored on return.
+    //
+    // A BINDING IS NOT JUST A VALUE. `declare -i n` inside a function is a function-local
+    // *attribute* in bash, and so are -a/-A/-u/-l; leaving them behind made `n="3+4"` in the
+    // caller answer 7 (docs/todo.md 1.5). The array store is a second table keyed by name, so
+    // it has to be saved beside the scalar - and COPIED, because a function that writes an
+    // element without redeclaring the array mutates the very object saved here.
     function declareLocal(name) {
         if (localFrames.length == 0) { return }
         var fr = localFrames[localFrames.length - 1]
-        fr.push({name: name, had: isSetVar(name), val: getVarVal(name)})
+        var ak = arrKey(name)
+        var hadA = hasOwn(arrs, ak) && arrs[ak] != null
+        fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
+                 ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
+                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}}})
     }
 
     function allDigits(s) {
@@ -1318,12 +1349,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return o2 + "'"
     }
-    // ${v@a}: the attribute letters. LIMIT: this interpreter tracks the array attributes
-    // only, so `declare -i n` reports "" where bash reports "i" - the -i/-r/-x attributes
-    // are not modelled anywhere else in this grammar either.
+    // ${v@a}: the attribute letters. LIMIT: -r and -x are not modelled anywhere in this
+    // grammar, so they are absent here too; -a/-A/-i/-u/-l are answered.
     function varAttrs(name) {
         if (isArr(name)) { if (arrs[arrKey(name)].assoc) { return "A" } return "a" }
+        if (attrOn(intVars, name)) { return "i" }
+        if (attrOn(upVars, name)) { return "u" }
+        if (attrOn(loVars, name)) { return "l" }
         return ""
+    }
+    // `unset` drops the attributes with the value, in bash and here.
+    function dropAttrs(name) {
+        intVars["$" + name] = false
+        upVars["$" + name] = false
+        loVars["$" + name] = false
     }
     // ${!prefix*} / ${!prefix@}: the set variable names with that prefix, sorted.
     //     $ Zq=1; Zw=2; echo "${!Z*}"   ->  Zq Zw
@@ -1612,19 +1651,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var upper = (flags.indexOf("u") >= 0)
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
+        var global = (flags.indexOf("g") >= 0)
+        // -p/-f/-F are QUERIES, not declarations. They are not modelled (nothing is printed),
+        // but they must not be read as `declare NAME`, which below would make the name a
+        // fresh unset local.
+        var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         return function() {
             var k
+            if (query) { setStatus(0); return 0 }
+            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
+            // function declare a function-local name (value AND attributes restored on
+            // return) unless -g is given; `export` and `readonly` always act on the global.
+            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
             for (k = 0; k < names.length; k++) {
-                if (kw == "local") { declareLocal(names[k]) }
+                if (localize) {
+                    declareLocal(names[k])
+                    // A local declaration starts from a CLEAN SLATE. bash does not inherit
+                    // the global's attributes or its array: `declare -i g; f(){ local g;
+                    // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
+                    // one-element array. declareLocal has just saved all of it for the return.
+                    dropAttrs(names[k])
+                    arrs[arrKey(names[k])] = null
+                }
                 if (integer) { intVars["$" + names[k]] = true }
+                if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
+                if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
                 if (isArray && asgs[k] == null) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
                 if (asgs[k] != null) {
                     if (isArray) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
                     runAssign(asgs[k], assoc)
-                    if (upper) { setVarVal(names[k], caseMap(getVarVal(names[k]), "^^", "")) }
-                    if (lower) { setVarVal(names[k], caseMap(getVarVal(names[k]), ",,", "")) }
                 }
-                else if (kw == "local" && !isArray) { unsetVar(names[k]) }
+                else if (localize && !isArray) { unsetVar(names[k]) }
             }
             setStatus(0)
             return 0
@@ -1886,6 +1943,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // One store for both kinds: keys are strings, kept in insertion order for an associative
     // array and in numeric order for an indexed one (which is also what ${!a[*]} reports).
     var intVars = {}   // names declared with `declare -i`: their assignments are arithmetic
+    var upVars = {}    // `declare -u`: EVERY later assignment is upper-cased, not just the first
+    var loVars = {}    // `declare -l`: likewise, lower-cased
+    // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
+    // a call frame unwinding a `local` - so membership alone is not the answer.
+    function attrOn(m, name) {
+        var k = "$" + name
+        if (!hasOwn(m, k)) { return false }
+        return m[k]
+    }
     var arrs = {}
     function arrKey(name) { return "$" + name }
     function isArr(name) {
@@ -1895,7 +1961,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrEnsure(name, assoc) {
         var k = arrKey(name)
-        if (!hasOwn(arrs, k)) { arrs[k] = {assoc: assoc, keys: [], vals: {}} }
+        // An UNSET array is a null in this map, not a missing key (`unset a`, and a `local`
+        // declaration hiding an outer array), so both have to be tested.
+        if (!hasOwn(arrs, k) || arrs[k] == null) { arrs[k] = {assoc: assoc, keys: [], vals: {}} }
         else if (assoc) { arrs[k].assoc = true }
         return arrs[k]
     }
@@ -1921,6 +1989,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         a.vals["$" + kk] = val
+    }
+    // A shallow copy of one array store, for `local`'s save entry.
+    function arrCopy(a) {
+        var c2 = {assoc: a.assoc, keys: [], vals: {}}
+        var i
+        for (i = 0; i < a.keys.length; i++) {
+            var kk = a.keys[i]
+            c2.keys.push(kk)
+            c2.vals["$" + kk] = hasOwn(a.vals, "$" + kk) ? a.vals["$" + kk] : ""
+        }
+        return c2
     }
     function arrGet(name, key) {
         if (!isArr(name)) { return "" }
@@ -2462,12 +2541,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (a.op == "+=") {
             if (isArr(a.name)) { arrAppendList(a.name, [v]) }
-            else if (hasOwn(intVars, "$" + a.name)) { setVarVal(a.name, numToStr(strToInt(getVarVal(a.name)) + evalArithStr(v))) }
+            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(strToInt(getVarVal(a.name)) + evalArithStr(v))) }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
         }
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic.
-        if (hasOwn(intVars, "$" + a.name)) { setVarVal(a.name, numToStr(evalArithStr(v))); return }
+        if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(evalArithStr(v))); return }
         setVarVal(a.name, v)
     }
 
@@ -2552,9 +2631,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         r = t()
     }
 
-    // printf FORMAT [ARG...] : %s %d %i %c %x %% with a width, a "-" (left align) and a "0"
-    // pad flag, plus the usual backslash escapes. The format is reused until the arguments
-    // run out, exactly like the shell.
+    // printf FORMAT [ARG...] : %s %d %i %u %c %x %X %o %b %q %% with a width, a precision,
+    // the "-" / "0" / "#" flags and the usual backslash escapes. The format is reused until
+    // the arguments run out, exactly like the shell.
+    //
+    // WIDTH OF THE INTEGER MODEL, stated because it is visible here and nowhere else:
+    // this engine is 32-bit throughout (strToInt ends in `| 0`; the compiler half's
+    // rt_str2int/rt_int2str are i32), while bash's printf is 64-bit. So a NEGATIVE operand
+    // under %x/%X/%o/%u renders its 32-BIT two's complement - `printf '%x' -1` is ffffffff
+    // here and ffffffffffffffff in bash 5.3. Both halves agree; nothing asserts it.
+    //
+    // NOT IMPLEMENTED, in either half: %e %f %g %a and the ' flag. bash's arithmetic and
+    // this whole runtime are integer-only (bash-rt.c has no double at all), so a float
+    // conversion would need a float parser and an exact formatter in the C runtime before
+    // it could be written here. Reported rather than half-done.
     function printfBuiltin(args) {
         var dest = null
         var a = args
@@ -2585,12 +2675,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else {
                         var left = false
                         var zero = false
+                        var alt = false
                         var flagging = true
                         while (flagging && i < fmt.length) {
                             var fc = fmt.charAt(i)
                             if (fc == "-") { left = true; i = i + 1 }
                             else if (fc == "0") { zero = true; i = i + 1 }
-                            else if (fc == "+" || fc == " " || fc == "#") { i = i + 1 }
+                            else if (fc == "#") { alt = true; i = i + 1 }
+                            else if (fc == "+" || fc == " ") { i = i + 1 }
                             else { flagging = false }
                         }
                         var width = 0
@@ -2613,14 +2705,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         ai = ai + 1
                         used = true
                         var piece = ""
+                        var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
                         if (conv == "s") { piece = arg; if (prec >= 0 && piece.length > prec) { piece = piece.slice(0, prec) } }
                         else if (conv == "d" || conv == "i") { piece = numToStr(strToInt(arg)) }
                         else if (conv == "c") { piece = (arg.length > 0) ? arg.charAt(0) : "" }
-                        else if (conv == "x" || conv == "X") { piece = toHex(strToInt(arg), conv == "X") }
+                        else if (conv == "u") { piece = radixStr(strToInt(arg), 10, false) }
+                        else if (conv == "o") { piece = radixStr(strToInt(arg), 8, false) }
+                        else if (conv == "x" || conv == "X") { piece = radixStr(strToInt(arg), 16, conv == "X") }
+                        else if (conv == "b") { piece = ansiC(arg) }
+                        else if (conv == "q") { piece = printfQuote(arg) }
                         else { piece = arg }
+                        // A PRECISION ON AN INTEGER is a minimum DIGIT count, and it cancels
+                        // the 0 flag: `%.3d` of 7 is 007, `%.0d` of 0 is the empty string,
+                        // `%8.3d` of 7 is five spaces then 007.
+                        if (isNum && prec >= 0) {
+                            zero = false
+                            piece = intPrec(piece, prec)
+                        }
+                        // # : 0/0X/0x prefixes. bash leaves a zero operand alone.
+                        if (alt && conv == "o" && piece.charAt(0) != "0") { piece = "0" + piece }
+                        if (alt && (conv == "x" || conv == "X") && piece != "" && piece != "0") {
+                            piece = ((conv == "X") ? "0X" : "0x") + piece
+                        }
                         while (piece.length < width) {
                             if (left) { piece = piece + " " }
-                            else if (zero && (conv == "d" || conv == "i" || conv == "x" || conv == "X")) { piece = "0" + piece }
+                            // bash pads with ZEROS on a %s too: `printf '%05s' ab` is 000ab.
+                            else if (zero) { piece = "0" + piece }
                             else { piece = " " + piece }
                         }
                         out = out + piece
@@ -2632,20 +2742,57 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (dest != null) { setVarVal(dest, out) } else { emitOut(out) }
         return 0
     }
-    function toHex(n, upper) {
-        if (n == 0) { return "0" }
-        var neg = false
+    // printf's %x/%X/%o/%u: the operand as an UNSIGNED 32-bit value in the given base.
+    // 4294967296 is exact in a double, so the two's complement is exact too.
+    function radixStr(n, base, upper) {
         var v = n
-        if (v < 0) { neg = true; v = (0 - v) | 0 }
+        if (v < 0) { v = v + 4294967296 }
+        if (v == 0) { return "0" }
         var digits = upper ? "0123456789ABCDEF" : "0123456789abcdef"
         var out = ""
         while (v > 0) {
-            var d = v % 16
+            var d = v % base
             out = digits.charAt(d) + out
-            v = ((v - d) / 16) | 0
+            v = (v - d) / base
         }
-        if (neg) { out = "-" + out }
         return out
+    }
+    // A minimum digit count, applied to the digits only - a "-" sign is not one of them.
+    function intPrec(sv, prec) {
+        var neg = (sv.length > 0 && sv.charAt(0) == "-")
+        var body = neg ? sv.slice(1, sv.length) : sv
+        if (prec == 0 && body == "0") { body = "" }
+        while (body.length < prec) { body = "0" + body }
+        return neg ? ("-" + body) : body
+    }
+    // printf %q: bash's BACKSLASH form, which is not ${v@Q}'s single-quoted form -
+    // `printf %q "a b"` is `a\ b` while `${v@Q}` is `'a b'`. An empty operand is '' and a
+    // value holding a control character falls back to the $'...' spelling, both as bash does.
+    function printfQuote(v) {
+        if (v.length == 0) { return "''" }
+        var ctl = false
+        var i
+        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
+        if (ctl) { return shellQuote(v) }
+        var out = ""
+        for (i = 0; i < v.length; i++) {
+            var ch = chunkAt(v, i)
+            if (ch.length == 1 && needsBackslash(v.charCodeAt(i))) { out = out + "\\" + ch }
+            else { out = out + ch }
+            i = i + (ch.length - 1)
+        }
+        return out
+    }
+    // The characters bash's %q escapes: everything outside the portable-filename set that is
+    // still a printable ASCII character.
+    function needsBackslash(k) {
+        if (k >= 48 && k <= 57) { return false }
+        if (k >= 65 && k <= 90) { return false }
+        if (k >= 97 && k <= 122) { return false }
+        if (k == 37 || k == 43 || k == 44 || k == 45 || k == 46 || k == 47) { return false }
+        if (k == 58 || k == 61 || k == 64 || k == 95) { return false }
+        if (k > 127) { return false }
+        return true
     }
 
     // set [-e|+e] [-u|+u] [-o pipefail|+o pipefail] [-- WORD...]
@@ -2964,7 +3111,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ui
             for (ui = 0; ui < args.length; ui++) {
                 var sp = splitSubscript(args[ui])
-                if (sp.key == null) { unsetVar(sp.name); arrs[arrKey(sp.name)] = null }
+                if (sp.key == null) { unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name) }
                 else { arrDel(sp.name, sp.key) }
             }
             setStatus(0)
