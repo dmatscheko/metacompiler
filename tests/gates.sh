@@ -95,7 +95,17 @@ done
 #
 # FULL_ASSERTIONS is a FLOOR, not an equality: the ratchet files legitimately
 # grow. Growing it is a one-line edit and the script tells you the new number.
-FULL_TIMEOUT=600
+#
+# 2026-08-10: 600 -> 900. Measured, not guessed: the js ratchet's `-frozen`
+# interpreter leg takes 456 s AT BASE on this machine and 482 s after the
+# fifteenth round's additions - 80% of a 600 s budget, before any concurrent
+# load. Under five agents it was killed outright in four separate gate runs, and
+# every one of those printed `js MISMATCH: RUN-FAILED`, i.e. a RED GATE FOR A
+# REASON THAT IS NOT A DEFECT. That is the same class this constant exists to
+# prevent, one level up: a brake tight enough to fire on load teaches people to
+# ignore the gate. If js grows much further the answer is to split its ratchet,
+# not to keep raising this.
+FULL_TIMEOUT=900
 #
 # SET IT FROM A COMMITTED TREE, NOT A WORKING ONE. On 2026-08-08 this was
 # deliberately left at the parent's 7625 while the tree measured 7720, because
@@ -139,7 +149,7 @@ MATRIX_ENTRIES=383        # 2026-08-09: 357 + 26 abort-text rows (13 languages x
                           # three MetaJS SHOULD ABORT rows were promoted in place.
 # And the abort rows specifically, since the count above cannot tell WHICH 383.
 ABORT_ROWS=16             # rows whose name says SHOULD ABORT
-ABORT_ALL_ROWS=10         # of those, the ones that also compare the interpreter
+ABORT_ALL_ROWS=14         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES). Raising this is how a language
                           # closes its interpreter-vs-compiler abort divergence.
 

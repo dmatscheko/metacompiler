@@ -2302,7 +2302,7 @@
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-abort-test.php", "-q"]
         },
         {
-            "name": "PHP abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half stringifies the exception as [object Object])",
+            "name": "PHP abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-abort-test.php", "-q", "-exe", "tests/php-abort.out"]
@@ -2314,7 +2314,7 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-abort-test.kt", "-q"]
         },
         {
-            "name": "Kotlin abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half stringifies the exception as [object Object])",
+            "name": "Kotlin abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-abort-test.kt", "-q", "-exe", "tests/kotlin-abort.out"]
@@ -2350,7 +2350,7 @@
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test.swift", "-q"]
         },
         {
-            "name": "Swift abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half dumps the engine stack, differently per host)",
+            "name": "Swift abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-throw.swift", "-q", "-exe", "tests/swift-abort.out"]
@@ -2362,7 +2362,7 @@
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test.sh", "-q"]
         },
         {
-            "name": "Bash abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half prefixes 'bash interpreter error:', the native binary the grammar name)",
+            "name": "Bash abort probe, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test.sh", "-q", "-exe", "tests/bash-abort.out"]
