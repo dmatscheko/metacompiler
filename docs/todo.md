@@ -4,8 +4,10 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-09 at `7af8514`; **~139 items closed since `e284185`**, in thirteen
-rounds.
+Rebuilt 2026-08-09 at `7af8514`; **~153 items closed since `e284185`**, in fourteen
+rounds. The fourteenth closed fourteen items (`3158f1d`..`5dba9b7`) and is the
+round that added the abort-text gate, so numbering below has gaps until the next
+rebuild.
 
 Two conventions, and they are the point of the file:
 
@@ -21,9 +23,9 @@ Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — `--serial` on 
 loaded machine, `--bench` for anything touching layer 2 or the floor):
 
 ```
-matrix 357/357 · --full 8,585 assertions, 0 halves disagree · --cross 121/0
-clang-check 16/16 none held · go test ok · gen-all 15/15 clean
-native-full 20 languages / 37 native programs, 0 held
+matrix 383/383 (16 SHOULD ABORT rows, 10 of them ALL HALVES) · --full 8,733
+assertions, 0 halves disagree · --cross 121/0 · clang-check 16/16 none held
+go test ok · gen-all 15/15 clean · native-full 20 languages / 37 programs, 0 held
 shape-scan 15 groups / 481 recoverable · -freeze a fixed point
 bench: 15 rows, no row outside its spread · tests/coro-poc/build.sh byte-identical
 ```
@@ -36,74 +38,11 @@ layout draws, `--paired` inside a row's spread, corroborate with an exact counte
 
 # 1. Correctness, with an oracle on this machine
 
-Chapter 1 was emptied for the thirteenth time. What follows is what emptying it
-turned up — all **[V]** on `7af8514`, all found by probing OUTWARD from an item.
-
-### 1.1 js/ts: sloppy-mode `OrdinaryCallBindThis` is not implemented **[V]**
-11 probe rows, all four engines. A plain call's `this` is `undefined` and
-`f.call(null)` keeps the `null`, where a sloppy Script substitutes the global
-object; `f.call(7)` keeps `7` where node makes a `Number` wrapper. **Our engines
-behave as STRICT functions do.** The blocker is real: **no engine carries a
-per-function strict-mode flag** — strictness here is a parse-time syntax guard
-(`NotStrict`), never a runtime property of a closure. Doing it without the flag
-knowingly breaks `"use strict"` functions; doing it properly is a strictness
-boolean out of a new parse-time guard at ~20 function-producing productions × 4
-grammars, carried through `js_closure`: **~250–400 lines**. The `.call(7)` row
-additionally needs primitive wrapper objects.
-
-### 1.2 js/ts: static members are not inherited **[V]**
-`class D extends C {}` then `D.staticMethod()` is `TypeError: D.s is not a
-function` in **all three engines**; node walks the class's prototype chain. Both
-halves agree, so `--cross` is blind. The `__super` walk already exists for
-instance members — this is the same walk applied to the class descriptor. ~2 sites
-× 3 engines.
-
-### 1.3 kotlin: the `js_ktmext*` divergence is HALF closed, and the fix is named **[V]**
-`a6df3a8` made the native binary right per the Kotlin spec — `with` takes a
-`T.() -> R` extension lambda that *adds* an implicit receiver rather than
-replacing the enclosing member's dispatch receiver — and the interpreter and
-`llvm.Run` still fail to resolve `with(Other(9)) { 2.tripled() }`. Cause:
-`abnf/jsrtkotlin.go:3328` `ktMemberExtFind` collects only the **first** frame
-carrying a `this` and the **first** carrying a `__dispatch`, mirrored by the same
-`break` in `kotlin-interpreter.abnf`'s `memberExtLookup`. **Fixing only the
-interpreter turns `--cross` red**, so it is both or neither. Three lines each,
-documented at `k6MextFind`'s header.
-
-### 1.4 kotlin: two pre-existing hijacks, reproduced at two commits **[V]**
-A local lambda is shadowed by an unrelated **interface method** in call position
-(`val f = { … }; f(3)` inside a class member resolves to a global `f()` when some
-interface declares one) — every leg. And a **member extension property hijacks an
-unrelated class's member, natively only**: `class Host { val Int.doubled }` plus
-`class Counted { var doubled }` leaves `raw` at 0 natively where the other two
-legs say 5. Kotlin says members beat extensions and the receiver type does not
-even match.
-
-### 1.5 dart: a user `class A implements B` records nothing **[V]**
-`A() is B` is false. Exactly the wall `9cd3272` closed for swift's protocols; the
-dart builtin sets already carry `implements` explicitly, so generalizing it means
-recording `ciface` on the descriptor in three engines. ~40 lines.
-
-### 1.6 dart: a list index out of range raises PYTHON's `IndexError` **[V]**
-Through `js_pyget` in the Go twin, while the other two engines abort — a
-**three-way** divergence. ~2 sites × 3 engines in `dart-to-llvm-ir.abnf`'s
-indexing.
-
-### 1.7 bash: an unquoted expansion on an assignment RHS is field-split **[V]**
-Broader than the array-element case it was found through: `y=$x`,
-`r=$(echo "  cs  ")` and `v=${A[$i]}` all lose leading and trailing blanks and
-collapse internal runs. Both halves agree, so `--cross` is blind. **It is NOT the
-documented `0x02` field-list marker** (manual 7.9) — `runAssign` calls `wordJoin`
-on an already-split field list; the fix builds the scalar RHS in the non-splitting
-mode `"$x"` already uses, in both grammars, without disturbing `A=(…)` literals.
-~30–60 lines, medium risk (expansion core).
-
-### 1.8 bash: four smaller declaration/expansion gaps **[V]**
-A scalar is not a one-element array (`"${x[@]}"` is empty where bash says `Q`);
-`${a[k]-default}` ignores the default on a missing element; a **subshell does not
-isolate arrays or attributes** (the snapshot covers the scalar table only —
-all-or-nothing, or it becomes a halves divergence); `declare -p` prints nothing.
-Interpreter side is ~15–20 lines each; the compiler needs `rt_ss_save`/
-`rt_ss_restore` and expansion-site-only helpers, ~60 lines each.
+Chapter 1 was emptied again in the fourteenth round: nine of its eleven items are
+closed (`3158f1d`..`5dba9b7`). **Both survivors are [U]** — inherited and not
+re-checked — which matters, because in the fourteenth round *every* item an agent
+touched was wrong as written and the defect underneath was real and bigger each
+time.
 
 ### 1.9 python: integer ARITHMETIC does not promote past 2^53 **[U]**
 The literals do (`506000a`). `9007199254740992 + 1` is unchanged; 54 of 55
@@ -115,14 +54,6 @@ guard measured **+9.5%** — and `*` needs the exact product, the expensive half
 `%d`/`%x`/`%o`/`%b` of a float past 2^53; negatives under `%x`/`%o`/`%b`, which
 need MRI's infinite two's-complement `..fb` notation; precision on an integer
 directive being ignored. **All three: both halves agree, so `--cross` is blind.**
-
-### 1.11 kotlin `kFixed` cannot reach past 2^53 **[V]**
-`Math.floor(x*10^p + 0.5)`, so the interpreter answers `1337987071613295900`
-where the compiler half and Java answer the exact `1337987071613295872`. **This
-blocks a ratchet assertion**: any assertion at a discriminating value fails the
-compiler leg. Needs an exact `%f` on `floPrec` at high n plus a HALF_UP tie rule,
-~40 lines — and first needs confirming `floPrec` (host id 70, `runtime.c`) stays
-exact at n≈767. Go's `%d` on a float is the same shape and ~5 lines.
 
 # 2. Cross-engine defects and latent traps
 
@@ -289,15 +220,6 @@ floor. Nothing is wasted by having done B: the extern surface is identical.
 
 # 4. Test coverage that is missing
 
-### 4.1 NOTHING IN THE SUITE CAN RATCHET AN ABORT TEXT **[V]**
-This is why `b56c2b0` found **five** halves divergences in abort messages that no
-gate had ever seen — including `llvm.Run` leaking Go type names
-(`(*abnf.jsArray)`) into user-visible output. lua and metajs have no catch
-surface, the matrix compares each engine against itself, and an `-exe` matrix row
-only **builds**. Closing it needs a `SHOULD ABORT` row that compares native
-**stderr**: a few `.vscode/launch.json` rows plus a compare mode in `gates.sh`.
-Small, and it would make five hand-fixed defects permanently visible.
-
 ### 4.2 The goja full-case-mapping fix is pinned in metajs only **[V]**
 `1367c23` routed goja's `toUpperCase`/`toLowerCase` through the same
 `strings.ToUpper` the frozen engine uses, closing the divergence in **every**
@@ -340,13 +262,6 @@ Cross-language ones whose home is already imported, so they are free today:
 Not free, and why, is manual 7.13: `js-rt.metajs` imports `regex.js` only and
 `lua-rt.metajs` imports nothing.
 
-### 5.2 The four `runtime-*.metajs` splits can be folded back **[V]**
-`runtime-decimal` (188), `runtime-bignum` (263), `runtime-jvm` (159),
-`runtime-dartswift` (50) were split off **only** to keep the per-declaration
-live-body tax off non-callers, and the `scope_find` hash index removed that tax.
-**5.1's warning does not apply**: folding a module back moves DECLARATIONS, which
-are free, and adds no call depth. It is the *delegation* that costs.
-
 ### 5.3 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
 `swift-to-llvm-ir.abnf:2495,2531`, `dart:2437,2451`, `kotlin:2555` (which says
 "transferred verbatim" at the site). They are **emitter closures that build basic
@@ -373,35 +288,7 @@ Emitted IR calls `js_*` **externs**, and **there is no `js_scope_parent` extern*
 This file also claimed "no emitter uses the new scope API yet" — ruby has shipped
 it through `js_rmethodval` since `018c693`, and kotlin since `a6df3a8`.
 
-### 6.2 Kotlin's three `:script` peek guards can become native `!"token"` **[V]**
-`NotArrow`, `NotParen`, `NotColon` are hand-written parse-time scripts that skip
-whitespace via `c.peek` and return an impossible token; since the dialect gained
-`!'token'` negative lookahead all three are pure "next token isn't X".
-**`SameLine` must stay a `:script`** — native lookahead skips the very newlines it
-inspects. **Risk**: it changes the *shared* grammar and depends on `!"token"`
-matching the guards' whitespace-skipping exactly; a mismatch silently changes what
-the grammar accepts, so it needs its own validated pass.
-
 # 7. Tooling and developer experience
-
-### 7.1 bash costs +3.10% per iteration since `eb78bd0`, and it is not layout **[V]**
-Bisected over four `git archive` trees: `0907c7f` 147,600,146 → `eb78bd0`
-152,157,001, i.e. 3,485.72 → 3,598.54 instructions **per iteration** on a loop
-that uses none of the added features, with an **identical emitted call mix** — so
-the grammar is not emitting more work, the runtime bodies got more expensive.
-Look at `rt_nounset` (gained two parameters, runs on every parameter read) and
-`rt_splitifs` (gained `rt_ifsws`, runs on every assignment); **`rt_splitifs` has
-been given exactly that short-circuit once before**, so the pattern is established.
-The arena is untouched (RSS slope 71.0 → 69.6 bytes/iteration), so there is no
-correctness edge behind it.
-
-### 7.2 Re-measure lua's hash-index buy-backs with draws **[V]**
-The `scope_find` hash index costs lua **~+4%** — real, re-measured twice. Its two
-proposed remedies were measured at **+2.8% / +4.7% / +6.1% as SINGLE BUILDS**
-against a row whose own 13-draw range is **3.3%**, so **"both ways of buying it
-back are worse" is not established.** Rebuild the two variants and measure with
-`--draws 9` or more, reporting median, range and overlap for lua **and** for
-kotlin/python. lua is the noisiest row relative to its own size.
 
 ### 7.3 Per-language coverage of the floor **[U]**
 The instrumentation that found 24 unreached floor bodies was written once and
@@ -421,10 +308,6 @@ found by running it, goja answers `ReferenceError`). Each is discovered by a
 confusing failure. A `-verify` pass over `lib/*.metajs` that names them would pay
 for itself immediately. `docs/abnf-dialect-gotchas.md` lists them; nothing
 enforces them.
-
-### 7.6 `dart-interpreter.abnf`'s `:description` is stale **[V]**
-It lists mixins, inheritance and named constructors as "not in the subset"; all
-three are implemented.
 
 # 8. Reference-corpus gaps
 
@@ -477,11 +360,15 @@ probably cheaper than thousands of ABNF ranges.
 
 # 9. Closed — do not re-open
 
-**~139 items, thirteen rounds** (`e284185`..`7af8514`). Detail is in git history,
+**~153 items, fourteen rounds** (`e284185`..`5dba9b7`). Detail is in git history,
 lessons in the manual's chapter 4; nothing is summarised here, on purpose. Only
 NOT-WORTH-DOING verdicts stay, because the reason is what stops a re-open:
 **glibc < 2.34's `-ldl -lpthread`** (in the code comment, untestable on darwin);
 **a catchable unknown-name error in java/go/swift/csharp/metajs** (COMPILE-time in
 each real toolchain, so nothing runs to catch; the toys emit no `js_*` externs);
 **headroom for `tests/bench/mod.py`** (`e09a766` — a discrete size class, not a
-threshold).
+threshold); **kotlin's three `:script` peek guards becoming native `!"token"`**
+(they are used at 12+ sites across two grammars, the change is behaviour-preserving
+by *intention only*, and a whitespace mismatch would silently change what the
+grammar accepts — an unbounded silent-acceptance risk in a language at 91% corpus,
+bought for a cosmetic simplification that fixes no defect and moves no number).
