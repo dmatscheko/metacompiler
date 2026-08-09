@@ -136,6 +136,16 @@ class Boom {
   Boom(this.code);
 }
 
+// `implements` and `with` contribute a NOMINAL TYPE in Dart: `class A implements B`
+// makes `A() is B` true and `on B catch` claim an A, and so does `class A with M`
+// for M. Neither is on the __super chain, and all three engines used to record
+// nothing at all, so every one of these answered false (docs/todo.md 1.5).
+abstract class FShape { double area(); }
+mixin FLoud { String shout() => "LOUD"; }
+class FSq implements FShape { double area() => 4.0; }
+class FSubSq extends FSq {}                 // conformance through an extends chain
+class FMix with FLoud implements FShape { double area() => 1.0; }
+
 int risky(int n) {
   if (n > 3) {
     throw Boom(n);
@@ -610,6 +620,57 @@ int main() {
   var assertKind = "";
   try { assert(zeros[0] == 1, "nope"); } on AssertionError catch (e) { assertKind = "$e"; }
   check("exc-assert-catchable", assertKind == "Assertion failed: \"nope\"");
+
+  // ----- implements / with are nominal types (docs/todo.md 1.5) -----
+  check("iface-direct", FSq() is FShape);
+  check("iface-self", FSq() is FSq);
+  check("iface-through-extends", FSubSq() is FSq && FSubSq() is FShape);
+  check("iface-mixin", FMix() is FLoud && FMix().shout() == "LOUD");
+  check("iface-mixin-and-implements", FMix() is FShape);
+  check("iface-negative", !(FSq() is FLoud) && !(7 is FShape) && !("x" is FShape));
+  var ifaceKind = "";
+  try { throw FSq(); } on FShape catch (e) { ifaceKind = "shape"; }
+  catch (e) { ifaceKind = "other"; }
+  check("iface-on-catch", ifaceKind == "shape");
+  var ifaceKind2 = "";
+  try { throw FSq(); } on FLoud catch (e) { ifaceKind2 = "loud"; }
+  catch (e) { ifaceKind2 = "other"; }
+  check("iface-on-catch-negative", ifaceKind2 == "other");
+
+  // ----- a list index out of range is dart's IndexError (docs/todo.md 1.6) -----
+  // Not python's, which is what the shared js_pyget raised: the interpreter aborted,
+  // llvm.Run threw python's IndexError and the native binary aborted with a third
+  // wording - a THREE-WAY split --cross cannot see, since two of the three legs are
+  // the same half. dart:core's List.operator [] throws a RangeError, and the object
+  // is an IndexError (errors.dart:445); the text is dxArgStr/dxExpl's.
+  var idxs = [10, 20, 30];
+  var idxMsg = "";
+  try { idxMsg = "${idxs[7]}"; } on IndexError catch (e) { idxMsg = "$e"; }
+  check("idx-range-error",
+        idxMsg == "RangeError (index): Index out of range: index should be less than 3: 7");
+  var idxNeg = "";
+  try { idxNeg = "${idxs[0 - 1]}"; } on RangeError catch (e) { idxNeg = "$e"; }
+  check("idx-negative-no-wrap",
+        idxNeg == "RangeError (index): Index out of range: index must not be negative: -1");
+  var idxSet = "";
+  try { idxs[5] = 1; } on IndexError catch (e) { idxSet = "set"; }
+  check("idx-set-range-error", idxSet == "set" && idxs[2] == 30);
+  var idxStr = "";
+  try { idxStr = "abc"[9]; } on IndexError catch (e) { idxStr = "str"; }
+  check("idx-string-range-error", idxStr == "str");
+  // IndexError's place in the hierarchy, and the fields dart:core documents on it.
+  var idxObj = "";
+  try { idxs[9]; } catch (e) {
+    idxObj = "${e is IndexError}${e is RangeError}${e is ArgumentError}"
+             "${e is Error}${e is Exception}";
+    var r = e as IndexError;
+    idxObj = "$idxObj|${r.invalidValue}|${r.start}|${r.end}|${r.name}|${r.message}";
+  }
+  check("idx-error-hierarchy",
+        idxObj == "truetruetruetruefalse|9|0|2|index|Index out of range");
+  // A Map miss is still NULL, not an error - the guard around it must survive.
+  var idxMap = {"a": 1};
+  check("idx-map-miss-still-null", idxMap["zz"] == null && idxMap["a"] == 1);
 
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");

@@ -1189,10 +1189,12 @@ void s31() {
   check("xe86", XiD(1, 8).w == 9);
   check("xe87", XiA.plain().x == 7); // no formal, no init entry: the declared one stands
 
-  // A user class is NOT one of the sixteen, and does not become an Exception by
-  // being thrown: `implements Exception` is recorded on no value in either engine
-  // (the same wall as docs/todo.md 1.1 for swift's protocols).
+  // A user class is NOT one of the sixteen and does not become an Exception by being
+  // thrown. It is the DECLARATION that decides, and since docs/todo.md 1.5 was closed
+  // an `implements Exception` on a user class IS recorded - so both directions are
+  // asserted here, and SECTION 32 asserts the rest of the shape.
   check("xe81", MyException("z").toString() == "mine:z" && !(MyException("z") is Exception));
+  check("xe88", MyRealException("z") is Exception && !(MyRealException("z") is Error));
   // A Type used as a value prints as its name.
   check("xe82", "${FormatException}" == "FormatException");
 }
@@ -1208,6 +1210,129 @@ class XiD { int w = 7; XiD(this.w, int q) : w = q + 1; }
 // path is left to the grammars' own guards and this only proves that a user class
 // is untouched by the binding.
 class MyException { final String m; MyException(this.m); String toString() => "mine:$m"; }
+// The same class with the clause dart:core's own FormatException carries
+// (exceptions.dart:43 `class FormatException implements Exception`).
+class MyRealException implements Exception { final String m; MyRealException(this.m); }
+
+// ===== SECTION 32: implements / with are nominal types; a bad index is a RangeError =====
+// Two things this file could not assert before, both of them three-engine defects that
+// --cross was blind to because both halves agreed (docs/todo.md 1.5 and 1.6).
+//
+// 1.5  `class A implements B` recorded NOTHING: `A() is B` was false in the
+//      interpreter, under llvm.Run and in the native binary, and so was `on B catch`.
+//      Neither `implements` nor `with` is on the __super chain, which is all the
+//      shared rtIsType / isTypeName walk knows. Exactly the wall 9cd3272 closed for
+//      swift's protocols; the answer here is a flattened supertype-name set on the
+//      class descriptor (__bases + dxUserAnc in the interpreter, __anc written at emit
+//      time in the compiler).
+//
+// 1.6  `xs[7]` raised PYTHON's IndexError, because Dart's indexing was lowered to the
+//      shared js_pyget. Three legs, three answers. dart:core's List.operator [] is
+//      documented "Throws a RangeError if index is out of bounds"; the object thrown
+//      is an IndexError (errors.dart:445 `class IndexError extends ArgumentError
+//      implements RangeError`) and its toString is dxArgStr + dxExpl (:227-238,
+//      :536-546). THERE IS NO dart TOOLCHAIN ON THIS MACHINE, so those two files are
+//      the ground truth and none of this was run against a real Dart VM. The one place
+//      the wording cannot be exact is the "(index)" - it is the error's `name`, which
+//      dart:core defaults inside the constructor and this engine passes explicitly
+//      from the indexing site, so an IndexError a PROGRAM builds by hand renders
+//      without it. That is recorded at js_dtidx in abnf/jsrtdart.go.
+abstract class NmShape { double area(); }
+abstract class NmNamed { String get label; }
+abstract class NmBoth implements NmShape, NmNamed {}   // an interface extending two
+mixin NmLoud { String shout() => "LOUD"; }
+mixin NmSoft { String whisper() => "soft"; }
+class NmSq implements NmShape, NmNamed {
+  double area() => 4.0;
+  String get label => "sq";
+}
+class NmSub extends NmSq {}                            // inherited conformance
+class NmDeep extends NmSub implements NmLoud {         // a chain plus a new edge
+  String shout() => "deep";
+}
+class NmMulti with NmLoud, NmSoft implements NmBoth {  // two mixins + a transitive iface
+  double area() => 1.0;
+  String get label => "multi";
+}
+class NmFwd implements NmLater {}                      // FORWARD reference
+abstract class NmLater {}
+class NmDiamond extends NmSq implements NmShape {}     // the same name twice
+enum NmCol with NmLoud implements NmNamed {
+  red, green;
+  String get label => "c";
+}
+void s32() {
+  // ----- 1.5: the nominal edges -----
+  check("nm1", NmSq() is NmShape && NmSq() is NmNamed && NmSq() is NmSq);
+  check("nm2", NmSub() is NmSq && NmSub() is NmShape && NmSub() is NmNamed);
+  check("nm3", NmDeep() is NmSq && NmDeep() is NmShape && NmDeep() is NmLoud);
+  check("nm4", NmMulti() is NmLoud && NmMulti() is NmSoft);
+  check("nm5", NmMulti() is NmBoth && NmMulti() is NmShape && NmMulti() is NmNamed);
+  check("nm6", NmMulti().shout() == "LOUD" && NmMulti().whisper() == "soft");
+  check("nm7", NmFwd() is NmLater);
+  check("nm8", NmDiamond() is NmShape && NmDiamond() is NmSq);
+  check("nm9", NmCol.red is NmNamed && NmCol.red is NmLoud && NmCol.red is Enum);
+  // It must not over-claim: an unrelated interface, a primitive and a String.
+  check("nm10", !(NmSq() is NmLoud) && !(NmSq() is NmSoft));
+  check("nm11", !(7 is NmShape) && !("x" is NmShape) && !([1] is NmShape));
+  check("nm12", NmSq() is Object && !(NmSq() is Enum));
+  // `on T catch` filters on the same edges, in both directions.
+  var nmOn = "";
+  try { throw NmSq(); } on NmShape catch (e) { nmOn = "shape"; } catch (e) { nmOn = "other"; }
+  check("nm13", nmOn == "shape");
+  var nmOn2 = "";
+  try { throw NmSq(); } on NmLoud catch (e) { nmOn2 = "loud"; } catch (e) { nmOn2 = "other"; }
+  check("nm14", nmOn2 == "other");
+  // NOT asserted here, and the reason is a defect found while probing 1.5 outward: a
+  // TYPED pattern does not test its type in either half. `switch (A()) { B _ => "b",
+  // A _ => "a" }` answers "b", and so does the named form `B b` and `if (o case B q)`.
+  // The type is dropped by the grammar itself - PatVarLead's TypeNamed carries no tag,
+  // so makeVarPat/emitPat never see it. Recording it rather than fixing it, because the
+  // fix needs a distinction resolvePat does not carry: a REFUTABLE position (a switch
+  // case, if-case) wants "no match", while an IRREFUTABLE one (a declaration, a for-in
+  // binder) wants Dart's TypeError - and makeForInPat silently SKIPS an element whose
+  // pattern does not match, so getting that cut wrong turns a wrong answer into a
+  // silently short loop. An assertion here would pass at base for the wrong reason.
+
+  // ----- 1.6: the range error -----
+  var xs = [10, 20, 30];
+  var e1 = "";
+  try { e1 = "${xs[7]}"; } on IndexError catch (e) { e1 = "$e"; }
+  check("nm16", e1 == "RangeError (index): Index out of range: index should be less than 3: 7");
+  var e2 = "";
+  try { e2 = "${xs[0 - 1]}"; } on IndexError catch (e) { e2 = "$e"; }
+  check("nm17", e2 == "RangeError (index): Index out of range: index must not be negative: -1");
+  var empty = <int>[];
+  var e3 = "";
+  try { e3 = "${empty[0]}"; } on IndexError catch (e) { e3 = "$e"; }
+  check("nm18", e3 == "RangeError (index): Index out of range: no indices are valid: 0");
+  // The WRITE side: `xs[7] = 1` grew the list silently in the interpreter half.
+  var e4 = "";
+  try { xs[7] = 1; } on IndexError catch (e) { e4 = "$e"; }
+  check("nm19", e4 == "RangeError (index): Index out of range: index should be less than 3: 7");
+  check("nm20", xs.length == 3 && xs[2] == 30);
+  // A String index is the same error (RangeError.checkValidIndex redirects to it).
+  var e5 = "";
+  try { e5 = "abc"[5]; } on IndexError catch (e) { e5 = "$e"; }
+  check("nm21", e5 == "RangeError (index): Index out of range: index should be less than 3: 5");
+  // Its place in the hierarchy, and the members dart:core documents on it.
+  var e6 = "";
+  try { xs[9]; } catch (e) {
+    var r = e as IndexError;
+    e6 = "${e is IndexError}/${e is RangeError}/${e is ArgumentError}/${e is Error}"
+         "/${e is Exception}/${r.invalidValue}/${r.start}/${r.end}/${r.name}/${r.message}";
+  }
+  check("nm22", e6 == "true/true/true/true/false/9/0/2/index/Index out of range");
+  // In-range indexing, a Map miss and a Set are untouched by the new guard.
+  check("nm23", xs[0] == 10 && xs[2] == 30 && "abc"[1] == "b");
+  var mm = {"a": 1};
+  check("nm24", mm["a"] == 1 && mm["zz"] == null);
+  mm["zz"] = 5;
+  check("nm25", mm["zz"] == 5 && mm.length == 2);
+  // A user `operator []` still wins over the range check.
+  check("nm26", NmIdx()[99] == 99);
+}
+class NmIdx { int operator [](int i) => i; }
 
 int main() {
   s01(); // SECTION-CALL 01
@@ -1241,6 +1366,7 @@ int main() {
   s29(); // SECTION-CALL 29
   s30(); // SECTION-CALL 30
   s31(); // SECTION-CALL 31
+  s32(); // SECTION-CALL 32
   print("full: $checks checks, $fails failures");
   return fails;
 }

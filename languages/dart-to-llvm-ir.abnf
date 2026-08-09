@@ -1302,6 +1302,30 @@ KwSuper     = "super" KwEnd ;
 
     var curClassName = ""
     var classNames = {}      // Known class names (bare-name construction).
+    // name -> its DIRECT nominal supertype names (extends, with, implements), filled at
+    // walk time by makeClassStmt. dtAncOf flattens one at emit time into the "|A|B|"
+    // string written to the descriptor's __anc, which js_dartis then tests with one
+    // substring search - the twin of dxUserAnc in languages/dart-interpreter.abnf.
+    var classBases = {}
+    function dtAncOf(nm) {
+        var out = "|"
+        var seen = {}
+        var stack = [nm]
+        // A bounded walk, not a recursion: `class A extends B` / `class B implements A`
+        // is expressible and the oracle HANGS on a cyclic supertype graph (manual 7.9),
+        // so `seen` is what terminates it, and it also collapses a diamond to one entry.
+        while (stack.length > 0) {
+            var n = stack.pop()
+            if (seen["$" + n] == 1) { continue }
+            seen["$" + n] = 1
+            out = out + n + "|"
+            var bs = classBases["$" + n]
+            if (bs != undefined) {
+                for (var i = 0; i < bs.length; i++) { stack.push(bs[i]) }
+            }
+        }
+        return out
+    }
     var factoryClasses = {}  // Classes whose UNNAMED constructor is a factory.
 
     // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
@@ -2325,7 +2349,14 @@ KwSuper     = "super" KwEnd ;
     // Python pair, which needs the KeyError; the guard uses only externs Dart
     // already emits (js_dartis for the type test - O(1) - and the js_pyin over
     // js_pyiter pair that `containsKey` is lowered to), so no half owes a new one.
-    // A LIST or a String keeps js_pyget's range error, which is Dart's too.
+    //
+    // A LIST or a String goes to js_dtidx, NOT to js_pyget. The claim that used to
+    // stand here - "a List or a String keeps js_pyget's range error, which is Dart's
+    // too" - was wrong twice over: the error was python's IndexError, and the three
+    // legs did three different things with it (docs/todo.md 1.6). js_dtidx raises
+    // dart's IndexError and drops python's negative-index wrap; the long note is at
+    // its Go twin in abnf/jsrtdart.go, the layer-2 half is in lib/dart-rt.metajs, and
+    // the interpreter's is dget in dart-interpreter.abnf.
     function emitIndexGet(b, obj, idx) {
         return emitOpDispatch(b, "[]", obj, [idx], function(bb) {
             var mapB = curF.NewBlock("")
@@ -2339,7 +2370,7 @@ KwSuper     = "super" KwEnd ;
             var hv = callExt(hitB, "js_pyget", [obj, idx])
             hitB.NewBr(endB)
             missB.NewBr(endB)
-            var sv = callExt(seqB, "js_pyget", [obj, idx])
+            var sv = callExt(seqB, "js_dtidx", [obj, idx])
             seqB.NewBr(endB)
             return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(hv, hitB),
                                              llvm.ir.NewIncoming(hNull, missB),
@@ -2348,7 +2379,7 @@ KwSuper     = "super" KwEnd ;
     }
     function emitIndexSet(b, obj, idx, val) {
         var r = emitOpDispatch(b, "[]=", obj, [idx, val],
-                               function(bb) { callExt(bb, "js_pyset", [obj, idx, val]); return {b: bb, v: val} })
+                               function(bb) { callExt(bb, "js_dtidxset", [obj, idx, val]); return {b: bb, v: val} })
         return r.b
     }
     function initsOf(items) {
@@ -2864,6 +2895,7 @@ KwSuper     = "super" KwEnd ;
         var primary = null
         var pbody = null
         var mixins = []
+        var ifaces = []
         var fields = []
         var sfields = []
         var methods = []
@@ -2877,7 +2909,10 @@ KwSuper     = "super" KwEnd ;
             else if (it.csuper != undefined) { superName = baseName(it.csuper) }
             else if (it.con != undefined) { superName = baseName(it.con) }
             else if (it.cmixin != undefined) { mixins.push(baseName(it.cmixin)) }
-            else if (it.ciface != undefined) { /* interface only: no implementation */ }
+            // `implements` contributes no implementation, but it DOES contribute a
+            // nominal type: `class A implements B` makes `A() is B` true, and this half
+            // recorded nothing at all (docs/todo.md 1.5). classBases below is the record.
+            else if (it.ciface != undefined) { ifaces.push(baseName(it.ciface)) }
             else if (it.field != undefined) { fields.push(it) }
             else if (it.sfield != undefined) { sfields.push(it) }
             else if (it.method != undefined) { methods.push(it.method) }
@@ -2893,6 +2928,16 @@ KwSuper     = "super" KwEnd ;
                         inits: (pbody != null) ? pbody.pinits : []})
         }
         classNames[name] = 1
+        // The nominal supertype edges this class adds beyond its own name: the superclass,
+        // the mixins and the `implements` list. Filled AT WALK TIME, so the table is
+        // complete before any emit closure runs and a forward reference (`class A
+        // implements B` above `abstract class B`) resolves - which the interpreter half
+        // gets for free, since its walk runs at `is` time.
+        var ownBases = []
+        if (superName != "") { ownBases.push(superName) }
+        for (i = 0; i < mixins.length; i++) { ownBases.push(mixins[i]) }
+        for (i = 0; i < ifaces.length; i++) { ownBases.push(ifaces[i]) }
+        classBases["$" + name] = ownBases
         var cls = {name: name, superName: superName, fields: fields, hasSuper: superName != ""}
         var defaultCtor = null
         for (i = 0; i < ctors.length; i++) { if (ctors[i].name == "" && !ctors[i].factory) { defaultCtor = ctors[i] } }
@@ -2919,6 +2964,10 @@ KwSuper     = "super" KwEnd ;
             if (superName != "") {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"), b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])])
             }
+            // The flattened supertype set. It is written AFTER the copy loop on purpose -
+            // js_keys hides __-prefixed slots, so a base's own __anc is never copied, but
+            // the ordering is what makes that independent of that rule.
+            callExt(b, "js_set", [clsV, emitStr(b, "__anc"), emitStr(b, dtAncOf(name))])
             // The class's own members are emitted in a scope of their own.
             var savedScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
@@ -3067,6 +3116,8 @@ KwSuper     = "super" KwEnd ;
             if (it.cname != undefined) { name = it.cname }
             rest.push(it)
         }
+        // Every enum implements dart:core's Enum (enum.dart), so `E.a is Enum` holds.
+        rest.push({ciface: "Enum"})
         var clsT = makeClassStmt(rest)
         return function(b) {
             b = clsT(b)

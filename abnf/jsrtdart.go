@@ -378,6 +378,77 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		return jsHFalse
 	}
 
+	// js_dtidx / js_dtidxset are DART's list and string indexing. They exist because
+	// the shared js_pyget / js_pyset are PYTHON's, and routing Dart through them made
+	// one out-of-range index answer three different things (docs/todo.md 1.6):
+	//
+	//	interpreter  abort   "dart interpreter error: list index out of range"
+	//	llvm.Run     python's IndexError - CATCHABLE, and `$e` rendered
+	//	                                  "Instance of 'IndexError'"
+	//	native       abort   "list index out of range: 7"
+	//
+	// A three-way split that --cross cannot see by construction: it diffs a language's
+	// two HALVES, and two of the three legs are the same half.
+	//
+	// What Dart does. dart:core's List.operator [] is documented "Throws a RangeError
+	// if index is out of bounds", and the object thrown is an IndexError
+	// (errors.dart:445, `class IndexError extends ArgumentError implements RangeError`;
+	// String's index goes through RangeError.checkValidIndex, which redirects to the
+	// same class). Its toString comes out of the dxArgStr / dxExpl pair this file
+	// already implements:
+	//
+	//	RangeError (index): Index out of range: index should be less than 3: 7
+	//	RangeError (index): Index out of range: index must not be negative: -1
+	//	RangeError (index): Index out of range: no indices are valid: 0
+	//
+	// WHERE THIS CANNOT BE EXACT, and it is written out rather than hidden: the "(index)"
+	// comes from the error's `name`, and dart:core defaults that name inside the
+	// constructor. dartExcArgNew takes name POSITIONALLY and defaults it to null, and a
+	// program can construct an IndexError itself, so the default is left alone and the
+	// name is passed explicitly from here - which is exact for this site and leaves
+	// `IndexError(7, xs)` written by hand rendering without the "(index)" it would have
+	// in Dart. THERE IS NO dart TOOLCHAIN ON THIS MACHINE (manual chapter 5).
+	//
+	// Python's negative-index WRAP goes with it: `xs[-1]` is the last element in Python
+	// and a RangeError in Dart, and the wrap was reachable from every Dart program.
+	dtIndexErr := func(idx interface{}, indexable interface{}) {
+		panic(&jsThrown{value: rt.dartExcNew("IndexError", "",
+			[]interface{}{idx, indexable, "index"})})
+	}
+	m["js_dtidx"] = func(a []uint64) uint64 {
+		switch o := u(a[0]).(type) {
+		case *jsArray:
+			i := jsToInt(rt.dartNumOf(u(a[1])))
+			if i < 0 || i >= len(o.elems) {
+				dtIndexErr(u(a[1]), o)
+			}
+			return w(o.elems[i])
+		case string:
+			// strLen counts UTF-16 code units here, which is what strAt indexes and
+			// what Dart's String.length counts.
+			i := jsToInt(rt.dartNumOf(u(a[1])))
+			if i < 0 || i >= rt.strLen(o) {
+				dtIndexErr(u(a[1]), o)
+			}
+			return rt.wrapStr(rt.strAt(o, i))
+		}
+		// A Map (whose miss is guarded in the emitter), a Set, or anything else: the
+		// shared behaviour, unchanged.
+		return m["js_pyget"](a)
+	}
+	m["js_dtidxset"] = func(a []uint64) uint64 {
+		if arr, ok := u(a[0]).(*jsArray); ok {
+			i := jsToInt(rt.dartNumOf(u(a[1])))
+			if i < 0 || i >= len(arr.elems) {
+				dtIndexErr(u(a[1]), arr)
+			}
+			arr.dropIdx()
+			arr.elems[i] = u(a[2])
+			return 0
+		}
+		return m["js_pyset"](a)
+	}
+
 	// ----- the number layer (see the invariant at the end of this file) -----
 	boolH := func(v bool) uint64 {
 		if v {
@@ -597,6 +668,18 @@ func (rt *jsrt) dartIsType(v interface{}, t string) bool {
 	if o, ok := v.(*jsObject); ok {
 		if n, isExc := o.props["__dexc"].(string); isExc {
 			return strings.Contains(dartExcAnc[n], "|"+t+"|")
+		}
+		// A USER class's supertype set, for exactly the same reason: isTypeName walks
+		// __super and knows `extends` alone, so `class A implements B` answered false
+		// for `A() is B` (docs/todo.md 1.5). dart-to-llvm-ir.abnf's makeClassStmt
+		// writes __anc on the descriptor, flattened over extends/with/implements at
+		// emit time; the twins are dxUserAnc in languages/dart-interpreter.abnf and
+		// dtIsType in languages/lib/dart-rt.metajs. No walk is needed here because
+		// __anc already carries the superclass's own set.
+		if cls, isCls := o.props["__class"].(*jsObject); isCls {
+			if anc, hasAnc := cls.props["__anc"].(string); hasAnc && strings.Contains(anc, "|"+t+"|") {
+				return true
+			}
 		}
 	}
 	return rt.isTypeName(v, t)

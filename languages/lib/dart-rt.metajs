@@ -1014,6 +1014,17 @@ function dtIsType(v, t) {
     if (dtIsObj(v)) {
         var dx = v["__dexc"]
         if (typeof dx == "string") { return dtExcAnc(dx).indexOf("|" + lt + "|") >= 0 }
+        // A USER class's supertype set, for the same reason: dtTypeName walks __super
+        // and knows `extends` alone, so `class A implements B` answered false for
+        // `A() is B` (docs/todo.md 1.5). dart-to-llvm-ir.abnf's makeClassStmt writes
+        // __anc on the descriptor, flattened over extends/with/implements at emit time,
+        // so no walk is needed here. Twins: dartIsType in abnf/jsrtdart.go and
+        // dxUserAnc in languages/dart-interpreter.abnf.
+        var cls = v["__class"]
+        if (dtIsObj(cls)) {
+            var anc = cls["__anc"]
+            if (typeof anc == "string" && anc.indexOf("|" + lt + "|") >= 0) { return true }
+        }
     }
     return dtTypeName(v, lt)
 }
@@ -1650,6 +1661,53 @@ function js_pyget(c, k) {
 // List element (negative wraps) or Map entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
 // rtkDictFind; the index coercion now truncates, which is the oracle).
+
+// js_dtidx / js_dtidxset are DART's list and string indexing, emitted by
+// dart-to-llvm-ir.abnf in place of js_pyget / js_pyset. The shared pair is PYTHON's,
+// and routing Dart through it made ONE out-of-range index answer three different
+// things (docs/todo.md 1.6): this half ABORTED with "list index out of range: 7", the
+// Go twin raised python's IndexError, and the interpreter aborted with a third
+// wording. --cross could never see it - it diffs a language's two HALVES, and two of
+// the three legs are the same half.
+//
+// dart:core's List.operator [] is documented "Throws a RangeError if index is out of
+// bounds"; the object thrown is an IndexError (errors.dart:445, `class IndexError
+// extends ArgumentError implements RangeError`). Its toString comes out of the
+// dtExcArgStr / dtExcExpl pair below:
+//
+//	RangeError (index): Index out of range: index should be less than 3: 7
+//
+// The "(index)" is the error's `name` and is passed EXPLICITLY here rather than
+// defaulted inside dtExcArgNew - see the long note at js_dtidx in abnf/jsrtdart.go
+// for why, and for what that leaves inexact. Python's negative-index WRAP goes with
+// it: `xs[-1]` is a RangeError in Dart, not the last element.
+function dtIndexErr(k, c) {
+    throw dtExcNew("IndexError", "", [k, c, "index"])
+}
+function js_dtidx(c, k) {
+    if (rtIsArr(c)) {
+        var idx = Math.trunc(dtNum(k))
+        if (idx < 0 || idx >= c.length) { dtIndexErr(k, c) }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        var si = Math.trunc(dtNum(k))
+        if (si < 0 || si >= dtStrLen(c)) { dtIndexErr(k, c) }
+        return dtStrAt(c, si)
+    }
+    // A Map (whose miss is guarded in the emitter), a Set, or anything else.
+    return js_pyget(c, k)
+}
+function js_dtidxset(c, k, v) {
+    if (rtIsArr(c)) {
+        var idx = Math.trunc(dtNum(k))
+        if (idx < 0 || idx >= c.length) { dtIndexErr(k, c) }
+        c[idx] = v
+        return undefined
+    }
+    js_pyset(c, k, v)
+    return undefined
+}
 
 // len() for strings, lists, sets and Maps. The string arm counts CODE POINTS,
 // which is what pyStrLen does in the Go twin.

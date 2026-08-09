@@ -12,17 +12,31 @@ with the dollar-var and dollar-brace-expr forms inside single and double quotes,
 while, C-style for and for (x in coll), closures with real captured scopes, print(...), the
 arithmetic + - * / ~/ % , comparisons, && || ! and the ternary operator.
 
+It also has, all of them added since the first version of this paragraph: inheritance
+(extends, super calls and super constructor chains), mixins (with, including the
+linearisation) and implements - `class A implements B` records the nominal supertype, so
+`A() is B` and `on B catch` both see it; named, redirecting, factory and primary
+(declaring-header) constructors; enums, including enhanced enums with members and an
+implements clause; extensions and extension types; async/await and sync* / async*
+generators; the null-aware operators, the null-assertion ! and the cascade ..; records and
+patterns (destructuring declarations, if-case, switch statements and switch expressions);
+operator overloading; and dart:core's error and exception hierarchy, whose supertype edges
+and toString texts are cited to sdk/lib/core/errors.dart at the dx* family below.
+
 Every tag composes a small closure (a thunk) out of the thunks of its children. Expression
 thunks return the value; statement thunks return undefined or a signal object
 (return/break/continue) that the enclosing statements route. Methods dispatch through a
 class descriptor object (instances carry a __class), exactly like the compiler.
 
-Not in the subset (accepted structurally and reported as not implemented under
--warn-unsupported, else aborting): mixins/inheritance, generics beyond being skipped,
-async/await, named constructors and the null-assertion ! . The nullable type marker ? is
-accepted and erased. The program must define int main(); its return value is the exit code
-of the metacompiler run, so the test programs are self checking (0 on success). The same
-subset is compiled to LLVM IR by dart-to-llvm-ir.abnf.") ;
+Not in the subset: the library directives export / part / library (accepted structurally and
+reported as not implemented under -warn-unsupported, else aborting) - `import` IS resolved,
+against the program's directory and the -i roots, with a dart: URI a builtin no-op. Generic
+type arguments are parsed and erased everywhere except a collection literal, which reifies
+its element type so `<Object>[1] is List<int>` is false the way Dart says. The nullable type
+marker ? is accepted and erased. `void main()` and `int main()` are both accepted; the
+return value of an int main() is the exit code of the metacompiler run, so the test programs
+are self checking (0 on success). The same subset is compiled to LLVM IR by
+dart-to-llvm-ir.abnf.") ;
 
 
 // --- main rules
@@ -158,7 +172,9 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 
 // class Name { fields; constructors; methods }. Class modifiers (abstract, base, final,
 // interface, sealed, mixin) are parsed and erased so the class still compiles.
-// Inheritance/mixins are not implemented.
+// extends, with and implements ARE implemented: extends gives the __super chain, with is
+// linearised into __lin, and both plus implements are recorded on __bases, which dxUserAnc
+// flattens for `is` and for `on T catch`.
 // A mixin application class: `class C = S with M1, M2;` declares a class whose body is
 // exactly S plus the mixins, with S's constructors forwarded. It has to be tried BEFORE
 // ClassDecl (both open with the same modifiers and name) and is told apart by the "=".
@@ -194,10 +210,10 @@ ImplementsClause = KwImplements IfaceType { "," IfaceType } ;
 IfaceType   <~~ push({ciface: up.in}) ~~> = TypeNamed ;
 
 // A member is a field, a method (Type? name(params) body) or a constructor (name == the
-// class name). NamedCtorMember is a named constructor - accepted, not implemented.
+// class name). NamedCtorMember is a named constructor, and it IS implemented - as are
+// getters, setters, operator overloads and factory constructors.
 // Metadata annotations and member modifiers (static/covariant/external/abstract) are
-// parsed and erased; getters, setters, operators and factory constructors are accepted
-// and not implemented.
+// parsed and erased.
 // One Member can declare SEVERAL things (`final int x, y;`), so the tag pushes one
 // descriptor per declared member rather than a single one.
 Member      <~~ pushMembers(takeAll()) ~~>
@@ -799,8 +815,8 @@ NullIndexTarget <~~ push({idx: pop(), nulla: true}) ~~> = "?[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = IfNullExpr [ "?" AssignExpr ":" AssignExpr ] ;
-// a ?? b : if-null. Accepted, not implemented; both operands are evaluated (calls
-// stay visible) and the first is returned. With no "??" it passes the operand through.
+// a ?? b : if-null, and it SHORT-CIRCUITS - makeIfNull returns the first operand that is
+// not null and never evaluates the rest. With no "??" it passes the operand through.
 IfNullExpr  <~~ push(makeIfNull(takeAll())) ~~>
             = OrExpr { "??" <~~ push({ifnull: true, pos: up.pos}) ~~> OrExpr } ;
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
@@ -812,7 +828,8 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeTestExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTestExpr } ;
 // is / is! / as type tests, at relational precedence. 'as' is an identity cast (operand
-// evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
+// evaluated, type erased); 'is' / 'is!' are a real runtime test - dartIsType, which knows
+// dart:core's types, the error hierarchy and a user class's extends/with/implements set.
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr [ TypeTestOp TestType ] ;
 TestType    <~~ push({tname: up.in}) ~~> = Type ;
@@ -1455,6 +1472,10 @@ KwDeferred  = "deferred" KwEnd ;
     }
     function dxRaise0(name) {
         throw {__exc: true, v: dxNew(name, "", [])}
+    }
+    // The same, with the full positional argument list of the class's constructor.
+    function dxRaiseA(name, ctor, argv) {
+        throw {__exc: true, v: dxNew(name, ctor, argv)}
     }
     // Construction. `ctor` is the named constructor's name, "" for the unnamed one.
     function dxNew(name, ctor, argv) {
@@ -2342,7 +2363,46 @@ KwDeferred  = "deferred" KwEnd ;
         // One of dart:core's errors or exceptions: its supertype set is dxAnc, which
         // carries the `implements` edges the __class walk below cannot express.
         if (dxIsExc(v)) { return dxIsA(v, t) }
+        // A USER class's supertype set, which the shared rtIsType's __super walk cannot
+        // express either: it knows `extends` and nothing else, so `class A implements B`
+        // answered false for `A() is B` in all three engines (docs/todo.md 1.5).
+        if (v !== null && v !== undefined && typeof v == "object") {
+            var vc = v.__class
+            if (vc !== null && vc !== undefined && typeof vc == "object") {
+                if (dxUserAnc(vc).indexOf("|" + t + "|") >= 0) { return true }
+            }
+        }
         return rtIsType(v, t)
+    }
+    // A user class's nominal supertype set, in the same "|A|B|" spelling dxAnc uses for
+    // dart:core's errors: the class's own name, then its mixins, its `implements` edges
+    // and its superclass's, transitively. `implements` and `with` both contribute a
+    // nominal type in Dart (`class C with M` makes `C() is M` true), and neither is on
+    // the __super chain, which is why the shared walk cannot answer this.
+    //
+    // Computed once per descriptor and cached under the hidden __anc key (keysOf hides
+    // __-prefixed slots, so no clone and no `keys` walk sees it). The cache is written
+    // BEFORE the recursion, so a cyclic implements/extends graph terminates with a
+    // partial answer instead of hanging - the same reason the __class/__super walk keeps
+    // a guard cap (manual 7.9: the oracle HANGS on a cyclic __super).
+    function dxUserAnc(cls) {
+        if (cls === null || cls === undefined || typeof cls != "object") { return "|" }
+        if (typeof cls.__anc == "string") { return cls.__anc }
+        var own = "|" + cls.__name + "|"
+        cls.__anc = own
+        var s = own
+        var bs = cls.__bases
+        if (bs != undefined) {
+            for (var i = 0; i < bs.length; i++) {
+                var bc = hasOwn(classReg, "$" + bs[i]) ? classReg["$" + bs[i]] : null
+                // A name with no descriptor is still a nominal supertype (`implements
+                // Comparable` names one of dart:core's, which is not a class here).
+                if (bc != null) { s = s + dxUserAnc(bc) } else { s = s + bs[i] + "|" }
+            }
+        }
+        if (cls.__super !== null && cls.__super !== undefined) { s = s + dxUserAnc(cls.__super) }
+        cls.__anc = s
+        return s
     }
 
     // ----- pattern statements: declaration, assignment, for-in, if-case -----
@@ -2732,16 +2792,28 @@ KwDeferred  = "deferred" KwEnd ;
             return o.vals[di]
         }
         if (o === null || o === undefined) { fail("index of null") }
+        // An out-of-range index is dart's IndexError, and it is CATCHABLE. It used to
+        // be a fail() here, python's IndexError under llvm.Run and a third fail()
+        // natively - one index, three answers, and --cross is blind to it because two
+        // of the three legs are the same half (docs/todo.md 1.6). dart:core's
+        // List.operator [] is documented "Throws a RangeError if index is out of
+        // bounds" and the object thrown is an IndexError (errors.dart:445). The twins
+        // are js_dtidx in abnf/jsrtdart.go and in languages/lib/dart-rt.metajs; the
+        // long note, including what the "(index)" name leaves inexact, is at the first.
         if (typeof o == "string") {
-            if (i < 0 || i >= o.length) { fail("string index out of range") }
+            if (i < 0 || i >= o.length) { dxRaiseA("IndexError", "", [i, o, "index"]) }
             return o.charAt(i)
         }
-        if (i < 0 || i >= o.length) { fail("list index out of range") }
+        if (i < 0 || i >= o.length) { dxRaiseA("IndexError", "", [i, o, "index"]) }
         return o[i]
     }
     function dsetIndex(o, i, v) {
         if (isDict(o)) { dictSet(o, i, v); return }
         if (o === null || o === undefined) { fail("index assign on null") }
+        // The write side raises the same IndexError: `xs[7] = 1` silently GREW the
+        // list here (MetaJS's array write extends), where Dart's List.operator []=
+        // throws a RangeError.
+        if (Array.isArray(o) && (i < 0 || i >= o.length)) { dxRaiseA("IndexError", "", [i, o, "index"]) }
         o[i] = v
     }
     // A field write that honours a user `set name(v)` setter and a user `operator []=`;
@@ -3545,6 +3617,7 @@ KwDeferred  = "deferred" KwEnd ;
         var primary = null
         var pbody = null
         var mixinNames = []
+        var ifaceNames = []
         var fields = []
         var statics = []
         var methods = []
@@ -3554,7 +3627,7 @@ KwDeferred  = "deferred" KwEnd ;
             if (it == undefined || it == null) { continue }
             if (hasOwn(it, "csuper")) { superName = bareTypeName(it.csuper) }
             else if (hasOwn(it, "cmixin")) { mixinNames.push(bareTypeName(it.cmixin)) }
-            else if (hasOwn(it, "ciface")) { continue }
+            else if (hasOwn(it, "ciface")) { ifaceNames.push(bareTypeName(it.ciface)) }
             else if (hasOwn(it, "con")) { superName = bareTypeName(it.con) }
             else if (hasOwn(it, "field")) { if (it.isStatic === true) { statics.push(it) } else { fields.push(it) } }
             else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
@@ -3569,7 +3642,7 @@ KwDeferred  = "deferred" KwEnd ;
                         inits: (pbody != null) ? pbody.pinits : []})
         }
         return function() {
-            declVar(name, buildClass(name, superName, mixinNames, fields, statics, methods, ctors, []))
+            declVar(name, buildClass(name, superName, mixinNames, ifaceNames, fields, statics, methods, ctors, []))
         }
     }
     // Strip the generic arguments and any nullability marker off a type name.
@@ -3578,9 +3651,14 @@ KwDeferred  = "deferred" KwEnd ;
         if (s2.length > 0 && s2.charAt(s2.length - 1) == "?") { s2 = s2.substring(0, s2.length - 1) }
         return s2
     }
-    function buildClass(name, superName, mixinNames, fields, statics, methods, ctors, enumVals) {
+    function buildClass(name, superName, mixinNames, ifaceNames, fields, statics, methods, ctors, enumVals) {
+        // __bases is the NOMINAL supertype list - the mixins and the `implements` edges,
+        // which contribute a type but are not on the __super chain. dxUserAnc flattens it.
+        var bases = []
+        for (var b1 = 0; b1 < mixinNames.length; b1++) { bases.push(mixinNames[b1]) }
+        for (var b2 = 0; b2 < ifaceNames.length; b2++) { bases.push(ifaceNames[b2]) }
         var cls = {__isclass: true, __name: name, __own: {}, __ctors: {}, __statics: {},
-                   __fields: fields, __lin: []}
+                   __fields: fields, __lin: [], __bases: bases}
         classReg["$" + name] = cls
         // Linearisation: this class, then the mixins right to left, then the superclass's.
         var lin = [cls]
@@ -3776,16 +3854,25 @@ KwDeferred  = "deferred" KwEnd ;
         var statics = []
         var methods = []
         var ctors = []
+        var mixinNames = []
+        var ifaceNames = []
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
             if (hasOwn(it, "evname")) { vals.push(it) }
-            else if (hasOwn(it, "cmixin") || hasOwn(it, "ciface")) { continue }
+            // `enum E with M implements I` - both contribute a nominal type, and the
+            // mixin contributes members too (the linearisation in buildClass).
+            else if (hasOwn(it, "cmixin")) { mixinNames.push(bareTypeName(it.cmixin)) }
+            else if (hasOwn(it, "ciface")) { ifaceNames.push(bareTypeName(it.ciface)) }
             else if (hasOwn(it, "field")) { if (it.isStatic === true) { statics.push(it) } else { fields.push(it) } }
             else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
             else if (hasOwn(it, "ctor")) { ctors.push(it.ctor) }
         }
-        return function() { declVar(name, buildClass(name, "", [], fields, statics, methods, ctors, vals)) }
+        // Every enum implements dart:core's Enum (enum.dart), so `E.a is Enum` holds.
+        ifaceNames.push("Enum")
+        return function() {
+            declVar(name, buildClass(name, "", mixinNames, ifaceNames, fields, statics, methods, ctors, vals))
+        }
     }
 
     // ----- extensions -----
@@ -3813,16 +3900,17 @@ KwDeferred  = "deferred" KwEnd ;
         var fieldName = ""
         var methods = []
         var statics = []
+        var ifaceNames = []
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
             if (hasOwn(it, "etfield")) { fieldName = it.etfield }
-            else if (hasOwn(it, "ciface")) { continue }
+            else if (hasOwn(it, "ciface")) { ifaceNames.push(bareTypeName(it.ciface)) }
             else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
         }
         var ctor = {name: "", params: [{thisf: fieldName}], body: {none: true}, inits: [], factory: false}
         return function() {
-            declVar(name, buildClass(name, "", [], [{field: fieldName, init: null}], statics, methods, [ctor], []))
+            declVar(name, buildClass(name, "", [], ifaceNames, [{field: fieldName, init: null}], statics, methods, [ctor], []))
         }
     }
 
