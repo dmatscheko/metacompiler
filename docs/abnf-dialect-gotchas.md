@@ -123,18 +123,37 @@ these fail ONLY under `-frozen` — behind an otherwise green goja run.
 
 - **No `for…in`.** Anything enumerating object keys (a class body, an instance
   dictionary, pattern captures) needs an explicit key list carried alongside.
-- **No `array.splice`, and `array.length` is not assignable.** Removal and
-  truncation have to be written with index shifting plus `pop()`.
+- **No `array.splice`.** Removal has to be written with index shifting plus
+  `pop()`. (`array.length` **is** assignable — see the correction below.)
 - **A reassigned function parameter keeps the type it was first called with.**
   `function f(v) { v = v + "" }` fails with "variable 'v' has type number and
   cannot hold a string". Copy the parameter into a fresh `anytype` local before
   mutating it.
-- **No `string.split` / `array.join`, no `string.lastIndexOf`, and `indexOf`
-  IGNORES its from-index argument.** The last one is the nasty one: it does not
-  raise, it returns the same match every time, so a `while (i < s.length) { i =
-  s.indexOf("\n", i) + 1 }` line walker spins until the IR step cap — under
-  `-frozen` only. Write a small `for` scan instead. (All four found while adding
-  the Ruby heredoc lexer.)
+- **No `string.lastIndexOf`, and `indexOf` IGNORES its from-index argument.**
+  The second is the nasty one: it does not raise, it returns the same match every
+  time, so a `while (i < s.length) { i = s.indexOf("\n", i) + 1 }` line walker
+  spins until the IR step cap — under `-frozen` only. Write a small `for` scan
+  instead. (Found while adding the Ruby heredoc lexer.)
+
+  > **Sharper than "ignores", measured 2026-08-10**: the two hosts DISAGREE.
+  > `"aXaXa".indexOf("a", 2)` is **2** under goja and **0** under `-frozen`. So a
+  > grammar that passes a from-index does not merely lose it — it has a **live
+  > goja-vs-`-frozen` divergence**, which is the failure the matrix exists to
+  > catch, and it will surface as a byte-difference rather than as a hang if the
+  > walker happens to terminate.
+
+  > **⚠ CORRECTED 2026-08-10 — `string.split`, `array.join` and `array.length =`
+  > were listed here as absent and ALL THREE WORK**, in goja and under `-frozen`
+  > and in a native MetaJS binary: `"a,b,c".split(",").length` is 3,
+  > `[1,2,3].join("-")` is `1-2-3`, and assigning `a.length = 1` truncates. They
+  > are removed from the list above rather than left with a note, because a
+  > false gap costs more than a missing one — someone hand-writes a split.
+  > `tools/metajs-lint` deliberately carries no rule for them (a linter that
+  > fires on working code gets switched off), so this document was the only
+  > place the wrong claim survived. **Still genuinely absent, re-measured at the
+  > same time: `splice`, `lastIndexOf`, `toPrecision`, `for…in`** — each works
+  > under goja and dies under `-frozen` with *call of a non function value*,
+  > which is exactly the shape this section is about.
 - **A `var` declared in a `for`-init is scoped to that loop.** A second
   `for (i = 0; …)` reusing the name dies with "assignment to undeclared
   variable". Declare it standalone first.
