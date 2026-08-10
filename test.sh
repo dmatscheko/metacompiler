@@ -179,6 +179,96 @@ fi
 # classify it. A file that runs green untouched is reported FULL and cross-
 # checked goja vs -frozen; that language is ready to join the default matrix.
 
+# full_section_table prints one TAB-separated record per SECTION of $1:
+#
+#     id <TAB> name <TAB> first line <TAB> last line
+#
+# IT IS THE ONE PLACE THAT DECIDES WHERE A SECTION ENDS, and it exists because
+# the previous answer - "the section region ends at `===== END SECTIONS =====`" -
+# had silently stopped being true in ELEVEN of the sixteen ratchet files, and a
+# twelfth never had the marker at all (docs/todo.md 4.2, which named three of the
+# eleven). Both awks below used to `exit` at that marker, so every
+# section after it was invisible: it could not be isolated, it could not be
+# deleted-and-retried, and a grammar choking inside one reported
+#
+#     error at line N outside the sections (prologue/main must stay minimal)
+#
+# and gave up on the whole file - one broken section hiding every gap behind it.
+# Measured at f1910a9, sections living AFTER the marker: go 18, typescript 13,
+# js 12, python 11, bash 9, java 6, ruby 4, csharp 3, dart 3, kotlin 3, lua 1 =
+# 83, plus the last section of tests/metajs-test-full.js, which has no marker at
+# all and so ran off the end of the scan. 84 of 627 sections, unreachable.
+#
+# WHY THIS RATHER THAN MOVING THE MARKER IN EACH FILE. Moving it is the smaller
+# diff and it is the fragile one: the marker is a hand-maintained line in sixteen
+# files that different people append sections to, and it has already drifted in
+# eleven of them and gone missing in a twelfth. Nothing checks it, because it
+# IS the check. The boundary is derivable from structure that cannot drift - a
+# section header, and the SECTION-CALL driver that every one of these files must
+# have to run at all - so it is derived here instead, and the marker becomes one
+# optional hint among three rather than the only one. Ruby settles the argument
+# on its own: its driver is SPLIT, calls 01-38, then sections 40-43, then calls
+# 39-43, so there is no single position a marker could be moved to.
+#
+# The rule, in priority order. A section starts at its header and ends at the
+# line before the first ANCHOR after it:
+#
+#   * the next SECTION header               - it is not part of any section
+#   * an `===== END SECTIONS =====` marker   - same, and still honoured where it
+#                                             is placed correctly
+#   * the start of a DRIVER BLOCK - the first line of a run of `SECTION-CALL <nn>`
+#     lines - backed up over the lines that OPEN it, to the nearest blank line.
+#     That back-up is what keeps `function main() {` (and C#'s `static int Main()`
+#     plus its brace, and PHP's two `global` lines) out of the deletion; it never
+#     crosses a blank line, a header or a marker, and it is only ever applied to
+#     a driver anchor, because a header and a marker are lines that belong to
+#     nobody while a driver block has scaffolding above it.
+#   * nothing - end of file. That is the right answer for java, whose main() sits
+#     in the PROLOGUE and whose last section runs to the last line of the file.
+#
+# The name is extracted exactly as before, so multi-line section headers (bash 33,
+# csharp 33) keep reading the way they always did.
+#
+# CHECKED RATHER THAN ARGUED, over all sixteen files: every one of the 543
+# sections the old scan could see keeps BYTE-IDENTICAL bounds here, the 84 it
+# could not see are now bounded, no two ranges overlap, no range runs past the
+# end of its file, and no range contains a `SECTION-CALL <nn>` line - which is
+# the property that says a deletion cannot eat the driver.
+full_section_table() {
+    awk '
+        { line[NR] = $0 }
+        /===== SECTION [0-9]+:/ {
+            s = $0; sub(/.*SECTION /, "", s)
+            i = s; sub(/:.*/, "", i)
+            nm = s; sub(/^[0-9]*: */, "", nm); sub(/ =====.*/, "", nm)
+            nsec++; sid[nsec] = i; snm[nsec] = nm; sst[nsec] = NR
+            kind[NR] = "header"; prevcall = 0; next
+        }
+        /===== END SECTIONS/ { kind[NR] = "marker"; prevcall = 0; next }
+        {
+            iscall = ($0 ~ /SECTION-CALL [0-9]/)
+            if (iscall && !prevcall) kind[NR] = "driver"
+            prevcall = iscall
+        }
+        END {
+            for (k = 1; k <= nsec; k++) {
+                a = 0
+                for (j = sst[k] + 1; j <= NR; j++) if (kind[j] != "") { a = j; break }
+                if (a == 0) {
+                    e = NR
+                } else if (kind[a] == "driver") {
+                    e = a - 1
+                    while (e > sst[k] && line[e] !~ /^[ \t]*$/) e--
+                    if (e <= sst[k]) e = a - 1
+                } else {
+                    e = a - 1
+                }
+                printf "%s\t%s\t%d\t%d\n", sid[k], snm[k], sst[k], e
+            }
+        }
+    ' "$1"
+}
+
 # full_error_msg extracts the most telling line of a failed run's output.
 full_error_msg() {
     printf '%s\n' "$1" | grep -i 'error\|not implemented' | grep -v '^  ==> Fail' | head -1 | cut -c1-160 | grep . \
@@ -189,15 +279,27 @@ full_error_msg() {
 # (prologue + that section + main with only its call). Prints one line per
 # still-failing section.
 full_isolate() {
-    local G="$1" work="$2" iso="$2.iso"
+    local G="$1" work="$2" iso="$2.iso" tbl="$2.tbl"
     local id ids name rc out
-    ids="$(awk '/===== SECTION [0-9]+:/ { line = $0; sub(/.*SECTION /, "", line); sub(/:.*/, "", line); print line }' "$work")"
+    full_section_table "$work" > "$tbl"
+    ids="$(cut -f1 "$tbl")"
     for id in $ids; do
-        awk -v keep="$id" '
-            /===== SECTION [0-9]+:/ { line = $0; sub(/.*SECTION /, "", line); cur = line; sub(/:.*/, "", cur); insec = 1 }
-            /===== END SECTIONS/ { insec = 0 }
+        # Keep the skeleton (anything in no section's range) plus the one section
+        # being classified. The ranges come from full_section_table, so a section
+        # after the END SECTIONS marker is isolated like any other - before
+        # docs/todo.md 4.2 every such section was treated as skeleton and was
+        # therefore present in EVERY isolation run, which is how one unparsable
+        # late section could fail all of them.
+        awk -v keep="$id" -v tbl="$tbl" '
+            BEGIN {
+                while ((getline t < tbl) > 0) {
+                    split(t, f, "\t")
+                    for (i = f[3]; i <= f[4]; i++) owner[i] = f[1]
+                }
+                close(tbl)
+            }
             {
-                if (insec && cur != keep) next
+                if (owner[NR] != "" && owner[NR] != keep) next
                 if ($0 ~ /SECTION-CALL/ && $0 !~ ("SECTION-CALL " keep)) next
                 print
             }
@@ -210,14 +312,11 @@ full_isolate() {
             out="VACUOUS: exits 0 but never printed the summary line - main() is not being run"
         fi
         if [ "$rc" -ne 0 ]; then
-            name="$(awk -v want="$id" '/===== SECTION [0-9]+:/ {
-                line = $0; sub(/.*SECTION /, "", line); id = line; sub(/:.*/, "", id)
-                if (id == want) { nm = line; sub(/^[0-9]*: */, "", nm); sub(/ =====.*/, "", nm); print nm; exit }
-            }' "$work")"
+            name="$(awk -F'\t' -v want="$id" '$1 == want { print $2; exit }' "$tbl")"
             printf '    - %s %s: %s\n' "$id" "$name" "$(full_error_msg "$out")"
         fi
     done
-    rm -f "$iso"
+    rm -f "$iso" "$tbl"
 }
 
 # full_probe writes the gap report for one grammar/test-file pair to $3.
@@ -333,7 +432,25 @@ full_probe() {
             # Where did it choke? Parse failures, "not implemented" aborts and
             # generic "line N" messages carry a position; everything else goes
             # through the per-section isolation fallback.
+            #
+            # TWO SPELLINGS, and the first one has not existed for a long time.
+            # abnf/parser.go:1288 says
+            #
+            #     Not everything could be parsed. Last good parse position: <file>:<ln>:<col>
+            #
+            # and the pattern here only knew the older `was ln N,` wording, so it
+            # matched NOTHING: every parse failure in every ratchet fell through to
+            # the isolation fallback and was reported as "error without a usable
+            # position", which is the slowest path and the least informative one.
+            # Found while probing docs/todo.md 4.2 - a deliberately broken section
+            # in lua was reported as 25 VACUOUS sections plus one real gap, and the
+            # dead sed is half of why. Both spellings are read now; the old one
+            # costs a line and cannot fire wrongly.
             ln="$(printf '%s\n' "$out" | sed -n 's/.*Last good parse position was ln \([0-9][0-9]*\),.*/\1/p' | head -1)"
+            if [ -z "$ln" ]; then
+                ln="$(printf '%s\n' "$out" \
+                      | sed -n 's/.*Last good parse position: .*:\([0-9][0-9]*\):[0-9][0-9]*.*/\1/p' | head -1)"
+            fi
             reason="does not parse"
             if [ -z "$ln" ]; then
                 impl="$(printf '%s\n' "$out" | grep 'not implemented' | head -1)"
@@ -352,20 +469,8 @@ full_probe() {
                 full_isolate "$G" "$work"
                 break
             fi
-            info="$(awk -v L="$ln" '
-                /===== SECTION [0-9]+:/ {
-                    if (insec && L >= start && L < NR) { printf "%s\t%s\t%d\t%d\n", id, name, start, NR - 1; exit }
-                    line = $0
-                    sub(/.*SECTION /, "", line); id = line; sub(/:.*/, "", id)
-                    name = line; sub(/^[0-9]*: */, "", name); sub(/ =====.*/, "", name)
-                    start = NR; insec = 1
-                    next
-                }
-                /===== END SECTIONS/ {
-                    if (insec && L >= start && L < NR) { printf "%s\t%s\t%d\t%d\n", id, name, start, NR - 1 }
-                    exit
-                }
-            ' "$work")"
+            info="$(full_section_table "$work" \
+                    | awk -F'\t' -v L="$ln" '$3 <= L && L <= $4 { print; exit }')"
             if [ -z "$info" ]; then
                 printf '    error at line %s outside the sections (prologue/main must stay minimal): %s\n' "$ln" "$(full_error_msg "$out")"
                 break
@@ -442,10 +547,39 @@ if [ "$FULL" -eq 1 ]; then
     # assertions below baseline as though that were the answer.
     #   1. the per-language line still carries the literal token RUN-FAILED,
     #      which is what tests/gates.sh greps for;
-    #   2. the total line is followed by an explicit statement that the total is
-    #      NOT a measurement, naming the languages that contributed nothing;
+    #   2. the total line SAYS SO ON ITSELF, and is followed by an explicit
+    #      statement naming what each killed language did and did not contribute;
     #   3. this group exits NON-ZERO when anything was killed - the only case in
     #      which it does. A language GAP remains informational, exit 0.
+    #
+    # WHAT A KILLED LANGUAGE CONTRIBUTES TO THE TOTAL (docs/todo.md 4.4). If one
+    # half was killed and the other finished, the survivor's count IS added, and
+    # that is a deliberate choice re-argued rather than inherited from e1816b3:
+    # zeroing the language would move the total FURTHER from the answer - by that
+    # language's whole ratchet, typically hundreds of assertions - and the number
+    # people read next to it is FULL_ASSERTIONS, a floor. A total short by 1,500
+    # because a run was killed and a total short by 1,500 because someone deleted
+    # a section look identical, and only one of them is a defect. Keeping the
+    # survivor's count means the residual delta still measures assertion LOSS.
+    #
+    # WHAT ACTUALLY CHANGES, then, is the READING of it, not the arithmetic:
+    # the total line was UNMARKED. It read exactly like a clean one, so the number
+    # could be quoted - or written into FULL_ASSERTIONS - with the disclaimer
+    # three lines below it left behind. The line now carries the disclaimer
+    # itself, and the banner names the surviving half's number instead of leaving
+    # the reader to work out which number is the suspect one. The leading
+    # "<N> assertions in total" spelling is preserved for tests/gates.sh's sed:
+    # it must still SEE the number to report it short.
+    #
+    # One SUSPECTED half of the defect turned out not to be live, and saying so is
+    # worth more than pretending it was. The contribution is v[0], the first half
+    # in the sorted list, which looks order-dependent - kill the interpreter and
+    # get 0, kill the compiler and get the full count. It is not: MEASURED at
+    # f1910a9 by injecting rc=124 for one grammar, a one-half kill on lua gave
+    # `384 assertions in total` BOTH ways, because the feeding pipeline sorts
+    # WHOLE LINES and "384" sorts before "RUN-FAILED". The asymmetry is latent,
+    # not live; it is spelled out at the site below rather than left resting on
+    # the ASCII order of a token name.
     awk_out="$RESDIR/full.summary"
     for r in $REPORTS; do
         [ -f "$r.lang" ] || continue
@@ -453,8 +587,8 @@ if [ "$FULL" -eq 1 ]; then
     done | sort | awk -F'\t' -v tmo="$TIMEOUT" '
         { if ($1 != last) { if (last != "") emit(); last = $1; n = 0 }
           v[n++] = $2 }
-        function emit(   i, bad, killed) {
-            bad = 0; killed = 0
+        function emit(   i, bad, killed, got) {
+            bad = 0; killed = 0; got = ""
             for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
             # FROZEN-DIFF is not a count: it is the marker written above when a
             # half is FULL under goja but differs under -frozen. Flag it even when
@@ -473,18 +607,43 @@ if [ "$FULL" -eq 1 ]; then
                               for (i = 0; i < n; i++) printf " %s", v[i]
                               printf "\n"; mismatch++ }
             else            printf "  %-12s %s\n", last, v[0]
-            total += (v[0] ~ /^[0-9]+$/ ? v[0] : 0)
+            # WHICH value of a killed language goes into the total. v[0] gives
+            # the right answer today only by accident: the feeding pipeline sorts
+            # WHOLE LINES, so "lua<TAB>384" sorts before "lua<TAB>RUN-FAILED"
+            # because "3" < "R", and the surviving count therefore lands in v[0]
+            # whichever half died. Rename the token and the total changes. Say it
+            # instead of leaning on ASCII. Every other case keeps v[0] exactly, so
+            # this cannot move the number on a clean run.
+            if (killed) { for (i = 0; i < n; i++) if (v[i] ~ /^[0-9]+$/ && got == "") got = v[i] }
+            else if (v[0] ~ /^[0-9]+$/) got = v[0]
+            if (got != "") total += got
+            if (killed) {
+                if (got != "") survived = survived sprintf("\n  %s contributed %s, from the ONE half that finished; the other measured nothing.", last, got)
+                else           survived = survived sprintf("\n  %s contributed NOTHING - both halves were killed.", last)
+            }
         }
         END { if (last != "") emit()
-              # KEEP THIS LINE SPELLED EXACTLY LIKE THIS: tests/gates.sh reads the
-              # number out of it with a sed on "^ *N assertions in total".
-              printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch
+              # KEEP THE LEADING "<N> assertions in total" SPELLING: tests/gates.sh
+              # reads the number out of it with a sed on "^ *N assertions in total"
+              # and must keep seeing it, so that a short read is reported as short
+              # rather than as "no total at all". Everything after the number is
+              # free text, which is where the kill disclaimer goes - ON THE LINE,
+              # so the number cannot be quoted without it (docs/todo.md 4.4).
+              if (nkilled > 0)
+                  printf "\n  %d assertions in total - NOT A MEASUREMENT, %d language(s) killed, see below; %d languages with halves that disagree\n", total, nkilled, mismatch
+              else
+                  printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch
               if (nkilled > 0) {
                   printf "\n  %d LANGUAGE(S) WERE KILLED BY THE %s s --timeout:%s\n", nkilled, tmo, killednames
                   printf "  A killed run records NO COUNT, so THE TOTAL ABOVE IS NOT A MEASUREMENT - it\n"
                   printf "  is a smaller number with holes in it, and that is the exact failure mode the\n"
                   printf "  FULL_ASSERTIONS floor in tests/gates.sh exists to catch. Nothing diverged and\n"
                   printf "  nothing ran. Re-run on a quieter machine, or:  ./test.sh --full --timeout %d\n", tmo * 2
+                  # Name the suspect number instead of leaving it to be worked out.
+                  # A half that finished IS counted (the alternative moves the total
+                  # further from the answer, by a whole ratchet file) - so
+                  # say which languages those are and how much each of them put in.
+                  printf "  What the killed languages put into the total above:%s\n", survived
               }
             }' | tee "$awk_out"
     # exit 1 iff something was killed. Language gaps stay informational. The

@@ -5800,8 +5800,13 @@ long host_call(long id, long self, long args) {
 	/* clz32 and fround exist in goja's Math and did not exist in the other two
 	 * engines, so `Math.clz32(1)` answered 31 in the js interpreter half under
 	 * goja and aborted with `call of a non function value` under -frozen: a live
-	 * FROZEN-DIFF that no test reached. Math.random is the third goja-only member
-	 * and is DELIBERATELY not converged - see abnf/hostglobals_test.go. */
+	 * FROZEN-DIFF that no test reached. Math.random was the third goja-only
+	 * member and it is converged the OTHER WAY, in goja: it needs a random
+	 * number generator here and a nondeterministic one would fail the matrix by
+	 * construction, so abnf/commonscript.go's installGojaMathSurface deletes the
+	 * name from the grammar host instead, and the floor gains no line. There is
+	 * no goja-only Math member left; abnf/hostglobals_test.go now compares the
+	 * whole surface with no exemption at all (docs/todo.md 4.1). */
 	if (id == 92) { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
 	if (id == 93) { return mk_dnum(d_fround(arg_d(args, 0))); }
 	die("unknown host function");

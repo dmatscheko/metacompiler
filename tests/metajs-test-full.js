@@ -1771,6 +1771,20 @@ function s31() {
     check("hg35", sprint("a", 1) === "a1" && sprint(1, "a") === "1a")
     check("hg36", sprint() === "")
     check("hg37", String.fromCharCode(65, 66) === "AB")
+    // Math.random is ABSENT, and this is the one absence that CAN be asserted
+    // here. The note above says absence is unassertable because an unbound name
+    // is a hard "variable not defined" abort - but Math is bound in all three
+    // engines, so a MEMBER of it answers a real "undefined" instead of aborting.
+    //
+    // It reads as a tautology and is not. Until 2026-08-10 goja's Math carried a
+    // `random` the other three engines did not, so this exact line was red in one
+    // engine BY CONSTRUCTION and could not be written - which is why todo.md 4.1
+    // existed. The convergence had to go this way round: the other three could
+    // only gain the name by putting an RNG in the floor, and a member answering
+    // differently per call fails the matrix by definition, while a deterministic
+    // one would agree with neither goja nor any real toolchain. So goja lost it,
+    // the same direction and argument as installGojaCaseMapping.
+    check("hg38", typeof Math.random === "undefined")
 }
 
 // ===== SECTION 32: string case mapping is the SIMPLE per-rune mapping =====

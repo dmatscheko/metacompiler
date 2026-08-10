@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"14.gy/mec/abnf/r"
 	"github.com/dop251/goja"
 )
 
@@ -183,7 +184,9 @@ func diffNames(t *testing.T, aName string, a []string, bName string, b []string)
 //	Math.clz32(1)   31 under goja, and "call of a non function value" under -frozen
 //
 // were all live, and no gate in this project could see any of them (docs/todo.md
-// 1.1). The sets are equal now, up to the two documented exceptions below.
+// 1.1). The sets are equal now, WITH NO EXCEPTION AT ALL: `random` was the last
+// one and docs/todo.md 4.1 closed it by removing the name from goja instead of
+// inventing it in the other two (abnf/commonscript.go, installGojaMathSurface).
 func TestMathMembersAgree(t *testing.T) {
 	floor := floorMathMemberNames(t)
 	twin := twinMathMemberNames()
@@ -198,17 +201,14 @@ func TestMathMembersAgree(t *testing.T) {
 		"goja's own Math (the grammar host of every interpreter half)", goja)
 }
 
-// gojaOnlyMathMembers are the members goja's Math has that the other two engines
-// deliberately do not. Adding an entry here is a DECISION, not a fix.
-//
-//	random  a nondeterministic member CANNOT be converged: the matrix demands
-//	        byte-identical output from goja and -frozen, so any Math.random that
-//	        actually answered differently per run would fail it by construction,
-//	        and a deterministic one would agree with neither goja nor any real
-//	        toolchain. `Math.random` therefore stays a goja-only name: a program
-//	        that calls it works in an interpreter half under goja and aborts
-//	        under -frozen, which is the honest report of the situation.
-var gojaOnlyMathMembers = map[string]bool{"random": true}
+// There is no exemption list any more, and that is the whole of docs/todo.md 4.1.
+// `random` used to be one: it was the last member goja's Math had and the other
+// two engines did not, and the argument written here was that a nondeterministic
+// member cannot be converged - which is true, and which is why the direction is
+// the other one. abnf/commonscript.go's installGojaMathSurface DELETES
+// Math.random from the grammar host, so all four engines agree the name does not
+// exist, and this test now compares the ENTIRE Math surface with nothing skipped.
+// Reintroducing a goja-only member is therefore a red test rather than a comment.
 
 var seedHostMathRe = regexp.MustCompile(`seed_host\(math, "([^"]+)"`)
 var objPutMathRe = regexp.MustCompile(`obj_put\(math, mk_cstr\("([^"]+)"\)`)
@@ -239,15 +239,27 @@ func twinMathMemberNames() []string {
 
 // gojaMathMemberNames asks goja itself rather than reading a source file, which
 // is the only way to get this set: goja's Math is native to the library.
+//
+// It builds the VM through NewCommonScript rather than from a bare goja.New(),
+// and that is deliberate rather than convenient: the grammar host EDITS its Math
+// (installGojaMathSurface removes `random`, docs/todo.md 4.1), so a bare runtime
+// would answer for an engine this project does not have. Calling the installer
+// directly would be worse than either - it would keep the test green if the CALL
+// were dropped from NewCommonScript while the divergence came back in every
+// grammar. Mutation-proved both ways: removing the `delete` from the installer,
+// and removing the installer call from NewCommonScript, each turn
+// TestMathMembersAgree red with `only in goja's own Math: [random]`.
 func gojaMathMemberNames(t *testing.T) []string {
 	vm := goja.New()
+	fm := map[string]r.Object{}
+	NewCommonScript(vm, &fm, true)
 	v, err := vm.RunString(`Object.getOwnPropertyNames(Math).join(",")`)
 	if err != nil {
 		t.Fatalf("goja: %v", err)
 	}
 	out := []string{}
 	for _, n := range strings.Split(v.String(), ",") {
-		if n == "" || gojaOnlyMathMembers[n] {
+		if n == "" {
 			continue
 		}
 		out = append(out, n)

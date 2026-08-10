@@ -389,6 +389,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("llvm", newHostAPIObject(vm, llvmFuncMap))
 
 	installGojaCaseMapping(vm)
+	installGojaMathSurface(vm)
 
 	return &common
 }
@@ -431,6 +432,59 @@ func installGojaCaseMapping(vm *goja.Runtime) {
 		String.prototype.toLowerCase = function () { return __goStrLower(String(this)) };
 	`); err != nil {
 		panic(err)
+	}
+}
+
+// installGojaMathSurface removes Math.random from the goja grammar host, so that
+// all four engines agree that the name does not exist.
+//
+// WHY. `typeof Math.random` was "function" under goja and "undefined" under
+// -frozen, under llvm.Run and in a native binary (docs/todo.md 4.1, recorded and
+// left by 1367c23 as "the same invisible class" as the Math MEMBERS divergence
+// that commit found). Measured on this tree before the change, one MetaJS program
+// through all four legs:
+//
+//	                       goja      -frozen   llvm.Run   native
+//	typeof Math.random     function  undefined undefined  undefined
+//	typeof Math.sin        function  function  function   function
+//	typeof Math.clz32      function  function  function   function
+//
+// It is a live goja-vs--frozen divergence in every interpreter half - `Math` in
+// languages/metajs-interpreter.abnf's hostGlobals IS the grammar host's Math -
+// and no gate could reach it, because a program that calls Math.random cannot be
+// in the matrix: the matrix demands byte-identical output from the two engines.
+//
+// THE DIRECTION IS FORCED, and this is the point rather than a preference. The
+// other three engines could only gain the name by gaining a random number
+// generator in languages/lib/runtime.c, and a member that actually answered
+// differently per call would fail the matrix by construction, while a
+// deterministic one would agree with neither goja nor any real toolchain. So the
+// only convergent answer is the one three engines already give: the name is
+// absent. goja is the outlier and goja is the one that moves - the same argument,
+// and the same direction, as installGojaCaseMapping above.
+//
+// WHAT THIS MAKES PINNABLE. Before, an assertion on `typeof Math.random` was red
+// in one engine by construction and read as FROZEN-DIFF rather than as a pin.
+// After, `typeof Math.random === "undefined"` holds in all four, and
+// abnf/hostglobals_test.go pins it at the source: with the exemption for `random`
+// gone, that test now compares goja's ENTIRE Math surface - through this
+// function - against the Go twin's and against languages/lib/runtime.c's, and
+// fails on any name that only one engine has.
+//
+// Nothing in this repository calls Math.random: `grep -rn 'Math.random' languages
+// abnf tools` finds only comments. A program that called it used to work in an
+// interpreter half under goja alone; now it fails the same way in all four, which
+// is the honest report.
+func installGojaMathSurface(vm *goja.Runtime) {
+	// Math.random is a writable, configurable own property in ES and in goja, so
+	// `delete` is enough; the check is here because a silent failure would leave
+	// the divergence in place while every gate went green.
+	v, err := vm.RunString(`delete Math.random; typeof Math.random`)
+	if err != nil {
+		panic(err)
+	}
+	if v.String() != "undefined" {
+		panic("installGojaMathSurface: Math.random survived the delete (" + v.String() + ")")
 	}
 }
 
