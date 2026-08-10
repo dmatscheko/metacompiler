@@ -117,16 +117,23 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=8733      # fourteenth round, +148 over the thirteenth's 8585:
-                          # js+ts +46 (sloppy-mode `this` behind a per-function
-                          # strict flag, inherited statics), bash +50 (assignment
-                          # RHS field splitting, four declaration gaps), kotlin +26
-                          # (`with` receivers, two hijacks, an exact %f), dart +26
-                          # (implements/with/on recorded, IndexError -> RangeError).
-                          # Raised by the coordinator AFTER the round was committed,
-                          # from a committed tree: every one of the six agents
-                          # reported "+N, RAISE FULL_ASSERTIONS" and none of them
-                          # did it, which is the rule below working as intended.
+FULL_ASSERTIONS=8927      # FIFTEENTH round, +194 over the fourteenth's 8733:
+                          # js+ts +93 (parenthesized-call receivers, the static
+                          # namespace), bash +51 (printf/read field splitting,
+                          # subscripted pattern operators, IFS-whitespace words),
+                          # ruby +32 (%B/%u/%c/%p, character-counted width, the
+                          # infinity hang), dart +17 (typed patterns actually
+                          # testing their type), kotlin/python/ruby +20 (full
+                          # case-mapping pins for 1367c23, which one language had
+                          # been asserting on behalf of sixteen).
+                          #
+                          # TEN AGENTS RAN IN THIS ROUND. Every one of them saw
+                          # "+N, RAISE FULL_ASSERTIONS" and NOT ONE of them raised
+                          # it - including the two that added 93 and 51 assertions
+                          # themselves. Raised here by the coordinator afterwards,
+                          # from a committed tree, for the reason above. The rule
+                          # costs each agent one line of report and it has now held
+                          # sixteen agents in a row across two rounds.
 
 SHAPE_GROUPS=15           # recorded 2026-08-08 at 6f60337
 SHAPE_LINES=481           # recoverable lines, same commit
