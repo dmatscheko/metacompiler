@@ -2520,6 +2520,78 @@ function s44(): void {
     })() === "S44C.ionly is not a function");
 }
 
+// ===== SECTION 45: a class object's OWN KEYS, e.constructor, and a method value's
+//       OVERRIDABLE receiver (docs/todo.md 2.10) =====
+// Three holes in the object model, all of them agreed-and-wrong or wrong in two
+// different ways, and none of them asserted anywhere before:
+//
+//   Object.keys(<class>)  node lists the static FIELDS. This engine listed nothing
+//                         (interpreter: a descriptor has no __keys) or the INSTANCE
+//                         methods (compiler: js_keys reads the descriptor's own map).
+//                         A static method, a static accessor and a private static are
+//                         not enumerable; a runtime `C.zz = 1` is.
+//   e.constructor         undefined in all four engines; node hands back the class,
+//                         and the FUNCTION itself for `new F()`.
+//   f.call(x)             a method read AS A VALUE - `const f = o.m`, `super.m` -
+//                         kept the receiver the READ was made with and ignored x.
+//
+// Every operand comes out of s45a so the constant folder cannot answer any of it.
+var s45a: any[] = [1, "two", 3, "m", "who", "constructor"];
+class S45C {
+    static sf: number = s45a[0];
+    static sf2: string = s45a[1];
+    static sm(): string { return "sm" }
+    static get sg(): string { return "sg" }
+    m(): string { return "m" }
+    get g(): string { return "g" }
+    iv: number = s45a[0];
+}
+class S45Sub extends S45C { static own: number = s45a[2]; }
+class S45B { nm: string = ""; who(): string { return "B/" + this.nm } }
+class S45D extends S45B {
+    constructor() { super(); this.nm = "d" }
+    paren(): string { return (super.who)() }
+    callx(o: any): string { return super.who.call(o) }
+    applyx(o: any): string { return super.who.apply(o, []) }
+    bindx(o: any): string { return super.who.bind(o)() }
+}
+function S45F(n: any) { (this as any).nm = n }
+
+function s45(): void {
+    // A static FIELD is enumerable; a static method, a static accessor and the
+    // instance members are not, and an inherited static is not an OWN key.
+    check("keys01", Object.keys(S45C).join("|") === "sf|sf2")
+    check("keys02", Object.keys(S45Sub).join("|") === "own")
+    check("keys03", Object.values(S45C).join("|") === "1|two")
+    var en: any[] = Object.entries(S45C)
+    check("keys04", en.length === 2 && en[0][0] === "sf" && en[0][1] === 1 && en[1][1] === "two")
+    ;(S45C as any).zz = s45a[2]
+    check("keys05", Object.keys(S45C).join("|") === "sf|sf2|zz" && (S45C as any).zz === 3)
+    var fi: string[] = []
+    for (var k in S45C) { fi.push(k) }
+    check("keys06", fi.join("|") === "sf|sf2|zz")
+    check("keys07", Object.keys(Object.assign({}, S45C)).join("|") === "sf|sf2|zz")
+    check("keys08", Object.keys(new S45C()).join("|") === "iv")
+    // The class object still answers every static it did before.
+    check("keys09", S45C.sm() === "sm" && S45C.sg === "sg" && S45Sub.sm() === "sm")
+    var c: any = new S45C()
+    check("ctor01", c.constructor === S45C && c.constructor.name === "S45C")
+    check("ctor02", (new S45Sub()).constructor === S45Sub)
+    check("ctor03", (s45a[5] in c) === true)
+    check("ctor04", (new S45F("f")).constructor === S45F)
+    check("ctor05", Object.keys(c).join("|") === "iv")
+    // A method read as a VALUE takes the receiver of the call that eventually runs
+    // it, and keeps the read-time one only when the call supplies none.
+    var d: S45D = new S45D()
+    var o: any = {nm: "x"}
+    check("recv01", d.callx(o) === "B/x")
+    check("recv02", d.applyx(o) === "B/x")
+    check("recv03", d.bindx(o) === "B/x")
+    check("recv04", d.paren() === "B/d")
+    var bm: any = d.who
+    check("recv05", bm.call(o) === "B/x" && bm.apply(o, []) === "B/x" && bm.bind(o)() === "B/x")
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -2565,6 +2637,7 @@ function main(): number {
     s42(); // SECTION-CALL 42
     s43(); // SECTION-CALL 43
     s44(); // SECTION-CALL 44
+    s45(); // SECTION-CALL 45
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

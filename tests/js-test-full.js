@@ -2453,6 +2453,78 @@ function s47() {
     })() === "S47C.ionly is not a function");
 }
 
+// ===== SECTION 48: a class object's OWN KEYS, e.constructor, and a method value's
+//       OVERRIDABLE receiver (docs/todo.md 2.10) =====
+// Three holes in the object model, all of them agreed-and-wrong or wrong in two
+// different ways, and none of them asserted anywhere before:
+//
+//   Object.keys(<class>)  node lists the static FIELDS. This engine listed nothing
+//                         (interpreter: a descriptor has no __keys) or the INSTANCE
+//                         methods (compiler: js_keys reads the descriptor's own map).
+//                         A static method, a static accessor and a private static are
+//                         not enumerable; a runtime `C.zz = 1` is.
+//   e.constructor         undefined in all four engines; node hands back the class,
+//                         and the FUNCTION itself for `new F()`.
+//   f.call(x)             a method read AS A VALUE - `const f = o.m`, `super.m` -
+//                         kept the receiver the READ was made with and ignored x.
+//
+// Every operand comes out of s48a so the constant folder cannot answer any of it.
+var s48a = [1, "two", 3, "m", "who", "constructor"];
+class S48C {
+    static sf = s48a[0];
+    static sf2 = s48a[1];
+    static sm() { return "sm" }
+    static get sg() { return "sg" }
+    m() { return "m" }
+    get g() { return "g" }
+    iv = s48a[0];
+}
+class S48Sub extends S48C { static own = s48a[2]; }
+class S48B { who() { return "B/" + this.nm } }
+class S48D extends S48B {
+    constructor() { super(); this.nm = "d" }
+    paren() { return (super.who)() }
+    callx(o) { return super.who.call(o) }
+    applyx(o) { return super.who.apply(o, []) }
+    bindx(o) { return super.who.bind(o)() }
+}
+function S48F(n) { this.nm = n }
+
+function s48() {
+    // A static FIELD is enumerable; a static method, a static accessor and the
+    // instance members are not, and an inherited static is not an OWN key.
+    check("keys01", Object.keys(S48C).join("|") === "sf|sf2")
+    check("keys02", Object.keys(S48Sub).join("|") === "own")
+    check("keys03", Object.values(S48C).join("|") === "1|two")
+    var en = Object.entries(S48C)
+    check("keys04", en.length === 2 && en[0][0] === "sf" && en[0][1] === 1 && en[1][1] === "two")
+    S48C.zz = s48a[2]
+    check("keys05", Object.keys(S48C).join("|") === "sf|sf2|zz" && S48C.zz === 3)
+    var fi = []
+    for (var k in S48C) { fi.push(k) }
+    check("keys06", fi.join("|") === "sf|sf2|zz")
+    check("keys07", Object.keys(Object.assign({}, S48C)).join("|") === "sf|sf2|zz")
+    check("keys08", Object.keys(new S48C()).join("|") === "iv")
+    // The class object still answers every static it did before.
+    check("keys09", S48C.sm() === "sm" && S48C.sg === "sg" && S48Sub.sm() === "sm")
+    var c = new S48C()
+    check("ctor01", c.constructor === S48C && c.constructor.name === "S48C")
+    check("ctor02", (new S48Sub()).constructor === S48Sub)
+    check("ctor03", (s48a[5] in c) === true)
+    check("ctor04", (new S48F("f")).constructor === S48F)
+    check("ctor05", Object.keys(c).join("|") === "iv")
+    // A method read as a VALUE takes the receiver of the call that eventually runs
+    // it, and keeps the read-time one only when the call supplies none.
+    var d = new S48D()
+    var o = {nm: "x"}
+    check("recv01", d.callx(o) === "B/x")
+    check("recv02", d.applyx(o) === "B/x")
+    check("recv03", d.bindx(o) === "B/x")
+    check("recv04", d.paren() === "B/d")
+    var bm = d.who
+    check("recv05", bm.call(o) === "B/x" && bm.apply(o, []) === "B/x" && bm.bind(o)() === "B/x")
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -2501,6 +2573,7 @@ function main() {
     s45() // SECTION-CALL 45
     s46() // SECTION-CALL 46
     s47() // SECTION-CALL 47
+    s48() // SECTION-CALL 48
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

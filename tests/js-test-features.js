@@ -604,6 +604,26 @@ check("static-namespace", (function () {
         && d.paren() === "B/d";
 })());
 
+// ----- a class object's OWN KEYS, e.constructor, and a method value's receiver -----
+// docs/todo.md 2.10: Object.keys of a class object listed nothing (interpreter) or the
+// INSTANCE methods (compiler) where node lists the static FIELDS; `e.constructor` was
+// undefined in all four engines; and a method read AS A VALUE ignored the receiver of
+// the .call/.apply/.bind that ran it. The wide version is SECTION 48 of
+// tests/js-test-full.js; this is the smallest program that fails at f1910a9.
+check("object-model-2-10", (function () {
+    var a = [1, "two", "x"];
+    class C { static sf = a[0];  static sm() { return "sm" }  m() { return "m" }  get g() { return "g" } }
+    class B { who() { return "B/" + this.nm } }
+    class D extends B { constructor() { super(); this.nm = "d" }  callx(o) { return super.who.call(o) }  paren() { return (super.who)() } }
+    var d = new D();
+    var o = {nm: a[2]};
+    var bm = d.who;
+    return Object.keys(C).join("|") === "sf" && Object.keys(new C()).join("|") === ""
+        && C.sm() === "sm" && d.constructor === D && d.constructor.name === "D"
+        && ("constructor" in d) === true
+        && d.callx(o) === "B/x" && d.paren() === "B/d" && bm.call(o) === "B/x";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

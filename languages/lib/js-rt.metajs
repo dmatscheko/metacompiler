@@ -39,7 +39,14 @@
 //     layer 2, NEUTRAL       10   js_has, js_defprop, js_iterable, js_supercall,
 //                                 js_supget, js_supset, js_call_new, js_this,
 //                                 js_newtarget, js_scope_set_or_create
-//     layer 2, JS's own      38   js_js* and js_jsx*
+//     layer 2, JS's own      41   js_js* and js_jsx*
+//
+// Three of those 41 exist ONLY because the shared name could not be changed:
+// js_jskeys, js_jssupget and js_jssfield answer what js_keys / js_supget / js_set
+// answer for everything except a CLASS DESCRIPTOR, whose object model js/ts alone
+// has (docs/todo.md 2.10). The extern map is one map for every language, so a fixed
+// behaviour that only js/ts should see needs a js-only name - manual chapter 4's
+// js_jvsub / js_csmcall / js_ktsmcall rule.
 //
 // ----- what js/ts did NOT need, checked rather than assumed -------------------
 //
@@ -616,6 +623,87 @@ function js_jsstatics(cls) {
     return t
 }
 
+// ----- which static members of a class are ENUMERABLE (docs/todo.md 2.10) -----
+//
+// A class object's own enumerable properties are its static FIELDS plus anything a
+// runtime `C.zz = 1` put there. A static METHOD and a static ACCESSOR are not
+// enumerable, and neither is `name`. All of them live in the SAME __statics table,
+// so that jvStaticFind walks one chain - and so keysOf of that table cannot separate
+// them. The enumerable names are therefore listed beside them under __sfk, which
+// keysOf hides for being __-prefixed. Twins: jsvSfTrack / jsvStaticEnumKeys in
+// abnf/jsrtjsprint.go, and the statics table's own __keys list in the two
+// *-interpreter.abnf start scripts.
+
+// js_jssfield(statics, key, value): file one static FIELD. The emitter calls this
+// instead of js_set in emitClass's static-field loop; a static method or accessor
+// goes in with a plain js_set / js_defprop and stays non-enumerable.
+// js_jskeys is js_keys plus the class-descriptor arm: the floor's js_keys answers a
+// class descriptor's own key map, which is its INSTANCE methods, so `{...C}` copied
+// the methods and `for (k in C)` enumerated them. Twin: m["js_jskeys"] in
+// abnf/jsrtjsprint.go.
+function js_jskeys(o) {
+    if (jvIsClassDesc(o)) { return jvStaticEnumKeys(o) }
+    // keysOf, not js_keys: an EXTERN is only callable from an emitted module, and
+    // `js_keys(o)` from here linked and then died with "ReferenceError: js_keys is
+    // not defined" on the first spread in a NATIVE binary - which no gate below
+    // clang-check can see. host id 61 IS js_keys (languages/lib/runtime.c:5551), so
+    // this is the same function under the name layer 2 can reach.
+    return keysOf(o)
+}
+
+function js_jssfield(statics, key, v) {
+    var k = jvStr(key)
+    statics[k] = v
+    jvSfTrack(statics, k)
+    return undefined
+}
+
+function jvSfTrack(statics, k) {
+    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return undefined } }
+    var lst = anytype
+    lst = statics["__sfk"]
+    if (!Array.isArray(lst)) {
+        lst = []
+        statics["__sfk"] = lst
+    }
+    if (lst.indexOf(k) < 0) { lst.push(k) }
+    return undefined
+}
+
+// Object.keys of a class object.
+function jvStaticEnumKeys(cls) {
+    var t = anytype
+    t = cls["__statics"]
+    if (!jvIsObj(t)) { return [] }
+    var lst = anytype
+    lst = t["__sfk"]
+    if (!Array.isArray(lst)) { return [] }
+    var out = []
+    var i = 0
+    while (i < lst.length) {
+        out.push(lst[i])
+        i = i + 1
+    }
+    return out
+}
+
+// What `x.constructor` answers for an object this engine built: the class descriptor
+// the instance carries, or - for an instance of a constructor FUNCTION - the function
+// itself, which js_jsctordesc remembers under __ctorfn. undefined for a value with no
+// __class at all (a plain object literal; node answers Object there, which needs a
+// prototype chain this value model does not have). Twins: jsvConstructorOf in
+// abnf/jsrtjsprint.go and classCtorOf in the two *-interpreter.abnf start scripts.
+// docs/todo.md 2.10.
+function jvConstructorOf(o) {
+    var cls = anytype
+    cls = o["__class"]
+    if (!jvIsObj(cls)) { return undefined }
+    var fn = anytype
+    fn = cls["__ctorfn"]
+    if (fn !== undefined) { return fn }
+    return cls
+}
+
 function jvIsClassDesc(v) {
     if (!jvIsObj(v)) { return false }
     return v["__isclass"] === true
@@ -923,7 +1011,18 @@ function jvFindClassMethod(o, name) {
 // same), so the shim rebuilds that argument list.
 function jvBoundMethod(fn, self) {
     return function () {
-        var a = [self]
+        // AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` (and the same shim
+        // reached through js_supget, so `super.m.call(x)`) runs the method on x in
+        // node; this shim used to ignore x and always re-enter with the receiver the
+        // READ was made with, in all four engines. jvThis is the receiver channel the
+        // emitter arms with js_jssetthis IMMEDIATELY BEFORE EVERY CALL - a plain
+        // `f()` therefore arms undefined, which keeps the read-time receiver and
+        // leaves `(super.who)()` behaving as it did. Every layer-2 callback site goes
+        // through jvCallT, which arms it too. docs/todo.md 2.10.
+        var recv = anytype
+        recv = jvThis
+        if (recv === undefined) { recv = self }
+        var a = [recv]
         var i = 0
         while (i < arguments.length) {
             a.push(arguments[i])
@@ -1035,6 +1134,14 @@ function jvValueMiss(o, key) {
         if (key == "then" || key == "catch" || key == "finally") {
             if (jpIs(o)) { return jpBound(o, key) }
         }
+        // `e.constructor` is the CLASS an instance was built from. It answered
+        // undefined in all four engines where node hands back the class object (and,
+        // for `new F()`, the function F itself). docs/todo.md 2.10.
+        if (key == "constructor") {
+            var cf = anytype
+            cf = jvConstructorOf(o)
+            if (cf !== undefined) { return cf }
+        }
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvBoundMethod(fn, o) }
@@ -1065,6 +1172,11 @@ function js_jshas(o, key) {
             }
         }
         if (js_has(o, key)) { return true }
+        // `"constructor" in e` is true in node for every instance, and the read
+        // answers it now. docs/todo.md 2.10.
+        if (k == "constructor") {
+            if (jvConstructorOf(o) !== undefined) { return true }
+        }
         if (jvFindClassMethod(o, k) !== undefined) { return true }
         return false
     }
@@ -1088,6 +1200,9 @@ function js_jsmset(o, key, v) {
             var st = o["__statics"]
             if (!jvIsObj(st)) { st = js_jsstatics(o) }
             st[sk] = v
+            // A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
+            // object, exactly as it does on any other object. docs/todo.md 2.10.
+            jvSfTrack(st, sk)
             return undefined
         }
     }
@@ -1247,6 +1362,13 @@ function js_supget(sup, self, key) {
     }
     return undefined
 }
+
+// js_jssupget: the name the js/ts emitter uses for the VALUE read of `super.x`. The
+// two are the same body here, because layer 2's js_supget is js/ts's alone - the
+// split exists for the GO TWIN, where js_supget is abnf/jsrt.go's and shared with
+// eight other languages, so the receiver-overridable shim needed a name of its own.
+// See m["js_jssupget"] in abnf/jsrtjsprint.go. docs/todo.md 2.10.
+function js_jssupget(sup, self, key) { return js_supget(sup, self, key) }
 
 // 'super.x = v'. A setter on the chain wins; otherwise this is an ordinary [[Set]]
 // whose RECEIVER is `this`, so the own property lands there.
@@ -1589,6 +1711,12 @@ function js_jsprintfn(name) {
 // jsvOwnKeys: an object's own enumerable keys in insertion order, WITHOUT the
 // __-prefixed internal slots (keysOf already skips those).
 function jvOwnKeys(v) {
+    // A CLASS DESCRIPTOR answers with the enumerable half of its STATIC namespace,
+    // and with nothing off its own property map: that map holds the class's INSTANCE
+    // methods, which node reports on the prototype and never on the constructor, so
+    // Object.keys(class C { static sf = 1; m(){} }) answered ["m"] where node says
+    // ["sf"]. docs/todo.md 2.10.
+    if (jvIsClassDesc(v)) { return jvStaticEnumKeys(v) }
     if (jvIsObj(v)) { return keysOf(v) }
     if (Array.isArray(v)) {
         var oa = []

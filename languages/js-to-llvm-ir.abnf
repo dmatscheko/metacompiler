@@ -3600,15 +3600,18 @@ NotFuncHead = :script(~~
         curScopeV = saved
         return exitB
     }
-    // '{...src}': copy src's own keys into the literal under construction. js_keys yields
-    // them in insertion order (and skips the __-prefixed internal slots), so the copy walks
-    // that key array by index.
+    // '{...src}': copy src's own keys into the literal under construction. js_jskeys
+    // yields them in insertion order (and skips the __-prefixed internal slots), so the
+    // copy walks that key array by index. js_jskeys and not the floor's js_keys: for a
+    // CLASS DESCRIPTOR the floor answers the descriptor's own map, which holds the
+    // INSTANCE methods, so `{...C}` copied the methods where node copies the static
+    // fields. docs/todo.md 2.10.
     function emitObjSpread(b, objV, t) {
         var r = t(b)
         b = r.b
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_keys", [r.v])
+        var keysV = callExt(b, "js_jskeys", [r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osk"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osrc"), r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osi"), callExt(b, "js_num_i", [handle(0)])])
@@ -5072,9 +5075,10 @@ NotFuncHead = :script(~~
     //     opens its own scope holding the iterable, the length and the index (hidden
     //     0-prefixed names that no JS identifier can collide with) and runs
     //     name = iter[i] while i < length.
-    // for-in iterates the object's own keys: js_keys yields them (insertion order,
-    // deterministic, __-prefixed slots skipped), and the same index loop walks that key
-    // array, binding name to each key string.
+    // for-in iterates the object's own keys: js_jskeys yields them (insertion order,
+    // deterministic, __-prefixed slots skipped, a class descriptor's static FIELDS - see
+    // docs/todo.md 2.10), and the same index loop walks that key array, binding name to
+    // each key string.
     function makeForOf(items, pos) {
         // 'for await (x of xs)' pushes a {fawait} marker from its header; strip it so
         // every index below is the one the plain form has.
@@ -5105,7 +5109,7 @@ NotFuncHead = :script(~~
             var seqV = ir.v
             // for-in materializes: js_iterable is the identity on arrays, strings and
             // objects and drains a generator, and js_keys wants the whole sequence.
-            if (isIn) { seqV = callExt(b, "js_keys", [callExt(b, "js_iterable", [seqV])]) }
+            if (isIn) { seqV = callExt(b, "js_jskeys", [callExt(b, "js_iterable", [seqV])]) }
             // for-of does NOT, because js_iterable's drain is what made
             // 'for (const x of endless()) { ...; break }' hang and what put every one of
             // the producer's side effects before the first of the consumer's. The probe
@@ -5378,13 +5382,14 @@ NotFuncHead = :script(~~
         return bindPattern(exitB, subPat, arrV, declExt)
     }
     // '{a, ...rest}': a fresh object with every own key of the source that the pattern did
-    // not name. js_keys yields the keys in insertion order; the loop body skips a key when
-    // it equals one of the statically taken ones (a compile-time chain of comparisons).
+    // not name. js_jskeys yields the keys in insertion order; the loop body skips a key
+    // when it equals one of the statically taken ones (a compile-time chain of
+    // comparisons).
     function emitObjRest(b, name, valueH, taken, declExt) {
         var restV = callExt(b, "js_obj_new", [])
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_keys", [valueH])
+        var keysV = callExt(b, "js_jskeys", [valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ork"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orsrc"), valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ori"), callExt(b, "js_num_i", [handle(0)])])
@@ -5755,7 +5760,12 @@ NotFuncHead = :script(~~
                 b = rs.b
                 sv = rs.v
             }
-            clsRawSet(b, statsV, kr.v, sv)
+            // js_jssfield rather than clsRawSet: a static FIELD is an ENUMERABLE own
+            // property of the class object and a static method/accessor is not, and
+            // all three live in the same __statics table, so the enumerable ones are
+            // named in a list beside them for Object.keys to read. See jsvSfTrack in
+            // abnf/jsrtjsprint.go. docs/todo.md 2.10.
+            callExt(b, "js_jssfield", [statsV, kr.v, sv])
         }
         var ctorIdx = anytype
         if (info.ctor != null) {
@@ -5974,7 +5984,12 @@ NotFuncHead = :script(~~
         return function(b) {
             var kr = keyT(b)
             var sb = emitSuperBase(kr.b, defName)
-            return {b: kr.b, v: callExt(kr.b, "js_supget", [sb.sup, sb.self, kr.v])}
+            // js_jssupget and not the shared js_supget: the js/ts value read has to
+            // hand back a method shim whose receiver the eventual `.call(x)` can
+            // OVERRIDE, and the extern map is one map for every language, so the
+            // fixed behaviour needs a name of its own. See abnf/jsrtjsprint.go.
+            // docs/todo.md 2.10.
+            return {b: kr.b, v: callExt(kr.b, "js_jssupget", [sb.sup, sb.self, kr.v])}
         }
     }
     // items = [{skey}, ...targetSuffixes, opString, valueThunk]. With suffixes the store is
@@ -6006,7 +6021,7 @@ NotFuncHead = :script(~~
             b = kr.b
             var sb = emitSuperBase(b, defName)
             if (op != "=") {
-                v = emitBinOp(b, op, callExt(b, "js_supget", [sb.sup, sb.self, kr.v]), v)
+                v = emitBinOp(b, op, callExt(b, "js_jssupget", [sb.sup, sb.self, kr.v]), v)
             }
             callExt(b, "js_supset", [sb.sup, sb.self, kr.v, v])
             return {b: b, v: v}

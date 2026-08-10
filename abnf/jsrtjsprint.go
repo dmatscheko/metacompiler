@@ -269,6 +269,14 @@ func jsvIsArrayGlobal(v interface{}) bool {
 func jsvOwnKeys(v interface{}) []string {
 	switch o := v.(type) {
 	case *jsObject:
+		// A CLASS DESCRIPTOR answers with the enumerable half of its STATIC
+		// namespace, and with nothing off its own property map: that map holds the
+		// class's INSTANCE methods, which node reports on the prototype and never on
+		// the constructor, so `Object.keys(class C { static sf = 1; m(){} })`
+		// answered ["m"] where node says ["sf"]. docs/todo.md 2.10.
+		if isClassDesc(o) {
+			return jsvStaticEnumKeys(o)
+		}
 		out := []string{}
 		for _, k := range o.keys {
 			if !jsvInternalKey(k) {
@@ -297,7 +305,84 @@ func jsvInternalKey(k string) bool {
 	return len(k) >= 2 && k[0] == '_' && k[1] == '_'
 }
 
+// ----- which static members of a class are ENUMERABLE (docs/todo.md 2.10) -----
+//
+// A class object's own enumerable properties are its static FIELDS plus anything a
+// runtime `C.zz = 1` put there. A static METHOD and a static ACCESSOR are not
+// enumerable, and neither is `name`, `length` or `prototype`. Every one of those
+// lives in the SAME table (__statics, so that jsStaticsFind can walk one chain), so
+// the table's own key order cannot separate them: the enumerable names are recorded
+// beside them in __sfk, by js_jssfield at class-definition time and by js_jsmset for
+// a runtime write. Twins: jvSfTrack / jvStaticEnumKeys in languages/lib/js-rt.metajs,
+// and the statics table's __keys list in the two *-interpreter.abnf start scripts
+// (an interpreter object already tracks insertion order by hand, so it needs no
+// second list - only a decision about which writes track).
+const jsvSFieldKeys = "__sfk"
+
+// jsvSfTrack records `name` as an enumerable static of the class owning this table.
+func jsvSfTrack(statics *jsObject, name string) {
+	if jsvInternalKey(name) {
+		return
+	}
+	lst, _ := statics.props[jsvSFieldKeys].(*jsArray)
+	if lst == nil {
+		lst = &jsArray{}
+		statics.set(jsvSFieldKeys, lst)
+	}
+	for _, e := range lst.elems {
+		if s, ok := e.(string); ok && s == name {
+			return
+		}
+	}
+	lst.elems = append(lst.elems, name)
+}
+
+// jsvStaticEnumKeys is Object.keys of a class object.
+func jsvStaticEnumKeys(cls *jsObject) []string {
+	out := []string{}
+	t := jsStaticsOf(cls, false)
+	if t == nil {
+		return out
+	}
+	lst, _ := t.props[jsvSFieldKeys].(*jsArray)
+	if lst == nil {
+		return out
+	}
+	for _, e := range lst.elems {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// jsvConstructorOf is what `x.constructor` answers for an object this engine built:
+// the class descriptor the instance carries, or - for an instance of a constructor
+// FUNCTION - the function itself, which js_jsctordesc remembers under __ctorfn. nil
+// for a value with no __class at all (a plain object literal; node answers Object
+// there, which needs a prototype chain this value model does not have). Twins:
+// jvConstructorOf in languages/lib/js-rt.metajs and classCtorOf in the two
+// *-interpreter.abnf start scripts. docs/todo.md 2.10.
+func jsvConstructorOf(o *jsObject) (interface{}, bool) {
+	cls, ok := o.props["__class"].(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if fn, has := cls.props["__ctorfn"]; has {
+		return fn, true
+	}
+	return cls, true
+}
+
 func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
+	// A CLASS DESCRIPTOR reads from its static namespace, exactly as js_jsvget does:
+	// rt.getMember would answer the descriptor's own slot, which is where the
+	// INSTANCE methods live, so Object.values(C) / Object.entries(C) / Object.assign
+	// came back undefined for every static field once jsvOwnKeys started naming them.
+	// The native leg goes through js_jsmget and never had this. docs/todo.md 2.10.
+	if cls, isStatic := jsvIsStaticSide(v, k); isStatic {
+		return rt.unwrap(rt.jsvStaticSideRead(cls, k))
+	}
 	return rt.getMember(v, k)
 }
 
@@ -1554,10 +1639,29 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvInternalKey(name) {
 			return r
 		}
+		// `e.constructor` is the CLASS an instance was built from. It answered
+		// undefined in all four engines where node hands back the class object (and,
+		// for `new F()`, the function F itself). docs/todo.md 2.10.
+		if name == "constructor" {
+			if c, found := jsvConstructorOf(recv); found {
+				return w(c)
+			}
+		}
 		if fn, found := jsvFindClassMethod(recv, name); found {
 			bound := fn
 			return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				return rt.call(bound, jsUndef, append([]interface{}{recv}, args...))
+				// AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the
+				// method on x in node; this shim used to ignore `this` and always
+				// re-enter with the receiver the READ was made with, so every
+				// .call/.apply/.bind on a method read as a value silently kept it -
+				// in all four engines. An absent receiver still keeps the read-time
+				// one, which is what leaves a bare `f()` behaving as it did.
+				// docs/todo.md 2.10.
+				self := interface{}(recv)
+				if !isUndefOrNull(u(this)) {
+					self = u(this)
+				}
+				return rt.call(bound, jsUndef, append([]interface{}{self}, args...))
 			}))
 		}
 		return r
@@ -1585,6 +1689,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(true)
 			}
 			return w(name == "name")
+		}
+		// `"constructor" in e` is true in node for every instance, and the read
+		// answers it now. docs/todo.md 2.10.
+		if isObj && name == "constructor" {
+			if _, found := jsvConstructorOf(recv); found {
+				return w(true)
+			}
 		}
 		if r := baseHas(a); u(r) == true {
 			return r
@@ -1626,12 +1737,108 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// The layer-2 twin also counts the classes, so that a program with none pays a
 	// single integer compare per member read instead of a hash lookup; the Go twin
 	// has no such loop to protect and only has to answer the same object.
+	// js_jssupget is `super.x` READ AS A VALUE for js/typescript, and it exists only
+	// because of the shim in its callable arm. The shared js_supget (abnf/jsrt.go)
+	// hands back a host function that IGNORES the receiver of the eventual call and
+	// always re-enters with the receiver the READ was made with, so
+	// `super.m.call(x)` ran the parent's method on `this` instead of on x. Fixing
+	// that in js_supget would change it for the eight other languages that emit it,
+	// and the extern map is ONE map for every language (manual chapter 4:
+	// overriding a shared name in a language's own twin file leaks across
+	// languages), so js/ts get a name of their own - the same pattern as js_jvsub /
+	// js_csmcall / js_ktsmcall. Everything else here is js_supget's own behaviour,
+	// deliberately: the static side first when the receiver is a class descriptor,
+	// then the __super walk, and a miss is undefined rather than a read of the
+	// receiver. The layer-2 twin is js_jssupget in languages/lib/js-rt.metajs.
+	// docs/todo.md 2.10.
+	m["js_jssupget"] = func(a []uint64) uint64 { // (super class, this, key) -> value
+		name := rt.toString(u(a[2]))
+		self := u(a[1])
+		if isClassDesc(self) {
+			if v, _, found := jsStaticsFind(u(a[0]), name); found {
+				if acc, isAcc := v.(*jsAccessor); isAcc {
+					if acc.get == nil {
+						return jsHUndefined
+					}
+					return w(rt.call(acc.get, self, nil))
+				}
+				return w(v)
+			}
+		}
+		for cls := u(a[0]); cls != nil; {
+			clsObj, ok := cls.(*jsObject)
+			if !ok {
+				break
+			}
+			if v, found := clsObj.props[name]; found {
+				if acc, isAcc := v.(*jsAccessor); isAcc {
+					if acc.get == nil {
+						return jsHUndefined
+					}
+					return w(rt.call(acc.get, self, nil))
+				}
+				if isCallable(v) {
+					bound := v
+					return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+						// An EXPLICIT receiver wins; an absent one keeps the
+						// read-time receiver, which is what a Reference does and
+						// what makes `(super.m)()` behave as it did.
+						recv := self
+						if !isUndefOrNull(u(this)) {
+							recv = u(this)
+						}
+						return rt.call(bound, jsUndef, append([]interface{}{recv}, args...))
+					}))
+				}
+				return w(v)
+			}
+			cls = clsObj.props["__super"]
+		}
+		return jsHUndefined
+	}
+
+	// js_jskeys is js_keys plus the class-descriptor arm. The floor's js_keys is
+	// shared by sixteen languages and answers an object's own key map, which for a
+	// class descriptor is its INSTANCE methods - so `{...C}` copied the methods and
+	// `for (k in C)` enumerated them, where node gives the static FIELDS and this
+	// engine's own Object.keys now does too. A name of its own rather than an
+	// override, for manual chapter 4's reason. The layer-2 twin is js_jskeys in
+	// languages/lib/js-rt.metajs. docs/todo.md 2.10.
+	baseKeys := m["js_keys"]
+	m["js_jskeys"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok && isClassDesc(o) {
+			out := &jsArray{}
+			for _, k := range jsvStaticEnumKeys(o) {
+				out.elems = append(out.elems, k)
+			}
+			return w(out)
+		}
+		return baseKeys(a)
+	}
+
 	m["js_jsstatics"] = func(a []uint64) uint64 {
 		o, ok := u(a[0]).(*jsObject)
 		if !ok {
 			rt.fail("js_jsstatics needs a class descriptor")
 		}
 		return w(jsStaticsOf(o, true))
+	}
+
+	// js_jssfield(statics, key, value) files one static FIELD, which is the only
+	// kind of static member that is ENUMERABLE. A static method and a static
+	// accessor go into the same table with a plain js_set / js_defprop and are
+	// therefore invisible to Object.keys, which is what node says. The emitter calls
+	// this instead of js_set in emitClass's static-field loop; the layer-2 twin is
+	// js_jssfield in languages/lib/js-rt.metajs. docs/todo.md 2.10.
+	m["js_jssfield"] = func(a []uint64) uint64 {
+		t, ok := u(a[0]).(*jsObject)
+		if !ok {
+			rt.fail("js_jssfield needs a static table")
+		}
+		name := rt.toString(u(a[1]))
+		t.set(name, u(a[2]))
+		jsvSfTrack(t, name)
+		return 0
 	}
 
 	// js_jsmset used to be emitted only under -exe, where layer 2 has to unwrap the
@@ -1655,7 +1862,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					return 0
 				}
 			}
-			jsStaticsOf(cls, true).set(name, u(a[2]))
+			t := jsStaticsOf(cls, true)
+			t.set(name, u(a[2]))
+			// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
+			// object, exactly as it does on any other object. docs/todo.md 2.10.
+			jsvSfTrack(t, name)
 			return 0
 		}
 		return baseSet(a)

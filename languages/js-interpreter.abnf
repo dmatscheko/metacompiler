@@ -4642,6 +4642,18 @@ NotFuncHead = :script(~~
             var g = findAccessor(o, "get", k)
             if (g != undefined) { return callWithThis(g, o, []) }
             if (!hasOwn(o, k)) {
+                // `e.constructor` is the CLASS an instance was built from - node reads
+                // it off the prototype, and this engine's equivalent is the instance's
+                // own __class descriptor. It answered undefined in all four engines.
+                // A constructor FUNCTION's instance answers the function itself, not
+                // the synthetic descriptor ctorDescriptor filed for it, so
+                // `new F().constructor === F` holds the way node says it does.
+                // Twins: js_jsvget / js_jsmget in abnf/jsrtjsprint.go and in
+                // languages/lib/js-rt.metajs. docs/todo.md 2.10.
+                if (k == "constructor") {
+                    var cf = classCtorOf(o)
+                    if (cf != undefined) { return cf }
+                }
                 // A numeric index on a plain object addresses the string key "0", "1",
                 // ... - which is what an array-LIKE object (a tagged template's chunk
                 // list) is built out of.
@@ -4664,6 +4676,18 @@ NotFuncHead = :script(~~
         if (v == undefined || v == null) { return false }
         if (typeof v != "object") { return false }
         return v.__isclass === true
+    }
+    // The value of `x.constructor` for an object this engine built: the class
+    // descriptor an instance carries, or - for an instance of a constructor FUNCTION -
+    // the function itself, which ctorDescriptor remembers under __ctorfn. undefined
+    // for anything with no __class at all (a plain literal; node answers Object there,
+    // which needs a prototype chain this value model does not have). docs/todo.md 2.10.
+    function classCtorOf(o) {
+        var cl = anytype // A class descriptor, or absent.
+        cl = o.__class
+        if (cl == undefined || cl == null) { return undefined }
+        if (hasOwn(cl, "__ctorfn")) { return cl["__ctorfn"] }
+        return cl
     }
     // Does a read of `k` on `o` belong to the static namespace alone? The engine's own
     // __-prefixed slots are excluded - __ctor, __name, __super and __statics itself are
@@ -4736,8 +4760,18 @@ NotFuncHead = :script(~~
                 return
             }
         }
-        if (o.__statics == undefined) { scopePut(o, "__statics", {}) }
+        if (o.__statics == undefined) { scopePut(o, "__statics", newStaticsTable()) }
         scopePut(o.__statics, k, v)
+        // `C.zz = 1` at run time creates an ENUMERABLE own property of the class
+        // object, exactly as it does on any other object. docs/todo.md 2.10.
+        trackKey(o.__statics, k)
+    }
+    // A static table, with the enumerable-key list makeClassValue gives the ones it
+    // builds. Out of line because MetaJS is typed and the literal needs its slot.
+    function newStaticsTable() {
+        var t = {}
+        t["__keys"] = []
+        return t
     }
     // getMember is getMemberRaw plus the METHODS. An instance keeps its methods on its
     // __class descriptor rather than as own properties, so a plain read found nothing
@@ -4769,8 +4803,25 @@ NotFuncHead = :script(~~
     }
     function boundMethodShim(o, k) {
         return function() {
+            // AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the method on
+            // x in node; this shim used to ignore x entirely and re-dispatch on o, so
+            // every .call/.apply/.bind on a method read as a VALUE silently kept the
+            // read-time receiver - in all four engines. pendingThis is the one-shot
+            // slot callWithThis (and so fnCallShim / fnApplyShim / fnBindShim) arms,
+            // and it must be DRAINED here exactly as makeClosure drains it, or the
+            // receiver leaks into the next closure that runs. An absent receiver keeps
+            // the read-time one, which is what makes `(super.who)()` and a bare `f()`
+            // behave as they did. The resolved method is invoked directly rather than
+            // re-entering mcall, because an explicit receiver need not be an instance
+            // of o's class - or an instance at all. docs/todo.md 2.10.
+            var recv = pendingThis
+            pendingThis = undefined
             var a = []
             for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            if (recv != undefined) {
+                var m = findClassMethod(o, k)
+                if (m != undefined) { return m.apply(undefined, concat2impl([recv], a)) }
+            }
             // A bound shim has lost its call site (`const f = o.m; f()`), so the text
             // node would print is the NAME the shim was made from, on an anonymous
             // receiver. docs/todo.md 1.4.
@@ -4852,8 +4903,24 @@ NotFuncHead = :script(~~
     }
     // The own enumerable key names of a value, as strings and in insertion order: an
     // array and a string answer with their indices, a tracked object with its __keys.
+    //
+    // A CLASS DESCRIPTOR answers with its STATIC namespace, because that is where the
+    // only enumerable own properties a class object has - its static FIELDS - live.
+    // Its own property map holds the INSTANCE methods, which node reports as
+    // properties of the PROTOTYPE and never of the constructor, so reading the
+    // descriptor raw made `Object.keys(class C { static sf = 1; m(){} })` answer the
+    // methods (compiler half) or nothing at all (this one) where node says ["sf"].
+    // A static METHOD and a static ACCESSOR are not enumerable either, and the
+    // static table's __keys list is what separates them: makeClassValue tracks a
+    // static FIELD there and files a method/accessor without tracking it, exactly as
+    // an object literal's __keys is maintained by hand. Twins: jsvOwnKeys in
+    // abnf/jsrtjsprint.go and jvOwnKeys in languages/lib/js-rt.metajs, which read the
+    // same list under the name __sfk (their statics table is a runtime object whose
+    // own key order records every write, so the enumerable ones need naming).
+    // docs/todo.md 2.10.
     function ownKeys(v) {
         if (v == undefined || v == null) { return [] }
+        if (isClassDesc(v)) { return ownKeys(v.__statics) }
         if (typeof v == "string") {
             var r = []
             for (var i = 0; i < v.length; i++) { r.push("" + i) }
@@ -6104,6 +6171,11 @@ NotFuncHead = :script(~~
         // so `"m" in instance` answered false where node answers true. Same walk
         // getMember's method arm makes; js_jshas is the compiled halves' twin.
         // docs/todo.md 2.5.
+        // `"constructor" in e` is true in node for every instance, and the read
+        // answers it now. docs/todo.md 2.10.
+        if (typeof o == "object" && ("" + k) == "constructor") {
+            if (classCtorOf(o) != undefined) { return true }
+        }
         if (typeof o == "object") {
             if (findClassMethod(o, "" + k) != undefined) { return true }
         }
@@ -6289,6 +6361,10 @@ NotFuncHead = :script(~~
     // __-prefixed internals never appear (they are never recorded in __keys).
     function jsKeys(o) {
         if (o == undefined || o == null) fail("for-in over " + o)
+        // A CLASS DESCRIPTOR enumerates its static FIELDS, the same list Object.keys
+        // answers - not its own property map, which holds the instance methods.
+        // docs/todo.md 2.10.
+        if (isClassDesc(o)) { return ownKeys(o) }
         if (hasOwn(o, "__keys")) return o["__keys"].slice()
         return []
     }
@@ -7343,6 +7419,12 @@ NotFuncHead = :script(~~
             // accessor - now goes into this table instead, and only the descriptor-read
             // path (staticSideRead) looks at it. Instance members stay where they were.
             var statics = {}
+            // The ENUMERABLE half of the static namespace, in insertion order: a
+            // static FIELD is an own enumerable property of the class object, a
+            // static method and a static accessor are not. Only the field loop and
+            // staticSideWrite (a runtime `C.zz = 1`) track a name here, which is what
+            // lets ownKeys answer Object.keys(C) with node's list. docs/todo.md 2.10.
+            statics["__keys"] = []
             cls["__statics"] = statics
             // The __stat table - a set of NAMES marking which descriptor slots were
             // static - used to live here, so that super.m() could pick the calling
@@ -7372,7 +7454,15 @@ NotFuncHead = :script(~~
                 if (it.kind == "staticblock") {
                     callWithThis(makeClosure([], it.body, mscopes, true), cls, [])
                 } else {
-                    scopePut(statics, memberKey(it), (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
+                    var itk = memberKey(it)
+                    scopePut(statics, itk, (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
+                    // A static FIELD is enumerable; see __keys above. A PRIVATE one
+                    // is not - and this half files a private name under its own '#'
+                    // spelling where both compiled halves mangle it to '__#x', which
+                    // the '__' rule already hides. That model difference is wider than
+                    // this line (it also makes a private INSTANCE field enumerable
+                    // here and not there); the guard keeps THIS list honest.
+                    if (itk.length < 1 || itk.charAt(0) != "#") { trackKey(statics, itk) }
                 }
             }
             return cls
@@ -7508,6 +7598,7 @@ NotFuncHead = :script(~~
         var d = {}
         d["__isclass"] = true
         d["__name"] = name
+        d["__ctorfn"] = fn // What `new F().constructor` answers. docs/todo.md 2.10.
         ctorDescriptorFns.push(fn)
         ctorDescriptors.push(d)
         return d
@@ -7571,7 +7662,14 @@ NotFuncHead = :script(~~
     // is called with here (see mcall).
     function superMethodShim(m, self) {
         return function() {
-            var a = [self]
+            // An EXPLICIT receiver wins over the read-time one, the same rule
+            // boundMethodShim follows and for the same reason: `super.m.call(x)` runs
+            // the parent's method on x in node, and this shim used to hand it `self`.
+            // pendingThis is drained here, as every other callable in this engine
+            // drains it. docs/todo.md 2.10.
+            var recv = pendingThis
+            pendingThis = undefined
+            var a = [(recv != undefined) ? recv : self]
             for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
             return m.apply(undefined, a)
         }
