@@ -459,6 +459,13 @@ type jsrt struct {
 	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
 	rubyLambdas map[interface{}]bool
 
+	// rubyMethodVals remembers which callables `method(:x)` handed out, and the
+	// owner and name each one carries. MRI's Method is a class of its own -
+	// #class is Method, #to_s is `#<Method: Object#x>` and #arity counts optionals
+	// like a lambda's - and every engine here answered Proc, `#<Proc>` and a
+	// proc's arity. docs/todo.md 2.5.
+	rubyMethodVals map[interface{}]rubyMethodVal
+
 	// rubyArities remembers a closure's PARAMETER SHAPE, which is the only thing
 	// Proc#arity can be computed from and which no function value carries. Filled
 	// by js_rarity where the closure is built; see rubyArityOf for why the three
@@ -1679,9 +1686,9 @@ func (rt *jsrt) toString(v interface{}) string {
 	case *jsPyFlo: // Python's float keeps its point too, in CPython's own window.
 		return pyFloStr(t.f)
 	case jsRat:
-		return jsNumString(t.n) + "/" + jsNumString(t.d)
+		return rubyRatText(t)
 	case jsCpx:
-		return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
+		return rubyCpxText(t)
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -3336,6 +3343,15 @@ func (rt *jsrt) dictFind(keys *jsArray, k interface{}) int {
 // of them. Scoping it to the dict object instead would need a python-only dict
 // constructor in languages/python-to-llvm-ir.abnf.
 func (rt *jsrt) pyDictFind(keys *jsArray, k interface{}) int {
+	// Every dict lookup, insertion, membership test and removal in this engine
+	// goes through here, so the unhashable-key refusal needs no other dict site.
+	// The type assertion is inline: almost every key is a string or a number and
+	// this is the hottest function on the dict path.
+	if rt.pyLang {
+		if _, isObj := k.(*jsObject); isObj {
+			rt.pyHashCheck(k, false)
+		}
+	}
 	if i := rt.dictFind(keys, k); i >= 0 {
 		return i
 	}
@@ -3399,6 +3415,18 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 	if rt.pyLang {
 		if pyIsFlo(a) || pyIsFlo(b) {
 			return rt.pyNumEq(a, b)
+		}
+		// PYTHON: a TUPLE key hashes by its CONTENTS, so `{(1,2): "x"}[(1,2)]` is
+		// a hit off two different objects - and a tuple IS an array in this value
+		// model (docs/todo.md 3.1). All three engines answered identity here and
+		// raised KeyError on `d[i, j]`, while the SET side of the same engines
+		// already deduplicated with Python's == (pySetHas -> pyEqual). Both sides
+		// are == now. Neither operand is dictKeyable, so every such lookup already
+		// arrives here through the scan.
+		if aa, isA := a.(*jsArray); isA {
+			if bb, isB := b.(*jsArray); isB {
+				return rt.pyEqual(aa, bb)
+			}
 		}
 	}
 	// GO: a struct or array key compares BY VALUE (goValueEq), because both are
@@ -4371,7 +4399,10 @@ func (rt *jsrt) rubyIntDigitOp(v interface{}, k int, mode byte) interface{} {
 		}
 	}
 	away := false
-	if !zeroTail {
+	// Mode 't' is TRUNCATION and never carries: 1234.truncate(-2) is 1200. It was
+	// absent, so #truncate ignored its ndigits outright in every engine -
+	// docs/todo.md 1.3's second argument-list rule.
+	if !zeroTail && mode != 't' {
 		switch mode {
 		case 'r':
 			away = tail[0] >= '5'
@@ -4425,6 +4456,13 @@ func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, 
 			return jsFlo{f: rubyFloDigitRound(t, nd)}
 		case 'f':
 			return jsFlo{f: rubyFloDigitFloor(t, nd)}
+		case 't':
+			// #truncate at a POSITIVE ndigits is toward zero: floor above, ceil
+			// below.
+			if t < 0 {
+				return jsFlo{f: rubyFloDigitCeil(t, nd)}
+			}
+			return jsFlo{f: rubyFloDigitFloor(t, nd)}
 		}
 		return jsFlo{f: rubyFloDigitCeil(t, nd)}
 	}
@@ -4439,6 +4477,8 @@ func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, 
 			return rt.rubyIntFromF(math.Round(t))
 		case 'f':
 			return rt.rubyIntFromF(math.Floor(t))
+		case 't':
+			return rt.rubyIntFromF(math.Trunc(t))
 		}
 		return rt.rubyIntFromF(math.Ceil(t))
 	}
@@ -4490,6 +4530,54 @@ func rubyAsRat(v interface{}) jsRat {
 		return r
 	}
 	return rubyMkRat(rubyToF(v), 1)
+}
+
+// rubyRatText / rubyCpxText are Rational#to_s and Complex#to_s. The SIGN is the
+// whole content of the second one: a negative imaginary part joins with "-" and
+// its own magnitude, and every engine wrote the "+" unconditionally, so
+// Complex(3, -4) rendered `3+-4i` where MRI writes `3-4i`. Agreed in all four legs
+// and wrong in all four. docs/todo.md 1.3.
+func rubyRatText(t jsRat) string { return jsNumString(t.n) + "/" + jsNumString(t.d) }
+
+func rubyCpxText(t jsCpx) string {
+	if t.im < 0 {
+		return jsNumString(t.re) + "-" + jsNumString(-t.im) + "i"
+	}
+	return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
+}
+
+// rubyRatDigitOp is Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI
+// keeps the Rational at a positive ndigits - `(2r/3r).round(1)` is (7/10) and not
+// the 0.7 every engine answered off rubyToF. The full rule and the 2^53 ceiling
+// are at ratDigitOp in languages/ruby-interpreter.abnf; rbRatDigitOp in
+// languages/lib/ruby-rt.metajs is the other twin. `round` is half AWAY FROM ZERO
+// and is written on integers, (2n +/- d) over 2d, so it does not depend on a
+// double holding n/d exactly. docs/todo.md 1.3.
+func rubyRatIntOp(n, d float64, mode byte) float64 {
+	switch mode {
+	case 'f':
+		return math.Floor(n / d)
+	case 'c':
+		return math.Ceil(n / d)
+	case 't':
+		return math.Trunc(n / d)
+	}
+	if n >= 0 {
+		return math.Floor((2*n + d) / (2 * d))
+	}
+	return math.Ceil((2*n - d) / (2 * d))
+}
+
+func (rt *jsrt) rubyRatDigitOp(v jsRat, mode byte, nd int) interface{} {
+	if nd > 0 {
+		p := math.Pow(10, float64(nd))
+		return rubyMkRat(rubyRatIntOp(v.n*p, v.d, mode), p)
+	}
+	k := rt.rubyIntFromF(rubyRatIntOp(v.n, v.d, mode))
+	if nd == 0 {
+		return k
+	}
+	return rt.rubyIntDigitOp(k, -nd, mode)
 }
 
 // rubyFloStr renders a Float the way Ruby does: with a decimal point even when the
@@ -5537,8 +5625,18 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			}
 			return strconv.FormatInt(int64(x), int(rubyToF(args[0]))), true
 		}
+		// #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes -
+		// and this arm answered rubyStr for both, so `p 2r/3r` printed the
+		// bracketed form off rubyInspect while `(2r/3r).inspect` printed the bare
+		// one, inside one engine. docs/todo.md 1.3.
+		if name == "inspect" {
+			return rt.rubyInspect(t), true
+		}
 		return rt.rubyStr(t), true
-	case "to_i", "to_int", "truncate":
+	// #truncate is NOT here any more: it takes an ndigits like #floor and #round,
+	// and this arm ignored it - `1.567.truncate(1)` answered the Integer 1 where
+	// MRI answers the Float 1.5. docs/todo.md 1.3.
+	case "to_i", "to_int":
 		return rt.rubyIntFromF(math.Trunc(x)), true
 	case "to_f":
 		if f, ok := t.(jsFlo); ok {
@@ -5547,7 +5645,20 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return jsFlo{f: x}, true
 	case "to_r":
 		return rubyAsRat(t), true
+	// Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
+	// through rubyToF, so (2r/3r).abs answered a Float and (3+4i).abs answered 3.0 -
+	// the REAL PART - where MRI says (2/3) and 5.0. Agreed in all four legs and
+	// wrong in all four. docs/todo.md 1.3.
 	case "abs", "magnitude":
+		if r, ok := t.(jsRat); ok {
+			if r.n < 0 {
+				return jsRat{n: -r.n, d: r.d}, true
+			}
+			return r, true
+		}
+		if c, ok := t.(jsCpx); ok {
+			return jsFlo{f: math.Sqrt(c.re*c.re + c.im*c.im)}, true
+		}
 		if _, ok := t.(jsFlo); ok {
 			return jsFlo{f: math.Abs(x)}, true
 		}
@@ -5555,16 +5666,23 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	// #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
 	// one answers a Float (and does not raise on an infinity); 0 and negatives
 	// answer an Integer. rubyNumDigitOp is the whole rule. docs/todo.md 1.2.
-	case "floor", "ceil", "round":
+	case "floor", "ceil", "round", "truncate":
 		nd := 0
 		if len(args) > 0 {
 			nd = int(math.Trunc(rubyToF(args[0])))
 		}
 		mode := byte('r')
-		if name == "floor" {
+		switch name {
+		case "floor":
 			mode = 'f'
-		} else if name == "ceil" {
+		case "ceil":
 			mode = 'c'
+		case "truncate":
+			mode = 't'
+		}
+		// A Rational stays EXACT at every ndigits - see rubyRatDigitOp.
+		if r, ok := t.(jsRat); ok {
+			return rt.rubyRatDigitOp(r, mode, nd), true
 		}
 		return rt.rubyNumDigitOp(x, nil, isInt, mode, nd), true
 	case "zero?":
@@ -5657,20 +5775,24 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 		return t.v.String(), true
 	// An Integer is already floored, ceilinged, truncated and rounded, at any
 	// digit argument a Ruby program can write here.
-	case "to_i", "to_int", "truncate":
+	case "to_i", "to_int":
 		return t, true
 	// ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
-	// 10**-ndigits, which past 2**53 has to be exact. docs/todo.md 1.2.
-	case "floor", "ceil", "round":
+	// 10**-ndigits, which past 2**53 has to be exact. #truncate is one of the four
+	// and used to ignore its ndigits. docs/todo.md 1.2, 1.3.
+	case "floor", "ceil", "round", "truncate":
 		nd := 0
 		if len(args) > 0 {
 			nd = int(math.Trunc(rubyToF(args[0])))
 		}
 		mode := byte('r')
-		if name == "floor" {
+		switch name {
+		case "floor":
 			mode = 'f'
-		} else if name == "ceil" {
+		case "ceil":
 			mode = 'c'
+		case "truncate":
+			mode = 't'
 		}
 		return rt.rubyNumDigitOp(0, t, true, mode, nd), true
 	case "abs", "magnitude":
@@ -5698,6 +5820,49 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 		}
 	}
 	return nil, false
+}
+
+// rubyIdenticalP is BasicObject#equal?, OBJECT IDENTITY, which existed in no
+// engine at all - `1.equal?(1)` aborted with *method call 'equal?' on a number*
+// here and in the native build, and *unknown Integer method: equal?* in the
+// interpreter half. docs/todo.md 2.5.
+//
+// The rule is NOT a bare `==` and the measured row table is at identicalP in
+// languages/ruby-interpreter.abnf; rbIdenticalP in languages/lib/ruby-rt.metajs is
+// the other twin. Three kinds of value need saying:
+//
+//	a jsFlo compares by its DOUBLE, because MRI's Float is a flonum and
+//	1.0.equal?(1.0) is true there; NaN's `false` falls out of that.
+//
+//	a string, a jsRat and a jsCpx answer FALSE always. MRI allocates a fresh
+//	object per value ("a".equal?("a") and (1r/3r).equal?(1r/3r) are both false)
+//	and none of the three has identity in this value model. THIS FILE IS WHY IT
+//	CANNOT BE `==`: jsRat and jsCpx are comparable Go STRUCTS, so two equal
+//	Rationals are `==` here and two distinct box objects in the other two
+//	engines - a designed-in halves divergence if it were left to `==`.
+//
+//	everything else is a reference or an interned value and `==` IS identity: a
+//	float64 Integer, a jsSym, nil, a bool, a *jsArray / *jsObject / *jsBigInt and
+//	every callable (all three callable representations are pointer types, which
+//	is what rt.rubyLambdas already relies on to key a map by them).
+func rubyIdenticalP(a, b interface{}) bool {
+	if isUndefOrNull(a) || isUndefOrNull(b) {
+		return isUndefOrNull(a) && isUndefOrNull(b)
+	}
+	af, aIsFlo := a.(jsFlo)
+	bf, bIsFlo := b.(jsFlo)
+	if aIsFlo || bIsFlo {
+		return aIsFlo && bIsFlo && af.f == bf.f
+	}
+	switch a.(type) {
+	case string, jsRat, jsCpx:
+		return false
+	}
+	switch b.(type) {
+	case string, jsRat, jsCpx:
+		return false
+	}
+	return a == b
 }
 
 // rubyClassName is Ruby's #class for the values that are not user instances: the
@@ -5751,6 +5916,24 @@ func rubyClassName(v interface{}) string {
 		return "Proc"
 	}
 	return ""
+}
+
+// rubyClassNameRT is rubyClassName with the ONE answer that needs runtime state:
+// a Method is a class of its own in MRI and is NOT a Proc, and which callables are
+// Methods lives in rt.rubyMethodVals. Every #class / is_a? / case-when path goes
+// through this; rubyClassName stays free of the receiver for the callers that have
+// no jsrt to hand.
+func (rt *jsrt) rubyClassNameRT(v interface{}) string {
+	// THE TYPE SWITCH IS NOT AN OPTIMISATION. This is reached with every receiver
+	// a Ruby `.class` / `is_a?` / `case when` names, and a Go map lookup PANICS on
+	// an interface holding a non-comparable dynamic type - isCallable's last line
+	// accepts a bare reflect.Func, so "it is callable" is not enough. The three
+	// pointer types below are the ones every callable this runtime mints has, and
+	// the ones rubyMarkMethodVal will store.
+	if _, isMeth := rt.rubyMethodValOf(v); isMeth {
+		return "Method"
+	}
+	return rubyClassName(v)
 }
 
 // rubyBuiltinClass hands out the ONE class object of a builtin class name, so that
@@ -6275,7 +6458,7 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		return true
 	}
 	if bn, isBuiltin := clsObj.props["__rbuiltin"].(string); isBuiltin {
-		kind := rubyClassName(v)
+		kind := rt.rubyClassNameRT(v)
 		if kind == bn {
 			return true
 		}
@@ -6631,6 +6814,33 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 	switch name {
 	case "String":
 		return rt.rubyStr(v)
+	// Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
+	// two parts. They were absent from the list, so `Rational(1, 3)` aborted both
+	// compiled halves with *call of a non function value* and built an INSTANCE of
+	// the class Rational in the interpreter half. Rational(a) IS a.to_r and
+	// Rational(a, b) is a.to_r / b.to_r, so both go through rubyAsRat and inherit
+	// exactly what #to_r already answers. docs/todo.md 1.3.
+	case "Rational":
+		p := rubyAsRat(v)
+		if len(args) < 2 {
+			return rubyMkRat(p.n, p.d)
+		}
+		q := rubyAsRat(args[1])
+		if q.n == 0 {
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		}
+		return rubyMkRat(p.n*q.d, p.d*q.n)
+	case "Complex":
+		if len(args) < 2 {
+			if c, isCpx := v.(jsCpx); isCpx {
+				return c
+			}
+		}
+		im := 0.0
+		if len(args) > 1 {
+			im = rubyToF(args[1])
+		}
+		return jsCpx{re: rubyToF(v), im: im}
 	case "Array":
 		if isUndefOrNull(v) {
 			return &jsArray{}
@@ -7616,9 +7826,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	case jsFlo:
 		return rubyFloStr(t.f)
 	case jsRat:
-		return jsNumString(t.n) + "/" + jsNumString(t.d)
+		return rubyRatText(t)
 	case jsCpx:
-		return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
+		return rubyCpxText(t)
 	case *jsArray:
 		return rt.rubyInspect(v)
 	case *jsObject:
@@ -7670,10 +7880,153 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 // see because neither half was ever asserted. Mirrors rstr of
 // ruby-interpreter.abnf and rbFuncRender of lib/ruby-rt.metajs. docs/todo.md 1.5.
 func (rt *jsrt) rubyFuncRender(v interface{}) string {
+	// A METHOD value renders as MRI's `#<Method: Object#foo>`, and that one IS
+	// byte-exact against the oracle: MRI 2.6 writes exactly it and only 3.0
+	// appends a source location. docs/todo.md 2.5.
+	if mv, ok := rt.rubyMethodValOf(v); ok {
+		return "#<Method: " + mv.owner + "#" + mv.name + ">"
+	}
 	if rt.rubyLambdas[v] {
 		return "#<Proc (lambda)>"
 	}
 	return "#<Proc>"
+}
+
+// rubyMethodVal is what a Method value knows about itself: the class its receiver
+// belongs to and the method name. Mirrors rbMethodRec of lib/ruby-rt.metajs and
+// methodOwners / methodNames of ruby-interpreter.abnf.
+type rubyMethodVal struct{ owner, name string }
+
+// rubyMethodValOf is the only read of rt.rubyMethodVals, and the type switch in it
+// is not an optimisation - see rubyClassNameRT.
+func (rt *jsrt) rubyMethodValOf(v interface{}) (rubyMethodVal, bool) {
+	if len(rt.rubyMethodVals) == 0 {
+		return rubyMethodVal{}, false
+	}
+	switch v.(type) {
+	case *jsClosure, *hostFunc, *boundMethod:
+		mv, ok := rt.rubyMethodVals[v]
+		return mv, ok
+	}
+	return rubyMethodVal{}, false
+}
+
+// rubyMarkMethodVal records f as a Method rather than a Proc. The owner is the
+// receiver's class, which is what MRI prints for a method defined there; a method
+// INHERITED from a superclass is written `D(C)#m` by MRI and plainly `D#m` here -
+// the one shape this leaves divergent, and it can only shorten the answer.
+func (rt *jsrt) rubyMarkMethodVal(f interface{}, owner string, name string) interface{} {
+	// Only a pointer-typed callable is recorded, for rubyClassNameRT's reason: a
+	// map insert panics on a non-comparable key just as a lookup does.
+	switch f.(type) {
+	case *jsClosure, *hostFunc, *boundMethod:
+	default:
+		return f
+	}
+	if rt.rubyMethodVals == nil {
+		rt.rubyMethodVals = map[interface{}]rubyMethodVal{}
+	}
+	rt.rubyMethodVals[f] = rubyMethodVal{owner: owner, name: name}
+	return f
+}
+
+// rubyKernelMethodNames is the Kernel functions `method(:x)` hands out as ordinary
+// Methods, and rubyKernelMethodArity is MRI's Method#arity for each (-1 is "any
+// number"; only String and Array take exactly one). `method(:puts)` raised
+// NameError in every engine here, agreed and wrong, so --cross was blind to it.
+// THE LIST AND ITS ORDER ARE THE SAME in languages/ruby-interpreter.abnf
+// (kernelMethodNames) and languages/lib/ruby-rt.metajs (rbKernelMethodNames) - a
+// name in one and not the others would be a halves divergence by construction.
+// What is deliberately left out, and why, is written out once at kernelMethodNames
+// in the interpreter half. docs/todo.md 2.5.
+var rubyKernelMethodNames = []string{"puts", "print", "p", "format", "sprintf", "printf", "rand",
+	"Integer", "Float", "String", "Array", "Rational", "Complex"}
+
+var rubyKernelMethodArity = []int{-1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 1, -1, -1}
+
+func rubyKernelMethodIndex(n string) int {
+	for i, k := range rubyKernelMethodNames {
+		if k == n {
+			return i
+		}
+	}
+	return -1
+}
+
+// rubyKernelInvoke calls one from an argument SLICE - through the same bodies the
+// emitter reaches for the bare name, so a Method value and a plain call cannot
+// answer differently.
+func (rt *jsrt) rubyKernelInvoke(n string, args []interface{}) interface{} {
+	switch n {
+	case "puts":
+		if len(args) == 0 {
+			fmt.Fprintln(outWriter)
+			return jsNull
+		}
+		for _, e := range args {
+			rt.rubyPuts(e)
+		}
+		return jsNull
+	case "print":
+		for _, e := range args {
+			fmt.Fprint(outWriter, wtf8Clean(rt.rubyStr(e)))
+		}
+		return jsNull
+	case "p":
+		if len(args) == 0 {
+			return jsNull
+		}
+		for _, e := range args {
+			fmt.Fprintln(outWriter, wtf8Clean(rt.rubyInspect(e)))
+		}
+		if len(args) == 1 {
+			return args[0]
+		}
+		return &jsArray{elems: append([]interface{}{}, args...)}
+	case "format", "sprintf":
+		return rt.rubyFormatArgs(args)
+	case "printf":
+		fmt.Fprint(outWriter, wtf8Clean(rt.rubyFormatArgs(args)))
+		return jsNull
+	case "rand":
+		if len(args) == 0 {
+			return rubyRand(nil)
+		}
+		return rubyRand(args[0])
+	}
+	return rt.rubyKernelConv(n, args)
+}
+
+// rubyKernelMethodVal is the Method value for one of them, with MRI's arity
+// recorded so Method#arity answers off the ordinary registry.
+func (rt *jsrt) rubyKernelMethodVal(name string, ki int) interface{} {
+	f := interface{}(&hostFunc{name: "method:" + name, fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+		return rt.rubyKernelInvoke(name, a)
+	}})
+	if rt.rubyArities == nil {
+		rt.rubyArities = map[interface{}]rubyArity{}
+	}
+	if rubyKernelMethodArity[ki] < 0 {
+		rt.rubyArities[f] = rubyArity{req: -rubyKernelMethodArity[ki] - 1, star: true}
+	} else {
+		rt.rubyArities[f] = rubyArity{req: rubyKernelMethodArity[ki]}
+	}
+	return rt.rubyMarkMethodVal(f, "Object(Kernel)", name)
+}
+
+// rubyOwnerName is the class name a bound Method prints as its owner.
+func rubyOwnerName(self interface{}) string {
+	if o, isObj := self.(*jsObject); isObj && rubyUserObj(o) {
+		if c, isCls := o.props["__class"].(*jsObject); isCls {
+			if n, isStr := c.props["__name"].(string); isStr {
+				return n
+			}
+		}
+	}
+	if kind := rubyClassName(self); kind != "" {
+		return kind
+	}
+	return "Object"
 }
 
 // rubyStrInspect is String#inspect: the DOUBLE-QUOTED SOURCE form, and it is the
@@ -7737,6 +8090,14 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		return rubyStrInspect(t)
 	case jsSym:
 		return ":" + t.s
+	// Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
+	// `(2/3)` against `2/3`, `(3+4i)` against `3+4i` - and it is the one place the
+	// two differ for a numeric. Every engine fell through to #to_s.
+	// docs/todo.md 1.3.
+	case jsRat:
+		return "(" + rubyRatText(t) + ")"
+	case jsCpx:
+		return "(" + rubyCpxText(t) + ")"
 	case *jsArray:
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
@@ -8657,11 +9018,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
 	case "class":
-		if kind := rubyClassName(target); kind != "" {
+		if kind := rt.rubyClassNameRT(target); kind != "" {
 			return rt.rubyBuiltinClass(kind)
 		}
 	case "is_a?", "kind_of?", "instance_of?":
-		if rubyClassName(target) != "" && !rubyUserObj(target) {
+		if rt.rubyClassNameRT(target) != "" && !rubyUserObj(target) {
 			return rt.rubyIsA(target, argAt(args, 0))
 		}
 	case "nil?":
@@ -8676,6 +9037,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return "true"
 			}
 			return "false"
+		}
+		// A Proc / Method. Both are the same string in MRI, and neither existed:
+		// `method(:x).inspect' aborted with *method call 'inspect' on a function*
+		// while "#{method(:x)}" answered off rubyStr - so the interpolation and the
+		// explicit call disagreed inside ONE engine. docs/todo.md 2.5.
+		if isCallable(target) {
+			return rt.rubyFuncRender(target)
 		}
 		// A user INSTANCE with no to_s / inspect of its own: `e.inspect' and
 		// `obj.to_s' aborted with *unknown method ... on an instance* here and in
@@ -8737,6 +9105,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case "frozen?":
 		_, isStr := target.(string)
 		return isStr || rubyIsNum(target)
+	case "equal?":
+		return rubyIdenticalP(target, argAt(args, 0))
 	case "call", "()", "yield", "[]", "===":
 		// A Proc / lambda / block: p.call(x), p.(x), p[x] and p.yield(x).
 		if isCallable(target) {
@@ -8751,8 +9121,35 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.rubyArityOf(target)
 		}
 	case "to_proc":
+		// Method#to_proc answers a PROC, and a LAMBDA one: MRI's
+		// `method(:foo).to_proc` is `#<Proc (lambda)>` with the Method's own
+		// arity. A fresh wrapper rather than the Method itself, because the Method
+		// is what carries the Method class.
+		if _, isMeth := rt.rubyMethodValOf(target); isMeth {
+			inner := target
+			pw := interface{}(&hostFunc{name: "to_proc", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+				return rt.call(inner, jsUndef, a)
+			}})
+			if ar, ok := rt.rubyArities[target]; ok {
+				rt.rubyArities[pw] = ar
+			}
+			if rt.rubyLambdas == nil {
+				rt.rubyLambdas = map[interface{}]bool{}
+			}
+			rt.rubyLambdas[pw] = true
+			return pw
+		}
 		if isCallable(target) {
 			return target
+		}
+	case "name":
+		// Method#name: the Symbol `#<Method: Object#x>` ends in. #owner is NOT
+		// implemented in any engine and that is deliberate - it has to answer the
+		// class OBJECT, which the two compiled halves reach only through the
+		// emitted module, so one of the three would have had to answer a synthetic
+		// stand-in. An omission is not a divergence.
+		if mv, isMeth := rt.rubyMethodValOf(target); isMeth {
+			return jsSym{s: mv.name}
 		}
 	case "between?", "clamp":
 		// Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
@@ -9158,10 +9555,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 						rt.fail("undefined method '%s'", nm)
 					}
 					recv := interface{}(o)
-					return &hostFunc{name: "method:" + nm,
+					return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
 						fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 							return rt.rubyMethod(recv, nm, a)
-						}}
+						}}, rubyOwnerName(recv), nm)
 				}
 			}
 		}
@@ -9403,7 +9800,11 @@ func (rt *jsrt) rubyArityOf(f interface{}) float64 {
 	if !ok {
 		return 0
 	}
-	if a.star || (rt.rubyLambdas[f] && a.opt > 0) {
+	// A METHOD counts optionals the way a lambda does, not the way a proc does:
+	// MRI's `method(:m).arity` for `def m(a, b = 1)` is -2, and every engine here
+	// answered the proc's 1. docs/todo.md 2.5.
+	_, isMeth := rt.rubyMethodValOf(f)
+	if a.star || ((rt.rubyLambdas[f] || isMeth) && a.opt > 0) {
 		return float64(-(a.req + 1))
 	}
 	return float64(a.req)
@@ -12920,7 +13321,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			var self interface{} = jsNull
 			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
 				if v, ok := sc.get(name); ok && isCallable(v) {
-					return w(v)
+					// A top-level `def` is a scope variable holding its own
+					// closure, so THAT is the Method value; MRI's owner for one
+					// is Object.
+					//
+					// ...UNLESS THE HIT IS IN THE ROOT SCOPE AND THE NAME IS A
+					// KERNEL ONE: the outermost scope is the HOST's and carries
+					// the shared `print` / `printf` / `sprintf`, which are Go's
+					// fmt and not Ruby's. Same reasoning, and the same three
+					// names, as js_rmethodval in languages/lib/ruby-rt.metajs.
+					if sc.parent != nil || rubyKernelMethodIndex(name) < 0 {
+						return w(rt.rubyMarkMethodVal(v, "Object", name))
+					}
 				}
 				if v, ok := sc.get("self"); ok && isUndefOrNull(self) {
 					self = v
@@ -12942,8 +13354,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						}
 						rt.rubyArities[f] = ar
 					}
-					return w(f)
+					return w(rt.rubyMarkMethodVal(f, rubyOwnerName(recv), mname))
 				}
+			}
+			// A KERNEL method, which MRI hands out as an ordinary Method bound to
+			// the main object - `#<Method: Object(Kernel)#puts>`. After the scope
+			// walk and after rubyFindMethod, so a `def puts` of the program's own
+			// still wins.
+			if ki := rubyKernelMethodIndex(name); ki >= 0 {
+				return w(rt.rubyKernelMethodVal(name, ki))
 			}
 			// A CATCHABLE NameError, which is what MRI raises; a host abort here
 			// printed on stderr where the interpreter half printed on stdout, so
@@ -16971,9 +17390,72 @@ func (rt *jsrt) pySetHas(els *jsArray, v interface{}) bool {
 }
 
 func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
+	// The INSERT form: no frozenset conversion, so `s.add({1})` raises where
+	// `{1} in s` does not.
+	rt.pyHashCheck(v, true)
 	if !rt.pySetHas(els, v) {
 		els.elems = append(els.elems, v)
 	}
+}
+
+// ----- Hashability -----------------------------------------------------------
+//
+// The twin of pyHashName / pyHashCheck in languages/lib/python-rt.metajs and of
+// pyHashName / pyHashCheck in languages/python-interpreter.abnf. CPython:
+//
+//	{[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
+//	{{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
+//
+// The wording differs between the two positions, and the OUTER name is the type
+// handed over while the INNER one is the type that is unhashable - they differ
+// only for a tuple holding a list, which this value model cannot build, so one
+// name serves both slots.
+//
+// dict and set are refused; the ARRAY is not. A tuple IS an array here
+// (docs/todo.md 3.1) and the two directions of that mistake are not symmetric:
+// treating a tuple as hashable only accepts a program CPython would reject,
+// while treating a list as unhashable would abort `{(1, 2), (3, 4)}` and
+// `d[i, j]`, which CPython accepts. bytearray and frozenset are not in this
+// subset at all.
+func pyUnhashName(v interface{}) string {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return ""
+	}
+	if tag, has := o.props["__set"]; has && tag == true {
+		return "set"
+	}
+	if tag, has := o.props["__dict"]; has && tag == true {
+		return "dict"
+	}
+	return ""
+}
+
+// elem: true for a set MEMBER, false for a dict KEY.
+func (rt *jsrt) pyHashCheck(v interface{}, elem bool) {
+	n := pyUnhashName(v)
+	if n == "" {
+		return
+	}
+	where := "a dict key"
+	if elem {
+		where = "a set element"
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		fmt.Sprintf("cannot use '%s' as %s (unhashable type: '%s')", n, where, n))})
+}
+
+// pyHashCheckMember is the set LOOKUP form. CPython's set.__contains__ /
+// .discard / .remove convert a set argument to a frozenset instead of refusing
+// it, so `{1} in {1}` is False where `{} in {1}` raises. Only that one pair is
+// exempt; a set used as a DICT key still raises.
+func (rt *jsrt) pyHashCheckMember(k interface{}) {
+	if o, isObj := k.(*jsObject); isObj {
+		if tag, has := o.props["__set"]; has && tag == true {
+			return
+		}
+	}
+	rt.pyHashCheck(k, true)
 }
 
 // pySetBin is the set algebra: union, intersection, difference and symmetric
@@ -18443,6 +18925,7 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 	case "remove", "discard":
 		// remove() raises KeyError when the member is absent and discard() does
 		// not. That difference is the whole reason both exist.
+		rt.pyHashCheckMember(argAt(args, 0))
 		for i, e := range els.elems {
 			if rt.pyEqual(e, argAt(args, 0)) {
 				els.elems = append(els.elems[:i], els.elems[i+1:]...)
@@ -19193,6 +19676,7 @@ func (rt *jsrt) pyBuiltinClass(name string) *jsObject {
 // from js_pybin once no __contains__ answered).
 func (rt *jsrt) pyContains(x, y interface{}) bool {
 	if els, ok := pySetElems(y); ok {
+		rt.pyHashCheckMember(x)
 		for _, e := range els.elems {
 			if rt.pyEqual(e, x) {
 				return true

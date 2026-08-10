@@ -290,16 +290,81 @@ function pyKeyAlias(k) {
 // value ({1.0: "a"}[1] is a hit), and two boxes holding the same double are one
 // key though they are two objects. Go: rt.dictKeyEq.
 function pyKeyEq(a, b) {
+    // === FIRST, because pyDictFind has no index and calls this once per stored
+    // key: an identical key is the whole answer under every rule below, so the hit
+    // path costs one comparison and no call at all. It used to pay two pyIsFlo
+    // calls before reaching the same conclusion.
+    if (a === b) { return true }
     if (pyIsFlo(a) || pyIsFlo(b)) {
         if (!pyIsNumeric(a) || !pyIsNumeric(b)) { return false }
         return pyNum(a) == pyNum(b)
     }
-    return a === b
+    // A TUPLE key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
+    // is a hit off two different objects - and a tuple IS an array in this value
+    // model (docs/todo.md 3.1). All three engines answered identity here and raised
+    // KeyError on `d[i, j]`, while the SET side of the same engines already
+    // deduplicated with Python's == (pySetHas -> pyEqual): the two halves of one
+    // engine did not even agree with each other. Both sides are == now. The typeof
+    // gate keeps the Array.isArray CALL off the string and number keys that are
+    // almost every key.
+    if (typeof a == "object") {
+        if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
+    }
+    return false
+}
+
+// ----- Hashability -----------------------------------------------------------
+// The twin of pyHashName / pyHashCheck in languages/python-interpreter.abnf and of
+// pyUnhashName / pyHashCheck in abnf/jsrt.go. CPython:
+//
+//   {[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
+//   {{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
+//
+// The wording differs between the two positions. dict and set are refused; the
+// ARRAY is not, because a tuple is an array here and refusing it would abort
+// `{(1,2)}` and `d[i, j]`, which CPython accepts - see the note at
+// python-interpreter.abnf's pyHashCheck. bytearray and frozenset are not in this
+// subset at all.
+function pyHashName(v) {
+    if (!pyIsObj(v)) { return "" }
+    if (v["__set"] === true) { return "set" }
+    if (v["__dict"] === true) { return "dict" }
+    return ""
+}
+
+// elem: true for a set MEMBER, false for a dict KEY.
+function pyHashCheck(v, elem) {
+    var n = pyHashName(v)
+    if (n == "") { return undefined }
+    var where = "a dict key"
+    if (elem) { where = "a set element" }
+    pyRaiseExc("TypeError", "cannot use '" + n + "' as " + where
+                            + " (unhashable type: '" + n + "')")
+    return undefined
+}
+
+// The set LOOKUP form. CPython's set.__contains__ / .discard / .remove convert a
+// set argument to a frozenset instead of refusing it, so `{1} in {1}` is False
+// where `{} in {1}` raises. Only that one pair is exempt; a set used as a DICT
+// key still raises.
+function pyHashCheckMember(k) {
+    if (pyIsObj(k)) {
+        if (k["__set"] === true) { return undefined }
+    }
+    pyHashCheck(k, true)
+    return undefined
 }
 
 // The alias is tried TWICE: a float box's alias is the plain number and the
 // plain number's is the bool, so {True: "t"}[1.0] takes two steps.
 function pyDictFind(keys, k) {
+    // Every dict lookup, insertion, membership test and removal in this half goes
+    // through here, so the unhashable-key refusal needs no other dict site. The
+    // typeof guard is inline rather than a pyIsObj call: this is the hottest
+    // function in the file and almost every key is a string or a number.
+    if (k !== null && k !== undefined) {
+        if (typeof k == "object") { pyHashCheck(k, false) }
+    }
     for (var i = 0; i < keys.length; i++) {
         if (pyKeyEq(keys[i], k)) { return i }
     }
@@ -352,6 +417,9 @@ function pySetHas(els, v) {
 }
 
 function pySetAdd(els, v) {
+    // The INSERT form: no frozenset conversion, so `s.add({1})` raises where
+    // `{1} in s` does not.
+    pyHashCheck(v, true)
     if (!pySetHas(els, v)) { els.push(v) }
     return els
 }
@@ -2593,6 +2661,7 @@ function pyADunderBin(op, l, r) {
 function pyAContains(x, y) {
     var els = pySetElemsOf(y)
     if (els !== null) {
+        pyHashCheckMember(x)
         var i = 0
         while (i < els.length) {
             if (pyAEqual(els[i], x)) { return true }
@@ -6471,6 +6540,7 @@ function pySetMethod(els, name, args) {
     // remove() raises KeyError when the member is absent and discard() does not.
     // That difference is the whole reason both exist.
     if (name == "remove" || name == "discard") {
+        pyHashCheckMember(pyEArgAt(args, 0))
         var ri = 0
         while (ri < els.length) {
             if (pyEqual(els[ri], pyEArgAt(args, 0))) {

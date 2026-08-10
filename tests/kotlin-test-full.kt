@@ -4362,6 +4362,201 @@ fun sec82() {
 }
 
 
+// ===== SECTION 83: A USER THROWABLE'S HIERARCHY, and three levels of nesting =====
+// docs/todo.md 2.9, both halves of it.
+//
+// (a) `class S83Top(m: String) : Exception(m)` then `S83Top("x") is Exception` was
+// TRUE in the interpreter half and FALSE under llvm.Run and natively: the compiler
+// half emits no descriptor for a builtin throwable, so the class's __super slot was
+// left absent and js_ktis' chain walk had nothing to walk. A live halves divergence
+// --cross is blind to, because --cross diffs a program's OUTPUT and no program asked.
+// js_ktexccls now hands emitSuperLinks the same descriptor js_ktnewexc constructs
+// from. Every row below was checked with `instanceof` under java 24.0.2 through an
+// Object-typed variable (javac REJECTS a statically impossible instanceof, which is
+// why the oracle needs the cast) - Kotlin's Exception / RuntimeException / Error are
+// TYPEALIASES to java.lang's, so java is the oracle and there is no kotlinc here.
+//
+// (b) `S83A.S83B.S83C(7)` - three levels - aborted both compiled halves outright
+// with *method call 'S83C' on a function*: the slot a nested class occupies on its
+// owner holds a CONSTRUCTION FACTORY, so the plain read `S83A.S83B` answered that
+// function. The descriptor now rides beside it under a `__`-prefixed slot.
+//
+// Every subject is read out of an array: a probe of literals tests the constant
+// folder, not the runtime (manual chapter 3).
+open class S83Top(m: String) : Exception(m)
+class S83Sub(m: String) : S83Top(m)
+class S83Err(m: String) : Error(m)
+class S83Ise(m: String) : IllegalStateException(m)
+class S83Plain(val n: Int)
+class S83A {
+    class S83B {
+        class S83C(val v: Int) { fun show(): String = "C" + v }
+    }
+    class S83D(val w: Int)
+}
+object S83Root {
+    class S83E {
+        class S83F(val u: Int)
+    }
+}
+
+fun s83flags(v: Any): String {
+    return "" + (v is Throwable) + (v is Exception) + (v is RuntimeException) + (v is Error)
+}
+
+fun s83text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun sec83() {
+    val vs = arrayOf<Any>(S83Top("a"), S83Sub("b"), S83Err("c"), S83Ise("d"), S83Plain(1))
+    // java 24.0.2, `new S83Top("a") instanceof ...` through an Object: T,E,-,-.
+    check("hi83a", s83flags(vs[0]) == "truetruefalsefalse")
+    // A subclass of a user throwable inherits the whole chain.
+    check("hi83b", s83flags(vs[1]) == "truetruefalsefalse")
+    // Error is NOT an Exception - the one row that would pass by accident if the
+    // chain were faked by a marker rather than built.
+    check("hi83c", s83flags(vs[2]) == "truefalsefalsetrue")
+    // IllegalStateException -> RuntimeException -> Exception -> Throwable.
+    check("hi83d", s83flags(vs[3]) == "truetruetruefalse")
+    // A class that extends nothing is untouched by the __super link.
+    check("hi83e", s83flags(vs[4]) == "falsefalsefalsefalse")
+    check("hi83f", vs[0] is S83Top && vs[1] is S83Top && !(vs[0] is S83Sub))
+    // The CATCH-CLAUSE selection follows the same chain now: a `: Exception` class
+    // is NOT caught by `catch (e: RuntimeException)`. js_ktexcmatch's "an
+    // intermediate root accepts a non-throwable" arm used to catch it there.
+    var by = "none"
+    try { throw (vs[0] as Throwable) } catch (e: RuntimeException) { by = "rte" } catch (e: Exception) { by = "exc" }
+    check("hi83g", by == "exc")
+    var by2 = "none"
+    try { throw (vs[3] as Throwable) } catch (e: RuntimeException) { by2 = "rte" } catch (e: Exception) { by2 = "exc" }
+    check("hi83h", by2 == "rte")
+    var by3 = "none"
+    try { throw (vs[2] as Throwable) } catch (e: Exception) { by3 = "exc" } catch (e: Throwable) { by3 = "thr" }
+    check("hi83i", by3 == "thr")
+    // Throwable#toString is unchanged by the link: a top-level user class keeps its
+    // SIMPLE name, and does NOT inherit java.lang.Exception's __bname off the chain.
+    check("hi83j", vs[0].toString() == "S83Top: a" && vs[2].toString() == "S83Err: c")
+    // An object EXPRESSION extending a builtin throwable gets the chain too.
+    val anon = object : IllegalArgumentException("q") {}
+    check("hi83k", anon is IllegalArgumentException && anon is RuntimeException && anon is Exception)
+    // TODO() / NotImplementedError. Both compiled halves printed "[object Object]"
+    // for it and could not construct the class by name at all, because
+    // ktExcHierarchy was missing the entry its own ktRaise call already named -
+    // found while linking the chain above. kotlin-stdlib: `class
+    // NotImplementedError(message: String = "An operation is not implemented.") :
+    // Error(message)`, and TODO(reason) prepends "An operation is not implemented: ".
+    check("hi83l", s83text { TODO("soon") } ==
+        "kotlin.NotImplementedError: An operation is not implemented: soon")
+    check("hi83m", s83text { TODO() } ==
+        "kotlin.NotImplementedError: An operation is not implemented.")
+    check("hi83n", s83text { throw NotImplementedError("m") } == "kotlin.NotImplementedError: m")
+    var by4 = "none"
+    try { TODO("q") } catch (e: NotImplementedError) { by4 = "byname" }
+    check("hi83o", by4 == "byname")
+    // It is an Error, not an Exception - the same row that would pass by accident
+    // if the entry were parented anywhere convenient.
+    check("hi83p", s83flags(NotImplementedError("z")) == "truefalsefalsetrue")
+    // Three levels of nesting, both as a construction and as a type.
+    val ns = arrayOf(7, 8, 9)
+    check("ne83a", S83A.S83B.S83C(ns[0]).show() == "C7")
+    check("ne83b", S83A.S83B.S83C(ns[0]).v == 7)
+    check("ne83c", S83A.S83B.S83C(ns[1]) is S83A.S83B.S83C)
+    // Two levels, and a nested class of an OBJECT declaration, both still work.
+    check("ne83d", S83A.S83D(ns[2]).w == 9)
+    check("ne83e", S83Root.S83E.S83F(ns[0]).u == 7)
+    val typed: S83A.S83B.S83C = S83A.S83B.S83C(ns[1])
+    check("ne83f", typed.v == 8)
+}
+
+// ===== SECTION 84: THE INDEX FAMILY - every message, and the empty receiver =====
+// docs/todo.md 1.2. Each of these used to ABORT the run - an abort is not catchable
+// at all, so no Kotlin program could recover from an out-of-range write or an empty
+// first(). Against a clean `git archive 22e7b44` tree this section aborts in every
+// leg on its first row.
+//
+// THE MESSAGES ARE java 24.0.2's, VERBATIM (measured on this machine), and the JVM
+// spells the family THREE different ways, which is the whole reason this is a
+// section rather than one helper:
+//     l.removeAt(9) / l.set(9,x) / l[9]     Index 9 out of bounds for length 2
+//     l.add(9, x)                           Index: 9, Size: 2
+//     "ab".substring(5)                     Range [5, 2) out of bounds for length 2
+// The first goes through Objects.checkIndex, the second through ArrayList's own
+// rangeCheckForAdd, the third through String's checkBoundsBeginEnd. All three raise
+// IndexOutOfBoundsException or its StringIndexOutOfBoundsException subclass.
+//
+// The EMPTY-RECEIVER rows are kotlin-stdlib's _Collections.kt and NOT a measurement:
+// java cannot answer them and there is no kotlinc on this machine. What java does
+// settle is the throwable CLASS, java.util.NoSuchElementException.
+//
+// Every index is read out of an array (manual chapter 3).
+fun s84text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun sec84() {
+    val ix = arrayOf(9, -1, 2, 0)
+    val io = "java.lang.IndexOutOfBoundsException: "
+    val sio = "java.lang.StringIndexOutOfBoundsException: "
+    val nse = "java.util.NoSuchElementException"
+    check("ax84a", s84text { mutableListOf(1, 2).removeAt(ix[0]) } == io + "Index 9 out of bounds for length 2")
+    check("ax84b", s84text { mutableListOf(1, 2).removeAt(ix[1]) } == io + "Index -1 out of bounds for length 2")
+    check("ax84c", s84text { mutableListOf(1, 2).set(ix[0], 5) } == io + "Index 9 out of bounds for length 2")
+    check("ax84d", s84text { mutableListOf(1, 2).set(ix[2], 5) } == io + "Index 2 out of bounds for length 2")
+    // The INDEXED WRITE is MutableList.set and raises the same thing. It used to
+    // grow the list silently for a positive index, and it was a live halves
+    // divergence for a negative one - a silent no-op in the interpreter, an
+    // uncatchable "invalid array index -1" in both compiled halves.
+    check("ax84e", s84text { val l = mutableListOf(1, 2); l[ix[0]] = 5; l.size } == io + "Index 9 out of bounds for length 2")
+    check("ax84f", s84text { val l = mutableListOf(1, 2); l[ix[1]] = 5; l.size } == io + "Index -1 out of bounds for length 2")
+    // add(index, element) is the one member with the OTHER format, and its upper
+    // bound is size INCLUSIVE - appending at the end is legal.
+    check("ax84g", s84text { mutableListOf(1, 2).add(ix[0], 5) } == io + "Index: 9, Size: 2")
+    check("ax84h", s84text { mutableListOf(1, 2).add(ix[1], 5) } == io + "Index: -1, Size: 2")
+    check("ax84i", s84text { val l = mutableListOf(1, 2); l.add(ix[2], 5); "" + l } == "[1, 2, 5]")
+    // substring: a RANGE, and the end of a one-argument call is the receiver's
+    // length. All three engines answered "" here, because JS substring clamps.
+    val ss = arrayOf("ab", "abcdef")
+    check("ax84j", s84text { ss[0].substring(ix[0]) } == sio + "Range [9, 2) out of bounds for length 2")
+    check("ax84k", s84text { ss[1].substring(ix[0]) } == sio + "Range [9, 6) out of bounds for length 6")
+    check("ax84l", s84text { ss[0].substring(ix[3], ix[0]) } == sio + "Range [0, 9) out of bounds for length 2")
+    check("ax84m", s84text { ss[0].substring(ix[1]) } == sio + "Range [-1, 2) out of bounds for length 2")
+    // In-range substrings are untouched, the empty one included.
+    check("ax84n", ss[1].substring(ix[2]) == "cdef" && ss[0].substring(ix[2]) == "")
+    // The empty receiver: NoSuchElementException, catchable, not an abort.
+    val emp = listOf<Int>()
+    val many = listOf(1, 2, 3, 4)
+    check("ax84o", s84text { emp.first() } == nse + ": List is empty.")
+    check("ax84p", s84text { emp.last() } == nse + ": List is empty.")
+    check("ax84q", s84text { emp.single() } == nse + ": List is empty.")
+    check("ax84r", s84text { mutableListOf<Int>().removeFirst() } == nse + ": List is empty.")
+    // max()/min()/maxBy()/maxOf() are stdlib's `?: throw NoSuchElementException()`,
+    // so their message is genuinely NULL and Throwable#toString prints the class
+    // alone - which is exactly the shape java prints for a null message.
+    check("ax84s", s84text { emp.max() } == nse && s84text { emp.maxBy { it } } == nse)
+    check("ax84t", s84text { emp.maxOf { it } } == nse && s84text { emp.min() } == nse)
+    // reduce() is the one that is NOT NoSuchElementException.
+    check("ax84u", s84text { emp.reduce { a, b -> a + b } } ==
+        "java.lang.UnsupportedOperationException: Empty collection can't be reduced.")
+    // single() on a longer list, and the predicate forms of first/single.
+    check("ax84v", s84text { many.single() } ==
+        "java.lang.IllegalArgumentException: List has more than one element.")
+    check("ax84w", s84text { many.first { it > 9 } } ==
+        nse + ": Collection contains no element matching the predicate.")
+    check("ax84x", s84text { many.single { it > 2 } } ==
+        "java.lang.IllegalArgumentException: Collection contains more than one matching element.")
+    // last(predicate) used to IGNORE the lambda and answer the last element, in
+    // every engine - agreed and wrong, and only an oracle can see that class.
+    check("ax84y", many.last { it < 3 } == 2 && many.first { it > 2 } == 3)
+    check("ax84z", s84text { many.last { it > 9 } } ==
+        nse + ": List contains no element matching the predicate.")
+    // The OrNull family still answers rather than throwing, and the in-range
+    // spellings are all untouched.
+    check("ax84A", emp.maxOrNull() == null && emp.firstOrNull() == null &&
+        many.first() == 1 && many.last() == 4 && listOf(6).single() == 6)
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4445,6 +4640,8 @@ fun main() {
     sec80() // SECTION-CALL 80
     sec81() // SECTION-CALL 81
     sec82() // SECTION-CALL 82
+    sec83() // SECTION-CALL 83
+    sec84() // SECTION-CALL 84
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

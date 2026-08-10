@@ -3818,15 +3818,71 @@ KwContinue  = "continue" KwEnd ;
         return t
     }
 
-    // ----- Struct value semantics -----
-    // A struct instance is copied whenever it is bound to a new name, assigned or
-    // passed as an argument, so `var b = a; b.x = 1` leaves a alone. A class instance
-    // is a reference and is never copied.
+    // ----- Value semantics: struct, Array, Dictionary and tuple -----
+    // Swift's defining property. EVERY value type is copied whenever it is stored
+    // into a location - a var/let binding, an assignment, a non-inout argument, an
+    // element of a collection literal, an argument to a mutating collection method.
+    // A class instance is a REFERENCE and is never copied, which is what makes
+    // `var b = a; b[0].x = 9` visible through a in an array of class instances
+    // (swiftc agrees: the array is copied, its elements are not).
+    //
+    // COPY AT STORE IS COMPLETE, and that is why there is no copy on READ. The only
+    // way two locations can alias is that one stored a value the other can still
+    // reach; if every store site deposits a graph nobody else holds, no read can
+    // produce one. It is also why `a[0].append(5)` still mutates a in place: a
+    // subscript READ is not a store.
+    //
+    // This is NOT copy-on-write. Swift's real rule is COW with value semantics
+    // OBSERVABLE; only the observable half is implemented here, eagerly. The cost
+    // is a walk per store, and the alternative needs a mutable flag on a host array,
+    // which this value model has nowhere to put.
     function isStructVal(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__struct === true
     }
+    function swCopyArr(v) {
+        var out = []
+        for (var i = 0; i < v.length; i++) { out.push(swCopy(v[i])) }
+        return out
+    }
+    function swCopyDict(v) {
+        var out = {__dict: true, keys: [], vals: []}
+        var ks = v.keys
+        var vs = v.vals
+        for (var i = 0; i < ks.length; i++) {
+            out.keys.push(ks[i])
+            out.vals.push(swCopy(vs[i]))
+        }
+        return out
+    }
+    // A LABELLED tuple stores the same value twice - under "0" and under its label -
+    // and makeParen is the site that establishes that aliasing. The copy re-
+    // establishes it rather than walking the keys, so the two spellings of one
+    // element stay the one element.
+    function swCopyTup(v) {
+        var n = v.__tuple
+        var out = {__tuple: n}
+        var lbls = hasOwn(v, "__tlabels") ? v.__tlabels : null
+        if (lbls != null) { scopePut(out, "__tlabels", lbls) }
+        for (var i = 0; i < n; i++) {
+            var e = swCopy(hasOwn(v, "" + i) ? v["" + i] : undefined)
+            scopePut(out, "" + i, e)
+            if (lbls != null && i < lbls.length && lbls[i] != "") { scopePut(out, lbls[i], e) }
+        }
+        return out
+    }
+    // An enum CASE value is deliberately NOT copied, and that is a measurement
+    // rather than an omission. Its payload is reachable only through a pattern
+    // binding (`if case .some(var v)`), and that binding is itself a copy site - so
+    // no program can observe two case values sharing one __vals array. swiftc
+    // agrees on the probe: A/B/C all answer [1, 2]. Copying it would mean keeping a
+    // seven-slot literal in step across three engines for no visible behaviour.
     function swCopy(v) {
-        if (!isStructVal(v)) { return v }
+        if (v === null || v === undefined) { return v }
+        if (Array.isArray(v)) { return swCopyArr(v) }
+        if (typeof v != "object") { return v }
+        if (v.__dict === true) { return swCopyDict(v) }
+        if (v.__tuple != undefined) { return swCopyTup(v) }
+        if (v.__struct !== true) { return v }
         var cls = v.__class
         if (cls == undefined || cls === null) { return v }
         var ks = cls.__fields
@@ -3944,7 +4000,7 @@ KwContinue  = "continue" KwEnd ;
         return function() {
             var v = init()
             for (var i = 0; i < names.length; i++) {
-                if (names[i] != "_") { declVar(names[i], tupleAt(v, i)) }
+                if (names[i] != "_") { declVar(names[i], swCopy(tupleAt(v, i))) }
             }
         }
     }
@@ -3954,7 +4010,7 @@ KwContinue  = "continue" KwEnd ;
         return function() {
             var v = init()
             for (var i = 0; i < names.length; i++) {
-                if (names[i] != "_") { setVar(names[i], tupleAt(v, i)) }
+                if (names[i] != "_") { setVar(names[i], swCopy(tupleAt(v, i))) }
             }
         }
     }
@@ -4096,7 +4152,7 @@ KwContinue  = "continue" KwEnd ;
         }
         // An enum case reference, or a name to bind.
         var simple = !k.pdot && k.pargs == null && k.ppath.indexOf(".") < 0
-        if (binding && simple) { declVar(k.ppath, v); return true }
+        if (binding && simple) { declVar(k.ppath, swCopy(v)); return true }
         return matchEnumCase(k, v, binding)
     }
     // An enum case pattern matches by case NAME (a leading `.` has no type to resolve
@@ -4140,8 +4196,8 @@ KwContinue  = "continue" KwEnd ;
                 var v = cd.init()
                 if (v === null || v === undefined) { return false }
                 var ns = cd.bindNames
-                if (ns.length == 1) { declVar(ns[0], v) }
-                else { for (var j = 0; j < ns.length; j++) { declVar(ns[j], tupleAt(v, j)) } }
+                if (ns.length == 1) { declVar(ns[0], swCopy(v)) }
+                else { for (var j = 0; j < ns.length; j++) { declVar(ns[j], swCopy(tupleAt(v, j))) } }
             } else {
                 if (!matchPat(cd.pat, cd.init(), false)) { return false }
             }
@@ -4830,6 +4886,14 @@ KwContinue  = "continue" KwEnd ;
             // Int(x) / UInt8(x) / ...: the integer types are descriptors rather than
             // functions, so that Int.max stays an ordinary property read; __conv is
             // the conversion behind the call form.
+            // __convl is the same hook for a conversion that has to SEE its argument
+            // labels: `String(x)` and `String(describing: x)` are two different
+            // initializers in Swift and differ on exactly one argument shape.
+            if (f != undefined && f !== null && typeof f == "object" && typeof f.__convl == "function") {
+                var cvl = f.__convl(argv, recLabels(recs))
+                writeBacks(ea.boxes)
+                return cvl
+            }
             if (f != undefined && f !== null && typeof f == "object" && typeof f.__conv == "function") {
                 var cv = f.__conv.apply(undefined, argv)
                 writeBacks(ea.boxes)
@@ -6826,8 +6890,26 @@ KwContinue  = "continue" KwEnd ;
     }
     hostGlobals["Double"] = swFloType()
     hostGlobals["Float"] = swF32Type()
-    // String(x) / String(describing: x): the text print would have written.
-    hostGlobals["String"] = {__conv: function(x) { return swstr(x) }}
+    // String(x) and String(describing: x) are NOT one conversion, and the argument
+    // that tells them apart is a SEQUENCE:
+    //   String(s.sorted())            "ehllo"                (init(_: some Sequence<Character>))
+    //   String(describing: s.sorted()) "[\"e\", \"h\", ...]"  (the description)
+    // Every other argument shape agrees, because `String(x)` unlabelled is only
+    // valid for a LosslessStringConvertible or a Character sequence and both render
+    // the same either way. So the label is the whole of the difference and swStrInit
+    // is reached through __convl, which is given it.
+    function swStrJoin(xs) {
+        var out = ""
+        for (var i = 0; i < xs.length; i++) { out = out + swstr(xs[i]) }
+        return out
+    }
+    function swStrInit(argv, labels) {
+        var x = argv.length > 0 ? argv[0] : undefined
+        var lb = labels.length > 0 ? labels[0] : null
+        if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
+        return swstr(x)
+    }
+    hostGlobals["String"] = {__convl: swStrInit}
     // Array(seq) and Array(repeating:count:). Both aborted in every engine, and the
     // two refusals did not even agree: "unknown name: Array" here against "call of a
     // non function value: [object Object]" under llvm.Run - a name bound to the

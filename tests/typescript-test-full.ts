@@ -2690,6 +2690,169 @@ function s46(): void {
     check("fin09", Object.keys({ ...null }).length === 0 && Object.keys({ ...s46a[5] }).length === 0);
 }
 
+// ===== SECTION 47: for-in is a SNAPSHOT, a private name is per CLASS BODY, and a
+//       FUNCTION carries own properties (docs/todo.md 2.10) =====
+// Three defects every engine here AGREED on, so byte-identity could not see any of
+// them; node is the only witness. Each row below was measured against node v24.
+//
+//   DELETING A KEY DURING for-in. js_jskeys / jsKeys answer a SNAPSHOT, so a key the
+//   body deleted before its turn came was still visited: `for (k in o) { s += k;
+//   delete o.c }` gave "abc" where node gives "ab". The compilers guard each
+//   iteration with js_jshas and the interpreters with propIn - both or neither, since
+//   one alone would be a halves divergence.
+//
+//   THE SAME PRIVATE NAME IN A SUBCLASS. `class A { #v } class B extends A { #v }` is
+//   TWO names in TypeScript and was ONE slot here, because the mangled key was per
+//   NAME ('__#v'). B's field initializer therefore overwrote A's, and A's own getter
+//   answered B's value. The key carries the CLASS BODY now ('__#<body>#v'), resolved
+//   to the innermost enclosing body that declares the name - so an inner class reading
+//   an outer class's private name still reaches it.
+//
+//   AN OWN PROPERTY ON A FUNCTION. `f.p = 1` killed both compiled halves outright
+//   ("cannot set field 'p' on *abnf.jsClosure" / "member assignment 'p' on
+//   [function]") and, in the INTERPRETERS, worked under goja and died under -frozen -
+//   a live goja-vs--frozen divergence no test reached. The map lives beside the
+//   function in a side table in all four engines now, and for-in, Object.keys,
+//   `in`, hasOwnProperty and delete all read it.
+//
+// Every operand comes out of s47a so the constant folder cannot answer any of it.
+const s47a: any[] = [0, 1, 2, 3, "a", "b", "c", "d"];
+
+class S47A {
+    #v: number = s47a[1];
+    getA(): number { return this.#v }
+    setA(x: number): void { this.#v = x }
+    hasA(o: any): boolean { return #v in o }
+}
+class S47B extends S47A {
+    #v: number = s47a[2];
+    getB(): number { return this.#v }
+    setB(x: number): void { this.#v = x }
+    hasB(o: any): boolean { return #v in o }
+}
+class S47C { #m(): string { return s47a[4] } callC(): string { return this.#m() } }
+class S47D extends S47C { #m(): string { return s47a[5] } callD(): string { return this.#m() } }
+class S47E { static #s: number = s47a[1]; static getE(): number { return S47E.#s } }
+class S47F extends S47E { static #s: number = s47a[2]; static getF(): number { return S47F.#s } }
+// An INNER class body reading the OUTER body's private name: the reference resolves
+// to the innermost enclosing body that DECLARES it, which is the outer one here.
+class S47G {
+    #g: number = s47a[3];
+    read(): number { return this.#g }
+    make(): any { return class S47H { peek(o: any): number { return o.#g } } }
+}
+// A method that reads a field declared LATER in the same body - which is why the
+// reference key cannot be settled while the body is being walked.
+class S47L { late(): number { return this.#l } #l: number = s47a[3] }
+
+const s47fn: any = function (x: any): any { return x };
+
+function s47(): void {
+    // ----- for-in is a snapshot, but a deleted key is skipped -----
+    const o1: any = { a: s47a[1], b: s47a[2], c: s47a[3] };
+    var r1 = "";
+    for (var k1 in o1) { r1 = r1 + k1; delete o1.c }
+    check("fin10", r1 === "ab");
+    const o2: any = { a: s47a[1], b: s47a[2], c: s47a[3] };
+    var r2 = "";
+    for (var k2 in o2) { r2 = r2 + k2; if (k2 === s47a[4]) { delete o2.b } }
+    check("fin11", r2 === "ac");
+    const o3: any = { a: s47a[1], b: s47a[2], c: s47a[3], d: s47a[3] };
+    var r3 = "";
+    for (var k3 in o3) { r3 = r3 + k3; delete o3.b; delete o3.d }
+    check("fin12", r3 === "ac");
+    // A key DELETED AND PUT BACK is still visited: it is present when its turn comes.
+    const o4: any = { a: s47a[1], b: s47a[2], c: s47a[3] };
+    var r4 = "";
+    for (var k4 in o4) { r4 = r4 + k4; delete o4.a; o4.a = s47a[1] }
+    check("fin13", r4 === "abc");
+    // A key ADDED during the loop is NOT visited - the list is still a snapshot.
+    const o5: any = { a: s47a[1], b: s47a[2] };
+    var r5 = "";
+    for (var k5 in o5) { r5 = r5 + k5; o5.z = s47a[3] }
+    check("fin14", r5 === "ab");
+    // The guard must not drop anything from an array, a string or a class object.
+    const ar: any[] = [s47a[1], s47a[2], s47a[3]];
+    var r6 = "";
+    for (var k6 in ar) { r6 = r6 + k6 }
+    check("fin15", r6 === "012");
+    var r7 = "";
+    for (var k7 in s47a[4] + s47a[5]) { r7 = r7 + k7 }
+    check("fin16", r7 === "01");
+    var r8 = "";
+    for (var k8 in S47E) { r8 = r8 + k8 }
+    check("fin17", r8 === "");
+
+    // ----- a private name is scoped to its CLASS BODY -----
+    const b: any = new S47B();
+    check("priv12", b.getA() === 1 && b.getB() === 2);
+    b.setA(s47a[3] * 10);
+    check("priv13", b.getA() === 30 && b.getB() === 2);
+    b.setB(s47a[2] * 10);
+    check("priv14", b.getA() === 30 && b.getB() === 20);
+    const d: any = new S47D();
+    check("priv15", d.callC() === "a" && d.callD() === "b");
+    check("priv16", S47E.getE() === 1 && S47F.getF() === 2);
+    // The brand check is per class body too: an A has A's #v and not B's.
+    check("priv17", b.hasA(b) === true && b.hasB(b) === true);
+    check("priv18", b.hasA(new S47A()) === true && b.hasB(new S47A()) === false);
+    const g: any = new S47G();
+    const H: any = g.make();
+    check("priv19", g.read() === 3 && (new H()).peek(g) === 3);
+    check("priv20", (new S47L()).late() === 3);
+    // Neither slot is enumerable, in either class.
+    check("priv21", Object.keys(b).join("|") === "" && Object.keys({ ...b }).join("|") === "");
+
+    // ----- a FUNCTION carries own properties -----
+    s47fn.p = s47a[1];
+    s47fn.q = s47a[2];
+    check("fnp01", s47fn.p === 1 && s47fn.q === 2 && s47fn.zz === undefined);
+    var fk = "";
+    for (var k9 in s47fn) { fk = fk + k9 + "," }
+    check("fnp02", fk === "p,q,");
+    check("fnp03", Object.keys(s47fn).join("|") === "p|q");
+    check("fnp04", (s47a[4] in s47fn) === false && ("p" in s47fn) === true);
+    check("fnp05", Object.prototype.hasOwnProperty.call(s47fn, "p") === true);
+    delete s47fn.p;
+    check("fnp06", s47fn.p === undefined && Object.keys(s47fn).join("|") === "q");
+    // A function that was never written to has no keys and is not disturbed.
+    check("fnp07", Object.keys(s47).join("|") === "" && ("q" in s47) === false);
+    // A property holding a function is callable, and the function is still a function.
+    s47fn.m = function (): number { return s47a[3] * 14 };
+    check("fnp08", s47fn.m() === 42 && s47fn(s47a[3]) === 3 && typeof s47fn === "function");
+    // A property holding UNDEFINED is still an own key, as it is on any object.
+    s47fn.u = undefined;
+    check("fnp09", ("u" in s47fn) === true && Object.keys(s47fn).join("|") === "q|m|u");
+
+    // ----- a FUNCTION's Object.prototype SURFACE, as methods -----
+    // These were a goja-vs--frozen divergence that PREDATES the side table: under goja
+    // a host function carries a real prototype chain and answered all four, while the
+    // frozen interpreter and both compiled halves died with "f.toString is not a
+    // function". The side table then made hasOwnProperty WORSE on the goja leg - it had
+    // answered true off goja's own expando and went to false once the property moved
+    // beside the function. All four are answered by this engine now, in all four legs.
+    check("fnp10", s47fn.hasOwnProperty("q") === true && s47fn.hasOwnProperty(s47a[4]) === false);
+    check("fnp11", s47fn.propertyIsEnumerable("q") === true && s47fn.propertyIsEnumerable(s47a[4]) === false);
+    // toString agrees with String(f), which is the one spelling every leg already had;
+    // node agrees with itself here too, so the row does not pin our text.
+    check("fnp12", typeof s47fn.toString() === "string" && s47fn.toString() === String(s47fn));
+    check("fnp13", s47fn.valueOf() === s47fn);
+    // An OWN property still wins over the built-in, as it does in node.
+    const s47g: any = function (): any { return s47a[1] };
+    s47g.valueOf = s47a[3];
+    check("fnp14", s47g.valueOf === 3 && typeof s47g.toString === "function");
+    // A function with NO own properties answers false rather than throwing.
+    check("fnp15", s47.hasOwnProperty("q") === false && s47.propertyIsEnumerable("q") === false);
+    // The VALUES, not just the keys: Object.values / entries / assign / spread read a
+    // function's own properties through a different path from for-in, and each one of
+    // them answered the right keys with undefined values on at least one leg.
+    const s47v: any[] = Object.values(s47fn);
+    const s47e: any[] = Object.entries(s47fn);
+    check("fnp16", s47v.length === 3 && s47v[0] === 2 && typeof s47v[1] === "function" && s47v[2] === undefined);
+    check("fnp16b", s47e.length === 3 && s47e[0][0] === "q" && s47e[0][1] === 2);
+    check("fnp17", Object.assign({}, s47fn).q === 2 && ({ ...s47fn }).q === 2);
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -2737,6 +2900,7 @@ function main(): number {
     s44(); // SECTION-CALL 44
     s45(); // SECTION-CALL 45
     s46(); // SECTION-CALL 46
+    s47(); // SECTION-CALL 47
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

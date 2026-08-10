@@ -587,6 +587,96 @@ function swStrArray(v) {
     return v
 }
 
+// ===================================================== value semantics ======
+//
+// js_swcopy is Swift's defining property: EVERY value type is copied whenever it
+// is stored into a location - a var/let binding, an assignment, a non-inout
+// argument. A class instance is a REFERENCE and is never copied, which is what
+// keeps `var b = a; b[0].x = 9` visible through a in an array of class instances.
+//
+// COPY AT STORE IS COMPLETE, so there is no copy on READ. Two locations can only
+// alias if one stored a value the other still reaches; if every store deposits a
+// graph nobody else holds, no read can produce one. It is also why
+// `a[0].append(5)` still mutates a in place - a subscript read is not a store.
+//
+// Not copy-on-write: Swift's rule is COW with the value semantics OBSERVABLE, and
+// only the observable half is implemented, eagerly. A real COW needs a mutable
+// shared flag on a host array, which this value model has nowhere to put.
+//
+// An enum CASE value is deliberately NOT copied: its payload is reachable only
+// through a pattern binding, which is itself a copy site, so no program can
+// observe two case values sharing one __vals array (measured against swiftc).
+//
+// Twins: swCopy in languages/swift-interpreter.abnf and js_swcopy in
+// abnf/jsrtswift.go.
+function swCopyElems(v) {
+    var out = []
+    var i = 0
+    while (i < v.length) { out.push(js_swcopy(v[i])); i = i + 1 }
+    return out
+}
+function swCopyDict(v) {
+    var ks = v["keys"]
+    var vs = v["vals"]
+    var nk = []
+    var nv = []
+    var i = 0
+    while (i < ks.length) { nk.push(ks[i]); nv.push(js_swcopy(vs[i])); i = i + 1 }
+    return {__dict: true, keys: nk, vals: nv}
+}
+// A LABELLED tuple stores the same value twice - under "0" and under its label -
+// and the copy re-establishes that aliasing rather than walking keys, so the two
+// spellings of one element stay the one element.
+function swCopyTup(v, n) {
+    var out = {__tuple: n}
+    var lbls = v["__tlabels"]
+    var has = lbls !== undefined && lbls !== null
+    if (has) { out["__tlabels"] = lbls }
+    var i = 0
+    while (i < n) {
+        var e = js_swcopy(v["" + i])
+        out["" + i] = e
+        if (has && i < lbls.length && lbls[i] != "") { out[lbls[i]] = e }
+        i = i + 1
+    }
+    return out
+}
+function swCopyStruct(v, cls) {
+    var ks = cls["__fields"]
+    if (!rtIsArr(ks)) { return v }
+    var out = {__class: cls}
+    var i = 0
+    while (i < ks.length) {
+        out[ks[i]] = js_swcopy(v[ks[i]])
+        i = i + 1
+    }
+    return out
+}
+// The __class test comes BEFORE the array test on purpose: rtIsArr is "an object
+// with a numeric length", and `struct S { var length: Int }` answers it. An
+// instance is identified by its descriptor, an array never has one.
+function js_swcopy(v) {
+    // THE SCALAR EARLY-OUT IS THE WHOLE PERFORMANCE STORY, and it is written with
+    // the `typeof` OPERATOR rather than swIsObj/rtIsObj on purpose: this extern is
+    // now emitted at every assignment, every binding and every argument, so a
+    // scalar-only loop calls it twice per iteration and reaches nothing else. A
+    // helper call here is a layer-2 scope lookup BY NAME, and spending one on a
+    // number cost tests/bench/mod.swift +10.2% in 9/9 paired draws; the operator
+    // compiles inline and takes it back.
+    if (typeof v != "object") { return v }
+    if (v === null) { return v }
+    if (v["__dict"] === true) { return swCopyDict(v) }
+    var cls = v["__class"]
+    if (cls !== undefined && cls !== null) {
+        if (cls["__struct"] !== true) { return v }
+        return swCopyStruct(v, cls)
+    }
+    var n = swNumProp(v, "__tuple")
+    if (n >= 0) { return swCopyTup(v, n) }
+    if (rtIsArr(v)) { return swCopyElems(v) }
+    return v
+}
+
 // dictFind: the index of a key, or -1. The Go twin hashes; a linear scan with the
 // same strictEq is observationally identical and is what layer 2 can write.
 // SHARED as rtDictFind - lib/runtime.metajs. This body was byte-identical in
@@ -1791,6 +1881,24 @@ function js_swdesc(v) { return swDesc(v) }
 
 // String(x) / String(describing: x): the same text.
 function js_swstr(v) { return swDesc(v) }
+
+// String(x) and String(describing: x) are NOT one conversion, and the argument
+// that tells them apart is a SEQUENCE:
+//   String(s.sorted())             "ehllo"                  init(_: some Sequence<Character>)
+//   String(describing: s.sorted())  ["e", "h", "l", "l", "o"]
+// Every other argument shape agrees, because an unlabelled String(x) is only
+// valid for a LosslessStringConvertible or a Character sequence and both of those
+// render the same either way. The emitter knows the LABEL statically, so it picks
+// the extern rather than passing one: js_swstrinit is the unlabelled form.
+function js_swstrinit(v) {
+    if (rtIsArr(v)) {
+        var out = ""
+        var i = 0
+        while (i < v.length) { out = out + swDesc(v[i]); i = i + 1 }
+        return out
+    }
+    return swDesc(v)
+}
 
 // Swift's print(_:separator:terminator:). args is the argument ARRAY, sep the
 // separator and term the terminator; nil means the default (" " and "\n").

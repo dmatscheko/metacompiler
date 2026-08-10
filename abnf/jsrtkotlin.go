@@ -153,9 +153,11 @@ var ktArithExcCls *jsObject
 // grammar has no user class for them, and before this the call aborted with
 // "unknown name: Exception" while kotlin-interpreter.abnf ran the same program.
 // The chain is Kotlin's own (IllegalStateException -> RuntimeException -> Exception
-// -> Throwable), so js_ktis answers `e is Exception` for one - see the report note
-// about installThrowables in the other half, which parents all of them directly to
-// Throwable and therefore answers false.
+// -> Throwable), so js_ktis answers `e is Exception` for one. js_ktexccls hands the
+// same descriptors to the emitter, which links a USER class that extends one of them
+// onto this chain - docs/todo.md 2.9. installThrowables in kotlin-interpreter.abnf
+// builds the identical shape; the two were checked against each other and against
+// java 24.0.2 class by class.
 var ktExcHier map[string]*jsObject
 
 func ktExcHierarchy() map[string]*jsObject {
@@ -196,6 +198,15 @@ func ktExcHierarchy() map[string]*jsObject {
 	h["UninitializedPropertyAccessException"] = mk("UninitializedPropertyAccessException", h["RuntimeException"])
 	h["StackOverflowError"] = mk("StackOverflowError", h["Error"])
 	h["OutOfMemoryError"] = mk("OutOfMemoryError", h["Error"])
+	// NotImplementedError is kotlin-stdlib's own `class NotImplementedError(message:
+	// String = "An operation is not implemented.") : Error(message)`, and it was
+	// MISSING here while ktRaise("NotImplementedError", ...) below already raised it:
+	// `TODO("soon")` therefore built a throwable with an UNDEFINED __class and both
+	// compiled halves printed "[object Object]" where the interpreter half - whose
+	// installThrowables has had it all along - printed
+	// "kotlin.NotImplementedError: An operation is not implemented: soon". A live
+	// halves divergence found while linking the user-class chain. docs/todo.md 2.9.
+	h["NotImplementedError"] = mk("NotImplementedError", h["Error"])
 	ktExcHier = h
 	return h
 }
@@ -276,19 +287,14 @@ func ktIsThrowable(o *jsObject) bool {
 }
 
 // ktIsThrowLike is "does Throwable#toString apply to this value" - the RENDERING
-// question, deliberately NOT js_ktexcmatch's chain walk. The __super chain of a class
-// the PROGRAM declared is never linked to the builtin throwable hierarchy in this
-// half (there is no descriptor in scope to link it to), so a chain walk alone answers
-// false for `class Top : Exception("t")`; emitSuperCtor in
-// languages/kotlin-to-llvm-ir.abnf marks the instance __kthrow instead. The
-// catch-clause walk is left exactly as it was, because js_ktexcmatch RELIES on a user
-// exception reading as a non-throwable: that is what makes `catch (e: Exception)`
-// catch one at all. The twin is k4bIsThrowLike in languages/lib/kotlin-rt.metajs.
-// docs/todo.md 1.2.
+// question. It used to be a __kthrow MARKER or the chain walk, because this half
+// emitted no descriptor for a builtin throwable and so could not link
+// `class Top : Exception("t")` to one. emitSuperLinks links it through js_ktexccls
+// now (docs/todo.md 2.9) and the marker was RETIRED: every emitCtor call site in
+// languages/kotlin-to-llvm-ir.abnf is immediately preceded by an emitSuperLinks over
+// the same supertype list, so the link strictly covers everything the marker covered.
+// The twin is k4bIsThrowLike in languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
 func ktIsThrowLike(o *jsObject) bool {
-	if t, ok := o.props["__kthrow"]; ok && t == true {
-		return true
-	}
 	return ktIsThrowable(o)
 }
 
@@ -1116,6 +1122,24 @@ func init() {
 			o.set("message", u(a[1]))
 			return w(o)
 		}
+		// js_ktexccls(name) hands the emitter the DESCRIPTOR of a builtin throwable, so
+		// that emitSuperLinks can put it on the __super chain of a class the program
+		// declares: `class Top(m: String) : Exception(m)` used to leave __super absent
+		// (this half emits no descriptor for Exception), so `Top("x") is Exception`
+		// answered FALSE under llvm.Run and natively where the interpreter half - whose
+		// installThrowables builds real descriptors - answered true, exactly as java
+		// 24.0.2 does for `new Top("x") instanceof Exception`. A live halves divergence
+		// --cross could not see, because --cross diffs a program's OUTPUT and no test
+		// asked. The twin is js_ktexccls in languages/lib/kotlin-rt.metajs.
+		// docs/todo.md 2.9.
+		m["js_ktexccls"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[0]))
+			cls, ok := ktExcHierarchy()[name]
+			if !ok {
+				rt.fail("unknown builtin exception %s", name)
+			}
+			return w(cls)
+		}
 		// THE JVM LAUNCHER'S UNCAUGHT-EXCEPTION LINE, called from the catch clause
 		// of the one js_try the emitter wraps the entry call in (buildMain in
 		// languages/kotlin-to-llvm-ir.abnf). Without it the value left the module
@@ -1289,6 +1313,16 @@ func init() {
 		// Throwable/Any accept everything (this model lets any value be thrown), the
 		// three intermediate roots accept a NON-throwable too, and everything else is
 		// the ordinary dynamic type test.
+		//
+		// THE NON-THROWABLE ARM SELF-RETIRED, and was left in place rather than
+		// deleted. It existed because a class the program declared could not be
+		// linked to the builtin chain in this half, so `catch (e: Exception)` had to
+		// accept one by NOT being a throwable; emitSuperLinks links it now
+		// (docs/todo.md 2.9), so a user throwable takes the ordinary type test below
+		// and `catch (e: RuntimeException)` correctly declines a `: Exception` class -
+		// measured, section 83 of tests/kotlin-test-full.kt. What still reaches the
+		// arm is a value that is genuinely not a throwable at all, which is the only
+		// thing it was ever a safety net for.
 		m["js_ktexcmatch"] = func(a []uint64) uint64 {
 			t := rt.toString(u(a[1]))
 			if i := strings.IndexByte(t, '<'); i >= 0 {
@@ -2416,6 +2450,22 @@ func init() {
 				}
 			}
 			if mo, isObj := o.(*jsObject); isObj {
+				// A NESTED CLASS read as a member of its owner's descriptor -
+				// the `Outer.Mid` of `Outer.Mid.Deep(7)`. The ordinary slot
+				// holds a construction factory (a function), so the read
+				// answered that and the following member call aborted with
+				// "method call 'Deep' on a function"; emitNestedList in
+				// languages/kotlin-to-llvm-ir.abnf now also writes the
+				// DESCRIPTOR under __ncls_<name>, which is what the interpreter
+				// half's attachNested puts in the only slot it has. The twin is
+				// the same arm of js_ktfget in languages/lib/kotlin-rt.metajs.
+				// __hasncls is the one fixed key the hot path pays for.
+				// docs/todo.md 2.9.
+				if _, owns := mo.props["__hasncls"]; owns {
+					if nc, has := mo.props["__ncls_"+name]; has {
+						return w(nc)
+					}
+				}
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, name, nil); handled {
 						return w(v)
@@ -2655,6 +2705,22 @@ func init() {
 		// map kept its old size and the write was invisible to every map operation).
 		baseSet := m["js_set"]
 		m["js_ktset"] = func(a []uint64) uint64 {
+			// THE INDEXED WRITE IS BOUNDS-CHECKED, exactly like the indexed read.
+			// `l[9] = 5` IS MutableList.set(9, 5) in Kotlin and throws
+			// IndexOutOfBoundsException; the shared setMember instead EXTENDS the
+			// array with undefined for a non-negative index and aborted outright
+			// for a negative one, so `l[9] = 5` silently grew the list in every
+			// engine while `l[-1] = 5` was an uncatchable abort in the compiled
+			// halves and a silent no-op in the interpreter - a live halves
+			// divergence --cross never reached. docs/todo.md 1.2.
+			if ao, isArr := u(a[0]).(*jsArray); isArr {
+				if k, isNum := u(a[1]).(float64); isNum {
+					ix := jsToInt(k)
+					if ix < 0 || ix >= len(ao.elems) {
+						rt.ktIndexOob("IndexOutOfBoundsException", ix, len(ao.elems))
+					}
+				}
+			}
 			if mo, isObj := u(a[0]).(*jsObject); isObj {
 				if _, _, isDict := dictParts(mo); isDict {
 					rt.ktMapPut(mo, u(a[1]), u(a[2]))
@@ -2968,6 +3034,28 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 				v, _ := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
 				return ktCharsStr(v), true
 			}
+		}
+		// BOUNDS-CHECKED, like the indexed read. java.lang.String#substring throws
+		// when begin < 0, begin > end or end > length; the shared js_mcall's
+		// substringRange is JS substring, which CLAMPS AND SWAPS instead, so
+		// `"ab".substring(5)` answered "" in all three engines - agreed and wrong,
+		// the class only an oracle can see (java 24.0.2: StringIndexOutOfBoundsException
+		// "Range [5, 2) out of bounds for length 2"). The check is here rather than in
+		// abnf/jsrt.go because that file backs all fifteen languages and java's own
+		// grammar already routes its substring through js_jvsub. docs/todo.md 1.2.
+		if name == "substring" {
+			n := rt.strLen(s)
+			begin, end := 0, n
+			if len(args) > 0 {
+				begin = jsToInt(rt.toNumber(args[0]))
+			}
+			if len(args) > 1 {
+				end = jsToInt(rt.toNumber(args[1]))
+			}
+			if begin < 0 || begin > end || end > n {
+				rt.ktStrRangeOob(begin, end, n)
+			}
+			return rt.strRange(s, begin, end), true
 		}
 	case "filter", "filterNot", "filterIndexed", "takeWhile", "dropWhile", "onEach":
 		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
@@ -4149,15 +4237,27 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 					return e, true
 				}
 			}
-			rt.fail("no element matching the predicate")
+			rt.ktNoElem("Collection contains no element matching the predicate.")
 		}
 		if len(es) == 0 {
-			rt.fail("first() on an empty list")
+			rt.ktNoElem("List is empty.")
 		}
 		return es[0], true
 	case "last":
+		// last(predicate) used to fall straight through to the LAST ELEMENT,
+		// ignoring the lambda: `listOf(1,2,3,4).last { it < 3 }` answered 4 in
+		// every engine (agreed and wrong; Kotlin answers 2). first(predicate)
+		// had its arm from the start, which is why nothing noticed.
+		if len(args) == 1 && isCallable(f) {
+			for i := len(es) - 1; i >= 0; i-- {
+				if rt.truthy(rt.ktCall(f, es[i])) {
+					return es[i], true
+				}
+			}
+			rt.ktNoElem("List contains no element matching the predicate.")
+		}
 		if len(es) == 0 {
-			rt.fail("last() on an empty list")
+			rt.ktNoElem("List is empty.")
 		}
 		return es[len(es)-1], true
 	case "single":
@@ -4169,13 +4269,19 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 					hit, n = e, n+1
 				}
 			}
-			if n != 1 {
-				rt.fail("single() matched %d elements", n)
+			if n == 0 {
+				rt.ktNoElem("Collection contains no element matching the predicate.")
+			}
+			if n > 1 {
+				rt.ktRaise("IllegalArgumentException", "Collection contains more than one matching element.")
 			}
 			return hit, true
 		}
-		if len(es) != 1 {
-			rt.fail("single() on a list of size %d", len(es))
+		if len(es) == 0 {
+			rt.ktNoElem("List is empty.")
+		}
+		if len(es) > 1 {
+			rt.ktRaise("IllegalArgumentException", "List has more than one element.")
 		}
 		return es[0], true
 	case "firstOrNull":
@@ -4241,7 +4347,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		return acc, true
 	case "reduce":
 		if len(es) == 0 {
-			rt.fail("reduce() on an empty list")
+			rt.ktRaise("UnsupportedOperationException", "Empty collection can't be reduced.")
 		}
 		acc := es[0]
 		for _, e := range es[1:] {
@@ -4726,7 +4832,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 	case "maxOf", "minOf", "maxOfOrNull", "minOfOrNull":
 		if len(es) == 0 {
 			if name == "maxOf" || name == "minOf" {
-				rt.fail("%s() on an empty list", name)
+				rt.ktNoElem(nil)
 			}
 			return jsNull, true
 		}
@@ -4743,12 +4849,12 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 	// counterparts of maxOrNull/minOrNull; both spellings answer the same thing.
 	case "max", "min":
 		if len(es) == 0 {
-			rt.fail("%s() on an empty list", name)
+			rt.ktNoElem(nil)
 		}
 		return ktSortBy(rt, es, nil, name == "max").elems[0], true
 	case "maxBy", "minBy":
 		if len(es) == 0 {
-			rt.fail("%s() on an empty list", name)
+			rt.ktNoElem(nil)
 		}
 		return ktSortBy(rt, es, f, name == "maxBy").elems[0], true
 	case "onEach":
@@ -4882,7 +4988,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 	case "removeAt":
 		ix := jsToInt(rt.toNumber(f))
 		if ix < 0 || ix >= len(o.elems) {
-			rt.fail("index %d is out of bounds", ix)
+			rt.ktIndexOob("IndexOutOfBoundsException", ix, len(o.elems))
 		}
 		gone := o.elems[ix]
 		o.dropIdx()
@@ -4904,7 +5010,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		}
 		i := jsToInt(rt.toNumber(f))
 		if i < 0 || i > len(es) {
-			rt.fail("index %d is out of bounds", i)
+			rt.ktIndexSizeOob(i, len(es))
 		}
 		o.dropIdx()
 		o.elems = append(o.elems, nil)
@@ -4914,7 +5020,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 	case "set":
 		i := jsToInt(rt.toNumber(f))
 		if i < 0 || i >= len(es) {
-			rt.fail("index %d is out of bounds", i)
+			rt.ktIndexOob("IndexOutOfBoundsException", i, len(es))
 		}
 		old := es[i]
 		es[i] = argAt(args, 1)
@@ -4978,7 +5084,7 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		return changed, true
 	case "removeFirst", "removeLast":
 		if len(o.elems) == 0 {
-			rt.fail("%s() on an empty list", name)
+			rt.ktNoElem("List is empty.")
 		}
 		ix := 0
 		if name == "removeLast" {
@@ -6899,6 +7005,14 @@ func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
 // ktRaise throws one of the builtin throwables from a host builtin, in the shape
 // js_try catches. The twin is kRaise in kotlin-interpreter.abnf.
 func (rt *jsrt) ktRaise(cls, msg string) {
+	rt.ktRaiseV(cls, msg)
+}
+
+// ktRaiseV is ktRaise with an arbitrary message VALUE, so that a throwable whose
+// message is genuinely null - kotlin-stdlib's `?: throw NoSuchElementException()` -
+// can be built. Throwable#toString prints only the class name for that one, which is
+// what java does.
+func (rt *jsrt) ktRaiseV(cls string, msg interface{}) {
 	o := newJSObject()
 	o.set("__class", ktExcHierarchy()[cls])
 	o.set("message", msg)
@@ -6912,6 +7026,45 @@ func (rt *jsrt) ktRaise(cls, msg string) {
 // languages/lib/kotlin-rt.metajs. docs/todo.md 2.9.
 func (rt *jsrt) ktIndexOob(cls string, idx, n int) {
 	rt.ktRaise(cls, "Index "+strconv.Itoa(idx)+" out of bounds for length "+strconv.Itoa(n))
+}
+
+// ktIndexSizeOob is MutableList.add(index, element)'s message, which is a DIFFERENT
+// format from every other member of the family. Both are java.util.ArrayList's own
+// and both are java 24.0.2's verbatim (measured): get/set/remove go through
+// Objects.checkIndex ("Index 9 out of bounds for length 2") while add goes through
+// rangeCheckForAdd ("Index: 9, Size: 2"). Both raise plain
+// IndexOutOfBoundsException. Twins: kIndexSizeOob in
+// languages/kotlin-interpreter.abnf, ktIndexSizeOob in
+// languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+func (rt *jsrt) ktIndexSizeOob(idx, n int) {
+	rt.ktRaise("IndexOutOfBoundsException", "Index: "+strconv.Itoa(idx)+", Size: "+strconv.Itoa(n))
+}
+
+// ktStrRangeOob is java.lang.String#substring's out-of-range message, which names a
+// RANGE and not an index: `"ab".substring(5)` is StringIndexOutOfBoundsException
+// "Range [5, 2) out of bounds for length 2" (measured, java 24.0.2 - docs/todo.md
+// 1.2 recorded "length 6" for this row, which is a DIFFERENT row's receiver). All
+// three engines answered "" for it, because JS substring clamps and swaps its
+// bounds. Twins: kStrRangeOob in languages/kotlin-interpreter.abnf, ktStrRangeOob in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktStrRangeOob(from, to, n int) {
+	rt.ktRaise("StringIndexOutOfBoundsException",
+		"Range ["+strconv.Itoa(from)+", "+strconv.Itoa(to)+") out of bounds for length "+strconv.Itoa(n))
+}
+
+// ktNoElem is kotlin.collections' empty-receiver throw. first()/last()/single() on
+// an empty List raise NoSuchElementException("List is empty.") and max()/min()/
+// maxBy()/maxOf() raise one with NO message (kotlin-stdlib's `?: throw
+// NoSuchElementException()`); every one of them used to ABORT the run in all three
+// engines, which is not catchable at all. There is no kotlinc on this machine, so
+// the message strings are kotlin-stdlib's _Collections.kt and not a measurement;
+// the throwable CLASS is java.util's and that part is settled. docs/todo.md 1.2.
+func (rt *jsrt) ktNoElem(text interface{}) {
+	if text == nil {
+		rt.ktRaiseV("NoSuchElementException", jsNull)
+		return
+	}
+	rt.ktRaise("NoSuchElementException", text.(string))
 }
 
 // ktRunCatching runs a lambda and boxes its completion as a kotlin.Result.

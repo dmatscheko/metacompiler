@@ -308,7 +308,102 @@ func jsvOwnKeys(v interface{}) []string {
 		}
 		return out
 	}
+	// A FUNCTION enumerates the own properties written onto it, which node reports
+	// and this engine keeps in a side table. docs/todo.md 2.10.
+	if p := jsvFnPropsOf(v); p != nil {
+		return jsvOwnKeys(p)
+	}
 	return []string{}
+}
+
+// jsvFnProps -- `f.p = 1` on a FUNCTION. A function value here is a *jsClosure or
+// a *hostFunc and neither carries a property map, so a member write on one aborted
+// with "cannot set field 'p' on *abnf.jsClosure" - while node gives every function
+// an ordinary own property map, and `f.cache = {}` is a common idiom. The map lives
+// BESIDE the function in this side table, keyed by the pointer, which is the
+// identity JavaScript uses. Only the two POINTER kinds are admitted, so nothing
+// uncomparable can reach the map key. The table pins its functions - a function
+// whose properties are reachable is live anyway - and it is package level rather
+// than per-jsrt so that jsvOwnKeys, which has no runtime, can read it; the keys are
+// pointers, so two runtimes in one process cannot collide.
+// Twin: jvFnProps* in languages/lib/js-rt.metajs. The interpreter halves keep the
+// same table under the same name. docs/todo.md 2.10.
+var jsvFnProps = map[interface{}]*jsObject{}
+
+func jsvIsFnLike(v interface{}) bool {
+	switch v.(type) {
+	case *jsClosure, *hostFunc:
+		return true
+	}
+	return false
+}
+
+func jsvFnPropsOf(v interface{}) *jsObject {
+	if len(jsvFnProps) == 0 || !jsvIsFnLike(v) {
+		return nil
+	}
+	return jsvFnProps[v]
+}
+
+func jsvFnPropsMake(v interface{}) *jsObject {
+	if !jsvIsFnLike(v) {
+		return nil
+	}
+	if p, found := jsvFnProps[v]; found {
+		return p
+	}
+	p := newJSObject()
+	jsvFnProps[v] = p
+	return p
+}
+
+// jsvFnMethod -- the Object.prototype SURFACE of a FUNCTION, as methods.
+// `f.toString()`, `f.valueOf()`, `f.hasOwnProperty(k)` and
+// `f.propertyIsEnumerable(k)` all died with "f.toString is not a function" in both
+// compiled halves and in the -frozen interpreter, while the goja interpreter answered
+// them off the host's own prototype chain - a live goja-vs--frozen divergence that
+// predates the function side table and that nothing reached, because a function was
+// not a property carrier and nobody asked. Twins: jvFnMethod in
+// languages/lib/js-rt.metajs and fnHasOwnShim / fnToStringShim / fnValueOfShim in both
+// *-interpreter.abnf. Answers nil for any receiver or name it does not claim, so the
+// caller tests one value instead of four names. docs/todo.md 2.10.
+//
+// Every own property a program can write onto a function here is an ordinary
+// enumerable data property, so hasOwnProperty and propertyIsEnumerable share a body,
+// and the KEY MAP is asked rather than the value, so a property holding undefined
+// still answers true. toString agrees with rt.jsvString rather than inventing a second
+// spelling: no engine here keeps a function's source text.
+func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
+	// The NAME switches before the type test, not after: this body sits on the MISS
+	// path of js_jsmget and js_jsvget, which an ordinary absent-property read reaches.
+	switch name {
+	case "hasOwnProperty", "propertyIsEnumerable", "toString", "valueOf":
+	default:
+		return nil
+	}
+	if !jsvIsFnLike(recv) {
+		return nil
+	}
+	switch name {
+	case "hasOwnProperty", "propertyIsEnumerable":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			p := jsvFnPropsOf(recv)
+			if p == nil {
+				return false
+			}
+			_, found := p.props[rt.toString(argAt(args, 0))]
+			return found
+		})
+	case "toString":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.jsvString(recv)
+		})
+	case "valueOf":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return recv
+		})
+	}
+	return nil
 }
 
 func jsvInternalKey(k string) bool {
@@ -403,6 +498,17 @@ func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
 	// The native leg goes through js_jsmget and never had this. docs/todo.md 2.10.
 	if cls, isStatic := jsvIsStaticSide(v, k); isStatic {
 		return rt.unwrap(rt.jsvStaticSideRead(cls, k))
+	}
+	// A FUNCTION's own properties live in the side table, and rt.getMember knows
+	// nothing about it - the SAME shape as the class-descriptor arm above, one layer
+	// out: once jsvOwnKeys started naming a function's properties, Object.values(f)
+	// and Object.entries(f) answered the right KEYS with undefined VALUES, and
+	// Object.assign({}, f) copied undefined. On the llvm.Run leg only, because the
+	// native leg goes through layer 2's js_jsmget. docs/todo.md 2.10.
+	if p := jsvFnPropsOf(v); p != nil {
+		if val, found := p.props[k]; found {
+			return val
+		}
 	}
 	return rt.getMember(v, k)
 }
@@ -1512,6 +1618,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
+		// A function's own properties live in the side table. docs/todo.md 2.10.
+		if p := jsvFnPropsOf(u(a[0])); p != nil {
+			name := rt.toString(u(a[1]))
+			if _, found := p.props[name]; found {
+				delete(p.props, name)
+				for i, k := range p.keys {
+					if k == name {
+						p.keys = append(p.keys[:i], p.keys[i+1:]...)
+						break
+					}
+				}
+			}
+			return boolH(true)
+		}
 		return baseDel(a)
 	}
 
@@ -1538,6 +1658,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return u(this)
 		}))
 		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			// A FUNCTION's own properties live in the side table. docs/todo.md 2.10.
+			if p := jsvFnPropsOf(u(this)); p != nil {
+				_, has := p.props[rt.toString(argAt(args, 0))]
+				return has
+			}
 			self, isObj := u(this).(*jsObject)
 			if !isObj {
 				return false
@@ -1654,6 +1779,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		recv, isObj := u(a[0]).(*jsObject)
 		if !isObj {
+			// An own property written onto a FUNCTION lives in the side table, not
+			// on the closure. docs/todo.md 2.10.
+			if p := jsvFnPropsOf(u(a[0])); p != nil {
+				if v, found := p.props[rt.toString(u(a[1]))]; found {
+					return w(v)
+				}
+			}
+			// ...and a function's Object.prototype surface, AFTER the side table so
+			// an own `f.toString = ...` still wins. docs/todo.md 2.10.
+			if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
+				return w(m)
+			}
 			return r
 		}
 		name := rt.toString(u(a[1]))
@@ -1721,6 +1858,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(true)
 			}
 		}
+		// The side table holds a function's own properties; the key map is asked, so
+		// a property holding undefined is still reported. A function that is not IN
+		// the table answers false rather than falling through, because the shared
+		// js_has aborts with "'in' needs an object on the right side" for any
+		// receiver that is not an object. docs/todo.md 2.10.
+		if jsvIsFnLike(u(a[0])) {
+			if p := jsvFnPropsOf(u(a[0])); p != nil {
+				if _, found := p.props[name]; found {
+					return w(true)
+				}
+			}
+			return w(false)
+		}
 		if r := baseHas(a); u(r) == true {
 			return r
 		}
@@ -1753,6 +1903,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					return v
 				}))
 			}
+		}
+		// An own property written onto a FUNCTION lives in the side table, at the end
+		// so a program that never writes one pays one map-length test.
+		// docs/todo.md 2.10.
+		if p := jsvFnPropsOf(u(a[0])); p != nil {
+			if v, found := p.props[rt.toString(u(a[1]))]; found {
+				return w(v)
+			}
+		}
+		// ...and a function's Object.prototype surface. This is the arm the CALL site
+		// reaches: the emitter reads the member with js_jsmget and calls the result
+		// when it is a function, so one body serves `f.hasOwnProperty("p")` and
+		// `typeof f.toString`. docs/todo.md 2.10.
+		if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
+			return w(m)
 		}
 		return baseGet(a)
 	}
@@ -1851,6 +2016,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// strLen, not len(v): a string is indexed in UTF-16 CODE UNITS here.
 			return w(jsvIndexKeys(rt.strLen(v)))
 		default:
+			// A FUNCTION enumerates the own properties written onto it.
+			// docs/todo.md 2.10.
+			if p := jsvFnPropsOf(v); p != nil {
+				out := &jsArray{}
+				for _, k := range jsvOwnKeys(p) {
+					out.elems = append(out.elems, k)
+				}
+				return w(out)
+			}
 			// Not an object at all: node's ToObject of a primitive has no own
 			// enumerable keys, and for-in over null/undefined is a no-op.
 			return w(&jsArray{})
@@ -1909,6 +2083,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
 			// object, exactly as it does on any other object. docs/todo.md 2.10.
 			jsvSfTrack(t, name)
+			return 0
+		}
+		// A write onto a FUNCTION goes to the side table: neither *jsClosure nor
+		// *hostFunc has a property map, and rt.setMember's reflect fallback aborted
+		// with "cannot set field 'p' on *abnf.jsClosure". docs/todo.md 2.10.
+		if p := jsvFnPropsMake(u(a[0])); p != nil {
+			p.set(rt.toString(u(a[1])), u(a[2]))
 			return 0
 		}
 		return baseSet(a)

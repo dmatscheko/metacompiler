@@ -2001,12 +2001,11 @@ func s36() {
     check("36ah", s36.dropFirst() == "ello" && s36.dropLast() == "hell")
     check("36ai", s36.allSatisfy { $0 != "z" } && s36.reduce(0, { n, _ in n + 1 }) == 5)
     check("36aj", s36.sorted() == ["e", "h", "l", "l", "o"])
-    // NOT ASSERTED, measured while writing this section: `String(s.sorted())` -
-    // Swift's idiom for rebuilding a String out of Characters - answers
-    // `["e", "h", "l", "l", "o"]` in all three engines where swiftc says `ehllo`.
-    // String(x) and String(describing: x) are ONE conversion here (the argument
-    // labels are dropped before it), and swiftc makes them differ on exactly this
-    // argument, so telling them apart needs label plumbing in both grammars.
+    // `String(s.sorted())` used to answer the DESCRIPTION here, because String(x)
+    // and String(describing: x) were one conversion. They are two now and SECTION
+    // 37 asserts both; the label is the whole of the difference, and neither
+    // grammar needed it at run time - the interpreter reads it off the argument
+    // records and the emitter picks the extern statically.
     // A RANGE printed as itself. Both halves answered "[object Object]" - a value
     // that no test had ever printed - and `r.count` ABORTED in both compiled halves
     // with "len() of a object" while the interpreter answered 3, and a for-in over a
@@ -2042,6 +2041,189 @@ struct C36: Comparable {
     var n: Int
     static func < (l: C36, r: C36) -> Bool { return l.n < r.n }
     static func == (l: C36, r: C36) -> Bool { return l.n == r.n }
+}
+
+// ===== SECTION 37: VALUE SEMANTICS - every copy site, and String(_:) =====
+// docs/todo.md 1.1, the largest swift gap that was left. `var b = a` SHARED the
+// array: copy-on-assign was missing for every Array, Dictionary and tuple binding
+// in all three engines, and a struct copy stopped at its first non-struct field.
+//
+// EVERY VALUE BELOW WAS READ OFF swiftc 6.1.2, and the design the rows pin down is
+// COPY AT STORE, which is complete: two locations can only alias if one stored a
+// value the other still reaches, so if every store deposits a graph nobody else
+// holds, no read can produce one. The store sites are a var/let binding, an
+// assignment (name, field, subscript), a non-inout argument, a tuple
+// destructuring, an if/guard-let binding and a case-pattern binding. There is
+// deliberately NO copy on READ, which is what keeps 37i's `a[0].append` in place.
+//
+// The two shapes that must NOT copy are asserted beside the ones that must: a
+// CLASS instance is a reference (37p, 37q - and 37q is the one that says the array
+// copy is shallow at a reference element) and an `inout` argument is an alias
+// (37d, 37n).
+//
+// An enum CASE value is deliberately NOT copied, and that is a measurement: its
+// payload is reachable only through a pattern binding, which is itself a copy
+// site, so no program can observe two case values sharing a payload. swiftc
+// agrees on the probe.
+struct P37 { var x: Int; var ys: [Int]
+    mutating func bump() { x += 1; ys.append(x) }
+    func copyYs() -> [Int] { return ys }
+}
+struct Q37 { var p: P37 }
+struct R37 { var m: [String: Int] }
+class C37 { var s: P37; var arr: [Int]; init(_ p: P37) { s = p; arr = [7] } }
+enum E37 { case some([Int]); case pair([Int], Int) }
+
+func mutArr37(_ v: [Int]) -> [Int] { var w = v; w.append(99); return w }
+func mutArrIn37(_ v: inout [Int]) { v.append(77) }
+func mutStructIn37(_ p: inout P37) { p.x = 555 }
+func guard37(_ v: [Int]?) -> [Int] { guard var w = v else { return [] }; w.append(3); return w }
+func dflt37(_ v: [Int] = [1]) -> Int { var w = v; w.append(2); return w.count }
+
+func s37() {
+    // --- the binding sites ---
+    var a = [1, 2, 3]
+    var b = a
+    b.append(9)
+    check("37a", a == [1, 2, 3] && b == [1, 2, 3, 9])
+    let c = [1, 2, 3]
+    var d = c
+    d.append(9)
+    check("37b", c == [1, 2, 3] && d == [1, 2, 3, 9])
+    var e = [1, 2, 3]
+    check("37c", mutArr37(e) == [1, 2, 3, 99] && e == [1, 2, 3])
+    mutArrIn37(&e)
+    check("37d", e == [1, 2, 3, 77])
+
+    // --- reading out of a container gives an independent value ---
+    var f = [[1, 2], [3, 4]]
+    var g = f[0]
+    g.append(5)
+    check("37e", f == [[1, 2], [3, 4]] && g == [1, 2, 5])
+    var h = ["a": [1]]
+    var i = h["a"]!
+    i.append(2)
+    check("37f", h["a"]! == [1] && i == [1, 2])
+    var j = P37(x: 0, ys: [1, 2])
+    var k = j.ys
+    k.append(3)
+    check("37g", j.ys == [1, 2] && k == [1, 2, 3])
+    var l = P37(x: 1, ys: [1])
+    check("37h", l.copyYs() == [1] && { var w = l.copyYs(); w.append(2); return l.ys == [1] && w == [1, 2] }())
+
+    // --- ...but a subscript WRITE is still in place ---
+    var m = [[1, 2], [3, 4]]
+    m[0].append(5)
+    check("37i", m == [[1, 2, 5], [3, 4]])
+    var n = [P37(x: 1, ys: [1])]
+    n[0].x = 5
+    n[0].ys.append(2)
+    check("37j", n[0].x == 5 && n[0].ys == [1, 2])
+
+    // --- struct, nested struct, dictionary, tuple ---
+    var o = P37(x: 1, ys: [1])
+    var p = o
+    p.x = 2
+    p.ys.append(2)
+    check("37k", o.x == 1 && o.ys == [1] && p.x == 2 && p.ys == [1, 2])
+    var q = Q37(p: P37(x: 1, ys: [1]))
+    var r = q
+    r.p.x = 7
+    r.p.ys.append(2)
+    check("37l", q.p.x == 1 && q.p.ys == [1] && r.p.x == 7 && r.p.ys == [1, 2])
+    var t = R37(m: ["a": 1])
+    var u = t
+    u.m["b"] = 2
+    check("37m", t.m.count == 1 && u.m.count == 2)
+    var v = P37(x: 1, ys: [])
+    mutStructIn37(&v)
+    check("37n", v.x == 555)
+    var w = (1, [1, 2])
+    var x = w
+    x.0 = 9
+    x.1.append(3)
+    check("37o", w.0 == 1 && w.1 == [1, 2] && x.0 == 9 && x.1 == [1, 2, 3])
+
+    // --- a CLASS is a reference, and the array copy is shallow at one ---
+    let y = C37(P37(x: 1, ys: [1]))
+    let z = y
+    z.arr.append(8)
+    check("37p", y.arr == [7, 8] && z.arr == [7, 8])
+    var aa = [C37(P37(x: 0, ys: []))]
+    var ab = aa
+    ab[0].arr.append(9)
+    check("37q", aa[0].arr == [7, 9])
+    // ...but a STRUCT field of a class instance is read out as a value
+    var ac = y.s
+    ac.x = 9
+    ac.ys.append(2)
+    check("37r", y.s.x == 1 && y.s.ys == [1] && ac.x == 9 && ac.ys == [1, 2])
+
+    // --- storing INTO a container copies too ---
+    var ad = [1, 2]
+    var ae = [[Int]]()
+    ae.append(ad)
+    ae.insert(ad, at: 0)
+    var af = [ad, ad]
+    var ag = ["k": ad]
+    var ah = (ad, 1)
+    var ai = [String: [Int]]()
+    ai["k"] = ad
+    var aj = P37(x: 0, ys: ad)
+    ad.append(3)
+    check("37s", ae[0] == [1, 2] && ae[1] == [1, 2] && af[0] == [1, 2] && af[1] == [1, 2])
+    check("37t", ag["k"]! == [1, 2] && ah.0 == [1, 2] && ai["k"]! == [1, 2] && aj.ys == [1, 2])
+    check("37u", ad == [1, 2, 3])
+
+    // --- tuple destructuring, if/guard-let, case patterns ---
+    let ak = ([1, 2], 9)
+    var (al, _) = ak
+    al.append(3)
+    check("37v", ak.0 == [1, 2] && al == [1, 2, 3])
+    var am = [1, 2]
+    var an = [0]
+    var ao = 0
+    (an, ao) = (am, 1)
+    an.append(3)
+    check("37w", am == [1, 2] && an == [1, 2, 3] && ao == 1)
+    let ap: [[Int]?] = [[1, 2]]
+    if var aq = ap[0] { aq.append(3); check("37x", ap[0]! == [1, 2] && aq == [1, 2, 3]) }
+    check("37y", guard37([1, 2]) == [1, 2, 3])
+    let ar = E37.some([1, 2])
+    if case .some(var asx) = ar { asx.append(3) }
+    if case .some(let at) = ar { check("37z", at == [1, 2]) }
+    let au = E37.pair([1, 2], 5)
+    if case .pair(var av, _) = au { av.append(3) }
+    if case .pair(let aw, _) = au { check("37aa", aw == [1, 2]) }
+    var ax = P37(x: 1, ys: [1])
+    switch ax { case let ay: var az = ay; az.ys.append(2); check("37ab", ax.ys == [1] && az.ys == [1, 2]) }
+
+    // --- a mutating method mutates only its own receiver ---
+    var ba = P37(x: 1, ys: [1])
+    var bb = ba
+    bb.bump()
+    check("37ac", ba.x == 1 && ba.ys == [1] && bb.x == 2 && bb.ys == [1, 2])
+    // ...and a default argument is fresh at every call
+    check("37ad", dflt37() == 2 && dflt37() == 2)
+    // ...and the same array passed twice is two arguments
+    var bc = [1, 2]
+    check("37ae", { (l: [Int], r: [Int]) -> Bool in var m2 = l; m2.append(9); return m2.count == 3 && r.count == 2 }(bc, bc) && bc == [1, 2])
+
+    // --- String(_:) is NOT String(describing:) ---
+    // Swift's idiom for rebuilding a String out of Characters. Both spellings
+    // used to be one conversion here and answered the DESCRIPTION.
+    let bd = "hello"
+    check("37af", String(bd.sorted()) == "ehllo")
+    check("37ag", String(describing: bd.sorted()) == "[\"e\", \"h\", \"l\", \"l\", \"o\"]")
+    let be: [Character] = ["a", "b"]
+    check("37ah", String(be) == "ab")
+    check("37ai", String(bd.reversed()) == "olleh")
+    // ...and every other argument shape still agrees, which is why the LABEL is
+    // the whole of the difference.
+    check("37aj", String(3) == "3" && String(describing: 3) == "3"
+               && String(3.5) == "3.5" && String(describing: 3.5) == "3.5"
+               && String(true) == "true" && String(describing: true) == "true"
+               && String("x") == "x" && String(describing: "x") == "x")
 }
 
 // ===== END SECTIONS =====
@@ -2083,6 +2265,7 @@ func main() {
     s34() // SECTION-CALL 34
     s35() // SECTION-CALL 35
     s36() // SECTION-CALL 36
+    s37() // SECTION-CALL 37
     print("full: \(checks) checks, \(fails) failures")
 }
 

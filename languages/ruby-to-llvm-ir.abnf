@@ -4547,7 +4547,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // and Float are STRICT (MRI raises ArgumentError on trailing junk, which is
         // what makes `Integer("z") rescue 5' the idiom it is) - js_rkconv is that
         // parse, shared by all three engines. docs/todo.md 1.3.
-        if ((name == "Integer" || name == "Float" || name == "String" || name == "Array")
+        // Rational and Complex are two more of them, and the only spelling that
+        // builds either from two parts: `Rational(1, 3)' aborted here with *call of
+        // a non function value*. docs/todo.md 1.3.
+        if ((name == "Integer" || name == "Float" || name == "String" || name == "Array"
+             || name == "Rational" || name == "Complex")
             && args.length > 0 && !hasBlockArg(args)) {
             var cargs = args
             var cname = name
@@ -6535,7 +6539,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The builtin classes named in ordinary Ruby code: the core value classes, the
     // module-like ancestors used in a type test, and the standard exception names.
     var rubyBuiltinClasses = ["Integer", "Float", "Rational", "Complex", "Numeric",
-        "String", "Symbol", "Array", "Hash", "Range", "Proc", "NilClass", "TrueClass",
+        "String", "Symbol", "Array", "Hash", "Range", "Proc",
+        // Method is what `method(:x)' answers to #class, and `m.is_a?(Method)' is
+        // the ordinary way to ask - without the name declared it aborted with
+        // *variable not defined: Method* while the interpreter half answered.
+        // Five IR lines in the prologue, on the measurement two paragraphs down.
+        // docs/todo.md 2.5.
+        "Method", "NilClass", "TrueClass",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
         "Enumerator",
         // Class and Module are what a class object and a module object ANSWER to

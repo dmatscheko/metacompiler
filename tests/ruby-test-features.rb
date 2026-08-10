@@ -1113,16 +1113,24 @@ def arity_def(a, b = 1); a + b; end
 def arity_none; 0; end
 # A def closure's parameter shape reaches Proc#arity now, gated exactly as before:
 # markParamArity / emitArity record nothing unless the program names `arity`.
-check("arity-def", "#{method(:arity_def).arity}|#{method(:arity_none).arity}", "1|0")
-# HOW A PROC PRINTS. MRI writes `#<Proc:0x0000...@f.rb:12 (lambda)>` and, for a
-# Method, `#<Method: Object#arity_none>`. The address and the source location are
-# the process's own and cannot be matched, so they are LEFT OFF rather than
-# invented - the same rule python's `<function fn>` follows (da43fee). This value
-# model has no Method class either, so `method(:x)` answers a Proc. Before this,
+# A METHOD counts optionals like a LAMBDA and not like a proc, so `def m(a, b = 1)`
+# is -2 and not 1 - every engine answered the proc's 1 until Method existed.
+# Measured against /usr/bin/ruby 2.6.10; #arity is unchanged in 3.x.
+check("arity-def", "#{method(:arity_def).arity}|#{method(:arity_none).arity}", "-2|0")
+# HOW A PROC AND A METHOD PRINT. MRI writes `#<Proc:0x0000...@f.rb:12 (lambda)>`
+# and, for a Method, `#<Method: Object#arity_none>`. A Proc's address and source
+# location are the process's own and cannot be matched, so they are LEFT OFF rather
+# than invented - the same rule python's `<function fn>` follows (da43fee). THE
+# METHOD FORM CARRIES NO ADDRESS AT ALL in MRI 2.6 (3.0 appends a source location),
+# so that row is byte-exact against the oracle rather than a near miss. Before this,
 # the interpreter half printed the closure's whole MetaJS SOURCE TEXT and both
-# compiled halves printed the C floor's `[function]`.
+# compiled halves printed the C floor's `[function]`. docs/todo.md 2.5.
 check("proc-to-s", "#{proc { }}|#{->(x) { x }}|#{lambda { |x| x }}", "#<Proc>|#<Proc (lambda)>|#<Proc (lambda)>")
-check("method-to-s", "#{method(:arity_none)}|#{method(:arity_none).class}", "#<Proc>|Proc")
+check("method-to-s", "#{method(:arity_none)}|#{method(:arity_none).class}", "#<Method: Object#arity_none>|Method")
+# Method#name, #to_proc and the two type tests. A Method is NOT a Proc in MRI and a
+# Method#to_proc IS one - a LAMBDA one, carrying the Method's arity.
+check("method-name", "#{method(:arity_def).name.inspect}|#{method(:arity_def).is_a?(Method)}|#{method(:arity_def).is_a?(Proc)}", ":arity_def|true|false")
+check("method-to-proc", "#{method(:arity_def).to_proc.class}|#{method(:arity_def).to_proc.arity}|#{method(:arity_def).to_proc.lambda?}", "Proc|-2|true")
 # method(:name) reaches an INSTANCE METHOD of the running self, bound to it. It
 # aborted with "undefined method 'inst' for class 'Object'" in every engine, and
 # the note that said so called a variadic bound closure impossible in layer 2 -
@@ -1131,7 +1139,11 @@ class MethodValC
   def inst(a); a + 10; end
   def probe; "#{method(:inst).call(5)}|#{method(:inst).arity}|#{method(:inst).class}"; end
 end
-check("method-bound-self", MethodValC.new.probe, "15|1|Proc")
+check("method-bound-self", MethodValC.new.probe, "15|1|Method")
+# The OWNER a bound Method prints is the receiver's class, which is what MRI writes
+# for a method defined there. (MRI writes `D(C)#m` for one INHERITED from C; this
+# writes `D#m`, which can only shorten the answer.)
+check("method-bound-to-s", "#{MethodValC.new.method(:inst)}", "#<Method: MethodValC#inst>")
 # A missing name is a CATCHABLE NameError, not a host abort.
 def method_miss
   begin

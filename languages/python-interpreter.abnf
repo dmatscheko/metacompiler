@@ -2047,7 +2047,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // membership, len and insertion order come from the dict machinery unchanged.
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
-    function setAdd(s2, v) { if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null } }
+    function setAdd(s2, v) {
+        pyHashCheck(v, true)
+        if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null }
+    }
+
+    // ----- Hashability: the only rule this value model can express ------------
+    //
+    // CPython refuses a MUTABLE container as a set element or a dict key:
+    //
+    //   {[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
+    //   {{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
+    //
+    // and the wording differs between the two positions, so both are spelled out.
+    // The OUTER name is the type of the object handed over and the INNER one the
+    // type that is unhashable; they differ only for a tuple holding a list, which
+    // this value model cannot build (see below), so one name serves both slots.
+    //
+    // WHAT IS REFUSED HERE IS dict AND set, AND NOT list. A tuple IS a list in
+    // this value model (docs/todo.md 3.1), and the two directions of the mistake
+    // are not symmetric: treating a tuple as hashable only ACCEPTS a program
+    // CPython would reject, while treating a list as unhashable would ABORT
+    // `{(1, 2), (3, 4)}` and `d[i, j]` - legal, and among the most common things
+    // Python programs do. So the array stays hashable until a real tuple type
+    // exists, and the halves are made to agree on it instead (core.keyEq below,
+    // pyKeyEq in languages/lib/python-rt.metajs, dictKeyEq in abnf/jsrt.go).
+    // bytearray and frozenset do not exist in this subset at all.
+    //
+    // Twins: pyHashCheck / pyHashName in languages/lib/python-rt.metajs and
+    // pyHashCheck / pyUnhashName in abnf/jsrt.go.
+    function pyHashName(v) {
+        if (v === null || v === undefined) { return "" }
+        if (typeof v != "object") { return "" }
+        if (v.__set === true) { return "set" }
+        if (v.__dict === true) { return "dict" }
+        return ""
+    }
+    // elem: true for a set MEMBER, false for a dict KEY - CPython words the two
+    // differently and both spellings are asserted.
+    function pyHashCheck(v, elem) {
+        var n = pyHashName(v)
+        if (n == "") { return }
+        var where = "a dict key"
+        if (elem) { where = "a set element" }
+        pyRaise(pyMakeExc("TypeError", ["cannot use '" + n + "' as " + where
+                                        + " (unhashable type: '" + n + "')"]))
+    }
+    // The LOOKUP form. CPython's set.__contains__ / .discard / .remove convert a
+    // set argument to a frozenset rather than refusing it, so `{1} in {1}` is
+    // False and not a TypeError - while `{}` in the same position still raises,
+    // and `{1}` used as a DICT key raises too. Only the set-in-set pair is exempt.
+    function pyHashCheckLookup(d, k) {
+        if (d !== null && d !== undefined && d.__set === true) {
+            if (k !== null && k !== undefined && typeof k == "object" && k.__set === true) { return }
+            pyHashCheck(k, true)
+            return
+        }
+        pyHashCheck(k, false)
+    }
     // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
     // iterable to the same value, None by default. The RECEIVER is the `dict` type
     // OBJECT, which is why this is not in the dict method dispatcher - see
@@ -2097,6 +2154,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // bool - two steps to get from 1.0 to True.
     var coreDictFind = dictFind
     dictFind = function(d, k) {
+        // Every dict and set lookup, insertion, membership test and removal in
+        // this half goes through here (interp-core's dictSet calls it too), so
+        // the unhashable-key refusal needs no other site. The typeof guard keeps
+        // the cost off the string/number/bool keys that are almost every key.
+        if (k !== null && k !== undefined && typeof k == "object") { pyHashCheckLookup(d, k) }
         var i = coreDictFind(d, k)
         if (i >= 0) { return i }
         var alias = pyKeyAlias(k)
@@ -2127,6 +2189,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // confirms with dictKeyEq, which is this hook. Numbers only: everything else
     // keeps === and the behaviour it had.
     core.keyEq = function(a, b) {
+        // A tuple key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
+        // is a hit off two different objects - and a tuple IS an array here. This
+        // half used to answer identity while the compiled halves already deduplicated
+        // set members with Python's == (pySetHas -> pyEqual): `{(1,2), (1,2)}` was 2
+        // in the interpreter and 1 in both compiled halves, a live halves divergence,
+        // and the interpreter was the wrong one of the two. See pyHashCheck above for
+        // why the array cannot instead be refused as unhashable.
+        if (Array.isArray(a) && Array.isArray(b)) { return pyEq(a, b) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
     }
@@ -5524,6 +5594,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // false apart from "not mine", and it never recurses into itself: every fallback
     // hands binOp plain numbers.
     function boxOp(op, l, r) {
+        // `in` and `not in` are CONTAINER operators: the box is the element being
+        // looked for, never an operand of an arithmetic rule, so it must fall
+        // through to pyIn exactly as floOp already lets it. Without this,
+        // `3j in xs` died with "unsupported operand type for in: complex" and
+        // `10**30 in xs` answered off bigToNum(xs) - in THIS half only, while both
+        // compiled halves answered CPython's True. Found by the docs/todo.md 2.4
+        // probe; floOp:5097 has had the same line all along.
+        if (op == "in" || op == "not in") { return null }
         if (isCplx(l) || isCplx(r)) { return {v: cplxOp(op, l, r)} }
         var a = bigOf(l)
         var b = bigOf(r)
@@ -5663,7 +5741,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var fo = floOp(op, l, r)
                 if (fo != null) { return fo.v }
             }
-            if (pyBoxed(l) || pyBoxed(r)) { return boxOp(op, l, r).v }
+            if (pyBoxed(l) || pyBoxed(r)) {
+                // null is "not mine" - the container operators, which boxOp hands
+                // back the same way floOp above does.
+                var bo = boxOp(op, l, r)
+                if (bo != null) { return bo.v }
+            }
             if (pyUser(l) || pyUser(r)) {
                 var uo = userOp(op, l, r)
                 if (uo != null) return uo.v

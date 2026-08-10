@@ -683,9 +683,10 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ) ;
-// 'this.#x': a private name. It is stored under the mangled key '__#x' (see ClassPrivate),
+// 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
+// ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
-PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: makeConst(privName(idName(up.in)))}) ~~> ;
+PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
 IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
@@ -707,10 +708,10 @@ Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperPro
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | PrivateNameRef | VarRef ;
 // '#field in obj' - the ergonomic brand check of ES2022. A private name is stored under
-// the mangled key '__#field' (privName), so the operand is that key as a string and the
+// the mangled key '__#<body>#field' (privKey), so the operand is that key as a string and the
 // ordinary 'in' does the rest - js_jshas has the arm that lets a private name past the
 // __-slot filter. Tried before VarRef, whose Id cannot start at a '#'. docs/todo.md 2.4.
-PrivateNameRef <~~ push(makeConst(privName(pop()))) ~~>
+PrivateNameRef <~~ push(privRefConst(pop())) ~~>
             = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
@@ -780,7 +781,7 @@ GenFuncExpr <~~ push(makeGenFuncExpr(takeAll())) ~~>
 ClassExpr   = ClassExprLowered | ClassExprWidened ;
 ClassExprLowered <~~ push(makeClassExpr(takeAll())) ~~>
             = KwClass ClassAnonName [ ClassExprName ]
-              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ] "{" { ClassMember } "}" ;
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassAnonName <~~ classSeq = classSeq + 1; curClassName = "0class" + classSeq; push({cname: curClassName}) ~~>
             = Nothing ;
 ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
@@ -788,7 +789,7 @@ ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
 // A class expression with a heritage EXPRESSION ('class extends f() {}'). Same builder
 // as ClassExprLowered: the parent simply arrives as a value thunk instead of a name.
 ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
-            = KwClass ClassAnonName [ ClassExprName ] KwExtends ClassExt "{" { ClassMember } "}" ;
+            = KwClass ClassAnonName [ ClassExprName ] KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll())) ~~>
@@ -1092,7 +1093,7 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
-              "{" { ClassMember } "}" ;
+              PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
 // 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. The plain
@@ -1104,7 +1105,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // choice: 'extends a.b' would match the name 'a' and then die on the '.'.
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
-              KwExtends ClassExt "{" { ClassMember } "}" ;
+              KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
             = ClassHeritage ;
 // CallMember rather than Expression: 'class a extends b, c {}' is a syntax error, and
@@ -1116,6 +1117,14 @@ ClassHeritage = CallMember ;
 // computed members. They are tried longest-form first, so that 'constructor', a method's
 // '(' and an accessor's 'get'/'set' are recognized before the bare field form (the LAST
 // alternative, which whatever the others reject falls into). A stray ';' is skipped.
+// The braces of a CLASS BODY, tagged so the walk knows which body it is inside. A
+// private name is scoped to the class body that declares it - `class A { #v }` and
+// `class B extends A { #v }` are TWO names in JavaScript - so the mangled key has to
+// carry the body, not just the name (privEnter / privDeclare in the start script).
+// Tags run in a post-parse walk of the chosen tree (abnf/compiler.go's compileRule),
+// so the enter/exit pair is exactly balanced and no backtracking can reach it.
+PrivBodyOpen <~~ privEnter() ~~> = "{" ;
+PrivBodyClose <~~ privExit() ~~> = "}" ;
 ClassMember = ClassSemi | ClassStaticBlock | CtorDef | ClassGetSet | ClassSpecialMethod | ClassPrivate | ClassComputed | ClassLiteralMember | MethodDef | FieldDef ;
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
 // 'static { ... }': a block that runs once, at class definition time, with 'this' bound
@@ -1134,10 +1143,11 @@ ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
 ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
             = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey ParamList Block ;
 // A private member '#x'. Private names are not properties in the spec, but they behave
-// exactly like non-enumerable ones, so they are stored under the mangled key '__#x': the
+// exactly like non-enumerable ones, so they are stored under the mangled key
+// '__#<body>#x' (privDeclare): the
 // '__' prefix is what keeps them out of js_keys, and so out of for-in and object spread.
 ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
-            = MemberMods "#" Id <~~ push(privName(idName(up.in))) ~~> ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+            = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~> ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
 // A computed key: 'class A { ["a" + "b"]() {} }'. The key expression is evaluated once,
 // when the class is defined.
 ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
@@ -3634,7 +3644,14 @@ NotFuncHead = :script(~~
         var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osk")])
         var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osrc")])
         var keyB = callExt(bodyB, memGetExt(), [ksB, iB])
-        callExt(bodyB, memSetExt(), [objV, keyB, callExt(bodyB, memGetExt(), [srcB, keyB])])
+        // js_jsvget and not memGetExt() for the VALUE: memGetExt() is the shared
+        // js_get under llvm.Run, which knows neither a class descriptor's static
+        // namespace nor a FUNCTION's side table - so `{...f}` copied the right keys
+        // with undefined values on that leg alone, where the native leg (js_jsmget)
+        // and both interpreters were right. The keys come from js_jskeys, so every
+        // read here hits an own slot and the value read is exactly the right
+        // semantics. docs/todo.md 2.10.
+        callExt(bodyB, memSetExt(), [objV, keyB, callExt(bodyB, "js_jsvget", [srcB, keyB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0osi"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
@@ -5115,7 +5132,15 @@ NotFuncHead = :script(~~
             var seqV = ir.v
             // for-in materializes: js_iterable is the identity on arrays, strings and
             // objects and drains a generator, and js_keys wants the whole sequence.
-            if (isIn) { seqV = callExt(b, "js_jskeys", [callExt(b, "js_iterable", [seqV])]) }
+            // srcV keeps the ENUMERATED VALUE alive beside the key array, because the
+            // key array is a snapshot and the per-iteration liveness guard below has to
+            // ask the original object whether the key is still there.
+            var srcV = anytype // A handle: the object being enumerated (for-in only).
+            srcV = hUndef
+            if (isIn) {
+                srcV = callExt(b, "js_iterable", [seqV])
+                seqV = callExt(b, "js_jskeys", [srcV])
+            }
             // for-of does NOT, because js_iterable's drain is what made
             // 'for (const x of endless()) { ...; break }' hang and what put every one of
             // the producer's side effects before the first of the consumer's. The probe
@@ -5201,7 +5226,20 @@ NotFuncHead = :script(~~
             // the specification's async-from-sync iterator does and what makes
             // 'for await (x of [p1, p2])' see the resolved values.
             if (isAwait) { idxElemV = emitAwait(elemB, idxElemV) }
-            elemB.NewBr(bodyB)
+            // for-in's per-iteration LIVENESS GUARD. js_jskeys is a snapshot, so a key
+            // the body deletes before its turn came was still visited:
+            // `for (k in o) { s += k; delete o.c }` printed "abc" where node prints
+            // "ab". js_jshas is total over every value for-in enumerates - an object, a
+            // class descriptor's statics, an array's and a string's index keys - so a
+            // key that is still there always passes, and only a deleted one is skipped.
+            // The skip branches to postB, which is the increment, so it costs one extern
+            // per iteration and no extra block on the taken path. The interpreter half
+            // makes the same test with propIn (js-interpreter.abnf makeForOf); the two
+            // are both-or-neither, since one alone is a halves divergence.
+            // docs/todo.md 2.10.
+            if (isIn) {
+                elemB.NewCondBr(truthy(elemB, callExt(elemB, "js_jshas", [srcV, idxElemV])), bodyB, postB)
+            } else { elemB.NewBr(bodyB) }
             var elemIn = [llvm.ir.NewIncoming(idxElemV, elemB)]
             if (lazy) { elemIn.push(llvm.ir.NewIncoming(stepElemV, stepB)) }
             var elemV = bodyB.NewPhi(elemIn)
@@ -5518,10 +5556,54 @@ NotFuncHead = :script(~~
     var classSeq = 0
     var heritageSeq = 0
 
-    // A private name '#x' is stored under the mangled key '__#x'. The '__' prefix is the
-    // runtime's marker for an internal slot, which js_keys skips - so a private field stays
-    // out of for-in, Object.keys and object spread, as a real private name does.
-    function privName(name) { return "__#" + name }
+    // A private name '#x' is stored under the mangled key '__#<body>#x'. The '__' prefix
+    // is the runtime's marker for an internal slot, which js_keys skips - so a private
+    // field stays out of for-in, Object.keys and object spread, as a real private name
+    // does. The '<body>' component is the CLASS BODY the name is declared in, because a
+    // private name is scoped to its class body and not to its spelling: `class A { #v }`
+    // and `class B extends A { #v }` declare TWO names in node, and a per-NAME key made
+    // them one slot, so B's field initializer overwrote A's and `getA()` answered B's
+    // value. docs/todo.md 2.4, 2.10.
+    //
+    // privStack is the chain of class bodies currently open in the WALK (tags run over
+    // the chosen parse tree, in source order - abnf/compiler.go's compileRule - so the
+    // PrivBodyOpen/PrivBodyClose pair is exactly balanced and no backtracking reaches
+    // it); privDecls[id] is the set of private names body id DECLARES.
+    var privStack = []
+    var privDecls = []
+    function privEnter() {
+        privStack.push(privDecls.length)
+        privDecls.push({})
+    }
+    function privExit() { privStack.pop() }
+    function privKey(id, n) { return "__#" + id + "#" + n }
+    // A DECLARATION always belongs to the body it is written in.
+    function privDeclare(n) {
+        if (privStack.length == 0) { return privKey(0 - 1, n) }
+        var id = privStack[privStack.length - 1]
+        privDecls[id]["$" + n] = true
+        return privKey(id, n)
+    }
+    // A REFERENCE resolves to the innermost ENCLOSING body that declares the name, which
+    // is what makes an inner class reading an outer class's `#v` keep working. It cannot
+    // be answered when the reference is walked - a method body may read a field declared
+    // further down the same body - so the key is computed on FIRST EMIT instead, by which
+    // time the whole walk is over and every declaration is recorded.
+    function privRefKey(st, n) {
+        var i = st.length - 1
+        while (i >= 0) {
+            if (privDecls[st[i]]["$" + n] != undefined) { return privKey(st[i], n) }
+            i = i - 1
+        }
+        if (st.length > 0) { return privKey(st[st.length - 1], n) }
+        return privKey(0 - 1, n)
+    }
+    // The value thunk of a private-name REFERENCE: makeConst, with the key resolved at
+    // emit time instead of at walk time.
+    function privRefConst(n) {
+        var st = privStack.slice()
+        return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
+    }
 
     // ----- Class members -----
     // Every member production pushes ONE descriptor:

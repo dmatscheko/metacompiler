@@ -564,6 +564,117 @@ func init() {
 			}
 			return baseIs(a)
 		}
+		// js_swcopy(v) is Swift's defining property: EVERY value type is copied
+		// whenever it is stored into a location - a var/let binding, an
+		// assignment, a non-inout argument. A class instance is a REFERENCE and
+		// is never copied, which is what keeps `var b = a; b[0].x = 9` visible
+		// through a in an array of class instances (swiftc agrees).
+		//
+		// COPY AT STORE IS COMPLETE, so there is no copy on READ. Two locations
+		// can only alias if one stored a value the other still reaches; if every
+		// store deposits a graph nobody else holds, no read can produce one. It
+		// is also why `a[0].append(5)` still mutates a in place - a subscript
+		// read is not a store.
+		//
+		// Not copy-on-write: Swift's rule is COW with the value semantics
+		// OBSERVABLE, and only the observable half is implemented, eagerly.
+		//
+		// An enum CASE value is deliberately NOT copied: its payload is reachable
+		// only through a pattern binding, which is itself a copy site, so no
+		// program can observe two case values sharing one __vals array (measured
+		// against swiftc 6.1.2).
+		//
+		// Twins: swCopy in languages/swift-interpreter.abnf and js_swcopy in
+		// languages/lib/swift-rt.metajs.
+		var swValCopy func(v interface{}) interface{}
+		swValCopy = func(v interface{}) interface{} {
+			o, isObj := v.(*jsObject)
+			if !isObj {
+				// An array has no descriptor and is the other value type; every
+				// non-object (number, string, bool, closure, nil) is immutable
+				// here and is its own copy.
+				if arr, ok := v.(*jsArray); ok {
+					out := make([]interface{}, len(arr.elems))
+					for i, e := range arr.elems {
+						out[i] = swValCopy(e)
+					}
+					return &jsArray{elems: out}
+				}
+				return v
+			}
+			if keys, vals, isDict := dictParts(v); isDict {
+				nk := make([]interface{}, len(keys.elems))
+				copy(nk, keys.elems)
+				nv := make([]interface{}, len(vals.elems))
+				for i, e := range vals.elems {
+					nv[i] = swValCopy(e)
+				}
+				d := newJSObject()
+				d.set("__dict", true)
+				d.set("keys", &jsArray{elems: nk})
+				d.set("vals", &jsArray{elems: nv})
+				return d
+			}
+			// An INSTANCE is identified by its descriptor, and only a struct's
+			// descriptor carries __struct. A class instance falls through here
+			// and is returned as itself.
+			if cls, has := o.props["__class"]; has && !isNullish(cls) {
+				co, ok := cls.(*jsObject)
+				if !ok {
+					return v
+				}
+				if tag, has := co.props["__struct"].(bool); !has || !tag {
+					return v
+				}
+				flds, ok := co.props["__fields"].(*jsArray)
+				if !ok {
+					return v
+				}
+				out := newJSObject()
+				out.set("__class", cls)
+				for _, k := range flds.elems {
+					name, ok := k.(string)
+					if !ok {
+						continue
+					}
+					// An ABSENT field must stay the twin's undefined rather
+					// than a raw Go nil: js_get answers jsUndef for a missing
+					// property and the emitted sw_copy this replaces stored
+					// exactly that.
+					fv, present := o.props[name]
+					if !present {
+						fv = jsUndef
+					}
+					out.set(name, swValCopy(fv))
+				}
+				return out
+			}
+			// A LABELLED tuple stores the same value under "0" and under its
+			// label; the copy re-establishes that aliasing rather than walking
+			// the raw keys, so the two spellings stay the one element.
+			if n, ok := swNumProp(o, "__tuple"); ok {
+				out := newJSObject()
+				out.set("__tuple", float64(n))
+				lbls := swStrArray(o.props["__tlabels"])
+				if len(lbls) > 0 {
+					out.set("__tlabels", o.props["__tlabels"])
+				}
+				for i := 0; i < n; i++ {
+					ev, present := o.props[itoa(i)]
+					if !present {
+						ev = jsUndef
+					}
+					e := swValCopy(ev)
+					out.set(itoa(i), e)
+					if i < len(lbls) && lbls[i] != "" {
+						out.set(lbls[i], e)
+					}
+				}
+				return out
+			}
+			return v
+		}
+		m["js_swcopy"] = func(a []uint64) uint64 { return w(swValCopy(u(a[0]))) }
 		m["js_swadoptdeep"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
 			var fmap *jsObject
@@ -726,6 +837,25 @@ func init() {
 		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
+		// String(x) and String(describing: x) are NOT one conversion. The one
+		// argument that tells them apart is a SEQUENCE - `String(s.sorted())` is
+		// init(_: some Sequence<Character>) and answers "ehllo" where the
+		// describing form answers `["e", "h", "l", "l", "o"]`. Every other shape
+		// agrees, because an unlabelled String(x) is only valid for a
+		// LosslessStringConvertible or a Character sequence. The emitter knows
+		// the LABEL statically and picks the extern; this is the unlabelled one.
+		// Twins: swStrInit in languages/swift-interpreter.abnf and js_swstrinit
+		// in languages/lib/swift-rt.metajs.
+		m["js_swstrinit"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				var sb strings.Builder
+				for _, e := range arr.elems {
+					sb.WriteString(rt.swDesc(e))
+				}
+				return rt.wrapStr(sb.String())
+			}
+			return rt.wrapStr(rt.swDesc(u(a[0])))
+		}
 		// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is
 		// 1.5, not the 1 an integer truncation gives) and compares by VALUE.
 		m["js_swabs"] = func(a []uint64) uint64 {

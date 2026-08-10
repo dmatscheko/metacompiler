@@ -158,6 +158,13 @@ var rbGlobalNames = {}   // "$name" -> true once assigned (defined? needs presen
 var rbLambdas = []       // the closures a lambda literal produced (identity scan)
 var rbArityFns = []      // the closures js_rarity has recorded a shape for
 var rbArityRec = []      // [required, optional, hasSplat] for rbArityFns[i]
+// The function values `method(:x)' handed out. MRI's Method is a class of its own
+// - #class is Method, #to_s is `#<Method: Object#x>' and #arity counts optionals
+// like a lambda's - and every engine here answered Proc, `#<Proc>' and a proc's
+// arity. A side table and not a property on the value, exactly as rbLambdas is,
+// and ungated because reaching it means calling Kernel#method. docs/todo.md 2.5.
+var rbMethodFns = []     // the closures `method(:x)' produced (identity scan)
+var rbMethodRec = []     // [ownerClassName, methodName] for rbMethodFns[i]
 var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
 
 // ===================================================== the value model ======
@@ -946,14 +953,15 @@ function rbABigMethod(t, name, args) {
     }
     // An Integer is already floored, ceilinged, truncated and rounded, at any
     // digit argument a Ruby program can write here.
-    if (name == "to_i" || name == "to_int" || name == "truncate") { return t }
+    if (name == "to_i" || name == "to_int") { return t }
     // ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
-    // 10**-ndigits, which past 2**53 has to be exact. docs/todo.md 1.2.
-    if (name == "floor" || name == "ceil" || name == "round") {
+    // 10**-ndigits, which past 2**53 has to be exact. #truncate is one of the four
+    // and used to ignore its ndigits. docs/todo.md 1.2, 1.3.
+    if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
         var bnd = 0
         if (args.length > 0) { bnd = Math.trunc(rbToF(args[0])) }
         var bmd = "r"
-        if (name == "floor") { bmd = "f" } else if (name == "ceil") { bmd = "c" }
+        if (name == "floor") { bmd = "f" } else if (name == "ceil") { bmd = "c" } else if (name == "truncate") { bmd = "t" }
         return rbNumDigitOp(0, t, true, bmd, bnd)
     }
     if (name == "to_f") { return rbMkFlo(rbABigToF(t)) }
@@ -1256,7 +1264,10 @@ function rbIntDigitOp(v, k, mode) {
         i = i + 1
     }
     var away = false
-    if (!zeroTail) {
+    // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200. It was
+    // absent, so #truncate ignored its ndigits outright in every engine -
+    // docs/todo.md 1.3's second argument-list rule.
+    if (!zeroTail && mode != "t") {
         if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
         else if (mode == "f") { away = neg }
         else { away = !neg }
@@ -1293,6 +1304,11 @@ function rbNumDigitOp(t, big, isInt, mode, nd) {
         if (t == 0) { return rbMkFlo(t) }
         if (mode == "r") { return rbMkFlo(rbFloDigitRound(t, nd)) }
         if (mode == "f") { return rbMkFlo(rbFloDigitFloor(t, nd)) }
+        // #truncate at a POSITIVE ndigits is toward zero: floor above, ceil below.
+        if (mode == "t") {
+            if (t < 0) { return rbMkFlo(rbFloDigitCeil(t, nd)) }
+            return rbMkFlo(rbFloDigitFloor(t, nd))
+        }
         return rbMkFlo(rbFloDigitCeil(t, nd))
     }
     rbFloDomain(t)
@@ -1303,10 +1319,11 @@ function rbNumDigitOp(t, big, isInt, mode, nd) {
     if (nd == 0) {
         if (mode == "r") { return rbIntFromF(rbCRound(t)) }
         if (mode == "f") { return rbIntFromF(Math.floor(t)) }
+        if (mode == "t") { return rbIntFromF(Math.trunc(t)) }
         return rbIntFromF(Math.ceil(t))
     }
     var w = 0
-    if (mode == "r") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
+    if (mode == "r" || mode == "t") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
     return rbIntDigitOp(rbIntFromF(w), 0 - nd, mode)
 }
 
@@ -1385,6 +1402,40 @@ function rbImOf(v) {
 function rbAsRat(v) {
     if (rbIsRat(v)) { return v }
     return rbMkRat(rbToF(v), 1)
+}
+
+// Rational#to_s and Complex#to_s. The SIGN is the whole content of the second one:
+// a negative imaginary part joins with "-" and its own magnitude, and every engine
+// wrote the "+" unconditionally, so Complex(3, -4) rendered `3+-4i' where MRI
+// writes `3-4i'. Agreed in all four legs and wrong in all four. docs/todo.md 1.3.
+function rbRatText(v) { return ("" + v["n"]) + "/" + ("" + v["d"]) }
+function rbCpxText(v) {
+    var im = v["im"]
+    if (im < 0) { return ("" + v["re"]) + "-" + ("" + (0 - im)) + "i" }
+    return ("" + v["re"]) + "+" + ("" + im) + "i"
+}
+
+// Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI keeps the Rational at
+// a positive ndigits - `(2r/3r).round(1)' is (7/10) and not the 0.7 every engine
+// answered off rbToF. The full rule and the 2^53 ceiling are at ratDigitOp in
+// languages/ruby-interpreter.abnf; rubyRatDigitOp in abnf/jsrt.go is the other
+// twin. `round' is half AWAY FROM ZERO and is written on integers, (2n +/- d) over
+// 2d, so it does not depend on a double holding n/d exactly. docs/todo.md 1.3.
+function rbRatIntOp(n, d, mode) {
+    if (mode == "f") { return Math.floor(n / d) }
+    if (mode == "c") { return Math.ceil(n / d) }
+    if (mode == "t") { return Math.trunc(n / d) }
+    if (n >= 0) { return Math.floor((2 * n + d) / (2 * d)) }
+    return Math.ceil((2 * n - d) / (2 * d))
+}
+function rbRatDigitOp(v, mode, nd) {
+    if (nd > 0) {
+        var p = rbPow10(nd)
+        return rbMkRat(rbRatIntOp(v["n"] * p, v["d"], mode), p)
+    }
+    var k = rbIntFromF(rbRatIntOp(v["n"], v["d"], mode))
+    if (nd == 0) { return k }
+    return rbIntDigitOp(k, 0 - nd, mode)
 }
 
 // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
@@ -1637,8 +1688,8 @@ function rbStr(v) {
     }
     if (rbTag(v, "__bint")) { return rbABigStr(v) }
     if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
-    if (rbIsRat(v)) { return ("" + v["n"]) + "/" + ("" + v["d"]) }
-    if (rbIsCpx(v)) { return ("" + v["re"]) + "+" + ("" + v["im"]) + "i" }
+    if (rbIsRat(v)) { return rbRatText(v) }
+    if (rbIsCpx(v)) { return rbCpxText(v) }
     if (rbIsSym(v)) { return v["s"] }
     if (rbIsArr(v)) { return rbInspect(v) }
     if (rbIsDict(v)) { return rbInspect(v) }
@@ -1677,7 +1728,12 @@ function rbStr(v) {
 // SOURCE TEXT, a live halves divergence that no gate could see because neither
 // half was ever asserted. Mirrors rstr of ruby-interpreter.abnf and
 // rubyFuncRender of abnf/jsrt.go. docs/todo.md 1.5.
+// A METHOD value renders as MRI's `#<Method: Object#foo>', and that one IS
+// byte-exact against the oracle: MRI 2.6 writes exactly it, and only 3.0 appends a
+// source location. docs/todo.md 2.5.
 function rbFuncRender(v) {
+    var mrec = rtPairGet(rbMethodFns, rbMethodRec, v)
+    if (mrec !== undefined) { return "#<Method: " + mrec[0] + "#" + mrec[1] + ">" }
     if (rtHas(rbLambdas, v)) { return "#<Proc (lambda)>" }
     return "#<Proc>"
 }
@@ -1728,6 +1784,12 @@ function rbInspect(v) {
     if (rbIsNil(v)) { return "nil" }
     if (typeof v == "string") { return rbStrInspect(v) }
     if (rbIsSym(v)) { return ":" + v["s"] }
+    // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
+    // `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one place the
+    // two differ for a numeric. Every engine fell through to #to_s.
+    // docs/todo.md 1.3.
+    if (rbIsRat(v)) { return "(" + rbRatText(v) + ")" }
+    if (rbIsCpx(v)) { return "(" + rbCpxText(v) + ")" }
     // Range#inspect INSPECTS its endpoints where #to_s renders them, which is the
     // only place the two differ: `("a".."e").inspect' is `"a".."e"' and its #to_s
     // is `a..e'. Both used to be the materialized array's. docs/todo.md 1.5.
@@ -2507,10 +2569,17 @@ function rbFloDomain(x) {
 // The `*` argument is read BEFORE the value and width before precision, and `*`
 // takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
 //
-// NOT implemented, deliberately: MRI's ArgumentErrors for MIXING the styles and
-// its "too few arguments". Running off the end of the argument list has always
-// answered nil in all three engines, and making one of the five raise while the
-// other four stay lenient would be a divergence of a different shape.
+// "TOO FEW ARGUMENTS" IS RAISED, since docs/todo.md 1.3's 2026-08-10 pass; the
+// paragraph that used to stand here declined it, and answering nil made
+// "%s %s" % ["a"] read "a " in all three engines - agreed and wrong. Measured
+// against /usr/bin/ruby 2.6.10 (unchanged in 3.x); the full row table, and the
+// shapes that do NOT raise, are at fmtTooFew in languages/ruby-interpreter.abnf.
+// rubyFmtTooFew in abnf/jsrtruby.go is the other twin. STILL not implemented:
+// MRI's four ArgumentErrors for MIXING the numbered, unnumbered and named styles.
+function rbFmtTooFew() {
+    rbRaiseErr("ArgumentError", "too few arguments")
+}
+
 function rbFmtHashArg(args) {
     if (args.length == 1 && rbIsDict(args[0])) { return args[0] }
     return null
@@ -2547,10 +2616,12 @@ function rbFmtStar(spec, j, args, st) {
     v = null
     if (j > ds && j < spec.length && spec.charAt(j) == "$") {
         j = j + 1
-        if (dn > 0 && dn - 1 < args.length) { v = args[dn - 1] }
+        if (dn == 0 || dn - 1 >= args.length) { rbFmtTooFew() }
+        v = args[dn - 1]
     } else {
         j = ds
-        if (st["ai"] < args.length) { v = args[st["ai"]] }
+        if (st["ai"] >= args.length) { rbFmtTooFew() }
+        v = args[st["ai"]]
         st["ai"] = st["ai"] + 1
     }
     return {n: Math.trunc(rbToF(v)), j: j}
@@ -2569,10 +2640,10 @@ function rbFmtStar(spec, j, args, st) {
 // string; nothing but a native probe could see it. The messages are MRI's own,
 // chosen by what the head consumed last - see the table in ruby-interpreter.abnf.
 //
-// NOT raised, and deliberately: MRI's "too few arguments" (the decline recorded
-// at rbFmtStar above). It costs one row where MRI reports the argument shortage
-// BEFORE the malformed head, and one where a selector saves an otherwise
-// malformed head ("%1$%" % 5 is "%" in MRI). docs/todo.md 1.3.
+// MRI's "too few arguments" is raised too, since 2026-08-10 - see rbFmtTooFew
+// above. The one row a selector still saves in MRI and not here is "%1$%" % 5,
+// which is "%" there and *invalid format character - %* here; it never reaches
+// the argument list, so it is a malformed-head row. docs/todo.md 1.3.
 function rbIsFmtConv(c) {
     return c == "d" || c == "i" || c == "u" || c == "f" || c == "s" || c == "p"
         || c == "c" || c == "x" || c == "X" || c == "o" || c == "b" || c == "B"
@@ -2742,8 +2813,12 @@ function rbFormat(spec, arg) {
         nx = null
         if (haveName) { nx = rbFmtNamed(args, nmk, brace ? "{" : "<", brace ? "}" : ">") }
         else if (sel >= 0) {
-            if (sel < args.length) { nx = args[sel] }
-        } else if (st["ai"] < args.length) { nx = args[st["ai"]] }
+            if (sel >= args.length) { rbFmtTooFew() }
+            nx = args[sel]
+        } else {
+            if (st["ai"] >= args.length) { rbFmtTooFew() }
+            nx = args[st["ai"]]
+        }
         // The positional cursor moves ONCE, here, rather than in each conversion
         // arm: the arms no longer decide which argument they get.
         if (!haveName && sel < 0) { st["ai"] = st["ai"] + 1 }
@@ -3379,6 +3454,25 @@ function rbFindMethod(v, name) {
     return undefined
 }
 
+// BasicObject#equal? - OBJECT IDENTITY, which existed in no engine at all
+// (`1.equal?(1)' aborted with *method call 'equal?' on a number* here and with
+// *unknown Integer method: equal?* in the interpreter half). docs/todo.md 2.5.
+//
+// The rule is NOT a bare `===' and the reasoning is at identicalP in
+// languages/ruby-interpreter.abnf, which carries the measured row table: a Float
+// compares by its DOUBLE (MRI's flonum makes 1.0.equal?(1.0) true, and NaN false
+// falls out), a String / Rational / Complex is always false (MRI allocates a fresh
+// object per value and this model has no identity for any of them), and everything
+// else is a reference or an interned value, where identity is exactly right.
+// rubyIdenticalP in abnf/jsrt.go is the other twin.
+function rbIdenticalP(a, b) {
+    if (rbIsNil(a) || rbIsNil(b)) { return rbIsNil(a) && rbIsNil(b) }
+    if (rbIsFlo(a) || rbIsFlo(b)) { return rbIsFlo(a) && rbIsFlo(b) && a["f"] === b["f"] }
+    if (typeof a == "string" || typeof b == "string") { return false }
+    if (rbIsRat(a) || rbIsCpx(a) || rbIsRat(b) || rbIsCpx(b)) { return false }
+    return a === b
+}
+
 // rubyClassName: the builtin class a runtime value belongs to ("" when none).
 function rbClassName(v) {
     if (v === true) { return "TrueClass" }
@@ -3403,6 +3497,9 @@ function rbClassName(v) {
     // A Proc / lambda / block closure. Without this arm `blk.class' and
     // `blk.is_a?(Proc)' aborted both compiled halves with "method call 'class' on a
     // function", where ruby-interpreter.abnf answered off classOf.
+    // A Method is a class of its own in MRI and is NOT a Proc, so this test comes
+    // first and the Proc arm excludes it. docs/todo.md 2.5.
+    if (rbIsMethodVal(v)) { return "Method" }
     if (rbIsFn(v)) { return "Proc" }
     return ""
 }
@@ -4408,13 +4505,21 @@ function rbNumMethod(t, name, args) {
             if (rbAIsExact(x)) { return rtBaseStr(x, Math.trunc(rbToF(args[0]))) }
             return rbABigBaseStr(rbABigFromNum(x), Math.trunc(rbToF(args[0])))
         }
+        // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes -
+        // and this arm answered rbStr for both, so `p 2r/3r' printed the bracketed
+        // form off rbInspect while `(2r/3r).inspect' printed the bare one, inside
+        // one engine. docs/todo.md 1.3.
+        if (name == "inspect") { return rbInspect(t) }
         return rbStr(t)
     }
     // An infinity or a NaN has no Integer, so every conversion to one raises
     // FloatDomainError (rbFloDomain). MRI's #round / #floor / #ceil with a POSITIVE
     // ndigits answer a Float and do not raise, which is why only the no-argument
     // forms are guarded. docs/todo.md 1.5.
-    if (name == "to_i" || name == "to_int" || name == "truncate") {
+    // #truncate is NOT here any more: it takes an ndigits like #floor and #round,
+    // and this arm ignored it - `1.567.truncate(1)' answered the Integer 1 where
+    // MRI answers the Float 1.5. docs/todo.md 1.3.
+    if (name == "to_i" || name == "to_int") {
         rbFloDomain(x)
         return rbIntFromF(Math.trunc(x))
     }
@@ -4423,18 +4528,29 @@ function rbNumMethod(t, name, args) {
         return rbMkFlo(x)
     }
     if (name == "to_r") { return rbAsRat(t) }
-    if (name == "abs") {
+    // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
+    // through rbToF, so (2r/3r).abs answered a Float and (3+4i).abs answered 3.0 -
+    // the REAL PART - where MRI says (2/3) and 5.0. Agreed in all four legs and
+    // wrong in all four. docs/todo.md 1.3.
+    if (name == "abs" || name == "magnitude") {
+        if (rbIsRat(t)) {
+            if (t["n"] < 0) { return rbMkRat(0 - t["n"], t["d"]) }
+            return t
+        }
+        if (rbIsCpx(t)) { return rbMkFlo(Math.sqrt(t["re"] * t["re"] + t["im"] * t["im"])) }
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
         return Math.abs(x)
     }
     // #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
     // one answers a Float (and does not raise on an infinity); 0 and negatives
     // answer an Integer. rbNumDigitOp is the whole rule. docs/todo.md 1.2.
-    if (name == "floor" || name == "ceil" || name == "round") {
+    if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
         var nd = 0
         if (args.length > 0) { nd = Math.trunc(rbToF(args[0])) }
         var md = "r"
-        if (name == "floor") { md = "f" } else if (name == "ceil") { md = "c" }
+        if (name == "floor") { md = "f" } else if (name == "ceil") { md = "c" } else if (name == "truncate") { md = "t" }
+        // A Rational stays EXACT at every ndigits - see rbRatDigitOp.
+        if (rbIsRat(t)) { return rbRatDigitOp(t, md, nd) }
         return rbNumDigitOp(x, null, isInt, md, nd)
     }
     if (name == "zero?") { return x == 0 }
@@ -6056,6 +6172,11 @@ function rbMethod(target, name, args) {
     if (name == "to_s" || name == "inspect") {
         if (target === true) { return "true" }
         if (target === false) { return "false" }
+        // A Proc / Method. Both are the same string in MRI, and neither existed:
+        // `method(:x).inspect' aborted with *method call 'inspect' on a function*
+        // while "#{method(:x)}" answered off rbStr, so the interpolation and the
+        // explicit call disagreed inside ONE engine. docs/todo.md 2.5.
+        if (rbIsFn(target)) { return rbFuncRender(target) }
         // A user INSTANCE with no to_s / inspect of its own: `e.inspect' and
         // `obj.to_s' aborted with *unknown method ... on an instance*. A Hash or an
         // Enumerator carries no __class, so their own arms still answer.
@@ -6105,6 +6226,7 @@ function rbMethod(target, name, args) {
         if (typeof target == "string") { return true }
         return rbIsNum(target)
     }
+    if (name == "equal?") { return rbIdenticalP(target, rbArgAt(args, 0)) }
     if (name == "call" || name == "()" || name == "yield" || name == "[]" || name == "===") {
         if (rbIsFn(target)) { return target.apply(undefined, args) }
     }
@@ -6114,8 +6236,26 @@ function rbMethod(target, name, args) {
     if (name == "arity") {
         if (rbIsFn(target)) { return rbProcArity(target) }
     }
+    // Method#to_proc answers a PROC, and a LAMBDA one: MRI's `method(:foo).to_proc'
+    // is `#<Proc (lambda)>' with the Method's own arity. A fresh wrapper rather
+    // than the Method itself, because the Method is what carries the Method class.
     if (name == "to_proc") {
+        if (rbIsMethodVal(target)) {
+            var tpw = function() { return target.apply(undefined, arguments) }
+            var tprec = rtPairGet(rbArityFns, rbArityRec, target)
+            if (tprec !== undefined) { js_rarity(tpw, tprec[0], tprec[1], tprec[2]) }
+            return js_rlambda(tpw)
+        }
         if (rbIsFn(target)) { return target }
+    }
+    // Method#name: the Symbol `#<Method: Object#x>' ends in. #owner is NOT
+    // implemented, in any engine, and that is deliberate rather than an oversight -
+    // it has to answer the class OBJECT, and the two compiled halves reach a user
+    // class's object only through the emitted module, so one of the three would
+    // have had to answer a synthetic stand-in. An omission is not a divergence.
+    if (name == "name") {
+        var mvr = rtPairGet(rbMethodFns, rbMethodRec, target)
+        if (mvr !== undefined) { return rbSym(mvr[1]) }
     }
     // Comparable#between? and #clamp are defined by <=> ALONE, so Integer, Float,
     // Rational and String all answer them off ONE pair of arms. They used to sit
@@ -7122,6 +7262,24 @@ function js_rkconv(name, args) {
     var v = null
     if (rbIsArr(args) && args.length > 0) { v = args[0] }
     if (name == "String") { return rbStr(v) }
+    // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
+    // two parts. They were absent from the list, so `Rational(1, 3)' aborted both
+    // compiled halves with *call of a non function value* and built an INSTANCE of
+    // the class Rational in the interpreter half. Rational(a) IS a.to_r and
+    // Rational(a, b) is a.to_r / b.to_r, so both go through rbAsRat and inherit
+    // exactly what #to_r already answers. docs/todo.md 1.3.
+    if (name == "Rational") {
+        var rp = rbAsRat(v)
+        if (!rbIsArr(args) || args.length < 2) { return rbMkRat(rp["n"], rp["d"]) }
+        var rq = rbAsRat(args[1])
+        if (rq["n"] == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        return rbMkRat(rp["n"] * rq["d"], rp["d"] * rq["n"])
+    }
+    if (name == "Complex") {
+        var nargs = rbIsArr(args) ? args.length : 0
+        if (nargs < 2 && rbIsCpx(v)) { return v }
+        return rbMkCpx(rbToF(v), nargs > 1 ? rbToF(args[1]) : 0)
+    }
     if (name == "Array") {
         if (rbIsNil(v)) { return [] }
         if (rbIsArr(v)) { return v }
@@ -7788,7 +7946,23 @@ function js_rmethodval(scope, name) {
     while (s !== undefined && s !== null) {
         if (scopeHas(s, n)) {
             v = scopeGet(s, n)
-            if (typeof v == "function") { return v }
+            // A top-level `def' is a scope variable holding its own closure, so
+            // THAT is the Method value; MRI's owner for one is Object.
+            //
+            // ...UNLESS THE HIT IS IN THE ROOT SCOPE AND THE NAME IS A KERNEL ONE.
+            // The outermost scope of the chain is the HOST's, and it carries
+            // MetaJS's own `print', `printf' and `sprintf' - Go's fmt, not Ruby's -
+            // which is the same collision the emitter's printf arm exists to avoid
+            // for a plain call ("%!f(string=1.)" under llvm.Run). Reached through
+            // method(:printf) it made the two compiled halves answer
+            // `#<Method: Object#printf>` with arity 0 while the interpreter half
+            // answered MRI's `#<Method: Object(Kernel)#printf>` and -1. A Ruby
+            // `def printf' lands in the MODULE's scope, which has a parent, so this
+            // test costs a program's own definition nothing. docs/todo.md 2.5.
+            if (typeof v == "function") {
+                var atRoot = scopeParent(s) === undefined || scopeParent(s) === null
+                if (!atRoot || rbKernelMethodIndex(n) < 0) { return rbMarkMethodVal(v, "Object", n) }
+            }
         }
         if (self === undefined && scopeHas(s, "self")) { self = scopeGet(s, "self") }
         s = scopeParent(s)
@@ -7796,6 +7970,22 @@ function js_rmethodval(scope, name) {
     if (self !== null && self !== undefined) {
         var m = rbFindMethod(self, n)
         if (m !== undefined) { return rbBindMethod(self, n, m) }
+    }
+    // A KERNEL method, which MRI hands out as an ordinary Method bound to the main
+    // object - `#<Method: Object(Kernel)#puts>`. It comes after the scope walk and
+    // after rbFindMethod, so a program's own `def puts` still wins.
+    var ki = rbKernelMethodIndex(n)
+    if (ki >= 0) {
+        var kn = n
+        var kw = function() {
+            var ka = []
+            var kq = 0
+            while (kq < arguments.length) { ka.push(arguments[kq]); kq = kq + 1 }
+            return rbKernelInvoke(kn, ka)
+        }
+        if (rbKernelMethodArity[ki] < 0) { js_rarity(kw, 0 - rbKernelMethodArity[ki] - 1, 0, true) }
+        else { js_rarity(kw, rbKernelMethodArity[ki], 0, false) }
+        return rbMarkMethodVal(kw, "Object(Kernel)", kn)
     }
     // A CATCHABLE NameError, which is what MRI raises; a host abort here printed on
     // stderr where the interpreter half printed on stdout, so the miss itself was a
@@ -7819,7 +8009,74 @@ function rbBindMethod(self, name, m) {
     }
     var rec = rtPairGet(rbArityFns, rbArityRec, m)
     if (rec !== undefined) { js_rarity(w, rec[0], rec[1], rec[2]) }
-    return w
+    return rbMarkMethodVal(w, rbOwnerName(self), name)
+}
+
+// The owner name `#<Method: C#m>' carries: the receiver's class, which is what MRI
+// prints for a method defined in that class. A method INHERITED from a superclass
+// is written `D(C)#m' by MRI and plainly `D#m' here - the one shape this leaves
+// divergent, and it can only shorten the answer.
+// A Kernel method reachable by name, and the ARITY MRI reports for it. `puts`,
+// `format` and their neighbours are ordinary Methods in MRI and every engine here
+// raised NameError instead, agreed and wrong. THE LIST AND ITS ORDER ARE THE SAME
+// in languages/ruby-interpreter.abnf (kernelMethodNames) and abnf/jsrt.go
+// (rubyKernelMethodNames) - a name in one and not the others would be a halves
+// divergence by construction; what is deliberately left out, and why, is written
+// out once at kernelMethodNames in the interpreter half. docs/todo.md 2.5.
+var rbKernelMethodNames = ["puts", "print", "p", "format", "sprintf", "printf", "rand",
+                           "Integer", "Float", "String", "Array", "Rational", "Complex"]
+var rbKernelMethodArity = [0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1,
+                           0 - 1, 0 - 1, 1, 1, 0 - 1, 0 - 1]
+
+function rbKernelMethodIndex(n) {
+    var i = 0
+    while (i < rbKernelMethodNames.length) {
+        if (rbKernelMethodNames[i] == n) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Call one, from an argument ARRAY - the same externs the emitter calls for the
+// bare name, so a Method value and a plain call cannot answer differently.
+function rbKernelInvoke(n, args) {
+    if (n == "puts") {
+        if (args.length == 0) { println("") ; return null }
+        js_rputs(args)
+        return null
+    }
+    if (n == "print") {
+        var i = 0
+        while (i < args.length) { js_rprint(args[i]); i = i + 1 }
+        return null
+    }
+    if (n == "p") { return js_rp(args) }
+    if (n == "format" || n == "sprintf") { return js_rformat(args) }
+    if (n == "printf") { js_rprint(js_rformat(args)); return null }
+    if (n == "rand") { return js_rrand(args) }
+    return js_rkconv(n, args)
+}
+
+function rbOwnerName(self) {
+    if (rbUserObj(self) && rbIsObj(self["__class"])) {
+        var nm = self["__class"]["__name"]
+        if (typeof nm == "string") { return nm }
+    }
+    var kind = rbClassName(self)
+    if (kind != "") { return kind }
+    return "Object"
+}
+
+// Remember that `f' is a Method rather than a Proc, with the owner and name its
+// #to_s / #name / #owner are made of. See rbMethodFns at the top of this file.
+function rbMarkMethodVal(f, owner, name) {
+    rbMethodFns.push(f)
+    rbMethodRec.push([owner, name])
+    return f
+}
+function rbIsMethodVal(f) {
+    if (typeof f != "function") { return false }
+    return rtPairGet(rbMethodFns, rbMethodRec, f) !== undefined
 }
 
 // *rest: the arguments from index i on, as an array (a trailing block closure is
@@ -8069,7 +8326,9 @@ function rbProcArity(f) {
     var rec = rtPairGet(rbArityFns, rbArityRec, f)
     if (rec === undefined) { return 0 }
     if (rec[2] === true) { return 0 - (rec[0] + 1) }
-    if (rtHas(rbLambdas, f) && rec[1] > 0) { return 0 - (rec[0] + 1) }
+    // A METHOD counts optionals the way a lambda does: MRI's `method(:m).arity' for
+    // `def m(a, b = 1)' is -2, and every engine answered the proc's 1.
+    if ((rtHas(rbLambdas, f) || rbIsMethodVal(f)) && rec[1] > 0) { return 0 - (rec[0] + 1) }
     return rec[0]
 }
 

@@ -222,11 +222,32 @@ LINT_FINDINGS=0
 MATRIX_ENTRIES=383        # 2026-08-09: 357 + 26 abort-text rows (13 languages x
                           # {interpreter SHOULD FAIL, native SHOULD ABORT}); the
                           # three MetaJS SHOULD ABORT rows were promoted in place.
+                          #
+                          # THE TREE IS AT 385 as this is written (docs/todo.md 6.2
+                          # gave swift's two abort probe FILES the full pair of rows
+                          # each, +2), and this floor is deliberately left at 383 for
+                          # the reason FULL_ASSERTIONS states above: a floor is set
+                          # from a COMMITTED tree, by whoever commits, not from a
+                          # working one with other agents' rows in flight. The gate
+                          # says "RAISE them" until then, and that message IS the
+                          # ratchet working.
 # And the abort rows specifically, since the count above cannot tell WHICH 383.
-ABORT_ROWS=16             # rows whose name says SHOULD ABORT
-ABORT_ALL_ROWS=14         # of those, the ones that also compare the interpreter
+ABORT_ROWS=17             # rows whose name says SHOULD ABORT
+ABORT_ALL_ROWS=15         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES). Raising this is how a language
                           # closes its interpreter-vs-compiler abort divergence.
+                          # 2026-08-10: 16/14 -> 17/15, docs/todo.md 6.2. Swift's
+                          # array-index probe carried ONLY an interpreter SHOULD
+                          # FAIL row, because its two compiler halves used to
+                          # disagree ("uncaught exception: list index out of range"
+                          # under llvm.Run against "list index out of range"
+                          # natively); it has the native ALL HALVES row now, and the
+                          # throw probe gained the interpreter row it was missing,
+                          # so BOTH files carry the full pair and nothing was
+                          # traded away. Closing docs/todo.md 1.1 was not what made
+                          # this possible - measured at 22e7b44, all five legs of
+                          # both files already agreed, so the two file headers were
+                          # the last place the old divergence survived.
 
 FAILED=()
 pass() { printf '  %-24s %s\n' "$1" "$2"; }

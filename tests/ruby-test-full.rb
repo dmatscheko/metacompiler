@@ -1903,11 +1903,11 @@ def s39
   # is MRI's: it names Proc, it is one line, and it is not the host's function text.
   # The interpreter half used to print the closure's whole MetaJS SOURCE and both
   # compiled halves the C floor's `[function]` - a live halves divergence. A Method
-  # VALUE is a Proc here and `#<Method: Object#s39_double>` in MRI, so only the
-  # inspect-shaped envelope is asserted of that one; the Proc naming is asserted of
-  # a lambda, where MRI says Proc too.
+  # VALUE now says so, and that one is BYTE-EXACT rather than an envelope: MRI 2.6
+  # writes `#<Method: Object#s39_double>` with no address in it (only 3.0 appends a
+  # source location). SECTION 48 is the rest of the Method surface.
   s = method(:s39_double).to_s
-  check("aa05", s[0] == "#" && !s.include?("function") && !s.include?("\n"))
+  check("aa05", s == "#<Method: Object#s39_double>" && !s.include?("\n"))
   t = "#{s39_lam}"
   check("aa06", t.include?("Proc") && !t.include?("function") && !t.include?("\n"))
   # TOO FEW POSITIONAL ARGUMENTS IS AN ArgumentError, with MRI's own message and
@@ -2413,6 +2413,204 @@ def s44
                   12345678901234567890.round(3) == 12345678901234567890)
   # A Float past 2**53 with a negative ndigits answers the exact Integer.
   check("rd44ab", 1.0e20.round(-5) == 100000000000000000000 && 1.0e20.round(2) == 1.0e20)
+  # #truncate IS ONE OF THE FOUR and IGNORED ITS ndigits in every engine, which is
+  # docs/todo.md 1.3's second argument-list rule: `1.567.truncate(1)` answered the
+  # Integer 1 where MRI answers the Float 1.5, and `1234.truncate(-2)` answered
+  # 1234 where MRI answers 1200. Truncation is toward zero at every sign, so it is
+  # floor above zero and ceil below it and it never carries.
+  check("rd44ac", 1.567.truncate(1) == 1.5 && (-1.567).truncate(1) == -1.5)
+  check("rd44ad", 1.567.truncate(1).class == Float && 1.0.truncate(3) == 1.0)
+  check("rd44ae", 1234.5678.truncate(-2) == 1200 && 1234.5678.truncate(-2).class == Integer)
+  check("rd44af", 2.5.truncate(0) == 2 && (-2.5).truncate(0) == -2 && 1.567.truncate == 1)
+  check("rd44ag", 1234.truncate(-2) == 1200 && (-1234).truncate(-2) == -1200 && 7.truncate(1) == 7)
+  check("rd44ah", 12345678901234567890.truncate(-5) == 12345678901234500000)
+end
+
+# ===== SECTION 46: Rational and Complex - the exact ones =====
+# docs/todo.md 1.3. Four defects, all four AGREED ACROSS EVERY ENGINE and all four
+# wrong, so nothing but an oracle could see them. Every right-hand side below is
+# /usr/bin/ruby 2.6.10's own answer and none of these forms changed in 3.x.
+#
+#   Kernel#Rational / #Complex did not exist. `Rational(1, 3)` built an INSTANCE
+#   of the class Rational in the interpreter half (every operator on it then
+#   aborted) and aborted both compiled halves with *call of a non function value*.
+#   The literal spellings 2r/3r and 3+4i were the only ones any test used.
+#
+#   #round / #floor / #ceil / #truncate went through to_f, so `(2r/3r).round(1)`
+#   answered the Float 0.7 where MRI keeps the Rational (7/10).
+#
+#   #abs went through to_f too: `(2r/3r).abs` answered a Float and `(3+4i).abs`
+#   answered 3.0 - THE REAL PART - where MRI answers 5.0.
+#
+#   #inspect was #to_s, so the parentheses were missing, and Complex#to_s wrote
+#   its "+" unconditionally, so Complex(3, -4) rendered `3+-4i`.
+def s46
+  v = [1, 3, 4, 2]
+  # Kernel#Rational: one argument is #to_r, two are a quotient, the sign moves to
+  # the numerator and the pair is reduced. Zero denominator is a ZeroDivisionError.
+  check("rc46a", Rational(v[0], v[1]).to_s == "1/3" && Rational(v[3]).to_s == "2/1")
+  check("rc46b", Rational(-4, 6).to_s == "-2/3" && Rational(4, -6).to_s == "-2/3")
+  check("rc46c", Rational(v[0], v[1]).class == Rational && Complex(v[1], v[2]).class == Complex)
+  check("rc46d", s46_zerodiv == "ZeroDivisionError")
+  # Kernel#Complex, and the SIGN of a negative imaginary part.
+  check("rc46e", Complex(v[1], v[2]).to_s == "3+4i" && Complex(3, -4).to_s == "3-4i")
+  check("rc46f", Complex(v[1]).to_s == "3+0i" && Complex(3 + 4i).to_s == "3+4i")
+  # #inspect PARENTHESIZES where #to_s does not - the one place the two differ for
+  # a numeric - and an interpolation is #to_s.
+  check("rc46g", Rational(v[0], v[1]).inspect == "(1/3)" && Complex(v[1], v[2]).inspect == "(3+4i)")
+  check("rc46h", Complex(3, -4).inspect == "(3-4i)" && Rational(-1, 3).inspect == "(-1/3)")
+  check("rc46i", "#{Rational(v[0], v[1])}|#{Complex(v[1], v[2])}" == "1/3|3+4i")
+  # #round / #floor / #ceil / #truncate at a POSITIVE ndigits keep the Rational,
+  # exactly: (self * 10**n).<mode> / 10**n. #round is half AWAY FROM ZERO.
+  check("rc46j", Rational(v[3], v[1]).round(1) == Rational(7, 10) &&
+                 Rational(v[3], v[1]).round(1).class == Rational)
+  check("rc46k", Rational(v[3], v[1]).floor(1) == Rational(3, 5) &&
+                 Rational(v[3], v[1]).ceil(1) == Rational(7, 10) &&
+                 Rational(v[3], v[1]).truncate(1) == Rational(3, 5))
+  check("rc46l", Rational(-1, 3).round(2) == Rational(-33, 100) &&
+                 Rational(-1, 3).floor(2) == Rational(-17, 50) &&
+                 Rational(-1, 3).truncate(2) == Rational(-33, 100))
+  check("rc46m", Rational(7, 4).round(1) == Rational(9, 5) && Rational(1, 8).round(2) == Rational(13, 100))
+  check("rc46n", Rational(5, 2).round(3) == Rational(5, 2) && Rational(5, 2).round(3).class == Rational)
+  # ndigits 0 and no argument answer an INTEGER, and a NEGATIVE one applies the
+  # Integer rule to that Integer - so (-5/2r).floor(-1) is -10 and not -0.
+  check("rc46o", Rational(v[3], v[1]).round == 1 && Rational(v[3], v[1]).round.class == Integer)
+  check("rc46p", Rational(5, 2).round == 3 && Rational(-5, 2).round == -3 && Rational(1, 3).round == 0)
+  check("rc46q", Rational(-5, 2).floor(-1) == -10 && Rational(-5, 2).ceil(-1) == 0 &&
+                 Rational(-5, 2).round(-1) == 0)
+  check("rc46r", Rational(22, 7).ceil == 4 && Rational(22, 7).floor == 3 && Rational(22, 7).truncate == 3)
+  # #abs: a Rational stays a Rational, a Complex is the MAGNITUDE.
+  check("rc46s", Rational(-2, 3).abs == Rational(2, 3) && Rational(-2, 3).abs.class == Rational)
+  check("rc46t", Complex(v[1], v[2]).abs == 5.0 && Complex(-3, -4).magnitude == 5.0)
+  check("rc46u", Complex(v[1], v[2]).abs.class == Float && Rational(v[3], v[1]).abs.to_s == "2/3")
+end
+def s46_zerodiv
+  begin
+    Rational(1, 0)
+    "no error"
+  rescue ZeroDivisionError => e
+    e.class.to_s
+  end
+end
+
+# ===== SECTION 47: BasicObject#equal? =====
+# docs/todo.md 2.5, and manual 7.6's `is`/`strictEq` under-read one language over.
+# It existed in NO engine: `1.equal?(1)` aborted with *unknown Integer method:
+# equal?* in the interpreter half and *method call 'equal?' on a number* in both
+# compiled halves, so --cross could never see it either.
+#
+# The rule is NOT a bare `===`. A Float compares by its DOUBLE (MRI's Float is a
+# flonum, so `1.0.equal?(1.0)` is true and NaN's false falls out); a String, a
+# Rational and a Complex answer FALSE always (MRI allocates a fresh object per
+# value and this value model has no identity for any of the three); everything
+# else is a reference or an interned value, where identity is exactly right.
+#
+# Every row is /usr/bin/ruby 2.6.10's own answer; #equal? is unchanged in 3.x. The
+# two rows deliberately NOT asserted, because they are MRI's flonum representation
+# showing through rather than a semantic, are `1e300.equal?(1e300)` and
+# `(-0.0).equal?(-0.0)` - false in MRI (neither value is a flonum), true here.
+def s47
+  v = [1, "a", :a, nil, true, 1.0]
+  check("eq47a", v[0].equal?(1) && !1.equal?(1.0) && !1.0.equal?(1))
+  check("eq47b", v[5].equal?(1.0) && !(0.0 / 0.0).equal?(0.0 / 0.0))
+  # Two equal Strings are DISTINCT objects in MRI, and this model has no string
+  # identity at all - so both spellings answer false, in all four engines.
+  check("eq47c", !v[1].equal?("a") && !"a".equal?("a"))
+  # A Symbol is INTERNED, and nil / true / false are singletons.
+  check("eq47d", v[2].equal?(:a) && v[3].equal?(nil) && v[4].equal?(true) && !nil.equal?(false))
+  # A reference compares by identity, and two freshly built ones are never equal.
+  a = [1]
+  h = {1 => 2}
+  r = (1..2)
+  check("eq47e", a.equal?(a) && h.equal?(h) && r.equal?(r))
+  check("eq47f", ![1].equal?([1]) && !({}).equal?({}) && !(1..2).equal?(1..2))
+  # NOTE the non-empty block bodies. `proc { }` with an EMPTY one is read as the
+  # bare name `proc` followed by an empty HASH literal in all three engines - the
+  # interpreter half then says *unknown Hash method: lambda?* and both compiled
+  # halves *variable not defined: proc*. That is a PARSE defect that predates this
+  # section (reproduced at 22e7b44) and it is not what this section is about, so
+  # the rows below step around it rather than assert it.
+  pr = proc { 1 }
+  pr2 = proc { 1 }
+  check("eq47g", pr.equal?(pr) && !pr.equal?(pr2))
+  o = S47C.new
+  check("eq47h", o.equal?(o) && !o.equal?(S47C.new) && S47C.equal?(S47C) && String.equal?(String))
+  # A big Integer is a distinct object per value in MRI too, and a Rational and a
+  # Complex are rebuilt by every operation.
+  check("eq47i", !(2 ** 70).equal?(2 ** 70) && !Rational(1, 3).equal?(Rational(1, 3)))
+  check("eq47j", !Complex(1, 2).equal?(Complex(1, 2)) && !v[0].equal?("1"))
+end
+class S47C
+end
+
+# ===== SECTION 48: `method(:x)` answers a METHOD, not a Proc =====
+# docs/todo.md 2.5. MRI's Method is a class of its own: #class is Method, #to_s is
+# `#<Method: Object#x>`, #arity counts optionals the way a LAMBDA does, and a
+# Method is not a Proc. Every engine here answered Proc, `#<Proc>` and a proc's
+# arity. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+#
+# THE RENDERING IS BYTE-EXACT and not an approximation, unlike Proc#to_s: MRI 2.6
+# writes exactly `#<Method: Object#s48_opt>` with no address in it, and only 3.0
+# appends a source location.
+def s48
+  v = [3, 5]
+  m = method(:s48_opt)
+  check("mv48a", m.class == Method && m.class.to_s == "Method")
+  check("mv48b", m.is_a?(Method) && !m.is_a?(Proc) && !s48_lam.is_a?(Method))
+  check("mv48c", m.to_s == "#<Method: Object#s48_opt>" && m.inspect == m.to_s)
+  check("mv48d", "#{m}" == "#<Method: Object#s48_opt>" && m.name == :s48_opt)
+  # A METHOD counts optionals like a lambda: `def s48_opt(a, b = 1)` is -2 where a
+  # proc of the same shape is 1. #call is unchanged.
+  check("mv48e", m.arity == -2 && method(:s48_one).arity == 1 && m.call(v[0]) == 4)
+  # #to_proc answers a PROC - a lambda one, carrying the Method's own arity.
+  check("mv48f", m.to_proc.class == Proc && m.to_proc.arity == -2 && m.to_proc.lambda?)
+  check("mv48g", m.to_proc.call(v[0]) == 4 && !m.to_proc.is_a?(Method))
+  # A BOUND method names the receiver's class.
+  check("mv48h", S48C.new.probe == "Method|#<Method: S48C#inst>|1|15")
+  # A KERNEL METHOD IS A METHOD TOO, and every engine raised NameError for it -
+  # agreed and wrong, so --cross was blind to it. MRI hands `method(:puts)` out as
+  # `#<Method: Object(Kernel)#puts>` with arity -1, and it is byte-exact here for
+  # the same reason the user-method form is: MRI 2.6 puts no address in it. The
+  # list of names is at kernelMethodNames in languages/ruby-interpreter.abnf, with
+  # the five it deliberately leaves out and why.
+  km = method(:puts)
+  check("mv48i", km.class == Method && km.to_s == "#<Method: Object(Kernel)#puts>")
+  check("mv48j", km.name == :puts && km.arity == -1 && km.is_a?(Method) && !km.is_a?(Proc))
+  check("mv48k", method(:format).to_s == "#<Method: Object(Kernel)#format>" &&
+                 method(:p).to_s == "#<Method: Object(Kernel)#p>" &&
+                 method(:rand).to_s == "#<Method: Object(Kernel)#rand>")
+  # ...and only String and Array take exactly one argument; the rest are -1.
+  check("mv48l", method(:String).arity == 1 && method(:Array).arity == 1 &&
+                 method(:Integer).arity == -1 && method(:Rational).arity == -1)
+  # #call reaches the SAME body the bare name does, which is what keeps a Method
+  # value and a plain call from answering differently.
+  check("mv48m", method(:format).call("%05.2f", v[0] / 2.0) == "01.50" &&
+                 method(:sprintf).call("%d-%s", v[0], "x") == "3-x")
+  check("mv48n", method(:Integer).call("0x1f") == 31 && method(:String).call(12) == "12" &&
+                 method(:Array).call(nil) == [])
+  check("mv48o", method(:Rational).call(1, 3).to_s == "1/3" &&
+                 method(:Complex).call(3, -4).to_s == "3-4i" &&
+                 method(:Float).call("2.5") == 2.5)
+  # A `def` of the program's own STILL WINS - the Kernel table is consulted after
+  # the scope walk and after the self-method lookup. `printf` is the row that
+  # matters: MetaJS's own host globals carry a `print` / `printf` / `sprintf` (Go's
+  # fmt, not Ruby's) in the ROOT scope, so the compiled halves used to answer
+  # `#<Method: Object#printf>` with arity 0 while this half answered MRI's.
+  check("mv48p", method(:s48_printf).arity == 1 && method(:s48_printf).call(v[0]) == "mine:3")
+  check("mv48q", method(:printf).to_s == "#<Method: Object#printf>" && method(:printf).arity == 1)
+end
+# A user `def` that SHADOWS a Kernel name, for mv48p / mv48q.
+def printf(a); "mine:" + a.to_s; end
+def s48_printf(a); "mine:" + a.to_s; end
+def s48_opt(a, b = 1); a + b; end
+def s48_one(a); a; end
+def s48_lam; ->(x) { x }; end
+class S48C
+  def inst(a); a + 10; end
+  def probe
+    m = method(:inst)
+    "#{m.class}|#{m}|#{m.arity}|#{m.call(5)}"
+  end
 end
 
 # ===== SECTION 45: a MALFORMED format string raises =====
@@ -2480,6 +2678,34 @@ def s45
                  s45m("%#x", 255) == "OK:0xff")
   check("mf45s", s45m("%1$s-%1$s", ["a"]) == "OK:a-a" && s45m("%{x}", {:x => 1}) == "OK:1" &&
                  s45m("%<x>d", {:x => 7}) == "OK:7")
+  # A SHORT ARGUMENT LIST is MRI's *too few arguments*, and every engine here
+  # answered nil for it - `"%s %s" % ["a"]` read "a " in all three, agreed and
+  # wrong. docs/todo.md 1.3, and the decline it replaced is at fmtTooFew in
+  # languages/ruby-interpreter.abnf. It fires for a plain directive, for one
+  # carrying flags or a width, for an explicit SELECTOR out of range, and for a `*`
+  # width or precision - the star is read BEFORE the value, so "%*d" % [5] is short
+  # too.
+  check("mf45t", s45m("%d", []) == "AE:too few arguments" && s45m("%s", []) == "AE:too few arguments")
+  check("mf45u", s45m("%s %s", ["a"]) == "AE:too few arguments" &&
+                 s45m("%-5s", []) == "AE:too few arguments" &&
+                 s45m("%c", []) == "AE:too few arguments")
+  check("mf45v", s45m("%*d", [5]) == "AE:too few arguments" &&
+                 s45m("%*d", []) == "AE:too few arguments" &&
+                 s45m("%.*f", [2]) == "AE:too few arguments")
+  check("mf45w", s45m("%1$d", []) == "AE:too few arguments" &&
+                 s45m("%2$d", [1]) == "AE:too few arguments")
+  # Left-to-right, so the shortage is reported BEFORE a malformed head further on -
+  # which is MRI's order too, and the row mf45h asserts with an argument present.
+  check("mf45x", s45m("%s%", []) == "AE:too few arguments")
+  # ...and what a short list does NOT raise. A NAMED directive short of a hash is
+  # *one hash required* and never this; a REUSED selector is not a shortage; a
+  # single non-array operand is a one-element list, so nil and a Hash both format;
+  # and a format string with no directive at all never looks at the list.
+  check("mf45y", s45m("%<x>d", []) == "AE:one hash required" &&
+                 s45m("%{x}", []) == "AE:one hash required" &&
+                 s45m("%1$d %1$d", [1]) == "OK:1 1")
+  check("mf45z", s45m("%s", nil) == "OK:" && s45m("%s", {:a => 1}) == "OK:{:a=>1}" &&
+                 s45m("abc", []) == "OK:abc" && s45m("%%", []) == "OK:%")
 end
 
 s39() # SECTION-CALL 39
@@ -2489,5 +2715,8 @@ s42() # SECTION-CALL 42
 s43() # SECTION-CALL 43
 s44() # SECTION-CALL 44
 s45() # SECTION-CALL 45
+s46() # SECTION-CALL 46
+s47() # SECTION-CALL 47
+s48() # SECTION-CALL 48
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

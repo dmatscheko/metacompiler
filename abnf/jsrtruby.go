@@ -205,12 +205,14 @@ func rubyFloDomain(rt *jsrt, x float64) {
 // The `*` argument is read BEFORE the value and width before precision, and `*`
 // takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
 //
-// NOT implemented, deliberately: MRI's ArgumentErrors for MIXING the styles and
-// its "too few arguments". Running off the end of the argument list has always
-// answered nil in all three engines here, and making one of the five raise while
-// the other four stay lenient would be a divergence of a different shape. The two
-// errors that ARE raised are the ones a working program hits by a typo in the
-// KEY, where the alternative is a silently empty field.
+// "TOO FEW ARGUMENTS" IS RAISED, since docs/todo.md 1.3's 2026-08-10 pass; the
+// paragraph that used to stand here declined it, and answering nil made
+// "%s %s" % ["a"] read "a " in all three engines - agreed and wrong. Measured
+// against /usr/bin/ruby 2.6.10 (unchanged in 3.x); the full row table, and the
+// shapes that do NOT raise, are at fmtTooFew in languages/ruby-interpreter.abnf.
+// rbFmtTooFew in languages/lib/ruby-rt.metajs is the other twin. STILL not
+// implemented: MRI's four ArgumentErrors for MIXING the numbered, unnumbered and
+// named styles.
 // rubyFmtCheckConv is MRI's malformed-format-string rule. Measured against
 // /usr/bin/ruby 2.6.10 (sprintf is unchanged in 3.x); the columns are
 // ruby-interpreter.abnf, llvm.Run (this file) and the native binary:
@@ -223,16 +225,20 @@ func rubyFloDomain(rt *jsrt, x float64) {
 // The messages are MRI's own, chosen by what the head consumed last - see the
 // table in languages/ruby-interpreter.abnf.
 //
-// NOT raised, and deliberately: MRI's "too few arguments" (the decline recorded
-// above). It costs one row where MRI reports the argument shortage BEFORE the
-// malformed head, and one where a selector saves an otherwise malformed head
-// ("%1$%" % 5 is "%" in MRI). docs/todo.md 1.3.
+// MRI's "too few arguments" is raised too, since 2026-08-10 - see the note above.
+// The one row a selector still saves in MRI and not here is "%1$%" % 5, which is
+// "%" there and *invalid format character - %* here; it never reaches the
+// argument list, so it is a malformed-head row. docs/todo.md 1.3.
 func rubyIsFmtConv(c byte) bool {
 	switch c {
 	case 'd', 'i', 'u', 'f', 's', 'p', 'c', 'x', 'X', 'o', 'b', 'B', 'e', 'E', 'g', 'G', 'a', 'A':
 		return true
 	}
 	return false
+}
+
+func (rt *jsrt) rubyFmtTooFew() {
+	rt.rubyRaiseErr("ArgumentError", "too few arguments")
 }
 
 func (rt *jsrt) rubyFmtCheckConv(c byte) {
@@ -256,12 +262,13 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		args = a.elems
 	}
 	ai := 0
-	// The next positional argument, or nil past the end.
+	// The next positional argument. Running off the end is MRI's ArgumentError,
+	// not a nil - see rubyFmtTooFew's note above.
 	take := func() interface{} {
-		var v interface{} = jsNull
-		if ai < len(args) {
-			v = args[ai]
+		if ai >= len(args) {
+			rt.rubyFmtTooFew()
 		}
+		v := args[ai]
 		ai++
 		return v
 	}
@@ -276,9 +283,10 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		var v interface{} = jsNull
 		if j > ds && j < len(spec) && spec[j] == '$' {
 			j++
-			if dn > 0 && dn-1 < len(args) {
-				v = args[dn-1]
+			if dn == 0 || dn-1 >= len(args) {
+				rt.rubyFmtTooFew()
 			}
+			v = args[dn-1]
 		} else {
 			j = ds
 			v = take()
@@ -438,9 +446,10 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			}
 			av = rt.rubyFmtNamed(args, name, open, close)
 		case sel >= 0:
-			if sel < len(args) {
-				av = args[sel]
+			if sel >= len(args) {
+				rt.rubyFmtTooFew()
 			}
+			av = args[sel]
 		default:
 			av = take()
 		}

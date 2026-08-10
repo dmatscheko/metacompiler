@@ -2657,7 +2657,7 @@ KwContinue  = "continue" KwEnd ;
             b = r.b
             for (var i = 0; i < names.length; i++) {
                 if (names[i] == "_") { continue }
-                var ev = callExt(b, "js_get", [r.v, emitStr(b, "" + i)])
+                var ev = emitCopy(b, callExt(b, "js_get", [r.v, emitStr(b, "" + i)]))
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[i]), ev])
             }
             return b
@@ -2671,7 +2671,7 @@ KwContinue  = "continue" KwEnd ;
             b = r.b
             for (var i = 0; i < names.length; i++) {
                 if (names[i] == "_") { continue }
-                var ev = callExt(b, "js_get", [r.v, emitStr(b, "" + i)])
+                var ev = emitCopy(b, callExt(b, "js_get", [r.v, emitStr(b, "" + i)]))
                 b.NewCall(rtKSet(), [curScopeV, emitStr(b, names[i]), ev])
             }
             return b
@@ -3763,37 +3763,36 @@ KwContinue  = "continue" KwEnd ;
             noB.NewRet(hUndef)
         })
     }
+    // ----- Value semantics: struct, Array, Dictionary and tuple -----
+    // Swift's defining property, and it is one extern rather than an emitted walk:
+    // sw_copy used to be an in-module recursion over a struct's __fields ONLY, so
+    // every array, dictionary and tuple binding aliased. Widening it in IR meant
+    // building three more typed loops in the emitter; js_swcopy is the same
+    // function written once per engine, which is the shape js_swadoptdeep already
+    // has beside it. See the extern for what is copied and what deliberately is
+    // not. Twins: swCopy in languages/swift-interpreter.abnf, js_swcopy in
+    // abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
+    // sw_copy is a SCALAR GUARD in front of it, and it is not a micro-optimisation:
+    // an emitted call to a LAYER-2 extern is not a call, it is `js_arr_new` +
+    // `js_arr_push` + `js_call` (look at any wrapper in lib/swift-rt.ll), so it
+    // allocates an argument array and dispatches a closure. This extern is emitted
+    // at every assignment, binding and argument, and tests/bench/mod.swift is a
+    // loop over two Ints that reaches it twice per iteration and copies nothing:
+    // measured at +10.23% in 9/9 paired draws against 22e7b44. Two FLOOR calls
+    // (js_typeof, js_seq - both small C functions, no allocation) in front of it
+    // took that to +0.5%. The whole copy still runs for anything that is an object.
     function rtCopy() {
         return rtFunc("sw_copy", 1, function(b, ps) {
             var v = ps[0]
-            var cls = b.NewCall(rtClassOf(), [v])
-            var c1 = curF.NewBlock("")
+            var objB = curF.NewBlock("")
             var asIs = curF.NewBlock("")
-            b.NewCondBr(truthy(b, cls), c1, asIs)
-            var c2 = curF.NewBlock("")
-            c1.NewCondBr(truthy(c1, callExt(c1, "js_get", [cls, emitStr(c1, "__struct")])), c2, asIs)
-            var flds = callExt(c2, "js_get", [cls, emitStr(c2, "__fields")])
-            var out = callExt(c2, "js_obj_new", [])
-            callExt(c2, "js_set", [out, emitStr(c2, "__class"), cls])
-            var sc = callExt(c2, "js_scope_new", [handle(0)])
-            callExt(c2, "js_scope_decl", [sc, emitStr(c2, "i"), emitNum(c2, 0)])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var doneB = curF.NewBlock("")
-            c2.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [flds])])), bodyB, doneB)
-            var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var kk = callExt(bodyB, "js_swidx", [flds, iV2])
-            callExt(bodyB, "js_set", [out, kk, bodyB.NewCall(rtCopy(), [callExt(bodyB, "js_get", [v, kk])])])
-            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
-            bodyB.NewBr(headB)
-            doneB.NewRet(out)
+            var tv = callExt(b, "js_typeof", [v])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "object")])), objB, asIs)
+            objB.NewRet(callExt(objB, "js_swcopy", [v]))
             asIs.NewRet(v)
         })
     }
     function emitCopy(b, v) {
-        if (!hasStructs) { return v }
         return b.NewCall(rtCopy(), [v])
     }
     // The [i] read and the [i] = v write, once the program declares a subscript: an
@@ -3984,7 +3983,7 @@ KwContinue  = "continue" KwEnd ;
         }
         var simple = !k.pdot && k.pargs == null && k.ppath.indexOf(".") < 0
         if (binding && simple) {
-            if (k.ppath != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, k.ppath), v]) }
+            if (k.ppath != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, k.ppath), emitCopy(b, v)]) }
             return b
         }
         // An enum case pattern matches by case NAME (a leading `.` has no type to
@@ -4037,12 +4036,12 @@ KwContinue  = "continue" KwEnd ;
                 b = emitNotNil(ri.b, ri.v, failB)
                 var ns = cd.bindNames
                 if (ns.length == 1) {
-                    if (ns[0] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ns[0]), ri.v]) }
+                    if (ns[0] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ns[0]), emitCopy(b, ri.v)]) }
                 } else {
                     for (var j = 0; j < ns.length; j++) {
                         if (ns[j] == "_") { continue }
                         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ns[j]),
-                                                     callExt(b, "js_get", [ri.v, emitStr(b, "" + j)])])
+                                                     emitCopy(b, callExt(b, "js_get", [ri.v, emitStr(b, "" + j)]))])
                     }
                 }
             } else {
@@ -4726,11 +4725,14 @@ KwContinue  = "continue" KwEnd ;
             } else if (recs[i].dflt != null) {
                 var rd = recs[i].dflt(b)
                 b = rd.b
-                v = rd.v
+                v = emitCopy(b, rd.v)
             } else {
                 var r = recs[i].t(b)
                 b = r.b
-                v = r.v
+                // A non-inout argument is a STORE into the parameter, so it copies.
+                // `o.append(a)` reaches here too, which is what makes the element o
+                // keeps independent of a; an &x argument must NOT copy and does not.
+                v = emitCopy(b, r.v)
             }
             // ety0 is the ELEMENT type a collection method's first argument adopts
             // (`arr.append(3)` into a `[Double]`); it is "" everywhere else, so no
@@ -4841,6 +4843,12 @@ KwContinue  = "continue" KwEnd ;
             && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var convExt = name == "String" ? "js_swstr" : "js_swflo"
             if (name == "Float") { convExt = "js_swflo32" }
+            // `String(x)` and `String(describing: x)` are two initializers, and the
+            // one argument they disagree on is a Character SEQUENCE. The label is
+            // known here, statically, so the choice is a different extern rather
+            // than a label passed at run time.
+            if (name == "String" && args.length == 1
+                && (args[0].lbl == null || args[0].lbl == "")) { convExt = "js_swstrinit" }
             return function(b) {
                 var ec2 = emitArgRecs(b, args)
                 b = ec2.b

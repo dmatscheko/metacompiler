@@ -847,7 +847,7 @@ ImportMeta  <~~ push(notImplExpr("import.meta", up.pos)) ~~>
 // under the MANGLED key '__#field' here (see PrivateDotSuffix), so the operand is that
 // key as a string and the ordinary 'in' does the rest - propIn has the arm that reaches
 // a slot no enumeration reports. docs/todo.md 2.4.
-PrivateNameRef <~~ push(makeConst(privName(pop()))) ~~>
+PrivateNameRef <~~ push(privRefThunk(pop())) ~~>
             = "#" Id <~~ push(up.in) ~~> ;
 
 // The ANGLE-BRACKET cast '<T>expr' - TypeScript's original assertion syntax, still the
@@ -918,7 +918,7 @@ ClassExpr   <~~ push(makeClassExprValue(takeAll())) ~~>
             = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ]
               [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
-              "{" { ClassMember } "}" ;
+              PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExprName <~~ push({cname: up.in}) ~~>
             = NotBindName Id ;
 // A class expression whose heritage is an EXPRESSION ('class extends mixin(Base) {}').
@@ -927,7 +927,7 @@ ClassExprName <~~ push({cname: up.in}) ~~>
 // ClassExpr, so the plain 'extends Name' shape always wins.
 ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
             = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ] KwExtends ClassExt [ TypeArgs ]
-              [ KwImplements TypeList ] "{" { ClassMember } "}" ;
+              [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll())) ~~>
@@ -1259,7 +1259,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 ClassDeclCore = [ KwAbstract ] KwClass [ NotBindName Id <~~ push({cname: up.in}) ~~> ] [ TypeParams ]
               [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
-              "{" { ClassMember } "}" ;
+              PrivBodyOpen { ClassMember } PrivBodyClose ;
 // The decorators may also stand IN FRONT OF the 'export' ('@dec export default class C
 // {}' is as legal as 'export @dec class C {}'), which is why the core of the declaration
 // is a production of its own: here the decorator list is picked up before the keyword and
@@ -1291,7 +1291,7 @@ Decorator   <~~ push(foldCallMember(takeAll())) ~~>
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
             = ClassDecorators [ KwAbstract ] KwClass NotBindName Id <~~ push({cname: up.in}) ~~>
               [ TypeParams ] KwExtends ClassExt [ TypeArgs ]
-              [ KwImplements TypeList ] "{" { ClassMember } "}" ;
+              [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
             = ClassHeritage ;
 // CallMember rather than Expression: 'class a extends b, c {}' is a syntax error, and
@@ -1312,6 +1312,14 @@ ClassHeritage = CallMember ;
 // ('[key: string]: number;'), an abstract or overload METHOD SIGNATURE ('abstract
 // area(): number;') and a constructor OVERLOAD signature. Each of them must be tried
 // before the form it is the bodyless twin of.
+// The braces of a CLASS BODY, tagged so the walk knows which body it is inside. A
+// private name is scoped to the class body that declares it - `class A { #v }` and
+// `class B extends A { #v }` are TWO names in TypeScript - so the mangled key has to
+// carry the body, not just the name (privEnter / privDeclare in the start script).
+// Tags run in a post-parse walk of the chosen tree (abnf/compiler.go's compileRule),
+// so the enter/exit pair is exactly balanced and no backtracking can reach it.
+PrivBodyOpen <~~ privEnter() ~~> = "{" ;
+PrivBodyClose <~~ privExit() ~~> = "}" ;
 ClassMember = ClassSemi | ClassStaticBlock | IndexSig | CtorDef | CtorSig | ClassGetSet | ClassGetSetSig | ClassSpecialMethod
             | MethodDef | MethodSig | FieldDef ;
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
@@ -1338,8 +1346,9 @@ ClassSpecialMethod <~~ push(makeMethod(takeAll())) ~~>
 // The key of a member, pushed as a descriptor so a literal name and a key that is only
 // known at run time are read the same way: {mk: "name"} or {mkT: keyThunk}.
 MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
-// A PRIVATE name is modelled as an ordinary property under the MANGLED key '__#secret'
-// (memberNameKey / privName). No source identifier can spell that, so the privacy is
+// A PRIVATE name is modelled as an ordinary property under the MANGLED key
+// '__#<body>#secret' (memberNameKey / privDeclare, where <body> is the class body it is
+// declared in). No source identifier can spell that, so the privacy is
 // exactly as tight as the syntax - '#secret' is reachable from inside the class body and
 // nowhere else - and the '__' prefix additionally keeps it out of every enumeration, as
 // a real private name is. Read back through the matching '.#name' member access (see
@@ -3040,6 +3049,12 @@ NotFuncHead = :script(~~
             var self = anytype // The receiver may be any value.
             self = jsThisArg()
             if (self == undefined || self == null) { return false }
+            // A FUNCTION's own properties live in the side table. docs/todo.md 2.10.
+            if (fnPropsN > 0) {
+                var fp = anytype
+                fp = fnPropsOf(self)
+                if (fp !== undefined) { return fp["__keys"].indexOf("" + k) >= 0 }
+            }
             if (typeof self != "object") { return false }
             return hasOwn(self, "" + k)
         }
@@ -4183,6 +4198,49 @@ NotFuncHead = :script(~~
             if (k == "call") { return fnCallShim(o) }
             if (k == "apply") { return fnApplyShim(o) }
             if (k == "bind") { return fnBindShim(o) }
+            // An own property written onto a FUNCTION lives in the side table, since
+            // the host's function value cannot carry one under -frozen. Asked after
+            // the three shims, which no program can shadow. docs/todo.md 2.10.
+            if (fnPropsN > 0) {
+                var fp = anytype
+                fp = fnPropsFind(o)
+                if (fp !== undefined) {
+                    // The KEY LIST decides, never `fp[k] !== undefined`. Two reasons,
+                    // and the second one bit: a property holding undefined is still an
+                    // own property; and under GOJA a bare `fp[k]` walks the HOST's
+                    // Object.prototype, so `f.hasOwnProperty` answered goja's own
+                    // method out of the side-table object and shadowed the shim below -
+                    // green under -frozen, wrong under goja, which is the divergence
+                    // class this file already warns about for plain objects two arms
+                    // down. docs/todo.md 2.10.
+                    if (fp["__keys"].indexOf("" + k) >= 0) { return fp["" + k] }
+                }
+            }
+            // The Object.prototype SURFACE of a function, as METHODS. Asked after the
+            // side table, so an own `f.toString = ...` still wins, exactly as in node.
+            //
+            // These four were a live goja-vs--frozen divergence BEFORE the side table
+            // existed and independently of it: a host function under goja carries a
+            // real prototype chain, so `f.toString()`, `f.valueOf()`,
+            // `f.hasOwnProperty(k)` and `f.propertyIsEnumerable(k)` all answered,
+            // while under -frozen a function is a Go *jsClosure with no chain at all
+            // and every one of them died with "f.toString is not a function" - as did
+            // both compiled halves. Nothing in the suite reached the rows, because a
+            // function was not a property carrier and nobody asked.
+            //
+            // The side table then made it worse in one place: `f.p = 1;
+            // f.hasOwnProperty("p")` was TRUE under goja (goja saw its own expando)
+            // and became false once the property moved beside the function. Answering
+            // here takes the read away from the host's chain in BOTH engines, which is
+            // what makes them agree by construction rather than by coincidence.
+            //
+            // toString answers jsStr's "[function]" and not node's source text: no
+            // engine here keeps the source, String(f) has always said "[function]" in
+            // all four legs, and agreeing with String(f) is the answer that costs no
+            // new divergence. docs/todo.md 2.10.
+            if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return fnHasOwnShim(o) }
+            if (k == "toString") { return fnToStringShim(o) }
+            if (k == "valueOf") { return fnValueOfShim(o) }
         }
         // Plain objects (instances, literals) read own properties only: a bare o[k]
         // resolved inherited Object.prototype members (toString, valueOf, ...) under a
@@ -4384,6 +4442,51 @@ NotFuncHead = :script(~~
             return mcall(o, k, a, "(intermediate value)." + k)
         }
     }
+    // ----- Own properties of a FUNCTION -----
+    // `f.p = 1`. In JavaScript every function is an ordinary object with an own
+    // property map, and `f.cache = {}` is a common idiom. A function value here is the
+    // HOST's function, and only goja lets one carry an expando: under -frozen it is a
+    // Go *jsClosure and the write died with "cannot set field 'p' on *abnf.jsClosure",
+    // so this half had a live goja-vs--frozen divergence that no test reached. The map
+    // therefore lives BESIDE the function in a side table, found by identity, in all
+    // four engines. Twins: jsvFnProps in abnf/jsrtjsprint.go and jvFnProps* in
+    // languages/lib/js-rt.metajs. docs/todo.md 2.10.
+    //
+    // fnPropsN is a guard, not a convenience: until a program has written one function
+    // property, every member read, write, `in`, delete and enumeration skips the scan
+    // on one comparison. The table PINS its functions for the run, which is the same
+    // trade the compiled halves make.
+    var fnPropsK = []
+    var fnPropsV = []
+    var fnPropsN = 0
+    function fnPropsFind(f) {
+        var r = anytype // The property map of a function, or undefined.
+        r = undefined
+        for (var i = 0; i < fnPropsN; i++) {
+            if (fnPropsK[i] === f) { return fnPropsV[i] }
+        }
+        return r
+    }
+    // The property map of a value that IS a function and HAS one, else undefined.
+    // Callers make the fnPropsN test themselves, so the common case costs one compare.
+    function fnPropsOf(o) {
+        var r = anytype
+        r = undefined
+        if (typeof o != "function") { return r }
+        return fnPropsFind(o)
+    }
+    function fnPropsMake(f) {
+        var p = anytype
+        p = fnPropsFind(f)
+        if (p !== undefined) { return p }
+        var o = {}
+        o["__keys"] = []
+        fnPropsK.push(f)
+        fnPropsV.push(o)
+        fnPropsN = fnPropsN + 1
+        return o
+    }
+
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
     function setMember(o, k, v) {
@@ -4394,9 +4497,37 @@ NotFuncHead = :script(~~
             var s = findAccessor(o, "set", k)
             if (s != undefined) { callWithThis(s, o, [v]); return }
         }
+        // A write onto a FUNCTION goes to the side table: the host's function value
+        // cannot carry an expando under -frozen. docs/todo.md 2.10.
+        if (typeof o == "function") {
+            var fp = fnPropsMake(o)
+            scopePut(fp, "" + k, v)
+            trackKey(fp, "" + k)
+            return
+        }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
     }
+    // Object.prototype.hasOwnProperty / .propertyIsEnumerable on a FUNCTION. Every own
+    // property a program can write onto a function here is an ordinary enumerable data
+    // property, so the two questions have the same answer and share one shim. The KEY
+    // LIST is asked, not the value, so a property holding undefined still answers true.
+    function fnHasOwnShim(fn) {
+        return function() {
+            var k = anytype // The queried key may be any value; it is compared as text.
+            k = (arguments.length > 0) ? arguments[0] : undefined
+            if (fnPropsN == 0) { return false }
+            var fp = anytype
+            fp = fnPropsFind(fn)
+            if (fp === undefined) { return false }
+            return fp["__keys"].indexOf("" + k) >= 0
+        }
+    }
+    // Function.prototype.toString / .valueOf. toString agrees with String(fn) rather
+    // than inventing a second spelling; valueOf is the identity, as it is in node.
+    function fnToStringShim(fn) { return function() { return jsStr(fn) } }
+    function fnValueOfShim(fn) { return function() { return fn } }
+
     // The two Function.prototype shims getMember hands out (see there). Each of them is a
     // fresh closure over the target function, so 'f.call === f.call' is false - which no
     // program in this subset can observe, and which keeps the shim free of any table.
@@ -4489,6 +4620,13 @@ NotFuncHead = :script(~~
             return a
         }
         if (hasOwn(v, "__keys")) { return v["__keys"].slice() }
+        // A FUNCTION enumerates the own properties written onto it, which node reports
+        // and this engine keeps in a side table. docs/todo.md 2.10.
+        if (fnPropsN > 0) {
+            var fp = anytype
+            fp = fnPropsOf(v)
+            if (fp !== undefined) { return fp["__keys"].slice() }
+        }
         return []
     }
     // Evaluates an argument / array-element list in which some entries may be spreads
@@ -5695,6 +5833,17 @@ NotFuncHead = :script(~~
     }
     function propIn(k, o) {
         if (o == undefined || o == null) fail("'in' on " + o)
+        // A FUNCTION's own properties live in the side table, and a function that has
+        // none answers false rather than falling through to the object arms.
+        // docs/todo.md 2.10.
+        if (typeof o == "function") {
+            if (fnPropsN > 0) {
+                var fp = anytype
+                fp = fnPropsFind(o)
+                if (fp !== undefined) { return fp["__keys"].indexOf("" + k) >= 0 }
+            }
+            return false
+        }
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
         // slots are C's instance methods, which node does not report as properties of
@@ -5779,16 +5928,25 @@ NotFuncHead = :script(~~
         return function() {
             if (ref.path.length == 0) { return true } // 'delete x' on a variable: a sloppy-mode no-op.
             var p = resolveRef(ref)
-            scopePut(p.obj, p.key, undefined)
-            if (p.obj != undefined && p.obj != null && hasOwn(p.obj, "__keys")) {
-                var ks = p.obj["__keys"]
+            // A FUNCTION's own properties live in the side table; the map there takes
+            // the delete in the object's place. docs/todo.md 2.10.
+            var tgt = anytype // The object the key is dropped from.
+            tgt = p.obj
+            if (fnPropsN > 0) {
+                var dfp = anytype
+                dfp = fnPropsOf(p.obj)
+                if (dfp !== undefined) { tgt = dfp }
+            }
+            if (typeof tgt != "function") { scopePut(tgt, p.key, undefined) }
+            if (tgt != undefined && tgt != null && typeof tgt != "function" && hasOwn(tgt, "__keys")) {
+                var ks = tgt["__keys"]
                 var at = ks.indexOf("" + p.key)
                 // A fresh list rather than a splice: the frozen engine's arrays have only
                 // the handful of methods the runtime implements, and splice is not one.
                 if (at >= 0) {
                     var keep = []
                     for (var i = 0; i < ks.length; i++) { if (i != at) { keep.push(ks[i]) } }
-                    scopePut(p.obj, "__keys", keep)
+                    scopePut(tgt, "__keys", keep)
                 }
             }
             return true
@@ -6021,6 +6179,13 @@ NotFuncHead = :script(~~
                 scopes.push({})
                 var res = undefined
                 for (var i = 0; i < ks.length; i++) {
+                    // The key list is a SNAPSHOT, so a key deleted by the body after the
+                    // snapshot was taken but before its turn came must not be visited:
+                    // `for (k in {a,b,c}) { s += k; delete o.c }` is "ab" in node and was
+                    // "abc" here. propIn is the same predicate the compiler half's
+                    // per-iteration js_jshas guard uses, so the two halves skip exactly
+                    // the same keys. docs/todo.md 2.10.
+                    if (!propIn(ks[i], obj)) { continue }
                     bindLoopTarget(target, ks[i])
                     var r = bodyT()
                     var a = loopAction(r, label)
@@ -7752,18 +7917,64 @@ NotFuncHead = :script(~~
         }
         return out
     }
-    // 'this.#x': a private name. It is stored under the MANGLED key '__#x', exactly as
-    // both compiler halves store it (privName in typescript-to-llvm-ir.abnf), and for the
-    // same two reasons: the '__' prefix is this engine's marker for a slot that no
-    // enumeration reports, so a private field stays out of for-in, Object.keys and object
-    // spread the way a real private name does; and it keeps `o["#x"] = 1` and a private
-    // `#x` in DIFFERENT slots, which the unmangled spelling did not - they were one slot
-    // here and two in the compilers. isPrivateKey is what lets the class-side lookups
-    // still see it, since it is a '__' name they otherwise skip. docs/todo.md 2.4.
-    function privName(n) { return "__#" + n }
+    // 'this.#x': a private name. It is stored under the MANGLED key '__#<body>#x',
+    // exactly as both compiler halves store it (privKey in typescript-to-llvm-ir.abnf), and for
+    // the same three reasons: the '__' prefix is this engine's marker for a slot that no
+    // enumeration reports, so a private field stays out of for-in, Object.keys and
+    // object spread the way a real private name does; it keeps `o["#x"] = 1` and a
+    // private `#x` in DIFFERENT slots, which the unmangled spelling did not; and the
+    // '<body>' component is the CLASS BODY the name is declared in, because a private
+    // name is scoped to its class body and not to its spelling - `class A { #v }` and
+    // `class B extends A { #v }` declare TWO names in node, and a per-NAME key made them
+    // one slot, so B's field initializer overwrote A's and `getA()` answered B's value.
+    // isPrivateKey is what lets the class-side lookups still see it, since it is a '__'
+    // name they otherwise skip. docs/todo.md 2.4, 2.10.
+    //
+    // privStack is the chain of class bodies currently open in the WALK (tags run over
+    // the chosen parse tree, in source order - abnf/compiler.go's compileRule - so the
+    // PrivBodyOpen/PrivBodyClose pair is exactly balanced and no backtracking reaches
+    // it); privDecls[id] is the set of private names body id DECLARES.
+    var privStack = []
+    var privDecls = []
+    function privEnter() {
+        privStack.push(privDecls.length)
+        privDecls.push({})
+    }
+    function privExit() { privStack.pop() }
+    function privKey(id, n) { return "__#" + id + "#" + n }
+    // A DECLARATION always belongs to the body it is written in.
+    function privDeclare(n) {
+        if (privStack.length == 0) { return privKey(0 - 1, n) }
+        var id = privStack[privStack.length - 1]
+        privDecls[id]["$" + n] = true
+        return privKey(id, n)
+    }
+    // A REFERENCE resolves to the innermost ENCLOSING body that declares the name, which
+    // is what makes an inner class reading an outer class's `#v` keep working. It cannot
+    // be answered when the reference is walked - a method body may read a field declared
+    // further down the same body - so the key is computed on FIRST USE instead, by which
+    // time the whole walk is over and every declaration is recorded. Cached, because a
+    // member access re-runs its key thunk on every evaluation.
+    function privRefKey(st, n) {
+        var i = st.length - 1
+        while (i >= 0) {
+            if (privDecls[st[i]]["$" + n] != undefined) { return privKey(st[i], n) }
+            i = i - 1
+        }
+        if (st.length > 0) { return privKey(st[st.length - 1], n) }
+        return privKey(0 - 1, n)
+    }
+    function privRefThunk(n) {
+        var st = privStack.slice()
+        var k = ""
+        return function() {
+            if (k == "") { k = privRefKey(st, n) }
+            return k
+        }
+    }
     // A class member's literal key text, mangled when it is a private name.
     function memberNameKey(s) {
-        if (s.length > 0 && s.charAt(0) == "#") { return privName(s.substring(1)) }
+        if (s.length > 0 && s.charAt(0) == "#") { return privDeclare(s.substring(1)) }
         return s
     }
     // Is this one of the mangled private-name slots? They are '__' names, so every
@@ -7774,8 +7985,8 @@ NotFuncHead = :script(~~
         if (k.length < 3) { return false }
         return k.charAt(0) == "_" && k.charAt(1) == "_" && k.charAt(2) == "#"
     }
-    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: makeConst(privName(n))} }
-    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: makeConst(privName(n))} }
+    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: privRefThunk(n)} }
+    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: privRefThunk(n)} }
 
     // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
     //

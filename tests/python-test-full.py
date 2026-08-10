@@ -2862,6 +2862,142 @@ def s41():
                   ord(chr(0x1E9E).lower()) == 0x00DF)
 
 
+# ===== SECTION 42: an unhashable set member or dict key =====
+# docs/todo.md 2.4. `a = [1]; b = [1]; len({a, b})` was 2 in the interpreter and 1
+# in both compiled halves - a live halves divergence - and CPython raises
+# TypeError for it. Two separate things came out of that one row.
+#
+# 1. dict and set ARE refused now, in all three engines, with CPython 3.14's exact
+#    wording - which differs between the two positions:
+#      {[1]}    cannot use 'list' as a set element (unhashable type: 'list')
+#      {{}: 1}  cannot use 'dict' as a dict key (unhashable type: 'dict')
+#    with one exception CPython really has: set.__contains__ / .discard / .remove
+#    convert a SET argument to a frozenset instead of refusing it, so `{1} in {1}`
+#    is False while `{} in {1}` and `{1} in {1: 2}` both raise.
+#
+# 2. The LIST is deliberately NOT refused, and that is the divergence this section
+#    records rather than fixes. A tuple IS a list in this value model
+#    (docs/todo.md 3.1), and the two directions of the mistake are not symmetric:
+#    treating a tuple as hashable only ACCEPTS a program CPython would reject,
+#    while treating a list as unhashable would abort `{(1, 2), (3, 4)}` and
+#    `d[i, j]` - legal Python, and among the most common things Python programs
+#    do. So the array stays hashable, and the halves were made to agree on it the
+#    other way instead: a tuple key now compares by CONTENTS in all three engines
+#    (core.keyEq, pyKeyEq, dictKeyEq), which is CPython's rule for a tuple and
+#    fixed `d[1, 2] = v; d[1, 2]` - a hard KeyError in every engine before.
+#
+# Every value is read out of a list so the constant folder cannot pre-compute a
+# row, and every error is CAUGHT.
+def s42():
+    def msg(f):
+        try:
+            f()
+            return "no raise"
+        except TypeError as e:
+            return str(e)
+
+    boxes = [{}, {1}, [1], (1, 2)]
+    empty_d = boxes[0]
+    a_set = boxes[1]
+    a_list = boxes[2]
+    a_tup = boxes[3]
+
+    # --- dict and set are unhashable, and the two wordings differ ---------
+    check("uh01", msg(lambda: {empty_d: 1}) ==
+          "cannot use 'dict' as a dict key (unhashable type: 'dict')")
+    check("uh02", msg(lambda: {a_set: 1}) ==
+          "cannot use 'set' as a dict key (unhashable type: 'set')")
+    check("uh03", msg(lambda: {empty_d}) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh04", msg(lambda: {a_set}) ==
+          "cannot use 'set' as a set element (unhashable type: 'set')")
+    # Every dict WRITE and READ site, not only the literal.
+    def dset(k):
+        d = {}
+        d[k] = 1
+        return len(d)
+    check("uh05", msg(lambda: dset(empty_d)) ==
+          "cannot use 'dict' as a dict key (unhashable type: 'dict')")
+    check("uh06", msg(lambda: {}[a_set]) ==
+          "cannot use 'set' as a dict key (unhashable type: 'set')")
+    check("uh07", msg(lambda: {}.get(empty_d, "d")) ==
+          "cannot use 'dict' as a dict key (unhashable type: 'dict')")
+    check("uh08", msg(lambda: {}.setdefault(empty_d, 1)) ==
+          "cannot use 'dict' as a dict key (unhashable type: 'dict')")
+    check("uh09", msg(lambda: empty_d in {1: 2}) ==
+          "cannot use 'dict' as a dict key (unhashable type: 'dict')")
+    # Every set INSERT site.
+    def sadd(v):
+        s = set()
+        s.add(v)
+        return len(s)
+    check("uh10", msg(lambda: sadd(empty_d)) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh11", msg(lambda: set([empty_d])) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh12", msg(lambda: {x for x in [empty_d]}) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh13", msg(lambda: sadd(a_set)) ==
+          "cannot use 'set' as a set element (unhashable type: 'set')")
+
+    # --- the frozenset conversion, which is a LOOKUP-only exception -------
+    check("uh14", msg(lambda: empty_d in a_set) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh15", (a_set in a_set) == False and (a_set in {1, 2}) == False)
+    check("uh16", {1}.discard(a_set) is None and {1}.discard({9}) is None)
+    check("uh17", msg(lambda: {1}.discard(empty_d)) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    check("uh18", msg(lambda: {1}.remove(empty_d)) ==
+          "cannot use 'dict' as a set element (unhashable type: 'dict')")
+    # A set used as a DICT key is refused even so - the exception is set-side only.
+    check("uh19", msg(lambda: a_set in {1: 2}) ==
+          "cannot use 'set' as a dict key (unhashable type: 'set')")
+
+    # --- a tuple key compares by CONTENTS, off two different objects ------
+    g = {}
+    g[1, 2] = "pair"
+    g[3, 4] = "other"
+    check("uh20", g[1, 2] == "pair" and g[3, 4] == "other" and len(g) == 2)
+    check("uh21", ((1, 2) in g) and not ((9, 9) in g))
+    t1 = boxes[3]
+    # Built from the elements rather than written as a literal: CPython folds and
+    # INTERNS a constant tuple, so a literal (1, 2) really is `is` boxes[3] there.
+    t2 = (t1[0] + 0, t1[1] + 0)
+    check("uh22", t1 is not t2 and {t1: "x"}[t2] == "x")
+    check("uh23", len({t1, t2, (3, 4)}) == 2)
+    check("uh24", len({(1, 2): "a", (1, 2): "b"}) == 1)
+    # By CONTENTS means by contents: a tuple with a different element misses.
+    nested = {}
+    nested[a_tup] = 5
+    check("uh25", nested[(1, 2)] == 5 and not ((1, 3) in nested))
+
+    # --- RECORDED DIVERGENCE: a list is hashable here, because it is a tuple
+    # (docs/todo.md 3.1). CPython raises for every row below.
+    # They CATCH rather than assert directly, so this section still runs to the
+    # end under CPython instead of aborting on the first of them.
+    def lsetlen():
+        try:
+            return len({[1], [1], [2]})
+        except TypeError:
+            return 0 - 1
+    check("uh26", msg(lambda: {a_list}) == "no raise")
+    check("uh27", msg(lambda: {a_list: 1}) == "no raise")
+    check("uh28", lsetlen() == 2)
+
+    # --- a BOXED number on the left of `in` -------------------------------
+    # Found by the same probe. `in` and `not in` are CONTAINER operators, so a
+    # boxed operand must fall through to pyIn - floOp let it, boxOp did not, and
+    # in the interpreter half alone `3j in xs` died with "unsupported operand
+    # type for in: complex" while `10**30 in xs` was answered off bigToNum of the
+    # CONTAINER. Both compiled halves already agreed with CPython.
+    boxes2 = [10 ** 30, 3j, 1]
+    big = boxes2[0]
+    cx = boxes2[1]
+    check("uh29", (big in boxes2) and (cx in boxes2) and (2 not in boxes2))
+    check("uh30", (big in {big}) and (cx in {cx}) and (big in {big: "b"}))
+    check("uh31", (big not in [1, 2]) and (cx not in [1, 2]))
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -2904,5 +3040,6 @@ def main():
     s39() # SECTION-CALL 39
     s40() # SECTION-CALL 40
     s41() # SECTION-CALL 41
+    s42() # SECTION-CALL 42
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -326,6 +326,56 @@ var jvClsN = 0
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
 var jvStringFn = anytype
 
+// ===================================================== function properties ==
+//
+// `f.p = 1` on a FUNCTION. A function value is a closure handle and the C floor's
+// set_member has no arm for one - it died with "member assignment 'p' on
+// [function]" - while node gives every function an ordinary own property map, and
+// `f.cache = {}` is a common idiom. There is no slot on a closure to hang a map
+// from without a floor change, so the map lives BESIDE the function in a side
+// table, found by identity (`===` on a closure is the floor's strict_eq, which for
+// a closure is pointer identity - manual 7.9). Twin: jsvFnProps in
+// abnf/jsrtjsprint.go; the interpreter halves keep the same table under the same
+// name. docs/todo.md 2.10.
+//
+// jvFnPropsN is the jvAccN/jvClsN guard again: until a program has written one
+// function property, every member read, write, `in` and enumeration skips the scan
+// outright, so a program that never does this pays one load and one compare.
+// The table PINS its functions for the lifetime of the program - a function whose
+// properties are still reachable is not collectable anyway, and the alternative is
+// a weak map the floor does not have.
+var jvFnPropsK = []
+var jvFnPropsV = []
+var jvFnPropsN = 0
+function jvFnPropsFind(f) {
+    var r = anytype
+    r = undefined
+    var i = 0
+    while (i < jvFnPropsN) {
+        if (jvFnPropsK[i] === f) { return jvFnPropsV[i] }
+        i = i + 1
+    }
+    return r
+}
+function jvFnPropsMake(f) {
+    var p = anytype
+    p = jvFnPropsFind(f)
+    if (p !== undefined) { return p }
+    var o = {}
+    jvFnPropsK.push(f)
+    jvFnPropsV.push(o)
+    jvFnPropsN = jvFnPropsN + 1
+    return o
+}
+// The own-property map of a function, or undefined when it has none. Both callers
+// have already made the jvFnPropsN > 0 test.
+function jvFnPropsOf(o) {
+    var r = anytype
+    r = undefined
+    if (!jvIsCallable(o)) { return r }
+    return jvFnPropsFind(o)
+}
+
 function jvIsAcc(v) {
     if (v === undefined) { return false }
     if (v === null) { return false }
@@ -581,6 +631,11 @@ function js_jsdel(o, key) {
         }
         return true
     }
+    if (jvFnPropsN > 0) {
+        var fp = anytype
+        fp = jvFnPropsOf(o)
+        if (fp !== undefined) { delKey(fp, jvStr(key)) }
+    }
     if (jvIsObj(o)) { delKey(o, jvStr(key)) }
     return true
 }
@@ -650,13 +705,73 @@ function js_jskeys(o) {
     // enumerate NOTHING rather than raising. docs/todo.md 2.4.
     if (Array.isArray(o)) { return jvIndexKeys(o.length) }
     if (typeof o == "string") { return jvIndexKeys(o.length) }
-    if (!jvIsObj(o)) { return [] }
+    if (!jvIsObj(o)) {
+        // A FUNCTION enumerates the own properties written onto it, which node
+        // reports and this engine kept in a side table. docs/todo.md 2.10.
+        if (jvFnPropsN > 0) {
+            var fp = anytype
+            fp = jvFnPropsOf(o)
+            if (fp !== undefined) { return keysOf(fp) }
+        }
+        return []
+    }
     // keysOf, not js_keys: an EXTERN is only callable from an emitted module, and
     // `js_keys(o)` from here linked and then died with "ReferenceError: js_keys is
     // not defined" on the first spread in a NATIVE binary - which no gate below
     // clang-check can see. host id 61 IS js_keys (languages/lib/runtime.c:5551), so
     // this is the same function under the name layer 2 can reach.
     return keysOf(o)
+}
+
+// The Object.prototype SURFACE of a FUNCTION, as methods. `f.toString()`,
+// `f.valueOf()`, `f.hasOwnProperty(k)` and `f.propertyIsEnumerable(k)` all died here
+// with "f.toString is not a function" - in BOTH compiled halves and in the -frozen
+// interpreter - while the goja interpreter answered them off the host's own prototype
+// chain. That was a live goja-vs--frozen divergence before the function side table
+// existed and independently of it; nothing reached it because a function was not a
+// property carrier and nobody asked. Twins: fnHasOwnShim / fnToStringShim /
+// fnValueOfShim in both *-interpreter.abnf, and jsvFnMethod in abnf/jsrtjsprint.go.
+// docs/todo.md 2.10.
+//
+// Every own property a program can write onto a function here is an ordinary
+// enumerable data property, so hasOwnProperty and propertyIsEnumerable share a body.
+// The KEY LIST is asked, not the value, so a property holding undefined answers true.
+// toString agrees with jvStr(f) rather than inventing a second spelling: no engine
+// here keeps a function's source text and String(f) has always said "[function]".
+function jvFnHasOwnShim(f) {
+    return function (k) {
+        if (jvFnPropsN == 0) { return false }
+        var fp = anytype
+        fp = jvFnPropsFind(f)
+        if (fp === undefined) { return false }
+        return js_has(fp, jvStr(k))
+    }
+}
+function jvFnToStringShim(f) { return function () { return jvStr(f) } }
+function jvFnValueOfShim(f) { return function () { return f } }
+// The four names, answered for a CALLABLE receiver only. Returns undefined for
+// everything else, so a caller can test one value instead of four names.
+// The NAME is compared before jvIsCallable, not after: this body sits on the MISS path
+// of js_jsmget and js_jsvget, which an ordinary absent-property read reaches, and
+// jvIsCallable is an out-of-line call while a comparison against an interned literal is
+// not - the same measurement the comment at the top of js_jsmget records, where asking
+// jvIsCallable first cost 21%. Four compares, then at most one call.
+function jvFnMethod(o, key) {
+    var r = anytype
+    r = undefined
+    if (key == "hasOwnProperty" || key == "propertyIsEnumerable") {
+        if (jvIsCallable(o)) { return jvFnHasOwnShim(o) }
+        return r
+    }
+    if (key == "toString") {
+        if (jvIsCallable(o)) { return jvFnToStringShim(o) }
+        return r
+    }
+    if (key == "valueOf") {
+        if (jvIsCallable(o)) { return jvFnValueOfShim(o) }
+        return r
+    }
+    return r
 }
 
 // The own enumerable key list of an indexed value - an array or a string - which node
@@ -1019,6 +1134,27 @@ function js_jsmget(o, key) {
             }
         }
         if (jvHides(o, key)) { return undefined }
+        // An own property written onto a FUNCTION lives in the side table. Placed at
+        // the very end, on the path where every arm above has already declined, so a
+        // program that never writes one pays a single global load and compare - the
+        // comment at the top of this function is why nothing goes in front.
+        // docs/todo.md 2.10.
+        if (jvFnPropsN > 0) {
+            var fp = anytype
+            fp = jvFnPropsOf(o)
+            if (fp !== undefined) {
+                var fv = anytype
+                fv = fp[key]
+                if (fv !== undefined) { return fv }
+            }
+        }
+        // ...and a function's Object.prototype surface. This is the arm the CALL site
+        // reaches: the emitter reads the member with js_jsmget and calls the result
+        // when it is a function, so answering here serves `f.hasOwnProperty("p")` and
+        // `typeof f.toString` with one body. docs/todo.md 2.10.
+        var fm = anytype
+        fm = jvFnMethod(o, key)
+        if (fm !== undefined) { return fm }
         return o[key]
     }
     return o[key]
@@ -1152,6 +1288,22 @@ function js_jsvget(o, key) {
             }
         }
         if (jvHides(o, key)) { return jvBoundBuiltin(o, key) }
+        // An own property written onto a FUNCTION lives in the side table, not on
+        // the closure. docs/todo.md 2.10.
+        if (jvFnPropsN > 0) {
+            var fp = anytype
+            fp = jvFnPropsOf(o)
+            if (fp !== undefined) {
+                var fv = anytype
+                fv = fp[key]
+                if (fv !== undefined) { return fv }
+            }
+        }
+        // ...and a function's Object.prototype surface, AFTER the side table so an own
+        // `f.toString = ...` still wins. docs/todo.md 2.10.
+        var fm = anytype
+        fm = jvFnMethod(o, key)
+        if (fm !== undefined) { return fm }
         var v = anytype
         v = o[key]
         if (v === undefined) { return jvValueMiss(o, key) }
@@ -1218,6 +1370,20 @@ function js_jshas(o, key) {
         if (jvFindClassMethod(o, k) !== undefined) { return true }
         return false
     }
+    // js_has and not `fp[k] !== undefined`, so a property holding undefined is still
+    // reported, exactly as it is on an ordinary object. A function that is not in the
+    // table answers false rather than falling through, because the floor's js_has
+    // aborts with "'in' needs an object on the right side" for a non-object.
+    if (jvIsCallable(o)) {
+        if (jvFnPropsN > 0) {
+            var fp = anytype
+            fp = jvFnPropsOf(o)
+            if (fp !== undefined) {
+                if (js_has(fp, key)) { return true }
+            }
+        }
+        return false
+    }
     return js_has(o, key)
 }
 
@@ -1254,6 +1420,13 @@ function js_jsmset(o, key, v) {
                 if (acc !== undefined) { return jvAccSet(acc, o, v) }
             }
         }
+    }
+    // A write onto a FUNCTION goes to the side table: the floor's set_member has no
+    // arm for a closure and killed the program. docs/todo.md 2.10.
+    if (jvIsCallable(o)) {
+        var fp = jvFnPropsMake(o)
+        fp[jvStr(key)] = v
+        return undefined
     }
     o[key] = v
     return undefined
@@ -1683,6 +1856,12 @@ function js_jsobject() {
     proto["hasOwnProperty"] = function (k) {
         var self = anytype
         self = js_this()
+        // A FUNCTION's own properties live in the side table. docs/todo.md 2.10.
+        if (jvFnPropsN > 0) {
+            var fp = anytype
+            fp = jvFnPropsOf(self)
+            if (fp !== undefined) { return fp[jvStr(k)] !== undefined }
+        }
         if (!jvIsObj(self)) { return false }
         return self[jvStr(k)] !== undefined
     }
@@ -1756,6 +1935,12 @@ function jvOwnKeys(v) {
     // ["sf"]. docs/todo.md 2.10.
     if (jvIsClassDesc(v)) { return jvStaticEnumKeys(v) }
     if (jvIsObj(v)) { return keysOf(v) }
+    // A FUNCTION's own properties live in the side table. docs/todo.md 2.10.
+    if (jvFnPropsN > 0) {
+        var fp = anytype
+        fp = jvFnPropsOf(v)
+        if (fp !== undefined) { return keysOf(fp) }
+    }
     if (Array.isArray(v)) {
         var oa = []
         var j = 0

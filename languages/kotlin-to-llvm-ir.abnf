@@ -3817,7 +3817,14 @@ KwContract  = "contract" KwEnd ;
                        "$NoSuchElementException": true, "$ConcurrentModificationException": true,
                        "$ClassCastException": true, "$IllegalAccessException": true,
                        "$StackOverflowError": true, "$OutOfMemoryError": true,
-                       "$StringIndexOutOfBoundsException": true}
+                       "$StringIndexOutOfBoundsException": true,
+                       // Both of these are constructible in the interpreter half (its
+                       // installThrowables registers all twenty) and were missing here,
+                       // so `throw NotImplementedError("m")` aborted the compiler half
+                       // with "unknown name: NotImplementedError" while the interpreter
+                       // ran it. docs/todo.md 2.9.
+                       "$NotImplementedError": true,
+                       "$UninitializedPropertyAccessException": true}
 
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
@@ -4905,6 +4912,29 @@ KwContract  = "contract" KwEnd ;
         if (pn != null) {
             callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, pn)])])
+        } else if (pk >= 0 && excBuiltins["$" + baseTypeName(stripWs(supers[pk].name))] == true) {
+            // A BUILTIN THROWABLE superclass. This half emits no descriptor for
+            // Exception / RuntimeException / ..., so pn is null and the __super slot
+            // used to stay absent - and `class Top(m: String) : Exception(m)` then
+            // answered `Top("x") is Exception` FALSE under llvm.Run and natively, where
+            // the interpreter half (installThrowables builds real descriptors) and
+            // java 24.0.2 both answer true. js_ktexccls hands over the descriptor out
+            // of the same ktExcHierarchy js_ktnewexc constructs from, so the chain a
+            // user class gets here is the chain a directly-constructed builtin already
+            // had, and js_ktis' ordinary __super walk answers every row.
+            //
+            // THIS ARM CAN ONLY FIRE WHEN pn IS NULL, so no class whose superclass
+            // this compile DOES emit is touched, and the worry that it "would change
+            // every Name@1" is measurable rather than arguable: the emitted module of
+            // tests/kotlin-test-features.kt against a clean `git archive 22e7b44`
+            // differs by 60 lines once the string-table indices are normalised, and
+            // every one of them is a js_ktexccls call and its class-name string on
+            // the SEVEN classes that extend a builtin throwable (plus the __kthrow
+            // js_set this retires, and emitNestedList's __ncls_ slots). Four other
+            // kotlin test programs emit a byte-identical module. docs/todo.md 2.9.
+            callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                  callExt(b, "js_ktexccls",
+                                          [emitStr(b, baseTypeName(stripWs(supers[pk].name)))])])
         }
         for (var k = 0; k < supers.length; k++) {
             if (k == pk) { continue }
@@ -6255,8 +6285,8 @@ KwContract  = "contract" KwEnd ;
         } else if (excBuiltins["$" + sup.name] == true) {
             // A class of the program extending a BUILTIN throwable. The builtin has no
             // descriptor in this half's scope (only js_ktnewexc's hierarchy knows it),
-            // so the super call is synthesized: the message goes on the instance, and
-            // __kthrow marks it a Throwable for the rendering path.
+            // so the super call is synthesized: the first argument becomes the
+            // instance's `message`, which is what `e.message` reads.
             //
             // TWO FIXES HERE, both docs/todo.md 1.2:
             //
@@ -6269,14 +6299,15 @@ KwContract  = "contract" KwEnd ;
             //    seventeen constructible throwables, so `class E :
             //    IndexOutOfBoundsException("x")` dropped its message entirely.
             //
-            // __kthrow is what makes Throwable#toString apply to a class the program
-            // declared: this half never links the descriptor's __super to the builtin
-            // chain (which is why js_ktexcmatch has to accept a non-throwable for the
-            // three root types), so a __super walk cannot see it. It is a `__`-prefixed
-            // slot, so keysOf hides it and no data-class rendering picks it up. The
-            // readers are k4bIsThrowLike in languages/lib/kotlin-rt.metajs and
-            // ktIsThrowLike in abnf/jsrtkotlin.go.
-            callExt(b, "js_set", [thisV, emitStr(b, "__kthrow"), hTrue])
+            // THE DESCRIPTOR'S __super IS WHAT MAKES THIS A THROWABLE, and that is new.
+            // A `js_set(this, "__kthrow", true)` used to sit here, because this half
+            // linked no __super to the builtin chain and a chain walk could not see
+            // one - which also cost `Top("x") is Exception` a FALSE answer under
+            // llvm.Run and natively while the interpreter half said true. emitSuperLinks
+            // links the chain through js_ktexccls now and the marker is RETIRED:
+            // every call site of emitCtor is immediately preceded by an emitSuperLinks
+            // over the same supertype list (and emitObjectInstance does both), so the
+            // link strictly covers every instance the marker covered. docs/todo.md 2.9.
             callExt(b, "js_set", [thisV, emitStr(b, "message"),
                                   argVs.length > 0 ? argVs[0] : hNull])
         }
@@ -7111,6 +7142,30 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nested[nc].name), declV])
             callExt(b, "js_set", [holderV, emitStr(b, nested[nc].name), slotV])
             if (alsoV != null) { callExt(b, "js_set", [alsoV, emitStr(b, nested[nc].name), slotV]) }
+            // THREE LEVELS OF NESTING. The slot above holds a CONSTRUCTION FACTORY for a
+            // nested class, which is what makes `Outer.Mid()` a call - but it also made
+            // the plain READ `Outer.Mid` answer that function, so `Outer.Mid.Deep(7)`
+            // aborted both compiled halves with *method call 'Deep' on a function* while
+            // the interpreter half (whose attachNested stores the DESCRIPTOR) ran it.
+            // A second, `__`-prefixed slot carries the descriptor: js_ktfget prefers it
+            // for a member READ, the plain slot still answers a member CALL, and the two
+            // spellings stop fighting over one name. keysOf hides `__` slots, so no
+            // data-class rendering or `for (k in o)` picks it up. An `asvalue` nested
+            // type (enum, interface, object) already stores its descriptor in the plain
+            // slot and needs none of this. docs/todo.md 2.9.
+            if (!nested[nc].asvalue) {
+                // __hasncls is the ONE FIXED KEY js_ktfget tests before it builds the
+                // "__ncls_" + name string. js_ktfget is the hot path of this half's
+                // member reads, and an unguarded concatenation there would cost every
+                // field read of every program a string build; with the flag, only a
+                // receiver that actually owns a nested class pays anything at all.
+                callExt(b, "js_set", [holderV, emitStr(b, "__hasncls"), hTrue])
+                callExt(b, "js_set", [holderV, emitStr(b, "__ncls_" + nested[nc].name), declV])
+                if (alsoV != null) {
+                    callExt(b, "js_set", [alsoV, emitStr(b, "__hasncls"), hTrue])
+                    callExt(b, "js_set", [alsoV, emitStr(b, "__ncls_" + nested[nc].name), declV])
+                }
+            }
         }
         return b
     }
