@@ -495,9 +495,9 @@ function csConvTo(v, w, u) {
         if (n >= 18446744073709551616) { return csNorm(csAllOnes(), w, u) }
         if (n >= 9223372036854775808) {
             if (u) { return csNorm(csFromUDouble(n), w, u) }
-            return csNorm(csMaxI64(), w, u)
+            return csNorm(rtjMaxL(), w, u)
         }
-        if (n < 0 - 9223372036854775808) { return csNorm(csMinI64(), w, u) }
+        if (n < 0 - 9223372036854775808) { return csNorm(rtjMinL(), w, u) }
         return csNorm(csFromDouble(Math.trunc(n)), w, u)
     }
     return csNorm(v, w, u)
@@ -505,8 +505,10 @@ function csConvTo(v, w, u) {
 
 // ulong.MaxValue's bit pattern, i.e. Go's `p = -1`.
 function csAllOnes() { return sintRaw(4294967295, 4294967295, 64, true) }
-function csMaxI64() { return sintRaw(2147483647, 4294967295, 64, false) }
-function csMinI64() { return sintRaw(2147483648, 0, 64, false) }
+// csMaxI64 / csMinI64 are SHARED as rtjMaxL / rtjMinL - lib/runtime.metajs,
+// beside rtjIsIntegral. java's jlMaxL/jlMinL were the byte-identical other copy
+// (docs/todo.md 5.1, 2026-08-10). Two call sites here, both in csConv's
+// saturation arm, and neither is in an arithmetic path.
 
 // An integral double in [-2^63, 2^63) as a 64 bit cell. Above 2^53 the double is
 // already inexact and this reproduces that inexactness rather than inventing

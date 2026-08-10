@@ -111,11 +111,10 @@
 // externs every language implements identically, parameterised by rtk* hooks this
 // file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
-
-// The two bodies dart and swift share and nobody else does, in their own module
-// so the other importers of runtime.metajs pay nothing for them. Both difference
-// lists were EMPTY; see the head of that file.
-import "./runtime-dartswift.metajs"
+// (runtime-dartswift.metajs held the two bodies dart and swift share and nobody
+// else does - rtIsArr and rtJavaStr. It was folded INTO runtime.metajs on
+// 2026-08-10, docs/todo.md 5.5: neither body adds a hook, so the other eight
+// importers carry two names they never resolve. One import, not two.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }

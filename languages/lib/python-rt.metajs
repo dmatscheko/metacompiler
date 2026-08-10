@@ -3188,7 +3188,7 @@ function js_pyyfsend(d, sent) {
 // docs/todo.md 1.4's sharpest gap: next(g) is the ordinary way to drive a
 // generator.
 function js_pynext(args) {
-    var it = pyFArgAt(args, 0)
+    var it = pyEArgAt(args, 0)
     if (pyIsIter(it)) {
         var s = pyItStep(it)
         if (s["done"] === true) { return pyStopIter(args, undefined) }
@@ -3224,7 +3224,7 @@ function pyStopIter(args, val) {
 function js_pyenumerate(args) {
     var start = 0
     if (args.length > 1) { start = pyNum(args[1]) }
-    var a = pyElemsOf(pyFArgAt(args, 0))
+    var a = pyElemsOf(pyEArgAt(args, 0))
     var out = []
     var i = 0
     while (i < a.length) {
@@ -3269,7 +3269,7 @@ function js_pyzip(args) {
 }
 
 function js_pymapfn(args) {
-    var f = pyFArgAt(args, 0)
+    var f = pyEArgAt(args, 0)
     var srcs = []
     var i = 1
     while (i < args.length) {
@@ -3319,7 +3319,7 @@ function js_pyreversed(v) {
 // Insertion sort, which is STABLE - Python's sort is.
 function js_pysorted(args) {
     if (args.length > 1) { fail("sorted(): key= and reverse= are not supported") }
-    var a = pyCCopyArr(pyElemsOf(pyFArgAt(args, 0)))
+    var a = pyCCopyArr(pyElemsOf(pyEArgAt(args, 0)))
     var i = 1
     while (i < a.length) {
         var x = anytype
@@ -3433,7 +3433,7 @@ function js_pydivmod(l, r) {
 // other integer. rtFixed is the shared exact decimal formatter and rounds half
 // to even by construction (docs/working-on-this-project.md 7.7).
 function js_pyround(args) {
-    var v = pyFArgAt(args, 0)
+    var v = pyEArgAt(args, 0)
     var f = pyAToF(v)
     if (args.length < 2 || args[1] === undefined || args[1] === null) {
         return parseFloat(rtFixed(f, 0))
@@ -3448,8 +3448,8 @@ function js_pyround(args) {
 // pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form,
 // computed by repeated squaring so an arbitrary-precision base stays exact.
 function js_pypow(args) {
-    var l = pyFArgAt(args, 0)
-    var r = pyFArgAt(args, 1)
+    var l = pyEArgAt(args, 0)
+    var r = pyEArgAt(args, 1)
     if (args.length > 2 && args[2] !== undefined && args[2] !== null) {
         var m = args[2]
         var base = anytype
@@ -3517,8 +3517,8 @@ function js_pyascii(v) {
 // than calling pyGetAttr and catching, because fail() is not catchable here -
 // and the Go twin has the same structural form for the same reason.
 function js_pygetattr3(args) {
-    var o = pyFArgAt(args, 0)
-    var n = pyToStr(pyFArgAt(args, 1))
+    var o = pyEArgAt(args, 0)
+    var n = pyToStr(pyEArgAt(args, 1))
     if (args.length > 2 && !pyDHasAttr(o, n)) { return args[2] }
     return pyGetAttr(o, n)
 }
@@ -3526,7 +3526,7 @@ function js_pygetattr3(args) {
 function js_pyhasattr(o, n) { return pyDHasAttr(o, pyToStr(n)) }
 
 function js_pysetattr3(args) {
-    pySetAttr(pyFArgAt(args, 0), pyToStr(pyFArgAt(args, 1)), pyFArgAt(args, 2))
+    pySetAttr(pyEArgAt(args, 0), pyToStr(pyEArgAt(args, 1)), pyEArgAt(args, 2))
     return undefined
 }
 
@@ -4149,15 +4149,12 @@ function pyBUpper(s) { return s.toUpperCase() }
 // pyIsAlign (jsrt.go:9680).
 function pyBIsAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
 
-function pyBRepeat(s, n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + s
-        i = i + 1
-    }
-    return out
-}
+// pyBRepeat WAS DECLARED A SECOND TIME HERE, with the same body written over
+// six lines instead of four. Two top-level `function pyBRepeat` in one file is
+// not an error for a non-js_* helper - the later declaration simply wins in the
+// pinned scope, so this one was the live copy and the earlier one was dead code
+// no fix could ever reach. Found by the -min 40 shape tier (docs/todo.md 5.1)
+// and removed 2026-08-10; the surviving body is next to pyStrSlice above.
 
 // pyFormatBody (jsrt.go:9737). `prec` is -1 when the spec carried no `.`.
 function pyBFormatBody(v, typ, prec, sign, conv) {
@@ -6035,7 +6032,7 @@ function pyIsListMethod(name) {
 // assertable in one ratchet file.
 function pyListMethod(xs, name, args, kw) {
     var n = xs.length
-    if (name == "append") { xs.push(pyFArgAt(args, 0)); return undefined }
+    if (name == "append") { xs.push(pyEArgAt(args, 0)); return undefined }
     if (name == "clear") {
         while (xs.length > 0) { xs.pop() }
         return undefined
@@ -6078,7 +6075,7 @@ function pyListMethod(xs, name, args, kw) {
     if (name == "insert") {
         // CPython CLAMPS rather than raising: insert(-5, x) on a 2-list prepends
         // and insert(99, x) appends.
-        var ii = pyListIdx(pyFArgAt(args, 0))
+        var ii = pyListIdx(pyEArgAt(args, 0))
         if (ii < 0) {
             ii = ii + n
             if (ii < 0) { ii = 0 }
@@ -6090,13 +6087,13 @@ function pyListMethod(xs, name, args, kw) {
             xs[im] = xs[im - 1]
             im = im - 1
         }
-        xs[ii] = pyFArgAt(args, 1)
+        xs[ii] = pyEArgAt(args, 1)
         return undefined
     }
     if (name == "remove") {
         var ri = 0
         while (ri < n) {
-            if (pyAEqual(xs[ri], pyFArgAt(args, 0))) {
+            if (pyAEqual(xs[ri], pyEArgAt(args, 0))) {
                 pyCRemoveAt(xs, ri)
                 return undefined
             }
@@ -6108,7 +6105,7 @@ function pyListMethod(xs, name, args, kw) {
         // A copy first, so xs.extend(xs) DOUBLES the list as it does in CPython
         // rather than looping forever. pyElemsOf raises CPython's own "'int'
         // object is not iterable" for a non-iterable.
-        var src = pyCCopyArr(pyElemsOf(pyFArgAt(args, 0)))
+        var src = pyCCopyArr(pyElemsOf(pyEArgAt(args, 0)))
         var ei = 0
         while (ei < src.length) {
             xs.push(src[ei])
@@ -6119,12 +6116,12 @@ function pyListMethod(xs, name, args, kw) {
     if (name == "index") {
         // start/stop clamp exactly like a slice, so index(x, -1) searches the
         // last element only; the ValueError carries no repr in 3.14.
-        var from = pyListClamp(pyFArgAt(args, 1), 0, n)
-        var to = pyListClamp(pyFArgAt(args, 2), n, n)
+        var from = pyListClamp(pyEArgAt(args, 1), 0, n)
+        var to = pyListClamp(pyEArgAt(args, 2), n, n)
         if (to < from) { to = from }
         var xi = from
         while (xi < to) {
-            if (pyAEqual(xs[xi], pyFArgAt(args, 0))) { return xi }
+            if (pyAEqual(xs[xi], pyEArgAt(args, 0))) { return xi }
             xi = xi + 1
         }
         throw pyExcInstance("ValueError", "list.index(x): x not in list")
@@ -6287,13 +6284,13 @@ function pyDictMethod(d, name, args, kw) {
         return pairs
     }
     if (name == "get") {
-        var gi = pyDictFind(keys, pyFArgAt(args, 0))
+        var gi = pyDictFind(keys, pyEArgAt(args, 0))
         if (gi >= 0) { return vals[gi] }
         if (args.length > 1) { return args[1] }
         return undefined
     }
     if (name == "pop") {
-        var pdI = pyDictFind(keys, pyFArgAt(args, 0))
+        var pdI = pyDictFind(keys, pyEArgAt(args, 0))
         if (pdI >= 0) {
             var pdV = anytype
             pdV = vals[pdI]
@@ -6302,7 +6299,7 @@ function pyDictMethod(d, name, args, kw) {
             return pdV
         }
         if (args.length > 1) { return args[1] }
-        throw pyExcInstanceV("KeyError", pyFArgAt(args, 0))
+        throw pyExcInstanceV("KeyError", pyEArgAt(args, 0))
     }
     // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
     // The pair is a 2-element list, like items()' pairs, because this subset has
@@ -6452,7 +6449,7 @@ function pyIntStr(n) { return pyToStr(n) }
 
 function pySetMethod(els, name, args) {
     if (name == "add") {
-        pySetAdd(els, pyFArgAt(args, 0)) // Already a member: no-op, returns None.
+        pySetAdd(els, pyEArgAt(args, 0)) // Already a member: no-op, returns None.
         return undefined
     }
     if (name == "clear") { pyCTruncate(els); return undefined }
@@ -6476,14 +6473,14 @@ function pySetMethod(els, name, args) {
     if (name == "remove" || name == "discard") {
         var ri = 0
         while (ri < els.length) {
-            if (pyEqual(els[ri], pyFArgAt(args, 0))) {
+            if (pyEqual(els[ri], pyEArgAt(args, 0))) {
                 pyCRemoveAt(els, ri)
                 return undefined
             }
             ri = ri + 1
         }
         if (name == "remove") {
-            throw pyExcInstanceV("KeyError", pyFArgAt(args, 0))
+            throw pyExcInstanceV("KeyError", pyEArgAt(args, 0))
         }
         return undefined
     }
@@ -7464,6 +7461,9 @@ function pyERxEscape(s) {
 
 // ----- Dispatch -----
 
+// argAt (jsrt.go:4311): the i'th argument, or undefined past the end. Shared
+// with the section below, whose pyFArgAt was a byte-identical copy until
+// 2026-08-10 - 12 call sites here, 28 there.
 function pyEArgAt(args, i) {
     if (i < args.length) { return args[i] }
     return undefined
@@ -7930,12 +7930,18 @@ function js_pymcall(target, name, args, kw) { return pyDMethodCall(target, name,
 // js_pyrxmcall (abnf/jsrtregexpy.go) and never reach here.
 // ============================================================================
 
-// argAt (jsrt.go:4311): the i'th argument, or undefined past the end. Go's
-// jsUndef is spelled `undefined` here.
-function pyFArgAt(args, i) {
-    if (i < args.length) { return args[i] }
-    return undefined
-}
+// argAt (jsrt.go:4311) WAS re-declared here as pyFArgAt: a byte-identical copy
+// of pyEArgAt above, deleted 2026-08-10 (docs/todo.md 5.1). The merge is
+// INTRA-FILE - one module scope either way - so every one of the 28 call sites
+// below resolves the same kind of name at the same cost, and the emitted
+// python-rt.ll loses a declaration.
+//
+// MEASURED: this merge plus the duplicate-pyBRepeat deletion below reads
+// python -0.87%, faster in 8 of 9 paired layout draws - two fewer permanently
+// live top-level declarations in the collection-heaviest module in the tree
+// (3,574 collections per bench run). It is the same effect, with the sign
+// reversed, that lib/runtime.metajs's dart/swift fold measured at +1.46% on
+// this row; the two cancel to +0.03% over 21 draws.
 
 // rt.strictEq, rt.truthy and their two bignum helpers (pyFStrictEq, pyFTruthy,
 // pyFBigEq, pyFBigIsZero) USED TO LIVE HERE, and so did clampSubstringIndex
@@ -8003,7 +8009,7 @@ function pyFStrMethod(o, name, args) {
 function pyFListMethod(o, name, args) {
     if (name == "append") {
         // Python: returns None.
-        o.push(pyFArgAt(args, 0))
+        o.push(pyEArgAt(args, 0))
         return undefined
     }
     if (name == "pop") {
@@ -8046,7 +8052,7 @@ function pyFDictMethod(o, name, args) {
     if (name == "keys") { return rtCopyArr(o["keys"]) }
     if (name == "values") { return rtCopyArr(o["vals"]) }
     if (name == "get") {
-        var i = pyDictFind(o["keys"], pyFArgAt(args, 0))
+        var i = pyDictFind(o["keys"], pyEArgAt(args, 0))
         if (i >= 0) { return o["vals"][i] }
         if (args.length > 1) { return args[1] }
         return undefined

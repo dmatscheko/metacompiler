@@ -188,10 +188,33 @@ function ktIsStr(v) { return typeof v == "string" }
 // isCallable (abnf/jsrt.go 1695).
 function ktIsFn(v) { return typeof v == "function" }
 
-// isUndefOrNull (abnf/jsrt.go 1156).
+// isUndefOrNull (abnf/jsrt.go 1156). SECTION 4's k4Nullish was a byte-identical
+// second copy and was deleted on 2026-08-10 (docs/todo.md 5.1): 15 call sites
+// here, 25 there, all of them already calls, so the merge removes a top-level
+// declaration and changes no call site's cost. kt* is this file's FILE-WIDE
+// helper prefix (see the head); k0*..k6* are the per-section ones, and a body
+// two sections share belongs under kt*.
 function ktIsNullish(v) {
     if (v === undefined) { return true }
     return v === null
+}
+
+// argAt(args, i): the i'th argument, or undefined past the end. WAS k1Arg,
+// k2Arg and k3Arg - three byte-identical copies, 6 + 26 + 22 call sites, merged
+// 2026-08-10 (docs/todo.md 5.1) for the same reason and with the same
+// non-effect on the call sites.
+//
+// MEASURED, since 54 argAt + 40 nullish + 18 integral sites is exactly the
+// count that made docs/todo.md 5.1 write its warning. tests/bench.sh --paired,
+// 9 layout draws, these three merges alone: kotlin -0.53%, "no difference".
+// Against the pre-fold base over 21 draws: -0.28%, also no difference. An
+// INTRA-FILE merge cannot move a call site's cost - the name resolves in the
+// same pinned scope either way, and the site was already a call. What the
+// warning is about is turning an inline test, or a local call, into a call
+// reached across an import.
+function ktArg(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
 }
 
 // ===================================================== the Char box =========
@@ -231,6 +254,18 @@ function k0Chars(s) {
 // as rtjIsIntegral for csharp and java: THREE bodies, and the only apparent
 // difference was ktIsChar against rtIsCharBox, which is what ktIsChar IS.
 function ktIsInt(v) { return rtIsIntegral(v) }
+
+// ktIsIntegral (jsrtkotlin.go 135) at the OPERAND level: a box, a plain number
+// or a Char - and NOT a boxed double, which must never be truncated into an
+// integer operation. WAS k1Integral and k3Integral, two byte-identical copies
+// (16 and 2 call sites), merged 2026-08-10. Not to be confused with
+// k0IsNumeric just below or k1Numeric in SECTION 1: those admit a Double and
+// are a different predicate, which is why the -min 40 shape group they all fall
+// into is only PARTLY mergeable.
+function ktIntegral(v) {
+    if (ktIsChar(v)) { return true }
+    return ktIsInt(v)
+}
 
 // k0IsNumeric is giIsNumeric (jsrtint.go 292) over this value model: the {__char}
 // box stands for the Go jsChar the switch there lists.
@@ -1154,27 +1189,15 @@ function k1Val(v) {
     return v
 }
 
-// jsrtkotlin.go ktIsIntegral (135): a box, a plain number or a Char - and NOT a
-// boxed double, which must never be truncated into an integer operation.
-function k1Integral(v) {
-    if (ktIsChar(v)) { return true }
-    return ktIsInt(v)
-}
-
 // jsrtint.go giIsNumeric (292).
 function k1Numeric(v) {
     if (floIs(v)) { return true }
-    return k1Integral(v)
+    return ktIntegral(v)
 }
 
 // int32(giVal(v)) as a PLAIN number, which is exactly what ktNorm answers at
 // width 32 signed.
 function k1I32(v) { return ktNorm(k1Val(v), 32, 0) }
-
-function k1Arg(args, i) {
-    if (i < args.length) { return args[i] }
-    return undefined
-}
 
 // The sintOp codes: 0 + 1 - 2 * 3 / 4 % 5 & 6 | 7 ^ 8 &^ 9 << 10 >>.
 function k1OpCode(op) {
@@ -1495,8 +1518,8 @@ function k1FloFix(op, rr, l, r) {
 function k1FloPromotes(l, r) {
     if (!floIs(l) && !floIs(r)) { return false }
     if (k1FloStyle2(l, r) != 3) { return false }
-    if (!floIs(l) && !k1Integral(l) && !ktIsChar(l)) { return false }
-    if (!floIs(r) && !k1Integral(r) && !ktIsChar(r)) { return false }
+    if (!floIs(l) && !ktIntegral(l) && !ktIsChar(l)) { return false }
+    if (!floIs(r) && !ktIntegral(r) && !ktIsChar(r)) { return false }
     return true
 }
 
@@ -1708,7 +1731,7 @@ function js_ktflo32(v) { return flo(k1F32Round(ktNum(v)), 3) }
 // jsrtkotlin.go js_ktadoptf32. The FLOAT half of js_ktadoptf: `val f: Float = 1`
 // and every other declared-Float binding site.
 function js_ktadoptf32(v) {
-    if (!k1Integral(v)) { return v }
+    if (!ktIntegral(v)) { return v }
     return flo(k1F32Round(ktNum(v)), 3)
 }
 
@@ -1728,7 +1751,7 @@ function k1GiEq(l, r) {
 // operands at the promoted width, anything with a Double in it as floating
 // point.
 function k1NumLess(l, r) {
-    if (k1Integral(l) && k1Integral(r)) { return k1Cmp("<", l, r) }
+    if (ktIntegral(l) && ktIntegral(r)) { return k1Cmp("<", l, r) }
     return ktNum(l) < ktNum(r)
 }
 
@@ -1776,8 +1799,8 @@ function ktNumMethod(recv, name, args) {
         return ktNorm(0 - k1I32(recv) - 1, 32, 0)
     }
     if (name == "compareTo") {
-        var o = k1Arg(args, 0)
-        if (k1Integral(recv) && k1Integral(o)) {
+        var o = ktArg(args, 0)
+        if (ktIntegral(recv) && ktIntegral(o)) {
             if (k1Cmp("<", recv, o)) { return 0 - 1 }
             if (k1Cmp(">", recv, o)) { return 1 }
             return 0
@@ -1788,20 +1811,20 @@ function ktNumMethod(recv, name, args) {
         if (af > bf) { return 1 }
         return 0
     }
-    if (name == "equals") { return k1GiEq(recv, k1Arg(args, 0)) }
+    if (name == "equals") { return k1GiEq(recv, ktArg(args, 0)) }
     if (name == "coerceAtLeast") {
-        var la = k1Arg(args, 0)
+        var la = ktArg(args, 0)
         if (k1NumLess(recv, la)) { return la }
         return recv
     }
     if (name == "coerceAtMost") {
-        var ma = k1Arg(args, 0)
+        var ma = ktArg(args, 0)
         if (k1NumLess(ma, recv)) { return ma }
         return recv
     }
     if (name == "coerceIn") {
-        var clo = k1Arg(args, 0)
-        var chi = k1Arg(args, 1)
+        var clo = ktArg(args, 0)
+        var chi = ktArg(args, 1)
         if (!ktIsNullish(clo)) { if (k1NumLess(recv, clo)) { return clo } }
         if (!ktIsNullish(chi)) { if (k1NumLess(chi, recv)) { return chi } }
         return recv
@@ -1860,7 +1883,7 @@ function js_ktarith(op, l, r) {
         }
     }
     if (floIs(l) || floIs(r)) { return k1JvmArith(op, l, r) }
-    if (!k1Integral(l) || !k1Integral(r)) {
+    if (!ktIntegral(l) || !ktIntegral(r)) {
         // `and`/`or`/`xor` on two Booleans are Kotlin's non-short-circuit boolean
         // operators; anything else is not a program kotlinc accepts.
         if (typeof l == "boolean" && typeof r == "boolean") {
@@ -1881,7 +1904,7 @@ function js_ktshift(op, l, r) { return k1Shift(op, l, r) }
 // everything else keeps the shared comparison, except that a class declaring
 // `operator fun compareTo` answers for itself (Kotlin's comparison convention).
 function js_ktcmp(op, l, r) {
-    if (k1Integral(l) && k1Integral(r) && !floIs(l) && !floIs(r)) { return k1Cmp(op, l, r) }
+    if (ktIntegral(l) && ktIntegral(r) && !floIs(l) && !floIs(r)) { return k1Cmp(op, l, r) }
     // A Float operand promotes the other side to Float too, so
     // `16777217 < 16777216f` is false - Int.compareTo(Float) compiles to a JVM
     // float comparison. THE INTEGRAL FAST PATH ABOVE STAYS FIRST: `i < 40000` is
@@ -1936,7 +1959,7 @@ function js_ktadd(l, r) {
     // converted first and the sum rounded after, and the floor's left-operand
     // style rule gets `Float + Double` (which is a Double) backwards.
     if (floIs(l) || floIs(r)) { return k1JvmArith("+", l, r) }
-    if (k1Integral(l) && k1Integral(r)) { return k1Arith("+", l, r) }
+    if (ktIntegral(l) && ktIntegral(r)) { return k1Arith("+", l, r) }
     // `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements
     // of another collection, or the single element. A SET gains them as a Set,
     // because kotlin.collections.plus is declared on Set separately from Iterable
@@ -2035,7 +2058,7 @@ function js_ktne(l, r) {
 // case the language does allow - an integer LITERAL typed by its expectation,
 // `val x: Long = 1` - and a non-integral value passes through untouched.
 function js_ktadopt(v, bits, uns) {
-    if (!k1Integral(v)) { return v }
+    if (!ktIntegral(v)) { return v }
     var u = 0
     if (uns) { u = 1 }
     return k1Conv(v, Math.trunc(ktNum(bits)), u)
@@ -2045,7 +2068,7 @@ function js_ktadopt(v, bits, uns) {
 // Double = 1` takes the expected type, and without this the value stayed an Int
 // and printed "1" where Kotlin prints "1.0".
 function js_ktadoptf(v) {
-    if (!k1Integral(v)) { return v }
+    if (!ktIntegral(v)) { return v }
     return flo(ktNum(v), 0)
 }
 
@@ -2644,19 +2667,19 @@ function ktStrMethod(s, name, args) {
     if (name == "get") {
         // No range check, exactly as the Go twin has none: strCodeAt answers -1
         // outside and the Char is built from that.
-        var gi = k2Int(k2Arg(args, 0))
+        var gi = k2Int(ktArg(args, 0))
         if (gi < 0 || gi >= s.length) { return ktChar(-1) }
         return ktChar(s.charCodeAt(gi))
     }
-    if (name == "plus") { return s + k2Str2(k2Arg(args, 0)) }
+    if (name == "plus") { return s + k2Str2(ktArg(args, 0)) }
     if (name == "compareTo") {
-        var o = k2Str2(k2Arg(args, 0))
+        var o = k2Str2(ktArg(args, 0))
         if (s < o) { return -1 }
         if (s > o) { return 1 }
         return 0
     }
     if (name == "repeat") {
-        var rn = k2Int(k2Arg(args, 0))
+        var rn = k2Int(ktArg(args, 0))
         var ro = ""
         var ri = 0
         while (ri < rn) {
@@ -2669,15 +2692,9 @@ function ktStrMethod(s, name, args) {
     // spellings are deprecated but still resolve, so both halves accept all four.
     if (name == "uppercase" || name == "toUpperCase") { return s.toUpperCase() }
     if (name == "lowercase" || name == "toLowerCase") { return s.toLowerCase() }
-    if (name == "contains") { return s.indexOf(k2Str2(k2Arg(args, 0))) >= 0 }
+    if (name == "contains") { return s.indexOf(k2Str2(ktArg(args, 0))) >= 0 }
     if (name == "hashCode") { return k2StrHash(s) }
     return k2StrMethod2(s, name, args)
-}
-
-// argAt(args, i).
-function k2Arg(args, i) {
-    if (i < args.length) { return args[i] }
-    return undefined
 }
 
 // k2StrMethod2 is ktStrMethod2 (jsrtkotlin.go:2209): the rest of the
@@ -2693,7 +2710,7 @@ function k2StrMethod2(s, name, args) {
     var n = s.length
 
     if (name == "charAt") {
-        var ci = k2Int(k2Arg(args, 0))
+        var ci = k2Int(ktArg(args, 0))
         if (ci < 0 || ci >= n) { fail("charAt(" + ci + ") out of range for " + s) }
         return ktChar(s.charCodeAt(ci))
     }
@@ -2727,10 +2744,10 @@ function k2StrMethod2(s, name, args) {
     if (name == "trim") { return k2TrimSpace(s) }
     if (name == "trimStart") { return k2TrimLeftCut(s) }
     if (name == "trimEnd") { return k2TrimRightCut(s) }
-    if (name == "startsWith") { return k2StartsWith(s, ktStrArg(k2Arg(args, 0))) }
-    if (name == "endsWith") { return k2EndsWith(s, ktStrArg(k2Arg(args, 0))) }
+    if (name == "startsWith") { return k2StartsWith(s, ktStrArg(ktArg(args, 0))) }
+    if (name == "endsWith") { return k2EndsWith(s, ktStrArg(ktArg(args, 0))) }
     if (name == "padStart" || name == "padEnd") {
-        var want = k2Int(k2Arg(args, 0))
+        var want = k2Int(ktArg(args, 0))
         var pad = " "
         if (args.length > 1) { pad = ktStrArg(args[1]) }
         var po = s
@@ -2773,7 +2790,7 @@ function k2StrMethod2(s, name, args) {
         return k2Split(s, sep)
     }
     if (name == "drop" || name == "take" || name == "dropLast" || name == "takeLast") {
-        var k = k2Int(k2Arg(args, 0))
+        var k = k2Int(ktArg(args, 0))
         if (k < 0) { k = 0 }
         if (k > n) { k = n }
         if (name == "drop") { return s.substring(k, n) }
@@ -2781,9 +2798,9 @@ function k2StrMethod2(s, name, args) {
         if (name == "dropLast") { return s.substring(0, n - k) }
         return s.substring(n - k, n)
     }
-    if (name == "indexOf") { return s.indexOf(ktStrArg(k2Arg(args, 0))) }
-    if (name == "lastIndexOf") { return k2LastIndexOf(s, ktStrArg(k2Arg(args, 0))) }
-    if (name == "contains") { return s.indexOf(ktStrArg(k2Arg(args, 0))) >= 0 }
+    if (name == "indexOf") { return s.indexOf(ktStrArg(ktArg(args, 0))) }
+    if (name == "lastIndexOf") { return k2LastIndexOf(s, ktStrArg(ktArg(args, 0))) }
+    if (name == "contains") { return s.indexOf(ktStrArg(ktArg(args, 0))) >= 0 }
     if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toIntOrNull") {
         return k2ParseNum(s, name)
     }
@@ -2800,8 +2817,8 @@ function k2StrMethod2(s, name, args) {
     // Regex receiver never reaches here - the hub routes a pattern argument to
     // the Regex dispatcher first (jsrtkotlin.go:1290).
     if (name == "replace" || name == "replaceFirst") {
-        var old = ktStrArg(k2Arg(args, 0))
-        var nw = ktStrArg(k2Arg(args, 1))
+        var old = ktStrArg(ktArg(args, 0))
+        var nw = ktStrArg(ktArg(args, 1))
         if (old.length == 0) { return s }
         var parts = k2Split(s, old)
         if (name == "replaceFirst") {
@@ -2827,17 +2844,17 @@ function k2StrMethod2(s, name, args) {
         return (k2TrimSpace(s).length == 0) === (name == "isBlank")
     }
     if (name == "removePrefix") {
-        var pre1 = ktStrArg(k2Arg(args, 0))
+        var pre1 = ktStrArg(ktArg(args, 0))
         if (pre1.length > 0 && k2StartsWith(s, pre1)) { return s.substring(pre1.length, s.length) }
         return s
     }
     if (name == "removeSuffix") {
-        var suf1 = ktStrArg(k2Arg(args, 0))
+        var suf1 = ktStrArg(ktArg(args, 0))
         if (suf1.length > 0 && k2EndsWith(s, suf1)) { return s.substring(0, s.length - suf1.length) }
         return s
     }
     if (name == "removeSurrounding") {
-        var pre = ktStrArg(k2Arg(args, 0))
+        var pre = ktStrArg(ktArg(args, 0))
         var post = pre
         if (args.length > 1) { post = ktStrArg(args[1]) }
         if (s.length >= pre.length + post.length) {
@@ -2849,7 +2866,7 @@ function k2StrMethod2(s, name, args) {
     }
     if (name == "substringBefore" || name == "substringAfter" ||
         name == "substringBeforeLast" || name == "substringAfterLast") {
-        var delim = ktStrArg(k2Arg(args, 0))
+        var delim = ktStrArg(ktArg(args, 0))
         var miss = s
         if (args.length > 1) { miss = ktStrArg(args[1]) }
         var di = s.indexOf(delim)
@@ -2861,11 +2878,11 @@ function k2StrMethod2(s, name, args) {
         return s.substring(di + delim.length, s.length)
     }
     if (name == "ifEmpty") {
-        if (s.length == 0) { return ktCall(k2Arg(args, 0), []) }
+        if (s.length == 0) { return ktCall(ktArg(args, 0), []) }
         return s
     }
     if (name == "ifBlank") {
-        if (k2TrimSpace(s).length == 0) { return ktCall(k2Arg(args, 0), []) }
+        if (k2TrimSpace(s).length == 0) { return ktCall(ktArg(args, 0), []) }
         return s
     }
     if (name == "capitalize" || name == "replaceFirstChar") {
@@ -2873,7 +2890,7 @@ function k2StrMethod2(s, name, args) {
         var c0 = k2CodePointAt(s, 0)
         var rest = s.substring(k2ChStr(c0).length, s.length)
         if (name == "replaceFirstChar") {
-            if (ktIsFn(k2Arg(args, 0))) {
+            if (ktIsFn(ktArg(args, 0))) {
                 return k2Str2(ktCall1(args[0], ktChar(c0))) + rest
             }
         }
@@ -2885,7 +2902,7 @@ function k2StrMethod2(s, name, args) {
         return k2ChStr(k2Lower(d0)) + s.substring(k2ChStr(d0).length, s.length)
     }
     if (name == "subSequence") {
-        return s.substring(k2Int(k2Arg(args, 0)), k2Int(k2Arg(args, 1)))
+        return s.substring(k2Int(ktArg(args, 0)), k2Int(ktArg(args, 1)))
     }
     if (name == "trimIndent") { return k2TrimIndent(s) }
 
@@ -3346,14 +3363,14 @@ function ktCharMethod(c, name, args) {
     }
     if (name == "compareTo") {
         var o = 0
-        var a0 = k2Arg(args, 0)
+        var a0 = ktArg(args, 0)
         if (ktIsChar(a0)) { o = ktCharCode(a0) } else { o = k2Int(a0) }
         if (r < o) { return -1 }
         if (r > o) { return 1 }
         return 0
     }
     if (name == "equals") {
-        var e0 = k2Arg(args, 0)
+        var e0 = ktArg(args, 0)
         if (ktIsChar(e0)) { return r === ktCharCode(e0) }
         return false
     }
@@ -3532,12 +3549,6 @@ function js_ktstr(v) { return ktRender(v) }
 
 // ----- small readers -------------------------------------------------------
 
-// k3Arg is Go's argAt: the i-th argument or undefined.
-function k3Arg(args, i) {
-    if (i < args.length) { return args[i] }
-    return undefined
-}
-
 // k3Truthy is rt.truthy (abnf/jsrt.go:909) for the value model Kotlin uses: a
 // sized integer is falsy at 0, a boxed double at 0.0 and at NaN.
 function k3Truthy(v) {
@@ -3602,13 +3613,6 @@ function k3Norm(x, w, u) {
 
 // k3I32 is Go's int32(x) wrap, which the hashCode folds need at every step.
 function k3I32(x) { return sintNum(sintConv(x, 32, 0)) }
-
-// k3Integral is ktIsIntegral (jsrtkotlin.go:135): an operand of INTEGER
-// arithmetic -- a Char is one, a Double is not.
-function k3Integral(v) {
-    if (ktIsChar(v)) { return true }
-    return ktIsInt(v)
-}
 
 // k3CmpLt is rt.ktCmp("<", l, r) (jsrtkotlin.go:293): the comparison at the
 // PROMOTED width, so a Byte receiver does not truncate a wide argument.
@@ -3697,8 +3701,8 @@ function k3KeyLess(a, b) {
     if (ktIsChar(a)) {
         if (ktIsChar(b)) { return ktCharCode(a) < ktCharCode(b) }
     }
-    if (k3Integral(a)) {
-        if (k3Integral(b)) { return k3CmpLt(a, b) }
+    if (ktIntegral(a)) {
+        if (ktIntegral(b)) { return k3CmpLt(a, b) }
     }
     // A user `Comparable`: listOf(V(3), V(1)).sorted() sorts by the class's own
     // compareTo. Without this every element compares as NaN and the list comes
@@ -3812,7 +3816,7 @@ function ktEnumMethod(recv, name, args) {
     if (name == "values") { return k3Copy(es) }
     if (name == "entries") { return k3Copy(es) }
     if (name == "valueOf") {
-        want = k3Str2(k3Arg(args, 0))
+        want = k3Str2(ktArg(args, 0))
         for (i = 0; i < es.length; i = i + 1) {
             e = es[i]
             if (ktIsObj(e)) {
@@ -3841,7 +3845,7 @@ function ktEnumMethod(recv, name, args) {
 
 function ktSeqMethod(arr, name, args) {
     var es = arr
-    var f = k3Arg(args, 0)
+    var f = ktArg(args, 0)
     var out = []
     var oth = []
     var keys = []
@@ -3981,13 +3985,13 @@ function ktSeqMethod(arr, name, args) {
         return -1
     }
     if (name == "fold") {
-        acc = k3Arg(args, 0)
-        for (i = 0; i < es.length; i = i + 1) { acc = ktCall2(k3Arg(args, 1), acc, es[i]) }
+        acc = ktArg(args, 0)
+        for (i = 0; i < es.length; i = i + 1) { acc = ktCall2(ktArg(args, 1), acc, es[i]) }
         return acc
     }
     if (name == "foldRight") {
-        acc = k3Arg(args, 0)
-        for (i = es.length - 1; i >= 0; i = i - 1) { acc = ktCall2(k3Arg(args, 1), es[i], acc) }
+        acc = ktArg(args, 0)
+        for (i = es.length - 1; i >= 0; i = i - 1) { acc = ktCall2(ktArg(args, 1), es[i], acc) }
         return acc
     }
     if (name == "reduce") {
@@ -4047,7 +4051,7 @@ function ktSeqMethod(arr, name, args) {
         return {first: out, second: oth}
     }
     if (name == "zip") {
-        oth = ktElems(k3Arg(args, 0))
+        oth = ktElems(ktArg(args, 0))
         b = false
         if (args.length > 1) { b = ktIsFn(args[1]) }
         for (i = 0; i < es.length && i < oth.length; i = i + 1) {
@@ -4062,7 +4066,7 @@ function ktSeqMethod(arr, name, args) {
     // chunks themselves - and windowed's partialWindows was ignored, so the tail
     // windows it asks for were never produced. todo.md 1.5.
     if (name == "chunked" || name == "windowed") {
-        k = k3Int(k3Arg(args, 0))
+        k = k3Int(ktArg(args, 0))
         n = k
         b = true
         var cxf = k4LastFn(args)
@@ -4153,7 +4157,7 @@ function ktSeqMethod(arr, name, args) {
         return ktSortBy(es, f, false)[0]
     }
     if (k3IsTakeDrop(name)) {
-        k = k3Int(k3Arg(args, 0))
+        k = k3Int(ktArg(args, 0))
         if (k < 0) { k = 0 }
         if (k > es.length) { k = es.length }
         if (name == "take") { return k3Sub(es, 0, k) }
@@ -4311,8 +4315,8 @@ function ktSeqMethod(arr, name, args) {
             if (k < es.length) { return es[k] }
         }
         if (name == "elementAt") { fail("index " + k + " is out of bounds") }
-        if (name == "elementAtOrElse") { return ktCall1(k3Arg(args, 1), k) }
-        if (name == "getOrElse") { return ktCall1(k3Arg(args, 1), k) }
+        if (name == "elementAtOrElse") { return ktCall1(ktArg(args, 1), k) }
+        if (name == "getOrElse") { return ktCall1(ktArg(args, 1), k) }
         return null
     }
     if (k3IsMaxOf(name)) {
@@ -4407,7 +4411,7 @@ function ktSeqMethod(arr, name, args) {
         for (i = 0; i < oth.length; i = i + 1) { out.push(es[k3Int(oth[i])]) }
         return out
     }
-    if (name == "subList") { return k3Sub(es, k3Int(f), k3Int(k3Arg(args, 1))) }
+    if (name == "subList") { return k3Sub(es, k3Int(f), k3Int(ktArg(args, 1))) }
     if (name == "zipWithNext") {
         b = ktIsFn(f)
         for (i = 0; i + 1 < es.length; i = i + 1) {
@@ -4430,7 +4434,7 @@ function ktSeqMethod(arr, name, args) {
         acc = f
         out.push(acc)
         for (i = 0; i < es.length; i = i + 1) {
-            acc = ktCall2(k3Arg(args, 1), acc, es[i])
+            acc = ktCall2(ktArg(args, 1), acc, es[i])
             out.push(acc)
         }
         return out
@@ -4462,14 +4466,14 @@ function ktSeqMethod(arr, name, args) {
         if (k < 0) { fail("index " + k + " is out of bounds") }
         if (k > es.length) { fail("index " + k + " is out of bounds") }
         if (arr.length == 0) {
-            arr.push(k3Arg(args, 1))
+            arr.push(ktArg(args, 1))
             return undefined
         }
         // Grow by duplicating the tail rather than by pushing an undefined,
         // which would widen the element slot under -frozen.
         arr.push(arr[arr.length - 1])
         for (i = arr.length - 2; i > k; i = i - 1) { arr[i] = arr[i - 1] }
-        arr[k] = k3Arg(args, 1)
+        arr[k] = ktArg(args, 1)
         return undefined
     }
     if (name == "set") {
@@ -4477,7 +4481,7 @@ function ktSeqMethod(arr, name, args) {
         if (k < 0) { fail("index " + k + " is out of bounds") }
         if (k >= es.length) { fail("index " + k + " is out of bounds") }
         v = es[k]
-        es[k] = k3Arg(args, 1)
+        es[k] = ktArg(args, 1)
         return v
     }
     if (k3IsSortOp(name)) {
@@ -4695,7 +4699,7 @@ function k3SortedWith(es, f) {
 
 function ktSetMethod(s, name, args) {
     var keys = anytype
-    var f = k3Arg(args, 0)
+    var f = ktArg(args, 0)
     var out = anytype
     var oth = []
     var kept = []
@@ -4804,7 +4808,7 @@ function k3IsSetMinus(name) {
 function ktMapMethod(m, name, args) {
     var keys = anytype
     var vals = anytype
-    var f = k3Arg(args, 0)
+    var f = ktArg(args, 0)
     var out = anytype
     var drop = []
     var i = 0
@@ -4828,27 +4832,27 @@ function ktMapMethod(m, name, args) {
     if (name == "getOrDefault") {
         i = ktMapFind(keys, f)
         if (i >= 0) { return vals[i] }
-        return k3Arg(args, 1)
+        return ktArg(args, 1)
     }
     // getOrPut(key) { default }: the value under key, or - when there is none -
     // the lambda's value, STORED under the key and then answered.
     if (name == "getOrPut") {
         i = ktMapFind(keys, f)
         if (i >= 0) { return vals[i] }
-        v = ktCall(k3Arg(args, 1), [])
+        v = ktCall(ktArg(args, 1), [])
         ktMapPut(m, f, v)
         return v
     }
     if (name == "getOrElse") {
         i = ktMapFind(keys, f)
         if (i >= 0) { return vals[i] }
-        return ktCall(k3Arg(args, 1), [])
+        return ktCall(ktArg(args, 1), [])
     }
     if (name == "put" || name == "set") {
         v = null
         i = ktMapFind(keys, f)
         if (i >= 0) { v = vals[i] }
-        ktMapPut(m, f, k3Arg(args, 1))
+        ktMapPut(m, f, ktArg(args, 1))
         return v
     }
     if (name == "remove") {
@@ -6141,12 +6145,6 @@ function k4At(args, i) {
 // answers "function" for a generator (tag 16) too, so no apply probe is needed.
 function k4Fn(v) { return typeof v == "function" }
 
-// isUndefOrNull.
-function k4Nullish(v) {
-    if (v === undefined) { return true }
-    return v === null
-}
-
 // rt.truthy: JavaScript truthiness, which is what every Go `rt.truthy(...)`
 // below means.
 function k4Truthy(v) {
@@ -6421,7 +6419,7 @@ function ktRecvMember(recv, name, iscall) {
             // (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
             if ((k4RecvProp(name) || !iscall) && !ktIsClassLit(recv) && !ktIsPkg(recv)) {
                 var pv = js_ktfget(recv, name)
-                if (!k4Nullish(pv)) { return pv }
+                if (!ktIsNullish(pv)) { return pv }
             }
         }
         // toString(), hashCode() and equals() are members of kotlin.Any, so an
@@ -6448,7 +6446,7 @@ function ktRecvMember(recv, name, iscall) {
     if (!iscall) {
         var fv = anytype
         fv = js_ktfget(recv, name)
-        if (!k4Nullish(fv)) { return fv }
+        if (!ktIsNullish(fv)) { return fv }
     }
     return k4Bound(recv, name)
 }
@@ -6524,7 +6522,7 @@ function ktPkgMember(pkg, name) {
     var sub = pkg + "." + name
     if (k4IsPkgPath(sub)) { return ktPkg(sub) }
     var v = ktGlobalFn(name)
-    if (!k4Nullish(v)) { return v }
+    if (!ktIsNullish(v)) { return v }
     fail("unknown name: " + sub)
     return undefined
 }
@@ -6635,7 +6633,7 @@ function ktIsResult(v) {
 // {__result, value, exc} box. isSuccess and isFailure are PROPERTIES in Kotlin, so
 // js_ktfget reaches this too.
 function ktResultMethod(r, name, args) {
-    var ok = k4Nullish(r["exc"])
+    var ok = ktIsNullish(r["exc"])
     if (name == "isSuccess") { return ok }
     if (name == "isFailure") { return !ok }
     if (name == "getOrNull") {
@@ -6701,7 +6699,7 @@ function ktLazyValue(o) {
 // isTypeName (abnf/jsrt.go:8432), for a NON-numeric receiver. `t` arrives with its
 // type arguments and its `?` already stripped; `opt` carries whether there was one.
 function k4IsTypeName(v, t, opt) {
-    if (k4Nullish(v)) { return opt }
+    if (ktIsNullish(v)) { return opt }
     // Kotlin's Char is its own type: `c is Char` holds, `c is Int` does not.
     if (ktIsChar(v)) {
         if (t == "Char") { return true }
@@ -6921,7 +6919,7 @@ function k4Contract(name, args) {
     if (name == "TODO") {
         var msg = "An operation is not implemented."
         if (args.length > 0) {
-            if (!k4Nullish(args[0])) { msg = "An operation is not implemented: " + ktRender(args[0]) }
+            if (!ktIsNullish(args[0])) { msg = "An operation is not implemented: " + ktRender(args[0]) }
         }
         ktRaise("NotImplementedError", msg)
     }
@@ -6940,13 +6938,13 @@ function k4Contract(name, args) {
     if (name == "requireNotNull") { notNull = true }
     if (name == "checkNotNull") { notNull = true }
     if (notNull) {
-        ok = !k4Nullish(k4At(args, 0))
+        ok = !ktIsNullish(k4At(args, 0))
         dflt = "Required value was null."
     }
     if (!ok) {
         var text = dflt
         if (args.length > 1) {
-            if (!k4Nullish(args[1])) {
+            if (!ktIsNullish(args[1])) {
                 if (k4Fn(args[1])) { text = ktRender(ktCall(args[1], [])) } else { text = ktRender(args[1]) }
             }
         }
@@ -7043,7 +7041,7 @@ function ktGlobalFn(name) {
     }
     if (name == "StringBuilder") {
         return function (init) {
-            if (k4Nullish(init)) { return ktMakeSb("") }
+            if (ktIsNullish(init)) { return ktMakeSb("") }
             return ktMakeSb(ktRender(init))
         }
     }
@@ -7071,11 +7069,11 @@ function ktGlobalFn(name) {
     }
     if (name == "compareValues") {
         return function (a, b) {
-            if (k4Nullish(a)) {
-                if (k4Nullish(b)) { return 0 }
+            if (ktIsNullish(a)) {
+                if (ktIsNullish(b)) { return 0 }
                 return -1
             }
-            if (k4Nullish(b)) { return 1 }
+            if (ktIsNullish(b)) { return 1 }
             return k4CmpKeys(a, b, false)
         }
     }
@@ -7123,7 +7121,7 @@ function ktGlobalFn(name) {
             var out = []
             var i = 0
             while (i < arguments.length) {
-                if (!k4Nullish(arguments[i])) { out.push(arguments[i]) }
+                if (!ktIsNullish(arguments[i])) { out.push(arguments[i]) }
                 i = i + 1
             }
             return out
@@ -7175,7 +7173,7 @@ function ktGlobalFn(name) {
             var out = ktMakeSet()
             var i = 0
             while (i < arguments.length) {
-                if (!k4Nullish(arguments[i])) { ktSetAdd(out, arguments[i]) }
+                if (!ktIsNullish(arguments[i])) { ktSetAdd(out, arguments[i]) }
                 i = i + 1
             }
             return out
@@ -7266,7 +7264,7 @@ function ktGlobalFn(name) {
             var guard = 0
             var cap = k4SeqCap()
             while (guard < cap) {
-                if (k4Nullish(v)) { guard = cap } else {
+                if (ktIsNullish(v)) { guard = cap } else {
                     out.push(v)
                     if (!k4Fn(next)) { guard = cap } else {
                         v = ktCall1(next, v)
@@ -7519,7 +7517,7 @@ function ktSmcall(recv, name, args) {
 
     // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a NULL
     // receiver answers them rather than throwing.
-    if (k4Nullish(rv)) {
+    if (ktIsNullish(rv)) {
         if (name == "hashCode") { return 0 }
         if (name == "toString") { return "null" }
     }
@@ -7721,7 +7719,7 @@ function js_ktsmcall(recv, name, args) { return ktSmcall(recv, name, args) }
 // ktLateinitCheck (jsrtkotlin.go:202): a `lateinit var` that is still null has NOT
 // been assigned, and Kotlin throws rather than answering null.
 function k4LateinitCheck(o, name, v) {
-    if (!k4Nullish(v)) { return v }
+    if (!ktIsNullish(v)) { return v }
     if (!ktIsObj(o)) { return v }
     var cls = o["__class"]
     var guard = 0
@@ -7943,7 +7941,7 @@ function k4RndDefault() {
 }
 
 var K4_RANDOM_FN = function (seed) {
-    if (k4Nullish(seed)) { return k4RndDefault() }
+    if (ktIsNullish(seed)) { return k4RndDefault() }
     return k4RndBox(seed)
 }
 
@@ -8220,9 +8218,9 @@ function js_ktfget(o, name) {
     // property read undefined. The rewrite happens HERE, only when the receiver has
     // no `size` of its own.
     if (name == "size") {
-        if (k4Nullish(r)) {
+        if (ktIsNullish(r)) {
             var lr = o["length"]
-            if (!k4Nullish(lr)) { return lr }
+            if (!ktIsNullish(lr)) { return lr }
         }
     }
     // KOTLIN'S INDEX PROPERTIES - the *jsArray and string arms of js_ktfget
@@ -8240,7 +8238,7 @@ function js_ktfget(o, name) {
     // what closed todo.md 1.8. `.size` on a progression is not Kotlin (IntRange is
     // an Iterable, not a Collection) but the interpreter half answers the element
     // count, so this one does too rather than diverge.
-    if (ktIsRange(o) && k4Nullish(r)) {
+    if (ktIsRange(o) && ktIsNullish(r)) {
         if (name == "first") { return k4RangeEl(o, o["from"]) }
         // IntProgression.last is the last ELEMENT, not the bound it was built
         // from: (1..10 step 4).last is 9.
@@ -8258,17 +8256,17 @@ function js_ktfget(o, name) {
         if (name == "indices") { return k4Indices(ktRangeList(o).length) }
         if (name == "lastIndex") { return ktRangeList(o).length - 1 }
     }
-    if (ktIsArr(o) && k4Nullish(r)) {
+    if (ktIsArr(o) && ktIsNullish(r)) {
         if (name == "indices") { return k4Indices(o["length"]) }
         if (name == "lastIndex") { return o["length"] - 1 }
     }
-    if (typeof o == "string" && k4Nullish(r)) {
+    if (typeof o == "string" && ktIsNullish(r)) {
         if (name == "indices") { return k4Indices(o.length) }
         if (name == "lastIndex") { return o.length - 1 }
     }
     // A StringBuilder IS a CharSequence, so the same two properties apply to it.
     // Only `length` was answered, in both halves alike.
-    if (ktIsSb(o) && k4Nullish(r)) {
+    if (ktIsSb(o) && ktIsNullish(r)) {
         if (name == "indices") { return k4Indices(ktSbText(o).length) }
         if (name == "lastIndex") { return ktSbText(o).length - 1 }
     }
@@ -9186,7 +9184,7 @@ function js_ktget(env, name, iscall) {
                     var mv = anytype
                     mv = ktRecvMember(t, name, iscall)
                     if (!ktMiss(mv)) {
-                        if (!k4Nullish(mv)) { return mv }
+                        if (!ktIsNullish(mv)) { return mv }
                     }
                 }
             }

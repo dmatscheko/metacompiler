@@ -580,9 +580,10 @@
 #
 # WHAT THE NEW ROWS ARE WORTH. php is one of the three languages that need the
 # __raw truthiness rule (manual 7.1), so its loop condition goes through layer 2
-# every iteration; dart shares lib/runtime-dartswift.metajs with swift, so that
-# file now has two callers measured rather than one, which is the same argument
-# that put csharp beside java. metajs is the substrate row: metajs-to-llvm-ir.abnf
+# every iteration; dart and swift share the bodies that used to live in
+# lib/runtime-dartswift.metajs (folded into runtime.metajs on 2026-08-10), so those
+# have two callers measured rather than one, which is the same argument that put
+# csharp beside java. metajs is the substrate row: metajs-to-llvm-ir.abnf
 # is the grammar every other language's layer 2 is compiled by, so a change there
 # moves every handle-IR row in this file, and this row is the one that says so
 # directly. It is also the tightest handle-IR row here at 0.76%, which makes it

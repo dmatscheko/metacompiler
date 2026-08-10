@@ -345,11 +345,25 @@ function jvPrepend(recv, args) {
     return out
 }
 
+// argAt (jsrt.go:4311): the i'th argument, or undefined past the end. USED BY
+// BOTH SECTIONS of this file - the regex half's jxArg was a byte-identical copy
+// and was deleted on 2026-08-10 (docs/todo.md 5.1). 29 call sites here, 13 in
+// the regex half; every one of them was already a call, so the merge changes no
+// call site's cost - it removes a top-level declaration.
 function jvArg(args, i) {
     if (i < args.length) { return args[i] }
     return undefined
 }
 
+// Likewise for jxNullish: 17 sites here, 4 in the regex half, one body.
+//
+// MEASURED (docs/todo.md 5.1's rule: size the CALL SITE, not the body).
+// tests/bench.sh --paired, 9 layout draws, js: +0.07%, "no difference" - which
+// is what an intra-file merge is expected to read, because every one of those
+// 17 + 4 + 29 + 13 sites was ALREADY a call to a same-cost body in the same
+// pinned scope. The pyIsObj / rbIsObj / rtjIsIntegral regressions the rule is
+// written from are a different shape: those turned INLINED tests, or a local
+// call, into a call reached across an import.
 function jvUndefOrNull(v) {
     if (v === undefined) { return true }
     return v === null
@@ -3802,15 +3816,12 @@ function jxToNum(v) {
     return jvToNumber(v)
 }
 
-function jxArg(args, i) {
-    if (i < args.length) { return args[i] }
-    return undefined
-}
-
-function jxNullish(v) {
-    if (v === undefined) { return true }
-    return v === null
-}
+// jxArg and jxNullish WERE here: byte-identical copies of jvArg and
+// jvUndefOrNull above (docs/todo.md 5.1, 2026-08-10). Merging them is
+// INTRA-FILE - one module scope either way, so a call site resolves the same
+// name it always did and no import is involved - and the emitted js-rt.ll loses
+// two declarations. The jv/jx prefixes are section prefixes, not scopes; the
+// same merge was already made for rxCache/rxGet a few hundred lines below.
 
 // ----- the match record --------------------------------------------------------
 //
@@ -4051,7 +4062,7 @@ function jxReplace(o, s, repl, forceAll) {
 // JavaScript ("a1".match("\\d") matches a digit).
 function jxRegexArg(v) {
     if (jxIsRe(v)) { return v }
-    if (jxNullish(v)) { return jxNewRegex("", "") }
+    if (jvUndefOrNull(v)) { return jxNewRegex("", "") }
     return jxNewRegex(jxToStr(v), "")
 }
 
@@ -4066,21 +4077,21 @@ var jxMiss = {}
 
 function jxMcall(recv, name, args) {
     if (jxIsRe(recv)) {
-        if (name == "test") { return jxTest(recv, jxToStr(jxArg(args, 0))) }
-        if (name == "exec") { return jxExec(recv, jxToStr(jxArg(args, 0))) }
+        if (name == "test") { return jxTest(recv, jxToStr(jvArg(args, 0))) }
+        if (name == "exec") { return jxExec(recv, jxToStr(jvArg(args, 0))) }
         if (name == "toString") { return jxStr(recv) }
         fail("unknown RegExp method: " + name)
     }
     if (typeof recv != "string") { return jxMiss }
     if (name == "search") {
-        var sre = jxProg(jxRegexArg(jxArg(args, 0)))
+        var sre = jxProg(jxRegexArg(jvArg(args, 0)))
         var sm = rxSearch(sre, recv, 0)
         if (sm === null) { return -1 }
         return sm["begin"]
     }
-    if (name == "matchAll") { return jxMatchAll(jxRegexArg(jxArg(args, 0)), recv, false) }
+    if (name == "matchAll") { return jxMatchAll(jxRegexArg(jvArg(args, 0)), recv, false) }
     if (name == "match") {
-        var mre = jxRegexArg(jxArg(args, 0))
+        var mre = jxRegexArg(jvArg(args, 0))
         if (jxBool(mre, "global")) {
             var all = jxMatchAll(mre, recv, true)
             if (all.length == 0) { return null }
@@ -4090,13 +4101,13 @@ function jxMcall(recv, name, args) {
     }
     if (name == "replace" || name == "replaceAll" || name == "split") {
         // A plain-string argument keeps the base behaviour.
-        if (!jxIsRe(jxArg(args, 0))) { return jxMiss }
-        var re = jxArg(args, 0)
-        if (name == "replace") { return jxReplace(re, recv, jxArg(args, 1), false) }
-        if (name == "replaceAll") { return jxReplace(re, recv, jxArg(args, 1), true) }
+        if (!jxIsRe(jvArg(args, 0))) { return jxMiss }
+        var re = jvArg(args, 0)
+        if (name == "replace") { return jxReplace(re, recv, jvArg(args, 1), false) }
+        if (name == "replaceAll") { return jxReplace(re, recv, jvArg(args, 1), true) }
         var limit = -1
-        var lv = jxArg(args, 1)
-        if (!jxNullish(lv)) { limit = Math.trunc(jxToNum(lv)) }
+        var lv = jvArg(args, 1)
+        if (!jvUndefOrNull(lv)) { limit = Math.trunc(jxToNum(lv)) }
         return jxSplit(re, recv, limit)
     }
     return jxMiss
@@ -4105,7 +4116,7 @@ function jxMcall(recv, name, args) {
 // jxCtorArgs is new RegExp(src, flags) / RegExp(src, flags): the same construction as
 // a literal, with the flags arriving at run time.
 function jxCtorArgs(args) {
-    var a0 = jxArg(args, 0)
+    var a0 = jvArg(args, 0)
     var src = ""
     var fl = ""
     if (jxIsRe(a0)) {
@@ -4113,11 +4124,11 @@ function jxCtorArgs(args) {
         var f0 = a0["flags"]
         if (typeof s0 == "string") { src = s0 }
         if (typeof f0 == "string") { fl = f0 }
-    } else if (!jxNullish(a0)) {
+    } else if (!jvUndefOrNull(a0)) {
         src = jxToStr(a0)
     }
-    var a1 = jxArg(args, 1)
-    if (!jxNullish(a1)) { fl = jxToStr(a1) }
+    var a1 = jvArg(args, 1)
+    if (!jvUndefOrNull(a1)) { fl = jxToStr(a1) }
     return jxNewRegex(src, fl)
 }
 
@@ -4157,7 +4168,7 @@ function js_jsxctor() { return jxRegExpFn }
 // cannot recurse. A floor extern that answered a bound method's name would remove
 // this; the measurement is in the agent report.
 function js_jsxcall(fn, self, args) {
-    if (typeof self == "string" && jxIsRe(jxArg(args, 0))) {
+    if (typeof self == "string" && jxIsRe(jvArg(args, 0))) {
         var probe = fn.apply(self, ["x"])
         var nm = ""
         if (Array.isArray(probe)) { nm = "split" }

@@ -126,8 +126,10 @@ function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 function jlZero() { return sintRaw(0, 0, 64, false) }
 function jlOnes() { return sintRaw(4294967295, 4294967295, 64, false) }
-function jlMaxL() { return sintRaw(2147483647, 4294967295, 64, false) }
-function jlMinL() { return sintRaw(2147483648, 0, 64, false) }
+// jlMaxL / jlMinL are SHARED as rtjMaxL / rtjMinL - lib/runtime.metajs, beside
+// rtjIsIntegral. csharp's csMaxI64/csMinI64 were the byte-identical other copy
+// (docs/todo.md 5.1, 2026-08-10). Six call sites here: jlOfDouble, jlOfFlo and
+// the two Long statics, which run once at module init.
 
 // A long is the ONE sized integer of width 64; byte and short are 8 and 16.
 function jvIsLong(v) {
@@ -157,8 +159,8 @@ function jlNot(x) { return jlOp(7, x, jlOnes()) }
 // 2^53 the double is already inexact and this reproduces that inexactness rather
 // than inventing digits.
 function jlFromNum(v) {
-    if (v >= 9223372036854775808) { return jlMaxL() }
-    if (v < 0 - 9223372036854775808) { return jlMinL() }
+    if (v >= 9223372036854775808) { return rtjMaxL() }
+    if (v < 0 - 9223372036854775808) { return rtjMinL() }
     return sintRaw(sintHi(v), sintLo(v), 64, false)
 }
 
@@ -210,8 +212,8 @@ function jvSatInt(f) {
 // jvNarrowFloat, the w == 64 half.
 function jvSatLong(f) {
     if (f !== f) { return jlZero() }
-    if (f >= 9223372036854775808) { return jlMaxL() }
-    if (f < 0 - 9223372036854775808) { return jlMinL() }
+    if (f >= 9223372036854775808) { return rtjMaxL() }
+    if (f < 0 - 9223372036854775808) { return rtjMinL() }
     return jlFromNum(Math.trunc(f))
 }
 
@@ -987,8 +989,8 @@ function jvBoxType(name) {
         return o
     }
     if (name == "Long") {
-        o["MAX_VALUE"] = jlMaxL()
-        o["MIN_VALUE"] = jlMinL()
+        o["MAX_VALUE"] = rtjMaxL()
+        o["MIN_VALUE"] = rtjMinL()
         jvAddCommon(o, 64, 64, 8)
         o["parseLong"] = function(s) { return jvParseInt(jpStr(s), 64) }
         o["toHexString"] = function(v) { return jvToHex64(v) }

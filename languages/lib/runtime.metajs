@@ -15,7 +15,8 @@
 // the repo still name them, and those names are PROVENANCE - they are accurate
 // about where a body lived when the comment was written, and repointing them here
 // would turn a true historical statement into a false one. Grep this file for the
-// body; runtime-dartswift.metajs is the one split that remains.
+// body. runtime-dartswift.metajs was the fourth and last split; it followed
+// them on 2026-08-10 (docs/todo.md 5.5) and is at the FOOT of this file.
 //
 // The mechanism is the one ruby proved with `import "./regex.js"`: a layer-2 file
 // may import a shared MetaJS source, metajs-to-llvm-ir.abnf resolves the relative
@@ -894,9 +895,9 @@ function rtIsObjNotArr(v) {
 // "variable not defined", not a link error, so it is stated here rather than
 // enforced by the toolchain.
 //
-// runtime-dartswift.metajs is NOT folded in this pass: dart-rt.metajs was owned
-// by another agent in the round this landed. It is the same argument and the
-// same answer.
+// runtime-dartswift.metajs was NOT folded in this pass: dart-rt.metajs was owned
+// by another agent in the round this landed. It was the same argument and it got
+// the same answer on 2026-08-10 - see the foot of this file.
 
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1468,24 @@ function rtjIsIntegral(v) {
     return !floIs(v)
 }
 
+// long.MaxValue / long.MinValue as 64 bit cells - the SIGNED extremes both
+// languages saturate a double to. WAS csMaxI64/csMinI64 in csharp-rt.metajs and
+// jlMaxL/jlMinL in java-rt.metajs: two pairs of one-line bodies with the same
+// four literals and the same signedness flag, merged 2026-08-10 (docs/todo.md
+// 5.1). The point is not the two lines. It is that 2147483647/4294967295 is a
+// bit pattern written by hand in two files, and a typo in one of them is exactly
+// the shape of defect this file exists to make impossible.
+//
+// SIZING THE CALL SITES, which is what decides a merge here: EIGHT in total -
+// two in csharp's csConv saturation arm, six in java (jlOfDouble, jlOfFlo and
+// the Long.MAX_VALUE/MIN_VALUE statics, two each). None is in an arithmetic
+// path; the java statics run once at module init. Compare rtjIsIntegral just above, which is
+// asked at fifteen sites inside the arithmetic dispatch and cost +5.7% to share.
+// Both languages already import this file, so the merge adds no import and no
+// hook; the other eight importers gain two lines they never resolve.
+function rtjMaxL() { return sintRaw(2147483647, 4294967295, 64, false) }
+function rtjMinL() { return sintRaw(2147483648, 0, 64, false) }
+
 // The double reading of anything numeric.
 //
 // THE LAST TWO ARMS ARE rt.toNumber's (abnf/jsrt.go:1473) AND THAT IS THE FIX for
@@ -1581,4 +1600,100 @@ function rtjArith(op, l, r) {
     var code = 0
     if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
     return floOp(code, rtjkFloOperand(l), rtjkFloOperand(r))
+}
+
+// ===================================================== the dart/swift pair ==
+//
+// WAS lib/runtime-dartswift.metajs, folded in on 2026-08-10 (docs/todo.md 5.5),
+// which retires the LAST of the four split modules. Its head is kept below,
+// because the argument it makes about the tax is still the right argument -
+// only its conclusion has expired, for the reason the sixth pass measured: a
+// layer-2 call is a SCOPE LOOKUP BY NAME, so a module that never calls one of
+// these two bodies never resolves it, and NEITHER BODY ADDS A HOOK. rtIsArr
+// calls rtIsObj, which is in this file already; rtJavaStr calls sintIs /
+// sintStr / floIs / floStr, which are MetaJS HOST GLOBALS the floor seeds, not
+// rtk* knobs. The hook contract is unchanged at seven, and that - not size -
+// is what makes a first import expensive (manual 7.13).
+//
+// Verbatim from the split file's head:
+//
+//   Its own module for the reason lib/runtime-jvm.metajs's head measures: a
+//   layer-2 body is permanently live, so a body put in front of ten importers
+//   to serve two taxes the other eight (~7 pinned objects and ~+1.3% wall per
+//   100 lines of shared code that the importer can never call, measured at two
+//   scales on swift). Fourteen lines would cost the other eight about 0.2%,
+//   which is under the noise floor - the tax is an argument about hundreds of
+//   lines, not tens.
+//
+//   THE DIFFERENCE LIST IS EMPTY FOR BOTH BODIES, which is the whole reason to
+//   merge them. Two byte-identical copies with no knobs between them are two
+//   places a future fix can land in one and not the other; that has now cost
+//   this project twice at one site (the NaN relational, and the sized-integer
+//   equality). swIsArr's own comment already said it was "the same
+//   discrimination php-rt.metajs's phIsList makes", so the duplication was
+//   known and unnamed.
+//
+//     dtIsArr / swIsArr      ONE apparent difference, dtIsObj vs swIsObj, and
+//                            BOTH are `rtIsObj(v)`. ZERO knobs. php's phIsList
+//                            is NOT merged in: it rejects a {__refcell} box as
+//                            well, which is a third specification and not a
+//                            knob.
+//     dtJavaStr / swJavaStr  ZERO differences, byte for byte.
+//
+//   go-rt.metajs's goJavaStr shares the NAME and not the body (it delegates to
+//   gopStr), and js-rt.metajs's jxToStr is that same two-line shape again;
+//   neither belongs here.
+//
+// Only dart and swift call either body; the other eight importers carry them
+// and never resolve them.
+//
+// MEASURED, because dd6671b's number was for different bodies and the rule is
+// that a zero-knob difference list is necessary and NOT sufficient.
+// tests/bench.sh --paired against a clean archive of bd80f09, 9 layout draws
+// per row, the fold alone:
+//
+//   csharp -0.03%   dart 0.00%   go -0.00%   java +0.06% (8/9 pairs)
+//   kotlin -0.12%   metajs -0.00%   php -0.19%   swift +0.01%
+//   python +1.46% (9/9 pairs)
+//
+// Every row but python is inside its own spread. java's +0.06% is
+// sign-consistent and is the tax made visible: it is 50x below java's 3.21%
+// noise floor. python is the collection-heaviest row in the bench (3,574
+// collections against kotlin's 1,880 and java's 1,054), so it is the row a
+// permanently-live body moves most - and the EXACT counters say what it is and
+// is not: heap 11,627,376 and collections 3,574 are UNCHANGED, so there is no
+// arena step; `live` goes 251,632 -> 252,080 (+448 B) and the binary +336 B.
+// It is the live-set walk, charged 3,574 times. Over 21 draws against the same
+// base, the same tree WITH the -min 40 intra-file merges of docs/todo.md 5.1 on
+// top reads python +0.03% and kotlin -0.28%, i.e. nothing: python-rt's own two
+// removed declarations paid the fold back in full (-0.87%, 8/9 pairs, measured
+// separately).
+//
+// CORRECTNESS: dart-rt.ll and swift-rt.ll - the only two modules that CALL
+// these bodies - are BYTE-IDENTICAL across the fold, because the declaration
+// order in the merged scope is the order the two files already saw. js-rt.ll
+// and lua-rt.ll, the controls that import neither, are byte-identical too. The
+// other eight gain exactly two `define`s. 24 native programs (the ratchet and
+// the feature file of twelve languages) built from bd80f09 and from the folded
+// tree produce byte-identical output including the exit code.
+
+// A MetaJS list. A Map / Dictionary / tuple / instance box is an object without
+// a numeric `length`.
+function rtIsArr(v) {
+    if (!rtIsObj(v)) { return false }
+    if (v["__dict"] === true) { return false }
+    return typeof v["length"] == "number"
+}
+
+// The Java-style rendering of a scalar, which both emitters use for their string
+// builders and their index arithmetic. Null and undefined are "null"; the two
+// number boxes render in their own style; anything else is MetaJS's own `+ ""`.
+function rtJavaStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (sintIs(v)) { return sintStr(v) }
+    if (floIs(v)) { return floStr(v) }
+    return "" + v
 }
