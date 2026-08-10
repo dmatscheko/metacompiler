@@ -2164,9 +2164,51 @@ def s42
   check("sing20", $s42g.gm == "GM")
 end
 
+# ===== SECTION 43: String#upcase / #downcase are the SIMPLE per-rune map =====
+# docs/todo.md 4.2. `1367c23` routed goja's String.prototype.toUpperCase /
+# toLowerCase through the same Go strings.ToUpper / strings.ToLower that the
+# frozen engine, the Go twin and the C floor already used. That closed a LIVE
+# goja-vs--frozen divergence in every language's interpreter half at once - and
+# only tests/metajs-test-full.js asserted it, so a regression in it would have
+# failed one file out of sixteen. Ruby routes #upcase / #downcase straight at
+# the host method, so this file has the full discriminating power of that fix:
+# all five rows below fail against a build with installGojaCaseMapping stubbed
+# out (measured, 6 of the 8 rows below).
+#
+# THE ANSWERS ARE NOT MRI'S, and that is the recorded decision, not a slip. MRI
+# does full Unicode case mapping: "\u00df".upcase is "SS", "\ufb01".upcase is
+# "FI", "\u0130".downcase is "i" + U+0307. This project answers the SIMPLE
+# per-rune mapping in all four engines because full mapping in the C floor is
+# `case_map`, which was built, passed every gate, measured at 135x on a real
+# workload and reverted (manual chapter 5). Three engines already did simple
+# mapping and the fourth - goja - was the odd one out.
+#
+# Every character is written as a \uXXXX ESCAPE, never as a raw literal: manual
+# chapter 4, test specific characters by CODE.
+def s43
+  # The five characters where the full mapping differs from the simple one.
+  # Each is unchanged here; under the full mapping each grows.
+  check("cm43a", "\u00df".upcase.length == 1 && "\u00df".upcase.ord == 0x00DF)   # sharp s -> SS
+  check("cm43b", "\ufb01".upcase.length == 1 && "\ufb01".upcase.ord == 0xFB01)   # fi ligature -> FI
+  check("cm43c", "\ufb03".upcase.length == 1 && "\ufb03".upcase.ord == 0xFB03)   # ffi ligature -> FFI
+  check("cm43d", "\u0149".upcase.length == 1 && "\u0149".upcase.ord == 0x0149)   # n preceded by apostrophe
+  check("cm43e", "\u1f50".upcase.length == 1 && "\u1f50".upcase.ord == 0x1F50)   # Greek upsilon with psili
+  # U+0130 goes the other way: the full map GROWS it on the way down, the simple
+  # map answers a bare "i".
+  check("cm43f", "\u0130".downcase.length == 1 && "\u0130".downcase.ord == 0x0069)
+  # Characters whose simple map IS the full map, so both models agree: NO
+  # discriminating power against 1367c23, kept because they pin the mapping
+  # itself (dotless i, final sigma, capital sharp s).
+  check("cm43g", "\u0131".upcase.ord == 0x0049 && "\u03c2".upcase.ord == 0x03A3 &&
+                 "\u1e9e".downcase.ord == 0x00DF)
+  check("cm43h", "abc".upcase == "ABC" && "ABC".downcase == "abc" && "".upcase == "")
+end
+
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
 s42() # SECTION-CALL 42
+s43() # SECTION-CALL 43
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

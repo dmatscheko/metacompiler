@@ -37,12 +37,16 @@
 #   ./test.sh -j, --jobs N    run N entries in parallel (1 = sequential).
 #                             Default: 2x CPU count for the MATRIX, 1x for --full
 #                             and --cross - measured, see the note at JOBS below.
-#   ./test.sh -t, --timeout N per-run timeout in seconds (default 120)
+#   ./test.sh -t, --timeout N per-run timeout in seconds. THE DEFAULT IS PER GROUP:
+#                             120 for the matrix and --cross, 900 for --full.
+#                             See the note at TIMEOUT below for the measurement.
 #   ./test.sh --full          run the SECOND test group: the full-syntax ratchet
 #                             files (tests/*-test-full.*). For every grammar it
 #                             reports the language areas that do not work yet -
 #                             the goal is full language support, and this is the
-#                             progress report. Informational: always exits 0.
+#                             progress report. A language GAP is informational;
+#                             a probe run KILLED by the timeout is NOT, and exits
+#                             non-zero (see "KILLED" in the summary).
 #                             Combine with --filter to probe one language.
 #   ./test.sh --cross         run the THIRD test group: diff each language's two
 #                             halves against each other. The default matrix runs
@@ -62,7 +66,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
-FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120; FULL=0; CROSS=0
+FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=""; TIMEOUT_EXPLICIT=0; FULL=0; CROSS=0
 NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 JOBS=""; JOBS_EXPLICIT=0
 while [ $# -gt 0 ]; do
@@ -73,11 +77,11 @@ while [ $# -gt 0 ]; do
         -l|--list)    LIST=1 ;;
         -j|--jobs)    JOBS="${2:-1}"; JOBS_EXPLICIT=1; shift ;;
         --jobs=*)     JOBS="${1#*=}"; JOBS_EXPLICIT=1 ;;
-        -t|--timeout) TIMEOUT="${2:-120}"; shift ;;
-        --timeout=*)  TIMEOUT="${1#*=}" ;;
+        -t|--timeout) TIMEOUT="${2:-120}"; TIMEOUT_EXPLICIT=1; shift ;;
+        --timeout=*)  TIMEOUT="${1#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --full)       FULL=1 ;;
         --cross)      CROSS=1 ;;
-        -h|--help)    sed -n '2,53p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,60p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -108,6 +112,39 @@ if [ "$JOBS_EXPLICIT" = 0 ]; then
     if [ "$FULL" -eq 1 ] || [ "$CROSS" -eq 1 ]; then JOBS="$NCPU"; else JOBS=$((NCPU * 2)); fi
 fi
 case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
+
+# THE DEFAULT PER-RUN TIMEOUT IS ALSO PER GROUP, and for the same reason: the
+# groups are not the same size. The matrix is 383 short runs and 120 s is many
+# times the slowest of them. --full is not: it runs the whole ratchet FILE of a
+# language through one grammar, four times per language.
+#
+# MEASURED on this machine at 1c76ec8, the four legs of the biggest ratchet
+# (tests/js-test-full.js), each a SINGLE run and therefore each subject to this
+# timeout on its own:
+#
+#     js-interpreter                110 s
+#     js-interpreter  -frozen       423 s     <- the slowest run in the suite
+#     js-to-llvm-ir                  42 s
+#     js-to-llvm-ir   -frozen       171 s
+#
+# The `-frozen` interpreter leg is the tail because there the MetaJS engine is
+# itself a MetaJS program running on the IR interpreter. tests/gates.sh measured
+# the same leg at 456 s idle and 482 s after the fifteenth round's additions, so
+# treat ~480 s as the number and 423 s here as the same figure on a quieter
+# moment - NOT as a second, smaller measurement.
+#
+# 900 s is that with ~1.9x of headroom, and it is deliberately the same constant
+# gates.sh already passes in as FULL_TIMEOUT: the bare command a human types by
+# hand and the gate should not have different brakes, because the whole point of
+# docs/todo.md 4.3 is that they DID, and the bare command was the one that
+# reported a kill as though it were a defect. If js grows much further the answer
+# is to split its ratchet, not to keep raising this.
+#
+# --cross keeps 120: its slowest program is a feature file, not a ratchet.
+if [ "$TIMEOUT_EXPLICIT" = 0 ]; then
+    if [ "$FULL" -eq 1 ]; then TIMEOUT=900; else TIMEOUT=120; fi
+fi
+case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=120 ;; esac
 
 command -v go >/dev/null 2>&1 || { echo "test.sh: 'go' not found on PATH" >&2; exit 2; }
 
@@ -389,22 +426,49 @@ if [ "$FULL" -eq 1 ]; then
     # self-maintaining: it needs no expected number checked into the repo.
     echo
     echo "assertion counts (both halves of a language run the same file, so they must agree)"
-    mism=0
+    # A KILLED RUN IS NOT A MISMATCH, and calling it one is docs/todo.md 4.3.
+    # MISMATCH is the most serious word this group prints - it means the two
+    # halves of a language computed different numbers of assertions from one
+    # file - and until now a run the harness KILLED was reported in exactly those
+    # words. Four gate runs in one round printed a red line for a timeout rather
+    # than for a defect, which is how a suite teaches people to ignore it. So the
+    # two are separated here: a kill says it was killed, says what the brake was,
+    # and says how to raise it.
+    #
+    # It stays a FAILURE, though, and in three independent ways, because the
+    # exact hole this project has already fallen into is the opposite one (see
+    # the FULL_ASSERTIONS comment in tests/gates.sh): killed probes recorded no
+    # count, both halves therefore "agreed", and the summary printed 437
+    # assertions below baseline as though that were the answer.
+    #   1. the per-language line still carries the literal token RUN-FAILED,
+    #      which is what tests/gates.sh greps for;
+    #   2. the total line is followed by an explicit statement that the total is
+    #      NOT a measurement, naming the languages that contributed nothing;
+    #   3. this group exits NON-ZERO when anything was killed - the only case in
+    #      which it does. A language GAP remains informational, exit 0.
+    awk_out="$RESDIR/full.summary"
     for r in $REPORTS; do
         [ -f "$r.lang" ] || continue
         printf '%s\t%s\n' "$(cat "$r.lang")" "$(cat "$r.checks" 2>/dev/null || echo -)"
-    done | sort | awk -F'\t' '
+    done | sort | awk -F'\t' -v tmo="$TIMEOUT" '
         { if ($1 != last) { if (last != "") emit(); last = $1; n = 0 }
           v[n++] = $2 }
-        function emit(   i, bad) {
-            bad = 0
+        function emit(   i, bad, killed) {
+            bad = 0; killed = 0
             for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
             # FROZEN-DIFF is not a count: it is the marker written above when a
             # half is FULL under goja but differs under -frozen. Flag it even when
             # BOTH halves carry it, because two halves failing the same way is not
             # agreement - it is two defects.
-            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF" || v[i] == "RUN-FAILED") bad = 1
-            if (n < 2)      printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
+            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF") bad = 1
+            # RUN-FAILED is not a count either, and it is not a disagreement: it
+            # is the harness saying it stopped the run. Reported separately.
+            for (i = 0; i < n; i++) if (v[i] == "RUN-FAILED") killed = 1
+            if (n < 2)        printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
+            else if (killed) { printf "  %-12s KILLED (RUN-FAILED):", last
+                               for (i = 0; i < n; i++) printf " %s", v[i]
+                               printf " - NOT a halves divergence, nothing was measured\n"
+                               nkilled++; killednames = killednames " " last }
             else if (bad)   { printf "  %-12s MISMATCH:", last
                               for (i = 0; i < n; i++) printf " %s", v[i]
                               printf "\n"; mismatch++ }
@@ -412,7 +476,22 @@ if [ "$FULL" -eq 1 ]; then
             total += (v[0] ~ /^[0-9]+$/ ? v[0] : 0)
         }
         END { if (last != "") emit()
-              printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch }'
+              # KEEP THIS LINE SPELLED EXACTLY LIKE THIS: tests/gates.sh reads the
+              # number out of it with a sed on "^ *N assertions in total".
+              printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch
+              if (nkilled > 0) {
+                  printf "\n  %d LANGUAGE(S) WERE KILLED BY THE %s s --timeout:%s\n", nkilled, tmo, killednames
+                  printf "  A killed run records NO COUNT, so THE TOTAL ABOVE IS NOT A MEASUREMENT - it\n"
+                  printf "  is a smaller number with holes in it, and that is the exact failure mode the\n"
+                  printf "  FULL_ASSERTIONS floor in tests/gates.sh exists to catch. Nothing diverged and\n"
+                  printf "  nothing ran. Re-run on a quieter machine, or:  ./test.sh --full --timeout %d\n", tmo * 2
+              }
+            }' | tee "$awk_out"
+    # exit 1 iff something was killed. Language gaps stay informational. The
+    # verdict is read back out of the text that was just printed rather than
+    # carried in a variable, because the awk above runs in a pipeline and its
+    # subshell cannot set one.
+    if grep -q 'WERE KILLED BY THE' "$awk_out" 2>/dev/null; then exit 1; fi
     exit 0
 fi
 
@@ -583,8 +662,36 @@ cross_one() {
     # resolve, -warn-imports skips it, and each half then fails its own way on the
     # missing symbol. That compares the recovery paths instead of the feature, so
     # pass the same include root here. It is inert for every other program.
-    oi="$(RUN "$BIN" -i tests/imports "$gi" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; ri=$?
-    oc="$(RUN "$BIN" -i tests/imports "$gc" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; rc=$?
+    # THE SAME KILLED-RUN HAZARD AS THE RATCHET, and it was live here too
+    # (docs/todo.md 4.3 asked; this is what was found). This used to be
+    #     oi="$(RUN ... | cross_strip)"; ri=$?
+    # which records the exit status of CROSS_STRIP, not of the run - so it was
+    # always 0 and was never read again. A leg killed by the per-run timeout
+    # therefore arrived as TRUNCATED output and was compared as though it were an
+    # answer: one leg killed reads as DIFFER (a defect that is not there), and
+    # BOTH legs killed - the normal case, because whatever is slow is slow in both
+    # halves - reads as "agree" and the group prints "0 divergent" while having
+    # measured nothing at all. That last one is silent, which is worse.
+    #
+    # So capture the RUN's own status, from a file rather than a pipeline, and
+    # report a kill as its own kind. 124 is timeout(1)/gtimeout(1), 142 is the
+    # perl-alarm fallback, 137/143 are KILL/TERM from anything else. Only those
+    # four codes: a program that merely EXITS non-zero is normal here (several
+    # test programs abort on purpose) and must keep being compared.
+    RUN "$BIN" -i tests/imports "$gi" "$P" -q -warn-unsupported -warn-imports >"$R.iraw" 2>&1; ri=$?
+    RUN "$BIN" -i tests/imports "$gc" "$P" -q -warn-unsupported -warn-imports >"$R.craw" 2>&1; rc=$?
+    oi="$(cross_strip < "$R.iraw")"
+    oc="$(cross_strip < "$R.craw")"
+    rm -f "$R.iraw" "$R.craw"
+    case "$ri:$rc" in
+        124:*|137:*|142:*|143:*|*:124|*:137|*:142|*:143)
+            printf 'KILLED  %s  %s\n' "$L" "$P" > "$R"
+            printf '          a leg was KILLED (interpreter exit %s, compiler exit %s) after the %ss\n' \
+                "$ri" "$rc" "$TIMEOUT" >> "$R"
+            printf '          --timeout. NOTHING WAS COMPARED - this is not a divergence and not an\n' >> "$R"
+            printf '          agreement. Re-run on a quieter machine, or raise --timeout.\n' >> "$R"
+            return ;;
+    esac
 
     if [ "$oi" = "$oc" ]; then
         printf 'agree\n' > "$R"; return
@@ -648,19 +755,35 @@ if [ "$CROSS" -eq 1 ]; then
     echo "run on the same program and diffed. The matrix cannot see this class:"
     echo "it compares each engine against ITSELF, never the two halves."
     echo
-    nd=0; nw=0
+    nd=0; nw=0; nk=0
     for r in $XREPORTS; do
         [ -f "$r" ] || continue
         if [ "$(head -1 "$r")" = "agree" ]; then continue; fi
-        case "$(head -1 "$r")" in "DIFFER "*) nd=$((nd + 1)) ;; *) nw=$((nw + 1)) ;; esac
+        case "$(head -1 "$r")" in
+            "DIFFER "*) nd=$((nd + 1)) ;;
+            "KILLED "*) nk=$((nk + 1)) ;;
+            *)          nw=$((nw + 1)) ;;
+        esac
         cat "$r"
     done
     echo
-    printf '%d programs compared, %d divergent, %d differing only in warnings\n' "$n" "$nd" "$nw"
+    printf '%d programs compared, %d divergent, %d differing only in warnings\n' "$((n - nk))" "$nd" "$nw"
+    # A killed pair is subtracted from the compared count above rather than
+    # folded into it, and it is reported on its own line, because "compared" has
+    # to mean compared. tests/gates.sh keys off ", 0 divergent" in the line
+    # above; the non-zero exit below is what makes a kill reach a caller that
+    # only looks at status.
+    if [ "$nk" -gt 0 ]; then
+        echo
+        printf '%d PAIR(S) WERE KILLED BY THE %ss --timeout and were NOT COMPARED. The counts\n' "$nk" "$TIMEOUT"
+        printf 'above are therefore over a SMALLER SET, which is not a result. Re-run when the\n'
+        printf 'machine is quiet, or:  ./test.sh --cross --timeout %d\n' "$((TIMEOUT * 2))"
+    fi
     echo
     echo "  A divergence is not automatically a bug - the real language decides which"
     echo "  half is right. Settle each against the real toolchain, then fix the wrong"
     echo "  half and pin it with a ratchet assertion."
+    [ "$nk" -gt 0 ] && exit 1
     exit 0
 fi
 
@@ -762,13 +885,25 @@ run_entry() {
         RUN "$BIN" "${interp[@]}" >"$ni.o" 2>"$ni"; rc_ni=$?
     fi
 
+    # A KILLED RUN IS NEVER A PASS, whatever the row expects (docs/todo.md 4.3).
+    # This is checked FIRST and outside the should_fail branch because of the
+    # trap: the by-design-failing rows - every name containing FAIL, and the
+    # SHOULD ABORT rows below - assert only that the exit status is NON-ZERO, and
+    # timeout(1) kills with 124, which is non-zero. So a row whose whole purpose
+    # is to fail would have gone GREEN on a machine too loaded to run it, and the
+    # matrix would have reported a pass for a run that never finished. The four
+    # codes are timeout/gtimeout's 124, the perl-alarm fallback's 142, and
+    # KILL/TERM's 137/143.
     local problems=()
+    killed_rc() { case "$1" in 124|137|142|143) return 0 ;; *) return 1 ;; esac; }
+    killed_rc "$rc_g" && problems+=("goja was KILLED (exit $rc_g) after the ${TIMEOUT}s --timeout - nothing was measured, raise --timeout")
+    killed_rc "$rc_f" && problems+=("frozen was KILLED (exit $rc_f) after the ${TIMEOUT}s --timeout - nothing was measured, raise --timeout")
     if [ "$should_fail" -eq 1 ]; then
         [ "$rc_g" -eq 0 ] && problems+=("goja exited 0 but should fail")
         [ "$rc_f" -eq 0 ] && problems+=("frozen exited 0 but should fail")
     else
-        [ "$rc_g" -ne 0 ] && problems+=("goja exit $rc_g")
-        [ "$rc_f" -ne 0 ] && problems+=("frozen exit $rc_f")
+        { [ "$rc_g" -ne 0 ] && ! killed_rc "$rc_g"; } && problems+=("goja exit $rc_g")
+        { [ "$rc_f" -ne 0 ] && ! killed_rc "$rc_f"; } && problems+=("frozen exit $rc_f")
     fi
     if [ "$abort_exe" -eq 1 ]; then
         if [ -z "$exe" ]; then
@@ -778,6 +913,11 @@ run_entry() {
         else
             [ "$rc_ng" -eq 0 ] && problems+=("the goja-built native binary exited 0 but should abort")
             [ "$rc_nf" -eq 0 ] && problems+=("the frozen-built native binary exited 0 but should abort")
+            # ...and the same trap one level down: "must exit non-zero" is
+            # satisfied by the timeout killing it.
+            killed_rc "$rc_ng" && problems+=("the goja-built native binary was KILLED (exit $rc_ng) after the ${TIMEOUT}s --timeout, it did not abort")
+            killed_rc "$rc_nf" && problems+=("the frozen-built native binary was KILLED (exit $rc_nf) after the ${TIMEOUT}s --timeout, it did not abort")
+            killed_rc "$rc_ni" && problems+=("the interpreter half was KILLED (exit $rc_ni) after the ${TIMEOUT}s --timeout, it did not abort")
             cmp -s "$ng" "$nf" || problems+=("goja-built vs frozen-built native stderr differ")
             cmp -s "$ng.o" "$nf.o" || problems+=("goja-built vs frozen-built native stdout differ")
             # The ABORT TEXT COMPARISON (docs/todo.md 4.1). abort_norm strips the

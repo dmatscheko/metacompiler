@@ -265,7 +265,7 @@ tests/gates.sh --freeze     # also: is the frozen snapshot a fixed point?
 | gate | what only it can see |
 |---|---|
 | `./test.sh` | the matrix: goja vs `-frozen`, byte-identical |
-| `./test.sh --full` | the full-syntax ratchets (informational; **it exits 0 by design**, so its summary line is not a verdict - the gate is the `BUT -frozen\|VACUOUS\|MISMATCH\|FROZEN-DIFF` grep, which `gates.sh` does for you) |
+| `./test.sh --full` | the full-syntax ratchets. A language GAP is informational and exits 0, so the summary line is not a verdict - the gate is the `BUT -frozen\|VACUOUS\|MISMATCH\|FROZEN-DIFF\|RUN-FAILED` grep, which `gates.sh` does for you. **A KILLED run exits 1**, because a killed probe records no count and the total is then a smaller number with holes in it rather than an answer. |
 | `./test.sh --cross` | each language's two halves diffed against each other |
 | `tests/clang-check.sh` | every emitted module handed to a real clang, then run |
 | `tests/native-full.sh` | all fifteen ratchets built and run as **native binaries** |

@@ -2824,6 +2824,44 @@ def s40():
     check("nm7", r3 == "NameError")
 
 
+# ===== SECTION 41: case mapping is the SIMPLE per-rune map, in THIS half too =====
+# docs/todo.md 4.2. `1367c23` routed goja's String.prototype.toUpperCase /
+# toLowerCase through the same Go strings.ToUpper / strings.ToLower the frozen
+# engine, the Go twin and the C floor already used, which closed a live
+# goja-vs--frozen divergence in SIXTEEN languages' interpreter halves at once.
+# Only tests/metajs-test-full.js asserted it, so a regression there would have
+# failed exactly one file.
+#
+# Python's own share of that is narrow and it is narrow ON PURPOSE. pySUpCh /
+# pySLoCh in languages/python-interpreter.abnf map per code point WITH A LENGTH
+# GUARD - any host answer whose unit count differs from the input is rejected and
+# the character is returned unchanged - so "ss".upper() and "fi".upper() answer
+# the input whichever host mapping is installed, and those rows CANNOT
+# discriminate. The one residual the guard cannot absorb is U+0130 LATIN CAPITAL
+# LETTER I WITH DOT ABOVE: the simple map answers a single "i", the full map
+# answers i + U+0307, so the guard keeps U+0130 under the full map and passes the
+# "i" through under the simple one. That row is the whole discriminating power
+# this file has, and it is measured: 1 of 4 rows below fail against a build with
+# installGojaCaseMapping stubbed out; the other three pass either way and are
+# here to pin the LENGTH GUARD itself, which is a different regression.
+#
+# Every character is built with chr(<code>) rather than written as a literal -
+# manual chapter 4, test specific characters by CODE.
+def s41():
+    # DISCRIMINATING (1367c23): simple map -> "i"; full map -> "i" + U+0307,
+    # which the length guard rejects, leaving U+0130 unchanged.
+    lo = chr(0x0130).lower()
+    check("cmp1", len(lo) == 1 and ord(lo) == 0x0069)
+    # The length guard, pinned. These pass under either host mapping.
+    up = chr(0x00DF).upper()
+    check("cmp2", len(up) == 1 and ord(up) == 0x00DF)
+    up = chr(0xFB01).upper()
+    check("cmp3", len(up) == 1 and ord(up) == 0xFB01)
+    # Characters where the simple map IS the full map, so both models agree.
+    check("cmp4", ord(chr(0x0131).upper()) == 0x0049 and ord(chr(0x03C2).upper()) == 0x03A3 and
+                  ord(chr(0x1E9E).lower()) == 0x00DF)
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -2865,5 +2903,6 @@ def main():
     s38() # SECTION-CALL 38
     s39() # SECTION-CALL 39
     s40() # SECTION-CALL 40
+    s41() # SECTION-CALL 41
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -4236,6 +4236,47 @@ fun sec80() {
     check("fx16", "%.2f".format(0.0) == "0.00")
 }
 
+// SECTION 81 - uppercase()/lowercase() are the SIMPLE per-rune map
+// docs/todo.md 4.2. `1367c23` routed goja's String.prototype.toUpperCase /
+// toLowerCase through the same Go strings.ToUpper / strings.ToLower that the
+// frozen engine, the Go twin and the C floor already use, closing a LIVE
+// goja-vs--frozen divergence in every language's interpreter half at once. Only
+// tests/metajs-test-full.js asserted it, so a regression in a fix that protects
+// sixteen languages failed exactly one file. Kotlin's uppercase()/lowercase()
+// call the host method directly, so this file carries the fix's full
+// discriminating power: 6 of the 8 rows below fail against a build with
+// installGojaCaseMapping stubbed out (measured).
+//
+// THE ANSWERS ARE NOT THE JVM'S, and that is the recorded decision. Real
+// kotlin.text.uppercase() is locale-invariant FULL Unicode case mapping:
+// "\u00df".uppercase() is "SS", "\ufb01" is "FI", "\u0130".lowercase() is
+// "i" + U+0307. This project answers the SIMPLE per-rune mapping in all four
+// engines, because full mapping in the C floor is `case_map` - built, measured
+// at 135x on a real workload, reverted (manual chapter 5).
+//
+// Every character is a \uXXXX ESCAPE, never a raw literal: manual chapter 4,
+// test specific characters by CODE.
+fun sec81() {
+    // The five characters that GROW under the full mapping and are unchanged
+    // under the simple one.
+    check("cm81a", "\u00df".uppercase().length == 1 && "\u00df".uppercase()[0].code == 0x00DF)
+    check("cm81b", "\ufb01".uppercase().length == 1 && "\ufb01".uppercase()[0].code == 0xFB01)
+    check("cm81c", "\ufb03".uppercase().length == 1 && "\ufb03".uppercase()[0].code == 0xFB03)
+    check("cm81d", "\u0149".uppercase().length == 1 && "\u0149".uppercase()[0].code == 0x0149)
+    check("cm81e", "\u1f50".uppercase().length == 1 && "\u1f50".uppercase()[0].code == 0x1F50)
+    // U+0130 grows on the way DOWN under the full map; the simple map answers "i".
+    check("cm81f", "\u0130".lowercase().length == 1 && "\u0130".lowercase()[0].code == 0x0069)
+    // Simple map == full map here, so NO discriminating power against 1367c23 -
+    // kept because they pin the mapping itself. Dotless i, final sigma, capital
+    // sharp s.
+    check("cm81g", "\u0131".uppercase()[0].code == 0x0049 && "\u03c2".uppercase()[0].code == 0x03A3 &&
+                   "\u1e9e".lowercase()[0].code == 0x00DF)
+    // The deprecated spellings resolve to the same host method.
+    check("cm81h", "\u00df".toUpperCase() == "\u00df".uppercase() &&
+                   "\u0130".toLowerCase() == "\u0130".lowercase())
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4317,6 +4358,7 @@ fun main() {
     sec78() // SECTION-CALL 78
     sec79() // SECTION-CALL 79
     sec80() // SECTION-CALL 80
+    sec81() // SECTION-CALL 81
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
