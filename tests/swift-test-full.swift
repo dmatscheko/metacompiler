@@ -1798,6 +1798,119 @@ protocol S33 { static func make33() -> String }
 struct T33S: S33 { static func make33() -> String { return "m" } }
 func g33<T: A33>(_ x: T) -> String { return "g:" + x.a33() }
 
+// ===== SECTION 34: uppercased()/lowercased() are the SIMPLE per-rune map =====
+// docs/todo.md 4.3. The interpreter half has had both since it was written and
+// NEITHER compiled half did - `"Hello".uppercased()` aborted with "unknown String
+// method: uppercased" under llvm.Run and natively. That is why swift got no
+// case-mapping pins in `e1816b3` while kotlin (+8), ruby (+8) and python (+4)
+// did: the gap was a halves CAPABILITY gap, and `--cross` could not see it
+// because no test program called the method.
+//
+// Both now reach the FLOOR's mapping the same way the other three do - the
+// string's own toUpperCase/toLowerCase (runtime.c member ids 27/28, whose
+// per-code-point table `case_map` is; strings.ToUpper in the Go twin). Nothing
+// moved into layer 2: `case_map` was moved there once, measured at 135x on a real
+// workload and reverted (manual chapter 5), and this needs no move at all.
+//
+// THE ANSWERS ARE NOT SWIFTC'S, and that is the recorded decision, the same one
+// kotlin's SECTION 81 records. Real Swift is FULL Unicode case mapping:
+// "\u{00df}".uppercased() is "SS", "\u{fb01}" is "FI", "\u{0130}".lowercased() is
+// "i" + U+0307 - measured against swiftc 6.1.2 on this machine. This project
+// answers the SIMPLE per-rune mapping in all four engines.
+//
+// Every character is an ESCAPE, never a raw literal: manual chapter 4, test
+// specific characters by CODE.
+func s34() {
+    // The characters that GROW under the full mapping and are unchanged under the
+    // simple one. `.count` is the cluster count, so an answer of "SS" would be 2.
+    check("34a", "\u{00df}".uppercased() == "\u{00df}" && "\u{00df}".uppercased().count == 1)
+    check("34b", "\u{fb01}".uppercased() == "\u{fb01}" && "\u{fb01}".uppercased().count == 1)
+    check("34c", "\u{fb03}".uppercased() == "\u{fb03}" && "\u{fb03}".uppercased().count == 1)
+    check("34d", "\u{0149}".uppercased() == "\u{0149}" && "\u{0149}".uppercased().count == 1)
+    check("34e", "\u{1f50}".uppercased() == "\u{1f50}" && "\u{1f50}".uppercased().count == 1)
+    // U+0130 grows on the way DOWN under the full map; the simple map answers "i".
+    check("34f", "\u{0130}".lowercased() == "i" && "\u{0130}".lowercased().count == 1)
+    // Simple == full here, so these pin the mapping itself rather than the choice:
+    // dotless i, final sigma, capital sharp s.
+    check("34g", "\u{0131}".uppercased() == "I" && "\u{03c2}".uppercased() == "\u{03a3}"
+                 && "\u{1e9e}".lowercased() == "\u{00df}")
+    // ASCII, the mixed case, and the identity on a string with no cased character.
+    check("34h", "Hello".uppercased() == "HELLO" && "Hello".lowercased() == "hello"
+                 && "MIXED case 123".lowercased() == "mixed case 123"
+                 && "".uppercased() == "" && "123-".uppercased() == "123-")
+    // Non-ASCII that IS one-to-one both ways.
+    check("34i", "\u{00e4}\u{00f6}\u{00fc}".uppercased() == "\u{00c4}\u{00d6}\u{00dc}"
+                 && "\u{00c4}\u{00d6}\u{00dc}".lowercased() == "\u{00e4}\u{00f6}\u{00fc}")
+}
+
+// ===== SECTION 35: Array(...), popLast()/removeLast(), and String as a SEQUENCE =====
+// docs/todo.md 2.11. `popLast()` and `Array(...)` were implemented in NO engine
+// and their two refusals did not even agree - "unknown Array method: popLast" /
+// "unknown name: Array" here against "unknown list method 'popLast'" / "call of a
+// non function value: [object Object]" under llvm.Run. `removeLast()` was worse:
+// implemented in BOTH compiled halves and missing from the interpreter, i.e. a
+// live halves divergence. swiftc 6.1.2 answers all of them.
+//
+// The String rows are the second half of the same fix. A String is a sequence of
+// extended grapheme CLUSTERS, and `Array(s)` and `for c in s` must both yield
+// what `.count` counts. They did not: each loop took its trip count from one
+// counter and its elements from a code-UNIT index, so `for c in "cafe\u{301}"`
+// ran four times here (dropping the combining mark) and FIVE times under
+// llvm.Run, where js_pylen counts code points. Three answers, none of them
+// swiftc's c, a, f, é.
+func s35() {
+    var a35 = [1, 2, 3]
+    check("35a", a35.popLast() == 3 && a35 == [1, 2])
+    check("35b", a35.removeLast() == 2 && a35 == [1])
+    var e35: [Int] = []
+    check("35c", e35.popLast() == nil && e35.count == 0)
+    // Array(seq): a copy, a Range's elements, a String's Characters.
+    let src35 = [4, 5, 6]
+    var cp35 = Array(src35)
+    cp35.append(9)
+    check("35d", cp35.count == 4 && src35.count == 3)
+    check("35e", Array(0..<3) == [0, 1, 2] && Array(1...3) == [1, 2, 3])
+    check("35f", Array("hi") == ["h", "i"] && Array("").count == 0)
+    check("35g", Array(repeating: 7, count: 3) == [7, 7, 7]
+                 && Array(repeating: 0, count: 0).count == 0)
+    // A String walked as a sequence, and Array(s), agree with .count - on a
+    // combining mark and on an astral pair, which is where they did not.
+    let uni35 = "cafe\u{301}"
+    var seen35 = ""
+    var n35 = 0
+    for c in uni35 { seen35 += c; n35 += 1 }
+    check("35h", n35 == 4 && n35 == uni35.count && seen35 == uni35)
+    check("35i", Array(uni35).count == 4 && Array(uni35)[3] == "e\u{301}")
+    let ast35 = "a\u{1f600}b"
+    var m35 = 0
+    for _ in ast35 { m35 += 1 }
+    check("35j", m35 == 3 && ast35.count == 3 && Array(ast35).count == 3)
+    // THE SAME STRING WRITTEN AS ITSELF. A raw astral character in the source is
+    // two code units, and both grammars used to copy the literal one unit at a
+    // time - which hands a LONE SURROGATE to the host, cannot be encoded in UTF-8,
+    // and comes back U+FFFD. So `raw35` and `ast35` were DIFFERENT VALUES: .count
+    // was 4 in the interpreter (two replacement characters) and 3 under llvm.Run
+    // (one cluster that PRINTED as two U+FFFD, the divergence the manual records
+    // in chapter 7.9). swiftc 6.1.2 says 3, and says the two spellings are equal.
+    // No test file had an astral literal, which is exactly why --cross never saw it.
+    let raw35 = "a😀b"
+    check("35k", raw35 == ast35 && raw35.count == 3 && Array(raw35).count == 3)
+    check("35l", Array(raw35)[1] == Array(ast35)[1] && String(Array(raw35)[1]).count == 1)
+    var r35 = ""
+    for c in raw35 { r35 += String(c) }
+    check("35m", r35 == raw35 && r35.count == 3)
+    // isEmpty / first / last are PROPERTIES on every Collection and all three
+    // answered nil in BOTH halves where swiftc says false / a value. A user type
+    // that declares a member of one of those names must still win.
+    check("35n", !a35.isEmpty && e35.isEmpty && !raw35.isEmpty && "".isEmpty)
+    check("35o", a35.first == 1 && a35.last == 1 && e35.first == nil && e35.last == nil)
+    check("35p", raw35.first == "a" && raw35.last == "b" && "".first == nil)
+    check("35q", uni35.last == "e\u{301}" && uni35.first == "c")
+    check("35r", ["k": 1].isEmpty == false && ([:] as [String: Int]).isEmpty)
+    check("35s", Own35().isEmpty == 99 && Own35().first == 7 && Own35().last == 8)
+}
+struct Own35 { var isEmpty = 99; var first = 7; var last = 8 }
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1834,6 +1947,8 @@ func main() {
     s31() // SECTION-CALL 31
     s32() // SECTION-CALL 32
     s33() // SECTION-CALL 33
+    s34() // SECTION-CALL 34
+    s35() // SECTION-CALL 35
     print("full: \(checks) checks, \(fails) failures")
 }
 

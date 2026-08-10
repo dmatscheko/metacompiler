@@ -2187,7 +2187,25 @@ KwContinue  = "continue" KwEnd ;
         var i = 0
         while (i < str.length) {
             var c1 = str.charCodeAt(i)
-            if (c1 != 92) { out += str.charAt(i); i++; continue }
+            // A RAW astral character in the source (an emoji written as itself
+            // rather than as \u{...}) is TWO code units, and copying it one unit at
+            // a time hands a LONE SURROGATE to the host, which cannot encode one in
+            // UTF-8 and answers U+FFFD. So the literal `"a<emoji>b"` held two
+            // replacement characters and PRINTED as two - the divergence the manual
+            // records as "an astral character prints as two U+FFFD in swift" - while
+            // the ESCAPE spelling of the same string printed the emoji. One literal,
+            // two values, decided by how it was written. Copy the pair in ONE
+            // substring. The identical fix is in swift-interpreter.abnf.
+            if (c1 != 92) {
+                if (c1 >= 0xD800 && c1 <= 0xDBFF && i + 1 < str.length) {
+                    out += str.substring(i, i + 2)
+                    i += 2
+                    continue
+                }
+                out += str.charAt(i)
+                i++
+                continue
+            }
             var e = str.charCodeAt(i + 1)
             if (e == 110) { out += "\n"; i += 2; continue }
             if (e == 116) { out += "\t"; i += 2; continue }
@@ -2742,6 +2760,37 @@ KwContinue  = "continue" KwEnd ;
             return excDispatch(b, callExt(b, "js_try", [bodyClo, hUndef, finClo]))
         }
     }
+    // The TOP LEVEL is not a block, and the difference is settled against swiftc
+    // 6.1.2. A top-level defer runs at the END of the top level, LIFO, ON THE NORMAL
+    // PATH ONLY: `print("s"); defer { print("d") }; try g()` prints `s` and then
+    // "Fatal error: Error raised at top level: m.E.boom" with NO `d`, because an
+    // uncaught error at top level traps and nothing unwinds. So the block shape above
+    // - wrap the rest in a js_try whose finally is the defer body - is wrong here; it
+    // would fire the defer on the way out. Every top-level statement after a marker
+    // runs unless the program traps or calls exit(), so a static move of the bodies to
+    // the end, reversed, IS Swift's order, and it emits no try at all.
+    //
+    // Before this, the marker record reached makeSeq's `items[i](b)` and the WALK died
+    // with a host "TypeError: Not a function: [object Object] at compile-core.js:617"
+    // - not a diagnostic, and not a language error. docs/todo.md 2.11.
+    // An IMPORTED file's top level is stashed rather than emitted, and the stash is
+    // handed to the shared core's own makeSeq - so the markers have to be resolved
+    // before they get there or the walk dies at compile-core.js's `items[i](b)`
+    // instead. Its defers therefore run at the end of ITS top level, which is where
+    // the interpreter half runs them too. (No valid Swift reaches this: only main.swift
+    // may carry top-level statements.)
+    function swTopItems(items) {
+        var plain = []
+        var defs = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == null) { continue }
+            if (typeof it == "function") { plain.push(it) } else { defs.push(it.isdefer) }
+        }
+        for (var j = defs.length - 1; j >= 0; j--) { plain.push(defs[j]) }
+        return plain
+    }
+    function swTopSeq(items) { return makeSeq(swTopItems(items)) }
     // Both overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
     makeBlockStmt = function(items) {
         var seq = swSeqWithDefers(items)
@@ -2894,6 +2943,19 @@ KwContinue  = "continue" KwEnd ;
     // a surrogate half comes back as U+FFFD, which is how a pair is recognised). Both
     // are emitted only for a program that has a non-ASCII or escaped string literal,
     // so an ASCII-only program keeps the IR it had.
+    //
+    // THE LENGTH THESE TWO LOOP TO MUST BE THE CODE-UNIT LENGTH, and js_pylen is not
+    // it: the Go twin's js_pylen counts CODE POINTS for a string (it is CPython's
+    // len(), shared by every language) while js_kindex indexes CODE UNITS - the
+    // jsrt.go inconsistency the manual's chapter 7.9 records. Layer 2's swift
+    // js_pylen answers `v.length`, i.e. UNITS, so the two engines disagreed on the
+    // loop bound and llvm.Run stopped one unit early per astral character:
+    // "a\u{1F600}b".count was 2 and "\u{1F600}\u{1F600}".count was 1, where swiftc,
+    // the interpreter half and the NATIVE binary all say 3 and 2. A live halves
+    // divergence --cross could not see, because no test program had an astral literal.
+    // `.length` is UTF-16 units in all three engines (rt.strLen, str_ulen in the
+    // floor, and the host string in the interpreter).
+    function swUnitLen(b, sV) { return callExt(b, "js_get", [sV, emitStr(b, "length")]) }
     var combLo = [0x300, 0x483, 0x591, 0x610, 0x64B, 0x1AB0, 0x1DC0, 0x20D0, 0xFE00, 0xFE20]
     var combHi = [0x36F, 0x489, 0x5BD, 0x61A, 0x65F, 0x1AFF, 0x1DFF, 0x20F0, 0xFE0F, 0xFE2F]
     function rtIsComb() {
@@ -2915,7 +2977,7 @@ KwContinue  = "continue" KwEnd ;
     function rtGCount() {
         return rtFunc("sw_gcount", 1, function(b, ps) {
             var sV = ps[0]
-            var lenV = callExt(b, "js_pylen", [sV])
+            var lenV = swUnitLen(b, sV)
             var sc = callExt(b, "js_scope_new", [handle(0)])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "n"), emitNum(b, 0)])
@@ -2945,6 +3007,304 @@ KwContinue  = "continue" KwEnd ;
             doneB.NewRet(callExt(doneB, "js_scope_get", [sc, emitStr(doneB, "n")]))
         })
     }
+    // The same walk as sw_gcount, keeping the CLUSTERS instead of counting them:
+    // `Array(s)` and `for c in s` both need the elements .count counts. Both used to
+    // index the string by CODE UNIT while taking their length from a different
+    // counter, so `for c in "cafe\u{301}"` ran FIVE times here (js_pylen: code
+    // points) and FOUR in the interpreter (grapheme clusters), printing the
+    // combining mark as its own element or dropping it - two answers, neither
+    // swiftc's c, a, f, é. A cluster is cut out with js_mcall's "substring", which
+    // is UTF-16 code units in all three engines (rt.strRange, the floor's, and the
+    // host string's).
+    function rtGSplit() {
+        return rtFunc("sw_gsplit", 1, function(b, ps) {
+            var sV = ps[0]
+            var out = callExt(b, "js_arr_new", [])
+            var lenV = swUnitLen(b, sV)
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "st"), emitNum(b, 0 - 1)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+            // jV is where THIS code point starts; i advances past it (twice for a
+            // surrogate pair, which js_kindex reports as U+FFFD).
+            var jV = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+            var cp = callExt(bodyB, "js_char_code", [callExt(bodyB, "js_kindex", [sV, jV])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [jV, emitNum(bodyB, 1)])])
+            var surB = curF.NewBlock("")
+            var chkB = curF.NewBlock("")
+            var cutB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [cp, emitNum(bodyB, 0xFFFD)])), surB, chkB)
+            callExt(surB, "js_scope_set", [sc, emitStr(surB, "i"),
+                                           callExt(surB, "js_jadd", [callExt(surB, "js_scope_get", [sc, emitStr(surB, "i")]), emitNum(surB, 1)])])
+            surB.NewBr(cutB)
+            // A combining mark attaches to the cluster in progress and cuts nothing.
+            chkB.NewCondBr(truthy(chkB, chkB.NewCall(rtIsComb(), [cp])), headB, cutB)
+            var stV = callExt(cutB, "js_scope_get", [sc, emitStr(cutB, "st")])
+            var pushB = curF.NewBlock("")
+            var setB = curF.NewBlock("")
+            cutB.NewCondBr(truthy(cutB, callExt(cutB, "js_ge", [stV, emitNum(cutB, 0)])), pushB, setB)
+            callExt(pushB, "js_arr_push", [out, swEmitSub(pushB, sV, stV, jV)])
+            pushB.NewBr(setB)
+            callExt(setB, "js_scope_set", [sc, emitStr(setB, "st"), jV])
+            setB.NewBr(headB)
+            var stD = callExt(doneB, "js_scope_get", [sc, emitStr(doneB, "st")])
+            var tailB = curF.NewBlock("")
+            var retB = curF.NewBlock("")
+            doneB.NewCondBr(truthy(doneB, callExt(doneB, "js_ge", [stD, emitNum(doneB, 0)])), tailB, retB)
+            callExt(tailB, "js_arr_push", [out, swEmitSub(tailB, sV, stD, lenV)])
+            tailB.NewBr(retB)
+            retB.NewRet(out)
+        })
+    }
+    // popLast() and Array(...) are lowered as EMITTED IR rather than as new externs,
+    // because a new extern needs a Go twin and abnf/jsrtswift.go is not this round's
+    // to change. Both are built from externs both compiled engines already answer.
+    //
+    // popLast(): removeLast() unless the array is empty, in which case nil. swiftc
+    // 6.1.2 traps on `[].removeLast()` and answers nil for `[].popLast()`; before
+    // this, `popLast` reached the shared list table and aborted with "unknown list
+    // method 'popLast'" where the interpreter said "unknown Array method: popLast".
+    // A receiver that is not an Array keeps the extern, so a user type that declares
+    // its own popLast still dispatches (and still gets its own refusal).
+    function rtPopLast() {
+        return rtFunc("sw_poplast", 1, function(b, ps) {
+            var arrB = curF.NewBlock("")
+            var othB = curF.NewBlock("")
+            var emptyB = curF.NewBlock("")
+            var popB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "Array")])), arrB, othB)
+            arrB.NewCondBr(truthy(arrB, callExt(arrB, "js_seq", [callExt(arrB, "js_pylen", [ps[0]]), emitNum(arrB, 0)])),
+                           emptyB, popB)
+            emptyB.NewRet(hNull)
+            popB.NewRet(callExt(popB, "js_swmcall", [ps[0], emitStr(popB, "removeLast"),
+                                                     callExt(popB, "js_arr_new", [])]))
+            othB.NewRet(callExt(othB, "js_swmcall", [ps[0], emitStr(othB, "popLast"),
+                                                     callExt(othB, "js_arr_new", [])]))
+        })
+    }
+    // Array(seq): a String yields its Characters (clusters), a Range its elements, a
+    // Dictionary its (key: value:) pairs, and everything array-shaped a COPY - Array
+    // is a value type in Swift, so `var b = Array(a); b.append(9)` must not touch a.
+    function rtArrayOf() {
+        return rtFunc("sw_arrayof", 1, function(b, ps) {
+            var strB = curF.NewBlock("")
+            var notStrB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
+            strB.NewRet(strB.NewCall(rtGSplit(), [ps[0]]))
+            var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
+            var dictB = curF.NewBlock("")
+            var arrB = curF.NewBlock("")
+            var rdA = rtIsDictStrict(notStrB, seqV)
+            rdA.b.NewCondBr(truthy(rdA.b, rdA.v), dictB, arrB)
+            // The dictionary form: one labeled two-element tuple per entry.
+            var dout = callExt(dictB, "js_arr_new", [])
+            var keysV = callExt(dictB, "js_get", [seqV, emitStr(dictB, "keys")])
+            var valsV = callExt(dictB, "js_get", [seqV, emitStr(dictB, "vals")])
+            var dlen = callExt(dictB, "js_pylen", [keysV])
+            var dsc = callExt(dictB, "js_scope_new", [handle(0)])
+            callExt(dictB, "js_scope_decl", [dsc, emitStr(dictB, "i"), emitNum(dictB, 0)])
+            var dHead = curF.NewBlock("")
+            var dBody = curF.NewBlock("")
+            var dDone = curF.NewBlock("")
+            dictB.NewBr(dHead)
+            var diV = callExt(dHead, "js_scope_get", [dsc, emitStr(dHead, "i")])
+            dHead.NewCondBr(truthy(dHead, callExt(dHead, "js_lt", [diV, dlen])), dBody, dDone)
+            var di2 = callExt(dBody, "js_scope_get", [dsc, emitStr(dBody, "i")])
+            var kV = callExt(dBody, "js_swidx", [keysV, di2])
+            var vV = callExt(dBody, "js_swidx", [valsV, di2])
+            var tupV = callExt(dBody, "js_obj_new", [])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "__tuple"), emitNum(dBody, 2)])
+            var lblArr = callExt(dBody, "js_arr_new", [])
+            callExt(dBody, "js_arr_push", [lblArr, emitStr(dBody, "key")])
+            callExt(dBody, "js_arr_push", [lblArr, emitStr(dBody, "value")])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "__tlabels"), lblArr])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "0"), kV])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "key"), kV])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "1"), vV])
+            callExt(dBody, "js_set", [tupV, emitStr(dBody, "value"), vV])
+            callExt(dBody, "js_arr_push", [dout, tupV])
+            callExt(dBody, "js_scope_set", [dsc, emitStr(dBody, "i"),
+                                            callExt(dBody, "js_jadd", [di2, emitNum(dBody, 1)])])
+            dBody.NewBr(dHead)
+            dDone.NewRet(dout)
+            // Everything else: a fresh array with the same elements.
+            var out = callExt(arrB, "js_arr_new", [])
+            var alen = callExt(arrB, "js_pylen", [seqV])
+            var asc = callExt(arrB, "js_scope_new", [handle(0)])
+            callExt(arrB, "js_scope_decl", [asc, emitStr(arrB, "i"), emitNum(arrB, 0)])
+            var aHead = curF.NewBlock("")
+            var aBody = curF.NewBlock("")
+            var aDone = curF.NewBlock("")
+            arrB.NewBr(aHead)
+            var aiV = callExt(aHead, "js_scope_get", [asc, emitStr(aHead, "i")])
+            aHead.NewCondBr(truthy(aHead, callExt(aHead, "js_lt", [aiV, alen])), aBody, aDone)
+            var ai2 = callExt(aBody, "js_scope_get", [asc, emitStr(aBody, "i")])
+            callExt(aBody, "js_arr_push", [out, callExt(aBody, "js_swidx", [seqV, ai2])])
+            callExt(aBody, "js_scope_set", [asc, emitStr(aBody, "i"),
+                                            callExt(aBody, "js_jadd", [ai2, emitNum(aBody, 1)])])
+            aBody.NewBr(aHead)
+            aDone.NewRet(out)
+        })
+    }
+    // Array(repeating: v, count: n).
+    function rtArrayRep() {
+        return rtFunc("sw_arrayrep", 2, function(b, ps) {
+            var out = callExt(b, "js_arr_new", [])
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, ps[1]])), bodyB, doneB)
+            var i2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+            callExt(bodyB, "js_arr_push", [out, ps[0]])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"),
+                                            callExt(bodyB, "js_jadd", [i2, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(out)
+        })
+    }
+    // A String walked as a SEQUENCE is its clusters; everything else passes through.
+    // Emitted into a for-in only when the program has a non-ASCII string literal -
+    // for an ASCII string the code-unit walk the loop already does IS the cluster
+    // walk, so an ASCII-only program's module is byte-identical to the one before.
+    function rtStrSeq() {
+        return rtFunc("sw_strseq", 1, function(b, ps) {
+            var sB = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
+            sB.NewRet(sB.NewCall(rtGSplit(), [ps[0]]))
+            oB.NewRet(ps[0])
+        })
+    }
+    // uppercased() / lowercased(): the interpreter half has had both since it was
+    // written and NEITHER compiled half did - `"Hello".uppercased()` aborted with
+    // "unknown String method: uppercased" under llvm.Run and natively, which is why
+    // swift got no case-mapping pins in e1816b3 while kotlin, ruby and python did.
+    // docs/todo.md 4.3.
+    //
+    // The mapping is the FLOOR'S, reached the way the other three reach it - the
+    // string's own toUpperCase/toLowerCase member (runtime.c member ids 27/28, whose
+    // per-code-point table case_map IS; strings.ToUpper in the Go twin's
+    // builtinMethod). Nothing is moved into layer 2: case_map was moved there once
+    // and reverted at 135x on a real workload (manual chapter 5), and this needs no
+    // move at all. A receiver that is not a String keeps the extern, so a user type
+    // declaring its own uppercased() still dispatches.
+    function rtCased(up) {
+        var host = up ? "toUpperCase" : "toLowerCase"
+        var swn = up ? "uppercased" : "lowercased"
+        return rtFunc("sw_" + host, 1, function(b, ps) {
+            var sB = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
+            sB.NewRet(callExt(sB, "js_call", [callExt(sB, "js_get", [ps[0], emitStr(sB, host)]),
+                                              hUndef, callExt(sB, "js_arr_new", [])]))
+            oB.NewRet(callExt(oB, "js_swmcall", [ps[0], emitStr(oB, swn),
+                                                 callExt(oB, "js_arr_new", [])]))
+        })
+    }
+    // isEmpty / first / last are PROPERTIES on every Collection and answered nil in
+    // BOTH halves, where swiftc 6.1.2 says false / 10 / 30 - agree-and-wrong with an
+    // installed oracle, so neither the matrix nor --cross could ever have seen it.
+    // Only a value that IS a collection is answered here; anything else keeps the
+    // plain js_get, so a user type with a member of one of these names is not
+    // hijacked (the same rule sw_extget applies to the extension tables).
+    // The twins are swGetField / swIsColl / swFirstLast in swift-interpreter.abnf.
+    // emitIsDict answers "an object that is not an Array", which is every STRUCT
+    // INSTANCE too - fine where it is used (a for-in sequence is never a struct),
+    // wrong here, where a user type with an `isEmpty` field reaches the same helper
+    // and used to die with "len() of a object". A dictionary is the object that
+    // carries BOTH parallel arrays.
+    // Answers {b, v} like emitIsDict, and for the same reason: there is no
+    // boolean-and extern here, so the second probe has to live in its own block and
+    // the answer is a phi at the top of the join (chapter 4's phi-grouping rule -
+    // nothing else may be emitted into joinB before it).
+    function rtIsDictStrict(bb, v) {
+        var kOk = callExt(bb, "js_is_type", [callExt(bb, "js_get", [v, emitStr(bb, "keys")]),
+                                             emitStr(bb, "Array")])
+        var chkB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        var fromB = bb
+        bb.NewCondBr(truthy(bb, kOk), chkB, joinB)
+        var vOk = callExt(chkB, "js_is_type", [callExt(chkB, "js_get", [v, emitStr(chkB, "vals")]),
+                                               emitStr(chkB, "Array")])
+        chkB.NewBr(joinB)
+        var phi = joinB.NewPhi([llvm.ir.NewIncoming(hFalse, fromB), llvm.ir.NewIncoming(vOk, chkB)])
+        return {b: joinB, v: phi}
+    }
+    function rtIsEmpty() {
+        return rtFunc("sw_isempty", 1, function(b, ps) {
+            var strB = curF.NewBlock("")
+            var notStrB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
+            strB.NewRet(callExt(strB, "js_seq", [callExt(strB, "js_pylen", [ps[0]]), emitNum(strB, 0)]))
+            var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
+            var collB = curF.NewBlock("")
+            var chkB = curF.NewBlock("")
+            var othB = curF.NewBlock("")
+            var rdE = rtIsDictStrict(notStrB, seqV)
+            rdE.b.NewCondBr(truthy(rdE.b, rdE.v), collB, chkB)
+            chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [seqV, emitStr(chkB, "Array")])), collB, othB)
+            collB.NewRet(callExt(collB, "js_seq", [callExt(collB, "js_pylen", [seqV]), emitNum(collB, 0)]))
+            othB.NewRet(callExt(othB, "js_get", [ps[0], emitStr(othB, "isEmpty")]))
+        })
+    }
+    function rtFirstLast(wantLast) {
+        var nm = wantLast ? "last" : "first"
+        return rtFunc("sw_" + nm, 1, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "a"), hUndef])
+            var strB = curF.NewBlock("")
+            var notStrB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
+            callExt(strB, "js_scope_set", [sc, emitStr(strB, "a"), strB.NewCall(rtGSplit(), [ps[0]])])
+            strB.NewBr(joinB)
+            var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
+            var dictB = curF.NewBlock("")
+            var chkB = curF.NewBlock("")
+            var arrB = curF.NewBlock("")
+            var othB = curF.NewBlock("")
+            var rdF = rtIsDictStrict(notStrB, seqV)
+            rdF.b.NewCondBr(truthy(rdF.b, rdF.v), dictB, chkB)
+            callExt(dictB, "js_scope_set", [sc, emitStr(dictB, "a"),
+                                            callExt(dictB, "js_get", [seqV, emitStr(dictB, "keys")])])
+            dictB.NewBr(joinB)
+            chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [seqV, emitStr(chkB, "Array")])), arrB, othB)
+            callExt(arrB, "js_scope_set", [sc, emitStr(arrB, "a"), seqV])
+            arrB.NewBr(joinB)
+            othB.NewRet(callExt(othB, "js_get", [ps[0], emitStr(othB, nm)]))
+            var aV = callExt(joinB, "js_scope_get", [sc, emitStr(joinB, "a")])
+            var nV = callExt(joinB, "js_pylen", [aV])
+            var emptyB = curF.NewBlock("")
+            var pickB = curF.NewBlock("")
+            joinB.NewCondBr(truthy(joinB, callExt(joinB, "js_seq", [nV, emitNum(joinB, 0)])), emptyB, pickB)
+            emptyB.NewRet(hNull)
+            var idxV = wantLast ? callExt(pickB, "js_sub", [nV, emitNum(pickB, 1)]) : emitNum(pickB, 0)
+            pickB.NewRet(callExt(pickB, "js_swidx", [aV, idxV]))
+        })
+    }
+    // Every method call in the chain folder goes through here, so a member the
+    // externs cannot answer can be lowered without a new extern.
+    function swEmitMCall(b, recvV, name, nameV, argsV) {
+        if (name == "popLast") { return b.NewCall(rtPopLast(), [recvV]) }
+        if (name == "uppercased") { return b.NewCall(rtCased(true), [recvV]) }
+        if (name == "lowercased") { return b.NewCall(rtCased(false), [recvV]) }
+        return callExt(b, "js_swmcall", [recvV, nameV, argsV])
+    }
+    function swEmitSub(b, sV, aV, bV) {
+        var sa = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [sa, aV])
+        callExt(b, "js_arr_push", [sa, bV])
+        return callExt(b, "js_mcall", [sV, emitStr(b, "substring"), sa])
+    }
     // Canonical decomposition of the Latin-1 precomposed letters (the range real
     // programs mix); everything else is copied through.
     function rtNfd() {
@@ -2956,7 +3316,7 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_arr_push", [baseArr, emitNum(b, nfdBase.charCodeAt(q))])
                 callExt(b, "js_arr_push", [markArr, emitNum(b, nfdMark[q])])
             }
-            var lenV = callExt(b, "js_pylen", [sV])
+            var lenV = swUnitLen(b, sV)
             var sc = callExt(b, "js_scope_new", [handle(0)])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "o"), emitStr(b, "")])
@@ -3664,6 +4024,7 @@ KwContinue  = "continue" KwEnd ;
             var r = listT(b)
             b = r.b
             var listV = hasRanges ? b.NewCall(rtRangeArr(), [r.v]) : r.v
+            if (hasUniStr) { listV = b.NewCall(rtStrSeq(), [listV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), listV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             var headB = curF.NewBlock("")
@@ -3791,6 +4152,8 @@ KwContinue  = "continue" KwEnd ;
             if (hasUniStr) { return b.NewCall(rtCount(), [cur]) }
             return callExt(b, "js_pylen", [cur])
         }
+        if (name == "isEmpty") { return b.NewCall(rtIsEmpty(), [cur]) }
+        if (name == "first" || name == "last") { return b.NewCall(rtFirstLast(name == "last"), [cur]) }
         if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
         var bt = builtinCompOf(name)
         if (bt != null) {
@@ -3881,7 +4244,7 @@ KwContinue  = "continue" KwEnd ;
                     if (s.kind == "mcall") {
                         var ea = emitArgRecs(b, s.args)
                         b = ea.b
-                        cur = callExt(b, "js_swmcall", [cur, emitStr(b, s.name), ea.v])
+                        cur = swEmitMCall(b, cur, s.name, emitStr(b, s.name), ea.v)
                     } else if (s.kind == "field") { cur = emitFieldRead(b, cur, s.name) }
                     else if (s.kind == "call") {
                         var eac = emitArgRecs(b, s.args)
@@ -3977,7 +4340,7 @@ KwContinue  = "continue" KwEnd ;
                     if (s.name == "init" && curType() != null) {
                         mnameV = emitOverloadKey(b, "init", typeRec(curType().key).inits, s.args, ea.v, 0)
                     }
-                    cur = callExt(b, "js_swmcall", [cur, mnameV, ea.v])
+                    cur = swEmitMCall(b, cur, s.name, mnameV, ea.v)
                     emitWriteBacks(b, ea.boxes)
                     pathKey = null
                 } else if (s.kind == "call") {
@@ -4329,6 +4692,24 @@ KwContinue  = "continue" KwEnd ;
         // Double is 0.3333333333333333. The whole specification, and why the
         // width cannot live in the C floor, is the float WIDTH block of
         // languages/lib/swift-rt.metajs.
+        // Array(seq) and Array(repeating:count:), resolved at walk time like the
+        // other builtin type names. `Array` was bound to the builtin-METHOD table
+        // and never callable, so every form aborted with "call of a non function
+        // value: [object Object]" where the interpreter said "unknown name: Array".
+        // Two arguments IS repeating:count: - no other Swift Array initializer takes
+        // two. A user type named Array still wins. docs/todo.md 2.11.
+        if (name == "Array" && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var eaa = emitArgRecs(b, args)
+                b = eaa.b
+                var a0 = callExt(b, "js_swidx", [eaa.v, emitNum(b, 0)])
+                if (args.length > 1) {
+                    var a1 = callExt(b, "js_swidx", [eaa.v, emitNum(b, 1)])
+                    return {b: b, v: b.NewCall(rtArrayRep(), [a0, a1])}
+                }
+                return {b: b, v: b.NewCall(rtArrayOf(), [a0])}
+            }
+        }
         if ((name == "Double" || name == "Float" || name == "String")
             && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var convExt = name == "String" ? "js_swstr" : "js_swflo"
@@ -4835,6 +5216,8 @@ KwContinue  = "continue" KwEnd ;
             // expansion yields a TUPLE - the one place a tuple is walked as a
             // sequence. js_swtuparr spreads it and passes every other value through.
             var r = {b: r0.b, v: callExt(r0.b, "js_swtuparr", [r0.v])}
+            // A String is a sequence of CLUSTERS, not of code units - see rtStrSeq.
+            if (hasUniStr) { r = {b: r.b, v: r.b.NewCall(rtStrSeq(), [r.v])} }
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
             // The indexable sequence: the value itself for an array or a string, its
@@ -6941,7 +7324,7 @@ KwContinue  = "continue" KwEnd ;
         // The walk of an imported file ends here too: stash its top-level declaration
         // statements for the real jsmain (prepended below) instead of emitting a second one.
         if (importDepth > 0) {
-            stashImported(items) // stashed with its file; emitted later (compile-core)
+            stashImported(swTopItems(items)) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -7028,7 +7411,7 @@ KwContinue  = "continue" KwEnd ;
         // docs/todo.md 1.12.
         var topBodyT = function(bb) {
             bb = emitImported(bb)
-            return makeSeq(items)(bb)
+            return swTopSeq(items)(bb)
         }
         var topCatchT = function(bb) {
             callExt(bb, "js_swtop", [bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "error")])])

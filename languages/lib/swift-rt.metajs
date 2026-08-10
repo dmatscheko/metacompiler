@@ -911,9 +911,33 @@ function js_char_code(v) {
 // astral pair - becomes U+FFFD, which is exactly how the emitter's sw_gcount
 // recognises a pair. That mapping is reproduced here rather than left to the
 // engine, which would hand back the surrogate itself.
+//
+// TWO DIVERGENCES FROM THE GO TWIN USED TO LIVE IN THIS BODY (docs/todo.md 2.11):
+// the failure TEXT and the returned TYPE.
+//
+//  - TEXT. abnf/jsrt.go says `string index %d out of range for %q`; this said
+//    `string index out of range`. It is settled ON THE TWIN, not on swiftc, and
+//    deliberately: no Swift program can reach this fail. Swift's own subscript is
+//    js_swidx (whose four messages ARE swiftc's, read off the toolchain);
+//    js_kindex is reached only from the emitter's own sw_gcount / sw_nfd walks,
+//    whose loop bound is now the same code-unit length the index counts in, and
+//    from the variadic-parameter prologue, where the receiver is the args ARRAY.
+//    So the twin's wording is the only fixed point available - it is in a file
+//    shared with kotlin, which this round may not touch. swQuote is Swift's
+//    debugDescription rather than Go's %q; the two agree on every printable
+//    string and differ only in how they escape a control character, which is as
+//    close as a body that must not import a Go quoter can get.
+//  - TYPE. The twin answers a jsChar and this answers a one-character String, and
+//    THAT ONE STAYS, because it cannot be closed from here: the floor has no
+//    jsChar tag at all (see WALL note 3 at the top of this file). It is also
+//    unobservable - every value this returns is consumed by js_char_code, whose
+//    two halves read a jsChar's code and a one-character string's charCodeAt to
+//    the same number. Recording it rather than pretending it is gone.
 function js_kindex(s, i) {
     if (typeof s != "string") { return s[i] }
-    if (i < 0 || i >= s.length) { fail("string index out of range") }
+    if (i < 0 || i >= s.length) {
+        fail("string index " + i + " out of range for " + swQuote(s))
+    }
     var c = s.charCodeAt(i)
     if (c >= 55296 && c <= 57343) { return String.fromCharCode(65533) }
     return String.fromCharCode(c)

@@ -151,7 +151,12 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 // swRunTop, not the loop written out here, because an error NOBODY CAUGHT has to
 // be reported as a diagnostic rather than allowed to escape into the engine - see
 // its comment in the start script below. docs/todo.md 1.12.
-Program     = [ Hashbang ] { TopExec } ;
+// The Program tag runs the TOP-LEVEL defers, once, after the last TopExec: each
+// TopExec executes ONE top-level statement as it is parsed, so a `defer` marker
+// has to be parked in a script-side list and drained here. swiftc runs them at
+// the end of the top level, LIFO, and only on the normal path - see swRunTop.
+Program     <~~ swRunTopDefers() ~~>
+            = [ Hashbang ] { TopExec } ;
 TopExec     <~~ swRunTop(takeAll()) ~~>
             = TopItem ;
 TopItem     = PoundIfTop | OpDeclTop | FunTop | TypeTop | UnsupTop | TopStmt ;
@@ -1717,7 +1722,24 @@ KwContinue  = "continue" KwEnd ;
         var i = 0
         while (i < str.length) {
             var c1 = str.charCodeAt(i)
-            if (c1 != 92) { out += str.charAt(i); i++; continue }
+            // A RAW astral character in the source (an emoji written as itself
+            // rather than as \u{...}) is TWO code units, and copying it one unit at
+            // a time hands a LONE SURROGATE to the host: it cannot be encoded in
+            // UTF-8, so it comes back as U+FFFD and the pair became two separate
+            // replacement characters. `"a<emoji>b".count` was 4 here and 3 under
+            // llvm.Run and swiftc - and 3 here for the ESCAPE spelling of the same
+            // string, so one literal had two values depending on how it was
+            // written. Copy the pair in ONE substring.
+            if (c1 != 92) {
+                if (c1 >= 0xD800 && c1 <= 0xDBFF && i + 1 < str.length) {
+                    out += str.substring(i, i + 2)
+                    i += 2
+                    continue
+                }
+                out += str.charAt(i)
+                i++
+                continue
+            }
             var e = str.charCodeAt(i + 1)
             if (e == 110) { out += "\n"; i += 2; continue }
             if (e == 116) { out += "\t"; i += 2; continue }
@@ -1901,6 +1923,35 @@ KwContinue  = "continue" KwEnd ;
             n++
         }
         return n
+    }
+    // The same walk, keeping the CLUSTERS instead of counting them. `Array(s)` and
+    // `for c in s` both need the elements swGraphemeCount counts, and before this
+    // they indexed the string by CODE UNIT and silently disagreed with .count:
+    // `for c in "cafe\u{301}"` walked to swGraphemeCount's 4 and read units 0..3, so
+    // the combining mark was dropped and `é` printed as `e`. swiftc 6.1.2 yields
+    // c, a, f, é.
+    function swGraphemes(str) {
+        var out = []
+        var i = 0
+        var start = -1
+        var joining = false
+        while (i < str.length) {
+            var j = i
+            var cp = str.charCodeAt(i)
+            var w = 1
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
+                cp = 0x10000 + ((cp - 0xD800) * 1024) + (str.charCodeAt(i + 1) - 0xDC00)
+                w = 2
+            }
+            i += w
+            if (cp == 0x200D) { joining = true; continue }
+            if (joining) { joining = false; continue }
+            if (isCombiningCp(cp)) { continue }
+            if (start >= 0) { out.push(str.substring(start, j)) }
+            start = j
+        }
+        if (start >= 0) { out.push(str.substring(start, str.length)) }
+        return out
     }
 
     // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
@@ -2831,8 +2882,34 @@ KwContinue  = "continue" KwEnd ;
         if (v.__range === true) { return rangeLen(v) }
         return v.length
     }
+    // isEmpty / first / last are PROPERTIES on every Collection, and all three
+    // answered nil in BOTH halves where swiftc 6.1.2 answers false / 10 / 30 -
+    // agree-and-wrong with an oracle installed, which is the class this project
+    // treats as the one byte-identity cannot see. `first`/`last` existed only as
+    // METHOD names in arrayMethod, so `a.first()` worked and `a.first` did not.
+    // On a String they are the first and last CLUSTER, not code unit.
+    function swIsColl(v) {
+        if (typeof v == "string") { return true }
+        if (v === null || v === undefined) { return false }
+        if (isDict(v)) { return true }
+        if (isRange(v)) { return true }
+        return Array.isArray(v)
+    }
+    function swFirstLast(o, wantLast) {
+        if (typeof o == "string") {
+            var g = swGraphemes(o)
+            if (g.length == 0) { return null }
+            return wantLast ? g[g.length - 1] : g[0]
+        }
+        var arr = anytype
+        arr = isRange(o) ? rangeArray(o) : (isDict(o) ? o.keys : o)
+        if (!Array.isArray(arr) || arr.length == 0) { return null }
+        return wantLast ? arr[arr.length - 1] : arr[0]
+    }
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
+        if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
+        if ((name == "first" || name == "last") && swIsColl(o)) { return swFirstLast(o, name == "last") }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
         // A sized-integer box is an object, so its own members have to be answered
         // before the generic object paths below take it for a struct instance.
@@ -3149,6 +3226,22 @@ KwContinue  = "continue" KwEnd ;
             while (jj > at) { t[jj] = t[jj - 1]; jj = jj - 1 }
             t[at] = args[0]
             return undefined
+        }
+        // removeLast() and popLast() differ ONLY on an empty array: swiftc 6.1.2
+        // traps on `[].removeLast()` ("Can't remove last element from an empty
+        // collection") and answers nil for `[].popLast()`. removeLast was already
+        // in BOTH compiled halves (the shared list table in abnf/jsrt.go and
+        // swListMethod in lib/swift-rt.metajs) and missing only here, so it was a
+        // live halves divergence; popLast was in none of the three, and the two
+        // refusals disagreed - "unknown Array method: popLast" here against
+        // "unknown list method 'popLast'" under llvm.Run. docs/todo.md 2.11.
+        if (name == "popLast") {
+            if (t.length == 0) { return null }
+            return t.pop()
+        }
+        if (name == "removeLast") {
+            if (t.length == 0) { fail("Fatal error: Can't remove last element from an empty collection") }
+            return t.pop()
         }
         if (name == "contains") { return t.indexOf(args[0]) >= 0 }
         if (name == "first") { return t.length == 0 ? null : t[0] }
@@ -3794,9 +3887,47 @@ KwContinue  = "continue" KwEnd ;
     // printed drops the qualifier the same way. js_swtop in lib/swift-rt.metajs and
     // abnf/jsrtswift.go print the IDENTICAL line, so all three engines agree.
     // docs/todo.md 1.12.
+    // A TOP-LEVEL defer is not a block defer, and the difference is settled against
+    // swiftc 6.1.2 rather than assumed. Top-level defers run at the END of the top
+    // level, LIFO, ON THE NORMAL PATH ONLY:
+    //
+    //     print("s"); defer { print("d") }; try g()   ->   s
+    //                                                      Fatal error: Error raised
+    //                                                      at top level: m.E.boom
+    //
+    // no `d`, because an error nobody caught at top level TRAPS (SIGTRAP/133) and
+    // nothing unwinds. So the block builder's "wrap the rest in a try whose finally
+    // is the defer body" shape is WRONG here: it would fire the defer on the way out
+    // of the throw. Reaching the marker is what registers it, and every top-level
+    // statement after it runs unless the program traps or calls exit(), so running
+    // the registered bodies in reverse after the loop is exactly Swift's order.
+    // (exit() does not run them either, in Swift or here - it is libc's exit.)
+    // Before this, a marker record reached makeSeq's call site and both script hosts
+    // died with a HOST error, differently: goja "TypeError: Not a function:
+    // [object Object]", -frozen "call of a non function value". docs/todo.md 2.11.
+    // Parked top-level defer bodies, drained by the Program tag in LIFO order.
+    var swTopDefers = []
+    function swTopSeq(xs) {
+        for (var i = 0; i < xs.length; i++) {
+            var it = xs[i]
+            if (it == null) { continue }
+            if (typeof it == "function") { it() } else { swTopDefers.push(it.isdefer) }
+        }
+    }
     function swRunTop(xs) {
         try {
-            for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { xs[i]() } }
+            swTopSeq(xs)
+        } catch (e) {
+            if (excIsUser(e)) { fail("Fatal error: Error raised at top level: " + swstr(e.v)) }
+            throw e
+        }
+    }
+    // The end of the top level: the parked defers, newest first.
+    function swRunTopDefers() {
+        var ds = swTopDefers
+        swTopDefers = []
+        try {
+            for (var j = ds.length - 1; j >= 0; j--) { ds[j]() }
         } catch (e) {
             if (excIsUser(e)) { fail("Fatal error: Error raised at top level: " + swstr(e.v)) }
             throw e
@@ -4564,6 +4695,18 @@ KwContinue  = "continue" KwEnd ;
     }
     // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. Iterating a dictionary with a
     // tuple pattern yields (key, value) pairs; with a plain name it yields the keys.
+    // What a for-in walks: a Range's elements, a `repeat` pack's tuple elements, and
+    // a String's CLUSTERS. The string arm is the fix: the loop used to take its trip
+    // count from swlen (grapheme clusters) and its elements from arr[i] (code
+    // UNITS), so `for c in "cafe\u{301}"` ran 4 times and printed c a f e - dropping
+    // the combining mark swiftc 6.1.2 keeps on the fourth. Everything else, arrays
+    // and dictionaries included, passes through untouched.
+    function swSeqVal(v) {
+        if (isRange(v)) { return rangeArray(v) }
+        if (isTupleVal(v)) { return tupleArray(v) }
+        if (typeof v == "string") { return swGraphemes(v) }
+        return v
+    }
     function makeForList(items) {
         var lbl = itemLbl(items)
         var rest = itemsAfterLbl(items)
@@ -4575,9 +4718,12 @@ KwContinue  = "continue" KwEnd ;
         var bodyT = rest[k]
         var wantPair = pat.tnames != undefined
         return function() {
-            var arr = listT()
-            if (isRange(arr)) { arr = rangeArray(arr) }
-            if (isTupleVal(arr)) { arr = tupleArray(arr) }
+            // OUT OF LINE, and it has to be: MetaJS is typed and a local that has
+            // held a string cannot later hold the array swGraphemes answers - and
+            // the interpreter only enforces that under -frozen, so the goja leg was
+            // green while --full read FROZEN-DIFF (manual chapter 4).
+            var arr = anytype
+            arr = swSeqVal(listT())
             var res = undefined
             var isD = isDict(arr)
             var n = swlen(arr)
@@ -6187,6 +6333,45 @@ KwContinue  = "continue" KwEnd ;
     hostGlobals["Float"] = swF32Type()
     // String(x) / String(describing: x): the text print would have written.
     hostGlobals["String"] = {__conv: function(x) { return swstr(x) }}
+    // Array(seq) and Array(repeating:count:). Both aborted in every engine, and the
+    // two refusals did not even agree: "unknown name: Array" here against "call of a
+    // non function value: [object Object]" under llvm.Run - a name bound to the
+    // builtin-type table and never made callable. swiftc 6.1.2:
+    //   Array("hi")                  ["h", "i"]     (Characters, i.e. CLUSTERS)
+    //   Array([4, 5])                [4, 5]         (a COPY - Array is a value type)
+    //   Array(0..<3)                 [0, 1, 2]
+    //   Array(["a": 1])              [(key: "a", value: 1)]
+    //   Array(repeating: 0, count: 3)  [0, 0, 0]
+    // Two positional arguments IS the repeating:count: form; nothing else in Swift
+    // spells Array with two. docs/todo.md 2.11.
+    function swArrayOf(x, n) {
+        if (n !== undefined) {
+            var rep = []
+            var k = szNum(n) | 0
+            for (var q = 0; q < k; q++) { rep.push(x) }
+            return rep
+        }
+        if (typeof x == "string") { return swGraphemes(x) }
+        if (isRange(x)) { return rangeArray(x) }
+        if (isTupleVal(x)) { return tupleArray(x) }
+        if (isDict(x)) {
+            var pairs = []
+            for (var d = 0; d < x.keys.length; d++) {
+                var pt = {__tuple: 2}
+                scopePut(pt, "__tlabels", ["key", "value"])
+                scopePut(pt, "0", x.keys[d])
+                scopePut(pt, "key", x.keys[d])
+                scopePut(pt, "1", x.vals[d])
+                scopePut(pt, "value", x.vals[d])
+                pairs.push(pt)
+            }
+            return pairs
+        }
+        if (Array.isArray(x)) { return x.slice(0) }
+        fail("Array(): not a sequence")
+        return []
+    }
+    hostGlobals["Array"] = {__conv: swArrayOf}
     hostGlobals["Int"] = swIntType(64, false)
     hostGlobals["Int64"] = swIntType(64, false)
     hostGlobals["Int32"] = swIntType(32, false)

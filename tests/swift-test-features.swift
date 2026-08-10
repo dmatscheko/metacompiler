@@ -1136,7 +1136,6 @@ func main() {
     check("protocol-composition-tests-every-component",
           (pvals[4] is PGreet & PSub) && !(pvals[0] is PGreet & PSub))
 
-    print("features: \(checks) checks, \(fails) failures")
 }
 
 // ----- The TOP LEVEL, deliberately outside main() -------------------------
@@ -1177,5 +1176,73 @@ check("top-level-struct-usable-at-top-level", TopS(v: 2).v == 2)
 check("top-level-do-catch-wins-over-the-program-wide-try", topLog == "boom3;012")
 check("top-level-try-optional-still-answers-nil", topOpt == nil)
 
+// ----- An ASTRAL literal, and the Collection PROPERTIES --------------------
+// This file is what ./test.sh --cross diffs the two halves with, and it had no
+// astral character anywhere - which is why a literal that meant two different
+// things in the two halves survived. A raw astral character is TWO code units,
+// and copying a literal one unit at a time hands the host a LONE SURROGATE that
+// cannot be encoded in UTF-8: `"a<emoji>b".count` was 4 in the interpreter and 3
+// under llvm.Run, where the same string spelled \u{1F600} was 3 in both. swiftc
+// 6.1.2 says 3 for both spellings and says they are equal.
+//
+// isEmpty / first / last rode along: all three are properties on every
+// Collection and all three answered nil in BOTH halves, where swiftc says false
+// and a value - agree-and-wrong, which byte-identity cannot see by construction.
+let astRaw = "a😀b"
+let astEsc = "a\u{1F600}b"
+let astComb = "cafe\u{301}"
+struct AstOwn { var isEmpty = 99; var first = 7; var last = 8 }
+check("a-raw-astral-literal-is-the-escape-spelling", astRaw == astEsc && astRaw.count == 3)
+check("an-astral-pair-is-one-cluster-in-every-leg",
+      astEsc.count == 3 && Array(astRaw).count == 3
+      && Array(astRaw)[1] == Array(astEsc)[1] && String(Array(astRaw)[1]).count == 1)
+check("a-combining-mark-joins-the-cluster-before-it",
+      astComb.count == 4 && Array(astComb)[3] == "e\u{301}")
+var astIter = ""
+for c in astRaw { astIter += String(c) }
+check("for-in-over-a-string-walks-clusters", astIter == astRaw && astIter.count == 3)
+check("isEmpty-is-a-Bool-not-nil",
+      !astRaw.isEmpty && "".isEmpty && ![1].isEmpty && ([] as [Int]).isEmpty)
+check("first-and-last-are-properties-too",
+      astRaw.first == "a" && astRaw.last == "b" && [1, 2].first == 1 && [1, 2].last == 2)
+check("first-and-last-of-an-empty-collection-are-nil",
+      "".first == nil && ([] as [Int]).last == nil)
+check("a-user-member-of-those-names-is-not-hijacked",
+      AstOwn().isEmpty == 99 && AstOwn().first == 7 && AstOwn().last == 8)
+
+// ----- A TOP-LEVEL defer (docs/todo.md 2.11) ------------------------------
+// A `defer` among the top-level statements used to kill BOTH halves with a HOST
+// error rather than a diagnostic - the marker record reached a call site that
+// expected a thunk. The interpreter said "TypeError: Not a function:
+// [object Object]" under goja and "call of a non function value" under -frozen
+// (so the crash was itself a live goja-vs--frozen divergence) and llvm.Run said
+// "TypeError: Not a function ... compile-core.js:617". A block defer worked in
+// every engine; only the top level did not.
+//
+// swiftc 6.1.2 settles the semantics, and they are NOT the block's:
+//   * top-level defers run at the END of the top level, LIFO;
+//   * an uncaught error at top level TRAPS, so they do NOT run on that path
+//     (the block form fires its defer on a throw, because a function unwinds);
+//   * exit() does not run them either.
+// The summary print and exit(fails) therefore live in the FIRST-registered
+// defer, which is the LAST to run: nothing after exit() can observe anything.
+// A FIFO order would spell "12" instead of "21", and a defer that ran where it
+// was written would spell it before the loop's letters.
+var tldLog = ""
+defer {
+    check("top-level-defers-run-at-the-end-LIFO", tldLog == "wxb0l0b1l121")
+    print("features: \(checks) checks, \(fails) failures")
+    exit(fails)
+}
+defer { tldLog += "1" }
+if topLet == 7 {
+    defer { tldLog += "x" }
+    tldLog += "w"
+}
+for i in 0..<2 {
+    defer { tldLog += "l\(i)" }
+    tldLog += "b\(i)"
+}
+defer { tldLog += "2" }
+
 main()
-exit(fails)
