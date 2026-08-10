@@ -2527,6 +2527,76 @@ func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
 }
 
 // ----------------------------------------------------------------------------
+// The STATIC NAMESPACE of a js/ts class (docs/todo.md 2.13)
+//
+// `class C { static m(){} m(){} }` is two different members in JavaScript - one on
+// the constructor, one on the prototype - and this engine used to keep both in the
+// descriptor's own property map, where the second write simply won. So `C.m()`
+// answered the instance method, `class F extends E {}` resolved an inherited static
+// to F's instance member, and an INSTANCE could see every static (`typeof c.sonly`
+// was "function" where node says "undefined").
+//
+// The fix is a second table: the js/ts emitters and interpreters put every static
+// member - methods, fields and accessor boxes - in a plain object stored on the
+// descriptor under `__statics`, and leave instance members where they are. Nothing
+// about instance dispatch changes, which is why js_get, js_set and js_mcall (shared
+// by sixteen languages, and the hottest externs here) are untouched: only the js/ts
+// externs js_jsvget / js_jsmget / js_jsmset / js_jsmcall and the three super
+// primitives below read the new table, and for a language that emits no __statics
+// every one of them falls through to exactly the code that ran before.
+//
+// Twins: jsStaticFind / jvStaticFind in languages/lib/js-rt.metajs and
+// classStaticFind / staticsOf in the two -interpreter grammars.
+
+// isClassDesc reports whether v is a class DESCRIPTOR ({__isclass: true, ...}) as
+// opposed to an instance of one. It is what tells the static side of a `super`
+// lookup from the instance side: only a static method's receiver is a class.
+func isClassDesc(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	isc, has := o.props["__isclass"]
+	return has && isc == true
+}
+
+// jsStaticsOf answers a descriptor's own static table, creating it when create is
+// set (a runtime `C.zz = 1` is a static write like any other).
+func jsStaticsOf(o *jsObject, create bool) *jsObject {
+	if t, ok := o.props["__statics"].(*jsObject); ok {
+		return t
+	}
+	if !create {
+		return nil
+	}
+	t := newJSObject()
+	o.set("__statics", t)
+	return t
+}
+
+// jsStaticsFind walks the descriptor chain from start along __super, looking in each
+// link's static table. It answers the RAW slot, so an accessor box reaches its caller
+// and can be invoked with the right receiver, plus the descriptor that owned it.
+// Statics ARE inherited in JavaScript - `class D extends C {}` then `D.s()` walks the
+// class object's own prototype chain - which is what the walk is for.
+func jsStaticsFind(start interface{}, name string) (interface{}, *jsObject, bool) {
+	guard := 0
+	for cls := start; cls != nil && guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if t := jsStaticsOf(clsObj, false); t != nil {
+			if v, found := t.props[name]; found {
+				return v, clsObj, true
+			}
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil, nil, false
+}
+
+// ----------------------------------------------------------------------------
 // Property access (including the Go bridge)
 
 // isCallable reports whether a value can be invoked.
@@ -11376,6 +11446,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_supercall args must be an array")
 			}
 			name := rt.toString(u(a[2]))
+			// `super.s(x)` inside a STATIC method resolves on the STATIC SIDE, and a
+			// static is a plain closure whose `this` is the receiver rather than an
+			// instance method with the receiver PREPENDED - handing it a[1] as
+			// arguments[0] shifts every argument by one. This used to be told apart
+			// by the __stat table, a set of NAMES, which cannot answer at all once a
+			// class may hold a static and an instance member of the SAME name
+			// (docs/todo.md 2.13): the two now live in different objects, so the
+			// question "which side" is answered by WHICH TABLE the member was found
+			// in. Which side to look at first is decided by the receiver - a class
+			// descriptor means the caller was a static method - and the fallthrough
+			// to the plain props below is what keeps this inert for the other
+			// fifteen languages, none of which emits __statics.
+			if isClassDesc(u(a[1])) {
+				if m, owner, found := jsStaticsFind(u(a[0]), name); found && isCallable(m) {
+					_ = owner
+					return w(rt.call(m, u(a[1]), args.elems))
+				}
+			}
 			// Walk the __super chain starting AT the given class (the caller already
 			// resolved the superclass of the defining class).
 			for cls := u(a[0]); cls != nil; {
@@ -11384,19 +11472,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					break
 				}
 				if m, ok := clsObj.props[name]; ok && isCallable(m) {
-					// `super.s(x)` inside a STATIC method: the parent's static
-					// member is a plain closure whose `this` comes from the
-					// receiver, not an instance method with the receiver
-					// PREPENDED, so handing it a[1] as arguments[0] shifted every
-					// argument by one. The two conventions are told apart by the
-					// __stat table the js/ts emitters write on the descriptor; no
-					// other language emits that slot, so this arm is inert for
-					// all of them. docs/todo.md 1.2.
-					if st, has := clsObj.props["__stat"].(*jsObject); has {
-						if _, isStatic := st.props[name]; isStatic {
-							return w(rt.call(m, u(a[1]), args.elems))
-						}
-					}
 					return w(rt.call(m, jsUndef, append([]interface{}{u(a[1])}, args.elems...)))
 				}
 				cls = clsObj.props["__super"]
@@ -11417,6 +11492,21 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// is invoked with the receiver, which is why 'this' travels separately.
 		"js_supget": func(a []uint64) uint64 { // (super class, this, key) -> value
 			name := rt.toString(u(a[2]))
+			// The static side first when the receiver is a class descriptor - see
+			// js_supercall for why the receiver is what decides, and why the walk
+			// below still runs for every language that emits no __statics.
+			if isClassDesc(u(a[1])) {
+				if v, owner, found := jsStaticsFind(u(a[0]), name); found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.get == nil {
+							return jsHUndefined
+						}
+						return w(rt.call(acc.get, u(a[1]), nil))
+					}
+					_ = owner
+					return w(v)
+				}
+			}
 			for cls := u(a[0]); cls != nil; {
 				clsObj, ok := cls.(*jsObject)
 				if !ok {
@@ -11428,6 +11518,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 							return jsHUndefined
 						}
 						return w(rt.call(acc.get, u(a[1]), nil))
+					}
+					// An INSTANCE method found on the super chain is stored with
+					// this engine's __class calling convention - the receiver is
+					// PREPENDED to the arguments - so handing the raw closure back
+					// made `(super.who)()` and `super[k]()` run the body with
+					// `this` undefined and every argument shifted by one, where
+					// node runs the parent's method on the current receiver. The
+					// answer is a bound shim, the same shape js_jsvget builds for
+					// `const f = p.m`. `super.who` STORED and called later is
+					// node's own undefined-receiver case and stays that way: the
+					// shim carries the receiver the READ was made with, which is
+					// exactly what a Reference does. docs/todo.md 2.13.
+					if isCallable(v) {
+						self := u(a[1])
+						bound := v
+						return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+							return rt.call(bound, jsUndef, append([]interface{}{self}, args...))
+						}))
 					}
 					return w(v)
 				}
@@ -11441,6 +11549,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_supset": func(a []uint64) uint64 { // (super class, this, key, value)
 			name := rt.toString(u(a[2]))
+			// The static side first when the receiver is a class descriptor; see
+			// js_supercall.
+			if isClassDesc(u(a[1])) {
+				if v, owner, found := jsStaticsFind(u(a[0]), name); found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.set != nil {
+							rt.call(acc.set, u(a[1]), []interface{}{u(a[3])})
+						}
+						return 0
+					}
+					_ = owner
+					if o, ok := u(a[1]).(*jsObject); ok {
+						jsStaticsOf(o, true).set(name, u(a[3]))
+						return 0
+					}
+				}
+			}
 			for cls := u(a[0]); cls != nil; {
 				clsObj, ok := cls.(*jsObject)
 				if !ok {

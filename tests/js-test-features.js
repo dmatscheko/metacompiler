@@ -566,6 +566,44 @@ check("this-call-null-strict", (function() { "use strict"; return this; }).call(
 check("this-strict-inherited", (function() { "use strict"; function inner() { return this; } return inner(); })() === undefined);
 check("this-class-body-strict", (function() { class K { m() { function inner() { return this; } return inner(); } } return (new K()).m(); })() === undefined);
 
+// ----- parentheses do not drop the receiver (docs/todo.md 2.13) -----
+// `(o.m)()` is a call THROUGH A REFERENCE: the parentheses are transparent, so `this`
+// is o - while `(0, o.m)()` is the idiom for calling WITHOUT a receiver and must stay
+// the global object. `(arr.push)(x)` as a statement aborted the interpreter half
+// outright. The wide version of this, twenty-eight rows deep, is SECTION 46 of
+// tests/js-test-full.js; this is the smallest program that fails at ec39aef.
+check("paren-receiver", (function() {
+    var a = ["m", 1, 2];
+    var o = {m: function() { return this }, n: function() { return this }};
+    var arr = [a[1]];
+    (arr.push)(a[2]);
+    class B { static s() { return this } }
+    class D extends B { static viaParen() { return (super.s)() } }
+    return (o.m)() === o && (o?.m)() === o && (o[a[0]])() === o && (o.m)`t` === o
+        && arr.length === 2 && D.viaParen() === D
+        && (0, o.m)() === globalThis && (a[0] === "m" ? o.m : o.n)() === globalThis;
+})());
+
+// ----- a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) -----
+// `class C { static m(){} m(){} }` is two different members: one on the constructor,
+// one on the prototype. Both used to land in one table, where the second won. The
+// wide version is SECTION 47 of tests/js-test-full.js; this is the smallest program
+// that fails at ec39aef.
+check("static-namespace", (function () {
+    var a = [1, "m"];
+    class C { static m() { return "S" }  m() { return "I" }  static so() { return "so" }  io() { return "io" } }
+    class E { static x() { return "Ex" } }
+    class F extends E { x() { return "Fx" } }
+    class B { who() { return "B/" + this.nm } }
+    class D extends B { who() { return "D" }  paren() { return (super.who)() } }
+    var d = new D(); d.nm = "d";
+    return C.m() === "S" && (new C()).m() === "I"
+        && typeof C.io === "undefined" && typeof (new C()).so === "undefined"
+        && F.x() === "Ex" && (new F()).x() === "Fx"
+        && (a[1] in C) === true && C.name === "C"
+        && d.paren() === "B/d";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

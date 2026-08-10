@@ -99,52 +99,41 @@ func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
-// jsvClassStatic is the __super walk for an INHERITED STATIC member. `class D
-// extends C {}` then `D.s()` was "TypeError: D.s is not a function" in all four
-// engines, where node walks the class object's own prototype chain: here that is the
-// DESCRIPTOR's __super chain, one link out from the __class chain an instance walks.
-// The engine's own __-prefixed slots are never inherited (every descriptor carries
-// its own __ctor, __name, __super), and the `guard` cap is the same 64 the rest of
-// this project puts on a descriptor walk. The answer is the RAW slot, so an accessor
-// box reaches its caller and can be invoked with the right receiver. Twins:
-// jvStaticFind in languages/lib/js-rt.metajs and classStaticFind in the two
-// interpreter grammars. docs/todo.md 1.2.
-func jsvClassStatic(o *jsObject, name string) (interface{}, bool) {
-	if isc, has := o.props["__isclass"]; !has || isc != true {
+// jsvIsStaticSide reports that a member read on this receiver must be answered from
+// the STATIC namespace and from nowhere else. A class descriptor's own property map
+// holds its INSTANCE methods, so falling back to it after a static miss is exactly
+// the bug: `class C { m(){} }` then `C.m` is undefined in node, not the method.
+// The engine's own slots (__ctor, __name, __super, ...) are excluded - they are read
+// off the descriptor itself by makeNewFrom, instanceof and the error machinery.
+func jsvIsStaticSide(v interface{}, name string) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok || !isClassDesc(o) || jsvInternalKey(name) {
 		return nil, false
 	}
-	if jsvInternalKey(name) {
-		return nil, false
-	}
-	guard := 0
-	for cls := o.props["__super"]; cls != nil && guard < 64; guard++ {
-		clsObj, ok := cls.(*jsObject)
-		if !ok {
-			break
-		}
-		if v, found := clsObj.props[name]; found {
-			return v, true
-		}
-		cls = clsObj.props["__super"]
-	}
-	return nil, false
+	return o, true
 }
 
-// The value of an inherited static member, with an accessor box unwrapped against
-// the receiver the read started from (node runs `static get g()` with `this` bound
-// to the SUBCLASS). Answers false when the name is nowhere on the chain.
-func (rt *jsrt) jsvStaticValue(o *jsObject, name string) (uint64, bool) {
-	v, found := jsvClassStatic(o, name)
-	if !found {
-		return 0, false
-	}
-	if acc, isAcc := v.(*jsAccessor); isAcc {
-		if acc.get == nil {
-			return jsHUndefined, true
+// The value of a member read on a class descriptor: the static chain, an accessor
+// unwrapped against the receiver the read started from (node runs `static get g()`
+// with `this` bound to the SUBCLASS), and `name` last - every class object has one,
+// and it is the descriptor's __name unless a `static name` member shadows it
+// (docs/todo.md 2.13 item 3). Anything else is undefined, as node says.
+func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
+	if v, _, found := jsStaticsFind(o, name); found {
+		if acc, isAcc := v.(*jsAccessor); isAcc {
+			if acc.get == nil {
+				return jsHUndefined
+			}
+			return rt.wrap(rt.call(acc.get, o, nil))
 		}
-		return rt.wrap(rt.call(acc.get, o, nil)), true
+		return rt.wrap(v)
 	}
-	return rt.wrap(v), true
+	if name == "name" {
+		if n, has := o.props["__name"]; has {
+			return rt.wrap(n)
+		}
+	}
+	return jsHUndefined
 }
 
 // jsvProtoTag is Object.prototype.toString's answer for a value.
@@ -1542,6 +1531,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// jsvCallMethod). The layer-2 twin is js_jsvget in languages/lib/js-rt.metajs and
 	// the interpreters' is getMember's class-method arm. docs/todo.md 2.5.
 	m["js_jsvget"] = func(a []uint64) uint64 {
+		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else
+		// (docs/todo.md 2.13). Ordered in front of baseGet because the descriptor's
+		// own property map is where its INSTANCE methods live, and answering one of
+		// those for `C.m` is the defect.
+		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			return rt.jsvStaticSideRead(cls, rt.toString(u(a[1])))
+		}
 		// The FAST PATH must not re-wrap: the handle baseGet answered is returned
 		// as it stands, and the fallback below runs only when the read found
 		// nothing. The layer-2 twin pays the same attention and for a measured
@@ -1564,13 +1560,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return rt.call(bound, jsUndef, append([]interface{}{recv}, args...))
 			}))
 		}
-		// An INHERITED STATIC member, read as a value: `class D extends C {}` then
-		// `D.f`, `typeof D.s`, `D.g` through C's static getter. Unlike an instance
-		// method this is NOT wrapped - a static is a plain closure and node hands
-		// back the very function object. docs/todo.md 1.2.
-		if sv, found := rt.jsvStaticValue(recv, name); found {
-			return sv
-		}
 		return r
 	}
 	// js_has plus the __class methods: an instance keeps its methods on its class
@@ -1587,6 +1576,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if isObj && jsvInternalKey(name) {
 			return w(false)
 		}
+		// `"m" in C` asks the STATIC namespace and nothing else, and it is asked
+		// BEFORE js_has: the descriptor's own property map holds C's INSTANCE
+		// methods, which node does not report as properties of the constructor.
+		// docs/todo.md 2.13.
+		if isObj && isClassDesc(recv) {
+			if _, _, found := jsStaticsFind(recv, name); found {
+				return w(true)
+			}
+			return w(name == "name")
+		}
 		if r := baseHas(a); u(r) == true {
 			return r
 		}
@@ -1600,6 +1599,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsmget"] = func(a []uint64) uint64 {
 		if jsvHidesMember(u(a[0]), rt.toString(u(a[1]))) {
 			return jsHUndefined
+		}
+		// The static namespace, exactly as in js_jsvget above (docs/todo.md 2.13).
+		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			return rt.jsvStaticSideRead(cls, rt.toString(u(a[1])))
 		}
 		// then/catch/finally READ AS A VALUE. Promise method dispatch is
 		// table-based (jsvMethod -> promMethod), so a promise has no own slot of
@@ -1616,18 +1619,46 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}))
 			}
 		}
-		r := baseGet(a)
-		// An INHERITED STATIC member at a CALL site: `class D extends C {}` then
-		// `D.s()`. Only on the miss, so an ordinary member read pays one compare.
-		// docs/todo.md 1.2.
-		if isUndefOrNull(u(r)) {
-			if recv, isObj := u(a[0]).(*jsObject); isObj {
-				if sv, found := rt.jsvStaticValue(recv, rt.toString(u(a[1]))); found {
-					return sv
+		return baseGet(a)
+	}
+
+	// The static table of one class, built at its definition (docs/todo.md 2.13).
+	// The layer-2 twin also counts the classes, so that a program with none pays a
+	// single integer compare per member read instead of a hash lookup; the Go twin
+	// has no such loop to protect and only has to answer the same object.
+	m["js_jsstatics"] = func(a []uint64) uint64 {
+		o, ok := u(a[0]).(*jsObject)
+		if !ok {
+			rt.fail("js_jsstatics needs a class descriptor")
+		}
+		return w(jsStaticsOf(o, true))
+	}
+
+	// js_jsmset used to be emitted only under -exe, where layer 2 has to unwrap the
+	// accessor box the C floor knows nothing about, and so it needed no Go twin. It
+	// is emitted in BOTH halves since docs/todo.md 2.13: a member WRITE on a class
+	// descriptor is a write to the STATIC namespace (`C.zz = 1` then `C.zz`), and
+	// putting it in the descriptor's own property map would put it where the instance
+	// methods live. Everything that is not a class descriptor - which is every write
+	// in a program with no classes in it - goes straight to js_set.
+	baseSet := m["js_set"]
+	m["js_jsmset"] = func(a []uint64) uint64 {
+		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			name := rt.toString(u(a[1]))
+			// A setter anywhere on the static chain wins over a fresh own slot,
+			// the same rule js_set follows for an ordinary object.
+			if v, _, found := jsStaticsFind(cls, name); found {
+				if acc, isAcc := v.(*jsAccessor); isAcc {
+					if acc.set != nil {
+						rt.call(acc.set, cls, []interface{}{u(a[2])})
+					}
+					return 0
 				}
 			}
+			jsStaticsOf(cls, true).set(name, u(a[2]))
+			return 0
 		}
-		return r
+		return baseSet(a)
 	}
 
 	// Wrap a compiled closure into an ASYNC function: calling the result runs the
@@ -1687,6 +1718,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if v, handled := rt.jsvMethod(u(a[0]), rt.toString(u(a[1])), arr.elems); handled {
 			return w(v)
 		}
+		// A CLASS DESCRIPTOR stops here (docs/todo.md 2.13). js_jsmget already
+		// answered every static, so reaching this line means the name is not one -
+		// and the shared js_mcall below would find the descriptor's own property of
+		// that name, which is its INSTANCE method. Answer the miss sentinel so the
+		// call site raises node's "C.m is not a function" instead.
+		if _, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			if v, ok := rt.mcallMiss(); ok {
+				return w(v)
+			}
+		}
 		if next := m["js_jsxmcall"]; next != nil {
 			return next(a)
 		}
@@ -1731,6 +1772,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		cls.set("__name", name)
 		cls.set("__errname", name)
 		cls.set("__ctor", u(a[1]))
+		// Every class descriptor gets a static table, the builtin Error hierarchy
+		// included - the layer-2 twin needs it to keep `TypeError.name` independent
+		// of whether the program declares a class of its own. docs/todo.md 2.13.
+		jsStaticsOf(cls, true)
 		if name == jsErrNames[0] {
 			// toString lives on the ROOT only, exactly as Error.prototype does:
 			// the __class/__super walk finds it from any of the seven and from

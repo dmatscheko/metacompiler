@@ -592,6 +592,44 @@ check("this-call-null-strict", (function() { "use strict"; return this; }).call(
 check("this-strict-inherited", (function() { "use strict"; function inner() { return this; } return inner(); })() === undefined);
 check("this-class-body-strict", (function() { class K { m() { function inner() { return this; } return inner(); } } return (new K()).m(); })() === undefined);
 
+// ----- parentheses do not drop the receiver (docs/todo.md 2.13) -----
+// `(o.m)()` is a call THROUGH A REFERENCE: the parentheses are transparent, so `this`
+// is o - while `(0, o.m)()` is the idiom for calling WITHOUT a receiver and must stay
+// the global object. `(arr.push)(x)` as a statement aborted the interpreter half
+// outright. The wide version of this, twenty-eight rows deep, is SECTION 43 of
+// tests/typescript-test-full.ts; this is the smallest program that fails at ec39aef.
+check("paren-receiver", (function(): boolean {
+    var a: any[] = ["m", 1, 2];
+    var o: any = {m: function(): any { return this }, n: function(): any { return this }};
+    var arr: any[] = [a[1]];
+    (arr.push)(a[2]);
+    class B { static s(): any { return this } }
+    class D extends B { static viaParen(): any { return (super.s)() } }
+    return (o.m)() === o && (o?.m)() === o && (o[a[0]])() === o && (o.m)`t` === o
+        && arr.length === 2 && D.viaParen() === D
+        && (0, o.m)() === globalThis && (a[0] === "m" ? o.m : o.n)() === globalThis;
+})());
+
+// ----- a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) -----
+// `class C { static m(){} m(){} }` is two different members: one on the constructor,
+// one on the prototype. Both used to land in one table, where the second won. The
+// wide version is SECTION 44 of tests/typescript-test-full.ts; this is the smallest program
+// that fails at ec39aef.
+check("static-namespace", (function (): boolean {
+    var a: any[] = [1, "m"];
+    class C { static m(): string { return "S" }  m(): string { return "I" }  static so(): string { return "so" }  io(): string { return "io" } }
+    class E { static x(): string { return "Ex" } }
+    class F extends E { x(): string { return "Fx" } }
+    class B { nm: string; who(): string { return "B/" + this.nm } }
+    class D extends B { who(): string { return "D" }  paren(): string { return (super.who)() } }
+    var d: any = new D(); d.nm = "d";
+    return C.m() === "S" && (new C()).m() === "I"
+        && typeof (C as any).io === "undefined" && typeof (new C() as any).so === "undefined"
+        && F.x() === "Ex" && (new F()).x() === "Fx"
+        && (a[1] in C) === true && C.name === "C"
+        && d.paren() === "B/d";
+})());
+
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

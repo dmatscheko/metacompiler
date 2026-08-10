@@ -306,6 +306,14 @@ function js_jsctorp__raw(v) {
 // The accessor-property count. abnf/jsrt.go's rt.accessorCount: while it is 0 the
 // member paths cannot meet an accessor and skip the whole lookup.
 var jvAccN = 0
+// jvClsN is the same idea as jvAccN one line up, for the STATIC NAMESPACE
+// (docs/todo.md 2.13): while no class with a static table has been built, every
+// member read skips the class-descriptor test outright. It matters because
+// js_jsmget's own comment records that adding ONE hash lookup to the top of that
+// function cost 21-43% on a member-read loop - and the js bench row is pure
+// arithmetic, so no gate in this project would have seen it. js_jsstatics, which the
+// emitter calls once per class definition, is what bumps it.
+var jvClsN = 0
 
 // The `String` global js_jsstringfn handed out, kept so that js_jsmcall can
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
@@ -573,39 +581,73 @@ function jvFindClassAcc(o, name) {
     return undefined
 }
 
-// jvStaticFind is the __super walk for an INHERITED STATIC member. `class D extends
-// C {}` then `D.s()` was "TypeError: D.s is not a function" in all four engines,
-// where node walks the class object's own prototype chain: here that is the
-// DESCRIPTOR's __super chain, one link out from the __class chain an instance walks.
-// The engine's own __-prefixed slots are never inherited - every descriptor carries
-// its own __ctor, __name, __super - and the guard cap is the same 64 the rest of this
-// project puts on a descriptor walk. Answers the RAW slot, so an accessor box reaches
-// its caller and can be invoked with the right receiver. Twins: jsvClassStatic in
-// abnf/jsrtjsprint.go and classStaticFind in the two interpreter grammars.
-// docs/todo.md 1.2.
+// ================================================ the STATIC namespace ====
+//
+// `class C { static m(){} m(){} }` is TWO members in JavaScript - one on the
+// constructor, one on the prototype - and both used to be written into the class
+// descriptor's own property map, where the second won. Every static member now lives
+// in a separate object hanging off the descriptor under `__statics`; instance members
+// stay exactly where they were, which is what keeps the floor's get_member and the
+// shared js_mcall out of this entirely. Twins: jsStaticsFind / jsvStaticSideRead in
+// abnf/jsrt.go and abnf/jsrtjsprint.go, staticsOf / classStaticFind in the two
+// interpreter grammars. docs/todo.md 2.13.
+
+// The emitter calls this once per class definition: it builds the static table, hangs
+// it on the descriptor and bumps the fast-out counter. Answering the table (rather
+// than letting the emitter build it) is what keeps the counter and the slot in step.
+function js_jsstatics(cls) {
+    var t = {}
+    cls["__statics"] = t
+    jvClsN = jvClsN + 1
+    return t
+}
+
+function jvIsClassDesc(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__isclass"] === true
+}
+
+// Does a read of `k` on `o` belong to the static namespace ALONE? The engine's own
+// __-prefixed slots are excluded: __ctor, __name, __super and __statics itself are
+// read off the descriptor by `new`, instanceof and the error machinery.
+function jvIsStaticSide(o, k) {
+    if (!jvIsClassDesc(o)) { return false }
+    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return false } }
+    return true
+}
+
+// The __super walk for a static member, starting at the descriptor ITSELF. Statics
+// ARE inherited - `class D extends C {}` then `D.s()` walks the class object's own
+// prototype chain - and the guard cap is the same 64 the rest of this project puts on
+// a descriptor walk. Answers the RAW slot, so an accessor box reaches its caller.
 function jvStaticFind(o, k) {
-    if (!jvIsObj(o)) { return undefined }
-    if (o["__isclass"] !== true) { return undefined }
-    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return undefined } }
-    var cls = o["__super"]
+    var cls = o
     var guard = 0
     while (jvIsObj(cls) && guard < 64) {
-        var v = cls[k]
-        if (v !== undefined) { return v }
+        var t = cls["__statics"]
+        if (jvIsObj(t)) {
+            var v = t[k]
+            if (v !== undefined) { return v }
+        }
         cls = cls["__super"]
         guard = guard + 1
     }
     return undefined
 }
 
-// The VALUE of an inherited static member, with an accessor box unwrapped against the
-// receiver the read started from (node runs `static get g()` with `this` bound to the
-// SUBCLASS). Kept out of line so an ordinary missing member pays one call.
-function jvStaticMiss(o, k) {
+// The VALUE of a member read on a class descriptor: the static chain, an accessor
+// unwrapped against the receiver the read started from (node runs `static get g()`
+// with `this` bound to the SUBCLASS), then `name` - every class object has one, and
+// it is the descriptor's __name unless a `static name` member shadows it. Anything
+// else is undefined, which is what node says for a class's INSTANCE method read off
+// the constructor.
+function jvStaticSideRead(o, k) {
     var v = anytype
     v = jvStaticFind(o, k)
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
-    return v
+    if (v !== undefined) { return v }
+    if (k == "name") { return o["__name"] }
+    return undefined
 }
 
 function jvAccGet(acc, self) {
@@ -823,6 +865,12 @@ function js_jsmget(o, key) {
                 return jvApplyShim(o)
             }
         }
+        // A CLASS DESCRIPTOR reads from its static namespace and from nowhere else:
+        // its own property map holds its INSTANCE methods, and answering one of those
+        // for `C.m` is the defect. docs/todo.md 2.13.
+        if (jvClsN > 0) {
+            if (jvIsStaticSide(o, key)) { return jvStaticSideRead(o, key) }
+        }
         if (jvAccN > 0) {
             if (jvIsObj(o)) {
                 var cur = o[key]
@@ -830,18 +878,13 @@ function js_jsmget(o, key) {
                 if (cur === undefined) {
                     var acc = jvFindClassAcc(o, key)
                     if (acc !== undefined) { return jvAccGet(acc, o) }
-                    // An INHERITED STATIC member at a CALL site: `class D extends
-                    // C {}` then `D.s()`. Only on the miss. docs/todo.md 1.2.
-                    return jvStaticMiss(o, key)
+                    return undefined
                 }
                 return cur
             }
         }
         if (jvHides(o, key)) { return undefined }
-        var mv = anytype
-        mv = o[key]
-        if (mv === undefined) { return jvStaticMiss(o, key) }
-        return mv
+        return o[key]
     }
     return o[key]
 }
@@ -946,6 +989,10 @@ function js_jsvget(o, key) {
                 return jvApplyShim(o)
             }
         }
+        // The static namespace, exactly as in js_jsmget. docs/todo.md 2.13.
+        if (jvClsN > 0) {
+            if (jvIsStaticSide(o, key)) { return jvStaticSideRead(o, key) }
+        }
         if (jvAccN > 0) {
             if (jvIsObj(o)) {
                 var cur = o[key]
@@ -977,11 +1024,7 @@ function jvValueMiss(o, key) {
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvBoundMethod(fn, o) }
-            // An INHERITED STATIC member read as a VALUE: `D.f`, `typeof D.s`, `D.g`
-            // through C's static getter. Unlike an instance method this is NOT
-            // wrapped - a static is a plain closure and node hands back the very
-            // function object. docs/todo.md 1.2.
-            return jvStaticMiss(o, key)
+            return undefined
         }
     }
     return undefined
@@ -998,6 +1041,15 @@ function js_jshas(o, key) {
         // `"__class" in p` answered TRUE in both compiled halves and false in the
         // interpreters and in node.
         if (k.length >= 2 && k.substring(0, 2) == "__") { return false }
+        // `"m" in C` asks the STATIC namespace and nothing else, BEFORE js_has: the
+        // descriptor's own property map holds C's instance methods, which node does
+        // not report as properties of the constructor. docs/todo.md 2.13.
+        if (jvClsN > 0) {
+            if (jvIsClassDesc(o)) {
+                if (jvStaticFind(o, k) !== undefined) { return true }
+                return k == "name"
+            }
+        }
         if (js_has(o, key)) { return true }
         if (jvFindClassMethod(o, k) !== undefined) { return true }
         return false
@@ -1010,6 +1062,21 @@ function js_jshas(o, key) {
 // slot (or a slot on the __class/__super chain) holds an accessor, call its setter
 // with the receiver".
 function js_jsmset(o, key, v) {
+    // A member write on a class DESCRIPTOR is a write to its static namespace, and a
+    // setter anywhere on the static chain wins over a fresh own slot - the same rule
+    // js_set follows for an ordinary object. docs/todo.md 2.13.
+    if (jvClsN > 0) {
+        var sk = jvStr(key)
+        if (jvIsStaticSide(o, sk)) {
+            var sv = anytype
+            sv = jvStaticFind(o, sk)
+            if (jvIsAcc(sv)) { return jvAccSet(sv, o, v) }
+            var st = o["__statics"]
+            if (!jvIsObj(st)) { st = js_jsstatics(o) }
+            st[sk] = v
+            return undefined
+        }
+    }
     if (jvAccN > 0) {
         if (jvIsObj(o)) {
             var k = jvStr(key)
@@ -1018,11 +1085,6 @@ function js_jsmset(o, key, v) {
             if (cur === undefined) {
                 var acc = jvFindClassAcc(o, k)
                 if (acc !== undefined) { return jvAccSet(acc, o, v) }
-                // An INHERITED STATIC setter: `class D extends C {}` then `D.g = 5`
-                // runs C's `static set g(v)` with `this` bound to D. docs/todo.md 1.2.
-                var sacc = anytype
-                sacc = jvStaticFind(o, k)
-                if (jvIsAcc(sacc)) { return jvAccSet(sacc, o, v) }
             }
         }
     }
@@ -1112,17 +1174,23 @@ function js_jsnewres(res, obj) {
 // already resolved the superclass of the DEFINING class).
 function js_supercall(sup, self, name, args) {
     var k = jvStr(name)
+    // `super.s(x)` inside a STATIC method resolves on the STATIC SIDE, and a static is
+    // a plain closure whose `this` is the receiver rather than an instance method with
+    // the receiver PREPENDED - handing it `self` as arguments[0] shifts every argument
+    // by one. The old __stat table answered this with a set of NAMES, which cannot
+    // answer at all once a class holds a static AND an instance member of the same
+    // name: which side is now decided by which TABLE the member is found in, and which
+    // table to look in first by the receiver - a class descriptor means the caller was
+    // a static method. docs/todo.md 2.13.
+    if (jvIsClassDesc(self)) {
+        var sm = anytype
+        sm = jvStaticFind(sup, k)
+        if (jvIsCallable(sm)) { return jvCallT(sm, self, args) }
+    }
     var cls = sup
     while (jvIsObj(cls)) {
         var m = cls[k]
         if (jvIsCallable(m)) {
-            // `super.s(x)` inside a STATIC method: the parent's static member is a
-            // plain closure whose `this` comes from the receiver, not an instance
-            // method with the receiver PREPENDED, so handing it `self` as
-            // arguments[0] shifted every argument by one. __stat is the table the
-            // emitter writes to tell the two conventions apart. docs/todo.md 1.2.
-            var st = cls["__stat"]
-            if (jvIsObj(st)) { if (st[k] === true) { return jvCallT(m, self, args) } }
             return jvCallT(m, self, jvPrepend(self, args))
         }
         cls = cls["__super"]
@@ -1140,11 +1208,25 @@ function js_supercall(sup, self, name, args) {
 // after 'super.zz = 3'.
 function js_supget(sup, self, key) {
     var k = jvStr(key)
+    // The static side first when the receiver is a class descriptor; see js_supercall.
+    if (jvIsClassDesc(self)) {
+        var sv = anytype
+        sv = jvStaticFind(sup, k)
+        if (jvIsAcc(sv)) { return jvAccGet(sv, self) }
+        if (sv !== undefined) { return sv }
+    }
     var cls = sup
     while (jvIsObj(cls)) {
         var v = cls[k]
         if (v !== undefined) {
             if (jvIsAcc(v)) { return jvAccGet(v, self) }
+            // An INSTANCE method found on the super chain is stored with this
+            // engine's __class calling convention - the receiver is PREPENDED - so
+            // handing the raw closure back made `(super.who)()` and `super[k]()` run
+            // the body with `this` undefined and every argument shifted by one, where
+            // node runs the parent's method on the current receiver. The bound shim is
+            // the same shape js_jsvget builds for `const f = p.m`. docs/todo.md 2.13.
+            if (jvIsCallable(v)) { return jvBoundMethod(v, self) }
             return v
         }
         cls = cls["__super"]
@@ -1156,6 +1238,18 @@ function js_supget(sup, self, key) {
 // whose RECEIVER is `this`, so the own property lands there.
 function js_supset(sup, self, key, v) {
     var k = jvStr(key)
+    // The static side first when the receiver is a class descriptor; see js_supercall.
+    if (jvIsClassDesc(self)) {
+        var sacc = anytype
+        sacc = jvStaticFind(sup, k)
+        if (jvIsAcc(sacc)) { return jvAccSet(sacc, self, v) }
+        if (sacc !== undefined) {
+            var st = self["__statics"]
+            if (!jvIsObj(st)) { st = js_jsstatics(self) }
+            st[k] = v
+            return undefined
+        }
+    }
     var cls = sup
     while (jvIsObj(cls)) {
         var cur = cls[k]
@@ -1282,6 +1376,11 @@ function js_jserrcls(name, ctor, tostr) {
     cls["__name"] = name
     cls["__errname"] = name
     cls["__ctor"] = ctor
+    // Every class descriptor gets a static table, the builtin Error hierarchy included:
+    // it is what makes `TypeError.name` answer "TypeError" whether or not the program
+    // declares a class of its own, since jvClsN - the fast-out that keeps the static
+    // test off every member read - is bumped here too. docs/todo.md 2.13.
+    js_jsstatics(cls)
     if (name === "Error") {
         // toString lives on the ROOT only, exactly as Error.prototype does: the
         // __class/__super walk finds it from any of the seven and from any user
@@ -2493,6 +2592,18 @@ function jvFallbackCall(recv, name, args) {
 // dispatch. A receiver none of them claims lands in jvFallbackCall.
 function js_jsmcall(recv, key, args) {
     var name = jvStr(key)
+    // A CLASS DESCRIPTOR stops here: js_jsmget already answered every static, so
+    // reaching this line means the name is not one - and jvFallbackCall below would
+    // find the descriptor's own property of that name, which is its INSTANCE method.
+    // The sentinel makes the call site raise node's "C.m is not a function" instead.
+    // docs/todo.md 2.13.
+    if (jvClsN > 0) {
+        if (jvIsStaticSide(recv, name)) {
+            if (jvStaticFind(recv, name) === undefined) {
+                if (jvMissCallSet) { return jvMissCall }
+            }
+        }
+    }
     // f.bind(self, ...) as a CALL. js_jsmget above answers the same name when it is
     // read as a value; this arm is what a direct `f.bind(o)(x)` reaches, since the
     // emitter lowers a call on a member to js_jsmcall and never through js_jsmget.

@@ -603,8 +603,56 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // An optional-chaining suffix (?. ?.[ ?.( ) carries an 'opt' flag: when the value in
 // front of it is null or undefined the WHOLE remaining chain is skipped and the
 // expression is undefined, which is exactly JavaScript's short circuit.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary <~~ push({ptxt: up.in}) ~~> { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TaggedTemplate } ;
+CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
+            = CallHead { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TaggedTemplate } ;
+// The head of a call chain, and the {ptxt} marker every call site's error text is
+// rendered from. A SUPER PROPERTY is singled out because 'super.m' is a Reference whose
+// thisValue is the CURRENT 'this' - so 'super[k]()', '(super.m)()' and 'super.m.call(x)'
+// all run the parent's method on the receiver, exactly as the SuperCall production makes
+// 'super.m()' do. Without the flag every one of those called with an undefined 'this'.
+// (up.in is the text matched in THIS rule, so both arms see the head's own source text
+// and not the whole chain's - which is what siteTexts wants.)
+CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
+            | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
+// PARENTHESES DO NOT DROP THE RECEIVER. '(o.m)()' calls m with 'this' === o, because a
+// parenthesized expression evaluates to whatever the inner expression evaluates to -
+// and a MemberExpression evaluates to a Reference, which carries its base. The
+// assignment side has always known this ('(a.b).c = 1' assigns where the unparenthesized
+// form does, through makeTargetRef's parenref); the call side dropped it, and every such
+// call ran with the global object as 'this'.
+//
+// ParenExpr is the call side's parenref, and it is a RECOGNISER, not a second parse.
+// The shape tried first was a dedicated production for a parenthesized member chain,
+// ordered in front of the ordinary '"(" Expression ")"' - and it is EXPONENTIAL in
+// paren-nesting depth, because every level whose chain shape fails is then parsed again
+// by Expression. Measured on nested '(x + a[0])': depth 8 0.39s -> 1.21s, depth 12
+// 0.40s -> 11.05s. This PEG has no memoisation, so the only safe answer is to parse the
+// parenthesized expression EXACTLY ONCE and decide afterwards.
+//
+// foldCallMember records every chain it folds - its item list and its own matched text.
+// The outermost chain inside a '(...)' is the LAST one to complete, so when its text is
+// the whole of the parenthesized text the parentheses held one member chain and nothing
+// else; parenPrimary then hands the chain's ITEMS out under a marker instead of the
+// opaque value thunk, and flattenParen splices them in front of whatever suffixes
+// followed the ')'. '(o.m)()' folds to precisely the item list of 'o.m()'.
+//
+// That text test is also what keeps the NEGATIVE forms negative, and they matter as much
+// as the positive ones: only a parenthesized MemberExpression is a Reference. In
+// '(0, o.m)()', '(c ? o.m : o.n)()', '(o.m || o.n)()' and '(o.m = f)()' the last chain to
+// complete covers only PART of the parentheses, no marker is built, and node's undefined
+// receiver is what comes out - '(0, o.m)()' is the idiom for exactly that.
+//
+// The NotArrow guard behind the ')' is what keeps '(a) => a' and '(a, b) => a' out:
+// both are Expressions, and only the '=>' behind them says they were an arrow PARAMETER
+// list. Guarding here rather than retrying ArrowFn in FRONT of ParenExpr is worth 12
+// seconds on the -frozen leg of tests/js-test-features.js (46.6s -> 34.3s, same machine
+// and file): an ArrowFn attempt ordered ahead of every call primary is paid by EVERY
+// primary in the program, while the guard is paid only by the arrow functions
+// themselves. On the unchanged base file the fix is inside the measurement noise
+// (clean 23.5/25.6s, this tree 24.6/24.7s).
+CallPrimary = ParenExpr | Primary ;
+ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
+            = "(" Expression ")" NotArrow ;
 // A TAGGED template - 'tag`a${x}b`' - is a call whose arguments are the template itself:
 // the tag function gets the array of the literal chunks (carrying the unprocessed text
 // in its 'raw' property) followed by one argument per substitution. It repeats the
@@ -4560,6 +4608,10 @@ NotFuncHead = :script(~~
     }
 
     function getMemberRaw(o, k) {
+        // A CLASS DESCRIPTOR reads from its static namespace and from nowhere else, and
+        // the test is FIRST because the two arms below - the accessor table and the own
+        // slot - are where its INSTANCE members live. docs/todo.md 2.13.
+        if (isStaticSide(o, k)) { return staticSideRead(o, k) }
         // Catches null and undefined. node's TypeError, catchable, with node's own
         // wording; the compiler half reaches it through js_rt_missmem.
         if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(k) + "')") }
@@ -4594,33 +4646,98 @@ NotFuncHead = :script(~~
                 // ... - which is what an array-LIKE object (a tagged template's chunk
                 // list) is built out of.
                 if (typeof k == "number" && hasOwn(o, "" + k)) { return o["" + k] }
-                // STATIC MEMBERS ARE INHERITED. `class D extends C {}` then `D.s()`
-                // was "TypeError: D.s is not a function" in all four engines, where
-                // node walks the class object's own prototype chain - which here is
-                // the descriptor's __super chain, one link out from the __class walk
-                // an instance does. Reached for a static method, a static field and
-                // a static accessor alike (the accessor arrives through findAccessor
-                // above, which starts at __super for a descriptor). docs/todo.md 1.2.
-                if (o.__isclass === true) { return classStaticFind(o, k) }
                 return undefined
             }
         }
         return o[k]
     }
-    // The __super walk for an INHERITED STATIC member: the class descriptor's own
-    // chain, skipped for the engine's own __-prefixed slots (__ctor, __name, __super,
-    // ... are never inherited - every descriptor carries its own). The `guard` cap is
-    // the same 64 the rest of this project puts on a descriptor walk. Twins:
-    // jsvClassStatic in abnf/jsrtjsprint.go and jvStaticFind in
-    // languages/lib/js-rt.metajs. docs/todo.md 1.2.
+    // ================================================ the STATIC namespace ====
+    //
+    // Every static member of a class lives in the descriptor's `__statics` table (see
+    // makeClassValue); its instance members stay in the descriptor itself. A read on a
+    // CLASS DESCRIPTOR is answered from the static table ALONE - falling back to the
+    // descriptor's own slots is exactly the defect, because those slots are the
+    // instance methods. Twins: jsStaticsFind / jsvStaticSideRead in abnf/jsrt.go and
+    // abnf/jsrtjsprint.go, jvStaticFind / jvStaticSideRead in languages/lib/js-rt.metajs.
+    // docs/todo.md 2.13.
+    function isClassDesc(v) {
+        if (v == undefined || v == null) { return false }
+        if (typeof v != "object") { return false }
+        return v.__isclass === true
+    }
+    // Does a read of `k` on `o` belong to the static namespace alone? The engine's own
+    // __-prefixed slots are excluded - __ctor, __name, __super and __statics itself are
+    // read off the descriptor by `new`, instanceof and the error machinery.
+    function isStaticSide(o, k) {
+        if (!isClassDesc(o)) { return false }
+        if (typeof k != "string") { return false }
+        return !isInternalKey(k)
+    }
+    // The __super walk for a static member, starting at the descriptor ITSELF. Statics
+    // ARE inherited - `class D extends C {}` then `D.s()` walks the class object's own
+    // prototype chain - and the guard cap is the same 64 the rest of this project puts
+    // on a descriptor walk. Answers a record so that "absent" and "holds undefined" stay
+    // apart, and so that an ACCESSOR can be invoked with the receiver the read started
+    // from (node runs `static get g()` with `this` bound to the SUBCLASS).
     function classStaticFind(cls, k) {
-        if (isInternalKey(k)) { return undefined }
         var guard = 0
-        for (var cl = cls.__super; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
-            if (hasOwn(cl, k)) { return cl[k] }
+        for (var cl = cls; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            var t = cl.__statics
+            if (t != undefined) {
+                if (hasOwn(t, "__acc")) {
+                    var tb = t["__acc"]
+                    // BOTH halves of the accessor come back in one record. Answering
+                    // whichever of get:/set: was found first made `static get sg()` hide
+                    // `static set sg(v)` from every write, so an inherited static setter
+                    // silently did nothing (tests/typescript-test-full.ts cls17). The
+                    // compiled halves cannot make this mistake: there the two live in
+                    // ONE accessor box.
+                    if (hasOwn(tb, "get:" + k) || hasOwn(tb, "set:" + k)) {
+                        return {isacc: true, g: accSlot(tb, "get:" + k), s: accSlot(tb, "set:" + k)}
+                    }
+                }
+                if (hasOwn(t, k)) { return {isacc: false, v: t[k]} }
+            }
             guard = guard + 1
         }
         return undefined
+    }
+    // One half of an accessor pair, or undefined. Out of line because MetaJS is typed
+    // and the two arms answer different things.
+    function accSlot(tb, key) {
+        var r = anytype
+        r = undefined
+        if (hasOwn(tb, key)) { r = tb[key] }
+        return r
+    }
+    // The VALUE of a member read on a class descriptor: the static chain, then `name` -
+    // every class object has one, and it is the descriptor's __name unless a
+    // `static name` member shadows it. Anything else is undefined, which is what node
+    // says for a class's INSTANCE method read off the constructor.
+    function staticSideRead(o, k) {
+        var hit = classStaticFind(o, k)
+        if (hit != undefined) {
+            if (hit.isacc) {
+                if (hit.g == undefined) { return undefined }
+                return callWithThis(hit.g, o, [])
+            }
+            return hit.v
+        }
+        if (k == "name") { return o.__name }
+        return undefined
+    }
+    // The write half: a setter anywhere on the static chain wins over a fresh own slot,
+    // the same rule setMember follows for an ordinary object.
+    function staticSideWrite(o, k, v) {
+        var hit = classStaticFind(o, k)
+        if (hit != undefined) {
+            if (hit.isacc) {
+                if (hit.s != undefined) { callWithThis(hit.s, o, [v]) }
+                return
+            }
+        }
+        if (o.__statics == undefined) { scopePut(o, "__statics", {}) }
+        scopePut(o.__statics, k, v)
     }
     // getMember is getMemberRaw plus the METHODS. An instance keeps its methods on its
     // __class descriptor rather than as own properties, so a plain read found nothing
@@ -4663,6 +4780,9 @@ NotFuncHead = :script(~~
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
     function setMember(o, k, v) {
+        // A member write on a class DESCRIPTOR is a write to its static namespace, for
+        // the same reason the read is. docs/todo.md 2.13.
+        if (isStaticSide(o, k)) { staticSideWrite(o, k, v); return }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
             var s = findAccessor(o, "set", k)
             if (s != undefined) { callWithThis(s, o, [v]); return }
@@ -4713,13 +4833,11 @@ NotFuncHead = :script(~~
     function findAccessor(o, kind, k) {
         var name = kind + ":" + k
         if (hasOwn(o, "__acc") && hasOwn(o["__acc"], name)) { return o["__acc"][name] }
-        // A CLASS DESCRIPTOR has no __class of its own: its STATIC accessors are
-        // inherited along __super, which is the very same walk one link further in.
-        // That is what makes `class D extends C {}` see C's `static get g()` and its
-        // `static set g(v)` - the read through getMemberRaw and the write through
-        // setMember both come here. docs/todo.md 1.2.
+        // A class descriptor's own __acc holds its INSTANCE accessors, which an
+        // instance inherits along __class; its STATIC ones are in __statics and are
+        // answered by staticSideRead before this function is ever reached.
         var start = anytype // The chain head is a class descriptor or undefined.
-        start = (o.__isclass === true) ? o.__super : o.__class
+        start = o.__class
         for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], name)) { return cl["__acc"][name] }
         }
@@ -5973,6 +6091,13 @@ NotFuncHead = :script(~~
     function propIn(k, o) {
         if (o == undefined || o == null) fail("'in' on " + o)
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
+        // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
+        // slots are C's instance methods, which node does not report as properties of
+        // the constructor. docs/todo.md 2.13.
+        if (isStaticSide(o, "" + k)) {
+            if (classStaticFind(o, "" + k) != undefined) { return true }
+            return ("" + k) == "name"
+        }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
         // A METHOD is not an own property here - it lives on the __class descriptor -
@@ -7209,25 +7334,31 @@ NotFuncHead = :script(~~
             // makes a later reassignment of the outer name invisible to the body.
             if (name != "") { clsScope[name] = cls }
             var mscopes = concat2impl(defScopes, [clsScope])
-            // __stat records which of the descriptor's method slots are STATIC. A static
-            // method is an ordinary closure that takes its `this` from the receiver slot,
-            // while an instance method has the receiver PREPENDED to its arguments, and
-            // super.m() cannot tell the two apart from the function value alone - it is
-            // the only reader of this table. Twins: the __stat slot emitJs/emitTs write in
-            // the two -to-llvm-ir grammars. docs/todo.md 1.2.
-            var stat = {}
-            var anyStat = false
+            // ----- The STATIC NAMESPACE (docs/todo.md 2.13) -----
+            // `class C { static m(){} m(){} }` is TWO members in JavaScript, one on
+            // the constructor and one on the prototype. Both used to be scopePut into
+            // the descriptor, where the second won: `C.m()` answered the instance
+            // method, an inherited static lost to a subclass's instance member, and an
+            // INSTANCE could see every static. Every static member - field, method and
+            // accessor - now goes into this table instead, and only the descriptor-read
+            // path (staticSideRead) looks at it. Instance members stay where they were.
+            var statics = {}
+            cls["__statics"] = statics
+            // The __stat table - a set of NAMES marking which descriptor slots were
+            // static - used to live here, so that super.m() could pick the calling
+            // convention. It is GONE: a set of names cannot answer once a class holds a
+            // static AND an instance member of the same name, and the two tables answer
+            // it by construction now. docs/todo.md 2.13.
             for (var mi = 0; mi < methods.length; mi++) {
                 var mm2 = methods[mi]
-                scopePut(cls, memberKey(mm2), classMemberFn(mm2, mscopes))
-                if (mm2.statik) { scopePut(stat, memberKey(mm2), true); anyStat = true }
+                scopePut(mm2.statik ? statics : cls, memberKey(mm2), classMemberFn(mm2, mscopes))
             }
-            if (anyStat) { scopePut(cls, "__stat", stat) }
             // An accessor is called with the receiver in the one-shot slot, never as
             // arguments[0], so a static and an instance accessor are built the same way.
             for (var ai = 0; ai < accessors.length; ai++) {
                 var aa = accessors[ai]
-                addAccessor(cls, aa.acc, memberKey(aa), makeClosure(aa.params, aa.body, mscopes, true))
+                addAccessor(aa.statik ? statics : cls, aa.acc, memberKey(aa),
+                            makeClosure(aa.params, aa.body, mscopes, true))
             }
             if (ctorInfo != null) {
                 cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, false, false)
@@ -7241,7 +7372,7 @@ NotFuncHead = :script(~~
                 if (it.kind == "staticblock") {
                     callWithThis(makeClosure([], it.body, mscopes, true), cls, [])
                 } else {
-                    scopePut(cls, memberKey(it), (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
+                    scopePut(statics, memberKey(it), (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
                 }
             }
             return cls
@@ -7399,19 +7530,66 @@ NotFuncHead = :script(~~
     }
     function superGet(k) {
         var self = getVar("this")
+        // The static side first when the receiver is a class descriptor; see
+        // makeSuperCall for why the receiver is what decides.
+        if (isClassDesc(self)) {
+            var shit = classStaticFind(superClass(), k)
+            if (shit != undefined) {
+                if (shit.isacc) {
+                    if (shit.g == undefined) { return undefined }
+                    return callWithThis(shit.g, self, [])
+                }
+                return shit.v
+            }
+        }
         for (var cl = superClass(); cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], "get:" + k)) {
                 return callWithThis(cl["__acc"]["get:" + k], self, [])
             }
-            if (hasOwn(cl, k)) { return cl[k] }
+            // An INSTANCE method found on the super chain is stored with this engine's
+            // __class calling convention - the receiver is PREPENDED - so handing the
+            // raw closure back made `(super.who)()` and `super[k]()` run the body with
+            // `this` undefined and every argument shifted by one, where node runs the
+            // parent's method on the current receiver. The bound shim carries the
+            // receiver the READ was made with, which is what a Reference does; a
+            // `super.who` stored and called later is node's own undefined-receiver case
+            // and stays that way. docs/todo.md 2.13.
+            if (hasOwn(cl, k)) {
+                var sv = anytype
+                sv = cl[k]
+                if (typeof sv == "function") { return superMethodShim(sv, self) }
+                return sv
+            }
         }
         // Nothing on the class chain is UNDEFINED, and deliberately not a read of the
         // receiver: node prints NaN for 'super.zz += 4' after 'super.zz = 3' (the store
         // lands on the receiver, the read does not see it).
         return undefined
     }
+    // A parent INSTANCE method read through `super`, bound to the receiver the read was
+    // made with. The receiver is PREPENDED, which is the convention every __class method
+    // is called with here (see mcall).
+    function superMethodShim(m, self) {
+        return function() {
+            var a = [self]
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return m.apply(undefined, a)
+        }
+    }
     function superSet(k, v) {
         var self = getVar("this")
+        // The static side first when the receiver is a class descriptor; see superGet.
+        if (isClassDesc(self)) {
+            var shit2 = classStaticFind(superClass(), k)
+            if (shit2 != undefined) {
+                if (shit2.isacc) {
+                    if (shit2.s != undefined) { callWithThis(shit2.s, self, [v]) }
+                    return
+                }
+                staticSideWrite(self, k, v)
+                return
+            }
+        }
         for (var cl = superClass(); cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], "set:" + k)) {
                 callWithThis(cl["__acc"]["set:" + k], self, [v])
@@ -7480,13 +7658,7 @@ NotFuncHead = :script(~~
         }
         return {dtype: "supertarget", skey: items[0].skey}
     }
-    // Is `name` a STATIC method of this class descriptor? See the __stat table
-    // makeClassValue builds. docs/todo.md 1.2.
-    function isStaticMember(cls, name) {
-        if (cls == undefined || cls == null) { return false }
-        if (!hasOwn(cls, "__stat")) { return false }
-        return hasOwn(cls["__stat"], name)
-    }
+
     function makeSuperCall(name, argThunks) {
         if (name == "") {
             return function() {
@@ -7500,18 +7672,29 @@ NotFuncHead = :script(~~
         }
         return function() {
             var self = getVar("this")
+            var sup = getVar("__class__").__super
+            // `super.s(x)` inside a STATIC method resolves on the STATIC SIDE, and a
+            // static is a plain closure whose `this` is the receiver rather than an
+            // instance method with the receiver PREPENDED - handing it `self` as
+            // arguments[0] shifts every argument by one. The old __stat table answered
+            // this with a set of NAMES, which cannot answer at all once a class holds a
+            // static AND an instance member of the same name: which side is now decided
+            // by which TABLE the member is found in, and which table to look in first by
+            // the receiver - a class descriptor means the caller was a static method.
+            // docs/todo.md 2.13.
+            if (isClassDesc(self)) {
+                var shit = classStaticFind(sup, name)
+                if (shit != undefined) {
+                    if (!shit.isacc && typeof shit.v == "function") {
+                        return callWithThis(shit.v, self, evalArgs(argThunks))
+                    }
+                }
+            }
             var m = undefined
-            var owner = undefined
-            for (var cl = getVar("__class__").__super; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) { m = cl[name]; owner = cl } }
+            for (var cl = sup; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) { m = cl[name] } }
             // node's wording: it has no source text for a super receiver either,
               // and prints "(intermediate value).<name>". docs/todo.md 1.4.
             if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
-            // `super.s(x)` inside a STATIC method: the parent's static member is a plain
-            // closure whose `this` comes from the receiver slot, not an instance method
-            // with the receiver prepended, so handing it `self` as arguments[0] shifted
-            // every argument by one. __stat is what the two conventions are told apart
-            // by. docs/todo.md 1.2.
-            if (isStaticMember(owner, name)) { return callWithThis(m, self, evalArgs(argThunks)) }
             var argv = concat2impl([self], evalArgs(argThunks))
             return m.apply(undefined, argv)
         }
@@ -7709,21 +7892,70 @@ NotFuncHead = :script(~~
     }
     function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: makeConst("#" + n)} }
 
+    // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
+    //
+    // chainItems is every member chain foldCallMember has folded, in completion order,
+    // and chainLastText is the matched source text of the most recent one. A chain is
+    // handed out by INDEX and never by value: a record pushed onto the tag stack is
+    // DEEP-COPIED, and the copy would not be the array the closures were built from.
+    var chainItems = []
+    var chainLastIx = 0 - 1
+    var chainLastText = ""
+    // The tag of '"(" Expression ")"' in a call position. The parenthesized expression has
+    // already been parsed exactly once, and t is its value thunk; the only question left
+    // is whether the parentheses held ONE member chain and nothing else. The last chain to
+    // complete inside them is the outermost one, so comparing its text with the text
+    // between the parentheses answers it - and answers NO for '(0, o.m)', '(a ? b.c : d)',
+    // '(o.m || o.n)' and '(o.m = f)', where the last chain covers only part of the inside.
+    function parenPrimary(t, txt) {
+        // MetaJS is typed and this answers either the value thunk or a marker record, so
+        // the result is declared anytype rather than returned from two arms.
+        var r = anytype
+        r = t
+        if (txt.length < 2) { return r }
+        if (chainLastIx < 0) { return r }
+        if (chainLastText != txt.substring(1, txt.length - 1)) { return r }
+        r = {parenchainIx: chainLastIx}
+        return r
+    }
+    // A parenthesized member chain arrives as [{parenchainIx}, {ptxt}, outerSuffixes...];
+    // the parentheses mean nothing at run time, so the inner chain's items REPLACE the
+    // marker and the outer suffixes are appended to them. '(o.m)()' therefore folds to
+    // precisely the item list of 'o.m()' and keeps its receiver. Nesting needs no
+    // recursion here - a chain is recorded already flattened - and the inner {ptxt}
+    // survives at index 1, which is what makes siteTexts name '(o.nope)()' 'o.nope', as
+    // V8 does.
+    function flattenParen(items) {
+        var head = items[0]
+        if (head == undefined || head.parenchainIx == undefined) { return items }
+        return chainItems[head.parenchainIx].concat(items.slice(2))
+    }
+
     // items = [primaryThunk, {ptxt}, {kind:"call"|"member", ...}...].
     // A member access remembers its object and its key. A directly following call is a
     // method call: if the looked-up member is a function value it is applied with the
     // object as 'this' (native string/array methods, object-literal methods); otherwise
     // it is a __class instance method, routed through mcall (which prepends the receiver
     // and follows __super). A call not preceded by a member is a plain function call.
-    foldCallMember = function(items) {
+    foldCallMember = function(items, txt) {
+        items = flattenParen(items)
+        // Recorded for parenPrimary. A caller with no text (NewCallee) records no chain:
+        // the index goes negative rather than the text going to some impossible spelling.
+        if (txt == undefined) { chainLastIx = 0 - 1 } else { chainLastIx = chainItems.length; chainLastText = txt }
+        chainItems.push(items)
         if (items.length == 2) return items[0]
         var primary = items[0]
         var suffixes = items.slice(2)
         var sTexts = siteTexts(items[1].ptxt, suffixes)
+        // A super property is a Reference whose thisValue is the current 'this' - see
+        // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
+        // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
+        var supThis = (items[1].supthis == true)
         return function() {
             var cur = anytype     // A member chain hops between types,
             var curThis = anytype // so do the remembered receiver
             var lastKey = anytype // and the remembered key.
+            if (supThis) { curThis = getVar("this") }
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]

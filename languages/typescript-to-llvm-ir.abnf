@@ -921,9 +921,73 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // 'satisfies' check and the non-null assertion '!' - are TYPE-LAYER ONLY: they push
 // nothing at all and so are the identity at run time, transparent to foldCallMember.
 // The '!' carries a negative lookahead, so it is never stolen from '!=' / '!=='.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary <~~ push({ptxt: up.in}) ~~> { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix
+CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
+            = CallHead { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix
                       | AsCast | SatisfiesCast | NonNullSfx } ;
+// The head of a call chain, and the {ptxt} marker every call site's error text is
+// rendered from. A SUPER PROPERTY is singled out because 'super.m' is a Reference whose
+// thisValue is the CURRENT 'this' - so 'super[k]()', '(super.m)()' and 'super.m.call(x)'
+// all run the parent's member on the receiver, exactly as the SuperCall production makes
+// 'super.m()' do. Without the flag every one of those called with an undefined 'this'.
+// (up.in is the text matched in THIS rule, so both arms see the head's own source text
+// and not the whole chain's - which is what siteTexts wants.)
+CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
+            | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
+// PARENTHESES DO NOT DROP THE RECEIVER. '(o.m)()' calls m with 'this' === o, because a
+// parenthesized expression evaluates to whatever the inner expression evaluates to -
+// and a MemberExpression evaluates to a Reference, which carries its base. The
+// assignment side has always known this ('(a.b).c = 1' assigns where the unparenthesized
+// form does, through TargetParen/retarget); the call side dropped it, and every such
+// call ran with the global object as 'this'.
+//
+// ParenExpr is the call side's parenref, and it is a RECOGNISER, not a second parse.
+// The shape tried first was a dedicated production for a parenthesized member chain,
+// ordered in front of the ordinary '"(" Expression ")"' - and it is EXPONENTIAL in
+// paren-nesting depth, because every level whose chain shape fails is then parsed again
+// by Expression. Measured on nested '(x + a[0])': depth 8 0.39s -> 1.21s, depth 12
+// 0.40s -> 11.05s. This PEG has no memoisation, so the only safe answer is to parse the
+// parenthesized expression EXACTLY ONCE and decide afterwards.
+//
+// foldCallMember records every chain it folds - its item list and its own matched text.
+// The outermost chain inside a '(...)' is the LAST one to complete, so when its text is
+// the whole of the parenthesized text the parentheses held one member chain and nothing
+// else; parenPrimary then hands the chain's ITEMS out under a marker instead of the
+// opaque value thunk, and flattenParen splices them in front of whatever suffixes
+// followed the ')'. '(o.m)()' folds to precisely the item list of 'o.m()'.
+//
+// That text test is also what keeps the NEGATIVE forms negative, and they matter as much
+// as the positive ones: only a parenthesized MemberExpression is a Reference. In
+// '(0, o.m)()', '(c ? o.m : o.n)()', '(o.m || o.n)()' and '(o.m = f)()' the last chain to
+// complete covers only PART of the parentheses, no marker is built, and node's undefined
+// receiver is what comes out - '(0, o.m)()' is the idiom for exactly that.
+//
+// The NotArrow guard behind the ')' is what keeps '(a) => a' and '(a, b) => a' out:
+// both are Expressions, and only the '=>' behind them says they were an arrow PARAMETER
+// list. Guarding here rather than retrying ArrowFn in FRONT of ParenExpr is worth 12
+// seconds on the -frozen leg of tests/js-test-features.js (46.6s -> 34.3s, same machine
+// and file): an ArrowFn attempt ordered ahead of every call primary is paid by EVERY
+// primary in the program, while the guard is paid only by the arrow functions
+// themselves. On the unchanged base file the fix is inside the measurement noise
+// (clean 23.5/25.6s, this tree 24.6/24.7s).
+CallPrimary = ParenExpr | Primary ;
+ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
+            = "(" Expression ")" NotArrow ;
+
+// Fails when the next two characters are '=>'. Returns the impossible token to FAIL,
+// undefined to succeed. ParenExpr needs it: '(a)' and '(a, b)' are Expressions the
+// parenthesized primary would happily match, and only the '=>' behind them says they
+// were an arrow PARAMETER LIST. The interpreter half has had this guard (for Yield)
+// since it was written.
+NotArrow    = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        return (cc === 61 && c.peek(i + 1) === 62) ? abnf.newToken("\x01arrow", 0) : undefined
+    })()
+~~) ;
 AsCast      = KwAs ( "const" KwEnd | Type ) ;
 SatisfiesCast = KwSatisfies Type ;
 NonNullSfx  = "!" !"=" ;
@@ -2767,10 +2831,12 @@ NotFuncHead = :script(~~
         if (nativeBuild) { return "js_jsmget" }
         return "js_get"
     }
-    function memSetExt() {
-        if (nativeBuild) { return "js_jsmset" }
-        return "js_set"
-    }
+    // js_jsmset in BOTH halves, not js_set under llvm.Run: a member write on a CLASS
+    // DESCRIPTOR is a write to its static namespace (docs/todo.md 2.13), and js_set is
+    // shared by sixteen languages and must not learn about it. The Go twin is in
+    // abnf/jsrtjsprint.go and delegates every non-descriptor write straight to js_set,
+    // so nothing but a class object changes behaviour.
+    function memSetExt() { return "js_jsmset" }
 
     if (nativeBuild) { core.indexExt = "js_jsmget" }
 
@@ -3945,7 +4011,50 @@ NotFuncHead = :script(~~
         return out
     }
     function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: makeConst(privName(n))} }
-    foldCallMember = function(items) {
+    // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
+    //
+    // chainItems is every member chain foldCallMember has folded, in completion order,
+    // and chainLastText is the matched source text of the most recent one. A chain is
+    // handed out by INDEX and never by value: a record pushed onto the tag stack is
+    // DEEP-COPIED, and the copy would not be the array the closures were built from.
+    var chainItems = []
+    var chainLastIx = 0 - 1
+    var chainLastText = ""
+    // The tag of '"(" Expression ")"' in a call position. The parenthesized expression has
+    // already been parsed exactly once, and t is its value thunk; the only question left
+    // is whether the parentheses held ONE member chain and nothing else. The last chain to
+    // complete inside them is the outermost one, so comparing its text with the text
+    // between the parentheses answers it - and answers NO for '(0, o.m)', '(a ? b.c : d)',
+    // '(o.m || o.n)' and '(o.m = f)', where the last chain covers only part of the inside.
+    function parenPrimary(t, txt) {
+        // MetaJS is typed and this answers either the value thunk or a marker record, so
+        // the result is declared anytype rather than returned from two arms.
+        var r = anytype
+        r = t
+        if (txt.length < 2) { return r }
+        if (chainLastIx < 0) { return r }
+        if (chainLastText != txt.substring(1, txt.length - 1)) { return r }
+        r = {parenchainIx: chainLastIx}
+        return r
+    }
+    // A parenthesized member chain arrives as [{parenchainIx}, {ptxt}, outerSuffixes...];
+    // the parentheses mean nothing at run time, so the inner chain's items REPLACE the
+    // marker and the outer suffixes are appended to them. '(o.m)()' therefore folds to
+    // precisely the item list of 'o.m()' and keeps its receiver. Nesting needs no
+    // recursion here - a chain is recorded already flattened - and the inner {ptxt}
+    // survives at index 1, which is what makes siteTexts name '(o.nope)()' 'o.nope', as
+    // V8 does.
+    function flattenParen(items) {
+        var head = items[0]
+        if (head == undefined || head.parenchainIx == undefined) { return items }
+        return chainItems[head.parenchainIx].concat(items.slice(2))
+    }
+    foldCallMember = function(items, txt) {
+        items = flattenParen(items)
+        // Recorded for parenPrimary. A caller with no text (NewCallee) records no chain:
+        // the index goes negative rather than the text going to some impossible spelling.
+        if (txt == undefined) { chainLastIx = 0 - 1 } else { chainLastIx = chainItems.length; chainLastText = txt }
+        chainItems.push(items)
         if (items.length == 2) return items[0]
         var primary = items[0]
         var suffixes = items.slice(2)
@@ -3954,11 +4063,16 @@ NotFuncHead = :script(~~
         for (var oi = 0; oi < suffixes.length; oi++) {
             if (suffixes[oi].kind == "optmember" || suffixes[oi].kind == "optcall") { hasOpt = true }
         }
+        // A super property is a Reference whose thisValue is the current 'this' - see
+        // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
+        // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
+        var supThis = (items[1].supthis == true)
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
             var curThis = hUndef
+            if (supThis) { curThis = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, "this")]) }
             var shortIn = []
             var i = 0
             while (i < suffixes.length) {
@@ -5103,6 +5217,23 @@ NotFuncHead = :script(~~
         return idx
     }
 
+    // ----- The static namespace (docs/todo.md 2.13) -----
+    // `class C { static m(){} m(){} }` is TWO members in JavaScript, one on the
+    // constructor and one on the prototype. Both used to be written into the
+    // descriptor's own property map, where the second simply won: `C.m()` answered
+    // the instance method, an inherited static lost to a subclass's instance member,
+    // and an INSTANCE could see every static. Every static member - field, method and
+    // accessor box - now goes into a plain object stored on the descriptor under
+    // `__statics`, and the js/ts member externs (js_jsmget / js_jsvget / js_jsmset /
+    // js_jsmcall) plus js_supget / js_supset / js_supercall read it. Instance members
+    // are untouched, so the shared js_get / js_set / js_mcall are untouched too.
+    //
+    // Every write here is a RAW js_set rather than memSetExt(): memSetExt is
+    // js_jsmset, whose whole job is to send a non-internal write on a descriptor to
+    // the static table, which is exactly wrong for the instance half of this loop.
+    // The table itself is created unconditionally, so a RUNTIME `C.zz = 1` has
+    // somewhere to land whether or not the class declared a static.
+    function clsRawSet(b, obj, key, val) { callExt(b, "js_set", [obj, key, val]) }
     // ----- The class descriptor -----
     // Sort the parsed members and remember the name and the parent. Shared by the
     // declaration and the expression form.
@@ -5145,11 +5276,19 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), hr.v])
         }
         var clsV = callExt(b, "js_obj_new", [])
-        callExt(b, memSetExt(), [clsV, emitStr(b, "__isclass"), hTrue])
-        callExt(b, memSetExt(), [clsV, emitStr(b, "__name"), emitStr(b, info.name)])
+        clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)
+        clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.name))
+        // js_jsstatics builds the static table, hangs it on the descriptor and answers
+        // it. It is one extern rather than js_obj_new plus a set because layer 2 counts
+        // the classes: while no class exists, every member read in the program skips the
+        // descriptor test with one integer compare, the same fast-out jvAccN gives the
+        // accessor box. js_jsmget's own comment records that ONE unconditional hash
+        // lookup added there cost 21-43% on a member-read loop - and the js bench row is
+        // pure arithmetic, so no gate here would have seen it.
+        var statsV = callExt(b, "js_jsstatics", [clsV])
         if (info.superName != null) {
-            callExt(b, memSetExt(), [clsV, emitStr(b, "__super"),
-                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)])])
+            clsRawSet(b, clsV, emitStr(b, "__super"),
+                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
         for (var s = 0; s < info.statics.length; s++) {
@@ -5161,7 +5300,7 @@ NotFuncHead = :script(~~
                 b = rs.b
                 sv = rs.v
             }
-            callExt(b, memSetExt(), [clsV, kr.v, sv])
+            clsRawSet(b, statsV, kr.v, sv)
         }
         var ctorIdx = anytype
         if (info.ctor != null) {
@@ -5169,45 +5308,37 @@ NotFuncHead = :script(~~
         } else {
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
         }
-        callExt(b, memSetExt(), [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
-        // __stat records which of the descriptor's method slots are STATIC. A static
-        // method is an ordinary closure that takes its `this` from the receiver slot,
-        // while an instance method has the receiver PREPENDED to its arguments, and
-        // js_supercall cannot tell the two apart from the function value alone - it is
-        // the only reader of this table, and the table is emitted only for a class that
-        // has a static method at all. Twins: the __stat table makeClassValue builds in
-        // the two -interpreter grammars. docs/todo.md 1.2.
-        var anyStat = false
-        for (var sm = 0; sm < info.methods.length; sm++) { if (info.methods[sm].statik) { anyStat = true } }
-        var statV = hUndef
-        if (anyStat) {
-            statV = callExt(b, "js_obj_new", [])
-            callExt(b, memSetExt(), [clsV, emitStr(b, "__stat"), statV])
-        }
+        clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
+        // The __stat table - a set of NAMES marking which descriptor slots were static -
+        // used to live here, so that js_supercall could pick the calling convention. It
+        // is GONE: a set of names cannot answer once a class holds a static AND an
+        // instance member of the same name, and the two tables answer it by construction
+        // now. docs/todo.md 2.13.
         for (var mi = 0; mi < info.methods.length; mi++) {
             var mm = info.methods[mi]
             var mk = emitMemberKey(b, mm)
             b = mk.b
-            if (mm.statik) { callExt(b, memSetExt(), [statV, mk.v, hTrue]) }
+            // The one line that separates the two namespaces.
+            var mtgt = mm.statik ? statsV : clsV
             var idx = anytype
             if (mm.decos != undefined) {
-                b = emitDecoratedMethod(b, clsV, mk.v, mm)
+                b = emitDecoratedMethod(b, mtgt, mk.v, mm)
                 continue
             }
             if (mm.gen == true && mm.async == true) {
                 // An async generator method (docs/todo.md 1.7).
                 pendingAsyncGen = true
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                callExt(b, memSetExt(), [clsV, mk.v, callExt(b, "js_jsasyncgen",
-                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])])
+                clsRawSet(b, mtgt, mk.v, callExt(b, "js_jsasyncgen",
+                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])]))
                 continue
             }
             if (mm.gen == true) {
                 // A generator method: the same body, wrapped so that calling it produces a
                 // generator object instead of running it.
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                callExt(b, memSetExt(), [clsV, mk.v,
-                    callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])
+                clsRawSet(b, mtgt, mk.v,
+                    callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])]))
                 continue
             }
             if (mm.async == true) {
@@ -5215,12 +5346,12 @@ NotFuncHead = :script(~~
                 // answering a promise (see makeAsyncFn).
                 pendingAsyncFn = true
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                callExt(b, memSetExt(), [clsV, mk.v, callExt(b, "js_jsasyncfn",
-                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])])
+                clsRawSet(b, mtgt, mk.v, callExt(b, "js_jsasyncfn",
+                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])]))
                 continue
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-            callExt(b, memSetExt(), [clsV, mk.v, callExt(b, "js_closure", [handle(idx), curScopeV])])
+            clsRawSet(b, mtgt, mk.v, callExt(b, "js_closure", [handle(idx), curScopeV]))
         }
         for (var ai = 0; ai < info.accessors.length; ai++) {
             var aa = info.accessors[ai]
@@ -5234,7 +5365,7 @@ NotFuncHead = :script(~~
             var aclo = callExt(b, "js_closure", [handle(aidx), curScopeV])
             var gV = (aa.acc == "get") ? aclo : hUndef
             var sV = (aa.acc == "set") ? aclo : hUndef
-            callExt(b, "js_defprop", [clsV, ak.v, gV, sV])
+            callExt(b, "js_defprop", [aa.statik ? statsV : clsV, ak.v, gV, sV])
         }
         for (var bi = 0; bi < info.sblocks.length; bi++) {
             var bidx = emitFunction([], info.sblocks[bi].body, false, false)
@@ -5778,7 +5909,10 @@ NotFuncHead = :script(~~
         var slot = "0deco" + decoSeq
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cur])
         var widx = emitDecoTrampoline(slot, mm.statik)
-        callExt(b, memSetExt(), [clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV])])
+        // clsV is the STATIC table for a static member and the descriptor for an
+        // instance one - emitClass picks which (docs/todo.md 2.13), and the raw set is
+        // for the same reason it is raw there.
+        clsRawSet(b, clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV]))
         return b
     }
     // jsf_N(env, args): args[0] is the receiver js_mcall prepended (for a static member

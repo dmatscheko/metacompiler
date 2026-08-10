@@ -2360,6 +2360,166 @@ function s42() {
     check("gthis17", typeof detached === "function")
 }
 
+// ===== SECTION 43: parentheses do not drop the receiver (docs/todo.md 2.13) =====
+// `(o.m)()` calls m with `this` === o. A parenthesized expression evaluates to whatever
+// the inner expression evaluates to, and a MemberExpression evaluates to a REFERENCE,
+// which carries its base - so the parentheses are transparent to the receiver exactly
+// as they are to an assignment target ((a.b).c = 1 has always assigned where a.b.c = 1
+// does). All four engines used to hand the GLOBAL object over instead: a
+// both-halves-agree-and-both-are-wrong defect that the matrix and --cross cannot see by
+// construction, and only node could settle. The TypeScript-only postfix forms are part
+// of the same rule here: `(x as T).m()` and `(x!).m()` are type-layer only, so they must
+// keep the receiver too.
+//
+// The negative rows are the point of the section as much as the positive ones. Only a
+// parenthesized MemberExpression is a Reference: `(0, o.m)()` is the IDIOM for calling a
+// method WITHOUT its receiver, and a fix that made it pass `o` would be a regression
+// dressed as a feature. Every value here is `new vm.Script(src)`'s.
+//
+// Every operand is read out of s43a so the constant folder cannot answer any of it.
+var s43a: any[] = ["m", "n", 1, 2, 3];
+function s43tag(v: any): string {
+    if (v === undefined) { return "undefined" }
+    if (v === globalThis) { return "GLOBAL" }
+    if (v !== null && v.nm !== undefined) { return v.nm }
+    return typeof v;
+}
+class S43B { who(): string { return "B/" + s43tag(this) } static swho(): string { return "SB/" + s43tag(this) } }
+// `super.m` is a Reference too, and its thisValue is the CURRENT `this` - which is what
+// makes the parenthesized and the computed spelling agree with the plain call.
+class S43D extends S43B {
+    who(): string { return "D" }
+    static sPlain(): string { return super.swho() }
+    static sParen(): string { return (super.swho)() }
+}
+class S43K { nm: string; constructor() { this.nm = "k" } m(): string { return s43tag(this) } static sm(): any { return this } }
+
+function s43(): void {
+    var o: any = {nm: "o", m: function (): string { return s43tag(this) }, n: function (): string { return s43tag(this) }};
+    var p: any = {nm: "p"};
+    var k0: any = s43a[0];
+    check("paren01", o.m() === "o");
+    check("paren02", (o.m)() === "o");
+    check("paren03", ((o.m))() === "o");
+    check("paren04", (o?.m)() === "o");
+    check("paren05", (o[k0])() === "o");
+    check("paren06", ((o).m)() === "o");
+    check("paren07", (o.m).call(p) === "p");
+    check("paren08", (o.m)?.() === "o");
+    check("paren09", (o?.m)?.() === "o");
+    // A TAGGED template behind a parenthesized member is a call like any other.
+    check("paren10", (o.m)`x` === "o");
+    var w: any = {nm: "w", g: function (): any { return {nm: "inner", h: function (): string { return s43tag(this) }} }};
+    check("paren11", (w.g().h)() === "inner");
+    check("paren12", (w.g)().nm === "inner");
+    // As a STATEMENT, not only in an expression: this line aborted the interpreter half.
+    var arr: any[] = [s43a[2]];
+    (arr.push)(s43a[3]);
+    check("paren13", arr.length === 2 && arr[1] === 2);
+    check("paren14", ("abc".toUpperCase)() === "ABC");
+    var kk: any = new S43K();
+    check("paren15", (kk.m)() === "k");
+    check("paren16", (S43K.sm)() === S43K);
+    check("paren17", ((S43K.sm))() === S43K);
+    check("paren18", S43D.sPlain() === "SB/" + s43tag(S43D));
+    check("paren19", S43D.sParen() === S43D.sPlain());
+    // The type-layer suffixes are erased, so they change nothing about the receiver.
+    check("paren21", (o.m as any)() === "o");
+    check("paren22", (o.m!)() === "o");
+    // ...and the NEGATIVE side: a value, not a Reference, so `this` is the global object
+    // in this sloppy Script.
+    var f: any = o.m;
+    check("paren23", f() === "GLOBAL");
+    check("paren24", (f)() === "GLOBAL");
+    check("paren25", (0, o.m)() === "GLOBAL");
+    check("paren26", (s43a[0] === "m" ? o.m : o.n)() === "GLOBAL");
+    check("paren27", (o.m, o.n)() === "GLOBAL");
+    check("paren28", (o.m || o.n)() === "GLOBAL");
+    check("paren29", (o.m = o.n, o.n)() === "GLOBAL");
+    // V8 prints the callee's source text without the parentheses; so does siteTexts.
+    check("paren30", (function (): string {
+        try { (o.nope)(); return "no" } catch (e: any) { return e.message }
+    })() === "o.nope is not a function");
+}
+
+// ===== SECTION 44: a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) =====
+// `class C { static m(){} m(){} }` is TWO members in JavaScript - one on the
+// constructor and one on the prototype - and this engine kept both in the descriptor's
+// own property map, where the second write simply won. So `C.m()` answered the INSTANCE
+// method, `class F extends E {}` resolved an inherited static to F's instance member,
+// and an instance could see every static (`typeof c.sonly` was "function" where node
+// says "undefined"). Every static member now lives in a separate `__statics` table on
+// the descriptor; instance members did not move, which is what keeps the shared js_get /
+// js_set / js_mcall - and therefore the other fifteen languages - untouched.
+//
+// 11 of the 18 rows below fail at ec39aef, in all three legs. Every value is
+// `new vm.Script(src)`'s, and every operand comes out of s44a so the constant folder
+// cannot answer any of it.
+var s44a: any[] = [1, 2, 3, "m", "who"];
+class S44C {
+    static m(): string { return "S-m" }
+    m(): string { return "I-m" }
+    static get g(): string { return "S-g" }
+    get g(): string { return "I-g" }
+    static sf: number = s44a[0];
+    static sonly(): string { return "S-only" }
+    ionly(): string { return "I-only" }
+    f: number;
+    constructor() { this.f = s44a[1] }
+    static set sv(v: any) { (S44C as any).svSeen = v }
+}
+class S44E { static x(): string { return "E-static-x" } static only(): string { return "E-only" } }
+class S44F extends S44E { x(): string { return "F-inst-x" } }
+class S44H { static n(): string { return "H-S-n" } n(): string { return "H-I-n" } static viaThis(): string { return this.n() } }
+// The four spellings of a super member. `super.m` is a Reference whose thisValue is the
+// CURRENT `this`, so which SIDE it resolves on is decided by the receiver: a static
+// method's is the class, an instance method's is the instance. The parenthesized and
+// computed forms have to agree with the plain one.
+class S44G extends S44C {
+    static viaSuper(): string { return super.m() }
+    // `super[k]()`, without the `as any` a checker would want: `(super as any)[k]`
+    // does not parse in either typescript grammar (a bare `super` is not a primary),
+    // which is a PARSER gap and not this item's.
+    static viaSuperIdx(): string { return super[s44a[3]]() }
+    viaSuperI(): string { return super.m() }
+    viaSuperParen(): string { return (super.m)() }
+}
+class S44B { nm: string; who(): string { return "B/" + (this === undefined ? "undef" : this.nm) } }
+class S44D extends S44B { who(): string { return "D" } paren(): string { return (super.who)() } }
+
+function s44(): void {
+    var c: any = new S44C();
+    check("stat01", S44C.m() === "S-m");
+    check("stat02", c.m() === "I-m");
+    check("stat03", S44C.g === "S-g");
+    check("stat04", c.g === "I-g");
+    check("stat05", S44C.sf === 1 && c.f === 2);
+    // An instance cannot see a static, and the constructor cannot see an instance member.
+    check("stat06", typeof S44C.sonly === "function" && typeof c.sonly === "undefined");
+    check("stat07", typeof (S44C as any).ionly === "undefined" && typeof c.ionly === "function");
+    // An INHERITED static beats the subclass's own INSTANCE member of the same name.
+    check("stat08", S44F.x() === "E-static-x" && (new S44F()).x() === "F-inst-x");
+    check("stat09", S44F.only() === "E-only");
+    // `this.n()` inside a static resolves on the static side.
+    check("stat10", S44H.viaThis() === "H-S-n" && (new S44H()).n() === "H-I-n");
+    check("stat11", (s44a[3] in S44C) === true && ("ionly" in S44C) === false);
+    // Every class object has a `name`, and it is the class's own (docs/todo.md 2.13).
+    check("stat12", S44C.name === "S44C" && S44F.name === "S44F");
+    (S44C as any).zz = s44a[2];
+    check("stat13", (S44C as any).zz === 3 && ((new S44C()) as any).zz === undefined);
+    (S44G as any).sv = s44a[0];
+    check("stat14", (S44G as any).svSeen === 1);
+    check("stat15", S44G.viaSuper() === "S-m" && S44G.viaSuperIdx() === "S-m");
+    check("stat16", (new S44G()).viaSuperI() === "I-m" && (new S44G()).viaSuperParen() === "I-m");
+    // A parent INSTANCE method reached through a super REFERENCE runs on the current
+    // receiver, not on undefined.
+    var d: any = new S44D(); d.nm = "d";
+    check("stat17", d.paren() === "B/d");
+    check("stat18", (function (): string {
+        try { (S44C as any).ionly(); return "no" } catch (e: any) { return e.message }
+    })() === "S44C.ionly is not a function");
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -2403,6 +2563,8 @@ function main(): number {
     s40(); // SECTION-CALL 40
     s41(); // SECTION-CALL 41
     s42(); // SECTION-CALL 42
+    s43(); // SECTION-CALL 43
+    s44(); // SECTION-CALL 44
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
