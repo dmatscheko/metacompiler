@@ -4575,8 +4575,15 @@ function rbStrStrip(s) {
     while (b > a && rbIsSpaceCh(s.charAt(b - 1))) { b = b - 1 }
     return s.slice(a, b)
 }
+// `\u000c` and NOT `"\f"`: MetaJS's string literal has no \f and DROPS THE
+// BACKSLASH, so `c == "\f"` compiles to `c == "f"` - and `"ffoo barf".strip`
+// answered "oo bar" in the NATIVE BINARY while the interpreter and MRI both
+// said "ffoo barf". The matrix, --full and --cross all run llvm.Run against the
+// Go twin and are structurally blind to layer 2, so nothing here could see it.
+// \u000b beside it was ALREADY spelled this way, which is how the broken one
+// survived. tools/metajs-lint now catches the whole class.
 function rbIsSpaceCh(c) {
-    return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\u000b" || c == "\u0000"
+    return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\u000c" || c == "\u000b" || c == "\u0000"
 }
 function rbStrChars(s) {
     var out = []
