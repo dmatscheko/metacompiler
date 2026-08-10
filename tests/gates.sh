@@ -128,29 +128,27 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9070      # SIXTEENTH round, +143 over the fifteenth's 8927:
-                          # bash +48 (the @ transform family, computed command
-                          # names, run-time echo flags), swift +28 (top-level
-                          # defer, case mapping, Array members, and astral string
-                          # literals), ruby +22 (format argument selectors, %a/%A,
-                          # Float:: constants, FloatDomainError), js +19 and
-                          # typescript +19 (the class object's own keys,
-                          # e.constructor, explicit receivers), dart +6 (reified
-                          # type parameters and typedefs), metajs +1 (Math.random
-                          # is absent in all four engines now, which is the
-                          # assertion todo item 4.1 existed because nobody could
-                          # write).
+FULL_ASSERTIONS=9219      # SEVENTEENTH round, +149 over the sixteenth's 9070:
+                          # ruby +47 (Float/Integer round/floor/ceil with a digit
+                          # count, and malformed format strings raising MRI's own
+                          # ArgumentError messages), swift +44 (nineteen Array and
+                          # String members, ranges as values, and one abort
+                          # wording), js +20 and typescript +20 (private names
+                          # mangled identically in all four engines, a total
+                          # js_jskeys, and the ES2022 brand check), kotlin +18
+                          # (out-of-range indexing throwing the JVM's exceptions,
+                          # and nested throwable names).
                           #
-                          # EIGHT AGENTS RAN IN THIS ROUND and every one of them
-                          # saw "+N, RAISE FULL_ASSERTIONS" and left it alone -
-                          # including the two that added 48 and 28 themselves.
-                          # Raised here afterwards from a COMMITTED tree
-                          # (949e2ae), measured by one whole-tree sweep of all
-                          # eight changes together rather than by adding up the
-                          # isolated runs: 9070 is exactly the sum of the parts,
-                          # which is the evidence that no change interfered with
-                          # another. The rule has now held twenty-five agents in
-                          # a row across three rounds.
+                          # SIX AGENTS RAN IN THIS ROUND and every one of them saw
+                          # "+N, RAISE FULL_ASSERTIONS" and left it alone, which is
+                          # the twenty-sixth through thirty-first in a row. Raised
+                          # here afterwards from a COMMITTED tree (d5360cc),
+                          # measured by ONE whole-tree sweep of all six changes
+                          # together rather than by adding up the isolated runs:
+                          # 9219 is exactly 9070 + 47 + 44 + 20 + 20 + 18, which is
+                          # the evidence that no change interfered with another.
+                          # Each was also verified alone, in a tree built from a
+                          # clean archive with only that agent's files copied in.
 
 # SECTION GAPS in the ratchet, summed per half over all sixteen languages.
 #
