@@ -6899,7 +6899,21 @@ NotMemberKw = :script(~~
         }
         return out + ")"
     }
-    function defaultToString(target) { return target.__class.__name + "@1" }
+    // The Object default, Name@1 - EXCEPT for a Throwable, which inherits
+    // java.lang.Throwable#toString: the BINARY class name and, only when the message
+    // is non-null, ": " and the message. Measured, java 24.0.2 -
+    // println(RuntimeException("x")) is "java.lang.RuntimeException: x", where all
+    // three engines answered "RuntimeException@1": agreed and wrong, the class only
+    // an oracle can see (manual chapter 5). It goes HERE rather than in kstr because
+    // dataMember answers toString for every non-data class, so kstr never reached
+    // past it - and because this is also what an explicit `e.toString()` calls
+    // (the mcall path). An `override fun toString()` and a data class' GENERATED one
+    // both still win, exactly as in Kotlin: neither reaches this function.
+    // docs/todo.md 1.2.
+    function defaultToString(target) {
+        if (kIsThrowable(target)) { return kThrowableStr(target) }
+        return target.__class.__name + "@1"
+    }
     // The structural hash of a value, CONSISTENT with kEq: two values that compare
     // equal hash equally. Kotlin's own recipe - the 31 * h + component fold over the
     // data-class components - so a data/value class hashes from its components, a Char
@@ -10227,6 +10241,24 @@ NotMemberKw = :script(~~
     }
 
     // ----- Exceptions declared in the program -----
+    // The PACKAGE-QUALIFIED (binary) name of a builtin throwable - what
+    // java.lang.Class#getName answers for it, and therefore what Throwable#toString
+    // and the launcher's uncaught-exception line spell. Kotlin's Exception /
+    // RuntimeException / IllegalStateException / ... are TYPEALIASES to the
+    // java.lang classes on the JVM, so `java` 24.0.2 is the oracle even though
+    // there is no kotlinc on this machine (measured: `new RuntimeException("x")`
+    // renders "java.lang.RuntimeException: x"). Two of the nineteen live in
+    // java.util, and NotImplementedError / UninitializedPropertyAccessException are
+    // Kotlin's OWN classes, declared by kotlin-stdlib in the `kotlin` package. The
+    // twins are ktExcFqcn in abnf/jsrtkotlin.go and in
+    // languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+    function kExcFqcn(name) {
+        if (name == "NoSuchElementException") { return "java.util." + name }
+        if (name == "ConcurrentModificationException") { return "java.util." + name }
+        if (name == "NotImplementedError") { return "kotlin." + name }
+        if (name == "UninitializedPropertyAccessException") { return "kotlin." + name }
+        return "java.lang." + name
+    }
     // The builtin throwable hierarchy: a class whose supertype list names one of these
     // gets `message` from it, so `catch (e: Exception) { e.message }` works.
     function installThrowables() {
@@ -10255,6 +10287,9 @@ NotMemberKw = :script(~~
                       "Error", "RuntimeException"]
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
+            // The PACKAGE-QUALIFIED (binary) name, which is what Throwable#toString
+            // and the launcher's uncaught line spell. See kExcFqcn. docs/todo.md 1.2.
+            cls.__bname = kExcFqcn(names[i])
             cls.__ctor = function() {
                 var self = arguments[0]
                 kTakeNamed()
@@ -10265,6 +10300,68 @@ NotMemberKw = :script(~~
         }
     }
     installThrowables()
+
+    // ----- Throwable#toString and the launcher's uncaught-exception line -----
+    // Kotlin inherits java.lang.Throwable#toString unchanged: the BINARY class name
+    // and, only when getMessage() is non-null, ": " and the message. An EMPTY
+    // message still prints the colon and the space; a null one prints neither.
+    // Measured, java 24.0.2 (Kotlin's throwables ARE java.lang's - typealiases):
+    //
+    //     java.lang.RuntimeException: abort probe
+    //     java.lang.RuntimeException                  <- message == null
+    //     java.lang.RuntimeException:                 <- message == ""
+    //     Top: t                                      <- a class the PROGRAM declares
+    //
+    // Before this every engine here fell through to the default Name@1 shape, so
+    // `println(RuntimeException("x"))` read "RuntimeException@1" in all three:
+    // agreed and wrong, the class only an oracle can see. The twins are
+    // ktThrowableStr in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
+    // docs/todo.md 1.2.
+    // A descriptor's __super is filled LAZILY (resolveParents), so a raw __super walk
+    // answers false for an instance whose class has not been constructed through yet -
+    // which is why this asks kIsType, the same test kExcMatches already uses for a
+    // `catch (e: Throwable)` clause. The twins walk __super directly because both
+    // compiled halves build the chain eagerly.
+    function kIsThrowable(v) {
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        if (v.__class == undefined || v.__class == null) { return false }
+        return kIsType(v, "Throwable")
+    }
+    function kClassBin(cls) {
+        if (cls.__bname != undefined && cls.__bname != "") { return cls.__bname }
+        if (typeof cls.__name == "string") { return cls.__name }
+        return "java.lang.Throwable"
+    }
+    function kThrowableStr(v) {
+        var cls = v.__class
+        var name = "java.lang.Throwable"
+        if (cls != undefined && cls != null && typeof cls == "object") { name = kClassBin(cls) }
+        var msg = v.message
+        if (msg === undefined || msg === null) { return name }
+        return name + ": " + kstr(msg)
+    }
+    // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE, on STDERR with exit status 1 - which
+    // is what real java does and what both compiled halves now do through
+    // js_kttop. This half used to print
+    // "kotlin interpreter error: uncaught exception: abort probe" on STDOUT.
+    //
+    // The "\tat MainKt.main(Main.kt:4)" frames real java prints after it are
+    // deliberately NOT reproduced: no engine here has a call-site line table (the
+    // same wall as dart's `catch (e, s)`, manual 7.9), and inventing frames would
+    // be a worse divergence than omitting them.
+    //
+    // A value that is NOT a Throwable cannot be thrown by real Kotlin at all
+    // (a throw operand must be a Throwable), so the fallback only has to AGREE
+    // across the three engines: it is each engine's own toString - kstr here,
+    // k2Render in layer 2, ktpRender in the Go twin - which ./test.sh --cross
+    // already keeps in step. That is strictly better than the raw-slot reading
+    // kExcText did for docs/todo.md 1.13, whose "" + v answered "[object Object]"
+    // natively and "P(x=1)" under llvm.Run.
+    function kExcTopLine(v) {
+        var head = "Exception in thread \"main\" "
+        if (kIsThrowable(v)) { return head + kThrowableStr(v) }
+        return head + kstr(v)
+    }
 
     // Set by makeCall around its callee resolution and cleared by core.varMiss - see
     // both. A name the scope walk answers never reaches varMiss, so makeCall clears it
@@ -10630,52 +10727,21 @@ NotMemberKw = :script(~~
         return false
     }
 
-    // The text an uncaught throw is reported with, and the twin of exc_text in
-    // languages/lib/runtime.c (the native binary) and excText in abnf/jsrt.go
-    // (llvm.Run). It used to be a bare `"" + e.v`, which for a Throwable INSTANCE
-    // is "[object Object]" - so `throw RuntimeException("abort probe")` read
-    // `uncaught exception: [object Object]` here while both compiled halves read
-    // `uncaught exception: abort probe`. docs/todo.md 1.13.
+    // AN EXCEPTION NOBODY CAUGHT IS REPORTED THE WAY THE JVM LAUNCHER REPORTS IT -
+    // "Exception in thread \"main\" java.lang.RuntimeException: abort probe", on
+    // STDERR, exit status 1 (measured, java 24.0.2). See kExcTopLine above.
     //
-    // kstr is deliberately NOT the stringifier used. The compiled halves do not
-    // reach a Kotlin toString here at all: exc_text reads two RAW slots off the
-    // object and, failing those, falls to the floor's to_string, which answers a
-    // flat "[object Object]" for every tag-6 object. So this reads the same two
-    // slots, raw, and combines them by exc_text's own rule - a string `message`
-    // wins, prefixed by `name` when that is a non-empty string, the name alone
-    // when the message is empty. `installThrowables` puts `message` on the
-    // instance directly, which is the slot both compiled halves read.
-    //
-    // exc_text's third arm, `args[0]` when `args` is a floor ARRAY, is the
-    // python/ruby exception shape and no Kotlin value has it; it is left unported
-    // rather than guessed at.
-    //
-    // The fallback stays `"" + v`, which is what makes `throw 5` / `throw "s"`
-    // agree with both compiled halves. It does NOT agree with llvm.Run for a
-    // thrown non-Throwable OBJECT - `data class P(val x: Int); throw P(1)` reads
-    // "P(x=1)" there and "[object Object]" from the native binary, because
-    // jsvString calls the object's toString and the floor's to_string does not.
-    // That divergence is between the two COMPILED halves, predates this and lives
-    // in files this grammar does not own; `[object Object]` is the answer that
-    // matches the native binary, and `throw P(1)` does not compile in real Kotlin
-    // (a throw operand must be a Throwable), so nothing valid reaches it.
-    function kExcSlot(o, name) {
-        if (hasOwn(o, name)) { return o[name] }
-        return undefined
-    }
-    function kExcText(v) {
-        if (v !== null && v !== undefined && typeof v == "object") {
-            var msg = kExcSlot(v, "message")
-            if (typeof msg == "string") {
-                var nm = kExcSlot(v, "name")
-                if (typeof nm == "string" && nm.length > 0) {
-                    if (msg.length == 0) { return nm }
-                    return nm + ": " + msg
-                }
-                return msg
-            }
-        }
-        return "" + v
+    // This replaces docs/todo.md 1.13's kExcText, which was written to the FLOOR's
+    // exc_text - a raw two-slot reading whose whole output was the bare message,
+    // "abort probe", with no class name and no launcher prefix anywhere. That was
+    // the right fix for the halves divergence it closed and the wrong text for the
+    // JVM, and both compiled halves agreed with it, which is precisely why only an
+    // oracle could see it (manual chapter 5). exc_text is no longer reached at all
+    // in either compiled half: buildMain in kotlin-to-llvm-ir.abnf catches the
+    // value inside the module and hands it to js_kttop.
+    function kReportUncaught(v) {
+        eprintln(kExcTopLine(v))
+        exit(1)
     }
 
     c.compile(c.asg)
@@ -10692,7 +10758,7 @@ NotMemberKw = :script(~~
         try {
             ret = runMainSnippet(mainName, "Statement")
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + kExcText(e.v)) }
+            if (excIsUser(e)) { kReportUncaught(e.v) }
             throw e
         }
         println("kotlin interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
@@ -10704,7 +10770,7 @@ NotMemberKw = :script(~~
         try {
             ret = globalScope[mainName]()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + kExcText(e.v)) }
+            if (excIsUser(e)) { kReportUncaught(e.v) }
             throw e
         }
         println("kotlin interpreter: " + mainName + "() returned " + (ret === undefined ? 0 : ret))

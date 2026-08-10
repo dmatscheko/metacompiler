@@ -728,10 +728,28 @@ function ktWithRecv(recv, f, args) {
 // own, so `e is Exception` answers true for an IllegalStateException.
 var ktExcHier = undefined
 
+// ktExcFqcn (jsrtkotlin.go 220) is the PACKAGE-QUALIFIED (binary) name of a
+// builtin throwable - what java.lang.Class#getName answers for it, and therefore
+// what Throwable#toString and the launcher's uncaught-exception line spell.
+// Kotlin's Exception / RuntimeException / IllegalStateException / ... are
+// TYPEALIASES to the java.lang classes on the JVM, so `java` 24.0.2 is the oracle
+// even though there is no kotlinc on this machine. Two of the nineteen live in
+// java.util, and NotImplementedError / UninitializedPropertyAccessException are
+// Kotlin's OWN classes, declared by kotlin-stdlib in the `kotlin` package.
+// The twin is kExcFqcn in languages/kotlin-interpreter.abnf. docs/todo.md 1.2.
+function ktExcFqcn(name) {
+    if (name === "NoSuchElementException") { return "java.util." + name }
+    if (name === "ConcurrentModificationException") { return "java.util." + name }
+    if (name === "NotImplementedError") { return "kotlin." + name }
+    if (name === "UninitializedPropertyAccessException") { return "kotlin." + name }
+    return "java.lang." + name
+}
+
 function k0MkExc(name, sup) {
     var o = {}
     o["__isclass"] = true
     o["__name"] = name
+    o["__bname"] = ktExcFqcn(name)
     if (sup !== undefined) { o["__super"] = sup }
     return o
 }
@@ -2349,10 +2367,98 @@ function k2Obj(o, depth) {
         var en = o["name"]
         if (typeof en == "string") { return en }
     }
+    // java.lang.Throwable#toString, which Kotlin inherits: the BINARY class name
+    // and, only when `message` is non-null, ": " and the message. Measured,
+    // java 24.0.2 - println(RuntimeException("x")) is
+    // "java.lang.RuntimeException: x", not the Object default below, which all
+    // three engines answered ("RuntimeException@1") and all three had wrong. This
+    // is also what an explicit `e.toString()` reaches (the no-argument toString arm
+    // of js_ktsmcall routes to ktRender). It sits AFTER the descriptor walk, so an
+    // `override fun toString()` and a data class' generated one still win, exactly
+    // as in Kotlin. docs/todo.md 1.2.
+    if (k4bIsThrowLike(o)) { return ktThrowableStr(o) }
     var name = cls["__name"]
     if (typeof name != "string") { return undefined }
     if (name.length == 0) { return undefined }
     return name + "@1"
+}
+
+// ktClassBin (jsrtkotlin.go's ktClassBin) is a descriptor's binary name: the
+// __bname the builtin hierarchy writes, falling back to the simple __name a class
+// the PROGRAM declares carries. A top-level Kotlin class in the default package
+// has the simple name as its binary name; a NESTED one is spelled Outer$Inner by
+// the JVM and this subset keeps no nesting path on the descriptor.
+function ktClassBin(cls) {
+    var b = cls["__bname"]
+    if (typeof b == "string") { if (b.length > 0) { return b } }
+    var n = cls["__name"]
+    if (typeof n == "string") { return n }
+    return "java.lang.Throwable"
+}
+
+// ktThrowableStr (jsrtkotlin.go's ktThrowableStr) is java.lang.Throwable#toString:
+// the binary class name and, only when `message` is non-null, ": " and the
+// message. An EMPTY message still prints the colon and the space; a null one
+// prints neither (measured, java 24.0.2). The twin in the other half is
+// kThrowableStr in languages/kotlin-interpreter.abnf.
+function ktThrowableStr(o) {
+    var cls = o["__class"]
+    var name = "java.lang.Throwable"
+    if (cls !== undefined && cls !== null && typeof cls == "object") { name = ktClassBin(cls) }
+    var msg = o["message"]
+    if (msg === undefined) { return name }
+    if (msg === null) { return name }
+    return name + ": " + ktRender(msg)
+}
+
+// k4bIsThrowLike is "does Throwable#toString apply to this value" - the RENDERING
+// question, deliberately NOT js_ktexcmatch's k4bIsThrowable. The __super chain of a
+// class the program declared is never linked to the builtin throwable hierarchy in
+// this half (there is no descriptor in scope to link it to), so a chain walk alone
+// answers false for `class Top : Exception("t")`; emitSuperCtor in
+// languages/kotlin-to-llvm-ir.abnf marks the instance __kthrow instead.
+// k4bIsThrowable is left exactly as it was, because js_ktexcmatch RELIES on a user
+// exception reading as a non-throwable: that is what makes `catch (e: Exception)`
+// catch one at all. docs/todo.md 1.2.
+function k4bIsThrowLike(v) {
+    if (!ktIsObj(v)) { return false }
+    if (v["__kthrow"] === true) { return true }
+    return k4bIsThrowable(v)
+}
+
+// THE JVM LAUNCHER'S UNCAUGHT-EXCEPTION LINE, and the top of the program.
+//
+// Without it the exception left the module and the floor's uncaught-throw handler
+// printed "js runtime error: uncaught exception: abort probe" - the bare message,
+// no class name - while the interpreter half printed its own engine-error wording
+// ON STDOUT. All three engines AGREED and all three were wrong, the one defect
+// class byte identity cannot see (manual chapter 5).
+//
+// Kotlin compiles to the JVM and its throwables ARE java.lang's, so java 24.0.2
+// settles the format (measured, stderr, exit status 1):
+//
+//     Exception in thread "main" java.lang.RuntimeException: abort probe
+//     Exception in thread "main" java.lang.Exception            <- message == null
+//     Exception in thread "main" Top: t                         <- a declared class
+//
+// The "\tat MainKt.main(Main.kt:4)" frames are NOT reproduced: there is no
+// call-site line table here, and inventing frames would be a worse divergence than
+// omitting them. A value that is not a Throwable cannot be thrown by real Kotlin at
+// all, so the fallback only has to AGREE across the engines: it is each engine's
+// own toString.
+//
+// Twins: kExcTopLine / kReportUncaught in languages/kotlin-interpreter.abnf and
+// js_kttop in abnf/jsrtkotlin.go. The shape - the whole entry call inside one
+// js_try whose catch clause calls this - is java's js_jvtop and ruby's js_rtop.
+function ktExcTopLine(v) {
+    var head = "Exception in thread \"main\" "
+    if (k4bIsThrowLike(v)) { return head + ktThrowableStr(v) }
+    return head + ktRender(v)
+}
+function js_kttop(exc) {
+    eprintln(ktExcTopLine(exc))
+    exit(1)
+    return undefined
 }
 
 // k2Name is ktpName (jsrtkotlin.go:2735): the __name of a class descriptor.

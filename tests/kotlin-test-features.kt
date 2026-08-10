@@ -301,6 +301,17 @@ fun transform(list: List<Int>): String {
 
 val List<Int>.midRecv: Int get() = this[size / 2]
 
+// Throwable#toString, i.e. the text the launcher's uncaught-exception line is built
+// from (docs/todo.md 1.2). Four shapes the builtin hierarchy cannot cover: a user
+// exception with a message, one without, one under a builtin that used not to store
+// its message at all, and one that overrides toString.
+class ThrTop(m: String) : RuntimeException(m)
+class ThrNoMsg : RuntimeException()
+class ThrIoobe(m: String) : IndexOutOfBoundsException(m)
+class ThrOwn(val tag: String) : Exception("ignored") {
+    override fun toString(): String = "own:" + tag
+}
+
 fun main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
@@ -1009,6 +1020,63 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         with(recvRe) { find(listOf("a(b)c", "zabc")[1])?.value } == "abc")
     check("recv-char-result", with('q') { code } == 113 && with('q') { isLetter() } &&
         with(runCatching { 7 }) { getOrNull() } == 7)
+
+    // ----- Throwable#toString, i.e. the uncaught-exception text -----
+    // docs/todo.md 1.2. Kotlin's throwables ARE java.lang's (typealiases), so
+    // java 24.0.2 prints exactly these strings; there is no kotlinc on this
+    // machine. The ABORT LINE is "Exception in thread \"main\" " plus this, so
+    // asserting toString is how a ratchet (which has to exit 0) reaches the text
+    // of the item at all. Every row below read "RuntimeException@1" - the
+    // java.lang.Object default - in ALL THREE engines before it: agreed and
+    // wrong, the class byte identity cannot see. Read out of an array so no
+    // constant folder can evaluate the concatenation.
+    val thr: Array<Any> = arrayOf(RuntimeException("abort probe"), RuntimeException(),
+        RuntimeException(""), IllegalStateException("ise"), ArithmeticException("/ by zero"),
+        NullPointerException(), NumberFormatException("nfe"), Exception("checked"),
+        Error("err"), Throwable("thr"), NoSuchElementException("nsee"),
+        ConcurrentModificationException("cme"), ThrTop("top"), ThrNoMsg(),
+        ThrIoobe("uio"), ThrOwn("q"))
+    check("thr-tostring-builtin", thr[0].toString() == "java.lang.RuntimeException: abort probe" &&
+        thr[3].toString() == "java.lang.IllegalStateException: ise" &&
+        thr[4].toString() == "java.lang.ArithmeticException: / by zero" &&
+        thr[6].toString() == "java.lang.NumberFormatException: nfe")
+    // A null message drops the colon; an EMPTY one keeps it. That pair is the whole
+    // rule, and it is the half a "print the message if there is one" implementation
+    // gets wrong.
+    check("thr-tostring-nomsg", thr[1].toString() == "java.lang.RuntimeException" &&
+        thr[5].toString() == "java.lang.NullPointerException" &&
+        thr[13].toString() == "ThrNoMsg")
+    check("thr-tostring-emptymsg", thr[2].toString() == "java.lang.RuntimeException: ")
+    // Exception, Error and Throwable itself are java.lang; NoSuchElementException and
+    // ConcurrentModificationException are the two that are NOT (java.util).
+    check("thr-tostring-roots", thr[7].toString() == "java.lang.Exception: checked" &&
+        thr[8].toString() == "java.lang.Error: err" &&
+        thr[9].toString() == "java.lang.Throwable: thr" &&
+        thr[10].toString() == "java.util.NoSuchElementException: nsee" &&
+        thr[11].toString() == "java.util.ConcurrentModificationException: cme")
+    // A class the PROGRAM declares keeps its own (unqualified) binary name, and
+    // "" + e goes through the same rendering as an explicit toString().
+    check("thr-tostring-user", thr[12].toString() == "ThrTop: top" && "" + thr[12] == "ThrTop: top")
+    // A user class under a builtin OUTSIDE the eight emitSuperCtor used to know
+    // about: its message was dropped entirely in both compiled halves.
+    check("thr-user-message", thr[14].toString() == "ThrIoobe: uio" &&
+        (thr[14] as IndexOutOfBoundsException).message == "uio")
+    // A no-argument super constructor stores message = NULL, not "absent": the
+    // compiled halves answered kotlin.Unit where the interpreter said null.
+    check("thr-nomsg-message", (thr[13] as RuntimeException).message == null)
+    // A RUNTIME-raised exception renders the same way, and this arm reaches the
+    // descriptors the runtime registers rather than the ones `new` builds.
+    var thrCaught = "none"
+    try {
+        val zero = thr.size - thr.size
+        check("thr-unreachable", 1 / zero == 0)
+    } catch (e: ArithmeticException) {
+        thrCaught = e.toString()
+    }
+    check("thr-tostring-runtime", thrCaught == "java.lang.ArithmeticException: / by zero")
+    // A declared toString() still wins over Throwable's - the same precedence real
+    // Kotlin has, and the arm the new one had to be inserted behind.
+    check("thr-tostring-override", thr[15].toString() == "own:q")
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")

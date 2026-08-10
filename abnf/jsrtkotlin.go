@@ -55,6 +55,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -165,6 +166,7 @@ func ktExcHierarchy() map[string]*jsObject {
 		o := newJSObject()
 		o.set("__isclass", true)
 		o.set("__name", name)
+		o.set("__bname", ktExcFqcn(name))
 		if super != nil {
 			o.set("__super", super)
 		}
@@ -214,6 +216,106 @@ func (rt *jsrt) ktLateinitCheck(o *jsObject, name string, v interface{}) interfa
 		cls, _ = cls.props["__super"].(*jsObject)
 	}
 	return v
+}
+
+// ktExcFqcn is the PACKAGE-QUALIFIED (binary) name of a builtin throwable - what
+// java.lang.Class#getName answers for it, and therefore what Throwable#toString and
+// the launcher's uncaught-exception line spell. Kotlin's Exception /
+// RuntimeException / IllegalStateException / ... are TYPEALIASES to the java.lang
+// classes on the JVM, so `java` 24.0.2 is the oracle even though there is no
+// kotlinc here (measured: new RuntimeException("x").toString() is
+// "java.lang.RuntimeException: x"). Two of the nineteen live in java.util and two
+// are Kotlin's OWN classes, declared in the `kotlin` package by kotlin-stdlib.
+// The twins are kExcFqcn in languages/kotlin-interpreter.abnf and ktExcFqcn in
+// languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+func ktExcFqcn(name string) string {
+	switch name {
+	case "NoSuchElementException", "ConcurrentModificationException":
+		return "java.util." + name
+	case "NotImplementedError", "UninitializedPropertyAccessException":
+		return "kotlin." + name
+	}
+	return "java.lang." + name
+}
+
+// ktClassBin is a descriptor's binary name: the __bname the hierarchy above and the
+// emitter write, falling back to the simple __name a class the PROGRAM declares
+// carries. A top-level Kotlin class in the default package has the simple name as
+// its binary name, which is the common case and exact; a NESTED one is spelled
+// Outer$Inner by the JVM and this subset has no nesting path on the descriptor, so
+// it answers "Inner" - recorded rather than guessed at (see the report note).
+func ktClassBin(cls *jsObject) string {
+	if b, ok := cls.props["__bname"].(string); ok && b != "" {
+		return b
+	}
+	if n, ok := cls.props["__name"].(string); ok {
+		return n
+	}
+	return "java.lang.Throwable"
+}
+
+// ktIsThrowable answers whether a value's descriptor chain reaches Throwable - the
+// same walk js_ktexcmatch does, hoisted out so ktpObj and the abort line share it.
+// The twins are kIsThrowable in languages/kotlin-interpreter.abnf and
+// k4bIsThrowable in languages/lib/kotlin-rt.metajs.
+func ktIsThrowable(o *jsObject) bool {
+	cls, _ := o.props["__class"].(*jsObject)
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		if n, ok := cls.props["__name"].(string); ok && n == "Throwable" {
+			return true
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return false
+}
+
+// ktIsThrowLike is "does Throwable#toString apply to this value" - the RENDERING
+// question, deliberately NOT js_ktexcmatch's chain walk. The __super chain of a class
+// the PROGRAM declared is never linked to the builtin throwable hierarchy in this
+// half (there is no descriptor in scope to link it to), so a chain walk alone answers
+// false for `class Top : Exception("t")`; emitSuperCtor in
+// languages/kotlin-to-llvm-ir.abnf marks the instance __kthrow instead. The
+// catch-clause walk is left exactly as it was, because js_ktexcmatch RELIES on a user
+// exception reading as a non-throwable: that is what makes `catch (e: Exception)`
+// catch one at all. The twin is k4bIsThrowLike in languages/lib/kotlin-rt.metajs.
+// docs/todo.md 1.2.
+func ktIsThrowLike(o *jsObject) bool {
+	if t, ok := o.props["__kthrow"]; ok && t == true {
+		return true
+	}
+	return ktIsThrowable(o)
+}
+
+// ktThrowableStr is java.lang.Throwable#toString, which Kotlin inherits unchanged:
+// the binary class name and, only when `message` is non-null, ": " and the message.
+// An EMPTY message still prints the colon and the space; a null one prints neither
+// (measured, java 24.0.2). It is both what println(e) writes and the whole of the
+// abort line after the fixed prefix. Twins: kThrowableStr in
+// languages/kotlin-interpreter.abnf, ktThrowableStr in
+// languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+func (rt *jsrt) ktThrowableStr(o *jsObject) string {
+	cls, _ := o.props["__class"].(*jsObject)
+	name := "java.lang.Throwable"
+	if cls != nil {
+		name = ktClassBin(cls)
+	}
+	msg, has := o.props["message"]
+	if !has || isUndefOrNull(msg) {
+		return name
+	}
+	return name + ": " + rt.ktpRender(msg, 0)
+}
+
+// ktExcTopLine is the JVM launcher's uncaught-exception line, the text js_kttop
+// writes. A value that is not a Throwable cannot be thrown by real Kotlin at all,
+// so the fallback only has to AGREE across the three engines: it is each engine's
+// own toString, which the three already keep in step.
+func (rt *jsrt) ktExcTopLine(v interface{}) string {
+	const head = "Exception in thread \"main\" "
+	if o, ok := v.(*jsObject); ok && ktIsThrowLike(o) {
+		return head + rt.ktThrowableStr(o)
+	}
+	return head + rt.ktpRender(v, 0)
 }
 
 // ktIsBuiltinExc reports a name the hierarchy above provides.
@@ -1007,6 +1109,30 @@ func init() {
 			o.set("__class", cls)
 			o.set("message", u(a[1]))
 			return w(o)
+		}
+		// THE JVM LAUNCHER'S UNCAUGHT-EXCEPTION LINE, called from the catch clause
+		// of the one js_try the emitter wraps the entry call in (buildMain in
+		// languages/kotlin-to-llvm-ir.abnf). Without it the value left the module
+		// and runJSModule's uncaught-throw handler printed
+		// "js runtime error: uncaught exception: abort probe" - no class name at
+		// all - while the interpreter half said "kotlin interpreter error:
+		// uncaught exception: abort probe" ON STDOUT. All three engines agreed on
+		// the text and all three were wrong, the one defect class engine-vs-engine
+		// byte identity cannot see (manual chapter 5).
+		//
+		// Kotlin compiles to the JVM and its throwables ARE java.lang's, so
+		// java 24.0.2 settles the format (measured, stderr, exit status 1):
+		//
+		//     Exception in thread "main" java.lang.RuntimeException: abort probe
+		//
+		// The "\tat MainKt.main(Main.kt:4)" frames are deliberately not reproduced;
+		// no engine here has a call-site line table. This is java's js_jvtop,
+		// ruby's js_rtop and go's js_gotop, one language further on.
+		// docs/todo.md 1.2.
+		m["js_kttop"] = func(a []uint64) uint64 {
+			fmt.Fprint(warnWriter, wtf8Clean(rt.ktExcTopLine(u(a[0]))+"\n"))
+			os.Exit(1)
+			return 0
 		}
 		// js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the
 		// __outer chain for an instance whose class is named `Outer`, and fall back to
@@ -3177,6 +3303,15 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 		if n, ok := o.props["name"].(string); ok {
 			return n, true
 		}
+	}
+	// java.lang.Throwable#toString, which Kotlin inherits: the BINARY class name
+	// and, only when `message` is non-null, ": " and the message. Measured,
+	// java 24.0.2 - println(RuntimeException("x")) is
+	// "java.lang.RuntimeException: x", not the Object default below, which all
+	// three engines answered ("RuntimeException@1") and all three had wrong. It is
+	// the same text the launcher's uncaught line prints. docs/todo.md 1.2.
+	if ktIsThrowLike(o) {
+		return rt.ktThrowableStr(o), true
 	}
 	name, _ := cls.props["__name"].(string)
 	if name == "" {

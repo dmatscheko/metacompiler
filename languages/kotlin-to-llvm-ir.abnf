@@ -3800,12 +3800,12 @@ KwContract  = "contract" KwEnd ;
     }
     // An abstract (bodiless) member function: only its name and arity matter.
     function makeAbstract(items) { noteParams(items[0], items[1].params); return {name: items[0], params: items[1].params} }
-    // Base types the runtime does not model as user classes but whose constructor
-    // argument programs DO observe: `class E(m: String) : Exception(m)` must make
-    // e.message readable, so the synthesized "super constructor" stores it.
-    var excBases = {"$Exception": true, "$RuntimeException": true, "$Throwable": true,
-                    "$Error": true, "$IllegalStateException": true, "$IllegalArgumentException": true,
-                    "$IllegalAccessException": true, "$ArithmeticException": true}
+    // The base types the runtime does not model as user classes but whose constructor
+    // argument programs DO observe (`class E(m: String) : Exception(m)` must make
+    // e.message readable) used to be a SECOND, SHORTER list here, `excBases`, holding
+    // eight of the seventeen names below - so `class E : IndexOutOfBoundsException(m)`
+    // silently dropped its message. emitSuperCtor now reads excBuiltins, which is the
+    // set the throwable hierarchy actually provides. docs/todo.md 1.2.
     // The builtin throwables that can also be CONSTRUCTED directly - `throw
     // IllegalStateException("x")`. The set matches ktExcHierarchy in abnf/jsrtkotlin.go
     // and installThrowables in kotlin-interpreter.abnf.
@@ -6250,8 +6250,33 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_arr_push", [argsV, thisV])
             for (var j = 0; j < argVs.length; j++) { callExt(b, "js_arr_push", [argsV, argVs[j]]) }
             callExt(b, "js_call", [ctorV, hUndef, argsV])
-        } else if (excBases["$" + sup.name] == true && argVs.length > 0) {
-            callExt(b, "js_set", [thisV, emitStr(b, "message"), argVs[0]])
+        } else if (excBuiltins["$" + sup.name] == true) {
+            // A class of the program extending a BUILTIN throwable. The builtin has no
+            // descriptor in this half's scope (only js_ktnewexc's hierarchy knows it),
+            // so the super call is synthesized: the message goes on the instance, and
+            // __kthrow marks it a Throwable for the rendering path.
+            //
+            // TWO FIXES HERE, both docs/todo.md 1.2:
+            //
+            //  - the message is stored EVEN WITH NO ARGUMENT, as null. `class NoMsg :
+            //    RuntimeException()` left the slot absent, so `NoMsg().message` was
+            //    kotlin.Unit in both compiled halves where the interpreter half
+            //    answered null (real Kotlin: null) - a live halves divergence --cross
+            //    never reached, found probing the abort text.
+            //  - the guard is excBuiltins, not excBases. excBases listed eight of the
+            //    seventeen constructible throwables, so `class E :
+            //    IndexOutOfBoundsException("x")` dropped its message entirely.
+            //
+            // __kthrow is what makes Throwable#toString apply to a class the program
+            // declared: this half never links the descriptor's __super to the builtin
+            // chain (which is why js_ktexcmatch has to accept a non-throwable for the
+            // three root types), so a __super walk cannot see it. It is a `__`-prefixed
+            // slot, so keysOf hides it and no data-class rendering picks it up. The
+            // readers are k4bIsThrowLike in languages/lib/kotlin-rt.metajs and
+            // ktIsThrowLike in abnf/jsrtkotlin.go.
+            callExt(b, "js_set", [thisV, emitStr(b, "__kthrow"), hTrue])
+            callExt(b, "js_set", [thisV, emitStr(b, "message"),
+                                  argVs.length > 0 ? argVs[0] : hNull])
         }
         return b
     }
@@ -7987,14 +8012,44 @@ KwContract  = "contract" KwEnd ;
         // can call the file's functions with real arguments.
         var mainName = c.mainName
         if (mainName == undefined || mainName == "") { mainName = "main" }
-        if (mainIsSnippet(mainName)) {
-            b = emitMainSnippet(b, mainName, "Statement")
-            b.NewRet(emitNum(b, 0))
-        } else {
-            var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, mainName)])
-            var argsV = callExt(b, "js_arr_new", [])
-            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        // THE WHOLE ENTRY CALL RUNS INSIDE ONE js_try, so an exception nobody caught is
+        // reported BY THE PROGRAM (js_kttop) instead of escaping the module. What
+        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
+        // whose exc_text answers the bare message - so `throw RuntimeException("abort
+        // probe")` read "js runtime error: uncaught exception: abort probe" in both
+        // compiled halves, with no class name and no launcher prefix, and the
+        // interpreter half said the same thing with its own engine wording. All three
+        // agreed and all three were wrong. js_kttop prints the JVM LAUNCHER's own line
+        // - `Exception in thread "main" java.lang.RuntimeException: abort probe`, on
+        // stderr, exit 1 - which is what real java does (measured, 24.0.2; Kotlin's
+        // throwables ARE java.lang's). This is exactly the shape
+        // java-to-llvm-ir.abnf (js_try + js_jvtop) and ruby-to-llvm-ir.abnf (js_try +
+        // js_rtop) use. docs/todo.md 1.2.
+        //
+        // Both closures are emitted with isCtl FALSE: nothing inside them is a
+        // return/break/continue crossing the boundary, so js_try's answer is the entry
+        // call's own value and llvm.Run's `res.Ret` is unchanged.
+        var entryT = function(bb) {
+            if (mainIsSnippet(mainName)) {
+                bb = emitMainSnippet(bb, mainName, "Statement")
+                bb.NewRet(emitNum(bb, 0))
+                return deadBlock()
+            }
+            var mainV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, mainName)])
+            var argsV = callExt(bb, "js_arr_new", [])
+            bb.NewRet(callExt(bb, "js_call", [mainV, hUndef, argsV]))
+            return deadBlock()
         }
+        var topCatchT = function(bb) {
+            callExt(bb, "js_kttop", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }
+        var entryIdx = emitFunc([], entryT, false, false)
+        var catchIdx = emitFunc(["$exc"], topCatchT, false, false)
+        b.NewRet(callExt(b, "js_try", [callExt(b, "js_closure", [handle(entryIdx), curScopeV]),
+                                       callExt(b, "js_closure", [handle(catchIdx), curScopeV]),
+                                       hUndef]))
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
