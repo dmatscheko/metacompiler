@@ -6422,6 +6422,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isIdentByte(text.charCodeAt(i))) { cur += text.charAt(i) }
         }
         if (cur != "") { parts.push(cur) }
+        // ----- Float's scoped constants -----
+        // `Float::INFINITY' printed an EMPTY LINE in both compiled halves (js_get of
+        // a slot the Float class object does not carry answers nil, and puts prints
+        // nil as ""), and aborted the interpreter half with *uninitialized constant
+        // Float::INFINITY*. A silent wrong answer and a hard error, from the same
+        // gap; the item that named this only saw the interpreter's half.
+        // docs/todo.md 1.5.
+        //
+        // Folded HERE rather than hung on the class object, because a runtime slot
+        // would have to be seeded in the C floor's twin, in abnf/jsrt.go's
+        // rubyBuiltinClass and in rbBuiltinClass - three engines and a per-program
+        // cost - to deliver thirteen compile-time constants. The two non-finite
+        // ones are built from a DIVISION rather than from a literal: js_num_str
+        // reads a decimal text and there is no text for an infinity.
+        //
+        // The price of folding: a program that reopens `class Float' and defines a
+        // constant of one of these thirteen names sees the builtin. MRI would let
+        // the redefinition win. No corpus program does this, and it buys a
+        // three-engine value slot.
+        if (parts.length == 2 && parts[0] == "Float" && rbFloatConst(parts[1]) != "") {
+            var fname = parts[1]
+            return function(b) {
+                var kind = rbFloatConst(fname)
+                if (kind == "int") { return {b: b, v: emitNum(b, rbFloatConstNum(fname))} }
+                if (kind == "inf") {
+                    var one = callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])
+                    var zed = callExt(b, "js_rflo", [emitNum(b, 0)])
+                    return {b: b, v: callExt(b, "js_rdiv", [one, zed])}
+                }
+                return {b: b, v: callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])}
+            }
+        }
         return function(b) {
             var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, parts[0])])
             for (var k = 1; k < parts.length; k++) {
@@ -6429,6 +6461,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return {b: b, v: v}
         }
+    }
+    // The thirteen Float:: constants MRI carries, and how each is built: "int" is a
+    // plain Integer, "flo" a Float box around a literal double, "inf" a Float box
+    // around N / 0.0 (1 for INFINITY, 0 for NAN - MRI's NaN is positive-signed and
+    // 0.0/0.0 is the spelling every engine here agrees on).
+    function rbFloatConst(n) {
+        if (n == "INFINITY" || n == "NAN") { return "inf" }
+        if (n == "MAX" || n == "MIN" || n == "EPSILON") { return "flo" }
+        if (n == "DIG" || n == "MANT_DIG" || n == "MAX_EXP" || n == "MIN_EXP") { return "int" }
+        if (n == "MAX_10_EXP" || n == "MIN_10_EXP" || n == "RADIX" || n == "ROUNDS") { return "int" }
+        return ""
+    }
+    // No exponent literal in this dialect (manual chapter 4), so MAX / MIN /
+    // EPSILON are built by arithmetic: 2^512 by repeated squaring, then
+    // (2 - 2^-52) * 2^1023, 2^-1022 and 2^-52.
+    function rbFloatConstNum(n) {
+        if (n == "INFINITY") { return 1 }
+        if (n == "NAN") { return 0 }
+        if (n == "DIG") { return 15 }
+        if (n == "MANT_DIG") { return 53 }
+        if (n == "MAX_EXP") { return 1024 }
+        if (n == "MIN_EXP") { return 0 - 1021 }
+        if (n == "MAX_10_EXP") { return 308 }
+        if (n == "MIN_10_EXP") { return 0 - 307 }
+        if (n == "RADIX") { return 2 }
+        if (n == "ROUNDS") { return 1 }
+        var f512 = 2
+        var fpk = 1
+        while (fpk < 512) { f512 = f512 * f512; fpk = fpk * 2 }
+        var f511 = f512 / 2
+        var eps = 1 / 4503599627370496
+        if (n == "EPSILON") { return eps }
+        if (n == "MIN") { return 1 / (f511 * f511) }
+        return (2 - eps) * (f512 * f511)
     }
 
 
@@ -6497,7 +6563,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "Math",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
-        "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError"]
+        "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError",
+        // FloatDomainError < RangeError: what Float::INFINITY.to_i and
+        // "%d" % Float::INFINITY raise. docs/todo.md 1.5.
+        "FloatDomainError"]
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its top-level
         // thunks for the real jsmain instead of emitting a second one.

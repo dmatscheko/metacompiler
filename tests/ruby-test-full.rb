@@ -226,20 +226,23 @@ def s06
   check("fmt28", "%.3x" % zed[1] == "0ff" && "%.3d" % neg[0] == "-001" && "%08.3x" % zed[2] == "     001")
   check("fmt29", "%.5x" % neg[0] == "..fff" && "%.5b" % neg[0] == "..111" && "%.3x" % neg[1] == "..fb" && "%#.5x" % zed[0] == "00000")
   check("fmt30", "%#.5o" % zed[1] == "00377" && "%#.1o" % zed[1] == "0377" && "%#.5x" % zed[1] == "0x000ff")
-  # A NON-FINITE float reaching an integer directive. MRI never gets here at all -
-  # its %d converts with to_i and Float::INFINITY.to_i raises FloatDomainError -
-  # but this engine's to_i answers Infinity in all three halves, so the value does
-  # reach the formatter. The INTERPRETER HUNG on %x/%o/%b (baseStr handed an
-  # infinity to bigFromDouble, which cannot terminate) where both compiled halves
-  # printed Go's int64() saturation: a hang against an answer, and --cross never
-  # reached it because nothing formatted an infinity. WHAT the saturation says is
-  # architecture-dependent - manual 7.9's giFromFloat note, +Inf is MaxInt64 on
-  # arm64 and MinInt64 on amd64 - so this pins that the row TERMINATES with digits,
-  # not what the digits are. %d is base ten, takes no int64 conversion in any half,
-  # and is therefore pinnable exactly.
+  # A NON-FINITE float reaching an INTEGER directive raises, because MRI's %d/%x/
+  # %o/%b convert the operand with to_i and Float::INFINITY.to_i is a
+  # FloatDomainError. This used to answer the value's own word or Go's int64
+  # saturation - agreed across the three engines and wrong against MRI - and
+  # 9102c91 pinned only "the row terminates with digits" precisely BECAUSE the
+  # saturation is architecture-dependent (manual 7.9's giFromFloat note, +Inf is
+  # MaxInt64 on arm64 and MinInt64 on amd64). Raising removes the architecture
+  # dependence rather than papering over it. The FLOAT directives do not raise:
+  # "%f" % Float::INFINITY is "Inf". docs/todo.md 1.5.
   inf = [1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0]
-  check("fmt31", ("%x" % inf[0]).length > 0 && ("%o" % inf[1]).length > 0 && ("%b" % inf[2]).length > 0)
-  check("fmt32", "%d" % inf[0] == "Infinity" && "%d" % inf[1] == "-Infinity" && "%d" % inf[2] == "NaN")
+  check("fmt31", (("%x" % inf[0]) rescue "R") == "R" && (("%o" % inf[1]) rescue "R") == "R" &&
+                 (("%b" % inf[2]) rescue "R") == "R")
+  check("fmt32", (begin; "%d" % inf[0]; rescue FloatDomainError => e; e.message; end) == "Infinity" &&
+                 (begin; "%d" % inf[1]; rescue FloatDomainError => e; e.message; end) == "-Infinity" &&
+                 (begin; "%d" % inf[2]; rescue FloatDomainError => e; e.message; end) == "NaN")
+  check("fmt44", "%f" % inf[0] == "Inf" && "%e" % inf[1] == "-Inf" && "%s" % inf[2] == "NaN" &&
+                 "%+f" % inf[0] == "+Inf")
   # %u, %B, %c and %p were in no engine's directive table: the two compiled halves
   # printed the conversion LETTER and consumed no argument, while the interpreter
   # printed the OPERAND - a live halves divergence in both directions, which
@@ -273,6 +276,95 @@ def s06
   # too. None of the three is expressible here, so all three engines answer ""
   # and the first character respectively.
   check("fmt43", "%c" % 1114112 == "" && "%c" % -1 == "" && "%c" % "zed" == "z" && "%c" % "" == "")
+  # ----- the ARGUMENT SELECTORS -----
+  # WHICH argument a directive takes. A three-way divergence until now:
+  # "%1$s-%2$s" % ["a","b"] was "a- b" in the interpreter (the 1 and the 2 read as
+  # WIDTHS), "$s- $s" in both compiled halves (the "$" read as the CONVERSION) and
+  # "a-b" in MRI. docs/todo.md 1.5.
+  ab = ["a", "b", "c"]
+  check("fmt45", "%1$s-%2$s" % ab == "a-b" && "%2$s-%1$s" % ab == "b-a" &&
+                 "%1$s-%1$s" % ab == "a-a" && "%3$s%1$s%2$s" % ab == "cab")
+  check("fmt46", format("%1$s-%2$s", ab[0], ab[1]) == "a-b" && "%1$05d" % [5] == "00005" &&
+                 sprintf("%2$s|%1$s", ab[0], ab[1]) == "b|a")
+  # A * width or precision is read from an argument, BEFORE the value and width
+  # first; a negative * width left-justifies and a negative * precision is none.
+  wp = [5, 2, -5, -1, 3.14159]
+  check("fmt47", "%*d|" % [wp[0], 1] == "    1|" && "%*d|" % [wp[2], 1] == "1    |" &&
+                 "%.*f|" % [wp[1], wp[4]] == "3.14|" && "%*.*f|" % [wp[0], wp[1], wp[4]] == " 3.14|")
+  check("fmt48", "%.*f|" % [wp[3], wp[4]] == "3.141590|" && "%-*d|" % [wp[0], 1] == "1    |" &&
+                 "%1$*2$d|" % [7, 6] == "     7|")
+  # %<name> formats the Hash entry, %{name} is its to_s with no conversion letter -
+  # and both take flags and a width. The key is a SYMBOL: a String key is a
+  # KeyError, and a non-Hash operand is an ArgumentError.
+  hh = {:x => 1, :y => "yy"}
+  check("fmt49", "%<x>d and %<y>s" % hh == "1 and yy" && "%{x} and %{y}" % hh == "1 and yy" &&
+                 "%<x>05.2f" % hh == "01.00" && "%5{x}|" % hh == "    1|")
+  check("fmt50", (("%{z}" % hh) rescue "K") == "K" && (("%{x}" % {"x" => 1}) rescue "K") == "K" &&
+                 (("%<x>s" % [1]) rescue "A") == "A")
+  # ----- %a / %A, the hex-float form -----
+  # Missing in all three engines: the default arm printed the conversion LETTER.
+  # [-]0x1.<hex fraction>p<binary exponent>, normalised so the leading digit is 1
+  # for every non-zero value - A SUBNORMAL IS NORMALISED TOO, which is the row
+  # 5.0e-324 pins - and 0x0p+0 for zero. No precision means no trailing zeros.
+  hf = [1.0, 3.5, 255.0, 0.0, -0.0, 100.0, 0.1, 1.0 / 3.0]
+  check("fmt51", "%a" % hf[0] == "0x1p+0" && "%a" % hf[1] == "0x1.cp+1" &&
+                 "%a" % hf[2] == "0x1.fep+7" && "%A" % hf[1] == "0X1.CP+1")
+  check("fmt52", "%a" % hf[3] == "0x0p+0" && "%a" % hf[4] == "-0x0p+0" &&
+                 "%a" % hf[6] == "0x1.999999999999ap-4" && "%a" % hf[7] == "0x1.5555555555555p-2")
+  sub = [5.0e-324, 2.2250738585072014e-308, 1.7976931348623157e+308]
+  check("fmt53", "%a" % sub[0] == "0x1p-1074" && "%a" % sub[1] == "0x1p-1022" &&
+                 "%a" % sub[2] == "0x1.fffffffffffffp+1023")
+  # A precision rounds HALF TO EVEN and carries out of the leading digit, and pads
+  # with zeros past the value's own 13 digits.
+  check("fmt54", "%.3a" % hf[1] == "0x1.c00p+1" && "%.0a" % hf[1] == "0x1p+2" &&
+                 "%.3a" % sub[2] == "0x1.000p+1024" && "%.0a" % hf[7] == "0x1p-2")
+  ties = [1.0 + 8.0 / 16, 1.0 + 24.0 / 256, 1.0 + 40.0 / 256, 1.0 + 56.0 / 256]
+  check("fmt55", "%.1a" % ties[1] == "0x1.2p+0" && "%.1a" % ties[2] == "0x1.2p+0" &&
+                 "%.1a" % ties[3] == "0x1.4p+0" && "%.0a" % ties[0] == "0x1p+1")
+  # %a is a NUMERIC directive: it takes + / space, and the 0 flag fills behind BOTH
+  # the sign and the "0x". # forces the point. Inf and NaN are never zero-padded.
+  check("fmt56", "%+a" % hf[0] == "+0x1p+0" && "% a" % hf[1] == " 0x1.cp+1" &&
+                 "%#a" % hf[0] == "0x1.p+0" && "%#.0a" % hf[1] == "0x1.p+2")
+  check("fmt57", "%020a" % hf[5] == "0x0000000000001.9p+6" && "%020a" % hf[4] == "-0x00000000000000p+0" &&
+                 "%15.2a|" % hf[7] == "      0x1.55p-2|" && "%-15.2a|" % hf[7] == "0x1.55p-2      |")
+  check("fmt58", "%a" % [inf[0]] == "Inf" && "%a" % [inf[2]] == "NaN" && "%+a" % [inf[0]] == "+Inf" &&
+                 "%020a" % [inf[0]] == "                 Inf")
+  # An Integer operand converts to a Float first: "%a" % 5 is 0x1.4p+2.
+  #
+  # THE ONE ROW IN THIS BLOCK MRI 2.6.10 DOES NOT PASS, and MRI is the one that is
+  # wrong. At a precision of EXACTLY 13 - the full digit count of a double's
+  # fraction, where no rounding can be needed - it rounds the last digit to even
+  # anyway: "%.13a" % (1.0/3) is 0x1.5555555555554p-2 there, against the value's
+  # own 0x1.5555555555555p-2, and "%.13a" of 1.0+3.0/2**52 is ...004 against
+  # ...003. C's printf on this machine, python3's float.hex and MRI's OWN "%a"
+  # with no precision all print the exact digits, and MRI is right again at 12 and
+  # at 14 - a tie test firing on an exact value in sprintf.c, not a rule. All
+  # three engines here print the exact digits; the other 20 rows of the selector
+  # and %a blocks were run under /usr/bin/ruby verbatim and all 20 are true.
+  check("fmt59", "%a" % 5 == "0x1.4p+2" && "%.13a" % hf[7] == "0x1.5555555555555p-2")
+  # ----- Float's scoped constants -----
+  # `Float::INFINITY' - the ordinary way to write an infinity in Ruby and the only
+  # way to write a NaN - aborted the interpreter half with *uninitialized constant
+  # Float::INFINITY* and printed an EMPTY LINE in both compiled halves (js_get of a
+  # slot no class object carries answers nil). A hard error against a silent wrong
+  # answer, and --cross saw neither because nothing named one. docs/todo.md 1.5.
+  check("flc1", Float::INFINITY.to_s == "Infinity" && (-Float::INFINITY).to_s == "-Infinity" &&
+                Float::NAN.nan? == true)
+  one = [1.0, 0.0]
+  check("flc2", Float::INFINITY == one[0] / one[1] && Float::MAX.to_s == "1.7976931348623157e+308" &&
+                Float::MIN.to_s == "2.2250738585072014e-308" && Float::EPSILON.to_s == "2.220446049250313e-16")
+  check("flc3", Float::DIG == 15 && Float::MANT_DIG == 53 && Float::RADIX == 2 && Float::ROUNDS == 1)
+  check("flc4", Float::MAX_EXP == 1024 && Float::MIN_EXP == -1021 &&
+                Float::MAX_10_EXP == 308 && Float::MIN_10_EXP == -307)
+  # Every route from a Float to an Integer raises FloatDomainError on a non-finite
+  # value, with the float's own #to_s as the message; #round with a POSITIVE
+  # ndigits answers a Float and does NOT raise, which is MRI's own rule.
+  check("flc5", (Float::INFINITY.to_i rescue "R") == "R" && (Float::NAN.to_int rescue "R") == "R" &&
+                ((-Float::INFINITY).truncate rescue "R") == "R" && (Float::INFINITY.floor rescue "R") == "R" &&
+                (Float::INFINITY.ceil rescue "R") == "R" && (Float::INFINITY.round rescue "R") == "R")
+  check("flc6", (begin; Float::INFINITY.to_i; rescue FloatDomainError => e; e.message; end) == "Infinity" &&
+                (begin; Float::NAN.to_i; rescue RangeError => e; e.message; end) == "NaN" &&
+                Float::INFINITY.round(2).to_s == "Infinity")
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40

@@ -104,6 +104,34 @@ check("fmt-p", "%p" % "a", "\"a\"")
 check("fmt-width-chars", "%6s|" % "café", "  café|")
 check("fmt-prec-chars", "%.2s" % "café", "ca")
 
+# ----- the ARGUMENT SELECTORS and %a/%A -----
+# WHICH argument a directive takes. A live three-way divergence: "%1$s-%2$s" was
+# "a- b" in the interpreter (the digits read as WIDTHS), "$s- $s" in both compiled
+# halves (the "$" read as the CONVERSION) and "a-b" in MRI. %a/%A - the hex-float
+# form - reached the default arm in every engine and printed its own letter.
+# docs/todo.md 1.5.
+check("fmt-numbered", "%2$s-%1$s" % ["a", "b"], "b-a")
+check("fmt-named", "%<x>03d/%{y}" % {:x => 7, :y => "z"}, "007/z")
+check("fmt-star", "%*.*f|" % [8, 2, 3.14159], "    3.14|")
+check("fmt-star-neg", "%*d|" % [-5, 1], "1    |")
+check("fmt-hexfloat", "%a %A %.2a" % [3.5, 3.5, 1.0 / 3.0], "0x1.cp+1 0X1.CP+1 0x1.55p-2")
+check("fmt-hexfloat-sub", "%a" % 5.0e-324, "0x1p-1074")
+check("fmt-hexfloat-pad", "%020a" % 100.0, "0x0000000000001.9p+6")
+
+# ----- Float's scoped constants, and the Float -> Integer domain error -----
+# `Float::INFINITY' aborted the interpreter with *uninitialized constant* and
+# printed an EMPTY LINE in both compiled halves. #to_i of a non-finite Float
+# answered the infinity in all three where MRI raises FloatDomainError, and
+# #nan? / #infinite? / #finite? existed nowhere at all. docs/todo.md 1.5.
+check("float-inf-const", Float::INFINITY.to_s, "Infinity")
+check("float-nan-const", Float::NAN.nan?, true)
+check("float-max-const", Float::MAX.to_s, "1.7976931348623157e+308")
+check("float-dig-const", Float::DIG, 15)
+check("float-infinite-p", [(1.0 / 0.0).infinite?, (-1.0 / 0.0).infinite?, 1.0.infinite?].inspect, "[1, -1, nil]")
+check("float-domain-to-i", (Float::INFINITY.to_i rescue "raised"), "raised")
+check("float-domain-msg", (begin; Float::NAN.to_i; rescue FloatDomainError => e; e.message; end), "NaN")
+check("float-domain-fmt", (begin; "%d" % [1.0 / 0.0]; rescue FloatDomainError => e; e.message; end), "Infinity")
+
 # ----- booleans, truthiness (only nil and false are falsy), short-circuit -----
 check("and-value", 3 && 4, 4)
 check("or-value", false || 7, 7)

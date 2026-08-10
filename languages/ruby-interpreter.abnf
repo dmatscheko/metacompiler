@@ -3700,6 +3700,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function raiseErr(clsName, msg) {
         throw {__exc: true, v: mkExc(hostGlobals[clsName], msg)}
     }
+    // Every route from a Float to an Integer - #to_i, #to_int, #truncate, #round,
+    // #floor, #ceil, and the %d / %x / %o / %b directives, whose operand MRI
+    // converts with to_i - raises FloatDomainError on an infinity or a NaN, with
+    // the float's own #to_s as the message. All three engines answered the
+    // infinity itself instead, agreed and wrong, so --cross was blind; and it is
+    // what made the ratchet's "%x" % Infinity row pin an ARCHITECTURE-DEPENDENT
+    // int64 saturation (9102c91 preserved that answer rather than invent one -
+    // this replaces it with MRI's, which is not an invention). rbFloDomain in
+    // languages/lib/ruby-rt.metajs and rubyFloDomain in abnf/jsrtruby.go are the
+    // twins. docs/todo.md 1.5.
+    function floDomainGuard(x) {
+        if (x !== x) { raiseErr("FloatDomainError", "NaN") }
+        if (x - x !== 0) { raiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
+    }
     function idiv(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return Math.floor(a / b) }
     function imod(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
     // A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG
@@ -4479,7 +4493,146 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (conv == "d" || conv == "i" || conv == "u" || conv == "f") { return true }
         if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
         if (conv == "b" || conv == "B") { return true }
+        // %a/%A takes a sign and honours the 0 flag exactly as %f does:
+        // "%+a" % 1.5 is "+0x1.8p+0" and "%020a" % 100.0 is "0x0000000000001.9p+6".
+        if (conv == "a" || conv == "A") { return true }
         return conv == "x" || conv == "X" || conv == "o"
+    }
+    // ----- %a / %A: the hex-float form --------------------------------------
+    //
+    // MRI writes a finite double as [-]0x1.<hex fraction>p<+|-><decimal binary
+    // exponent>, normalised so the leading digit is 1 for every non-zero value -
+    // a SUBNORMAL is normalised too ("%a" % 5.0e-324 is "0x1p-1074", not
+    // "0x0.0000000000001p-1022") - and zero is "0x0p+0". Without a precision the
+    // trailing zeros of the fraction go, and with one the fraction is rounded
+    // (half to even) or zero-padded to exactly that many digits.
+    //
+    // Chapter 7.7 of docs/working-on-this-project.md points at d_frexp for this,
+    // and it is NOT needed: scaling a double by a POWER OF TWO is exact as long as
+    // the result neither overflows nor falls into the subnormals, and both
+    // directions can be driven so that it never does - divide only while the value
+    // is >= the power (the quotient stays >= 1), multiply only while the product
+    // stays < 2. So hexNorm is pure arithmetic, needs no bit access, no floor
+    // primitive and no new host global, and it is exact for every finite double
+    // including 5.0e-324. rbHexNorm in languages/lib/ruby-rt.metajs and
+    // rubyHexNorm in abnf/jsrtruby.go are the twins.
+    //
+    // The powers are built by REPEATED SQUARING (2, 4, 16, 256, ... 2^512), which
+    // is the exponent ladder 1, 2, 4, ... 512 the two loops walk downward. The
+    // dialect has no exponent literal (manual chapter 4), so they cannot be
+    // written out.
+    var hexP2v = []
+    var hexP2k = []
+    {
+        var hpv = 2
+        var hpk = 1
+        while (hpk <= 512) {
+            hexP2v.push(hpv)
+            hexP2k.push(hpk)
+            hpv = hpv * hpv
+            hpk = hpk * 2
+        }
+    }
+    // x > 0 and finite -> {m, e} with m in [1, 2) and x == m * 2^e, exactly.
+    function hexNorm(x) {
+        var e = 0
+        var i = hexP2v.length - 1
+        while (i >= 0) {
+            while (x >= hexP2v[i]) { x = x / hexP2v[i]; e = e + hexP2k[i] }
+            i = i - 1
+        }
+        i = hexP2v.length - 1
+        while (i >= 0) {
+            while (x * hexP2v[i] < 2) { x = x * hexP2v[i]; e = e - hexP2k[i] }
+            i = i - 1
+        }
+        return {m: x, e: e}
+    }
+    function hexDigitChar(d) {
+        if (d < 10) { return "" + d }
+        if (d == 10) { return "a" }
+        if (d == 11) { return "b" }
+        if (d == 12) { return "c" }
+        if (d == 13) { return "d" }
+        if (d == 14) { return "e" }
+        return "f"
+    }
+    // The 13 hex digits of m - 1 for m in [1, 2). 13 x 4 == the 52 fraction bits
+    // of a double, so this is the WHOLE value and nothing is lost: m - 1 is exact
+    // (Sterbenz) and every f * 16 step is a scale by a power of two.
+    function hexFrac(m) {
+        var f = m - 1
+        var d = []
+        var i = 0
+        while (i < 13) {
+            f = f * 16
+            var q = Math.floor(f)
+            d.push(q)
+            f = f - q
+            i = i + 1
+        }
+        return d
+    }
+    // hexBody: the finite-value body of %a, WITHOUT the sign (padTo adds that) -
+    // "0x1.8p+0". prec < 0 means "as many digits as the value needs".
+    //
+    // ONE DELIBERATE DIVERGENCE FROM THE ORACLE, and it is MRI 2.6.10 that is
+    // wrong: at a precision of EXACTLY 13 - the full digit count, where no
+    // rounding can be needed - MRI rounds the last digit to even anyway.
+    // "%.13a" % (1.0/3) is 0x1.5555555555554p-2 there against the value's own
+    // 0x1.5555555555555p-2, and "%.13a" of 1.0 + 3.0/2**52 is ...004 against
+    // ...003. C's printf on this same machine, python3's float.hex and MRI's OWN
+    // %a with no precision all say the untouched digits, and MRI is right again
+    // at 12 and at 14 - so this is a tie test firing on an exact value in
+    // sprintf.c, not a rule. All three engines here print the exact digits.
+    function hexBody(fv, prec, alt, upper) {
+        var lead = "1"
+        var frac = ""
+        var ex = 0
+        if (fv == 0) {
+            lead = "0"
+        } else {
+            var nm = hexNorm(fv < 0 ? 0 - fv : fv)
+            ex = nm.e
+            var d = hexFrac(nm.m)
+            var n = 13
+            if (prec >= 0 && prec < 13) {
+                // Round to `prec` digits, half to even, and carry.
+                var up = false
+                if (d[prec] > 8) { up = true }
+                else if (d[prec] == 8) {
+                    var rest = false
+                    var q = prec + 1
+                    while (q < 13) { if (d[q] != 0) { rest = true } q = q + 1 }
+                    if (rest) { up = true }
+                    else { up = (prec == 0 ? 1 : d[prec - 1]) % 2 == 1 }
+                }
+                n = prec
+                if (up) {
+                    var c = n - 1
+                    while (c >= 0 && d[c] == 15) { d[c] = 0; c = c - 1 }
+                    if (c < 0) { ex = ex + 1 } else { d[c] = d[c] + 1 }
+                }
+            }
+            var k = 0
+            while (k < n) { frac = frac + hexDigitChar(d[k]); k = k + 1 }
+            if (prec < 0) {
+                while (frac.length > 0 && frac.charAt(frac.length - 1) == "0") {
+                    frac = frac.substring(0, frac.length - 1)
+                }
+            } else {
+                while (frac.length < prec) { frac = frac + "0" }
+            }
+        }
+        if (prec > 0 && frac.length == 0) {
+            var z = 0
+            while (z < prec) { frac = frac + "0"; z = z + 1 }
+        }
+        var out = "0x" + lead
+        if (frac.length > 0) { out = out + "." + frac } else if (alt) { out = out + "." }
+        var es = "" + (ex < 0 ? 0 - ex : ex)
+        out = out + "p" + (ex < 0 ? "-" : "+") + es
+        return upper ? out.toUpperCase() : out
     }
     // ----- the EXACT decimal of a double ------------------------------------
     //
@@ -5035,10 +5188,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var iv = anytype
             iv = isBig(v) ? v : Math.trunc(toF(v))
             if (!isBig(iv) && (iv !== iv || iv - iv !== 0)) {
-                // Unreachable from real Ruby - Float::INFINITY.to_i raises
-                // FloatDomainError - and left as it was rather than invented.
-                body = base == 10 ? "" + iv : baseStr(iv, base)
-                if (conv == "X") { body = body.toUpperCase() }
+                // MRI's integer directives convert the operand with to_i, so an
+                // infinity or a NaN raises FloatDomainError here exactly as
+                // Float#to_i does. This used to print the value's own word or
+                // baseStr's int64 saturation, which was ARCHITECTURE-DEPENDENT.
+                floDomainGuard(iv)
             } else {
                 var ib = intBody(iv, base, conv == "X" || conv == "B", alt, plus || space, prec)
                 body = ib.b
@@ -5059,6 +5213,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var gp = prec < 0 ? 6 : prec
                 if (gp == 0) { gp = 1 }
                 body = alt ? genAltStr(fv, gp, conv == "G") : genStr(fv, gp, conv == "G")
+            }
+        }
+        // %a / %A - the hex-float form. The sign is put on HERE rather than inside
+        // hexBody, because the 0 flag has to fill behind BOTH the sign and the
+        // "0x": "%020a" % -0.0 is "-0x00000000000000p+0". keep counts them.
+        else if (conv == "a" || conv == "A") {
+            var av = toF(v)
+            var aword = floatWord(av)
+            if (aword != "") { body = aword ; nonFinite = true }
+            else {
+                body = hexBody(av, prec, alt, conv == "A")
+                if (av < 0 || (av == 0 && 1 / av < 0)) { body = "-" + body ; keep = 3 }
+                else { keep = 2 }
             }
         }
         // %c is ONE character: a code point from an Integer (a Float is truncated,
@@ -5095,29 +5262,164 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var padChar = (zero && !left && numeric && !nonFinite && !intPrec) ? fill : " "
         return padTo(body, width, !left, padChar, keep)
     }
+    // ----- the ARGUMENT SELECTORS -------------------------------------------
+    //
+    // A directive does not have to take the next argument. MRI offers four ways of
+    // saying which one it takes, and until now this half implemented NONE of them
+    // and mis-parsed three of the four into a wrong answer rather than an error:
+    // "%1$s-%2$s" % ["a", "b"] read the "1" and the "2" as WIDTHS and answered
+    // "a- b" (the two compiled halves read the "$" as the conversion and answered
+    // "$s- $s" - a live three-way divergence, docs/todo.md 1.5).
+    //
+    //   %N$s          the Nth argument, 1-based, in any order and reusable
+    //   %<name>s      the Hash entry :name, formatted by the directive
+    //   %{name}       the Hash entry :name, to_s, with NO conversion letter
+    //   %*d / %.*f    the width / the precision comes from an argument, and a
+    //                 NEGATIVE * width means left-justify ("%*d" % [-5, 1] is
+    //                 "1    "), while a negative * precision means none at all
+    //
+    // The `*` argument is read BEFORE the value, and width before precision:
+    // "%*.*f" % [5, 2, 3.14159] is " 3.14". "*" also takes an explicit selector
+    // ("%1$*2$d" % [7, 6] is "     7").
+    //
+    // NOT implemented, deliberately: MRI's four ArgumentErrors for MIXING the
+    // styles ("unnumbered(1) mixed with numbered" and its three siblings) and its
+    // "too few arguments". Running off the end of the argument list has always
+    // answered nil here and in both compiled halves - "%s %s" % ["a"] is "a " -
+    // and making one of the five raise while the other four stay lenient would be
+    // a divergence of a different shape. The two errors that ARE raised are the
+    // ones a working program can hit by a typo in the KEY, where the alternative
+    // is a silently empty field.
+    function fmtHashArg(args) {
+        if (args.length == 1 && isDict(args[0])) { return args[0] }
+        return null
+    }
+    function fmtNamed(args, name, open, close) {
+        var h = fmtHashArg(args)
+        if (h === null) { raiseErr("ArgumentError", "one hash required") }
+        // A SCAN and not dictFind: the key is the Symbol :name, and building one
+        // here would depend on symTable's interning agreeing with whatever built
+        // the hash. A String key does NOT match - MRI's "%{x}" % {"x" => 1} is a
+        // KeyError - and neither does anything else.
+        for (var i = 0; i < h.keys.length; i++) {
+            if (isSym(h.keys[i]) && h.keys[i].s == name) { return h.vals[i] }
+        }
+        raiseErr("KeyError", "key" + open + name + close + " not found")
+        return null
+    }
+    // The value a `*` reads: the next positional argument, or the explicit one of
+    // a "*2$" form. Answers the integer and the position just past what it ate.
+    function fmtStar(fmt, j, args, st) {
+        var dn = 0
+        var ds = j
+        while (j < fmt.length && fmt.charCodeAt(j) >= 48 && fmt.charCodeAt(j) <= 57) {
+            dn = dn * 10 + (fmt.charCodeAt(j) - 48)
+            j = j + 1
+        }
+        var v = anytype
+        v = null
+        if (j > ds && j < fmt.length && fmt.charAt(j) == "$") {
+            j = j + 1
+            if (dn > 0 && dn - 1 < args.length) { v = args[dn - 1] }
+        } else {
+            j = ds
+            if (st.ai < args.length) { v = args[st.ai] }
+            st.ai = st.ai + 1
+        }
+        return {n: Math.trunc(toF(v)), j: j}
+    }
     function rformat(fmt, arg) {
         var args = Array.isArray(arg) ? arg : [arg]
         var out = ""
-        var ai = 0
+        var st = {ai: 0}
         var i = 0
         while (i < fmt.length) {
             var ch = fmt.charAt(i)
             if (ch != "%") { out += ch; i = i + 1; continue }
             if (i + 1 < fmt.length && fmt.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
             var j = i + 1
-            var spec = ""
+            var flags = ""
+            var width = 0
+            var prec = 0 - 1
+            var sel = 0 - 1
+            var nm = ""
+            var haveName = false
+            var brace = false
+            var bad = false
             while (j < fmt.length) {
                 var c2 = fmt.charAt(j)
-                if ((c2 >= "a" && c2 <= "z") || (c2 >= "A" && c2 <= "Z")) { break }
-                spec += c2
+                if (c2 == "-" || c2 == "0" || c2 == "+" || c2 == " " || c2 == "#") {
+                    flags += c2
+                    j = j + 1
+                    continue
+                }
+                if (c2 == "<" || c2 == "{") {
+                    var close = c2 == "<" ? ">" : "}"
+                    var e2 = j + 1
+                    var got = ""
+                    while (e2 < fmt.length && fmt.charAt(e2) != close) { got += fmt.charAt(e2); e2 = e2 + 1 }
+                    if (e2 >= fmt.length) { bad = true; break }
+                    nm = got
+                    haveName = true
+                    j = e2 + 1
+                    if (c2 == "{") { brace = true }
+                    if (brace) { break }
+                    continue
+                }
+                if (c2 == "*") {
+                    var sw = fmtStar(fmt, j + 1, args, st)
+                    j = sw.j
+                    if (sw.n < 0) { flags += "-"; width = 0 - sw.n } else { width = sw.n }
+                    continue
+                }
+                if (c2 == ".") {
+                    j = j + 1
+                    if (j < fmt.length && fmt.charAt(j) == "*") {
+                        var sp = fmtStar(fmt, j + 1, args, st)
+                        j = sp.j
+                        prec = sp.n < 0 ? 0 - 1 : sp.n
+                    } else {
+                        prec = 0
+                        while (j < fmt.length && fmt.charCodeAt(j) >= 48 && fmt.charCodeAt(j) <= 57) {
+                            prec = prec * 10 + (fmt.charCodeAt(j) - 48)
+                            j = j + 1
+                        }
+                    }
+                    continue
+                }
+                if (fmt.charCodeAt(j) >= 49 && fmt.charCodeAt(j) <= 57) {
+                    // A leading 0 was taken as the zero FLAG above, so a run of
+                    // digits here is a width - unless a "$" makes it a selector.
+                    var dn2 = 0
+                    while (j < fmt.length && fmt.charCodeAt(j) >= 48 && fmt.charCodeAt(j) <= 57) {
+                        dn2 = dn2 * 10 + (fmt.charCodeAt(j) - 48)
+                        j = j + 1
+                    }
+                    if (j < fmt.length && fmt.charAt(j) == "$") { sel = dn2 - 1; j = j + 1; continue }
+                    width = dn2
+                    continue
+                }
+                break
+            }
+            var conv = "s"
+            if (!brace) {
+                if (bad || j >= fmt.length) { out += ch; i = i + 1; continue }
+                conv = fmt.charAt(j)
                 j = j + 1
             }
-            if (j >= fmt.length) { out += ch; i = i + 1; continue }
             var av = anytype
-            av = ai < args.length ? args[ai] : null
-            ai = ai + 1
-            out += fmtOne(spec, fmt.charAt(j), av)
-            i = j + 1
+            av = null
+            if (haveName) { av = fmtNamed(args, nm, brace ? "{" : "<", brace ? "}" : ">") }
+            else if (sel >= 0) { if (sel < args.length) { av = args[sel] } }
+            else {
+                if (st.ai < args.length) { av = args[st.ai] }
+                st.ai = st.ai + 1
+            }
+            var spec = flags
+            if (width > 0) { spec = spec + ("" + width) }
+            if (prec >= 0) { spec = spec + "." + ("" + prec) }
+            out += fmtOne(spec, conv, av)
+            i = j
         }
         return out
     }
@@ -5831,16 +6133,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function numberMethod(t, name, args, blk) {
         if (name == "to_s" || name == "inspect") { return rstr(t) }
         if (name == "to_f") { return isFlo(t) ? t : mkFlo(toF(t)) }
-        if (name == "to_i" || name == "to_int" || name == "truncate") { var x1 = toF(t); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
+        if (name == "to_i" || name == "to_int" || name == "truncate") { var x1 = toF(t); floDomainGuard(x1); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
         if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
         if (name == "abs") { var x2 = toF(t); return mkFlo(x2 < 0 ? 0 - x2 : x2) }
-        if (name == "floor") { return intFromF(Math.floor(toF(t))) }
-        if (name == "ceil") { return intFromF(Math.ceil(toF(t))) }
-        if (name == "round") { var x3 = toF(t); return intFromF(Math.floor(x3 + 0.5)) }
+        if (name == "floor") { var xf = toF(t); floDomainGuard(xf); return intFromF(Math.floor(xf)) }
+        if (name == "ceil") { var xc = toF(t); floDomainGuard(xc); return intFromF(Math.ceil(xc)) }
+        // MRI's #round with a POSITIVE ndigits answers a Float and does NOT raise,
+        // so only the no-argument form is guarded. (This half ignores ndigits
+        // outright, which is a separate and older divergence - see the report on
+        // docs/todo.md 1.5.)
+        if (name == "round") { var x3 = toF(t); if (args.length == 0) { floDomainGuard(x3) } return intFromF(Math.floor(x3 + 0.5)) }
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
+        // Float#nan? / #infinite? / #finite?, which existed in NO engine: this half
+        // aborted with *unknown Numeric method: nan?* and both compiled halves with
+        // *method call 'nan?' on a object*, agreed and both useless. Found while
+        // asserting Float::NAN, which cannot be checked without one of them.
+        // #infinite? answers 1, -1 or NIL - not a boolean. docs/todo.md 1.5.
+        if (name == "nan?") { var xn = toF(t); return xn !== xn }
+        if (name == "finite?") { var xk = toF(t); return xk === xk && xk - xk === 0 }
+        if (name == "infinite?") {
+            var xi = toF(t)
+            if (xi !== xi || xi - xi === 0) { return null }
+            return xi > 0 ? 1 : 0 - 1
+        }
         if (name == "numerator") { return asRat(t).n }
         if (name == "denominator") { return asRat(t).d }
         if (name == "real") { return reOf(t) }
@@ -9688,6 +10006,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
     }
+    // ----- Float's scoped constants -----
+    // `Float::INFINITY' - the ordinary way to write an infinity in Ruby, and the
+    // only way to write a NaN - aborted this half with *uninitialized constant
+    // Float::INFINITY* while `1.0/0.0' worked, and printed an EMPTY LINE in both
+    // compiled halves (js_get of a slot no class object carries answers nil, which
+    // puts prints as ""). A silent empty line is the worse of the two, and the
+    // item that named this only saw the interpreter's half of it. docs/todo.md 1.5.
+    //
+    // The compiled halves are fixed in the EMITTER (makeScopedConst in
+    // ruby-to-llvm-ir.abnf), which folds these thirteen names to a literal - no
+    // runtime slot, and therefore nothing to keep in step in two more engines.
+    //
+    // No exponent literal in this dialect (manual chapter 4), so MAX / MIN /
+    // EPSILON / INFINITY are all built by arithmetic. 2^-52 and 2^-1022 are exact
+    // powers of two, and MAX is (2 - 2^-52) * 2^1023 exactly.
+    {
+        var flc = hostGlobals["Float"]
+        var f512 = 2
+        var fpk = 1
+        while (fpk < 512) { f512 = f512 * f512; fpk = fpk * 2 }
+        var f511 = f512 / 2
+        var f1023 = f512 * f511
+        var f1022 = f511 * f511
+        var fEps = 1 / 4503599627370496
+        var fInf = f1023 * 4
+        flc["$c$INFINITY"] = mkFlo(fInf)
+        flc["$c$NAN"] = mkFlo(fInf - fInf)
+        flc["$c$MAX"] = mkFlo((2 - fEps) * f1023)
+        flc["$c$MIN"] = mkFlo(1 / f1022)
+        flc["$c$EPSILON"] = mkFlo(fEps)
+        flc["$c$DIG"] = 15
+        flc["$c$MANT_DIG"] = 53
+        flc["$c$MAX_EXP"] = 1024
+        flc["$c$MIN_EXP"] = 0 - 1021
+        flc["$c$MAX_10_EXP"] = 308
+        flc["$c$MIN_10_EXP"] = 0 - 307
+        flc["$c$RADIX"] = 2
+        flc["$c$ROUNDS"] = 1
+    }
     // ----- the Math module -----
     // Math was in the list above and carried NOTHING, so `Math.sin(1)' aborted this
     // half with "unknown class method 'sin'" while the compiler half answered (its
@@ -9745,6 +10102,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         hostGlobals[excNames[eci]] = mkBuiltinClass(excNames[eci], stdErr)
     }
     hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
+    // FloatDomainError < RangeError is what an infinity or a NaN raises when it is
+    // asked for an Integer - Float::INFINITY.to_i and "%d" % Float::INFINITY both.
+    // It existed in no engine, which is why both of those answered "Infinity"
+    // instead. docs/todo.md 1.5.
+    hostGlobals["FloatDomainError"] = mkBuiltinClass("FloatDomainError", hostGlobals["RangeError"])
     // Exception#initialize / #message: the message defaults to the class name, which
     // is what `raise S18Sub` (no message) has to produce.
     function excInitFn() {

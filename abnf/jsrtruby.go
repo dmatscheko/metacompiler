@@ -1,0 +1,607 @@
+package abnf
+
+// jsrtruby.go -- the Ruby half of Kernel#format that abnf/jsrt.go's rubyFormat
+// does not reach: the ARGUMENT SELECTORS, the %a/%A hex-float directive, and
+// FloatDomainError on every Float -> Integer conversion.
+//
+// WHY IT IS A SEPARATE FILE. rubyFormat in abnf/jsrt.go renders one directive
+// correctly and its own header says what it cannot do ("Still absent, and NOT
+// cheap: %a/%A ... and the argument selectors %N$, %<name> and %{name} and the *
+// width/precision"). What was missing is not inside any directive - it is the
+// scanner AROUND them, which decides WHICH argument a directive gets. So this
+// file is that scanner, and it delegates each directive it has resolved back to
+// rubyFormat as a single "%<flags><width>.<prec><conv>" with a single argument.
+// No directive body is duplicated: %a is the only one rendered here, because it
+// is the only one rubyFormat has no arm for.
+//
+// Registration is additive in the way abnf/jsrtdart.go and abnf/jsrtcsharp.go
+// are: an init() appends a registrar to rxExtraExterns, which runs AFTER the base
+// table is filled, and it rebinds only the four RUBY-ONLY externs below
+// (js_rformat, js_rmod, js_rmcall, js_rxmcall), each of which keeps and calls the
+// base binding for everything it does not itself answer. Manual chapter 4's
+// warning is about wrapping a SHARED extern - js_mcall was the case that made a
+// C# Substring raise java's message - and none of these four is shared.
+//
+// The twins are rformat / fmtOne / hexBody / floDomainGuard in
+// languages/ruby-interpreter.abnf and rbFormat / rbHexBody / rbFloDomain in
+// languages/lib/ruby-rt.metajs. docs/todo.md 1.5.
+
+import (
+	"math"
+	"strings"
+)
+
+func init() {
+	// FloatDomainError < RangeError, so `rescue FloatDomainError' and
+	// `rescue RangeError' both catch what rubyFloDomain raises. rubyExcParent is a
+	// plain package var and rubyBuiltinClass makes a class object for any name, so
+	// this is the whole registration.
+	rubyExcParent["FloatDomainError"] = "RangeError"
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		rt.addRubyFmtExterns(m)
+	})
+}
+
+func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
+	u := rt.unwrap
+	w := rt.wrap
+
+	// Kernel#format / #sprintf.
+	m["js_rformat"] = func(a []uint64) uint64 {
+		arr, ok := u(a[0]).(*jsArray)
+		if !ok || len(arr.elems) == 0 {
+			return rt.wrapStr("")
+		}
+		return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}))
+	}
+
+	// String#% - the same formatter reached through the % operator. Every other
+	// left operand is the base binding's modulo.
+	baseMod := m["js_rmod"]
+	m["js_rmod"] = func(a []uint64) uint64 {
+		if s, ok := u(a[0]).(string); ok {
+			return rt.wrapStr(rt.rubyFormat2(s, u(a[1])))
+		}
+		return baseMod(a)
+	}
+
+	// Float#to_i and its five relatives. The guard has to sit in front of the
+	// dispatcher rather than inside it, because rubyMethod's numeric arm is in
+	// abnf/jsrt.go; it fires only for a non-finite Float receiver, so every other
+	// call reaches the base binding after one type switch.
+	for _, name := range []string{"js_rmcall", "js_rxmcall"} {
+		base := m[name]
+		m[name] = func(a []uint64) uint64 {
+			nm, args := rt.rubyRealCall(rt.toString(u(a[1])), u(a[2]))
+			// `Kernel.format(...)' with the module named explicitly does NOT go
+			// through js_rformat - rubyMethod answers it off the Kernel builtin -
+			// so it needs the same interception, or llvm.Run and the native binary
+			// disagree on exactly the selectors this file adds.
+			if rubyIsKernelObj(u(a[0])) && (nm == "format" || nm == "sprintf") {
+				if arr, ok := args.(*jsArray); ok && len(arr.elems) > 0 {
+					return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]),
+						&jsArray{elems: arr.elems[1:]}))
+				}
+			}
+			if v, done := rubyFloPredicate(u(a[0]), nm); done {
+				return w(v)
+			}
+			rt.rubyFloDomainGuard(u(a[0]), nm, args)
+			return base(a)
+		}
+	}
+}
+
+func rubyIsKernelObj(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	bn, isBuiltin := o.props["__rbuiltin"].(string)
+	return isBuiltin && bn == "Kernel"
+}
+
+// rubyRealCall unwraps #send / #__send__ / #public_send, which re-enter the
+// dispatcher with the real method name one argument along. The two hooks below
+// sit OUTSIDE the dispatcher, so they have to do that themselves.
+func (rt *jsrt) rubyRealCall(name string, args interface{}) (string, interface{}) {
+	arr, _ := args.(*jsArray)
+	for (name == "send" || name == "__send__" || name == "public_send") && arr != nil && len(arr.elems) > 0 {
+		name = rt.rubyStr(arr.elems[0])
+		arr = &jsArray{elems: arr.elems[1:]}
+		args = arr
+	}
+	return name, args
+}
+
+// Float#nan? / #infinite? / #finite?, which existed in NO engine: both compiled
+// halves aborted with *method call 'nan?' on a object* and the interpreter half
+// with *unknown Numeric method: nan?*. #infinite? answers 1, -1 or NIL and not a
+// boolean. The twins are numberMethod in languages/ruby-interpreter.abnf and
+// rbNumMethod in languages/lib/ruby-rt.metajs. docs/todo.md 1.5.
+func rubyFloPredicate(target interface{}, name string) (interface{}, bool) {
+	if name != "nan?" && name != "infinite?" && name != "finite?" {
+		return nil, false
+	}
+	var x float64
+	switch t := target.(type) {
+	case jsFlo:
+		x = t.f
+	case float64:
+		x = t
+	default:
+		return nil, false
+	}
+	switch name {
+	case "nan?":
+		return math.IsNaN(x), true
+	case "finite?":
+		return !math.IsNaN(x) && !math.IsInf(x, 0), true
+	}
+	if math.IsInf(x, 1) {
+		return float64(1), true
+	}
+	if math.IsInf(x, -1) {
+		return float64(-1), true
+	}
+	return jsNull, true
+}
+
+// rubyFloDomainGuard raises FloatDomainError when a non-finite Float is asked for
+// an Integer. MRI's #round / #floor / #ceil with a POSITIVE ndigits answer a Float
+// and do not raise, which is why the no-argument form is the one that is guarded.
+func (rt *jsrt) rubyFloDomainGuard(target interface{}, name string, args interface{}) {
+	f, ok := target.(jsFlo)
+	if !ok {
+		return
+	}
+	if !math.IsNaN(f.f) && !math.IsInf(f.f, 0) {
+		return
+	}
+	switch name {
+	case "to_i", "to_int", "truncate", "floor", "ceil":
+	case "round":
+		if arr, isArr := args.(*jsArray); isArr && len(arr.elems) > 0 {
+			return
+		}
+	default:
+		return
+	}
+	rubyFloDomain(rt, f.f)
+}
+
+// rubyFloDomain is the raise itself, with the float's own #to_s as the message.
+func rubyFloDomain(rt *jsrt, x float64) {
+	if math.IsNaN(x) {
+		rt.rubyRaiseErr("FloatDomainError", "NaN")
+	}
+	if math.IsInf(x, 1) {
+		rt.rubyRaiseErr("FloatDomainError", "Infinity")
+	}
+	if math.IsInf(x, -1) {
+		rt.rubyRaiseErr("FloatDomainError", "-Infinity")
+	}
+}
+
+// ===== the argument selectors =====
+//
+// A directive does not have to take the next argument, and MRI offers four ways
+// of saying which one it takes. This engine implemented NONE of them and read the
+// "$" of "%1$s" as the CONVERSION LETTER, so `"%1$s-%2$s" % ["a","b"]' answered
+// "$s- $s" where the interpreter half read the digits as WIDTHS and answered
+// "a- b" and MRI says "a-b": a live three-way divergence.
+//
+//	%N$s          the Nth argument, 1-based, in any order and reusable
+//	%<name>s      the Hash entry :name, formatted by the directive
+//	%{name}       the Hash entry :name, to_s, with NO conversion letter
+//	%*d / %.*f    the width / precision comes from an argument; a NEGATIVE *
+//	              width left-justifies, a negative * precision means none
+//
+// The `*` argument is read BEFORE the value and width before precision, and `*`
+// takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
+//
+// NOT implemented, deliberately: MRI's ArgumentErrors for MIXING the styles and
+// its "too few arguments". Running off the end of the argument list has always
+// answered nil in all three engines here, and making one of the five raise while
+// the other four stay lenient would be a divergence of a different shape. The two
+// errors that ARE raised are the ones a working program hits by a typo in the
+// KEY, where the alternative is a silently empty field.
+func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
+	args := []interface{}{arg}
+	if a, ok := arg.(*jsArray); ok {
+		args = a.elems
+	}
+	ai := 0
+	// The next positional argument, or nil past the end.
+	take := func() interface{} {
+		var v interface{} = jsNull
+		if ai < len(args) {
+			v = args[ai]
+		}
+		ai++
+		return v
+	}
+	// The value a `*` reads: the next positional argument, or the explicit one of
+	// a "*2$" form. Answers the integer and the position just past what it ate.
+	star := func(j int) (int, int) {
+		ds, dn := j, 0
+		for j < len(spec) && spec[j] >= '0' && spec[j] <= '9' {
+			dn = dn*10 + int(spec[j]-'0')
+			j++
+		}
+		var v interface{} = jsNull
+		if j > ds && j < len(spec) && spec[j] == '$' {
+			j++
+			if dn > 0 && dn-1 < len(args) {
+				v = args[dn-1]
+			}
+		} else {
+			j = ds
+			v = take()
+		}
+		return int(math.Trunc(rubyToF(v))), j
+	}
+	var out strings.Builder
+	for i := 0; i < len(spec); {
+		if spec[i] != '%' {
+			out.WriteByte(spec[i])
+			i++
+			continue
+		}
+		if i+1 < len(spec) && spec[i+1] == '%' {
+			out.WriteString("%")
+			i += 2
+			continue
+		}
+		j := i + 1
+		flags := ""
+		width, prec, sel := 0, -1, -1
+		name := ""
+		haveName, brace, bad := false, false, false
+		// ONE loop over the whole directive head, because the pieces may come in
+		// any order: "% 1$d" and "%1$ d" are both " 5" in MRI.
+		for j < len(spec) {
+			c := spec[j]
+			if c == '-' || c == '0' || c == '+' || c == ' ' || c == '#' {
+				flags += string(c)
+				j++
+				continue
+			}
+			if c == '<' || c == '{' {
+				close := byte('>')
+				if c == '{' {
+					close = '}'
+				}
+				e := j + 1
+				for e < len(spec) && spec[e] != close {
+					e++
+				}
+				if e >= len(spec) {
+					bad = true
+					break
+				}
+				name, haveName = spec[j+1:e], true
+				j = e + 1
+				if c == '{' {
+					brace = true
+					break
+				}
+				continue
+			}
+			if c == '*' {
+				n, nj := star(j + 1)
+				j = nj
+				if n < 0 {
+					flags += "-"
+					width = -n
+				} else {
+					width = n
+				}
+				continue
+			}
+			if c == '.' {
+				j++
+				if j < len(spec) && spec[j] == '*' {
+					n, nj := star(j + 1)
+					j = nj
+					prec = n
+					if n < 0 {
+						prec = -1
+					}
+					continue
+				}
+				prec = 0
+				for j < len(spec) && spec[j] >= '0' && spec[j] <= '9' {
+					prec = prec*10 + int(spec[j]-'0')
+					j++
+				}
+				continue
+			}
+			if c >= '1' && c <= '9' {
+				// A leading 0 was taken as the zero FLAG above, so a run of digits
+				// here is a width - unless a "$" makes it an argument selector.
+				dn := 0
+				for j < len(spec) && spec[j] >= '0' && spec[j] <= '9' {
+					dn = dn*10 + int(spec[j]-'0')
+					j++
+				}
+				if j < len(spec) && spec[j] == '$' {
+					sel = dn - 1
+					j++
+					continue
+				}
+				width = dn
+				continue
+			}
+			break
+		}
+		conv := byte('s')
+		if !brace {
+			if bad || j >= len(spec) {
+				out.WriteString("%")
+				i++
+				continue
+			}
+			conv = spec[j]
+			j++
+		}
+		var av interface{} = jsNull
+		switch {
+		case haveName:
+			open, close := "<", ">"
+			if brace {
+				open, close = "{", "}"
+			}
+			av = rt.rubyFmtNamed(args, name, open, close)
+		case sel >= 0:
+			if sel < len(args) {
+				av = args[sel]
+			}
+		default:
+			av = take()
+		}
+		// An infinity or a NaN reaching an INTEGER directive raises, because MRI's
+		// %d/%x/%o/%b convert the operand with to_i. This used to print Go's int64
+		// saturation, which is ARCHITECTURE-DEPENDENT (manual 7.9's giFromFloat
+		// note) and is why 9102c91's ratchet row could pin only "it terminates".
+		switch conv {
+		case 'd', 'i', 'u', 'x', 'X', 'o', 'b', 'B':
+			if _, isBig := av.(*jsBigInt); !isBig {
+				rubyFloDomain(rt, math.Trunc(rubyToF(av)))
+			}
+		}
+		if conv == 'a' || conv == 'A' {
+			out.WriteString(rubyHexDirective(av, flags, width, prec, conv == 'A'))
+			i = j
+			continue
+		}
+		head := "%" + flags
+		if width > 0 {
+			head += itoaPos(width)
+		}
+		if prec >= 0 {
+			head += "." + itoaPos(prec)
+		}
+		// One directive, one argument: the argument is WRAPPED in a one-element
+		// array, because rubyFormat reads a bare *jsArray as the argument LIST and
+		// `"%s" % [[1, 2]]' would otherwise print the inner array's first element.
+		out.WriteString(rt.rubyFormat(head+string(conv), &jsArray{elems: []interface{}{av}}))
+		i = j
+	}
+	return out.String()
+}
+
+func itoaPos(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
+// rubyFmtNamed resolves %<name> / %{name} against the one Hash the right operand
+// has to be. A SCAN and not rubyDictFind: the key is the Symbol :name, and a
+// String key does NOT match - MRI's `"%{x}" % {"x" => 1}' is a KeyError.
+func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) interface{} {
+	var h *jsObject
+	if len(args) == 1 {
+		if o, ok := args[0].(*jsObject); ok {
+			if d, isDict := o.props["__dict"].(bool); isDict && d {
+				h = o
+			}
+		}
+	}
+	if h == nil {
+		rt.rubyRaiseErr("ArgumentError", "one hash required")
+	}
+	keys, _ := h.props["keys"].(*jsArray)
+	vals, _ := h.props["vals"].(*jsArray)
+	if keys != nil && vals != nil {
+		for i, k := range keys.elems {
+			if s, ok := k.(jsSym); ok && s.s == name && i < len(vals.elems) {
+				return vals.elems[i]
+			}
+		}
+	}
+	rt.rubyRaiseErr("KeyError", "key"+open+name+close+" not found")
+	return jsNull
+}
+
+// ===== %a / %A =====
+//
+// MRI writes a finite double as [-]0x1.<hex fraction>p<+|-><decimal binary
+// exponent>, normalised so the leading digit is 1 for every non-zero value - a
+// SUBNORMAL is normalised too ("%a" % 5.0e-324 is "0x1p-1074") - and zero is
+// "0x0p+0". Without a precision the fraction's trailing zeros go; with one it is
+// rounded half to even, or zero-padded, to exactly that many digits.
+//
+// Written on the same pure ARITHMETIC as the other two engines rather than on
+// math.Frexp or strconv's 'x' format, deliberately: this is the twin the two
+// MetaJS halves have to agree with digit for digit, and the cheapest way to be
+// sure of that is to run the same algorithm. Scaling a double by a power of two
+// is exact as long as the result neither overflows nor falls into the subnormals,
+// and both loops are driven so that it never does.
+//
+// ONE DELIBERATE DIVERGENCE FROM THE ORACLE, and MRI 2.6.10 is the one that is
+// wrong: at a precision of EXACTLY 13 - the full digit count, where no rounding
+// can be needed - it rounds the last digit to even anyway. "%.13a" % (1.0/3) is
+// 0x1.5555555555554p-2 there against the value's own 0x1.5555555555555p-2. C's
+// printf on this machine, python3's float.hex and MRI's own %a with no precision
+// all print the exact digits, and MRI is right again at 12 and at 14.
+func rubyHexNorm(x float64) (float64, int) {
+	pv, pk := []float64{}, []int{}
+	for v, k := 2.0, 1; k <= 512; v, k = v*v, k*2 {
+		pv = append(pv, v)
+		pk = append(pk, k)
+	}
+	e := 0
+	for i := len(pv) - 1; i >= 0; i-- {
+		for x >= pv[i] {
+			x /= pv[i]
+			e += pk[i]
+		}
+	}
+	for i := len(pv) - 1; i >= 0; i-- {
+		for x*pv[i] < 2 {
+			x *= pv[i]
+			e -= pk[i]
+		}
+	}
+	return x, e
+}
+
+// rubyHexBody is the finite-value body WITHOUT the sign - "0x1.8p+0". prec < 0
+// means "as many digits as the value needs".
+func rubyHexBody(fv float64, prec int, alt, upper bool) string {
+	lead, frac, ex := "1", "", 0
+	if fv != 0 {
+		if fv < 0 {
+			fv = -fv
+		}
+		m, e := rubyHexNorm(fv)
+		ex = e
+		// The 13 hex digits of m - 1: 13 x 4 is exactly the 52 fraction bits of a
+		// double, so nothing is lost (m - 1 is exact and every *16 is a scale by a
+		// power of two).
+		d := make([]int, 13)
+		f := m - 1
+		for i := 0; i < 13; i++ {
+			f *= 16
+			d[i] = int(math.Floor(f))
+			f -= float64(d[i])
+		}
+		n := 13
+		if prec >= 0 && prec < 13 {
+			up := false
+			if d[prec] > 8 {
+				up = true
+			} else if d[prec] == 8 {
+				rest := false
+				for q := prec + 1; q < 13; q++ {
+					if d[q] != 0 {
+						rest = true
+					}
+				}
+				last := 1
+				if prec > 0 {
+					last = d[prec-1]
+				}
+				up = rest || last%2 == 1
+			}
+			n = prec
+			if up {
+				c := n - 1
+				for c >= 0 && d[c] == 15 {
+					d[c] = 0
+					c--
+				}
+				if c < 0 {
+					ex++
+				} else {
+					d[c]++
+				}
+			}
+		}
+		for k := 0; k < n; k++ {
+			frac += string("0123456789abcdef"[d[k]])
+		}
+		if prec < 0 {
+			frac = strings.TrimRight(frac, "0")
+		} else {
+			for len(frac) < prec {
+				frac += "0"
+			}
+		}
+	} else {
+		lead = "0"
+	}
+	if prec > 0 && frac == "" {
+		frac = strings.Repeat("0", prec)
+	}
+	out := "0x" + lead
+	if frac != "" {
+		out += "." + frac
+	} else if alt {
+		out += "."
+	}
+	sign, ae := "+", ex
+	if ex < 0 {
+		sign, ae = "-", -ex
+	}
+	out += "p" + sign + itoaPos(ae)
+	if upper {
+		return strings.ToUpper(out)
+	}
+	return out
+}
+
+// rubyHexDirective is one whole %a/%A field: the body, the sign, the + / space
+// flags and the padding. %a is a NUMERIC directive - it takes a sign and honours
+// the 0 flag - and the zeros go behind BOTH the sign and the "0x", which is what
+// `keep' counts: "%020a" % -0.0 is "-0x00000000000000p+0".
+func rubyHexDirective(av interface{}, flags string, width, prec int, upper bool) string {
+	left := strings.Contains(flags, "-")
+	zero := strings.Contains(flags, "0")
+	plus := strings.Contains(flags, "+")
+	space := strings.Contains(flags, " ")
+	alt := strings.Contains(flags, "#")
+	f := rubyToF(av)
+	body, keep, nonFinite := "", 0, false
+	if w, bad := rubyFloatWord(f); bad {
+		body, nonFinite = w, true
+	} else {
+		body = rubyHexBody(f, prec, alt, upper)
+		keep = 2
+		if f < 0 || (f == 0 && math.Signbit(f)) {
+			body, keep = "-"+body, 3
+		}
+	}
+	if !strings.HasPrefix(body, "-") {
+		if plus {
+			body, keep = "+"+body, keep+1
+		} else if space {
+			body, keep = " "+body, keep+1
+		}
+	}
+	pad := " "
+	if zero && !left && !nonFinite {
+		pad = "0"
+	}
+	if nonFinite {
+		keep = 0
+	}
+	for rubyCharCount(body) < width {
+		if left {
+			body += " "
+		} else if pad != " " {
+			body = body[:keep] + pad + body[keep:]
+		} else {
+			body = pad + body
+		}
+	}
+	return body
+}

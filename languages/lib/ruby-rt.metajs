@@ -2059,15 +2059,255 @@ function rbFmtNumeric(conv) {
     if (conv == "d" || conv == "i" || conv == "u" || conv == "f") { return true }
     if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
     if (conv == "b" || conv == "B") { return true }
+    // %a/%A takes a sign and honours the 0 flag exactly as %f does:
+    // "%+a" % 1.5 is "+0x1.8p+0" and "%020a" % 100.0 is "0x0000000000001.9p+6".
+    if (conv == "a" || conv == "A") { return true }
     return conv == "x" || conv == "X" || conv == "o"
 }
 
 function rbIsSignChar(c) { return c == "-" || c == "+" || c == " " }
 
+// ----- %a / %A: the hex-float form -----------------------------------------
+//
+// MRI writes a finite double as [-]0x1.<hex fraction>p<+|-><decimal binary
+// exponent>, normalised so the leading digit is 1 for every non-zero value - a
+// SUBNORMAL is normalised too ("%a" % 5.0e-324 is "0x1p-1074") - and zero is
+// "0x0p+0". Without a precision the fraction's trailing zeros go; with one it is
+// rounded half to even, or zero-padded, to exactly that many digits.
+//
+// Chapter 7.7 of docs/working-on-this-project.md points at d_frexp for this and
+// it is NOT needed. Scaling a double by a POWER OF TWO is exact as long as the
+// result neither overflows nor falls into the subnormals, and both directions can
+// be driven so that it never does: divide only while the value is >= the power
+// (the quotient stays >= 1), multiply only while the product stays < 2. So this
+// is pure arithmetic - no bit access, no floor primitive, no new upcall - and it
+// is exact for every finite double including 5.0e-324. hexNorm in
+// languages/ruby-interpreter.abnf and rubyHexNorm in abnf/jsrtruby.go are the
+// twins.
+//
+// The powers are built by REPEATED SQUARING (2, 4, 16, ... 2^512): the ladder of
+// exponents 1, 2, 4, ... 512 that the two loops walk downward. MetaJS has no
+// exponent literal (manual chapter 4), so they cannot be written out.
+var rbHexP2v = []
+var rbHexP2k = []
+
+function rbHexP2() {
+    if (rbHexP2v.length > 0) { return }
+    var pv = 2
+    var pk = 1
+    while (pk <= 512) {
+        rbHexP2v.push(pv)
+        rbHexP2k.push(pk)
+        pv = pv * pv
+        pk = pk * 2
+    }
+}
+
+// x > 0 and finite -> {m, e} with m in [1, 2) and x == m * 2^e, exactly.
+function rbHexNorm(x) {
+    rbHexP2()
+    var e = 0
+    var i = rbHexP2v.length - 1
+    while (i >= 0) {
+        while (x >= rbHexP2v[i]) {
+            x = x / rbHexP2v[i]
+            e = e + rbHexP2k[i]
+        }
+        i = i - 1
+    }
+    i = rbHexP2v.length - 1
+    while (i >= 0) {
+        while (x * rbHexP2v[i] < 2) {
+            x = x * rbHexP2v[i]
+            e = e - rbHexP2k[i]
+        }
+        i = i - 1
+    }
+    return {m: x, e: e}
+}
+
+function rbHexDigitChar(d) {
+    if (d < 10) { return "" + d }
+    if (d == 10) { return "a" }
+    if (d == 11) { return "b" }
+    if (d == 12) { return "c" }
+    if (d == 13) { return "d" }
+    if (d == 14) { return "e" }
+    return "f"
+}
+
+// The 13 hex digits of m - 1 for m in [1, 2). 13 x 4 is exactly the 52 fraction
+// bits of a double, so this is the WHOLE value: m - 1 is exact (Sterbenz) and
+// every f * 16 step is a scale by a power of two.
+function rbHexFrac(m) {
+    var f = m - 1
+    var d = []
+    var i = 0
+    while (i < 13) {
+        f = f * 16
+        var q = Math.floor(f)
+        d.push(q)
+        f = f - q
+        i = i + 1
+    }
+    return d
+}
+
+// The finite-value body of %a WITHOUT the sign - "0x1.8p+0". prec < 0 means "as
+// many digits as the value needs".
+//
+// ONE DELIBERATE DIVERGENCE FROM THE ORACLE, and MRI 2.6.10 is the one that is
+// wrong: at a precision of EXACTLY 13 - the full digit count, where no rounding
+// can be needed - it rounds the last digit to even anyway. "%.13a" % (1.0/3) is
+// 0x1.5555555555554p-2 there against the value's own 0x1.5555555555555p-2. C's
+// printf on this machine, python3's float.hex and MRI's own %a with no precision
+// all print the exact digits, and MRI is right again at 12 and at 14 - a tie test
+// firing on an exact value in sprintf.c, not a rule. All three engines here print
+// the exact digits.
+function rbHexBody(fv, prec, alt, upper) {
+    var lead = "1"
+    var frac = ""
+    var ex = 0
+    if (fv == 0) {
+        lead = "0"
+    } else {
+        var nm = rbHexNorm(fv < 0 ? 0 - fv : fv)
+        ex = nm["e"]
+        var d = rbHexFrac(nm["m"])
+        var n = 13
+        if (prec >= 0 && prec < 13) {
+            var up = false
+            if (d[prec] > 8) { up = true }
+            else if (d[prec] == 8) {
+                var rest = false
+                var q = prec + 1
+                while (q < 13) {
+                    if (d[q] != 0) { rest = true }
+                    q = q + 1
+                }
+                if (rest) { up = true }
+                else { up = (prec == 0 ? 1 : d[prec - 1]) % 2 == 1 }
+            }
+            n = prec
+            if (up) {
+                var c = n - 1
+                while (c >= 0 && d[c] == 15) {
+                    d[c] = 0
+                    c = c - 1
+                }
+                if (c < 0) { ex = ex + 1 } else { d[c] = d[c] + 1 }
+            }
+        }
+        var k = 0
+        while (k < n) {
+            frac = frac + rbHexDigitChar(d[k])
+            k = k + 1
+        }
+        if (prec < 0) {
+            while (frac.length > 0 && frac.charAt(frac.length - 1) == "0") {
+                frac = frac.substring(0, frac.length - 1)
+            }
+        } else {
+            while (frac.length < prec) { frac = frac + "0" }
+        }
+    }
+    if (prec > 0 && frac.length == 0) {
+        var z = 0
+        while (z < prec) {
+            frac = frac + "0"
+            z = z + 1
+        }
+    }
+    var out = "0x" + lead
+    if (frac.length > 0) { out = out + "." + frac } else if (alt) { out = out + "." }
+    var es = "" + (ex < 0 ? 0 - ex : ex)
+    out = out + "p" + (ex < 0 ? "-" : "+") + es
+    if (upper) { return rbUpper(out) }
+    return out
+}
+
+// Every route from a Float to an Integer - #to_i, #to_int, #truncate, #round,
+// #floor, #ceil, and the %d / %x / %o / %b directives, whose operand MRI converts
+// with to_i - raises FloatDomainError on an infinity or a NaN, with the float's
+// own #to_s as the message. All three engines answered the infinity itself
+// instead, agreed and wrong, so --cross was blind. floDomainGuard in
+// languages/ruby-interpreter.abnf and rubyFloDomain in abnf/jsrtruby.go are the
+// twins. docs/todo.md 1.5.
+function rbFloDomain(x) {
+    if (x !== x) { rbRaiseErr("FloatDomainError", "NaN") }
+    if (x - x !== 0) { rbRaiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
+}
+
+// ----- the ARGUMENT SELECTORS ----------------------------------------------
+//
+// A directive does not have to take the next argument, and MRI offers four ways
+// of saying which one it takes. This file implemented NONE of them and read the
+// "$" of "%1$s" as the CONVERSION, so "%1$s-%2$s" % ["a","b"] answered "$s- $s"
+// while ruby-interpreter.abnf read the digits as WIDTHS and answered "a- b": a
+// live three-way divergence. docs/todo.md 1.5.
+//
+//   %N$s          the Nth argument, 1-based, in any order and reusable
+//   %<name>s      the Hash entry :name, formatted by the directive
+//   %{name}       the Hash entry :name, to_s, with NO conversion letter
+//   %*d / %.*f    the width / precision comes from an argument; a NEGATIVE *
+//                 width left-justifies, a negative * precision means none
+//
+// The `*` argument is read BEFORE the value and width before precision, and `*`
+// takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
+//
+// NOT implemented, deliberately: MRI's ArgumentErrors for MIXING the styles and
+// its "too few arguments". Running off the end of the argument list has always
+// answered nil in all three engines, and making one of the five raise while the
+// other four stay lenient would be a divergence of a different shape.
+function rbFmtHashArg(args) {
+    if (args.length == 1 && rbIsDict(args[0])) { return args[0] }
+    return null
+}
+
+function rbFmtNamed(args, name, open, close) {
+    var h = rbFmtHashArg(args)
+    if (h === null) { rbRaiseErr("ArgumentError", "one hash required") }
+    // A SCAN and not rbDictFind: the key is the Symbol :name and a String key does
+    // NOT match - MRI's "%{x}" % {"x" => 1} is a KeyError.
+    var keys = h["keys"]
+    var vals = h["vals"]
+    var i = 0
+    while (i < keys.length) {
+        if (rbIsSym(keys[i]) && keys[i]["s"] == name) { return vals[i] }
+        i = i + 1
+    }
+    rbRaiseErr("KeyError", "key" + open + name + close + " not found")
+    return null
+}
+
+// The value a `*` reads: the next positional argument, or the explicit one of a
+// "*2$" form. Answers the integer and the position just past what it ate.
+function rbFmtStar(spec, j, args, st) {
+    var dn = 0
+    var ds = j
+    while (j < spec.length) {
+        var dg = rtDigitAt(spec, j)
+        if (dg < 0) { break }
+        dn = dn * 10 + dg
+        j = j + 1
+    }
+    var v = anytype
+    v = null
+    if (j > ds && j < spec.length && spec.charAt(j) == "$") {
+        j = j + 1
+        if (dn > 0 && dn - 1 < args.length) { v = args[dn - 1] }
+    } else {
+        j = ds
+        if (st["ai"] < args.length) { v = args[st["ai"]] }
+        st["ai"] = st["ai"] + 1
+    }
+    return {n: Math.trunc(rbToF(v)), j: j}
+}
+
 function rbFormat(spec, arg) {
     var args = [arg]
     if (rbIsArr(arg)) { args = arg }
-    var ai = 0
+    var st = {ai: 0}
     var out = ""
     var i = 0
     while (i < spec.length) {
@@ -2092,39 +2332,109 @@ function rbFormat(spec, arg) {
         var plus = false
         var space = false
         var alt = false
+        var width = 0
+        var prec = 0 - 1
+        var sel = 0 - 1
+        var nmk = ""
+        var haveName = false
+        var brace = false
+        var bad = false
+        // ONE loop over the whole directive head, because the pieces may come in
+        // any order: "% 1$d" and "%1$ d" are both " 5" in MRI.
         while (i < spec.length) {
             var fc = spec.charAt(i)
-            if (fc != "-" && fc != "0" && fc != "+" && fc != " " && fc != "#") { break }
-            if (fc == "-") { left = true }
-            if (fc == "0") { zero = true }
-            if (fc == "+") { plus = true }
-            if (fc == " ") { space = true }
-            if (fc == "#") { alt = true }
-            i = i + 1
-        }
-        var width = 0
-        while (i < spec.length) {
-            var wd = rtDigitAt(spec, i)
-            if (wd < 0) { break }
-            width = width * 10 + wd
-            i = i + 1
-        }
-        var prec = 0 - 1
-        if (i < spec.length && spec.charAt(i) == ".") {
-            i = i + 1
-            prec = 0
-            while (i < spec.length) {
-                var pd = rtDigitAt(spec, i)
-                if (pd < 0) { break }
-                prec = prec * 10 + pd
+            if (fc == "-" || fc == "0" || fc == "+" || fc == " " || fc == "#") {
+                if (fc == "-") { left = true }
+                if (fc == "0") { zero = true }
+                if (fc == "+") { plus = true }
+                if (fc == " ") { space = true }
+                if (fc == "#") { alt = true }
                 i = i + 1
+                continue
             }
+            if (fc == "<" || fc == "{") {
+                var close = fc == "<" ? ">" : "}"
+                var e2 = i + 1
+                var got = ""
+                while (e2 < spec.length && spec.charAt(e2) != close) {
+                    got = got + spec.charAt(e2)
+                    e2 = e2 + 1
+                }
+                if (e2 >= spec.length) {
+                    bad = true
+                    break
+                }
+                nmk = got
+                haveName = true
+                i = e2 + 1
+                if (fc == "{") {
+                    brace = true
+                    break
+                }
+                continue
+            }
+            if (fc == "*") {
+                var sw = rbFmtStar(spec, i + 1, args, st)
+                i = sw["j"]
+                if (sw["n"] < 0) {
+                    left = true
+                    width = 0 - sw["n"]
+                } else { width = sw["n"] }
+                continue
+            }
+            if (fc == ".") {
+                i = i + 1
+                if (i < spec.length && spec.charAt(i) == "*") {
+                    var sp = rbFmtStar(spec, i + 1, args, st)
+                    i = sp["j"]
+                    prec = sp["n"] < 0 ? 0 - 1 : sp["n"]
+                } else {
+                    prec = 0
+                    while (i < spec.length) {
+                        var pd = rtDigitAt(spec, i)
+                        if (pd < 0) { break }
+                        prec = prec * 10 + pd
+                        i = i + 1
+                    }
+                }
+                continue
+            }
+            var wd = rtDigitAt(spec, i)
+            if (wd > 0) {
+                // A leading 0 was taken as the zero FLAG above, so a run of digits
+                // here is a width - unless a "$" makes it an argument selector.
+                var dn2 = 0
+                while (i < spec.length) {
+                    var w2 = rtDigitAt(spec, i)
+                    if (w2 < 0) { break }
+                    dn2 = dn2 * 10 + w2
+                    i = i + 1
+                }
+                if (i < spec.length && spec.charAt(i) == "$") {
+                    sel = dn2 - 1
+                    i = i + 1
+                    continue
+                }
+                width = dn2
+                continue
+            }
+            break
         }
-        if (i >= spec.length) { break }
-        var conv = spec.charAt(i)
-        i = i + 1
-        var nx = null
-        if (ai < args.length) { nx = args[ai] }
+        var conv = "s"
+        if (!brace) {
+            if (bad || i >= spec.length) { break }
+            conv = spec.charAt(i)
+            i = i + 1
+        }
+        var nx = anytype
+        nx = null
+        if (haveName) { nx = rbFmtNamed(args, nmk, brace ? "{" : "<", brace ? "}" : ">") }
+        else if (sel >= 0) {
+            if (sel < args.length) { nx = args[sel] }
+        } else if (st["ai"] < args.length) { nx = args[st["ai"]] }
+        // The positional cursor moves ONCE, here, rather than in each conversion
+        // arm: the arms no longer decide which argument they get.
+        if (!haveName && sel < 0) { st["ai"] = st["ai"] + 1 }
         var body = ""
         var nonFinite = false
         // The 0 flag's fill character and the number of leading characters it has
@@ -2135,15 +2445,14 @@ function rbFormat(spec, arg) {
         var intPrec = false
         var base = rbIntBase(conv)
         if (base != 0) {
-            ai = ai + 1
             var iv = anytype
             iv = rbIsBig(nx) ? nx : Math.trunc(rbToF(nx))
             if (!rbIsBig(iv) && (iv !== iv || iv - iv !== 0)) {
-                // Unreachable from real Ruby - Float::INFINITY.to_i raises
-                // FloatDomainError - and left exactly as it was rather than
-                // invented: the number's own word, or rtBaseStr's int64 saturation.
-                if (base == 10) { body = "" + iv } else { body = rtBaseStr(iv, base) }
-                if (conv == "X") { body = rbUpper(body) }
+                // MRI's integer directives convert the operand with to_i, so an
+                // infinity or a NaN raises FloatDomainError here exactly as
+                // Float#to_i does. This used to print the number's own word or
+                // rtBaseStr's int64 saturation, which was ARCHITECTURE-DEPENDENT.
+                rbFloDomain(iv)
             } else {
                 var ib = rbIntBody(iv, base, conv == "X" || conv == "B", alt, plus || space, prec)
                 body = ib["b"]
@@ -2154,7 +2463,6 @@ function rbFormat(spec, arg) {
                 intPrec = prec >= 0
             }
         } else if (conv == "f") {
-            ai = ai + 1
             var ff = rbToF(nx)
             var fw = rbFloatWord(ff)
             if (fw != "") {
@@ -2165,7 +2473,6 @@ function rbFormat(spec, arg) {
                 if (alt) { body = rbAltPoint(body) }
             }
         } else if (conv == "e" || conv == "E") {
-            ai = ai + 1
             var ef = rbToF(nx)
             var ew = rbFloatWord(ef)
             if (ew != "") {
@@ -2177,7 +2484,6 @@ function rbFormat(spec, arg) {
                 if (conv == "E") { body = rbUpper(body) }
             }
         } else if (conv == "g" || conv == "G") {
-            ai = ai + 1
             var gf = rbToF(nx)
             var gw = rbFloatWord(gf)
             if (gw != "") {
@@ -2190,7 +2496,6 @@ function rbFormat(spec, arg) {
                 if (conv == "G") { body = rbUpper(body) }
             }
         } else if (conv == "s") {
-            ai = ai + 1
             body = rbStr(nx)
             // body[:prec] in Go is a BYTE slice; the cut has to count bytes too.
             if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
@@ -2201,18 +2506,31 @@ function rbFormat(spec, arg) {
             // a precision on it outright ("%.0c" % 65 is "A"). MRI demands a String
             // of EXACTLY one character and raises ArgumentError otherwise; this
             // takes the first.
-            ai = ai + 1
             if (typeof nx == "string") { body = nx.length > 0 ? nx.charAt(0) : "" }
             else { body = rbCharCode(Math.trunc(rbToF(nx))) }
         } else if (conv == "p") {
             // %p is #inspect where %s is #to_s, and it truncates by BYTES the same
             // way: "%.2p" % "abcdef" is `"a'.
-            ai = ai + 1
             body = rbInspect(nx)
             if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
+        } else if (conv == "a" || conv == "A") {
+            // %a / %A - the hex-float form. The sign goes on HERE rather than
+            // inside rbHexBody, because the 0 flag has to fill behind BOTH the sign
+            // and the "0x": "%020a" % -0.0 is "-0x00000000000000p+0". keep counts
+            // them.
+            var af = rbToF(nx)
+            var aw = rbFloatWord(af)
+            if (aw != "") {
+                body = aw
+                nonFinite = true
+            } else {
+                body = rbHexBody(af, prec, alt, conv == "A")
+                if (af < 0 || (af == 0 && 1 / af < 0)) {
+                    body = "-" + body
+                    keep = 3
+                } else { keep = 2 }
+            }
         } else {
-            // %a/%A - the hex-float form - is the only directive MRI has that no
-            // engine here answers, and this arm is what prints its letter.
             body = conv
         }
         // The + and SPACE flags were parsed and thrown away, in every half, so
@@ -2845,6 +3163,9 @@ var rbExcParent = {
     $KeyError: "IndexError",
     $RangeError: "StandardError",
     $ZeroDivisionError: "StandardError",
+    // FloatDomainError < RangeError: what Float::INFINITY.to_i and "%d" %
+    // Float::INFINITY raise. docs/todo.md 1.5.
+    $FloatDomainError: "RangeError",
     $StopIteration: "IndexError",
     $FrozenError: "RuntimeError",
     $NotImplementedError: "StandardError"
@@ -3774,7 +4095,14 @@ function rbNumMethod(t, name, args) {
         }
         return rbStr(t)
     }
-    if (name == "to_i" || name == "to_int" || name == "truncate") { return rbIntFromF(Math.trunc(x)) }
+    // An infinity or a NaN has no Integer, so every conversion to one raises
+    // FloatDomainError (rbFloDomain). MRI's #round / #floor / #ceil with a POSITIVE
+    // ndigits answer a Float and do not raise, which is why only the no-argument
+    // forms are guarded. docs/todo.md 1.5.
+    if (name == "to_i" || name == "to_int" || name == "truncate") {
+        rbFloDomain(x)
+        return rbIntFromF(Math.trunc(x))
+    }
     if (name == "to_f") {
         if (rbIsFlo(t)) { return t }
         return rbMkFlo(x)
@@ -3784,9 +4112,16 @@ function rbNumMethod(t, name, args) {
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
         return Math.abs(x)
     }
-    if (name == "floor") { return rbIntFromF(Math.floor(x)) }
-    if (name == "ceil") { return rbIntFromF(Math.ceil(x)) }
+    if (name == "floor") {
+        rbFloDomain(x)
+        return rbIntFromF(Math.floor(x))
+    }
+    if (name == "ceil") {
+        rbFloDomain(x)
+        return rbIntFromF(Math.ceil(x))
+    }
     if (name == "round") {
+        if (args.length == 0) { rbFloDomain(x) }
         if (args.length > 0) {
             var p = Math.pow(10, rbToF(args[0]))
             return rbMkFlo(Math.floor(x * p + 0.5) / p)
@@ -3797,6 +4132,16 @@ function rbNumMethod(t, name, args) {
     if (name == "zero?") { return x == 0 }
     if (name == "positive?") { return x > 0 }
     if (name == "negative?") { return x < 0 }
+    // Float#nan? / #infinite? / #finite?, which existed in NO engine: both compiled
+    // halves aborted with *method call 'nan?' on a object* and the interpreter with
+    // *unknown Numeric method: nan?*. #infinite? answers 1, -1 or NIL, not a
+    // boolean. docs/todo.md 1.5.
+    if (name == "nan?") { return x !== x }
+    if (name == "finite?") { return x === x && x - x === 0 }
+    if (name == "infinite?") {
+        if (x !== x || x - x === 0) { return null }
+        return x > 0 ? 1 : 0 - 1
+    }
     if (name == "even?") { return x - Math.floor(x / 2) * 2 == 0 }
     if (name == "odd?") { return x - Math.floor(x / 2) * 2 != 0 }
     if (name == "succ" || name == "next") { return rbNumBin("+", t, 1) }
