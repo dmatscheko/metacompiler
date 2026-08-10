@@ -42,7 +42,7 @@ var (
 // serve the event stream, the CFG line annotations, and the call graph
 // definition lines.
 func TraceMarkersWanted() bool {
-	return TraceOutPath != "" || CFGOutPath != "" || CallgraphOutPath != ""
+	return TraceOutPath != "" || CFGOutPath != "" || CallgraphOutPath != "" || WhyEnabled
 }
 
 // SetTraceSource registers the program source, so events and CFG labels can
@@ -62,13 +62,23 @@ func SetTraceSource(name, text string) {
 			sourceLineStarts = map[string][]int{}
 		}
 		sourceLineStarts[name] = traceLineStarts
+		// -why quotes the statement it reports on, so the text is kept too. Only
+		// when it is asked for: nothing else needs it, and a pipeline can carry
+		// several megabytes of source.
+		if WhyEnabled {
+			if sourceTexts == nil {
+				sourceTexts = map[string]string{}
+			}
+			sourceTexts[name] = text
+		}
 	}
 }
 
 var (
 	traceSrcName     string
-	traceLineStarts  []int            // Byte offset of every line start; nil = no source known.
-	sourceLineStarts map[string][]int // file name -> its line-start table (for re-push by name).
+	traceLineStarts  []int             // Byte offset of every line start; nil = no source known.
+	sourceLineStarts map[string][]int  // file name -> its line-start table (for re-push by name).
+	sourceTexts      map[string]string // file name -> its text; only filled under -why (sourceLine).
 )
 
 // lineOfPos converts a byte offset to a 1-based line number (0 = unknown),

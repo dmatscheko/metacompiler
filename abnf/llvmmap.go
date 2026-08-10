@@ -992,7 +992,12 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// value is an i64 handle and the js_* externals implement the semantics). The
 	// named function is the module entry (usually "jsmain"); its i64 handle result
 	// is converted to an int32 and returned as Ret.
-	"RunJS": runJSModule,
+	// The -why report is taken here rather than inside runJSModule, so the
+	// handle-IR execution path keeps its single responsibility (abnf/why.go).
+	"RunJS": func(m *ir.Module, entry string) *RunResult {
+		maybeDumpWhy(m)
+		return runJSModule(m, entry)
+	},
 	// BuildExecutable writes the module as textual LLVM IR to a temp file and invokes
 	// clang to link a native executable at outPath. Returns "" on success or a
 	// human-readable error string. Driven by the -exe flag (c.exePath) from a compiler
@@ -1313,6 +1318,9 @@ func rdynamicFlags() []string {
 }
 
 func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
+	// Before stubUndefined rewrites anything: -why reports the module the
+	// grammar emitted, and it must read the same under -exe as without it.
+	maybeDumpWhy(m)
 	inputs := linkInputs(runtime)
 	linkingForReal := len(inputs) > 0 || len(LinkLibs) > 0
 	if !linkingForReal {
@@ -2065,6 +2073,7 @@ func (ma *machine) callByName(name string, args []uint64) uint64 {
 func run(m *ir.Module, start string, input string, runtime ...string) *RunResult {
 	maybeDumpCFG(m)
 	maybeDumpCallgraph(m)
+	maybeDumpWhy(m)
 	ma := newMachine(m, input)
 	if len(runtime) > 0 {
 		ma.linkRuntimeModules(m, runtime)

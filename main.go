@@ -67,6 +67,11 @@ import (
 //                c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
 //  -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
+//  -why[=NAME]   print, per source STATEMENT, which externs the emitter actually chose for it,
+//                read off the emitted module (so it is what was emitted, not what the grammar
+//                appears to say). =NAME keeps only the statements mentioning an extern whose
+//                name contains NAME. Report goes to stderr; enables the js_srcpos statement
+//                markers, exactly like -trace, so the module it reports on carries them
 //  -callgraph F  write the static call graph to file F, overwriting it (.jsonl feeds -render static)
 //  -callgraph-append F  like -callgraph but keeps F and adds to it, to accumulate a graph across many runs
 //  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
@@ -107,6 +112,9 @@ type options struct {
 	maxSteps                              int   // -max-steps N: the IR interpreter's per-call instruction budget (0 = no limit).
 	maxStepsSet                           bool  // -max-steps was passed; otherwise the built-in default stands.
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
+
+	why       bool   // -why: report the extern each source statement lowered to (abnf/why.go).
+	whyFilter string // -why=NAME: keep only the statements whose report mentions NAME.
 
 	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
 	callgraphAppend                                           bool // -callgraph-append: add to the .jsonl instead of overwriting (accumulate across runs).
@@ -236,6 +244,15 @@ func parseArgs(args []string) (*options, error) {
 			o.cfgPath, err = takeVal()
 		case "-trace":
 			o.tracePath, err = takeVal()
+		case "-why":
+			// A boolean flag with an OPTIONAL value: bare -why reports every
+			// statement, -why=js_ktadd only the ones that reach that extern. The
+			// value never comes from the next argument, or `-why prog.kt` would
+			// eat the program.
+			o.why = true
+			if hasVal {
+				o.whyFilter = val
+			}
 		case "-callgraph":
 			o.callgraphPath, err = takeVal()
 		case "-callgraph-append":
@@ -370,8 +387,20 @@ func main() {
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
 	abnf.CallgraphAppend = o.callgraphAppend
+	abnf.WhyEnabled = o.why
+	abnf.WhyFilter = o.whyFilter
 	abnf.OpenTrace() // Truncate up front: a zero-event run must not leave a stale file.
 	defer abnf.CloseTrace()
+	if o.why {
+		// Announced up front, not at the end: these language tests are
+		// self-checking and propagate the program's result through os.Exit, so a
+		// deferred notice would never run (the same reason -exe refuses up front,
+		// below). Without it, -why on an INTERPRETER grammar - which walks the
+		// tree and builds no module at all - is silent, and silence reads as
+		// "the emitter chose nothing here".
+		fmt.Fprintln(os.Stderr, "-why: reporting the calls each statement's emitter produced; "+
+			"a <lang>-interpreter.abnf grammar builds no module and reports nothing.")
+	}
 	abnf.OpenCallgraph() // Same for -callgraph .jsonl (overwrite); -callgraph-append keeps the old file.
 
 	if len(o.files) == 0 {
@@ -699,6 +728,9 @@ anywhere among the files.
                 c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
   -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines; also the -render input
+  -why[=NAME]   print, per source statement, which externs the emitter chose for it, read off
+                the emitted module; =NAME keeps only the statements that reach an extern whose
+                name contains NAME. To stderr; needs a <lang>-to-llvm-ir.abnf grammar
   -callgraph F  write the static call graph to file F, overwriting it (.jsonl feeds -render static)
   -callgraph-append F
                 like -callgraph but keeps F and adds to it, to accumulate a graph across many runs
