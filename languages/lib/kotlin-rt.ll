@@ -311,7 +311,7 @@
 @str.1000299 = global [3 x i8] c"alt"
 @str.1000300 = global [10 x i8] c"rxClsMatch"
 @str.1000301 = global [2 x i8] c"ch"
-@str.1000302 = global [23 x i8] c"\5C^$.|?*+()[]{}-#/ \09\0A\0Dfv"
+@str.1000302 = global [23 x i8] c"\5C^$.|?*+()[]{}-#/ \09\0A\0D\0C\0B"
 @str.1000303 = global [10 x i8] c"rxIsMetaCh"
 @str.1000304 = global [1 x i8] c"p"
 @str.1000305 = global [2 x i8] c"\5CQ"

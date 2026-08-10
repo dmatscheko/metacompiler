@@ -76,7 +76,7 @@
 @str.1000075 = global [3 x i8] c"alt"
 @str.1000076 = global [10 x i8] c"rxClsMatch"
 @str.1000077 = global [2 x i8] c"ch"
-@str.1000078 = global [23 x i8] c"\5C^$.|?*+()[]{}-#/ \09\0A\0Dfv"
+@str.1000078 = global [23 x i8] c"\5C^$.|?*+()[]{}-#/ \09\0A\0D\0C\0B"
 @str.1000079 = global [7 x i8] c"indexOf"
 @str.1000080 = global [10 x i8] c"rxIsMetaCh"
 @str.1000081 = global [1 x i8] c"p"

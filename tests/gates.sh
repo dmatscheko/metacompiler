@@ -187,21 +187,26 @@ SHAPE_LINES=481           # recoverable lines, same commit
 # all structurally blind. That is the exact profile of a defect that needs a
 # static check, because no dynamic gate here can have one.
 #
-# THE THREE ARE REAL AND ARE NOT FIXED HERE (this round's agent owns tools/ and
-# tests/, not languages/). Both were confirmed by running them:
+# ALL THREE WERE REAL AND ALL THREE ARE NOW FIXED. Both were confirmed by running
+# them, and both are kept here because the class will recur:
 #
-#   languages/lib/ruby-rt.metajs  rbIsSpaceCh tests c == "\f", which compiles to
-#       c == "f", so the NATIVE ruby binary strips the letter f:
-#       "ffoo barf".strip is "oo bar" natively and "ffoo barf" in the
-#       interpreter and in real Ruby.
-#   languages/lib/regex.js:277    rxIsMetaCh's meta set contains \f and \v, which
-#       become the letters f and v under -frozen only. Measured: kotlin
-#       Regex(Regex.escape("f")+Regex.escape("v")+Regex.escape("x")) matches
-#       "fvx" under goja and DOES NOT under -frozen. A live halves divergence
-#       that no test exercises.
+#   languages/lib/ruby-rt.metajs  rbIsSpaceCh tested c == "\f", which compiles to
+#       c == "f", so the NATIVE ruby binary stripped the letter f:
+#       "ffoo barf".strip was "oo bar" natively and "ffoo barf" in the
+#       interpreter and in real Ruby. The vertical tab in the SAME EXPRESSION was
+#       already spelled \u000b, which is how the broken one survived.
+#   languages/lib/regex.js:277    rxIsMetaCh's meta set contained \f and \v, which
+#       become the letters f and v. Measured: kotlin
+#       Regex(Regex.escape("f")+Regex.escape("v")+Regex.escape("x")) matching
+#       "fvx" was true under goja, FALSE under -frozen and FALSE in the native
+#       binary, where real Kotlin says true. abnf/jsrtregex.go is a line-by-line
+#       port of that file and is written in Go, where \f and \v are real - so the
+#       TWIN was right and only the MetaJS side was wrong, which is exactly why no
+#       dynamic gate could see it.
 #
-# Lower this number as they are fixed; it must never go up.
-LINT_FINDINGS=3
+# Raise this ONLY to record a finding you have decided to accept, and say why
+# here. It must never go up silently.
+LINT_FINDINGS=0
 
 # The matrix ENTRY COUNT, for the same reason FULL_ASSERTIONS exists: the matrix
 # is .vscode/launch.json, so a row that is deleted, renamed out of its mode, or

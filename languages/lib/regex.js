@@ -273,8 +273,18 @@ function rxClsMatch(cls, c, icase) {
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
 // Whitespace and # are included because the x (extended) flag would otherwise drop
 // them, and - because it is a range operator inside a character class.
+// \u000c and \u000b, NOT \f and \v: this file is layer 2, so it is parsed BOTH by
+// goja (real JavaScript, where \f and \v are formfeed and vertical tab) AND by the
+// frozen MetaJS parser, whose string literal has NEITHER and DROPS THE BACKSLASH -
+// turning them into the letters f and v. Measured before the fix, on kotlin:
+// Regex(Regex.escape("f") + Regex.escape("v") + Regex.escape("x")) matching "fvx"
+// was true under goja, FALSE under -frozen and FALSE in the native binary, where
+// real Kotlin says true. The \uXXXX spelling means the same thing in both parsers.
+// abnf/jsrtregex.go is a line-by-line port of this file and is written in Go, where
+// \f and \v are real - so the twin was right and only this side was wrong, which is
+// exactly why no dynamic gate could see it. tools/metajs-lint catches the class.
 function rxIsMetaCh(ch) {
-    return "\\^$.|?*+()[]{}-#/ \t\n\r\f\v".indexOf(ch) >= 0
+    return "\\^$.|?*+()[]{}-#/ \t\n\r\u000c\u000b".indexOf(ch) >= 0
 }
 
 // rxExpandQuotes rewrites every \Q...\E region into the equivalent escaped text, as
