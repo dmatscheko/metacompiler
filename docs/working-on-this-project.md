@@ -15,6 +15,18 @@ the LENGTH OF ITS OUTPUT FILENAME, which invalidated every sub-2% single-build
 measurement in these documents, including several I had quoted back to people as
 facts. That is chapter 4's newest trap and it is the most expensive thing in here.
 
+**Revised 2026-08-10** after the sixteenth round closed eleven todo items with
+eight agents. **Three of the eleven were wrong as written and two of the FIXES I
+prescribed were wrong** - dart's "erase type parameters to `dynamic`" (Dart
+reifies; erasing fixes one row and breaks another), and C#'s "the generated
+message applies to every derived type" (almost every derived BCL type passes its
+own string to `base(...)`, so it would have fixed one name and broken twenty-six).
+A third item asserted real TypeScript accepts a form that real TypeScript rejects.
+**Every agent that declined an instruction did so with a measurement**, which is
+the whole argument for writing briefs that invite it. This round also retired two
+sentences in THIS file as no longer true, added a `tsc` oracle nobody knew was
+installed, and found that item 4.2 understated its own defect fourfold.
+
 **Revised 2026-08-07** after ten more todo items closed. Two of them were WRONG
 AS WRITTEN (`floExt` is live, not dead code - deleting it as the item implied
 would have introduced a defect; and the C# `is` residue was every integral and
@@ -263,6 +275,21 @@ confirmation either.** Two builds landing on the same number inside a
 percent-wide lottery is a coin landing heads, and several conclusions in the plan
 documents were drawn from exactly that.
 
+**An extern is only callable FROM AN EMITTED MODULE, never from layer 2.** A
+`lib/*-rt.metajs` file calling `js_keys(o)` links, passes clang, and then dies
+natively with *ReferenceError: js_keys is not defined*. The same function is
+reachable from layer 2 under its HOST-BUILTIN name (`keysOf`, host id 61). Nothing
+in the matrix, `--full` or `--cross` can see this - only a native `-exe` probe can.
+
+**`up.in` arrives with whitespace ALREADY STRIPPED.** `<T extends num>` reads as
+`<Textendsnum>`, so a scan cannot separate a type parameter's name from its bound
+and a structured parse is the only option. Cost one agent a wrong first
+implementation of dart's type parameters.
+
+**`hasOwn` exists in `interp-core.js` and NOT in `compile-core.js`.** In an emitter,
+test `map["$k"] == undefined` instead. The two cores are not the same surface, and
+the difference is only discovered by an emitter that works in one half.
+
 **An unprefixed helper in `lib/compile-core.js` can SILENTLY REPLACE a grammar's
 own.** `python-to-llvm-ir.abnf` defines `numText`; a change to the java float
 literal added a `numText` to the shared core, and python's module grew two
@@ -287,7 +314,9 @@ subnormal boundaries it emits a non-digit character outright
 takes a double's digits from `"" + n` has a live goja-vs-`-frozen` divergence**
 waiting for the first value that reaches it. Choose the digit count by
 round-trip (`floPrec(a, n)` for n = 1..17, stop when `parseFloat` agrees), never
-by counting the host's own printed digits. java is fixed; **lua, kotlin, csharp
+by counting the host's own printed digits. java is fixed, and **csharp is fixed
+too** - `csDecDigits` (`csharp-interpreter.abnf`) already chooses by `floPrec`
+round-trip, and this sentence listed it wrongly until 2026-08-10. **lua, kotlin
 and go's interpreter halves still do this** (todo.md).
 
 **A RANDOM float probe has near-zero discriminating power; targeted values have
@@ -406,6 +435,16 @@ entries. `git archive HEAD | tar x -C /tmp/x` and run the suite there.
 
 Installed and usable: `go`, `node`, `python3` 3.14.6, `java` 24.0.2,
 `swiftc` 6.1.2, `lua` 5.5.0, `bash` 5.3, `cc`/`clang` 17.
+
+**And a real `tsc`, which nobody knew was here until 2026-08-10.** VS Code ships
+TypeScript 6.0.3 at
+`/Applications/Visual Studio Code.app/Contents/Resources/app/extensions/node_modules/typescript/lib/typescript.js`.
+Drive it from node - `ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true)`
+and read `sf.parseDiagnostics` - and you get real TS error codes. It immediately
+paid for itself: todo item 2.10 asserted that real TS accepts `(super as any)[k]`
+and that our grammars were wrong to reject it. tsc rejects it too, with
+**TS1034 "'super' must be followed by an argument list or member access"**, so the
+item's fix would have taught two grammars to accept invalid TypeScript.
 **Absent**: `dart`, `kotlinc`, any C# toolchain — cite the language spec and say so.
 `/usr/bin/ruby` is **2.6.10 (2018)** and rejects every Ruby-3 form the corpus uses;
 it once produced nine false "hidden defects". Its `Float#to_s` and `Float#%` are
@@ -596,7 +635,17 @@ layout through `union DB`. MetaJS has no union and no access to a double's bits,
 and its numbers *are* these doubles, so a MetaJS `pow` written on `*` and `/`
 lowers to `__mec_dmul`/`__mec_ddiv` in the same file. Same for `d_mod`,
 `d_mod_go`, `d_is_nan/inf/zero`, `d_sign`, `d_neg`, `d_abs`, `d_from_long`,
-`d_to_long`, `d_trunc`, `d_floor`. Separately, **strike `d_frexp`/`d_ldexp`/
+`d_to_long`, `d_trunc`, `d_floor`.
+
+**But do NOT read that as "hex-float formatting needs the floor".** Ruby's `%a`
+was written entirely in MetaJS in 2026-08-10 with no bit access at all: scaling a
+double by a power of two is EXACT provided you never overflow and never enter the
+subnormals, and both directions can be driven so they do not (divide only while
+`x >= p`, multiply only while `x*p < 2`). `d_frexp` is not reachable from MetaJS
+anyway - it takes an out-pointer. 6,624 probe rows, exact to `5e-324`, and the same
+arithmetic in all three engines so they agree by construction.
+
+Separately, **strike `d_frexp`/`d_ldexp`/
 `d_mod` from any candidate list on hotness**: `metajs-bench-try.js` does `i % 3`
 once per iteration and calls them 143,792 / 123,793 / 20,000 times.
 
@@ -741,8 +790,13 @@ a decision was taken:
   is atomic and ~640 lines).
 
 **Recorded at their sites in the same way, moved here from todo.md 2.11 when that
-list was compressed.** **C#** `e.ToString()` prints `[object Object]`; .NET returns
-`FullName: Message` plus a stack trace this engine cannot produce. **Ruby**
+list was compressed.** ~~**C#** `e.ToString()` prints `[object Object]`~~ -
+**CLOSED 2026-08-10.** It answers `System.Exception: m` now, and for an exception
+that has not been thrown .NET's `_stackTraceString` is null and `FullName: Message`
+is the ENTIRE answer, so that case is byte-exact. What is still absent is the
+`at Program.Main()` frames (no call-site line table in any engine) and inner
+exceptions (no inner slot in the value model); **both omissions can only shorten
+the answer, neither makes the produced part disagree.** **Ruby**
 `("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare `.size`
 to `js_pylen`, which is also for-in's trip count (implemented, measured, reverted);
 `p (x).m` parses as `(p(x)).m` here and `p((x).m)` in MRI, which has now bitten two
@@ -762,7 +816,10 @@ evaluator and the compiler has none at runtime; `readonly` is not enforced;
 Per-language divergences from real toolchains, recorded and permanent: Go byte-
 slicing a rune in half cannot be represented at all (the floor's strings are
 UTF-16); Go counts `len([]byte(s))` in RUNES and prints `%q` as UTF-8 bytes. An
-astral character prints as two U+FFFD in swift. JS: `(-0.4).toFixed(0)` is `"0"`,
+~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
+literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
+and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
+print the character now. JS: `(-0.4).toFixed(0)` is `"0"`,
 `(0.1).toString(3)` emits 52 fraction digits, the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
 `Infinity`/`NaN`, no `ZeroDivisionError`, the format mini-language is a subset,
