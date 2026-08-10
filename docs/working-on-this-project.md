@@ -410,6 +410,25 @@ gets swept in; it does not stop a needed file being left *out*. Swift once shipp
 without the Go file defining its externs and a fresh checkout failed three matrix
 entries. `git archive HEAD | tar x -C /tmp/x` and run the suite there.
 
+**`tar x` OVERWRITES, so re-extracting an archive over a verification tree
+silently reverts the files you copied in.** The symptom is that a change you are
+verifying "does not take effect", or that two gate runs disagree for no reason;
+an agent lost two full gate runs to it and reasonably but wrongly concluded that
+`test.sh` was reverting files. It is not — **no script in `tests/` runs `git` at
+all**. Either extract into a fresh directory every time (`rm -rf` first), or
+re-copy your files after any re-extraction, and `md5` the files you care about
+before and after a long run if you are unsure.
+
+**A LANGUAGE'S GO TWIN IS NOT CONFINED TO `abnf/jsrt<lang>.go`.** Isolating one
+language by copying its grammars, its `lib/<lang>-rt.metajs` and
+`abnf/jsrt<lang>.go` is *not enough*: ruby's `Rational`/`Complex`/`Method` work
+put 429 lines into the shared `abnf/jsrt.go`. Verifying without it showed a large
+fake halves divergence — the interpreter half had the fix and the `llvm.Run` half
+did not, because the twin it resolves `js_*` against was the base one. Copy the
+shared twin too, and remember that doing so drags in every *other* language's
+in-flight edits to that file, so a single-language isolation is only clean when no
+other agent owns `jsrt.go` that round.
+
 ---
 
 # 5. The rules that made the work reliable
