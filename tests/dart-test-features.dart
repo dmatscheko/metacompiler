@@ -672,6 +672,94 @@ int main() {
   var idxMap = {"a": 1};
   check("idx-map-miss-still-null", idxMap["zz"] == null && idxMap["a"] == 1);
 
+  // ----- a TYPED pattern TESTS its type (docs/todo.md 2.14) -----
+  // The type annotation on a variable pattern was dropped by the grammar itself, in
+  // BOTH halves, so the FIRST case of any typed switch always won. The position
+  // decides what a failed test means: a switch case / if-case is REFUTABLE and falls
+  // to the next case, a declaration or a for-in binder is IRREFUTABLE and raises
+  // Dart's TypeError (patterns feature spec, "Variable"; errors.dart:144).
+  Object tpSub = FSubSq();
+  check("tpat-switch-expr-picks-the-subtype",
+        switch (tpSub) { FSubSq _ => "sub", FSq _ => "sq", _ => "no" } == "sub");
+  Object tpSq = FSq();
+  check("tpat-switch-expr-skips-a-non-match",
+        switch (tpSq) { FSubSq _ => "sub", FSq _ => "sq", _ => "no" } == "sq");
+  check("tpat-switch-expr-falls-through-to-wildcard",
+        switch (7) { FSubSq _ => "sub", FSq _ => "sq", _ => "no" } == "no");
+  // The named form binds only in the case whose type matched.
+  check("tpat-named-binder",
+        switch (tpSq) { FSubSq s => "sub", FSq s => "sq${s.area()}", _ => "no" } == "sq4.0");
+  // dart:core's own names, and int/double being DISJOINT.
+  check("tpat-core-types",
+        switch (3) { String s => "s", double d => "d", int i => "i$i", _ => "no" } == "i3");
+  check("tpat-core-double",
+        switch (2.5) { int i => "i", double d => "d$d", _ => "no" } == "d2.5");
+  check("tpat-core-null-is-not-int",
+        switch (null) { int i => "i", Null n => "nul", _ => "no" } == "nul");
+  check("tpat-nullable-type-matches-null",
+        switch (null) { int? i => "opt", _ => "no" } == "opt");
+  // A switch STATEMENT and an if-case take the same route.
+  var tpStmt = "";
+  switch (tpSq) { case FSubSq _: tpStmt = "sub"; case FSq _: tpStmt = "sq"; }
+  check("tpat-switch-statement", tpStmt == "sq");
+  var tpIf = "no";
+  if (tpSq case FSubSq q) { tpIf = "sub"; }
+  check("tpat-if-case-refuses", tpIf == "no");
+  if (tpSq case FSq q) { tpIf = "sq${q.area()}"; }
+  check("tpat-if-case-accepts", tpIf == "sq4.0");
+  // Nested: a record field, a list element, a map value, an object-pattern field.
+  check("tpat-record-field",
+        switch ((1, "s")) { (String a, int b) => "1", (int a, String b) => "2", _ => "3" } == "2");
+  check("tpat-list-element",
+        switch ([1, 2]) { [String a, String b] => "ss", [int a, int b] => "ii", _ => "no" } == "ii");
+  check("tpat-map-value",
+        switch ({"k": 1}) { {"k": String v} => "s", {"k": int v} => "i$v", _ => "no" } == "i1");
+  // An IRREFUTABLE position: the declaration downcasts, and a failure is a TypeError.
+  var (int tpOk, String tpOk2) = (4, "z");
+  check("tpat-declaration-binds", tpOk == 4 && tpOk2 == "z");
+  var tpDeclErr = "none";
+  try {
+    var (int tpBad, int tpBad2) = (1, "s");
+    tpDeclErr = "ran$tpBad$tpBad2";
+  } on TypeError catch (e) { tpDeclErr = "typeerror"; }
+  check("tpat-declaration-raises-typeerror", tpDeclErr == "typeerror");
+  // A for-in binder is a declaration too. Assert the TRIP COUNT: skipping the element
+  // instead of raising would leave a short loop that still exits 0.
+  var tpTrips = 0;
+  for (var (int n, String s) in [(1, "a"), (2, "b"), (3, "c")]) { tpTrips = tpTrips + n; }
+  check("tpat-for-in-runs-every-trip", tpTrips == 6);
+  var tpLoopErr = "none";
+  var tpShort = 0;
+  try {
+    for (var (int n, String s) in [(1, "a"), (2, 9), (3, "c")]) { tpShort = tpShort + 1; }
+    tpLoopErr = "ran";
+  } on TypeError catch (e) { tpLoopErr = "typeerror"; }
+  check("tpat-for-in-raises-not-skips", tpLoopErr == "typeerror" && tpShort == 1);
+  // An object pattern's own type now sees the `implements` edge the shared js_is_type
+  // could not: FSq implements FShape and is not on any __super chain.
+  check("tpat-object-pattern-implements",
+        switch (tpSq) { FShape() => "iface", _ => "no" } == "iface");
+  check("tpat-object-pattern-negative",
+        switch (7) { FShape() => "iface", _ => "no" } == "no");
+
+  // ----- `o is T ? a : b` parses (docs/todo.md 2.14) -----
+  // The type's trailing "?" is greedy and a PEG never gives it back, so the whole
+  // program failed to parse at the ":" - in both halves.
+  check("iscond-plain", (tpSq is FShape ? "y" : "n") == "y");
+  check("iscond-negated", (tpSq is! FShape ? "y" : "n") == "n");
+  check("iscond-nullable-type-still-parses", (tpSq is FShape? ? "y" : "n") == "y");
+  int? iscondN;
+  check("iscond-nullable-plain", iscondN is int? && !(iscondN is int));
+  check("iscond-nested", (tpSq is FShape ? (tpSub is FSq ? "a" : "b") : "c") == "a");
+  check("iscond-unary-arms", (tpSq is FShape ? -1 : -2) == -1);
+  // While factoring the type test out for the patterns above: `is List<T>` answered the
+  // NUMBER 1 in the compiler half and true in the interpreter, because the element-type
+  // refinement is a BITWISE js_band. --cross never reached it - every existing test of
+  // it was an `if`, where a raw 1 is truthy. Interpolate it, so the value is compared
+  // and not just tested.
+  check("is-typed-list-answers-a-bool", "${<int>[1, 2] is List<int>}" == "true");
+  check("is-typed-list-negative", "${<int>[1, 2] is List<String>}" == "false");
+
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");
 

@@ -433,8 +433,12 @@ PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
             = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
 PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
 // A typed / var / final binder: `var v`, `int a`, `final String s`.
+// The TYPE has to be tagged: a variable pattern with a type annotation TESTS that type
+// (patterns feature spec, "Variable / Runtime semantics"), and without the tag
+// makeVarPat never saw it, so `case B b` matched an A.
 PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
-PatVarLead  = KwVar | KwFinal [ TypeNamed ] | TypeNamed ;
+PatVarLead  = KwVar | KwFinal [ PatVarType ] | PatVarType ;
+PatVarType  <~~ push({ptype: up.in}) ~~> = TypeNamed ;
 PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
 // A zero-width guard that fails when the next word is one of the operators that may
 // FOLLOW a pattern (as / when / in / is). Without it `ci as int` reads `ci` as the type
@@ -832,7 +836,36 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // dart:core's types, the error hierarchy and a user class's extends/with/implements set.
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr [ TypeTestOp TestType ] ;
-TestType    <~~ push({tname: up.in}) ~~> = Type ;
+// The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
+// with the conditional operator, and a PEG's greedy optional never gives it back, so
+// `o is Shape ? a : b` ate the "?" as a nullable marker and then failed at the ":" with
+// no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
+// "," or ">"), so only that one is guarded; a record or Function type keeps its own.
+TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
+TestTypeT   = TestTypePrim { TypeFn } ;
+TestTypePrim = TypeRecord | TypeFn | TestTypeNamed ;
+TestTypeNamed = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ NotCondQ "?" ] ;
+// A zero-width guard that fails when the "?" ahead begins a conditional expression
+// rather than ending the type. Dart's own parsers disambiguate the same way and in the
+// same direction: what follows the "?" decides, and anything that can BEGIN an
+// expression makes it the conditional operator (`o is Shape ? a : b`), while anything
+// that cannot (")", ";", ",", "?", "&", "|", ...) leaves it on the type (`o is Shape?`).
+NotCondQ = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 63) { return undefined }
+        var j = i + 1
+        var n = c.peek(j)
+        while (n === 32 || n === 9 || n === 10 || n === 13) { j = j + 1; n = c.peek(j) }
+        if (n < 0) { return undefined }
+        var starts = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
+                     || n === 95 || n === 36 || n === 34 || n === 39 || n === 40
+                     || n === 91 || n === 123 || n === 45 || n === 33 || n === 126
+        return starts ? abnf.newToken("\x01conditional-question", 0) : undefined
+    })()
+~~) ;
 TypeTestOp  = IsOp | AsOp ;
 IsOp        <~~ push({tt: up.in}) ~~> = KwIs [ "!" ] ;
 AsOp        <~~ push({tt: "as"}) ~~> = KwAs ;
@@ -2190,7 +2223,13 @@ KwDeferred  = "deferred" KwEnd ;
     function makeRestPat(items) { return {prest: true, rpat: items.length > 0 ? items[0] : null} }
     function makeMapPat(items) { return {p: "map", entries: items} }
     function makeRecPat(items) { return {p: "rec", fields: items} }
-    function makeVarPat(items) { return {p: "bind", name: items[items.length - 1].pvname} }
+    // `int a` / `final String s` / `var v`. A type annotation is kept: it is a TYPE TEST
+    // (patterns spec, Variable / Runtime semantics), not decoration.
+    function makeVarPat(items) {
+        var ty = ""
+        if (items.length > 1) { ty = stripWs(items[0].ptype) }
+        return {p: "bind", name: items[items.length - 1].pvname, ty: ty}
+    }
     function makeObjPat(items) { return {p: "obj", ty: items[0].otype, fields: items.slice(1)} }
     // :var side  ==  side: var side  (the getter name comes from the bound variable).
     function makeShortField(pat) {
@@ -2200,19 +2239,38 @@ KwDeferred  = "deferred" KwEnd ;
         else { fail("an object-pattern shorthand needs a variable pattern") }
         return {pfname: nm, pfpat: pat}
     }
-    // Resolve the idref leaves for one context. mode: "decl" (declare), "assign" (assign to
-    // an existing variable) or "match" (a constant to compare against).
+    // Resolve the idref leaves for one context. mode is TWO things at once, and it has to
+    // be: it says how a bare name resolves AND whether the position is refutable.
+    //   "decl"   a pattern-variable declaration or a for-in binder - binds, IRREFUTABLE
+    //   "case"   a switch case, a switch-expression case, an if-case - binds, REFUTABLE
+    //   "assign" a pattern assignment - assigns to an existing name, IRREFUTABLE
+    //   anything else: a bare name is a CONSTANT to compare against.
+    // The refutability is what a typed variable pattern needs and what "decl" alone could
+    // not say: a failed type test in a refutable position means NO MATCH (try the next
+    // case), and in an irrefutable one it is Dart's TypeError. See patTyped.
+    function patRefutable(mode) { return mode == "case" }
+    // A resolved variable pattern: the binder, wrapped in its type test when it has one.
+    // `B _` keeps the test and drops the binding - the wildcard is the NAME, not the type.
+    function patBinder(name) {
+        if (name == "_") { return {p: "wild"} }
+        return {p: "bind", name: name}
+    }
+    function patTyped(pat, mode) {
+        var inner = patBinder(pat.name)
+        if (pat.ty == undefined || pat.ty == "") { return inner }
+        return {p: "tcheck", ty: pat.ty, refut: patRefutable(mode), inner: inner}
+    }
     function resolvePat(pat, mode) {
         if (pat.p == "idref") {
             if (pat.name == "_") { return {p: "wild"} }
-            if (mode == "decl") { return {p: "bind", name: pat.name} }
+            if (mode == "decl" || mode == "case") { return {p: "bind", name: pat.name} }
             if (mode == "assign") { return {p: "setvar", name: pat.name} }
             if (pat.name == "null") { return {p: "const", t: makeConst(null)} }
             if (pat.name == "true") { return {p: "const", t: makeConst(true)} }
             if (pat.name == "false") { return {p: "const", t: makeConst(false)} }
             return {p: "const", t: makeVarRef(pat.name)}
         }
-        if (pat.p == "bind" && pat.name == "_") { return {p: "wild"} }
+        if (pat.p == "bind") { return patTyped(pat, mode) }
         if (pat.p == "or" || pat.p == "and") {
             var alts = []
             for (var i = 0; i < pat.alts.length; i++) { alts.push(resolvePat(pat.alts[i], mode)) }
@@ -2267,6 +2325,18 @@ KwDeferred  = "deferred" KwEnd ;
         if (k == "nullcheck") { if (v === null || v === undefined) { return false } return patMatch(pat.inner, v) }
         if (k == "nullassert") {
             if (v === null || v === undefined) { fail("null check pattern matched a null value") }
+            return patMatch(pat.inner, v)
+        }
+        if (k == "tcheck") {
+            // patterns spec, Variable / Runtime semantics: "if the runtime type of v is
+            // not a subtype of the type annotation, the match fails". In an IRREFUTABLE
+            // position the pattern may not fail, so the same test is a downcast and a
+            // failure is Dart's TypeError (errors.dart:144) - which is catchable, so a
+            // for-in over a wrongly typed element raises instead of silently skipping it.
+            if (!dartIsType(v, pat.ty)) {
+                if (pat.refut) { return false }
+                dxRaise0("TypeError")
+            }
             return patMatch(pat.inner, v)
         }
         if (k == "cast") { return patMatch(pat.inner, v) }
@@ -2433,8 +2503,13 @@ KwDeferred  = "deferred" KwEnd ;
             var n = dlen(it)
             for (var i = 0; i < n; i++) {
                 scopes.push({})
-                var ok = patMatch(pat, dget(it, i))
-                var r = ok ? bodyT() : undefined
+                // The for-in pattern is a DECLARATION (patterns spec: the pattern-for
+                // statement desugars to `var <pattern> = element;` per iteration), so it
+                // is irrefutable: an element that does not match raises. Skipping it - as
+                // this loop used to - turns a wrong answer into a silently SHORT LOOP,
+                // and it disagreed with the compiler half, which already raised here.
+                if (!patMatch(pat, dget(it, i))) { scopes.pop(); fail("for-in pattern did not match an element") }
+                var r = bodyT()
                 scopes.pop()
                 if (r != undefined) {
                     var act = loopRoute(r, myLabel)
@@ -2448,7 +2523,7 @@ KwDeferred  = "deferred" KwEnd ;
     // items = [subject, pattern, guard?, then, else?]
     function makeIfCase(items) {
         var subj = items[0]
-        var pat = resolvePat(items[1], "decl")
+        var pat = resolvePat(items[1], "case")
         var idx = 2
         var guard = null
         if (items[idx] != undefined && items[idx].guard != undefined) { guard = items[idx].guard; idx = idx + 1 }
@@ -2468,7 +2543,7 @@ KwDeferred  = "deferred" KwEnd ;
     // ----- switch statement and switch expression -----
     function makeSwBody(items) { return {swbody: makeSeq(items), swempty: items.length == 0} }
     function makeSwCase(items) {
-        var c = {pat: resolvePat(items[0], "decl"), guard: null, body: null, empty: true, isdef: false}
+        var c = {pat: resolvePat(items[0], "case"), guard: null, body: null, empty: true, isdef: false}
         for (var i = 1; i < items.length; i++) {
             if (items[i].guard != undefined) { c.guard = items[i].guard }
             else { c.body = items[i].swbody; c.empty = items[i].swempty }
@@ -2506,7 +2581,7 @@ KwDeferred  = "deferred" KwEnd ;
         }
     }
     function makeSwExprCase(items) {
-        var c = {pat: resolvePat(items[0], "decl"), guard: null, val: null}
+        var c = {pat: resolvePat(items[0], "case"), guard: null, val: null}
         for (var i = 1; i < items.length; i++) {
             if (items[i].guard != undefined) { c.guard = items[i].guard }
             else { c.val = items[i] }

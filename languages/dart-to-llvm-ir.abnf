@@ -425,8 +425,12 @@ PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
             = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
 PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
 // A typed / var / final binder: `var v`, `int a`, `final String s`.
+// The TYPE has to be tagged: a variable pattern with a type annotation TESTS that type
+// (patterns feature spec, "Variable / Runtime semantics"), and without the tag
+// makeVarPat never saw it, so `case B b` matched an A.
 PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
-PatVarLead  = KwVar | KwFinal [ TypeNamed ] | TypeNamed ;
+PatVarLead  = KwVar | KwFinal [ PatVarType ] | PatVarType ;
+PatVarType  <~~ push({ptype: up.in}) ~~> = TypeNamed ;
 PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
 // A zero-width guard that fails when the next word is one of the operators that may
 // FOLLOW a pattern (as / when / in / is). Without it `ci as int` reads `ci` as the type
@@ -826,7 +830,36 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // cast (operand evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr [ TypeTestOp TestType ] ;
-TestType    <~~ push({tname: up.in}) ~~> = Type ;
+// The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
+// with the conditional operator, and a PEG's greedy optional never gives it back, so
+// `o is Shape ? a : b` ate the "?" as a nullable marker and then failed at the ":" with
+// no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
+// "," or ">"), so only that one is guarded; a record or Function type keeps its own.
+TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
+TestTypeT   = TestTypePrim { TypeFn } ;
+TestTypePrim = TypeRecord | TypeFn | TestTypeNamed ;
+TestTypeNamed = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ NotCondQ "?" ] ;
+// A zero-width guard that fails when the "?" ahead begins a conditional expression
+// rather than ending the type. Dart's own parsers disambiguate the same way and in the
+// same direction: what follows the "?" decides, and anything that can BEGIN an
+// expression makes it the conditional operator (`o is Shape ? a : b`), while anything
+// that cannot (")", ";", ",", "?", "&", "|", ...) leaves it on the type (`o is Shape?`).
+NotCondQ = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 63) { return undefined }
+        var j = i + 1
+        var n = c.peek(j)
+        while (n === 32 || n === 9 || n === 10 || n === 13) { j = j + 1; n = c.peek(j) }
+        if (n < 0) { return undefined }
+        var starts = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
+                     || n === 95 || n === 36 || n === 34 || n === 39 || n === 40
+                     || n === 91 || n === 123 || n === 45 || n === 33 || n === 126
+        return starts ? abnf.newToken("\x01conditional-question", 0) : undefined
+    })()
+~~) ;
 TypeTestOp  = IsOp | AsOp ;
 IsOp        <~~ push({tt: up.in, pos: up.pos}) ~~> = KwIs [ "!" ] ;
 AsOp        <~~ push({tt: "as", pos: up.pos}) ~~> = KwAs ;
@@ -1507,41 +1540,56 @@ KwSuper     = "super" KwEnd ;
         }
     }
 
+    // One runtime type test, as the interpreter half's dartIsType answers it. Factored out
+    // of makeTypeTest because a TYPED PATTERN needs exactly the same answer, down to the
+    // element-type refinement: two spellings of the test are two behaviours, and the
+    // pattern half of them would have been the one nothing measured.
+    //
+    // js_dartis answers for DART's type names (int, double, num, bool, Map, Set,
+    // Function, ...) and falls through to the shared class-chain walk for a user type.
+    // The shared js_is_type knows only the JVM spelling and answered false for every one
+    // of them, so `1 is int` was false here while the interpreter half said true.
+    // The trailing '?' has to survive: baseName strips it, and `null is int?` is TRUE
+    // while `null is int` is false. A '?' inside the type arguments (List<int?>) is not
+    // the type's own, so only a FINAL one counts.
+    function emitDartIsType(b, val, tname) {
+        var tn = baseName(tname)
+        var targ = typeArgOf(tname)
+        var rawT = stripWs(tname)
+        var probeT = (rawT.length > 0 && rawT.charAt(rawT.length - 1) == "?") ? (tn + "?") : tn
+        var v = callExt(b, "js_dartis", [val, emitStr(b, probeT)])
+        // `is List<int>`: a list built as a typed literal carries its element type, and
+        // one written with a different argument is NOT of this type.
+        if (targ != "" && anyTypedColl && (tn == "List" || tn == "Iterable")) {
+            var er = emitETGet(b, val)
+            b = er.b
+            // js_band is BITWISE, so it answers the NUMBER 1, not true: `print(<int?>[1]
+            // is List<int?>)` printed "1" here and "true" in the interpreter half - a
+            // live divergence --cross never reached, because the only test of it was an
+            // `if`, where a raw 1 is truthy. The double negation is the cheapest thing
+            // that gives back a bool, and it only costs the typed-collection path.
+            v = callExt(b, "js_not", [callExt(b, "js_not", [callExt(b, "js_band", [v,
+                    callExt(b, "js_bor", [callExt(b, "js_seq", [er.v, emitStr(b, "")]),
+                                          callExt(b, "js_seq", [er.v, emitStr(b, targ)])])])])])
+        }
+        return {b: b, v: v}
+    }
     // A type test: items = [operand] or [operand, {tt, pos}, {tname}]. 'as' erases to an
-    // identity cast; 'is' / 'is!' become a js_is_type probe (which answers false for every
-    // value it does not recognize, so it is safe on any operand). The type ARGUMENTS are
-    // erased, so `<Object>[1] is List<int>` answers on the outer type only.
+    // identity cast; 'is' / 'is!' become a js_dartis probe (which answers false for every
+    // value it does not recognize, so it is safe on any operand).
     function makeTypeTest(items) {
         if (items.length == 1) { return items[0] }
         var operand = items[0]
         var mk = items[1]
         if (mk.tt == "as") { return operand }
-        var tn = baseName(items[2].tname)
-        var targ = typeArgOf(items[2].tname)
+        var tname = items[2].tname
         var neg = stripWs(mk.tt) != "is"
         return function(b) {
             var r = operand(b)
             b = r.b
-            // js_dartis answers for DART's type names (int, double, num, bool, Map,
-            // Set, Function, ...) and falls through to the shared class-chain walk for
-            // a user type. The shared js_is_type knows only the JVM spelling and
-            // answered false for every one of them, so `1 is int` was false here while
-            // the interpreter half said true.
-            // The trailing '?' has to survive: baseName strips it, and `null is int?`
-            // is TRUE while `null is int` is false. A '?' inside the type arguments
-            // (List<int?>) is not the type's own, so only a FINAL one counts.
-            var rawT = stripWs(items[2].tname)
-            var probeT = (rawT.length > 0 && rawT.charAt(rawT.length - 1) == "?") ? (tn + "?") : tn
-            var v = callExt(b, "js_dartis", [r.v, emitStr(b, probeT)])
-            // `is List<int>`: a list built as a typed literal carries its element type,
-            // and one written with a different argument is NOT of this type.
-            if (targ != "" && anyTypedColl && (tn == "List" || tn == "Iterable")) {
-                var er = emitETGet(b, r.v)
-                b = er.b
-                v = callExt(b, "js_band", [v, callExt(b, "js_bor",
-                        [callExt(b, "js_seq", [er.v, emitStr(b, "")]),
-                         callExt(b, "js_seq", [er.v, emitStr(b, targ)])])])
-            }
+            var tr = emitDartIsType(b, r.v, tname)
+            b = tr.b
+            var v = tr.v
             if (neg) { v = callExt(b, "js_not", [v]) }
             return {b: b, v: v}
         }
@@ -3589,7 +3637,13 @@ KwSuper     = "super" KwEnd ;
     function makeRestPat(items) { return {prest: true, rpat: items.length > 0 ? items[0] : null} }
     function makeMapPat(items) { return {p: "map", entries: items} }
     function makeRecPat(items) { return {p: "rec", fields: items} }
-    function makeVarPat(items) { return {p: "bind", name: stripWs(items[items.length - 1].pvname)} }
+    // `int a` / `final String s` / `var v`. A type annotation is kept: it is a TYPE TEST
+    // (patterns spec, Variable / Runtime semantics), not decoration.
+    function makeVarPat(items) {
+        var ty = ""
+        if (items.length > 1) { ty = stripWs(items[0].ptype) }
+        return {p: "bind", name: stripWs(items[items.length - 1].pvname), ty: ty}
+    }
     function makeObjPat(items) { return {p: "obj", ty: items[0].otype, fields: items.slice(1)} }
     // :var side  ==  side: var side  (the getter name comes from the bound variable).
     function makeShortField(pat) {
@@ -3599,17 +3653,38 @@ KwSuper     = "super" KwEnd ;
         else { fail("an object-pattern shorthand needs a variable pattern") }
         return {pfname: nm, pfpat: pat}
     }
+    // mode is TWO things at once, and it has to be: it says how a bare name resolves AND
+    // whether the position is refutable.
+    //   "decl"   a pattern-variable declaration or a for-in binder - binds, IRREFUTABLE
+    //   "case"   a switch case, a switch-expression case, an if-case - binds, REFUTABLE
+    //   "assign" a pattern assignment - assigns to an existing name, IRREFUTABLE
+    //   anything else: a bare name is a CONSTANT to compare against.
+    // The refutability is what a typed variable pattern needs and what "decl" alone could
+    // not say: a failed type test in a refutable position means NO MATCH (branch to the
+    // next case), and in an irrefutable one it is Dart's TypeError.
+    function patRefutable(mode) { return mode == "case" }
+    // A resolved variable pattern: the binder, wrapped in its type test when it has one.
+    // `B _` keeps the test and drops the binding - the wildcard is the NAME, not the type.
+    function patBinder(name) {
+        if (name == "_") { return {p: "wild"} }
+        return {p: "bind", name: name}
+    }
+    function patTyped(pat, mode) {
+        var inner = patBinder(pat.name)
+        if (pat.ty == undefined || pat.ty == "") { return inner }
+        return {p: "tcheck", ty: pat.ty, refut: patRefutable(mode), inner: inner}
+    }
     function resolvePat(pat, mode) {
         if (pat.p == "idref") {
             if (pat.name == "_") { return {p: "wild"} }
-            if (mode == "decl") { return {p: "bind", name: pat.name} }
+            if (mode == "decl" || mode == "case") { return {p: "bind", name: pat.name} }
             if (mode == "assign") { return {p: "setvar", name: pat.name} }
             if (pat.name == "null") { return {p: "const", t: makeConst(null)} }
             if (pat.name == "true") { return {p: "const", t: makeConst(true)} }
             if (pat.name == "false") { return {p: "const", t: makeConst(false)} }
             return {p: "const", t: makeVarRef(pat.name)}
         }
-        if (pat.p == "bind" && pat.name == "_") { return {p: "wild"} }
+        if (pat.p == "bind") { return patTyped(pat, mode) }
         if (pat.p == "or" || pat.p == "and") {
             var alts = []
             for (var i = 0; i < pat.alts.length; i++) { alts.push(resolvePat(pat.alts[i], mode)) }
@@ -3700,6 +3775,27 @@ KwSuper     = "super" KwEnd ;
             badA.NewBr(okA)
             return emitPat(okA, pat.inner, v, failB)
         }
+        if (k == "tcheck") {
+            // patterns spec, Variable / Runtime semantics: "if the runtime type of v is
+            // not a subtype of the type annotation, the match fails". In an IRREFUTABLE
+            // position the pattern may not fail, so the same test is a downcast and a
+            // failure is Dart's TypeError (errors.dart:144) - a real, catchable error
+            // object, the way makeAssert raises a real AssertionError, and the same one
+            // the interpreter half raises through dxRaise0.
+            var tr = emitDartIsType(b, v, pat.ty)
+            b = tr.b
+            var okT = curF.NewBlock("")
+            if (pat.refut) {
+                b.NewCondBr(truthy(b, tr.v), okT, failB)
+                return emitPat(okT, pat.inner, v, failB)
+            }
+            var badT = curF.NewBlock("")
+            b.NewCondBr(truthy(b, tr.v), okT, badT)
+            callExt(badT, "js_throw", [callExt(badT, "js_dartexc",
+                    [emitStr(badT, "TypeError"), emitStr(badT, ""), callExt(badT, "js_arr_new", [])])])
+            badT.NewBr(okT)
+            return emitPat(okT, pat.inner, v, failB)
+        }
         if (k == "cast") { return emitPat(b, pat.inner, v, failB) }
         if (k == "rec") {
             var okE = curF.NewBlock("")
@@ -3761,8 +3857,14 @@ KwSuper     = "super" KwEnd ;
             return b
         }
         if (k == "obj") {
+            // emitDartIsType, not the shared js_is_type: an object pattern names a Dart
+            // type, so `case Shape(...)` has to see the `implements` and `with` edges and
+            // dart:core's own names - which is what the interpreter half's dartIsType
+            // does here, and what js_is_type's JVM-spelling walk does not.
+            var tr2 = emitDartIsType(b, v, pat.ty)
+            b = tr2.b
             var okB2 = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [v, emitStr(b, baseName(pat.ty))])), okB2, failB)
+            b.NewCondBr(truthy(b, tr2.v), okB2, failB)
             b = okB2
             for (var o = 0; o < pat.fields.length; o++) {
                 var mr = emitGetterRead(b, v, pat.fields[o].pfname)
@@ -3845,7 +3947,7 @@ KwSuper     = "super" KwEnd ;
     // items = [subject, pattern, guard?, then, else?]
     function makeIfCase(items) {
         var subj = items[0]
-        var pat = resolvePat(items[1], "decl")
+        var pat = resolvePat(items[1], "case")
         var idx = 2
         var guard = null
         if (items[idx] != undefined && items[idx].guard != undefined) { guard = items[idx].guard; idx = idx + 1 }
@@ -3873,7 +3975,7 @@ KwSuper     = "super" KwEnd ;
     // ----- switch statement and switch expression -----
     function makeSwBody(items) { return {swbody: makeSeq(items), swempty: items.length == 0} }
     function makeSwCase(items) {
-        var c = {pat: resolvePat(items[0], "decl"), guard: null, body: null, empty: true, isdef: false}
+        var c = {pat: resolvePat(items[0], "case"), guard: null, body: null, empty: true, isdef: false}
         for (var i = 1; i < items.length; i++) {
             if (items[i].guard != undefined) { c.guard = items[i].guard }
             else { c.body = items[i].swbody; c.empty = items[i].swempty }
@@ -3924,7 +4026,7 @@ KwSuper     = "super" KwEnd ;
         }
     }
     function makeSwExprCase(items) {
-        var c = {pat: resolvePat(items[0], "decl"), guard: null, val: null}
+        var c = {pat: resolvePat(items[0], "case"), guard: null, val: null}
         for (var i = 1; i < items.length; i++) {
             if (items[i].guard != undefined) { c.guard = items[i].guard }
             else { c.val = items[i] }

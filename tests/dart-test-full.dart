@@ -1283,16 +1283,59 @@ void s32() {
   var nmOn2 = "";
   try { throw NmSq(); } on NmLoud catch (e) { nmOn2 = "loud"; } catch (e) { nmOn2 = "other"; }
   check("nm14", nmOn2 == "other");
-  // NOT asserted here, and the reason is a defect found while probing 1.5 outward: a
-  // TYPED pattern does not test its type in either half. `switch (A()) { B _ => "b",
-  // A _ => "a" }` answers "b", and so does the named form `B b` and `if (o case B q)`.
-  // The type is dropped by the grammar itself - PatVarLead's TypeNamed carries no tag,
-  // so makeVarPat/emitPat never see it. Recording it rather than fixing it, because the
-  // fix needs a distinction resolvePat does not carry: a REFUTABLE position (a switch
-  // case, if-case) wants "no match", while an IRREFUTABLE one (a declaration, a for-in
-  // binder) wants Dart's TypeError - and makeForInPat silently SKIPS an element whose
-  // pattern does not match, so getting that cut wrong turns a wrong answer into a
-  // silently short loop. An assertion here would pass at base for the wrong reason.
+  // ----- 2.14: a typed pattern TESTS its type, and the position says what a failure
+  // means. The type used to be dropped by the grammar itself (PatVarLead's TypeNamed
+  // carried no tag), so the FIRST case of a typed switch always won, in both halves.
+  // A REFUTABLE position (a switch case, an if-case) falls to the next case; an
+  // IRREFUTABLE one (a declaration, a for-in binder) raises Dart's TypeError. The
+  // nominal edges above are the interesting subject: `case NmShape _` has to claim an
+  // NmSq through `implements`, which is exactly what the plain __super walk cannot see.
+  Object nmObj = NmSub();
+  check("nm-pat1", switch (nmObj) { NmSub _ => "sub", NmSq _ => "sq", _ => "no" } == "sub");
+  check("nm-pat2", switch (NmSq()) { NmSub _ => "sub", NmSq _ => "sq", _ => "no" } == "sq");
+  check("nm-pat3", switch (NmSq()) { NmLoud _ => "loud", NmShape _ => "shape", _ => "no" } == "shape");
+  check("nm-pat4", switch (7) { NmSub _ => "sub", NmSq _ => "sq", _ => "no" } == "no");
+  check("nm-pat5", switch (NmSq()) { NmSq s => "l${s.label}", _ => "no" } == "lsq");
+  check("nm-pat6", switch (NmCol.red) { NmNamed n => "named", _ => "no" } == "named");
+  var nmPatIf = "no";
+  if (nmObj case NmDeep d) { nmPatIf = "deep"; }
+  if (nmObj case NmShape sh) { nmPatIf = "shape"; }
+  check("nm-pat7", nmPatIf == "shape");
+  var nmPatSw = "";
+  switch (NmSq()) { case NmLoud _: nmPatSw = "loud"; case NmNamed _: nmPatSw = "named"; }
+  check("nm-pat8", nmPatSw == "named");
+  // An object pattern's type takes the same route (it used to use the shared
+  // js_is_type in the compiler half, which knows no `implements` edge).
+  check("nm-pat9", switch (NmSq()) { NmShape() => "os", _ => "no" } == "os");
+  // Irrefutable: the declaration and the for-in binder downcast, and a failure is a
+  // TypeError. The trip COUNT is asserted, because a loop that silently skips a
+  // non-matching element still exits 0.
+  var (NmShape nmA, int nmB) = (NmSq(), 2);
+  check("nm-pat10", nmA.area() == 4.0 && nmB == 2);
+  var nmDeclErr = "none";
+  try {
+    var (NmLoud nmC, int nmD) = (NmSq(), 2);
+    nmDeclErr = "ran${nmD}";
+  } on TypeError catch (e) { nmDeclErr = "typeerror"; }
+  check("nm-pat11", nmDeclErr == "typeerror");
+  var nmTrips = 0;
+  for (var (NmShape sh, int k) in [(NmSq(), 1), (NmSub(), 2), (NmDiamond(), 3)]) {
+    nmTrips = nmTrips + k;
+  }
+  check("nm-pat12", nmTrips == 6);
+  var nmLoopErr = "none";
+  var nmShort = 0;
+  try {
+    for (var (NmShape sh, int k) in [(NmSq(), 1), (7, 2), (NmSub(), 3)]) { nmShort = nmShort + 1; }
+    nmLoopErr = "ran";
+  } on TypeError catch (e) { nmLoopErr = "typeerror"; }
+  check("nm-pat13", nmLoopErr == "typeerror" && nmShort == 1);
+  // 2.14, second half: `o is T ? a : b`. The type's trailing "?" is greedy and a PEG
+  // never gives it back, so the whole FILE used to fail to parse at the ":".
+  check("nm-pat14", (nmObj is NmShape ? "y" : "n") == "y");
+  check("nm-pat15", (nmObj is NmLoud ? "y" : "n") == "n");
+  check("nm-pat16", (nmObj is NmShape? ? "y" : "n") == "y");
+  check("nm-pat17", (nmObj is! NmLoud ? 1 : 2) == 1);
 
   // ----- 1.6: the range error -----
   var xs = [10, 20, 30];
