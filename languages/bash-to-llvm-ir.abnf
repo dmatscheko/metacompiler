@@ -461,9 +461,16 @@ PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubst
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
 PePlain     = PeTarget PeBraceEnd ;
 // ${v@Q} ${v@U} ${v@L} ${v@u} ${v@E} ${v@a} ${v@A} ${v@K} ${v@k} ${v@P} : the transform
-// operators. Verified against GNU bash 5.3.15 with x='a b':
-//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @A -> x='a b'
-//     @a -> the attribute letters (a for an indexed array, empty for a plain variable)
+// operators. Verified against GNU bash 5.3.15 with x='a b' and a=(pa pb):
+//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @P -> a b
+//     @A -> x='a b', with a `declare -FLAGS ` prefix when the name has an attribute
+//     @a -> the attribute letters (i for `declare -i n`, ai for `declare -ai x`)
+// With a @ or * SUBSCRIPT, four of them stop being element-wise and describe the whole
+// variable instead - the half of docs/todo.md 2.12 that neither engine had:
+//     ${a[@]@A} -> the three fields  declare  -a  a=([0]="pa" [1]="pb")
+//     ${a[@]@a} -> `a a`, one copy per element      ${a[@]@K} -> 0 "pa" 1 "pb"
+//     ${a[@]@k} -> the four fields  0 pa 1 pb
+// and @Q/@K/@k/@A of an UNSET name are EMPTY, where a set-but-empty one gives ''.
 PeXform     = PeTarget "@" PeXfOp ;
 PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" | "L" | "U" | "u" ;
 
@@ -1211,6 +1218,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gFrameBase = rtGlobal("frame_base", i32)
     var gFrameN = rtGlobal("frame_n", i32)
 
+    // $0 as the RUNTIME sees it. The emitter answers $0 from c.file directly, but
+    // rt_getvar_byname has to answer `z=0; echo "${!z}"` and it runs far from here, so
+    // main's entry block hands the path over (docs/todo.md 2.12).
+    var gScriptName = rtGlobal("script_name", i8ptr)
+
     // ===================================================================================
     //  Emitter state.
     // ===================================================================================
@@ -1256,6 +1268,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
                             // walk, so a call emitted before the definition still resolves)
     var definedFuncs = {}   // names whose body has already been emitted
+    var declaredFuncList = []  // the same names as declaredFuncs, in an enumerable order
+    var declaredSeen = {}
     var fnCount = 0
 
     function bashFnParams() { return [] }
@@ -1367,6 +1381,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtScCount = rtDecl("rt_sc_count", false, [1])
     var rtScList = rtDecl("rt_sc_list", true, [1, 1, 0, 0])
     var rtDeclp = rtDecl("rt_declp", false, [1, 1, 0])
+    // The ${v@A} / ${v@K} / ${v@k} / ${v@a} family, all measured against bash 5.3.15 -
+    // see the block comment above rt_declasg in languages/lib/bash-rt.c.
+    var rtIsset = rtDecl("rt_isset", false, [1])
+    var rtShq = rtDecl("rt_shq", true, [1, 0])
+    var rtDeclAsg = rtDecl("rt_declasg", true, [1, 1, 1, 0])
+    var rtDeclXa = rtDecl("rt_declxa", true, [1, 1, 1, 0, 0, 1, 0])
+    var rtKvq = rtDecl("rt_kvq", true, [1, 0])
+    var rtKvp = rtDecl("rt_kvp", true, [1, 1, 0])
+    var rtAttrf = rtDecl("rt_attrf", true, [1, 1, 1, 0])
+    var rtPrompt = rtDecl("rt_prompt", true, [1])
     var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
@@ -1377,6 +1401,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // the positional parameters.
     var rtArgPush = rtDecl("rt_argpush", false, [1])
+    // `echo` with its flag scan at RUN TIME - see emitEcho.
+    var rtEcho = rtDecl("rt_echo", false, [1, 0, 0])
     var rtParam = rtDecl("rt_param", true, [0])
     var rtParams = rtDecl("rt_params", true, [1, 0])
 
@@ -1541,12 +1567,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // The @-transforms rt_mapf can walk element-wise, as an (kind, mode) pair. -1 means
-    // "not one of them": @A and @a describe the VARIABLE rather than an element and @P is
-    // not modelled, so all three stay on the scalar path.
+    // "not one of them": @A, @a, @K and @k describe the VARIABLE rather than an element
+    // when the subscript is @ or *, so they are handled beside this walk, not by it.
     function xfMapKind(xf) {
         if (xf == "U" || xf == "L" || xf == "u") { return 2 }
         if (xf == "E") { return 4 }
-        if (xf == "Q" || xf == "K" || xf == "k") { return 3 }
+        if (xf == "P") { return 5 }
+        if (xf == "Q") { return 3 }
         return -1
     }
     function xfMapMode(xf) {
@@ -1582,33 +1609,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bare = (op == "" && pe == "" && xf == "")
         if (lenp && bare) { pe = "len" }
         if (indp && bare) { pe = "ind" }
-        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shquote, @A is the
-        // assignment that would recreate the variable and @E decodes the $'...' escapes at
-        // run time. @a answers the attribute letters: A/a for the two array kinds and i/u/l
-        // for the scalar attributes, which is what the interpreter half answers too. -r and
-        // -x are modelled in neither half, so they are absent from both. Indexed-ness is a
-        // RUN-TIME question here (`q=(1 2)` declares nothing), hence the select. @P (prompt
-        // expansion) is NOT modelled: it answers the value unchanged, which is right for
-        // every value holding no backslash escape and wrong for one that does.
+        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shq, @A is the assignment
+        // that would recreate the variable, @E decodes the $'...' escapes at run time and
+        // @P is rt_prompt. -r and -x are modelled in neither half, so they are absent from
+        // both.
         var xfName = name
-        function applyXf(b, v) {
+        // The attribute letters of the name, as an i8*: A/a for the two array kinds ahead
+        // of i/l/u for the scalar ones, which is what the interpreter half answers too.
+        // `nmv` is the name - a constant for a plain expansion, and the value of the
+        // reference for ${!r@A}, where bash names the variable the indirection LANDED on.
+        // The scalar letters come from the lexical tables, which is the compiler's
+        // documented attribute scope (manual 7.9); only array-ness is asked at RUN time,
+        // because `q=(1 2)` declares nothing, hence the select.
+        function attrLetters(b, nmv) {
+            var sc = scalarAttrLetters(xfName)
+            if (hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A" + sc) }
+            var isArrRt = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nmv), zero)
+            return b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))
+        }
+        // `isset` is an i32 0/1: ${nosuch@Q} is EMPTY in bash 5.3.15 while ${empty@Q} is
+        // '', and ${nosuch@A} is empty where this used to answer `nosuch=''`.
+        function applyXf(b, v, isset, nmv) {
             if (xf == "U") { return b.NewCall(rtCase, [v, one, emptyPtr(b)]) }
             if (xf == "L") { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3), emptyPtr(b)]) }
             if (xf == "u") { return b.NewCall(rtCase, [v, zero, emptyPtr(b)]) }
             if (xf == "E") { return b.NewCall(rtAnsiC, v) }
-            if (xf == "P") { return v }
-            if (xf == "a") {
-                if (hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A") }
-                var scalarLetter = ""
-                if (attrOn(intVars, xfName)) { scalarLetter = "i" }
-                else if (attrOn(upVars, xfName)) { scalarLetter = "u" }
-                else if (attrOn(loVars, xfName)) { scalarLetter = "l" }
-                var isArrRt = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, xfName)), zero)
-                return b.NewSelect(isArrRt, gepStr(b, "a"), gepStr(b, scalarLetter))
-            }
-            var q = b.NewCall(rtShQuote, v)
-            if (xf == "A") { return b.NewCall(rtStrcat, [gepStr(b, xfName + "="), q]) }
-            return q
+            if (xf == "P") { return b.NewCall(rtPrompt, v) }
+            if (xf == "a") { return attrLetters(b, nmv) }
+            if (xf == "A") { return b.NewCall(rtDeclAsg, [nmv, attrLetters(b, nmv), v, isset]) }
+            return b.NewCall(rtShq, [v, isset])
         }
         // NAME[SUBSCRIPT]: the first word is the subscript, the rest belong to the operator.
         if (hasIdx && words.length > 0) {
@@ -1764,25 +1793,54 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     lst = pickedL
                 }
                 var sel = b.NewSelect(whole, lst, one1)
+                // Is the ELEMENT the plain-subscript arm reads actually set? ${a[9]@Q} is
+                // empty in bash and ${a[9]@A} is `declare -a a`, both of which need this
+                // and neither of which the value alone can answer.
+                var elemSet = b.NewCall(rtScHas, [nmOf(b), keyOf(b, rs.v)])
+                var assocI = llvm.constant.NewInt(i32, isAssoc ? 1 : 0)
                 // ${a[@]@Q} TRANSFORMS EVERY ELEMENT and the result is still a field list -
                 // `a=(pa pb); echo "${a[@]@Q}"` is `'pa' 'pb'`. This handed rt_shquote the
                 // whole ENCODED list instead, so the 0x02 / 0x01 marker bytes came out as
                 // data: the native binary printed `$'\002pa\001pb\001'` where the
                 // interpreter half and bash 5.3.15 both print the two quoted elements.
                 // Found while probing the pattern-operator fix above, which is the same
-                // per-element walk (rt_mapf). @A and @a name the VARIABLE rather than an
-                // element, and @P is not modelled, so those three keep the scalar path.
-                if (xf != "" && op == "" && xfMapKind(xf) >= 0) {
-                    var allX = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
-                    var lstX = b.NewCall(rtMapf, [allX, llvm.constant.NewInt(i32, xfMapKind(xf)),
-                                                  emptyPtr(b), emptyPtr(b),
-                                                  llvm.constant.NewInt(i32, xfMapMode(xf)),
-                                                  ifsFirstValue(b), b.NewZExt(star, i32)])
-                    return {b: b, v: b.NewSelect(whole, lstX, applyXf(b, one1))}
+                // per-element walk (rt_mapf).
+                //
+                // @A, @K and @k are NOT that walk: with a @ or * subscript all three
+                // describe the WHOLE variable, which is the other half of docs/todo.md
+                // 2.12. Measured against bash 5.3.15, a=(pa pb):
+                //     ${a[@]@A} -> the three fields  declare  -a  a=([0]="pa" [1]="pb")
+                //     ${a[@]@K} -> one field  0 "pa" 1 "pb"
+                //     ${a[@]@k} -> the four fields  0 pa 1 pb
+                // and @a repeats the attribute letters ONCE PER ELEMENT (`a a`), where
+                // this answered a single copy.
+                if (xf != "" && op == "") {
+                    var wholeV = null
+                    if (xf == "A") {
+                        wholeV = b.NewCall(rtDeclXa, [nmOf(b), attrLetters(b, nmOf(b)), one1, elemSet,
+                                                      assocI, ifsFirstValue(b), b.NewZExt(star, i32)])
+                    } else if (xf == "K") {
+                        wholeV = b.NewCall(rtKvq, [nmOf(b), assocI, one1, elemSet])
+                    } else if (xf == "k") {
+                        wholeV = b.NewCall(rtKvp, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32),
+                                                   one1, elemSet])
+                    } else if (xf == "a") {
+                        wholeV = b.NewCall(rtAttrf, [nmOf(b), attrLetters(b, nmOf(b)), ifsFirstValue(b),
+                                                     b.NewZExt(star, i32)])
+                    } else if (xfMapKind(xf) >= 0) {
+                        var allX = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                        wholeV = b.NewCall(rtMapf, [allX, llvm.constant.NewInt(i32, xfMapKind(xf)),
+                                                    emptyPtr(b), emptyPtr(b),
+                                                    llvm.constant.NewInt(i32, xfMapMode(xf)),
+                                                    ifsFirstValue(b), b.NewZExt(star, i32)])
+                    }
+                    if (wholeV != null) {
+                        return {b: b, v: b.NewSelect(whole, wholeV, applyXf(b, one1, elemSet, nmOf(b)))}
+                    }
                 }
                 // ${a[i]@Q} and friends: the transform applies to the ELEMENT, exactly as
                 // it does to a scalar. Without this the array path silently dropped it.
-                if (xf != "") { return {b: b, v: applyXf(b, sel)} }
+                if (xf != "") { return {b: b, v: applyXf(b, sel, elemSet, nmOf(b))} }
                 return {b: b, v: sel}
             }}
         }
@@ -1817,14 +1875,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (indirect) { b.NewCall(rtSetByName, [varString(b, name), v]); return }
             storeVar(b, name, v)
         }
-        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shquote, @A is the
-        // assignment that would recreate the variable and @E decodes the $'...' escapes.
-        // @a answers the attribute letters, which for this compiler is "a" for a name it
-        // saw declared as an array and empty otherwise. @P (prompt expansion) is NOT
-        // modelled: it answers the value unchanged, which is right for every value that
-        // holds no backslash escape and wrong for one that does.
+        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shq, @A is the assignment
+        // that would recreate the variable, @E decodes the $'...' escapes and @P is
+        // rt_prompt - which used to be the identity here, a live halves divergence for
+        // every value holding a backslash (docs/todo.md 2.12). @a answers the attribute
+        // letters. The value is read ONCE and rt_isset asks the pointer whether it is the
+        // unset marker, so `set -u` fires exactly where it did before.
         if (xf != "") {
-            return {c: undefined, fn: function(b) { return {b: b, v: applyXf(b, valOf(b))} }}
+            return {c: undefined, fn: function(b) {
+                var nmv = indirect ? varString(b, name) : gepStr(b, name)
+                var v0 = valOf(b)
+                return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
+            }}
         }
         if (pe == "substr") {
             var offT = ariths[0]
@@ -2538,10 +2600,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isPrint && names.length > 0) {
                     var acc = zero
                     for (j = 0; j < names.length; j++) {
-                        var lt = "-"
-                        if (attrOn(intVars, names[j])) { lt = "i" }
-                        else if (attrOn(upVars, names[j])) { lt = "u" }
-                        else if (attrOn(loVars, names[j])) { lt = "l" }
+                        var lt = scalarAttrLetters(names[j])
                         var isAs = hasOwn(assocArrays, "$" + names[j]) ? one : zero
                         var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), isAs])
                         acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
@@ -2630,6 +2689,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(m, k)) { return false }
         return m[k]
     }
+    // The SCALAR attribute letters of a name, in bash's own order (i, l, u; the array
+    // letter goes in front of them). bash answers all of them - `declare -iu n` prints
+    // `declare -iu` - and both halves used to answer the first one only.
+    function scalarAttrLetters(name) {
+        var out = ""
+        if (attrOn(intVars, name)) { out = out + "i" }
+        if (attrOn(loVars, name)) { out = out + "l" }
+        if (attrOn(upVars, name)) { out = out + "u" }
+        return out
+    }
     // The undo log makeFuncDef unwinds. One entry per name declared inside a function body -
     // and, since docs/todo.md 1.8, one per name declared inside a ( LIST ) or a $( LIST ),
     // which subDepth counts. The ASSOCIATIVE flag is deliberately NOT in it: assocArrays is
@@ -2679,12 +2748,38 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitEcho(b, args) {
         var start = 0, newline = true, escapes = false
         var flagging = true
+        var runtimeFlags = false
         while (flagging && start < args.length) {
             var fa = args[start].c
-            if (fa == "-n") { newline = false; start = start + 1 }
+            if (fa == undefined) { runtimeFlags = true; flagging = false }
+            else if (fa == "-n") { newline = false; start = start + 1 }
             else if (fa == "-e") { escapes = true; start = start + 1 }
             else if (fa == "-E") { escapes = false; start = start + 1 }
             else { flagging = false }
+        }
+        // A FLAG CAN COME OUT OF AN EXPANSION. `opts="-n"; echo $opts x` treats -n as a
+        // flag in bash, and this scan sees only compile-time constants, so it stopped at
+        // the expansion and printed the flag as an argument (docs/todo.md 2.12). When the
+        // word the scan stopped on is not a constant the flag scan has to happen at RUN
+        // time, over the FIELDS the expansions produced - rt_echo. The constant path is
+        // kept because it is the overwhelming majority and it emits no call at all.
+        if (runtimeFlags) {
+            var ei
+            var acc = gepStr(b, "\x02")
+            // NOT evalWord: that JOINS a field list into one word, and the whole point
+            // here is that `a=(-n hi); echo "${a[@]}"` hands echo two words and bash reads
+            // the first as a flag. rt_catfields takes a plain string as one field, so the
+            // non-splitting words need no special case.
+            for (ei = start; ei < args.length; ei++) {
+                var re = args[ei].fn(b)
+                b = re.b
+                acc = b.NewCall(rtCatFields, [acc, re.v])
+            }
+            b = emitAbortCheck(b)
+            b.NewCall(rtEcho, [acc, llvm.constant.NewInt(i32, newline ? 1 : 0),
+                               llvm.constant.NewInt(i32, escapes ? 1 : 0)])
+            storeStatusI(b, 0)
+            return b
         }
         // EVALUATE EVERY WORD FIRST, THEN CHECK THE set -u ABORT, THEN PRINT. This used to
         // print each word as it was evaluated, so `set -u; echo "${nope}"` had already
@@ -3523,7 +3618,98 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b
     }
 
-    // words[0] is the command word (must be a literal here), the rest are arguments.
+    // A COMMAND NAME THAT COMES OUT OF AN EXPANSION. `cmd="echo hi"; $cmd` runs echo with
+    // the argument hi in bash 5.3.15 - the command word is field-split like any other word,
+    // and the extra fields become the first arguments. This compiler used to refuse the
+    // whole program with "a computed command name is not supported"; the interpreter half
+    // ran it (badly - it looked for a command literally named `echo hi`, which is the other
+    // half of docs/todo.md 2.12).
+    //
+    // The name is only known at RUN time, so the dispatch is a chain of string compares
+    // over the command forms whose whole argument list can be handed over as a FIELD LIST:
+    // echo, the three trivial builtins, and every user function. THE LIMIT, stated rather
+    // than hidden: `printf`, `test`/`[`, `read`, `eval`, `set`, `trap`, `unset`, `declare`
+    // and the control-flow builtins are compiled from their argument list at COMPILE time
+    // (printf needs a literal format, `break` a literal level, `[` a parsed expression), so
+    // a computed name that resolves to one of those reaches the fallback and prints the
+    // shell's `command not found`, where the interpreter half runs it. That is a smaller
+    // gap than refusing to compile, and it is the same fallback a genuinely unknown name
+    // takes in both halves.
+    function emitComputedCommand(b, cmdT, argTs) {
+        var listP = b.NewAlloca(i8ptr)
+        b.NewStore(gepStr(b, "\x02"), listP)
+        var rw = cmdT.fn(b)
+        b = rw.b
+        b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), rw.v]), listP)
+        var i
+        for (i = 0; i < argTs.length; i++) {
+            var ra = argTs[i].fn(b)
+            b = ra.b
+            b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), ra.v]), listP)
+        }
+        b = emitAbortCheck(b)
+        var all = b.NewLoad(i8ptr, listP)
+        var nf = b.NewCall(rtNFields, all)
+        var nameV = b.NewCall(rtGetField, [all, zero])
+        var restV = b.NewCall(rtSliceFields, [all, one, b.NewSub(nf, one), ifsFirstValue(b), zero])
+        var done = curF.NewBlock("")
+        // A command word that expands to NO field at all runs nothing and answers 0:
+        // `e=""; $e` is a successful no-op in bash.
+        var haveB = curF.NewBlock(""), noneB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGT, nf, zero), haveB, noneB)
+        storeStatusI(noneB, 0)
+        noneB.NewBr(done)
+        b = haveB
+        var cands = ["echo", ":", "true", "false", "wait"]
+        for (i = 0; i < declaredFuncList.length; i++) { cands.push(declaredFuncList[i]) }
+        var ci
+        for (ci = 0; ci < cands.length; ci++) {
+            var cname = cands[ci]
+            var hit = curF.NewBlock(""), miss = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE,
+                                  b.NewCall(rtStreq, [nameV, gepStr(b, cname)]), zero), hit, miss)
+            var hb = hit
+            if (cname == "echo") {
+                hb.NewCall(rtEcho, [restV, one, zero])
+                storeStatusI(hb, 0)
+            } else if (cname == "false") {
+                storeStatusI(hb, 1)
+            } else if (cname == ":" || cname == "true" || cname == "wait") {
+                storeStatusI(hb, 0)
+            } else {
+                var f = funcFor(cname)
+                var savedTop = hb.NewAlloca(i32)
+                var savedBase = hb.NewAlloca(i32)
+                var savedN = hb.NewAlloca(i32)
+                hb.NewStore(hb.NewLoad(i32, gArgvTop), savedTop)
+                hb.NewStore(hb.NewLoad(i32, gFrameBase), savedBase)
+                hb.NewStore(hb.NewLoad(i32, gFrameN), savedN)
+                hb.NewCall(rtArgPush, restV)
+                var base = hb.NewLoad(i32, savedTop)
+                hb.NewStore(base, gFrameBase)
+                hb.NewStore(hb.NewSub(hb.NewLoad(i32, gArgvTop), base), gFrameN)
+                storeStatus(hb, hb.NewCall(f))
+                hb.NewStore(hb.NewLoad(i32, savedBase), gFrameBase)
+                hb.NewStore(hb.NewLoad(i32, savedN), gFrameN)
+                hb.NewStore(hb.NewLoad(i32, savedTop), gArgvTop)
+                hb = emitExitCheck(hb)
+            }
+            hb.NewBr(done)
+            b = miss
+        }
+        // The same diagnostic and the same 127 the literal path writes, with the name from
+        // the expansion. bash carries on after it; this language stops, in both halves.
+        b.NewCall(rtPrints, gepStr(b, c.file + ": command not found: "))
+        b.NewCall(rtPrints, nameV)
+        b.NewCall(rtPrints, gepStr(b, "\n"))
+        b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
+        b.NewStore(one, gExited)
+        b.NewBr(curExit)
+        return done
+    }
+
+    // words[0] is the command word (a literal, or an expansion - see emitComputedCommand),
+    // the rest are arguments.
     function makeSimpleCommand(items0) {
         var cmdT = items0[0]
         var argTs = []
@@ -3536,7 +3722,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var inner = function(b) {
             b = emitAbortCheck(b)
             var cmd = cmdT.c
-            if (cmd == undefined) { fail("a computed command name is not supported by this compiler") }
+            if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
             if (cmd == "true" || cmd == ":") { storeStatusI(b, 0); return b }
@@ -4057,6 +4243,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fname = items[0].fname
         var bodyT = items[1]
         declaredFuncs["$" + fname] = true
+        // The same set as an ARRAY: the run-time command dispatch below has to enumerate
+        // the names, and keysOf is not bound for grammar scripts (docs/todo.md 6.3).
+        if (!hasOwn(declaredSeen, "$" + fname)) {
+            declaredSeen["$" + fname] = true
+            declaredFuncList.push(fname)
+        }
         return function(b) {
             var i
             var key = "$" + fname
@@ -4125,6 +4317,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // llvm.Run, and rt_putc's comment says why that has to stay silent rather than
         // abort on the first stderr byte.
         entry.NewStore(llvm.constant.NewInt(i32, (c.exePath != undefined && c.exePath != "") ? 1 : 0), gErrNative)
+        // $0 for the runtime's own ${!r} lookup.
+        entry.NewStore(gepStr(entry, c.file), gScriptName)
         // Now that every variable slot is known, mark them all unset in entry (a raw null
         // would trap on the first load, so the marker is a real pointer to a NUL byte).
         var up0 = unsetPtr(entry)

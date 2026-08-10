@@ -702,6 +702,48 @@ dpt=$'a\tb'
 check dpa5 "$(declare -p dpt)" "declare -- dpt=\$'a\\tb'"
 declare -p nosuchname 2>/dev/null
 check dpa6 "$?" 1
+declare -ai dpu=(1 2)
+check dpa7 "$(declare -p dpu)" 'declare -ai dpu=([0]="1" [1]="2")'
+declare -A dpv=(["k one"]=y)
+check dpa8 "$(declare -p dpv)" 'declare -A dpv=(["k one"]="y" )'
+
+# ----- the @-transform family, a computed command name, echo's flags -----
+# docs/todo.md 2.12. tests/bash-test-full.sh SECTION 34 is the full set and
+# carries the reasoning; these are the rows that must stay green in the MATRIX
+# and in the native binary, which the ratchet file does not reach.
+xa=(pa "p b")
+declare -A xm=([k]=v)
+xs="hi there"
+check xtf1 "${xa[*]@A}" 'declare -a xa=([0]="pa" [1]="p b")'
+check xtf2 "$(printf '<%s>' "${xa[@]@A}")" '<declare><-a><xa=([0]="pa" [1]="p b")>'
+check xtf3 "${xm[*]@A}" 'declare -A xm=([k]="v" )'
+check xtf4 "${xs@A}" "xs='hi there'"
+check xtf5 "${xa[*]@a}" 'a a'
+check xtf6 "${xa[*]@K}" '0 "pa" 1 "p b"'
+check xtf7 "$(printf '<%s>' "${xa[@]@k}")" '<0><pa><1><p b>'
+check xtf8 "${nosuchname@Q}" ''
+check xtf9 "${nosuchname@A}" ''
+xp='\[foo\]\$'
+check xtf10 "${xp@P}" 'foo$'
+# ${!r} reaches the SPECIAL parameters, not just the named slots
+set -- one two
+xz=0
+check xtf11 "${!xz}" "$0"
+xz='#'
+check xtf12 "${!xz}" 2
+# a command NAME out of an expansion is field-split like any other word
+xc="echo hi"
+check xtf13 "$($xc)" hi
+xe2=""
+check xtf14 "$($xe2 echo late)" late
+xfn2() { echo "fn:$1"; }
+xg2="xfn2 zz"
+check xtf15 "$($xg2)" 'fn:zz'
+# ...and echo reads its flags from whatever the expansion produced
+xo="-n"
+check xtf16 "$(echo $xo x; echo '|')" 'x|'
+xna=(-n hi)
+check xtf17 "$(echo "${xna[@]}"; echo '|')" 'hi|'
 
 # ----- done -----
 echo "features: $checks checks, $fails failures"

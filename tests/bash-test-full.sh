@@ -1521,15 +1521,15 @@ s31() {
 #     array store keeps no record of a declared-but-empty INDEXED array. The
 #     rule is written identically into both halves; see rt_declp in
 #     languages/lib/bash-rt.c.
-#   * `declare -p` of a name with more than one attribute (bash prints -ai,
-#     both engines print one letter), and -x / -r, which neither engine models.
+#   * -x / -r, which neither engine models. MORE THAN ONE ATTRIBUTE is modelled
+#     now (docs/todo.md 2.12): `declare -ai x` prints `declare -ai` in both
+#     halves and SECTION 34 pins it. So is the KEY-QUOTING rule that used to be
+#     the next line here - bash quotes an associative subscript only when the
+#     shell would need it (a_b, k and 5x stay bare, "k one" and "q\$x" do not),
+#     which is sh_contains_shell_metas and is now rt_keymeta / keyNeedsQuote.
 #   * `declare -p` with NO names, which in bash lists the whole shell.
 #   * an ASSOCIATIVE array with more than one key anywhere its ORDER would
 #     show: bash iterates in hash order, both halves in insertion order.
-#   * `declare -p` of an associative array whose KEY needs quoting: bash prints
-#     ["a b"]="y" and both halves print [a b]="y". bash quotes a subscript only
-#     when the shell would need it (a.b, a-b and 9x stay bare), and that rule is
-#     not modelled.
 s32() {
   local x="  a   b  "
   # --- 1.7: the right hand side of an assignment keeps its blanks
@@ -1758,6 +1758,124 @@ s33() {
   esac
 }
 
+# ===== SECTION 34: the @-transform family, a command name out of an expansion,
+#       and echo's flags out of an expansion (docs/todo.md 2.12) =====
+# Every assertion here was settled against bash 5.3.15 before it was written.
+# At f1910a9 the interpreter half failed SIXTEEN of them and then died on the
+# first computed command name, and the compiler half refused to compile the
+# section at all ("a computed command name is not supported by this compiler").
+#
+# Two shapes are load-bearing and easy to get wrong when editing this:
+#   * `"${a[@]@A}"` is THREE WORDS in bash, so it cannot be the second argument
+#     of check - the [*] form is the joined string and printf '<%s>' is the
+#     field view.
+#   * @A of a LOCAL prints `declare x=...` in bash 5.3 (it names the scope), so
+#     the plain-assignment form is asserted on a GLOBAL, exactly as pex10 does.
+#
+# STILL NOT ASSERTED, and each is measured rather than assumed:
+#   * `${a[@]@A}` under a NON-DEFAULT IFS. bash splits the declare text on IFS
+#     with the parenthesised group atomic, so `IFS=: ; printf '<%s>' "${a[@]@A}"`
+#     is ONE field there and three here. The three-field form is bash's answer
+#     under the default IFS, which is what this models.
+#   * `${v@P}` of a value holding `$name`: bash runs the decoded prompt through
+#     a full word expansion and answers the variable's value. The compiler has
+#     no expander at run time, so modelling it in one half only would trade a
+#     divergence from bash for a divergence between the halves. The BACKSLASH
+#     half of that pass is modelled (xe3, xe4).
+#   * `\t` in a prompt is the TIME, which is not reproducible.
+#   * a computed command name that resolves to `printf`, `[`, `read`, `eval`,
+#     `set`, `trap`, `unset`, `declare` or a control-flow builtin: those are
+#     compiled from their argument list at compile time, so the compiled half
+#     reaches the command-not-found fallback where the interpreter runs them.
+#     Recorded at emitComputedCommand in languages/bash-to-llvm-ir.abnf.
+#   * `declare -ul x` / `declare -lu x`, which CANCEL in bash (it prints
+#     `declare --`) and leave the later attribute on here.
+s34helper() { echo "fn:$1"; }
+s34() {
+  local -a A34=(pa "p b")
+  local -A M34=([k]=v)
+  S34g="hi there"   # a GLOBAL: @A of a LOCAL prints `declare x=...` in bash 5.3
+  declare -i N34=7
+  declare -u U34=abc
+
+  check xa1 "${A34[*]@A}" 'declare -a A34=([0]="pa" [1]="p b")'
+  check xa2 "$(printf '<%s>' "${A34[@]@A}")" '<declare><-a><A34=([0]="pa" [1]="p b")>'
+  check xa3 "${M34[*]@A}" 'declare -A M34=([k]="v" )'
+  check xa4 "${A34[1]@A}" "declare -a A34='p b'"
+  check xa5 "${S34g@A}" "S34g='hi there'"
+  check xa6 "${N34@A}" "declare -i N34='7'"
+  check xa7 "${U34@A}" "declare -u U34='ABC'"
+  check xa8 "${nosuch34@A}" ""
+  check xa9 "${A34[9]@A}" 'declare -a A34'
+
+  check xb1 "${A34[*]@a}" 'a a'
+  check xb2 "${A34@a}" 'a'
+  check xb3 "${N34@a}" 'i'
+  check xb4 "${S34g@a}" ''
+  check xb5 "$(printf '<%s>' "${A34[@]@a}")" '<a><a>'
+
+  check xc1 "${A34[*]@K}" '0 "pa" 1 "p b"'
+  check xc2 "$(printf '<%s>' "${A34[@]@k}")" '<0><pa><1><p b>'
+  check xc3 "${A34[1]@K}" "'p b'"
+  check xc4 "${M34[*]@K}" 'k "v" '
+
+  local E34=""
+  check xd1 "${E34@Q}" "''"
+  check xd2 "${nosuch34@Q}" ''
+  check xd3 "${nosuch34@K}" ''
+  check xd4 "${A34[9]@Q}" ''
+
+  local P34='x\ny'
+  check xe1 "${P34@P}" "$(printf 'x\ny')"
+  local P35='\[foo\]\$'
+  check xe2 "${P35@P}" 'foo$'
+  local P36='\\$'
+  check xe3 "${P36@P}" '$'
+  local P37='q\"w'
+  check xe4 "${P37@P}" 'q"w'
+  local -a PA34=('a\nb' 'c\nd')
+  check xe5 "$(printf '<%s>' "${PA34[@]@P}")" "$(printf '<a\nb><c\nd>')"
+
+  set -- one two
+  local Z34=0
+  check xf1 "${!Z34}" "$0"
+  Z34=1;  check xf2 "${!Z34}" one
+  Z34='#'; check xf3 "${!Z34}" 2
+  Z34='*'; check xf4 "${!Z34}" 'one two'
+  Z34=S34g; check xf5 "${!Z34@Q}" "'hi there'"
+  Z34=S34g; check xf6 "${!Z34@A}" "S34g='hi there'"
+
+  local C34="echo hi"
+  check xg1 "$($C34)" hi
+  local G34=""
+  check xg2 "$($G34 echo late)" late
+  $G34
+  check xg3 "$?" 0
+  local H34="s34helper zz"
+  check xg4 "$($H34)" 'fn:zz'
+  local T34=true
+  if $T34; then check xg5 ok ok; else check xg5 no ok; fi
+  local FA34=(echo aa bb)
+  check xg6 "$("${FA34[@]}")" 'aa bb'
+
+  local O34="-n"
+  check xh1 "$(echo $O34 x; echo '|')" 'x|'
+  local O35="-e"
+  check xh2 "$(echo $O35 'a\tb')" "$(printf 'a\tb')"
+  local NA34=(-n hi)
+  check xh3 "$(echo "${NA34[@]}"; echo '|')" 'hi|'
+  check xh4 "$(echo $O34)" ''
+
+  declare -ai AI34=(1 2)
+  check xi1 "$(declare -p AI34)" 'declare -ai AI34=([0]="1" [1]="2")'
+  check xi2 "${AI34[*]@A}" 'declare -ai AI34=([0]="1" [1]="2")'
+  declare -iu IU34=5
+  check xi3 "$(declare -p IU34)" 'declare -iu IU34="5"'
+  declare -A KQ34=(["k one"]=y)
+  check xi4 "$(declare -p KQ34)" 'declare -A KQ34=(["k one"]="y" )'
+  check xi5 "${KQ34[*]@A}" 'declare -A KQ34=(["k one"]="y" )'
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1791,5 +1909,6 @@ s30   # SECTION-CALL 30
 s31   # SECTION-CALL 31
 s32   # SECTION-CALL 32
 s33   # SECTION-CALL 33
+s34   # SECTION-CALL 34
 echo "full: $checks checks, $fails failures"
 exit $fails

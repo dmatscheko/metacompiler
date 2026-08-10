@@ -453,9 +453,16 @@ PePlain     = PeTarget PeBraceEnd ;
 PePfxNames  <~~ push({pfx: up.in}) ~~> = PeName PfxTok PeBraceEnd ;
 PfxTok      = "*" | "@" ;
 // ${v@Q} ${v@U} ${v@L} ${v@u} ${v@E} ${v@a} ${v@A} ${v@K} ${v@k} ${v@P} : the transform
-// operators. Verified against GNU bash 5.3.15 with x='a b':
-//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @A -> x='a b'
-//     @a -> the attribute letters (i for `declare -i n`, a for an indexed array)
+// operators. Verified against GNU bash 5.3.15 with x='a b' and a=(pa pb):
+//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @P -> a b
+//     @A -> x='a b', with a `declare -FLAGS ` prefix when the name has an attribute
+//     @a -> the attribute letters (i for `declare -i n`, ai for `declare -ai x`)
+// With a @ or * SUBSCRIPT, four of them stop being element-wise and describe the whole
+// variable instead - the half of docs/todo.md 2.12 that neither engine had:
+//     ${a[@]@A} -> the three fields  declare  -a  a=([0]="pa" [1]="pb")
+//     ${a[@]@a} -> `a a`, one copy per element      ${a[@]@K} -> 0 "pa" 1 "pb"
+//     ${a[@]@k} -> the four fields  0 pa 1 pb
+// and @Q/@K/@k/@A of an UNSET name are EMPTY, where a set-but-empty one gives ''.
 PeXform     = PeTarget "@" PeXfOp ;
 PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" | "L" | "U" | "u" ;
 
@@ -1387,12 +1394,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ${v@a}: the attribute letters. LIMIT: -r and -x are not modelled anywhere in this
     // grammar, so they are absent here too; -a/-A/-i/-u/-l are answered.
+    // bash answers ALL of them, in the order a/A, i, l, u: `declare -ai x` is `ai` and
+    // `declare -iu n` is `iu`. This used to answer the FIRST letter only, which is what
+    // made `declare -p` print `declare -a` for a name bash prints `declare -ai` for -
+    // recorded at the time as a limit and closed with docs/todo.md 2.12.
     function varAttrs(name) {
-        if (isArr(name)) { if (arrs[arrKey(name)].assoc) { return "A" } return "a" }
-        if (attrOn(intVars, name)) { return "i" }
-        if (attrOn(upVars, name)) { return "u" }
-        if (attrOn(loVars, name)) { return "l" }
-        return ""
+        var out = ""
+        if (isArr(name)) { out = arrs[arrKey(name)].assoc ? "A" : "a" }
+        if (attrOn(intVars, name)) { out = out + "i" }
+        if (attrOn(loVars, name)) { out = out + "l" }
+        if (attrOn(upVars, name)) { out = out + "u" }
+        return out
     }
     // ---- declare -p ----------------------------------------------------------------
     // `declare -p NAME` reproduces the declaration bash would need to recreate the
@@ -1406,12 +1418,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The trailing space before ")" on the ASSOCIATIVE form is bash's, not a slip - the
     // indexed form has none - and it is reproduced here because it is free.
     //
-    // TWO LIMITS, both inherited rather than introduced. varAttrs answers ONE letter, so
-    // `declare -ai x` prints `declare -a` where bash prints `declare -ai`; and -x/-r are
-    // not modelled anywhere in this grammar (see varAttrs), so `declare -x XX=1` prints
-    // `declare --`. The bare `declare -p` with NO names still prints nothing: bash lists
-    // every variable in the shell, most of which this engine does not have, so there is no
-    // output that could be right.
+    // ONE LIMIT, inherited rather than introduced: -x/-r are not modelled anywhere in this
+    // grammar (see varAttrs), so `declare -x XX=1` prints `declare --`. The other one -
+    // varAttrs answering a single letter, so `declare -ai x` printed `declare -a` - was
+    // closed with docs/todo.md 2.12. The bare `declare -p` with NO names still prints
+    // nothing: bash lists every variable in the shell, most of which this engine does not
+    // have, so there is no output that could be right.
     // bash quotes a `declare -p` value with "..." unless it holds a CONTROL character, and
     // with the ANSI-C form $'...' when it does - the same switch ${v@Q} makes, and the
     // same escape table, which is why this calls ansiQuote rather than carrying a second
@@ -1443,20 +1455,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isArr(name)) { return false }
         return arrKeyList(name).length > 0 || arrs[arrKey(name)].assoc
     }
+    // Does this subscript need quoting inside `[...]`? bash quotes an associative key only
+    // when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare, `["k one"]` and
+    // `["q\$x"]` do not - and the test is sh_contains_shell_metas from bash's own lib/sh.
+    // languages/lib/bash-rt.c's rt_keymeta is the same list.
+    function keyNeedsQuote(k) {
+        var i
+        for (i = 0; i < k.length; i++) {
+            var c = k.charCodeAt(i)
+            if (c == 32 || c == 9 || c == 10) { return true }
+            if (c == 39 || c == 34 || c == 92) { return true }
+            if (c == 124 || c == 38 || c == 59) { return true }
+            if (c == 40 || c == 41 || c == 60 || c == 62) { return true }
+            if (c == 33 || c == 123 || c == 125) { return true }
+            if (c == 42 || c == 91 || c == 63 || c == 93) { return true }
+            if (c == 94 || c == 36 || c == 96 || c == 44) { return true }
+            if ((c == 126 || c == 35) && i == 0) { return true }
+        }
+        return false
+    }
+    function declKey(k) { return keyNeedsQuote(k) ? declQuote(k) : k }
+    // `NAME=([k]="v" ...)`, the third FIELD of `declare -p` and of ${a[@]@A}.
+    function declArrAssign(name) {
+        var assoc = arrs[arrKey(name)].assoc
+        var ks = arrKeyList(name)
+        var body = ""
+        var i
+        for (i = 0; i < ks.length; i++) {
+            if (i > 0) { body = body + " " }
+            body = body + "[" + declKey(ks[i]) + "]=" + declQuote(arrGet(name, ks[i]))
+        }
+        if (assoc && ks.length > 0) { body = body + " " }
+        return name + "=(" + body + ")"
+    }
     function declLine(name) {
         var at = varAttrs(name)
-        if (declIsArr(name)) {
-            var assoc = arrs[arrKey(name)].assoc
-            var ks = arrKeyList(name)
-            var body = ""
-            var i
-            for (i = 0; i < ks.length; i++) {
-                if (i > 0) { body = body + " " }
-                body = body + "[" + ks[i] + "]=" + declQuote(arrGet(name, ks[i]))
-            }
-            if (assoc && ks.length > 0) { body = body + " " }
-            return "declare -" + (assoc ? "A" : "a") + " " + name + "=(" + body + ")"
-        }
+        if (declIsArr(name)) { return "declare -" + at + " " + declArrAssign(name) }
         if (!isSetVar(name)) { return "" }
         return "declare -" + ((at == "") ? "-" : at) + " " + name + "=" + declQuote(getVarVal(name))
     }
@@ -1492,7 +1526,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //     '\1004$'    -> @4$   (\100 is the octal escape, the trailing $ stays literal)
     // The escapes that need a process behind them (\u \h \s \j \! \#) answer this
     // interpreter's documented fixed values rather than pretending to know a real system.
-    function promptExpand(s) {
+    // bash decodes the prompt escapes and then runs the RESULT through one more pass of
+    // double-quoted word expansion (`promptvars`, on by default), which is why
+    //     p='\\$' -> the decoder writes \$ -> this pass writes $
+    //     p='q\"w' -> the decoder writes q\"w -> this pass writes q"w
+    // Only the backslash half of that pass is modelled: the other half is full word
+    // expansion, so bash answers /h for p='$HOME' and both halves here answer $HOME. The
+    // compiler has no expander at run time at all, so modelling it in one half only would
+    // trade a divergence from bash for a divergence between the halves.
+    function promptDequote(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charAt(i)
+            if (c == "\\" && i + 1 < s.length) {
+                var d = s.charAt(i + 1)
+                if (d == "$" || d == "`" || d == "\"" || d == "\\" || d == "\n") {
+                    out = out + d
+                    i = i + 2
+                    continue
+                }
+            }
+            out = out + c
+            i = i + 1
+        }
+        return out
+    }
+    function promptExpand(s) { return promptDequote(promptDecode(s)) }
+    function promptDecode(s) {
         var out = ""
         var i = 0
         while (i < s.length) {
@@ -1532,19 +1593,65 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
+    // ${v@A} of a SCALAR (or of one element): the assignment that would recreate it, with
+    // the `declare -FLAGS ` prefix bash writes whenever the name carries an attribute.
+    // Measured against bash 5.3.15:
+    //     s='hi there'   ->  s='hi there'          (no attribute: no `declare`)
+    //     declare -i n=7 ->  declare -i n='7'
+    //     a=(pa pb)      ->  declare -a a='pa'     for ${a[0]@A}
+    // The value is shellQuote's single-quoted form, NOT declQuote's "..." - `declare -p`
+    // and `@A` disagree about that in bash, and this is the `@A` side.
+    function declAssign(nm, v) {
+        var at = varAttrs(nm)
+        if (at == "") { return nm + "=" + shellQuote(v) }
+        return "declare -" + at + " " + nm + "=" + shellQuote(v)
+    }
+    // ${a[@]@K} joins `key value` pairs with the value in declQuote's "..." form; the
+    // associative form carries the same trailing space `declare -p` does. ${a[@]@k} is the
+    // same pairs as separate FIELDS, unquoted.
+    function kvPairs(name) {
+        var out = []
+        var ks = scKeyList(name)
+        var i
+        for (i = 0; i < ks.length; i++) { out.push(ks[i]); out.push(scGet(name, ks[i])) }
+        return out
+    }
+    function kvJoinedK(name) {
+        var ks = scKeyList(name)
+        var out = ""
+        var i
+        for (i = 0; i < ks.length; i++) {
+            if (i > 0) { out = out + " " }
+            out = out + declKey(ks[i]) + " " + declQuote(scGet(name, ks[i]))
+        }
+        if (isArr(name) && arrs[arrKey(name)].assoc && ks.length > 0) { out = out + " " }
+        return out
+    }
     // One value through one @-transform. @P (prompt expansion) is the only one that is not
     // a pure string function; @a is the only one that looks at the NAME rather than the value.
-    function xformOne(v, xfOp, nm) {
-        if (xfOp == "Q") { return shellQuote(v) }
+    //
+    // `isset` is not decoration: ${nosuch@Q} is EMPTY in bash 5.3.15 while ${empty@Q} is
+    // `''`, and both halves used to answer `''` for the first (docs/todo.md 2.12). The same
+    // distinction settles ${nosuch@A}, which was `nosuch=''`.
+    function xformOne(v, xfOp, nm, isset) {
         if (xfOp == "U") { return v.toUpperCase() }
         if (xfOp == "L") { return v.toLowerCase() }
         if (xfOp == "u") { if (v.length == 0) { return v } return v.charAt(0).toUpperCase() + v.slice(1) }
         if (xfOp == "E") { return ansiC(v) }
         if (xfOp == "P") { return promptExpand(v) }
         if (xfOp == "a") { return varAttrs(nm) }
-        if (xfOp == "K" || xfOp == "k") { return shellQuote(v) }
-        // @A prints the assignment that would recreate the variable.
-        return nm + "=" + shellQuote(v)
+        if (xfOp == "A") {
+            // An element that is not set, on a name that IS: bash prints the declaration
+            // with no value at all - `a=(pa pb); echo "${a[9]@A}"` is `declare -a a`.
+            if (!isset) {
+                var at9 = varAttrs(nm)
+                if (at9 == "") { return "" }
+                return "declare -" + at9 + " " + nm
+            }
+            return declAssign(nm, v)
+        }
+        if (!isset) { return "" }
+        return shellQuote(v)
     }
     function promptBase(p) {
         var i
@@ -1657,11 +1764,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var idxName = name
                 return function() {
                     var sub = readIdx()
-                    if (sub != "@" && sub != "*") { return xformOne(scGet(idxName, sub), idxXf, idxName) }
+                    if (sub != "@" && sub != "*") {
+                        return xformOne(scGet(idxName, sub), idxXf, idxName, scHas(idxName, sub))
+                    }
+                    // @A, @K and @k describe the WHOLE VARIABLE when the subscript is @ or *,
+                    // and none of the three is the per-element walk the others are. Measured
+                    // against bash 5.3.15 (docs/todo.md 2.12):
+                    //   a=(pa pb)          ${a[@]@A} -> declare -a a=([0]="pa" [1]="pb")
+                    //                      ${a[@]@K} -> 0 "pa" 1 "pb"
+                    //                      ${a[@]@k} -> the four fields 0 pa 1 pb
+                    //   s=hi (not an array) ${s[@]@A} -> s='hi'   i.e. the scalar form
+                    // @A's array form is three FIELDS - `declare`, the flags and the
+                    // assignment - which is what makes `printf '<%s>' "${a[@]@A}"` print
+                    // three items in bash and is why it cannot be one joined string here.
+                    if (idxXf == "A" && declIsArr(idxName)) {
+                        var dfs = ["declare", "-" + varAttrs(idxName), declArrAssign(idxName)]
+                        if (sub == "@") { return encFields(dfs) }
+                        return joinList(dfs, ifsFirst())
+                    }
+                    if (idxXf == "A" || idxXf == "K" || idxXf == "k") {
+                        if (!isArr(idxName)) {
+                            return xformOne(scGet(idxName, "0"), idxXf, idxName, scHas(idxName, "0"))
+                        }
+                        if (idxXf == "K") { return kvJoinedK(idxName) }
+                        var kvs = kvPairs(idxName)
+                        if (sub == "@") { return encFields(kvs) }
+                        return joinList(kvs, ifsFirst())
+                    }
                     var vals = scValList(idxName)
                     var outv = []
                     var q
-                    for (q = 0; q < vals.length; q++) { outv.push(xformOne(vals[q], idxXf, idxName)) }
+                    for (q = 0; q < vals.length; q++) { outv.push(xformOne(vals[q], idxXf, idxName, true)) }
                     if (sub == "@") { return encFields(outv) }
                     return joinList(outv, ifsFirst())
                 }
@@ -1733,7 +1866,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // string function; promptExpand implements the escapes bash documents for PS1.
         if (xf != "") {
             var xfOp = xf
-            return function() { return xformOne(getVarVal(nameOf()), xfOp, nameOf()) }
+            return function() {
+                var xn = nameOf()
+                return xformOne(getVarVal(xn), xfOp, xn, isSetVar(xn) || isArr(xn))
+            }
         }
         if (pe == "substr") {
             var offT0 = args[0]
@@ -2945,10 +3081,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
         }
         return function() {
-            var cmd = wordJoin(cmdT())
-            var args = expandWords(argTs)
+            // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER (docs/todo.md 2.12).
+            // `cmd="echo hi"; $cmd` runs echo with the argument hi in bash 5.3.15; this
+            // used to wordJoin the command word and look for a command literally named
+            // "echo hi". The extra fields become the FIRST arguments, ahead of the words
+            // that follow, and a word that expands to no field at all (`e=""; $e echo x`)
+            // contributes nothing - which is why the split has to happen here rather than
+            // inside runCommand, and why the empty case is a success with nothing run.
+            var cf = wordFields(cmdT())
+            var rest = expandWords(argTs)
             var k
             if (abortSignal != null) { var ab = abortSignal; abortSignal = null; return ab }
+            var all = []
+            for (k = 0; k < cf.length; k++) { all.push(cf[k]) }
+            for (k = 0; k < rest.length; k++) { all.push(rest[k]) }
+            // `$e` with e empty contributes NO field, so `$e echo late` runs echo and a
+            // command word that vanishes entirely runs nothing at all and answers 0.
+            if (all.length == 0) { setStatus(0); return 0 }
+            var cmd = all[0]
+            var args = []
+            for (k = 1; k < all.length; k++) { args.push(all[k]) }
             if (redirs.length == 0) { return runCommand(cmd, args) }
             var rs = openRedirs(redirs)
             var st = anytype

@@ -39,6 +39,11 @@ int exit_code;
 char empty[1];
 char unset_marker[1];
 
+/* $0: the program's own path, stored by main's entry block from c.file. It is a
+ * global rather than an argument because rt_getvar_byname has to answer ${!r}
+ * with r=0, and that lookup happens far from the emitter. */
+char *script_name;
+
 /* Variable storage is ONE array of char*, indexed by a compile-time id, so the
  * `local` unwinder can restore a slot chosen at run time. NVARS = 1024. */
 char *gvars[1024];
@@ -202,9 +207,19 @@ int rt_arr_count(char *nm);
 char *rt_arr_list(char *nm, char *sep, int star, int keys);
 int rt_sc_count(char *nm);
 int rt_declp(char *nm, char *flag, int assoc);
-int rt_dq(char *v);
-int rt_ansiq(char *v);
-int rt_octd(int k);
+char *rt_dqs(char *v);
+char *rt_ansiqs(char *v);
+char *rt_arrassign(char *nm, int assoc);
+int rt_keymeta(char *k);
+char *rt_shq(char *v, int isset);
+int rt_isset(char *v);
+char *rt_declasg(char *nm, char *at, char *v, int isset);
+char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *sep, int star);
+char *rt_kvq(char *nm, int assoc, char *v, int isset);
+char *rt_kvp(char *nm, char *sep, int star, char *v, int isset);
+char *rt_attrf(char *nm, char *at, char *sep, int star);
+char *rt_prompt(char *s);
+char *rt_ifsfirst(void);
 char *rt_sc_get(char *nm, char *k);
 int rt_sc_has(char *nm, char *k);
 char *rt_sc_list(char *nm, char *sep, int star, int keys);
@@ -216,6 +231,7 @@ char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
 char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star);
 int rt_argpush(char *v);
+int rt_echo(char *fields, int newline, int escapes);
 char *rt_param(int n);
 char *rt_params(char *sep, int star);
 int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps);
@@ -2143,73 +2159,353 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys) {
  * says `declare -a a=()`; the interpreter's declIsArr is deliberately written to
  * the same rule, because a fifth table plus a subshell snapshot entry for that
  * one line was judged not worth it. Recorded, not hidden. */
-int rt_octd(int k) {
-    int n = k;
-    int d0 = (n / 64) % 8;
-    int d1 = (n / 8) % 8;
-    int d2 = n % 8;
-    rt_putc(48 + d0);
-    rt_putc(48 + d1);
-    rt_putc(48 + d2);
-    return 0;
-}
-
 /* The $'...' form, with bash's escape table - the same one shellQuote uses in
- * languages/bash-interpreter.abnf. */
-int rt_ansiq(char *v) {
+ * languages/bash-interpreter.abnf.
+ *
+ * These two used to PRINT. ${a[@]@A} needs the same rendering as a VALUE (it is
+ * an expansion, not a builtin), so they build a string and rt_declp prints what
+ * they return - one renderer, two callers, which is what keeps `declare -p` and
+ * ${a[@]@A} from drifting apart the way they had (docs/todo.md 2.12). */
+char *rt_ansiqs(char *v) {
     int n = rt_strlen(v);
+    char *d = rt_bump(n * 4 + 8);
+    int o = 0;
     int i = 0;
-    rt_prints("$'");
+    d[o] = (char)36; o = o + 1;
+    d[o] = (char)39; o = o + 1;
     while (i < n) {
         int c = (int)(unsigned char)v[i];
-        if (c == 39) { rt_prints("\\'"); }
-        else if (c == 92) { rt_prints("\\\\"); }
-        else if (c == 7) { rt_prints("\\a"); }
-        else if (c == 8) { rt_prints("\\b"); }
-        else if (c == 9) { rt_prints("\\t"); }
-        else if (c == 10) { rt_prints("\\n"); }
-        else if (c == 11) { rt_prints("\\v"); }
-        else if (c == 12) { rt_prints("\\f"); }
-        else if (c == 13) { rt_prints("\\r"); }
-        else if (c == 27) { rt_prints("\\E"); }
-        else if (c < 32 || c == 127) { rt_prints("\\"); rt_octd(c); }
-        else { rt_putc(c); }
+        int e = 0;
+        if (c == 39) e = 39;
+        else if (c == 92) e = 92;
+        else if (c == 7) e = 97;
+        else if (c == 8) e = 98;
+        else if (c == 9) e = 116;
+        else if (c == 10) e = 110;
+        else if (c == 11) e = 118;
+        else if (c == 12) e = 102;
+        else if (c == 13) e = 114;
+        else if (c == 27) e = 69;
+        if (e != 0) {
+            d[o] = (char)92; o = o + 1;
+            d[o] = (char)e; o = o + 1;
+        } else if (c < 32 || c == 127) {
+            d[o] = (char)92; o = o + 1;
+            d[o] = (char)(48 + (c / 64)); o = o + 1;
+            d[o] = (char)(48 + ((c / 8) % 8)); o = o + 1;
+            d[o] = (char)(48 + (c % 8)); o = o + 1;
+        } else {
+            d[o] = (char)c; o = o + 1;
+        }
         i = i + 1;
     }
-    rt_prints("'");
-    return 0;
+    d[o] = (char)39; o = o + 1;
+    d[o] = 0;
+    return d;
 }
 
 /* "..." unless the value holds a control character. A byte >= 128 is not one:
  * in a UTF-8 locale bash prints the accented byte intact. */
-int rt_dq(char *v) {
+char *rt_dqs(char *v) {
     int n = rt_strlen(v);
     int ctl = 0;
     int i = 0;
+    char *d;
+    int o = 0;
     while (i < n) {
         int c = (int)(unsigned char)v[i];
         if (c < 32 || c == 127) { ctl = 1; }
         i = i + 1;
     }
-    if (ctl != 0) return rt_ansiq(v);
-    rt_prints("\"");
+    if (ctl != 0) return rt_ansiqs(v);
+    d = rt_bump(n * 2 + 4);
+    d[o] = (char)34; o = o + 1;
     i = 0;
     while (i < n) {
         int c = (int)(unsigned char)v[i];
-        if (c == 34 || c == 92 || c == 36 || c == 96) rt_prints("\\");
-        rt_putc(c);
+        if (c == 34 || c == 92 || c == 36 || c == 96) { d[o] = (char)92; o = o + 1; }
+        d[o] = (char)c; o = o + 1;
         i = i + 1;
     }
-    rt_prints("\"");
+    d[o] = (char)34; o = o + 1;
+    d[o] = 0;
+    return d;
+}
+
+/* Does this subscript need quoting inside `[...]`? bash quotes an associative
+ * key only when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare,
+ * `["k one"]` and `["q\$x"]` do not - and the test is sh_contains_shell_metas
+ * from bash's own lib/sh. This was recorded as "not modelled" in
+ * tests/bash-test-full.sh section 32 and is modelled now. */
+int rt_keymeta(char *k) {
+    int i = 0;
+    while (k[i] != 0) {
+        int c = (int)(unsigned char)k[i];
+        if (c == 32 || c == 9 || c == 10) return 1;
+        if (c == 39 || c == 34 || c == 92) return 1;
+        if (c == 124 || c == 38 || c == 59) return 1;
+        if (c == 40 || c == 41 || c == 60 || c == 62) return 1;
+        if (c == 33 || c == 123 || c == 125) return 1;
+        if (c == 42 || c == 91 || c == 63 || c == 93) return 1;
+        if (c == 94 || c == 36 || c == 96 || c == 44) return 1;
+        if (c == 126 && i == 0) return 1;
+        if (c == 35 && i == 0) return 1;
+        i = i + 1;
+    }
     return 0;
+}
+
+/* `NAME=([k]="v" ...)`: the third FIELD of `declare -p` and of ${a[@]@A}. */
+char *rt_arrassign(char *nm, int assoc) {
+    char *out = rt_strcat(nm, "=(");
+    int c = 0;
+    int i = 0;
+    while (i < arr_n) {
+        if (rt_streq(nm, arr_nm[i]) != 0) {
+            if (c > 0) out = rt_strcat(out, " ");
+            out = rt_strcat(out, "[");
+            out = rt_strcat(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
+            out = rt_strcat(out, "]=");
+            out = rt_strcat(out, rt_dqs(arr_v[i]));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if (assoc != 0 && c > 0) out = rt_strcat(out, " ");
+    return rt_strcat(out, ")");
+}
+
+/* ---- the ${v@A} / ${v@K} / ${v@k} / ${v@a} family ------------------------ */
+/* Every rule below was measured against GNU bash 5.3.15 and is written into
+ * languages/bash-interpreter.abnf character for character; see xformOne there. */
+
+/* Is this the unset marker? ${nosuch@Q} is EMPTY in bash while ${empty@Q} is
+ * '', and both halves used to answer '' for the first. */
+int rt_isset(char *v) { return (v == &unset_marker[0]) ? 0 : 1; }
+
+char *rt_shq(char *v, int isset) {
+    if (isset == 0) return empty;
+    return rt_shquote(v);
+}
+
+/* ${v@A} of a scalar or of ONE element: the assignment that would recreate it,
+ * with the `declare -FLAGS ` prefix bash writes when the name has an attribute.
+ * An element that is not set on a name that IS prints the declaration alone -
+ * `a=(pa pb); echo "${a[9]@A}"` is `declare -a a`. */
+char *rt_declasg(char *nm, char *at, char *v, int isset) {
+    char *base;
+    if (at[0] == 0) {
+        if (isset == 0) return empty;
+        return rt_strcat(rt_strcat(nm, "="), rt_shquote(v));
+    }
+    base = rt_strcat(rt_strcat("declare -", at), " ");
+    base = rt_strcat(base, nm);
+    if (isset == 0) return base;
+    return rt_strcat(rt_strcat(base, "="), rt_shquote(v));
+}
+
+/* ${a[@]@A}: the whole `declare -p` rendering, as the THREE fields bash makes
+ * of it - `declare`, `-a`, `a=([0]="pa" [1]="pb")`. It is three and not one
+ * because `printf '<%s>' "${a[@]@A}"` prints three items in bash 5.3.15. The
+ * [*] form joins them with the first character of IFS. A name that is not an
+ * array falls back to the scalar form, which is what bash does too. */
+char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *sep, int star) {
+    int isarr = (rt_arr_count(nm) > 0 || assoc != 0) ? 1 : 0;
+    char *flag;
+    char *asg;
+    char *out;
+    if (isarr == 0) return rt_declasg(nm, at, v, isset);
+    /* `at` already carries the array letter in front of the scalar ones, so
+     * `declare -ai x` answers `-ai`; the fallback is for the case where the
+     * emitter could not decide array-ness at all. */
+    flag = at[0] == 0 ? (assoc != 0 ? "-A" : "-a") : rt_strcat("-", at);
+    asg = rt_arrassign(nm, assoc);
+    if (star != 0) {
+        out = rt_strcat("declare", sep);
+        out = rt_strcat(out, flag);
+        out = rt_strcat(out, sep);
+        return rt_strcat(out, asg);
+    }
+    out = rt_strcat("\002declare\001", flag);
+    out = rt_strcat(out, "\001");
+    out = rt_strcat(out, asg);
+    return rt_strcat(out, "\001");
+}
+
+/* ${a[@]@K}: `key "value"` pairs as ONE field, with the trailing space bash
+ * writes for the associative form only. */
+char *rt_kvq(char *nm, int assoc, char *v, int isset) {
+    char *out = empty;
+    int c = 0;
+    int i = 0;
+    if (rt_arr_count(nm) == 0 && assoc == 0) return rt_shq(v, isset);
+    while (i < arr_n) {
+        if (rt_streq(nm, arr_nm[i]) != 0) {
+            if (c > 0) out = rt_strcat(out, " ");
+            out = rt_strcat(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
+            out = rt_strcat(out, " ");
+            out = rt_strcat(out, rt_dqs(arr_v[i]));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if (assoc != 0 && c > 0) out = rt_strcat(out, " ");
+    return out;
+}
+
+/* ${a[@]@k}: the same pairs, unquoted, as separate FIELDS. */
+char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
+    char *out = star != 0 ? empty : "\002";
+    int c = 0;
+    int i = 0;
+    if (rt_arr_count(nm) == 0) return rt_shq(v, isset);
+    while (i < arr_n) {
+        if (rt_streq(nm, arr_nm[i]) != 0) {
+            if (star != 0) {
+                if (c > 0) out = rt_strcat(out, sep);
+                out = rt_strcat(out, arr_k[i]);
+                out = rt_strcat(out, sep);
+                out = rt_strcat(out, arr_v[i]);
+            } else {
+                out = rt_strcat(out, arr_k[i]);
+                out = rt_strcat(out, "\001");
+                out = rt_strcat(out, arr_v[i]);
+                out = rt_strcat(out, "\001");
+            }
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/* ${a[@]@a}: the attribute letters, ONCE PER ELEMENT - `a=(pa pb)` answers
+ * `a a`. The compiled half answered one copy (docs/todo.md 2.12). */
+char *rt_attrf(char *nm, char *at, char *sep, int star) {
+    int n = rt_arr_count(nm);
+    char *out;
+    int i = 0;
+    if (n == 0) n = 1;
+    out = star != 0 ? empty : "\002";
+    while (i < n) {
+        if (star != 0) {
+            if (i > 0) out = rt_strcat(out, sep);
+            out = rt_strcat(out, at);
+        } else {
+            out = rt_strcat(out, at);
+            out = rt_strcat(out, "\001");
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/* ${v@P}: PS1-style prompt expansion. The compiled halves DID NOT MODEL IT AT
+ * ALL - they answered the value unchanged, which is right for a value holding
+ * no backslash and wrong for every other one, and it was a live halves
+ * divergence (docs/todo.md 2.12). This is promptExpand from
+ * languages/bash-interpreter.abnf, escape for escape: the ones that need a
+ * process behind them (\u \h \s \j \! \#) answer the same documented fixed
+ * values, and the second pass is the double-quoted backslash removal bash runs
+ * over the decoded prompt (`promptvars`), which is what turns \\$ into $. */
+char *rt_prompt(char *s) {
+    int n = rt_strlen(s);
+    char *u0 = rt_getvar_byname("USER");
+    char *p0 = rt_getvar_byname("PWD");
+    int ex;
+    char *d;
+    int o = 0;
+    int i = 0;
+    char *dq;
+    int m;
+    int j;
+    if (u0 == &unset_marker[0]) u0 = empty;
+    if (p0 == &unset_marker[0]) p0 = empty;
+    /* Every escape expands to at most one of \u, \w or "localhost", so this
+     * bound holds however the escapes are arranged. */
+    ex = rt_strlen(u0) + rt_strlen(p0) + 16;
+    d = rt_bump(n * (ex + 4) + 64);
+    while (i < n) {
+        int c = (int)(unsigned char)s[i];
+        int e;
+        if (c != 92) { d[o] = (char)c; o = o + 1; i = i + 1; continue; }
+        i = i + 1;
+        if (i >= n) { d[o] = (char)92; o = o + 1; i = i + 1; continue; }
+        e = (int)(unsigned char)s[i];
+        i = i + 1;
+        if (e == 97) { d[o] = (char)7; o = o + 1; }
+        else if (e == 101) { d[o] = (char)27; o = o + 1; }
+        else if (e == 110) { d[o] = (char)10; o = o + 1; }
+        else if (e == 114) { d[o] = (char)13; o = o + 1; }
+        else if (e == 92) { d[o] = (char)92; o = o + 1; }
+        else if (e == 91 || e == 93) { o = o + 0; }
+        else if (e == 36) { d[o] = (char)36; o = o + 1; }
+        else if (e == 117) {
+            int k = 0;
+            while (u0[k] != 0) { d[o] = u0[k]; o = o + 1; k = k + 1; }
+        }
+        else if (e == 104 || e == 72) {
+            char *hs = "localhost";
+            int k = 0;
+            while (hs[k] != 0) { d[o] = hs[k]; o = o + 1; k = k + 1; }
+        }
+        else if (e == 119 || e == 87) {
+            int k = 0;
+            int st = 0;
+            if (e == 87) {
+                int pl = rt_strlen(p0);
+                int last = -1;
+                k = 0;
+                while (k < pl) { if ((int)(unsigned char)p0[k] == 47) last = k; k = k + 1; }
+                if (last >= 0 && last != pl - 1) st = last + 1;
+                k = st;
+            }
+            while (p0[k] != 0) { d[o] = p0[k]; o = o + 1; k = k + 1; }
+        }
+        else if (e == 115) {
+            char *bs = "bash";
+            int k = 0;
+            while (bs[k] != 0) { d[o] = bs[k]; o = o + 1; k = k + 1; }
+        }
+        else if (e == 106 || e == 33 || e == 35) { d[o] = (char)48; o = o + 1; }
+        else if (e >= 48 && e <= 55) {
+            int val = e - 48;
+            int cnt = 1;
+            while (cnt < 3 && i < n) {
+                int dch = (int)(unsigned char)s[i];
+                if (dch < 48 || dch > 55) break;
+                val = val * 8 + (dch - 48);
+                i = i + 1;
+                cnt = cnt + 1;
+            }
+            d[o] = (char)val; o = o + 1;
+        }
+        else { d[o] = (char)92; o = o + 1; d[o] = (char)e; o = o + 1; }
+    }
+    d[o] = 0;
+    /* pass two: the backslash removal of a double-quoted expansion. */
+    m = o;
+    dq = rt_bump(m + 2);
+    j = 0;
+    o = 0;
+    while (j < m) {
+        int c = (int)(unsigned char)d[j];
+        if (c == 92 && j + 1 < m) {
+            int nx = (int)(unsigned char)d[j + 1];
+            if (nx == 36 || nx == 96 || nx == 34 || nx == 92 || nx == 10) {
+                dq[o] = (char)nx; o = o + 1; j = j + 2; continue;
+            }
+        }
+        dq[o] = (char)c; o = o + 1; j = j + 1;
+    }
+    dq[o] = 0;
+    return dq;
 }
 
 int rt_declp(char *nm, char *flag, int assoc) {
     int n = rt_arr_count(nm);
     int isarr = (n > 0 || assoc != 0) ? 1 : 0;
     char *v;
-    int i;
-    int c;
     int saved;
     if (isarr == 0) {
         v = rt_getvar_byname(nm);
@@ -2225,34 +2521,23 @@ int rt_declp(char *nm, char *flag, int assoc) {
             return 1;
         }
         rt_prints("declare -");
-        rt_prints(flag);
+        /* `flag` is the SCALAR attribute letters, "" for a name that has none -
+         * where bash writes `declare -- x`. It used to be a single letter, and
+         * `declare -ai x` printed `declare -a`. */
+        rt_prints(flag[0] == 0 ? "-" : flag);
         rt_prints(" ");
         rt_prints(nm);
         rt_prints("=");
-        rt_dq(v);
+        rt_prints(rt_dqs(v));
         rt_prints("\n");
         return 0;
     }
     rt_prints("declare -");
     rt_prints(assoc != 0 ? "A" : "a");
+    rt_prints(flag);
     rt_prints(" ");
-    rt_prints(nm);
-    rt_prints("=(");
-    c = 0;
-    i = 0;
-    while (i < arr_n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) {
-            if (c > 0) rt_prints(" ");
-            rt_prints("[");
-            rt_prints(arr_k[i]);
-            rt_prints("]=");
-            rt_dq(arr_v[i]);
-            c = c + 1;
-        }
-        i = i + 1;
-    }
-    if (assoc != 0 && c > 0) rt_prints(" ");
-    rt_prints(")\n");
+    rt_prints(rt_arrassign(nm, assoc));
+    rt_prints("\n");
     return 0;
 }
 
@@ -2342,6 +2627,7 @@ char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) 
         else if (op == 1) g = rt_replace(f, p, r, mode);
         else if (op == 3) g = rt_shquote(f);
         else if (op == 4) g = rt_ansic(f);
+        else if (op == 5) g = rt_prompt(f);
         else g = rt_case(f, mode, p);
         if (star != 0) {
             if (i > 0) out = rt_strcat(out, sep);
@@ -2366,6 +2652,34 @@ char *rt_catfields(char *a, char *b) {
         i = i + 1;
     }
     return out;
+}
+
+/* `echo` with the FLAG SCAN AT RUN TIME. The compiler read -n / -e / -E from
+ * compile-time constants only, so `opts="-n"; echo $opts x` printed the flag as
+ * an argument where bash treats it as a flag (docs/todo.md 2.12). `newline` and
+ * `escapes` carry in whatever the constant prefix already settled, and the scan
+ * continues over the fields the expansions produced - which is the same order
+ * languages/bash-interpreter.abnf's echoCmd walks. */
+int rt_echo(char *fields, int newline, int escapes) {
+    int n = rt_nfields(fields);
+    int i = 0;
+    int flagging = 1;
+    int first = 1;
+    while (i < n) {
+        char *f = rt_getfield(fields, i);
+        if (flagging != 0) {
+            if (rt_streq(f, "-n") != 0) { newline = 0; i = i + 1; continue; }
+            if (rt_streq(f, "-e") != 0) { escapes = 1; i = i + 1; continue; }
+            if (rt_streq(f, "-E") != 0) { escapes = 0; i = i + 1; continue; }
+            flagging = 0;
+        }
+        if (first == 0) rt_prints(" ");
+        rt_prints(escapes != 0 ? rt_unescape(f) : f);
+        first = 0;
+        i = i + 1;
+    }
+    if (newline != 0) rt_putc(10);
+    return 0;
 }
 
 /* i32 rt_argpush(i8* v): append every FIELD of v to the argv stack. */
@@ -2718,10 +3032,49 @@ int rt_pop_locals(int d)
 
 /* ${!name}: the value of the variable whose NAME is `n`, or the unset marker.
  * Names are distinct, so at most one slot can match. */
+/* "$*" joins with the FIRST character of IFS (a space when IFS is unset). The
+ * emitter has ifsFirstValue for the same thing; this is the copy the runtime's
+ * own ${!r} path needs, and IFS is an ordinary named slot so the lookup below
+ * cannot recurse into a special. */
+char *rt_ifsfirst(void)
+{
+    char *v = rt_getvar_byname("IFS");
+    if (v == &unset_marker[0]) return " ";
+    return rt_substr(v, 0, 1);
+}
+
 char *rt_getvar_byname(char *n)
 {
     char *sel;
     int i;
+    int c0;
+    int allDigits;
+    /* THE SPECIAL PARAMETERS ARE NOT IN varnames[]. `z=0; echo "${!z}"` is the
+     * script path in bash and was EMPTY here, because this walked the named
+     * slots only and $0..$9, $#, $@, $* and $? have none (docs/todo.md 2.12).
+     * languages/bash-interpreter.abnf's getVarVal answers the same set. */
+    if (rt_streq(n, "?") != 0) return rt_int2str(last_status);
+    if (rt_streq(n, "#") != 0) return rt_int2str(frame_n);
+    /* ${!r} answers ONE string - the indirection path has no way to hand a field
+     * list back - so both $@ and $* come through as the joined form, which is
+     * what `"${!r}"` prints in bash either way. */
+    if (rt_streq(n, "*") != 0 || rt_streq(n, "@") != 0) return rt_params(rt_ifsfirst(), 1);
+    if (rt_streq(n, "$") != 0) return "1000";
+    if (rt_streq(n, "!") != 0) return "0";
+    if (rt_streq(n, "-") != 0) return "hB";
+    c0 = rt_strlen(n);
+    allDigits = c0 > 0 ? 1 : 0;
+    i = 0;
+    while (i < c0) {
+        int ch = (int)(unsigned char)n[i];
+        if (ch < 48 || ch > 57) allDigits = 0;
+        i = i + 1;
+    }
+    if (allDigits != 0) {
+        int k = rt_str2int(n);
+        if (k == 0) return script_name;
+        return rt_param(k);
+    }
     sel = &unset_marker[0];
     i = 0;
     while (i < nvars) {
