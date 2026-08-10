@@ -927,6 +927,41 @@ function cpObjStr(o, depth) {
     // "function"`. Zero knobs.
     var m = rtFindMethod(o["__class"], "ToString")
     if (m !== undefined) { return cpRender(m.apply(undefined, [o]), depth + 1) }
+    // SYSTEM.EXCEPTION.ToString(), which is an override of System.Object's and so
+    // wins over the bare type name below. A BCL exception used to fall off the end of
+    // this function into cpPlainObj and read "[object Object]", and a user exception
+    // class read its bare type name - in all three engines, so byte identity was
+    // green on it (manual chapter 5). docs/todo.md 1.3.
+    //
+    // .NET's, from dotnet/runtime, src/libraries/System.Private.CoreLib/src/System/
+    // Exception.cs:
+    //     public override string ToString() => ToString(true, true);
+    //     ... string s = GetClassName();                       // GetType().ToString()
+    //         if (!string.IsNullOrEmpty(message)) s += ": " + message;
+    //         if (_innerException != null) s += " ---> " + ...
+    //         if (stackTrace != null) s += Environment.NewLine + stackTrace;
+    //
+    // WHERE THIS STOPS AND WHY. The class name and the message are exact, and for an
+    // exception that has not been THROWN yet .NET's stack trace is null and the
+    // two-part form is the entire answer - `new Exception("m").ToString()` really is
+    // "System.Exception: m". The "   at Program.Main() in Program.cs:line 8" frames of
+    // a thrown one are not reproducible in any engine here (no call-site line table -
+    // manual 7.9 records the same wall and is why this was left alone until now), and
+    // inner exceptions are not reproduced because the value model has no inner slot:
+    // `new Exception(msg, inner)` keeps the message only. Both omissions can only
+    // SHORTEN the answer; neither makes the part that is produced disagree.
+    //
+    // The twins are csExcToStr in languages/csharp-interpreter.abnf and the same arm
+    // of cspObjStr in abnf/jsrtcsharp.go.
+    if (csExcBase(o) != "") {
+        var full = csTypeOfVal(o)["FullName"]
+        var em = o["Message"]
+        if (em === undefined) { return full }
+        if (em === null) { return full }
+        var es = cpRender(em, depth + 1)
+        if (es == "") { return full }
+        return full + ": " + es
+    }
     // The type descriptor itself.
     if (o["__isclass"] !== undefined) {
         var n = o["__name"]
@@ -2286,6 +2321,20 @@ function js_csconsole() {
 // everything else through UNCHANGED, so that `1 + 2` stays an integer addition and a
 // boxed double stays a double. The caller wraps the result in js_csadd, which
 // supplies C#'s null rule and the numeric cases.
+// ArgumentException.Message's paramName suffix. `new ArgumentNullException(p)` takes
+// a PARAM NAME, not a message (the specification and the citations are in the header
+// of csExcParamName1 in languages/csharp-interpreter.abnf, whose csArgParamMsg is the
+// twin of this; the other twin is js_csargmsg in abnf/jsrtcsharp.go). It is a runtime
+// join and not a baked string because .NET appends NOTHING for a null or empty name
+// (`if (!string.IsNullOrEmpty(_paramName))`) and the name is rarely a literal.
+function js_csargmsg(base, pname) {
+    if (pname === undefined) { return base }
+    if (pname === null) { return base }
+    var ps = cpStr(pname)
+    if (ps == "") { return base }
+    return base + " (Parameter '" + ps + "')"
+}
+
 function js_csstr(v) {
     if (typeof v == "boolean") { return cpBoolStr(v) }
     if (Array.isArray(v)) { return cpArrayName(v) }

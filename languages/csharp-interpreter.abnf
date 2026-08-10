@@ -2204,6 +2204,139 @@ KwLet       = "let" KwEnd ;
         if (n == "KeyNotFoundException") { return "System.Collections.Generic." + n }
         return "System." + n
     }
+    // ----- the message a parameterless exception constructor leaves behind ----------
+    //
+    // `new Exception().Message` used to be the bare string "Exception" here, in all
+    // three engines - agreed and wrong, the class byte identity cannot see
+    // (docs/todo.md 1.3). .NET has TWO rules and this repo had neither:
+    //
+    //   1. System.Exception's parameterless constructor stores NO message at all.
+    //      `Exception.Message` then GENERATES one from the RUNTIME type:
+    //          public virtual string Message =>
+    //              _message ?? SR.Format(SR.Exception_WasThrown, GetClassName());
+    //      with SR.Exception_WasThrown = "Exception of type '{0}' was thrown." and
+    //      GetClassName() == GetType().ToString(), i.e. the FULLY QUALIFIED name.
+    //      (dotnet/runtime, src/libraries/System.Private.CoreLib/src/System/Exception.cs
+    //      and .../Resources/Strings.resx.) So it is the runtime type and not the
+    //      declaring one: `class MyEx : Exception {}` gives "Exception of type
+    //      'MyEx' was thrown.", and a class derived from MyEx names ITSELF.
+    //
+    //   2. Almost every DERIVED BCL type overrides that by passing its own SR string
+    //      to base(...), so `new ArgumentException().Message` is NOT the generated
+    //      sentence but "Value does not fall within the expected range.". The item as
+    //      filed said rule 1 covered the derived types too; it does not, and taking
+    //      it literally would have converged Exception and broken 26 other names.
+    //
+    // SPEC-CITED, NOT MEASURED - there is no C# toolchain on this machine (manual
+    // 7.9). Each string below is the resource the type's parameterless constructor
+    // passes to base(), from System.Private.CoreLib's Strings.resx (System.IO's and
+    // System.Collections' for the four/one that live there). Corroboration inside
+    // this repo: five of them were already written independently as the text of a
+    // RUNTIME-raised exception in abnf/jsrtcsharp.go's csThrow calls
+    // (DivideByZeroException, IndexOutOfRangeException, NullReferenceException,
+    // OverflowException, KeyNotFoundException) and they agree character for
+    // character.
+    //
+    // ObjectDisposedException is deliberately ABSENT: it has no public parameterless
+    // constructor in .NET at all, so `new ObjectDisposedException()` does not compile
+    // and no answer here is observable in a valid program; it falls to rule 1.
+    //
+    // The twins are csExcDefMsgOf in languages/csharp-to-llvm-ir.abnf (which bakes
+    // the answer into the emitted module at compile time, so layer 2 and the Go twin
+    // need no copy).
+    var csExcDefMsgs = {}
+    var csExcDefMsgPairs = [
+        "SystemException", "System error.",
+        "ApplicationException", "Error in the application.",
+        "InvalidOperationException", "Operation is not valid due to the state of the object.",
+        "ArgumentException", "Value does not fall within the expected range.",
+        "ArgumentNullException", "Value cannot be null.",
+        "ArgumentOutOfRangeException", "Specified argument was out of the range of valid values.",
+        "NotImplementedException", "The method or operation is not implemented.",
+        "NotSupportedException", "Specified method is not supported.",
+        "IndexOutOfRangeException", "Index was outside the bounds of the array.",
+        "NullReferenceException", "Object reference not set to an instance of an object.",
+        "InvalidCastException", "Specified cast is not valid.",
+        "FormatException", "One of the identified items was in an invalid format.",
+        "OverflowException", "Arithmetic operation resulted in an overflow.",
+        "DivideByZeroException", "Attempted to divide by zero.",
+        "ArithmeticException", "Overflow or underflow in the arithmetic operation.",
+        "KeyNotFoundException", "The given key was not present in the dictionary.",
+        "IOException", "I/O error occurred.",
+        "FileNotFoundException", "Unable to find the specified file.",
+        "DirectoryNotFoundException", "Attempted to access a path that is not valid.",
+        "InvalidDataException", "Found invalid data while decoding.",
+        "TimeoutException", "The operation has timed out.",
+        "StackOverflowException", "Operation caused a stack overflow.",
+        "OutOfMemoryException", "Insufficient memory to continue the execution of the program.",
+        "AggregateException", "One or more errors occurred.",
+        "RankException", "Attempted to operate on an array with the incorrect number of dimensions.",
+        "UnauthorizedAccessException", "Attempted to perform an unauthorized operation."]
+    for (var iDm = 0; iDm + 1 < csExcDefMsgPairs.length; iDm = iDm + 2) {
+        csExcDefMsgs[csExcDefMsgPairs[iDm]] = csExcDefMsgPairs[iDm + 1]
+    }
+    // "" when the type's parameterless constructor stores no message (rule 1 above).
+    function csExcDefMsgOf(n) {
+        var s = csExcDefMsgs[n]
+        if (typeof s == "string") { return s }
+        return ""
+    }
+    function csExcGenMsg(full) { return "Exception of type '" + full + "' was thrown." }
+    // `new XException()` on a BCL name: the runtime type IS the named type.
+    function csExcDefMsg(n) {
+        var s = csExcDefMsgOf(n)
+        if (s != "") { return s }
+        return csExcGenMsg(csExcFullName(n))
+    }
+    // ----- the exception types whose ONE-argument constructor takes a PARAM NAME ----
+    //
+    // A structural rule, not a string: for these two the single-string overload is
+    //     public ArgumentNullException(string? paramName) : base(SR.ArgumentNull_Generic, paramName)
+    //     public ArgumentOutOfRangeException(string? paramName) : base(SR.Arg_ArgumentOutOfRangeException, paramName)
+    // (dotnet/runtime, System/ArgumentNullException.cs and
+    // System/ArgumentOutOfRangeException.cs), so `throw new
+    // ArgumentNullException(nameof(x))` does NOT set the message to "x" - it sets
+    // ParamName to "x" and leaves the message the type's default, which
+    // ArgumentException.Message then extends:
+    //     public override string Message {
+    //         get { string s = base.Message;
+    //               if (!string.IsNullOrEmpty(_paramName))
+    //                   return s + " " + SR.Format(SR.Arg_ParamName_Name, _paramName);
+    //               return s; } }
+    // with SR.Arg_ParamName_Name = "(Parameter '{0}')" - a SPACE separator, not a
+    // newline (that is .NET Framework's older form). Corroborated inside this repo:
+    // csSubstr below and abnf/jsrtcsharp.go both already raise
+    // "StartIndex cannot be less than zero. (Parameter 'startIndex')", written in an
+    // earlier round from the same documentation and agreeing character for character.
+    // Every engine here read the argument as the MESSAGE, so `new
+    // ArgumentNullException("value").Message` was "value".
+    //
+    // ArgumentException is NOT in this list - its one-argument overload really is
+    // (string? message); the paramName is its SECOND argument, and the two types
+    // above put theirs FIRST. ObjectDisposedException is not either: its
+    // objectName suffix is joined with Environment.NewLine, which is "\n" here and
+    // "\r\n" on Windows, so there is no single right answer to converge on - the
+    // same reasoning that left .NET's abort()-derived exit status alone in 800ef57.
+    //
+    // MULTI-ARGUMENT forms are deliberately untouched: the second argument of
+    // ArgumentNullException(string, string) is a message while that of
+    // ArgumentNullException(string, Exception) is an inner exception, and this value
+    // model has no inner-exception slot to tell them apart with. Today every engine
+    // ignores arguments past the first, and that is unchanged.
+    //
+    // The twins are csExcParamName1 in languages/csharp-to-llvm-ir.abnf, and the
+    // message join is js_csargmsg in languages/lib/csharp-rt.metajs and
+    // abnf/jsrtcsharp.go (a runtime join, because a null or empty paramName appends
+    // nothing and the name is not a compile-time constant).
+    function csExcParamName1(n) {
+        return n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
+    }
+    function csArgParamMsg(base, pname) {
+        if (pname === undefined || pname === null) { return base }
+        var ps = csStr(pname)
+        if (ps == "") { return base }
+        return base + " (Parameter '" + ps + "')"
+    }
     // GetType(): a System.Type token with the same two members typeof(T) answers.
     function csTypeOfVal(v) {
         var full = csElemName(v)
@@ -2222,6 +2355,33 @@ KwLet       = "let" KwEnd ;
         }
         var parts = full.split(".")
         return {Name: parts[parts.length - 1], FullName: full}
+    }
+    // System.Exception.ToString(), as far as this engine can honestly go. .NET's is
+    //     public override string ToString() => ToString(true, true);
+    //     ... string s = GetClassName();
+    //         if (!string.IsNullOrEmpty(message)) s += ": " + message;
+    //         if (_innerException != null) s += " ---> " + ... + "   --- End of inner
+    //                                             exception stack trace ---";
+    //         if (stackTrace != null) s += Environment.NewLine + stackTrace;
+    // (dotnet/runtime, System/Exception.cs). WHERE THIS STOPS, and why: the class
+    // name and the message are exact - and for an exception that has NOT been thrown
+    // yet, .NET's _stackTraceString is null and the two-part form IS the whole answer,
+    // so `new Exception("m").ToString()` is "System.Exception: m" on the nose. The
+    // "   at Program.Main() in Program.cs:line 8" frames of a thrown one are not
+    // reproducible in any engine here (no call-site line table - manual 7.9 records
+    // the same wall), and INNER exceptions are not reproduced either because this
+    // value model has no inner-exception slot: `new Exception(msg, inner)` keeps only
+    // the message (see makeNew). Both omissions can only ever SHORTEN the answer;
+    // they never make it disagree on the part that is produced.
+    // The twins are cpObjStr in languages/lib/csharp-rt.metajs and cspObjStr in
+    // abnf/jsrtcsharp.go. docs/todo.md 1.3.
+    function csExcToStr(v, d) {
+        var full = csTypeOfVal(v).FullName
+        var msg = v.Message
+        if (msg === undefined || msg === null) { return full }
+        var ms = csStrD(msg, d + 1)
+        if (ms == "") { return full }
+        return full + ": " + ms
     }
     function csIsRecObj(v) {
         return v !== null && v !== undefined && typeof v == "object"
@@ -2337,6 +2497,11 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "object") {
             var m = csFindToStr(v)
             if (m != undefined) { return csStrD(m(v), d + 1) }
+            // An exception - a BCL {__excname, Message} object or a user class whose
+            // chain reaches one - renders with System.Exception's OWN ToString
+            // override, not System.Object's bare type name: "System.Exception: m",
+            // and "[object Object]" before this. A user override still wins, above.
+            if (csExcBase(v) != "") { return csExcToStr(v, d) }
             if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
             if (v.__class != undefined && typeof v.__class.__name == "string") { return v.__class.__name }
         }
@@ -3143,12 +3308,27 @@ KwLet       = "let" KwEnd ;
             // A BCL exception the program did not declare: a plain object, not a class.
             if (globalScope[clsName] == undefined && hasOwn(csBclExc, clsName)) {
                 var msg = anytype
-                msg = clsName
+                // No argument: the type's OWN parameterless-constructor message, which
+                // is a per-type SR string for all but Exception itself and a sentence
+                // generated from the runtime type for that one. It was the bare class
+                // name in all three engines (docs/todo.md 1.3, csExcDefMsg above).
+                msg = csExcDefMsg(clsName)
+                // ...unless the type's one-argument constructor takes a PARAM NAME
+                // rather than a message (csExcParamName1 above): then the default
+                // message stands and the name is appended to it.
+                var pn1 = csExcParamName1(clsName)
+                var pname = anytype
+                pname = undefined
                 for (var m = 0; m < args.length; m++) {
                     var av = args[m]()
-                    if (m == 0) { msg = av }
+                    if (m == 0) {
+                        if (pn1) { pname = av; msg = csArgParamMsg(msg, av) }
+                        else { msg = av }
+                    }
                 }
-                return {__excname: clsName, Message: msg}
+                var eo = {__excname: clsName, Message: msg}
+                if (pn1 && args.length > 0) { eo.ParamName = pname }
+                return eo
             }
             var cls = getVar(clsName)
             if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
@@ -5355,7 +5535,16 @@ KwLet       = "let" KwEnd ;
             // the message (ECMA-335 / System.Exception(String)). No message means the
             // class name, which is what `new XException()` already answers in makeNew.
             if (sup == null && cls.__excbase != undefined) {
-                self.Message = (bargs.length > 0) ? bargs[0] : name
+                if (bargs.length > 0) { self.Message = bargs[0]; return }
+                // The implicit ': base()' runs the BASE's parameterless constructor, so
+                // the default message is the BASE's - and for System.Exception, which
+                // stores none, the sentence Exception.Message generates from the
+                // RUNTIME type of the instance (csExcDefMsg above). `self` is the most
+                // derived instance even when this ctor belongs to a class in the
+                // middle of the chain, which is why csTypeOfVal(self) and not `name`.
+                // This was the declaring class' bare name (docs/todo.md 1.3).
+                var db = csExcDefMsgOf(cls.__excbase)
+                self.Message = (db != "") ? db : csExcGenMsg(csTypeOfVal(self).FullName)
                 return
             }
             if (sup == null) { return }

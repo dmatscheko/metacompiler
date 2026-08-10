@@ -138,6 +138,36 @@ namespace Demo
         }
     }
 
+    // The default Message of a parameterless exception constructor, and
+    // Exception.ToString() (docs/todo.md 1.3). MyEx declares both constructors,
+    // BareEx declares NONE - a class with no constructor at all still runs the
+    // implicit ': base()' - and OverEx overrides ToString, which must keep winning.
+    class MyEx : Exception
+    {
+        public MyEx() { }
+        public MyEx(string m) : base(m) { }
+    }
+
+    class BareEx : Exception { }
+
+    class DerivedEx : MyEx
+    {
+        public DerivedEx() { }
+    }
+
+    // The base is NOT System.Exception, so the base constructor's own message wins
+    // over the generated sentence.
+    class ArgEx : ArgumentException
+    {
+        public ArgEx() { }
+    }
+
+    class OverEx : Exception
+    {
+        public OverEx() { }
+        public override string ToString() { return "over!"; }
+    }
+
     class Program
     {
         static int Fails = 0;
@@ -888,6 +918,81 @@ namespace Demo
             Program.Check("catch-no-match-propagates", Program.Unmatched() == "fin;out:zzz");
             Program.Check("catch-bare-rethrow", Program.BareRethrow() == "re:kk");
             Program.Check("catch-is-hierarchy", Program.IsChain() == "abc");
+
+            // ----- the default Message, and Exception.ToString() (docs/todo.md 1.3) --
+            //
+            // SPEC-CITED, NOT MEASURED: no C# toolchain on this machine (manual 7.9).
+            // System.Exception's parameterless constructor stores NO message, and
+            // Exception.Message then generates SR.Format(SR.Exception_WasThrown,
+            // GetClassName()) - "Exception of type '{0}' was thrown." over the FULLY
+            // QUALIFIED RUNTIME type. Almost every derived BCL type instead passes its
+            // own SR string to base(), which is why ArgumentException does NOT say the
+            // generated sentence. All three engines used to answer the bare class name
+            // here, and all three said "[object Object]" for ToString().
+            Program.Check("exc-default-msg-root",
+                          new Exception().Message == "Exception of type 'System.Exception' was thrown.");
+            Program.Check("exc-explicit-msg-unchanged", new Exception("m").Message == "m");
+            Program.Check("exc-default-msg-derived-bcl",
+                          new ArgumentException().Message == "Value does not fall within the expected range."
+                          && new InvalidOperationException().Message
+                             == "Operation is not valid due to the state of the object."
+                          && new FormatException().Message == "One of the identified items was in an invalid format."
+                          && new KeyNotFoundException().Message == "The given key was not present in the dictionary.");
+            // The generated sentence names the RUN-TIME type, so a user class names
+            // itself - and a class derived from it names the derived one, even though
+            // the constructor that writes the message belongs to the base.
+            Program.Check("exc-default-msg-user",
+                          new MyEx().Message == "Exception of type 'MyEx' was thrown."
+                          && new BareEx().Message == "Exception of type 'BareEx' was thrown."
+                          && new DerivedEx().Message == "Exception of type 'DerivedEx' was thrown.");
+            Program.Check("exc-user-msg-unchanged", new MyEx("custom").Message == "custom");
+            // A base that is not System.Exception contributes ITS message, not the
+            // generated one.
+            Program.Check("exc-default-msg-user-nonroot",
+                          new ArgEx().Message == "Value does not fall within the expected range.");
+            // Exception.ToString() is "FullName: Message" - the whole answer for an
+            // exception that has not been thrown yet, since .NET's stack trace is null
+            // until then. The frames of a thrown one are not reproducible here.
+            Program.Check("exc-tostring-bcl",
+                          new Exception("m").ToString() == "System.Exception: m"
+                          && new FormatException("f").ToString() == "System.FormatException: f");
+            Program.Check("exc-tostring-default",
+                          new Exception().ToString()
+                          == "System.Exception: Exception of type 'System.Exception' was thrown.");
+            // A user type has no namespace in this subset, so its FullName is its name.
+            Program.Check("exc-tostring-user", new MyEx("c").ToString() == "MyEx: c");
+            // String concatenation and Console.Write go through the same conversion.
+            Program.Check("exc-tostring-implicit", ("" + new MyEx("c")) == "MyEx: c");
+            // A user ToString() override still wins over System.Exception's, exactly
+            // as the virtual dispatch says. This one passes at base too, and is kept
+            // to pin the precedence the new arm was inserted behind.
+            Program.Check("exc-tostring-override", new OverEx().ToString() == "over!");
+
+            // ----- the one argument of ArgumentNullException is a PARAM NAME --------
+            //
+            // SPEC-CITED, NOT MEASURED (manual 7.9). ArgumentNullException(string?
+            // paramName) and ArgumentOutOfRangeException(string? paramName) pass their
+            // argument as the paramName and the type's own SR string as the message;
+            // ArgumentException.Message then appends " (Parameter '{0}')" - a SPACE,
+            // and nothing at all for a null or empty name. Every engine here read the
+            // argument as the MESSAGE, so `new ArgumentNullException("value").Message`
+            // was "value". The names are read out of an ARRAY so that no constant
+            // folder can answer this at compile time.
+            string[] pnames = { "value", "" };
+            Program.Check("exc-argnull-paramname",
+                          new ArgumentNullException(pnames[0]).Message
+                          == "Value cannot be null. (Parameter 'value')"
+                          && new ArgumentNullException(pnames[0]).ParamName == "value");
+            Program.Check("exc-argrange-paramname",
+                          new ArgumentOutOfRangeException(pnames[0]).Message
+                          == "Specified argument was out of the range of valid values. (Parameter 'value')");
+            // An EMPTY name appends nothing - `if (!string.IsNullOrEmpty(_paramName))`.
+            Program.Check("exc-paramname-empty",
+                          new ArgumentNullException(pnames[1]).Message == "Value cannot be null.");
+            // ArgumentException is NOT one of the two: its single argument really is
+            // the message, and it must not have moved.
+            Program.Check("exc-argexc-msg-not-paramname",
+                          new ArgumentException(pnames[0]).Message == "value");
             Program.Check("loop-break-out-of-try", Program.LoopBreakOutOfTry() == 3);
             Program.Check("loop-continue-out-of-try", Program.LoopContinueOutOfTry() == 4);
 

@@ -3586,11 +3586,22 @@ KwLet       = "let" KwEnd ;
             if (csKnownClasses[clsName] != true && csBclExc[clsName] == true) {
                 var eo = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [eo, emitStr(b, "__excname"), emitStr(b, clsName)])
-                callExt(b, "js_set", [eo, emitStr(b, "Message"), emitStr(b, clsName)])
+                // No argument: the type's OWN parameterless-constructor message, baked
+                // in at emit time (csExcDefMsg above). It was the bare class name in
+                // all three engines - docs/todo.md 1.3.
+                callExt(b, "js_set", [eo, emitStr(b, "Message"), emitStr(b, csExcDefMsg(clsName))])
+                var pn1 = csExcParamName1(clsName)
                 for (var m = 0; m < args.length; m++) {
                     var rm = args[m](b)
                     b = rm.b
-                    if (m == 0) { callExt(b, "js_set", [eo, emitStr(b, "Message"), rm.v]) }
+                    if (m == 0 && pn1) {
+                        // The argument is the PARAM NAME: the default message stands
+                        // and the name is appended to it (csExcParamName1 above).
+                        callExt(b, "js_set", [eo, emitStr(b, "ParamName"), rm.v])
+                        callExt(b, "js_set", [eo, emitStr(b, "Message"),
+                                              callExt(b, "js_csargmsg",
+                                                      [emitStr(b, csExcDefMsg(clsName)), rm.v])])
+                    } else if (m == 0) { callExt(b, "js_set", [eo, emitStr(b, "Message"), rm.v]) }
                 }
                 return {b: b, v: eo}
             }
@@ -4889,6 +4900,88 @@ KwLet       = "let" KwEnd ;
         "FileNotFoundException", "DirectoryNotFoundException", "UnauthorizedAccessException"]
     for (var iBcl = 0; iBcl < csBclExcNames.length; iBcl++) { csBclExc[csBclExcNames[iBcl]] = true }
 
+    // ----- the message a parameterless exception constructor leaves behind ----------
+    //
+    // The twin is csExcDefMsgs / csExcDefMsgOf in languages/csharp-interpreter.abnf,
+    // whose header is the specification half: .NET has TWO rules, and this repo had
+    // neither (`new Exception().Message` was the bare string "Exception" in all three
+    // engines - docs/todo.md 1.3). In short: System.Exception's parameterless ctor
+    // stores NO message and Exception.Message then generates
+    // SR.Format(SR.Exception_WasThrown, GetClassName()) from the RUNTIME type, while
+    // almost every derived BCL type passes its own SR string to base() instead.
+    // SPEC-CITED, NOT MEASURED - there is no C# toolchain here (manual 7.9).
+    //
+    // Everything below runs at EMIT time and the answer is baked into the module as a
+    // string constant, so neither languages/lib/csharp-rt.metajs nor
+    // abnf/jsrtcsharp.go needs a copy of the table. The one answer that cannot be
+    // baked is rule 1 for a USER class, whose runtime type is not known until the
+    // constructor runs; that one is emitted as a concatenation off this.__class.__name
+    // in emitFunc's excBase arm.
+    var csExcDefMsgs = {}
+    var csExcDefMsgPairs = [
+        "SystemException", "System error.",
+        "ApplicationException", "Error in the application.",
+        "InvalidOperationException", "Operation is not valid due to the state of the object.",
+        "ArgumentException", "Value does not fall within the expected range.",
+        "ArgumentNullException", "Value cannot be null.",
+        "ArgumentOutOfRangeException", "Specified argument was out of the range of valid values.",
+        "NotImplementedException", "The method or operation is not implemented.",
+        "NotSupportedException", "Specified method is not supported.",
+        "IndexOutOfRangeException", "Index was outside the bounds of the array.",
+        "NullReferenceException", "Object reference not set to an instance of an object.",
+        "InvalidCastException", "Specified cast is not valid.",
+        "FormatException", "One of the identified items was in an invalid format.",
+        "OverflowException", "Arithmetic operation resulted in an overflow.",
+        "DivideByZeroException", "Attempted to divide by zero.",
+        "ArithmeticException", "Overflow or underflow in the arithmetic operation.",
+        "KeyNotFoundException", "The given key was not present in the dictionary.",
+        "IOException", "I/O error occurred.",
+        "FileNotFoundException", "Unable to find the specified file.",
+        "DirectoryNotFoundException", "Attempted to access a path that is not valid.",
+        "InvalidDataException", "Found invalid data while decoding.",
+        "TimeoutException", "The operation has timed out.",
+        "StackOverflowException", "Operation caused a stack overflow.",
+        "OutOfMemoryException", "Insufficient memory to continue the execution of the program.",
+        "AggregateException", "One or more errors occurred.",
+        "RankException", "Attempted to operate on an array with the incorrect number of dimensions.",
+        "UnauthorizedAccessException", "Attempted to perform an unauthorized operation."]
+    for (var iDm = 0; iDm + 1 < csExcDefMsgPairs.length; iDm = iDm + 2) {
+        csExcDefMsgs[csExcDefMsgPairs[iDm]] = csExcDefMsgPairs[iDm + 1]
+    }
+    // "" when the type's parameterless constructor stores no message (rule 1).
+    function csExcDefMsgOf(n) {
+        var s = csExcDefMsgs[n]
+        if (typeof s == "string") { return s }
+        return ""
+    }
+    function csExcGenMsg(full) { return "Exception of type '" + full + "' was thrown." }
+    // The fully qualified .NET name of a BCL exception type - the twins are
+    // csExcFullName in csharp-interpreter.abnf, lib/csharp-rt.metajs and
+    // abnf/jsrtcsharp.go. Only the default MESSAGE needs it in this grammar; every
+    // other use of a full name in the compiled half is answered by layer 2.
+    function csExcFullName(n) {
+        if (n == "IOException") { return "System.IO." + n }
+        if (n == "FileNotFoundException") { return "System.IO." + n }
+        if (n == "DirectoryNotFoundException") { return "System.IO." + n }
+        if (n == "InvalidDataException") { return "System.IO." + n }
+        if (n == "KeyNotFoundException") { return "System.Collections.Generic." + n }
+        return "System." + n
+    }
+    // `new XException()` on a BCL name: the runtime type IS the named type.
+    function csExcDefMsg(n) {
+        var s = csExcDefMsgOf(n)
+        if (s != "") { return s }
+        return csExcGenMsg(csExcFullName(n))
+    }
+    // The two exception types whose ONE-argument constructor takes a PARAM NAME and
+    // not a message. The twin - and the whole citation, which is a structural rule
+    // rather than a string - is csExcParamName1 in languages/csharp-interpreter.abnf.
+    // The join itself is the js_csargmsg extern, because .NET appends nothing for a
+    // null or empty name and the name is not a compile-time constant.
+    function csExcParamName1(n) {
+        return n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
+    }
+
     var csClassTParams = {}
     // ----- unqualified access to a member of the enclosing type (docs/todo.md 1.2) -----
     //
@@ -5766,8 +5859,10 @@ KwLet       = "let" KwEnd ;
     // makeReturn's thunk runs inside body(b) below (docs/todo.md 1.1).
     var curRetTy = ""
     // excBase: present only on a CONSTRUCTOR of a class whose base is a BCL exception
-    // name (see __excbase at the class emitter). It holds that class' OWN name, which is
-    // the default Message. See the ': base(...)' arm below.
+    // name (see __excbase at the class emitter). It holds THAT BASE'S name - it used to
+    // hold the class' own name, because the default Message was the class name; the
+    // default is now the base constructor's own message and the base is what selects it
+    // (docs/todo.md 1.3). See the ': base(...)' arm below.
     function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy, cinit, excBase) {
         funcCount++
         var idx = funcCount
@@ -5840,16 +5935,30 @@ KwLet       = "let" KwEnd ;
         // does not happen at all. System.Exception's own constructor is inlined instead:
         // it stores the message (ECMA-335, System.Exception(String)). Before this the
         // base was silently dropped, so ': base(m)' set nothing and e.Message read empty
-        // in BOTH halves (docs/todo.md 1.1). No message means the class name, which is
-        // what `new XException()` on a BCL name already answers in makeNew.
+        // in BOTH halves (docs/todo.md 1.1).
         if (excBase != undefined && excBase != null && !isThisInit) {
             var thisEV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
                 var er = cinit.cargs[0](b)
                 b = er.b
                 callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v])
+            } else if (csExcDefMsgOf(excBase) != "") {
+                // The implicit ': base()' runs the BASE's parameterless constructor, so
+                // the message is the BASE's own SR string. Bakeable.
+                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), emitStr(b, csExcDefMsgOf(excBase))])
             } else {
-                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), emitStr(b, excBase)])
+                // System.Exception stores no message, so Exception.Message generates
+                // "Exception of type 'T' was thrown." from the RUNTIME type T. Not
+                // bakeable: `this` here is the most derived instance even when this
+                // constructor belongs to a class in the middle of the chain, so the
+                // name is read off this.__class.__name at run time. (A user type has no
+                // namespace in this subset, so __name IS its full name.) The twin is
+                // initBase in csharp-interpreter.abnf. docs/todo.md 1.3.
+                var ecV = callExt(b, "js_get", [thisEV, emitStr(b, "__class")])
+                var enV = callExt(b, "js_get", [ecV, emitStr(b, "__name")])
+                var e1V = callExt(b, "js_csadd", [emitStr(b, "Exception of type '"), enV])
+                var e2V = callExt(b, "js_csadd", [e1V, emitStr(b, "' was thrown.")])
+                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), e2V])
             }
         }
         if (fields != null && !isThisInit) {
@@ -6215,7 +6324,9 @@ KwLet       = "let" KwEnd ;
             for (i = 0; i < members.length; i++) {
                 if (typeof members[i].ext == "string" && csKnownClasses[members[i].ext] != true
                     && csBclExc[members[i].ext] == true) {
-                    excBase = name
+                    // The BASE's name, not this class' - it is what selects the default
+                    // Message now (docs/todo.md 1.3, emitFunc's excBase arm).
+                    excBase = members[i].ext
                     callExt(b, "js_set", [clsV, emitStr(b, "__excbase"), emitStr(b, members[i].ext)])
                 }
             }

@@ -1409,6 +1409,25 @@ func init() {
 		// `1 + 2` stays an integer addition and a boxed double stays a double. The
 		// caller wraps the result in js_csadd, which supplies C#'s null rule and
 		// the numeric cases.
+		// ArgumentException.Message's paramName suffix - `new
+		// ArgumentNullException(p)` takes a PARAM NAME, not a message. The
+		// specification and the citations are in the header of csExcParamName1 in
+		// languages/csharp-interpreter.abnf; the twins are csArgParamMsg there and
+		// js_csargmsg in languages/lib/csharp-rt.metajs. A runtime join rather than a
+		// baked string because .NET appends nothing for a null or EMPTY name.
+		m["js_csargmsg"] = func(a []uint64) uint64 {
+			base := rt.cspStr(u(a[0]))
+			pn := u(a[1])
+			switch pn.(type) {
+			case nil, jsUndefT, jsNullT:
+				return a[0]
+			}
+			ps := rt.cspStr(pn)
+			if ps == "" {
+				return a[0]
+			}
+			return rt.wrapStr(base + " (Parameter '" + ps + "')")
+		}
 		m["js_csstr"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch t := v.(type) {
@@ -1470,6 +1489,30 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 	// the virtual System.Object.ToString() does in C#.
 	if mth, ok := cspFindToString(o); ok {
 		return rt.cspRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
+	}
+	// An exception - a BCL {__excname, Message} object or a user class whose chain
+	// reaches one - renders with System.Exception's OWN ToString override, not
+	// System.Object's bare type name. A BCL one used to fall off the end of this
+	// function and read "[object Object]" in all three engines (docs/todo.md 1.3).
+	// The twins are csExcToStr in languages/csharp-interpreter.abnf and the same arm
+	// of cpObjStr in languages/lib/csharp-rt.metajs, where the citation lives.
+	if csExcBase(o) != "" {
+		full := "System.Object"
+		if t := rt.csTypeOfVal(o); t != nil {
+			if f, isStr := t.props["FullName"].(string); isStr {
+				full = f
+			}
+		}
+		msg := o.props["Message"]
+		switch msg.(type) {
+		case nil, jsUndefT, jsNullT:
+			return full, true
+		}
+		ms := rt.cspRender(msg, depth+1)
+		if ms == "" {
+			return full, true
+		}
+		return full + ": " + ms, true
 	}
 	// The type descriptor itself.
 	if _, ok := o.props["__isclass"]; ok {
