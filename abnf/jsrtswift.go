@@ -41,6 +41,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -139,6 +140,22 @@ func init() {
 		m["js_swarith"] = func(a []uint64) uint64 {
 			op, l, r := rt.toString(u(a[0])), u(a[1]), u(a[2])
 			if swIsWhole(l) && swIsWhole(r) {
+				// AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S
+				// (docs/todo.md 1.1). `integer divide by zero` is the
+				// text of GO'S OWN runtime panic and reaches this
+				// through the SHARED sized-integer layer
+				// (abnf/jsrtint.go, languages/lib/runtime.c's
+				// si_arith) - correct for go and for nobody else.
+				// swiftc 6.1.2 says
+				//   Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
+				// so the guard sits in FRONT of the shared
+				// primitive, in swift's own file, and the floor's
+				// Go-correct wording is left exactly as it is.
+				// Twins: swGiArith in languages/lib/swift-rt.metajs
+				// and swDivGuard in languages/swift-interpreter.abnf.
+				if (op == "/" || op == "%") && swNum(rt, r) == 0 {
+					rt.swAbort("Fatal error: Division by zero")
+				}
 				return w(rt.giArith(op, l, r))
 			}
 			if op == "+" {
@@ -772,6 +789,8 @@ func init() {
 		// against swift 6.1.2: 2.0.rounded() is 2.0, 2.5.squareRoot() is
 		// 1.5811388300841898 and 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
 		baseMcall := m["js_mcall"]
+		// One deterministic generator per runtime: see swRndState.
+		swRnd := &swRndState{s: 20260810}
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
@@ -812,6 +831,26 @@ func init() {
 						elems = args.elems
 					}
 					return w(rt.call(fn, jsUndef, elems))
+				}
+				// The Sequence/Collection members (docs/todo.md 2.10), in
+				// FRONT of abnf/jsrt.go's shared list table - that table
+				// refused with "unknown list method 'sorted'" where the
+				// interpreter said "unknown Array method: sorted", so the
+				// two engines disagreed about the wording of a refusal as
+				// well as about the member. Every Array receiver lands
+				// here now, including the refusal.
+				if arr, isArr := u(a[0]).(*jsArray); isArr {
+					name := rt.toString(u(a[1]))
+					var elems []interface{}
+					if ia, _ := u(a[2]).(*jsArray); ia != nil {
+						elems = ia.elems
+					}
+					if v, ok := rt.swSeqMethod(arr, name, elems, swRnd); ok {
+						return w(v)
+					}
+					if !swSharedListMethod(name) {
+						rt.fail("unknown Array method: %s", name)
+					}
 				}
 				return baseMcall(a)
 			}
@@ -968,6 +1007,13 @@ func init() {
 					return a[0]
 				}
 			}
+			// indices is a PROPERTY on every Collection and answered nil in
+			// all three engines. Only an Array is answered: a String's
+			// indices are String.Index values with no printable form here.
+			// swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
+			if arr, ok := u(a[0]).(*jsArray); ok && rt.toString(u(a[1])) == "indices" {
+				return w(swMkRange(0, float64(len(arr.elems)), false))
+			}
 			// The same three on a value that stayed a plain number, which is
 			// where every integer inside +/- 2^53 lives.
 			if f, ok := u(a[0]).(float64); ok {
@@ -1015,14 +1061,32 @@ func init() {
 		basePyget := m["js_pyget"]
 		m["js_swidx"] = func(a []uint64) uint64 {
 			base := u(a[0])
+			// a[1...] / a[0..<2] / s[1...3]: a RANGE subscript answers the
+			// slice. Swift's ArraySlice/Substring keep the ORIGINAL indices,
+			// which a plain array/string cannot; the printed form, the count
+			// and every walk agree, and the re-indexing is the one measured
+			// divergence (docs/todo.md 2.10). Twins: swSlice in
+			// languages/lib/swift-rt.metajs and swift-interpreter.abnf.
+			if r, ok := u(a[1]).(*jsObject); ok && swIsRange(r) {
+				switch c := base.(type) {
+				case *jsArray:
+					lo, hi := rt.swSliceBounds(r, len(c.elems))
+					out := make([]interface{}, hi-lo)
+					copy(out, c.elems[lo:hi])
+					return w(&jsArray{elems: out})
+				case string:
+					lo, hi := rt.swSliceBounds(r, rt.strLen(c))
+					return rt.wrapStr(rt.strRange(c, lo, hi))
+				}
+			}
 			if keys, _, ok := dictParts(base); ok {
 				if rt.pyDictFind(keys, u(a[1])) < 0 {
-					rt.fail("%s", swNilUnwrap)
+					rt.swAbort("%s", swNilUnwrap)
 				}
 				return basePyget(a)
 			}
 			if base == nil || base == jsNull {
-				rt.fail("%s", swNilUnwrap)
+				rt.swAbort("%s", swNilUnwrap)
 			}
 			switch o := base.(type) {
 			case *jsArray:
@@ -1031,7 +1095,7 @@ func init() {
 					idx += len(o.elems)
 				}
 				if idx < 0 || idx >= len(o.elems) {
-					rt.fail("Fatal error: Index out of range")
+					rt.swAbort("Fatal error: Index out of range")
 				}
 			case string:
 				idx := int(rt.toNumber(u(a[1])))
@@ -1040,7 +1104,7 @@ func init() {
 					idx += n
 				}
 				if idx < 0 || idx >= n {
-					rt.fail("Fatal error: String index is out of bounds")
+					rt.swAbort("Fatal error: String index is out of bounds")
 				}
 			}
 			return basePyget(a)
@@ -1065,7 +1129,7 @@ func init() {
 		// value - so `m.E.boom' reads `boom', this runtime having no module concept
 		// (manual chapter 7.9). docs/todo.md 1.12.
 		m["js_swtop"] = func(a []uint64) uint64 {
-			rt.fail("Fatal error: Error raised at top level: %s", rt.swDesc(u(a[0])))
+			rt.swAbort("Fatal error: Error raised at top level: %s", rt.swDesc(u(a[0])))
 			return 0
 		}
 	})
@@ -1496,6 +1560,33 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 		return rt.swDesc(d), true
 	}
 
+	// A Range printed as itself. Both compiled halves used to answer
+	// "[object Object]" - agree-and-wrong, which byte-identity cannot see.
+	// swiftc 6.1.2 prints `0..<3` and `1...3`. A ONE-SIDED range prints
+	// PartialRangeFrom/Through/UpTo, whose real form names the static element
+	// type and so cannot be reproduced without a type checker - the generic
+	// parameter is dropped and the rest is byte-exact.
+	if t, has := o.props["__range"]; has && t == true {
+		rlo, hasLo := o.props["lo"]
+		rhi, hasHi := o.props["hi"]
+		closed := o.props["closed"] == true
+		if !hasLo || isNullish(rlo) {
+			nm := "PartialRangeUpTo"
+			if closed {
+				nm = "PartialRangeThrough"
+			}
+			return nm + "(upperBound: " + rt.swRender(rhi, false, depth+1) + ")", true
+		}
+		if !hasHi || isNullish(rhi) {
+			return "PartialRangeFrom(lowerBound: " + rt.swRender(rlo, false, depth+1) + ")", true
+		}
+		op := "..<"
+		if closed {
+			op = "..."
+		}
+		return rt.swRender(rlo, false, depth+1) + op + rt.swRender(rhi, false, depth+1), true
+	}
+
 	// Dictionary: ["k": v, ...], and the empty one is [:].
 	if keys, vals, ok := dictParts(o); ok {
 		if len(keys.elems) == 0 {
@@ -1737,6 +1828,20 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 		}
 		return true
 	}
+	// Two RANGES compare by their bounds - a Range is Equatable in Swift and
+	// `0..<3 == 0..<3` is true there, where these engines fell through to object
+	// IDENTITY and answered false. Adjacent to docs/todo.md 2.10: nothing could
+	// build a comparable Range value until `indices` did.
+	if swIsRange(l) || swIsRange(r) {
+		lr, lrok := l.(*jsObject)
+		rr, rrok := r.(*jsObject)
+		if !lrok || !rrok || !swIsRange(l) || !swIsRange(r) {
+			return false
+		}
+		return rt.swEqualDepth(lr.props["lo"], rr.props["lo"], depth+1) &&
+			rt.swEqualDepth(lr.props["hi"], rr.props["hi"], depth+1) &&
+			(lr.props["closed"] == true) == (rr.props["closed"] == true)
+	}
 	lo, lok := l.(*jsObject)
 	ro, rok := r.(*jsObject)
 	if lok && rok {
@@ -1801,4 +1906,444 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 		return false
 	}
 	return rt.strictEq(l, r)
+}
+
+// ----- The Sequence/Collection members, docs/todo.md 2.10 --------------------
+// The Go twin of swSeqMethod in languages/lib/swift-rt.metajs and arraySeqMethod
+// in languages/swift-interpreter.abnf. Every member here was measured against
+// swiftc 6.1.2 before it was written; the ones that cannot be matched exactly are
+// recorded at their arms in the two files above.
+//
+// It sits in FRONT of abnf/jsrt.go's shared list table, which is the other half of
+// the item: that table refuses with "unknown list method 'sorted'" while the
+// interpreter said "unknown Array method: sorted", so the two engines disagreed
+// even about the WORDING of a refusal. Every Array receiver now lands here and no
+// swift value can reach the shared wording.
+//
+// Nothing here rebinds a SHARED extern (manual chapter 4's rxExtraExterns trap) -
+// it is reached only from m["js_swmcall"], which is swift's own name.
+
+// swSortLess is Swift's <, over the values a Swift Array can hold: a UInt64 above
+// 2^63 is not negative, a Double is a box, and a String pair compares as text.
+// A user type's own `static func <` WINS. `[P(n: 3), P(n: 1)].sorted()` answered
+// [3, 1] in all three engines against swiftc 6.1.2's [1, 3]: Comparable is how
+// Swift sorts anything that is not a built-in, and the built-in comparison sees
+// two opaque objects. The operand's type is asked first, then the other's -
+// exactly what sw_opfn does for a written `a < b`.
+func (rt *jsrt) swSortLess(a, b interface{}) bool {
+	if f, ok := swFindMember(a, "<"); ok {
+		return rt.truthy(rt.call(f, jsUndef, []interface{}{a, b}))
+	}
+	if f, ok := swFindMember(b, "<"); ok {
+		return rt.truthy(rt.call(f, jsUndef, []interface{}{a, b}))
+	}
+	if as, ok := a.(string); ok {
+		if bs, ok2 := b.(string); ok2 {
+			return as < bs
+		}
+	}
+	if swIsFlo(a) || swIsFlo(b) {
+		x, y := swNum(rt, a), swNum(rt, b)
+		if swIsF32(a) || swIsF32(b) {
+			x, y = jvmFround(x), jvmFround(y)
+		}
+		return x < y
+	}
+	if giIsInt(a) || giIsInt(b) {
+		if giIsIntegral(a) && giIsIntegral(b) {
+			return rt.giCmp(a, b) < 0
+		}
+	}
+	return rt.jsCompare(a, b) < 0
+}
+
+// swMergeSort is STABLE. Swift's own sort is introsort and is not stable, so
+// stability is not a convergence claim - it is what makes the three engines agree
+// with each other on equal keys, which byte-identity requires.
+func swMergeSort(xs []interface{}, less func(a, b interface{}) bool) []interface{} {
+	if len(xs) < 2 {
+		out := make([]interface{}, len(xs))
+		copy(out, xs)
+		return out
+	}
+	mid := len(xs) / 2
+	l := swMergeSort(xs[:mid], less)
+	r := swMergeSort(xs[mid:], less)
+	out := make([]interface{}, 0, len(xs))
+	i, j := 0, 0
+	for i < len(l) && j < len(r) {
+		if less(r[j], l[i]) {
+			out = append(out, r[j])
+			j++
+		} else {
+			out = append(out, l[i])
+			i++
+		}
+	}
+	out = append(out, l[i:]...)
+	out = append(out, r[j:]...)
+	return out
+}
+
+// THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
+// engines agree on byte-for-byte (kotlin's ktRndMake is settled by the same
+// argument, and Math.random is deleted from the goja host for it). shuffled()
+// draws from a DETERMINISTIC xorshift32 with a fixed seed, so every run of every
+// engine sees the same permutation; a test asserts on the SORTED result or the
+// count, never on the order. The twins are swRndNext in swift-interpreter.abnf and
+// swRndNext in languages/lib/swift-rt.metajs, and all three produce one stream.
+type swRndState struct{ s int32 }
+
+func (r *swRndState) next() int32 {
+	x := r.s
+	x = x ^ (x << 13)
+	x = x ^ int32(uint32(x)>>17)
+	x = x ^ (x << 5)
+	if x == 0 {
+		x = 1
+	}
+	r.s = x
+	return x
+}
+
+func (r *swRndState) below(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	return int(r.next()&1073741823) % n
+}
+
+func swSeqK(rt *jsrt, args []interface{}, dflt, n int) int {
+	k := dflt
+	if len(args) > 0 {
+		k = int(swNum(rt, args[0]))
+	}
+	if k < 0 {
+		k = 0
+	}
+	if k > n {
+		k = n
+	}
+	return k
+}
+
+// swMkRange builds the {__range, lo, hi, closed} object both grammars emit.
+func swMkRange(lo, hi float64, closed bool) *jsObject {
+	o := newJSObject()
+	o.set("__range", true)
+	o.set("lo", lo)
+	o.set("hi", hi)
+	o.set("closed", closed)
+	return o
+}
+
+func swIsRange(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	t, has := o.props["__range"]
+	return has && t == true
+}
+
+// swSliceBounds fills a ONE-SIDED range's missing end in from the receiver's
+// length, which is the only place either can be used.
+func (rt *jsrt) swSliceBounds(r *jsObject, n int) (int, int) {
+	lo := 0
+	if v, has := r.props["lo"]; has && !isNullish(v) {
+		lo = int(swNum(rt, v))
+	}
+	hi := n
+	if v, has := r.props["hi"]; has && !isNullish(v) {
+		hi = int(swNum(rt, v))
+		if c, ok := r.props["closed"]; ok && c == true {
+			hi++
+		}
+	}
+	if lo < 0 || hi > n || lo > hi {
+		rt.swAbort("Fatal error: Range requires lowerBound <= upperBound")
+	}
+	return lo, hi
+}
+
+func (rt *jsrt) swArgList(v interface{}) []interface{} {
+	if a, ok := v.(*jsArray); ok {
+		return a.elems
+	}
+	return nil
+}
+
+func (rt *jsrt) swLessOf(args []interface{}) func(a, b interface{}) bool {
+	if len(args) > 0 && isCallable(args[0]) {
+		f := args[0]
+		return func(a, b interface{}) bool {
+			return rt.truthy(rt.call(f, jsUndef, []interface{}{a, b}))
+		}
+	}
+	return rt.swSortLess
+}
+
+// swSeqMethod answers (value, true) for a member it knows and (nil, false) for
+// everything else, so the caller can fall through to the shared table.
+func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *swRndState) (interface{}, bool) {
+	n := len(o.elems)
+	switch name {
+	case "isEmpty":
+		return n == 0, true
+	case "removeFirst":
+		// removeFirst() answers the element; removeFirst(k) answers Void. Both
+		// trap on an empty array, with swiftc 6.1.2's own two messages.
+		if len(args) == 0 {
+			if n == 0 {
+				rt.swAbort("Fatal error: Can't remove first element from an empty collection")
+			}
+			f0 := o.elems[0]
+			o.elems = o.elems[1:]
+			return f0, true
+		}
+		k := int(swNum(rt, args[0]))
+		if k < 0 || k > n {
+			rt.swAbort("Fatal error: Can't remove more items from a collection than it contains")
+		}
+		o.elems = o.elems[k:]
+		return jsUndef, true
+	case "remove":
+		i := int(swNum(rt, args[0]))
+		if i < 0 || i >= n {
+			rt.swAbort("Fatal error: Index out of range")
+		}
+		rv := o.elems[i]
+		o.elems = append(o.elems[:i], o.elems[i+1:]...)
+		return rv, true
+	case "removeAll":
+		if len(args) > 0 && isCallable(args[0]) {
+			keep := make([]interface{}, 0, n)
+			for _, e := range o.elems {
+				if !rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
+					keep = append(keep, e)
+				}
+			}
+			o.elems = keep
+			return jsUndef, true
+		}
+		o.elems = o.elems[:0]
+		return jsUndef, true
+	case "reversed":
+		// reversed() answers a ReversedCollection in Swift, whose printed form
+		// names the STATIC element type. See the twin's comment: a plain
+		// reversed ARRAY is answered instead and the print is the divergence.
+		out := make([]interface{}, 0, n)
+		for i := n - 1; i >= 0; i-- {
+			out = append(out, o.elems[i])
+		}
+		return &jsArray{elems: out}, true
+	case "sorted":
+		return &jsArray{elems: swMergeSort(o.elems, rt.swLessOf(args))}, true
+	case "sort":
+		o.elems = swMergeSort(o.elems, rt.swLessOf(args))
+		return jsUndef, true
+	case "shuffled":
+		out := make([]interface{}, n)
+		copy(out, o.elems)
+		for i := len(out) - 1; i > 0; i-- {
+			j := rnd.below(i + 1)
+			out[i], out[j] = out[j], out[i]
+		}
+		return &jsArray{elems: out}, true
+	case "swapAt":
+		x, y := int(swNum(rt, args[0])), int(swNum(rt, args[1]))
+		if x < 0 || x >= n || y < 0 || y >= n {
+			rt.swAbort("Fatal error: Index out of range")
+		}
+		o.elems[x], o.elems[y] = o.elems[y], o.elems[x]
+		return jsUndef, true
+	case "min", "max":
+		// An Optional in Swift and this value model has none (manual 7.9), so
+		// `print(a.min())` reads `1` where swiftc prints `Optional(1)`. The
+		// EMPTY case answers nil, which swiftc prints as `nil` too.
+		if n == 0 {
+			return jsNull, true
+		}
+		less := rt.swLessOf(args)
+		best := o.elems[0]
+		for i := 1; i < n; i++ {
+			// Swift's own min/max keep the LEFT operand on a tie.
+			if name == "min" {
+				if less(o.elems[i], best) {
+					best = o.elems[i]
+				}
+			} else if !less(o.elems[i], best) {
+				best = o.elems[i]
+			}
+		}
+		return best, true
+	case "prefix":
+		k := swSeqK(rt, args, 1, n)
+		out := make([]interface{}, k)
+		copy(out, o.elems[:k])
+		return &jsArray{elems: out}, true
+	case "suffix":
+		k := swSeqK(rt, args, 1, n)
+		out := make([]interface{}, k)
+		copy(out, o.elems[n-k:])
+		return &jsArray{elems: out}, true
+	case "dropFirst":
+		k := swSeqK(rt, args, 1, n)
+		out := make([]interface{}, n-k)
+		copy(out, o.elems[k:])
+		return &jsArray{elems: out}, true
+	case "dropLast":
+		k := swSeqK(rt, args, 1, n)
+		out := make([]interface{}, n-k)
+		copy(out, o.elems[:n-k])
+		return &jsArray{elems: out}, true
+	case "firstIndex", "lastIndex", "index":
+		// `of:` (a value) or `where:` (a closure), answering an Optional - the
+		// same divergence as min/max, and nil for "not found", which IS what
+		// swiftc prints.
+		var found interface{} = jsNull
+		for i := 0; i < n; i++ {
+			hit := false
+			if len(args) > 0 && isCallable(args[0]) {
+				hit = rt.truthy(rt.call(args[0], jsUndef, []interface{}{o.elems[i]}))
+			} else if len(args) > 0 {
+				hit = rt.swEqual(o.elems[i], args[0])
+			}
+			if hit {
+				if name != "lastIndex" {
+					return float64(i), true
+				}
+				found = float64(i)
+			}
+		}
+		return found, true
+	case "allSatisfy":
+		for _, e := range o.elems {
+			if !rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
+				return false, true
+			}
+		}
+		return true, true
+	case "compactMap":
+		out := make([]interface{}, 0, n)
+		for _, e := range o.elems {
+			cv := rt.call(args[0], jsUndef, []interface{}{e})
+			if !isNullish(cv) {
+				out = append(out, cv)
+			}
+		}
+		return &jsArray{elems: out}, true
+	case "flatMap":
+		out := make([]interface{}, 0, n)
+		for _, e := range o.elems {
+			fv := rt.call(args[0], jsUndef, []interface{}{e})
+			if fa, ok := fv.(*jsArray); ok {
+				out = append(out, fa.elems...)
+			} else {
+				out = append(out, fv)
+			}
+		}
+		return &jsArray{elems: out}, true
+	case "contains":
+		// contains(_:) is a value test and contains(where:) a PREDICATE; the
+		// label does not reach here, so the closure argument tells them apart.
+		// The value form stays with the shared table.
+		if len(args) > 0 && isCallable(args[0]) {
+			for _, e := range o.elems {
+				if rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
+					return true, true
+				}
+			}
+			return false, true
+		}
+		return nil, false
+	case "indices":
+		return swMkRange(0, float64(n), false), true
+	case "enumerated":
+		// An EnumeratedSequence in Swift, whose printed form names the static
+		// type; `Array(a.enumerated())` is what programs use and THAT is
+		// byte-exact - `[(offset: 0, element: 3), ...]`.
+		out := make([]interface{}, 0, n)
+		for i, e := range o.elems {
+			pt := newJSObject()
+			pt.set("__tuple", float64(2))
+			pt.set("__tlabels", &jsArray{elems: []interface{}{"offset", "element"}})
+			pt.set("0", float64(i))
+			pt.set("offset", float64(i))
+			pt.set("1", e)
+			pt.set("element", e)
+			out = append(out, pt)
+		}
+		return &jsArray{elems: out}, true
+	case "joined":
+		// [String] concatenates, [[T]] flattens.
+		allArr := n > 0
+		for _, e := range o.elems {
+			if _, ok := e.(*jsArray); !ok {
+				allArr = false
+			}
+		}
+		if allArr && len(args) == 0 {
+			out := make([]interface{}, 0, n)
+			for _, e := range o.elems {
+				out = append(out, e.(*jsArray).elems...)
+			}
+			return &jsArray{elems: out}, true
+		}
+		sep := ""
+		if len(args) > 0 {
+			sep = rt.swDesc(args[0])
+		}
+		js := ""
+		for i, e := range o.elems {
+			if i > 0 {
+				js = strConcat(js, sep)
+			}
+			js = strConcat(js, rt.swDesc(e))
+		}
+		return js, true
+	case "reduce":
+		// reduce(initial, combine) and reduce(into: seed, combine). The labels
+		// do not reach here, so the two forms are told apart by WHAT THE CLOSURE
+		// ANSWERS: an `into` body mutates its accumulator and returns Void.
+		acc := args[0]
+		for _, e := range o.elems {
+			r2 := rt.call(args[1], jsUndef, []interface{}{acc, e})
+			if _, isUndef := r2.(jsUndefT); !isUndef {
+				acc = r2
+			}
+		}
+		return acc, true
+	}
+	return nil, false
+}
+
+// swSharedListMethod names the members abnf/jsrt.go's shared list table already
+// answers for an Array receiver, so they keep reaching it - the swift-side table
+// above only ADDS members and takes over the refusal. Keeping the list explicit is
+// what makes "unknown Array method: X" reachable without re-implementing the eleven
+// the shared table already has.
+func swSharedListMethod(name string) bool {
+	switch name {
+	case "add", "append", "pop", "removeLast", "size", "get", "contains", "map",
+		"filter", "forEach", "count", "any", "insert", "popLast":
+		return true
+	}
+	return false
+}
+
+// swAbort is HOW A SWIFT PROGRAM DIES (docs/todo.md 1.1). rt.fail prefixes
+// "js runtime error: ", which sat in front of an otherwise byte-correct
+// `Fatal error: Error raised at top level: boom`; a message ALREADY in swiftc's own
+// wording is printed bare on stderr and exits 1. The pattern is js_jvtop in
+// abnf/jsrtjvm.go, which has done exactly this since docs/todo.md 1.14, and the
+// twins are swAbort in languages/lib/swift-rt.metajs and the fail override in
+// languages/swift-interpreter.abnf. An engine-level complaint no toolchain would
+// say ("unknown Array method: x") still goes through rt.fail and keeps its prefix.
+//
+// THE EXIT CODE STAYS 1: swiftc traps at 133 and that is declined with the
+// measurement - see the long note in languages/swift-interpreter.abnf.
+func (rt *jsrt) swAbort(format string, args ...interface{}) {
+	fmt.Fprint(warnWriter, wtf8Clean(fmt.Sprintf(format, args...)+"\n"))
+	os.Exit(1)
 }

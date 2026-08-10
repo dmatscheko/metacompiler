@@ -1136,6 +1136,27 @@ func main() {
     check("protocol-composition-tests-every-component",
           (pvals[4] is PGreet & PSub) && !(pvals[0] is PGreet & PSub))
 
+    // ----- the Sequence/Collection members (docs/todo.md 2.10) -----
+    // Nineteen members aborted in every engine and with TWO DIFFERENT WORDINGS -
+    // "unknown Array method: sorted" here against "unknown list method 'sorted'"
+    // under llvm.Run, which is the shared table in abnf/jsrt.go. SECTION 36 of
+    // tests/swift-test-full.swift carries the whole set and swiftc 6.1.2 passes it
+    // as written; these are the ones with a rendering the matrix should watch,
+    // because a Range and a labelled tuple are new PRINTED shapes and the
+    // goja/-frozen pair is the only gate that can see a divergence in one.
+    let sq = [3, 1, 2]
+    check("seq-sorted-min-max", sq.sorted() == [1, 2, 3] && sq.min() == 1 && sq.max() == 3)
+    check("seq-slices", sq.prefix(2) == [3, 1] && sq.dropFirst() == [1, 2])
+    check("seq-reduce-operator-as-value", sq.reduce(0, +) == 6 && sq.sorted(by: >) == [3, 2, 1])
+    check("seq-range-prints-as-itself", "\(sq.indices)" == "0..<3" && "\(1...3)" == "1...3")
+    check("seq-range-count-and-equality", sq.indices.count == 3 && sq.indices == 0..<3)
+    check("seq-enumerated-is-a-labelled-tuple",
+          "\(Array(sq.enumerated()))" == "[(offset: 0, element: 3), (offset: 1, element: 1), (offset: 2, element: 2)]")
+    check("seq-string-is-a-collection",
+          "hello".filter { $0 != "l" } == "heo" && "hello".map { String($0) }.count == 5)
+    check("seq-one-sided-range-subscript", Array(sq[1...]) == [1, 2] && Array(sq[..<2]) == [3, 1])
+    check("seq-shuffled-is-a-permutation", sq.shuffled().sorted() == [1, 2, 3])
+    check("seq-contains-where", sq.contains(where: { $0 > 2 }) && !sq.contains(where: { $0 > 3 }))
 }
 
 // ----- The TOP LEVEL, deliberately outside main() -------------------------

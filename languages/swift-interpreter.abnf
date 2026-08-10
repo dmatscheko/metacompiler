@@ -865,7 +865,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
-            = "[" Expression { "," Expression } "]" ;
+            = "[" IndexArg { "," IndexArg } "]" ;
 
 // cond ? a : b (right associative). The ? cannot be confused with ?? (consumed
 // deeper, at Coalesce) or with an argument label's colon.
@@ -888,8 +888,15 @@ Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
             = RangeExpr { CastOp CastType } ;
 // a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
 // pattern-match operator ~= tests it, and a for-in can walk it.
+// The upper bound is OPTIONAL so that `a[1...]` - a PartialRangeFrom - parses; it
+// used to fail the whole file at the `]` (docs/todo.md 2.10). PEG never re-enters
+// a rule that already succeeded, so `a[0...1]` cannot be recovered by ordering two
+// alternatives: the optional bound has to live in RangeExpr itself, where the
+// greedy Coalesce still takes `1` first and only a genuinely absent bound falls
+// through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
+// unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = Coalesce [ RangeOp Coalesce ] ;
+            = Coalesce [ RangeOp [ Coalesce ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
@@ -1017,7 +1024,11 @@ TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
 IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
-            = "[" Expression { "," Expression } "]" ;
+            = "[" IndexArg { "," IndexArg } "]" ;
+// A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
+// first - see RangeExpr for why the UP form cannot be an alternative here.
+IndexArg    = PartRangeDn | Expression ;
+PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp Coalesce ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -1101,10 +1112,11 @@ CallArg     <~~ push(makeCallArg(takeAll())) ~~>
             = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
 // `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
 // on purpose - `f(-1)` is an expression, and only a run of operator characters that
-// no expression could read reaches this rule. Building the function it denotes is a
-// separate job (the operator table is per-type), so it reports not-implemented at
-// RUN time and the file parses.
-OpRefArg    <~~ push(notImplExpr("an operator used as a value", up.pos)) ~~>
+// no expression could read reaches this rule. It now builds the two-argument
+// function the operator denotes, which goes THROUGH binOp, so a `static func +` an
+// operand's type declares still wins (docs/todo.md 2.10). The twin is makeOpRef in
+// swift-to-llvm-ir.abnf, which emits a js_closure over the same operator externs.
+OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
@@ -1630,15 +1642,25 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Ranges -----
     // a...b / a..<b as a value: what ~= tests and what a for-in over a range walks.
+    // A ONE-SIDED range carries a null bound: `1...` is {lo: 1, hi: null} and
+    // `...1` / `..<2` is {lo: null, hi: 1}. swSlice fills the missing end in from
+    // the receiver's length, which is the only place either can be used - that is
+    // what PartialRangeFrom/PartialRangeThrough are for in Swift too.
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
-        var lo = items[0]
-        var closed = items[1].rop == "..."
-        var hi = items[2]
+        var opAt = items[0].rop != undefined ? 0 : 1
+        var lo = opAt == 1 ? items[0] : null
+        var closed = items[opAt].rop == "..."
+        var hi = items.length > opAt + 1 ? items[opAt + 1] : null
         // The bounds are read as plain numbers: a range is walked and measured with
         // ordinary arithmetic, and a sized-integer box (Int32(3), Int.max) would
         // otherwise arrive here as an object and compare as NaN.
-        return function() { return {__range: true, lo: szNum(lo()), hi: szNum(hi()), closed: closed} }
+        return function() {
+            return {__range: true,
+                    lo: lo == null ? null : szNum(lo()),
+                    hi: hi == null ? null : szNum(hi()),
+                    closed: closed}
+        }
     }
     function isRange(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__range === true
@@ -2004,6 +2026,21 @@ KwContinue  = "continue" KwEnd ;
         // 1.0 is "1.0", not the "1" a JS number would give.
         if (isFlo(v)) { return swFloDesc(v) }
         if (typeof v != "object") { return "" + v }
+        // A Range printed as itself. Both halves used to answer "[object Object]" -
+        // agree-and-wrong, which byte-identity cannot see. swiftc 6.1.2 prints
+        // `0..<3` and `1...3`, which is what a...b / a..<b are spelled as.
+        // A ONE-SIDED range prints Swift's PartialRangeFrom/Through/UpTo, whose real
+        // form names the static element type (`PartialRangeFrom<Int>(lowerBound: 1)`)
+        // and so cannot be reproduced without a type checker - the generic parameter
+        // is dropped and the rest is byte-exact.
+        if (v.__range === true) {
+            var rop = v.closed ? "..." : "..<"
+            if (v.lo === null || v.lo === undefined) {
+                return (v.closed ? "PartialRangeThrough" : "PartialRangeUpTo") + "(upperBound: " + v.hi + ")"
+            }
+            if (v.hi === null || v.hi === undefined) { return "PartialRangeFrom(lowerBound: " + v.lo + ")" }
+            return "" + v.lo + rop + v.hi
+        }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) {
@@ -2909,6 +2946,13 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
         if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
+        // indices is a PROPERTY on every Collection and answered nil in all three
+        // engines (docs/todo.md 2.10 lists it among the members that "abort"; it did
+        // not abort, it answered the wrong thing silently, which is worse). Only an
+        // Array is answered: a String's indices are String.Index values with no
+        // printable form here, and a Dictionary's are opaque too. swiftc 6.1.2
+        // prints `0..<3` for [3, 1, 2].indices, which this matches exactly.
+        if (name == "indices" && Array.isArray(o)) { return {__range: true, lo: 0, hi: o.length, closed: false} }
         if ((name == "first" || name == "last") && swIsColl(o)) { return swFirstLast(o, name == "last") }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
         // A sized-integer box is an object, so its own members have to be answered
@@ -3008,9 +3052,38 @@ KwContinue  = "continue" KwEnd ;
         // array arm below, which is what it has always done.
         fail("Fatal error: Index out of range")
     }
+    // a[1...] / a[0..<2] / s[1...3]: a RANGE subscript answers the slice. Swift's
+    // ArraySlice/Substring keep the ORIGINAL indices (`a[1...][1]` is a[1]), which a
+    // plain array cannot; the printed form, the count and every walk agree, and the
+    // re-indexing is the one measured divergence - recorded rather than modelled,
+    // because a slice type is a second collection representation in three engines.
+    // A one-sided range arrives with lo undefined (`a[...1]`) or hi undefined
+    // (`a[1...]`), which swRangeBounds fills in from the receiver's length.
+    function swRangeBounds(r, n) {
+        var lo = r.lo === undefined || r.lo === null ? 0 : szNum(r.lo) | 0
+        var hi = r.hi === undefined || r.hi === null ? n : szNum(r.hi) | 0
+        if (r.closed) { hi = hi + 1 }
+        if (r.hi === undefined || r.hi === null) { hi = n }
+        if (lo < 0 || hi > n || lo > hi) { fail("Fatal error: Range requires lowerBound <= upperBound") }
+        return {lo: lo, hi: hi}
+    }
+    function swSlice(o, r) {
+        if (typeof o == "string") {
+            var gs = swGraphemes(o)
+            var sb = swRangeBounds(r, gs.length)
+            var s = ""
+            for (var k = sb.lo; k < sb.hi; k++) { s += gs[k] }
+            return s
+        }
+        var ab = swRangeBounds(r, o.length)
+        var out = []
+        for (var j = ab.lo; j < ab.hi; j++) { out.push(o[j]) }
+        return out
+    }
     function swIndex(o, i) {
         var sg = subAccessor(o, "__sub_get")
         if (sg != null) { return sg.apply(undefined, concat2impl([o], idxArgs(i))) }
+        if (isRange(i) && (Array.isArray(o) || typeof o == "string")) { return swSlice(o, i) }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) { swIndexFail("dict") }
@@ -3142,7 +3215,23 @@ KwContinue  = "continue" KwEnd ;
             if (name == "uppercased") { return target.toUpperCase() }
             if (name == "lowercased") { return target.toLowerCase() }
             if (name == "hasPrefix") { return target.slice(0, args[0].length) === args[0] }
-            if (name == "contains") { return target.indexOf(args[0]) >= 0 }
+            if (name == "contains" && (args.length == 0 || typeof args[0] != "function")) {
+                return target.indexOf(args[0]) >= 0
+            }
+            // A String IS a Collection of Characters in Swift, so every Sequence
+            // member applies to it - `"hello".map { $0 }` is
+            // ["h", "e", "l", "l", "o"] (docs/todo.md 2.10). The receiver is split
+            // into GRAPHEME CLUSTERS, the array member runs, and the five members
+            // whose Swift result is a String/Substring are joined back:
+            // `"hello".filter { $0 != "l" }` is the String "heo" and
+            // `"hello".prefix(2)` prints `he`. The twin is rtStrMeth in
+            // swift-to-llvm-ir.abnf, which emits the same split-run-join around the
+            // same js_swmcall - so layer 2 and the Go twin never see a String here.
+            if (swIsSeqMember(name)) {
+                var sres = arrayMethod(swGraphemes(target), name, args)
+                if (swSeqKeepsString(name)) { return swJoinStrs(sres) }
+                return sres
+            }
             fail("unknown String method: " + name)
         }
         // The Double methods this subset carries. Verified against swift 6.1.2:
@@ -3243,7 +3332,18 @@ KwContinue  = "continue" KwEnd ;
             if (t.length == 0) { fail("Fatal error: Can't remove last element from an empty collection") }
             return t.pop()
         }
-        if (name == "contains") { return t.indexOf(args[0]) >= 0 }
+        // contains(_:) is a value test and contains(where:) a PREDICATE; the label
+        // does not reach here, so the closure argument is what tells them apart.
+        // `[1, 3].contains(where: { $0 > 2 })` answered FALSE in all three engines
+        // against swiftc 6.1.2's true - agree-and-wrong, which byte-identity cannot
+        // see (docs/todo.md 2.10).
+        if (name == "contains") {
+            if (args.length > 0 && typeof args[0] == "function") {
+                for (i = 0; i < t.length; i++) { if (args[0](t[i])) { return true } }
+                return false
+            }
+            return t.indexOf(args[0]) >= 0
+        }
         if (name == "first") { return t.length == 0 ? null : t[0] }
         if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
         if (name == "map") {
@@ -3259,6 +3359,341 @@ KwContinue  = "continue" KwEnd ;
         if (name == "forEach") {
             for (i = 0; i < t.length; i++) { args[0](t[i]) }
             return undefined
+        }
+        return arraySeqMethod(t, name, args)
+    }
+    // ----- The Sequence/Collection members, docs/todo.md 2.10 -----
+    // Every one of these was measured against swiftc 6.1.2 before it was written;
+    // the four that CANNOT be matched exactly are recorded at their arms below.
+    // The twins are swListMethod in languages/lib/swift-rt.metajs and swListMethod
+    // in abnf/jsrtswift.go, and all three have to answer the same values AND the
+    // same refusal - the two engines used to disagree even about the WORDING
+    // ("unknown Array method: sorted" here against "unknown list method 'sorted'"
+    // under llvm.Run), which is the symptom this item names.
+    //
+    // The comparison is swOrd's, not `<`: a UInt64 above 2^63 reads as a NEGATIVE
+    // value through a plain relational operator, and a Double is a BOX, which is an
+    // object to JS's `<`. A String pair compares as text.
+    // A user type's own `static func <` WINS. `[P(n: 3), P(n: 1)].sorted()` answered
+    // [3, 1] in all three engines against swiftc 6.1.2's [1, 3]: Comparable is how
+    // Swift sorts anything that is not a built-in, and the built-in comparison sees
+    // two opaque objects. The operand's type is asked first, then the other's -
+    // exactly what sw_opfn does for a written `a < b`.
+    function swSortLess(a, b) {
+        var f = findOpFn("<", a)
+        if (f == null) { f = findOpFn("<", b) }
+        if (typeof f == "function") { return f(undefined, a, b) === true }
+        if (typeof a == "string" && typeof b == "string") { return a < b }
+        return swOrd(a, b, function(x, y) { return x < y })
+    }
+    // A STABLE merge sort. Swift's own sort is introsort and is not stable, so
+    // stability is not a convergence claim - it is what makes the three engines
+    // agree with each other on equal keys, which byte-identity requires.
+    function swMergeSort(xs, less) {
+        if (xs.length < 2) { return xs.slice(0) }
+        var mid = (xs.length / 2) | 0
+        var l = swMergeSort(xs.slice(0, mid), less)
+        var r = swMergeSort(xs.slice(mid), less)
+        var out = []
+        var i = 0
+        var j = 0
+        while (i < l.length && j < r.length) {
+            if (less(r[j], l[i])) { out.push(r[j]); j++ } else { out.push(l[i]); i++ }
+        }
+        while (i < l.length) { out.push(l[i]); i++ }
+        while (j < r.length) { out.push(r[j]); j++ }
+        return out
+    }
+    function swLessOf(args) {
+        if (args.length > 0 && typeof args[0] == "function") {
+            var f = args[0]
+            return function(a, b) { return f(a, b) }
+        }
+        return swSortLess
+    }
+    // THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
+    // engines agree on byte-for-byte (the argument kotlin's k4RndBox is settled by,
+    // and Math.random is deleted from the goja host for the same reason). So
+    // shuffled() draws from a DETERMINISTIC xorshift32 with a fixed seed: a program
+    // sees a permuted sequence, every run of every engine sees the SAME permutation,
+    // and the matrix's byte-identity holds by construction. A test therefore asserts
+    // on the SORTED result or the count, never on the order. The twins are swRndNext
+    // in lib/swift-rt.metajs and abnf/jsrtswift.go, and all three produce one stream.
+    var swRndState = 20260810
+    function swRndNext() {
+        var x = swRndState | 0
+        x = (x ^ ((x << 13) | 0)) | 0
+        x = (x ^ (x >>> 17)) | 0
+        x = (x ^ ((x << 5) | 0)) | 0
+        if (x == 0) { x = 1 }
+        swRndState = x
+        return x
+    }
+    function swRndBelow(n) {
+        if (n <= 1) { return 0 }
+        return (swRndNext() & 1073741823) % n
+    }
+    // The count Swift takes from `prefix(k)` / `dropFirst(k)` etc: the argument, or
+    // the default 1, clamped into 0...length. swiftc traps on a NEGATIVE argument
+    // ("Can't take a prefix of negative length from a collection"); clamping to 0 is
+    // this project's answer, recorded rather than trapped, because the trap text
+    // differs per member and none of it is reachable from a correct program.
+    function swSeqK(args, dflt, n) {
+        var k = args.length > 0 ? (szNum(args[0]) | 0) : dflt
+        if (k < 0) { k = 0 }
+        if (k > n) { k = n }
+        return k
+    }
+    // `a.reduce(0, +)` / `a.sorted(by: >)`: the operator NAMED as a value. It becomes
+    // the two-argument function binOp already dispatches, so an overload a user type
+    // declares is picked up for free. An operator the table has no entry for is still
+    // reported not-implemented, at PARSE time as before - binOps is fully populated
+    // by then only for the built-ins, so the check is deferred to the first call.
+    // The twin is makeOpRef in swift-to-llvm-ir.abnf.
+    function makeOpRef(sym, pos) {
+        return function() {
+            return function(l, r) {
+                if (typeof binOps[sym] != "function") {
+                    notImpl("the operator '" + sym + "' used as a value", pos)
+                    return undefined
+                }
+                return binOp(sym, l, r)
+            }
+        }
+    }
+    // The Sequence members a STRING receiver forwards to the Array table, and the
+    // subset whose Swift result type is a String or a Substring (both of which print
+    // as bare text). `firstIndex(of:)` is deliberately NOT in the list: on a String
+    // it answers a String.Index, whose printed form is an opaque `Index(_rawBits:)`
+    // that no value model here can produce. These two lists are duplicated in
+    // rtStrMeth (swift-to-llvm-ir.abnf) and must stay in step.
+    function swIsSeqMember(name) {
+        return name == "map" || name == "filter" || name == "sorted" || name == "reversed"
+            || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
+            || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
+            || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
+            || name == "forEach" || name == "shuffled"
+    }
+    function swSeqKeepsString(name) {
+        return name == "filter" || name == "prefix" || name == "suffix"
+            || name == "dropFirst" || name == "dropLast"
+    }
+    function swJoinStrs(xs) {
+        if (!Array.isArray(xs)) { return xs }
+        var s = ""
+        for (var i = 0; i < xs.length; i++) { s += swstr(xs[i]) }
+        return s
+    }
+    function arraySeqMethod(t, name, args) {
+        var i
+        var out
+        var n = t.length
+        if (name == "isEmpty") { return n == 0 }
+        // removeFirst() answers the element; removeFirst(k) answers Void (swiftc
+        // prints `()` for it), and both TRAP on an empty array.
+        if (name == "removeFirst") {
+            if (args.length == 0) {
+                if (n == 0) { fail("Fatal error: Can't remove first element from an empty collection") }
+                var f0 = t[0]
+                for (i = 0; i < n - 1; i++) { t[i] = t[i + 1] }
+                t.pop()
+                return f0
+            }
+            var rk = szNum(args[0]) | 0
+            if (rk < 0 || rk > n) { fail("Fatal error: Can't remove more items from a collection than it contains") }
+            for (i = 0; i < n - rk; i++) { t[i] = t[i + rk] }
+            for (i = 0; i < rk; i++) { t.pop() }
+            return undefined
+        }
+        // remove(at:) answers the removed element.
+        if (name == "remove") {
+            var ai = szNum(args[0]) | 0
+            if (ai < 0 || ai >= n) { fail("Fatal error: Index out of range") }
+            var rv = t[ai]
+            for (i = ai; i < n - 1; i++) { t[i] = t[i + 1] }
+            t.pop()
+            return rv
+        }
+        if (name == "removeAll") {
+            if (args.length > 0 && typeof args[0] == "function") {
+                var keep = []
+                for (i = 0; i < n; i++) { if (!args[0](t[i])) { keep.push(t[i]) } }
+                while (t.length > 0) { t.pop() }
+                for (i = 0; i < keep.length; i++) { t.push(keep[i]) }
+                return undefined
+            }
+            while (t.length > 0) { t.pop() }
+            return undefined
+        }
+        // reversed() answers a ReversedCollection in Swift, whose printed form names
+        // the STATIC element type - `ReversedCollection<Array<Int>>(_base: [3, 1, 2])`.
+        // That needs a type checker (manual 7.9's Optional argument, exactly), so a
+        // plain reversed ARRAY is answered instead: every use except printing the
+        // collection itself agrees, and `print(a.reversed())` is one measured line of
+        // divergence, `[2, 1, 3]` against swiftc's ReversedCollection spelling.
+        if (name == "reversed") {
+            out = []
+            for (i = n - 1; i >= 0; i--) { out.push(t[i]) }
+            return out
+        }
+        if (name == "sorted") { return swMergeSort(t, swLessOf(args)) }
+        // sort() is the MUTATING form and answers Void.
+        if (name == "sort") {
+            var so = swMergeSort(t, swLessOf(args))
+            for (i = 0; i < n; i++) { t[i] = so[i] }
+            return undefined
+        }
+        if (name == "shuffled") {
+            out = t.slice(0)
+            for (i = out.length - 1; i > 0; i--) {
+                var j = swRndBelow(i + 1)
+                var tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            }
+            return out
+        }
+        if (name == "swapAt") {
+            var x = szNum(args[0]) | 0
+            var y = szNum(args[1]) | 0
+            if (x < 0 || x >= n || y < 0 || y >= n) { fail("Fatal error: Index out of range") }
+            var sv = t[x]
+            t[x] = t[y]
+            t[y] = sv
+            return undefined
+        }
+        // min()/max() answer an Optional in Swift and this value model has none
+        // (manual 7.9), so `print(a.min())` reads `1` where swiftc prints
+        // `Optional(1)`. The EMPTY case still answers nil, which swiftc prints as
+        // `nil` too, so that row is byte-exact.
+        if (name == "min" || name == "max") {
+            if (n == 0) { return null }
+            var less = swLessOf(args)
+            var best = t[0]
+            for (i = 1; i < n; i++) {
+                // Swift's own min/max keep the LEFT operand on a tie: min is
+                // `y < x ? y : x` and max `y >= x ? y : x`.
+                if (name == "min") { if (less(t[i], best)) { best = t[i] } }
+                else { if (!less(t[i], best)) { best = t[i] } }
+            }
+            return best
+        }
+        if (name == "prefix") {
+            out = []
+            var pk = swSeqK(args, 1, n)
+            for (i = 0; i < pk; i++) { out.push(t[i]) }
+            return out
+        }
+        if (name == "suffix") {
+            out = []
+            var sk = swSeqK(args, 1, n)
+            for (i = n - sk; i < n; i++) { out.push(t[i]) }
+            return out
+        }
+        if (name == "dropFirst") {
+            out = []
+            var dk = swSeqK(args, 1, n)
+            for (i = dk; i < n; i++) { out.push(t[i]) }
+            return out
+        }
+        if (name == "dropLast") {
+            out = []
+            var lk = swSeqK(args, 1, n)
+            for (i = 0; i < n - lk; i++) { out.push(t[i]) }
+            return out
+        }
+        // firstIndex/lastIndex take either `of:` (a value) or `where:` (a closure),
+        // and answer an Optional - the same Optional divergence as min/max, and nil
+        // for "not found", which IS what swiftc prints.
+        if (name == "firstIndex" || name == "lastIndex" || name == "index") {
+            var wantLast = name == "lastIndex"
+            var found = null
+            for (i = 0; i < n; i++) {
+                var hit = typeof args[0] == "function" ? args[0](t[i]) : swEq(t[i], args[0])
+                if (hit) {
+                    if (!wantLast) { return i }
+                    found = i
+                }
+            }
+            return found
+        }
+        if (name == "allSatisfy") {
+            for (i = 0; i < n; i++) { if (!args[0](t[i])) { return false } }
+            return true
+        }
+        if (name == "compactMap") {
+            out = []
+            for (i = 0; i < n; i++) {
+                var cv = args[0](t[i])
+                if (cv !== null && cv !== undefined) { out.push(cv) }
+            }
+            return out
+        }
+        if (name == "flatMap") {
+            out = []
+            for (i = 0; i < n; i++) {
+                var fv = args[0](t[i])
+                if (Array.isArray(fv)) { for (var q = 0; q < fv.length; q++) { out.push(fv[q]) } }
+                else if (typeof fv == "string") { var gs = swGraphemes(fv); for (var g = 0; g < gs.length; g++) { out.push(gs[g]) } }
+                else { out.push(fv) }
+            }
+            return out
+        }
+        // indices answers a Range, and `print(a.indices)` is `0..<3` in swiftc, which
+        // this now matches exactly.
+        if (name == "indices") { return {__range: true, lo: 0, hi: n, closed: false} }
+        // enumerated() answers an EnumeratedSequence whose own printed form names the
+        // static type, like reversed(); `Array(a.enumerated())` is what programs use
+        // and THAT is byte-exact - swiftc prints
+        // `[(offset: 0, element: 3), (offset: 1, element: 1), ...]`.
+        if (name == "enumerated") {
+            out = []
+            for (i = 0; i < n; i++) {
+                var pt = {__tuple: 2}
+                scopePut(pt, "__tlabels", ["offset", "element"])
+                scopePut(pt, "0", i)
+                scopePut(pt, "offset", i)
+                scopePut(pt, "1", t[i])
+                scopePut(pt, "element", t[i])
+                out.push(pt)
+            }
+            return out
+        }
+        // joined(): [String] concatenates to a String, [[T]] flattens to an array.
+        // swiftc's `[[1,2],[3]].joined()` prints a FlattenSequence naming the static
+        // type; `Array(...)` of it is the array this answers, the same trade as
+        // reversed().
+        if (name == "joined") {
+            var sep = args.length > 0 ? swstr(args[0]) : ""
+            var allArr = n > 0
+            for (i = 0; i < n; i++) { if (!Array.isArray(t[i])) { allArr = false } }
+            if (allArr && args.length == 0) {
+                out = []
+                for (i = 0; i < n; i++) { for (var z = 0; z < t[i].length; z++) { out.push(t[i][z]) } }
+                return out
+            }
+            var js = ""
+            for (i = 0; i < n; i++) {
+                if (i > 0) { js += sep }
+                js += swstr(t[i])
+            }
+            return js
+        }
+        // reduce(initial, combine) and reduce(into: seed, combine). The labels do not
+        // reach here, so the two forms are told apart by WHAT THE CLOSURE ANSWERS: an
+        // `into` body mutates its inout accumulator and returns Void, which is the
+        // only shape in which discarding the result is right. Measured against
+        // swiftc: `a.reduce(0, +)` is 6 and `a.reduce(into: [Int]()) { $0.append($1) }`
+        // is [3, 1, 2].
+        if (name == "reduce") {
+            var acc = anytype
+            acc = args[0]
+            var comb = args[1]
+            for (i = 0; i < n; i++) {
+                var r2 = comb(acc, t[i])
+                if (r2 !== undefined) { acc = r2 }
+            }
+            return acc
         }
         fail("unknown Array method: " + name)
     }
@@ -3975,6 +4410,42 @@ KwContinue  = "continue" KwEnd ;
             }
             return r
         }
+    }
+    // ----- How a Swift program DIES (docs/todo.md 1.1) -----
+    // Three things were wrong with this leg and all three are swift-local.
+    //
+    //  - THE STREAM. interp-core.js's fail() prints on STDOUT (println) while both
+    //    compiled halves are already on stderr, so an abort landed in the middle of
+    //    the program's own output here and beside it there. swiftc writes to stderr.
+    //  - THE PREFIX. `swift interpreter error: ` sat in front of an otherwise
+    //    byte-correct `Fatal error: Error raised at top level: boom`. A message that
+    //    is ALREADY in swiftc's own wording is printed bare; an engine-level
+    //    complaint that no toolchain would ever say ("unknown Array method: x") keeps
+    //    its prefix, because it is the engine talking and manual chapter 3 says that
+    //    has to stay distinguishable.
+    //  - THE EXIT CODE stays 1. swiftc traps at 133 (SIGTRAP) and that is DECLINED
+    //    here, with the measurement, for two reasons. First, `800ef57` left C# at
+    //    exit 1 on the argument that .NET's 134 is the HOST calling abort() rather
+    //    than a language property, and the same holds twice over here: swiftc's
+    //    trapped binary also DISCARDS its pending stdout, and that discard is pure
+    //    libc - block-buffered stdout never flushed because `brk` skips exit() - so
+    //    on a terminal the same binary prints everything and only through a pipe
+    //    loses it. Second, and decisively, the interpreter and llvm.Run legs run
+    //    INSIDE the mec process: raising SIGTRAP there kills the metacompiler, not
+    //    the program, so at most the native leg could match and the other two could
+    //    not. Making 1 of 3 legs "right" WIDENS the halves gap, which is exactly the
+    //    argument that keeps docs/todo.md 2.11 unasserted.
+    //
+    // Twins: js_swtop / swAbort in languages/lib/swift-rt.metajs and rt.swAbort in
+    // abnf/jsrtswift.go. The pattern is java's js_jvtop, which has printed its
+    // uncaught line bare on stderr since docs/todo.md 1.14.
+    function swIsFatalMsg(msg) {
+        return typeof msg == "string" && msg.slice(0, 12) == "Fatal error:"
+    }
+    // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
+    fail = function(msg) {
+        if (swIsFatalMsg(msg)) { eprintln(msg) } else { eprintln("swift interpreter error: " + msg) }
+        exit(1)
     }
     // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
     makeBlockStmt = function(items) {
@@ -6101,6 +6572,14 @@ KwContinue  = "continue" KwEnd ;
             for (var i = 0; i < l.length; i++) { if (!swEqD(l[i], r[i], depth + 1)) { return false } }
             return true
         }
+    // Two RANGES compare by their bounds - a Range is Equatable in Swift and
+    // `0..<3 == 0..<3` is true there, where these engines fell through to object
+    // IDENTITY and answered false. Adjacent to docs/todo.md 2.10: nothing could
+    // build a comparable Range value until `indices` did.
+        if (isRange(l) || isRange(r)) {
+            if (!isRange(l) || !isRange(r)) { return false }
+            return l.lo === r.lo && l.hi === r.hi && l.closed === r.closed
+        }
         if (l !== null && l !== undefined && r !== null && r !== undefined
             && typeof l == "object" && typeof r == "object") {
             if (l === r) { return true }
@@ -6185,8 +6664,24 @@ KwContinue  = "continue" KwEnd ;
     swOverloadable("+", function(l, r) { return swadd(l, r) })
     swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swFloArith("-", l, r) })
     swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swFloArith("*", l, r) })
-    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swFloArith("/", l, r) })
-    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swFloArith("%", l, r) })
+    // AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S (docs/todo.md 1.1). All three
+    // engines said `integer divide by zero`, which is the text of GO'S OWN runtime
+    // panic and is correct for go and for nobody else - it comes from the shared
+    // sized-integer layer (interp-core.js's szArith here, languages/lib/runtime.c's
+    // si_arith and abnf/jsrtint.go natively and under llvm.Run). swiftc 6.1.2 says
+    //     Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
+    // so the guard sits in FRONT of the shared primitive, in each language's own
+    // file - which is how go itself already does it (goRTPanic in go-rt.metajs) and
+    // what leaves the floor's Go-correct wording untouched. java needed nothing: it
+    // already answers `java.lang.ArithmeticException: / by zero` in all three legs,
+    // which is byte-exact against java 24.0.2. Twins: swGiArith in
+    // languages/lib/swift-rt.metajs and js_swarith in abnf/jsrtswift.go.
+    function swDivGuard(op, l, r) {
+        if (swIntish(l, r) && szNum(r) === 0) { fail("Fatal error: Division by zero") }
+        return swIntish(l, r) ? szArith(op, l, r) : swFloArith(op, l, r)
+    }
+    swOverloadable("/", function(l, r) { return swDivGuard("/", l, r) })
+    swOverloadable("%", function(l, r) { return swDivGuard("%", l, r) })
     // A box has to be compared through szCmp rather than by <: a UInt64 above 2^63
     // reads as a NEGATIVE value in the pair, so UInt64.max < 0 would hold. A FLOAT
     // box is an object, so it has to be unboxed instead - `1.5 < 2.0` between two

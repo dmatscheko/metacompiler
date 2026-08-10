@@ -849,7 +849,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
-            = "[" Expression { "," Expression } "]" ;
+            = "[" IndexArg { "," IndexArg } "]" ;
 
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Ternary ] ;
@@ -870,8 +870,15 @@ Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
             = RangeExpr { CastOp CastType } ;
 // a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
 // pattern-match operator ~= tests it, and a for-in can walk it.
+// The upper bound is OPTIONAL so that `a[1...]` - a PartialRangeFrom - parses; it
+// used to fail the whole file at the `]` (docs/todo.md 2.10). PEG never re-enters
+// a rule that already succeeded, so `a[0...1]` cannot be recovered by ordering two
+// alternatives: the optional bound has to live in RangeExpr itself, where the
+// greedy Coalesce still takes `1` first and only a genuinely absent bound falls
+// through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
+// unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = Coalesce [ RangeOp Coalesce ] ;
+            = Coalesce [ RangeOp [ Coalesce ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
@@ -997,7 +1004,11 @@ TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
 IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
-            = "[" Expression { "," Expression } "]" ;
+            = "[" IndexArg { "," IndexArg } "]" ;
+// A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
+// first - see RangeExpr for why the UP form cannot be an alternative here.
+IndexArg    = PartRangeDn | Expression ;
+PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp Coalesce ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -1080,10 +1091,12 @@ CallArg     <~~ push(makeCallArg(takeAll())) ~~>
             = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
 // `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
 // on purpose - `f(-1)` is an expression, and only a run of operator characters that
-// no expression could read reaches this rule. Building the function it denotes is a
-// separate job (the operator table is per-type), so it reports not-implemented at
-// RUN time and the file parses.
-OpRefArg    <~~ push(notImplExpr("an operator used as a value", up.pos)) ~~>
+// no expression could read reaches this rule. It now builds the two-argument
+// function the operator denotes; a spelling the table has no extern for is still
+// reported not-implemented, and the file still parses (docs/todo.md 2.10). The twin
+// is makeOpRef in swift-interpreter.abnf, which builds binOp's function so that a
+// `static func +` an operand's type declares still wins.
+OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
@@ -3293,10 +3306,98 @@ KwContinue  = "continue" KwEnd ;
     }
     // Every method call in the chain folder goes through here, so a member the
     // externs cannot answer can be lowered without a new extern.
+    // A String IS a Collection of Characters in Swift, so every Sequence member
+    // applies to it - `"hello".map { $0 }` is ["h", "e", "l", "l", "o"] and
+    // `"hello".filter { $0 != "l" }` is the String "heo" (docs/todo.md 2.10). This is
+    // lowered as EMITTED IR rather than as an arm of layer 2 because the split has to
+    // be into GRAPHEME CLUSTERS, and the cluster walk (rtGSplit) is emitted IR: layer
+    // 2's own string indexing counts CODE UNITS, so an arm there would have given the
+    // two halves different answers for every non-ASCII receiver. Split, run the array
+    // member through the ordinary js_swmcall, and - for the five members whose Swift
+    // result is a String or a Substring - join back through the `joined` member the
+    // same table now answers.
+    //
+    // firstIndex(of:) is deliberately absent: on a String it answers a String.Index,
+    // whose printed form is an opaque `Index(_rawBits:)` no value model here can
+    // produce. The twins are swIsSeqMember / swSeqKeepsString in
+    // swift-interpreter.abnf, and the two lists must stay in step.
+    function swIsSeqMember(name) {
+        return name == "map" || name == "filter" || name == "sorted" || name == "reversed"
+            || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
+            || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
+            || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
+            || name == "forEach" || name == "shuffled"
+    }
+    function swSeqKeepsString(name) {
+        return name == "filter" || name == "prefix" || name == "suffix"
+            || name == "dropFirst" || name == "dropLast"
+    }
+    function rtStrMeth(name) {
+        var keep = swSeqKeepsString(name)
+        return rtFunc("sw_strm_" + name, 2, function(b, ps) {
+            var sB = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
+            var gV = sB.NewCall(rtGSplit(), [ps[0]])
+            var rV = callExt(sB, "js_swmcall", [gV, emitStr(sB, name), ps[1]])
+            if (!keep) { sB.NewRet(rV) }
+            if (keep) {
+                sB.NewRet(callExt(sB, "js_swmcall", [rV, emitStr(sB, "joined"),
+                                                     callExt(sB, "js_arr_new", [])]))
+            }
+            oB.NewRet(callExt(oB, "js_swmcall", [ps[0], emitStr(oB, name), ps[1]]))
+        })
+    }
+    // `a.reduce(0, +)` / `a.sorted(by: >)`: the operator NAMED as a value. It becomes
+    // a callable VALUE backed by the same extern the binary operator emits - a
+    // js_closure over a two-argument jsf_N, exactly emitExtFn's shape. An operator
+    // outside the table is still reported not-implemented, at parse time as before.
+    // The twin is makeOpRef in swift-interpreter.abnf, which builds binOp's function.
+    function swOpExtern(sym) {
+        if (sym == "+" || sym == "-" || sym == "*" || sym == "/" || sym == "%"
+            || sym == "&" || sym == "|" || sym == "^" || sym == "&+" || sym == "&-"
+            || sym == "&*") { return "js_swarith" }
+        if (sym == "<") { return "js_swlt" }
+        if (sym == ">") { return "js_swgt" }
+        if (sym == "<=") { return "js_swle" }
+        if (sym == ">=") { return "js_swge" }
+        if (sym == "==") { return "js_sweq" }
+        if (sym == "<<" || sym == ">>") { return "js_swshift" }
+        return ""
+    }
+    function makeOpRef(sym, pos) {
+        var ext = swOpExtern(sym)
+        if (ext == "") { return notImplExpr("the operator '" + sym + "' used as a value", pos) }
+        // &+ / &- / &* are the WRAPPING forms and js_swarith is already the wrapping
+        // arithmetic, so both spellings pass the same operator character through.
+        var opText = sym
+        if (sym == "&+") { opText = "+" }
+        if (sym == "&-") { opText = "-" }
+        if (sym == "&*") { opText = "*" }
+        return function(b) {
+            funcCount++
+            var idx = funcCount
+            var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var savedF = curF
+            var savedScope = curScopeV
+            curF = f
+            var fb = f.NewBlock("entry")
+            curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+            var a0 = callExt(fb, "js_arg", [f.Params[1], handle(0)])
+            var a1 = callExt(fb, "js_arg", [f.Params[1], handle(1)])
+            var argv = [a0, a1]
+            if (ext == "js_swarith" || ext == "js_swshift") { argv = [emitStr(fb, opText), a0, a1] }
+            fb.NewRet(callExt(fb, ext, argv))
+            curF = savedF
+            curScopeV = savedScope
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
     function swEmitMCall(b, recvV, name, nameV, argsV) {
         if (name == "popLast") { return b.NewCall(rtPopLast(), [recvV]) }
         if (name == "uppercased") { return b.NewCall(rtCased(true), [recvV]) }
         if (name == "lowercased") { return b.NewCall(rtCased(false), [recvV]) }
+        if (swIsSeqMember(name)) { return b.NewCall(rtStrMeth(name), [recvV, argsV]) }
         return callExt(b, "js_swmcall", [recvV, nameV, argsV])
     }
     function swEmitSub(b, sV, aV, bV) {
@@ -3351,6 +3452,27 @@ KwContinue  = "continue" KwEnd ;
         })
     }
     // .count over a value that may be a string.
+    // .count, with the Range arm in front. `let r = 0..<3; print(r.count)` ABORTED
+    // in BOTH compiled halves with "len() of a object" while the interpreter half
+    // answered 3 - a live halves divergence found while giving Range a printed form
+    // and an `indices` producer (docs/todo.md 2.10). The range is measured through
+    // rtRangeArr, the walk that already exists, so nothing new is introduced and a
+    // non-range receiver pays one probe.
+    //
+    // js_pylen could NOT be taught the range instead: its Go twin is the SHARED one
+    // in abnf/jsrt.go, and rebinding a shared extern from a language's own twin file
+    // is manual chapter 4's rxExtraExterns trap.
+    function rtSwCount(uni) {
+        return rtFunc(uni ? "sw_countr" : "sw_lenr", 1, function(b, ps) {
+            var isR = b.NewCall(rtProbe("sw_isrange", "__range"), [ps[0]])
+            var rB = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, isR), rB, oB)
+            rB.NewRet(callExt(rB, "js_pylen", [rB.NewCall(rtRangeArr(), [ps[0]])]))
+            if (uni) { oB.NewRet(oB.NewCall(rtCount(), [ps[0]])) }
+            if (!uni) { oB.NewRet(callExt(oB, "js_pylen", [ps[0]])) }
+        })
+    }
     function rtCount() {
         return rtFunc("sw_count", 1, function(b, ps) {
             var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "string")])
@@ -4148,10 +4270,7 @@ KwContinue  = "continue" KwEnd ;
     // through the generated __get_x method, everything else is a plain js_get. The
     // decision is by NAME, over the set of names some type in this program computes.
     function emitFieldRead(b, cur, name) {
-        if (name == "count") {
-            if (hasUniStr) { return b.NewCall(rtCount(), [cur]) }
-            return callExt(b, "js_pylen", [cur])
-        }
+        if (name == "count") { return b.NewCall(rtSwCount(hasUniStr), [cur]) }
         if (name == "isEmpty") { return b.NewCall(rtIsEmpty(), [cur]) }
         if (name == "first" || name == "last") { return b.NewCall(rtFirstLast(name == "last"), [cur]) }
         if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
@@ -4171,7 +4290,15 @@ KwContinue  = "continue" KwEnd ;
         // names emit it, so a program that never reads one emits the IR it did
         // before. (swGetField in swift-interpreter.abnf is the twin.)
         if (name == "description" || name == "bitWidth" || name == "magnitude"
-            || name == "isNaN" || name == "isInfinite" || name == "isFinite" || name == "isZero") {
+            || name == "isNaN" || name == "isInfinite" || name == "isFinite" || name == "isZero"
+            // .indices is a Collection PROPERTY and answered nil in all three
+            // engines - it did not abort, it silently answered the wrong thing,
+            // which is worse (docs/todo.md 2.10). js_swget answers a Range for an
+            // Array and falls through to js_get for everything else, so a user type
+            // with a member of that name is not hijacked. It PRODUCES a Range, so it
+            // arms hasRanges: a program can now hold one with no `...` in its text.
+            || name == "indices") {
+            if (name == "indices") { hasRanges = true }
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
         return callExt(b, "js_get", [cur, emitStr(b, name)])
@@ -5216,6 +5343,13 @@ KwContinue  = "continue" KwEnd ;
             // expansion yields a TUPLE - the one place a tuple is walked as a
             // sequence. js_swtuparr spreads it and passes every other value through.
             var r = {b: r0.b, v: callExt(r0.b, "js_swtuparr", [r0.v])}
+            // A RANGE VALUE walked as a sequence. `let r = 0..<3; for i in r` printed
+            // `lo` / `hi` / `closed` here - the object's own KEYS - while the
+            // interpreter half walked 0, 1, 2: a live halves divergence that no test
+            // reached, found while giving `indices` a Range to answer with
+            // (docs/todo.md 2.10). The other for-in maker already did this; only the
+            // destructuring one did not.
+            if (hasRanges) { r = {b: r.b, v: r.b.NewCall(rtRangeArr(), [r.v])} }
             // A String is a sequence of CLUSTERS, not of code units - see rtStrSeq.
             if (hasUniStr) { r = {b: r.b, v: r.b.NewCall(rtStrSeq(), [r.v])} }
             b = r.b
@@ -7521,20 +7655,34 @@ KwContinue  = "continue" KwEnd ;
     // a...b / a..<b as a value: {__range, lo, hi, closed}. ~= tests it, and a for-in
     // over a range VALUE (the a...b of a for loop is read below this level and keeps
     // its own operator) walks it.
+    // A ONE-SIDED range carries a null bound: `1...` is {lo: 1, hi: null} and
+    // `...1` / `..<2` is {lo: null, hi: 1}. sw_slice fills the missing end in from
+    // the receiver's length, which is the only place either can be used - that is
+    // what PartialRangeFrom/PartialRangeThrough are for in Swift too.
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
         var loT = items[0]
-        var closed = items[1].rop == "..."
-        var hiT = items[2]
+        var opAt = items[0].rop != undefined ? 0 : 1
+        var closed = items[opAt].rop == "..."
+        var hiT = items[opAt + 1]
+        if (opAt == 1) { loT = items[0] } else { loT = null }
         return function(b) {
-            var rl = loT(b)
-            b = rl.b
-            var rh = hiT(b)
-            b = rh.b
+            var loV = hNull
+            if (loT != null) {
+                var rl = loT(b)
+                b = rl.b
+                loV = rl.v
+            }
+            var hiV = hNull
+            if (hiT != undefined && hiT != null) {
+                var rh = hiT(b)
+                b = rh.b
+                hiV = rh.v
+            }
             var o = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [o, emitStr(b, "__range"), hTrue])
-            callExt(b, "js_set", [o, emitStr(b, "lo"), rl.v])
-            callExt(b, "js_set", [o, emitStr(b, "hi"), rh.v])
+            callExt(b, "js_set", [o, emitStr(b, "lo"), loV])
+            callExt(b, "js_set", [o, emitStr(b, "hi"), hiV])
             callExt(b, "js_set", [o, emitStr(b, "closed"), closed ? hTrue : hFalse])
             hasRanges = true
             return {b: b, v: o}

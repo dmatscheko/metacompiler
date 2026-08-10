@@ -1911,6 +1911,139 @@ func s35() {
 }
 struct Own35 { var isEmpty = 99; var first = 7; var last = 8 }
 
+// ===== SECTION 36: the Sequence/Collection members, and Range as a VALUE =====
+// docs/todo.md 2.10. Nineteen members aborted in every engine - AND WITH TWO
+// DIFFERENT WORDINGS, "unknown Array method: sorted" in the interpreter against
+// "unknown list method 'sorted'" under llvm.Run and natively, because the compiled
+// halves fell through to the shared list table in abnf/jsrt.go. Both the members
+// and the wording are closed here; a name no engine knows now says
+// "unknown Array method: X" in all three.
+//
+// Every value below was read off swiftc 6.1.2. FOUR THINGS ARE DELIBERATELY NOT
+// ASSERTED because they cannot be matched and each is recorded at its site:
+//   * min()/max()/firstIndex(of:) answer an OPTIONAL - swiftc prints Optional(1)
+//     where this value model has no Optional at all (manual 7.9). The VALUE is
+//     asserted; the printed form is not.
+//   * reversed() / enumerated() / [[T]].joined() answer ReversedCollection /
+//     EnumeratedSequence / FlattenSequence, whose printed forms name the STATIC
+//     element type (`ReversedCollection<Array<Int>>(_base: [3, 1, 2])`) and need a
+//     type checker. Array(...) of each IS asserted and is byte-exact.
+//   * a[1...] is an ArraySlice, which keeps the ORIGINAL indices; a plain array
+//     cannot, so only the elements and the count are asserted.
+//   * shuffled() has no random source any three engines can agree on, so it draws
+//     from a fixed-seed xorshift32 - the assertion is on the SORTED result and the
+//     count, never on the order.
+func s36() {
+    var a36 = [3, 1, 2]
+    let e36: [Int] = []
+    check("36a", a36.sorted() == [1, 2, 3] && a36 == [3, 1, 2])
+    check("36b", a36.sorted(by: { $0 > $1 }) == [3, 2, 1])
+    check("36c", a36.reversed() == [2, 1, 3] && Array(a36.reversed()) == [2, 1, 3])
+    check("36d", a36.min() == 1 && a36.max() == 3)
+    check("36e", e36.min() == nil && e36.max() == nil)
+    check("36f", a36.prefix(2) == [3, 1] && a36.suffix(2) == [1, 2])
+    check("36g", Array(a36.prefix(9)) == a36 && Array(a36.suffix(9)) == a36)
+    check("36h", a36.dropFirst() == [1, 2] && a36.dropLast() == [3, 1])
+    check("36i", a36.dropFirst(2) == [2] && Array(a36.dropLast(5)) == e36)
+    check("36j", a36.firstIndex(of: 1) == 1 && a36.firstIndex(of: 9) == nil)
+    check("36k", a36.allSatisfy { $0 > 0 } && !a36.allSatisfy { $0 > 1 })
+    check("36l", a36.compactMap { $0 > 1 ? $0 : nil } == [3, 2])
+    check("36m", [[1, 2], [3]].flatMap { $0 } == [1, 2, 3])
+    check("36n", a36.indices == 0..<3 && a36.indices.count == 3 && e36.indices == 0..<0)
+    check("36o", a36.shuffled().sorted() == [1, 2, 3] && a36.shuffled().count == 3)
+    check("36p", a36.contains(where: { $0 > 2 }) && !a36.contains(where: { $0 > 3 }))
+    // A user type's own `static func <` WINS: Comparable is how Swift sorts anything
+    // that is not a built-in, and the built-in comparison sees two opaque objects.
+    // All three engines answered [3, 1] here against swiftc 6.1.2's [1, 3].
+    let cs36 = [C36(n: 3), C36(n: 1)]
+    check("36pa", cs36.sorted().map { $0.n } == [1, 3] && cs36.min()!.n == 1 && cs36.max()!.n == 3)
+    // The MUTATING members, each on a FRESH LITERAL: `var b = a` does not copy in
+    // this value model, where Swift's Array is a value type - a pre-existing gap
+    // recorded at the bottom of this section, not one of them.
+    var b36 = [3, 1, 2]
+    b36.removeFirst()
+    check("36q", b36 == [1, 2])
+    var c36 = [3, 1, 2]
+    check("36r", c36.remove(at: 1) == 1 && c36 == [3, 2])
+    var d36 = [3, 1, 2]
+    d36.removeAll()
+    check("36s", d36 == e36 && d36.isEmpty)
+    var f36 = [3, 1, 2]
+    f36.removeAll(where: { $0 == 1 })
+    check("36t", f36 == [3, 2])
+    var g36 = [3, 1, 2]
+    g36.swapAt(0, 2)
+    check("36u", g36 == [2, 1, 3])
+    var h36 = [3, 1, 2]
+    h36.sort()
+    check("36v", h36 == [1, 2, 3])
+    var i36 = [1, 2, 3]
+    i36.removeFirst(2)
+    check("36w", i36 == [3])
+    // enumerated(), joined(), reduce - and an OPERATOR USED AS A VALUE, which
+    // parsed and then reported not-implemented at run time in both halves.
+    var eo36 = ""
+    for (i, v) in a36.enumerated() { eo36 += "\(i):\(v);" }
+    check("36x", eo36 == "0:3;1:1;2:2;")
+    check("36y", "\(Array(a36.enumerated()))" == "[(offset: 0, element: 3), (offset: 1, element: 1), (offset: 2, element: 2)]")
+    let j36 = ["a", "b"]
+    check("36z", j36.joined(separator: "-") == "a-b" && j36.joined() == "ab")
+    check("36aa", Array([[1, 2], [3]].joined()) == [1, 2, 3])
+    check("36ab", a36.reduce(0, +) == 6 && a36.reduce(1, *) == 6 && a36.reduce(0, -) == -6)
+    check("36ac", a36.sorted(by: >) == [3, 2, 1])
+    check("36ad", a36.reduce(into: [Int]()) { $0.append($1) } == a36)
+    // A STRING is a Collection of Characters, so every one of these applies to it;
+    // the five whose Swift result is a String/Substring come back as text.
+    let s36 = "hello"
+    check("36ae", s36.map { String($0) } == ["h", "e", "l", "l", "o"])
+    check("36af", s36.filter { $0 != "l" } == "heo")
+    check("36ag", s36.prefix(2) == "he" && s36.suffix(2) == "lo")
+    check("36ah", s36.dropFirst() == "ello" && s36.dropLast() == "hell")
+    check("36ai", s36.allSatisfy { $0 != "z" } && s36.reduce(0, { n, _ in n + 1 }) == 5)
+    check("36aj", s36.sorted() == ["e", "h", "l", "l", "o"])
+    // NOT ASSERTED, measured while writing this section: `String(s.sorted())` -
+    // Swift's idiom for rebuilding a String out of Characters - answers
+    // `["e", "h", "l", "l", "o"]` in all three engines where swiftc says `ehllo`.
+    // String(x) and String(describing: x) are ONE conversion here (the argument
+    // labels are dropped before it), and swiftc makes them differ on exactly this
+    // argument, so telling them apart needs label plumbing in both grammars.
+    // A RANGE printed as itself. Both halves answered "[object Object]" - a value
+    // that no test had ever printed - and `r.count` ABORTED in both compiled halves
+    // with "len() of a object" while the interpreter answered 3, and a for-in over a
+    // range VALUE walked its own KEYS ("lo", "hi", "closed") in the compiler half.
+    let r36 = 0..<3
+    let q36 = 1...3
+    check("36ak", "\(r36)" == "0..<3" && "\(q36)" == "1...3")
+    check("36al", r36.count == 3 && q36.count == 3)
+    var w36: [Int] = []
+    for i in r36 { w36.append(i) }
+    check("36am", w36 == [0, 1, 2])
+    var x36: [Int] = []
+    for i in a36.indices { x36.append(i) }
+    check("36an", x36 == [0, 1, 2])
+    // A ONE-SIDED range subscript. `a[1...]` did not PARSE at all before - the file
+    // failed at the `]`.
+    check("36ao", Array(a36[1...]) == [1, 2] && a36[1...].count == 2)
+    check("36ap", Array(a36[...1]) == [3, 1] && Array(a36[..<2]) == [3, 1])
+    check("36aq", Array(a36[0...1]) == [3, 1] && Array(a36[0..<3]) == a36)
+    // NOT ASSERTED: `s[1...]` is REJECTED by swiftc - "cannot subscript String with
+    // an integer range, use a String.Index range instead" - while both halves here
+    // accept it and answer "ello". A String.Index is not representable in this value
+    // model, so the superset is kept and recorded rather than removed.
+    // NOT ASSERTED, and measured while writing this section: `var b = a` SHARES the
+    // array here where Swift's Array is a VALUE TYPE and copies -
+    //     var a = [1,2,3]; var b = a; b.append(9); print(a)
+    // is [1, 2, 3] under swiftc 6.1.2 and [1, 2, 3, 9] in all three engines. That is
+    // a copy-on-assign rule for every array, dictionary, tuple and struct binding in
+    // three engines, not a member, so it is recorded here rather than started.
+}
+
+struct C36: Comparable {
+    var n: Int
+    static func < (l: C36, r: C36) -> Bool { return l.n < r.n }
+    static func == (l: C36, r: C36) -> Bool { return l.n == r.n }
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1949,6 +2082,7 @@ func main() {
     s33() // SECTION-CALL 33
     s34() // SECTION-CALL 34
     s35() // SECTION-CALL 35
+    s36() // SECTION-CALL 36
     print("full: \(checks) checks, \(fails) failures")
 }
 
