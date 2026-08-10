@@ -325,6 +325,25 @@ full_probe() {
     local work="$R.work"
     cp "$F" "$work"
     local gaps=0 iter=0 rc out ln reason impl info id name start end
+    # THREE facts come out of this probe, and until 2026-08-10 they were crammed
+    # into ONE file ($R.checks), which is docs/todo.md 6.1:
+    #
+    #   $R.checks  the assertion COUNT, or '-' when nothing was measured
+    #   $R.flag    WHAT HAPPENED: FULL | PARTIAL | FROZEN-DIFF | RUN-FAILED |
+    #              VACUOUS | UNMEASURED
+    #   $R.gaps    how many SECTIONS had to be deleted to get there
+    #
+    # Overloading one file meant every non-FULL outcome DESTROYED the count. A
+    # half with one gap wrote no count at all, a FROZEN-DIFF half overwrote its
+    # count with the word, and both then contributed ZERO to the ratchet total -
+    # a language that ran 375 of its 384 assertions was reported as '-' and
+    # subtracted 384 from the number this project is gated on. Measured at
+    # db6bf43 by inserting one unparsable line into tests/lua-test-full.lua:
+    # `lua -` and `0 assertions in total; 0 languages with halves that disagree`.
+    # Splitting them means the count survives every outcome that produced one.
+    echo -          > "$R.checks"
+    echo UNMEASURED > "$R.flag"
+    echo 0          > "$R.gaps"
     {
         printf '%s:\n' "$(basename "$G" .abnf)"
         while :; do
@@ -354,7 +373,7 @@ full_probe() {
                     printf '    RUN-FAILED - the probe run was KILLED (exit %s) after the %ss --timeout.\n' "$rc" "$TIMEOUT"
                     printf '                 This is NOT a language gap and NOT a frozen divergence: nothing\n'
                     printf '                 was measured. Re-run on a quieter machine, or raise --timeout.\n'
-                    echo RUN-FAILED > "$R.checks"
+                    echo RUN-FAILED > "$R.flag"
                     break ;;
             esac
             if [ "$rc" -eq 0 ]; then
@@ -368,9 +387,22 @@ full_probe() {
                 # loud instead of green.
                 if ! printf '%s\n' "$out" | grep -Eq '^full: [0-9]+ checks, [0-9]+ failures$'; then
                     printf '    VACUOUS - exits 0 but never printed the summary line: main() is not being run\n'
+                    echo VACUOUS > "$R.flag"
                     break
                 fi
-                if [ "$gaps" -eq 0 ]; then
+                # THE COUNT IS RECORDED WHETHER OR NOT SECTIONS HAD TO BE REMOVED
+                # (docs/todo.md 6.1). It used to be recorded only in the gaps == 0
+                # arm, so a half with a single gap printed "(the remaining sections
+                # pass)" - true, and it never said how many, and the summary read
+                # '-'. The rest of the file is a REAL MEASUREMENT of the rest of
+                # the file; refusing to report it does not make the ratchet safer,
+                # it makes the number this project gates on drop by a whole
+                # language while the report says only that some sections passed.
+                #
+                # The count and the gap count are both reported; the total adds the
+                # count, the summary names the gaps, and tests/gates.sh has a
+                # recorded FULL_GAPS ceiling so a NEW gap is still red.
+                {
                     # Record how many assertions actually ran. "FULL" only says the
                     # file got to the end; it cannot see a section whose checks
                     # stopped executing (an early return, a swallowed exception, a
@@ -378,13 +410,19 @@ full_probe() {
                     # while staying green. The two halves of a language must agree
                     # on it - see the CHECK-COUNT report at the end of this group.
                     printf '%s\n' "$out" | sed -n 's/^full: \([0-9]*\) checks.*/\1/p' | head -1 > "$R.checks"
+                    printf '%s\n' "$gaps" > "$R.gaps"
                     # stderr is compared too, not discarded: warnings live there
                     # (they used to pollute stdout), so a ratchet file that starts
                     # warning under one engine only would otherwise pass unseen.
                     # Every ratchet file runs with an EMPTY stderr today, on both
                     # engines and both halves - measured, all 15 languages.
-                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>"$work.ge"; grc=$?
-                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>"$work.fe"; frc=$?
+                    # $work, NOT $F: with gaps == 0 it is a byte copy of $F, and
+                    # with gaps > 0 it is the file MINUS the sections that do not
+                    # parse - which is the only version of the file this half can
+                    # run at all. Comparing goja against -frozen on $F when the
+                    # gaps > 0 path had reached here would compare two failures.
+                    RUN "$BIN" "$G" "$work" -q          > "$work.g" 2>"$work.ge"; grc=$?
+                    RUN "$BIN" "$G" "$work" -q -frozen  > "$work.f" 2>"$work.fe"; frc=$?
                     # THE EXIT CODES MATTER, and not checking them produced a
                     # FALSE FROZEN-DIFF that went unexplained for a week. If a RUN
                     # is killed by the per-run timeout its output file is
@@ -408,11 +446,19 @@ full_probe() {
                         printf '    RUN-FAILED - goja exit %s, -frozen exit %s (124 = killed by the %ss --timeout;\n' \
                             "$grc" "$frc" "$TIMEOUT"
                         printf '                 this is NOT a frozen divergence - re-run, or raise --timeout)\n'
-                        echo RUN-FAILED > "$R.checks"
+                        echo - > "$R.checks"; echo RUN-FAILED > "$R.flag"
                     elif cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
-                        printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
+                        if [ "$gaps" -eq 0 ]; then
+                            echo FULL > "$R.flag"
+                            printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
+                        else
+                            echo PARTIAL > "$R.flag"
+                            printf '    PARTIAL - %s assertions from the sections that DO run (%s gap(s) above), goja and -frozen byte-identical\n' \
+                                "$(cat "$R.checks")" "$gaps"
+                        fi
                     else
-                        printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
+                        printf '    %s under goja, BUT -frozen fails or differs - inspect before celebrating\n' \
+                            "$([ "$gaps" -eq 0 ] && echo FULL || echo PARTIAL)"
                         # And make the SUMMARY say so. The count above was recorded
                         # from the goja run, so without this the end-of-group report
                         # compares two goja numbers, finds them equal, and prints "0
@@ -422,11 +468,15 @@ full_probe() {
                         # followed by an expression on the next line) - 17 of 59 new
                         # assertions red in ONE half, invisible to the summary that
                         # everyone actually quotes.
-                        echo FROZEN-DIFF > "$R.checks"
+                        # The COUNT IS KEPT, and only the flag says FROZEN-DIFF.
+                        # It used to overwrite $R.checks, which meant a language
+                        # whose halves differ under -frozen ALSO silently
+                        # subtracted its whole ratchet from the total - the same
+                        # defect as 6.1, one arm over. The flag is what the
+                        # summary and tests/gates.sh read.
+                        echo FROZEN-DIFF > "$R.flag"
                     fi
-                else
-                    printf '    (the remaining sections pass)\n'
-                fi
+                }
                 break
             fi
             # Where did it choke? Parse failures, "not implemented" aborts and
@@ -583,43 +633,73 @@ if [ "$FULL" -eq 1 ]; then
     awk_out="$RESDIR/full.summary"
     for r in $REPORTS; do
         [ -f "$r.lang" ] || continue
-        printf '%s\t%s\n' "$(cat "$r.lang")" "$(cat "$r.checks" 2>/dev/null || echo -)"
+        printf '%s\t%s\t%s\t%s\n' "$(cat "$r.lang")" \
+            "$(cat "$r.checks" 2>/dev/null || echo -)" \
+            "$(cat "$r.flag"   2>/dev/null || echo UNMEASURED)" \
+            "$(cat "$r.gaps"   2>/dev/null || echo 0)"
     done | sort | awk -F'\t' -v tmo="$TIMEOUT" '
         { if ($1 != last) { if (last != "") emit(); last = $1; n = 0 }
-          v[n++] = $2 }
-        function emit(   i, bad, killed, got) {
-            bad = 0; killed = 0; got = ""
+          v[n] = $2; f[n] = $3; g[n] = $4 + 0; n++ }
+        # THE COUNT AND THE VERDICT ARE NOW SEPARATE FIELDS (docs/todo.md 6.1).
+        # v[] is the assertion count or "-"; f[] is FULL/PARTIAL/FROZEN-DIFF/
+        # RUN-FAILED/VACUOUS/UNMEASURED; g[] is the number of sections that had to
+        # be deleted before the half would run. Previously ONE field carried all
+        # three, so every non-FULL outcome erased the count and the language
+        # contributed 0 - the total silently stopped being a measurement, which is
+        # the whole reason this item exists.
+        function emit(   i, bad, killed, nocount, got, gs, ng) {
+            bad = 0; killed = 0; nocount = 0; got = ""; gs = 0; ng = 0
             for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
-            # FROZEN-DIFF is not a count: it is the marker written above when a
-            # half is FULL under goja but differs under -frozen. Flag it even when
-            # BOTH halves carry it, because two halves failing the same way is not
-            # agreement - it is two defects.
-            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF") bad = 1
-            # RUN-FAILED is not a count either, and it is not a disagreement: it
-            # is the harness saying it stopped the run. Reported separately.
-            for (i = 0; i < n; i++) if (v[i] == "RUN-FAILED") killed = 1
+            for (i = 0; i < n; i++) {
+                # FROZEN-DIFF: this half is FULL/PARTIAL under goja but differs
+                # under -frozen. Flag it even when BOTH halves carry it, because
+                # two halves failing the same way is not agreement - it is two
+                # defects.
+                if (f[i] == "FROZEN-DIFF") bad = 1
+                # RUN-FAILED is the harness saying it stopped the run. Not a
+                # disagreement; reported separately.
+                if (f[i] == "RUN-FAILED") killed = 1
+                # NO COUNT AT ALL. Before this field existed the only trace of
+                # this was a "-" in the count column, which was caught by
+                # tests/gates.sh only BY OVERLAP: both halves silent read as
+                # agreement and produced no MISMATCH, and one half silent printed
+                # "MISMATCH: - 384" and was caught by the OTHER grep. It is a
+                # named category now and gates.sh looks for it by name.
+                if (v[i] !~ /^[0-9]+$/) nocount = 1
+                gs += g[i]; if (g[i] > 0) ng++
+            }
             if (n < 2)        printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
             else if (killed) { printf "  %-12s KILLED (RUN-FAILED):", last
-                               for (i = 0; i < n; i++) printf " %s", v[i]
+                               for (i = 0; i < n; i++) printf " %s", (f[i] == "RUN-FAILED" ? "RUN-FAILED" : v[i])
                                printf " - NOT a halves divergence, nothing was measured\n"
                                nkilled++; killednames = killednames " " last }
+            else if (nocount) { printf "  %-12s NO-COUNT:", last
+                                for (i = 0; i < n; i++) printf " %s", (v[i] ~ /^[0-9]+$/ ? v[i] : f[i])
+                                printf " - a half recorded NO ASSERTION COUNT; whatever it runs is MISSING from the total\n"
+                                nnocount++; nocountnames = nocountnames " " last }
             else if (bad)   { printf "  %-12s MISMATCH:", last
-                              for (i = 0; i < n; i++) printf " %s", v[i]
+                              for (i = 0; i < n; i++) printf " %s%s", v[i], (f[i] == "FROZEN-DIFF" ? "(FROZEN-DIFF)" : "")
                               printf "\n"; mismatch++ }
+            else if (gs > 0) { printf "  %-12s %s  PARTIAL: %d section gap(s) summed over %d half/halves - the count is of the REST of the file\n", last, v[0], gs, ng
+                               ngappy++; gapnames = gapnames sprintf(" %s(%d)", last, gs); totgaps += gs }
             else            printf "  %-12s %s\n", last, v[0]
-            # WHICH value of a killed language goes into the total. v[0] gives
-            # the right answer today only by accident: the feeding pipeline sorts
-            # WHOLE LINES, so "lua<TAB>384" sorts before "lua<TAB>RUN-FAILED"
-            # because "3" < "R", and the surviving count therefore lands in v[0]
-            # whichever half died. Rename the token and the total changes. Say it
-            # instead of leaning on ASCII. Every other case keeps v[0] exactly, so
-            # this cannot move the number on a clean run.
-            if (killed) { for (i = 0; i < n; i++) if (v[i] ~ /^[0-9]+$/ && got == "") got = v[i] }
-            else if (v[0] ~ /^[0-9]+$/) got = v[0]
+            # WHICH value goes into the total: the FIRST NUMERIC one, in every
+            # case. This used to be v[0] except when killed, which was right only
+            # by an ASCII accident the old comment here spelled out at length -
+            # the feeding pipeline sorts WHOLE LINES, so "lua<TAB>384" sorted
+            # before "lua<TAB>RUN-FAILED" because "3" < "R". Renaming a token
+            # would have moved the total. Scanning for the first numeric is the
+            # same answer for every case that has one and does not depend on the
+            # sort order at all.
+            for (i = 0; i < n; i++) if (v[i] ~ /^[0-9]+$/ && got == "") got = v[i]
             if (got != "") total += got
             if (killed) {
                 if (got != "") survived = survived sprintf("\n  %s contributed %s, from the ONE half that finished; the other measured nothing.", last, got)
                 else           survived = survived sprintf("\n  %s contributed NOTHING - both halves were killed.", last)
+            }
+            if (!killed && nocount) {
+                if (got != "") missing = missing sprintf("\n  %s contributed %s, from the half that DID record a count; the other recorded none.", last, got)
+                else           missing = missing sprintf("\n  %s contributed NOTHING - NO half recorded a count.", last)
             }
         }
         END { if (last != "") emit()
@@ -629,10 +709,44 @@ if [ "$FULL" -eq 1 ]; then
               # rather than as "no total at all". Everything after the number is
               # free text, which is where the kill disclaimer goes - ON THE LINE,
               # so the number cannot be quoted without it (docs/todo.md 4.4).
+              #
+              # THE TOTAL SAYS WHAT KIND OF NUMBER IT IS. Three shapes, and only
+              # the last one is a clean measurement:
+              #   killed   - a run was stopped; nothing was measured for it
+              #   no-count - a half produced no count; its work is missing
+              #   gaps     - sections were deleted to make the file run; the
+              #              count is of what remains and is HONEST, just smaller
+              # A gap is the case docs/todo.md 6.1 is about: it used to make the
+              # WHOLE language contribute 0 and print "-", so one unparsable line
+              # in lua took 384 assertions off the total and the summary still
+              # read "0 languages with halves that disagree".
               if (nkilled > 0)
                   printf "\n  %d assertions in total - NOT A MEASUREMENT, %d language(s) killed, see below; %d languages with halves that disagree\n", total, nkilled, mismatch
+              else if (nnocount > 0)
+                  printf "\n  %d assertions in total - INCOMPLETE, %d language(s) recorded no count, see NO-COUNT below; %d languages with halves that disagree\n", total, nnocount, mismatch
+              else if (totgaps > 0)
+                  printf "\n  %d assertions in total, from %d language(s) with %d SECTION GAP(S) skipped, see GAPS below; %d languages with halves that disagree\n", total, ngappy, totgaps, mismatch
               else
                   printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch
+              if (nnocount > 0) {
+                  printf "\n  NO-COUNT: %d language(s) had a half that recorded NO ASSERTION COUNT AT ALL:%s\n", nnocount, nocountnames
+                  printf "  That half did not report a `full: N checks` line, so the total above is missing\n"
+                  printf "  whatever it runs. It is NOT a gap (a gap still measures the rest of the file)\n"
+                  printf "  and NOT a kill (that is reported separately). Usual causes: VACUOUS - main() is\n"
+                  printf "  not being run; UNMEASURED - the probe hit an error it could not attribute to a\n"
+                  printf "  section, or the grammar is missing. tests/gates.sh greps for the NO-COUNT: line\n"
+                  printf "  above BY NAME - it is the designed detector, not the two greps that used to\n"
+                  printf "  catch this class only by overlapping each other.\n"
+                  printf "  What the affected languages put into the total above:%s\n", missing
+              }
+              if (totgaps > 0) {
+                  printf "\n  GAPS: %d section-gap(s), summed per half, across %d language(s), deleted before the file would run:%s\n", totgaps, ngappy, gapnames
+                  printf "  Each of those languages still CONTRIBUTED its remaining assertions to the total\n"
+                  printf "  above - that is the fix for docs/todo.md 6.1, and it is why the total falls by\n"
+                  printf "  the size of the deleted sections rather than by a whole language. The gap list\n"
+                  printf "  per grammar is in the per-language report above. tests/gates.sh has a recorded\n"
+                  printf "  FULL_GAPS ceiling, so a NEW gap is red even though the total barely moves.\n"
+              }
               if (nkilled > 0) {
                   printf "\n  %d LANGUAGE(S) WERE KILLED BY THE %s s --timeout:%s\n", nkilled, tmo, killednames
                   printf "  A killed run records NO COUNT, so THE TOTAL ABOVE IS NOT A MEASUREMENT - it\n"
@@ -646,11 +760,17 @@ if [ "$FULL" -eq 1 ]; then
                   printf "  What the killed languages put into the total above:%s\n", survived
               }
             }' | tee "$awk_out"
-    # exit 1 iff something was killed. Language gaps stay informational. The
-    # verdict is read back out of the text that was just printed rather than
-    # carried in a variable, because the awk above runs in a pipeline and its
+    # exit 1 iff something was killed OR a half recorded no count at all.
+    # Language GAPS stay informational (exit 0) - that is what this group is for,
+    # and the gap is reported, counted and ratcheted by tests/gates.sh's FULL_GAPS
+    # instead. A NO-COUNT half is different in kind: it is a half of the suite
+    # that produced no measurement, which is the failure mode this whole group's
+    # comments are written against, so it is a non-zero exit as well as a named
+    # line. The verdict is read back out of the text that was just printed rather
+    # than carried in a variable, because the awk above runs in a pipeline and its
     # subshell cannot set one.
     if grep -q 'WERE KILLED BY THE' "$awk_out" 2>/dev/null; then exit 1; fi
+    if grep -q '^  NO-COUNT: ' "$awk_out" 2>/dev/null; then exit 1; fi
     exit 0
 fi
 

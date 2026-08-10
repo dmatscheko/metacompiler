@@ -12,10 +12,19 @@
 # the Go twin and never touches layer 2. Only clang-check, native-full and a
 # native -exe probe can see layer 2 at all.
 #
-# So the rule this script encodes: green means all eight, including the greps AND
-# the two RECORDED NUMBERS (FULL_ASSERTIONS, SHAPE_GROUPS) below - a gate that
-# prints a smaller number without complaining is worse than no gate, and this one
-# used to do exactly that.
+# So the rule this script encodes: green means EVERY gate, including the greps AND
+# the RECORDED NUMBERS below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS,
+# MATRIX_ENTRIES, LINT_FINDINGS) - a gate that prints a smaller number without
+# complaining is worse than no gate, and this one used to do exactly that.
+#
+# 2026-08-10 (docs/todo.md 6.1): two of the greps below were only correct BY
+# OVERLAP. A ratchet half that recorded no assertion count printed `-`, which the
+# `blank=` grep caught when BOTH halves did it and which the MISMATCH grep caught
+# when only one did (`MISMATCH: - 384`). Neither grep was aimed at the class and
+# neither said what had happened. test.sh now names it - a `NO-COUNT:` line - and
+# the check below reads that line. The same change makes a gapped half report the
+# assertions it really ran instead of nothing, which is why FULL_GAPS exists: the
+# total can no longer be the thing that notices a section falling out.
 #
 # Usage:
 #   tests/gates.sh              every gate (~5-6 minutes)
@@ -49,6 +58,8 @@
 #   gen-all.sh         its own temp binary; --check writes nothing.
 #   go test            writes nothing.
 #   shape-scan         reads languages/lib/*.metajs; writes nothing.
+#   metajs-lint        reads languages/lib/* and languages/*.abnf; writes nothing.
+#                      Runs twice: once over the corpus, once as -selftest.
 #
 # So no two concurrent gates write the same path, and ./mec is written exactly
 # once, before the fan-out. The VERDICT LOGIC BELOW IS UNCHANGED - only when each
@@ -69,7 +80,7 @@ for a in "$@"; do
         --serial) SERIAL=1 ;;
         --bench)  BENCH=1 ;;
         --all)    GEN=1; FREEZE=1; BENCH=1 ;;
-        -h|--help) sed -n "2,38p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,48p" "$0"; exit 0 ;;
         *) echo "gates.sh: unknown flag $a" >&2; exit 2 ;;
     esac
 done
@@ -141,8 +152,56 @@ FULL_ASSERTIONS=9070      # SIXTEENTH round, +143 over the fifteenth's 8927:
                           # another. The rule has now held twenty-five agents in
                           # a row across three rounds.
 
+# SECTION GAPS in the ratchet, summed per half over all sixteen languages.
+#
+# docs/todo.md 6.1. Until 2026-08-10 a half with ANY gap recorded NO COUNT: the
+# per-language line read `-`, the language contributed ZERO to the total, and one
+# unparsable line in tests/lua-test-full.lua took 384 assertions off the number
+# this project is gated on. MEASURED at db6bf43, both shapes:
+#
+#   gap in BOTH halves       `lua          -`            total 0, "0 halves disagree"
+#   gap in ONE half          `lua MISMATCH: - 384`       total 0
+#
+# The first was caught by gates.sh only because a count of `-` matched the
+# `blank=` grep; the second only because `- 384` happens to print the word
+# MISMATCH. Two greps overlapping is not a design. test.sh now records the count,
+# the verdict and the gap count as SEPARATE fields, so a gapped half contributes
+# the assertions it really ran (375, above) and says PARTIAL - which means the
+# TOTAL no longer moves much when a section stops parsing, and the total can
+# therefore no longer be the thing that notices. This constant is what notices.
+#
+# A CEILING, not a floor, and the opposite direction from FULL_ASSERTIONS: gaps
+# should only ever go down. 0 is not aspirational - all sixteen languages run
+# their whole ratchet today, on both halves.
+FULL_GAPS=0
+
 SHAPE_GROUPS=15           # recorded 2026-08-08 at 6f60337
 SHAPE_LINES=481           # recoverable lines, same commit
+
+# MetaJS DIALECT-GAP findings (docs/todo.md 6.4), a CEILING.
+#
+# docs/abnf-dialect-gotchas.md lists a dozen ways MetaJS is not JavaScript and
+# NOTHING ENFORCED ANY OF THEM until tools/metajs-lint. Every gap in that list is
+# discovered the same way: a confusing failure under -frozen only, or - for the
+# `\f` one - in the NATIVE BINARY ONLY, where the matrix, --full and --cross are
+# all structurally blind. That is the exact profile of a defect that needs a
+# static check, because no dynamic gate here can have one.
+#
+# THE THREE ARE REAL AND ARE NOT FIXED HERE (this round's agent owns tools/ and
+# tests/, not languages/). Both were confirmed by running them:
+#
+#   languages/lib/ruby-rt.metajs  rbIsSpaceCh tests c == "\f", which compiles to
+#       c == "f", so the NATIVE ruby binary strips the letter f:
+#       "ffoo barf".strip is "oo bar" natively and "ffoo barf" in the
+#       interpreter and in real Ruby.
+#   languages/lib/regex.js:277    rxIsMetaCh's meta set contains \f and \v, which
+#       become the letters f and v under -frozen only. Measured: kotlin
+#       Regex(Regex.escape("f")+Regex.escape("v")+Regex.escape("x")) matches
+#       "fvx" under goja and DOES NOT under -frozen. A live halves divergence
+#       that no test exercises.
+#
+# Lower this number as they are fixed; it must never go up.
+LINT_FINDINGS=3
 
 # The matrix ENTRY COUNT, for the same reason FULL_ASSERTIONS exists: the matrix
 # is .vscode/launch.json, so a row that is deleted, renamed out of its mode, or
@@ -204,6 +263,13 @@ start full   ./test.sh --full  --timeout "$FULL_TIMEOUT"
 start cross  ./test.sh --cross --timeout "$FULL_TIMEOUT"
 start gotest go test ./abnf/
 start shape  go run ./tools/shape-scan -max "$SHAPE_GROUPS" -max-lines "$SHAPE_LINES"
+# Two runs, and the second one is the point. -selftest asserts every rule still
+# fires on its own construct: a linter whose rules have stopped matching reports
+# ZERO FINDINGS and is indistinguishable from a clean tree, which is the same
+# false-green shape every recorded number in this file exists to prevent. Both
+# are sub-second after the first go build.
+start lint   go run ./tools/metajs-lint -grammars -q
+start lintst go run ./tools/metajs-lint -selftest
 if [ "$QUICK" = 0 ]; then
     start clang  tests/clang-check.sh
     start native tests/native-full.sh
@@ -239,16 +305,36 @@ fi
 #    line is not a verdict and the grep is the actual gate.
 bad=$(grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF|RUN-FAILED' "$log/full")
 n=$(grep -E 'assertions in total' "$log/full" | tail -1)
-# A language whose count is '-' recorded NOTHING - it never reached the summary
-# line. Two halves that both do this AGREE, so it produces no MISMATCH; it is
-# invisible except in the total. Name it.
+# A half that recorded NO ASSERTION COUNT AT ALL. test.sh names this case
+# explicitly now - `NO-COUNT: <n> language(s) had a half that recorded NO
+# ASSERTION COUNT AT ALL: <names>` - and THIS GREP IS THE DESIGNED DETECTOR.
+# Before it, the class was caught only by two greps overlapping: both halves
+# silent printed a count of `-` and matched the `blank=` line below, one half
+# silent printed `MISMATCH: - 384` and matched the `bad=` line above. Neither
+# was aimed at it, and neither says what happened.
+nocount=$(sed -n 's/^  NO-COUNT: [0-9]* language(s) had a half that recorded NO ASSERTION COUNT AT ALL://p' "$log/full")
+# The old detector, kept as a backstop rather than as the reason: a language
+# whose count column is literally '-' should now be impossible (test.sh writes a
+# named flag for every exit path out of the probe), so if this ever fires again
+# it means a NEW path out of full_probe forgot to record one.
 blank=$(grep -E '^  [a-z0-9]+ +-$' "$log/full" | awk '{print $1}' | tr '\n' ' ')
+# Section gaps, against the recorded ceiling. The total can no longer be relied
+# on to notice these - that is the POINT of the 6.1 fix, since a gapped half now
+# contributes its real count - so they are checked on their own line. No GAPS:
+# line at all means zero.
+gaps=$(sed -n 's/^  GAPS: \([0-9][0-9]*\) section-gap(s).*/\1/p' "$log/full" | tail -1)
+[ -z "$gaps" ] && gaps=0
 # The total itself, as a number, against what it is supposed to be.
 tot=$(printf '%s\n' "$n" | sed -n 's/^ *\([0-9][0-9]*\) assertions in total.*/\1/p')
-if [ -n "$bad" ]; then
+if [ -n "$nocount" ]; then
+    fail --full "${n:-ran} -- NO ASSERTION COUNT AT ALL from a half of:$nocount (its assertions are missing from the total)"
+elif [ -n "$bad" ]; then
     fail --full "${n:-ran} -- $(echo "$bad" | head -3)"
+elif [ "$gaps" -gt "$FULL_GAPS" ]; then
+    fail --full "${n:-ran} -- $gaps SECTION GAP(S), above the recorded ceiling of $FULL_GAPS. A section of a ratchet file stopped running; the total barely moves, so this line is what sees it. See the GAPS: block in the output."
+    cp "$log/full" /tmp/gates-full.log
 elif [ -n "$blank" ]; then
-    fail --full "${n:-ran} -- RECORDED NOTHING for: $blank (both halves silent: not a MISMATCH, so only the total moved)"
+    fail --full "${n:-ran} -- RECORDED NOTHING for: $blank (a count of '-' should now be unreachable: a path out of full_probe is not writing a flag)"
 elif [ -z "$tot" ]; then
     fail --full "NO ASSERTION TOTAL in the output at all - the run did not finish"
 elif [ "$tot" -lt "$FULL_ASSERTIONS" ]; then
@@ -256,6 +342,8 @@ elif [ "$tot" -lt "$FULL_ASSERTIONS" ]; then
     printf '  %-24s %s\n' "" "A SMALLER NUMBER IS A FAILURE, not a smaller test run. Usually killed runs"
     printf '  %-24s %s\n' "" "(raise --timeout / re-run when quiet); otherwise assertions stopped executing."
     cp "$log/full" /tmp/gates-full.log
+elif [ "$gaps" -lt "$FULL_GAPS" ]; then
+    pass --full "${n:-ran} ($gaps section gaps, BELOW the recorded $FULL_GAPS - LOWER FULL_GAPS in tests/gates.sh)"
 elif [ "$tot" -gt "$FULL_ASSERTIONS" ]; then
     pass --full "$tot assertions (+$((tot - FULL_ASSERTIONS)) over the recorded $FULL_ASSERTIONS - RAISE FULL_ASSERTIONS in tests/gates.sh), 0 halves disagree"
 else
@@ -286,6 +374,26 @@ elif [ -n "$sg" ] && { [ "$sg" -lt "$SHAPE_GROUPS" ] || { [ -n "$sl" ] && [ "$sl
     pass shape-scan "$ss (BELOW the recorded $SHAPE_GROUPS/$SHAPE_LINES - lower SHAPE_GROUPS/SHAPE_LINES in tests/gates.sh)"
 else
     pass shape-scan "${ss:-ok}"
+fi
+
+# 5b. The MetaJS dialect gaps (docs/todo.md 6.4). Static, so unlike every other
+#     gate here it can see the `\f` class at all - that one is wrong in the
+#     native binary only, and no dynamic gate in this repository reaches it.
+lrc=$(rc_of lintst)
+ls_=$(grep -E '^metajs-lint: [0-9]+ finding' "$log/lint" | tail -1)
+lf=$(printf '%s\n' "$ls_" | sed -n 's/^metajs-lint: \([0-9][0-9]*\) finding.*/\1/p')
+[ -z "$lf" ] && lf=$(grep -cE '^  [a-z-]+ +languages/' "$log/lint")
+if [ "$lrc" != 0 ]; then
+    fail metajs-lint "SELF-TEST FAILED - a rule stopped detecting its own construct, so 0 findings would mean nothing: $(tail -3 "$log/lintst" | tr '\n' ' ')"
+elif [ "$(rc_of lint)" != 0 ] && [ -z "$lf" ]; then
+    fail metajs-lint "did not run - $(tail -2 "$log/lint" | tr '\n' ' ')"
+elif [ "$lf" -gt "$LINT_FINDINGS" ]; then
+    fail metajs-lint "$lf dialect-gap findings, ABOVE the recorded $LINT_FINDINGS - a NEW one; copied to /tmp/gates-lint.log"
+    cp "$log/lint" /tmp/gates-lint.log
+elif [ "$lf" -lt "$LINT_FINDINGS" ]; then
+    pass metajs-lint "$lf findings (BELOW the recorded $LINT_FINDINGS - LOWER LINT_FINDINGS in tests/gates.sh), self-test ok"
+else
+    pass metajs-lint "$lf known findings, self-test ok"
 fi
 
 if [ "$QUICK" = 0 ]; then
