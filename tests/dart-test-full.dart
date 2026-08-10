@@ -434,6 +434,16 @@ class GnBox<T extends num> { // bounded type parameter
   bool bigger(GnBox<T> o) => v > o.v;
 }
 T gnMax<T extends num>(T a, T b) => a > b ? a : b;
+// A type PARAMETER and a typedef name are both names that stand for another type, and
+// both fell through the class-chain walk in BOTH halves (docs/todo.md 2.4).
+typedef GnIntFn = int Function(int);
+typedef GnNames = List<String>;
+class GnT<T> {
+  bool t(Object v) => v is T;
+  String w(Object v) { switch (v) { case T t: return "y"; } return "n"; }
+}
+class GnSub extends GnT<int> { }
+int gnDbl(int x) => x * 2;
 void s18() {
   var bi = GnBox<int>(3); // explicit type argument
   var bd = GnBox(2.5); // inferred as GnBox<double>
@@ -452,6 +462,15 @@ void s18() {
   check("gn7", gnNil is! int && gnNil is int? && 1 is Object);
   Map<String, List<int>> deep = {"a": [1, 2]};
   check("gn4", deep["a"]![1] == 2);
+  // Dart REIFIES a type argument: `case T t` inside a generic class tests the argument
+  // the instance was made with, not `dynamic`.
+  check("gn8", GnT<int>().t(3) && !GnT<int>().t("s") && GnT<String>().t("s"));
+  check("gn9", GnT<int>().w(3) == "y" && GnT<int>().w("s") == "n");
+  check("gn10", GnSub().t(3) && !GnSub().t("s")); // argument from the extends clause
+  check("gn11", GnT().t("anything")); // no argument anywhere: Dart infers GnT<dynamic>
+  // A typedef DENOTES the aliased type, so `is` tests THAT type.
+  check("gn12", gnDbl is GnIntFn && !(3 is GnIntFn));
+  check("gn13", <String>["a"] is GnNames && !(<int>[1] is GnNames));
 }
 
 // ===== SECTION 19: control flow =====

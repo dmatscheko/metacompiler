@@ -92,9 +92,9 @@ TopMod      = ( "external" | "abstract" ) KwEnd ;
 // parses, runs and quietly returns null.
 ExternDecl  = ExternFnTyped | ExternGetter | ExternSetter | ExternFnPlain ;
 ExternFnTyped <~~ push(makeFuncDecl(takeAll())) ~~>
-            = Type FName [ SkipAngle ] ParamList ExternBody ;
+            = Type FName [ TParams ] ParamList ExternBody ;
 ExternFnPlain <~~ push(makeFuncDecl(takeAll())) ~~>
-            = FName [ SkipAngle ] ParamList ExternBody ;
+            = FName [ TParams ] ParamList ExternBody ;
 ExternGetter <~~ push(makeTopAccessor(true, takeAll())) ~~>
             = KwGet FName ExternBody | Type KwGet FName ExternBody ;
 ExternSetter <~~ push(makeTopAccessor(false, takeAll())) ~~>
@@ -114,7 +114,7 @@ AnnPart     = KwNew | Id ;
 // then (after a ";") the ordinary members of an enhanced enum. Every value gets .index
 // and .name, and the enum itself a static .values list.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum [ KwConst ] CName [ SkipAngle ] [ PrimaryCtor ] [ WithClause ] [ ImplementsClause ]
+            = KwEnum [ KwConst ] CName [ ClsTParams ] [ PrimaryCtor ] [ WithClause ] [ ImplementsClause ]
               "{" EnumValue { "," EnumValue } [ "," ] [ ";" { Member } ] "}" ;
 EnumValue   <~~ push(makeEnumValue(takeAll())) ~~>
             = EVName [ SkipAngle ] [ EnumArgs ] ;
@@ -123,7 +123,7 @@ EnumArgs    <~~ push({eargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] "
 // A mixin is a class body with no constructor. Its `on` type is the superclass interface
 // it may call through with super, so it becomes the mixin descriptor's __super.
 MixinDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ MixinMods ] KwMixin [ KwClass ] CName [ SkipAngle ] [ PrimaryCtor ]
+            = [ MixinMods ] KwMixin [ KwClass ] CName [ ClsTParams ] [ PrimaryCtor ]
               [ KwOn OnType { "," OnType } ] [ ImplementsClause ] ClassBody ;
 OnType      <~~ push({con: up.in}) ~~> = TypeNamed ;
 // extension Name on T { ... } adds members to an existing type; extension type N(T v)
@@ -135,9 +135,9 @@ ExtensionDecl = ExtensionType | ExtensionOn ;
 // matched the `on` keyword itself and KwOn then failed. Two full alternatives instead.
 ExtensionOn = ExtensionNamed | ExtensionAnon ;
 ExtensionNamed <~~ push(makeExtensionStmt(takeAll())) ~~>
-            = KwExtension EXName [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+            = KwExtension EXName [ TParams ] KwOn ExtOnType "{" { Member } "}" ;
 ExtensionAnon <~~ push(makeExtensionStmt(takeAll())) ~~>
-            = KwExtension [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+            = KwExtension [ TParams ] KwOn ExtOnType "{" { Member } "}" ;
 EXName      <~~ push({exname: up.in}) ~~> = Id ;
 // The members that follow are NOT a class's, so the accessor/operator tables must not
 // attribute them to whatever class was declared last: curClassName is parked on a name
@@ -149,13 +149,38 @@ ExtensionType <~~ push(makeExtTypeStmt(takeAll())) ~~>
 ETCtorName  = Id ;
 ExtTypeField <~~ push({etfield: popName()}) ~~>
             = [ ParamMods ] Type Id <~~ push({mname: up.in}) ~~> ;
-// A typedef only names a type, and all types are erased here, so it compiles to nothing.
+// A typedef DECLARES no code - but it NAMES a type, and `f is IntFn` tests the type it
+// names (Dart language spec, "Type Aliases": a type alias denotes the aliased type, and
+// the runtime type test is the test of THAT type). So the name and its target are
+// recorded here and dtResolve expands them at the test site; the declaration itself still
+// compiles to nothing. The two legacy forms declare a FUNCTION type by construction.
 TypedefDecl <~~ push(function(b) { return b }) ~~>
             = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
-TypedefNew  = Id [ SkipAngle ] "=" Type ";" ;
-TypedefOld  = Type Id [ SkipAngle ] SkipParen ";" ;
+TypedefNew  = TdName [ TParams ] "=" TdTarget ";" ;
+TypedefOld  = Type TdName [ TParams ] TdParen ";" ;
 // The legacy form with no return type: typedef Handler(bool e);
-TypedefBare = Id [ SkipAngle ] SkipParen ";" ;
+TypedefBare = TdName [ TParams ] TdParen ";" ;
+TdName      <~~ tdCur = up.in; tpPending = [] ~~> = Id ;
+TdTarget    <~~ tdReg(tdCur, up.in) ~~> = Type ;
+TdParen     <~~ tdReg(tdCur, "Function") ~~> = SkipParen ;
+
+// A type-PARAMETER list, as opposed to a type-ARGUMENT list: `<T>` in `class Box<T>` and
+// in `void f<T>()` binds T, while `<int>` in `Box<int>()` supplies it. Only the binding
+// positions use these rules, because only they may erase a name. ClsTParams also records
+// the list POSITIONALLY against the class, which is what makes `Box<int>()` reifiable;
+// TParams (functions, methods, typedefs, extensions) only notes the names, because this
+// front end does no call-site inference and has nowhere to read them from.
+// It is a real parse and not a SkipAngle scan because `up.in` arrives with the whitespace
+// already removed - `<T extends num>` reads as `<Textendsnum>`, and the bound cannot be
+// told from the name in it. TPSkip keeps anything this shape cannot read (a variance
+// modifier, a future syntax) parsing, recording nothing rather than recording garbage.
+TParams     = TPList | TPSkip ;
+TPList      = TPOpen TParam { "," TParam } ">" ;
+TPOpen      <~~ tpPending = [] ~~> = "<" ;
+TParam      = [ Annotations ] TPName [ KwExtends Type ] ;
+TPName      <~~ tpNote(up.in) ~~> = Id ;
+TPSkip      <~~ tpPending = [] ~~> = SkipAngle ;
+ClsTParams  <~~ tpNoteClass(curClassName) ~~> = TParams ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -168,21 +193,21 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // exactly S plus the mixins, with S's constructors forwarded. It has to be tried BEFORE
 // ClassDecl (both open with the same modifiers and name) and is told apart by the "=".
 ClassAlias  <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ ClassMods ] KwClass CName [ SkipAngle ] "=" AliasSuper [ WithClause ]
+            = [ ClassMods ] KwClass CName [ ClsTParams ] "=" AliasSuper [ WithClause ]
               [ ImplementsClause ] ";" ;
-AliasSuper  <~~ push({csuper: up.in}) ~~> = TypeNamed ;
+AliasSuper  <~~ push({csuper: up.in}); classSuperReg["$" + curClassName] = up.in ~~> = TypeNamed ;
 // A PRIMARY (declaring header) constructor, Dart 3.10: `class Point(var int x, var int y);`
 // declares two fields and the constructor that fills them, and the body may be just a ";".
 // `class const C(...)` marks that constructor const.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ ClassMods ] KwClass [ KwConst ] CName [ SkipAngle ] [ PrimaryCtor ]
+            = [ ClassMods ] KwClass [ KwConst ] CName [ ClsTParams ] [ PrimaryCtor ]
               [ ExtendsClause ] [ WithClause ] [ ImplementsClause ] ClassBody ;
 // A class body is a brace block or, for a header-constructor class, a bare ";".
 ClassBody   = ClassBraceBody | ClassSemiBody ;
 ClassBraceBody = "{" { Member } "}" ;
 ClassSemiBody = ";" ;
 PrimaryCtor <~~ push(makePrimaryCtor(pop())) ~~> = ParamList ;
-CName       <~~ push({cname: up.in}); curClassName = up.in ~~> = Id ;
+CName       <~~ push({cname: up.in}); curClassName = up.in; classNameReg["$" + up.in] = true ~~> = Id ;
 ClassMods   = { ClassMod } ;
 ClassMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" | "mixin" ) KwEnd ;
 // The same modifiers WITHOUT "mixin": a greedy ClassMods would eat the `mixin` keyword of
@@ -190,7 +215,9 @@ ClassMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" | "mixin"
 MixinMods   = MixinMod { MixinMod } ;
 MixinMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" ) KwEnd ;
 ExtendsClause = KwExtends SuperType ;
-SuperType   <~~ push({csuper: up.in}) ~~> = TypeNamed ;
+// The `extends` type is recorded WITH its arguments: `class Sub extends Box<int>` fixes
+// Box's T to int for every Sub, and that is as static as a written `Box<int>()`.
+SuperType   <~~ push({csuper: up.in}); classSuperReg["$" + curClassName] = up.in ~~> = TypeNamed ;
 WithClause  = KwWith MixinType { "," MixinType } ;
 MixinType   <~~ push({cmixin: up.in}) ~~> = TypeNamed ;
 ImplementsClause = KwImplements IfaceType { "," IfaceType } ;
@@ -240,9 +267,9 @@ NamedCtorMember <~~ push(makeCtorMember(false, takeAll())) ~~>
 // A const constructor CANONICALIZES: two creations with equal arguments are identical().
 CtorConst   <~~ push({cconst: true}) ~~> = KwConst ;
 PlainFnMember <~~ push(makeMember(false, takeAll())) ~~>
-            = [ KwConst ] MName [ SkipAngle ] ParamList [ CtorInit ] MemberBody ;
+            = [ KwConst ] MName [ TParams ] ParamList [ CtorInit ] MemberBody ;
 TypedFnMember <~~ push(makeMember(true, takeAll())) ~~>
-            = Type MName [ SkipAngle ] ParamList MemberBody ;
+            = Type MName [ TParams ] ParamList MemberBody ;
 MName       <~~ push({mn: up.in}) ~~> = Id ;
 
 // A constructor initializer list: `: assert(c), this.x = e, super(a)` or the redirect
@@ -295,9 +322,9 @@ FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
 // type does not get stuck when it is absent.
 FuncDecl    = FuncTyped | FuncPlain ;
 FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = Type FName [ SkipAngle ] ParamList FnBody ;
+            = Type FName [ TParams ] ParamList FnBody ;
 FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = FName [ SkipAngle ] ParamList FnBody ;
+            = FName [ TParams ] ParamList FnBody ;
 FName       <~~ push({fname: up.in}) ~~> = Id ;
 FnBody      = [ AsyncMod ] FnBodyKind ;
 FnBodyKind  = FBlock | FArrow ;
@@ -828,8 +855,12 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeTestExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTestExpr } ;
 // is / is! / as type tests, at relational precedence. 'as' is compiled as an identity
 // cast (operand evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
+// The postfix is a REPETITION, not one optional: Dart's relationalExpression takes a
+// chain, and `o as Shape is Shape` used to fail to parse - the whole program, not just
+// the expression. Measured against the whole dart corpus in both halves: no other output
+// changes, because a second postfix is exactly what did not parse before.
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
-            = BitOrExpr [ TypeTestOp TestType ] ;
+            = BitOrExpr { TypeTestOp TestType } ;
 // The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
 // with the conditional operator, and a PEG's greedy optional never gives it back, so
 // `o is Shape ? a : b` ate the "?" as a nullable marker and then failed at the ":" with
@@ -1102,7 +1133,11 @@ NewExpr     = KwNew CallMember ;
 
 // f(args): a top level function, a builtin, or (when the name is a class) a constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = Id <~~ push(up.in) ~~> [ CallTArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+// `Box<int>()` supplies Box's type argument. Dart REIFIES it (spec, "Generics": type
+// arguments are available at run time and `is` tests the instantiated type), so the text
+// is carried to makeCall and stamped on the fresh instance.
+CallTArgs   <~~ push({ctypeargs: up.in}) ~~> = TypeArgs ;
 
 // A call argument is positional (a bare expression, pushed as a thunk) or named
 // (name: expr, pushed as a {named, val} marker collected into a trailing options dict).
@@ -1540,6 +1575,190 @@ KwSuper     = "super" KwEnd ;
         }
     }
 
+    // ----- type aliases and type parameters -----
+    // Both are NAMES that stand for another type, and before this every one of them fell
+    // through js_dartis to the shared __class walk, which knows only real classes and so
+    // answered false. The interpreter half carries the same two registries and the same
+    // dtResolve; see its comment for the rules and their spec citations. The split here is
+    // that a TYPEDEF resolves statically (the target text is known at emit time) while a
+    // TYPE PARAMETER resolves at RUN time, out of the instance's `__ta$T` slot, because
+    // the type argument is per-instance.
+    var typedefReg = {}    // alias name -> target type text
+    var typedefTPReg = {}  // alias name -> its own type parameters, in order
+    var tparamReg = {}     // every declared type-PARAMETER name in the program
+    var classTPReg = {}    // class name -> its type parameters, in order
+    var classNameReg = {}  // every declared class name: it stands in where nothing else can
+    var classSuperReg = {} // class name -> its `extends` type, arguments included
+    var tdCur = ""
+    function tdReg(n, target) {
+        if (n == "") { return }
+        typedefReg["$" + n] = stripWs(target)
+        // Its own type parameters, so `typedef Nested<T> = List<T>` can substitute.
+        typedefTPReg["$" + n] = tpPending
+        tpPending = []
+    }
+    // TPName / ClsTParams feed these: tpPending collects one list's names in order, and
+    // the class rule takes it.
+    var tpPending = []
+    function tpNote(n) {
+        if (n != "") { tparamReg["$" + n] = true; tpPending.push(n) }
+    }
+    function tpNoteClass(cls) {
+        if (cls != "" && cls != "0ext") { classTPReg["$" + cls] = tpPending }
+        tpPending = []
+    }
+    // A GENERIC typedef substitutes: `typedef Nested<T> = List<T>` makes `Nested<int>`
+    // stand for `List<int>`, so the arguments written at the use site replace the
+    // parameters in the target text. Identifier-wise, so `List` is not touched by a
+    // parameter called `L`.
+    function dtSubst(t, ps, as) {
+        if (ps.length == 0) { return t }
+        var out = ""
+        var cur = ""
+        for (var i = 0; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            var isId = (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95 || cc == 36
+                       || (cur.length > 0 && cc >= 48 && cc <= 57)
+            if (isId) { cur = cur + t.charAt(i); continue }
+            out = out + dtSubst1(cur, ps, as) + t.charAt(i)
+            cur = ""
+        }
+        return out + dtSubst1(cur, ps, as)
+    }
+    function dtSubst1(w, ps, as) {
+        for (var i = 0; i < ps.length; i++) { if (ps[i] == w && i < as.length) { return as[i] } }
+        return w
+    }
+    function dtBase(t) {
+        var s = stripWs(t)
+        var i = s.indexOf("<")
+        if (i >= 0) { s = s.substring(0, i) }
+        if (s.length > 0 && s.charAt(s.length - 1) == "?") { s = s.substring(0, s.length - 1) }
+        return s
+    }
+    function dtOpt(t) {
+        var s = stripWs(t)
+        return (s.length > 0 && s.charAt(s.length - 1) == "?") ? "?" : ""
+    }
+    // A function TYPE: `int Function(int)`, `void Function()`. stripWs has already run, so
+    // the test is "names Function and ends in a parameter list". The value model has no
+    // function SIGNATURE, so every function type collapses to `Function`: `f is IntFn` is
+    // answerable, `f is StrFn` cannot be refused. Recorded in the :description block.
+    function dtIsFnType(t) {
+        var s = stripWs(t)
+        if (s.length == 0 || s.charAt(s.length - 1) != ")") { return false }
+        return s.indexOf("Function(") >= 0
+    }
+    // Expand the typedefs out of a type name. A cap rather than a visited set: a cyclic
+    // typedef is a compile error in Dart and the walk must terminate, not diagnose it.
+    function dtResolveStatic(tname) {
+        var out = stripWs(tname)
+        var hops = 0
+        while (hops < 8) {
+            hops = hops + 1
+            var b = dtBase(out)
+            if (b == "" || typedefReg["$" + b] == undefined) { break }
+            out = dtSubst(typedefReg["$" + b], typedefTPReg["$" + b], dtArgTexts(out)) + dtOpt(out)
+        }
+        if (dtIsFnType(out)) { return "Function" }
+        return out
+    }
+    // The type-PARAMETER name a (typedef-expanded) type resolves to, or "" when it names a
+    // real type.
+    function dtTParamOf(tname) {
+        var b = dtBase(tname)
+        if (b == "" || tparamReg["$" + b] == undefined) { return "" }
+        return b
+    }
+    // What a type-parameter name means where the receiver cannot supply an argument: the
+    // declared class of that name if there is one, and dynamic otherwise.
+    function dtTParamFallback(nm) {
+        if (classNameReg["$" + nm] != undefined) { return nm }
+        return "dynamic"
+    }
+    // (scope, "__ta$T", fallback) -> the type argument this instance was created with, or
+    // the fallback. The instance answers FIRST, and that is what makes a type parameter
+    // and a same-named class both work: inside `class Box<T>` the receiver carries __ta$T,
+    // so T is Box's parameter (which is what shadows the class in Dart); at a site with no
+    // such receiver - a static or top-level generic, a bare `Box()`, an instance built
+    // through a path that carries no arguments - the fallback stands in.
+    function rtTArg() {
+        return rtFunc("dt_targ", 3, function(b, ps) {
+            var dynB = curF.NewBlock("")
+            var probeB = curF.NewBlock("")
+            var tt = callExt(b, "js_scope_typeof", [ps[0], emitStr(b, "this")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tt, emitStr(b, "undefined")])), dynB, probeB)
+            var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
+            var hitB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, dynB)
+            hitB.NewRet(mV)
+            dynB.NewRet(ps[2])
+        })
+    }
+    // The top-level elements of a type-ARGUMENT list, whole: `<int, List<String>>` gives
+    // "int" and "List<String>", whitespace already removed by the engine.
+    function dtArgTexts(txt) {
+        var out = []
+        var depth = 0
+        var cur = ""
+        for (var i = 0; i < txt.length; i++) {
+            var ch = txt.charAt(i)
+            if (ch == "<") { depth = depth + 1; if (depth == 1) { continue } }
+            if (ch == ">") { depth = depth - 1; if (depth == 0) { break } }
+            if (depth == 1 && ch == ",") { out.push(stripWs(cur)); cur = ""; continue }
+            // Only inside the brackets: the input may be a whole type (`Box<int>`) and the
+            // head is not one of its arguments.
+            if (depth >= 1) { cur = cur + ch }
+        }
+        if (stripWs(cur) != "") { out.push(stripWs(cur)) }
+        return out
+    }
+    // Write the type arguments onto the fresh instance: the ones written at the creation
+    // site for the class's own parameters, then the ones written in each `extends` clause
+    // up the chain. A parameter with no argument anywhere stays absent, which rtTArg reads
+    // as the declared class of that name or dynamic. `done` keeps the nearest binding: the
+    // creation site's arguments must not be overwritten by an inherited default.
+    function dtStamp(b, objV, clsName, targs) {
+        var done = {}
+        dtStampOne(b, objV, clsName, targs, done)
+        var cur = clsName
+        var hops = 0
+        while (hops < 16) {
+            hops = hops + 1
+            var sup = classSuperReg["$" + cur]
+            if (sup == undefined) { break }
+            var sb = dtBase(sup)
+            if (sb == "" || sb == cur) { break }
+            dtStampOne(b, objV, sb, sup, done)
+            cur = sb
+        }
+    }
+    function dtStampOne(b, objV, clsName, targs, done) {
+        if (targs == "" || classTPReg["$" + clsName] == undefined) { return }
+        var ps = classTPReg["$" + clsName]
+        var raw = dtArgTexts(targs)
+        for (var i = 0; i < ps.length; i++) {
+            if (i >= raw.length || ps[i] == "" || raw[i] == "") { continue }
+            if (done["$" + ps[i]] != undefined) { continue }
+            done["$" + ps[i]] = 1
+            // `class Sub<X> extends Box<X>`: the superclass argument is the subclass's own
+            // parameter, so what carries up is its VALUE, not the letter. js_get of an
+            // absent slot answers undefined, which rtTArg reads as "no argument".
+            if (tparamReg["$" + raw[i]] != undefined) {
+                callExt(b, "js_set", [objV, emitStr(b, "__ta$" + ps[i]),
+                                      callExt(b, "js_get", [objV, emitStr(b, "__ta$" + raw[i])])])
+                callExt(b, "js_set", [objV, emitStr(b, "__taE$" + ps[i]),
+                                      callExt(b, "js_get", [objV, emitStr(b, "__taE$" + raw[i])])])
+                continue
+            }
+            callExt(b, "js_set", [objV, emitStr(b, "__ta$" + ps[i]), emitStr(b, raw[i])])
+            var ea = typeArgOf(raw[i])
+            if (ea != "") {
+                callExt(b, "js_set", [objV, emitStr(b, "__taE$" + ps[i]), emitStr(b, ea)])
+            }
+        }
+    }
     // One runtime type test, as the interpreter half's dartIsType answers it. Factored out
     // of makeTypeTest because a TYPED PATTERN needs exactly the same answer, down to the
     // element-type refinement: two spellings of the test are two behaviours, and the
@@ -1552,7 +1771,35 @@ KwSuper     = "super" KwEnd ;
     // The trailing '?' has to survive: baseName strips it, and `null is int?` is TRUE
     // while `null is int` is false. A '?' inside the type arguments (List<int?>) is not
     // the type's own, so only a FINAL one counts.
-    function emitDartIsType(b, val, tname) {
+    function emitDartIsType(b, val, tnameIn) {
+        var tname = dtResolveStatic(tnameIn)
+        // A type parameter: the name to test is only known at run time.
+        var tp = dtTParamOf(tname)
+        if (tp != "") {
+            var fb = dtTParamFallback(tp)
+            var nv = b.NewCall(rtTArg(), [curScopeV, emitStr(b, "__ta$" + tp), emitStr(b, fb)])
+            if (dtOpt(tname) == "?") { nv = callExt(b, "js_add", [nv, emitStr(b, "?")]) }
+            var tv = callExt(b, "js_dartis", [val, nv])
+            // The same element-type refinement the static path does below, over a type
+            // argument that is only known at run time: `Coll<List<int>>().t(<String>["a"])`
+            // is FALSE, and without this the compiler half said true while the interpreter
+            // half - which resolves the whole name and re-enters its own List arm - said
+            // false. The creation site stamps the element type beside the type argument
+            // (__taE$T) precisely so this does not need string surgery in IR.
+            if (anyTypedColl) {
+                var eaV = b.NewCall(rtTArg(), [curScopeV, emitStr(b, "__taE$" + tp),
+                                               emitStr(b, typeArgOf(fb))])
+                var er0 = emitETGet(b, val)
+                b = er0.b
+                // No element type on either side means no refinement; js_band is BITWISE,
+                // so the double negation gives back a bool (see the static path).
+                var okV = callExt(b, "js_bor", [callExt(b, "js_seq", [eaV, emitStr(b, "")]),
+                          callExt(b, "js_bor", [callExt(b, "js_seq", [er0.v, emitStr(b, "")]),
+                                                callExt(b, "js_seq", [er0.v, eaV])])])
+                tv = callExt(b, "js_not", [callExt(b, "js_not", [callExt(b, "js_band", [tv, okV])])])
+            }
+            return {b: b, v: tv}
+        }
         var tn = baseName(tname)
         var targ = typeArgOf(tname)
         var rawT = stripWs(tname)
@@ -1579,10 +1826,14 @@ KwSuper     = "super" KwEnd ;
     // value it does not recognize, so it is safe on any operand).
     function makeTypeTest(items) {
         if (items.length == 1) { return items[0] }
-        var operand = items[0]
-        var mk = items[1]
+        var t = items[0]
+        for (var i = 1; i + 1 < items.length; i += 2) {
+            t = makeTypeTest1(t, items[i], items[i + 1].tname)
+        }
+        return t
+    }
+    function makeTypeTest1(operand, mk, tname) {
         if (mk.tt == "as") { return operand }
-        var tname = items[2].tname
         var neg = stripWs(mk.tt) != "is"
         return function(b) {
             var r = operand(b)
@@ -1676,7 +1927,11 @@ KwSuper     = "super" KwEnd ;
                         // errors and exceptions, so `on Exception catch` claims a
                         // FormatException, and falls through to the shared __class
                         // walk for a user class.
-                        b.NewCondBr(truthy(b, callExt(b, "js_dartis", [ev, emitStr(b, cl.catchtype)])), bodyB, nextB)
+                        // emitDartIsType, not a bare js_dartis: `on MyAlias catch` and
+                        // `on T catch` have to resolve the same way the `is` operator does.
+                        var ctr = emitDartIsType(b, ev, cl.catchtype)
+                        b = ctr.b
+                        b.NewCondBr(truthy(b, ctr.v), bodyB, nextB)
                     } else { b.NewBr(bodyB) }
                     // A clause with its own binder name aliases it to the closure's
                     // parameter, so `on T catch (e)` sees the caught value as `e`.
@@ -1991,7 +2246,13 @@ KwSuper     = "super" KwEnd ;
     // ----- calls and construction -----
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var targs = ""
+        var args = []
+        for (var ci = 1; ci < items.length; ci++) {
+            if (items[ci] != undefined && items[ci] != null && items[ci].ctypeargs != undefined) {
+                targs = items[ci].ctypeargs
+            } else { args.push(items[ci]) }
+        }
         return function(b) {
             // identical(a, b) is reference equality - except for numbers, which have no
             // identity apart from their value and their type: identical(1.0, 1.0) is
@@ -2024,6 +2285,11 @@ KwSuper     = "super" KwEnd ;
                 var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                // Dart reifies a type argument: `Box<int>()` makes an instance whose T IS
+                // int, and `case T t` inside the class tests against it. The argument text
+                // is stamped on the instance before the constructor runs, in a __-prefixed
+                // slot so keysOf / js_keys / printing never see it.
+                dtStamp(b, objV, name, targs)
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
                 b = emitCallArgsInto(b, argsV, args)

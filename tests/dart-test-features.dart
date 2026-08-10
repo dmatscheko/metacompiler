@@ -146,6 +146,30 @@ class FSq implements FShape { double area() => 4.0; }
 class FSubSq extends FSq {}                 // conformance through an extends chain
 class FMix with FLoud implements FShape { double area() => 1.0; }
 
+// ----- typedef names and type PARAMETER names in a type test (docs/todo.md 2.4) -----
+// Both are names that stand for another type, and both fell through to the class-chain
+// walk, which knows only real classes: `f is FIntFn` was false and `case T t` inside
+// `class FBox<T>` never matched, in BOTH halves.
+typedef FIntFn = int Function(int);
+typedef FNames = List<String>;
+typedef FAlias = FNames;
+typedef FOldStyle(bool e);
+class FBox<T> {
+  String w(Object v) { switch (v) { case T t: return "yes"; } return "no"; }
+  bool isT(Object v) => v is T;
+  bool isNotT(Object v) => v is! T;
+  bool isTq(Object? v) => v is T?;
+}
+class FTwo<K, V> {
+  bool k(Object v) => v is K;
+  bool val(Object v) => v is V;
+}
+class FBounded<T extends num> { bool t(Object v) => v is T; }
+class FSubBox extends FBox<int> { }
+class FRelay<X> extends FBox<X> { }
+class FColl<T> { bool t(Object v) => v is T; }
+int fDouble(int x) => x * 2;
+
 int risky(int n) {
   if (n > 3) {
     throw Boom(n);
@@ -759,6 +783,45 @@ int main() {
   // and not just tested.
   check("is-typed-list-answers-a-bool", "${<int>[1, 2] is List<int>}" == "true");
   check("is-typed-list-negative", "${<int>[1, 2] is List<String>}" == "false");
+
+  // ----- typedef / type-parameter names in a type test (docs/todo.md 2.4) -----
+  // A typedef DENOTES the aliased type, so the test is the test of that type. A type
+  // parameter is REIFIED in Dart: `case T t` inside `class FBox<T>` tests the argument
+  // the instance was created with, so FBox<int> claims 3 and refuses "s" - erasing T to
+  // dynamic would have made both answer yes.
+  check("tdef-function-alias", (fDouble is FIntFn));
+  check("tdef-function-alias-negative", !(3 is FIntFn));
+  check("tdef-legacy-form", (fDouble is FOldStyle));
+  check("tdef-collection-alias", <String>["a"] is FNames);
+  check("tdef-collection-alias-element-type", !(<int>[1] is FNames));
+  check("tdef-alias-of-alias", <String>["a"] is FAlias);
+  check("tparam-pattern-matches", FBox<int>().w(3) == "yes");
+  check("tparam-pattern-refuses-other-argument", FBox<int>().w("s") == "no");
+  check("tparam-pattern-second-instantiation", FBox<String>().w("s") == "yes");
+  check("tparam-is", FBox<int>().isT(3) && !FBox<int>().isT("s"));
+  check("tparam-is-not", FBox<int>().isNotT("s"));
+  check("tparam-nullable", FBox<int>().isTq(null));
+  check("tparam-two-parameters-are-positional",
+        FTwo<int, String>().k(1) && !FTwo<int, String>().k("a") && FTwo<int, String>().val("a"));
+  check("tparam-bounded", FBounded<double>().t(1.5) && !FBounded<double>().t(1));
+  check("tparam-generic-argument", FColl<List<int>>().t(<int>[1]));
+  check("tparam-generic-argument-element-type", !FColl<List<int>>().t(<String>["a"]));
+  // The `extends` clause fixes the superclass's parameter for every instance, and a
+  // subclass that forwards its own parameter carries the VALUE, not the letter.
+  check("tparam-from-extends-clause", FSubBox().isT(3) && !FSubBox().isT("s"));
+  check("tparam-forwarded-through-subclass", FRelay<int>().isT(3) && !FRelay<int>().isT("s"));
+  // Nothing supplies an argument: Dart infers FBox<dynamic> here, and so does this.
+  check("tparam-uninstantiated-is-dynamic", FBox().isT("anything"));
+  // A boolean, not the raw 1 a bitwise js_band would leave (see is-typed-list above).
+  check("tparam-answers-a-bool", "${FBox<int>().isT(3)}" == "true");
+
+  // ----- a CHAIN of type-test postfixes parses (docs/todo.md 2.4, adjacent) -----
+  // TypeTestExpr took one optional postfix, so `o as FShape is FShape` failed to parse -
+  // the whole program, in both halves.
+  Object tchO = tpSq;
+  check("typetest-chain-as-then-is", (tchO as FShape is FShape));
+  check("typetest-chain-as-as-isnot", (tchO as FShape as FShape is! int));
+  check("typetest-chain-still-binds-below-equality", (1 is int == true));
 
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");
