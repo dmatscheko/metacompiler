@@ -118,6 +118,30 @@ check("fmt-hexfloat", "%a %A %.2a" % [3.5, 3.5, 1.0 / 3.0], "0x1.cp+1 0X1.CP+1 0
 check("fmt-hexfloat-sub", "%a" % 5.0e-324, "0x1p-1074")
 check("fmt-hexfloat-pad", "%020a" % 100.0, "0x0000000000001.9p+6")
 
+# ----- a MALFORMED format string raises, and #round/#floor/#ceil take digits ---
+# docs/todo.md 1.2 and 1.3. Both were LIVE halves divergences: 2.345.round(2) was
+# 2 in the interpreter half and 2.35 in the compiled ones, and "%5" % 5 was "%5"
+# in the two interpreted halves and "" in the native binary (layer 2's `break`
+# discarded the rest of the string). Values and messages off ruby 2.6.10.
+def mfmt(f, a)
+  begin
+    return "OK:" + (f % a)
+  rescue ArgumentError => e
+    return "AE:" + e.message
+  end
+end
+check("fmt-bad-conv", mfmt("%z", 5), "AE:malformed format string - %z")
+check("fmt-bad-width", mfmt("%5", 5), "AE:malformed format string - %*[0-9]")
+check("fmt-bad-flags", mfmt("%-", 5), "AE:invalid format character - %")
+check("fmt-bad-trail", mfmt("100%", []), "AE:incomplete format specifier; use %% (double %) instead")
+check("fmt-bad-paren", mfmt("%<x", 5), "AE:malformed name - unmatched parenthesis")
+check("fmt-bad-nl", mfmt("%\n%d", 5), "OK:%\n5")
+check("round-digits", [2.345.round(2), 2.675.round(2), 1.15.round(1)].inspect, "[2.35, 2.68, 1.2]")
+check("floor-digits", [2.345.floor(2), 2.345.ceil(2), 3.7.floor(1)].inspect, "[2.34, 2.35, 3.7]")
+check("round-neg-digits", [1234.567.round(-2), 1234.567.round(-2).class].inspect, "[1200, Integer]")
+check("round-int-digits", [15.round(-1), (-25).round(-1), 5.ceil, (-1234).floor(-20)].inspect, "[20, -30, 5, 0]")
+check("round-big-digits", 12345678901234567890.round(-5).to_s, "12345678901234600000")
+
 # ----- Float's scoped constants, and the Float -> Integer domain error -----
 # `Float::INFINITY' aborted the interpreter with *uninitialized constant* and
 # printed an EMPTY LINE in both compiled halves. #to_i of a non-finite Float

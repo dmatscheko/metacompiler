@@ -947,7 +947,15 @@ function rbABigMethod(t, name, args) {
     // An Integer is already floored, ceilinged, truncated and rounded, at any
     // digit argument a Ruby program can write here.
     if (name == "to_i" || name == "to_int" || name == "truncate") { return t }
-    if (name == "floor" || name == "ceil" || name == "round") { return t }
+    // ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
+    // 10**-ndigits, which past 2**53 has to be exact. docs/todo.md 1.2.
+    if (name == "floor" || name == "ceil" || name == "round") {
+        var bnd = 0
+        if (args.length > 0) { bnd = Math.trunc(rbToF(args[0])) }
+        var bmd = "r"
+        if (name == "floor") { bmd = "f" } else if (name == "ceil") { bmd = "c" }
+        return rbNumDigitOp(0, t, true, bmd, bnd)
+    }
     if (name == "to_f") { return rbMkFlo(rbABigToF(t)) }
     if (name == "abs" || name == "magnitude") { return rbABigNarrow(rbABigAbs(t)) }
     if (name == "zero?") { return rbABigIsZero(t) }
@@ -1056,6 +1064,250 @@ function rbZeroSign(x) {
     if (x < 0) { return z / (0 - 1) }
     if (x == 0 && 1 / x < 0) { return z / (0 - 1) }
     return z
+}
+
+// ----- Float#round / #floor / #ceil AND Integer#round / #floor / #ceil with a
+// DIGIT COUNT -----------------------------------------------------------------
+//
+// This file applied `Math.floor(x * 10**n + 0.5) / 10**n` for #round and IGNORED
+// ndigits outright for #floor / #ceil, where ruby-interpreter.abnf ignored it for
+// all three - a live halves divergence (2.345.round(2) was 2 there and 2.35 here)
+// on top of three defects both halves shared: half-away-from-zero where MRI
+// corrects toward the DECIMAL the double prints as, a Float where a negative
+// ndigits answers an INTEGER, and Infinity/NaN where MRI answers the receiver.
+//
+// Measured against /usr/bin/ruby 2.6.10 (Float#round is unchanged in 3.x):
+//
+//     2.345.round(2)   2.35     (2.345 is really 2.3449999999999997513)
+//     2.675.round(2)   2.68     (2.675 is really 2.6749999999999998224)
+//     3.7.floor(1)     3.7      2.345.floor(2)  2.34    2.345.ceil(5)  2.34501
+//     1234.567.round(-2) -> the Integer 1200, and (…).class is Integer
+//     1.7976931348623157e308.round(1) -> itself, where x*10 is Infinity
+//     5e-324.round(374) -> NaN, because MRI's own pow(10, 374) is Infinity
+//
+// So this is MRI's algorithm (numeric.c) and not an approximation of it; the
+// twins are floBinExp/floDigitRound/intDigitOp in languages/ruby-interpreter.abnf
+// and rubyFloDigitRound/rubyIntDigitOp in abnf/jsrt.go (which asks math.Frexp
+// for the binary exponent the other two compute by scaling), and the
+// three agree by construction because every step is the same double arithmetic.
+// docs/todo.md 1.2.
+
+// frexp's exponent: the e with x == m * 2**e and 0.5 <= |m| < 1. x must be finite
+// and non-zero. The 2**32 steps keep a subnormal off a 1074-iteration loop.
+function rbFloBinExp(x) {
+    var v = Math.abs(x)
+    var e = 0
+    while (v >= 4294967296) { v = v / 4294967296 ; e = e + 32 }
+    while (v >= 1) { v = v / 2 ; e = e + 1 }
+    while (v * 4294967296 < 1) { v = v * 4294967296 ; e = e - 32 }
+    while (v < 0.5) { v = v * 2 ; e = e - 1 }
+    return e
+}
+
+// C's integer division, which TRUNCATES toward zero - Math.floor answers -358
+// where C answers -357 for -1073/3, and MRI's two guards are written in C.
+function rbCTruncDiv(n, d) {
+    var q = n / d
+    if (q < 0) { return Math.ceil(q) }
+    return Math.floor(q)
+}
+
+// 10**ndigits * 2**binexp is past the mantissa: every digit asked for is already
+// there, so the receiver IS the answer. And the other end: the value is entirely
+// below the last digit asked for.
+function rbFloRoundOver(nd, be) {
+    if (be > 0) { return nd >= 17 - rbCTruncDiv(be, 4) }
+    return nd >= 17 - (rbCTruncDiv(be, 3) - 1)
+}
+function rbFloRoundUnder(nd, be) {
+    if (be > 0) { return nd < 0 - (rbCTruncDiv(be, 3) + 1) }
+    return nd < 0 - rbCTruncDiv(be, 4)
+}
+
+// 10**nd as a DOUBLE, by PARSING the decimal rather than by Math.pow. The tag
+// engine of ruby-interpreter.abnf keeps an integral value as a sized integer and
+// its integer power WRAPS (Math.pow(10, 20) is 10**20 mod 2**64 there), and here
+// Math.pow is the C floor's d_pow - a third implementation to agree with. Parsing
+// is exact in all three engines and answers Infinity past 1e308, which is what
+// MRI's own pow() does.
+function rbPow10(nd) { return parseFloat("1e" + nd) }
+
+// C's round(): half away from zero, and EXACT - `Math.floor(v + 0.5)` answers 1
+// for the largest double below 0.5, because the addition itself rounds up.
+function rbCRound(v) {
+    var t = Math.trunc(v)
+    var d = v - t
+    if (d >= 0.5) { return t + 1 }
+    if (d <= 0 - 0.5) { return t - 1 }
+    return t
+}
+
+// The three ndigits > 0 bodies. round_half_up is C's round() plus the correction
+// that makes 2.675.round(2) == 2.68: if the double `(f + 0.5) / s` is <= x then x
+// is at or past the midpoint whatever the scaled product said. That correction is
+// why rtExactDec is NOT used here - the true decimal expansion would answer 2.67.
+// A zero result carries the receiver's sign (-0.05.ceil(1) is -0.0 in MRI).
+function rbFloDigitRound(x, nd) {
+    var be = rbFloBinExp(x)
+    if (rbFloRoundOver(nd, be)) { return x }
+    if (rbFloRoundUnder(nd, be)) { return 0 }
+    var s = rbPow10(nd)
+    var f = rbCRound(x * s)
+    if (x > 0) {
+        if ((f + 0.5) / s <= x) { f = f + 1 }
+    } else {
+        if ((f - 0.5) / s >= x) { f = f - 1 }
+    }
+    var r = f / s
+    if (r == 0) { return rbZeroSign(x) }
+    return r
+}
+function rbFloDigitFloor(x, nd) {
+    var be = rbFloBinExp(x)
+    if (rbFloRoundOver(nd, be)) { return x }
+    if (x > 0 && rbFloRoundUnder(nd, be)) { return 0 }
+    var s = rbPow10(nd)
+    var r = Math.floor(x * s) / s
+    if (r == 0) { return rbZeroSign(x) }
+    return r
+}
+function rbFloDigitCeil(x, nd) {
+    var be = rbFloBinExp(x)
+    if (rbFloRoundOver(nd, be)) { return x }
+    if (x < 0 && rbFloRoundUnder(nd, be)) { return 0 }
+    var s = rbPow10(nd)
+    var r = Math.ceil(x * s) / s
+    if (r == 0) { return rbZeroSign(x) }
+    return r
+}
+
+// MRI's int_round_zero_p, and it is NOT an optimisation that happens to agree
+// with the arithmetic - it OVERRIDES it. numeric.c: "If 10**N / 2 > num, then
+// return 0", decided on the receiver's BYTE SIZE with log_256(10) > 0.415241 and
+// log_256(1/2) == -0.125, where a Fixnum's size is sizeof(long) == 8 whatever the
+// value is. So `(-1234).floor(-20)` is 0 in MRI where the arithmetic says
+// -10**20. Measured, first-zero-at: -20 for every Fixnum and for 2**63, -22 for
+// 2**64 (9 bytes), -32 for 2**100 (13), -63 for 2**200 (26), -304 for 2**1000
+// (126), -309 for Float::MAX floored (128).
+function rbIntByteSize(v) {
+    var bits = 0
+    if (rbIsBig(v)) {
+        bits = rbABigBinDigits(v).length
+    } else {
+        var m = Math.abs(v)
+        while (m >= 1) {
+            m = Math.floor(m / 2)
+            bits = bits + 1
+        }
+    }
+    var bytes = Math.floor((bits + 7) / 8)
+    if (bytes < 8) { bytes = 8 }
+    return bytes
+}
+function rbIntRoundZero(v, k) { return 0.415241 * k - 0.125 > rbIntByteSize(v) }
+
+// "199" -> "200". A decimal string incremented by one, carry and all.
+function rbDecIncr(s) {
+    var i = s.length - 1
+    var out = ""
+    var carry = 1
+    while (i >= 0) {
+        var d = s.charCodeAt(i) - 48 + carry
+        if (d == 10) { d = 0 } else { carry = 0 }
+        out = ("" + d) + out
+        i = i - 1
+    }
+    if (carry == 1) { out = "1" + out }
+    return out
+}
+
+// Integer#round / #floor / #ceil with k = -ndigits > 0, and the ndigits < 0 half
+// of the Float methods once the receiver is an Integer. Exact, and on the DECIMAL
+// STRING rather than on 10**k, because 10**k past 2**53 is not a number any of
+// these engines can multiply by. mode is "r", "f" or "c"; #round ties AWAY FROM
+// ZERO (25.round(-1) is 30, -25.round(-1) is -30).
+//
+// One deliberate NON-convergence: MRI 2.6.10's BIGNUM #ceil adds the step even
+// when the receiver is already a multiple of it - `10000000000000000000.ceil(-1)`
+// is 10000000000000000010 there, while the Fixnum `1250.ceil(-1)` is 1250. MRI
+// disagrees with itself, so this is a bug in the oracle and not a rule; the two
+// rows it costs are named in the report.
+function rbIntDigitOp(v, k, mode) {
+    if (rbIntRoundZero(v, k)) { return 0 }
+    var s = ""
+    if (rbIsBig(v)) { s = rbABigStr(v) } else { s = rbIntStr(v) }
+    var neg = s.charAt(0) == "-"
+    if (neg) { s = s.substring(1, s.length) }
+    var head = ""
+    var tail = s
+    if (k < s.length) {
+        head = s.substring(0, s.length - k)
+        tail = s.substring(s.length - k, s.length)
+    } else {
+        while (tail.length < k) { tail = "0" + tail }
+    }
+    var zeroTail = true
+    var i = 0
+    while (i < tail.length) {
+        if (tail.charAt(i) != "0") {
+            zeroTail = false
+            break
+        }
+        i = i + 1
+    }
+    var away = false
+    if (!zeroTail) {
+        if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
+        else if (mode == "f") { away = neg }
+        else { away = !neg }
+    }
+    var mag = head
+    if (mag == "") { mag = "0" }
+    if (away) { mag = rbDecIncr(mag) }
+    if (mag == "0") { return 0 }
+    var out = mag
+    var z = 0
+    while (z < k) {
+        out = out + "0"
+        z = z + 1
+    }
+    if (neg) { out = "-" + out }
+    return rbABigNarrow(rbABigFromStr(out))
+}
+
+// The one entry point the numeric method set calls. `t` is the receiver's double,
+// `isInt` says whether the receiver is an Integer (an Integer is already rounded
+// at every ndigits >= 0), `big` is the receiver itself when it is a big and null
+// otherwise, and mode is "r" / "f" / "c".
+function rbNumDigitOp(t, big, isInt, mode, nd) {
+    if (isInt) {
+        if (nd >= 0) {
+            if (big !== null) { return big }
+            return t
+        }
+        if (big !== null) { return rbIntDigitOp(big, 0 - nd, mode) }
+        return rbIntDigitOp(t, 0 - nd, mode)
+    }
+    if (nd > 0) {
+        if (t !== t || t - t !== 0) { return rbMkFlo(t) }
+        if (t == 0) { return rbMkFlo(t) }
+        if (mode == "r") { return rbMkFlo(rbFloDigitRound(t, nd)) }
+        if (mode == "f") { return rbMkFlo(rbFloDigitFloor(t, nd)) }
+        return rbMkFlo(rbFloDigitCeil(t, nd))
+    }
+    rbFloDomain(t)
+    // ndigits == 0 rounds the DOUBLE; a NEGATIVE one truncates first and then
+    // applies the Integer rule (MRI: rb_int_round(flo_truncate(num), ndigits)).
+    // 1234.567.round(-1) is 1230 and not the 1240 that rounding to 1235 first
+    // would give.
+    if (nd == 0) {
+        if (mode == "r") { return rbIntFromF(rbCRound(t)) }
+        if (mode == "f") { return rbIntFromF(Math.floor(t)) }
+        return rbIntFromF(Math.ceil(t))
+    }
+    var w = 0
+    if (mode == "r") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
+    return rbIntDigitOp(rbIntFromF(w), 0 - nd, mode)
 }
 
 function rbFmaSub(x, q, y) {
@@ -2304,6 +2556,38 @@ function rbFmtStar(spec, j, args, st) {
     return {n: Math.trunc(rbToF(v)), j: j}
 }
 
+// MRI raises ArgumentError on a malformed format string, and every engine here
+// accepted one - in three DIFFERENT ways. Measured against /usr/bin/ruby 2.6.10
+// (sprintf is unchanged in 3.x); the columns are ruby-interpreter.abnf, llvm.Run
+// and the native binary:
+//
+//     "%z" % 5     5      z     z          MRI: malformed format string - %z
+//     "%5" % 5     %5     %5    ""         MRI: malformed format string - %*[0-9]
+//     "100%" % []  100%   100%  100%       MRI: incomplete format specifier…
+//
+// The native column is THIS file's `break`, which discarded the rest of the
+// string; nothing but a native probe could see it. The messages are MRI's own,
+// chosen by what the head consumed last - see the table in ruby-interpreter.abnf.
+//
+// NOT raised, and deliberately: MRI's "too few arguments" (the decline recorded
+// at rbFmtStar above). It costs one row where MRI reports the argument shortage
+// BEFORE the malformed head, and one where a selector saves an otherwise
+// malformed head ("%1$%" % 5 is "%" in MRI). docs/todo.md 1.3.
+function rbIsFmtConv(c) {
+    return c == "d" || c == "i" || c == "u" || c == "f" || c == "s" || c == "p"
+        || c == "c" || c == "x" || c == "X" || c == "o" || c == "b" || c == "B"
+        || c == "e" || c == "E" || c == "g" || c == "G" || c == "a" || c == "A"
+}
+function rbFmtCheckConv(c) {
+    if (rbIsFmtConv(c)) { return }
+    var cc = c.charCodeAt(0)
+    // % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
+    // is NOT directly after the % ("%5\n"), are MRI's one message.
+    if (c == "%" || cc == 10 || cc == 0) { rbRaiseErr("ArgumentError", "invalid format character - %") }
+    if (cc >= 32 && cc < 127) { rbRaiseErr("ArgumentError", "malformed format string - %" + c) }
+    rbRaiseErr("ArgumentError", "malformed format string")
+}
+
 function rbFormat(spec, arg) {
     var args = [arg]
     if (rbIsArr(arg)) { args = arg }
@@ -2317,14 +2601,21 @@ function rbFormat(spec, arg) {
             continue
         }
         i = i + 1
-        if (i >= spec.length) {
+        // A MALFORMED directive is an ArgumentError in MRI, and it was accepted by
+        // all three engines here in three DIFFERENT ways - this file's `break`
+        // below DISCARDED the rest of the string, so "%5" % 5 was "" natively and
+        // "%5" in the other two. rbFmtCheckConv carries the measurements.
+        // docs/todo.md 1.3.
+        if (i >= spec.length) { rbRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead") }
+        if (spec.charAt(i) == "%") {
             out = out + "%"
             i = i + 1
             continue
         }
-        if (spec.charAt(i) == "%") {
+        // A newline or a NUL DIRECTLY after the % is the one shape MRI writes out
+        // instead of raising - "%\n" is "%\n" - and only there: "%5\n" raises.
+        if (spec.charCodeAt(i) == 10 || spec.charCodeAt(i) == 0) {
             out = out + "%"
-            i = i + 1
             continue
         }
         var left = false
@@ -2339,6 +2630,10 @@ function rbFormat(spec, arg) {
         var haveName = false
         var brace = false
         var bad = false
+        // What the directive head consumed last, which is what MRI's message at
+        // the end of the string is chosen by: 1 flags, 2 a number (a width, a
+        // precision or a *), 3 an argument SELECTOR or a <name>.
+        var tail = 0
         // ONE loop over the whole directive head, because the pieces may come in
         // any order: "% 1$d" and "%1$ d" are both " 5" in MRI.
         while (i < spec.length) {
@@ -2350,6 +2645,7 @@ function rbFormat(spec, arg) {
                 if (fc == " ") { space = true }
                 if (fc == "#") { alt = true }
                 i = i + 1
+                tail = 1
                 continue
             }
             if (fc == "<" || fc == "{") {
@@ -2367,6 +2663,7 @@ function rbFormat(spec, arg) {
                 nmk = got
                 haveName = true
                 i = e2 + 1
+                tail = 3
                 if (fc == "{") {
                     brace = true
                     break
@@ -2376,6 +2673,7 @@ function rbFormat(spec, arg) {
             if (fc == "*") {
                 var sw = rbFmtStar(spec, i + 1, args, st)
                 i = sw["j"]
+                tail = 2
                 if (sw["n"] < 0) {
                     left = true
                     width = 0 - sw["n"]
@@ -2383,7 +2681,9 @@ function rbFormat(spec, arg) {
                 continue
             }
             if (fc == ".") {
+                if (prec >= 0) { rbRaiseErr("ArgumentError", "precision given twice") }
                 i = i + 1
+                tail = 2
                 if (i < spec.length && spec.charAt(i) == "*") {
                     var sp = rbFmtStar(spec, i + 1, args, st)
                     i = sp["j"]
@@ -2413,16 +2713,28 @@ function rbFormat(spec, arg) {
                 if (i < spec.length && spec.charAt(i) == "$") {
                     sel = dn2 - 1
                     i = i + 1
+                    tail = 3
                     continue
                 }
                 width = dn2
+                tail = 2
                 continue
             }
             break
         }
         var conv = "s"
         if (!brace) {
-            if (bad || i >= spec.length) { break }
+            if (bad) { rbRaiseErr("ArgumentError", "malformed name - unmatched parenthesis") }
+            if (i >= spec.length) {
+                if (tail == 2) { rbRaiseErr("ArgumentError", "malformed format string - %*[0-9]") }
+                if (tail != 3) { rbRaiseErr("ArgumentError", "invalid format character - %") }
+                // A selector or a <name> that ran off the end writes a bare "%" in
+                // MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
+                // "%<x>" % 5 is *one hash required*.
+                if (haveName) { rbFmtNamed(args, nmk, "<", ">") }
+                out = out + "%"
+                break
+            }
             conv = spec.charAt(i)
             i = i + 1
         }
@@ -2435,6 +2747,9 @@ function rbFormat(spec, arg) {
         // The positional cursor moves ONCE, here, rather than in each conversion
         // arm: the arms no longer decide which argument they get.
         if (!haveName && sel < 0) { st["ai"] = st["ai"] + 1 }
+        // AFTER the argument, because MRI resolves the name first: "%<x>z" % 5 is
+        // *one hash required* and not *malformed format string - %z*.
+        if (!brace) { rbFmtCheckConv(conv) }
         var body = ""
         var nonFinite = false
         // The 0 flag's fill character and the number of leading characters it has
@@ -4112,22 +4427,15 @@ function rbNumMethod(t, name, args) {
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
         return Math.abs(x)
     }
-    if (name == "floor") {
-        rbFloDomain(x)
-        return rbIntFromF(Math.floor(x))
-    }
-    if (name == "ceil") {
-        rbFloDomain(x)
-        return rbIntFromF(Math.ceil(x))
-    }
-    if (name == "round") {
-        if (args.length == 0) { rbFloDomain(x) }
-        if (args.length > 0) {
-            var p = Math.pow(10, rbToF(args[0]))
-            return rbMkFlo(Math.floor(x * p + 0.5) / p)
-        }
-        if (x < 0) { return rbIntFromF(-Math.floor(-x + 0.5)) }
-        return rbIntFromF(Math.floor(x + 0.5))
+    // #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
+    // one answers a Float (and does not raise on an infinity); 0 and negatives
+    // answer an Integer. rbNumDigitOp is the whole rule. docs/todo.md 1.2.
+    if (name == "floor" || name == "ceil" || name == "round") {
+        var nd = 0
+        if (args.length > 0) { nd = Math.trunc(rbToF(args[0])) }
+        var md = "r"
+        if (name == "floor") { md = "f" } else if (name == "ceil") { md = "c" }
+        return rbNumDigitOp(x, null, isInt, md, nd)
     }
     if (name == "zero?") { return x == 0 }
     if (name == "positive?") { return x > 0 }

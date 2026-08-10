@@ -2329,11 +2329,165 @@ def s43
   check("cm43h", "abc".upcase == "ABC" && "ABC".downcase == "abc" && "".upcase == "")
 end
 
+# ===== SECTION 44: #round / #floor / #ceil with a DIGIT COUNT =====
+# docs/todo.md 1.2. Every engine ignored ndigits for #floor / #ceil, and for
+# #round ruby-interpreter.abnf ignored it while the two compiled halves applied
+# `floor(x * 10**n + 0.5) / 10**n` - a LIVE halves divergence (2.345.round(2) was
+# 2 in one half and 2.35 in the other) sitting on top of three defects all three
+# shared: half-away-from-zero where MRI corrects toward the DECIMAL the double
+# prints as, a Float where a negative ndigits answers an INTEGER, and
+# Infinity/NaN where MRI answers the receiver.
+#
+# Every expected value below was read off /usr/bin/ruby 2.6.10, whose
+# Float#round / #floor / #ceil are unchanged in 3.x. THIS SECTION RUNS UNDER
+# REAL RUBY unchanged, which is how it was checked.
+def s44
+  # The correction that makes MRI round the decimal the double PRINTS as. 2.345
+  # is really 2.3449999999999997513 and 2.675 is 2.6749999999999998224, so an
+  # honest half-up on the true value answers 2.34 and 2.67.
+  check("rd44a", 2.345.round(2) == 2.35 && 2.675.round(2) == 2.68 && 1.15.round(1) == 1.2)
+  # ...and #floor / #ceil do NOT get that correction: they are the plain scaled
+  # floor and ceil, so they see the true value.
+  check("rd44b", 2.345.floor(2) == 2.34 && 2.345.ceil(2) == 2.35 && 2.345.ceil(5) == 2.34501)
+  check("rd44c", 3.7.floor(1) == 3.7 && 3.7.ceil(1) == 3.7 && 1.15.floor(5) == 1.14999)
+  check("rd44d", 9.995.round(2) == 10.0 && 9.995.floor(10) == 9.9949999999 && 0.135.round(2) == 0.14)
+  check("rd44e", 0.125.round(2) == 0.13 && 0.05.round(1) == 0.1 && (-1.5e-5).round(5) == -2.0e-05)
+  # The RESULT TYPE rule: a positive ndigits answers a Float, 0 and negatives an
+  # Integer. This is the row the compiled halves failed outright - they answered
+  # the Float 1200.0 where MRI answers the Integer 1200.
+  check("rd44f", 1234.567.round(-2) == 1200 && 1234.567.round(-2).class == Integer)
+  check("rd44g", 1234.567.round(2).class == Float && 1234.567.round(0).class == Integer)
+  check("rd44h", 1234.567.round(-1) == 1230 && 1234.567.floor(-2) == 1200 && 1234.567.ceil(-2) == 1300)
+  check("rd44i", 2.345.floor(-1) == 0 && 2.345.ceil(-1) == 10 && 2.345.round(-1) == 0)
+  # A NEGATIVE ndigits TRUNCATES the float first and then applies the Integer
+  # rule: rounding to 1235 first would answer 1240 here.
+  check("rd44j", 1234.567.round(-1) == 1230)
+  # ndigits == 0 and the no-argument form: C's round(), half AWAY FROM ZERO.
+  check("rd44k", 2.5.round == 3 && (-2.5).round == -3 && 0.5.round == 1 && (-1.15).floor == -2)
+  # The OVERFLOW guard: 10**n * 2**binexp past the mantissa answers the receiver,
+  # which is also what keeps x * 10**n off Infinity.
+  fmax = 1.7976931348623157e308
+  check("rd44l", fmax.round(1) == fmax && fmax.floor(5) == fmax && fmax.ceil(300) == fmax)
+  check("rd44m", 2.345.round(17) == 2.345 && 9.995.floor(16) == 9.995 && 9.995.floor(15) == 9.995)
+  # ...and the UNDERFLOW guard, plus the one place MRI's own pow() overflows and
+  # it answers NaN rather than the receiver.
+  tiny = 5.0e-324
+  check("rd44n", tiny.ceil(20) == 1.0e-20 && tiny.round(1) == 0.0 && tiny.round(374).nan?)
+  check("rd44o", 1.0e-320.ceil(300) == 1.0e-300 && (-1.0e-10).floor(5) == -1.0e-05)
+  # A zero result keeps the receiver's SIGN.
+  check("rd44p", (1.0 / (-0.05).ceil(1)) < 0 && (1.0 / (-0.0).floor(3)) < 0 && 0.0.round(2) == 0.0)
+  # A non-finite receiver answers ITSELF for a positive ndigits and raises
+  # FloatDomainError for 0 and negatives.
+  inf = 1.0 / 0.0
+  check("rd44q", inf.floor(2) == inf && inf.round(5) == inf && (0.0 / 0.0).ceil(3).nan?)
+  raised = 0
+  begin
+    inf.floor(0)
+  rescue FloatDomainError => e
+    raised = 1 if e.message == "Infinity"
+  end
+  begin
+    inf.round(-2)
+  rescue FloatDomainError
+    raised = raised + 1
+  end
+  check("rd44r", raised == 2)
+  # Integer#round / #floor / #ceil. #ceil and #round were absent from the plain
+  # Integer arm outright - `5.ceil` aborted with *unknown Integer method: ceil*.
+  check("rd44s", 5.ceil == 5 && 5.round == 5 && 5.floor == 5 && 15.round(2) == 15)
+  check("rd44t", 15.round(-1) == 20 && 25.round(-1) == 30 && (-25).round(-1) == -30)
+  check("rd44u", 1250.round(-2) == 1300 && 1250.round(-1) == 1250 && 1250.floor(-2) == 1200)
+  check("rd44v", 1234.floor(-2) == 1200 && (-1234).floor(-2) == -1300 && (-1234).ceil(-2) == -1200)
+  check("rd44w", 99999.round(-5) == 100000 && 1234.round(-5) == 0 && 15.round(0) == 15)
+  # MRI's int_round_zero_p, which OVERRIDES the arithmetic: the answer is 0 as
+  # soon as -0.415241*ndigits - 0.125 exceeds the receiver's BYTE size, and a
+  # Fixnum's size is sizeof(long) == 8 whatever the value is. So the cliff is at
+  # -20 for every Fixnum, and the arithmetic answer -10**20 is never reached.
+  check("rd44x", (-1234).floor(-20) == 0 && (-1234).floor(-19) == -10000000000000000000)
+  check("rd44y", (2 ** 100).floor(-32) == 0 && 12345678901234567890.round(-22) == 0)
+  # ...and an Integer past 2**53 rounds EXACTLY, which needs the decimal and not
+  # a 10**k the double cannot hold.
+  check("rd44z", 12345678901234567890.round(-5) == 12345678901234600000 &&
+                 12345678901234567890.floor(-5) == 12345678901234500000)
+  check("rd44aa", 12345678901234567890.round(-19) == 10000000000000000000 &&
+                  12345678901234567890.round(3) == 12345678901234567890)
+  # A Float past 2**53 with a negative ndigits answers the exact Integer.
+  check("rd44ab", 1.0e20.round(-5) == 100000000000000000000 && 1.0e20.round(2) == 1.0e20)
+end
+
+# ===== SECTION 45: a MALFORMED format string raises =====
+# docs/todo.md 1.3. A directive MRI rejects was accepted here, in three
+# DIFFERENT ways: "%z" % 5 answered "5" in ruby-interpreter.abnf (its unknown
+# arm is %s) and "z" in the other two (theirs prints the letter), and "%5" % 5
+# answered "%5" in the two interpreted halves and "" in the NATIVE binary - layer
+# 2's `break` discarded the rest of the string, which nothing but a native probe
+# could see. Converging means raising, and it is the whole of the decision.
+#
+# Every message below was read off /usr/bin/ruby 2.6.10, whose sprintf is
+# unchanged in 3.x. THIS SECTION RUNS UNDER REAL RUBY unchanged.
+#
+# NOT converged, and older than this item: MRI's "too few arguments". Running
+# off the end of the ARGUMENT list answers nil in all three engines here, so
+# "%d" % [] is "0" and not a raise, and the two rows where MRI reports the
+# shortage BEFORE the malformed head ("%s%" % []) keep this file's message.
+def s45m(f, a)
+  begin
+    return "OK:" + (f % a)
+  rescue ArgumentError => e
+    return "AE:" + e.message
+  end
+end
+def s45
+  # An unknown conversion letter, printable and not.
+  check("mf45a", s45m("%z", 5) == "AE:malformed format string - %z")
+  check("mf45b", s45m("a%zb", 5) == "AE:malformed format string - %z" &&
+                 s45m("%q %d", 5) == "AE:malformed format string - %q")
+  check("mf45c", s45m("%\t", 5) == "AE:malformed format string")
+  # Ran off the end after a NUMBER (a width, a precision or a *)...
+  check("mf45d", s45m("%5", 5) == "AE:malformed format string - %*[0-9]" &&
+                 s45m("%08", 5) == "AE:malformed format string - %*[0-9]")
+  check("mf45e", s45m("%.2", 5) == "AE:malformed format string - %*[0-9]" &&
+                 s45m("%5.", 5) == "AE:malformed format string - %*[0-9]")
+  # ...after FLAGS only, which is a different message...
+  check("mf45f", s45m("%-", 5) == "AE:invalid format character - %" &&
+                 s45m("%0", 5) == "AE:invalid format character - %")
+  # ...and a bare % at the very end, which is a third.
+  check("mf45g", s45m("100%", []) == "AE:incomplete format specifier; use %% (double %) instead")
+  check("mf45h", s45m("%", 5) == "AE:incomplete format specifier; use %% (double %) instead" &&
+                 s45m("%d%", 5) == "AE:incomplete format specifier; use %% (double %) instead")
+  # % reached AS the conversion of a non-empty head is the flags message, not the
+  # escape - only "%%" directly after the % is the escape.
+  check("mf45i", s45m("%5%", 5) == "AE:invalid format character - %" &&
+                 s45m("%-%", 5) == "AE:invalid format character - %")
+  check("mf45j", s45m("%%", 5) == "OK:%" && s45m("%%d", 5) == "OK:%d")
+  # A newline or a NUL DIRECTLY after the % is written out instead of raising -
+  # and only there.
+  check("mf45k", s45m("%\n", 5) == "OK:%\n" && s45m("a%\nb", 5) == "OK:a%\nb")
+  check("mf45l", s45m("%\n%d", 5) == "OK:%\n5" && s45m("%5\n", 5) == "AE:invalid format character - %")
+  # An unmatched name bracket, and a precision written twice.
+  check("mf45m", s45m("%<x", 5) == "AE:malformed name - unmatched parenthesis" &&
+                 s45m("%{x", 5) == "AE:malformed name - unmatched parenthesis")
+  check("mf45n", s45m("%..2f", 5) == "AE:precision given twice")
+  # A SELECTOR or a <name> that runs off the end writes a bare "%" - MRI's own
+  # inconsistency, kept - but the name is still looked up.
+  check("mf45o", s45m("%1$", 5) == "OK:%" && s45m("%<x>", {:x => 1}) == "OK:%")
+  check("mf45p", s45m("%<x>z", 5) == "AE:one hash required")
+  # ...and the conversion letter is checked AFTER the argument, which is what
+  # puts "one hash required" in front of "malformed format string - %z" there.
+  check("mf45q", s45m("%<x>z", {:x => 1}) == "AE:malformed format string - %z")
+  # The valid directives are untouched.
+  check("mf45r", s45m("%d", 5) == "OK:5" && s45m("%05.2f", 1.5) == "OK:01.50" &&
+                 s45m("%#x", 255) == "OK:0xff")
+  check("mf45s", s45m("%1$s-%1$s", ["a"]) == "OK:a-a" && s45m("%{x}", {:x => 1}) == "OK:1" &&
+                 s45m("%<x>d", {:x => 7}) == "OK:7")
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
 s42() # SECTION-CALL 42
 s43() # SECTION-CALL 43
+s44() # SECTION-CALL 44
+s45() # SECTION-CALL 45
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

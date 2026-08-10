@@ -4171,6 +4171,286 @@ func rubyIntStr(x float64) string {
 	return bf.String()
 }
 
+// ----- Float#round / #floor / #ceil AND Integer#round / #floor / #ceil with a
+// DIGIT COUNT -----------------------------------------------------------------
+//
+// This twin applied `math.Floor(x*10**n+0.5) / 10**n` for #round and IGNORED
+// ndigits outright for #floor / #ceil, where ruby-interpreter.abnf ignored it for
+// all three - a live halves divergence (2.345.round(2) was 2 there and 2.35 here)
+// on top of three defects both halves shared: half-away-from-zero where MRI
+// corrects toward the DECIMAL the double prints as, a Float where a negative
+// ndigits answers an INTEGER, and Infinity/NaN where MRI answers the receiver.
+//
+// Measured against /usr/bin/ruby 2.6.10 (Float#round is unchanged in 3.x):
+//
+//	2.345.round(2)   2.35     (2.345 is really 2.3449999999999997513)
+//	2.675.round(2)   2.68     (2.675 is really 2.6749999999999998224)
+//	3.7.floor(1)     3.7      2.345.floor(2)  2.34    2.345.ceil(5)  2.34501
+//	1234.567.round(-2) -> the Integer 1200, and (…).class is Integer
+//	1.7976931348623157e308.round(1) -> itself, where x*10 is Infinity
+//	5e-324.round(374) -> NaN, because MRI's own pow(10, 374) is Infinity
+//
+// So this is MRI's algorithm (numeric.c) and not an approximation of it. The
+// twins are floBinExp/floDigitRound/intDigitOp in languages/ruby-interpreter.abnf
+// and rbFloBinExp/rbFloDigitRound/rbIntDigitOp in languages/lib/ruby-rt.metajs.
+// docs/todo.md 1.2.
+
+// 10**ndigits * 2**binexp is past the mantissa: every digit asked for is already
+// there, so the receiver IS the answer. And the other end: the value is entirely
+// below the last digit asked for. Both are MRI's, in C's TRUNCATING integer
+// division, which Go's `/` on ints already is.
+func rubyFloRoundOver(nd, be int) bool {
+	if be > 0 {
+		return nd >= 17-be/4
+	}
+	return nd >= 17-(be/3-1)
+}
+
+func rubyFloRoundUnder(nd, be int) bool {
+	if be > 0 {
+		return nd < -(be/3 + 1)
+	}
+	return nd < -(be / 4)
+}
+
+// 10**nd as a double, by PARSING the decimal rather than by math.Pow. The tag
+// engine of ruby-interpreter.abnf keeps an integral value as a sized integer and
+// its integer power WRAPS (Math.pow(10, 20) is 10**20 mod 2**64 there), and layer
+// 2's Math.pow is the C floor's d_pow - a third implementation to agree with.
+// Parsing is exact in all three and answers +Inf past 1e308, which is what MRI's
+// own pow() does; strconv reports that as an ErrRange the caller does not want.
+func rubyPow10(nd int) float64 {
+	v, _ := strconv.ParseFloat("1e"+strconv.Itoa(nd), 64)
+	return v
+}
+
+// The three ndigits > 0 bodies. round_half_up is C's round() (math.Round) plus
+// the correction that makes 2.675.round(2) == 2.68: if the double `(f + 0.5) / s`
+// is <= x then x is at or past the midpoint whatever the scaled product said.
+// That correction is why the exact decimal expansion is NOT used here - it would
+// answer 2.67, which is the true value and not MRI's. A zero result carries the
+// receiver's sign (-0.05.ceil(1) is -0.0 in MRI).
+func rubyFloDigitRound(x float64, nd int) float64 {
+	_, be := math.Frexp(x)
+	if rubyFloRoundOver(nd, be) {
+		return x
+	}
+	if rubyFloRoundUnder(nd, be) {
+		return 0
+	}
+	s := rubyPow10(nd)
+	f := math.Round(x * s)
+	if x > 0 {
+		if (f+0.5)/s <= x {
+			f++
+		}
+	} else {
+		if (f-0.5)/s >= x {
+			f--
+		}
+	}
+	r := f / s
+	if r == 0 {
+		return math.Copysign(0, x)
+	}
+	return r
+}
+
+func rubyFloDigitFloor(x float64, nd int) float64 {
+	_, be := math.Frexp(x)
+	if rubyFloRoundOver(nd, be) {
+		return x
+	}
+	if x > 0 && rubyFloRoundUnder(nd, be) {
+		return 0
+	}
+	s := rubyPow10(nd)
+	r := math.Floor(x*s) / s
+	if r == 0 {
+		return math.Copysign(0, x)
+	}
+	return r
+}
+
+func rubyFloDigitCeil(x float64, nd int) float64 {
+	_, be := math.Frexp(x)
+	if rubyFloRoundOver(nd, be) {
+		return x
+	}
+	if x < 0 && rubyFloRoundUnder(nd, be) {
+		return 0
+	}
+	s := rubyPow10(nd)
+	r := math.Ceil(x*s) / s
+	if r == 0 {
+		return math.Copysign(0, x)
+	}
+	return r
+}
+
+// MRI's int_round_zero_p, and it is NOT an optimisation that happens to agree
+// with the arithmetic - it OVERRIDES it. numeric.c: "If 10**N / 2 > num, then
+// return 0", decided on the receiver's BYTE SIZE with log_256(10) > 0.415241 and
+// log_256(1/2) == -0.125, where a Fixnum's size is sizeof(long) == 8 whatever the
+// value is. So `(-1234).floor(-20)` is 0 in MRI where the arithmetic says
+// -10**20. Measured, first-zero-at: -20 for every Fixnum and for 2**63, -22 for
+// 2**64 (9 bytes), -32 for 2**100 (13), -63 for 2**200 (26), -304 for 2**1000
+// (126), -309 for Float::MAX floored (128).
+func rubyIntByteSize(v interface{}) int {
+	bits := 0
+	if b, isBig := v.(*jsBigInt); isBig {
+		bits = b.v.BitLen()
+	} else {
+		m := math.Abs(rubyToF(v))
+		for m >= 1 {
+			m = math.Floor(m / 2)
+			bits++
+		}
+	}
+	bytes := (bits + 7) / 8
+	if bytes < 8 {
+		bytes = 8
+	}
+	return bytes
+}
+
+func rubyIntRoundZero(v interface{}, k int) bool {
+	return 0.415241*float64(k)-0.125 > float64(rubyIntByteSize(v))
+}
+
+// rubyDecIncr is "199" -> "200": a decimal string incremented by one.
+func rubyDecIncr(s string) string {
+	b := []byte(s)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != '9' {
+			b[i]++
+			return string(b)
+		}
+		b[i] = '0'
+	}
+	return "1" + string(b)
+}
+
+// Integer#round / #floor / #ceil with k = -ndigits > 0, and the ndigits < 0 half
+// of the Float methods once the receiver is an Integer. Exact, and on the DECIMAL
+// STRING rather than on 10**k, because the other two engines cannot multiply by a
+// 10**k past 2**53 without a bignum either. mode is 'r', 'f' or 'c'; #round ties
+// AWAY FROM ZERO (25.round(-1) is 30, -25.round(-1) is -30).
+//
+// One deliberate NON-convergence: MRI 2.6.10's BIGNUM #ceil adds the step even
+// when the receiver is already a multiple of it - `10000000000000000000.ceil(-1)`
+// is 10000000000000000010 there, while the Fixnum `1250.ceil(-1)` is 1250. MRI
+// disagrees with itself, so that is a bug in the oracle and not a rule.
+func (rt *jsrt) rubyIntDigitOp(v interface{}, k int, mode byte) interface{} {
+	if rubyIntRoundZero(v, k) {
+		return float64(0)
+	}
+	var s string
+	if b, isBig := v.(*jsBigInt); isBig {
+		s = b.v.String()
+	} else {
+		s = rubyIntStr(rubyToF(v))
+	}
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	head, tail := "", s
+	if k < len(s) {
+		head, tail = s[:len(s)-k], s[len(s)-k:]
+	} else {
+		for len(tail) < k {
+			tail = "0" + tail
+		}
+	}
+	zeroTail := true
+	for i := 0; i < len(tail); i++ {
+		if tail[i] != '0' {
+			zeroTail = false
+			break
+		}
+	}
+	away := false
+	if !zeroTail {
+		switch mode {
+		case 'r':
+			away = tail[0] >= '5'
+		case 'f':
+			away = neg
+		default:
+			away = !neg
+		}
+	}
+	mag := head
+	if mag == "" {
+		mag = "0"
+	}
+	if away {
+		mag = rubyDecIncr(mag)
+	}
+	if mag == "0" {
+		return float64(0)
+	}
+	out := mag + strings.Repeat("0", k)
+	if neg {
+		out = "-" + out
+	}
+	bi, _ := new(big.Int).SetString(out, 10)
+	return rt.rubyBigNarrow(bi)
+}
+
+// rubyNumDigitOp is the one entry point both numeric method sets call. `t` is the
+// receiver's double, `isInt` says whether the receiver is an Integer (an Integer
+// is already rounded at every ndigits >= 0), `big` is the receiver itself when it
+// is a big and nil otherwise, and mode is 'r' / 'f' / 'c'.
+func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, nd int) interface{} {
+	if isInt {
+		if nd >= 0 {
+			if big != nil {
+				return big
+			}
+			return t
+		}
+		if big != nil {
+			return rt.rubyIntDigitOp(big, -nd, mode)
+		}
+		return rt.rubyIntDigitOp(t, -nd, mode)
+	}
+	if nd > 0 {
+		if t != t || math.IsInf(t, 0) || t == 0 {
+			return jsFlo{f: t}
+		}
+		switch mode {
+		case 'r':
+			return jsFlo{f: rubyFloDigitRound(t, nd)}
+		case 'f':
+			return jsFlo{f: rubyFloDigitFloor(t, nd)}
+		}
+		return jsFlo{f: rubyFloDigitCeil(t, nd)}
+	}
+	rubyFloDomain(rt, t)
+	// ndigits == 0 rounds the DOUBLE; a NEGATIVE one truncates first and then
+	// applies the Integer rule (MRI: rb_int_round(flo_truncate(num), ndigits)).
+	// 1234.567.round(-1) is 1230 and not the 1240 that rounding to 1235 first
+	// would give.
+	if nd == 0 {
+		switch mode {
+		case 'r':
+			return rt.rubyIntFromF(math.Round(t))
+		case 'f':
+			return rt.rubyIntFromF(math.Floor(t))
+		}
+		return rt.rubyIntFromF(math.Ceil(t))
+	}
+	w := math.Trunc(t)
+	if mode == 'f' {
+		w = math.Floor(t)
+	} else if mode == 'c' {
+		w = math.Ceil(t)
+	}
+	return rt.rubyIntDigitOp(rt.rubyIntFromF(w), -nd, mode)
+}
+
 func rubyGcd(a, b float64) float64 {
 	x, y := math.Abs(a), math.Abs(b)
 	for y != 0 {
@@ -5272,19 +5552,21 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			return jsFlo{f: math.Abs(x)}, true
 		}
 		return math.Abs(x), true
-	case "floor":
-		return rt.rubyIntFromF(math.Floor(x)), true
-	case "ceil":
-		return rt.rubyIntFromF(math.Ceil(x)), true
-	case "round":
+	// #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
+	// one answers a Float (and does not raise on an infinity); 0 and negatives
+	// answer an Integer. rubyNumDigitOp is the whole rule. docs/todo.md 1.2.
+	case "floor", "ceil", "round":
+		nd := 0
 		if len(args) > 0 {
-			p := math.Pow(10, rubyToF(args[0]))
-			return jsFlo{f: math.Floor(x*p+0.5) / p}, true
+			nd = int(math.Trunc(rubyToF(args[0])))
 		}
-		if x < 0 {
-			return rt.rubyIntFromF(-math.Floor(-x + 0.5)), true
+		mode := byte('r')
+		if name == "floor" {
+			mode = 'f'
+		} else if name == "ceil" {
+			mode = 'c'
 		}
-		return rt.rubyIntFromF(math.Floor(x + 0.5)), true
+		return rt.rubyNumDigitOp(x, nil, isInt, mode, nd), true
 	case "zero?":
 		return x == 0, true
 	case "positive?":
@@ -5375,8 +5657,22 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 		return t.v.String(), true
 	// An Integer is already floored, ceilinged, truncated and rounded, at any
 	// digit argument a Ruby program can write here.
-	case "to_i", "to_int", "truncate", "floor", "ceil", "round":
+	case "to_i", "to_int", "truncate":
 		return t, true
+	// ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
+	// 10**-ndigits, which past 2**53 has to be exact. docs/todo.md 1.2.
+	case "floor", "ceil", "round":
+		nd := 0
+		if len(args) > 0 {
+			nd = int(math.Trunc(rubyToF(args[0])))
+		}
+		mode := byte('r')
+		if name == "floor" {
+			mode = 'f'
+		} else if name == "ceil" {
+			mode = 'c'
+		}
+		return rt.rubyNumDigitOp(0, t, true, mode, nd), true
 	case "abs", "magnitude":
 		return rt.rubyBigNarrow(new(big.Int).Abs(t.v)), true
 	case "zero?":

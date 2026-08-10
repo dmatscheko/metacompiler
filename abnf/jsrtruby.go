@@ -159,8 +159,13 @@ func (rt *jsrt) rubyFloDomainGuard(target interface{}, name string, args interfa
 		return
 	}
 	switch name {
-	case "to_i", "to_int", "truncate", "floor", "ceil":
-	case "round":
+	case "to_i", "to_int", "truncate":
+	// #floor and #ceil take an ndigits too, and a POSITIVE one answers the
+	// receiver rather than raising - exactly as #round does. Guarding them
+	// unconditionally made Float::INFINITY.floor(2) raise here where MRI and
+	// ruby-interpreter.abnf both answer Infinity. The ndigits <= 0 case still
+	// raises: rubyNumDigitOp does it, on the value it is about to convert.
+	case "floor", "ceil", "round":
 		if arr, isArr := args.(*jsArray); isArr && len(arr.elems) > 0 {
 			return
 		}
@@ -206,6 +211,45 @@ func rubyFloDomain(rt *jsrt, x float64) {
 // the other four stay lenient would be a divergence of a different shape. The two
 // errors that ARE raised are the ones a working program hits by a typo in the
 // KEY, where the alternative is a silently empty field.
+// rubyFmtCheckConv is MRI's malformed-format-string rule. Measured against
+// /usr/bin/ruby 2.6.10 (sprintf is unchanged in 3.x); the columns are
+// ruby-interpreter.abnf, llvm.Run (this file) and the native binary:
+//
+//	"%z" % 5     5      z     z          MRI: malformed format string - %z
+//	"%5" % 5     %5     %5    ""         MRI: malformed format string - %*[0-9]
+//	"100%" % []  100%   100%  100%       MRI: incomplete format specifier…
+//
+// The native column is layer 2's `break`, which discarded the rest of the string.
+// The messages are MRI's own, chosen by what the head consumed last - see the
+// table in languages/ruby-interpreter.abnf.
+//
+// NOT raised, and deliberately: MRI's "too few arguments" (the decline recorded
+// above). It costs one row where MRI reports the argument shortage BEFORE the
+// malformed head, and one where a selector saves an otherwise malformed head
+// ("%1$%" % 5 is "%" in MRI). docs/todo.md 1.3.
+func rubyIsFmtConv(c byte) bool {
+	switch c {
+	case 'd', 'i', 'u', 'f', 's', 'p', 'c', 'x', 'X', 'o', 'b', 'B', 'e', 'E', 'g', 'G', 'a', 'A':
+		return true
+	}
+	return false
+}
+
+func (rt *jsrt) rubyFmtCheckConv(c byte) {
+	if rubyIsFmtConv(c) {
+		return
+	}
+	// % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
+	// is NOT directly after the % ("%5\n"), are MRI's one message.
+	if c == '%' || c == '\n' || c == 0 {
+		rt.rubyRaiseErr("ArgumentError", "invalid format character - %")
+	}
+	if c >= 32 && c < 127 {
+		rt.rubyRaiseErr("ArgumentError", "malformed format string - %"+string(c))
+	}
+	rt.rubyRaiseErr("ArgumentError", "malformed format string")
+}
+
 func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 	args := []interface{}{arg}
 	if a, ok := arg.(*jsArray); ok {
@@ -248,9 +292,22 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			i++
 			continue
 		}
-		if i+1 < len(spec) && spec[i+1] == '%' {
+		// A MALFORMED directive is an ArgumentError in MRI, and it was accepted
+		// by all three engines here in three DIFFERENT ways. rubyFmtCheckConv
+		// carries the measurements. docs/todo.md 1.3.
+		if i+1 >= len(spec) {
+			rt.rubyRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead")
+		}
+		if spec[i+1] == '%' {
 			out.WriteString("%")
 			i += 2
+			continue
+		}
+		// A newline or a NUL DIRECTLY after the % is the one shape MRI writes out
+		// instead of raising - "%\n" is "%\n" - and only there: "%5\n" raises.
+		if spec[i+1] == '\n' || spec[i+1] == 0 {
+			out.WriteString("%")
+			i++
 			continue
 		}
 		j := i + 1
@@ -258,6 +315,10 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		width, prec, sel := 0, -1, -1
 		name := ""
 		haveName, brace, bad := false, false, false
+		// What the directive head consumed last, which is what MRI's message at
+		// the end of the string is chosen by: 1 flags, 2 a number (a width, a
+		// precision or a *), 3 an argument SELECTOR or a <name>.
+		tail := 0
 		// ONE loop over the whole directive head, because the pieces may come in
 		// any order: "% 1$d" and "%1$ d" are both " 5" in MRI.
 		for j < len(spec) {
@@ -265,6 +326,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			if c == '-' || c == '0' || c == '+' || c == ' ' || c == '#' {
 				flags += string(c)
 				j++
+				tail = 1
 				continue
 			}
 			if c == '<' || c == '{' {
@@ -282,6 +344,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 				}
 				name, haveName = spec[j+1:e], true
 				j = e + 1
+				tail = 3
 				if c == '{' {
 					brace = true
 					break
@@ -291,6 +354,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			if c == '*' {
 				n, nj := star(j + 1)
 				j = nj
+				tail = 2
 				if n < 0 {
 					flags += "-"
 					width = -n
@@ -300,7 +364,11 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 				continue
 			}
 			if c == '.' {
+				if prec >= 0 {
+					rt.rubyRaiseErr("ArgumentError", "precision given twice")
+				}
 				j++
+				tail = 2
 				if j < len(spec) && spec[j] == '*' {
 					n, nj := star(j + 1)
 					j = nj
@@ -328,19 +396,35 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 				if j < len(spec) && spec[j] == '$' {
 					sel = dn - 1
 					j++
+					tail = 3
 					continue
 				}
 				width = dn
+				tail = 2
 				continue
 			}
 			break
 		}
 		conv := byte('s')
 		if !brace {
-			if bad || j >= len(spec) {
+			if bad {
+				rt.rubyRaiseErr("ArgumentError", "malformed name - unmatched parenthesis")
+			}
+			if j >= len(spec) {
+				if tail == 2 {
+					rt.rubyRaiseErr("ArgumentError", "malformed format string - %*[0-9]")
+				}
+				if tail != 3 {
+					rt.rubyRaiseErr("ArgumentError", "invalid format character - %")
+				}
+				// A selector or a <name> that ran off the end writes a bare "%"
+				// in MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
+				// "%<x>" % 5 is *one hash required*.
+				if haveName {
+					rt.rubyFmtNamed(args, name, "<", ">")
+				}
 				out.WriteString("%")
-				i++
-				continue
+				break
 			}
 			conv = spec[j]
 			j++
@@ -359,6 +443,11 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			}
 		default:
 			av = take()
+		}
+		// AFTER the argument, because MRI resolves the name first: "%<x>z" % 5 is
+		// *one hash required* and not *malformed format string - %z*.
+		if !brace {
+			rt.rubyFmtCheckConv(conv)
 		}
 		// An infinity or a NaN reaching an INTEGER directive raises, because MRI's
 		// %d/%x/%o/%b convert the operand with to_i. This used to print Go's int64
