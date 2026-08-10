@@ -168,13 +168,20 @@ handle_ir() { grep -q 'libPath("runtime.ll")' "$COMPILE" 2>/dev/null; }
 # awk TRUNCATES A STRING AT A NUL (docs chapter 7.10: a probe printing a control
 # character reported a phantom defect this exact way), so the count is computed
 # on a NUL-free copy and applied to the raw bytes with `tail -n +K`.
+#
+# THE `declare` ARM REQUIRES AN `@`, and that is not decoration. Every LLVM
+# `declare` names a symbol (`declare i64 @js_add(i64, i64)`); a BASH program
+# printing `declare -a a=([0]="pa")` does not. Matching a bare `^declare ` ate the
+# first output line of any bash probe whose output begins with `declare -p`, so
+# the `run` leg read short and the probe reported a halves divergence that did not
+# exist. Cost one agent a false finding before it was spotted.
 module_lines() {
     tr -d '\000' <"$1" | awk '
         BEGIN { depth = 0; n = 0 }
         {
             if (depth > 0) { n = NR; if ($0 ~ /^}/) depth = 0; next }
             if ($0 ~ /^define /) { n = NR; depth = 1; if ($0 ~ /}[ \t]*$/) depth = 0; next }
-            if ($0 ~ /^@/ || $0 ~ /^declare / || $0 ~ /^[ \t]*$/ ||
+            if ($0 ~ /^@/ || $0 ~ /^declare [^\n]*@/ || $0 ~ /^[ \t]*$/ ||
                 $0 ~ /^source_filename/ || $0 ~ /^target / || $0 ~ /^;/ ||
                 $0 ~ /^!/ || $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { n = NR; next }
             exit
@@ -214,7 +221,16 @@ GNAMES="$(basename "$COMPILE" .abnf)|$(basename "$INTERP" .abnf)|$LANG_NAME"
 # does) makes grep decide the stream is BINARY, print `Binary file (standard
 # input) matches`, and discard every real line. Both legs then held that one
 # sentence and the probe reported them identical.
-strip_engine() { grep -a -v -E "^([a-z0-9#+-]+ (interpreter|compiler)|$GNAMES): "; }
+strip_engine() {
+    # A sign-off is normally its own line. But it is written to the same stdout
+    # the program writes, so when the program's LAST output has no trailing
+    # newline - `echo -n x`, which is ordinary in bash and batch - the tag is
+    # GLUED onto it: `xbash-to-llvm-ir: exit status 0`. No line-anchored filter
+    # can see that, and the probe then reports a one-line "halves divergence"
+    # between two legs that agree. Strip the glued form first, then the plain one.
+    sed -E "s/($GNAMES): (exit status [0-9]+|wrote executable .*)\$//" \
+  | grep -a -v -E "^([a-z0-9#+-]+ (interpreter|compiler)|$GNAMES): "
+}
 
 # One more piece of engine chatter, and it only exists between the module and
 # the program: brainfuck's compiler grammar announces the handover with
