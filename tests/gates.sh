@@ -128,7 +128,26 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9219      # SEVENTEENTH round, +149 over the sixteenth's 9070:
+FULL_ASSERTIONS=9468      # EIGHTEENTH round, +249 over the seventeenth's 9219:
+                          # ruby +61 (too-few-arguments raising, Rational/Complex
+                          # round/floor/ceil/truncate/abs, equal?, and Method
+                          # values for user AND kernel methods), js +36 and
+                          # typescript +36 (a function carrying own properties at
+                          # all, plus its Object.prototype surface), kotlin +49
+                          # (user throwables linking to the builtin hierarchy,
+                          # three levels of nesting, and the whole index family
+                          # throwing the JVM's own messages), swift +36 (value
+                          # semantics on assignment, argument passing and pattern
+                          # binding), python +31 (unhashable dict/set keys raising
+                          # CPython's TypeError, and structural tuple keys).
+                          #
+                          # FIVE AGENTS RAN IN THIS ROUND and every one of them saw
+                          # "+N, RAISE FULL_ASSERTIONS" and left it alone. Raised
+                          # here afterwards from a COMMITTED tree (3610ad6), which
+                          # is the rule this constant exists to enforce.
+                          #
+                          # The seventeenth round's note, kept because the pattern
+                          # is the point: +149 over the sixteenth's 9070:
                           # ruby +47 (Float/Integer round/floor/ceil with a digit
                           # count, and malformed format strings raising MRI's own
                           # ArgumentError messages), swift +44 (nineteen Array and
@@ -219,19 +238,25 @@ LINT_FINDINGS=0
 # link" without failing anything.
 #
 # A FLOOR, not an equality - rows are added often, and the gate says so.
-MATRIX_ENTRIES=383        # 2026-08-09: 357 + 26 abort-text rows (13 languages x
+MATRIX_ENTRIES=385        # 2026-08-11: +2 for swift's abort pair (docs/todo.md
+                          # 6.2). Both swift probe files now carry the
+                          # interpreter SHOULD FAIL + native SHOULD ABORT, ALL
+                          # HALVES pair every other language has; ABORT_ROWS and
+                          # ABORT_ALL_ROWS below moved with them. Set from the
+                          # committed tree 3610ad6.
+                          #
+                          # 2026-08-09: 357 + 26 abort-text rows (13 languages x
                           # {interpreter SHOULD FAIL, native SHOULD ABORT}); the
                           # three MetaJS SHOULD ABORT rows were promoted in place.
                           #
-                          # THE TREE IS AT 385 as this is written (docs/todo.md 6.2
-                          # gave swift's two abort probe FILES the full pair of rows
-                          # each, +2), and this floor is deliberately left at 383 for
-                          # the reason FULL_ASSERTIONS states above: a floor is set
-                          # from a COMMITTED tree, by whoever commits, not from a
-                          # working one with other agents' rows in flight. The gate
-                          # says "RAISE them" until then, and that message IS the
-                          # ratchet working.
-# And the abort rows specifically, since the count above cannot tell WHICH 383.
+                          # It was LEFT at 383 while the round was in flight, and
+                          # the agent that added the two rows correctly refused to
+                          # raise it, for the reason FULL_ASSERTIONS states above: a
+                          # floor is set from a COMMITTED tree, by whoever commits,
+                          # not from a working one with other agents' rows in
+                          # flight. The gate said "RAISE them" until this commit,
+                          # and that message IS the ratchet working.
+# And the abort rows specifically, since the count above cannot tell WHICH 385.
 ABORT_ROWS=17             # rows whose name says SHOULD ABORT
 ABORT_ALL_ROWS=15         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES). Raising this is how a language
