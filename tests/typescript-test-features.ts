@@ -368,6 +368,40 @@ check("class-override", pet.speak() === "Rex barks");
 check("class-super-inherit", pet.describe() === "Rex makes a sound, animal");
 check("class-base", new Animal("Cat").speak() === "Cat makes a sound");
 
+// ----- private names, and for-in over what is not a plain object (todo 2.4) -----
+// A private field is a slot NO enumeration reports, and `o["#x"]` is a DIFFERENT
+// slot; a static private is reachable; for-in over an array yields the index
+// STRINGS and over null/a primitive yields nothing (it used to abort the compiled
+// halves with "js_keys: not an object").
+const fkA: any[] = [0, 1, 2, "#x"];
+class FKP {
+    #x: number = fkA[1];
+    y: number = fkA[2];
+    static #s: number = fkA[2];
+    get val(): number { return this.#x; }
+    brand(o: any): boolean { return #x in o; }
+    static gets(): number { return FKP.#s; }
+}
+const fkp: any = new FKP();
+check("class-private-not-enumerable", Object.keys(fkp).join("|") === "y");
+check("class-private-static-read", FKP.gets() === 2 && Object.keys(FKP).join("|") === "");
+fkp[fkA[3]] = fkA[0];
+check("class-private-distinct-slot", fkp.val === 1 && fkp[fkA[3]] === 0 &&
+      Object.keys(fkp).join("|") === "y|#x");
+check("class-private-brand", fkp.brand(fkp) === true && fkp.brand({}) === false);
+const fkArr: any[] = [fkA[1], fkA[2]];
+let fkIdx = "";
+for (const fk in fkArr) { fkIdx = fkIdx + fk + ":" + typeof fk + ","; }
+check("for-in-array-indices", fkIdx === "0:string,1:string,");
+let fkStr = "";
+for (const fs in "ab") { fkStr = fkStr + fs; }
+check("for-in-string-indices", fkStr === "01");
+let fkNone = 0;
+const fkVals: any[] = [null, undefined, fkA[2], true];
+for (let fv = 0; fv < fkVals.length; fv++) { for (const fn in fkVals[fv]) { fkNone = fkNone + 1; } }
+check("for-in-non-object-empty", fkNone === 0);
+check("spread-array-into-object", Object.keys({ ...fkArr }).join("|") === "0|1");
+
 // ----- exceptions: throw / catch / finally / control flow -----
 var exOrder = "";
 try {

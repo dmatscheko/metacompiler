@@ -105,12 +105,22 @@ func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
 // the bug: `class C { m(){} }` then `C.m` is undefined in node, not the method.
 // The engine's own slots (__ctor, __name, __super, ...) are excluded - they are read
 // off the descriptor itself by makeNewFrom, instanceof and the error machinery.
+// A mangled PRIVATE name is a __ name too, and it is NOT one of those: `static #s = 5`
+// files '__#s' in the static table, so skipping it made `C.#s` answer undefined in
+// both compiled halves. jsvPrivateKey is the exception. docs/todo.md 2.4.
 func jsvIsStaticSide(v interface{}, name string) (*jsObject, bool) {
 	o, ok := v.(*jsObject)
-	if !ok || !isClassDesc(o) || jsvInternalKey(name) {
+	if !ok || !isClassDesc(o) || (jsvInternalKey(name) && !jsvPrivateKey(name)) {
 		return nil, false
 	}
 	return o, true
+}
+
+// jsvPrivateKey recognizes the mangled spelling of a private name, '__#x' - the key
+// both js/typescript emitters build with privName and both interpreter halves build
+// with their own privName. Twin: jvIsPrivateKey in languages/lib/js-rt.metajs.
+func jsvPrivateKey(k string) bool {
+	return len(k) >= 3 && k[0] == '_' && k[1] == '_' && k[2] == '#'
 }
 
 // The value of a member read on a class descriptor: the static chain, an accessor
@@ -335,6 +345,17 @@ func jsvSfTrack(statics *jsObject, name string) {
 		}
 	}
 	lst.elems = append(lst.elems, name)
+}
+
+// jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
+// string - which node answers as the index STRINGS "0".."n-1". Twin: jvIndexKeys in
+// languages/lib/js-rt.metajs. docs/todo.md 2.4.
+func jsvIndexKeys(n int) *jsArray {
+	out := &jsArray{}
+	for i := 0; i < n; i++ {
+		out.elems = append(out.elems, strconv.Itoa(i))
+	}
+	return out
 }
 
 // jsvStaticEnumKeys is Object.keys of a class object.
@@ -1677,7 +1698,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// The __-prefixed engine slots are not properties of the program's object:
 		// `"__class" in p` answered TRUE in both compiled halves and false in the
 		// interpreters and in node. Measured on the way past, not part of the item.
-		if isObj && jsvInternalKey(name) {
+		// ...but a mangled PRIVATE name IS one of the program's own, and `#x in o` -
+		// the ergonomic brand check - asks for exactly that slot, so it falls through
+		// to the own-slot and class-method arms below. docs/todo.md 2.4.
+		if isObj && jsvInternalKey(name) && !jsvPrivateKey(name) {
 			return w(false)
 		}
 		// `"m" in C` asks the STATIC namespace and nothing else, and it is asked
@@ -1804,14 +1828,32 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// engine's own Object.keys now does too. A name of its own rather than an
 	// override, for manual chapter 4's reason. The layer-2 twin is js_jskeys in
 	// languages/lib/js-rt.metajs. docs/todo.md 2.10.
+	// It also has to be TOTAL, which the floor's js_keys is not. `for (i in [7,8])`
+	// and `{...[7,8]}` both reach here with an ARRAY, and js_keys aborts the whole
+	// program with "js_keys: not an object (got object)" - a plain abort on ordinary
+	// code, where node answers the INDICES as strings ("0","1"). A string enumerates
+	// the same way, and null/undefined/a number/a boolean enumerate NOTHING rather
+	// than raising. docs/todo.md 2.4.
 	baseKeys := m["js_keys"]
 	m["js_jskeys"] = func(a []uint64) uint64 {
-		if o, ok := u(a[0]).(*jsObject); ok && isClassDesc(o) {
-			out := &jsArray{}
-			for _, k := range jsvStaticEnumKeys(o) {
-				out.elems = append(out.elems, k)
+		switch v := u(a[0]).(type) {
+		case *jsObject:
+			if isClassDesc(v) {
+				out := &jsArray{}
+				for _, k := range jsvStaticEnumKeys(v) {
+					out.elems = append(out.elems, k)
+				}
+				return w(out)
 			}
-			return w(out)
+		case *jsArray:
+			return w(jsvIndexKeys(len(v.elems)))
+		case string:
+			// strLen, not len(v): a string is indexed in UTF-16 CODE UNITS here.
+			return w(jsvIndexKeys(rt.strLen(v)))
+		default:
+			// Not an object at all: node's ToObject of a primitive has no own
+			// enumerable keys, and for-in over null/undefined is a no-op.
+			return w(&jsArray{})
 		}
 		return baseKeys(a)
 	}

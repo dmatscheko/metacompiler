@@ -1031,7 +1031,13 @@ SpreadElem  <~~ push({spreadT: pop()}) ~~>
 
 Primary     = AsyncArrow | ArrowFn | TypeAssertion | DynImport | ImportMeta | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
-            | True | False | Null | Undefined | VarRef ;
+            | True | False | Null | Undefined | PrivateNameRef | VarRef ;
+// '#field in obj' - the ergonomic brand check of ES2022. A private name is stored under
+// the mangled key '__#field' (privName), so the operand is that key as a string and the
+// ordinary 'in' does the rest - js_jshas has the arm that lets a private name past the
+// __-slot filter. Tried before VarRef, whose Id cannot start at a '#'. docs/todo.md 2.4.
+PrivateNameRef <~~ push(makeConst(privName(pop()))) ~~>
+            = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // 'import("./m")' is the dynamic import EXPRESSION and 'import.meta' the module record:
 // both are module-system features this flat, single-scope compiler has no model for, so

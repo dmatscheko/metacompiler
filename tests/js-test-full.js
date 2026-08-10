@@ -2525,6 +2525,104 @@ function s48() {
     check("recv05", bm.call(o) === "B/x" && bm.apply(o, []) === "B/x" && bm.bind(o)() === "B/x")
 }
 
+// ===== SECTION 49: the PRIVATE-NAME model, and for-in over what is not a plain
+//       object (docs/todo.md 2.4) =====
+// Two defects with one root, and one plain abort on ordinary code.
+//
+//   THE PRIVATE NAME. Both compiled halves store `#x` under the mangled key '__#x',
+//   which the engine's __-slot rule already hides; the interpreters filed it under
+//   its own '#x' spelling. So `Object.keys(p)` answered "#x|y" in the interpreters
+//   and "y" in the compilers and in node, AND `o["#x"] = 1` and a private `#x` were
+//   the SAME slot in the interpreters and two different slots in the compilers.
+//   The interpreters mangle now. The compilers were wrong in a second place: every
+//   __-name is skipped by the static-side test, so `C.#s` - a static private - read
+//   undefined in both of them while both interpreters answered. The mangled private
+//   spelling is the one exception now, in all four engines.
+//
+//   for (k in [7,8])  aborted BOTH compiled halves with "js_keys: not an object
+//   (got object)" and answered nothing at all in the interpreters. node yields the
+//   INDICES as strings. A string enumerates the same way; null, undefined and a
+//   primitive enumerate nothing rather than raising. `{...[7,8]}` took the same
+//   abort, through the same call.
+//
+//   #x in o - ES2022's ergonomic brand check - existed in the typescript
+//   INTERPRETER alone. All four engines parse and answer it now.
+//
+// Every operand comes out of s49a so the constant folder cannot answer any of it.
+var s49a = [0, 1, 2, "#x", "ab", 4];
+class S49P {
+    #x = s49a[1];
+    y = s49a[2];
+    static #s = s49a[5];
+    #bump(n) { this.#x = this.#x + n; return this.#x }
+    get val() { return this.#x }
+    run(n) { return this.#bump(n) }
+    brand(o) { return #x in o }
+    brandM(o) { return #bump in o }
+    static gets() { return S49P.#s }
+    static bumps() { S49P.#s = S49P.#s + s49a[1]; return S49P.#s }
+}
+
+function s49() {
+    var p = new S49P()
+    // A private field is not an own key, is not spread and is not enumerated.
+    check("priv01", Object.keys(p).join("|") === "y")
+    check("priv02", Object.keys({ ...p }).join("|") === "y")
+    var fi = ""
+    for (var k in p) { fi = fi + k + "," }
+    check("priv03", fi === "y,")
+    // It is still readable and writable from inside the class body.
+    check("priv04", p.val === 1 && p.run(s49a[5]) === 5 && p.val === 5)
+    // A STATIC private is reachable - this is what the __-slot skip broke in both
+    // compiled halves - and it is not an own key of the class object either.
+    check("priv05", S49P.gets() === 4 && S49P.bumps() === 5 && S49P.gets() === 5)
+    check("priv06", Object.keys(S49P).join("|") === "")
+    // '#x' AS AN ORDINARY STRING KEY is a DIFFERENT SLOT from the private #x: the
+    // write below must not disturb the field, and it IS enumerable.
+    p[s49a[3]] = s49a[5]
+    check("priv07", p.val === 5 && p[s49a[3]] === 4)
+    check("priv08", Object.keys(p).join("|") === "y|#x")
+    var q = {}
+    q[s49a[3]] = s49a[1]
+    check("priv09", Object.keys(q).join("|") === "#x" && q[s49a[3]] === 1)
+    // The ergonomic brand check, over a field and over a method.
+    check("priv10", p.brand(p) === true && p.brand({}) === false)
+    check("priv11", p.brandM(p) === true && p.brandM({}) === false)
+
+    // ----- for-in over what is not a plain object -----
+    var arr = [s49a[5], s49a[5], s49a[5]]
+    var ai = ""
+    for (var i in arr) { ai = ai + i + "," }
+    check("fin01", ai === "0,1,2,")
+    // The key is a STRING, as node says, not a number.
+    var tk = ""
+    for (var i2 in arr) { tk = tk + typeof i2 }
+    check("fin02", tk === "stringstringstring")
+    var si = ""
+    for (var j in s49a[4]) { si = si + j + "," }
+    check("fin03", si === "0,1,")
+    // null, undefined and a primitive enumerate NOTHING and do not raise.
+    var none = [null, undefined, s49a[5], true, ""]
+    var nc = 0
+    for (var n = 0; n < none.length; n++) {
+        for (var k2 in none[n]) { nc = nc + 1 }
+    }
+    check("fin04", nc === 0)
+    // break and continue inside a for-in over an array.
+    var cc = ""
+    for (var c in arr) { if (c === "1") { continue } cc = cc + c }
+    check("fin05", cc === "02")
+    var bb = ""
+    for (var b in arr) { if (b === "1") { break } bb = bb + b }
+    check("fin06", bb === "0")
+    // The same call is what object spread makes, so it took the same abort.
+    var sa = { ...arr }
+    check("fin07", Object.keys(sa).join("|") === "0|1|2" && sa[s49a[1]] === 4)
+    var ss = { ...s49a[4] }
+    check("fin08", Object.keys(ss).join("|") === "0|1" && ss[s49a[0]] === "a")
+    check("fin09", Object.keys({ ...null }).length === 0 && Object.keys({ ...s49a[5] }).length === 0)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -2574,6 +2672,7 @@ function main() {
     s46() // SECTION-CALL 46
     s47() // SECTION-CALL 47
     s48() // SECTION-CALL 48
+    s49() // SECTION-CALL 49
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

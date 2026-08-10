@@ -844,9 +844,10 @@ ImportCall  <~~ takeAll(); push(notImplExpr("dynamic import()", up.pos)) ~~>
 ImportMeta  <~~ push(notImplExpr("import.meta", up.pos)) ~~>
             = KwImport "." "meta" KwEnd ;
 // '#field in obj' - the ergonomic brand check. A private name is an ordinary property
-// name starting with '#' here (see PrivateDotSuffix), so the operand is that name as a
-// string and the ordinary 'in' does the rest.
-PrivateNameRef <~~ push(makeConst("#" + pop())) ~~>
+// under the MANGLED key '__#field' here (see PrivateDotSuffix), so the operand is that
+// key as a string and the ordinary 'in' does the rest - propIn has the arm that reaches
+// a slot no enumeration reports. docs/todo.md 2.4.
+PrivateNameRef <~~ push(makeConst(privName(pop()))) ~~>
             = "#" Id <~~ push(up.in) ~~> ;
 
 // The ANGLE-BRACKET cast '<T>expr' - TypeScript's original assertion syntax, still the
@@ -1337,11 +1338,13 @@ ClassSpecialMethod <~~ push(makeMethod(takeAll())) ~~>
 // The key of a member, pushed as a descriptor so a literal name and a key that is only
 // known at run time are read the same way: {mk: "name"} or {mkT: keyThunk}.
 MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
-// A PRIVATE name is modelled as an ordinary property whose name starts with '#'. No
-// source identifier can spell that, so the privacy is exactly as tight as the syntax -
-// '#secret' is reachable from inside the class body and nowhere else. Read back through
-// the matching '.#name' member access (see PrivateDotSuffix).
-MemberNameKey <~~ push({mk: stripWs(up.in)}) ~~>
+// A PRIVATE name is modelled as an ordinary property under the MANGLED key '__#secret'
+// (memberNameKey / privName). No source identifier can spell that, so the privacy is
+// exactly as tight as the syntax - '#secret' is reachable from inside the class body and
+// nowhere else - and the '__' prefix additionally keeps it out of every enumeration, as
+// a real private name is. Read back through the matching '.#name' member access (see
+// PrivateDotSuffix). Both compiler halves mangle identically. docs/todo.md 2.4.
+MemberNameKey <~~ push({mk: memberNameKey(stripWs(up.in))}) ~~>
             = PrivateName | Id ;
 PrivateName = "#" Id ;
 MemberLitKey <~~ push({mkT: pop()}) ~~>
@@ -4241,6 +4244,10 @@ NotFuncHead = :script(~~
     function isStaticSide(o, k) {
         if (!isClassDesc(o)) { return false }
         if (typeof k != "string") { return false }
+        // A mangled PRIVATE name is a '__' name too and is NOT one of the engine's own
+        // slots: `static #s = 5` files '__#s' in the static table, so excluding it makes
+        // `C.#s` answer undefined. docs/todo.md 2.4.
+        if (isPrivateKey(k)) { return true }
         return !isInternalKey(k)
     }
     // The __super walk for a static member, starting at the descriptor ITSELF. Statics
@@ -4332,7 +4339,10 @@ NotFuncHead = :script(~~
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
-        if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" && !isInternalKey(k)) {
+        // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
+        // the __-name skip would hide it from the walk. docs/todo.md 2.4.
+        if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
+            (isPrivateKey(k) || !isInternalKey(k))) {
             if (findClassMethod(o, k) != undefined) { return boundMethodShim(o, k) }
         }
         return v
@@ -5693,6 +5703,9 @@ NotFuncHead = :script(~~
             if (classStaticFind(o, "" + k) != undefined) { return true }
             return ("" + k) == "name"
         }
+        // A mangled PRIVATE name is deliberately absent from __keys - nothing enumerates
+        // one - so the brand check `#x in o` has to ask the slot itself. docs/todo.md 2.4.
+        if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
         // A METHOD is not an own property here - it lives on the __class descriptor -
@@ -5885,14 +5898,18 @@ NotFuncHead = :script(~~
     }
     // The own keys of an object for for-in: a snapshot (so the body may add keys), the
     // __-prefixed internals never appear (they are never recorded in __keys).
+    //
+    // This is exactly Object.keys' list, so it IS ownKeys - which already answers the
+    // index strings of an ARRAY and of a STRING, the two cases this used to answer ""
+    // for where node says 0,1. The one difference is the head: for-in over null or
+    // undefined is a NO-OP in node, not a TypeError, and this half raised one.
+    // docs/todo.md 2.4.
     function jsKeys(o) {
-        if (o == undefined || o == null) fail("for-in over " + o)
+        if (o == undefined || o == null) { return [] }
         // A CLASS DESCRIPTOR enumerates its static FIELDS, the same list Object.keys
         // answers - not its own property map, which holds the instance methods.
         // docs/todo.md 2.10.
-        if (isClassDesc(o)) { return ownKeys(o) }
-        if (hasOwn(o, "__keys")) return o["__keys"].slice()
-        return []
+        return ownKeys(o)
     }
 
     function makeFunctionExpr(bodyT, params, ownStrict) {
@@ -7025,13 +7042,12 @@ NotFuncHead = :script(~~
                 } else {
                     var itk = memberKey(it)
                     scopePut(statics, itk, (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
-                    // A static FIELD is enumerable; see __keys above. A PRIVATE one
-                    // is not - and this half files a private name under its own '#'
-                    // spelling where both compiled halves mangle it to '__#x', which
-                    // the '__' rule already hides. That model difference is wider than
-                    // this line (it also makes a private INSTANCE field enumerable
-                    // here and not there); the guard keeps THIS list honest.
-                    if (itk.length < 1 || itk.charAt(0) != "#") { trackKey(statics, itk) }
+                    // A static FIELD is enumerable; see __keys above. A PRIVATE one is
+                    // not, and needs no guard of its own any more: a private name is
+                    // filed under the mangled key '__#x' here exactly as in both
+                    // compiled halves, and trackKey skips every '__' name.
+                    // docs/todo.md 2.4.
+                    trackKey(statics, itk)
                 }
             }
             return cls
@@ -7736,8 +7752,30 @@ NotFuncHead = :script(~~
         }
         return out
     }
-    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: makeConst("#" + n)} }
-    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: makeConst("#" + n)} }
+    // 'this.#x': a private name. It is stored under the MANGLED key '__#x', exactly as
+    // both compiler halves store it (privName in typescript-to-llvm-ir.abnf), and for the
+    // same two reasons: the '__' prefix is this engine's marker for a slot that no
+    // enumeration reports, so a private field stays out of for-in, Object.keys and object
+    // spread the way a real private name does; and it keeps `o["#x"] = 1` and a private
+    // `#x` in DIFFERENT slots, which the unmangled spelling did not - they were one slot
+    // here and two in the compilers. isPrivateKey is what lets the class-side lookups
+    // still see it, since it is a '__' name they otherwise skip. docs/todo.md 2.4.
+    function privName(n) { return "__#" + n }
+    // A class member's literal key text, mangled when it is a private name.
+    function memberNameKey(s) {
+        if (s.length > 0 && s.charAt(0) == "#") { return privName(s.substring(1)) }
+        return s
+    }
+    // Is this one of the mangled private-name slots? They are '__' names, so every
+    // enumeration skips them, but the class-side lookups (isStaticSide, the method walk
+    // in getMember) must still reach them or `C.#s` and `this.#m()` answer undefined.
+    function isPrivateKey(k) {
+        if (typeof k != "string") { return false }
+        if (k.length < 3) { return false }
+        return k.charAt(0) == "_" && k.charAt(1) == "_" && k.charAt(2) == "#"
+    }
+    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: makeConst(privName(n))} }
+    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: makeConst(privName(n))} }
 
     // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
     //
