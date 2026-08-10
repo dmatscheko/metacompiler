@@ -240,6 +240,39 @@ def s06
   inf = [1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0]
   check("fmt31", ("%x" % inf[0]).length > 0 && ("%o" % inf[1]).length > 0 && ("%b" % inf[2]).length > 0)
   check("fmt32", "%d" % inf[0] == "Infinity" && "%d" % inf[1] == "-Infinity" && "%d" % inf[2] == "NaN")
+  # %u, %B, %c and %p were in no engine's directive table: the two compiled halves
+  # printed the conversion LETTER and consumed no argument, while the interpreter
+  # printed the OPERAND - a live halves divergence in both directions, which
+  # --cross never saw because no test used any of the four. MRI: %u is %d (the
+  # 1.8 "unsigned" meaning is long gone), %B is %b with an UPPERCASE # prefix,
+  # %c is a code point and %p is #inspect. Settled against ruby 2.6.10; the
+  # integer directives are unchanged in 3.x.
+  check("fmt33", "%u" % 255 == "255" && "%u" % -5 == "-5" && "%010u" % -5 == "-000000005" && "%+u" % 5 == "+5")
+  check("fmt34", "%B" % 255 == "11111111" && "%#B" % 5 == "0B101" && "%#B" % 0 == "0" && "%#010B" % -5 == "0B..111011")
+  check("fmt35", "%.8B" % 5 == "00000101" && "%+B" % -5 == "-101" && "%-6B|" % 5 == "101   |" && "%#.8B" % 5 == "0B00000101")
+  # %c is not a NUMERIC directive, so the 0 flag pads it with spaces, and MRI
+  # ignores a precision on it outright.
+  check("fmt36", "%c" % 65 == "A" && "%c" % 97 == "a" && "%5c|" % 65 == "    A|" && "%05c" % 65 == "    A")
+  check("fmt37", "%c" % "z" == "z" && "%c" % 8364 == "€" && "%.0c" % 65 == "A" && "%-5c|" % 65 == "A    |")
+  check("fmt38", "%p" % "a" == "\"a\"" && "%p" % nil == "nil" && "%p" % 1.0 == "1.0" && "%10p|" % 1 == "         1|")
+  check("fmt39", "%p" % [[1, "a", nil]] == "[1, \"a\", nil]" && "%.2p" % "abcdef" == "\"a" && "%-6p|" % 1 == "1     |")
+  # A width and a precision count CHARACTERS in MRI, not bytes: "%10s" % "café"
+  # is SIX spaces and a result of String#length 10 and #bytesize 11. All three
+  # engines counted BYTES - layer 2 was written to match abnf/jsrt.go's len(body)
+  # and that was never checked against MRI - and chapter 7.7 of the manual states
+  # the byte rule and cites this very example. Both halves agreeing and both
+  # wrong, the one class byte-identity cannot see. The interpreter half dropped a
+  # %s precision entirely, which was a third live divergence in the same spot.
+  check("fmt40", "%10s|" % "café" == "      café|" && "%.2s" % "café" == "ca" && "%.1s" % "日本語" == "日")
+  check("fmt41", "%10s|" % "日本語" == "       日本語|" && "%-6s|" % "日本" == "日本    |" && "%.3s" % "日本語" == "日本語")
+  # An ASTRAL character is ONE character to MRI and two UTF-16 units to the floor.
+  check("fmt42", "%5c|" % 128512 == "    😀|" && "%-3c|" % 128512 == "😀  |")
+  # THREE DELIBERATE DIVERGENCES, and the only rows in this block MRI itself does
+  # not pass: %c out of range raises ArgumentError there (0x110000) or writes a
+  # raw invalid byte (a negative), and a String of more than one character raises
+  # too. None of the three is expressible here, so all three engines answer ""
+  # and the first character respectively.
+  check("fmt43", "%c" % 1114112 == "" && "%c" % -1 == "" && "%c" % "zed" == "z" && "%c" % "" == "")
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40

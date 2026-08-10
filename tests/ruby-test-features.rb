@@ -93,6 +93,17 @@ check("str-compare-lt", "apple" < "banana", true)
 check("str-unicode-len", "héllo".length, 5)
 check("symbol-not-string", :hello == "hello", false)  # a Symbol is its own type
 
+# ----- Kernel#format directives that reached no engine's table -----
+# %u, %B, %c and %p: the compiled halves printed the conversion LETTER and
+# consumed no argument, the interpreter printed the OPERAND. A width and a
+# precision count CHARACTERS in MRI and all three engines counted BYTES.
+check("fmt-u", "%u" % -5, "-5")
+check("fmt-B", "%#B" % 5, "0B101")
+check("fmt-c", "%c" % 65, "A")
+check("fmt-p", "%p" % "a", "\"a\"")
+check("fmt-width-chars", "%6s|" % "café", "  café|")
+check("fmt-prec-chars", "%.2s" % "café", "ca")
+
 # ----- booleans, truthiness (only nil and false are falsy), short-circuit -----
 check("and-value", 3 && 4, 4)
 check("or-value", false || 7, 7)

@@ -1747,7 +1747,23 @@ function rbBasePrefix(conv, v) {
     if (conv == "x") { return "0x" }
     if (conv == "X") { return "0X" }
     if (conv == "b") { return "0b" }
+    if (conv == "B") { return "0B" }
     return ""
+}
+
+// %c on an Integer is the CODE POINT and not the byte, so an astral value has to
+// be written as the surrogate PAIR the floor's UTF-16 strings are made of -
+// "%c" % 128512 is one emoji in MRI and here.
+//
+// Out of range is the one place this does not follow MRI: 0x110000 raises
+// ArgumentError there and a negative renders a raw invalid byte, neither of which
+// any engine here can express, so all three answer the empty string. rubyCharCode
+// in abnf/jsrt.go and charFromCode in languages/ruby-interpreter.abnf are twins.
+function rbCharCode(cp) {
+    if (cp < 0 || cp > 1114111) { return "" }
+    if (cp < 65536) { return String.fromCharCode(cp) }
+    var off = cp - 65536
+    return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
 }
 
 // ----- the three integer directives -----------------------------------------
@@ -1936,7 +1952,10 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
         } else if (base == 16) {
             prefix = rbBasePrefix(upper ? "X" : "x", f)
         } else if (base == 2) {
-            prefix = rbBasePrefix("b", f)
+            // %B is %b with an UPPERCASE prefix: "%#B" % 5 is "0B101". Base 2's
+            // digits are 0 and 1, so `upper` changes nothing else here and the
+            // caller sets it for "B" exactly as it does for "X".
+            prefix = rbBasePrefix(upper ? "B" : "b", f)
         }
     }
     var keep = 0
@@ -1959,10 +1978,13 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
 
 // The base of a conversion character, and 0 for the ones that are not integers.
 function rbIntBase(conv) {
-    if (conv == "d" || conv == "i") { return 10 }
+    // %u is MRI's %d: the 1.8 "unsigned" meaning is long gone and "%u" % -5 is
+    // "-5". It was in the interpreter half's intBase and in neither compiled one,
+    // so both of those printed the literal letter "u" - a live halves divergence.
+    if (conv == "d" || conv == "i" || conv == "u") { return 10 }
     if (conv == "x" || conv == "X") { return 16 }
     if (conv == "o") { return 8 }
-    if (conv == "b") { return 2 }
+    if (conv == "b" || conv == "B") { return 2 }
     return 0
 }
 
@@ -1990,17 +2012,43 @@ function rbFloatWord(x) {
 function rbUpper(s) { return s.toUpperCase() }
 function rbLower(s) { return s.toLowerCase() }
 
-// The first `n` BYTES of a string, as Go's body[:n] takes them. Every string the
-// %s directive can be handed is valid UTF-8 here, and a cut that would land inside
-// a multi-byte character stops before it - which is what a Go slice of a valid
-// string does to the RUNES, and the corpus has no case that reaches it.
-function rbByteCut(s, n) {
-    var out = ""
+// MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
+// "%10s" % "café" is six spaces and four characters, and its result has
+// String#length 10 and #bytesize 11. This file counted BYTES, because it was
+// written to match abnf/jsrt.go's `len(body)` and that file was never checked
+// against MRI - docs/working-on-this-project.md chapter 7.7 states the byte rule
+// and cites this very example, and it is wrong for Ruby. Both halves agreeing and
+// both wrong, so --cross could not see it; only the oracle could.
+//
+// A surrogate PAIR is one character to MRI ("%5c" % 128512 is four spaces), so
+// this counts code points and not the UTF-16 units String#length answers.
+// rubyCharCount in abnf/jsrt.go and charCount in languages/ruby-interpreter.abnf
+// are the twins.
+function rbCharCount(s) {
+    var n = 0
     var i = 0
     while (i < s.length) {
-        var next = out + s.charAt(i)
-        if (byteLen(next) > n) { return out }
-        out = next
+        var c = s.charCodeAt(i)
+        if (c < 56320 || c > 57343) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// The first `n` CHARACTERS of a string, which is what a %s or %p precision cuts
+// to: "%.1s" % "日本語" is "日" in MRI, where the byte cut this replaces
+// answered nothing at all.
+function rbCharCut(s, n) {
+    var out = ""
+    var seen = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c < 56320 || c > 57343) {
+            if (seen == n) { return out }
+            seen = seen + 1
+        }
+        out = out + s.charAt(i)
         i = i + 1
     }
     return out
@@ -2008,9 +2056,10 @@ function rbByteCut(s, n) {
 
 // The directives that take a SIGN and honour the 0 flag.
 function rbFmtNumeric(conv) {
-    if (conv == "d" || conv == "i" || conv == "f") { return true }
+    if (conv == "d" || conv == "i" || conv == "u" || conv == "f") { return true }
     if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
-    return conv == "x" || conv == "X" || conv == "o" || conv == "b"
+    if (conv == "b" || conv == "B") { return true }
+    return conv == "x" || conv == "X" || conv == "o"
 }
 
 function rbIsSignChar(c) { return c == "-" || c == "+" || c == " " }
@@ -2096,7 +2145,7 @@ function rbFormat(spec, arg) {
                 if (base == 10) { body = "" + iv } else { body = rtBaseStr(iv, base) }
                 if (conv == "X") { body = rbUpper(body) }
             } else {
-                var ib = rbIntBody(iv, base, conv == "X", alt, plus || space, prec)
+                var ib = rbIntBody(iv, base, conv == "X" || conv == "B", alt, plus || space, prec)
                 body = ib["b"]
                 fill = ib["f"]
                 keep = ib["k"]
@@ -2144,8 +2193,26 @@ function rbFormat(spec, arg) {
             ai = ai + 1
             body = rbStr(nx)
             // body[:prec] in Go is a BYTE slice; the cut has to count bytes too.
-            if (prec >= 0 && prec < byteLen(body)) { body = rbByteCut(body, prec) }
+            if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
+        } else if (conv == "c") {
+            // %c is ONE character: a code point from an Integer (a Float is
+            // truncated, as it is under %d) or the first character of a String. It
+            // is not a numeric directive - "%05c" % 65 is "    A" - and MRI ignores
+            // a precision on it outright ("%.0c" % 65 is "A"). MRI demands a String
+            // of EXACTLY one character and raises ArgumentError otherwise; this
+            // takes the first.
+            ai = ai + 1
+            if (typeof nx == "string") { body = nx.length > 0 ? nx.charAt(0) : "" }
+            else { body = rbCharCode(Math.trunc(rbToF(nx))) }
+        } else if (conv == "p") {
+            // %p is #inspect where %s is #to_s, and it truncates by BYTES the same
+            // way: "%.2p" % "abcdef" is `"a'.
+            ai = ai + 1
+            body = rbInspect(nx)
+            if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
         } else {
+            // %a/%A - the hex-float form - is the only directive MRI has that no
+            // engine here answers, and this arm is what prints its letter.
             body = conv
         }
         // The + and SPACE flags were parsed and thrown away, in every half, so
@@ -2162,10 +2229,8 @@ function rbFormat(spec, arg) {
         // neither is an integer directive that carried a precision.
         var pad = " "
         if (zero && !left && !nonFinite && !intPrec && numeric) { pad = fill }
-        // Go pads to `len(body)`, which is the BYTE length of the UTF-8 string, not
-        // the number of characters: "%10s" of "café" gets FIVE spaces, not six.
-        // byteLen is the floor's own answer to that and it is what the emitters
-        // already use (lib/compile-core.js emitStr).
+        // The width counts CHARACTERS: "%10s" of "café" gets SIX spaces in MRI,
+        // where this counted the five BYTES of its UTF-8 form. rbCharCount.
         // The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
         // "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff". For the ".."
         // two's-complement form they go behind that too, and they are f/7/1 rather
@@ -2175,7 +2240,7 @@ function rbFormat(spec, arg) {
             skip = 0
             if (body.length > 0 && rbIsSignChar(body.charAt(0))) { skip = 1 }
         }
-        while (byteLen(body) < width) {
+        while (rbCharCount(body) < width) {
             if (left) {
                 body = body + " "
             } else if (pad != " ") {

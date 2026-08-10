@@ -4455,10 +4455,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // number of leading characters the zeros must not get in front of - the sign
     // and the prefix and, for MRI's infinite two's complement, the ".." as well
     // ("%#010x" % -5 is "0x..fffffb", where the FILL is "f" and not "0").
+    //
+    // The width counts CHARACTERS, and `out.length` is UTF-16 CODE UNITS: an
+    // astral character is one character to MRI ("%5c" % 128512 is four spaces)
+    // and two units here. charCount is the measure.
     function padTo(s, width, left, padChar, keep) {
         var out = s
         if (!left) {
-            while (out.length < width) { out = out + padChar }
+            while (charCount(out) < width) { out = out + padChar }
             return out
         }
         var head = ""
@@ -4466,7 +4470,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             head = out.slice(0, keep)
             out = out.slice(keep)
         }
-        while (head.length + out.length < width) { out = padChar + out }
+        while (charCount(head) + charCount(out) < width) { out = padChar + out }
         return head + out
     }
     function isSignChar(c) { return c == "-" || c == "+" || c == " " }
@@ -4474,7 +4478,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function fmtNumeric(conv) {
         if (conv == "d" || conv == "i" || conv == "u" || conv == "f") { return true }
         if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
-        return conv == "x" || conv == "X" || conv == "o" || conv == "b"
+        if (conv == "b" || conv == "B") { return true }
+        return conv == "x" || conv == "X" || conv == "o"
     }
     // ----- the EXACT decimal of a double ------------------------------------
     //
@@ -4689,6 +4694,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (conv == "x") { return "0x" }
         if (conv == "X") { return "0X" }
         if (conv == "b") { return "0b" }
+        if (conv == "B") { return "0B" }
         return ""
     }
     // ----- the three integer directives -------------------------------------
@@ -4836,7 +4842,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // the ".." form entirely.
                 if (!twos && (digits.length == 0 || digits.charAt(0) != "0")) { prefix = "0" }
             } else if (base == 16) { prefix = basePrefix(upper ? "X" : "x", v) }
-            else if (base == 2) { prefix = basePrefix("b", v) }
+            // %B is %b with an UPPERCASE prefix: "%#B" % 5 is "0B101". Base 2's
+            // digits are 0 and 1, so `upper` changes nothing else here and the
+            // caller sets it for "B" exactly as it does for "X".
+            else if (base == 2) { prefix = basePrefix(upper ? "B" : "b", v) }
         }
         var keep = 0
         if (twos) { digits = ".." + digits ; keep = 2 }
@@ -4851,7 +4860,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (conv == "d" || conv == "i" || conv == "u") { return 10 }
         if (conv == "x" || conv == "X") { return 16 }
         if (conv == "o") { return 8 }
-        if (conv == "b") { return 2 }
+        if (conv == "b" || conv == "B") { return 2 }
         return 0
     }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
@@ -4921,6 +4930,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return neg ? "-" + out : out
     }
+    // %c on an Integer is the CODE POINT and not the byte, so an astral value has
+    // to be written as the surrogate PAIR the floor's UTF-16 strings are made of -
+    // "%c" % 128512 is one emoji in MRI and here.
+    //
+    // Out of range is the one place this does not follow MRI: 0x110000 raises
+    // ArgumentError there and a negative renders a raw invalid byte, neither of
+    // which any engine here can express, so all three answer the empty string.
+    // rubyCharCode in abnf/jsrt.go and rbCharCode in languages/lib/ruby-rt.metajs
+    // are the twins.
+    function charFromCode(cp) {
+        if (cp < 0 || cp > 1114111) { return "" }
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var off = cp - 65536
+        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+    }
+    // MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
+    // "%10s" % "café" is six spaces and four characters, and its result has
+    // String#length 10 and #bytesize 11. The two compiled halves counted BYTES -
+    // layer 2 was written to match abnf/jsrt.go's `len(body)` and that file was
+    // never checked against MRI, and docs/working-on-this-project.md chapter 7.7
+    // states the byte rule and cites this very example. Both of them agreeing and
+    // both wrong, so --cross could not see it; only the oracle could.
+    //
+    // A surrogate PAIR is one character to MRI, so this counts CODE POINTS and not
+    // the UTF-16 units String#length answers. rubyCharCount in abnf/jsrt.go and
+    // rbCharCount in languages/lib/ruby-rt.metajs are the twins.
+    function charCount(s) {
+        var n = 0
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c < 56320 || c > 57343) { n = n + 1 }
+            i = i + 1
+        }
+        return n
+    }
+    // The first `n` CHARACTERS of a string, which is what a %s or %p precision
+    // cuts to: "%.1s" % "日本語" is "日".
+    function charCut(s, n) {
+        var out = ""
+        var seen = 0
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c < 56320 || c > 57343) {
+                if (seen == n) { return out }
+                seen = seen + 1
+            }
+            out = out + s.charAt(i)
+            i = i + 1
+        }
+        return out
+    }
     // A single %-directive: [-][0][width][.prec]<conv>.
     function fmtOne(spec, conv, v) {
         var left = false
@@ -4978,7 +5040,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 body = base == 10 ? "" + iv : baseStr(iv, base)
                 if (conv == "X") { body = body.toUpperCase() }
             } else {
-                var ib = intBody(iv, base, conv == "X", alt, plus || space, prec)
+                var ib = intBody(iv, base, conv == "X" || conv == "B", alt, plus || space, prec)
                 body = ib.b
                 fill = ib.f
                 keep = ib.k
@@ -4999,7 +5061,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 body = alt ? genAltStr(fv, gp, conv == "G") : genStr(fv, gp, conv == "G")
             }
         }
-        else { body = rstr(v) }
+        // %c is ONE character: a code point from an Integer (a Float is truncated,
+        // as it is under %d) or the first character of a String. It is not a
+        // numeric directive - "%05c" % 65 is "    A" - and MRI ignores a precision
+        // on it outright ("%.0c" % 65 is "A"). MRI demands a String of EXACTLY one
+        // character and raises ArgumentError otherwise; this takes the first.
+        else if (conv == "c") {
+            if (typeof v == "string") { body = v.length > 0 ? v.charAt(0) : "" }
+            else { body = charFromCode(Math.trunc(toF(v))) }
+        }
+        // %p is #inspect where %s is #to_s, and it truncates by BYTES the same way.
+        else if (conv == "p") {
+            body = rinspect(v)
+            if (prec >= 0 && prec < charCount(body)) { body = charCut(body, prec) }
+        }
+        else {
+            // %s. The precision was PARSED AND DROPPED here where both compiled
+            // halves cut the string, so "%.2s" % "abcdef" was "abcdef" in this half
+            // and "ab" in the other two - a live halves divergence --cross never
+            // saw, because no test gave %s a precision.
+            body = rstr(v)
+            if (prec >= 0 && prec < charCount(body)) { body = charCut(body, prec) }
+        }
         // The + and SPACE flags were parsed and THROWN AWAY here, and in both
         // compiled halves: "%+d" % 7 was "7" against MRI's "+7". Both halves
         // agreeing and both wrong, so --cross could never have seen it.

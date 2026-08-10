@@ -608,9 +608,17 @@ decimal expansion of the double (`m*2^e`, or `m*5^-e` with the point moved) on a
 little-endian base-10000 bignum plus a half-to-even rounder — it exists,
 language-neutral, as `rtExactDec`/`rtRoundHalfEven`/`rtFixed` in `runtime.metajs`.
 **Half-up-vs-half-even has been a live divergence three separate times and
-`--cross` was silent every time.** Also: **`printf` width and precision count
-BYTES, not characters** — `"%10s" % "café"` gets five spaces; `byteLen` is the
-floor's answer.
+`--cross` was silent every time.** Also: **whether `printf` width and precision count BYTES or CHARACTERS is
+PER-LANGUAGE, and this file asserted the wrong one for Ruby until 2026-08-10.**
+It said "count BYTES, not characters — `"%10s" % "café"` gets five spaces;
+`byteLen` is the floor's answer". Measured against `/usr/bin/ruby`: **MRI pads to
+six spaces** (result `length` 10, `bytesize` 11), because Ruby counts CHARACTERS.
+All three engines had been written to `abnf/jsrt.go`'s `len(body)`, and
+`jsrt.go` had never been checked against MRI — so the wrong rule was in the code,
+in the twin, and in this manual at once. Ruby also counts an astral character as
+one, i.e. code points and not UTF-16 units. `byteLen` remains the right answer
+where the language really is byte-counted (C, and PHP's `printf`); **check the
+oracle per language rather than inheriting this sentence.**
 
 **Only the digit machinery is shared; the renderers are per-language on purpose.**
 CPython: `str == repr`, exponential iff `decpt <= -4 || decpt > 16`, **no** forced

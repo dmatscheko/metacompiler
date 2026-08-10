@@ -7861,8 +7861,59 @@ func rubyBasePrefix(conv byte, v *big.Int) string {
 		return "0X"
 	case 'b':
 		return "0b"
+	case 'B':
+		return "0B"
 	}
 	return ""
+}
+
+// rubyCharCode is %c on an Integer: the CODE POINT, not the byte. MRI writes
+// "%c" % 128512 as the astral character itself, so this is Go's rune conversion
+// and layer 2's is a surrogate pair.
+//
+// Out of range is the one place this does not follow MRI: 0x110000 raises
+// ArgumentError there and a negative renders a raw invalid byte, neither of
+// which any engine here can express, so both answer the empty string.
+func rubyCharCode(cp int) string {
+	if cp < 0 || cp > 0x10FFFF {
+		return ""
+	}
+	return string(rune(cp))
+}
+
+// rubyFirstChar is %c on a String. MRI demands EXACTLY one character and raises
+// ArgumentError otherwise; this takes the first one and is documented as such.
+func rubyFirstChar(s string) string {
+	for _, r := range s {
+		return string(r)
+	}
+	return ""
+}
+
+// MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
+// "%10s" % "café" is six spaces and four characters, and its result has
+// String#length 10 and #bytesize 11. All three engines here counted BYTES,
+// because layer 2 was written to match this file's `len(body)` and this file was
+// never checked against MRI - docs/working-on-this-project.md chapter 7.7 states
+// the byte rule and cites this very example, and it is wrong for Ruby.
+//
+// Both halves agreeing and both wrong, so --cross could not see it; only the
+// oracle could. rbCharCount in languages/lib/ruby-rt.metajs and charCount in
+// languages/ruby-interpreter.abnf are the twins, and they count CODE POINTS -
+// a surrogate pair is one character to MRI ("%5c" % 128512 is four spaces).
+func rubyCharCount(s string) int { return utf8.RuneCountInString(s) }
+
+// The first `n` CHARACTERS of a string, which is what a %s or %p precision cuts
+// to: "%.1s" % "日本語" is "日" in MRI, where a byte cut answered nothing at all.
+func rubyCharCut(s string, n int) string {
+	i := 0
+	for at := range s {
+		if i == n {
+			return s[:at]
+		}
+		i++
+	}
+	return s
 }
 
 // ----- the three integer directives ----------------------------------------
@@ -7981,7 +8032,14 @@ func rubyIntBody(f *big.Int, base int, upper, alt, sign bool, prec int) (body, p
 				prefix = rubyBasePrefix('x', f)
 			}
 		} else if base == 2 {
-			prefix = rubyBasePrefix('b', f)
+			// %B is %b with an UPPERCASE prefix: "%#B" % 5 is "0B101". The digits
+			// are 0 and 1, so `upper` changes nothing else in base 2 and the
+			// caller passes it for 'B' exactly as it does for 'X'.
+			if upper {
+				prefix = rubyBasePrefix('B', f)
+			} else {
+				prefix = rubyBasePrefix('b', f)
+			}
 		}
 	}
 	if twos {
@@ -8002,8 +8060,17 @@ func rubyIntBody(f *big.Int, base int, upper, alt, sign bool, prec int) (body, p
 }
 
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
-// %[-][0][+][ ][#][width][.prec](d|i|f|s|x|X|o|b|e|E|g|G|%). The right operand is
-// the argument, or an array of them.
+// %[-][0][+][ ][#][width][.prec](d|i|u|f|s|p|c|x|X|o|b|B|e|E|g|G|%). The right
+// operand is the argument, or an array of them.
+//
+// %u, %B, %c and %p reached the default arm until now and printed their own
+// conversion LETTER while consuming no argument, where the interpreter half had
+// %u and printed the operand for the other three - a live halves divergence in
+// both directions. MRI: %u is %d (its 1.8 unsigned meaning is long gone), %B is
+// %b with an uppercase # prefix, %c is a code point and %p is #inspect.
+//
+// Still absent, and NOT cheap: %a/%A (the hex-float form), and the argument
+// selectors %N$, %<name> and %{name} and the * width/precision.
 //
 // %g/%G is C's "shortest of the two shapes": the value rounded to P significant
 // digits (P defaults to 6, and P == 0 means 1) is written in %e form when its
@@ -8083,14 +8150,14 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		fill, keep := byte('0'), -1
 		intPrec := false
 		switch spec[i] {
-		case 'd', 'i', 'x', 'X', 'o', 'b':
+		case 'd', 'i', 'u', 'x', 'X', 'o', 'b', 'B':
 			base := 10
 			switch spec[i] {
 			case 'x', 'X':
 				base = 16
 			case 'o':
 				base = 8
-			case 'b':
+			case 'b', 'B':
 				base = 2
 			}
 			// The argument's EXACT integer value: an Integer past 2^53 is a big
@@ -8119,7 +8186,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				}
 				break
 			}
-			body, prefix, fill, keep = rubyIntBody(iv, base, spec[i] == 'X', alt, plus || space, prec)
+			body, prefix, fill, keep = rubyIntBody(iv, base, spec[i] == 'X' || spec[i] == 'B', alt, plus || space, prec)
 			// A precision turns the 0 flag OFF for an integer directive, as it does
 			// in C: "%08.3x" % 1 is "     001".
 			intPrec = prec >= 0
@@ -8172,8 +8239,26 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			}
 		case 's':
 			body = rt.rubyStr(next())
-			if prec >= 0 && prec < len(body) {
-				body = body[:prec]
+			if prec >= 0 && prec < rubyCharCount(body) {
+				body = rubyCharCut(body, prec)
+			}
+		case 'c':
+			// %c is ONE character: a code point from an Integer (a Float is
+			// truncated, as it is under %d) or the first character of a String.
+			// It is not a numeric directive - "%05c" % 65 is "    A" - and MRI
+			// ignores a precision on it outright ("%.0c" % 65 is "A").
+			av := next()
+			if s, isStr := av.(string); isStr {
+				body = rubyFirstChar(s)
+			} else {
+				body = rubyCharCode(int(math.Trunc(rubyToF(av))))
+			}
+		case 'p':
+			// %p is #inspect where %s is #to_s, and it truncates by BYTES the same
+			// way: "%.2p" % "abcdef" is `"a'.
+			body = rt.rubyInspect(next())
+			if prec >= 0 && prec < rubyCharCount(body) {
+				body = rubyCharCut(body, prec)
 			}
 		default:
 			body = string(spec[i])
@@ -8185,7 +8270,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		// NaN too ("%+f" % Float::INFINITY is "+Inf").
 		numeric := false
 		switch spec[i] {
-		case 'd', 'i', 'f', 'e', 'E', 'g', 'G', 'x', 'X', 'o', 'b':
+		case 'd', 'i', 'u', 'f', 'e', 'E', 'g', 'G', 'x', 'X', 'o', 'b', 'B':
 			numeric = true
 		}
 		if numeric && (len(body) == 0 || body[0] != '-') {
@@ -8217,7 +8302,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			}
 			skip += len(prefix)
 		}
-		for len(body) < width {
+		for rubyCharCount(body) < width {
 			if left {
 				body += " "
 			} else if pad != ' ' {
