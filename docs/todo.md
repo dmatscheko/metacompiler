@@ -4,10 +4,8 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-09 at `7af8514`; **~153 items closed since `e284185`**, in fourteen
-rounds. The fourteenth closed fourteen items (`3158f1d`..`5dba9b7`) and is the
-round that added the abort-text gate, so numbering below has gaps until the next
-rebuild.
+Rebuilt 2026-08-10 at `8de27d7`, after the fifteenth round. Completed work lives in
+git, not here — see [§9](#9-settled--do-not-re-open) for the one-paragraph version.
 
 Two conventions, and they are the point of the file:
 
@@ -15,78 +13,71 @@ Two conventions, and they are the point of the file:
 > **[U]** — inherited from an older note and NOT re-checked. A lead, not a fact.
 
 > **Treat an item as a place to start probing, never as a specification.** In the
-> thirteenth round all ten were wrong as written, and the defect underneath was
-> real and bigger every time. Probe the FIX as well as the DEFECT. **Item NUMBERS
-> are re-assigned every rebuild** — a citation of `docs/todo.md 1.4` is provenance.
+> fifteenth round **nine of ten items were wrong as written**: two were already
+> closed (one 123 commits earlier), two understated the defect, one named the wrong
+> symptom, one had a mistaken cost estimate, and one carried a suggested fix that
+> would have made two languages worse. **Every time, the defect underneath was real
+> and bigger.** Probe the FIX as well as the DEFECT. **Item NUMBERS are re-assigned
+> every rebuild** — a citation of `docs/todo.md 1.4` is provenance.
 
 Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — `--serial` on a
 loaded machine, `--bench` for anything touching layer 2 or the floor):
 
 ```
-matrix 383/383 (16 SHOULD ABORT rows, 10 of them ALL HALVES) · --full 8,733
+matrix 383/383 (16 SHOULD ABORT rows, 14 of them ALL HALVES) · --full 8,927
 assertions, 0 halves disagree · --cross 121/0 · clang-check 16/16 none held
-go test ok · gen-all 15/15 clean · native-full 20 languages / 37 programs, 0 held
+go test ok · gen-all 15/15 clean · native-full 20 languages, 0 failures
 shape-scan 15 groups / 481 recoverable · -freeze a fixed point
 bench: 15 rows, no row outside its spread · tests/coro-poc/build.sh byte-identical
 ```
 
 **Before measuring anything, read the manual's chapter 4 and
 `tests/bench/baseline.txt`'s header** — instructions not wall clock, medians over
-layout draws, `--paired` inside a row's spread, corroborate with an exact counter.
+layout draws, `--paired`, corroborate with an exact counter.
 
 ---
 
 # 1. Correctness, with an oracle on this machine
 
-Chapter 1 was emptied again in the fourteenth round: nine of its eleven items are
-closed (`3158f1d`..`5dba9b7`). **Both survivors are [U]** — inherited and not
-re-checked — which matters, because in the fourteenth round *every* item an agent
-touched was wrong as written and the defect underneath was real and bigger each
-time.
-
-### 1.9 python: integer ARITHMETIC does not promote past 2^53 **[U]**
+### 1.1 python: integer ARITHMETIC does not promote past 2^53 **[U]**
 The literals do (`506000a`). `9007199254740992 + 1` is unchanged; 54 of 55
 differing probe rows are the `*` column. The site is the plain `l+r`/`l-r`/`l*r`
 arms in all three engines — the hot path of every Python program, where a naive
 guard measured **+9.5%** — and `*` needs the exact product, the expensive half.
 
-### 1.10 ruby's three integer directives **[U]**
-`%d`/`%x`/`%o`/`%b` of a float past 2^53; negatives under `%x`/`%o`/`%b`, which
-need MRI's infinite two's-complement `..fb` notation; precision on an integer
-directive being ignored. **All three: both halves agree, so `--cross` is blind.**
-Before copying kotlin's `%f` fix (`0636ee6`) here or into go, note what it
-established: `floPrec` (host id 70) **clamps at 17 significant digits**, and
-java's `%f` renders from `Double.toString`'s shortest round-tripping digits with
-HALF_UP — *not* the exact decimal, so `rtExactDec`/`rtFixed` are the wrong tool.
-Whether ruby and go do the same is **unverified**; measure before assuming.
+### 1.2 kotlin's abort text is agreed-and-wrong against the JVM **[V]**
+All three engines now say `abort probe` where Kotlin/JVM says
+`Exception in thread "main" java.lang.RuntimeException: abort probe`. This is
+exactly the class `800ef57` closed for java/csharp/go, and kotlin was not in that
+item. No `kotlinc` here, but kotlin targets the JVM and `java` 24.0.2 settles the
+format. Same for **swift's exit code and stream**: we exit 1 on stderr where
+`swiftc` traps with SIGTRAP (133) — converging needs the floor to raise a signal.
 
-### 1.12 swift's abort text disagrees three ways, and one leg leaks Go internals **[V]**
-Found by the new abort-text rows the moment they existed. The worst is a
-**goja-vs-`-frozen` divergence in USER-VISIBLE OUTPUT**: an uncaught `throw` in
-the swift interpreter prints `[object Object] at interp-core.js:143` under goja
-and `&{%!s(*abnf.jsObject=&{{4363 0x50b4…} map[__exc:true v:0x…]})}` under
-`-frozen` — a Go type name **and a heap address**, non-deterministic between runs.
-Same class as the `(*abnf.jsArray)` leak `b56c2b0` fixed elsewhere. Separately the
-native binary drops the `uncaught exception:` framing every other language has
-(`[1,2,3][7]`), and answers `KeyError: 9` where `llvm.Run` says `9`. Until these
-close, swift cannot get an `ALL HALVES` abort row — promoting it is a one-word
-edit in `.vscode/launch.json` plus raising `ABORT_ALL_ROWS` in `tests/gates.sh`.
+### 1.3 C# `new Exception()` gives Message = the class name **[V]**
+.NET's parameterless constructor generates
+`"Exception of type 'System.Exception' was thrown."`. Three engines, one of them
+`abnf/jsrtcsharp.go`. Spec-cited only — there is no dotnet on this machine.
 
-### 1.13 php's and kotlin's interpreters lose the abort message entirely **[V]**
-Both print `uncaught exception: [object Object]` where the compiled halves print
-the message. dart's interpreter is the one that matches real Dart, and bash's
-native binary uses the GRAMMAR name as `$0` where real bash uses the script name.
-Each is a two-leg abort row today; each becomes `ALL HALVES` when it closes.
+### 1.4 swift's `integer divide by zero` is agreed and wrong **[V]**
+`swiftc` says `Fatal error: Division by zero`. Agreed in all three engines, so
+`--cross` is blind. **The message is SHARED across languages**, so converging it
+is a cross-language decision and not a swift edit — that is why `d3ee2b2` left it.
 
-### 1.14 java, csharp and go abort text is agreed-and-wrong **[V]**
-java and csharp print `uncaught exception: [object Object]` in **all three
-engines**; real java says `Exception in thread "main" java.lang.RuntimeException:
-abort probe`. go never says `panic:`. Engine-vs-engine cannot see this class by
-construction — only an oracle can, and `java` 24.0.2 is installed.
+### 1.5 ruby: `%a`/`%A`, the argument selectors, and two float gaps **[V]**
+After `d28d8ca` closed `%B`/`%u`/`%c`/`%p` and character-counted widths, what is
+left is: **`%a`/`%A` hex-float**, missing in all three (needs a `frexp`-then-×16
+digit loop written three times — layer 2 has no access to a double's bits);
+**the argument selectors** `%1$s`, `%<name>s`, `%{name}` and `*`, which DIVERGE
+between the halves (`"%1$s-%2$s" % ["a","b"]` is `a- b` in the interpreter and
+`$s- $s` in the compiled halves) and need argument consumption restructured in all
+three; **`Float::INFINITY` is `uninitialized constant`** in the interpreter while
+`1.0/0.0` works; and **`(1.0/0.0).to_i` answers `Infinity`** where MRI raises
+`FloatDomainError` — one item with the formatter, not two, and `9102c91`
+deliberately preserved the existing answer rather than inventing one.
 
 # 2. Cross-engine defects and latent traps
 
-### 2.2 `with` is the one js construct that cannot be lowered honestly **[V]**
+### 2.1 `with` is the one js construct that cannot be lowered honestly **[V]**
 The INTERPRETER can implement it exactly (`scopes.push(o)` — scopes there are
 plain objects). Both compiled engines cannot: the floor's scope is a name/value
 pair of arrays with a hash index, **not object-backed**, so the only lowering is
@@ -94,26 +85,35 @@ snapshot-in/write-back, which cannot see a property added inside the body.
 Shipping that would ship a *designed-in* halves divergence. Needs an object-backed
 scope in the floor, or nothing.
 
-### 2.3 A boxed value knows its KIND but not its declared class **[V]**
+### 2.2 A boxed value knows its KIND but not its declared class **[V]**
 Two boxed values of the same primitive kind and different declared classes cannot
 be told apart. Same family as **kotlin's mixed Float/Double set key**, **swift's
 `Int` vs `Int64`** (`8 as Int64 is Int` is true where `swiftc` says false) and
 **kotlin's empty-range `first`**. All four would likely fall to one mechanism: a
 nominal type on the value.
 
-### 2.4 Reading an extension-only member through a PROTOCOL-typed variable **[V]**
+### 2.3 Reading an extension-only member through a PROTOCOL-typed variable **[V]**
 swift: `let d: Named = D2(); d.shout` binds to the extension in `swiftc` and to
 D2's own member here; through the concrete type every engine agrees. Needs the
 expression's **static type** — a propagation pass plus a declared-type table for
 locals, loop variables and array elements, touching every member-access site in
 both grammars. Comparable to 3.1. Same wall as `Optional(3)` (manual 7.9).
 
+### 2.4 dart: a type PARAMETER or `typedef` name in a pattern does not match **[V]**
+`switch(v){ T t => … }` inside `class Box<T>` answers `no`, and `f is IntFn` is
+false. Pre-existing in `dartIsType` and measured at base in BOTH halves — typed
+patterns now inherit it, where before `b0eb4c4` they matched by accident. Needs
+the emitter and interpreter to know which names are type parameters and erase them
+to `dynamic`. Adjacent, both left deliberately: **`x as T` is an identity cast**
+that never throws (changing it changes every `as` in the language), and
+**`o as Shape is Shape` does not parse** (`TypeTestExpr` allows one postfix).
+
 ### 2.5 A Python `set` member that is unhashable **[U]**
 Compared with `==` in the compiled halves and `===` in the interpreter
 (`a=[1]; b=[1]; {a,b}` is 1 vs 2); CPython raises `TypeError`. Closing it means
 changing the shared `dictFind` contract, not Python.
 
-### 2.7 Ruby and python residue **[V]**
+### 2.6 Ruby and python residue **[V]**
 - **A bare `except:` will not catch python's `GeneratorExit`** — costed as 3.3.
 - **An abandoned python generator never runs its `finally`** — CPython finalizes
   at collection; we have no finalizer hook and the GC deliberately has none.
@@ -123,23 +123,14 @@ changing the shared `dictFind` contract, not Python.
   bigs, a second value model.
 - **ruby `equal?`** is missing in all four engines, and it is manual 7.6's
   `is`/`strictEq` under-read: MRI has `1.equal?(1)` true and `"a".equal?("a")`
-  false, and a bare `===` diverges between the interpreter and layer 2. Needs its
-  own oracle pass.
-- **ruby `singleton_class`** cannot be matched — MRI's `to_s` embeds the object
-  address.
-- **ruby `respond_to?` on non-objects** (`"a".respond_to?(:upcase)`) needs a
-  universal-method table rather than dispatcher arms; and the module-object
-  unqualified-name rule is a heuristic whose exact fix is a `js_rselfcall(scope,
-  name, args)` extern, ~3 engines × 25 lines.
+  false, and a bare `===` diverges between the interpreter and layer 2.
+- **ruby `singleton_class`** cannot be matched — MRI's `to_s` embeds the address.
+- **ruby `respond_to?` on non-objects** needs a universal-method table; the
+  module-object unqualified-name rule is a heuristic whose exact fix is a
+  `js_rselfcall(scope, name, args)` extern, ~3 engines × 25 lines.
 - **`method(:x).class` is `Proc`** where MRI says `Method`.
 
-### 2.8 A `getattr()`-bound python builtin cannot carry keyword arguments **[V]**
-`getattr(xs,"sort")(reverse=True)` differs from `xs.sort(reverse=True)`: a
-signature-less builtin receives its keyword dict as a trailing POSITIONAL.
-Documented at all three sites. Related and deliberate: `sorted()` refuses
-`key=`/`reverse=` loudly, because they are keyword-only in CPython.
-
-### 2.9 php's undefined `$variable` — the blocker is in the floor **[V]**
+### 2.7 php's undefined `$variable` — the blocker is in the floor **[V]**
 PHP 8 warns and evaluates to **null**, and the program continues; `b56c2b0` made
 every *throwing* case catchable but left this one aborting. **The floor's hook can
 only answer a value to THROW, never a value to RETURN.** Three ways out, none
@@ -147,50 +138,58 @@ cheap: (a) a `runtime.c` hook, ~15 lines plus its Go twin and php's registration
 and a floor change must land with its layer-2 deletions in ONE sequenced commit;
 (b) a `js_scope_has`-guarded read, which **doubles the chain walk on php's hottest
 path**; (c) emitter pre-declaration of every `$name` a body mentions, ~30 lines ×
-2 grammars with `isset`/`compact`/`global` regression risk. The reason is written
-at `js_phmissname`.
+2 grammars with `isset`/`compact`/`global` regression risk. Written at
+`js_phmissname`.
 
-### 2.10 lua has no `error`/`pcall` at all **[V]**
+### 2.8 lua has no `error`/`pcall` at all **[V]**
 Without them "catchable" is vacuous, and the compiled halves' `member 'q' of
 undefined` cannot be brought onto the interpreter's `attempt to index a nil value`
 — routing through the miss hook would just produce a third wording. A real fix is
 a throw/catch surface: 2 grammars + layer 2 + twin.
 
-### 2.12 a generator body's `this` is wrong in the NATIVE build only **[V]**
+### 2.9 a generator body's `this` is wrong in the NATIVE build only **[V]**
 `function* g(){ yield this }` then `g().next().value` gives the GENERATOR OBJECT
 natively and `undefined` in the other two legs. `js_this` is one global slot in
-layer 2 and the emitter arms it with the receiver of the `.next()` call, so the
-body reads the wrong one. `--cross` cannot see it (it compares interp vs run).
-Closing it needs a **per-coroutine `this`** in the C floor's control block —
-manual 7.8's highest-risk area. Deliberately unasserted in both ratchets with the
-reason at the site: `e4c8659` made 2 of 3 legs correct, which WIDENS the gap, so
-an assertion there would turn `clang-check` and `native-full` red.
+layer 2 and the emitter arms it with the receiver of the `.next()` call. `--cross`
+cannot see it (it compares interp vs run). Closing it needs a **per-coroutine
+`this`** in the C floor's control block — manual 7.8's highest-risk area.
+Deliberately unasserted in both ratchets: `e4c8659` made 2 of 3 legs correct, which
+WIDENS the gap, so an assertion would turn `clang-check` and `native-full` red.
 
-### 2.13 two js receiver/namespace holes, all four engines **[V]**
-`(o.m)()` loses its receiver — node says `this === o`, we say `globalThis`. The
-parenthesized primary drops the Reference; the assignment path already has the
-machinery (`makeTargetRef`'s `parenref`), the call path does not. ~4 grammars.
-And a static and an instance member of the same name COLLIDE on the descriptor
-(`class C { static m(){} m(){} }`) — both `scopePut(cls,"m",…)`, second wins,
-where node keeps them on different objects. Needs a separate static namespace.
+### 2.10 js: three object-model holes left after `bd80f09` **[V]**
+- **`Object.keys(<class object>)` is wrong in BOTH halves, differently.** node says
+  `["sf"]` (static fields; methods are non-enumerable). Interpreter `[]`, compiler
+  `m,ionly,g,iv`. Needs a descriptor arm in `js_keys`. Nothing asserts it.
+- **`e.constructor` is `undefined`** where node hands back the class.
+- **`(super.m).call(x)` uses the read-time receiver**, not `x` — consistent with
+  the engine's existing bound-method shim, divergent from node.
+- **`(super as any)[k]` does not parse in either typescript grammar** (a bare
+  `super` is not a Primary, so the cast has nothing to apply to). Real TS accepts it.
 
-### 2.14 dart: a typed pattern does not test its type **[V]**
-`switch (A()) { B _ => "b", A _ => "a" }` answers `"b"`, in both halves; so do
-`B b` and `if (o case B q)`. `PatVarLead`'s `TypeNamed` carries no tag, so
-`makeVarPat`/`emitPat` never see the type. **The hazard is why it was left**: a
-refutable position wants "no match" and an irrefutable one wants Dart's
-`TypeError`, a distinction `resolvePat`'s `mode` does not carry — and
-`makeForInPat` SILENTLY SKIPS a non-matching element, so a wrong cut turns a wrong
-answer into a short loop. Also, `o is Shape ? a : b` does not parse in either half.
+### 2.11 swift and php/kotlin residue from the abort round **[V]**
+- **A top-level `defer` is unsupported in swift's interpreter half**, and the
+  HOST error it dies with is itself a goja-vs-`-frozen` divergence
+  (`TypeError: Not a function` vs `call of a non function value`). The compiled
+  half handles it, so this is also a live halves divergence.
+- **`js_kindex` diverges for swift**: the Go twin says
+  `string index %d out of range for %q` and answers a `jsChar`; `swift-rt.metajs`
+  says `string index out of range` and answers a String.
+- **Two unimplemented swift Array members disagree in their REFUSAL text**
+  (`popLast()`, `Array(s)`) — swiftc supports both.
+- **kotlin `data class` thrown**: `llvm.Run` prints `P(x=1)`, the native binary
+  `[object Object]` — the floor's `to_string` flattens every tag-6 object.
+  Unreachable from valid Kotlin, and it lives in `jsrt.go` + `runtime.c`.
+- **php `throw 1.5`**: `[object Object]` in the interpreter (its float is a
+  `{__flo}` box), `1.5` in both compiled halves. Unreachable from valid PHP.
 
-### 2.15 bash expansion residue, all pre-existing **[V]**
-A literal-prefixed unquoted word still drops leading/trailing IFS whitespace
-(`echo w:[$x]` with `x="  a   b  "` gives `[a b]`, bash gives `[ a b ]`) — fixing
-it means the field-list protocol reporting delimiters, i.e. the hottest code in
-the runtime. A pattern operator on a subscripted expansion is ignored entirely
-(`${a[@]/x/Y}`, `${a[1]#p}`). And **two live halves divergences `--cross` has
-never reached**: `printf '%s|' $x` does not field-split its operands in the
-compiler, and `read -r v <<< "  hd  "` keeps trailing blanks there.
+### 2.12 bash expansion residue, all pre-existing **[V]**
+`${a[@]@A}` needs the whole `declare -p` rendering (interp `a='pa' a='pb'`, the
+compiled halves still leak `a=$'\002pa\001pb\001'`); **`${a[@]@a}`** is a halves
+divergence (interp `a a`, compiled `a`); **`${!z}` with `z=0`** is another
+(`rt_getvar_byname` cannot reach positional parameters); **a command NAME from an
+expansion is not field-split** in either half (`cmd="echo hi"; $cmd` dies); and
+**`echo`'s flags are read only from compile-time constants** in the compiler, so
+`opts="-n"; echo $opts x` prints the flag as an argument.
 
 # 3. Costed designs, deliberately not started
 
@@ -204,7 +203,7 @@ must become a tag-6 BOX — the float box's ~640 lines again, zero in the C floo
 **It is atomic**: any subset is a `--cross` divergence. Sites:
 `python-interpreter.abnf` 17 `Array.isArray` + 49 tuple refs, `python-rt.metajs`
 42 `pyIsArr`, `python-to-llvm-ir.abnf` 54 tuple refs, `abnf/jsrt.go` 241
-`*jsArray`. Unblocks: the `%`-formatting arity heuristic, `BaseException.__str__`,
+`*jsArray`. Unblocks the `%`-formatting arity heuristic, `BaseException.__str__`,
 and hashability as a real rule. **Copy the python FLOAT box, not the tag-14 floor
 box** — manual 7.6 says why, and its two surprises are the reusable half.
 
@@ -224,11 +223,11 @@ args.
 `b086d07` landed `.throw()` and **declined `close()` deliberately**:
 `js_try`'s `pending != GEN_EXIT` guard is **shared with fifteen languages**, where
 a close IS a return completion and must not be catchable; `GEN_EXIT` is a bare
-floor object with **no Python class**, so `except Exception` (which must not
-catch it) and bare `except:` (which must) cannot be told apart; and the floor
-needs `gen_close(g, sentinel)` with the language supplying the value, reached
-through the tag-15 `return` member, which has nowhere to pass one. A new extern →
-three engines → plus `coro-poc`.
+floor object with **no Python class**, so `except Exception` (which must not catch
+it) and bare `except:` (which must) cannot be told apart; and the floor needs
+`gen_close(g, sentinel)` with the language supplying the value, reached through the
+tag-15 `return` member, which has nowhere to pass one. A new extern → three
+engines → plus `coro-poc`.
 
 ### 3.4 `Symbol.iterator` is a VALUE-MODEL change **[V]**
 There are **no symbols in the value model at all**, and `for..of`, `yield*` and
@@ -246,57 +245,67 @@ deprecated on darwin, and `runtime.c` has no `#include`, so `ucontext_t` fields
 would be hard-coded byte offsets — a floor that guesses a struct layout is not a
 floor. Nothing is wasted by having done B: the extern surface is identical.
 
-# 4. Test coverage that is missing
+# 4. Test coverage and harness
 
-### 4.2 The goja full-case-mapping fix is pinned in metajs only **[V]**
-`1367c23` routed goja's `toUpperCase`/`toLowerCase` through the same
-`strings.ToUpper` the frozen engine uses, closing the divergence in **every**
-language's interpreter half at once. Only `tests/metajs-test-full.js` asserts it.
-Related and harmless-but-invisible: `Math.random` is `function` under goja and
-`undefined` under `-frozen` in the grammar host.
+### 4.1 `Math.random` cannot be pinned until it is fixed **[V]**
+`typeof Math.random` is `function` under goja and `undefined` under `-frozen` in
+the grammar host. An assertion on it is red in one engine **by construction**, so
+it would read as `FROZEN-DIFF` rather than as a pin. It needs a fix in `abnf/`
+first — bind it identically in all three engines, or drop it from goja — and only
+then an assertion. Same class as the `Math` *members* divergence `1367c23`
+recorded and left.
 
-### 4.3 `./test.sh --full` is misleading by hand **[V]**
-js reads `MISMATCH: 576 RUN-FAILED` under the default 120 s timeout — the
-`-frozen` js interpreter leg simply overruns. Pre-existing, and `gates.sh` is
-green only because it passes `--timeout 600` itself. Either raise the default or
-make the bare command say why.
+### 4.2 Sections after `===== END SECTIONS =====` are invisible to the gap probe **[V]**
+`full_probe`'s awk `exit`s at that marker, so python's sections 37–41, ruby's
+40–43 and kotlin's 76–81 can never be isolated or deleted-and-retried: if one
+breaks, the probe reports "error at line N outside the sections" and gives up.
+Either move the marker to the end of each file or teach the awk to ignore it.
 
-### 4.4 The `.expected` fixture path is used by ONE program **[V]**
-Only brainfuck uses a fixture and only calculator uses `exit-only`. The mechanism
-is barely exercised — if a third fixture is added, check `--bless` still does the
-right thing.
+### 4.3 swift's compiler half lacks `uppercased()`/`lowercased()` **[V]**
+The interpreter has both. A live halves CAPABILITY gap that `--cross` does not see
+because no test program calls it — and the reason swift got no case-mapping pins
+in `e1816b3` while kotlin, ruby and python did.
+
+### 4.4 `--full`'s total still includes a killed language's surviving half **[V]**
+`e1816b3` made a kill loud and made it exit 1, but the printed total still counts
+the half that did finish. Annotating it was chosen over zeroing it, because
+zeroing would make the number *more* wrong; recorded in case the other choice is
+preferred later.
 
 # 5. Duplication and dead code
 
 `go run ./tools/shape-scan` is the measure.
-
-### 5.1 The `-min 40` shape tier: 15 groups, 111 recoverable lines **[V]**
 
 > **⚠ A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT SUFFICIENT — SIZE THE CALL
 > SITE, NOT THE BODY.** The fifth pass merged on an empty difference list alone
 > and shipped a regression that stood for four commits: `pyIsObj` → `rtIsObj` cost
 > **python +41%**, `rbIsObj` **ruby +11%**, `rtjIsIntegral` **java +5.7%** —
 > because each is a predicate asked at ~15–30 sites inside an arithmetic path, and
-> **in MetaJS a call is a scope frame**. Sharing stayed free for kotlin's
-> `ktIsInt` at the *same* body (−0.64%). Identical bodies, different call sites,
-> and only the call sites decide. **Measure with `--bench` before and after.**
+> **in MetaJS a call is a scope frame**. Sharing stayed free for kotlin's `ktIsInt`
+> at the *same* body (−0.64%). Identical bodies, different call sites, and only the
+> call sites decide. `8de27d7` is the worked example of doing it right: every merge
+> there was already a call to a same-cost body in the same pinned scope, and the
+> one that was not — folding `runtime-dartswift` — cost python **+1.46%** on its own
+> and had to be paid back by the merges. **Measure with `--bench --paired` before
+> and after.**
 
-The safe half is **INTRA-file** duplication, mergeable with no import and no
-shared-module decision: `k1Arg`/`k2Arg`/`k3Arg`, `jvArg`/`jxArg`,
-`pyEArgAt`/`pyFArgAt` — one 4-line body, 8 copies — plus
-`k1Integral`/`k1Numeric`/`k3Integral` and two nullish pairs. ~32 lines.
-Cross-language ones whose home is already imported, so they are free today:
-`pyBRepeat`/`rbRepeat`, `pyIsNone`/`rbIsNil`, `pyTag`/`rbTag`, `csMaxI64`/`jlMaxL`.
-Not free, and why, is manual 7.13: `js-rt.metajs` imports `regex.js` only and
-`lua-rt.metajs` imports nothing.
+### 5.1 The ruby-side pairs of the `-min 40` tier **[V]**
+`pyBRepeat`/`rbRepeat`, `pyIsNone`/`rbIsNil`, `pyTag`/`rbTag` — all three need the
+ruby side, and `ruby-rt.metajs` belonged to another agent during `8de27d7`, where a
+one-sided merge would have been incoherent. Both languages already import
+`runtime.metajs`, so these cost no new import. The tier stands at **47 groups /
+750 recoverable** at `-min 40`; the gate's 140-char threshold is unchanged at 15 /
+481. Not free, and manual 7.13 says why: `js-rt.metajs` imports `regex.js` only and
+`lua-rt.metajs` imports nothing, so anything reaching into those two costs a first
+import plus seven hooks.
 
-### 5.3 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
+### 5.2 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
 `swift-to-llvm-ir.abnf:2495,2531`, `dart:2437,2451`, `kotlin:2555` (which says
 "transferred verbatim" at the site). They are **emitter closures that build basic
 blocks**, so `runtime.metajs` cannot hold them; merging means a shared ABNF module
 imported by three grammars.
 
-### 5.4 The other five lowered probes can follow kotlin's **[V]**
+### 5.3 The other five lowered probes can follow kotlin's **[V]**
 `a6df3a8` moved kotlin's ten scope helpers into layer 2 and deleted the abort that
 stood for the whole ceiling. The same conversion is open for php `isset`, python's
 `py_setvar` residue (a containment walk is `scopeHas` + `scopeParent`, ~15 lines
@@ -305,26 +314,20 @@ each), swift/dart `sw_kget`/`sw_kset` (~40 each, the same body twice) and ruby
 local-hit arm inline and route only the MISS paths**, or you pay a scope frame on
 the hottest name resolution in the language.
 
-### 5.5 `runtime-dartswift.metajs` is the one split left to fold **[V]**
-The other three went back into `runtime.metajs` in `dd6671b` on a measurement —
-the hook contract costs a non-caller nothing, because a layer-2 call is a scope
-lookup by NAME. This one was left only because `dart-rt.metajs` was another
-agent's file that round. Same argument, same expected answer, 50 lines.
+# 6. Tooling and developer experience
 
-# 7. Tooling and developer experience
-
-### 7.3 Per-language coverage of the floor **[U]**
+### 6.1 Per-language coverage of the floor **[U]**
 The instrumentation that found 24 unreached floor bodies was written once and
 thrown away. Keeping it as `tools/floor-coverage` would make "is this body dead or
 untested?" answerable at any time — **it is the question that gates 3.2**, because
 a body no test reaches is a body no move can be validated against.
 
-### 7.4 A `--why` flag for the emitters **[U]**
+### 6.2 A `--why` flag for the emitters **[U]**
 Understanding which extern an emitter chooses for an operator means reading
 thousands of lines of grammar, repeatedly. A flag printing the extern chosen per
 AST node would make layer-2 work dramatically faster.
 
-### 7.5 Make MetaJS's dialect gaps loud **[U]**
+### 6.3 Make MetaJS's dialect gaps loud **[U]**
 No exponent literal, no `toPrecision`, typed locals, ASI differences, **and
 `keysOf` is not bound for grammar scripts at all** (only for layer-2 MetaJS —
 found by running it, goja answers `ReferenceError`). Each is discovered by a
@@ -332,14 +335,14 @@ confusing failure. A `-verify` pass over `lib/*.metajs` that names them would pa
 for itself immediately. `docs/abnf-dialect-gotchas.md` lists them; nothing
 enforces them.
 
-# 8. Reference-corpus gaps
+# 7. Reference-corpus gaps
 
 Recorded 2026-07-27 and **not re-measured since — treat every number as [U]**.
 Corpus: lua 100%, js 98.9, ruby 98.1, dart 96.6, typescript 93.7, python 92.9,
 java 92.1, kotlin 91.0, bash 88.6, c 87.3, csharp 84.6, php 83.1, go 81.1,
 swift 80.0, batch 0/2.
 
-### 8.1 JS reject side — three coherent groups
+### 7.1 JS reject side — three coherent groups
 **Assignment targets (8 files)**: a form that is not a LeftHandSideExpression used
 as one — `() => {}()`, `({a:this}=0)`, `switch (c) { default: default: }`.
 
@@ -357,8 +360,7 @@ Module is always strict, reserves `await`, and forbids Annex B `<!--` comments
 (8 `*.module.js` files). Needs a filename or module-goal boolean exposed to guards
 in **both** engines. **Note what `2a59980` settled**: these grammars implement the
 **Script** goal, evidenced by `HtmlCloseAtStart` accepting Annex B comments, sloppy
-mode by default, and top-level `return` being a syntax error (which rules out
-CommonJS, since node legalises it in the wrapper).
+mode by default, and top-level `return` being a syntax error.
 
 **Unicode identifiers (3 files)**: `IdUni`/`IdUniPart` approximate
 ID_Start/ID_Continue with a few wide ranges, so `var 🀂` is wrongly accepted. Real
@@ -367,7 +369,7 @@ tables would also serve Java, C#, Kotlin, Swift and Python, so they belong in
 ASCII `Id` or `KwEnd`. A compressed range list checked by a `:script` guard is
 probably cheaper than thousands of ABNF ranges.
 
-### 8.2 Other corpora
+### 7.2 Other corpora
 - **batch 0 of 2** — the ratchet is FULL at 24 sections, but neither wine file
   parses. No statistical weight; still a stark gap.
 - **swift 80%** — an 18-file lexical tail: suppressed conformances, `@isolated(any)`
@@ -383,15 +385,27 @@ probably cheaper than thousands of ABNF ranges.
 
 # 9. Settled — do not re-open
 
-**~153 items closed in fourteen rounds** (`e284185`..`5dba9b7`); detail in git
-history, lessons in the manual's chapter 4. Only verdicts stay — the reason is the
-only part that stops a re-open. **`i in arr` after `delete`**: needs the shared
-`*jsArray` changed for every language, declined twice. **Iterator close on
-`throw`**: built, matched node, reverted — a depth stack cannot survive `for
-await`; needs a per-coroutine one, `itc20`/`itc24` pin it. **Catchable
-unknown-name error in java/go/swift/csharp/metajs**: COMPILE-time in each real
-toolchain, so nothing runs to catch. **kotlin's `:script` guards → `!"token"`**:
-equivalent by intention only, and a mismatch silently changes what parses.
-**glibc < 2.34's `-ldl -lpthread`**: untestable on darwin. **`mod.py` headroom**:
-a size class, not a threshold. The scope API note and the per-language recorded
-divergences moved to the manual (7.3, 7.9), which is where they belong.
+**~163 items closed in fifteen rounds** (`e284185`..`8de27d7`). Detail is in git
+history; the durable lessons are in the manual's chapters 4 and 7. Only verdicts
+live here, because the *reason* is the only part that stops a re-open.
+
+**Declined on a measurement, not a preference.** `i in arr` after `delete` (needs
+the shared `*jsArray` changed for every language, declined twice) · iterator close
+on `throw` (built, matched node, reverted — a depth stack cannot survive
+`for await`; `itc20`/`itc24` pin it) · a catchable unknown-name error in
+java/go/swift/csharp/metajs (COMPILE-time in each real toolchain, so nothing runs
+to catch) · kotlin's `:script` guards → `!"token"` (equivalent by intention only,
+and a mismatch silently changes what parses) · `case_map` into layer 2 (reverted at
+135×) · retiring the Go twin (`llvm.Run` structurally cannot execute the C floor —
+manual 7.11).
+
+**Not worth doing, examined and dropped.** The `.expected` fixture path is
+exercised by one program each (brainfuck, calculator) — no action until a third
+exists · a `getattr()`-bound python builtin cannot carry keyword arguments: it is
+documented at all three sites and its sibling refusal is deliberate, so it belongs
+in the manual's permanent-divergence list · `glibc < 2.34`'s `-ldl -lpthread`
+(untestable on darwin) · `mod.py` headroom (a size class, not a threshold).
+
+**Moved, not deleted.** The scope-API note, the per-language recorded divergences
+and the byte-vs-character `printf` rule now live in the manual (7.3, 7.9, 7.7),
+which is where they belong.
