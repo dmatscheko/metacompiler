@@ -348,59 +348,58 @@ probably cheaper than thousands of ABNF ranges.
 
 # 8. Settled — do not re-open
 
-**~194 items closed in seventeen rounds** (`e284185`..HEAD). Verdicts only, and
-only the REASON, because the reason is the only part that stops a re-open. No
-dates, no order, no commit archaeology — the detail is in git and the durable
-lessons are in the manual (ch. 4 and 7).
+**~194 items closed** (`e284185`..HEAD). **One section, grouped by VERDICT and by
+nothing else** — no dates, no rounds, no order, no commit archaeology. The
+verdict plus its REASON is the whole content, because the reason is the only part
+that stops someone re-opening it; the detail is in git and the durable lessons are
+in the manual (ch. 4 and 7).
 
-**Measured, then declined.** `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name
 error in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) ·
 kotlin `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go
 twin (manual 7.11) · dart `x as T` as a throwing cast · an mtime skip for the
 generators (a `git checkout` would make a stale `.ll` report CLEAN) · matching
 swiftc's **exit 133** on a trap (its stdout discard is libc block buffering, not a
-language property — the same binary on a terminal prints everything; and our
-interpreter legs run *inside* `mec`, so `raise()` would kill the metacompiler and
-at most 1 of 3 legs could match, widening the halves gap).
+language property, and our interpreter legs run *inside* `mec`, so `raise()` would
+kill the metacompiler and at most 1 of 3 legs could match — widening the gap).
 
-**The ITEM was wrong, oracle in hand.** `(super as any)[k]` — real `tsc` rejects
-it (TS1034) · dart type-parameter erasure — Dart reifies · the C# generated
-message on every derived type — fixes one name, breaks twenty-six · **python
-integer arithmetic past 2^53 — already exact** (70 probe rows over 2^53, 2^60 and
-negatives agree with CPython on all four legs) · **ruby `%g` — already
-implemented** (the real gap was the `#` flag) · **python's `&` int32-signed —
-already correct**, its own example row included · **java's divide-by-zero message
-— already right** (`/ by zero`, catchable, already asserted) · **kotlin's nested
-throwable name would "change every `Name@1`" — it does not** (`Name@1` reads
-`__name`; only the throwable path reads `__bname`).
+**The ITEM was wrong** — already fixed, or a false premise, oracle in hand.
+python integer arithmetic past 2^53 (already exact, 70 rows) · python's `&`
+int32-signed (already correct, its own example row included) · ruby `%g` (already
+implemented — the real gap was the `#` flag) · java's divide-by-zero message
+(already right and already asserted) · `(super as any)[k]` (real `tsc` rejects it,
+TS1034) · dart type-parameter erasure (Dart reifies) · kotlin's nested throwable
+name "changes every `Name@1`" (it does not — `Name@1` reads `__name`, only the
+throwable path reads `__bname`) · swift's two abort probes "become byte-identical
+once value semantics land" (they already were; only the stale headers survived).
 
-**The prescribed FIX was wrong.** ruby's malformed formats: "emit % and rescan"
-would have converged all three engines on behaviour MRI rejects, turning a halves
-divergence into agreed-and-wrong · ruby's `round(n)` via `rtExactDec`: the true
-expansion of 2.675 is 2.67 and MRI answers 2.68, because `round_half_up` carries
-a midpoint correction · swift's abort message via a floor change: Go already
-guards in front of the shared layer, so `runtime.c` needed no edit at all.
+**The prescribed FIX was wrong.** The C# generated message on every derived type —
+fixes one name, breaks twenty-six · ruby's malformed formats via "emit % and
+rescan" — would have converged all three engines on behaviour MRI rejects, turning
+a halves divergence into agreed-and-wrong · ruby's `round(n)` via `rtExactDec` —
+the true expansion of 2.675 is 2.67 and MRI answers 2.68, because `round_half_up`
+carries a midpoint correction · swift's abort message via a floor change — Go
+already guards in front of the shared layer, so `runtime.c` needed no edit ·
+python's unhashable-key check by refusing `list` — a tuple IS a list here, so it
+would abort `{(1,2),(3,4)}` and `d[i,j]`; structural array comparison instead.
 
-**Examined and dropped.** The `.expected` fixture path · `getattr()`-bound python
-builtins with kwargs · `glibc < 2.34`'s `-ldl -lpthread` · `mod.py` headroom.
+**FIXED, and what each one actually turned out to be** — kept only where the
+finding is bigger than the fix. ruby `Float#round/floor/ceil(n)` — MRI's own
+numeric.c algorithms, including the `int_round_zero_p` cliff that overrides the
+arithmetic · ruby malformed formats — now RAISE with MRI's messages, and the blast
+radius of raising was zero · kotlin out-of-range indexing — six defects, not two,
+and the bounds check measured FREE because it folds into work the read already
+does · js/ts private names and `for..in` — one root cause (the interpreters filed
+`#x` unmangled) and a second place in the compilers nobody had checked · swift
+Array/String members — nineteen, plus six adjacent, SECTION 36 running under real
+`swiftc` · `--full`'s total silently discarding a gapped half's assertions ·
+`tools/floor-coverage` (330 of 345 floor bodies reached) · `tools/metajs-lint`,
+which found two live defects on its first run, both wrong answers in shipped
+native binaries no dynamic gate could see · `-why`, justified by answering three
+questions BY HAND first and getting two of them wrong.
 
-**Closed this round, and what each one actually was.** ruby `Float#round/floor/
-ceil(n)` — MRI's own numeric.c algorithms, including the `int_round_zero_p` cliff
-that overrides the arithmetic · ruby malformed formats — now RAISE with MRI's
-messages, and the blast radius of raising turned out to be zero · kotlin
-out-of-range indexing — six defects, not two, and the bounds check measured FREE
-because it folds into work the read already does · js/ts private names and
-`for..in` — one root cause (the interpreters filed `#x` unmangled), and the
-compilers were wrong in a second place nobody had checked · swift Array/String
-members — nineteen of them, plus six adjacent defects, and SECTION 36 runs under
-real `swiftc` · swift's abort message — Go already guards in front of the shared
-layer, so the floor was never touched · `--full`'s total silently discarding a
-gapped half's assertions · `tools/floor-coverage` (330 of 345 floor bodies
-reached) · `tools/metajs-lint`, which found two live defects on its first run,
-both wrong answers in shipped native binaries that no dynamic gate could see ·
-`-why`, which was justified by answering three questions BY HAND first and
-getting two of them wrong.
-
-**Moved to the manual.** The scope API (7.3) · per-language divergences (7.9) ·
-the byte-vs-character `printf` rule (7.7).
+**Dropped, or moved out of this file.** The `.expected` fixture path ·
+`getattr()`-bound python builtins with kwargs · `glibc < 2.34`'s `-ldl -lpthread`
+· `mod.py` headroom. Moved to the manual: the scope API (7.3), per-language
+divergences (7.9), the byte-vs-character `printf` rule (7.7).
