@@ -4276,6 +4276,91 @@ fun sec81() {
                    "\u0130".toLowerCase() == "\u0130".lowercase())
 }
 
+// ===== SECTION 82: OUT-OF-RANGE INDEXING, and a nested throwable's BINARY name =====
+// docs/todo.md 2.9. The indexed read is bounds-checked and what it raises is a
+// CATCHABLE throwable, not an abort: `listOf(1,2)[5]` and `arrayOf(1,2)[5]`
+// answered kotlin.Unit in both halves, and `"ab"[5]` was a LIVE HALVES DIVERGENCE -
+// a blank character in the interpreter, an abort ("string index 5 out of range")
+// under llvm.Run and natively. Against a clean `git archive db6bf43` tree this
+// section fails and then ABORTS in every leg.
+//
+// THE MESSAGES ARE java 24.0.2's, VERBATIM, and that is a citation of a measurement
+// and not of a document: Kotlin's throwables ARE java.lang's (typealiases), and
+// there is no kotlinc on this machine. The CLASS for a collection read is the one
+// place this cannot be exact - the JVM raises ArrayIndexOutOfBoundsException from
+// Arrays$ArrayList (what listOf and arrayOf both produce) and plain
+// IndexOutOfBoundsException from an ArrayList, while this value model has ONE array
+// type - so the common SUPERTYPE is what is asserted, and a real Kotlin
+// `catch (e: IndexOutOfBoundsException)` catches either.
+//
+// Every index is READ OUT OF AN ARRAY: a probe of literals tests the constant
+// folder, not the runtime (manual chapter 3).
+class S82Outer {
+    class S82Inner(m: String) : Exception(m)
+    class S82Plain(val n: Int)
+}
+class S82Top(m: String) : Exception(m)
+class S82Len(val length: Int)
+
+fun s82text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun sec82() {
+    val ix = listOf(5, -1, 0, 1)
+    val li = listOf(10, 20)
+    val ar = arrayOf(10, 20)
+    val st = "ab"
+    val sb = StringBuilder("ab")
+    val oob = "java.lang.IndexOutOfBoundsException: Index 5 out of bounds for length 2"
+    val soob = "java.lang.StringIndexOutOfBoundsException: Index 5 out of bounds for length 2"
+    check("ix82a", s82text { li[ix[0]] } == oob)
+    check("ix82b", s82text { ar[ix[0]] } == oob)
+    check("ix82c", s82text { st[ix[0]] } == soob)
+    check("ix82d", s82text { sb[ix[0]] } == soob)
+    check("ix82e", s82text { li[ix[1]] } ==
+        "java.lang.IndexOutOfBoundsException: Index -1 out of bounds for length 2")
+    check("ix82f", s82text { st[ix[1]] } ==
+        "java.lang.StringIndexOutOfBoundsException: Index -1 out of bounds for length 2")
+    check("ix82g", s82text { listOf<Int>()[ix[2]] } ==
+        "java.lang.IndexOutOfBoundsException: Index 0 out of bounds for length 0")
+    // The METHOD spellings of the same read.
+    check("ix82h", s82text { li.get(ix[0]) } == oob && s82text { st.get(ix[0]) } == soob)
+    check("ix82i", s82text { li.elementAt(ix[0]) } == oob)
+    // In-range reads are untouched - including the StringBuilder, which answered
+    // kotlin.Unit for EVERY index before.
+    check("ix82j", li[ix[3]] == 20 && st[ix[3]] == 'b' && sb[ix[2]] == 'a' &&
+        ar[ix[2]] == 10 && li.get(ix[2]) == 10 && li.elementAt(ix[2]) == 10)
+    // ...and the OrNull / OrElse family still answers rather than throwing.
+    check("ix82k", li.getOrNull(ix[0]) == null && li.getOrElse(ix[0]) { -7 } == -7 &&
+        li.elementAtOrNull(ix[0]) == null)
+    // Catchable by name; StringIndexOutOfBoundsException is UNDER
+    // IndexOutOfBoundsException (instanceof, java 24.0.2), not beside it.
+    var by = "none"
+    try { li[ix[0]] } catch (e: IndexOutOfBoundsException) { by = "io:" + e.message }
+    check("ix82l", by == "io:Index 5 out of bounds for length 2")
+    var by2 = "none"
+    try { st[ix[0]] } catch (e: IndexOutOfBoundsException) { by2 = "super" }
+    check("ix82m", by2 == "super")
+    var by3 = "none"
+    try { st[ix[0]] } catch (e: StringIndexOutOfBoundsException) { by3 = "exact" }
+    check("ix82n", by3 == "exact")
+    // A CLASS INSTANCE carrying a numeric `length` field of its own is NOT an array:
+    // its indexed read still answers kotlin.Unit. Without the exact Array.isArray
+    // test on the miss path this threw in the NATIVE leg only.
+    check("ix82r", "" + S82Len(3)[ix[0]] == "kotlin.Unit")
+    // A nested throwable's BINARY name. The dollar is ESCAPED - an unescaped one is
+    // a string template. java.lang.Class#getName spells a nested type Outer$Inner,
+    // and Throwable#toString is that name; this rendered "S82Inner: in".
+    check("ix82o", S82Outer.S82Inner("in").toString() == "S82Outer\$S82Inner: in")
+    // A TOP-LEVEL user throwable is unchanged: its simple name IS its binary name.
+    check("ix82p", S82Top("t").toString() == "S82Top: t")
+    // The `Name@1` fallback still reads the SIMPLE name. That is deliberate: the @1
+    // is a fixed stand-in for the JVM's identity hash, so "S82Outer$S82Plain@1"
+    // would be no closer to the JVM's answer than "S82Plain@1" is.
+    check("ix82q", S82Outer.S82Plain(1).toString() == "S82Plain@1")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4359,6 +4444,7 @@ fun main() {
     sec79() // SECTION-CALL 79
     sec80() // SECTION-CALL 80
     sec81() // SECTION-CALL 81
+    sec82() // SECTION-CALL 82
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

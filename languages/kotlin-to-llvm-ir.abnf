@@ -3816,7 +3816,8 @@ KwContract  = "contract" KwEnd ;
                        "$UnsupportedOperationException": true, "$ArithmeticException": true,
                        "$NoSuchElementException": true, "$ConcurrentModificationException": true,
                        "$ClassCastException": true, "$IllegalAccessException": true,
-                       "$StackOverflowError": true, "$OutOfMemoryError": true}
+                       "$StackOverflowError": true, "$OutOfMemoryError": true,
+                       "$StringIndexOutOfBoundsException": true}
 
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
@@ -4986,6 +4987,7 @@ KwContract  = "contract" KwEnd ;
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+        emitBinName(b, clsV, name)
         b = emitPTypes(b, clsV, null, props)
         b = emitLateinit(b, clsV, props)
         b = emitSuperLinks(b, clsV, supers, own)
@@ -6911,6 +6913,30 @@ KwContract  = "contract" KwEnd ;
         return b
     }
 
+    // The BINARY name of a declared type - "Outer$Inner", "Outer$Inner$Deep" - which
+    // is what java.lang.Class#getName answers and therefore what Throwable#toString
+    // and the launcher's uncaught line spell for a NESTED throwable. `class Inner :
+    // Exception(m)` inside `class Outer` emitted "Inner: in" where the JVM says
+    // "Outer$Inner: in" (docs/todo.md 2.9's adjacent note). java carries the same
+    // bookkeeping in languages/java-to-llvm-ir.abnf, as jBinStack / jBinOf.
+    //
+    // This half has no walk-time class stack, so the prefix is threaded at EMIT time
+    // by emitNestedList, the same way emitOuterProps already is: emission is one
+    // sequential pass, so a saved-and-restored script variable is exactly a stack.
+    // Only a NESTED type gets a __bname; a top-level one falls back to __name in
+    // ktClassBin and the string would be identical, so emitting it would grow every
+    // module for nothing.
+    //
+    // MEASURED, because the note in the list warned that adding this "changes the
+    // Name@1 rendering of EVERY nested class, not just throwables": it does not. The
+    // `Name@1` fallback reads __name (ktpObj in abnf/jsrtkotlin.go, k4bRender in
+    // languages/lib/kotlin-rt.metajs); only ktClassBin reads __bname.
+    var curBinPrefix = ""
+    function emitBinName(b, clsV, name) {
+        if (curBinPrefix == "") { return }
+        callExt(b, "js_set", [clsV, emitStr(b, "__bname"), emitStr(b, curBinPrefix + "$" + name)])
+    }
+
     // ----- nested and inner classes -----
     // makeClassStmt records the name it just declared so the enclosing NestedClass tag,
     // which runs immediately afterwards, can name its factory.
@@ -7064,7 +7090,12 @@ KwContract  = "contract" KwEnd ;
             var savedScopeV = curScopeV
             curScopeV = callExt(b, "js_scope_new", [savedScopeV])
             var ownScopeV = curScopeV
+            // The enclosing type's binary name, for the __bname of everything the
+            // nested declaration itself declares. See emitBinName.
+            var savedBin = curBinPrefix
+            curBinPrefix = (savedBin == "") ? ownerName : savedBin + "$" + ownerName
             b = nested[nc].stmt(b)
+            curBinPrefix = savedBin
             emitOuterProps = savedOuter
             if (nested[nc].name == null) { curScopeV = savedScopeV; continue }
             var declV = callExt(b, "js_scope_get", [ownScopeV, emitStr(b, nested[nc].name)])
@@ -7384,6 +7415,7 @@ KwContract  = "contract" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            emitBinName(b, clsV, name)
             b = emitPTypes(b, clsV, hdr.cparams, parts.inits)
             b = emitLateinit(b, clsV, parts.inits)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
@@ -7470,6 +7502,7 @@ KwContract  = "contract" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            emitBinName(b, clsV, name)
             // The marker kotlin-interpreter.abnf sets on an enum descriptor, so that
             // js_ktstr can render an entry as its NAME (java.lang.Enum.toString)
             // instead of the Name@1 an ordinary instance gets.
@@ -7737,6 +7770,7 @@ KwContract  = "contract" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            emitBinName(b, clsV, name)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             var savedSuper = emitSuperName

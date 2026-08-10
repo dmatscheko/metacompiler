@@ -186,6 +186,12 @@ func ktExcHierarchy() map[string]*jsObject {
 	// NumberFormatException is under IllegalArgumentException, not directly under
 	// RuntimeException - checked with `instanceof` under java (JDK 24).
 	h["NumberFormatException"] = mk("NumberFormatException", h["IllegalArgumentException"])
+	// StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
+	// directly under RuntimeException - checked with `instanceof` under java (JDK
+	// 24), which also gives the message an out-of-range charAt carries:
+	// "Index 5 out of bounds for length 2". It is what `"ab"[5]` throws; the
+	// COLLECTION read throws plain IndexOutOfBoundsException here, see js_ktindex.
+	h["StringIndexOutOfBoundsException"] = mk("StringIndexOutOfBoundsException", h["IndexOutOfBoundsException"])
 	h["IllegalAccessException"] = mk("IllegalAccessException", h["Exception"])
 	h["UninitializedPropertyAccessException"] = mk("UninitializedPropertyAccessException", h["RuntimeException"])
 	h["StackOverflowError"] = mk("StackOverflowError", h["Error"])
@@ -2605,6 +2611,39 @@ func init() {
 					return w(jsNull)
 				}
 			}
+			// Kotlin's indexed reads are BOUNDS-CHECKED, and until docs/todo.md
+			// 2.9 neither of these was: the shared js_kindex ABORTS on an
+			// out-of-range string (rt.fail, not catchable, and a live divergence
+			// against the interpreter half's blank character) and answers
+			// undefined for an out-of-range array, which printed "kotlin.Unit".
+			// Both are caught HERE rather than in abnf/jsrt.go's js_kindex,
+			// because that extern is shared with swift and must keep its own
+			// answers. Order against js_rxktindex is immaterial: a MatchResult
+			// group holder is neither a string nor an array.
+			if s, isStr := u(a[0]).(string); isStr {
+				i := jsToInt(rt.toNumber(u(a[1])))
+				if n := rt.strLen(s); i < 0 || i >= n {
+					rt.ktIndexOob("StringIndexOutOfBoundsException", i, n)
+				}
+			}
+			if arr, isArr := u(a[0]).(*jsArray); isArr {
+				i := jsToInt(rt.toNumber(u(a[1])))
+				if n := len(arr.elems); i < 0 || i >= n {
+					rt.ktIndexOob("IndexOutOfBoundsException", i, n)
+				}
+			}
+			// sb[i] on a StringBuilder answered undefined - "kotlin.Unit" - in
+			// BOTH halves. Kotlin's StringBuilder is a CharSequence, so it
+			// indexes like a String and raises the same throwable out of range
+			// (java 24.0.2: "Index 5 out of bounds for length 2").
+			if o, isObj := u(a[0]).(*jsObject); isObj && o.props["__sb"] == true {
+				st := ktSbText(o)
+				i := jsToInt(rt.toNumber(u(a[1])))
+				if n := rt.strLen(st); i < 0 || i >= n {
+					rt.ktIndexOob("StringIndexOutOfBoundsException", i, n)
+				}
+				return w(jsChar{code: int32(rt.strCodeAt(st, i))})
+			}
 			if next := m["js_rxktindex"]; next != nil {
 				return next(a)
 			}
@@ -2649,7 +2688,15 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 	case "isNotEmpty":
 		return len(s) > 0, true
 	case "get":
-		return jsChar{code: int32(rt.strCodeAt(s, jsToInt(rt.toNumber(argAt(args, 0)))))}, true
+		// Bounds-checked, like the indexed read s[i] it is the method spelling of.
+		// This arm used to answer the Char built from strCodeAt's -1 - U+FFFD -
+		// where layer 2 answered a blank character, so the two halves also
+		// DISAGREED. docs/todo.md 2.9.
+		gi := jsToInt(rt.toNumber(argAt(args, 0)))
+		if n := rt.strLen(s); gi < 0 || gi >= n {
+			rt.ktIndexOob("StringIndexOutOfBoundsException", gi, n)
+		}
+		return jsChar{code: int32(rt.strCodeAt(s, gi))}, true
 	case "plus":
 		return s + rt.ktStr2(argAt(args, 0)), true
 	case "compareTo":
@@ -4653,14 +4700,25 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			}
 		}
 		return true, true
-	case "elementAt", "elementAtOrNull", "elementAtOrElse", "getOrNull", "getOrElse":
+	// `get` joins this group so the LIST read a[i] and its method spelling a.get(i)
+	// answer alike: the shared js_mcall's `get` aborted with "list index 5 out of
+	// range" where the interpreter half answered kotlin.Unit - a live halves
+	// divergence, and neither is Kotlin's. docs/todo.md 2.9.
+	case "get", "elementAt", "elementAtOrNull", "elementAtOrElse", "getOrNull", "getOrElse":
 		ix := jsToInt(rt.toNumber(f))
 		if ix >= 0 && ix < len(es) {
 			return es[ix], true
 		}
 		switch name {
-		case "elementAt":
-			rt.fail("index %d is out of bounds", ix)
+		case "get", "elementAt":
+			// Was fail("index %d is out of bounds") - an ABORT where the JVM
+			// throws a catchable IndexOutOfBoundsException.
+			// kotlin.collections.elementAt on a List IS get(index), so the two
+			// share the message; on a bare Iterable the stdlib spells it
+			// "Collection doesn't contain element at index N.", a distinction
+			// this value model cannot make because the receiver's elements are
+			// already materialized. docs/todo.md 2.9.
+			rt.ktIndexOob("IndexOutOfBoundsException", ix, len(es))
 		case "elementAtOrElse", "getOrElse":
 			return rt.ktCall(argAt(args, 1), float64(ix)), true
 		}
@@ -6845,6 +6903,15 @@ func (rt *jsrt) ktRaise(cls, msg string) {
 	o.set("__class", ktExcHierarchy()[cls])
 	o.set("message", msg)
 	panic(&jsThrown{value: o})
+}
+
+// ktIndexOob is the out-of-range indexed read. One helper so the message - java
+// 24.0.2's verbatim, "Index 5 out of bounds for length 2" - is spelled once and
+// each check site stays two comparisons and a call. The twins are kIndexOob in
+// languages/kotlin-interpreter.abnf and ktIndexOob in
+// languages/lib/kotlin-rt.metajs. docs/todo.md 2.9.
+func (rt *jsrt) ktIndexOob(cls string, idx, n int) {
+	rt.ktRaise(cls, "Index "+strconv.Itoa(idx)+" out of bounds for length "+strconv.Itoa(n))
 }
 
 // ktRunCatching runs a lambda and boxes its completion as a kotlin.Result.

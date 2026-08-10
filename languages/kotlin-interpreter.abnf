@@ -5982,7 +5982,13 @@ NotMemberKw = :script(~~
             name == "getOrNull" || name == "getOrElse") {
             var ix = kNum(f)
             if (ix >= 0 && ix < es.length) { return {v: es[ix]} }
-            if (name == "elementAt") { fail("index " + ix + " is out of bounds") }
+            // Was fail() - an ABORT where the JVM throws a catchable
+            // IndexOutOfBoundsException. kotlin.collections.elementAt on a List IS
+            // get(index), so the two share the message; on a bare Iterable the
+            // stdlib spells it "Collection doesn't contain element at index N.", a
+            // distinction this value model cannot make because kElems has already
+            // materialized the receiver. docs/todo.md 2.9.
+            if (name == "elementAt") { kIndexOob("IndexOutOfBoundsException", ix, es.length) }
             if (name == "elementAtOrElse" || name == "getOrElse") { return {v: args[1](ix)} }
             return {v: null}
         }
@@ -6453,7 +6459,14 @@ NotMemberKw = :script(~~
             if (name == "indexOf") return target.indexOf(kstr2(args[0]))
             if (name == "isEmpty") return target.length == 0
             if (name == "isNotEmpty") return target.length > 0
-            if (name == "get") return kChar(target.charCodeAt(kNum(args[0])))
+            // Bounds-checked, like the indexed read s[i] it is the method spelling
+            // of: this used to answer kChar(NaN), a blank character, where the Go
+            // twin answered U+FFFD. docs/todo.md 2.9.
+            if (name == "get") {
+                var sgi = kNum(args[0])
+                if (sgi < 0 || sgi >= target.length) { kIndexOob("StringIndexOutOfBoundsException", sgi, target.length) }
+                return kChar(target.charCodeAt(sgi))
+            }
             if (name == "toString") return target
             if (name == "plus") return target + kstr2(args[0])
             if (name == "compareTo") return target < args[0] ? -1 : (target > args[0] ? 1 : 0)
@@ -6770,7 +6783,15 @@ NotMemberKw = :script(~~
             // to kSeqMethod below, so the fast path takes the one-argument form only.
             if (name == "add" && args.length == 1) { tgt.push(args[0]); return true }
             if (name == "size") return tgt.length
-            if (name == "get") return tgt[kNum(args[0])]
+            // Bounds-checked, like the indexed read a[i] it is the method spelling
+            // of: this used to answer undefined, which PRINTED "kotlin.Unit", while
+            // the compiled halves aborted with "list index 5 out of range".
+            // docs/todo.md 2.9.
+            if (name == "get") {
+                var lgi = kNum(args[0])
+                if (lgi < 0 || lgi >= tgt.length) { kIndexOob("IndexOutOfBoundsException", lgi, tgt.length) }
+                return tgt[lgi]
+            }
             if (name == "contains") { for (var ci2 = 0; ci2 < tgt.length; ci2++) { if (kEq(tgt[ci2], args[0])) return true } return false }
             if (name == "indexOf") { for (var ii = 0; ii < tgt.length; ii++) { if (kEq(tgt[ii], args[0])) return ii } return -1 }
             if (name == "isEmpty") return tgt.length == 0
@@ -8818,8 +8839,36 @@ NotMemberKw = :script(~~
         d = dg.dsrc()
         self[dg.prop + "$delegate"] = delegResolve(d, self, dg.prop, dg.pos)
     }
+    // The BINARY name of a declared type - "Outer$Inner", "Outer$Inner$Deep" - which
+    // is what java.lang.Class#getName answers and therefore what Throwable#toString
+    // and the launcher's uncaught line spell for a NESTED throwable. `class Inner :
+    // Exception(m)` inside `class Outer` rendered "Inner: in" where the JVM says
+    // "Outer$Inner: in" (docs/todo.md 2.9's adjacent note). java has carried the same
+    // bookkeeping all along, as jBinStack in languages/java-interpreter.abnf; kotlin
+    // already had the STACK it needs (curClasses), only nothing wrote the name down.
+    //
+    // MEASURED, because the note in the list warned that adding it "changes the
+    // Name@1 rendering of EVERY nested class, not just throwables": it does not. The
+    // `Name@1` fallback reads __name (ktpObj in abnf/jsrtkotlin.go, k4bRender in
+    // languages/lib/kotlin-rt.metajs, kstr here); only ktClassBin / kThrowableStr
+    // read __bname. So this moves the throwable line and nothing else. Making
+    // `Name@1` JVM-exact is a SEPARATE change and a losing one on its own terms: the
+    // JVM prints an identity hash there, this project prints a fixed `@1` in all
+    // three engines, so `Outer$Plain@1` would still not be the JVM's answer.
+    //
+    // An anonymous object's descriptor and the two synthetic names are excluded: the
+    // JVM spells those Outer$1, and no engine here has the counter that would need.
+    function kBinName(name) {
+        if (name.length > 0 && name.charAt(0) == "<") { return "" }
+        var p = ""
+        for (var bi = 0; bi < curClasses.length; bi++) {
+            if (curClasses[bi] == "<object>") { return "" }
+            p = (p == "") ? curClasses[bi] : p + "$" + curClasses[bi]
+        }
+        return (p == "") ? "" : p + "$" + name
+    }
     function newDescriptor(name, parentSpecs) {
-        return {__isclass: true, __name: name, __parentSpecs: parentSpecs, __parents: null,
+        return {__isclass: true, __name: name, __bname: kBinName(name), __parentSpecs: parentSpecs, __parents: null,
                 __super: null, __statics: {}, __staticSelf: null, __dataProps: null,
                 __secondary: [], __cparams: [], __methodNames: [], __sam: null,
                 __isinner: false, __outerName: null}
@@ -10150,6 +10199,12 @@ NotMemberKw = :script(~~
         if (es != undefined && (typeof o != "object" || !hasOwn(o, name))) { es(o, fv2); return }
         scopePut(o, name, fv2)
     }
+    // The out-of-range indexed read. One helper so the message is spelled once and
+    // the check sites stay two comparisons and a call. Twins: ktIndexOob in
+    // abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
+    function kIndexOob(cls, idx, len) {
+        kRaise(cls, "Index " + idx + " out of bounds for length " + len)
+    }
     function kIndex(o, i) {
         if (o === undefined || o === null) { fail("indexing of " + kstr(o)) }
         // m.groups[1] / m.groups["name"]: a MatchGroup (value + range) or null.
@@ -10159,8 +10214,38 @@ NotMemberKw = :script(~~
             var mi = kMapFind(o, i)
             return mi < 0 ? null : o.vals[mi]
         }
-        if (typeof o == "string") { return kChar(o.charCodeAt(kNum(i))) }
-        if (Array.isArray(o)) { return o[kNum(i)] }
+        // Kotlin's indexed reads are BOUNDS-CHECKED, and both of these used to answer
+        // a value: a string gave kChar(NaN) - a blank character - and a list gave
+        // undefined, which printed "kotlin.Unit". Both are catchable throwables on the
+        // JVM, and the messages are java 24.0.2's verbatim (docs/todo.md 2.9):
+        //   "ab"[5]         java.lang.StringIndexOutOfBoundsException: Index 5 out of bounds for length 2
+        //   listOf(1,2)[5]  java.lang.IndexOutOfBoundsException:       Index 5 out of bounds for length 2
+        // The JVM's CLASS for the collection read depends on the implementation
+        // behind the interface - Arrays$ArrayList (which is what `listOf` and
+        // `arrayOf` produce) raises ArrayIndexOutOfBoundsException where a plain
+        // ArrayList raises IndexOutOfBoundsException - and this value model has ONE
+        // array type for all of them (hostGlobals["arrayOf"] IS hostGlobals["listOf"]),
+        // so the common SUPERTYPE is the only answer that is right for every
+        // receiver. `catch (e: IndexOutOfBoundsException)` catches the JVM's too.
+        // sb[i] on a StringBuilder answered undefined - "kotlin.Unit". Kotlin's
+        // StringBuilder is a CharSequence, so it indexes like a String and raises
+        // the same throwable out of range (java 24.0.2). docs/todo.md 2.9.
+        if (typeof o == "object" && o.__sb === true) {
+            var bt = o.s
+            var bi = kNum(i)
+            if (bi < 0 || bi >= bt.length) { kIndexOob("StringIndexOutOfBoundsException", bi, bt.length) }
+            return kChar(bt.charCodeAt(bi))
+        }
+        if (typeof o == "string") {
+            var si = kNum(i)
+            if (si < 0 || si >= o.length) { kIndexOob("StringIndexOutOfBoundsException", si, o.length) }
+            return kChar(o.charCodeAt(si))
+        }
+        if (Array.isArray(o)) {
+            var ai = kNum(i)
+            if (ai < 0 || ai >= o.length) { kIndexOob("IndexOutOfBoundsException", ai, o.length) }
+            return o[ai]
+        }
         if (isRange(o)) { return rangeList(o)[kNum(i)] }
         if (typeof o == "object" && o.__class != undefined && o.__class != null) {
             var g = clsFind(o.__class, "get")
@@ -10276,7 +10361,11 @@ NotMemberKw = :script(~~
                      "NoSuchElementException", "ConcurrentModificationException",
                      "ClassCastException", "NumberFormatException",
                      "IllegalAccessException", "StackOverflowError", "OutOfMemoryError",
-                     "NotImplementedError", "UninitializedPropertyAccessException"]
+                     "NotImplementedError", "UninitializedPropertyAccessException",
+                     // Under IndexOutOfBoundsException, not RuntimeException - checked
+                     // with instanceof under java (JDK 24). `"ab"[5]` throws it; the
+                     // COLLECTION read throws plain IndexOutOfBoundsException, see kIndex.
+                     "StringIndexOutOfBoundsException"]
         var supers = ["", "Throwable", "Throwable", "Exception",
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
@@ -10284,7 +10373,8 @@ NotMemberKw = :script(~~
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "IllegalArgumentException",
                       "Exception", "Error", "Error",
-                      "Error", "RuntimeException"]
+                      "Error", "RuntimeException",
+                      "IndexOutOfBoundsException"]
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
             // The PACKAGE-QUALIFIED (binary) name, which is what Throwable#toString

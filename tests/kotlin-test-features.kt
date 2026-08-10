@@ -312,6 +312,31 @@ class ThrOwn(val tag: String) : Exception("ignored") {
     override fun toString(): String = "own:" + tag
 }
 
+// docs/todo.md 2.9: the text of whatever a block throws, or the value it answered.
+// A lambda, so the operand cannot be constant-folded at the call site.
+fun ixCatch(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+fun ixCatchExc(f: () -> Any?): Any? {
+    return try { f() } catch (e: Throwable) { e }
+}
+
+class IxTop(m: String) : Exception(m)
+
+class IxLen(val length: Int)
+
+class IxOuter {
+    class IxInner(m: String) : Exception(m)
+    class IxPlain(val n: Int)
+}
+
+// A nested class of a top-level OBJECT. A third level (IxOuter.IxObj.IxDeep) does
+// not resolve in the compiler half at all - "method call 'IxDeep' on a function",
+// which reproduces on a clean db6bf43 tree and is a separate defect.
+object IxObj2 {
+    class IxDeep(m: String) : Exception(m)
+}
+
 fun main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
@@ -1077,6 +1102,95 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // A declared toString() still wins over Throwable's - the same precedence real
     // Kotlin has, and the arm the new one had to be inserted behind.
     check("thr-tostring-override", thr[15].toString() == "own:q")
+
+    // ----- out-of-range indexing is a CATCHABLE THROWABLE -----
+    // docs/todo.md 2.9. `listOf(1,2)[5]` and `arrayOf(1,2)[5]` answered kotlin.Unit
+    // in BOTH halves, and `"ab"[5]` was a LIVE HALVES DIVERGENCE - the interpreter
+    // gave a blank character, the compiler ABORTED with "string index 5 out of
+    // range". Every message here is java 24.0.2's verbatim (Kotlin's throwables ARE
+    // java.lang's - typealiases - and there is no kotlinc on this machine).
+    //
+    // The JVM's CLASS for the collection read depends on the List implementation:
+    // Arrays$ArrayList (what listOf/arrayOf produce) raises
+    // ArrayIndexOutOfBoundsException, a plain ArrayList raises
+    // IndexOutOfBoundsException. This value model has ONE array type, so the common
+    // SUPERTYPE is asserted - which a `catch (e: IndexOutOfBoundsException)` in real
+    // Kotlin catches either way.
+    //
+    // Every index is READ OUT OF AN ARRAY so the constant folder cannot answer any
+    // of these at compile time (manual chapter 3).
+    val ixIdx = listOf(5, -1, 0, 3)
+    val ixList = listOf(10, 20)
+    val ixArr = arrayOf(10, 20)
+    val ixMut = mutableListOf(10, 20)
+    val ixStr = "ab"
+    val ixSb = StringBuilder("ab")
+    val ixOob = "java.lang.IndexOutOfBoundsException: Index 5 out of bounds for length 2"
+    val ixSoob = "java.lang.StringIndexOutOfBoundsException: Index 5 out of bounds for length 2"
+    check("ix-list", ixCatch { ixList[ixIdx[0]] } == ixOob)
+    check("ix-array", ixCatch { ixArr[ixIdx[0]] } == ixOob)
+    check("ix-mutable", ixCatch { ixMut[ixIdx[0]] } == ixOob)
+    check("ix-string", ixCatch { ixStr[ixIdx[0]] } == ixSoob)
+    check("ix-sb", ixCatch { ixSb[ixIdx[0]] } == ixSoob)
+    // A NEGATIVE index is the same throwable, and the message carries the sign.
+    check("ix-neg", ixCatch { ixList[ixIdx[1]] } ==
+        "java.lang.IndexOutOfBoundsException: Index -1 out of bounds for length 2" &&
+        ixCatch { ixStr[ixIdx[1]] } ==
+        "java.lang.StringIndexOutOfBoundsException: Index -1 out of bounds for length 2")
+    // index 0 of an EMPTY list is out of range; the length in the message is 0.
+    check("ix-empty", ixCatch { listOf<Int>()[ixIdx[2]] } ==
+        "java.lang.IndexOutOfBoundsException: Index 0 out of bounds for length 0")
+    // The METHOD spellings of the same read. `get` fell to the shared list surface
+    // and aborted with "list index 5 out of range" in the compiled halves while the
+    // interpreter answered kotlin.Unit; `elementAt` aborted in all three.
+    check("ix-get", ixCatch { ixList.get(ixIdx[0]) } == ixOob &&
+        ixCatch { ixStr.get(ixIdx[0]) } == ixSoob)
+    check("ix-elementat", ixCatch { ixList.elementAt(ixIdx[0]) } == ixOob)
+    // IN-RANGE reads are untouched, including the last index and a StringBuilder,
+    // which answered kotlin.Unit for EVERY index before.
+    check("ix-inrange", ixList[ixIdx[3] - 2] == 20 && ixStr[ixIdx[3] - 2] == 'b' &&
+        ixSb[ixIdx[2]] == 'a' && ixArr[ixIdx[2]] == 10 &&
+        ixList.get(ixIdx[2]) == 10 && ixList.elementAt(ixIdx[2]) == 10)
+    // The class is catchable BY NAME, and StringIndexOutOfBoundsException is under
+    // IndexOutOfBoundsException (instanceof, java 24.0.2) - not beside it.
+    var ixBy = "none"
+    try { ixList[ixIdx[0]] } catch (e: IndexOutOfBoundsException) { ixBy = "io:" + e.message }
+    check("ix-catch-typed", ixBy == "io:Index 5 out of bounds for length 2")
+    var ixBy2 = "none"
+    try { ixStr[ixIdx[0]] } catch (e: IndexOutOfBoundsException) { ixBy2 = "super" }
+    check("ix-catch-super", ixBy2 == "super")
+    check("ix-is", ixCatchExc { ixStr[ixIdx[0]] } is IndexOutOfBoundsException &&
+        ixCatchExc { ixStr[ixIdx[0]] } is StringIndexOutOfBoundsException &&
+        ixCatchExc { ixList[ixIdx[0]] } is RuntimeException &&
+        !(ixCatchExc { ixList[ixIdx[0]] } is StringIndexOutOfBoundsException))
+    // The getOrNull / getOrElse family still answers rather than throwing - the
+    // property that a bounds check bolted onto the wrong arm would break.
+    check("ix-ornull", ixList.getOrNull(ixIdx[0]) == null &&
+        ixList.getOrElse(ixIdx[0]) { -7 } == -7 &&
+        ixList.elementAtOrNull(ixIdx[0]) == null)
+
+    // A CLASS INSTANCE that carries a numeric `length` field of its own is NOT an
+    // array, and its indexed read still answers kotlin.Unit rather than throwing.
+    // The bounds check's fast path cannot tell the two apart cheaply, so the exact
+    // Array.isArray test lives on the miss path; without it this threw in the NATIVE
+    // leg only, and no gate but a native -exe probe could see it.
+    check("ix-classlen", "" + IxLen(3)[ixIdx[0]] == "kotlin.Unit")
+
+    // ----- a NESTED throwable's BINARY name -----
+    // docs/todo.md 2.9's adjacent note: `class Inner : Exception(m)` inside
+    // `class Outer` rendered "Inner: in" where java.lang.Class#getName - and so
+    // Throwable#toString - says "Outer$Inner". java carried the bookkeeping all
+    // along (jBinStack); kotlin now does too, in both grammars.
+    // The dollar is ESCAPED: an unescaped one is a Kotlin string template, and
+    // "IxOuter$IxInner" reads the VARIABLE IxInner.
+    check("nest-bname", IxOuter.IxInner("in").toString() == "IxOuter\$IxInner: in")
+    check("nest-bname-obj", IxObj2.IxDeep("d").toString() == "IxObj2\$IxDeep: d")
+    // A TOP-LEVEL user throwable is unchanged - the simple name IS its binary name.
+    check("nest-bname-top", IxTop("t").toString() == "IxTop: t")
+    // And the `Name@1` fallback still reads the SIMPLE name: it is not the binary
+    // name in this project, because the `@1` is a fixed stand-in for the JVM's
+    // identity hash and "IxOuter$IxPlain@1" would be no closer to the JVM's answer.
+    check("nest-plain-render", IxOuter.IxPlain(1).toString() == "IxPlain@1")
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")

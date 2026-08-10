@@ -774,6 +774,11 @@ function ktExcHierarchy() {
     // NumberFormatException is under IllegalArgumentException, not directly under
     // RuntimeException - checked with `instanceof` under java (JDK 24).
     h["NumberFormatException"] = k0MkExc("NumberFormatException", h["IllegalArgumentException"])
+    // StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
+    // directly under RuntimeException - checked with `instanceof` under java (JDK
+    // 24). It is what `"ab"[5]` throws; the COLLECTION read throws plain
+    // IndexOutOfBoundsException here, see js_ktindex.
+    h["StringIndexOutOfBoundsException"] = k0MkExc("StringIndexOutOfBoundsException", h["IndexOutOfBoundsException"])
     h["IllegalAccessException"] = k0MkExc("IllegalAccessException", h["Exception"])
     h["UninitializedPropertyAccessException"] = k0MkExc("UninitializedPropertyAccessException", h["RuntimeException"])
     h["StackOverflowError"] = k0MkExc("StackOverflowError", h["Error"])
@@ -803,6 +808,39 @@ function ktRaise(clsName, msg) {
     o["__class"] = ktExcHierarchy()[clsName]
     o["message"] = msg
     throw o
+}
+
+// ktIndexOob (jsrtkotlin.go's ktIndexOob): the out-of-range indexed read. One
+// helper so the message is spelled once and each check site stays two comparisons
+// and a call. Twins: kIndexOob in languages/kotlin-interpreter.abnf.
+function ktIndexOob(clsName, idx, len) {
+    ktRaise(clsName, "Index " + idx + " out of bounds for length " + len)
+}
+
+// ktArrMiss (jsrtkotlin.go's ktArrMiss) is js_ktindex's COLD arm: the indexed
+// read of an array answered undefined, which is either an out-of-range index -
+// Kotlin throws, where this used to answer undefined and print "kotlin.Unit" -
+// or an element that really holds undefined, which is handed straight back. The
+// JVM's class depends on the List implementation behind the interface -
+// Arrays$ArrayList (what `listOf` and `arrayOf` both produce here) raises
+// ArrayIndexOutOfBoundsException, a plain ArrayList raises
+// IndexOutOfBoundsException - and this value model has ONE array type for all of
+// them, so the common SUPERTYPE is the only answer right for every receiver.
+// `catch (e: IndexOutOfBoundsException)` catches the JVM's too. docs/todo.md 2.9.
+function ktArrMiss(o, k) {
+    // THE EXACT ARRAY TEST LIVES HERE, not on the fast path, and this is what makes
+    // the fast path's cheap `typeof o["length"] == "number"` probe safe: a CLASS
+    // INSTANCE can carry a numeric `length` field of its own, and with the test only
+    // on the fast path `class Len(val length: Int)` indexed at 9 threw in the NATIVE
+    // leg while both other legs answered kotlin.Unit - a divergence this change
+    // would have introduced, caught by a native -exe probe and by nothing else
+    // (manual chapter 3). Array.isArray is the same predicate the interpreter half's
+    // kIndex uses and the same one the Go twin's *jsArray assertion is.
+    if (!Array.isArray(o)) { return undefined }
+    var ai = k4Int(k)
+    var n = o["length"]
+    if (ai < 0 || ai >= n) { ktIndexOob("IndexOutOfBoundsException", ai, n) }
+    return undefined
 }
 
 // ktThrowArith (jsrtkotlin.go 233).
@@ -2771,10 +2809,12 @@ function k2TrimRightCut(s) {
 function ktStrMethod(s, name, args) {
     if (name == "isNotEmpty") { return s.length > 0 }
     if (name == "get") {
-        // No range check, exactly as the Go twin has none: strCodeAt answers -1
-        // outside and the Char is built from that.
+        // Bounds-checked, like the indexed read s[i] it is the method spelling of.
+        // This arm used to answer ktChar(-1) - a blank character - where the Go
+        // twin's strCodeAt-based build answered U+FFFD, so the two halves also
+        // DISAGREED. docs/todo.md 2.9.
         var gi = k2Int(ktArg(args, 0))
-        if (gi < 0 || gi >= s.length) { return ktChar(-1) }
+        if (gi < 0 || gi >= s.length) { ktIndexOob("StringIndexOutOfBoundsException", gi, s.length) }
         return ktChar(s.charCodeAt(gi))
     }
     if (name == "plus") { return s + k2Str2(ktArg(args, 0)) }
@@ -4420,7 +4460,15 @@ function ktSeqMethod(arr, name, args) {
         if (k >= 0) {
             if (k < es.length) { return es[k] }
         }
-        if (name == "elementAt") { fail("index " + k + " is out of bounds") }
+        // Was fail("index N is out of bounds") for elementAt - an ABORT where the
+        // JVM throws a catchable IndexOutOfBoundsException, agreed by both halves
+        // and wrong in both. kotlin.collections.elementAt on a List IS get(index),
+        // so the two share the message; on a bare Iterable the stdlib spells it
+        // "Collection doesn't contain element at index N.", a distinction this
+        // value model cannot make because ktElems has already materialized the
+        // receiver. docs/todo.md 2.9.
+        if (name == "elementAt") { ktIndexOob("IndexOutOfBoundsException", k, es.length) }
+        if (name == "get") { ktIndexOob("IndexOutOfBoundsException", k, es.length) }
         if (name == "elementAtOrElse") { return ktCall1(ktArg(args, 1), k) }
         if (name == "getOrElse") { return ktCall1(ktArg(args, 1), k) }
         return null
@@ -4687,6 +4735,11 @@ function k3IsCopyName(name) {
 }
 
 function k3IsElementAt(name) {
+    // `get` joins this group so the LIST read a[i] and its method spelling a.get(i)
+    // answer alike: the shared js_mcall's `get` aborted with "list index 5 out of
+    // range" where the interpreter half answered kotlin.Unit - a live halves
+    // divergence, and neither is Kotlin's. docs/todo.md 2.9.
+    if (name == "get") { return true }
     if (name == "elementAt") { return true }
     if (name == "elementAtOrNull") { return true }
     if (name == "elementAtOrElse") { return true }
@@ -8405,10 +8458,55 @@ function js_ktindex(o, k) {
     // is the ordinary member read.
     if (typeof o == "string") {
         var i = k4Int(k)
-        if (i < 0 || i >= o.length) { fail("string index " + i + " out of range") }
+        // Was fail() - an ABORT, where the JVM throws a CATCHABLE
+        // StringIndexOutOfBoundsException and the interpreter half answered a blank
+        // character. docs/todo.md 2.9; the message is java 24.0.2's verbatim.
+        if (i < 0 || i >= o.length) { ktIndexOob("StringIndexOutOfBoundsException", i, o.length) }
         return ktChar(o.charCodeAt(i))
     }
-    if (ktIsArr(o)) { return o[k4Int(k)] }
+    // The array arm's bounds test is FOLDED INTO THE READ, because this is the hot
+    // path of every Kotlin program and docs/todo.md 2.9 is on this list precisely
+    // because a naive guard here is the shape that measured +9.5% elsewhere. An
+    // out-of-range read already answers undefined, so the fast path pays ONE
+    // comparison against a value it has in hand and nothing else - no second
+    // `length` read, no extra call. Only a miss goes to ktArrMiss, which is where
+    // the real bounds test lives and which correctly hands an IN-RANGE undefined
+    // element straight back. The type test is also SPELLED OUT rather than written
+    // `ktIsArr(o)`: that helper's `__dict` probe is dead here, because a dict
+    // handle both returned from the rtIsDictObj arm above AND has no numeric
+    // `length`, and dropping the probe pays for the fold and more.
+    //
+    // Measured with MEC_GC_STATS on a loop that does nothing but index (200,000
+    // reads), against a `git archive db6bf43` tree - an EXACT counter, so one run
+    // settles it, and two runs of this spelling agree to the collection:
+    //   base tree                                        collections = 7197
+    //   this spelling                                                  7178  -0.26%
+    //   ktIsArr + read `length` for the guard                          7209  +0.17%
+    //   ktIsArr + read `length` twice                                  7227  +0.42%
+    // Instructions retired cannot resolve any of these, which is the point of
+    // tests/bench.sh's header: 13 paired layout draws of tests/bench/idxhot.kt read
+    // a median of 52.165G against the base tree's 52.576G - -0.78%, well inside the
+    // base row's own 4.39% spread, so the median says NOTHING - and the sign test
+    // over the matched pairs is 10 of 13 in this tree's favour. Both instruments
+    // agree with the counter on the DIRECTION and neither can put a number on it.
+    // tests/bench.sh's shared kotlin row (mod.kt indexes nothing) reads +0.46%
+    // against a 1.02% spread with heap and collections BYTE-IDENTICAL to baseline.
+    if (ktIsObj(o) && o["__set"] !== true && typeof o["length"] == "number") {
+        var av = o[k4Int(k)]
+        if (av === undefined) { return ktArrMiss(o, k) }
+        return av
+    }
+    // sb[i] on a StringBuilder answered undefined - "kotlin.Unit" - in BOTH halves.
+    // Kotlin's StringBuilder is a CharSequence, so it indexes like a String and
+    // raises the same throwable out of range (java 24.0.2: "Index 5 out of bounds
+    // for length 2"). The arm is AFTER the array arm on purpose: an sb box carries
+    // no numeric `length`, so it costs the hot path nothing. docs/todo.md 2.9.
+    if (ktIsSb(o)) {
+        var st = ktSbText(o)
+        var si = k4Int(k)
+        if (si < 0 || si >= st.length) { ktIndexOob("StringIndexOutOfBoundsException", si, st.length) }
+        return ktChar(st.charCodeAt(si))
+    }
     return o[k]
 }
 
