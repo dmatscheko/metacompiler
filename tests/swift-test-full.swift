@@ -2226,6 +2226,205 @@ func s37() {
                && String("x") == "x" && String(describing: "x") == "x")
 }
 
+// ===== SECTION 38: a loop variable is a FRESH BINDING per iteration =====
+// docs/todo.md 1.1. Swift's for-in binds its element with a `let` INSIDE the body,
+// so a closure made in iteration k captures iteration k's binding and nothing
+// else. `for i in 0..<3 { fs.append({ i }) }` then fs[0]() / fs[2]() is 0 / 2 in
+// swiftc 6.1.2. Both compiled halves answered 3 / 3: the emitter opened ONE scope
+// per loop, declared the variable in it and wrote it per iteration, so every
+// closure shared one cell. The interpreter half was right all along (it pushes a
+// scope frame per iteration), which makes this a live halves divergence --cross
+// never reached, and the reason it never reached it is that no test in this file
+// or in the features file ever captured a loop variable.
+//
+// Every loop form that BINDS a name is asserted here, because slot reuse is a
+// property of the emitter and not of the sequence: the range loop (makeForRange),
+// the list loop over arrays / strings / dictionaries / enumerated() (makeForList),
+// `for case` (makeForCase) and `while let` (makeCondWhile) each had their own copy
+// of the one-scope shape. `while` and `repeat` needed no change - their body is an
+// ordinary Block, and a Block's js_scope_new is emitted INTO the loop body block,
+// so it already ran once per iteration - and 38k/38l are here to keep it that way.
+//
+// The other half of the property, and the one a careless fix breaks: a `var`
+// declared OUTSIDE the loop is still ONE cell, shared by every closure and by the
+// loop body (38i), and a `var` declared inside the body is still one cell for the
+// whole of that iteration, so a mutating closure and its neighbours see each other
+// (38m). Both were checked against swiftc 6.1.2.
+//
+// NOT asserted, because it is absent from this subset rather than wrong:
+// `stride(from:to:by:)`, named as out of scope in this file's header. Its for-in
+// would be makeForList over a materialized sequence, which is exactly what 38c/38d
+// cover.
+func s38() {
+    // --- the range loop, half-open and closed ---
+    var a: [() -> Int] = []
+    for i in 0..<3 { a.append({ i }) }
+    check("38a", a[0]() == 0 && a[1]() == 1 && a[2]() == 2)
+    var b: [() -> Int] = []
+    for i in 0...2 { b.append({ i }) }
+    check("38b", b[0]() == 0 && b[1]() == 1 && b[2]() == 2)
+    // --- the list loop: an array, and a materialized step sequence ---
+    var c: [() -> Int] = []
+    for x in [10, 20, 30] { c.append({ x }) }
+    check("38c", c[0]() == 10 && c[1]() == 20 && c[2]() == 30)
+    var d: [() -> Int] = []
+    for x in [0, 2, 4] { d.append({ x }) }
+    check("38d", d[0]() == 0 && d[1]() == 2 && d[2]() == 4)
+    // --- enumerated(): BOTH names of the tuple pattern are per-iteration ---
+    var e: [() -> Int] = []
+    for (n, v) in ["p", "qq", "rrr"].enumerated() { e.append({ n * 10 + v.count }) }
+    check("38e", e[0]() == 1 && e[1]() == 12 && e[2]() == 23)
+    // ...and with a where clause, which reads the binding before the body does
+    var f: [() -> Int] = []
+    for (n, v) in [5, 6, 7, 8].enumerated() where v % 2 == 0 { f.append({ n * 100 + v }) }
+    check("38f", f.count == 2 && f[0]() == 106 && f[1]() == 308)
+    // --- a nested for-in captures both levels ---
+    var g: [() -> Int] = []
+    for i in 0..<2 { for j in 0..<2 { g.append({ i * 10 + j }) } }
+    check("38g", g[0]() == 0 && g[1]() == 1 && g[2]() == 10 && g[3]() == 11)
+    // --- a string is a sequence of clusters, and each cluster is a binding ---
+    var h: [() -> String] = []
+    for ch in "xyz" { h.append({ String(ch) }) }
+    check("38h", h[0]() == "x" && h[1]() == "y" && h[2]() == "z")
+    // --- THE OPPOSITE PROPERTY: a var declared outside the loop is ONE cell ---
+    var i2: [() -> Int] = []
+    var shared = 0
+    for _ in 0..<3 {
+        i2.append({ shared })
+        shared += 1
+    }
+    check("38i", shared == 3 && i2[0]() == 3 && i2[1]() == 3 && i2[2]() == 3)
+    // ...and a plain `for _ in` still runs the right number of times
+    var counted = 0
+    for _ in 0..<4 { counted += 1 }
+    check("38j", counted == 4)
+    // --- while and repeat: the body block was already a per-iteration scope ---
+    var k2: [() -> Int] = []
+    var kn = 0
+    while kn < 3 {
+        let m = kn
+        k2.append({ m })
+        kn += 1
+    }
+    check("38k", k2[0]() == 0 && k2[1]() == 1 && k2[2]() == 2)
+    var l2: [() -> Int] = []
+    var ln = 0
+    repeat {
+        let w = ln * 5
+        l2.append({ w })
+        ln += 1
+    } while ln < 3
+    check("38l", l2[0]() == 0 && l2[1]() == 5 && l2[2]() == 10)
+    // --- within ONE iteration a body var is still one cell, mutated in place ---
+    var mlog = ""
+    for i in 0..<2 {
+        var n = 0
+        let inc = { n += 1 }
+        inc()
+        inc()
+        mlog += "\(i)\(n)"
+    }
+    check("38m", mlog == "0212")
+    // --- for case, one binding and two ---
+    var n2: [() -> Int] = []
+    let opts: [Int?] = [1, nil, 3]
+    for case let v? in opts { n2.append({ v }) }
+    check("38n", n2.count == 2 && n2[0]() == 1 && n2[1]() == 3)
+    var o2: [() -> String] = []
+    let pairs: [(Int, String)?] = [(1, "a"), nil, (2, "b")]
+    for case let (num, txt)? in pairs { o2.append({ "\(num)\(txt)" }) }
+    check("38o", o2.count == 2 && o2[0]() == "1a" && o2[1]() == "2b")
+    // --- while let rebinds every iteration ---
+    var p2: [() -> Int] = []
+    var q2 = [1, 2, 3]
+    while let t = q2.popLast() { p2.append({ t }) }
+    check("38p", p2[0]() == 3 && p2[1]() == 2 && p2[2]() == 1)
+    // ...and so does a second name declared beside it in the body
+    var r2: [() -> String] = []
+    var stack = ["p", "q"]
+    while let t = stack.popLast() {
+        let u = t + "!"
+        r2.append({ t + u })
+    }
+    check("38q", r2[0]() == "qq!" && r2[1]() == "pp!")
+    // --- the binding survives the loop leaving early, and a labelled continue ---
+    var s2: [() -> Int] = []
+    for i in 0..<5 {
+        if i == 2 { break }
+        s2.append({ i })
+    }
+    check("38r", s2.count == 2 && s2[0]() == 0 && s2[1]() == 1)
+    var t2: [() -> Int] = []
+    outer38: for i in 0..<3 {
+        for w in 0..<3 {
+            if w == 1 { continue outer38 }
+            t2.append({ i * 10 + w })
+        }
+    }
+    check("38s", t2.count == 3 && t2[0]() == 0 && t2[1]() == 10 && t2[2]() == 20)
+    // --- a closure nested two deep, and one built inside a function and returned ---
+    var u2: [() -> Int] = []
+    for i in 0..<3 {
+        let mk = { { i * 3 } }
+        u2.append(mk())
+    }
+    check("38t", u2[0]() == 0 && u2[1]() == 3 && u2[2]() == 6)
+    // --- a tuple pattern over a dictionary, and an index loop ---
+    // Two entries, and the answers SORTED: Dictionary order is unspecified in Swift
+    // itself, so one entry is the only orderable form and one entry cannot show slot
+    // reuse at all (it has no second iteration to overwrite the first).
+    var v3: [() -> String] = []
+    for (kk, vv) in ["a": 1, "b": 2] { v3.append({ "\(kk)\(vv)" }) }
+    var v3s: [String] = []
+    for cl in v3 { v3s.append(cl()) }
+    check("38u", v3s.count == 2 && v3s.sorted() == ["a1", "b2"])
+    var w2: [() -> Int] = []
+    let src = [1, 2, 3]
+    for idx in src.indices { w2.append({ src[idx] }) }
+    check("38v", w2[0]() == 1 && w2[2]() == 3)
+    // --- a defer in the body sees its own iteration's binding ---
+    var dlog = ""
+    for i in 0..<2 {
+        defer { dlog += "d\(i)" }
+        dlog += "b\(i)"
+    }
+    check("38w", dlog == "b0d0b1d1")
+    // --- the capture SITE varies independently of the loop, so three more of them:
+    // a nested func (emitFunc, not a closure literal), a closure built inside a
+    // do/catch (makeTry wraps the body in closures of its own over the same scope),
+    // and one built inside an if. All three read the per-iteration scope through a
+    // different emitter path than a bare closure in the body does.
+    var x2: [() -> Int] = []
+    for i in 0..<3 {
+        func g38() -> Int { return i }
+        x2.append(g38)
+    }
+    check("38x", x2[0]() == 0 && x2[2]() == 2)
+    var y2: [() -> Int] = []
+    for i in 0..<3 {
+        do { y2.append({ i }) } catch { }
+    }
+    check("38y", y2[0]() == 0 && y2[2]() == 2)
+    var z2: [() -> Int] = []
+    for i in 0..<3 { if i != 1 { z2.append({ i }) } }
+    check("38z", z2.count == 2 && z2[0]() == 0 && z2[1]() == 2)
+    // --- a COMMA condition clause: `while a, b` is the same emitter as `while let`
+    // (CplxWhile), and it reaches it without binding anything, so it must keep
+    // working AND keep paying nothing. Then the two-binding form, where both names
+    // are per-iteration.
+    var aa = 0
+    var ab = 5
+    while aa < 3, ab > 0 {
+        aa += 1
+        ab -= 1
+    }
+    check("38aa", aa == 3 && ab == 2)
+    var ac: [() -> Int] = []
+    var ad: [Int?] = [7, 8, 9]
+    while let e1 = ad.popLast(), let e2 = e1 { ac.append({ e2 }) }
+    check("38ab", ac.count == 3 && ac[0]() == 9 && ac[2]() == 7)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2266,6 +2465,7 @@ func main() {
     s35() // SECTION-CALL 35
     s36() // SECTION-CALL 36
     s37() // SECTION-CALL 37
+    s38() // SECTION-CALL 38
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -2748,6 +2748,18 @@ KwContinue  = "continue" KwEnd ;
         }
         if (pat.fname != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.fname), v]) }
     }
+    // Does the loop pattern bind any name at all? `for _ in xs` and `for (_, _) in m`
+    // bind nothing, so those loops need no per-iteration scope and keep costing
+    // exactly what they cost before (see the header above makeForRange).
+    function forPatBinds(pat) {
+        if (pat.tnames != undefined) {
+            for (var j = 0; j < pat.tnames.length; j++) {
+                if (pat.tnames[j] != "_") { return true }
+            }
+            return false
+        }
+        return pat.fname != undefined && pat.fname != "_"
+    }
 
     // ----- defer -----
     // A defer is not a statement thunk but a MARKER in its block's item list; the
@@ -4107,6 +4119,18 @@ KwContinue  = "continue" KwEnd ;
             return contB
         }
     }
+    // Does a complex condition clause DECLARE anything? A CplxCondClause is reached
+    // either through a leading binding or through a comma, so `while a > 1, b < 2` is
+    // a legal clause that binds nothing - and it must not start paying for the
+    // per-iteration scope the binding forms need (see makeForRange's header). Anything
+    // that is not a plain cexpr is treated as binding, which over-counts a
+    // value-only `case` pattern and never under-counts.
+    function condsBind(conds) {
+        for (var i = 0; i < conds.length; i++) {
+            if (conds[i].cexpr == undefined) { return true }
+        }
+        return false
+    }
     function makeCondWhile(items) {
         var lbl = itemLbl(items)
         var rest = itemsAfterLbl(items)
@@ -4114,10 +4138,15 @@ KwContinue  = "continue" KwEnd ;
         var bodyT = rest[1]
         return function(b) {
             var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var headB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
+            // The clause's bindings are RE-MADE every iteration, so the scope they land
+            // in is opened in the loop HEAD and not before it: `while let t =
+            // q.popLast() { fs.append({ t }) }` binds a fresh t each turn, exactly like
+            // the interpreter half's scopes.push({}) inside its while(true). Opening it
+            // once outside gave every closure the same cell (see makeForRange's header).
+            if (condsBind(conds)) { curScopeV = callExt(headB, "js_scope_new", [saved]) }
             var bodyB = emitConds(headB, conds, exitB)
             loopStack.push({cont: headB, brk: exitB, lbl: lbl})
             bodyT(bodyB).NewBr(headB)
@@ -4160,6 +4189,12 @@ KwContinue  = "continue" KwEnd ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
             var elV = callExt(bodyB, "js_swidx", [sV2, iV2])
+            // A FRESH SCOPE per iteration, and emitMatchPat's `let` bindings land in it -
+            // see the header above makeForRange. The pattern is a general Pattern here,
+            // so there is no cheap "binds nothing" case to skip: `for case 1 in xs` is
+            // the only one and it is not worth a walk of the pattern tree.
+            var loopSavedC = curScopeV
+            curScopeV = callExt(bodyB, "js_scope_new", [loopSavedC])
             var innerB = emitMatchPat(bodyB, pat, elV, false, postB)
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             if (whereT != null) {
@@ -4170,6 +4205,7 @@ KwContinue  = "continue" KwEnd ;
             }
             bodyT(innerB).NewBr(postB)
             loopStack.pop()
+            curScopeV = loopSavedC
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName),
                                             callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
@@ -5276,6 +5312,24 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     // items = [{lbl}?, pat, fromT, {rop}, toT, {fwhere}?, bodyT]. ..< subtracts one.
+    //
+    // THE LOOP VARIABLE IS A FRESH BINDING PER ITERATION, and that is not a detail:
+    // Swift's for-in binds the element with a `let` inside the body, so
+    // `for i in 0..<3 { fs.append({ i }) }` then fs[0]() / fs[2]() answers 0 / 2 in
+    // swiftc 6.1.2 and in the interpreter half (which pushes a scope frame per
+    // iteration). This half used to open ONE scope, declare the variable in it and
+    // write it per iteration, so every closure shared one cell and answered 3 / 3 -
+    // both compiled halves agreed and both were wrong, which is why --cross was blind
+    // to it (docs/todo.md 1.1). The counter is therefore a HIDDEN name in the loop's
+    // own scope ($ct) and the user's name is declared from it in a per-iteration
+    // child. Kotlin's makeForRange took the same shape at a6df3a8 and its cost was
+    // measured there rather than assumed; tests/bench/forcap.swift is this
+    // language's copy of that measurement, and swift's answer is NOT kotlin's coin
+    // flip: +0.43%, HIGHER in 15 of 15 paired layout draws, corroborated by the exact
+    // counters (collections 808 -> 816, live +80 bytes, binary size identical). That
+    // is the price of the semantics on a program that is nothing but tight for loops,
+    // and it is paid only by a loop that BINDS a name - `for _ in` is byte-identical
+    // in collections, live bytes and instruction count.
     function makeForRange(items) {
         var lbl = itemLbl(items)
         var rest = itemsAfterLbl(items)
@@ -5291,11 +5345,12 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             hidCount++
             var tName = "$to" + hidCount
+            var cName = "$ct" + hidCount
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var rf = fromT(b)
             b = rf.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), rf.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), rf.v])
             var rt = toT(b)
             b = rt.b
             var boundV = rt.v
@@ -5306,9 +5361,25 @@ KwContinue  = "continue" KwEnd ;
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, name)])
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
             var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_le", [iV, tV])), bodyB, exitB)
+            // The fresh per-iteration binding, taken from the hidden counter. The
+            // where clause reads it too, so it is declared before the guard. `for _ in`
+            // binds nothing, so it opens no scope either and costs exactly what it did.
+            //
+            // The value is the head block's OWN iV rather than a second js_scope_get in
+            // the body: headB is bodyB's only predecessor, so iV dominates it, and the
+            // per-iteration binding then costs one js_scope_new plus one js_scope_decl
+            // and no extra read. (The saving itself is NOT quoted as a percentage: it is
+            // one extern call per iteration against a 40,000-iteration loop that already
+            // collects 364 times, i.e. far below what a single build can resolve -
+            // manual chapter 4.)
+            var loopSaved = curScopeV
+            if (name != "_" && name != "$_") {
+                curScopeV = callExt(bodyB, "js_scope_new", [loopSaved])
+                callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), iV])
+            }
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             var innerB = bodyB
             if (whereT != null) {
@@ -5319,8 +5390,9 @@ KwContinue  = "continue" KwEnd ;
             }
             bodyT(innerB).NewBr(postB)
             loopStack.pop()
-            var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, name)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, name), callExt(postB, "js_jadd", [iV2, emitNum(postB, 1)])])
+            curScopeV = loopSaved
+            var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, "js_jadd", [iV2, emitNum(postB, 1)])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
@@ -5409,6 +5481,11 @@ KwContinue  = "continue" KwEnd ;
                 elV = pJoinB.NewPhi([llvm.ir.NewIncoming(rawV, pArrB), llvm.ir.NewIncoming(pairV, pDictB)])
                 bodyB = pJoinB
             }
+            // A FRESH SCOPE per iteration, and emitBindForPat declares INTO it - see the
+            // header above makeForRange. Both names of a tuple pattern are per-iteration
+            // bindings, so `for (k, v) in m { fs.append({ k }) }` captures each one.
+            var loopSavedL = curScopeV
+            if (forPatBinds(pat)) { curScopeV = callExt(bodyB, "js_scope_new", [loopSavedL]) }
             emitBindForPat(bodyB, pat, elV)
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             var innerB = bodyB
@@ -5420,6 +5497,7 @@ KwContinue  = "continue" KwEnd ;
             }
             bodyT(innerB).NewBr(postB)
             loopStack.pop()
+            curScopeV = loopSavedL
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
             postB.NewBr(headB)

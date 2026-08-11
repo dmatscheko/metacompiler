@@ -778,6 +778,40 @@ func main() {
     let add3 = makeAdder(3)
     let add9 = makeAdder(9)
     check("closure-factory-independent", add3(1) == 4 && add9(1) == 10)
+    // A LOOP VARIABLE IS A FRESH BINDING PER ITERATION (docs/todo.md 1.1). Swift
+    // binds the element with a `let` inside the body, so the closure made in
+    // iteration k captures iteration k's cell: swiftc 6.1.2 answers 0 / 2 where both
+    // compiled halves answered 3 / 3 from one shared slot. The interpreter half was
+    // right, so --cross was blind to it - nothing here had ever captured a loop
+    // variable. The full-syntax file's SECTION 38 walks every loop form; these four
+    // are the ones cheap enough for the matrix.
+    var caps: [() -> Int] = []
+    for i in 0..<3 { caps.append({ i }) }
+    check("closure-captures-for-in-per-iteration", caps[0]() == 0 && caps[2]() == 2)
+    var lcaps: [() -> Int] = []
+    for v in [10, 20, 30] { lcaps.append({ v }) }
+    check("closure-captures-for-in-list-per-iteration", lcaps[0]() == 10 && lcaps[2]() == 30)
+    // ...and the opposite property, which a careless fix breaks: a var declared
+    // OUTSIDE the loop is still one cell, shared by the body and by every closure.
+    var outerCaps: [() -> Int] = []
+    var outerVar = 0
+    for _ in 0..<3 {
+        outerCaps.append({ outerVar })
+        outerVar += 1
+    }
+    check("closure-captures-outer-var-shared", outerVar == 3
+          && outerCaps[0]() == 3 && outerCaps[2]() == 3)
+    // ...and a var declared INSIDE the body is one cell for that iteration, so a
+    // mutating closure and the code beside it see each other.
+    var inLog = ""
+    for i in 0..<2 {
+        var n = 0
+        let inc = { n += 1 }
+        inc()
+        inc()
+        inLog += "\(i)\(n)"
+    }
+    check("closure-captures-body-var-shared-within-iteration", inLog == "0212")
 
     // ----- arrays -----
     var nums = [3, 1, 4]
