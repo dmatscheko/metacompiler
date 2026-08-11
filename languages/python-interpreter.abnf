@@ -8853,7 +8853,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the next one out (makeNonlocal already checked that one exists), so it
         // lifts every function boundary on the way, not just the first.
         var lifted = false
-        for (var i = sc.length - 1; i >= 0; i--) {
+        // THE DECLARATION OF THE CURRENT FUNCTION IS CONSULTED FIRST, and it has to
+        // be: `global x` covers the WHOLE body in CPython, so there is no local x for
+        // any binding site in it - while the walk below assigns to the first scope
+        // that already HAS the name, and the block scopes of an `except ... as x` /
+        // `with ... as x` / a for target sit inside the function and carry exactly
+        // that. So
+        //
+        //     z = 1
+        //     def i():
+        //         global z
+        //         try: raise ValueError()
+        //         except ValueError as z: pass
+        //         z = 77
+        //     i(); print(z)          # CPython 77
+        //
+        // wrote the handler's own block binding and left the module's z at 1, while
+        // both compiled halves answer 77 (python-to-llvm-ir.abnf's py_setvar takes
+        // its g*/n* arms before anything else, which is the order abnf/jsrt.go's
+        // js_pyset_var uses too). This is that same order, in the third engine.
+        // GATED ON THE NAME, because pySet runs on every assignment the interpreter
+        // makes and this pre-pass would otherwise walk to the function boundary twice.
+        // pyDeclNames holds every name any `global` / `nonlocal` statement in the
+        // program mentions, so a program without one pays a single own-property test
+        // here and nothing else. (objHasOwn rather than a plain read: a name like
+        // `toString` would find Object.prototype's - docs/abnf-dialect-gotchas.md.)
+        var declStart = sc.length - 1
+        if (ho.call(pyDeclNames, name)) {
+            var fi = -1
+            for (var j = sc.length - 1; j >= 1; j--) {
+                if (sc[j].__pyfn === true) { fi = j; break }
+            }
+            if (fi >= 0) {
+                var d0 = sc[fi].__pyd
+                if (d0 != undefined && d0 != "") {
+                    if (d0.indexOf("g:" + name + ";") >= 0) { scopePut(globalScope, name, value); return }
+                    // `nonlocal x`: the binding is not in this function at all, so the
+                    // walk starts OUTSIDE its frame with every further boundary lifted.
+                    if (d0.indexOf("n:" + name + ";") >= 0) { declStart = fi - 1; lifted = true }
+                }
+            }
+        }
+        for (var i = declStart; i >= 0; i--) {
             if (ho.call(sc[i], name)) { scopePut(sc[i], name, value); return }
             // A plain property read, not hasOwn: this runs on every assignment that
             // is not answered by the innermost scope, and no scope object inherits
@@ -8877,7 +8918,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return null
     }
+    // Every name a `global` / `nonlocal` statement mentions, anywhere in the program.
+    // It is pySet's gate, not a semantic table: a name in here still has to find the
+    // declaration on the CURRENT function's frame to mean anything, and a name not in
+    // here cannot possibly be declared, which is what makes the check above free.
+    var pyDeclNames = {}
     function pyDeclare(kind, name) {
+        rawSet(pyDeclNames, name, true)
         var fs = pyFnScope()
         if (fs != null) { fs.__pyd = fs.__pyd + kind + ":" + name + ";" }
     }

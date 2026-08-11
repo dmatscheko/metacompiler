@@ -1188,6 +1188,75 @@ function s30() {
     check("n1", (new S30Inner())->w === 6 && s30nested() === 11);
 }
 
+// ===== SECTION 31: isset() diagnoses NOTHING =====
+// isset() and unset() are the two forms PHP 8 guarantees never to warn and never
+// to raise, whatever the operand: an undeclared variable, a path through one, a
+// property of null. All three used to take the C floor's UNCATCHABLE `variable not
+// defined` / `member '__class' of null` abort in the compiled halves - the second
+// only in a program that declares __isset or __get anywhere, which this file does
+// (SECTION 12), so it is the shape a real program hits. None of it is
+// docs/todo.md 2.5: that item is blocked because the floor's miss hook can only
+// answer a value to THROW where a plain `$x` READ needs one to RETURN, and isset
+// needs no value at all.
+//
+// The string-offset rows are the other half: a NEGATIVE offset counts from the end
+// (PHP 7.1+), so isset($s[-1]) is true - and js_phget has always ANSWERED "c" for
+// it, so isset and the read disagreed inside one expression. The out-of-range
+// rows (isset($s[3]), isset($s["x"]), both false in PHP 8) are correct in the
+// compiled halves and WRONG in the interpreter half, which answers true for every
+// offset; they are deliberately not asserted here, see docs/todo.md.
+class S31M {
+    private $d = ["k" => 3];
+    public function __isset($n) { return isset($this->d[$n]); }
+    public function __get($n) { return isset($this->d[$n]) ? $this->d[$n] : "none"; }
+}
+class S31P { public $p = 3; public $n = null; }
+function s31() {
+    check("is01", !isset($s31undef));
+    check("is02", !isset($s31undef[0]) && !isset($s31undef["k"]["j"]));
+    check("is03", !isset($s31undef->p) && !isset($s31undef->a->b));
+    $o = new S31P();
+    check("is04", isset($o->p) && !isset($o->n) && !isset($o->zz));
+    check("is05", !isset($o->n->b) && !isset($o->zz->b));
+    $m = new S31M();
+    check("is06", isset($m->k) && !isset($m->nope) && $m->k === 3);
+    // A reference is dereferenced before the path is walked: the root used to be
+    // the reference CELL, so this answered false in the compiled halves alone.
+    $arr = [1, 2];
+    $r = &$arr;
+    check("is07", isset($r[0]) && !isset($r[9]));
+    $obj = new S31P();
+    $ro = &$obj;
+    check("is08", isset($ro->p) && !isset($ro->zz));
+    // Negative string offsets.
+    $vals = ["abc", -1, -3, 1];
+    $s = $vals[0];
+    check("is09", isset($s[$vals[1]]) && $s[$vals[1]] === "c");
+    check("is10", isset($s[$vals[2]]) && $s[$vals[2]] === "a");
+    check("is11", isset($s[$vals[3]]) && $s[$vals[3]] === "b");
+    // And the offsets that are NOT set: past the end, past the start, and one that
+    // is not a number at all. isset() answers false for each and diagnoses nothing;
+    // the interpreter half used to answer TRUE for all three, because reading an
+    // invalid offset yields "" and "" is not null. All three engines agree now.
+    $bad = ["abc", 3, -4, "x", 0];
+    $t = $bad[0];
+    check("is12", !isset($t[$bad[1]]));
+    check("is13", !isset($t[$bad[2]]));
+    check("is14", !isset($t[$bad[3]]) && isset($t[$bad[4]]));
+    // unset() through a name that was never assigned is a no-op, not a diagnostic:
+    // the interpreter half raised `unknown name`, the compiled halves aborted in the
+    // floor. Nothing here may raise, and the array beside it must survive untouched.
+    $keep = ["x" => 1];
+    unset($s31gone[0]);
+    unset($s31gone->p);
+    unset($s31gone["k"]["j"]);
+    unset($o->n->b);
+    unset($o->zz->b);
+    check("is15", count($keep) === 1 && !isset($s31gone) && isset($o->p));
+    unset($keep["x"]);
+    check("is16", count($keep) === 0);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1224,6 +1293,7 @@ function main() {
     s29(); // SECTION-CALL 29
     s29dump(); // SECTION-CALL 29
     s30(); // SECTION-CALL 30
+    s31(); // SECTION-CALL 31
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

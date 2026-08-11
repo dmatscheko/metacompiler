@@ -1298,7 +1298,14 @@ func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 			return false
 		}
 		i := int(rt.phpToLong(k))
-		return i >= 0 && i < len(s)
+		// A NEGATIVE string offset counts from the end (PHP 7.1+), so
+		// isset("abc"[-1]) is true - and phpGet has always ANSWERED "c" for it,
+		// so this arm made isset and the read disagree inside one expression.
+		// Mirrored in languages/lib/php-rt.metajs's phArrHas.
+		if i < 0 {
+			return -i <= len(s)
+		}
+		return i < len(s)
 	}
 	if o, ok := av.(*jsObject); ok {
 		pv, has := o.props[rt.phpStr(k)]

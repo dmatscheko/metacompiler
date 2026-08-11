@@ -2415,9 +2415,37 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var k = anytype
             k = st.idx()
             if (isArr(o)) { if (!arrHas(o, k)) { return false } }
+            // A STRING OFFSET is a containment question too, and this arm was missing:
+            // phpIndex answers "" for an offset outside the string, "" is neither null
+            // nor undefined, so isset("abc"[3]) came out TRUE. PHP 8 says false for an
+            // out-of-range offset, false for a too-negative one, and false for a
+            // non-numeric one - isset() never diagnoses, it just answers. The rule is
+            // phArrHas's in languages/lib/php-rt.metajs and phpArrHas's in
+            // abnf/jsrtphp.go, and the three engines now agree on all seven offsets.
+            else if (typeof o == "string") { if (!strOffsetExists(o, k)) { return false } }
             o = phpIndex(o, k)
         }
         return o !== null && o !== undefined
+    }
+    // Is `k` a valid, OCCUPIED offset of the string `s`? An integer-ish key inside
+    // [-length, length-1]; a negative one counts from the end (PHP 7.1+), which is
+    // what phpIndex already reads. The numeric-key test is phNumericKey's
+    // (languages/lib/php-rt.metajs): an int, a float, a bool, or a string that is a
+    // number at all - and NOT an arbitrary string, which is why isset($s["x"]) is
+    // false rather than isset($s[0]).
+    // NOTE THE NAME. strOffsetSet is ALREADY TAKEN in this file (the '$s[0] = "H"'
+    // splice writer, ~1400 lines below), and calling it from here instead compiled,
+    // ran, answered isset() TRUE for every offset and then died in unescapeSq on an
+    // unrelated program. An unprefixed helper added to a file that already has one of
+    // that name silently replaces it - docs/working-on-this-project.md chapter 4.
+    function strOffsetExists(s, k) {
+        var ok = false
+        if (isNum(k) || typeof k == "boolean") { ok = true }
+        else if (typeof k == "string" && numStrVal(k) != null) { ok = true }
+        if (!ok) { return false }
+        var n = trunc(numOf(toNumV(k)))
+        if (n < 0) { return 0 - n <= s.length }
+        return n < s.length
     }
     function makeEmpty(t) { return function() { return !phptest(t()) } }
     function makeUnset(items) {
@@ -2433,6 +2461,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     }
                     continue
                 }
+                // unset() DIAGNOSES NOTHING, and neither does a path through a name
+                // that was never assigned: `unset($undef[0])` and `unset($undef->p)`
+                // are no-ops in PHP 8, where resolveRefPhpV's walk raises the engine's
+                // `unknown name: $undef` for a root it cannot find. The compiled halves
+                // read that root with the non-aborting scope probe now
+                // (php-to-llvm-ir.abnf's refRootV), so this arm is what keeps the two
+                // halves answering the same thing. A call head and a static-property
+                // head have no name to be missing and are left alone.
+                var plainRoot = (ref.headT == null || ref.headT == undefined) &&
+                                (ref.sref == null || ref.sref == undefined)
+                if (plainRoot && !varExists(nm)) { continue }
                 var p = resolveRefPhpV(ref, false)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { arrDel(p.obj.p, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }

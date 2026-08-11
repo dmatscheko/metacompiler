@@ -1256,14 +1256,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the scope it stands in, which is exactly where abnf/jsrt.go puts its pyDecl
     // entry, and py_setvar consults them by the same chain walk the Go arm does.
     //
-    // THE ONE INEXACTNESS, stated rather than buried: py_setvar decides "is this
+    // THE ONE APPROXIMATION, stated rather than buried: py_setvar decides "is this
     // name bound at or below the boundary" as "it resolves from here AND it does
     // not resolve from MID". A name bound BOTH strictly below the boundary (a
-    // `with ... as w` / `except ... as e` target, which the emitter declares in the
-    // ctl closure's own scope) AND above it would be re-bound at the boundary here
-    // where abnf/jsrt.go assigns the inner holder. Nothing in tests/ does that; the
-    // exact fix needs a per-scope containment test, which is the one thing the
-    // floor's scope API does not expose.
+    // `with ... as w` / `except ... as e` target / a comprehension target, which the
+    // emitter declares in the ctl closure's own scope) AND above it reads as "not
+    // below" here, where abnf/jsrt.go assigns the inner holder.
+    //
+    // IT ERRS IN ONE DIRECTION ONLY, and that is what makes it safe. "Resolves from
+    // here and not from MID" implies the first holder IS at or below the boundary,
+    // so there is no false POSITIVE; the false negative lands in the declare arm and
+    // is exactly the case above. The three ways to bind strictly below the boundary
+    // are all the EMITTER's own declarations, so it knows those names statically -
+    // see pyInnerNames, which routes them to the floor's exact walk instead. The
+    // per-scope containment test docs/todo.md 5.3 costs in layer 2 therefore has
+    // nothing left to decide.
     var pySetVarF = undefined
     var pyGetVarF = undefined
     var pyDelVarF = undefined
@@ -1308,18 +1315,97 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // below cannot see (a slot that HOLDS undefined answers "undefined" exactly like
     // an absent name, which is what declCompNames leaves behind). The emitter knows
     // these names statically, so it says so: the floor's own js_pyset_var walk is
-    // exactly right for them and is emitted straight.
+    // exactly right for them and is reached through py_setvar_in below, which owes
+    // them the two marks first.
+    //
+    // THESE THREE ARE THE ONLY WAY TO BIND A NAME STRICTLY BELOW THE BOUNDARY -
+    // every other js_scope_decl of a user name in this grammar writes the boundary
+    // scope, and every other assignment goes through pySetVar - so the containment
+    // question py_setvar's two-typeof probe cannot answer is answered STATICALLY
+    // here, and completely. docs/todo.md 5.3 costs a scopeHas/scopeParent walk in
+    // layer 2 for it; there is nothing left for that walk to decide, and it would put
+    // a layer-2 call (a scope frame) on the language's hottest write path.
     var pyInnerNames = {}
     function pyDeclInner(nameStr) { pyInnerNames["$" + nameStr] = true }
+    // True while the ONE write of a comprehension's own loop target is emitted; see
+    // pySetVar.
+    var pyCompTgt = false
 
     // js_pyset_var's four arms, in the order abnf/jsrt.go takes them. The name
     // arrives as a STRING (not an emitted value) so the class-body sink can see it.
     function pySetVar(b, envV, nameStr, v) {
         if (pyBindSink != null) { pyBindSink.push(nameStr) }
         var nameV = emitStr(b, nameStr)
+        // A COMPREHENSION TARGET is local to the comprehension and to nothing else:
+        // the comprehension has a symbol table of its own in CPython, so an enclosing
+        // `global q` / `nonlocal q` does not reach the `q` of `[q for q in ...]` - the
+        // enclosing statement `q = 55` is sent away and the target is not. It is the
+        // one write site the marks must not see, so it says so rather than being
+        // decided by name (the SAME name is usually both, which is how the defect
+        // py_setvar_in fixes came to be reachable at all). declCompNames has already
+        // declared the slot, so the floor's own walk lands on it.
+        if (pyCompTgt) { return callExt(b, "js_pyset_var", [envV, nameV, v]) }
         if (pyInnerNames["$" + nameStr] == true) {
-            return callExt(b, "js_pyset_var", [envV, nameV, v])
+            return pySetVarInner(b, envV, nameV, v)
         }
+        return b.NewCall(pySetVarFunc(), [envV, nameV, v])
+    }
+    // An INNER name still owes the `global` / `nonlocal` arms, and it used to skip
+    // them: the shortcut above went straight to js_pyset_var, which is the FLOOR's
+    // walk - "assign where the chain already holds it, else declare here" - and the
+    // floor knows nothing about the g*/n* marks, because those are the emitter's own
+    // bindings (runtime.c says so at js_pyset_var). abnf/jsrt.go consults its pyDecl
+    // map FIRST, so a name that is both inner-declared and `global` disagreed:
+    //
+    //     q = 1
+    //     def o():
+    //         q = 100
+    //         def i():
+    //             global q
+    //             v = [q for q in range(2)]   # declCompNames -> pyDeclInner("q")
+    //             q = 55
+    //         i()
+    //         return q
+    //     print(o(), q)                       # CPython: 100 1 -> 100 55
+    //
+    // The floor's walk found o's `q` on the way up and assigned THERE, so llvm.Run
+    // and the native binary both answered `55 1` where CPython and
+    // python-interpreter.abnf answer `100 55`. It needs BOTH marks to be reachable
+    // and an intermediate function binding the name - at depth 1 the floor's walk
+    // reaches the module scope anyway (js_pyglobal seeds it) and the answer happens
+    // to be right, which is why nothing caught it.
+    //
+    // The fix keeps py_setvar byte-identical and keeps the shortcut: two typeof
+    // probes ask whether either mark is in scope at all, and when one is, py_setvar
+    // - which has the arms already - decides. Nothing here is duplicated logic, and
+    // the extra pair of probes is on the inner path only.
+    var pySetVarInF = undefined
+    function pySetVarInner(b, envV, nameV, v) {
+        if (pySetVarInF == undefined) {
+            pySetVarInF = m.NewFunc("py_setvar_in", i64,
+                                    [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
+                                     llvm.ir.NewParam("v", i64)])
+            var envQ = pySetVarInF.Params[0]
+            var nmQ = pySetVarInF.Params[1]
+            var vQ = pySetVarInF.Params[2]
+            var qb = pySetVarInF.NewBlock("entry")
+            var markB = pySetVarInF.NewBlock("declared")
+            var plainB = pySetVarInF.NewBlock("inner")
+            var undefQ = emitStr(qb, "undefined")
+            var gtQ = callExt(qb, "js_scope_typeof",
+                              [envQ, callExt(qb, "js_add", [emitStr(qb, "g*"), nmQ])])
+            var ntQ = callExt(qb, "js_scope_typeof",
+                              [envQ, callExt(qb, "js_add", [emitStr(qb, "n*"), nmQ])])
+            var hasG = truthy(qb, callExt(qb, "js_sne", [gtQ, undefQ]))
+            var hasN = truthy(qb, callExt(qb, "js_sne", [ntQ, undefQ]))
+            qb.NewCondBr(qb.NewOr(hasG, hasN), markB, plainB)
+            markB.NewRet(markB.NewCall(pySetVarFunc(), [envQ, nmQ, vQ]))
+            callExt(plainB, "js_pyset_var", [envQ, nmQ, vQ])
+            plainB.NewRet(handle(0))
+        }
+        return b.NewCall(pySetVarInF, [envV, nameV, v])
+    }
+    function pySetVarFunc() {
         if (pySetVarF == undefined) {
             pySetVarF = m.NewFunc("py_setvar", i64,
                                   [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
@@ -1363,7 +1449,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(declB, "js_scope_decl", [bsV, nmP, vP])
             declB.NewRet(handle(0))
         }
-        return b.NewCall(pySetVarF, [envV, nameV, v])
+        return pySetVarF
     }
 
     // A variable READ. abnf/jsrt.go's scopeGet raises a catchable UnboundLocalError
@@ -2331,6 +2417,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return b
     }
+    // Is a comprehension target made ENTIRELY of plain names? See emitCompChain.
+    function compTgtAllNames(t) {
+        if (t.tuple != undefined) {
+            var its = t.tuple
+            for (var i = 0; i < its.length; i++) {
+                if (!compTgtAllNames(its[i])) { return false }
+            }
+            return true
+        }
+        if (t.startgt != undefined) { return compTgtAllNames(t.startgt) }
+        return t.path != undefined && t.path.length == 0
+    }
     // Emit the clause chain of a comprehension RECURSIVELY, so nested `for`s and
     // interleaved `if`s work in any order and to any depth. Each `for` is a counted loop
     // over the normalized iterable (js_pyiter) whose target goes through the same
@@ -2374,7 +2472,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
         var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
         var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+        // pyCompTgt is set only for a target made of PLAIN NAMES, which is the only
+        // shape whose writes reach pySetVar: a subscript or attribute target writes an
+        // object, needs no flag, and could carry a walrus in its index expression that
+        // the flag has no business seeing.
+        pyCompTgt = compTgtAllNames(cc.cfor)
         var bb = writeTarget(bodyB, cc.cfor, callExt(bodyB, "js_get", [aV2, iV2]))
+        pyCompTgt = false
         emitCompChain(bb, cl, i + 1, oName, elemT).NewBr(postB)
         var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
         callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])

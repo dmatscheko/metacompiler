@@ -1172,7 +1172,11 @@ function phArrHas(av, k) {
     if (typeof av == "string") {
         if (!phNumericKey(k)) { return false }
         var j = phNumOf(phToLong(k))
-        if (j < 0) { return false }
+        // A NEGATIVE string offset counts from the end and has since PHP 7.1, so
+        // isset("abc"[-1]) is true and reading it answers "c" - which js_phget has
+        // always done here, while this answered false and made the two disagree
+        // inside one expression. The valid negative range is -length .. -1.
+        if (j < 0) { return 0 - j <= av.length }
         return j < av.length
     }
     // `typeof null` is "object" here as it is in JS, and the Go twin's arm is a

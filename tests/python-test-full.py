@@ -2998,6 +2998,113 @@ def s42():
     check("uh31", (big not in [1, 2]) and (cx not in [1, 2]))
 
 
+# ===== SECTION 43: global / nonlocal across the emitter's inner scopes =====
+# A comprehension target, an `except ... as e` and a `with ... as w` name are the
+# only names the python emitter declares BELOW a binding boundary, and an
+# assignment to such a name used to go straight to the runtime's own chain walk -
+# "assign where the chain already holds it" - which knows nothing about `global`
+# and `nonlocal`. With an intermediate function binding the same name the walk
+# stopped THERE: `[q for q in range(2)]` plus `global q` made a later `q = 55`
+# write the enclosing function's q and leave the module's alone. Both compiled
+# halves did it and the interpreter half did not. docs/todo.md 5.3.
+def s43():
+    def lvl2():
+        def deep():
+            global s43g
+            seq = [s43g for s43g in range(2)]
+            s43g = 55
+            return seq
+        s43g = 100
+        inner = deep()
+        return [s43g, inner]
+
+    def readg():
+        global s43g
+        return s43g
+
+    pair = lvl2()
+    check("gsc1", pair[0] == 100)                 # the intermediate local is untouched
+    check("gsc2", pair[1] == [0, 1])              # the target stayed the comprehension's
+    check("gsc3", readg() == 55)                  # `global` reached the module
+
+    # `nonlocal` takes the same route, two levels down from the binding it names.
+    def outn():
+        n43 = 100
+        def mid():
+            def deep2():
+                nonlocal n43
+                seq = [n43 for n43 in range(3)]
+                n43 = 42
+                return seq
+            return deep2()
+        inner = mid()
+        return [n43, inner]
+
+    pair2 = outn()
+    check("gsc4", pair2[0] == 42 and pair2[1] == [0, 1, 2])
+
+    # A `global` at depth ONE always worked (the chain walk reaches the module
+    # scope, which the `global` statement itself seeds), and stays working.
+    def one():
+        global s43h
+        s43h = 3
+    def readh():
+        global s43h
+        return s43h
+    one()
+    check("gsc5", readh() == 3)
+
+    # No mark in sight: the comprehension target must not leak into the function,
+    # and an `except ... as` name is rebindable after its handler.
+    def leak():
+        z = 7
+        w = [z for z in range(3)]
+        return [z, w]
+    check("gsc6", leak() == [7, [0, 1, 2]])
+
+    def exname():
+        seen = []
+        try:
+            raise ValueError("v")
+        except ValueError as e:
+            seen.append(str(e))
+        e = "after"
+        return [seen, e]
+    check("gsc7", exname() == [["v"], "after"])
+
+    # An `except ... as x` target is a BINDING SITE like any other, so a `global x`
+    # in the same function covers it and everything after it. The interpreter half
+    # assigned the handler's own block binding and left the module's alone (`1` where
+    # CPython and both compiled halves say 77), because it took the first scope that
+    # already had the name; the declaration is consulted first now, in all three
+    # engines. The `nonlocal` row is the same question one scope further in.
+    def exglobal():
+        global s43e
+        try:
+            raise ValueError("x")
+        except ValueError as s43e:
+            pass
+        s43e = 77
+    def reade():
+        global s43e
+        return s43e
+    exglobal()
+    check("gsc8", reade() == 77)
+
+    def exnonlocal():
+        w43 = 100
+        def inner():
+            nonlocal w43
+            try:
+                raise ValueError("y")
+            except ValueError as w43:
+                pass
+            w43 = 88
+        inner()
+        return w43
+    check("gsc9", exnonlocal() == 88)
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3041,5 +3148,6 @@ def main():
     s40() # SECTION-CALL 40
     s41() # SECTION-CALL 41
     s42() # SECTION-CALL 42
+    s43() # SECTION-CALL 43
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

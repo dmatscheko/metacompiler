@@ -1473,6 +1473,14 @@ KwInstanceof = "instanceof" KwEnd ;
         if (!usesRefs) { return {b: b, v: v} }
         return {b: b, v: callExt(b, "js_phderef", [v])}
     }
+    // "is this handle null or undefined" - the two interned constants, so it is two
+    // integer comparisons and no runtime call (isSetHandle below is the same trick).
+    // It is the guard in front of anything that would reach the floor's js_get, whose
+    // `member '<k>' of null` is an UNCATCHABLE abort.
+    function isNullishHandle(b, v) {
+        return b.NewOr(b.NewICmp(llvm.enum.IPredEQ, v, hNull),
+                       b.NewICmp(llvm.enum.IPredEQ, v, hUndef))
+    }
     // ----- scope PROBES, lowered here instead of in a runtime -------------------
     //
     // js_phthis and js_phclslookup were externs that WALKED THE SCOPE CHAIN, and a
@@ -3276,6 +3284,28 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return emitPropGetPlain(b, objV, keyV)
     }
+    // emitPropGet for a step of the NON-CREATING walk: isset() and unset() must not
+    // diagnose anything, so a nullish receiver answers null instead of reaching
+    // js_get (`member 'a' of null`, an uncatchable abort) or - in a program that
+    // declares __get anywhere - emitHasMethod's js_get(objV, "__class"). It is the
+    // intermediate step of `isset($undef->a->b)` / `isset($o->missing->p)`.
+    //
+    // ONLY the non-creating walk gets it. An ordinary `$null->p` READ keeps the abort
+    // it has always had, because php-interpreter.abnf aborts there too ("property ->p
+    // of null") and this half answering PHP 8's warn-and-null would be a new halves
+    // divergence in the one place --cross would eventually find it. Both halves being
+    // wrong together is a recorded defect, not something to half-fix; see the report.
+    function emitPropGetSafe(b, objV, keyV, name) {
+        var nullB = curF.NewBlock("")
+        var liveB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, objV), nullB, liveB)
+        nullB.NewBr(joinB)
+        var r = emitPropGet(liveB, objV, keyV, name)
+        r.b.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nullB),
+                                           llvm.ir.NewIncoming(r.v, r.b)])}
+    }
     function emitPropGetPlain(b, objV, keyV) {
         if (!magicGet) { return phDeref(b, callExt(b, "js_get", [objV, keyV])) }
         var haveB = curF.NewBlock("")
@@ -3361,12 +3391,20 @@ KwInstanceof = "instanceof" KwEnd ;
         return mergeB
     }
     // isset($o->p), with __isset as the fallback.
+    //
+    // THE MAGIC FALLBACK IS SKIPPED FOR A NULLISH RECEIVER, and only a program that
+    // declares __isset ANYWHERE ever reached the difference: emitHasMethod opens with
+    // js_get(objV, "__class"), which is the floor's uncatchable `member '__class' of
+    // null`, so `isset($undef->p)` and `isset($o->missing->p)` aborted in all three
+    // legs of such a program while the SAME source without an __isset answered false.
+    // PHP 8 answers false for both and never diagnoses inside isset(). Two integer
+    // compares against the interned handles, no runtime call - isSetHandle's trick.
     function emitPropIsset(b, objV, keyV) {
         var plain = callExt(b, "js_phisset", [objV, keyV])
         if (!magicIsset) { return {b: b, v: plain} }
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, plain), mergeB, missB)
+        b.NewCondBr(b.NewOr(truthy(b, plain), isNullishHandle(b, objV)), mergeB, missB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__isset"))
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
@@ -3485,7 +3523,18 @@ KwInstanceof = "instanceof" KwEnd ;
                     var p = emitRefPath(b, ref)
                     b = p.b
                     if (p.kind == "index") { callExt(b, "js_phunset", [p.obj, p.key]) }
-                    else if (p.kind == "field") { callExt(b, "js_set", [p.obj, p.key, hUndef]) }
+                    else if (p.kind == "field") {
+                        // js_set aborts with `member assignment 'p' on null`, and
+                        // `unset($undef->p)` is a no-op in PHP 8 - unset() diagnoses
+                        // nothing, exactly like isset(). js_phunset already answers
+                        // quietly for a non-container, so only the field arm needs it.
+                        var liveB = curF.NewBlock("")
+                        var skipB = curF.NewBlock("")
+                        b.NewCondBr(isNullishHandle(b, p.obj), skipB, liveB)
+                        callExt(liveB, "js_set", [p.obj, p.key, hUndef])
+                        liveB.NewBr(skipB)
+                        b = skipB
+                    }
                 }
             }
             return b
@@ -3946,7 +3995,7 @@ KwInstanceof = "instanceof" KwEnd ;
     makeTargetRef = function(items) {
         var head = items[0]
         // A CALL head ('foo()->bar[1] = "123"'): the path starts from the value the
-        // call returned, so there is no name and no scope slot - refRoot runs the
+        // call returned, so there is no name and no scope slot - refRootV runs the
         // thunk. A write reaches the caller exactly when that value is a shared one,
         // which is what php-src's witnesses for this form use (tests/bug37144,
         // tests/bug70332); a by-value array return is a temporary, as in PHP.
@@ -3960,7 +4009,22 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // The value a target's PATH starts from: a plain variable, or a static property
     // (self::$rows[0] = e reads the property, then indexes it).
-    function refRoot(b, ref) {
+    //
+    // THE NON-CREATING WALK READS THE ROOT WITH THE PROBE, not with js_scope_get, and
+    // that is not a tidy-up: isset() and unset() are the two forms PHP guarantees
+    // never to diagnose, and `isset($undef[0])` / `isset($undef->p)` / `unset($u[0])`
+    // took the floor's UNCATCHABLE `variable not defined` abort in all three legs
+    // where PHP 8 answers false and runs on. It is NOT docs/todo.md 2.5: that item is
+    // blocked because the floor's miss hook can only answer a value to THROW and a
+    // plain `$undef` READ needs a value to RETURN, and isset needs no value at all -
+    // the emitter's own non-aborting probe is the whole answer, with no floor change.
+    //
+    // The probe also answers the RAW slot, so the root is dereferenced here: with
+    // `$r = &$arr`, `isset($r[0])` used to index the reference CELL and answer false
+    // where the interpreter half and PHP both say true. A write walk keeps
+    // js_scope_get: it has setVarV and js_phvivroot for the same job, and reaching
+    // this abort from a write is docs/todo.md 2.5's territory, not isset's.
+    function refRootV(b, ref, viv) {
         if (ref.headT != undefined) { return ref.headT(b) }
         if (ref.sbase != undefined) {
             var rb = ref.sbase(b)
@@ -3968,6 +4032,7 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: rs4.b, v: callExt(rs4.b, "js_phsget", [rb.v, rs4.v])}
         }
         var rn = refNameV(b, ref)
+        if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
         return {b: rn.b, v: callExt(rn.b, "js_scope_get", [curScopeV, rn.v])}
     }
     // emitRefPath walks a target's path down to the container the LAST step writes
@@ -3982,7 +4047,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // is isArr(o), and an object is not one), and so is a static-property root.
     function emitRefPath(b, ref) { return emitRefPathV(b, ref, false) }
     function emitRefPathV(b, ref, viv) {
-        var rr = refRoot(b, ref)
+        var rr = refRootV(b, ref, viv)
         b = rr.b
         var o = rr.v
         // A multi-step target on a null variable makes that variable an array, and the
@@ -4000,7 +4065,8 @@ KwInstanceof = "instanceof" KwEnd ;
             // legal in a READ position at all, so the non-creating walk answers null.
             if (s.append === true) { o = viv ? callExt(b, "js_phvivpush", [o]) : hNull }
             else if (s.key != undefined) {
-                var rs = emitPropGet(b, o, emitStr(b, s.key), s.key)
+                var rs = viv ? emitPropGet(b, o, emitStr(b, s.key), s.key)
+                             : emitPropGetSafe(b, o, emitStr(b, s.key), s.key)
                 b = rs.b
                 o = rs.v
             }
@@ -4011,7 +4077,8 @@ KwInstanceof = "instanceof" KwEnd ;
             else if (s.keyT != undefined) {
                 var rt = s.keyT(b)
                 b = rt.b
-                var rs2 = emitPropGet(b, o, callExt(b, "js_phstr", [rt.v]), null)
+                var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phstr", [rt.v]), null)
+                              : emitPropGetSafe(b, o, callExt(b, "js_phstr", [rt.v]), null)
                 b = rs2.b
                 o = rs2.v
             }
