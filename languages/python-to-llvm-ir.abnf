@@ -241,8 +241,9 @@ KwFrom      = "from" KwEnd ;
 KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
-Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | For | TryStmt | With | Match | Decorated | DefLike | SmallLine ;
+Statement   <~~ push(pyStmtPos(takeAll())) ~~>
+            = "" <~~ push(up.pos) ~~>
+              ( If | While | For | TryStmt | With | Match | Decorated | DefLike | SmallLine ) ;
 
 // class / def / async def push {dname, dstmt}: the NAME is what a decorator
 // chain has to rebind, so the definition carries it. Used undecorated, only the
@@ -1216,6 +1217,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // resolveImport / notImpl (lib/compile-core.js) call fail; each compiler
     // defines it. Bare early returns are braced (MetaJS has no ASI).
     function fail(msg) { println("python compiler error: " + msg); exit(1) }
+
+    // The source position of a statement, for -trace / -cfgraph / -callgraph /
+    // -why. It is NOT core stmtPos (lib/compile-core.js), because up.pos is the
+    // position AFTER the tag's node matched and neither python shape ends at its
+    // own last token: a SmallLine ends in NL, so `x = 1` on line 1 was reported
+    // as line 2 - the last statement of a file pointing PAST EOF - and a compound
+    // statement's node ends after its whole suite, so an `if` would be reported
+    // at the end of its block (docs/todo.md 6.1). The Statement rule therefore
+    // captures the position of the statement's FIRST token with an empty-token
+    // tag ahead of the alternatives and hands over [pos, thunk].
+    //
+    // Everything else is core stmtPos: the marker is emitted only when the host
+    // collects positions (c.tracing), so without -trace/-cfgraph/-callgraph/-why
+    // the emitted module is exactly the module of a grammar with no markers.
+    function pyStmtPos(items) {
+        var t = items[1]
+        if (!c.tracing) { return t }
+        var pos = items[0]
+        if (pos == undefined) { return t }
+        return function(b) {
+            callExt(b, "js_srcpos", [handle(pos)])
+            return t(b)
+        }
+    }
 
     // ======================================================================
     // PYTHON SCOPING, LOWERED IN THE EMITTER (docs/runtime-next-plan.md part 3,

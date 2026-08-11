@@ -288,7 +288,12 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // A bare ';' is an empty statement: Ruby uses it as a statement separator, and it
 // appears immediately after a def / class / module header (def f(x); BODY; end).
 // Semi pushes nothing, so a body simply skips it.
-Statement   = Semi | Require | DoWhileStmt | ModStmt ;
+// Semi and Require push NOTHING, so the source-position wrapper cannot sit on
+// Statement itself (it would push a value where a body expects none) - it sits on
+// PosStmt, around the two alternatives that do push a thunk. See rbStmtPos.
+Statement   = Semi | Require | PosStmt ;
+PosStmt     <~~ push(rbStmtPos(takeAll())) ~~>
+            = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) ;
 Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
@@ -2298,6 +2303,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     function fail(msg) { println("ruby compiler error: " + msg); exit(1) }
+
+    // The source position of a statement, for -trace / -cfgraph / -callgraph /
+    // -why. Ruby had NO line attribution in any of the four (docs/todo.md 6.1);
+    // this is the same marker every other handle-IR language emits, but it cannot
+    // be core stmtPos (lib/compile-core.js): up.pos is the position AFTER the
+    // tag's node matched, and Ruby's whitespace INCLUDES newlines and comments, so
+    // a statement's node ends past every blank line that follows it - `x = 1' as
+    // the last statement of a file would be attributed past EOF. The PosStmt rule
+    // therefore captures the position of the statement's FIRST token (an empty
+    // token skips whitespace before matching, so it lands on the token itself) and
+    // hands over [pos, thunk].
+    //
+    // Everything else is core stmtPos: the marker is emitted only when the host
+    // collects positions (c.tracing), so without -trace/-cfgraph/-callgraph/-why
+    // the emitted module is byte for byte the module of a grammar with no markers.
+    function rbStmtPos(items) {
+        var t = items[1]
+        if (!c.tracing) { return t }
+        var pos = items[0]
+        if (pos == undefined) { return t }
+        return function(b) {
+            callExt(b, "js_srcpos", [handle(pos)])
+            return t(b)
+        }
+    }
 
     // ----- Ruby truthiness: only nil and false are falsy. The value handles are
     // table indices: 0/1/2 = undefined/null/false (all falsy), 3 = true, and every
@@ -5470,25 +5500,63 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeGvarRef(name) {
         return function(b) { return {b: b, v: callExt(b, "js_rgget", [emitStr(b, name)])} }
     }
-    // ----- the scope probe, lowered HERE and not into layer 2 -----
-    // js_rdefined used to be an extern that took a SCOPE HANDLE and walked the
-    // chain. A scope is the C floor's PRIVATE storage, so a MetaJS runtime library
-    // cannot open one and that extern could never have been written in layer 2 -
-    // the same wall php, swift, java and dart met (docs/runtime-next-plan.md part
-    // 3, "a scope probe belongs in the EMITTER"). It is a pure PROBE - "the kind of
-    // this name if it is declared anywhere up the chain, else nil" - and an EMITTER
-    // may call js_scope_typeof, so it is spelled out here. ONE module-level helper
-    // rather than an inline branch, so the call site stays a single-value
-    // expression, which is PHP's shape unchanged.
+    // ----- the scope probe, AND WHY IT WENT BACK TO BEING AN EXTERN -----
     //
-    // The one inexactness, the same one swift-to-llvm-ir.abnf records:
-    // js_scope_typeof answers "undefined" for a slot that HOLDS undefined and for
-    // an absent name alike. A Ruby local is created-on-assign and a declared one
-    // holds nil (js_scope_decl with hNull), so the only slot that can hold
-    // undefined is an OPTIONAL PARAMETER the caller omitted - and defined? on such
-    // a parameter would answer nil here where the Go twin answers its kind. No
-    // program in tests/ does that; the fix, if one ever does, is to declare the
-    // parameter slot with hNull before js_arg overwrites it.
+    // js_rdefined takes a SCOPE HANDLE and walks the chain, so between 018c693 and
+    // docs/todo.md 5.3 it was lowered right here into an IR helper (`rb_defined`,
+    // one js_scope_typeof and a compare): a scope is the C floor's PRIVATE storage,
+    // layer 2 could not open one, and an emitter may call js_scope_typeof. That is
+    // the wall php, swift, java and dart met and it is still real.
+    //
+    // WHAT THE LOWERING COULD NOT DO, and it was written down at this site as a
+    // theoretical inexactness that "no program in tests/ does". It is reachable in
+    // three lines and MRI disagrees with it:
+    //
+    //     [1].each { |a, b| puts defined?(b).inspect }
+    //         MRI + ruby-interpreter.abnf   "local-variable"
+    //         both compiled halves          nil
+    //
+    // js_scope_typeof answers "undefined" for a slot that HOLDS undefined and for an
+    // absent name alike (docs/working-on-this-project.md 7.3). A Ruby local is
+    // created-on-assign and a declared one holds nil, but a BLOCK OR OPTIONAL
+    // PARAMETER the caller did not supply holds exactly undefined - js_arg answers
+    // undefined for a missing index and emitParamDefault's js_rundef test relies on
+    // that - so `defined?` on one answered nil. The site's own suggested fix
+    // (declare the slot with hNull first) would have broken js_rundef, which is the
+    // one thing that distinguishes an absent argument from an explicit nil.
+    //
+    // scopeHas + scopeParent ARE that question, they are MetaJS HOST BUILTINS
+    // (ids 65..68) reachable only from a layer-2 file, and lib/ruby-rt.metajs's
+    // js_rmethodval had already shipped on them. So the probe is an extern again,
+    // answered by abnf/jsrt.go's js_rdefined under llvm.Run and by
+    // lib/ruby-rt.metajs's under -exe, and both halves now agree with the
+    // interpreter and with MRI.
+    //
+    // BUT ONLY THE COLD ARM LEAVES, which is the judgement todo.md 5.3 asks for and
+    // the reason this is not php's decline (cc28d07: php's probe was all hot arm and
+    // cost +0.77%). In MetaJS a call is a scope frame, so the two arms an EMITTER can
+    // already answer stay here:
+    //
+    //   1. js_scope_typeof != "undefined" - the name is bound and holds a value.
+    //      Unchanged from the lowering, and it is every `defined?` a program that
+    //      asks about a real local writes.
+    //   2. js_scope_typeof == "undefined" AND js_scope_has - js_scope_has is the
+    //      OWN-SCOPE twin of the scopeHas builtin and IS an extern, so the innermost
+    //      scope's "holds undefined" is separable right here. kotlin's kt_ktgetp does
+    //      exactly this at a6df3a8 and this is the second emitter use of it. It
+    //      answers the common shape of the defect on its own: a block's own
+    //      unsupplied parameter is bound in the block's own scope.
+    //
+    // Only when BOTH miss does the layer-2 walk run - a name bound nowhere (nil
+    // either way, so this arm buys nothing and is charged for the correctness of the
+    // next one) or a slot holding undefined in an ENCLOSING scope, which is
+    // `[1].each { |a, b| [2].each { |c| defined?(b) } }` and needs scopeParent.
+    //
+    // Measured, because mod.rb emits `defined?` ZERO times and the shared bench row
+    // therefore cannot see any of this: tests/bench/defined.rb, five probes per
+    // iteration over all four shapes, 9 draws paired against a clean 61aa3de. The
+    // readings are in that file's header; routing EVERY call to layer 2 read +9.70%
+    // on it (9 of 9 pairs) and this split takes it to what the header records.
     var definedF = undefined
     function rbScopeProbe(b, nameV, kindV) {
         if (definedF == undefined) {
@@ -5497,10 +5565,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                   llvm.ir.NewParam("kind", i64)])
             var eb = definedF.NewBlock("entry")
             var hitB = definedF.NewBlock("hit")
-            var missB = definedF.NewBlock("miss")
+            var undefB = definedF.NewBlock("undef")
+            var deepB = definedF.NewBlock("deep")
             var tv = callExt(eb, "js_scope_typeof", [definedF.Params[0], definedF.Params[1]])
-            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
-            missB.NewRet(hNull)
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), undefB, hitB)
+            undefB.NewCondBr(truthy(undefB, callExt(undefB, "js_scope_has",
+                                                    [definedF.Params[0], definedF.Params[1]])), hitB, deepB)
+            deepB.NewRet(callExt(deepB, "js_rdefined", [definedF.Params[0], definedF.Params[1],
+                                                        definedF.Params[2]]))
             hitB.NewRet(definedF.Params[2])
         }
         return b.NewCall(definedF, [curScopeV, nameV, kindV])
@@ -5539,6 +5611,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (!isPlainName(txt)) {
             return function(b) { return {b: b, v: emitStr(b, "expression")} }
+        }
+        // `self` is always defined and MRI names its own kind for it; both engines of
+        // the interpreter half answer "self" too, and the scope probe below answered
+        // "local-variable" inside a method and NIL at top level, where `self` is not a
+        // scope binding at all. Three legs, one answer, and it is not the probe's.
+        if (txt == "self") {
+            return function(b) { return {b: b, v: emitStr(b, "self")} }
+        }
+        // The keyword literals are not names, and MRI gives each its OWN kind:
+        // `defined?(nil)` is "nil", not "expression". The compiled halves used to run
+        // them through the probe and answer nil for all three; the first pass of this
+        // round converged them on ruby-interpreter.abnf's "expression", which closed
+        // the halves divergence at the price of three legs agreeing on something MRI
+        // contradicts - docs/todo.md 8's own example of a WRONG FIX. The interpreter
+        // half answers the keyword now too, so all four legs are MRI's. They are
+        // KEYWORDS, so no local, method or constant can carry the name and the text
+        // needs no further test.
+        if (txt == "nil" || txt == "true" || txt == "false") {
+            return function(b) { return {b: b, v: emitStr(b, txt)} }
         }
         var kind = "local-variable"
         var c0 = txt.charAt(0)

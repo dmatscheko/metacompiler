@@ -79,7 +79,15 @@ Program     <~~ buildMain(takeAll()) ~~>
             = LeadHtml { TopItem } ;
 // One item of a top level: a declaration or a statement. Factored out because a
 // BRACED namespace body holds exactly the same items (see NsDecl).
-TopItem     = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
+// A top-level DECLARATION never reaches the Statement rule (the same names are
+// alternatives there, for a declaration inside a body), so it takes the same
+// source-position wrapper here rather than none at all. Statement stays out of
+// this group: it carries its own marker, and two markers for one statement would
+// report it twice.
+TopItem     = TopDecl | Statement ;
+TopDecl     <~~ push(phStmtPos(takeAll())) ~~>
+            = "" <~~ push(up.pos) ~~>
+              ( Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl ) ;
 OpenTag     = "<?php" :whitespace(Whitespace) ;
 // Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
 // only the newline directly after a CLOSE tag is swallowed.
@@ -370,10 +378,15 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // registers it when control reaches it). DefStmt wraps Def so the thunk it pushes is
 // the same makeDefStmt record TopItem builds; an ANONYMOUS function still rolls back
 // here (Def demands a Name) and reaches ClosureExpr through ExprStmt.
-Statement   = InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | Block | If | While | ForEach | For
+// The empty-token tag ahead of the alternatives records where the statement STARTS,
+// which is what the four position-reading tools want; phStmtPos says why up.pos at
+// this level is not that position.
+Statement   <~~ push(phStmtPos(takeAll())) ~~>
+            = "" <~~ push(up.pos) ~~>
+              ( InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | Block | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare
             | DefStmt | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
-            | Return | Break | Continue | Goto | Label | Empty | ExprStmt ;
+            | Return | Break | Continue | Goto | Label | Empty | ExprStmt ) ;
 DefStmt     <~~ push(makeDefStmt(pop())) ~~> = Def ;
 // goto L; / L: -- a jump inside one function body. The label is a real basic block, so
 // the jump costs one branch; PHP's rule that a goto may LEAVE a block but never enter
@@ -1423,6 +1436,37 @@ KwInstanceof = "instanceof" KwEnd ;
     var hidCount = 0
 
     function fail(msg) { println("php compiler error: " + msg); exit(1) }
+
+    // The source position of a statement, for -trace / -cfgraph / -callgraph /
+    // -why. PHP had NO line attribution in any of the four (docs/todo.md 6.1);
+    // this is the same marker every other handle-IR language emits, but it cannot
+    // be core stmtPos (lib/compile-core.js): up.pos is the position AFTER the
+    // tag's node matched, and PHP's whitespace INCLUDES newlines and comments, so
+    // a statement's node ends past every blank and comment line that follows its
+    // ';' - the last statement of a file would be attributed past EOF. The
+    // Statement rule therefore captures the position of the statement's FIRST
+    // token (an empty token skips whitespace before matching, so it lands on the
+    // token itself) and hands over [pos, thunk].
+    //
+    // A statement is not always a thunk: Block pushes a {body} record and Label a
+    // {lblstmt} record, both of which makeBody has to RECOGNIZE, so a non-function
+    // passes through untouched - the same guard swift-to-llvm-ir.abnf puts on its
+    // own stmtPos for its defer markers.
+    //
+    // Everything else is core stmtPos: the marker is emitted only when the host
+    // collects positions (c.tracing), so without -trace/-cfgraph/-callgraph/-why
+    // the emitted module is byte for byte the module of a grammar with no markers.
+    function phStmtPos(items) {
+        var t = items[1]
+        if (!c.tracing) { return t }
+        if (typeof t != "function") { return t }
+        var pos = items[0]
+        if (pos == undefined) { return t }
+        return function(b) {
+            callExt(b, "js_srcpos", [handle(pos)])
+            return t(b)
+        }
+    }
 
     // ----- references: one storage CELL shared by two names ---------------------
     // php-interpreter.abnf models a PHP reference as a CELL that a scope slot or an
