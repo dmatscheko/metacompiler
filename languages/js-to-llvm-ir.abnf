@@ -207,8 +207,11 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 :whitespace(Whitespace) ;
 
 // The merged statement thunks of the top level become jsmain(env, args) in the module.
+// NoModuleHtml and ModuleStrict are the GOAL SYMBOL (see NotModule): a Module has no
+// Annex B HTML-like comments and its top level is strict whatever its prologue says.
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ UseStrictMark ] { TopStatement } ;
+            = NoModuleHtml [ UseStrictMark | ModuleStrict ] { TopStatement } ;
+ModuleStrict <~~ push({ustrict: true}) ~~> = IsModule ;
 
 // An import or an export is a MODULE ITEM, not a statement: it may only stand at the top
 // level of the file. '{ import a from "b"; }', '{ export {a}; }' and
@@ -1267,8 +1270,14 @@ ExportDefaultDecl = KwExport KwDefault ExportDecl [ ";" ] ;
 ExportDefaultExpr <~~ push(makeExportDefault(pop())) ~~>
             = KwExport KwDefault AssignExpr [ ";" ] ;
 // 'export {a, b}', 'export {a} from "m"', 'export * from "m"': no emitted code at all.
+// StmtEnd rather than an optional ';': 'export {a,b} from' - with the module path missing -
+// is a syntax error, and with '[ ";" ]' the export ended after the '}' and the leftover
+// 'from' became a whole expression statement of its own on the same line (test262
+// 2e6ef2acc3ed75a9.module.js). Automatic semicolon insertion is exactly the rule that
+// forbids that: a statement may only end without a ';' at a line break, a '}' or the end
+// of the file.
 ExportSpecs <~~ takeAll(); push(function(b) { return b }) ~~>
-            = KwExport ( ExportAll | ExportNamed [ KwFrom StringLit ] ) [ ";" ] ;
+            = KwExport ( ExportAll | ExportNamed [ KwFrom StringLit ] ) StmtEnd ;
 // What may follow 'export' is a closed list: the specifier forms, 'export default', and a
 // DECLARATION. It is deliberately NOT the whole Statement level - 'export 3;', 'export;'
 // and 'export {a,b} from' would otherwise be read as an export of an expression statement
@@ -1326,7 +1335,7 @@ JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsNulEsc | JsOctalEsc | JsLineCont | 
 // '\0' NOT followed by a digit is the NUL escape and is legal everywhere, strict
 // included. Anything else built from octal digits is the legacy octal escape.
 JsNulEsc    = "0" NotDigit ;
-JsOctalEsc  = NotStrict OctDigit { OctDigit } ;
+JsOctalEsc  = NotModule NotStrict OctDigit { OctDigit } ;
 JsLineCont  = "\r\n" | "\n" | "\r" | "\u2028" | "\u2029" ;
 // The catch-all escape. It excludes the digits outright: 0-7 belong to JsNulEsc and
 // JsOctalEsc above (and must NOT be readmitted here, or a strict-mode octal escape
@@ -1378,13 +1387,13 @@ OctDigit    = "0"..."7" ;
 // are tried before it, since it would otherwise stop after the '0'. The octal form comes
 // first: '019' fails it at the '9' (KwEnd refuses a trailing digit) and falls through.
 LegacyOctLit <~~ push(makeConst(radixVal(up.in, 1, 8))) ~~>
-            = "0" :whitespace() OctDigit { OctDigit } NotStrict KwEnd :whitespace(Whitespace) ;
+            = "0" :whitespace() OctDigit { OctDigit } NotStrict NotModule KwEnd :whitespace(Whitespace) ;
 // A NonOctalDecimalIntegerLiteral may carry a FRACTION ('09.0', '09.5'): the leading zero
 // only decides how the integer part is read. Spelling the fraction out here is what makes
 // '09.x' the syntax error it is - the '.' belongs to the number, so the name after it is
 // a second token on the same line with no operator between them.
 NonOctalDecLit <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = "0" :whitespace() Digit { Digit } [ "." { Digit } ] NotStrict KwEnd :whitespace(Whitespace) ;
+            = "0" :whitespace() Digit { Digit } [ "." { Digit } ] NotStrict NotModule KwEnd :whitespace(Whitespace) ;
 // A BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is not
 // orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). BigInt is a
 // value type of its own (typeof 10n is "bigint"), so it cannot go through makeConst,
@@ -1771,7 +1780,18 @@ NotReserved = :script(~~
             || w === "null" || w === "return" || w === "super" || w === "switch"
             || w === "throw" || w === "true" || w === "try" || w === "typeof"
             || w === "var" || w === "void" || w === "while" || w === "with")
-        return kw ? abnf.newToken("\x01reserved-word", 0) : undefined
+        if (kw) { return abnf.newToken("\x01reserved-word", 0) }
+        // 'await' is a reserved word in a MODULE and an ordinary identifier in a Script
+        // (see NotModule). The file name is only asked for once the word ahead is
+        // literally 'await', so every other identifier pays nothing for this.
+        if (w === "await") {
+            var mn = c.srcName(), ml = mn.length
+            var sfx4 = (ml > 4) ? mn.substring(ml - 4) : ""
+            var sfx10 = (ml > 10) ? mn.substring(ml - 10) : ""
+            var mod = sfx4 === ".mjs" || sfx10 === ".module.js"
+            return mod ? abnf.newToken("\x01reserved-word", 0) : undefined
+        }
+        return undefined
     })()
 ~~) ;
 // The one reserved word whose status depends on WHERE it stands: 'yield' is an
@@ -2394,6 +2414,158 @@ InFunc = :script(~~
             i = i + 1
         }
         return fnDepth > 0 ? undefined : abnf.newToken("\x01return-outside-function", 0)
+    })()
+~~) ;
+
+// ----- The GOAL SYMBOL: Script or Module -----
+//
+// JavaScript has TWO goal symbols and the source text alone does not say which one a file
+// is parsed as. This grammar implements the SCRIPT goal - Annex B's '<!--' comments are in
+// the whitespace rule, sloppy mode is the default, and a top level 'return' is a syntax
+// error - so Script is what a file gets unless it says otherwise, and Module is the opt-in.
+//
+// The only thing that says otherwise is the file NAME, which a ':script' guard could not
+// see until c.srcName() existed (abnf/parserscript.go for the goja engine, abnf/frozen.go
+// for the frozen one - both, or the two halves would disagree). A '.mjs' file is a Module,
+// as it is everywhere in the ecosystem; '.module.js' is test262's spelling of the same
+// thing and is accepted as well. Everything else - including '.js' and '.cjs' - is a
+// Script. NotModule fails inside a Module, IsModule fails outside one; both are zero width.
+//
+// What a Module changes here:
+//   - it is ALWAYS strict, whatever its directive prologue says, so the legacy octal forms
+//     are syntax errors (NotModule at the three sites that carry NotStrict) and the top
+//     level carries the strict flag at run time (ModuleStrict in Program);
+//   - 'await' is a reserved word, so it is not an identifier (see NotReserved);
+//   - the Annex B HTML-like comments do not exist (NoModuleHtml).
+//
+// What is deliberately NOT enforced, with the measurement: a Script may not contain
+// 'import'/'export' at all. Refusing them outside a Module wins 6 test262 reject files
+// and costs SEVEN must-parse files of our own - tests/js-test-full.js (the '--full'
+// ratchet), js-test-recognize.js, js-test-multifile.js, metajs-test-multifile.js and the
+// three typescript twins - every one of which exercises 'export' from a plain '.js'/'.ts'
+// file. Winning it needs those files renamed to '.mjs'/'.mts', i.e. a change to
+// .vscode/launch.json and test.sh, and it is a LOSS at 6 won against 7 lost until then.
+// (For TypeScript the rule does not exist in the first place: tsc decides module-ness from
+// the CONTENT, so a top level 'export' in a '.ts' file is what MAKES it a module.)
+NotModule = :script(~~
+    (function() {
+        var mn = c.srcName(), ml = mn.length
+        var sfx4 = (ml > 4) ? mn.substring(ml - 4) : ""
+        var sfx10 = (ml > 10) ? mn.substring(ml - 10) : ""
+        var mod = sfx4 === ".mjs" || sfx10 === ".module.js"
+        return mod ? abnf.newToken("\x01module-goal", 0) : undefined
+    })()
+~~) ;
+IsModule = :script(~~
+    (function() {
+        var mn = c.srcName(), ml = mn.length
+        var sfx4 = (ml > 4) ? mn.substring(ml - 4) : ""
+        var sfx10 = (ml > 10) ? mn.substring(ml - 10) : ""
+        var mod = sfx4 === ".mjs" || sfx10 === ".module.js"
+        return mod ? undefined : abnf.newToken("\x01script-goal", 0)
+    })()
+~~) ;
+
+// The Annex B HTML-like comments, which a Module does not have: '<!--' is a line comment
+// anywhere, and '-->' is one at the start of a line (see HtmlOpenComment/HtmlCloseComment).
+//
+// Both of those live in the WHITESPACE rule, and a ':script' anywhere under the whitespace
+// rule turns off the whitespace memo for the whole grammar (parser.go, skipSpaces/isPure:
+// the memo is only valid because the skip is a pure function of the position). Measured
+// cost of guarding them in place: tests/js-test-full.js goes from 19.4 s to 20.6 s, +6%,
+// on EVERY file of both languages, to win four reject files. So the refusal is lifted out
+// to one scan of the whole file at the top of Program instead, which runs only for a
+// Module and leaves the memo intact.
+//
+// The scan skips strings, template literals and both comment forms, and skips a '/...:/'
+// that can only be a regular expression (the previous significant byte is not an
+// identifier character, a digit or a closing bracket) up to the end of its line - a regex
+// may not contain a raw line terminator, so a wrong guess can only swallow the rest of one
+// line, which makes the guard MISS rather than misfire. That is the same family of
+// approximation NotStrict documents, and like it, it can only misjudge a file that is
+// already a Module.
+//
+// Returns the impossible token to FAIL (the Module contains an HTML-like comment),
+// undefined to succeed.
+NoModuleHtml = :script(~~
+    (function() {
+        var mn = c.srcName(), ml = mn.length
+        var sfx4 = (ml > 4) ? mn.substring(ml - 4) : ""
+        var sfx10 = (ml > 10) ? mn.substring(ml - 10) : ""
+        var mod = sfx4 === ".mjs" || sfx10 === ".module.js"
+        if (!mod) { return undefined }
+
+        // Program can be entered after leading whitespace, so walk back to the first byte.
+        var back = 0
+        while (c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        var i = 0 - back
+        var lineStart = true   // Only whitespace and block comments seen on this line so far.
+        var prev = 0           // The previous significant byte, for the regex/division test.
+        while (true) {
+            var ch = c.peek(i)
+            if (ch < 0) { return undefined }
+            if (ch === 60 && c.peek(i + 1) === 33 && c.peek(i + 2) === 45 && c.peek(i + 3) === 45) {
+                return abnf.newToken("\x01module-html-comment", 0)
+            }
+            if (lineStart && ch === 45 && c.peek(i + 1) === 45 && c.peek(i + 2) === 62) {
+                return abnf.newToken("\x01module-html-comment", 0)
+            }
+            if (ch === 10 || ch === 13) { lineStart = true; prev = 0; i = i + 1; continue }
+            // U+2028 / U+2029 end a line too, and c.peek is byte oriented.
+            if (ch === 226 && c.peek(i + 1) === 128 && (c.peek(i + 2) === 168 || c.peek(i + 2) === 169)) {
+                lineStart = true
+                prev = 0
+                i = i + 3
+                continue
+            }
+            if (ch === 32 || ch === 9 || ch === 11 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {                     // a // comment
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {                     // a /* */ comment
+                i = i + 2
+                while (true) {
+                    var bc = c.peek(i)
+                    if (bc < 0) { return undefined }
+                    if (bc === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i = i + 1
+                }
+                continue                                                 // keeps lineStart
+            }
+            if (ch === 34 || ch === 39 || ch === 96) {                    // a string or template
+                var q = ch
+                i = i + 1
+                while (true) {
+                    var sc = c.peek(i)
+                    if (sc < 0) { return undefined }
+                    if (sc === 92) { i = i + 2; continue }
+                    if (sc === q) { i = i + 1; break }
+                    i = i + 1
+                }
+                lineStart = false
+                prev = q
+                continue
+            }
+            if (ch === 47 && !((prev >= 48 && prev <= 57) || (prev >= 65 && prev <= 90) || (prev >= 97 && prev <= 122)
+                || prev === 95 || prev === 36 || prev === 41 || prev === 93 || prev === 125)) {
+                // A regular expression literal: skip to its closing '/', within this line.
+                i = i + 1
+                while (true) {
+                    var rc = c.peek(i)
+                    if (rc < 0 || rc === 10 || rc === 13) { break }
+                    if (rc === 92) { i = i + 2; continue }
+                    if (rc === 47) { i = i + 1; break }
+                    i = i + 1
+                }
+                lineStart = false
+                prev = 47
+                continue
+            }
+            lineStart = false
+            prev = ch
+            i = i + 1
+        }
     })()
 ~~) ;
 

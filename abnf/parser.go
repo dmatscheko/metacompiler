@@ -1289,6 +1289,16 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	if pa.initialSpaces != nil {
 		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
+	// nil is FAILURE (see apply(): a successful path always returns a non-nil, possibly
+	// empty *r.Rules), and it has to be reported even when nothing is left over: a start
+	// rule that fails at position 0 on a file whose whole text the WHITESPACE rule can
+	// consume used to fall through both checks and return (nil, nil), i.e. a silent
+	// success with no ASG - the caller then died inside the grammar's :startScript() with
+	// 'TypeError: Value is not an object: null' instead of a parse error. Found by a
+	// js Module guard refusing '<!--' in a file that is nothing but that comment.
+	if newProductions == nil {
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), "<nothing: the start production did not match>"))
+	}
 	if pa.Sdx < len(pa.Src) {
 		// Default is the structure-only tree (least noise); -error code/code-all also show
 		// each tag's code.

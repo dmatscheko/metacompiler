@@ -926,6 +926,13 @@ function s28(): void {
     n = n + 1;
     debugger;
     check("dbg1", n === 1);
+
+    // The Annex B legacy OCTAL string escape. The one-digit form is octal on its own -
+    // '"\1"' is U+0001, not the character '1' - and only '\0' with nothing after it is the
+    // NUL escape. The interpreter half decoded no octal escape at all until this check
+    // existed (a live halves divergence: the compiled half was already correct).
+    check("oct1", "\1".charCodeAt(0) === 1 && "\1".length === 1);
+    check("oct2", "\101" === "A" && "\0".charCodeAt(0) === 0 && "\0".length === 1);
 }
 
 // ===== SECTION 29: shapes TypeScript parses and then refuses =====

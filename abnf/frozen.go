@@ -699,8 +699,11 @@ func (ps *frozenParserScript) init() {
 	ps.cMap = map[string]r.Object{
 		"getSrc": func() string { return ps.pa.Src },
 		"setSrc": func(src string) { ps.pa.setSrc(src) },
-		"getSdx": func() int { return ps.pa.Sdx },
-		"setSdx": func(sdx int) { ps.pa.Sdx = sdx },
+		// The name of the file being PARSED - see parserscript.go for what a guard
+		// uses it for (JavaScript's Script-vs-Module goal symbol).
+		"srcName": func() string { return ps.pa.fileName },
+		"getSdx":  func() int { return ps.pa.Sdx },
+		"setSdx":  func(sdx int) { ps.pa.Sdx = sdx },
 		"peek": func(offset int) int {
 			pos := ps.pa.Sdx + offset
 			if pos < 0 || pos >= len(ps.pa.Src) {

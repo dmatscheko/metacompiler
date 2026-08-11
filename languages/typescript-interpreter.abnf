@@ -5980,6 +5980,28 @@ NotFuncHead = :script(~~
             if (e == 10) { i = i + 2; continue }                                  // \<LF>
             if (e == 13) { i = (s.charCodeAt(i + 2) == 10) ? i + 3 : i + 2; continue } // \<CR> / \<CRLF>
             if (e == 8232 || e == 8233) { i = i + 2; continue }                   // \<LS> / \<PS>
+            // The legacy OCTAL escape: up to three octal digits, and at most 255 - '\400'
+            // is '\40' followed by a literal '0'. '\1'..'\7' are octal on their own; only
+            // '\0' needs a digit behind it, because a '\0' with nothing after it is the NUL
+            // escape and is left to the shared unescapeJs below. Requiring that second
+            // digit of ALL of them made '"\1"' the character '1' in this half and U+0001 in
+            // the compiled one - a live halves divergence, found by tests/js-test-full.js's
+            // goal3 check, which is the first assertion to test a one-digit octal escape.
+            if ((e >= 49 && e <= 55) || (e == 48 && isOctDigit(s.charCodeAt(i + 2)))) {
+                var oc = 0
+                var n = 0
+                var k = i + 1
+                while (n < 3 && isOctDigit(s.charCodeAt(k))) {
+                    var nv = oc * 8 + (s.charCodeAt(k) - 48)
+                    if (nv > 255) { break }
+                    oc = nv
+                    k = k + 1
+                    n = n + 1
+                }
+                out = out + String.fromCharCode(oc)
+                i = k
+                continue
+            }
             if (e == 117 && s.charCodeAt(i + 2) == 123) {                         // \u{...}
                 var j = i + 3
                 var cp = 0
@@ -5993,6 +6015,7 @@ NotFuncHead = :script(~~
         }
         return out
     }
+    function isOctDigit(cc) { return cc >= 48 && cc <= 55 }
     // The source length of the escape starting at s[i] (the backslash), so the shared
     // unescapeJs can be handed exactly one escape at a time.
     function escLen(s, i) {

@@ -998,6 +998,27 @@ function s34() {
     n = n + 1
     debugger;
     check("dbg1", n === 1)
+
+    // The SCRIPT goal. This file is a '.js', so it is a Script, and a Script has three
+    // things a Module does not: 'await' is an ordinary identifier, the Annex B legacy
+    // octal forms are legal, and '<!--' / '-->' are HTML-like line comments. A '.mjs' or
+    // '.module.js' file refuses all three - see NotModule in the js grammars, which is
+    // where the file name reaches a :script() guard (c.srcName()). These checks are the
+    // Script half of that pair; the Module half is test262's reject corpus, which cannot
+    // live here because a Module file would need its own suite entry.
+    var await = 5
+    check("goal1", await === 5)
+    check("goal2", 01 === 1 && 08 === 8 && 0777 === 511)
+    check("goal3", "\1".charCodeAt(0) === 1 && "\1".length === 1)
+    check("goal3b", "\101" === "A" && "\0".charCodeAt(0) === 0 && "\0".length === 1)
+    var goal4 = 1
+<!-- an HTML open comment is a line comment in a Script, anywhere a comment may stand
+    check("goal4", goal4 === 1)
+    var goal5 = 2
+--> an HTML close comment is one too, at the start of a line
+    check("goal5", goal5 === 2)
+    var goal6 = 4, goal7 = 2
+    check("goal6", (goal6-- > goal7) === true && goal6 === 3)
 }
 
 // ===== SECTION 35: BigInt =====

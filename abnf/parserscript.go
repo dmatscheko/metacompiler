@@ -74,6 +74,15 @@ func (ps *parserscript) initFuncMap() {
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.setSrc(src) }
+	// srcName is the name of the file currently being PARSED (cleaned, exactly as
+	// it was handed to ParseWithAgrammar). A :script guard otherwise cannot see it,
+	// and some languages make a syntactic decision from the file name alone - in
+	// JavaScript the GOAL SYMBOL is one: a '.mjs' (or test262's '.module.js') file
+	// is a Module, which is always strict, reserves 'await' as an identifier and
+	// has no Annex B HTML comments, while a plain '.js' file is a Script and may
+	// not contain 'import'/'export' at all. c.file/c.curFile are the TRACE source
+	// (the top level program, and only set when tracing), not this.
+	ps.compilerFuncMap["srcName"] = func() string { return ps.pa.fileName }
 	ps.compilerFuncMap["getSdx"] = func() int { return ps.pa.Sdx }
 	ps.compilerFuncMap["setSdx"] = func(sdx int) { ps.pa.Sdx = sdx }
 	// peek returns the byte at the current parse position plus offset, or -1 outside of the
