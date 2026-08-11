@@ -93,11 +93,15 @@
 //
 // ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
 //
-// js_rdefined took a SCOPE HANDLE and walked the chain. A scope is the floor's
-// private storage, so layer 2 cannot open one and this could never have been
-// written here. It is a pure PROBE, and an EMITTER may call js_scope_typeof, so
-// ruby-to-llvm-ir.abnf now emits it as the IR helper rb_defined. PHP recorded the
-// generalisation, Swift/Java/Dart confirmed it, Ruby is the fifth lowering.
+// js_rdefined took a SCOPE HANDLE and walked the chain, and for a while it WAS
+// lowered into the emitter as the IR helper `rb_defined` over js_scope_typeof -
+// PHP recorded that generalisation, Swift/Java/Dart confirmed it and Ruby was the
+// fifth lowering. THAT LOWERING IS GONE AGAIN (docs/todo.md 5.3): js_scope_typeof
+// cannot tell "holds undefined" from "absent", an unsupplied block parameter holds
+// exactly undefined, and scopeHas can - see js_rdefined below, which is the only
+// scope-taking extern this file implements besides js_rmethodval. The wall the
+// paragraph above describes is real and unchanged; what moved is which side of it
+// this particular probe belongs on.
 //
 // ----- the regular-expression engine is IMPORTED, not copied ------------------
 //
@@ -8593,6 +8597,40 @@ function js_rgset(name, v) { return rbGset(rbStr(name), v) }
 // kind at compile time; this only tests presence.
 function js_rgdefined(name, kind) {
     if (rbGlobalNames["$" + rbStr(name)] === true) { return kind }
+    return null
+}
+
+// defined?(x): the KIND of a plain name, or nil - abnf/jsrt.go's js_rdefined,
+// walk for walk (`for s := rt.scopeOf(a[0]); s != nil; s = s.parent { if
+// s.has(name) }`). The kind was decided at compile time from the shape of the
+// source text; this only answers whether the name is BOUND anywhere up the
+// chain.
+//
+// WHY IT IS HERE AND NOT IN THE EMITTER, which is the whole of docs/todo.md 5.3
+// for ruby. ruby-to-llvm-ir.abnf used to lower this into an IR helper
+// (`rb_defined`) over js_scope_typeof, because an emitter may call that and may
+// not open a scope. But js_scope_typeof CANNOT DISTINGUISH "holds undefined"
+// from "absent" (docs/working-on-this-project.md 7.3), and a Ruby BLOCK
+// PARAMETER the caller did not supply holds exactly undefined - js_arg answers
+// undefined for a missing index and js_scope_decl stores it, which is what
+// emitParamDefault's js_rundef test then reads. So:
+//
+//     [1].each { |a, b| puts defined?(b).inspect }
+//
+// answered nil in BOTH COMPILED HALVES where ruby-interpreter.abnf and MRI both
+// answer "local-variable". scopeHas is the own-scope test that CAN tell the two
+// apart, and it is a HOST BUILTIN (ids 65..68), reachable only from here - the
+// same wall and the same answer as js_rmethodval above. The call site is
+// `defined?` itself, which no hot path in any test program contains, so nothing
+// here pays the MetaJS scope frame that declined php's probe (cc28d07).
+function js_rdefined(scope, name, kind) {
+    var n = rbStr(name)
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) { return kind }
+        s = scopeParent(s)
+    }
     return null
 }
 

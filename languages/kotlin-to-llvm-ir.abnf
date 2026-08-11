@@ -2566,6 +2566,49 @@ KwContract  = "contract" KwEnd ;
     // object (js_get fails on nil and answers an index on an array). swift's
     // sw_safeget and dart's dt_safeget, transferred verbatim - the third and fourth
     // language to use exactly this guard.
+    //
+    // ===== docs/todo.md 5.2 (merge these three into a shared ABNF module): =====
+    // ===== DECLINED. The mechanism the item prescribes does not exist.     =====
+    //
+    // THE LOAD-BEARING FACT, and it settles the item on its own: a grammar-level
+    // `:include("lib/x.abnf")` merges PRODUCTIONS. abnf/parser.go's applyCommand
+    // parses the file, compiles it and APPENDS its rules to the a-grammar; the
+    // included file's own `:startScript()` is then never run, because
+    // abnf/r/rules.go's GetStartScript returns the FIRST startScript command and the
+    // host grammar's own comes before anything an include appended. Verified by
+    // experiment, not by reading: a two-line fragment whose startScript prints is
+    // included by a host grammar whose startScript prints, and only the HOST's line
+    // appears - SILENTLY, with no error and no warning. These helpers are startScript
+    // closures over m / curF / callExt / emitStr, so no shared .abnf module can hold
+    // them. (That silent drop is itself worth knowing and is in this round's report.)
+    //
+    // THE MECHANISM THAT COULD HOLD THEM is the script-level `include("lib/*.js")`
+    // three lines above, and using it here is exactly the architecture decision
+    // docs/working-on-this-project.md 7.12 records AGAINST: there are precisely two
+    // such files, lib/compile-core.js (every compiler grammar) and lib/interp-core.js
+    // (every interpreter), plus lib/regex.js, and a three-language file would be the
+    // first family-only one in the repo. Both chapter-4 traps that kill it are live at
+    // THIS site: an unprefixed helper in a shared core SILENTLY REPLACES a grammar's
+    // own (python's `numText`, 13,087 lines of goja-vs-frozen divergence from a commit
+    // about nothing, no gate caught it) and rtFunc/rtSafeGet/rtKGet/rtKSet are exactly
+    // those unprefixed names; and the hoist-vs-textual-position rule is already load
+    // bearing here, since swift's rtFunc calls a `hasOwn` its own grammar defines
+    // 1,400 lines FURTHER DOWN.
+    //
+    // AND THE THREE BODIES ARE NOT THE THREE BODIES THE ITEM DESCRIBES. Measured over
+    // the committed grammars, normalised for the emitted name:
+    //
+    //   rtSafeGet        14 lines, identical in ALL THREE
+    //   rtKGet + rtKSet  44 lines, identical in swift and dart ONLY - kotlin's kt_kset
+    //                    lost its `this` walk to layer 2 at a6df3a8 and kotlin has no
+    //                    kt_kget at all (kt_ktgetp is a different, larger probe)
+    //   rtFunc           already THREE spellings, not one (swift hasOwn, dart/kotlin
+    //                    `!= undefined`)
+    //
+    // 72 recoverable lines, every one of them carrying the EMITTED FUNCTION NAME, so
+    // even a shared file has to thread a `sw_`/`dt_`/`kt_` prefix through or three
+    // languages' modules change byte for byte. tools/shape-scan keeps reporting them,
+    // which is the right outcome for harmless duplication.
     function rtSafeGet() {
         return rtFunc("kt_safeget", 2, function(b, ps) {
             var v = ps[0]

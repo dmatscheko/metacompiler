@@ -2329,7 +2329,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (c0 == "$") { return hasOwn(rubyGlobals, t.slice(1)) ? "global-variable" : null }
             if (c0 == "@") { return "instance-variable" }
             if (t == "self") { return "self" }
-            if (t == "nil" || t == "true" || t == "false") { return "expression" }
+            // MRI gives each keyword literal its OWN kind - `defined?(nil)` is "nil",
+            // not "expression". This answered "expression" for all three, and
+            // ruby-to-llvm-ir.abnf converged on that wrong answer rather than invent a
+            // fourth one; MRI is the oracle and it is installed, so both halves now
+            // answer the keyword itself. (2.6.10's Float and defined? behaviour is
+            // unchanged in 3.x, so this row is settleable on /usr/bin/ruby.) These are
+            // KEYWORDS - no local, method or constant can carry one of these names - so
+            // returning the text needs no further test.
+            if (t == "nil" || t == "true" || t == "false") { return t }
             if (c0 >= "A" && c0 <= "Z") {
                 for (var i2 = scopes.length - 1; i2 >= 0; i2--) { if (hasOwn(scopes[i2], t)) { return "constant" } }
                 return hasOwn(hostGlobals, t) ? "constant" : null

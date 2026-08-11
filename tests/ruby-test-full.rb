@@ -403,6 +403,18 @@ def s07
   check("var3", a.v + b.v == 16 && S07Counter.made == 2)
   check("var4", defined?(S07_LIMIT) == "constant" && defined?($s07_hits) == "global-variable")
   check("var5", defined?(local) == "local-variable" && defined?(puts) == "method" && defined?(zz_undefined) == nil)
+  # defined? on a block parameter the caller did NOT supply. The slot holds
+  # undefined, js_scope_typeof cannot tell that from absent, and both compiled
+  # halves therefore answered nil where MRI says "local-variable" (docs/todo.md
+  # 5.3: the probe moved to lib/ruby-rt.metajs, where scopeHas CAN tell).
+  check("var6", [7].map { |x, y| defined?(y) } == ["local-variable"])
+  check("var7", (proc { |q, r| [defined?(q), defined?(r)] }.call(1)) == ["local-variable", "local-variable"])
+  # `self` has its own kind in MRI and is always defined; the scope probe answered
+  # "local-variable" inside a method and nil at top level.
+  check("var8", defined?(self) == "self")
+  # MRI gives each keyword literal its own kind. Both halves used to answer
+  # "expression" for all three - agreed, and contradicted by the oracle.
+  check("var9", defined?(nil) == "nil" && defined?(true) == "true" && defined?(false) == "false")
 end
 # ===== SECTION 08: multiple assignment and splats =====
 def s08_pair

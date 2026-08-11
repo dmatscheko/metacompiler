@@ -414,6 +414,16 @@ extension ExInt on int {
   int addTo(int o) => this + o;
 }
 extension ExList<T> on List<T> { T orElse(int i, T fb) => i < length ? this[i] : fb; }
+// Unqualified GETTERS of a NON-OBJECT receiver. A List receiver is an object and the
+// `length` above resolved through the emitter's own `this`-property arm all along; a
+// String is not, so both compiled halves died on `length` with "variable not defined"
+// while dart-interpreter.abnf answered it, and `isEmpty` - a Dart getter that is not a
+// host own property - failed in BOTH halves. Both are answered through Dart's own
+// curated dispatch now (docs/todo.md 5.3), so no name Dart lacks comes with them.
+extension ExStr on String {
+  int lenPlus() => length + 1;
+  bool emptyq() => isEmpty;
+}
 extension type ExMeters(int value) { // extension type (3.3)
   ExMeters operator +(ExMeters o) => ExMeters(value + o.value);
   int get doubledUp => value * 2;
@@ -424,6 +434,8 @@ void s17() {
   check("ex3", [7, 8].orElse(1, 0) == 8 && <int>[].orElse(0, 5) == 5); // generic ext
   var m = ExMeters(3) + ExMeters(4);
   check("ex4", m.value == 7 && ExMeters(2).doubledUp == 4);
+  check("ex5", "abcd".lenPlus() == 5); // unqualified getter of a String receiver
+  check("ex6", "".emptyq() && !"a".emptyq());
 }
 
 // ===== SECTION 18: generics =====

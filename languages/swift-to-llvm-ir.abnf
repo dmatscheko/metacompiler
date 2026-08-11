@@ -3508,6 +3508,9 @@ KwContinue  = "continue" KwEnd ;
     }
     // A property read that cannot abort: undefined for anything that is not a plain
     // object (js_get fails on nil, and answers an index on an array).
+    // docs/todo.md 5.2 (merge sw_safeget/dt_safeget/kt_safeget and the kget/kset pair
+    // into a shared ABNF module) is DECLINED; the argument, the experiment that settles
+    // it and the line counts are at the same helper in languages/kotlin-to-llvm-ir.abnf.
     function rtSafeGet() {
         return rtFunc("sw_safeget", 2, function(b, ps) {
             var v = ps[0]
@@ -3539,11 +3542,52 @@ KwContinue  = "continue" KwEnd ;
     //
     // The one place this cannot be exact is a scope slot that HOLDS undefined:
     // js_scope_typeof answers "undefined" for it and for an absent name alike, so such
-    // a name takes the self fallback and then, on a miss, the js_scope_get below -
-    // which returns the undefined it held under the Go twin and ABORTS in the C floor
-    // ("variable not defined"). Swift's grammar declares an uninitialised `let v: Int`
-    // as NULL, not undefined (see the `let v: Int` note further down), so no emitted
-    // binding takes that path; it is written out rather than hidden.
+    // a name takes the self fallback and then, on a miss, the js_scope_get below.
+    // Swift's grammar declares an uninitialised `let v: Int` as NULL, not undefined
+    // (see the `let v: Int` note further down), so no emitted binding takes that path.
+    // AND THE PATH IS HARMLESS ANYWAY, which this comment used to get wrong: it said
+    // js_scope_get "returns the undefined it held under the Go twin and ABORTS in the
+    // C floor". It does not. languages/lib/runtime.c's scope_get dies only when
+    // scope_find MISSES in every frame; a frame that binds the name and holds H_UNDEF
+    // returns H_UNDEF, exactly like the twin. Probed in both engines and they agree.
+    //
+    // ===== docs/todo.md 5.3, MOVING THIS PAIR INTO LAYER 2: BUILT, MEASURED, =====
+    // ===== REVERTED. DO NOT RE-OPEN WITHOUT READING THE NUMBERS.            =====
+    //
+    // The item asks for kotlin's a6df3a8 conversion here, with the judgement "keep the
+    // hot local-hit arm inline and route only the MISS paths". Both halves of that were
+    // examined and the answer is no, for the reason php's probe was declined in cc28d07
+    // and by two orders of magnitude more:
+    //
+    //   1. THERE IS NO MISS PATH LAYER 2 ANSWERS BETTER, so there is no hot/cold split
+    //      to make. The two arms below are already exact. The third arm - the abort - is
+    //      the same abort in both engines. abnf/jsrt.go's js_kget has ONE arm this
+    //      lowering lacks (a non-object `this`, where it asks rt.getMember, so an
+    //      extension on String could read an unqualified member); routing the miss to
+    //      js_kget was tried and it answers nothing, because getMember does not know
+    //      Swift's `count`, AND swift-interpreter.abnf rejects the same program
+    //      ("unknown name: count"), so all three engines agree and the fix is a
+    //      three-engine one that does not start here. Recorded in docs/todo.md.
+    //   2. THE WHOLE PROBE IS THE HOT ARM. sw_kget/sw_kset are how EVERY plain name is
+    //      read and written: tests/bench/mod.swift, a bare `while` over two locals,
+    //      emits 4 sw_kget and 2 sw_kset per iteration. In MetaJS a call is a scope
+    //      frame, and one frame on that path is ~13,700 instructions.
+    //
+    // MEASURED, not assumed. The move was built in full - js_kget/js_kset in
+    // lib/swift-rt.metajs over scopeHas/scopeParent/scopeGet, arm for arm with what is
+    // below, both helpers reduced to a one-line extern trampoline, swift-rt.ll and
+    // dart-rt.ll regenerated - and the swift and dart ratchets stayed green in BOTH
+    // compiled halves, 479 and 368 checks, so this is a cost verdict and not a
+    // feasibility one. tests/bench.sh --draws 9 --paired against a clean 61aa3de:
+    //
+    //     swift   +81.19%   SLOWER in 9 of 9 pairs, 0 ties
+    //     dart    +68.97%   SLOWER in 9 of 9 pairs, 0 ties
+    //
+    // php's declined probe cost +0.77%. This is the same shape of mistake at 100x, and
+    // the reason is entirely the call site: identical bodies, different sites, and only
+    // the sites decide (docs/todo.md 5's header). dart's dt_kget/dt_kset are the same
+    // body and carry the same verdict; kotlin's kt_kset already keeps its local arm
+    // inline for the same reason and only its chain walk went to layer 2.
     function rtKGet() {
         return rtFunc("sw_kget", 2, function(b, ps) {
             var localB = curF.NewBlock("")

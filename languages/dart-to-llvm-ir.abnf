@@ -2305,7 +2305,11 @@ KwSuper     = "super" KwEnd ;
             }
             // dart:core's own errors and exceptions: FormatException("x"), ...
             if (dxIsName(name)) { return emitDartExc(b, name, "", args) }
-            var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
+            // dt_kgetc, not dt_kget: the callee is resolved in CALL position, so the helper
+            // keeps its abort instead of reading a zero-argument member of a builtin `this`.
+            // See the long note at that arm - a getter read is not a method call, and
+            // answering one for the other made `indexOf("b")` in a String extension call -1.
+            var fV = b.NewCall(rtKGetC(), [curScopeV, emitStr(b, name)])
             var argsV2 = callExt(b, "js_arr_new", [])
             b = emitCallArgsInto(b, argsV2, args)
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, argsV2])}
@@ -2812,10 +2816,31 @@ KwSuper     = "super" KwEnd ;
     //
     // The one place this cannot be exact is a scope slot that HOLDS undefined:
     // js_scope_typeof answers "undefined" for it and for an absent name alike, so such
-    // a name takes the `this` fallback and then, on a miss, the js_scope_get below -
-    // which returns the undefined it held under the Go twin and ABORTS in the C floor.
+    // a name takes the `this` fallback and then, on a miss, the js_scope_get below.
     // Dart's emitter declares an uninitialised `int? v;` as NULL, not undefined, so no
-    // emitted binding takes that path; it is written out rather than hidden.
+    // emitted binding takes that path. AND THAT PATH IS HARMLESS ANYWAY: this comment
+    // used to say js_scope_get "ABORTS in the C floor" for such a slot, and it does
+    // not - runtime.c's scope_get dies only when scope_find misses in EVERY frame, and
+    // a frame holding H_UNDEF returns it, exactly like the Go twin.
+    //
+    // ===== docs/todo.md 5.3, MOVING THIS PAIR INTO LAYER 2: BUILT, MEASURED, =====
+    // ===== REVERTED. The full argument is at the same site in                =====
+    // ===== languages/swift-to-llvm-ir.abnf, which is the same body.          =====
+    //
+    // In short: there is no MISS arm layer 2 answers better (the two arms below are
+    // exact, and the third is the same abort in both engines), and the whole probe is
+    // the HOT arm - tests/bench/mod.dart, a bare `while` over two locals, emits 5
+    // dt_kget and 4 dt_kset, because this pair is how every plain name is read and
+    // written. The move was built in full (js_kget/js_kset in lib/dart-rt.metajs over
+    // scopeHas/scopeParent/scopeGet, these two helpers reduced to extern trampolines,
+    // dart-rt.ll regenerated), the ratchet stayed green in both compiled halves at 368
+    // checks, and tests/bench.sh --draws 9 --paired against a clean 61aa3de read:
+    //
+    //     dart    +68.97%   SLOWER in 9 of 9 pairs, 0 ties
+    //     swift   +81.19%   SLOWER in 9 of 9 pairs, 0 ties
+    //
+    // php's declined probe (cc28d07) cost +0.77%. Same shape of mistake, 90x the price,
+    // and the whole of it is the call site.
     var rtFuncs = {}
     function rtFunc(name, nparams, bodyFn) {
         if (rtFuncs["$" + name] != undefined) { return rtFuncs["$" + name] }
@@ -2839,6 +2864,9 @@ KwSuper     = "super" KwEnd ;
     }
     // A guarded property read: undefined for anything that is not a plain object, so
     // it is safe to apply to a value of unknown type (js_get aborts on nil).
+    // docs/todo.md 5.2 (merge dt_safeget/sw_safeget/kt_safeget and the kget/kset pair
+    // into a shared ABNF module) is DECLINED; the argument, the experiment that settles
+    // it and the line counts are at the same helper in languages/kotlin-to-llvm-ir.abnf.
     function rtSafeGet() {
         return rtFunc("dt_safeget", 2, function(b, ps) {
             var v = ps[0]
@@ -2853,8 +2881,19 @@ KwSuper     = "super" KwEnd ;
             noB.NewRet(hUndef)
         })
     }
-    function rtKGet() {
-        return rtFunc("dt_kget", 2, function(b, ps) {
+    // ONE body, TWO emitted functions, and no third parameter: `iscall` is a constant at
+    // every call site (a name in value position, or makeCall's callee), so it is decided
+    // HERE, at emit time, and neither function carries a runtime branch for it. kotlin's
+    // kt_ktget / kt_ktgetp pair spends a call and a parameter on the same distinction
+    // because its sites are not all statically known; dart's are. It matters because
+    // dt_kget is dart's hottest helper - 5 per iteration of tests/bench/mod.dart - and a
+    // wrapper would have put an extra call in front of every local read in the language.
+    // dt_kgetc is emitted only if some call site asks for it (rtFunc is lazy and keyed by
+    // name), so a program with no unqualified call never carries it.
+    function rtKGet() { return rtKGetB("dt_kget", false) }
+    function rtKGetC() { return rtKGetB("dt_kgetc", true) }
+    function rtKGetB(nm, iscall) {
+        return rtFunc(nm, 2, function(b, ps) {
             var localB = curF.NewBlock("")
             var selfB = curF.NewBlock("")
             var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
@@ -2868,8 +2907,67 @@ KwSuper     = "super" KwEnd ;
             var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
             var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
             var hitB = curF.NewBlock("")
-            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, missB)
+            // In CALL position `this` having no property of that name is the end of it and
+            // this function is byte-for-byte the one that shipped before; in value position
+            // there is one arm more, below.
+            var noPropB = missB
+            if (!iscall) { noPropB = curF.NewBlock("") }
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, noPropB)
             hitB.NewRet(mV)
+            // ===== AN UNQUALIFIED MEMBER OF A NON-OBJECT RECEIVER (docs/todo.md 5.3) ====
+            //
+            // `this` is bound and has no PROPERTY of that name. For an ordinary instance
+            // that is the end of it, but a Dart EXTENSION ON A BUILTIN has a receiver with
+            // members and no properties at all, so the whole of
+            //
+            //     extension StrX on String { int lenPlus() => length + 1; }
+            //
+            // died here with "variable not defined: length" while dart-interpreter.abnf
+            // printed 4 - a halves divergence --cross never reached, because no test
+            // program extends a builtin.
+            //
+            // THE FIRST FIX FOR IT WAS WRONG AND THE MEASUREMENT IS WHY IT IS NOT HERE.
+            // Routing this block to the js_kget EXTERN works, and it works by asking
+            // abnf/jsrt.go's getMember - whose surface for a string is `length` plus TEN
+            // JAVASCRIPT METHOD NAMES (charCodeAt, charAt, indexOf, replace, slice,
+            // substring, split, toUpperCase, toLowerCase, trim). Four of those - slice,
+            // charAt, replace, charCodeAt - are names Dart does not have at all, and both
+            // compiled halves then ACCEPTED them with JavaScript semantics:
+            //
+            //     extension SX on String { String jsSlice() => slice(1); }   ->  "bc"
+            //
+            // Real Dart rejects that program, and dart-interpreter.abnf rejects it too
+            // (its varMiss tests hasOwn, and a JS string's own property set is `length`
+            // and nothing else - which is exactly why the interpreter was right here all
+            // along). So the first fix traded one divergence for a worse defect: three
+            // legs agreeing on JavaScript. It was measured, backed out, and this replaced
+            // it. Do not put js_kget back.
+            //
+            // WHAT IS HERE INSTEAD is DART's own curated member dispatch, js_dartnm - the
+            // same extern the qualified `.name` chain uses, so an unqualified read answers
+            // exactly what a qualified one would and no name enters the language through
+            // the back door. Two guards, and both are load bearing:
+            //
+            //   * NOT FOR AN OBJECT WITH A __class. Those are the instances the property
+            //     arm above already served; letting js_dartnm see one would turn a missing
+            //     name into a zero-argument call of a same-named METHOD. dt_safeget answers
+            //     undefined for a non-object AND for an object without a descriptor, which
+            //     is precisely the set that has members but no properties.
+            //   * NOT IN CALL POSITION. js_dartnm(recv, name, []) is a zero-argument member
+            //     read, which is what a Dart GETTER is - `length`, `isEmpty` - and it is
+            //     not what `indexOf("b")` is. makeCall resolves its callee with iscall
+            //     TRUE, so a call keeps the abort below rather than calling the member with
+            //     no arguments and then calling its result (which read "call of a non
+            //     function value: -1" while it was being tried). This is kotlin's
+            //     kt_ktgetp third parameter decided at emit time instead of run time, and
+            //     its note is the general form: what the name alone cannot decide, the
+            //     SITE can.
+            if (!iscall) {
+                var clsV = noPropB.NewCall(rtSafeGet(), [selfV, emitStr(noPropB, "__class")])
+                var dnB = curF.NewBlock("")
+                noPropB.NewCondBr(truthy(noPropB, callExt(noPropB, "js_seq", [clsV, hUndef])), dnB, missB)
+                dnB.NewRet(callExt(dnB, "js_dartnm", [selfV, ps[1], callExt(dnB, "js_arr_new", [])]))
+            }
             // Nothing anywhere: js_scope_get is the abort, and it is the SAME abort the
             // extern used to raise, so a program that read an unknown name still dies.
             missB.NewRet(callExt(missB, "js_scope_get", [ps[0], ps[1]]))

@@ -4671,6 +4671,26 @@ KwDeferred  = "deferred" KwEnd ;
         // the receiver of a named constructor (ArgumentError.value(7)) or a Type
         // value. A marker object, not a class descriptor - see the dx* block.
         if (dxIsName(name)) { return {v: {__dexcType: name}} }
+        // An unqualified GETTER of a non-object receiver: `extension SX on String { bool
+        // e() => isEmpty; }`. The hasOwn arm at the top of this function already answers
+        // `length`, because a host string's own property set is exactly {length} - and
+        // that is why this half was RIGHT where both compiled halves were wrong
+        // (docs/todo.md 5.3) - but a Dart getter that is not a host own property, like
+        // isEmpty, fell through to "unknown name". mcall is Dart's own curated member
+        // dispatch, the same one a qualified `.isEmpty` uses, so this answers exactly
+        // what the qualified read would and admits no name Dart lacks.
+        //
+        // The guard is the receiver, and it matches the emitter's dt_kgetp arm exactly:
+        // NOT an object carrying a __class, since those instances were served by the two
+        // arms above and handing one to mcall would turn a missing name into a zero-
+        // argument call of a same-named method. mcall ABORTS on a name it cannot place,
+        // so this is terminal and its diagnostic replaces "unknown name: X" for this
+        // receiver shape - which is also what the compiled halves now say.
+        if (self != undefined && self != null) {
+            var plainRecv = true
+            if (typeof self == "object") { if (self.__class != undefined) { plainRecv = false } }
+            if (plainRecv) { return {v: mcall(self, name, [])} }
+        }
         return null
     }
     core.setMiss = function(name, value) {

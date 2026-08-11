@@ -97,6 +97,19 @@
 // so dart-to-llvm-ir.abnf now emits them as the IR helpers dt_kget / dt_kset.
 // PHP recorded the generalisation, Swift confirmed it, Dart is the third.
 //
+// AND IT STAYS TRUE OF THE WHOLE PAIR, which docs/todo.md 5.3 settled by building the
+// alternative twice. Moving both helpers here cost +68.97% over 9 paired draws (9 of
+// 9 slower) - they are how EVERY plain name is read and written, so the probe is all
+// hot arm and there is no cold half to route. A narrower version, with only
+// dt_kget's final miss routed to a js_kget implemented here, was then built for the
+// one thing the emitter could not reach - an unqualified member of a NON-OBJECT
+// receiver, i.e. a Dart extension on a builtin - and that was backed out too, for a
+// better reason: the arm it borrowed is abnf/jsrt.go's getMember, whose string
+// surface is `length` plus ten JAVASCRIPT method names, four of which Dart does not
+// have. The emitter answers that case through js_dartnm instead - Dart's own curated
+// dispatch, which this file already implements - and the argument is written out at
+// dt_kgetp in the grammar. Nothing scope-taking lives here.
+//
 // ----- MetaJS rules that shape the code below --------------------------------
 //
 // docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the
@@ -2023,3 +2036,4 @@ function js_dartnm(recv, name, args) {
     }
     return dtMember(recv, name, args)
 }
+
