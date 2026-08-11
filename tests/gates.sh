@@ -128,7 +128,31 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9468      # EIGHTEENTH round, +249 over the seventeenth's 9219:
+FULL_ASSERTIONS=9665      # NINETEENTH round, +197 over the eighteenth's 9468:
+                          # js +43 and typescript +43 (a function's name and length
+                          # in both halves, and its own name BOUND inside its body
+                          # via a spec funcEnv), ruby +33 (to_c, an empty block
+                          # after proc/lambda, an exact Float#to_r, a power-of-two
+                          # scaled hypot, and MRI's whole %d coercion table),
+                          # swift +28 (a fresh per-iteration binding for a captured
+                          # for-in variable, across all four loop makers), kotlin
+                          # +25 (the collection KIND reaching the throw site, and
+                          # the String members that were aborting or ignoring their
+                          # predicate), python +9 and php +16 (global/nonlocal arm
+                          # order in all three engines, and isset/unset diagnosing
+                          # nothing as PHP 8 requires).
+                          #
+                          # +197 IS EXACTLY 28+25+86+25+33, the five agents' own
+                          # isolated numbers, which is the evidence that no change
+                          # interfered with another - the same cross-check the
+                          # seventeenth round used.
+                          #
+                          # FIVE AGENTS RAN IN THIS ROUND and every one of them saw
+                          # "+N, RAISE FULL_ASSERTIONS" and left it alone, which is
+                          # the thirty-seventh through forty-first in a row. Raised
+                          # here afterwards from a COMMITTED tree (44bdde7).
+                          #
+                          # The eighteenth round's note: +249 over the seventeenth's 9219:
                           # ruby +61 (too-few-arguments raising, Rational/Complex
                           # round/floor/ceil/truncate/abs, equal?, and Method
                           # values for user AND kernel methods), js +36 and
@@ -447,11 +471,22 @@ fi
 
 if [ "$QUICK" = 0 ]; then
     # 6 and 7 are THE ONLY GATES THAT SEE LAYER 2.
+    # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS and for the same reason: the
+    # number legitimately GROWS (the js ratchet split added js2 and js3, taking it
+    # 16 -> 18) and must never SHRINK. A hard-coded 16 in the message printed
+    # "18/16 agreeing", which reads as a fault when it is the opposite; a hard-coded
+    # EQUALITY would have gone red for a split that broke nothing. Raise it in the
+    # same way and at the same time as FULL_ASSERTIONS - from a COMMITTED tree.
+    CLANG_MODULES=18
     crc=$(rc_of clang)
     held=$(grep -c 'row HELD' "$log/clang")
     ok=$(grep -c 'the clang executable agrees' "$log/clang")
-    if [ "$crc" = 0 ] && [ "$ok" -ge 16 ] && [ "$held" = 0 ]; then pass clang-check "$ok/16 agreeing, none held"
-    else fail clang-check "$ok/16 agreeing, $held held, rc=$crc - copied to /tmp/gates-clang.log"; cp "$log/clang" /tmp/gates-clang.log; fi
+    if [ "$ok" -gt "$CLANG_MODULES" ]; then
+        extra="  (+$((ok - CLANG_MODULES)), RAISE CLANG_MODULES in tests/gates.sh)"
+    else extra=""; fi
+    if [ "$crc" = 0 ] && [ "$ok" -ge "$CLANG_MODULES" ] && [ "$held" = 0 ]; then
+        pass clang-check "$ok modules agreeing, none held$extra"
+    else fail clang-check "$ok agreeing of $CLANG_MODULES expected, $held held, rc=$crc - copied to /tmp/gates-clang.log"; cp "$log/clang" /tmp/gates-clang.log; fi
 
     nf=$(grep -E 'languages, every native binary|native binaries' "$log/native" | tail -1)
     if grep -q 'every native binary exits 0 with 0 failures' "$log/native"; then pass native-full "$nf"
