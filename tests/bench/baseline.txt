@@ -13,6 +13,35 @@
 # fourteen rows. Everything below was paid for and is not re-derivable from the
 # numbers - which is why it is now the script's job to keep it.
 #
+# RE-RECORDED at 61aa3de (the NINETEENTH round), clean `git archive` tree, 9 draws
+# per row. FOUR ROWS MOVED BEYOND THEIR OWN SPREAD AND NOT ONE OF THEM IS THIS
+# ROUND'S WORK:
+#
+#     c      -3.48% (spread 0.58)      swift  +0.64% (0.34)
+#     bash   -0.70% (0.13)             metajs -0.14% (0.10)
+#
+# `c` IS THE SEMANTIC CONTROL - self-contained IR, no js_* extern - so a layer-2 or
+# floor change cannot move it, and -3.48% is six times its own noise floor. bash and
+# metajs were not touched this round at all. The cause is three commits that landed
+# after the last re-record and never re-recorded: 25ed216 (-why, which edits
+# emitters), 23ff38c (the harness), and dd6671b (folding three runtime modules back,
+# which changes the runtime EVERY language links).
+#
+# SWIFT'S +0.64% IS NOT THE for-in FIX, and this was checked rather than assumed.
+# 54a2b70 gives a captured for-in variable a fresh binding per iteration, measured
+# at +0.43% unanimous over 15 paired draws on a loop that BINDS a name - but
+# tests/bench/mod.swift uses a `while` loop, and its emitted module is md5-IDENTICAL
+# across that commit (9c122a1deaded983f005b41752f1f85c, 718 lines, both sides). So
+# this row's movement is the same stale drift as the other three. Attributing it to
+# the visible change of the round would have been wrong, and it was the obvious
+# reading.
+#
+# THE GATE-DESIGN LESSON, which is the reusable part: bench.sh only FAILS on
+# regressions, so a stale baseline can drift indefinitely as long as it drifts
+# FASTER. Three of the four rows above are improvements. Nothing complained for
+# three commits. If you land an improvement, re-record - the header two paragraphs
+# down has said so all along, and this is what not doing it looks like.
+#
 # RE-RECORDED 2026-08-09 at 27cdf8d (the fourteenth round), in a clean `git
 # archive` tree, 9 draws per row. Two changes account for every row that moved and
 # both are intended:
@@ -591,18 +620,19 @@
 # ===========================================================================
 # re-recorded at commit 27cdf8d, 9 draws, min of 3 runs per build.
 # recorded at commit unknown, 9 draws, min of 3 runs.
-bash       53136504         -          -
-batch      34230835         -          -
-c          11169053         -          -
-csharp     19172842883      11558256   2345
-dart       3551646460       11556976   446
-go         753508954        11560816   75
-java       7884422989       11556976   1054
-js         1157960410       11577456   131
-kotlin     15109238968      11627376   1880
-lua        1409032760       10498176   121
-metajs     221711469        11537792   4
-php        7046513591       11560816   968
-python     27030117030      11627376   3574
-ruby       5070656894       11622256   466
-swift      4009906266       11556976   470
+# recorded at commit unknown, 9 draws, min of 3 runs.
+bash       52765827         -          -
+batch      33842018         -          -
+c          10781531         -          -
+csharp     19242059787      11558256   2345
+dart       3552180262       11556976   446
+go         753396825        11560816   75
+java       7885649822       11556976   1054
+js         1155979219       11577456   131
+kotlin     15314802526      11627376   1880
+lua        1409088293       10498176   121
+metajs     221405238        11537792   4
+php        7046568127       11560816   968
+python     26956903341      11627376   3574
+ruby       5099679726       11622256   466
+swift      4035601042       11556976   470
