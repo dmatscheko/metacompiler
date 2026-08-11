@@ -4,41 +4,36 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Completed work lives in git, not here. [§8](#8-settled--do-not-re-open) keeps
-one line per settled question — the VERDICT and its REASON, nothing else, because
-that is the only part that stops someone re-opening it.
+Completed work lives in git, not here. [§8](#8-settled--do-not-re-open) keeps one
+line per settled question — the VERDICT and its REASON, nothing else, because the
+reason is the only part that stops someone re-opening it.
 
 Two conventions, and they are the point of the file:
 
-> **[V]** — a probe or grep was run for this list, on this commit.
+> **[V]** — a probe or grep was run for this item, on this commit.
 > **[U]** — inherited from an older note and NOT re-checked. A lead, not a fact.
 
-> **Treat an item as a place to start probing, never as a specification.** THREE
-> rounds running, the list has been wrong more often than right, and ALWAYS in the
-> direction of understating the defect.
+> **TREAT AN ITEM AS A PLACE TO START PROBING, NEVER AS A SPECIFICATION.** Round
+> after round this list has been wrong more often than right, and **always in the
+> direction of understating the defect**. The strongest single measurement: of
+> **eleven claims across eight items, nine were wrong as written**, and every
+> underlying defect was real and larger. Two items were already CLOSED when
+> assigned — one of them 123 commits earlier, its text verbatim the pre-fix
+> wording of the commit that fixed it.
 >
-> The eighteenth round is the strongest case yet: of **eleven claims across eight
-> items, nine were wrong as written**, and every underlying defect was real and
-> larger. One item gave a java error message that belongs to a DIFFERENT RECEIVER
-> (`"ab".substring(5)` is `…for length 2`; the recorded `length 6` is
-> `"abcdef".substring(7)` — two rows merged in transcription). One said a fix
-> "means changing the shared `dictFind` contract"; it does not. One said swift's
-> two abort probes "become byte-identical once value semantics land"; they already
-> were, and only the stale headers survived. One named three js residues, of which
-> the third was not a for-in bug at all — **a function could not carry own
-> properties**, which worked under goja and ABORTED under `-frozen`.
+> Failure modes seen more than once: an error message recorded against the WRONG
+> receiver (two probe rows merged in transcription); a named blocker that does not
+> exist; and an item naming three residues of which the third was a different
+> defect entirely.
 >
-> The seventeenth and sixteenth had the same shape (see §8 for their verdicts).
+> So: **probe the FIX as well as the DEFECT**, and **re-probe any [U] item BEFORE
+> it is assigned, not during**. **Item NUMBERS are re-assigned on every rebuild** —
+> a citation of `docs/todo.md 1.4` is provenance, not an address.
 >
-> **Every time, the defect underneath was real and bigger.** So: **probe the FIX
-> as well as the DEFECT**, and re-probe any **[U]** item BEFORE assigning it, not
-> during. **Item NUMBERS are re-assigned every rebuild** — a citation of
-> `docs/todo.md 1.4` is provenance, not an address.
->
-> The corollary that keeps paying: **three agents declined an instruction with a
-> measurement and were right every time**, and two partial results that were sent
-> back turned up further defects the fix itself had created. Write the brief so
-> declining is expected.
+> The corollary that keeps paying: **agents that declined an instruction with a
+> measurement have been right every time**, and partial results sent back for the
+> rest turned up further defects the fix itself had created. Write the brief so
+> that declining is expected.
 
 Baseline every item must preserve (`tests/gates.sh`, `--serial` on a loaded
 machine, `--bench` for anything touching layer 2 or the floor):
@@ -55,6 +50,10 @@ tests/coro-poc/build.sh byte-identical
 **Before measuring anything, read the manual's chapter 4 and
 `tests/bench/baseline.txt`'s header** — instructions not wall clock, medians over
 layout draws, `--paired`, corroborate with an exact counter.
+
+**Do not raise `FULL_ASSERTIONS` from a working tree.** The gate prints
+"+N, RAISE FULL_ASSERTIONS" and that message is the ratchet doing its job; the
+floor is raised afterwards, once, from a COMMITTED tree.
 
 ---
 
@@ -357,73 +356,63 @@ probably cheaper than thousands of ABNF ranges.
 
 # 8. Settled — do not re-open
 
-**~194 items closed** (`e284185`..HEAD). **One section, grouped by VERDICT and by
-nothing else** — no dates, no rounds, no order, no commit archaeology. The
-verdict plus its REASON is the whole content, because the reason is the only part
-that stops someone re-opening it; the detail is in git and the durable lessons are
-in the manual (ch. 4 and 7).
+**~196 items, one section, grouped by VERDICT and by nothing else** — no dates, no
+rounds, no order, no commit archaeology, because none of it changes what to do
+next. Each line is a verdict plus the shortest reason that stops someone
+re-opening it. The detail is in git; the durable lessons are in the manual
+(ch. 4 and 7).
 
 **DECLINED after measurement.** `i in arr` after `delete` · iterator close on
-`throw` (a depth stack cannot survive `for await`) · a catchable unknown-name
-error in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) ·
-kotlin `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go
-twin (manual 7.11) · dart `x as T` as a throwing cast · an mtime skip for the
-generators (a `git checkout` would make a stale `.ll` report CLEAN) · matching
-swiftc's **exit 133** on a trap (its stdout discard is libc block buffering, not a
-language property, and our interpreter legs run *inside* `mec`, so `raise()` would
-kill the metacompiler and at most 1 of 3 legs could match — widening the gap).
+`throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
+in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
+`:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
+(`llvm.Run` structurally cannot execute the C floor, manual 7.11) · dart `x as T`
+as a throwing cast · an mtime skip for the generators (a `git checkout` would make
+a stale `.ll` report CLEAN) · swiftc's **exit 133** on a trap (libc buffering, not
+a language property, and our interpreter legs run *inside* `mec`, so at most 1 of 3
+legs could match — widening the gap) · kotlin's unattributed **+2.28%** (five
+controls exclude every attributable cause; it is module LAYOUT, ch. 4's 4.8%
+effect, and it passes the gate) · a tuple-keyed python dict being **O(n·m)** (a
+consequence of the tuple type, not independent work; +0.77% inside a 1.13% spread).
 
 **The ITEM was wrong** — already fixed, or a false premise, oracle in hand.
-python integer arithmetic past 2^53 (already exact, 70 rows) · python's `&`
-int32-signed (already correct, its own example row included) · ruby `%g` (already
-implemented — the real gap was the `#` flag) · java's divide-by-zero message
-(already right and already asserted) · `(super as any)[k]` (real `tsc` rejects it,
+python integer arithmetic past 2^53 · python's `&` int32-signed (both already
+correct, each including the item's own example row) · ruby `%g` (already
+implemented; the real gap was the `#` flag) · java's divide-by-zero message
+(already right AND already asserted) · `(super as any)[k]` (real `tsc` rejects it,
 TS1034) · dart type-parameter erasure (Dart reifies) · kotlin's nested throwable
-name "changes every `Name@1`" (it does not — `Name@1` reads `__name`, only the
-throwable path reads `__bname`) · swift's two abort probes "become byte-identical
-once value semantics land" (they already were; only the stale headers survived).
+name "changes every `Name@1`" (only the throwable path reads `__bname`) · swift's
+two abort probes "become byte-identical once value semantics land" (they already
+were; only the stale headers survived).
 
-**The prescribed FIX was wrong.** The C# generated message on every derived type —
-fixes one name, breaks twenty-six · ruby's malformed formats via "emit % and
-rescan" — would have converged all three engines on behaviour MRI rejects, turning
-a halves divergence into agreed-and-wrong · ruby's `round(n)` via `rtExactDec` —
-the true expansion of 2.675 is 2.67 and MRI answers 2.68, because `round_half_up`
-carries a midpoint correction · swift's abort message via a floor change — Go
-already guards in front of the shared layer, so `runtime.c` needed no edit ·
-python's unhashable-key check by refusing `list` — a tuple IS a list here, so it
-would abort `{(1,2),(3,4)}` and `d[i,j]`; structural array comparison instead.
+**The prescribed FIX was wrong.** C#'s generated message on every derived type
+(fixes one name, breaks twenty-six) · ruby's malformed formats via "emit % and
+rescan" (would have converged all three engines on behaviour MRI rejects, turning a
+halves divergence into agreed-and-wrong) · ruby's `round(n)` via `rtExactDec` (the
+true expansion of 2.675 is 2.67 and MRI says 2.68 — `round_half_up` carries a
+midpoint correction) · swift's abort message via a floor change (Go already guards
+in front of the shared layer) · python's unhashable-key check by refusing `list` (a
+tuple IS a list here, so it would abort `{(1,2),(3,4)}` and `d[i,j]`).
 
-**FIXED, and what each one actually turned out to be** — kept only where the
-finding is bigger than the fix. ruby `Float#round/floor/ceil(n)` — MRI's own
-numeric.c algorithms, including the `int_round_zero_p` cliff that overrides the
-arithmetic · ruby malformed formats — now RAISE with MRI's messages, and the blast
-radius of raising was zero · kotlin out-of-range indexing — six defects, not two,
-and the bounds check measured FREE because it folds into work the read already
-does · js/ts private names and `for..in` — one root cause (the interpreters filed
-`#x` unmangled) and a second place in the compilers nobody had checked · swift
-Array/String members — nineteen, plus six adjacent, SECTION 36 running under real
-`swiftc` · `--full`'s total silently discarding a gapped half's assertions ·
-`tools/floor-coverage` (330 of 345 floor bodies reached) · `tools/metajs-lint`,
-which found two live defects on its first run, both wrong answers in shipped
-native binaries no dynamic gate could see · `-why`, justified by answering three
-questions BY HAND first and getting two of them wrong.
-
-**Settled by the eighteenth round.** swift value semantics — copy at STORE, not
-on read, which is complete by construction and is why an in-place subscript write
-still mutates · swift's two abort probes — already byte-identical, so they got the
-full row pair instead, proved by sabotage · kotlin user throwables — link
-`__super` to the builtin hierarchy; the "changes every user class" worry is false
-because the arm only fires when the superclass has no descriptor in this compile ·
-kotlin `js_ktexcmatch`'s non-throwable hack — NOT deleted, it self-retires behind
-its own `!isThrowable` guard · python unhashable keys — `dict`/`set` refused,
-arrays compared STRUCTURALLY, because a tuple IS a list here · ruby `equal?` — not
-a bare `===`, since the twin's `jsRat`/`jsCpx` are comparable Go structs and `==`
-would have been a designed-in halves divergence · ruby kernel `method(:x)` — a hit
-in the PARENTLESS scope is a host builtin, a `def` always lands in the module
-scope, which has a parent · js function properties — the side-table read must not
-be spelled `fp[k]`, which walks goja's own `Object.prototype`.
+**FIXED.** ruby: `Float#round/floor/ceil(n)` (MRI's own numeric.c, including the
+`int_round_zero_p` cliff), malformed formats now RAISE, `equal?` (not a bare `===`
+— the twin's `jsRat`/`jsCpx` are comparable Go structs, which would have been a
+designed-in halves divergence), kernel `method(:x)` (a hit in the PARENTLESS scope
+is a host builtin) · kotlin: out-of-range indexing (six defects, not two; the
+bounds check is FREE because it folds into the read), user throwables via `__super`,
+`js_ktexcmatch`'s hack self-retires behind its own guard · js/ts: private names and
+`for..in` (one root cause, plus a second site in the compilers nobody had checked),
+function own-properties (the side-table read must not be spelled `fp[k]`, which
+walks goja's `Object.prototype`) · swift: nineteen Array/String members plus six
+adjacent under real `swiftc`, and value semantics as copy-at-STORE (complete by
+construction, which is why an in-place subscript write still mutates) · python:
+unhashable keys — `dict`/`set` refused, arrays compared STRUCTURALLY · `--full`'s
+total silently discarding a gapped half's assertions · `tools/floor-coverage`
+(330/345 floor bodies reached) · `tools/metajs-lint` (two live defects on its first
+run, both wrong answers in shipped native binaries that no dynamic gate could see)
+· `-why`.
 
 **Dropped, or moved out of this file.** The `.expected` fixture path ·
-`getattr()`-bound python builtins with kwargs · `glibc < 2.34`'s `-ldl -lpthread`
-· `mod.py` headroom. Moved to the manual: the scope API (7.3), per-language
+`getattr()`-bound python builtins with kwargs · `glibc < 2.34`'s `-ldl -lpthread` ·
+`mod.py` headroom. Moved to the manual: the scope API (7.3), per-language
 divergences (7.9), the byte-vs-character `printf` rule (7.7).
