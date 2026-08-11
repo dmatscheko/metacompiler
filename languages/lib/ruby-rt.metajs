@@ -189,23 +189,25 @@ function rbIsObj(v) {
     return !Array.isArray(v)
 }
 
-function rbTag(v, name) {
-    if (!rbIsObj(v)) { return false }
-    return v[name] === true
-}
-
-function rbIsSym(v) { return rbTag(v, "__sym") }
-function rbIsBig(v) { return rbTag(v, "__bint") }
-function rbIsFlo(v) { return rbTag(v, "__flo") }
-function rbIsRat(v) { return rbTag(v, "__rat") }
-function rbIsCpx(v) { return rbTag(v, "__cpx") }
-function rbIsDict(v) { return rbTag(v, "__dict") }
-function rbIsRange(v) { return rbTag(v, "__rrange") }
+// rbTag is SHARED as rtTag - lib/runtime.metajs - and rtTag INLINES the four
+// tests rbIsObj makes rather than calling them: a shared body cannot name
+// rbIsObj, and the delegating spelling is the +38.79% shape rbNumBin's own
+// comment records below (rbIsBig -> rbTag -> rbIsObj). Measured at python
+// +10.60% delegating and -13.90% inlined; ruby's bench row sees neither, because
+// rbBin's number path reaches rbUserObj and rbNumBin and never a tag. The seven
+// predicates below are asked at 113 sites in this file. docs/todo.md 5.1.
+function rbIsSym(v) { return rtTag(v, "__sym") }
+function rbIsBig(v) { return rtTag(v, "__bint") }
+function rbIsFlo(v) { return rtTag(v, "__flo") }
+function rbIsRat(v) { return rtTag(v, "__rat") }
+function rbIsCpx(v) { return rtTag(v, "__cpx") }
+function rbIsDict(v) { return rtTag(v, "__dict") }
+function rbIsRange(v) { return rtTag(v, "__rrange") }
 function rbIsArr(v) { return Array.isArray(v) }
-function rbIsNil(v) {
-    if (v === null) { return true }
-    return v === undefined
-}
+// rbIsNil is SHARED as rtIsNil - lib/runtime.metajs, the same body python's
+// pyIsNone was. Thirty-six call sites, none of them on mod.rb's loop (ruby's
+// `while` does not reach rbTruthy), all of them already calls in the same pinned
+// scope. docs/todo.md 5.1.
 function rbIsFn(v) { return typeof v == "function" }
 
 // The operator METHOD names Object#send may be handed - see rbMethod. The Go
@@ -1767,7 +1769,7 @@ function rbNumCmp(l, r) {
 // the floor's sign flip.
 function rbNeg(v) {
     if (typeof v == "number") { return -v }
-    if (rbTag(v, "__bint")) { return rbABigNarrow(rbABigNeg(v)) }
+    if (rtTag(v, "__bint")) { return rbABigNarrow(rbABigNeg(v)) }
     if (rbIsFlo(v)) { return rbMkFlo(-v["f"]) }
     if (rbIsRat(v)) { return {__rat: true, n: -v["n"], d: v["d"]} }
     if (rbIsCpx(v)) { return rbMkCpx(-v["re"], -v["im"]) }
@@ -1809,13 +1811,13 @@ function rtkFloDigits(a) {
 function rbFloStr(x) { return rtFloStr(x, "NaN", "Infinity", "-Infinity") }
 
 function rbStr(v) {
-    if (rbIsNil(v)) { return "" }
+    if (rtIsNil(v)) { return "" }
     if (typeof v == "string") { return v }
     if (typeof v == "number") {
         if (v <= 9007199254740992 && v >= 0 - 9007199254740992) { return "" + v }
         return rbIntStr(v)
     }
-    if (rbTag(v, "__bint")) { return rbABigStr(v) }
+    if (rtTag(v, "__bint")) { return rbABigStr(v) }
     if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
     if (rbIsRat(v)) { return rbRatText(v) }
     if (rbIsCpx(v)) { return rbCpxText(v) }
@@ -1910,7 +1912,7 @@ function rbStrInspect(s) {
 }
 
 function rbInspect(v) {
-    if (rbIsNil(v)) { return "nil" }
+    if (rtIsNil(v)) { return "nil" }
     if (typeof v == "string") { return rbStrInspect(v) }
     if (rbIsSym(v)) { return ":" + v["s"] }
     // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
@@ -2447,7 +2449,7 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
 // said "Plain" off classOf - a halves divergence caught by a native probe before it
 // shipped. rbOwnerName is the existing helper that walks __class.__name first.
 function rbFmtConvName(v) {
-    if (rbIsNil(v)) { return "nil" }
+    if (rtIsNil(v)) { return "nil" }
     if (v === true) { return "true" }
     if (v === false) { return "false" }
     return rbOwnerName(v)
@@ -2504,7 +2506,7 @@ function rbFmtCharOperand(v) {
     if (rbFmtIsNumV(v)) { return rbToF(v) }
     var uc = rbFmtUserConv(v, "to_int", "to_i")
     if (uc !== null && rbFmtIsNumV(uc)) { return rbToF(uc) }
-    if (rbIsNil(v)) { rbRaiseErr("TypeError", "no implicit conversion from nil to integer") }
+    if (rtIsNil(v)) { rbRaiseErr("TypeError", "no implicit conversion from nil to integer") }
     rbRaiseErr("TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
     return 0
 }
@@ -3192,7 +3194,7 @@ function rbFormat(spec, arg) {
 // all truthy). It backs the select/reject predicates so js_rxmcall agrees with
 // the emitter's own `handle >= 3` compare, and NOT with JS truthiness.
 function rbTruthy(v) {
-    if (rbIsNil(v)) { return false }
+    if (rtIsNil(v)) { return false }
     if (v === false) { return false }
     return true
 }
@@ -3288,8 +3290,8 @@ function rbPyEqual(x, y) {
     // ends in answers false for them - which made `[a, b] == [c, d]` false
     // whenever an element was past 2^53. The Go twin has the same arm inside
     // strictEq, and the interpreter reaches numEq through core.keyEq.
-    if (rbTag(x, "__bint")) {
-        if (!rbTag(y, "__bint")) { return false }
+    if (rtTag(x, "__bint")) {
+        if (!rtTag(y, "__bint")) { return false }
         return rbABigCmp(x, y) == 0
     }
     // A Float / Rational / Complex is a BOX for the same reason, and two boxes of
@@ -3464,7 +3466,7 @@ function rbCmpSign(n) {
 // is a special constant or a Float, which are inspected - hence "comparison of
 // NilClass with 1 failed" for `[1, nil].max`.
 function rbCmpName(v) {
-    if (rbIsNil(v) || v === true || v === false) { return rbInspect(v) }
+    if (rtIsNil(v) || v === true || v === false) { return rbInspect(v) }
     if (typeof v == "number" || rbIsFlo(v) || rbIsSym(v)) { return rbInspect(v) }
     var n = rbClassName(v)
     return n == "" ? "Object" : n
@@ -3690,7 +3692,7 @@ function rbFindMethod(v, name) {
 // else is a reference or an interned value, where identity is exactly right.
 // rubyIdenticalP in abnf/jsrt.go is the other twin.
 function rbIdenticalP(a, b) {
-    if (rbIsNil(a) || rbIsNil(b)) { return rbIsNil(a) && rbIsNil(b) }
+    if (rtIsNil(a) || rtIsNil(b)) { return rtIsNil(a) && rtIsNil(b) }
     if (rbIsFlo(a) || rbIsFlo(b)) { return rbIsFlo(a) && rbIsFlo(b) && a["f"] === b["f"] }
     if (typeof a == "string" || typeof b == "string") { return false }
     if (rbIsRat(a) || rbIsCpx(a) || rbIsRat(b) || rbIsCpx(b)) { return false }
@@ -3701,7 +3703,7 @@ function rbIdenticalP(a, b) {
 function rbClassName(v) {
     if (v === true) { return "TrueClass" }
     if (v === false) { return "FalseClass" }
-    if (rbIsNil(v)) { return "NilClass" }
+    if (rtIsNil(v)) { return "NilClass" }
     if (typeof v == "number") { return "Integer" }
     if (rbIsBig(v)) { return "Integer" }
     if (typeof v == "string") { return "String" }
@@ -4034,14 +4036,14 @@ function rbExcMessage(o) {
 //   nil / undefined  -> a BARE raise: re-raise what the running rescue caught
 //   anything else    -> raised unchanged (raise ArgumentError.new("arg"))
 function rbMakeExc(v, msg) {
-    if (rbIsNil(v)) {
+    if (rtIsNil(v)) {
         if (rbCurExc !== null) { return rbCurExc }
         return rbExc(rbBuiltinClass("RuntimeError"), [])
     }
     if (typeof v == "string") { return rbExc(rbBuiltinClass("RuntimeError"), [v]) }
     if (rbIsObj(v) && v["__isclass"] === true) {
         var argv = []
-        if (!rbIsNil(msg)) { argv = [msg] }
+        if (!rtIsNil(msg)) { argv = [msg] }
         var inst = rbExc(v, argv)
         if (rbFindMethod(inst, "initialize") !== undefined) { rbMethod(inst, "initialize", argv) }
         return inst
@@ -4164,15 +4166,15 @@ function rbRangeText(r, insp) {
     var hi = r["end"]
     var ls = ""
     var hs = ""
-    if (!rbIsNil(lo)) { ls = insp ? rbInspect(lo) : rbStr(lo) }
-    if (!rbIsNil(hi)) { hs = insp ? rbInspect(hi) : rbStr(hi) }
+    if (!rtIsNil(lo)) { ls = insp ? rbInspect(lo) : rbStr(lo) }
+    if (!rtIsNil(hi)) { hs = insp ? rbInspect(hi) : rbStr(hi) }
     return ls + dots + hs
 }
 
 // The element sequence. An ENDLESS range has none, and asking for one is an error
 // in MRI too - the message is ruby-interpreter.abnf's, so all three engines agree.
 function rbRangeToArr(r) {
-    if (rbIsNil(r["end"]) || rbIsNil(r["begin"])) {
+    if (rtIsNil(r["end"]) || rtIsNil(r["begin"])) {
         fail("cannot convert an endless range to an array")
     }
     return rbRangeArr(r["begin"], r["end"], r["excl"] === true)
@@ -4199,7 +4201,7 @@ function rbRangeSpan(r) {
     return hi - rbToF(r["begin"])
 }
 function rbRangeLen(r) {
-    if (rbIsNil(r["end"]) || rbIsNil(r["begin"])) {
+    if (rtIsNil(r["end"]) || rtIsNil(r["begin"])) {
         fail("cannot take the length of an endless range")
     }
     if (!rbRangeNumeric(r)) { return rbRangeToArr(r).length }
@@ -4239,7 +4241,7 @@ function rbRangeEq(l, r) {
 function rbRangeMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
-    var endless = rbIsNil(t["end"]) || rbIsNil(t["begin"])
+    var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
     // Membership stays LAZY - it is the one part that an endless range can answer,
     // and materializing (1..1_000_000) to ask `include?(3)` would be absurd.
     if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
@@ -4326,13 +4328,13 @@ function rbRangeMethod(t, name, args) {
 // which is why making every range an object needed no change here.
 function rbOpenRangeCover(o, v) {
     var lo = o["begin"]
-    if (!rbIsNil(lo)) {
+    if (!rtIsNil(lo)) {
         var c = rbSpaceship(v, lo)
         if (c === null) { return false }
         if (c < 0) { return false }
     }
     var hi = o["end"]
-    if (!rbIsNil(hi)) {
+    if (!rtIsNil(hi)) {
         var d = rbSpaceship(v, hi)
         if (d === null) { return false }
         if (o["excl"] === true) { return d < 0 }
@@ -4343,15 +4345,9 @@ function rbOpenRangeCover(o, v) {
 
 // ===================================================== binary operators =====
 
-function rbRepeat(s, n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + s
-        i = i + 1
-    }
-    return out
-}
+// rbRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros. Its one
+// call site is String#* in rbBin below, which was already a call in the same
+// pinned scope, so no frame is added. docs/todo.md 5.1.
 
 // rubyBin: the one binary operator step. A user object dispatches to its own
 // operator method, strings and arrays get their Ruby operators, everything else
@@ -4382,7 +4378,7 @@ function rbBin(op, l, r) {
         if (typeof l == "string") {
             var n = Math.trunc(rbToF(r))
             if (n < 0) { n = 0 }
-            return rbRepeat(l, n)
+            return rtRepeat(l, n)
         }
         // Array#* is repetition with an Integer and JOIN with a String.
         if (rbIsArr(l) && typeof r == "string") { return rbArrJoin(l, r) }
@@ -4587,7 +4583,7 @@ function rbRxMatchOp(l, r) {
     } else {
         fail("=~ needs a Regexp on one side")
     }
-    if (rbIsNil(subj)) {
+    if (rtIsNil(subj)) {
         rbRxSetGlobals(null)
         return null
     }
@@ -4716,7 +4712,7 @@ function rbCall3(f, a, b, c) { return f.apply(undefined, [a, b, c]) }
 // `undefined` for a name it does not know, so the caller carries on with the
 // generic dispatch (and its error message).
 function rbNumMethod(t, name, args) {
-    if (typeof t != "number" && rbTag(t, "__bint")) {
+    if (typeof t != "number" && rtTag(t, "__bint")) {
         var bm = rbABigMethod(t, name, args)
         if (bm !== undefined) { return bm }
     }
@@ -5190,7 +5186,7 @@ function rbArrNew(args) {
 // are Floats in [0,1), `rand(n)` an Integer in [0,n), and `rand(a..b)` the range's
 // own low end (a closed range reaches this half already materialized as an array).
 function rbRand(v) {
-    if (rbIsNil(v)) { return rbMkFlo(0) }
+    if (rtIsNil(v)) { return rbMkFlo(0) }
     if (rbIsArr(v)) {
         if (v.length == 0) { return null }
         return v[0]
@@ -5890,7 +5886,7 @@ function rbArrayMethod(t, name, args) {
         var cmp2 = []
         var pi = 0
         while (pi < t.length) {
-            if (!rbIsNil(t[pi])) { cmp2.push(t[pi]) }
+            if (!rtIsNil(t[pi])) { cmp2.push(t[pi]) }
             pi = pi + 1
         }
         if (name == "compact") { return cmp2 }
@@ -6399,7 +6395,7 @@ function rbMethod(target, name, args) {
     if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
-    if (name == "nil?") { return rbIsNil(target) }
+    if (name == "nil?") { return rtIsNil(target) }
     // TrueClass / FalseClass. Without this arm both compiled halves fell through
     // to the shared member call and aborted with "method call 'inspect' on a
     // boolean", where ruby-interpreter.abnf answered.
@@ -6515,7 +6511,7 @@ function rbMethod(target, name, args) {
     }
     // NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0, so they must
     // not reach the "method .x on nil" abort at the bottom.
-    if (rbIsNil(target)) {
+    if (rtIsNil(target)) {
         if (name == "to_s") { return "" }
         if (name == "inspect") { return "nil" }
         if (name == "to_a") { return [] }
@@ -6819,7 +6815,7 @@ function rbMethod(target, name, args) {
         }
         return rbMemberCall(target, name, args)
     }
-    if (rbIsNil(target)) { fail("method ." + name + " on nil") }
+    if (rtIsNil(target)) { fail("method ." + name + " on nil") }
     return rbMemberCall(target, name, args)
 }
 
@@ -6860,7 +6856,7 @@ function rbGset(name, v) {
 
 function rbJStr(v) {
     if (typeof v == "string") { return v }
-    if (rbIsNil(v)) { return "null" }
+    if (rtIsNil(v)) { return "null" }
     return "" + v
 }
 
@@ -7189,7 +7185,7 @@ function js_rget(o, k) {
         if (idx < 0 || idx >= o.length) { return null }
         return o.charAt(idx)
     }
-    if (rbIsNil(o)) { fail("indexing nil") }
+    if (rtIsNil(o)) { fail("indexing nil") }
     return o[k]
 }
 
@@ -7204,11 +7200,11 @@ function js_rget(o, k) {
 function js_rsubrange(o, lo, hi, excl) {
     if (rbIsArr(o) || typeof o == "string") {
         var n = o.length
-        var b0 = rbIsNil(lo) ? 0 : Math.trunc(rbToF(lo))
+        var b0 = rtIsNil(lo) ? 0 : Math.trunc(rbToF(lo))
         if (b0 < 0) { b0 = b0 + n }
         if (b0 < 0 || b0 > n) { return null }
         var e0 = n - 1
-        if (!rbIsNil(hi)) {
+        if (!rtIsNil(hi)) {
             e0 = Math.trunc(rbToF(hi))
             if (e0 < 0) { e0 = e0 + n }
             if (rbTruthy(excl)) { e0 = e0 - 1 }
@@ -7218,7 +7214,7 @@ function js_rsubrange(o, lo, hi, excl) {
         if (typeof o == "string") { return rbStrSubseq(o, b0, len) }
         return rbArrSubseq(o, b0, len)
     }
-    if (rbIsNil(lo) || rbIsNil(hi)) { return js_rget(o, js_rrangeopen(lo, hi, excl)) }
+    if (rtIsNil(lo) || rtIsNil(hi)) { return js_rget(o, js_rrangeopen(lo, hi, excl)) }
     return js_rget(o, js_rrangearr(lo, hi, excl))
 }
 
@@ -7230,7 +7226,7 @@ function js_rsubrange(o, lo, hi, excl) {
 function rbSliceBounds(n, k1, k2) {
     var st = 0
     var ln = 1
-    if (!rbIsNil(k2)) {
+    if (!rtIsNil(k2)) {
         st = Math.trunc(rbToF(k1))
         ln = Math.trunc(rbToF(k2))
         if (ln < 0) { ln = 0 }
@@ -7238,10 +7234,10 @@ function rbSliceBounds(n, k1, k2) {
         // A RANGE key, read from its own endpoints. It used to be a materialized
         // array, so this arm guessed the bounds from the elements and could not
         // express `a[1..-1] = v' at all. docs/todo.md 1.5.
-        var rb0 = rbIsNil(k1["begin"]) ? 0 : Math.trunc(rbToF(k1["begin"]))
+        var rb0 = rtIsNil(k1["begin"]) ? 0 : Math.trunc(rbToF(k1["begin"]))
         if (rb0 < 0) { rb0 = rb0 + n }
         var re0 = n - 1
-        if (!rbIsNil(k1["end"])) {
+        if (!rtIsNil(k1["end"])) {
             re0 = Math.trunc(rbToF(k1["end"]))
             if (re0 < 0) { re0 = re0 + n }
             if (k1["excl"] === true) { re0 = re0 - 1 }
@@ -7269,7 +7265,7 @@ function rbSliceBounds(n, k1, k2) {
 // and rsetSlice of ruby-interpreter.abnf. docs/todo.md 1.3.
 function js_rsetsl(o, k1, k2, v) {
     if (rbUserObj(o)) {
-        if (rbIsNil(k2)) { rbMethod(o, "[]=", [k1, v]) } else { rbMethod(o, "[]=", [k1, k2, v]) }
+        if (rtIsNil(k2)) { rbMethod(o, "[]=", [k1, v]) } else { rbMethod(o, "[]=", [k1, k2, v]) }
         return o
     }
     if (rbIsDict(o)) { rbDictSet(o, k1, v); return o }
@@ -7285,7 +7281,7 @@ function js_rsetsl(o, k1, k2, v) {
     if (!rbIsArr(o)) { js_rset(o, k1, v); return o }
     // A RANGE key is a slice write, not an element write - it reached js_rset as a
     // whole object once a range stopped being an array. docs/todo.md 1.5.
-    if (rbIsNil(k2) && !rbIsArr(k1) && !rbIsRange(k1)) { js_rset(o, k1, v); return o }
+    if (rtIsNil(k2) && !rbIsArr(k1) && !rbIsRange(k1)) { js_rset(o, k1, v); return o }
     var ab = rbSliceBounds(o.length, k1, k2)
     if (ab["s"] < 0) { fail("index " + ab["s"] + " too small for array") }
     while (o.length < ab["s"]) { o.push(null) }
@@ -7515,7 +7511,7 @@ function js_rkconv(name, args) {
         return rbMkCpx(rbToF(v), nargs > 1 ? rbToF(args[1]) : 0)
     }
     if (name == "Array") {
-        if (rbIsNil(v)) { return [] }
+        if (rtIsNil(v)) { return [] }
         if (rbIsArr(v)) { return v }
         if (rbIsDict(v)) {
             var out = []
@@ -7528,7 +7524,7 @@ function js_rkconv(name, args) {
         return [v]
     }
     if (name == "Integer") {
-        if (rbIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Integer") }
+        if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Integer") }
         if (typeof v == "string") {
             var base = 0
             if (rbIsArr(args) && args.length > 1) { base = rbToF(args[1]) }
@@ -7541,7 +7537,7 @@ function js_rkconv(name, args) {
         return v
     }
     if (name == "Float") {
-        if (rbIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Float") }
+        if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Float") }
         if (typeof v == "string") {
             var rf = rbConvStrToFloat(v)
             if (rf["ok"]) { return rbMkFlo(rf["v"]) }

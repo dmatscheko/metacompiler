@@ -158,19 +158,20 @@ function pyIsBool(v) { return typeof v == "boolean" }
 function pyIsFn(v) { return typeof v == "function" }
 function pyIsCallable(v) { return typeof v == "function" }
 
-function pyIsNone(v) {
-    if (v === null) { return true }
-    return v === undefined
-}
+// pyIsNone is SHARED as rtIsNil - lib/runtime.metajs. Eight call sites, one of
+// them hot (pyDTruthy, which js_pytruthy reaches on every `while` condition),
+// and all eight were already calls in the same pinned scope. docs/todo.md 5.1.
 
-function pyTag(v, name) {
-    if (!pyIsObj(v)) { return false }
-    return v[name] === true
-}
-
-function pyIsDict(v) { return pyTag(v, "__dict") }
-function pyIsCplx(v) { return pyTag(v, "__cplx") }
-function pyIsBig(v) { return pyTag(v, "__pybig") }
+// pyTag is SHARED as rtTag - lib/runtime.metajs - and rtTag INLINES the four
+// tests pyIsObj makes instead of calling them, because a shared body cannot name
+// pyIsObj and the delegating spelling cost python +10.60% at 9 of 9 paired
+// draws. Inlining REMOVES a frame from the hottest predicate in this file (five
+// rtTag calls per js_pybin operator) and the row reads -13.90%, faster in 9 of 9,
+// with collections down 3,574 -> 3,017. The full write-up is at rtTag.
+// docs/todo.md 5.1.
+function pyIsDict(v) { return rtTag(v, "__dict") }
+function pyIsCplx(v) { return rtTag(v, "__cplx") }
+function pyIsBig(v) { return rtTag(v, "__pybig") }
 
 // Python's float: a boxed double (abnf/jsrt.go's jsPyFlo, python-interpreter.abnf's
 // pyFlo). int and float are two DIFFERENT Python types - they print differently
@@ -178,7 +179,7 @@ function pyIsBig(v) { return pyTag(v, "__pybig") }
 // ints - and one double cannot carry that, because 2.0 and 2 ARE the same double.
 // So the float is the boxed one and the int stays the plain number, which leaves
 // the common integer path untouched. The field is not `=== true` like the tags
-// above, so pyTag cannot answer it.
+// above, so rtTag cannot answer it.
 function pyIsFlo(v) {
     if (!pyIsObj(v)) { return false }
     return v["__flo"] !== undefined
@@ -403,7 +404,7 @@ function pyDictSet(d, k, v) {
 function pyNewSet(elems) { return {__set: true, elems: elems} }
 
 function pySetElemsOf(v) {
-    if (!pyTag(v, "__set")) { return null }
+    if (!rtTag(v, "__set")) { return null }
     var e = v["elems"]
     if (!Array.isArray(e)) { return null }
     return e
@@ -1495,7 +1496,7 @@ function pyClampIndex(i, n, step) {
 
 function pySliceIndices(n, loV, hiV, stepV) {
     var step = 1
-    if (!pyIsNone(stepV)) {
+    if (!rtIsNil(stepV)) {
         step = Math.trunc(pyNum(stepV))
         if (step == 0) { fail("slice step cannot be zero") }
     }
@@ -1505,8 +1506,8 @@ function pySliceIndices(n, loV, hiV, stepV) {
         lo = n - 1
         hi = (0 - n) - 1
     }
-    if (!pyIsNone(loV)) { lo = pyClampIndex(Math.trunc(pyNum(loV)), n, step) }
-    if (!pyIsNone(hiV)) { hi = pyClampIndex(Math.trunc(pyNum(hiV)), n, step) }
+    if (!rtIsNil(loV)) { lo = pyClampIndex(Math.trunc(pyNum(loV)), n, step) }
+    if (!rtIsNil(hiV)) { hi = pyClampIndex(Math.trunc(pyNum(hiV)), n, step) }
     var out = []
     var i = lo
     while (true) {
@@ -4066,21 +4067,19 @@ function pyBPctOne(v, typ, left, zero, plus, space, width, prec) {
     }
     var pad = width - pyStrLen(body)
     if (pad <= 0) { return body }
-    if (left) { return body + pyBRepeat(" ", pad) }
+    if (left) { return body + rtRepeat(" ", pad) }
     if (zero && numeric) {
         var sgn = body.charAt(0)
-        if (sgn == "-" || sgn == "+" || sgn == " ") { return sgn + pyBRepeat("0", pad) + body.slice(1) }
-        return pyBRepeat("0", pad) + body
+        if (sgn == "-" || sgn == "+" || sgn == " ") { return sgn + rtRepeat("0", pad) + body.slice(1) }
+        return rtRepeat("0", pad) + body
     }
-    return pyBRepeat(" ", pad) + body
+    return rtRepeat(" ", pad) + body
 }
 
-function pyBRepeat(s, n) {
-    var out = ""
-    var i = 0
-    while (i < n) { out = out + s ; i = i + 1 }
-    return out
-}
+// pyBRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros - and
+// the seven call sites above and below call it under that name. Same pinned
+// scope, same kind of name, no frame added: every one of them was already a
+// call, and all seven are in the format-spec padding arms. docs/todo.md 5.1.
 
 // The first `n` CODE POINTS of s - what a %.Ns precision truncates to.
 function pyStrSlice(s, n) {
@@ -4317,13 +4316,13 @@ function js_pyformat(v, specV, convV) {
     // Go's float64 assertion, so a bool and a bignum left-align.
     var isNum = pyIsNum(v) || pyIsFlo(v)
     if (align == ">" || align == "=" || (align == "" && isNum)) {
-        return pyBRepeat(fill, pad) + body
+        return rtRepeat(fill, pad) + body
     }
     if (align == "^") {
         var left = Math.floor(pad / 2)
-        return pyBRepeat(fill, left) + body + pyBRepeat(fill, pad - left)
+        return rtRepeat(fill, left) + body + rtRepeat(fill, pad - left)
     }
-    return body + pyBRepeat(fill, pad)
+    return body + rtRepeat(fill, pad)
 }
 // ============================================================================
 // CHUNK C - containers, indexing, slicing and destructuring
@@ -4382,7 +4381,7 @@ var pyCEllipsis = null
 function pyCTruthy(v) {
     if (v === true) { return true }
     if (v === false) { return false }
-    if (pyIsNone(v)) { return false }
+    if (rtIsNil(v)) { return false }
     if (typeof v == "number") { return v !== 0 && v === v }
     if (typeof v == "string") { return v.length > 0 }
     return true
@@ -4452,7 +4451,7 @@ function pyCClampIndex(i_in, n, step) {
 
 // rt.pySliceStart (jsrt.go:8750): where an EMPTY step-1 slice splices at.
 function pyCSliceStart(n, lo) {
-    if (pyIsNone(lo)) { return 0 }
+    if (rtIsNil(lo)) { return 0 }
     return pyCClampIndex(Math.trunc(pyNum(lo)), n, 1)
 }
 
@@ -4845,7 +4844,7 @@ function js_pysetslice(arr, lo, hi, step, values) {
         return undefined
     }
     var vals = pySeqElems(values)
-    if (pyIsNone(step) || pyNum(step) == 1) {
+    if (rtIsNil(step) || pyNum(step) == 1) {
         var idx = pySliceIndices(arr.length, lo, hi, step)
         var from = arr.length
         var to = from
@@ -5137,7 +5136,7 @@ function js_pytruthy__raw(v) {
 // arm and `if 0n:` would be taken. The prelude has no big-sign helper, so the
 // limbs are scanned directly.
 function pyDTruthy(v) {
-    if (pyIsNone(v)) { return false }
+    if (rtIsNil(v)) { return false }
     if (pyIsBool(v)) { return v }
     // Go's `t != 0 && t == t` - the second half is the NaN test.
     if (pyIsNum(v)) { return v != 0 && v == v }
@@ -5182,7 +5181,7 @@ function js_pysuper(cls, self) {
     if (self !== undefined) { s["__sobj"] = self }
     return s
 }
-function pyIsSuper(v) { return pyTag(v, "__pysup") }
+function pyIsSuper(v) { return rtTag(v, "__pysup") }
 // CPython's own two messages for a zero-argument super() with nothing to bind.
 function pySuperCheck(s) {
     if (s["__scls"] === undefined) { pyRaiseExc("RuntimeError", "super(): __class__ cell not found") }
@@ -7402,7 +7401,7 @@ function pyERxSub(rv, repl, s, count) {
     var re = pyERxReOf(rv)
     var src = rv["__src"]
     var out = ""
-    var isFn = !pyIsNone(repl) && typeof repl != "string"
+    var isFn = !rtIsNil(repl) && typeof repl != "string"
     var tpl = ""
     if (!isFn) { tpl = pyERxTemplate(pyToStr(repl)) }
     var at = 0

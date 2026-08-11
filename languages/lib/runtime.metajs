@@ -807,13 +807,159 @@ function rtZeros(n) {
     return out
 }
 
+// A run of n copies of s. TWO bodies, ZERO knobs: python's pyBRepeat and ruby's
+// rbRepeat were the same four statements, and the ONLY reason they were not a
+// shape-scan group is that python wrote the loop body on one line with a `;` and
+// ruby over two - the normaliser keeps the `;` (docs/todo.md 5.1 lists this pair
+// at the -min 40 tier on the strength of a THIRD copy, a six-line duplicate
+// pyBRepeat that 8de27d7 deleted; measured at 098aaa5 the pair is in no tier).
+//
+// THE CALL SITES, which are what decide (docs/todo.md section 5's warning):
+// SEVEN in python, ALL of them inside pyBFormatBody / pyBFormat's padding arms,
+// and ONE in ruby, String#* in rbBin. Neither is on an arithmetic path, and the
+// body itself carries a loop over n, so the one frame is amortised even there.
+//
+// MEASURED, and the measurement needed an instrument this file did not have -
+// read this before believing any paired layer-2 number, including the ones below:
+//
+//   tests/bench.sh --draws 9 --paired, against a clean archive of 098aaa5:
+//     control, the SAME tree both sides    python +0.13%   ruby +0.03%
+//     this merge                           python +1.08% SLOWER 8/9   ruby -0.12%
+//     a DEAD rtRepeat, nothing calling it  python +0.95% SLOWER 8/9   ruby -0.08%
+//     this merge vs that dead-code tree    python +0.07%   ruby +0.27%  (neither
+//                                          consistent in sign: no difference)
+//
+// So the +1.08% at 8-of-9 pairs IS NOT THE MERGE. Inserting one name into
+// runtime.metajs renumbers the whole @str.N intern table of every importing
+// module - 13,568 changed lines in python-rt.ll for a body of nine, with the
+// LINE COUNT unchanged - and that is a layout draw of the size manual chapter 4
+// measures at 4.8%. --paired holds the -exe path fixed, so the draw is the SAME
+// draw in every pair, and a pure layout shift therefore reads as a UNANIMOUS
+// sign. Dead code that only renumbers reads +0.95% at the same 8/9. The
+// instrument that answers the question is a matched control - base plus the new
+// body as dead code, so both sides carry the renumbering - and against that one
+// this merge is nothing, which is what seven cold call sites predict.
+//
+// rtZeros above is NOT re-expressed as rtRepeat("0", n): its two callers are
+// php's float formatter, php-rt.metajs is not this change's file, and turning a
+// body php calls directly into a delegation is the one thing section 5's warning
+// is about. Two loops, seven lines, and no frame added to anybody.
+function rtRepeat(s, n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+// null OR undefined. TWO bodies, ZERO knobs: python's pyIsNone and ruby's
+// rbIsNil were byte-identical, both testing null first. THREE MORE languages
+// carry the same predicate with the two tests the other way round - js-rt's
+// jvUndefOrNull, kotlin-rt's ktIsNullish and php-rt's phIsNull, a second
+// shape-scan group of the same four lines - and kotlin and php import this file,
+// so two of those three could delegate here for free. They are NOT touched: they
+// are not this change's files, and the call-site count they would need is theirs
+// to take. See the report at docs/todo.md 5.1.
+//
+// THE CALL SITES: EIGHT in python and THIRTY-SIX in ruby, and one of the eight
+// is genuinely hot - pyDTruthy's first test, and js_pytruthy is on the loop
+// condition of every `while` python emits (two calls per iteration of
+// tests/bench/mod.py). Ruby's hottest are js_rget / js_rset and rbMethod's
+// receiver guard; its `while` does NOT reach rbTruthy, so tests/bench/mod.rb
+// cannot see this pair at all. It is still free, and for the reason section 5's
+// warning gives in reverse: NO FRAME IS ADDED. Every site was already a call in
+// the same pinned scope, and the language-local names are DELETED rather than
+// left as delegations - which is exactly what 120ba0f did wrong at pyIsObj.
+//
+// MEASURED, --draws 9 --paired against the tree that has rtRepeat above and
+// nothing else, so the renumbering it carries is the only one in the comparison:
+// python +0.39% (signs mixed, verdict no difference), ruby -0.00%. Read the
+// rtRepeat note above for why a paired layer-2 number needs a matched base.
+function rtIsNil(v) {
+    if (v === null) { return true }
+    return v === undefined
+}
+
+// "is this an object carrying tag `name` set to true" - the __dict / __set /
+// __cplx / __sym / __flo / __rat / __rrange / __bint / __pybig / __pysup test
+// every value model here is built out of. TWO bodies, and the difference list is
+// ONE ENTRY that is not a knob: pyTag asked pyIsObj and rbTag asked rbIsObj, and
+// those two are byte-identical (this file's head records them as the pair that
+// must NOT be shared, and they are still spelled out in both files).
+//
+// THE CALL SITES, and they are the reason this body looks the way it does. FIVE
+// direct in python and TWELVE in ruby, but four of python's and seven of ruby's
+// are ONE-LINE PREDICATES - pyIsDict / pyIsCplx / pyIsBig / pyIsSuper, rbIsSym /
+// rbIsBig / rbIsFlo / rbIsRat / rbIsCpx / rbIsDict / rbIsRange - which are
+// themselves asked at 84 sites in python and 113 in ruby, several of them per
+// arithmetic step: js_pybin reaches this body FIVE TIMES for one operator
+// (pyASetBin -> pySetElemsOf, pyIsCplx twice, pyABigPair -> pyIsBig twice), so
+// tests/bench/mod.py's loop pays ten of them per iteration. This is the single
+// hottest predicate in the two files, and section 5's warning is about exactly
+// this shape.
+//
+// SO THE OBJECT TEST IS INLINED, and the merge is what forces the question: a
+// shared body cannot call pyIsObj or rbIsObj by name, and delegating to
+// rtIsObjNotArr below makes the chain FOUR deep where it was three. Both
+// spellings were built and measured, --draws 9 --paired against the tree that
+// has rtRepeat and rtIsNil and nothing else:
+//
+//   rtTag -> rtIsObjNotArr -> rtIsObj   python +10.60% SLOWER 9/9   ruby -0.39%
+//   the four tests INLINED (this body)  python -13.90% FASTER 9/9   ruby -0.07%
+//
+// The first is 120ba0f's regression re-run at a hotter site and is DECLINED. The
+// second is a frame REMOVED from a predicate asked ten times per iteration, and
+// the exact counter agrees with the timing: MEC_GC_STATS on mod.py goes from
+// collections=3574 live=252800 to collections=3017 live=252656, heap and pinned
+// unmoved - fewer scope frames allocated, which is what a MetaJS call IS. Ruby's
+// row cannot see either spelling because rbBin's number path reaches rbUserObj
+// and rbNumBin and never a tag; the site is still hot in ruby PROGRAMS (rbIsFlo
+// and rbIsBig are the numeric tower's own guards, and this file records a
+// +38.79% ruby row for one extra call at that very spot), so it gains there too.
+//
+// Ordered null, undefined, typeof, array exactly as pyIsObj and rbIsObj had it.
+//
+// WHAT THE THREE BODIES ABOVE COST THE EIGHT NON-CALLERS, measured rather than
+// assumed, because manual 7.13's "a layer-2 call is a scope lookup by NAME, so a
+// module that never calls the body never resolves the hook" is a claim about the
+// CALL and not about the +274 lines of IR each of the eight now links. All
+// fifteen rows, --draws 9 --paired, this tree against a clean archive of 098aaa5:
+//
+//   python -12.82% FASTER 9/9        kotlin -1.19% faster 8/9 (a non-caller: this
+//   ruby    -0.18% no difference     is the same layout draw, in the other
+//   csharp  -0.02  dart  -0.03       direction, that the rtRepeat note above
+//   go      +0.02  java  +0.09       measures at +0.95% for dead code)
+//   php     -0.08  swift -0.01
+//   metajs  +0.01  js    -0.12  lua  0.00
+//   c +0.01  bash +0.04  batch -0.04   <- the semantic controls, and they read 0
+//
+// So: nothing for the non-callers, and no new hook and no new import either -
+// none of these three bodies calls an rtk*, and python and ruby both imported
+// this file already. The whole -12.82% is rtTag's removed frame.
+function rtTag(v, name) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return v[name] === true
+}
+
 // rtIsObj plus the array rejection. TWO bodies, ZERO knobs: pyIsObj and rbIsObj
 // were byte-identical, and both are the four tests rtIsObj's own head comment
 // names - it merged the first three and deliberately left the fourth out,
 // because ITS callers walk __class/__super and an array carries neither. Python
 // and Ruby ask a stricter question in ~60 places each (`is this a user object
-// rather than a list`), so the fourth test is real for them and the two files
-// keep their own names as one-line delegations to this body.
+// rather than a list`), so the fourth test is real for them.
+//
+// IT HAS NO CALLER, and the sentence that used to end this comment - "the two
+// files keep their own names as one-line delegations to this body" - was left
+// behind when 120ba0f's delegation was measured at python +41% and taken back
+// out. The two files spell the four tests out; nothing calls this. It is kept,
+// not deleted, because keeping it is a decision recorded twice (see pyIsObj in
+// lib/python-rt.metajs): a COLD caller that wants the strict test should call
+// here rather than write a fifth copy. rtTag above does not, and says why.
 function rtIsObjNotArr(v) {
     if (!rtIsObj(v)) { return false }
     return !Array.isArray(v)
