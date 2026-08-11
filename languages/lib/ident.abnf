@@ -1,3 +1,10 @@
+// For a language whose names may contain UNICODE letters, see lib/ident-unicode.abnf:
+// it carries the real ID_Start / ID_Continue tables as two guards, defines no Id of its
+// own (so it composes with the Id below or with a grammar's own), and its header records
+// which languages those tables are and are not the right answer for - the answer differs
+// per language and it is not obvious. This module stays ASCII: it is on the hot path of
+// every language that includes it.
+//
 // Identifiers and the keyword boundary: a keyword production ends with KwEnd,
 // which fails (via the impossible-token trick) when the next byte would extend
 // the word, so 'iffy' or 'variable' stay identifiers. Expects Whitespace.

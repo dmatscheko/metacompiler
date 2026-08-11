@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 3, sections 44-51.
+// Full-syntax test: JavaScript - part 3 of 3, sections 44-52.
 //
 // THE JS RATCHET IS THREE FILES, and this is docs/todo.md 6.2. As one file its
 // -frozen INTERPRETER leg measured 627 s wall against ./test.sh --full's 900 s brake
@@ -17,7 +17,8 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-51, the call/class/private-name model
+//   tests/js-test-full.3.js   sections 44-52, the call/class/private-name model,
+//                             plus the Unicode identifier tables
 //
 // Nothing else moved. The section NUMBERS are the ones they have always had (grammar
 // comments and docs cite them), the three files together run the same assertions in
@@ -914,6 +915,45 @@ function s51() {
 // exactly as it did.
 function s51decl(n) { return n < 2 ? 1 : n * s51decl(n - 1) }
 
+// ===== SECTION 52: UNICODE IDENTIFIERS - the real ID_Start / ID_Continue tables =====
+// Every name below is legal JavaScript and node runs this section unchanged. The point is
+// that the two js grammars now decide with node's own ID_Start / ID_Continue tables
+// (lib/ident-unicode.abnf) instead of a range approximation, so the names are chosen out
+// of the code points where that approximation was wrong in BOTH directions:
+//   - U+FF41, a fullwidth 'a', is ID_Start. The interpreter's ranges stopped at U+FEFE
+//     and REFUSED it while the compiler's ran from U+FF21 and accepted it - a live halves
+//     divergence that --cross never reached, because no program had ever used one.
+//   - U+00B7, U+200C and U+203F are ID_Continue and NOT ID_Start: node parses
+//     'var a<U+00B7>b' and refuses 'var <U+00B7>b', and so do we now.
+//   - U+2176 is a roman numeral (Nl) and IS ID_Start; U+1D7CB is a mathematical digit
+//     (Nd) and is ID_Continue only, so it may not lead a name.
+// No ESCAPED spelling is asserted here, and that is a finding rather than an omission:
+// a \u escape in a name is judged by the same guard as the raw character, but only the
+// COMPILER halves resolve it back to the name it spells (idName). 'var \u0061 = 1' binds
+// 'a' in js-to-llvm-ir and binds the literal text '\u0061' in js-interpreter, so
+// 'print(a)' prints 1 in one half and throws ReferenceError in the other. It predates
+// this section in both halves and it is ~30 'up.in' sites per interpreter grammar to fix,
+// which is why it is written down instead of bolted on here. The other half of that
+// guard - '\u002a' being an asterisk and no identifier however it is spelled - is a PARSE
+// error and so only the corpus (test262 fail/) can hold it.
+function s52() {
+    var ａ = 11
+    check("uni01", ａ === 11)
+    var a·b = 12
+    check("uni02", a·b === 12)
+    var c‌d = 13
+    check("uni03", c‌d === 13)
+    var e‿f = 14
+    check("uni04", e‿f === 14)
+    var ⅶ = 15
+    check("uni05", ⅶ === 15)
+    var 日本 = 17
+    check("uni06", 日本 === 17)
+    var _𝟋 = 18
+    check("uni07", _𝟋 === 18)
+    check("uni08", typeof ａ === "number")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -925,6 +965,7 @@ function main() {
     s49() // SECTION-CALL 49
     s50() // SECTION-CALL 50
     s51() // SECTION-CALL 51
+    s52() // SECTION-CALL 52
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

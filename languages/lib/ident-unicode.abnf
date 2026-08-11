@@ -1,0 +1,303 @@
+// The real Unicode identifier tables: ID_Start and ID_Continue, exact, as the two guards
+// a grammar puts behind an identifier character. SEPARATE from lib/ident.abnf on purpose -
+// that module defines Id and KwEnd, and :include()ing two definitions of one production
+// name into a single a-grammar is a hard error, so a grammar with its own Unicode-aware
+// Id (js, typescript) cannot include it. Nothing in this file redefines Id, so it
+// composes with any of them. Which languages these tables are the right answer FOR is a
+// question with a surprising answer; see the block further down before adopting them.
+//
+// Everything here is OPT-IN, like lib/ident.abnf's IdBacktick: a grammar wires the
+// productions into its own Id and pays nothing otherwise.
+//
+// USE: put the guard AFTER the character it judges, never in front.
+//
+//     Id      = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
+//     IdStart = ( IdEscape IdCpStartOk ) | "a"..."z" | ... | ( IdUniChar IdCpStartOk ) ;
+//     IdPart  = ( IdEscape IdCpPartOk )  | "a"..."z" | ... | ( IdUniChar IdCpPartOk ) ;
+//
+// The consume-then-judge order is the whole design. A guard IN FRONT of the character
+// would have to skip the leading whitespace itself - :script() is not a terminal, so the
+// parser skips nothing before it - and "the leading whitespace" in a real language
+// includes comments, so the guards this replaced hand-skipped six ASCII characters and
+// refused 'var /*c*/\u0061' as a result. Behind the character there is nothing left to
+// skip, and c.peek() takes negative offsets.
+//
+// COST: one range attempt (IdUniChar) for every identifier position that is not an
+// identifier - cheaper than the thirteen-alternative approximations this replaced, and
+// far cheaper than the ~700 ABNF ranges a spelled-out table would need, which failing
+// positions would re-scan every time (the found list memoizes matches only). The script
+// itself runs only when a non-ASCII character or a backslash is actually there.
+//
+// REGENERATING the tables (they are Unicode 17.0, from the same node that is the js
+// oracle, and they were verified code point by code point against \p{...} over the whole
+// range 0x80-0x10FFFF):
+//
+//     node -e 'for (const p of ["ID_Start","ID_Continue"]) {
+//       const re = new RegExp("\\p{"+p+"}","u"); let cur = 0, out = "";
+//       const num = v => { const d = []; do { d.unshift(v % 16); v = Math.floor(v/16) } while (v > 0);
+//         return d.map((x,i) => String.fromCharCode(48 + x + (i < d.length-1 ? 16 : 0))).join("") };
+//       let a = -1;
+//       for (let cp = 128; cp <= 0x110000; cp++) {
+//         const ok = cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF) && re.test(String.fromCodePoint(cp));
+//         if (ok && a < 0) a = cp; else if (!ok && a >= 0) { out += num(a-cur) + num(cp-1-a); cur = cp; a = -1 } }
+//       console.log(p, out) }'
+//
+// ----------------------------------------------------------------------------------
+// WHO MAY USE THESE TABLES, and who may not. ID_Start/ID_Continue is JavaScript's and
+// TypeScript's rule; it is NOT the general "Unicode identifier" rule, and every other
+// language checked here differs. Each line below was measured on this machine, not
+// inferred, because assuming they are the same would tighten four grammars wrongly.
+//
+//   js, typescript   ID_Start / ID_Continue. Wired in. node's own parser agrees with
+//                    node's \p{ID_Start} / \p{ID_Continue} on every probe, including
+//                    the three that look like exceptions and are not: U+00B7, U+203F
+//                    and U+200C are ID_Continue, and 'var a<U+00B7>b' parses.
+//
+//   swift            NOT these tables. The Swift reference gives identifier-head as an
+//                    explicit list, and swiftc proves the difference in BOTH directions:
+//                    'let <U+1F002> = 1' COMPILES (the list carries U+10000-U+1FFFD)
+//                    while ID_Start refuses it, and 'let a<U+00A1> = 1' is rejected
+//                    ("consecutive statements on a line") while our own approximation
+//                    accepts it. Swift needs its own list - and it is ~45 plain ranges,
+//                    so it needs no table and no guard at all.
+//
+//   java             NOT these tables. Character.isJavaIdentifierStart/Part is the rule,
+//                    and the installed JDK 24 disagrees three ways: U+00A3 (a currency
+//                    sign) STARTS a Java identifier and is not ID_Start; U+00B7 and
+//                    U+0387 are ID_Continue and are not Java identifier parts; U+2118
+//                    is ID_Start (Other_ID_Start) and is not a Java identifier start.
+//                    java also has no Unicode identifiers here at all today - it takes
+//                    the ASCII Id from lib/ident-dollar.abnf - so adopting anything is a
+//                    WIDENING, not a tightening.
+//
+//   kotlin           NOT these tables, and untestable here (no kotlinc). The published
+//                    grammar spells Identifier out of Letter = Ll|Lm|Lo|Lt|Lu|Nl and
+//                    UnicodeDigit = Nd, so it has no Other_ID_Start, no Mn/Mc and no Pc.
+//                    Like java it is ASCII-only here today.
+//
+//   c#               NOT these tables, and untestable here (no C# toolchain). ECMA-334
+//                    6.4.3 builds identifier_start_character from Lu|Ll|Lt|Lm|Lo|Nl plus
+//                    '_', and identifier_part_character adds Nd, Pc, Mn|Mc and ALL of
+//                    Cf - so it is wider than ID_Continue on Cf and narrower on
+//                    Other_ID_Start/Other_ID_Continue. Its Id here is
+//                    '"\x7f"..."\U0010ffff"', which accepts a no-break space in a name;
+//                    the mono corpus has no reject row, so tightening it would be
+//                    unmeasurable either way.
+//
+//   python           XID_Start / XID_Continue, not ID_*: the language reference defines
+//                    identifier ::= xid_start xid_continue*. Its tables must be generated
+//                    from PYTHON, not from node - python3 3.14.6 here carries Unicode
+//                    16.0 and node 24 carries 17.0, and the two disagree on 4,647 code
+//                    points for XID_Start alone, so a node-generated table would be a
+//                    silent oracle mismatch. Not wired in.
+
+// One raw code point above ASCII. The bound is the whole non-ASCII range: WHICH of them
+// may appear in a name is the guards' answer, not this range's, and keeping the range
+// wide is what makes a failing identifier position cost one attempt instead of hundreds.
+IdUniChar   = "\u0080"..."\U0010ffff" ;
+
+// The code point just consumed may START an identifier: ID_Start, plus the ASCII letters,
+// '_' and '$' that a \u escape can spell.
+IdCpStartOk = :script(~~
+    (function() {
+        // The code point that was JUST CONSUMED, read backwards from the parse position.
+        // The guard sits AFTER the character it judges, which is what lets one production
+        // serve both spellings of an identifier character - a raw UTF-8 code point and a
+        // '\uHHHH' / '\u{H...H}' escape - and leaves all whitespace skipping to the
+        // grammar (a guard placed IN FRONT would have to re-implement Whitespace itself,
+        // comments included, because :script() is not a terminal and skips nothing).
+        var cp = -1
+        var b1 = c.peek(-1)
+        if (b1 >= 128) {
+            // A raw code point: walk back over the UTF-8 continuation bytes (0x80-0xBF)
+            // to the lead byte. The distance is the sequence length.
+            var k = 1
+            var lead = b1
+            while (lead >= 128 && lead < 192) {
+                k = k + 1
+                lead = c.peek(-k)
+            }
+            if (k === 2) { cp = (lead - 192) * 64 + (b1 - 128) }
+            else if (k === 3) { cp = (lead - 224) * 4096 + (c.peek(-2) - 128) * 64 + (b1 - 128) }
+            else if (k === 4) { cp = (lead - 240) * 262144 + (c.peek(-3) - 128) * 4096 + (c.peek(-2) - 128) * 64 + (b1 - 128) }
+        } else {
+            // An escape, read backwards: the hex digits first (least significant last in
+            // the text, so most significant last here), then the '{' / 'u' / '\\' shape.
+            // Eight digits is the cap, as in the guards this replaced.
+            var i = 1
+            if (b1 === 125) { i = 2 }
+            var v = 0
+            var mul = 1
+            var n = 0
+            while (n < 8) {
+                var hc = c.peek(-i)
+                var hd = -1
+                if (hc >= 48 && hc <= 57) { hd = hc - 48 }
+                else if (hc >= 97 && hc <= 102) { hd = hc - 87 }
+                else if (hc >= 65 && hc <= 70) { hd = hc - 55 }
+                if (hd < 0) { break }
+                v = v + hd * mul
+                mul = mul * 16
+                n = n + 1
+                i = i + 1
+            }
+            var shaped = false
+            if (b1 === 125) {
+                if (n > 0 && c.peek(-i) === 123 && c.peek(-i - 1) === 117 && c.peek(-i - 2) === 92) { shaped = true }
+            } else {
+                if (n === 4 && c.peek(-i) === 117 && c.peek(-i - 1) === 92) { shaped = true }
+            }
+            if (shaped) { cp = v }
+        }
+        // U+0000 is the one deliberate exception. It is no more an identifier character
+        // than any other control code, but test262 files '\u0000', '\u{0}', 'a\u0000'
+        // and 'a\u{0}' under early/ - as programs that PARSE and are rejected afterwards
+        // - so refusing it here would cost four must-parse files to win nothing.
+        if (cp === 0) { return undefined }
+        if (cp >= 97 && cp <= 122) { return undefined }
+        if (cp >= 65 && cp <= 90) { return undefined }
+        if (cp === 95 || cp === 36) { return undefined }
+        if (cp < 128) { return abnf.newToken("\x01not-an-identifier-char", 0) }
+        // ID_Start, exactly - the table below and nothing wider. Every code point above
+        // ASCII is decided here; the ASCII answer is above, because a \u escape may spell
+        // an ASCII character and then the grammar's own ranges never see it.
+        //
+        // The table is ID_Start minus its ASCII part, as a delta-varint range list:
+        // pairs of (gap since the previous range's end, range length - 1), most
+        // significant digit first, base 16, digit '0'..'?' terminal and '@'..'O'
+        // continued. Ranges are ascending, so the scan can stop at the first one that
+        // starts above the code point. Written as ONE literal on purpose: a '+' chain
+        // would rebuild the string on every call, and this guard runs once per non-ASCII
+        // identifier character. Regenerated from node's own \p{ID_Start} - see
+        // the header comment of this file for the command.
+        var t = "J:0:0405A61A>1AL94;>47010H141123106012101A31E21H:8J51B5206B8D7A:43B=B:B311F210?171:220A001A=A=E8;0A8B091405A5409030A7A87:5A716A0B9C:C530A2079??47212A516103330A00=112>1:085412A516111111A?310A32A08121A516111430A20?1A70;7212A516111430A>112?0A1015321331101131323;A60C47121A61?30A:21121A>047121A6191430A>211?1A18121B820A005282A855A13A7181026C:B?11<6C:110141A7101911902410A53B00C?71B3A;4G3B:A40A05433031724<<0A1B510502B:1AD<132610132B8132B0132610132>1C8132D2B5?A0E5253BF;2A01A95D:3:7A1=A2>A1><12?C3B3040D3E87B8105D5:A>C1A=24;B;4A9C6A69C4E20E=B>A17C6A==1:B;A:B3B92:B32:5B:22B931511305K?D0AA5252B525271010101A>2C41610321633254<5216G40=0A0<F50402910256010101?235440A1B8JG7N46331<B510502C770A0A69616161616161616BB62A9874244E5441E9135B:1E=A1A?C0?B@0AIK?D0EFH<D3B=2A@<3?:1A4B>A0A>2D?B782F62E1A4A012131A6A=C3>C1C>53011;A;:A6A9A<7B>A<0A0419:41B8A7217A4A6303C11031242010A822:72<5252596161B:1=6G2A=BKJ3<A64C0BA@4AF=2F9B66<450191<141011111F;B1AF:A2C?2C5B8;G441H6B4A96A9;E835252522B3;1A91A2111>2=B2G:D5C4A@;A<3C0B?A?=A=5B5:A=2B34714B:I=A2B34B34B78C3<:1>16111:1>16113C3<AC69A5:7A851B918D55201B;11302A6:A69A>D1A211:A5:A96A9B6C761D00?3121A<B:A<3A<B371A;A;C5:A5:A2=A1F>D8C7C2=C2=B3B6A;9A6O:B961A05C8A<:08A5B:A1B>A4A;A6<C4C9120=B<B0A8A:B3A=0208B230<B?>3A5010B3A11A8A31C?610131>197B>B67212A516111430A20<4A>910201B510A9010B<C4A23A42A>B?A4110K8B>B93B4B?A40C;B:=0D7A:B56K9B;G4C?A?72027111A7?010E>72B6A0010A<0:B770A50;B=A30A2D8L7B0A?81B4A10C1A=G06111B5A50A95111A?>0A7B;A@4A2?01<1B1G<0D?CI9F6F>A1L3JD<F0?DB?A15A9OI:5BD6AJK9A=FN2BC87A>A1D>A1A=A2B?A03A?A45A2AK0B<M3C?B0A82A8B<D:50D2<D0110>49ALM5B9A?F1G2BAO=316111AB2?0A=220>38AH;I@4F:5<3879AGF6E41D6112021231;10161D01327161A;131410361AE32A81A81A>1A81A>1A81A>1A81A>1A817GC4A>65A@5C=I2B<:6A00AD1A=A2B;AN4A;N4A=20L?A>1211162491N0613111>1L4C;D370DK431A:1110201913101060401010121110201010101011102316131310191A052141A0AAD4JFM?B0AAA=2AFH=2AMC0?BF=IJ2BA=EN2ACD:5BAB9"
+        var idx = 0
+        var cur = 0
+        var len = t.length
+        while (idx < len) {
+            var g = 0
+            while (true) {
+                var gd = t.charCodeAt(idx) - 48
+                idx = idx + 1
+                if (gd < 16) { g = g * 16 + gd; break }
+                g = g * 16 + (gd - 16)
+            }
+            var start = cur + g
+            var w = 0
+            while (true) {
+                var wd = t.charCodeAt(idx) - 48
+                idx = idx + 1
+                if (wd < 16) { w = w * 16 + wd; break }
+                w = w * 16 + (wd - 16)
+            }
+            if (cp < start) { break }
+            if (cp <= start + w) { return undefined }
+            cur = start + w + 1
+        }
+        return abnf.newToken("\x01not-an-identifier-char", 0)
+    })()
+~~) ;
+
+// ... may CONTINUE one: ID_Continue (which already carries U+200C/U+200D, U+203F/U+2040
+// and U+00B7 - verified against node, which parses 'var a\u200cb' and refuses
+// 'var \u200cb'), plus the ASCII letters, digits, '_' and '$'.
+IdCpPartOk  = :script(~~
+    (function() {
+        // The code point that was JUST CONSUMED, read backwards from the parse position.
+        // The guard sits AFTER the character it judges, which is what lets one production
+        // serve both spellings of an identifier character - a raw UTF-8 code point and a
+        // '\uHHHH' / '\u{H...H}' escape - and leaves all whitespace skipping to the
+        // grammar (a guard placed IN FRONT would have to re-implement Whitespace itself,
+        // comments included, because :script() is not a terminal and skips nothing).
+        var cp = -1
+        var b1 = c.peek(-1)
+        if (b1 >= 128) {
+            // A raw code point: walk back over the UTF-8 continuation bytes (0x80-0xBF)
+            // to the lead byte. The distance is the sequence length.
+            var k = 1
+            var lead = b1
+            while (lead >= 128 && lead < 192) {
+                k = k + 1
+                lead = c.peek(-k)
+            }
+            if (k === 2) { cp = (lead - 192) * 64 + (b1 - 128) }
+            else if (k === 3) { cp = (lead - 224) * 4096 + (c.peek(-2) - 128) * 64 + (b1 - 128) }
+            else if (k === 4) { cp = (lead - 240) * 262144 + (c.peek(-3) - 128) * 4096 + (c.peek(-2) - 128) * 64 + (b1 - 128) }
+        } else {
+            // An escape, read backwards: the hex digits first (least significant last in
+            // the text, so most significant last here), then the '{' / 'u' / '\\' shape.
+            // Eight digits is the cap, as in the guards this replaced.
+            var i = 1
+            if (b1 === 125) { i = 2 }
+            var v = 0
+            var mul = 1
+            var n = 0
+            while (n < 8) {
+                var hc = c.peek(-i)
+                var hd = -1
+                if (hc >= 48 && hc <= 57) { hd = hc - 48 }
+                else if (hc >= 97 && hc <= 102) { hd = hc - 87 }
+                else if (hc >= 65 && hc <= 70) { hd = hc - 55 }
+                if (hd < 0) { break }
+                v = v + hd * mul
+                mul = mul * 16
+                n = n + 1
+                i = i + 1
+            }
+            var shaped = false
+            if (b1 === 125) {
+                if (n > 0 && c.peek(-i) === 123 && c.peek(-i - 1) === 117 && c.peek(-i - 2) === 92) { shaped = true }
+            } else {
+                if (n === 4 && c.peek(-i) === 117 && c.peek(-i - 1) === 92) { shaped = true }
+            }
+            if (shaped) { cp = v }
+        }
+        // U+0000 is the one deliberate exception. It is no more an identifier character
+        // than any other control code, but test262 files '\u0000', '\u{0}', 'a\u0000'
+        // and 'a\u{0}' under early/ - as programs that PARSE and are rejected afterwards
+        // - so refusing it here would cost four must-parse files to win nothing.
+        if (cp === 0) { return undefined }
+        if (cp >= 97 && cp <= 122) { return undefined }
+        if (cp >= 65 && cp <= 90) { return undefined }
+        if (cp === 95 || cp === 36) { return undefined }
+        if (cp >= 48 && cp <= 57) { return undefined }
+        if (cp < 128) { return abnf.newToken("\x01not-an-identifier-char", 0) }
+        // ID_Continue, exactly - the table below and nothing wider. Every code point above
+        // ASCII is decided here; the ASCII answer is above, because a \u escape may spell
+        // an ASCII character and then the grammar's own ranges never see it.
+        //
+        // The table is ID_Continue minus its ASCII part, as a delta-varint range list:
+        // pairs of (gap since the previous range's end, range length - 1), most
+        // significant digit first, base 16, digit '0'..'?' terminal and '@'..'O'
+        // continued. Ranges are ascending, so the scan can stop at the first one that
+        // starts above the code point. Written as ONE literal on purpose: a '+' chain
+        // would rebuild the string on every call, and this guard runs once per non-ASCII
+        // identifier character. Regenerated from node's own \p{ID_Continue} - see
+        // the header comment of this file for the command.
+        var t = "J:0:010205A61A>1AL94;>47010A1G411231064101A31E21H:142J51B5206B88B<101111108A:43A=:5D94F517291A220A0C:2F4>C540202B=A2A;4:5A7167D:1H0291A217212A51610332821238041142;:0102215412A516111111201441223073107?;218121A516111429121220?329961217212A51611142821227241142910A0115321331101131323;4432132060>9A0<121A61?2812137112112329A0317121A619142812137152132912<<121C21214537429:5121A13A7181026304510176921=C95>19B7110141A7101A62410161923B00A7169;01010491B34A31A11B390C9D96D=2B510502B:1AD<132610132B8132B0132610132>1C8132D22298>?A0E5253BF;2A01A95D:3:7A59A5;A3<<1211<E3304129B121:6E87B:5D5:A>1;4;:B724;B;4A96:B5A;4C>1A<2:69=08=1A>2;A4D<39A18<G3<C7893C02:5B:22A021B65BA5252B525271010101A>2C41610321633254<5216?1C11A30A<0=0A0<C3<403;A10402910256010101?235440A1B8JG7N468<B510502C770?A796161616161616161A?B@52A9>14244E5261E>5B:1E=A1A?C0?B@0AIK?D0EFH<D3B=2A@<3A;A4B?491G2B582F62E1A4C640A3C3<D5:96A7301C02B3<A<3D0>:6A>1C69=296A63D8A822?24:5252596161B:1=6G:11296BKJ3<A64C0BA@4AF=2F9B66<45;1<141011111F;B1AF:A2C?2C5B8;4?A0?31A82B041H6A397A9401A9:E935252522B3;1A91A2111>2=B2G:D5C4H80H2A<3C0?0A?A?=A=5B:5A=2B34714B:I=296B34B34B78C3<:1>16111:1>16113C3<AC69A5:7A851B918D55201B;11302A6:A69A>D1A211:A5:A96A9B6C761D031157121A<2240B0A<3A<B371A=A9C5:A5:A2=A1F>D8C7C2=C2=B7896B5341A6O:B91131A05C2B2:08B0A?A5B:A4A;A69D6A??9C;70=A8796C419438B3209D4431<10B3A11B463C>610131>197C:596317212A51611141921222060562634;910201B51910201317=1A=D:5943A>D51089J6C528A75B2D030;9B6C8796A3A<A:2>4966K9C:F5D9A572027111A=1128<9D672B=2711A;C>808D930A2D8F77E8B0?9681B<18?9A8A=2A51=D96111B;3011188965111B41115796B;49O6A69A01B834=:E50D?CI9F6F>A1L3JD<F0?DB?A0A5:OI:5BD6AJK9C9FL6BC87A>196D>196A=24;C693<99A45A2AK0B<39L6C?B0A82A8B<D:4C87A0D0111;69ALM5B9A?F1G2BAO=316111AB2?0A=220>38AH;I@4F:5<387931A@E19B@6B=2A6BA>4358726A>3I42AK;E41D6112021231;10161D01327161A;131410361AE32A81A81A>1A81A>1A81A>1A81A>1A8172C1B@0C64C180>0A641>DE0A>65M561A02611145C=B10G0B<3=2940AD1A>A1C9AM6B9M6B:L5A>1A581N0613111>1L4;6B9D;49DJ631A:1110201913101060401010121110201010101011102316131310191A052141A0MC49D@6JFM?B0AAA=2AFH=2AMC0?BF=IJ2BA=EN2ACD:5BAB9JLLH6N?"
+        var idx = 0
+        var cur = 0
+        var len = t.length
+        while (idx < len) {
+            var g = 0
+            while (true) {
+                var gd = t.charCodeAt(idx) - 48
+                idx = idx + 1
+                if (gd < 16) { g = g * 16 + gd; break }
+                g = g * 16 + (gd - 16)
+            }
+            var start = cur + g
+            var w = 0
+            while (true) {
+                var wd = t.charCodeAt(idx) - 48
+                idx = idx + 1
+                if (wd < 16) { w = w * 16 + wd; break }
+                w = w * 16 + (wd - 16)
+            }
+            if (cp < start) { break }
+            if (cp <= start + w) { return undefined }
+            cur = start + w + 1
+        }
+        return abnf.newToken("\x01not-an-identifier-char", 0)
+    })()
+~~) ;

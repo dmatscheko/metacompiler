@@ -171,6 +171,7 @@ The same language is compiled to LLVM IR by typescript-to-llvm-ir.abnf.") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
+:include("lib/ident-unicode.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -2135,32 +2136,19 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // a \u escape - 'var \u0061' declares 'a' - which is why IdEscape leads both alternations
 // - a backslash can start no other token in an identifier position.
 //
-// The Unicode ranges are a deliberate approximation of ID_Start/ID_Continue: the real
-// tables are thousands of ranges, and a grammar that accepts a few code points the spec
-// would reject costs nothing here, while carrying the tables would cost a lot. What the
-// ranges DO exclude is everything that must stay outside a name: the ASCII punctuation,
-// the whitespace code points listed above, the two line separators, and the BOM.
-// U+200C/U+200D (the zero width non-joiner and joiner) are in, as the spec requires.
+// Both spellings are judged by the SAME pair of guards from lib/ident-unicode.abnf,
+// which carry the real ID_Start / ID_Continue tables and sit BEHIND the character they
+// judge (see that file for why in front does not work). They answer for the ASCII code
+// points too, because an escape can spell one: '\u002a' is an asterisk and is not an
+// identifier however it is spelled - which this grammar did not check at all before, its
+// IdEscape having had no guard in front of it.
+//
+// IdEscape scopes whitespace to nothing after the backslash, so '\ u0061' and '\u00 61'
+// are the syntax errors they are in JavaScript.
 Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
-IdStart     = IdEscape | "a"..."z" | "A"..."Z" | "_" | "$" | IdUni ;
-IdPart      = IdEscape | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | IdUni | IdUniPart ;
-IdEscape    = "\\" JsUniEsc ;
-// The Latin-1 supplement is spelled out rather than swept into the first range, because
-// it is the one block where a NON-letter sits close enough to ASCII to turn up in real
-// source: U+00AC (the logic-not sign) is what the conformance suite plants in
-// ErrorRecovery/Blocks/parserErrorRecovery_Block2.ts and ParameterLists/...ParameterList4
-// as a deliberately invalid token, and node refuses it too ("Invalid or unexpected
-// token"). Accepting it made a garbage file parse. The letters of that block are exactly
-// AA, B5, BA, C0-D6, D8-F6 and F8 upward - so the multiplication and division signs
-// (U+00D7 / U+00F7) and all the punctuation stay out as well.
-IdUni       = "\u00aa" | "\u00b5" | "\u00ba" | "\u00c0"..."\u00d6" | "\u00d8"..."\u00f6"
-            | "\u00f8"..."\u167f" | "\u1681"..."\u1fff" | "\u2070"..."\u218f"
-            | "\u2c00"..."\u2fef" | "\u3001"..."\ud7ff" | "\uf900"..."\ufdcf"
-            | "\ufdf0"..."\ufefe" | "\U00010000"..."\U000effff" ;
-// ID_Continue but NOT ID_Start: the zero width non-joiner and joiner, and the two
-// connector punctuation marks. A name may not BEGIN with any of them, which is why they
-// are a separate production that only IdPart lists.
-IdUniPart   = "\u200c"..."\u200d" | "\u203f"..."\u2040" ;
+IdStart     = ( IdEscape IdCpStartOk ) | "a"..."z" | "A"..."Z" | "_" | "$" | ( IdUniChar IdCpStartOk ) ;
+IdPart      = ( IdEscape IdCpPartOk ) | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | ( IdUniChar IdCpPartOk ) ;
+IdEscape    = "\\" :whitespace() JsUniEsc ;
 
 // The keyword boundary: the guard that stops a keyword (or a numeric literal) from being
 // glued to an identifier character. Like the shared KwEnd, but a Unicode letter and a

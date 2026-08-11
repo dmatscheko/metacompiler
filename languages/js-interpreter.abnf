@@ -204,6 +204,7 @@ The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
+:include("lib/ident-unicode.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -1723,151 +1724,20 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // a \u escape - 'var \u0061' declares 'a' - which is why IdEscape leads both alternations
 // - a backslash can start no other token in an identifier position.
 //
-// The Unicode ranges are a deliberate approximation of ID_Start/ID_Continue: the real
-// tables are thousands of ranges, and a grammar that accepts a few code points the spec
-// would reject costs nothing here, while carrying the tables would cost a lot. What the
-// ranges DO exclude is everything that must stay outside a name: the ASCII punctuation,
-// the whitespace code points listed above, the two line separators, and the BOM.
-// U+200C/U+200D (the zero width non-joiner and joiner) are in, as the spec requires.
-Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
-IdStart     = ( IdEscStartOk IdEscape ) | "a"..."z" | "A"..."Z" | "_" | "$" | IdUni ;
-IdPart      = ( IdEscPartOk IdEscape ) | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | IdUni | IdUniPart ;
-IdEscape    = "\\" JsUniEsc ;
-
-// A \u escape in an identifier must denote a character that IS an identifier character:
-// '\' (a backslash), '*' (an asterisk) and '\uD800' (a lone surrogate) are not
-// identifiers however they are spelled. The escape is unreadable to a character range, so
-// the check runs as a guard in front of it: it reads the escape from the source, computes
-// the code point and answers the impossible token when the code point is not allowed here.
-// The two guards differ by exactly the digits and the two zero-width joiners, which
-// continue an identifier but cannot start one.
+// Both spellings are judged by the SAME pair of guards from lib/ident-unicode.abnf,
+// which carry the real ID_Start / ID_Continue tables and sit BEHIND the character they
+// judge (see that file for why in front does not work). The guards also answer for the
+// ASCII code points, because an escape can spell one: '\u002a' is an asterisk and is not
+// an identifier however it is spelled.
 //
-// U+0000 is the one deliberate exception. It is no more an identifier character than the
-// others, but test262 files '\u0000', '\u{0}', 'a\u0000' and 'a\u{0}' under early/ - as
-// programs that PARSE and are rejected afterwards - so refusing it here would cost four
-// must-parse files to win nothing the range check does not already win.
-IdEscStartOk = :script(~~
-    (function() {
-        // An identifier START is reached with the whitespace in front of it not yet
-        // skipped (the :whitespace() of Id only takes effect from the second character
-        // on), so step over it here the way the other lookahead guards do. Nothing is
-        // consumed either way - the guard only reads.
-        var w = 0
-        var wc = c.peek(0)
-        while (wc === 32 || wc === 9 || wc === 10 || wc === 13 || wc === 11 || wc === 12) {
-            w = w + 1
-            wc = c.peek(w)
-        }
-        if (c.peek(w) !== 92 || c.peek(w + 1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
-        var cp = 0
-        if (c.peek(w + 2) === 123) { // \u{ H+ }
-            var i = w + 3
-            var n = 0
-            while (true) {
-                var cc = c.peek(i)
-                if (cc === 125) { break }
-                var d = -1
-                if (cc >= 48 && cc <= 57) { d = cc - 48 }
-                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
-                cp = cp * 16 + d
-                n = n + 1
-                i = i + 1
-            }
-            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
-        } else { // \uHHHH
-            for (var k = 0; k < 4; k++) {
-                var c2 = c.peek(w + 2 + k)
-                var d2 = -1
-                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
-                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
-                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
-                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
-                cp = cp * 16 + d2
-            }
-        }
-        var isStart = true
-        var ok = false
-        if (cp === 0) { ok = true }   // see the note above: test262 files it under early/
-        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
-        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
-        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
-        else if (cp === 8255 || cp === 8256) { ok = !isStart } // U+203F/2040 continue only
-        else if (cp >= 128) {
-            // The same approximation as IdUni: everything above ASCII except the space and
-            // line separators, the surrogates, the Latin-1 punctuation and the
-            // multiplication/division signs.
-            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
-                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
-                || cp === 12288 || cp === 65279
-                || (cp >= 55296 && cp <= 57343)
-                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
-                || cp === 215 || cp === 247)
-        }
-        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
-    })()
-~~) ;
-IdEscPartOk = :script(~~
-    (function() {
-        // Sitting on the backslash of the escape; read it without consuming anything.
-        if (c.peek(0) !== 92 || c.peek(1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
-        var cp = 0
-        if (c.peek(2) === 123) { // \u{ H+ }
-            var i = 3
-            var n = 0
-            while (true) {
-                var cc = c.peek(i)
-                if (cc === 125) { break }
-                var d = -1
-                if (cc >= 48 && cc <= 57) { d = cc - 48 }
-                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
-                cp = cp * 16 + d
-                n = n + 1
-                i = i + 1
-            }
-            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
-        } else { // \uHHHH
-            for (var k = 0; k < 4; k++) {
-                var c2 = c.peek(2 + k)
-                var d2 = -1
-                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
-                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
-                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
-                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
-                cp = cp * 16 + d2
-            }
-        }
-        var isStart = false
-        var ok = false
-        if (cp === 0) { ok = true }   // see the note above: test262 files it under early/
-        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
-        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
-        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
-        else if (cp === 8255 || cp === 8256) { ok = !isStart } // U+203F/2040 continue only
-        else if (cp >= 128) {
-            // The same approximation as IdUni: everything above ASCII except the space and
-            // line separators, the surrogates, the Latin-1 punctuation and the
-            // multiplication/division signs.
-            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
-                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
-                || cp === 12288 || cp === 65279
-                || (cp >= 55296 && cp <= 57343)
-                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
-                || cp === 215 || cp === 247)
-        }
-        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
-    })()
-~~) ;
-IdUni       = "\u00aa"..."\u167f" | "\u1681"..."\u1fff" | "\u2070"..."\u218f"
-            | "\u2c00"..."\u2fef" | "\u3001"..."\ud7ff" | "\uf900"..."\ufdcf"
-            | "\ufdf0"..."\ufefe" | "\U00010000"..."\U000effff" ;
-// ID_Continue but NOT ID_Start: the zero width non-joiner and joiner, and the two
-// connector punctuation marks. A name may not BEGIN with any of them, which is why they
-// are a separate production that only IdPart lists.
-IdUniPart   = "\u200c"..."\u200d" | "\u203f"..."\u2040" ;
+// IdEscape scopes whitespace to nothing after the backslash, so '\ u0061' and
+// '\u00 61' stay the syntax errors they are - the leading guards this replaced enforced
+// that by reading the escape themselves, and lost 'var /*c*/\u0061' (which node accepts)
+// in the process, because a hand-written skip cannot see a comment.
+Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
+IdStart     = ( IdEscape IdCpStartOk ) | "a"..."z" | "A"..."Z" | "_" | "$" | ( IdUniChar IdCpStartOk ) ;
+IdPart      = ( IdEscape IdCpPartOk ) | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | ( IdUniChar IdCpPartOk ) ;
+IdEscape    = "\\" :whitespace() JsUniEsc ;
 
 // The keyword boundary: the guard that stops a keyword (or a numeric literal) from being
 // glued to an identifier character. Like the shared KwEnd, but a Unicode letter and a
