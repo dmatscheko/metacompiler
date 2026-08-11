@@ -2083,7 +2083,17 @@ CmdArgAhead = :script(~~
             return no
         }
         // Characters that can only continue an expression, never open one.
-        if (cc === 40 || cc === 41 || cc === 93 || cc === 125 || cc === 44 || cc === 59
+        // `{` IS ONE OF THEM, and that is Ruby's rule rather than a convenience: a
+        // brace after a method name is always a BLOCK, never a Hash argument - MRI
+        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}` with
+        // *syntax error, unexpected ':'*. Without 123 here, CommandForm read the
+        // brace as an ArrowArg and `x = proc { }` became `x = proc({})`, so this
+        // half died with *variable not defined: proc* and the interpreter answered
+        // *unknown Hash method: lambda?*. The shape is specifically a command
+        // argument list: `p proc { }.lambda?` always worked, because there the
+        // brace is reached through Primary -> Call -> `BareName Block`.
+        // docs/todo.md 1.3.
+        if (cc === 40 || cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)

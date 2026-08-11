@@ -270,12 +270,22 @@ def s06
   check("fmt41", "%10s|" % "日本語" == "       日本語|" && "%-6s|" % "日本" == "日本    |" && "%.3s" % "日本語" == "日本語")
   # An ASTRAL character is ONE character to MRI and two UTF-16 units to the floor.
   check("fmt42", "%5c|" % 128512 == "    😀|" && "%-3c|" % 128512 == "😀  |")
-  # THREE DELIBERATE DIVERGENCES, and the only rows in this block MRI itself does
-  # not pass: %c out of range raises ArgumentError there (0x110000) or writes a
-  # raw invalid byte (a negative), and a String of more than one character raises
-  # too. None of the three is expressible here, so all three engines answer ""
-  # and the first character respectively.
-  check("fmt43", "%c" % 1114112 == "" && "%c" % -1 == "" && "%c" % "zed" == "z" && "%c" % "" == "")
+  # A STRING operand must be EXACTLY one character, and MRI's message is its own.
+  # This used to be listed here as one of three deliberate divergences - all three
+  # engines took the FIRST character, and "" answered "" - and it is closed now.
+  check("fmt43", s06c("zed") == "AE:%c requires a character" &&
+                 s06c("") == "AE:%c requires a character" &&
+                 s06c("z") == "OK:z" && s06c("日") == "OK:日")
+  # TWO DELIBERATE DIVERGENCES REMAIN, the only rows in this block MRI itself does
+  # not pass: an out-of-range code point. MRI raises RangeError, and its rule is not
+  # simply "above 0x10FFFF" - measured against /usr/bin/ruby 2.6.10, `"%c" % 1114111`
+  # raises too (U+10FFFF is a noncharacter) while `"%c" % 128512` is fine, so the
+  # boundary is the default external ENCODING's and not a code-point limit. A
+  # negative is reported as its UNSIGNED 32-bit value (`"%c" % -1` says
+  # *4294967295 out of char range*), and a value past 2^31 gets a third message
+  # again (*integer 10000000000 too big to convert to `int`*). None of the three
+  # messages is expressible without an encoding concept, so both engines answer "".
+  check("fmt43b", "%c" % 1114112 == "" && "%c" % -1 == "")
   # ----- the ARGUMENT SELECTORS -----
   # WHICH argument a directive takes. A three-way divergence until now:
   # "%1$s-%2$s" % ["a","b"] was "a- b" in the interpreter (the 1 and the 2 read as
@@ -365,6 +375,14 @@ def s06
   check("flc6", (begin; Float::INFINITY.to_i; rescue FloatDomainError => e; e.message; end) == "Infinity" &&
                 (begin; Float::NAN.to_i; rescue RangeError => e; e.message; end) == "NaN" &&
                 Float::INFINITY.round(2).to_s == "Infinity")
+end
+# %c through a rescue, for the rows where MRI raises. Section 06 needs it too.
+def s06c(v)
+  begin
+    return "OK:" + ("%c" % v)
+  rescue ArgumentError => e
+    return "AE:" + e.message
+  end
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40
@@ -2483,6 +2501,72 @@ def s46
   check("rc46s", Rational(-2, 3).abs == Rational(2, 3) && Rational(-2, 3).abs.class == Rational)
   check("rc46t", Complex(v[1], v[2]).abs == 5.0 && Complex(-3, -4).magnitude == 5.0)
   check("rc46u", Complex(v[1], v[2]).abs.class == Float && Rational(v[3], v[1]).abs.to_s == "2/3")
+  # ----- Float#to_r is EXACT (docs/todo.md 2.4) -------------------------------
+  # A double IS m * 2^e, so its Rational is exact. Every engine answered `x/1` with
+  # the double itself as the "numerator" - (1.5).to_r was (1.5/1) - agreed and wrong
+  # in all four legs. The denominators below are 2, 4, 2^55, 2^60 and 2^16, so they
+  # also pin Rational#to_s using the EXACT integer expansion and not the shortest
+  # round-tripping form: `"" + 2**55` is 36028797018963970, one ulp out.
+  f = [1.5, -1.5, 0.1, 3.25, 0.001, 2.0, 0.0, -0.0, 0.0000152587890625, -0.25]
+  check("rc46v", f[0].to_r.to_s == "3/2" && f[1].to_r.to_s == "-3/2" && f[9].to_r.to_s == "-1/4")
+  check("rc46w", f[2].to_r.to_s == "3602879701896397/36028797018963968" &&
+                 f[4].to_r.to_s == "1152921504606847/1152921504606846976")
+  check("rc46x", f[3].to_r.to_s == "13/4" && f[8].to_r.to_s == "1/65536")
+  # An integral Float, and both zeros. MRI's (-0.0).to_r is (0/1), not (-0/1).
+  check("rc46y", f[5].to_r.to_s == "2/1" && f[6].to_r.to_s == "0/1" && f[7].to_r.to_s == "0/1")
+  # #to_r round-trips: to_r.to_f is the same double, which is the whole property.
+  check("rc46z", f[2].to_r.to_f == f[2] && f[4].to_r.to_f == f[4] && f[0].to_r.to_f == f[0])
+  # #numerator / #denominator read the same exact pair, and Kernel#Rational inherits it.
+  check("rc46aa", f[0].numerator == 3 && f[0].denominator == 2 &&
+                  Rational(f[0]).to_s == "3/2" && Rational(f[0], 2).to_s == "3/4")
+  # An infinity and a NaN have no Rational: MRI raises FloatDomainError, and WITHOUT
+  # the guard this HUNG - the gcd's `x % y` never terminates with y = NaN.
+  check("rc46ab", s46_tor(1.0 / 0.0) == "FloatDomainError:Infinity" &&
+                  s46_tor(-1.0 / 0.0) == "FloatDomainError:-Infinity" &&
+                  s46_tor(0.0 / 0.0) == "FloatDomainError:NaN")
+  # ----- Integer#to_c / Float#to_c (docs/todo.md 1.2) -------------------------
+  # Missing from BOTH compiled halves outright: `5.to_c` died with *method call
+  # 'to_c' on a number* while the interpreter half answered 5+0i - a live halves
+  # divergence at base, which is why the class row matters as much as the text.
+  check("rc46ac", v[3].to_c.to_s == "2+0i" && (0 - v[1]).to_c.to_s == "-3+0i")
+  check("rc46ad", v[3].to_c.class == Complex && v[3].to_c.inspect == "(2+0i)")
+  # A Complex passes through unchanged. What is NOT asserted, because no engine here
+  # can produce it: MRI's Complex keeps its parts' own kind, so 5.0.to_c is
+  # (5.0+0i) and Rational(1, 3).to_c is ((1/3)+0i), where this value model holds two
+  # RAW DOUBLES and answers (5+0i) and (0.3333333333333333+0i). It is the same
+  # part-ness gap Complex(0, 0).abs has - MRI answers the Integer 0 there and every
+  # engine here a Float - and closing it means Complex parts becoming full tower
+  # values with promotion rules of their own, the same class of change as the
+  # bignum-Rational docs/todo.md 2.4 names. All four legs agree on the answer given.
+  check("rc46ae", Complex(v[1], v[2]).to_c.to_s == "3+4i" &&
+                  Complex(v[1], v[2]).to_c.class == Complex)
+  # ----- Complex#abs is HYPOT, so it must not overflow or underflow -----------
+  # docs/todo.md 2.4 named this and it does NOT reproduce at Complex(3, 4), which is
+  # 5.0 under either formula. It reproduces where the SQUARES leave the double's
+  # range: sqrt(re*re + im*im) answered Infinity for the first pair and 0.0 for the
+  # second, in all four legs, where MRI answers the magnitude.
+  g = [1.0e200, 1.0e-200, 1.0e300, 1.0e-300, 1.0e154, 1.0e-154, 1.0e308]
+  check("rc46af", Complex(g[0], g[0]).abs.to_s == "1.414213562373095e+200" &&
+                  Complex(g[1], g[1]).abs.to_s == "1.414213562373095e-200")
+  check("rc46ag", Complex(g[4], g[4]).abs.to_s == "1.414213562373095e+154" &&
+                  Complex(g[5], g[5]).abs.to_s == "1.414213562373095e-154")
+  check("rc46ah", Complex(g[6], g[6]).abs.to_s == "1.4142135623730951e+308" &&
+                  Complex(g[2], g[3]).abs.to_s == "1.0e+300")
+  # ...and the ordinary range is untouched: these are the plain sum's own answers,
+  # which is what makes the scaled path a speed guard rather than a second answer.
+  check("rc46ai", Complex(v[1], v[2]).abs.to_s == "5.0" && Complex(5, 12).abs.to_s == "13.0" &&
+                  Complex(0.1, 0.2).abs.to_s == "0.223606797749979")
+  # An infinity beats a NaN, which is IEEE-754's rule for hypot and MRI's.
+  check("rc46aj", Complex(1.0 / 0.0, 0.0 / 0.0).abs.to_s == "Infinity" &&
+                  Complex(0.0 / 0.0, v[0]).abs.to_s == "NaN")
+end
+def s46_tor(x)
+  begin
+    x.to_r
+    return "no error"
+  rescue FloatDomainError => e
+    return "FloatDomainError:" + e.message
+  end
 end
 def s46_zerodiv
   begin
@@ -2524,12 +2608,13 @@ def s47
   r = (1..2)
   check("eq47e", a.equal?(a) && h.equal?(h) && r.equal?(r))
   check("eq47f", ![1].equal?([1]) && !({}).equal?({}) && !(1..2).equal?(1..2))
-  # NOTE the non-empty block bodies. `proc { }` with an EMPTY one is read as the
-  # bare name `proc` followed by an empty HASH literal in all three engines - the
-  # interpreter half then says *unknown Hash method: lambda?* and both compiled
-  # halves *variable not defined: proc*. That is a PARSE defect that predates this
-  # section (reproduced at 22e7b44) and it is not what this section is about, so
-  # the rows below step around it rather than assert it.
+  # The block bodies below are non-empty for no reason any more: `x = proc { }` with
+  # an EMPTY body used to be read as the bare name `proc` followed by an empty HASH
+  # literal, so the interpreter half said *unknown Hash method: lambda?* and both
+  # compiled halves *variable not defined: proc*. CmdArgAhead now refuses to open a
+  # parenthesis-less argument list with `{`, which is Ruby's own rule - a brace after
+  # a method name is always a block - and the eq47k..eq47n rows below assert it.
+  # docs/todo.md 1.3.
   pr = proc { 1 }
   pr2 = proc { 1 }
   check("eq47g", pr.equal?(pr) && !pr.equal?(pr2))
@@ -2539,6 +2624,32 @@ def s47
   # Complex are rebuilt by every operation.
   check("eq47i", !(2 ** 70).equal?(2 ** 70) && !Rational(1, 3).equal?(Rational(1, 3)))
   check("eq47j", !Complex(1, 2).equal?(Complex(1, 2)) && !v[0].equal?("1"))
+  # ----- an EMPTY block on an assignment's right-hand side (docs/todo.md 1.3) -
+  # `x = proc { }` was `x = proc({})`, because a parenthesis-less command argument
+  # list would open on `{`. In Ruby a brace after a method name is ALWAYS a block:
+  # MRI needs parentheses for a Hash argument and rejects `f {a: 1}` outright with
+  # *syntax error, unexpected ':'*. The empty block is what made it visible; the
+  # non-empty one always worked, and so did `p proc { }.lambda?`, which reaches the
+  # brace through Primary -> Call rather than through the command form.
+  ep = proc { }
+  el = lambda { }
+  check("eq47k", !ep.lambda? && el.lambda? && ep.call.nil? && el.call.nil?)
+  check("eq47l", ep.class == Proc && el.class == Proc && ep.arity == 0)
+  # A bare statement and a method call take the same path, and a block still wins
+  # over a Hash argument there too.
+  check("eq47m", s47blk { } == "blk" && s47blk({}) == "hash:{}" &&
+                 s47blk { 1 } == "blk")
+  # ...and `{ }` really IS a Hash literal everywhere a value is expected, which is
+  # the half of the rule the fix must not break.
+  eh = { }
+  eh2 = {:a => 1}
+  eh3 = {b: 2}
+  check("eq47n", eh.class == Hash && eh.empty? && eh2[:a] == 1 && eh3[:b] == 2 &&
+                 eh2.to_s == "{:a=>1}")
+end
+def s47blk(h = nil)
+  return "blk" if block_given?
+  return "hash:" + h.to_s
 end
 class S47C
 end
@@ -2706,6 +2817,79 @@ def s45
                  s45m("%1$d %1$d", [1]) == "OK:1 1")
   check("mf45z", s45m("%s", nil) == "OK:" && s45m("%s", {:a => 1}) == "OK:{:a=>1}" &&
                  s45m("abc", []) == "OK:abc" && s45m("%%", []) == "OK:%")
+  # ----- what a NUMERIC directive may be given (docs/todo.md 2.4) -------------
+  # MRI's numeric directives CONVERT the operand with Kernel#Integer / Kernel#Float
+  # rules: they raise on a value with no number in it, and they PARSE one whose text
+  # has a number. Every engine went straight to to_f, whose answer is 0 for nil,
+  # true, a Symbol and an Array - AND 0 for the perfectly good string "12". Agreed
+  # and wrong in all four legs. nil/true/false name THEMSELVES in the message and
+  # everything else names its CLASS, which is MRI's own wording.
+  check("mf45aa", s45t("%d", [nil]) == "TE:can't convert nil into Integer" &&
+                  s45t("%d", [true]) == "TE:can't convert true into Integer" &&
+                  s45t("%d", [false]) == "TE:can't convert false into Integer")
+  check("mf45ab", s45t("%d", [:s]) == "TE:can't convert Symbol into Integer" &&
+                  s45t("%d", [[1]]) == "TE:can't convert Array into Integer")
+  # Every integer directive shares the rule, not just %d.
+  check("mf45ac", s45t("%x", [nil]) == "TE:can't convert nil into Integer" &&
+                  s45t("%o", [nil]) == "TE:can't convert nil into Integer" &&
+                  s45t("%b", [nil]) == "TE:can't convert nil into Integer" &&
+                  s45t("%u", [nil]) == "TE:can't convert nil into Integer")
+  # ...and every float directive says Float, including %a, which is rendered by a
+  # different file in the compiler half and needed the check of its own.
+  check("mf45ad", s45t("%f", [nil]) == "TE:can't convert nil into Float" &&
+                  s45t("%e", [nil]) == "TE:can't convert nil into Float" &&
+                  s45t("%g", [nil]) == "TE:can't convert nil into Float" &&
+                  s45t("%a", [nil]) == "TE:can't convert nil into Float")
+  # %c has a message of its own, and it is not the Integer one.
+  check("mf45ae", s45t("%c", [nil]) == "TE:no implicit conversion from nil to integer")
+  # A STRING operand is PARSED, with Kernel#Integer's whole grammar - surrounding
+  # space, a 0x radix prefix and _ separators - and an unparseable one is an
+  # ArgumentError naming the inspected string, not a TypeError.
+  check("mf45af", s45t("%d", ["12"]) == "OK:12" && s45t("%d", [" 12 "]) == "OK:12" &&
+                  s45t("%d", ["0x1f"]) == "OK:31" && s45t("%d", ["1_0"]) == "OK:10")
+  check("mf45ag", s45t("%d", ["x"]) == "AE:invalid value for Integer(): \"x\"" &&
+                  s45t("%d", [""]) == "AE:invalid value for Integer(): \"\"" &&
+                  s45t("%d", ["7abc"]) == "AE:invalid value for Integer(): \"7abc\"")
+  check("mf45ah", s45t("%f", ["1.5"]) == "OK:1.500000" && s45t("%f", ["1e3"]) == "OK:1000.000000" &&
+                  s45t("%f", ["x"]) == "AE:invalid value for Float(): \"x\"")
+  # ...and what the rule does NOT change. %s and %p take anything; a Float, a
+  # Rational and a Complex are all converted; the flags still apply.
+  check("mf45ai", s45t("%s", [nil]) == "OK:" && s45t("%p", [nil]) == "OK:nil" &&
+                  s45t("%d", [1.7]) == "OK:1" && s45t("%d", [-1.7]) == "OK:-1")
+  check("mf45aj", s45t("%d", [Rational(3, 2)]) == "OK:1" && s45t("%d", [Complex(1, 0)]) == "OK:1" &&
+                  s45t("%f", [Rational(3, 2)]) == "OK:1.500000" && s45t("%c", [65]) == "OK:A")
+  # A USER OBJECT is converted with the two names Kernel#Integer tries - #to_int, then
+  # #to_i - and with #to_f for a float directive. Without one it raises, and the message
+  # names ITS OWN CLASS: rbClassName / rubyClassName answer "" for a user object, so
+  # both compiled halves said "Object" where the interpreter said "S45Plain" until a
+  # native probe caught it. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+  check("mf45ak", s45t("%d", [S45Int.new]) == "OK:7" && s45t("%x", [S45Int.new]) == "OK:7" &&
+                  s45t("%d", [S45Toi.new]) == "OK:42")
+  check("mf45al", s45t("%f", [S45Flo.new]) == "OK:2.500000" && s45t("%c", [S45Int.new]) == "OK:\a")
+  check("mf45am", s45t("%d", [S45Plain.new]) == "TE:can't convert S45Plain into Integer" &&
+                  s45t("%f", [S45Plain.new]) == "TE:can't convert S45Plain into Float" &&
+                  s45t("%c", [S45Plain.new]) == "TE:no implicit conversion of S45Plain into Integer")
+end
+class S45Plain
+end
+class S45Int
+  def to_int; 7; end
+  def to_i; 9; end
+end
+class S45Toi
+  def to_i; 42; end
+end
+class S45Flo
+  def to_f; 2.5; end
+end
+def s45t(f, a)
+  begin
+    return "OK:" + (f % a)
+  rescue TypeError => e
+    return "TE:" + e.message
+  rescue ArgumentError => e
+    return "AE:" + e.message
+  end
 end
 
 s39() # SECTION-CALL 39

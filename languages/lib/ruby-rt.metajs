@@ -1399,16 +1399,141 @@ function rbImOf(v) {
     return 0
 }
 
+// ----- Float#to_r, EXACTLY -------------------------------------------------
+//
+// A double IS m * 2^e with m an integer below 2^53, so its Rational is exact and needs
+// NO bit access - the same argument manual 7.7 makes for ruby's %a, and the same safety
+// property: scaling a double by a power of two is exact provided you never overflow and
+// never enter the subnormals, and the loops below are driven so they do not. (1.5).to_r
+// was (1.5/1) in all four legs where MRI says (3/2).
+//
+// WHAT THIS CANNOT REACH is a property of the value model, not of the arithmetic: n and
+// d are DOUBLES, so d = 2^-e is representable only while -e <= 1023. A normal double may
+// need 2^1074 (the second-smallest normal reduces to an ODD numerator over 2^1074), so
+// |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
+// denominator this model cannot hold, and falls back to the old x/1. Closing it is the
+// bignum-Rational second value model docs/todo.md 2.4 already names.
+//
+// An infinity or a NaN has no Rational: MRI raises FloatDomainError, and WITHOUT the
+// guard this HUNG - rbGcd does `x % y` with y = NaN forever, so Float::INFINITY.to_r
+// never returned in any engine. The twins are ratOfFlo in ruby-interpreter.abnf and
+// rubyRatOfFlo in abnf/jsrt.go.
+function rbRatOfFlo(x) {
+    rbFloDomain(x)
+    if (x == 0) { return rbMkRat(0, 1) }
+    var neg = x < 0
+    var a = neg ? 0 - x : x
+    var e = 0
+    // Normalize the significand into [2^52, 2^53), where it is an exact integer.
+    // Doubling a subnormal and halving a large value are both exact.
+    while (a < 4503599627370496) { a = a * 2 ; e = e - 1 }
+    while (a >= 9007199254740992) { a = a / 2 ; e = e + 1 }
+    // Reduce the power of two out of the numerator, so the gcd has nothing to find.
+    while (e < 0 && a / 2 == Math.floor(a / 2)) { a = a / 2 ; e = e + 1 }
+    // Every pair built here is ALREADY reduced - the loop above took the twos out of a
+    // and d is a power of two, so their gcd is 1 - so the record is built directly
+    // rather than through rbMkRat. That is not only a saving: rbMkRat's Euclid runs
+    // `x % y` on a pair spanning 1074 binades, and the floor's d_mod_go is a
+    // shift-and-subtract loop, one iteration per binade. The fallback pair (5e-324, 1)
+    // took the NATIVE binary past 45 seconds through it at base, and does not any more.
+    //
+    // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
+    // integral Float past 2^53, whose numerator rbIntStr expands exactly.
+    if (e >= 0 || e < 0 - 1023) { return {__rat: true, n: x, d: 1} }
+    var d = 1
+    var k = 0
+    while (k < 0 - e) { d = d * 2 ; k = k + 1 }
+    if (neg) { return {__rat: true, n: 0 - a, d: d} }
+    return {__rat: true, n: a, d: d}
+}
+
 function rbAsRat(v) {
     if (rbIsRat(v)) { return v }
+    if (rbIsFlo(v)) { return rbRatOfFlo(v["f"]) }
+    if (typeof v == "number") { return rbMkRat(v, 1) }
     return rbMkRat(rbToF(v), 1)
+}
+
+// ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) --------------
+//
+// The plain sum SQUARES both parts, so it overflows to Infinity above ~1.3e154 and
+// underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well:
+// Complex(1e200, 1e200).abs was Infinity and Complex(1e-200, 1e-200).abs was 0.0, in all
+// four legs, against MRI's 1.414213562373095e+200 and 1.414213562373095e-200.
+// Complex(3, 4).abs is 5.0 either way, which is why the claim does not reproduce at small
+// integers.
+//
+// THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to the
+// textbook `hi * sqrt(1 + (lo/hi)^2)`. Measured against /usr/bin/ruby over the pairs where
+// the plain sum is unsafe, 40,000 per band:
+//
+//	                     hi >= 2^511      hi <= 2^-511
+//	hi*sqrt(1+t*t)       1,825 differ     1,937 differ
+//	power-of-two scaled     23 differ        21 differ
+//
+// and the ratio form also moves 5,370 of 20,000 pairs in the ORDINARY range, so it cannot
+// simply replace the plain sum either. Scaling by 2^k is EXACT (manual 7.7's %a argument),
+// so the scaled operands carry the same significands and the same roundings as the
+// unscaled ones - which is why the two paths agree bit-for-bit wherever both are defined,
+// and the safe-band branch below is a SPEED guard and not a second answer.
+//
+// The residue is ~1 in 1,700 pairs at 1 ulp, and it is not closable here: Apple's libm
+// hypot is not correctly rounded (3,165 of 20,000 differ from the exactly-rounded answer,
+// computed in Ruby over exact Rationals), so no double formula matches it everywhere. All
+// three engines run this same arithmetic, so they agree by construction. The twins are
+// hypotOf in ruby-interpreter.abnf and rubyHypot in abnf/jsrt.go.
+//
+// 2^511 is the widest safe threshold: hi <= 2^511 keeps hi*hi + hi*hi under 2^1023, and
+// hi >= 2^-511 keeps hi*hi at or above 2^-1022, so it never goes subnormal. Built by a
+// loop because MetaJS has no exponent literal (manual chapter 4), and cached because it is
+// 511 multiplies.
+var RB_HYP_BIG = 0
+function rbHypBig() {
+    if (RB_HYP_BIG != 0) { return RB_HYP_BIG }
+    var r = 1
+    var i = 0
+    while (i < 511) { r = r * 2 ; i = i + 1 }
+    RB_HYP_BIG = r
+    return r
+}
+// 2^k for the k that puts hi in [1, 2). Every value on the way is a power of two and
+// therefore exact, at both ends of the range: k runs from 1023 down to -1074.
+function rbHypScale(hi) {
+    var h = hi
+    var s = 1
+    while (h >= 2) { h = h / 2 ; s = s * 2 }
+    while (h < 1) { h = h * 2 ; s = s / 2 }
+    return s
+}
+function rbHypot(a, b) {
+    var x = a < 0 ? 0 - a : a
+    var y = b < 0 ? 0 - b : b
+    // An infinity beats a NaN, which is IEEE-754's rule for hypot and MRI's:
+    // Complex(Float::INFINITY, Float::NAN).abs is Infinity, not NaN.
+    if (x - x != 0 && x == x) { return x }
+    if (y - y != 0 && y == y) { return y }
+    if (x != x || y != y) { return x + y }
+    var hi = x > y ? x : y
+    if (hi == 0) { return 0 }
+    var big = rbHypBig()
+    if (hi <= big && hi >= 1 / big) { return Math.sqrt(x * x + y * y) }
+    var sc = rbHypScale(hi)
+    var xs = x / sc
+    var ys = y / sc
+    return Math.sqrt(xs * xs + ys * ys) * sc
 }
 
 // Rational#to_s and Complex#to_s. The SIGN is the whole content of the second one:
 // a negative imaginary part joins with "-" and its own magnitude, and every engine
 // wrote the "+" unconditionally, so Complex(3, -4) rendered `3+-4i' where MRI
 // writes `3-4i'. Agreed in all four legs and wrong in all four. docs/todo.md 1.3.
-function rbRatText(v) { return ("" + v["n"]) + "/" + ("" + v["d"]) }
+// Both parts go through rbIntStr and NOT through `"" + n`, because a Rational's parts
+// are INTEGERS and `"" + n` answers the SHORTEST ROUND-TRIPPING form, which past 2^53 is
+// a different integer: `"" + 36028797018963968` (2^55) is "36028797018963970". That
+// became reachable the moment #to_r started answering the exact pair - MRI's (0.001).to_r
+// is 1152921504606847/1152921504606846976 - and it printed 36028797018963970 for
+// (0.1).to_r in all four legs. rbIntStr is the exact expansion.
+function rbRatText(v) { return rbIntStr(v["n"]) + "/" + rbIntStr(v["d"]) }
 function rbCpxText(v) {
     var im = v["im"]
     if (im < 0) { return ("" + v["re"]) + "-" + ("" + (0 - im)) + "i" }
@@ -2291,6 +2416,95 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
 }
 
 // The base of a conversion character, and 0 for the ones that are not integers.
+// ----- what a numeric directive may be GIVEN --------------------------------
+//
+// MRI's numeric directives do not read a number out of the operand, they CONVERT it with
+// Kernel#Integer / Kernel#Float rules - so they raise on a value that has no number in
+// it, and they PARSE one that has a number in its text. Every engine here went straight
+// to rbToF, whose answer is 0 for nil, true, false, a Symbol and an Array, AND 0 for the
+// perfectly good string "12". Measured against /usr/bin/ruby, agreed and wrong in all
+// four legs:
+//
+//   "%d" % [nil]    "0"   MRI: TypeError    can't convert nil into Integer
+//   "%d" % [true]   "0"   MRI: TypeError    can't convert true into Integer
+//   "%d" % [:s]     "0"   MRI: TypeError    can't convert Symbol into Integer
+//   "%d" % ["x"]    "0"   MRI: ArgumentError invalid value for Integer(): "x"
+//   "%d" % ["12"]   "0"   MRI: "12"
+//   "%f" % [nil]    "0.000000"  MRI: TypeError can't convert nil into Float
+//   "%c" % [nil]    ""    MRI: TypeError    no implicit conversion from nil to integer
+//
+// nil / true / false name THEMSELVES in the message and everything else names its CLASS,
+// which is MRI's wording and not a simplification. %c has a message of its own. The twins
+// are fmtIntOperand / fmtFloOperand / fmtCharOperand in ruby-interpreter.abnf and
+// rubyFmtIntOperand / rubyFmtFloOperand / rubyFmtCharOperand in abnf/jsrt.go.
+// docs/todo.md 2.4.
+// rbOwnerName and NOT rbClassName: rbClassName answers "" for a USER OBJECT, so the
+// message read "can't convert Object into Integer" here while ruby-interpreter.abnf
+// said "Plain" off classOf - a halves divergence caught by a native probe before it
+// shipped. rbOwnerName is the existing helper that walks __class.__name first.
+function rbFmtConvName(v) {
+    if (rbIsNil(v)) { return "nil" }
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    return rbOwnerName(v)
+}
+// A user object is CONVERTED first, with the same two names Kernel#Integer tries
+// (#to_int, then #to_i) and #to_f for a float directive - MRI's `"%d" % obj` is 7 when
+// obj answers to_int. Same find-then-call shape rbStr already uses for #to_s.
+function rbFmtUserConv(v, n1, n2) {
+    if (!rbUserObj(v)) { return null }
+    var m = rbFindMethod(v, n1)
+    if (m !== undefined) { return m.apply(undefined, [v]) }
+    if (n2 != "") {
+        var m2 = rbFindMethod(v, n2)
+        if (m2 !== undefined) { return m2.apply(undefined, [v]) }
+    }
+    return null
+}
+function rbFmtIsNumV(v) {
+    if (typeof v == "number") { return true }
+    if (rbIsBig(v)) { return true }
+    if (rbIsFlo(v)) { return true }
+    if (rbIsRat(v)) { return true }
+    return rbIsCpx(v)
+}
+function rbFmtIntOperand(v) {
+    if (rbFmtIsNumV(v)) { return v }
+    if (typeof v == "string") {
+        var ri = rbConvStrToInt(v, 0)
+        if (ri["ok"]) { return ri["v"] }
+        rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
+    }
+    var uc = rbFmtUserConv(v, "to_int", "to_i")
+    if (uc !== null && rbFmtIsNumV(uc)) { return uc }
+    rbRaiseErr("TypeError", "can't convert " + rbFmtConvName(v) + " into Integer")
+    return 0
+}
+function rbFmtFloOperand(v) {
+    if (rbFmtIsNumV(v)) { return rbToF(v) }
+    if (typeof v == "string") {
+        var rf = rbConvStrToFloat(v)
+        if (rf["ok"]) { return rf["v"] }
+        rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
+    }
+    var uf = rbFmtUserConv(v, "to_f", "")
+    if (uf !== null && rbFmtIsNumV(uf)) { return rbToF(uf) }
+    rbRaiseErr("TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
+    return 0
+}
+// %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
+// "no implicit conversion from nil to integer" and everything else is
+// "no implicit conversion of Symbol into Integer" - a different preposition and a
+// different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
+function rbFmtCharOperand(v) {
+    if (rbFmtIsNumV(v)) { return rbToF(v) }
+    var uc = rbFmtUserConv(v, "to_int", "to_i")
+    if (uc !== null && rbFmtIsNumV(uc)) { return rbToF(uc) }
+    if (rbIsNil(v)) { rbRaiseErr("TypeError", "no implicit conversion from nil to integer") }
+    rbRaiseErr("TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
+    return 0
+}
+
 function rbIntBase(conv) {
     // %u is MRI's %d: the 1.8 "unsigned" meaning is long gone and "%u" % -5 is
     // "-5". It was in the interpreter half's intBase and in neither compiled one,
@@ -2836,7 +3050,8 @@ function rbFormat(spec, arg) {
         var base = rbIntBase(conv)
         if (base != 0) {
             var iv = anytype
-            iv = rbIsBig(nx) ? nx : Math.trunc(rbToF(nx))
+            var ivx = rbFmtIntOperand(nx)
+            iv = rbIsBig(ivx) ? ivx : Math.trunc(rbToF(ivx))
             if (!rbIsBig(iv) && (iv !== iv || iv - iv !== 0)) {
                 // MRI's integer directives convert the operand with to_i, so an
                 // infinity or a NaN raises FloatDomainError here exactly as
@@ -2853,7 +3068,7 @@ function rbFormat(spec, arg) {
                 intPrec = prec >= 0
             }
         } else if (conv == "f") {
-            var ff = rbToF(nx)
+            var ff = rbFmtFloOperand(nx)
             var fw = rbFloatWord(ff)
             if (fw != "") {
                 body = fw
@@ -2863,7 +3078,7 @@ function rbFormat(spec, arg) {
                 if (alt) { body = rbAltPoint(body) }
             }
         } else if (conv == "e" || conv == "E") {
-            var ef = rbToF(nx)
+            var ef = rbFmtFloOperand(nx)
             var ew = rbFloatWord(ef)
             if (ew != "") {
                 body = ew
@@ -2874,7 +3089,7 @@ function rbFormat(spec, arg) {
                 if (conv == "E") { body = rbUpper(body) }
             }
         } else if (conv == "g" || conv == "G") {
-            var gf = rbToF(nx)
+            var gf = rbFmtFloOperand(nx)
             var gw = rbFloatWord(gf)
             if (gw != "") {
                 body = gw
@@ -2896,8 +3111,13 @@ function rbFormat(spec, arg) {
             // a precision on it outright ("%.0c" % 65 is "A"). MRI demands a String
             // of EXACTLY one character and raises ArgumentError otherwise; this
             // takes the first.
-            if (typeof nx == "string") { body = nx.length > 0 ? nx.charAt(0) : "" }
-            else { body = rbCharCode(Math.trunc(rbToF(nx))) }
+            // A String operand must be EXACTLY one character. This took the first and
+            // said so at the site; MRI raises, and the message is its own.
+            if (typeof nx == "string") {
+                if (rbCharCount(nx) != 1) { rbRaiseErr("ArgumentError", "%c requires a character") }
+                body = nx
+            }
+            else { body = rbCharCode(Math.trunc(rbFmtCharOperand(nx))) }
         } else if (conv == "p") {
             // %p is #inspect where %s is #to_s, and it truncates by BYTES the same
             // way: "%.2p" % "abcdef" is `"a'.
@@ -2908,7 +3128,7 @@ function rbFormat(spec, arg) {
             // inside rbHexBody, because the 0 flag has to fill behind BOTH the sign
             // and the "0x": "%020a" % -0.0 is "-0x00000000000000p+0". keep counts
             // them.
-            var af = rbToF(nx)
+            var af = rbFmtFloOperand(nx)
             var aw = rbFloatWord(af)
             if (aw != "") {
                 body = aw
@@ -4528,6 +4748,16 @@ function rbNumMethod(t, name, args) {
         return rbMkFlo(x)
     }
     if (name == "to_r") { return rbAsRat(t) }
+    // #to_c existed in NEITHER compiled half: `5.to_c' died with *method call 'to_c' on
+    // a number* while ruby-interpreter.abnf answered 5+0i, a live halves divergence at
+    // base. MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is (5.0+0i));
+    // this Complex carries two raw doubles, so it answers (5+0i) for both - the same
+    // part-ness gap Complex(0, 0).abs has, recorded rather than invented around.
+    // docs/todo.md 1.2.
+    if (name == "to_c") {
+        if (rbIsCpx(t)) { return t }
+        return rbMkCpx(x, 0)
+    }
     // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
     // through rbToF, so (2r/3r).abs answered a Float and (3+4i).abs answered 3.0 -
     // the REAL PART - where MRI says (2/3) and 5.0. Agreed in all four legs and
@@ -4537,7 +4767,7 @@ function rbNumMethod(t, name, args) {
             if (t["n"] < 0) { return rbMkRat(0 - t["n"], t["d"]) }
             return t
         }
-        if (rbIsCpx(t)) { return rbMkFlo(Math.sqrt(t["re"] * t["re"] + t["im"] * t["im"])) }
+        if (rbIsCpx(t)) { return rbMkFlo(rbHypot(t["re"], t["im"])) }
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
         return Math.abs(x)
     }

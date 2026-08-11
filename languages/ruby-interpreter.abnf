@@ -1994,7 +1994,17 @@ CmdArgAhead = :script(~~
             return no
         }
         // Characters that can only continue an expression, never open one.
-        if (cc === 40 || cc === 41 || cc === 93 || cc === 125 || cc === 44 || cc === 59
+        // `{` IS ONE OF THEM, and that is Ruby's rule rather than a convenience: a
+        // brace after a method name is always a BLOCK, never a Hash argument - MRI
+        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}` with
+        // *syntax error, unexpected ':'*. Without 123 here, CommandForm read the
+        // brace as an ArrowArg and `x = proc { }` became `x = proc({})`, so the
+        // interpreter answered *unknown Hash method: lambda?* and both compiled
+        // halves *variable not defined: proc*. The shape is specifically a command
+        // argument list: `p proc { }.lambda?` always worked, because there the
+        // brace is reached through Primary -> Call -> `BareName Block`.
+        // docs/todo.md 1.3.
+        if (cc === 40 || cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)
@@ -3669,7 +3679,131 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBig(v)) { return bigToNum(v) }
         return 0
     }
-    function asRat(v) { if (isRat(v)) { return v } return mkRat(toF(v), 1) }
+    // ----- Float#to_r, EXACTLY -----------------------------------------------
+    //
+    // A double IS m * 2^e with m an integer below 2^53, so its Rational is exact and
+    // needs NO bit access - the same argument manual 7.7 makes for ruby's %a, and the
+    // same safety property: scaling a double by a power of two is exact provided you
+    // never overflow and never enter the subnormals, and the loops below are driven so
+    // they do not. (1.5).to_r was (1.5/1) in all four legs where MRI says (3/2), and
+    // (0.1).to_r has to come out 3602879701896397/36028797018963968.
+    //
+    // WHAT THIS CANNOT REACH, and it is a property of the value model rather than of
+    // the arithmetic: n and d are DOUBLES here, so d = 2^-e is representable only
+    // while -e <= 1023. A normal double may need 2^1074 (the second-smallest normal,
+    // 2^-1022 * (1 + 2^-52), reduces to an ODD numerator over 2^1074), so every
+    // |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
+    // denominator this model cannot hold. Those fall back to the old x/1, which is
+    // visibly not an Integer pair rather than a plausible wrong one. Closing it is
+    // the bignum-Rational second value model docs/todo.md 2.4 already names.
+    //
+    // An infinity or a NaN has no Rational at all: MRI raises FloatDomainError, and
+    // WITHOUT the guard this HUNG - mkRat's gcd2 does `x % y` with y = NaN forever,
+    // so `Float::INFINITY.to_r` never returned in the interpreter OR under llvm.Run.
+    var RAT_M52 = 4503599627370496          // 2^52
+    var RAT_M53 = 9007199254740992          // 2^53
+    function ratOfFlo(x) {
+        floDomainGuard(x)
+        if (x == 0) { return mkRat(0, 1) }
+        var neg = x < 0
+        var a = neg ? 0 - x : x
+        var e = 0
+        // Normalize the significand into [2^52, 2^53), where it is an exact integer.
+        // Doubling a subnormal and halving a large value are both exact.
+        while (a < RAT_M52) { a = a * 2 ; e = e - 1 }
+        while (a >= RAT_M53) { a = a / 2 ; e = e + 1 }
+        // Reduce the power of two out of the numerator, so the gcd below has nothing
+        // left to find and d stays as small as the pair allows.
+        while (e < 0 && a / 2 == Math.floor(a / 2)) { a = a / 2 ; e = e + 1 }
+        // Every pair built here is ALREADY reduced - the loop above took the twos out
+        // of a and d is a power of two, so their gcd is 1 - so the record is built
+        // directly rather than through mkRat. That is not only a saving: mkRat's
+        // Euclid runs `x % y` on a pair spanning 1074 binades, and the floor's
+        // d_mod_go is a shift-and-subtract loop, one iteration per binade. The
+        // fallback pair (5e-324, 1) took the NATIVE binary past 45 seconds through it
+        // at base, and does not any more.
+        //
+        // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
+        // integral Float too big for 2^53, whose numerator intStr expands exactly.
+        if (e >= 0 || e < 0 - 1023) { return {__rat: true, n: x, d: 1} }
+        var d = 1
+        for (var i = 0; i < 0 - e; i++) { d = d * 2 }
+        return {__rat: true, n: neg ? 0 - a : a, d: d}
+    }
+    function asRat(v) {
+        if (isRat(v)) { return v }
+        if (isFlo(v)) { return ratOfFlo(v.f) }
+        if (typeof v == "number") { return mkRat(v, 1) }
+        return mkRat(toF(v), 1)
+    }
+    // ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) -------------
+    //
+    // The plain sum SQUARES both parts, so it overflows to Infinity above ~1.3e154 and
+    // underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well:
+    // Complex(1e200, 1e200).abs was Infinity and Complex(1e-200, 1e-200).abs was 0.0,
+    // in all four legs, against MRI's 1.414213562373095e+200 and
+    // 1.414213562373095e-200. Complex(3, 4).abs is 5.0 either way, which is why the
+    // claim does not reproduce at small integers.
+    //
+    // THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to
+    // the textbook `hi * sqrt(1 + (lo/hi)^2)`. Measured against /usr/bin/ruby over the
+    // pairs where the plain sum is unsafe, 40,000 per band:
+    //
+    //                        hi >= 2^511      hi <= 2^-511
+    //   hi*sqrt(1+t*t)       1,825 differ     1,937 differ
+    //   power-of-two scaled     23 differ        21 differ
+    //
+    // and the ratio form also moves 5,370 of 20,000 pairs in the ORDINARY range, so it
+    // cannot simply replace the plain sum either. Scaling by 2^k is EXACT (manual 7.7's
+    // %a argument), so the scaled operands carry the same significands and the same
+    // roundings as the unscaled ones - which is why the two paths agree bit-for-bit
+    // wherever both are defined, and the safe-band branch below is a SPEED guard and
+    // not a second answer.
+    //
+    // The residue is ~1 in 1,700 pairs at 1 ulp, and it is not closable here: Apple's
+    // libm hypot is not correctly rounded (3,165 of 20,000 differ from the
+    // exactly-rounded answer, computed in Ruby over exact Rationals), so no double
+    // formula matches it everywhere. All three engines run this same arithmetic, so
+    // they agree by construction.
+    //
+    // 2^511 is the widest safe threshold: hi <= 2^511 keeps hi*hi + hi*hi under 2^1023,
+    // and hi >= 2^-511 keeps hi*hi at or above 2^-1022, so it never goes subnormal.
+    // Built by a loop because MetaJS has no exponent literal (manual chapter 4), and
+    // cached because it is 511 multiplies.
+    var HYP_BIG = 0
+    function hypBig() {
+        if (HYP_BIG != 0) { return HYP_BIG }
+        var r = 1
+        for (var i = 0; i < 511; i++) { r = r * 2 }
+        HYP_BIG = r
+        return r
+    }
+    // 2^k for the k that puts hi in [1, 2). Every value on the way is a power of two and
+    // therefore exact, at both ends of the range: k runs from 1023 down to -1074.
+    function hypScale(hi) {
+        var h = hi
+        var s = 1
+        while (h >= 2) { h = h / 2 ; s = s * 2 }
+        while (h < 1) { h = h * 2 ; s = s / 2 }
+        return s
+    }
+    function hypotOf(a, b) {
+        var x = a < 0 ? 0 - a : a
+        var y = b < 0 ? 0 - b : b
+        // An infinity beats a NaN, which is IEEE-754's rule for hypot and MRI's:
+        // Complex(Float::INFINITY, Float::NAN).abs is Infinity, not NaN.
+        if (x - x != 0 && x == x) { return x }
+        if (y - y != 0 && y == y) { return y }
+        if (x != x || y != y) { return x + y }
+        var hi = x > y ? x : y
+        if (hi == 0) { return 0 }
+        var big = hypBig()
+        if (hi <= big && hi >= 1 / big) { return Math.sqrt(x * x + y * y) }
+        var sc = hypScale(hi)
+        var xs = x / sc
+        var ys = y / sc
+        return Math.sqrt(xs * xs + ys * ys) * sc
+    }
     function reOf(v) { if (isCpx(v)) { return v.re } return toF(v) }
     function imOf(v) { if (isCpx(v)) { return v.im } return 0 }
     function isUserObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined }
@@ -4626,7 +4760,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `3+-4i' where MRI writes `3-4i'. Agreed in all four legs and wrong in all
     // four. Mirrors rbRatText / rbCpxText of lib/ruby-rt.metajs and rubyRatText /
     // rubyCpxText of abnf/jsrt.go. docs/todo.md 1.3.
-    function ratText(v) { return "" + v.n + "/" + v.d }
+    // Both parts go through intStr and NOT through `"" + n`, because a Rational's
+    // parts are INTEGERS and `"" + n` answers the SHORTEST ROUND-TRIPPING form,
+    // which past 2^53 is a different integer: `"" + 36028797018963968` (2^55) is
+    // "36028797018963970". That became reachable the moment #to_r started answering
+    // the exact pair - MRI's (0.001).to_r is 1152921504606847/1152921504606846976
+    // and its denominator is 2^60 - and it printed 36028797018963970 for (0.1).to_r
+    // in all four legs. intStr is the exact expansion, and it is the same rule
+    // Integer#to_s already follows.
+    function ratText(v) { return intStr(v.n) + "/" + intStr(v.d) }
     function cpxText(v) {
         var im = v.im
         if (im < 0) { return "" + v.re + "-" + (0 - im) + "i" }
@@ -5343,6 +5485,83 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (conv == "b" || conv == "B") { return 2 }
         return 0
     }
+    // ----- what a numeric directive may be GIVEN -------------------------------
+    //
+    // MRI's numeric directives do not read a number out of the operand, they CONVERT
+    // it with Kernel#Integer / Kernel#Float rules - so they raise on a value that has
+    // no number in it, and they PARSE one that has a number in its text. Every engine
+    // here went straight to toF, whose answer is 0 for nil, true, false, a Symbol and
+    // an Array, AND 0 for the perfectly good string "12". Measured against
+    // /usr/bin/ruby, agreed and wrong in all four legs:
+    //
+    //   "%d" % [nil]    "0"   MRI: TypeError    can't convert nil into Integer
+    //   "%d" % [true]   "0"   MRI: TypeError    can't convert true into Integer
+    //   "%d" % [:s]     "0"   MRI: TypeError    can't convert Symbol into Integer
+    //   "%d" % ["x"]    "0"   MRI: ArgumentError invalid value for Integer(): "x"
+    //   "%d" % ["12"]   "0"   MRI: "12"
+    //   "%f" % [nil]    "0.000000"  MRI: TypeError can't convert nil into Float
+    //   "%c" % [nil]    ""    MRI: TypeError    no implicit conversion from nil to integer
+    //
+    // nil / true / false name THEMSELVES in the message and everything else names its
+    // CLASS, which is MRI's wording and not a simplification. %c has a message of its
+    // own. The twins are rbFmtIntOperand / rbFmtFloOperand in lib/ruby-rt.metajs and
+    // rubyFmtIntOperand / rubyFmtFloOperand in abnf/jsrt.go. docs/todo.md 2.4.
+    function fmtConvName(v) {
+        if (v === null || v === undefined) { return "nil" }
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        return classOf(v).__name
+    }
+    function fmtIsNumV(v) {
+        return typeof v == "number" || isBig(v) || isFlo(v) || isRat(v) || isCpx(v)
+    }
+    // A user object is CONVERTED first, with the same two names Kernel#Integer tries
+    // (#to_int, then #to_i) and #to_f for a float directive - MRI's `"%d" % obj` is 7
+    // when obj answers to_int. Same find-then-call shape rstr already uses for #to_s.
+    function fmtUserConv(v, n1, n2) {
+        if (!isUserObj(v)) { return null }
+        if (typeof lookupMethod(v.__class, n1) == "function") { return mcall(v, n1, [], null) }
+        if (n2 != "" && typeof lookupMethod(v.__class, n2) == "function") { return mcall(v, n2, [], null) }
+        return null
+    }
+    function fmtIntOperand(v) {
+        if (fmtIsNumV(v)) { return v }
+        if (typeof v == "string") {
+            var ri = convStrToInt(v, 0)
+            if (ri.ok) { return ri.v }
+            raiseErr("ArgumentError", "invalid value for Integer(): " + strInspect(v))
+        }
+        var uc = fmtUserConv(v, "to_int", "to_i")
+        if (uc !== null && fmtIsNumV(uc)) { return uc }
+        raiseErr("TypeError", "can't convert " + fmtConvName(v) + " into Integer")
+        return 0
+    }
+    function fmtFloOperand(v) {
+        if (fmtIsNumV(v)) { return toF(v) }
+        if (typeof v == "string") {
+            var rf = convStrToFloat(v)
+            if (rf.ok) { return rf.v }
+            raiseErr("ArgumentError", "invalid value for Float(): " + strInspect(v))
+        }
+        var uf = fmtUserConv(v, "to_f", "")
+        if (uf !== null && fmtIsNumV(uf)) { return toF(uf) }
+        raiseErr("TypeError", "can't convert " + fmtConvName(v) + " into Float")
+        return 0
+    }
+    // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
+    // "no implicit conversion from nil to integer" and everything else is
+    // "no implicit conversion of Symbol into Integer" - a different preposition and a
+    // different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
+    function fmtCharOperand(v) {
+        if (fmtIsNumV(v)) { return toF(v) }
+        var uc = fmtUserConv(v, "to_int", "to_i")
+        if (uc !== null && fmtIsNumV(uc)) { return toF(uc) }
+        if (v === null || v === undefined) {
+            raiseErr("TypeError", "no implicit conversion from nil to integer")
+        }
+        raiseErr("TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
+        return 0
+    }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
     // directive, in that directive's own case or not ("%G" % Float::INFINITY is
     // "Inf"), and pads them with SPACES even under the 0 flag. rubyFloatWord in
@@ -5513,7 +5732,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // over, and it is gone with baseStr's use here.
         if (base != 0) {
             var iv = anytype
-            iv = isBig(v) ? v : Math.trunc(toF(v))
+            var ivx = fmtIntOperand(v)
+            iv = isBig(ivx) ? ivx : Math.trunc(toF(ivx))
             if (!isBig(iv) && (iv !== iv || iv - iv !== 0)) {
                 // MRI's integer directives convert the operand with to_i, so an
                 // infinity or a NaN raises FloatDomainError here exactly as
@@ -5531,7 +5751,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         else if (conv == "f" || conv == "e" || conv == "E" || conv == "g" || conv == "G") {
-            var fv = toF(v)
+            var fv = fmtFloOperand(v)
             var word = floatWord(fv)
             if (word != "") { body = word ; nonFinite = true }
             else if (conv == "f") { body = altOrNot(fixedStr(fv, prec < 0 ? 6 : prec), alt) }
@@ -5546,7 +5766,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // hexBody, because the 0 flag has to fill behind BOTH the sign and the
         // "0x": "%020a" % -0.0 is "-0x00000000000000p+0". keep counts them.
         else if (conv == "a" || conv == "A") {
-            var av = toF(v)
+            var av = fmtFloOperand(v)
             var aword = floatWord(av)
             if (aword != "") { body = aword ; nonFinite = true }
             else {
@@ -5561,8 +5781,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // on it outright ("%.0c" % 65 is "A"). MRI demands a String of EXACTLY one
         // character and raises ArgumentError otherwise; this takes the first.
         else if (conv == "c") {
-            if (typeof v == "string") { body = v.length > 0 ? v.charAt(0) : "" }
-            else { body = charFromCode(Math.trunc(toF(v))) }
+            // A String operand must be EXACTLY one character. This took the first and
+            // said so at the site; MRI raises, and the message is its own.
+            if (typeof v == "string") {
+                if (charCount(v) != 1) { raiseErr("ArgumentError", "%c requires a character") }
+                body = v
+            }
+            else { body = charFromCode(Math.trunc(fmtCharOperand(v))) }
         }
         // %p is #inspect where %s is #to_s, and it truncates by BYTES the same way.
         else if (conv == "p") {
@@ -6635,7 +6860,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Agreed in all four legs and wrong in all four. docs/todo.md 1.3.
         if (name == "abs" || name == "magnitude") {
             if (isRat(t)) { return t.n < 0 ? mkRat(0 - t.n, t.d) : t }
-            if (isCpx(t)) { return mkFlo(Math.sqrt(t.re * t.re + t.im * t.im)) }
+            if (isCpx(t)) { return mkFlo(hypotOf(t.re, t.im)) }
             var x2 = toF(t)
             return mkFlo(x2 < 0 ? 0 - x2 : x2)
         }

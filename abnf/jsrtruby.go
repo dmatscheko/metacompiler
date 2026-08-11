@@ -464,12 +464,20 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		// note) and is why 9102c91's ratchet row could pin only "it terminates".
 		switch conv {
 		case 'd', 'i', 'u', 'x', 'X', 'o', 'b', 'B':
+			// The OPERAND CHECK comes first: MRI raises TypeError on nil before it
+			// can ever reach the to_i that raises FloatDomainError, and this
+			// pre-pass runs ahead of rubyFormat's own arm. rubyFmtIntOperand is in
+			// abnf/jsrt.go beside rubyFormat.
+			av = rt.rubyFmtIntOperand(av)
 			if _, isBig := av.(*jsBigInt); !isBig {
 				rubyFloDomain(rt, math.Trunc(rubyToF(av)))
 			}
 		}
 		if conv == 'a' || conv == 'A' {
-			out.WriteString(rubyHexDirective(av, flags, width, prec, conv == 'A'))
+			// %a is the one directive rendered in this file, so it needs the operand
+			// check here rather than in rubyFormat: "%a" % [nil] is MRI's
+			// *can't convert nil into Float*.
+			out.WriteString(rubyHexDirective(rt.rubyFmtFloOperand(av), flags, width, prec, conv == 'A'))
 			i = j
 			continue
 		}
@@ -661,13 +669,12 @@ func rubyHexBody(fv float64, prec int, alt, upper bool) string {
 // flags and the padding. %a is a NUMERIC directive - it takes a sign and honours
 // the 0 flag - and the zeros go behind BOTH the sign and the "0x", which is what
 // `keep' counts: "%020a" % -0.0 is "-0x00000000000000p+0".
-func rubyHexDirective(av interface{}, flags string, width, prec int, upper bool) string {
+func rubyHexDirective(f float64, flags string, width, prec int, upper bool) string {
 	left := strings.Contains(flags, "-")
 	zero := strings.Contains(flags, "0")
 	plus := strings.Contains(flags, "+")
 	space := strings.Contains(flags, " ")
 	alt := strings.Contains(flags, "#")
-	f := rubyToF(av)
 	body, keep, nonFinite := "", 0, false
 	if w, bad := rubyFloatWord(f); bad {
 		body, nonFinite = w, true

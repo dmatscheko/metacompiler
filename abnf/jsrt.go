@@ -4525,11 +4525,176 @@ func rubyImOf(v interface{}) float64 {
 	return 0
 }
 
-func rubyAsRat(v interface{}) jsRat {
+// ----- Float#to_r, EXACTLY -------------------------------------------------
+//
+// A double IS m * 2^e with m an integer below 2^53, so its Rational is exact and needs NO
+// bit access - the same argument manual 7.7 makes for ruby's %a, and the same safety
+// property: scaling a double by a power of two is exact provided you never overflow and
+// never enter the subnormals, and the loops below are driven so they do not. (1.5).to_r
+// was (1.5/1) in all four legs where MRI says (3/2).
+//
+// The arithmetic is spelled out rather than handed to math.Frexp, so this twin, layer 2
+// and the interpreter run THE SAME STEPS and agree by construction; math.Frexp takes an
+// out-parameter and is not reachable from MetaJS at all (manual 7.7).
+//
+// WHAT THIS CANNOT REACH is a property of the value model, not of the arithmetic: jsRat's
+// n and d are float64, so d = 2^-e is representable only while -e <= 1023. A normal double
+// may need 2^1074 (the second-smallest normal reduces to an ODD numerator over 2^1074), so
+// |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
+// denominator this model cannot hold, and falls back to the old x/1. Closing it is the
+// bignum-Rational second value model docs/todo.md 2.4 already names.
+//
+// An infinity or a NaN has no Rational: MRI raises FloatDomainError, and WITHOUT the guard
+// this HUNG - rubyGcd does math.Mod(x, y) with y = NaN forever, so Float::INFINITY.to_r
+// never returned under llvm.Run either. The twins are ratOfFlo in ruby-interpreter.abnf
+// and rbRatOfFlo in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyRatOfFlo(x float64) jsRat {
+	rubyFloDomain(rt, x)
+	if x == 0 {
+		return rubyMkRat(0, 1)
+	}
+	neg := x < 0
+	a := x
+	if neg {
+		a = -x
+	}
+	e := 0
+	// Normalize the significand into [2^52, 2^53), where it is an exact integer.
+	// Doubling a subnormal and halving a large value are both exact.
+	for a < 4503599627370496 {
+		a = a * 2
+		e = e - 1
+	}
+	for a >= 9007199254740992 {
+		a = a / 2
+		e = e + 1
+	}
+	// Reduce the power of two out of the numerator, so the gcd has nothing to find.
+	for e < 0 && a/2 == math.Floor(a/2) {
+		a = a / 2
+		e = e + 1
+	}
+	// Every pair built here is ALREADY reduced - the loop above took the twos out of a
+	// and d is a power of two, so their gcd is 1 - so the value is built directly rather
+	// than through rubyMkRat. That is not only a saving: rubyMkRat's Euclid runs
+	// math.Mod on a pair spanning 1074 binades, and layer 2's twin lowers that to the
+	// floor's d_mod_go, a shift-and-subtract loop with one iteration per binade. The
+	// fallback pair (5e-324, 1) took the NATIVE binary past 45 seconds through it at
+	// base, and does not any more.
+	//
+	// e >= 0 means x is itself an integer, and then to_r is x/1 - including every
+	// integral Float past 2^53, whose numerator rubyIntStr expands exactly.
+	if e >= 0 || e < -1023 {
+		return jsRat{n: x, d: 1}
+	}
+	d := 1.0
+	for k := 0; k < -e; k++ {
+		d = d * 2
+	}
+	if neg {
+		return jsRat{n: -a, d: d}
+	}
+	return jsRat{n: a, d: d}
+}
+
+func (rt *jsrt) rubyAsRat(v interface{}) jsRat {
 	if r, ok := v.(jsRat); ok {
 		return r
 	}
+	if f, ok := v.(jsFlo); ok {
+		return rt.rubyRatOfFlo(f.f)
+	}
+	if n, ok := v.(float64); ok {
+		return rubyMkRat(n, 1)
+	}
 	return rubyMkRat(rubyToF(v), 1)
+}
+
+// ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) --------------
+//
+// The plain sum SQUARES both parts, so it overflows to Infinity above ~1.3e154 and
+// underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well:
+// Complex(1e200, 1e200).abs was Infinity and Complex(1e-200, 1e-200).abs was 0.0, in all
+// four legs, against MRI's 1.414213562373095e+200 and 1.414213562373095e-200.
+// Complex(3, 4).abs is 5.0 either way, which is why the claim does not reproduce at small
+// integers.
+//
+// THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to the
+// textbook `hi * sqrt(1 + (lo/hi)^2)`. Measured against /usr/bin/ruby over the pairs where
+// the plain sum is unsafe, 40,000 per band:
+//
+//	                     hi >= 2^511      hi <= 2^-511
+//	hi*sqrt(1+t*t)       1,825 differ     1,937 differ
+//	power-of-two scaled     23 differ        21 differ
+//
+// and the ratio form also moves 5,370 of 20,000 pairs in the ORDINARY range, so it cannot
+// simply replace the plain sum either. Scaling by 2^k is EXACT (manual 7.7's %a argument),
+// so the scaled operands carry the same significands and the same roundings as the
+// unscaled ones - which is why the two paths agree bit-for-bit wherever both are defined,
+// and the safe-band branch below is a SPEED guard and not a second answer.
+//
+// The residue is ~1 in 1,700 pairs at 1 ulp, and it is not closable here: Apple's libm
+// hypot is not correctly rounded (3,165 of 20,000 differ from the exactly-rounded answer,
+// computed in Ruby over exact Rationals), so no double formula matches it everywhere.
+//
+// math.Hypot is DELIBERATELY not used: it IS the ratio form, so it would put this twin one
+// ulp away from layer 2 and the interpreter over the whole ordinary range - a manufactured
+// halves divergence. Spelling the same steps in all three engines is what makes them agree
+// by construction. math.Ldexp is avoided for the same reason: it is not reachable from
+// MetaJS, so the scale is built by the same loop there and here. The twins are hypotOf in
+// ruby-interpreter.abnf and rbHypot in languages/lib/ruby-rt.metajs.
+//
+// 2^511 is the widest safe threshold: hi <= 2^511 keeps hi*hi + hi*hi under 2^1023, and
+// hi >= 2^-511 keeps hi*hi at or above 2^-1022, so it never goes subnormal.
+var rubyHypBig = func() float64 {
+	r := 1.0
+	for i := 0; i < 511; i++ {
+		r = r * 2
+	}
+	return r
+}()
+
+// rubyHypScale is 2^k for the k that puts hi in [1, 2). Every value on the way is a power
+// of two and therefore exact, at both ends of the range: k runs from 1023 down to -1074.
+func rubyHypScale(hi float64) float64 {
+	h, s := hi, 1.0
+	for h >= 2 {
+		h = h / 2
+		s = s * 2
+	}
+	for h < 1 {
+		h = h * 2
+		s = s / 2
+	}
+	return s
+}
+
+func rubyHypot(a, b float64) float64 {
+	x, y := math.Abs(a), math.Abs(b)
+	// An infinity beats a NaN, which is IEEE-754's rule for hypot and MRI's:
+	// Complex(Float::INFINITY, Float::NAN).abs is Infinity, not NaN.
+	if math.IsInf(x, 0) {
+		return x
+	}
+	if math.IsInf(y, 0) {
+		return y
+	}
+	if x != x || y != y {
+		return x + y
+	}
+	hi := x
+	if y > x {
+		hi = y
+	}
+	if hi == 0 {
+		return 0
+	}
+	if hi <= rubyHypBig && hi >= 1/rubyHypBig {
+		return math.Sqrt(x*x + y*y)
+	}
+	sc := rubyHypScale(hi)
+	xs, ys := x/sc, y/sc
+	return math.Sqrt(xs*xs+ys*ys) * sc
 }
 
 // rubyRatText / rubyCpxText are Rational#to_s and Complex#to_s. The SIGN is the
@@ -4537,7 +4702,13 @@ func rubyAsRat(v interface{}) jsRat {
 // its own magnitude, and every engine wrote the "+" unconditionally, so
 // Complex(3, -4) rendered `3+-4i` where MRI writes `3-4i`. Agreed in all four legs
 // and wrong in all four. docs/todo.md 1.3.
-func rubyRatText(t jsRat) string { return jsNumString(t.n) + "/" + jsNumString(t.d) }
+// Both parts go through rubyIntStr and NOT through jsNumString, because a Rational's
+// parts are INTEGERS and jsNumString answers the SHORTEST ROUND-TRIPPING form, which past
+// 2^53 is a different integer: 2^55 prints as "36028797018963970". That became reachable
+// the moment #to_r started answering the exact pair - MRI's (0.001).to_r is
+// 1152921504606847/1152921504606846976 - and it printed 36028797018963970 for (0.1).to_r
+// in all four legs. rubyIntStr is the exact expansion.
+func rubyRatText(t jsRat) string { return rubyIntStr(t.n) + "/" + rubyIntStr(t.d) }
 
 func rubyCpxText(t jsCpx) string {
 	if t.im < 0 {
@@ -5164,7 +5335,7 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		rt.fail("Complex does not support '%s'", op)
 	}
 	if rk == 1 {
-		p, q := rubyAsRat(l), rubyAsRat(r)
+		p, q := rt.rubyAsRat(l), rt.rubyAsRat(r)
 		switch op {
 		case "+":
 			return rubyMkRat(p.n*q.d+q.n*p.d, p.d*q.d)
@@ -5644,7 +5815,17 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		}
 		return jsFlo{f: x}, true
 	case "to_r":
-		return rubyAsRat(t), true
+		return rt.rubyAsRat(t), true
+	// #to_c existed in NEITHER compiled half: `5.to_c` died with *method call 'to_c' on a
+	// number* while ruby-interpreter.abnf answered 5+0i, a live halves divergence at base.
+	// MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is (5.0+0i)); jsCpx
+	// carries two float64, so it answers (5+0i) for both - the same part-ness gap
+	// Complex(0, 0).abs has, recorded rather than invented around. docs/todo.md 1.2.
+	case "to_c":
+		if c, ok := t.(jsCpx); ok {
+			return c, true
+		}
+		return jsCpx{re: x, im: 0}, true
 	// Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
 	// through rubyToF, so (2r/3r).abs answered a Float and (3+4i).abs answered 3.0 -
 	// the REAL PART - where MRI says (2/3) and 5.0. Agreed in all four legs and
@@ -5657,7 +5838,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			return r, true
 		}
 		if c, ok := t.(jsCpx); ok {
-			return jsFlo{f: math.Sqrt(c.re*c.re + c.im*c.im)}, true
+			return jsFlo{f: rubyHypot(c.re, c.im)}, true
 		}
 		if _, ok := t.(jsFlo); ok {
 			return jsFlo{f: math.Abs(x)}, true
@@ -5704,9 +5885,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "integer?":
 		return isInt, true
 	case "numerator":
-		return rubyAsRat(t).n, true
+		return rt.rubyAsRat(t).n, true
 	case "denominator":
-		return rubyAsRat(t).d, true
+		return rt.rubyAsRat(t).d, true
 	case "times": // n.times { |i| ... }
 		_, tblk := rubyBlockArgs(args)
 		for i := 0.0; i < x; i++ {
@@ -6732,7 +6913,15 @@ func rubyStrToInt(s string, base int) (float64, bool) {
 		if d < 0 || d >= base {
 			return 0, false
 		}
-		acc = acc*float64(base) + float64(d)
+		// float64() ON THE PRODUCT is load-bearing: Go's arm64 backend CONTRACTS
+		// `a*b + c` into one FMA (manual chapter 4), so this accumulator rounded
+		// once per digit here and twice in the other two engines. Measured:
+		// Integer("123456789012345678901") answered 123456789012345700352 here and
+		// 123456789012345683968 in ruby-interpreter.abnf and lib/ruby-rt.metajs - a
+		// live halves divergence, pre-existing and invisible until a numeric STRING
+		// became reachable from a %d directive too. Assigning the product to a local
+		// does NOT stop the fusion; only the explicit conversion does.
+		acc = float64(acc*float64(base)) + float64(d)
 		digits++
 		prevUnd = false
 	}
@@ -6821,11 +7010,11 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 	// Rational(a, b) is a.to_r / b.to_r, so both go through rubyAsRat and inherit
 	// exactly what #to_r already answers. docs/todo.md 1.3.
 	case "Rational":
-		p := rubyAsRat(v)
+		p := rt.rubyAsRat(v)
 		if len(args) < 2 {
 			return rubyMkRat(p.n, p.d)
 		}
-		q := rubyAsRat(args[1])
+		q := rt.rubyAsRat(args[1])
 		if q.n == 0 {
 			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
 		}
@@ -8540,13 +8729,6 @@ func rubyCharCode(cp int) string {
 
 // rubyFirstChar is %c on a String. MRI demands EXACTLY one character and raises
 // ArgumentError otherwise; this takes the first one and is documented as such.
-func rubyFirstChar(s string) string {
-	for _, r := range s {
-		return string(r)
-	}
-	return ""
-}
-
 // MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
 // "%10s" % "café" is six spaces and four characters, and its result has
 // String#length 10 and #bytesize 11. All three engines here counted BYTES,
@@ -8716,6 +8898,123 @@ func rubyIntBody(f *big.Int, base int, upper, alt, sign bool, prec int) (body, p
 	return
 }
 
+// ----- what a numeric directive may be GIVEN --------------------------------
+//
+// MRI's numeric directives do not read a number out of the operand, they CONVERT it with
+// Kernel#Integer / Kernel#Float rules - so they raise on a value that has no number in it,
+// and they PARSE one that has a number in its text. Every engine here went straight to
+// rubyToF, whose answer is 0 for nil, true, false, a Symbol and an Array, AND 0 for the
+// perfectly good string "12". Measured against /usr/bin/ruby, agreed and wrong in all four
+// legs:
+//
+//	"%d" % [nil]    "0"   MRI: TypeError     can't convert nil into Integer
+//	"%d" % [true]   "0"   MRI: TypeError     can't convert true into Integer
+//	"%d" % [:s]     "0"   MRI: TypeError     can't convert Symbol into Integer
+//	"%d" % ["x"]    "0"   MRI: ArgumentError invalid value for Integer(): "x"
+//	"%d" % ["12"]   "0"   MRI: "12"
+//	"%f" % [nil]    "0.000000"  MRI: TypeError can't convert nil into Float
+//	"%c" % [nil]    ""    MRI: TypeError     no implicit conversion from nil to integer
+//
+// nil / true / false name THEMSELVES in the message and everything else names its CLASS,
+// which is MRI's wording and not a simplification. %c has a message of its own. The twins
+// are fmtIntOperand / fmtFloOperand / fmtCharOperand in ruby-interpreter.abnf and
+// rbFmtIntOperand / rbFmtFloOperand / rbFmtCharOperand in languages/lib/ruby-rt.metajs.
+// docs/todo.md 2.4.
+// rubyOwnerName and NOT rubyClassName: rubyClassName answers "" for a USER OBJECT, so
+// the message read "can't convert Object into Integer" here while ruby-interpreter.abnf
+// said "Plain" off classOf - a halves divergence caught by a native probe before it
+// shipped. rubyOwnerName is the existing helper that reads __class.__name first.
+func rubyFmtConvName(v interface{}) string {
+	if isUndefOrNull(v) {
+		return "nil"
+	}
+	if b, isB := v.(bool); isB {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
+	return rubyOwnerName(v)
+}
+
+// A user object is CONVERTED first, with the same two names Kernel#Integer tries
+// (#to_int, then #to_i) and #to_f for a float directive - MRI's `"%d" % obj` is 7 when
+// obj answers to_int. Same find-then-call shape rubyStr already uses for #to_s.
+func (rt *jsrt) rubyFmtUserConv(v interface{}, n1, n2 string) (interface{}, bool) {
+	if !rubyUserObj(v) {
+		return nil, false
+	}
+	if m, has := rubyFindMethod(v, n1); has {
+		return rt.call(m, v, nil), true
+	}
+	if n2 != "" {
+		if m, has := rubyFindMethod(v, n2); has {
+			return rt.call(m, v, nil), true
+		}
+	}
+	return nil, false
+}
+
+func rubyFmtIsNumV(v interface{}) bool {
+	switch v.(type) {
+	case float64, *jsBigInt, jsFlo, jsRat, jsCpx:
+		return true
+	}
+	return false
+}
+
+func (rt *jsrt) rubyFmtIntOperand(v interface{}) interface{} {
+	if rubyFmtIsNumV(v) {
+		return v
+	}
+	if s, isStr := v.(string); isStr {
+		if n, ok := rubyStrToInt(s, 0); ok {
+			return n
+		}
+		rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
+	}
+	if uc, has := rt.rubyFmtUserConv(v, "to_int", "to_i"); has && rubyFmtIsNumV(uc) {
+		return uc
+	}
+	rt.rubyRaiseErr("TypeError", "can't convert "+rubyFmtConvName(v)+" into Integer")
+	return float64(0)
+}
+
+func (rt *jsrt) rubyFmtFloOperand(v interface{}) float64 {
+	if rubyFmtIsNumV(v) {
+		return rubyToF(v)
+	}
+	if s, isStr := v.(string); isStr {
+		if f, ok := rubyStrToFloat(s); ok {
+			return f
+		}
+		rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
+	}
+	if uf, has := rt.rubyFmtUserConv(v, "to_f", ""); has && rubyFmtIsNumV(uf) {
+		return rubyToF(uf)
+	}
+	rt.rubyRaiseErr("TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
+	return 0
+}
+
+// %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
+// "no implicit conversion from nil to integer" and everything else is
+// "no implicit conversion of Symbol into Integer" - a different preposition and a
+// different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
+func (rt *jsrt) rubyFmtCharOperand(v interface{}) float64 {
+	if rubyFmtIsNumV(v) {
+		return rubyToF(v)
+	}
+	if uc, has := rt.rubyFmtUserConv(v, "to_int", "to_i"); has && rubyFmtIsNumV(uc) {
+		return rubyToF(uc)
+	}
+	if isUndefOrNull(v) {
+		rt.rubyRaiseErr("TypeError", "no implicit conversion from nil to integer")
+	}
+	rt.rubyRaiseErr("TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
+	return 0
+}
+
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
 // %[-][0][+][ ][#][width][.prec](d|i|u|f|s|p|c|x|X|o|b|B|e|E|g|G|%). The right
 // operand is the argument, or an array of them.
@@ -8820,7 +9119,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			// The argument's EXACT integer value: an Integer past 2^53 is a big
 			// and carries all of it, and a Float is truncated toward zero (MRI's
 			// %d converts with to_i) and then expanded exactly.
-			av := next()
+			av := rt.rubyFmtIntOperand(next())
 			var iv *big.Int
 			if bi, isBig := av.(*jsBigInt); isBig {
 				iv = bi.v
@@ -8851,7 +9150,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			if prec < 0 {
 				prec = 6
 			}
-			f := rubyToF(next())
+			f := rt.rubyFmtFloOperand(next())
 			if w, bad := rubyFloatWord(f); bad {
 				body, nonFinite = w, true
 			} else {
@@ -8864,7 +9163,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			if prec < 0 {
 				prec = 6
 			}
-			f := rubyToF(next())
+			f := rt.rubyFmtFloOperand(next())
 			if w, bad := rubyFloatWord(f); bad {
 				body, nonFinite = w, true
 			} else {
@@ -8883,7 +9182,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			if prec == 0 {
 				prec = 1
 			}
-			f := rubyToF(next())
+			f := rt.rubyFmtFloOperand(next())
 			if w, bad := rubyFloatWord(f); bad {
 				body, nonFinite = w, true
 			} else if alt {
@@ -8906,9 +9205,15 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			// ignores a precision on it outright ("%.0c" % 65 is "A").
 			av := next()
 			if s, isStr := av.(string); isStr {
-				body = rubyFirstChar(s)
+				// A String operand must be EXACTLY one character. This took the
+				// first and said so at the site; MRI raises, and the message is
+				// its own.
+				if rubyCharCount(s) != 1 {
+					rt.rubyRaiseErr("ArgumentError", "%c requires a character")
+				}
+				body = s
 			} else {
-				body = rubyCharCode(int(math.Trunc(rubyToF(av))))
+				body = rubyCharCode(int(math.Trunc(rt.rubyFmtCharOperand(av))))
 			}
 		case 'p':
 			// %p is #inspect where %s is #to_s, and it truncates by BYTES the same
