@@ -466,6 +466,27 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		if err != nil {
 			panic(err)
 		}
+		// AN INCLUDED FILE'S :startScript IS SILENTLY DISCARDED, so say so.
+		// r.GetStartScript returns the FIRST :startScript in the a-grammar and the
+		// include appends below the host's, so the host's always wins - with no
+		// error, no warning, and a fragment whose script simply never runs. That
+		// cost one investigation: it is the fact that settles docs/todo.md 5.2,
+		// because sw_kget/sw_kset/sw_safeget are start-script CLOSURES over
+		// m/curF/callExt/emitStr, so no shared .abnf module can carry them however
+		// much text they share. Warn rather than fail: a fragment could legitimately
+		// carry one for standalone use, and this is the only place that can tell.
+		for _, ir := range *aGrammar {
+			if ir.Operator == r.Command && ir.String == "startScript" {
+				fmt.Fprintf(os.Stderr,
+					"warning: :include(%q) - the included file has a :startScript, which is "+
+						"IGNORED. Only the INCLUDING grammar's start script ever runs "+
+						"(r.GetStartScript takes the first one in the a-grammar, and included "+
+						"rules are appended after it). Move that code into the including "+
+						"grammar.\n",
+					fullFileName)
+				break
+			}
+		}
 		*pa.agrammar = append(*pa.agrammar, *aGrammar...)
 		// Correct all references: The included productions moved to new positions and
 		// previously unresolved identifiers can now point to them.
