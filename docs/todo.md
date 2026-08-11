@@ -39,9 +39,9 @@ Baseline every item must preserve (`tests/gates.sh`, `--serial` on a loaded
 machine, `--bench` for anything touching layer 2 or the floor):
 
 ```
-matrix 385/385 (17 SHOULD ABORT, 15 of them ALL HALVES) · --full 9,468
-assertions, 0 halves disagree · --cross 121/0 · clang-check 16/16 none held
-go test ok · gen-all 15/15 clean · native-full 20 languages, 0 failures
+matrix 385/385 (17 SHOULD ABORT, 15 of them ALL HALVES) · --full 9,688
+assertions, 0 halves disagree · --cross 121/0 · clang-check 18 modules agreeing,
+none held · go test ok · gen-all 15/15 clean · native-full 20 languages, 0 failures
 shape-scan 15 groups / 481 recoverable · metajs-lint 0 findings, self-test ok
 -freeze a fixed point · bench: 15 rows, no row outside its spread
 tests/coro-poc/build.sh byte-identical
@@ -59,43 +59,94 @@ floor is raised afterwards, once, from a COMMITTED tree.
 
 # 1. Correctness, with an oracle on this machine
 
-All five were measured by an agent during the eighteenth round, on the tree that
-became `3610ad6`, while closing something else. They are findings, not leads.
+Every item here was measured while closing something else, so they are findings
+rather than leads — but the header's warning still applies: **re-probe before
+assigning.** Two of the five items this section carried into the nineteenth round
+were not defects at all, and one of my own non-reproductions was wrong because I
+had probed at the wrong magnitude.
 
-### 1.1 swift: a closure capturing a `for-in` variable shares ONE binding **[V]**
-`for i in 0..<3 { fs.append({ i }) }` then `fs[0]()`, `fs[2]()` gives `3 3` in
-both compiled halves and `0 2` in the interpreter; `swiftc` says `0 2`. **A live
-halves divergence `--cross` has never reached**, and the interpreter is the
-correct side. Pre-existing at `22e7b44`.
+### 1.1 python: `%d`/`{:d}` on a non-integer operand is a THREE-WAY divergence **[V]**
+`"%d" % 1e300` gives `1e+300` natively, `9223372036854775807` in the Go twin, and
+CPython the exact 301-digit integer. `"%d" % None` gives `NaN` natively, `0` in the
+twin, and CPython a `TypeError`. Same for list/tuple/dict/set/str operands: **192
+differing rows, both halves wrong and differently wrong.** `python3` settles every
+row. Found while merging `rtTag`; probe recipe in that commit (`cd75454`).
 
-### 1.2 ruby: `to_c` is missing in both compiled halves **[V]**
-`method call 'to_c' on a number`, while the interpreter answers. A live halves
-divergence at base. Adjacent, and agreed-and-wrong rather than divergent:
-`"%d" % [nil]` is `"0"` where MRI raises `TypeError: can't convert nil into
-Integer`, and `Complex#abs` is `sqrt(re²+im²)` rather than `hypot`, so it
-overflows where MRI does not.
+### 1.2 js/ts: identifier `\u` escapes are never resolved in the INTERPRETER halves **[V]**
+`var a = 1; print(a)` prints `1` under the compiler and throws
+`ReferenceError: a is not defined` under the interpreter, in both js and typescript.
+A live halves divergence, pre-existing. The compiler has `idName`; the interpreters
+have nothing. It is ~30 `up.in` sites per interpreter grammar and `up.in` is matched
+TEXT, so no tag inside `Id` can fix it centrally — which is why `js-test-full.js`
+SECTION 52 deliberately asserts no escaped spelling. `node` settles it.
 
-### 1.3 ruby: `proc { }` / `lambda { }` with an EMPTY block does not parse **[V]**
-Parsed as the bare name plus an empty **Hash literal** in all three engines — the
-interpreter says *unknown Hash method: lambda?*, both compiled halves *variable
-not defined: proc*. MRI reads a block. Reproduced at `22e7b44`; ruby's SECTION 47
-steps around it and says so at the site.
+### 1.3 js: spreading a generator answers an empty array **[V]**
+`[...g()]` gives length 0 where node gives 2, in both halves, pre-existing. The
+spread path (`evalArgs`/`spreadInto`) admits arrays and strings only. It is why
+`fns09` drives its generator with `next()`.
 
-### 1.4 js: `f.constructor` diverges goja vs `-frozen` **[V]**
-`function` under goja, `undefined` under `-frozen`, `llvm.Run` and natively.
-Pre-existing and identical at `22e7b44`. Answering it needs a `Function` global
-the subset does not have, and returning anything else would be wrong rather than
-merely absent — so it is **deliberately unasserted**: an assertion here would pin
-a divergence. Adjacent: `f.name` is `""` and `f.length` is `0` where node says
-`f` and `1`, which needs the emitter to record a closure's declared name and
-arity; `Object.getOwnPropertyNames(f)` omits exactly those.
+### 1.4 ruby: `String#to_i` is a three-way divergence **[V]**
+`"0xffffffffffffffffff".to_i` → interpreter `4722366482869645213696`, both compiled
+halves `0`, MRI `0`; with an explicit `.to_i(16)` → interpreter the same big value,
+compiled halves `0`, MRI `4722366482869645213695`. So the interpreter honours a `0x`
+prefix that MRI's base-10 `to_i` ignores, AND the compiled halves ignore an explicit
+base. `rubySmBasePrefix` also carries the FMA contraction of manual chapter 4 —
+fixing only that swaps one wrong answer for another without closing the divergence.
 
-### 1.5 kotlin: `setOf<Int>().first()` says `List is empty.` **[V]**
-Kotlin says `Collection is empty.` `kSeqMethod` receives a materialized element
-array and the Set-ness is gone by then — the same wall as the `elementAt` note
-already at that site. Note the empty-collection MESSAGES are kotlin-stdlib
-`_Collections.kt` source, not a measurement: there is no `kotlinc` here and java
-cannot answer them. The throwable CLASSES are `java.util`'s and are settled.
+### 1.5 ruby: `print`/`puts` emit earlier arguments before a later one raises **[V]**
+`print "A","B",boom,"C"` prints `AB` in the compiled halves and nothing in the
+interpreter; `puts "D", boom` prints `D` in all our legs. MRI evaluates every
+argument first and prints nothing. A live halves divergence for `print`,
+agreed-and-wrong for `puts`.
+
+### 1.6 ruby: `defined?` kind classification, four residues **[V]**
+Kernel names (`p`, `sprintf`, `format`, `lambda`, `proc`, `rand`) answer nil or
+`"local-variable"` where MRI and the interpreter say `"method"` — blocked on a fourth
+copy of the host-globals list, or an extern-signature change in `abnf/jsrt.go`.
+`defined?(printf)` reads `"local-variable"` because the chain's root is the MetaJS
+host scope carrying `print`/`printf`/`sprintf`, the collision `js_rmethodval` already
+documents. `defined?(@nope)` answers `"instance-variable"` in all four legs where MRI
+says nil. And `defined?(loc)` at TOP LEVEL answers `"method"` in the interpreter — its
+`globalScope` is `scopes[0]`, so the local walk skips it — where MRI and both compiled
+halves say `"local-variable"`.
+
+### 1.7 kotlin: `Array`, `Sequence` and a Map's `values` still say `List is empty.` **[V]**
+`arrayOf<Int>().first()` should say `Array is empty.`, `asSequence().first()`
+`Sequence is empty.`, `map.values.first()` `Collection is empty.` **An Array, a
+Sequence, a Map's `values` view and a List are the same host array in this value
+model**, so no receiver survives to carry a kind — see 2.2. The `values` row is
+deliberately NOT asserted rather than pinned to a known-wrong answer. Strings are
+spec-derived from `_Strings.kt`/`_Collections.kt`; there is no `kotlinc` here.
+Also absent: `reduceOrNull`/`reduceRightOrNull`.
+
+### 1.8 swift and dart: extensions on a builtin receiver **[V]**
+swift `extension String { var lenPlus: Int { return count + 1 } }` fails in all THREE
+engines (`unknown name: count`) where real Swift accepts it — `getMember` does not
+know Swift's `count`, so it needs the interpreter, the twin and layer 2 together.
+dart `extension IX on int { bool evenq() => isEven; }` still fails: `getMember` knows
+no Dart `int` members, so it needs a member table in `abnf/jsrt.go` and in layer 2.
+**Do NOT route either through `js_kget`**: its string surface is `length` plus ten
+JAVASCRIPT method names, and `809d470` records what happened when dart tried —
+`"abc".slice(1)` started working, which real Dart rejects.
+
+### 1.9 php: variable scope leaks into every function, in both halves **[V]**
+`$g=5; function f(){ echo $g; }` prints `5`; a closure sees `$g` with no `use`. PHP
+has no lexical variable scope, so this is not a corner. A function's body scope
+chains to the module scope and variables are ordinary `$`-prefixed bindings in it.
+Both halves agree, so `--cross` is blind and no oracle here can see it. A fix needs a
+VARIABLE BOUNDARY (`global`/`use`/`$GLOBALS`/`static` are the four documented ways
+through) in both grammars, on the hottest path in the language — so the boundary test
+must be ONE `js_scope_has` on ONE frame, never a walk. **Entangled with 2.5 in one
+direction: closing the leak turns every accidental global read into 2.5's abort, so
+2.5 must land first.**
+
+### 1.10 php: `empty($undef)` aborts, and `$u[0] = 1` does not vivify **[V]**
+`empty($undef)` / `empty($undef[0])` abort in both halves where PHP 8 answers true
+and diagnoses nothing — and because `empty` takes an arbitrary EXPRESSION, the
+non-aborting read must be selected at PARSE time (`KwEmpty "(" TgtOnly ")"` before
+the expression alternative) in both grammars. Separately `$u[0] = 1` on an undeclared
+variable aborts where PHP creates the array: `emitRefPathV`'s
+`viv && ref.path.length > 1` guard skips vivification for a single-step target.
 
 # 2. Cross-engine defects and latent traps
 
@@ -138,10 +189,20 @@ both grammars. Comparable to 3.1. Same wall as `Optional(3)` (manual 7.9).
   — `lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` — still answers
   `NameError` where MRI answers a Method. An OMISSION identical in all four legs,
   not a wrong answer, and each has a reason recorded at the site.
-- **`Float#to_r` is `(1.5/1)`** where MRI says `(3/2)`, and `Complex` answers
-  where MRI raises (`to_i`/`to_f`/`to_r` → RangeError,
+- **`Complex` answers where MRI raises** (`to_i`/`to_f`/`to_r` → RangeError,
   `round`/`floor`/`ceil`/`positive?` → NoMethodError; `conjugate`/`rect`/`polar`
-  absent). Both need the bignum-Rational value model this section already names.
+  absent) — needs the bignum-Rational value model this section already names.
+  (`Float#to_r` and `Complex#abs` were closed at `44bdde7`; `abs` needed
+  power-of-two scaling, because the textbook `hi*sqrt(1+t²)` is WORSE in the
+  ordinary range and Apple's own libm `hypot` is not correctly rounded either.)
+- **Complex's parts are raw doubles** in all three engines, so no engine can tell
+  `Complex(0,0)` from `Complex(0.0,0.0)`: `Complex(0,5).abs` is `5.0` where MRI says
+  the Integer `5`, `5.0.to_c` is `(5+0i)` not `(5.0+0i)`. Same class as the above.
+- **`Kernel#Integer(str)` is imprecise past 2^53** — now agreed across all three
+  legs, so `--cross` is blind. `bigFromDec`/`rbABigFromStr`/`big.Int` all exist;
+  layer 2 has no radix→decimal helper, so it is ~3 × 25 lines plus assertions.
+- **`1.5r` does not parse** (`RatLit` takes only an integer mantissa), and
+  `p two 1, 2` — a nested parenthesis-less call in an argument — does not parse.
 
 ### 2.5 php's undefined `$variable` — the blocker is in the floor **[V]**
 PHP 8 warns and evaluates to **null**, and the program continues; `b56c2b0` made
@@ -225,134 +286,128 @@ floor. Nothing is wasted by having done B: the extern surface is identical.
 
 # 5. Duplication and dead code
 
-`go run ./tools/shape-scan` is the measure.
+`go run ./tools/shape-scan` is the measure. Gate tier (140 chars): **15 groups / 481
+recoverable**. Permissive tier (`-min 40`): **48 / 761**, re-measured at `cd75454`.
 
 > **⚠ A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT SUFFICIENT — SIZE THE CALL
-> SITE, NOT THE BODY.** The fifth pass merged on an empty difference list alone
-> and shipped a regression that stood for four commits: `pyIsObj` → `rtIsObj` cost
-> **python +41%**, `rbIsObj` **ruby +11%**, `rtjIsIntegral` **java +5.7%** —
-> because each is a predicate asked at ~15–30 sites inside an arithmetic path, and
-> **in MetaJS a call is a scope frame**. Sharing stayed free for kotlin's `ktIsInt`
-> at the *same* body (−0.64%). Identical bodies, different call sites, and only the
-> call sites decide. `8de27d7` is the worked example of doing it right: every merge
-> there was already a call to a same-cost body in the same pinned scope, and the
-> one that was not — folding `runtime-dartswift` — cost python **+1.46%** on its own
-> and had to be paid back by the merges. **Measure with `--bench --paired` before
-> and after.**
+> SITE, NOT THE BODY.** The fifth pass merged on an empty difference list alone and
+> shipped a regression that stood for four commits: `pyIsObj` → `rtIsObj` cost
+> **python +41%**, `rbIsObj` **ruby +11%**, `rtjIsIntegral` **java +5.7%** — because
+> each is a predicate asked at ~15–30 sites inside an arithmetic path, and **in
+> MetaJS a call is a scope frame**. `8de27d7` is the worked example of doing it
+> right, and `cd75454` is the sharpest: the same merge DELEGATING measured
+> **+10.60%, slower 9/9**, and INLINED measured **−13.90%, faster 9/9**. Identical
+> bodies, different call sites, and only the call sites decide.
 
-### 5.1 The ruby-side pairs of the `-min 40` tier **[V]**
-`pyBRepeat`/`rbRepeat`, `pyIsNone`/`rbIsNil`, `pyTag`/`rbTag` — all three need the
-ruby side, and `ruby-rt.metajs` belonged to another agent during `8de27d7`, where a
-one-sided merge would have been incoherent. Both languages already import
-`runtime.metajs`, so these cost no new import. The tier stands at **47 groups /
-750 recoverable** at `-min 40`; the gate's 140-char threshold is unchanged at 15 /
-481. Not free, and manual 7.13 says why: `js-rt.metajs` imports `regex.js` only and
-`lua-rt.metajs` imports nothing, so anything reaching into those two costs a first
-import plus seven hooks.
+> **⚠ AND THE INSTRUMENT HAS A BLIND SPOT ON EXACTLY THIS KIND OF CHANGE.** Adding a
+> name to `runtime.metajs` renumbers the `@str.N` intern table of every importing
+> module (148 source lines → 7,705 insertions in `python-rt.ll`), and `--paired`
+> cancels the output PATH and nothing else — so that shift is identical in every pair
+> and reads as a **unanimous sign**. A nine-line uncalled body measured "+0.95%,
+> slower in 8 of 9". **Measure against a DEAD-CODE MATCHED CONTROL.** Full note in
+> `tests/bench.sh`'s header.
 
-### 5.2 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
-`swift-to-llvm-ir.abnf:2495,2531`, `dart:2437,2451`, `kotlin:2555` (which says
-"transferred verbatim" at the site). They are **emitter closures that build basic
-blocks**, so `runtime.metajs` cannot hold them; merging means a shared ABNF module
-imported by three grammars.
+### 5.1 The frame-elimination class, and it is the biggest measured win available **[V]**
+`rtTag`'s **−13.9% on python** is ONE scope frame removed from ONE predicate. The same
+`!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`, `pyInstClassOf`,
+`rbUserObj` and `rbIsClassObj`, all on arithmetic paths. Each needs its own call-site
+sizing and its own measurement against a matched control, which is why `cd75454` did
+not fold them in.
 
-### 5.3 The other five lowered probes can follow kotlin's **[V]**
-`a6df3a8` moved kotlin's ten scope helpers into layer 2 and deleted the abort that
-stood for the whole ceiling. The same conversion is open for php `isset`, python's
-`py_setvar` residue (a containment walk is `scopeHas` + `scopeParent`, ~15 lines
-each), swift/dart `sw_kget`/`sw_kset` (~40 each, the same body twice) and ruby
-`defined?` (~30). **Each needs the same judgement kotlin's did: keep the hot
-local-hit arm inline and route only the MISS paths**, or you pay a scope frame on
-the hottest name resolution in the language.
+### 5.2 `rtIsNil` could serve three more languages **[V]**
+`jvUndefOrNull` (js-rt), `ktIsNullish` (kotlin-rt) and `phIsNull` (php-rt) are the
+same four lines with the two tests swapped — a second shape-scan group. kotlin and php
+already import `runtime.metajs`; **js imports only `regex.js`, so it pays a first
+import plus seven `rtk*` hooks** (manual 7.13), which is the real cost and not the
+line count.
+
+### 5.3 `rtIsObjNotArr` has zero callers **[V]**
+Kept deliberately — recorded twice now — since `120ba0f`'s revert removed its two
+callers. Its stale comment was corrected at `cd75454`.
 
 # 6. Tooling and developer experience
 
-### 6.1 `stmtPos` is wrong in python and ABSENT in ruby and php **[V]**
-Found by building `-why`, and it breaks **four** consumers at once — `-trace`,
-`-cfgraph`, `-callgraph` and `-why` all read the same `js_srcpos` markers.
-Measured: a python file whose statements are on lines 1, 2, 3 reports them as
-**2, 3, 4**, the last pointing past EOF; kotlin is correct on the same probe.
-The cause is that a tag's `up.pos` is the position AFTER the production matched
-and python's `SmallLine` ends in `NL`. **It is not the one-liner it looks like**:
-moving `stmtPos` down to the alternatives was tried and reverted, because
-`PosSmallLine` still consumes the `NL`, and a compound statement's tag ends after
-its whole suite — so `If` would mark the END of its block. It wants a rule that
-ends at the statement's last token, for both shapes. Separately,
-`grep -L stmtPos languages/*-to-llvm-ir.abnf` shows **ruby and php never apply it
-at all** — the only two handle-IR languages missing it, so they get no line
-attribution in any of the four tools. `stmtPos` returns its argument unchanged
-unless `c.tracing` is on, so nothing here can affect ordinary emission.
+### 6.1 The `-frozen` host needs 11.9 GB for one js ratchet part **[V]**
+`tests/js-test-full.js` part 1 under the `-frozen` interpreter needs **11,907 MB
+where goja needs 99 MB** for the same file, and typescript's *larger* ratchet needs
+2,398 MB — so it is js-path-specific, not file size. Fifty sections cost 57 s of CPU
+parsed one at a time and 356 s in one file. **First suspect: `chainItems`, which
+retains every folded member chain for the whole run.** This is what made the ratchet
+split (`ed9f71a`) necessary: at 23.5 GB the machine pages while other legs run, and
+that is how the probe was being KILLED — a red gate for a reason that is not a defect.
 
-### 6.2 The js ratchet is now the slowest thing in `--full`, at 70% of its brake **[V]**
-`tests/js-test-full.js`'s `-frozen` interpreter leg measures **627 s wall / 504 s
-user idle** against `FULL_TIMEOUT=900`, up from 410–440 s at the sixteenth round.
-Under concurrent gate load it has been KILLED outright, which reads as
-`RUN-FAILED` — a red gate for a reason that is not a defect, the exact class that
-timeout exists to prevent. `tests/gates.sh` already records the verdict: **if js
-grows much further the answer is to SPLIT its ratchet, not to keep raising the
-brake.** Splitting costs `.vscode/launch.json` rows, the `--full` per-language
-accounting and `native-full`; raising the brake costs nothing and buys nothing.
+### 6.2 `-trace` output is not reproducible run to run **[V]**
+32 lines of a 170-line python trace carry raw Go heap addresses, because a scope
+object gets rendered into a `decl`/`read` `val`. Pre-existing, and it means **no gate
+can ever compare a trace file byte-for-byte.** The site is `abnf/trace.go`'s value
+rendering, not a grammar. Same for ruby and php.
 
-### 6.3 A tuple-keyed python dict is O(n·m) **[V]**
-Structural array comparison (the eighteenth round's fix for unhashable keys) has
-no index behind it: layer 2's `pyDictFind` cannot hash an array and the
-interpreter's index cannot represent one, so every stored key is compared
-element-wise. It was O(n) before only because it never found anything. **Hashing
-tuples needs the real tuple type (3.1)**, so this is a consequence of that item
-rather than an independent one. Measured cost on a dict-saturated microbenchmark:
-+0.77% against that row's own 1.13% spread, i.e. inside the noise.
+### 6.3 php aborts on a top-level `label:`/`goto` or a bare `{ … }` block **[V]**
+`TypeError: Not a function` from `compile-core.js:617` (`makeSeq`) via `buildMain`:
+the top-level list is built by `makeSeq`, which — unlike php's own `makeBody` — does
+not recognise the `{lblstmt}` / `{body}` records those statements push. The same
+shapes work INSIDE a function.
 
-### 6.4 kotlin carries an unattributed +2.28% **[V]**
-`tests/bench.sh --draws 9` puts kotlin at +2.28% median against its own 1.85%
-spread (gate tolerance 2.5%, so it passes); a paired sign test over 16 draws says
-14 slower, ~+1.6%. **Five controls say what it is NOT**: not layer-2 growth
-(appending ~800 dead `.ll` lines reproduces it 6/6), not the two new hot-path
-arms, not the four new helpers, not a scope-name hash collision, and not executed
-code anyone can point at — `mod.kt` has no member read, no indexed write and no
-collection call, its emitted module is **md5-identical** to base, and
-`MEC_GC_STATS` reports the same collections and heap. That points at module
-LAYOUT, which is manual chapter 4's effect, and it is written up at the site.
+### 6.4 `gates.sh` runs its seven gates serially at 315% CPU **[V]**
+Measured at **291 s → 150 s** concurrently, with all seven verdicts byte-identical.
+Not shipped, and the blocker is specific: the matrix entries in `.vscode/launch.json`
+write FIXED paths inside the repo (`tests/*.out`), so proving no two concurrent gates
+collide needs an audit of three more scripts, and `--freeze` must stay serial because
+it rewrites `abnf/jsbootstrap.ll`. **One green run is not proof, and a false green in
+`gates.sh` is the worst outcome available here.**
 
-### 7.1 JS reject side — three coherent groups
-**Assignment targets (8 files)**: a form that is not a LeftHandSideExpression used
-as one — `() => {}()`, `({a:this}=0)`, `switch (c) { default: default: }`.
+### 6.5 `-callgraph` names a function by the minimum marker in its body **[V]**
+So `def f` on line 8 reads `L9` in every language. Cosmetic, and now visible in three
+more languages because `932b3e2` gave ruby and php line attribution at all.
 
-> **A warning that was paid for once.** The neighbouring `for(([a]) of 0)`,
-> `for((1 + 1) in list)`, `1++` and `1--` files look like the same group and are
-> **not**. Guards refusing a parenthesized non-target for-head and a numeric
-> postfix operand won 7 reject files and cost **8 must-parse** files — `0++`,
-> `for(([0]) in 0)`, `for((0) of 0)` under `early/`, which are early errors that
-> must PARSE. Reverted. **Do not reintroduce without measuring both rows.**
+# 7. Corpus recognition
 
-**Goal symbol, Script vs Module (17 files)**: a `:script` guard cannot see the
-file name — `abnf/parserscript.go` exposes only `getSrc`/`setSrc`/`getSdx`/
-`setSdx`/`peek`. A Script may not contain `import`/`export` at all (6 files); a
-Module is always strict, reserves `await`, and forbids Annex B `<!--` comments
-(8 `*.module.js` files). Needs a filename or module-goal boolean exposed to guards
-in **both** engines. **Note what `2a59980` settled**: these grammars implement the
-**Script** goal, evidenced by `HtmlCloseAtStart` accepting Annex B comments, sloppy
-mode by default, and top-level `return` being a syntax error.
+### 7.1 JS reject side — what is left after two passes
+`026d5cd` took the unicode group (+3 reject, −0 must-parse) and `53102a4` the goal
+symbol (+9, −0). Reject stands at **703 / 727**, must-parse at **2623 / 2653**.
 
-**Unicode identifiers (3 files)**: `IdUni`/`IdUniPart` approximate
-ID_Start/ID_Continue with a few wide ranges, so `var 🀂` is wrongly accepted. Real
-tables would also serve Java, C#, Kotlin, Swift and Python, so they belong in
-`languages/lib/ident.abnf` as an **additive** change — do not alter the existing
-ASCII `Id` or `KwEnd`. A compressed range list checked by a `:script` guard is
-probably cheaper than thousands of ABNF ranges.
+> **A warning that was paid for TWICE.** Guards refusing a parenthesized non-target
+> for-head and a numeric postfix operand won 7 reject files and cost **8 must-parse**
+> — `0++`, `for(([0]) in 0)`, `for((0) of 0)` under `early/`, which are early errors
+> that must PARSE. And "a Script may not contain `import`/`export`" won 6 and cost
+> **3**: `js-test-full.js` (the ratchet itself), `js-test-recognize.js` and
+> `js-test-multifile.js`. **Always measure BOTH rows.**
+
+**Assignment targets (8 files)**: a form that is not a LeftHandSideExpression used as
+one — `() => {}()`, `({a:this}=0)`, `switch (c) { default: default: }`.
+
+**`import`/`export` in a Script (6 files)**: measured, and the fix is not in a
+grammar — it needs the three ratchet files renamed to `.mjs`, i.e.
+`.vscode/launch.json` and `test.sh`.
+
+**`export default` (2 files)**: `ExportDefaultExpr` takes `[ ";" ]` rather than
+`StmtEnd`, so `export default 3 4` parses as two statements. `StmtEnd` there costs two
+must-parse files, because an anonymous `export default class {}` is a DECLARATION in
+the spec and ends at its own brace. The real fix is anonymous class/function
+declaration forms in the `ExportDefaultDecl` branch.
+
+**Unicode identifiers — CLOSED for js/ts, and NOT transferable.** `026d5cd` has the
+real ID_Start/ID_Continue tables in `languages/lib/ident-unicode.abnf`. Five languages
+were checked against a toolchain or a spec and each needs its OWN list: swift
+(`swiftc` disagrees in both directions), java (JDK 24 disagrees three ways), kotlin,
+csharp, and python (XID_*, and **python3 is Unicode 16.0 while node 24 is 17.0 —
+they disagree on 4,647 code points for XID_Start alone**, so the tables must come
+from python3). Also `\u{0000000061}` (>8 hex digits) is accepted by node and rejected
+here, an 8-digit cap inherited from the replaced guards.
 
 ### 7.2 Other corpora
-- **batch 0 of 2** — the ratchet is FULL at 24 sections, but neither wine file
-  parses. No statistical weight; still a stark gap.
+- **batch 0 of 2** — the ratchet is FULL at 24 sections, but neither wine file parses.
 - **swift 80%** — an 18-file lexical tail: suppressed conformances, `@isolated(any)`
   in a type, `borrowing` as a bare type name, raw multi-line strings with 3+ pound
-  levels, parameter packs, form feed and NBSP. **For Swift, lexical work buys
-  corpus and semantic work buys ratchet — they are nearly disjoint.**
+  levels, parameter packs, form feed and NBSP. **For Swift, lexical work buys corpus
+  and semantic work buys ratchet — they are nearly disjoint.**
 - **dart 96.6%** — ~53 of the remaining 117 are multitests whose surviving `//#`
   variants the files themselves label "syntax error".
 - **python 92.9% and ruby 98.1%** are at their hard caps.
-- **go / php / csharp / java / c** have ordinary long tails.
-
----
+- **go** — one file fewer, deliberately: `fixedbugs/issue24801.go` is comment-only
+  with no `package` clause and real `gofmt -e` rejects it, so `53102a4`'s parser fix
+  made that row truthful rather than worse.
+- **php / csharp / java / c** have ordinary long tails.
 
 # 8. Settled — do not re-open
 
@@ -361,6 +416,30 @@ rounds, no order, no commit archaeology, because none of it changes what to do
 next. Each line is a verdict plus the shortest reason that stops someone
 re-opening it. The detail is in git; the durable lessons are in the manual
 (ch. 4 and 7).
+
+**DECLINED after measurement — the nineteenth round's, added here because each one
+is a number the next person should not have to re-derive.** php's `isset`/`$this`
+scope probe into layer 2 (**+0.77%, slower in 9 of 9 paired draws**, ~490 instructions
+per probe call: unlike kotlin's, php's probe has NO miss arm layer 2 answers better,
+so it is all hot arm) · swift's and dart's `sw_kget`/`sw_kset` into layer 2
+(**+81.19% and +68.97%, 9 of 9** — `mod.swift`, a bare `while` over two locals, emits
+4 `sw_kget` + 2 `sw_kset` PER ITERATION) · python's `py_setvar` containment walk (the
+premise does not survive: the emitter already knows those names statically via
+`pyInnerNames`, and the floor already owns the name so layer 2 cannot re-use it) ·
+a shared `.abnf` module for the three emitter closures (**impossible, not merely
+unwanted: an `:include`d file's `:startScript` is SILENTLY DISCARDED**, since
+`GetStartScript` takes the first and includes are appended after the host's — there is
+a warning for it now) · `rtTag` in its DELEGATING spelling (**+10.60%, slower 9/9** —
+`120ba0f`'s regression re-run; the INLINED spelling is −13.90% and shipped) ·
+`import`/`export` refused in a Script (+6 reject files, **−3 must-parse**, including
+the js ratchet itself) · the goal symbol for TypeScript (the corpus has ZERO
+`.mts`/`.module.ts` files and `tsc` decides module-ness from CONTENT) · ID_Start
+tables for swift/java/kotlin/csharp/python (**each language's identifier set really is
+different, and two toolchains proved it in both directions**) · swift's `stride(...)`
+(absent from the subset, and its `for-in` is a shape already asserted) · making a
+named function expression's inner name immutable (needs a const flag on the floor's
+scope, or a scope-walking extern on every plain-name assignment, measured at
++21%..+43% elsewhere on that path).
 
 **DECLINED after measurement.** `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
