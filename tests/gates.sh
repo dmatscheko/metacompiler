@@ -128,7 +128,15 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9679      # NINETEENTH round, SECOND raise: +14 for the three
+FULL_ASSERTIONS=9688      # NINETEENTH round, THIRD raise: +9 for wave 3's goal-symbol
+                          # work (js SECTION 34's Script-goal rows +7, typescript
+                          # SECTION 28's octal escapes +2). The ruby/python merge pass
+                          # that landed beside it contributed +0 DELIBERATELY: its
+                          # output is byte-identical to base, so an assertion there
+                          # would have zero discriminating power, and the agent
+                          # measured that rather than assuming it.
+                          #
+                          # THE SECOND RAISE, +14 for the three
                           # wave-2 items, on top of the +197 below. unicode +8 (real
                           # ID_Start/ID_Continue for js/ts), ruby +4 and dart +2
                           # (defined? kinds, and extensions on a builtin receiver).
