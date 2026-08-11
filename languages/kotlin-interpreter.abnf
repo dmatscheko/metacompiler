@@ -5026,18 +5026,28 @@ NotMemberKw = :script(~~
                 if (ci < 0 || ci >= n) { fail("charAt(" + ci + ") out of range for " + sv) }
                 return {v: kChar(sv.charCodeAt(ci))}
             }
+            // A PREDICATE form of any of the five is the CharSequence overload in
+            // _Strings.kt and belongs to the shared table: firstOrNull/lastOrNull used
+            // to ignore the lambda here exactly as first/last did.
+            if (args.length > 0 && typeof args[0] == "function") {
+                return kSeqMethodK(kChars(sv), name, args, "Char sequence")
+            }
             if (name == "firstOrNull") { return {v: n == 0 ? null : kChar(sv.charCodeAt(0))} }
             if (name == "lastOrNull") { return {v: n == 0 ? null : kChar(sv.charCodeAt(n - 1))} }
-            if (name == "single") {
-                // single(predicate) filters first - the predicate used to be IGNORED,
-                // so `"hello".single { it == 'h' }` aborted with "single() on a string
-                // of length 5" in both halves instead of answering 'h'.
-                if (args.length > 0 && typeof args[0] == "function") { return kSeqMethod(kChars(sv), name, args) }
-                if (n != 1) { fail("single() on a string of length " + n) }
-                return {v: kChar(sv.charCodeAt(0))}
+            // first/last/single with a PREDICATE, and every empty or over-long
+            // receiver, are kotlin.text's own CharSequence family in _Strings.kt and
+            // are answered by the shared table under the "Char sequence" kind. Three
+            // defects lived in these four lines, all of them agreed in every engine:
+            // `"abc".first { it == 'z' }` IGNORED the predicate and answered 'a',
+            // `"".first()` was an uncatchable ABORT where CharSequence.first() throws
+            // NoSuchElementException("Char sequence is empty."), and `"abc".single()`
+            // aborted where it throws IllegalArgumentException("Char sequence has more
+            // than one element."). The single-character fast path stays, so the cost of
+            // materializing the chars is paid only where a throw or a lambda is due.
+            if (n == 0 || (name == "single" && n != 1)) {
+                return kSeqMethodK(kChars(sv), name, args, "Char sequence")
             }
-            if (n == 0) { fail(name + "() on an empty string") }
-            return {v: kChar(sv.charCodeAt(name == "first" ? 0 : n - 1))}
+            return {v: kChar(sv.charCodeAt(name == "last" ? n - 1 : 0))}
         }
         if (name == "toCharArray" || name == "toList") { return {v: kChars(sv)} }
         if (name == "trim") { return {v: kTrimSide(sv, true, true)} }
@@ -5181,14 +5191,14 @@ NotMemberKw = :script(~~
                 if (rangeEmpty(args[0])) { return {v: ""} }
                 return {v: sv.substring(args[0].from, args[0].to + 1)}
             }
-            return {v: kCharsStr(kSeqMethod(kChars(sv), name, args).v)}
+            return {v: kCharsStr(kSeqMethodK(kChars(sv), name, args, "Char sequence").v)}
         }
         if (name == "filter" || name == "filterNot" || name == "filterIndexed" ||
             name == "takeWhile" || name == "dropWhile" || name == "onEach") {
-            return {v: kCharsStr(kSeqMethod(kChars(sv), name, args).v)}
+            return {v: kCharsStr(kSeqMethodK(kChars(sv), name, args, "Char sequence").v)}
         }
         if (name == "partition") {
-            var pp = kSeqMethod(kChars(sv), name, args).v
+            var pp = kSeqMethodK(kChars(sv), name, args, "Char sequence").v
             return {v: kPair(kCharsStr(pp.first), kCharsStr(pp.second))}
         }
         if (name == "chunked" || name == "windowed") {
@@ -5199,7 +5209,7 @@ NotMemberKw = :script(~~
             for (var si = 0; si < args.length; si++) {
                 if (typeof args[si] == "function") { sxf = args[si] } else { sargs.push(args[si]) }
             }
-            var pieces = kSeqMethod(kChars(sv), name, sargs).v
+            var pieces = kSeqMethodK(kChars(sv), name, sargs, "Char sequence").v
             var sout = []
             for (var pi = 0; pi < pieces.length; pi++) {
                 var ptxt = kCharsStr(pieces[pi])
@@ -5208,7 +5218,7 @@ NotMemberKw = :script(~~
             return {v: sout}
         }
         // Everything a String shares with a List of Char.
-        return kSeqMethod(kChars(sv), name, args)
+        return kSeqMethodK(kChars(sv), name, args, "Char sequence")
     }
     // A list of Char boxes back to the text it came from.
     function kCharsStr(a) {
@@ -5562,7 +5572,13 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    function kSeqMethod(es, name, rawArgs) {
+    // A LIST receiver, which is also every receiver whose kind this value model cannot
+    // recover: an Array, a Sequence and a Map's `values` view are the same host array.
+    // Every caller that DOES still know its receiver's kind - a Set, a Map, a range, a
+    // String - calls kSeqMethodK with the word kotlin-stdlib's overload for that kind
+    // uses. See kNoElemKind.
+    function kSeqMethod(es, name, rawArgs) { return kSeqMethodK(es, name, rawArgs, "List") }
+    function kSeqMethodK(es, name, rawArgs, kind) {
         // A callable reference passed where a lambda is expected - list.map(Box::v),
         // forEach(::println) - is the closure it stands for at every BUILTIN member.
         var args = kNormArgs(rawArgs)
@@ -5606,17 +5622,17 @@ NotMemberKw = :script(~~
         if (name == "first") {
             if (args.length == 1 && typeof f == "function") {
                 for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: es[i]} } }
-                kNoElem("Collection contains no element matching the predicate.")
+                kNoElem(kPredWord(kind) + " contains no element matching the predicate.")
             }
-            if (es.length == 0) { kNoElem("List is empty.") }
+            if (es.length == 0) { kNoElemKind(kind) }
             return {v: es[0]}
         }
         if (name == "last") {
             if (args.length == 1 && typeof f == "function") {
                 for (i = es.length - 1; i >= 0; i--) { if (f(es[i])) { return {v: es[i]} } }
-                kNoElem("List contains no element matching the predicate.")
+                kNoElem(kind + " contains no element matching the predicate.")
             }
-            if (es.length == 0) { kNoElem("List is empty.") }
+            if (es.length == 0) { kNoElemKind(kind) }
             return {v: es[es.length - 1]}
         }
         if (name == "single") {
@@ -5625,12 +5641,12 @@ NotMemberKw = :script(~~
                 hit = undefined
                 var nhit = 0
                 for (i = 0; i < es.length; i++) { if (f(es[i])) { hit = es[i]; nhit++ } }
-                if (nhit == 0) { kNoElem("Collection contains no element matching the predicate.") }
-                if (nhit > 1) { kRaise("IllegalArgumentException", "Collection contains more than one matching element.") }
+                if (nhit == 0) { kNoElem(kPredWord(kind) + " contains no element matching the predicate.") }
+                if (nhit > 1) { kRaise("IllegalArgumentException", kPredWord(kind) + " contains more than one matching element.") }
                 return {v: hit}
             }
-            if (es.length == 0) { kNoElem("List is empty.") }
-            if (es.length > 1) { kRaise("IllegalArgumentException", "List has more than one element.") }
+            if (es.length == 0) { kNoElemKind(kind) }
+            if (es.length > 1) { kRaise("IllegalArgumentException", kind + " has more than one element.") }
             return {v: es[0]}
         }
         if (name == "firstOrNull") {
@@ -5640,7 +5656,17 @@ NotMemberKw = :script(~~
             }
             return {v: es.length == 0 ? null : es[0]}
         }
-        if (name == "lastOrNull") { return {v: es.length == 0 ? null : es[es.length - 1]} }
+        // lastOrNull(predicate) is the last MATCHING element, and this arm used to
+        // ignore the lambda and answer the last element - `listOf(1,2,3).lastOrNull
+        // { it < 2 }` was 3 in every engine where Kotlin says 1. The findLast arm
+        // further down names lastOrNull too and never saw a call because of it.
+        if (name == "lastOrNull") {
+            if (args.length == 1 && typeof f == "function") {
+                for (i = es.length - 1; i >= 0; i--) { if (f(es[i])) { return {v: es[i]} } }
+                return {v: null}
+            }
+            return {v: es.length == 0 ? null : es[es.length - 1]}
+        }
         if (name == "find") {
             for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: es[i]} } }
             return {v: null}
@@ -5670,12 +5696,27 @@ NotMemberKw = :script(~~
             for (i = es.length - 1; i >= 0; i--) { accr = args[1](es[i], accr) }
             return {v: accr}
         }
-        if (name == "reduce") {
-            if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty collection can't be reduced.") }
+        if (name == "reduce" || name == "reduceIndexed") {
+            if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, false) + " can't be reduced.") }
             var accd = anytype
             accd = es[0]
-            for (i = 1; i < es.length; i++) { accd = f(accd, es[i]) }
+            for (i = 1; i < es.length; i++) {
+                accd = (name == "reduce") ? f(accd, es[i]) : f(i, accd, es[i])
+            }
             return {v: accd}
+        }
+        // reduceRight folds from the END with the accumulator as the SECOND parameter,
+        // and it is declared on List (and CharSequence), which is the only place the
+        // "Empty list can't be reduced." wording comes from. Both spellings used to
+        // abort with "unknown list method" in all three engines.
+        if (name == "reduceRight" || name == "reduceRightIndexed") {
+            if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, true) + " can't be reduced.") }
+            var accr2 = anytype
+            accr2 = es[es.length - 1]
+            for (i = es.length - 2; i >= 0; i--) {
+                accr2 = (name == "reduceRight") ? f(es[i], accr2) : f(i, es[i], accr2)
+            }
+            return {v: accr2}
         }
         if (name == "sumOf") { return {v: kSumOf(es, f)} }
         if (name == "sum") { return {v: kSumOf(es, null)} }
@@ -5765,7 +5806,11 @@ NotMemberKw = :script(~~
         if (name == "random" || name == "randomOrNull") {
             if (es.length == 0) {
                 if (name == "randomOrNull") { return {v: null} }
-                kThrowExc("NoSuchElementException", "Collection is empty.")
+                // random() is declared on COLLECTION (and on CharSequence), never on
+                // List, so a list receiver takes the Collection wording too - which is
+                // why this site already spelled it that way while first()/last() did
+                // not, and is the "why does that site have it" of docs/todo.md 1.5.
+                kThrowExc("NoSuchElementException", kPredWord(kind) + " is empty.")
             }
             return {v: es[kRndBelow(kRndOf(args), es.length)]}
         }
@@ -6329,7 +6374,7 @@ NotMemberKw = :script(~~
             }
             return {v: mm}
         }
-        return kSeqMethod(kElems(m), name, args)
+        return kSeqMethodK(kElems(m), name, args, "Collection")
     }
 
     // The Set member surface. Only the members whose ANSWER is a Set, or that mutate
@@ -6399,7 +6444,7 @@ NotMemberKw = :script(~~
             for (i = 0; i < sorted.length; i++) { kSetAdd(ss, sorted[i]) }
             return {v: ss}
         }
-        return kSeqMethod(s.keys, name, args)
+        return kSeqMethodK(s.keys, name, args, "Collection")
     }
 
     function mcall(target, name, args, spec) {
@@ -6760,6 +6805,10 @@ NotMemberKw = :script(~~
         }
         var tgt = anytype
         tgt = target
+        // A range materialized into its elements is still not a List: IntRange is an
+        // Iterable, so its empty-receiver messages are the Collection ones. The kind is
+        // remembered here because rangeList() below is what loses it. docs/todo.md 1.5.
+        var tgtKind = "List"
         if (isRange(tgt)) {
             if (name == "contains") return rangeHas(tgt, args[0])
             // The members whose answer IS the range. toString / hashCode / equals
@@ -6794,6 +6843,7 @@ NotMemberKw = :script(~~
                 return rangeAt(tgt, kRndBelow(kRndOf(args), rc))
             }
             tgt = rangeList(tgt)
+            tgtKind = "Collection"
         }
         if (Array.isArray(tgt)) {
             // add(element); add(index, element) is the INSERTING overload and belongs
@@ -6841,7 +6891,7 @@ NotMemberKw = :script(~~
                 for (i = 0; i < tgt.length; i++) { if (args[0](tgt[i])) return true }
                 return false
             }
-            var kqm = kSeqMethod(tgt, name, args)
+            var kqm = kSeqMethodK(tgt, name, args, tgtKind)
             if (kqm != null) { return kqm.v }
             return mfallback(tgt, name, args, "list")
         }
@@ -10250,6 +10300,40 @@ NotMemberKw = :script(~~
     // is java.util's and that part is settled). Every one of these used to abort the
     // run in all three engines, which is not catchable at all. docs/todo.md 1.2.
     function kNoElem(text) { kRaise("NoSuchElementException", text) }
+    // The KIND WORD in those messages is the OVERLOAD the call resolved to and not
+    // the element type. `first()` has a List overload that says "List is empty." and
+    // an Iterable one that says "Collection is empty." (_Collections.kt); CharSequence
+    // has its own family in _Strings.kt ("Char sequence is empty."). A Set, a Map's
+    // keys/entries and a range are all Iterable and none of them is a List, so they
+    // take the Collection wording. kSeqMethodK carries the word from the receiver that
+    // still knows it, because kElems/kChars/rangeList have already materialized the
+    // elements by the time the message is chosen. Two kinds are NOT reachable and both
+    // are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
+    // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an
+    // Array, a Sequence and a Map's `values` view are all the SAME host array as a
+    // List in this value model - telling them apart is docs/todo.md 2.2's nominal type
+    // on the value. Every string here is kotlin-stdlib SOURCE, not a measurement:
+    // there is no kotlinc on this machine and java cannot answer them. The throwable
+    // classes are java.util's and are settled. docs/todo.md 1.5.
+    function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
+    // first(predicate) and single(predicate) exist ONLY on Iterable and on
+    // CharSequence, so a List receiver resolves to the Iterable overload and says
+    // "Collection contains no element matching the predicate." - the predicate word is
+    // NOT the receiver word. last(predicate) does have a List overload, so that one
+    // takes the receiver word.
+    function kPredWord(kind) {
+        if (kind == "Char sequence") { return "Char sequence" }
+        return "Collection"
+    }
+    // reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be
+    // reduced."); reduceRight()/reduceRightIndexed() are the List ones ("Empty list
+    // can't be reduced."). Both spell CharSequence's as "Empty char sequence can't be
+    // reduced." (_Strings.kt).
+    function kRedWord(kind, fromRight) {
+        if (kind == "Char sequence") { return "char sequence" }
+        if (fromRight) { return "list" }
+        return "collection"
+    }
     function kIndex(o, i) {
         if (o === undefined || o === null) { fail("indexing of " + kstr(o)) }
         // m.groups[1] / m.groups["name"]: a MatchGroup (value + range) or null.

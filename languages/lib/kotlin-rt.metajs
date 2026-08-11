@@ -877,6 +877,38 @@ function ktStrRangeOob(from, to, len) {
 function ktNoElem(text) { ktRaise("NoSuchElementException", text) }
 function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 
+// The KIND WORD in those messages is the OVERLOAD the call resolved to and not the
+// element type. `first()` has a List overload that says "List is empty." and an
+// Iterable one that says "Collection is empty." (_Collections.kt); CharSequence has
+// its own family in _Strings.kt ("Char sequence is empty."). A Set, a Map's
+// keys/entries and a range are all Iterable and none of them is a List, so they take
+// the Collection wording. ktSeqMethodK carries the word from the receiver that still
+// knows it, because ktElems/ktChars/ktRangeList have already materialized the
+// elements by the time the message is chosen. Two kinds are NOT reachable and both
+// are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
+// empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
+// a Sequence and a Map's `values` view are all the SAME host array as a List in this
+// value model - telling them apart is docs/todo.md 2.2's nominal type on the value.
+// Spec-derived, not measured, exactly as above. docs/todo.md 1.5.
+function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
+// first(predicate) and single(predicate) exist ONLY on Iterable and on CharSequence,
+// so a List receiver resolves to the Iterable overload and says "Collection contains
+// no element matching the predicate." - the predicate word is NOT the receiver word.
+// last(predicate) does have a List overload, so that one takes the receiver word.
+function ktPredWord(kind) {
+    if (kind == "Char sequence") { return "Char sequence" }
+    return "Collection"
+}
+// reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be reduced.");
+// reduceRight()/reduceRightIndexed() are the List ones ("Empty list can't be
+// reduced."). Both spell CharSequence's as "Empty char sequence can't be reduced."
+// (_Strings.kt).
+function ktRedWord(kind, fromRight) {
+    if (kind == "Char sequence") { return "char sequence" }
+    if (fromRight) { return "list" }
+    return "collection"
+}
+
 // ktArrMiss (jsrtkotlin.go's ktArrMiss) is js_ktindex's COLD arm: the indexed
 // read of an array answered undefined, which is either an out-of-range index -
 // Kotlin throws, where this used to answer undefined and print "kotlin.Unit" -
@@ -2917,31 +2949,33 @@ function k2StrMethod2(s, name, args) {
         if (ci < 0 || ci >= n) { fail("charAt(" + ci + ") out of range for " + s) }
         return ktChar(s.charCodeAt(ci))
     }
-    if (name == "first") {
-        if (n == 0) { fail("first() on an empty string") }
-        return ktChar(s.charCodeAt(0))
-    }
-    if (name == "last") {
-        if (n == 0) { fail("last() on an empty string") }
-        return ktChar(s.charCodeAt(n - 1))
-    }
-    if (name == "single") {
-        // single(predicate) filters first - the predicate used to be IGNORED, so
-        // "hello".single { it == 'h' } aborted with "single() on a string of
-        // length 5" in both halves instead of answering 'h'.
+    // first/last/single/firstOrNull/lastOrNull with a PREDICATE, and every empty or
+    // over-long receiver, are kotlin.text's own CharSequence family in _Strings.kt
+    // and are answered by the shared table under the "Char sequence" kind. Three
+    // defects lived in these arms, all of them agreed in every engine:
+    // `"abc".first { it == 'z' }` IGNORED the predicate and answered 'a',
+    // `"".first()` was an uncatchable ABORT where CharSequence.first() throws
+    // NoSuchElementException("Char sequence is empty."), and `"abc".single()`
+    // aborted where it throws IllegalArgumentException("Char sequence has more than
+    // one element."). The single-character fast paths stay, so the cost of
+    // materializing the chars is paid only where a throw or a lambda is due.
+    if (name == "first" || name == "last" || name == "single" ||
+        name == "firstOrNull" || name == "lastOrNull") {
         if (args.length > 0) {
-            if (ktIsFn(args[0])) { return ktSeqMethod(ktChars(s), name, args) }
+            if (ktIsFn(args[0])) { return ktSeqMethodK(ktChars(s), name, args, "Char sequence") }
         }
-        if (n != 1) { fail("single() on a string of length " + n) }
+        if (name == "firstOrNull" || name == "lastOrNull") {
+            if (n == 0) { return null }
+            if (name == "firstOrNull") { return ktChar(s.charCodeAt(0)) }
+            return ktChar(s.charCodeAt(n - 1))
+        }
+        if (n == 0) { return ktSeqMethodK(ktChars(s), name, args, "Char sequence") }
+        if (name == "single") {
+            if (n != 1) { return ktSeqMethodK(ktChars(s), name, args, "Char sequence") }
+            return ktChar(s.charCodeAt(0))
+        }
+        if (name == "last") { return ktChar(s.charCodeAt(n - 1)) }
         return ktChar(s.charCodeAt(0))
-    }
-    if (name == "firstOrNull") {
-        if (n == 0) { return null }
-        return ktChar(s.charCodeAt(0))
-    }
-    if (name == "lastOrNull") {
-        if (n == 0) { return null }
-        return ktChar(s.charCodeAt(n - 1))
     }
     if (name == "toCharArray" || name == "toList") { return ktChars(s) }
     if (name == "trim") { return k2TrimSpace(s) }
@@ -3128,7 +3162,7 @@ function k2StrMethod2(s, name, args) {
                 if (ktRangeEmpty(args[0])) { return "" }
                 return s.substring(args[0]["from"], args[0]["to"] + 1)
             }
-            if (name == "slice") { return k4CharsStr(ktSeqMethod(ktChars(s), name, args)) }
+            if (name == "slice") { return k4CharsStr(ktSeqMethodK(ktChars(s), name, args, "Char sequence")) }
         }
         // BOUNDS-CHECKED, like the indexed read. java.lang.String#substring throws
         // when begin < 0, begin > end or end > length; the shared mcall's substring
@@ -3148,11 +3182,11 @@ function k2StrMethod2(s, name, args) {
     }
     if (name == "filter" || name == "filterNot" || name == "filterIndexed" ||
         name == "takeWhile" || name == "dropWhile" || name == "onEach") {
-        var fv = ktSeqMethod(ktChars(s), name, args)
+        var fv = ktSeqMethodK(ktChars(s), name, args, "Char sequence")
         if (!ktMiss(fv)) { return k4CharsStr(fv) }
     }
     if (name == "partition") {
-        var pv = ktSeqMethod(ktChars(s), name, args)
+        var pv = ktSeqMethodK(ktChars(s), name, args, "Char sequence")
         if (!ktMiss(pv)) {
             return {first: k4CharsStr(pv["first"]), second: k4CharsStr(pv["second"])}
         }
@@ -3167,7 +3201,7 @@ function k2StrMethod2(s, name, args) {
             if (!ktIsFn(args[wi])) { wrest.push(args[wi]) }
             wi = wi + 1
         }
-        var wv = ktSeqMethod(ktChars(s), name, wrest)
+        var wv = ktSeqMethodK(ktChars(s), name, wrest, "Char sequence")
         if (!ktMiss(wv)) {
             var wout = []
             var wj = 0
@@ -3181,7 +3215,7 @@ function k2StrMethod2(s, name, args) {
     }
     // Everything a String shares with a List of Char - map/filter/forEach/any/
     // all/count/fold/joinToString/... - goes through the collection surface.
-    var sv = ktSeqMethod(ktChars(s), name, args)
+    var sv = ktSeqMethodK(ktChars(s), name, args, "Char sequence")
     if (!ktMiss(sv)) { return sv }
     return KT_MISS
 }
@@ -4061,7 +4095,14 @@ function ktEnumMethod(recv, name, args) {
 // repeated here.
 // ============================================================================
 
-function ktSeqMethod(arr, name, args) {
+// A LIST receiver, which is also every receiver whose kind this value model cannot
+// recover: an Array, a Sequence and a Map's `values` view are the same host array.
+// Every caller that DOES still know its receiver's kind - a Set, a Map, a range, a
+// String - calls ktSeqMethodK with the word kotlin-stdlib's overload for that kind
+// uses. See ktNoElemKind.
+function ktSeqMethod(arr, name, args) { return ktSeqMethodK(arr, name, args, "List") }
+
+function ktSeqMethodK(arr, name, args, kind) {
     var es = arr
     var f = ktArg(args, 0)
     var out = []
@@ -4133,10 +4174,10 @@ function ktSeqMethod(arr, name, args) {
                 for (i = 0; i < es.length; i = i + 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
-                ktNoElem("Collection contains no element matching the predicate.")
+                ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
             }
         }
-        if (es.length == 0) { ktNoElem("List is empty.") }
+        if (es.length == 0) { ktNoElemKind(kind) }
         return es[0]
     }
     if (name == "last") {
@@ -4149,10 +4190,10 @@ function ktSeqMethod(arr, name, args) {
                 for (i = es.length - 1; i >= 0; i = i - 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
-                ktNoElem("List contains no element matching the predicate.")
+                ktNoElem(kind + " contains no element matching the predicate.")
             }
         }
-        if (es.length == 0) { ktNoElem("List is empty.") }
+        if (es.length == 0) { ktNoElemKind(kind) }
         return es[es.length - 1]
     }
     if (name == "single") {
@@ -4166,13 +4207,13 @@ function ktSeqMethod(arr, name, args) {
                         n = n + 1
                     }
                 }
-                if (n == 0) { ktNoElem("Collection contains no element matching the predicate.") }
-                if (n > 1) { ktRaise("IllegalArgumentException", "Collection contains more than one matching element.") }
+                if (n == 0) { ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.") }
+                if (n > 1) { ktRaise("IllegalArgumentException", ktPredWord(kind) + " contains more than one matching element.") }
                 return best
             }
         }
-        if (es.length == 0) { ktNoElem("List is empty.") }
-        if (es.length > 1) { ktRaise("IllegalArgumentException", "List has more than one element.") }
+        if (es.length == 0) { ktNoElemKind(kind) }
+        if (es.length > 1) { ktRaise("IllegalArgumentException", kind + " has more than one element.") }
         return es[0]
     }
     if (name == "firstOrNull") {
@@ -4187,7 +4228,19 @@ function ktSeqMethod(arr, name, args) {
         if (es.length == 0) { return null }
         return es[0]
     }
+    // lastOrNull(predicate) is the last MATCHING element, and this arm used to
+    // ignore the lambda and answer the last element - `listOf(1,2,3).lastOrNull
+    // { it < 2 }` was 3 in every engine where Kotlin says 1. The findLast arm
+    // further down names lastOrNull too and never saw a call because of it.
     if (name == "lastOrNull") {
+        if (args.length == 1) {
+            if (ktIsFn(f)) {
+                for (i = es.length - 1; i >= 0; i = i - 1) {
+                    if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
+                }
+                return null
+            }
+        }
         if (es.length == 0) { return null }
         return es[es.length - 1]
     }
@@ -4226,10 +4279,26 @@ function ktSeqMethod(arr, name, args) {
         for (i = es.length - 1; i >= 0; i = i - 1) { acc = ktCall2(ktArg(args, 1), es[i], acc) }
         return acc
     }
-    if (name == "reduce") {
-        if (es.length == 0) { ktRaise("UnsupportedOperationException", "Empty collection can't be reduced.") }
+    if (name == "reduce" || name == "reduceIndexed") {
+        if (es.length == 0) { ktRaise("UnsupportedOperationException", "Empty " + ktRedWord(kind, false) + " can't be reduced.") }
         acc = es[0]
-        for (i = 1; i < es.length; i = i + 1) { acc = ktCall2(f, acc, es[i]) }
+        for (i = 1; i < es.length; i = i + 1) {
+            if (name == "reduce") { acc = ktCall2(f, acc, es[i]) }
+            else { acc = ktCall(f, [i, acc, es[i]]) }
+        }
+        return acc
+    }
+    // reduceRight folds from the END with the accumulator as the SECOND parameter,
+    // and it is declared on List (and CharSequence), which is the only place the
+    // "Empty list can't be reduced." wording comes from. Both spellings used to
+    // abort with "unknown list method" in all three engines.
+    if (name == "reduceRight" || name == "reduceRightIndexed") {
+        if (es.length == 0) { ktRaise("UnsupportedOperationException", "Empty " + ktRedWord(kind, true) + " can't be reduced.") }
+        acc = es[es.length - 1]
+        for (i = es.length - 2; i >= 0; i = i - 1) {
+            if (name == "reduceRight") { acc = ktCall2(f, es[i], acc) }
+            else { acc = ktCall(f, [i, es[i], acc]) }
+        }
         return acc
     }
     if (name == "sumOf") { return ktSumOf(es, f) }
@@ -4326,7 +4395,11 @@ function ktSeqMethod(arr, name, args) {
     if (name == "random" || name == "randomOrNull") {
         if (es.length == 0) {
             if (name == "randomOrNull") { return null }
-            ktRaise("NoSuchElementException", "Collection is empty.")
+            // random() is declared on COLLECTION (and on CharSequence), never on
+            // List, so a list receiver takes the Collection wording too - which is
+            // why this site already spelled it that way while first()/last() did
+            // not, and is the "why does that site have it" of docs/todo.md 1.5.
+            ktRaise("NoSuchElementException", ktPredWord(kind) + " is empty.")
         }
         return es[k4RndBelow(k4RndOf(args), es.length)]
     }
@@ -5024,7 +5097,7 @@ function ktSetMethod(s, name, args) {
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
     if (name == "toSortedSet") { return k3SetFrom(ktSortBy(keys, null, false)) }
-    return ktSeqMethod(keys, name, args)
+    return ktSeqMethodK(keys, name, args, "Collection")
 }
 
 function k3IsSetRemove(name) {
@@ -5213,7 +5286,7 @@ function ktMapMethod(m, name, args) {
         return out
     }
     // map/filter/forEach/any/... over the entry sequence.
-    return ktSeqMethod(ktElems(m), name, args)
+    return ktSeqMethodK(ktElems(m), name, args, "Collection")
 }
 
 function k3IsMapView(name) {
@@ -7697,6 +7770,10 @@ function ktSmcall(recv, name, args) {
     rv = recv
     var as = args
     if (as === undefined) { as = [] }
+    // A range materialized into its elements is still not a List: IntRange is an
+    // Iterable, so its empty-receiver messages are the Collection ones. The kind is
+    // remembered here because ktRangeList below is what loses it. docs/todo.md 1.5.
+    var rvKind = "List"
 
     // A callable reference receiver: get / set / invoke, with the receiver as the
     // FIRST argument when the reference is unbound (Kotlin's KProperty1.get).
@@ -7779,6 +7856,7 @@ function ktSmcall(recv, name, args) {
             }
         }
         rv = ktRangeList(rv)
+        rvKind = "Collection"
     }
     // A kotlin.random.Random receiver, and Random's COMPANION OBJECT -
     // `Random.nextInt(10)` arrives as a member call on the constructor function.
@@ -7837,7 +7915,7 @@ function ktSmcall(recv, name, args) {
     }
 
     if (ktIsArr(rv)) {
-        var lv = ktSeqMethod(rv, name, as)
+        var lv = ktSeqMethodK(rv, name, as, rvKind)
         if (!ktMiss(lv)) { return lv }
     }
 

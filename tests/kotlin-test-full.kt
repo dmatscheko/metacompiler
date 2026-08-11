@@ -4554,6 +4554,115 @@ fun sec84() {
     // spellings are all untouched.
     check("ax84A", emp.maxOrNull() == null && emp.firstOrNull() == null &&
         many.first() == 1 && many.last() == 4 && listOf(6).single() == 6)
+    // The KIND WORD is the OVERLOAD the call resolved to, not the element type, and
+    // every receiver above is a List. kotlin-stdlib has three parallel families:
+    //   _Collections.kt  List overload      "List is empty."
+    //                    Iterable overload  "Collection is empty."
+    //   _Strings.kt      CharSequence       "Char sequence is empty."
+    // A Set, a Map's keys/entries and a range are Iterable and none of them is a
+    // List, so all three take the Collection wording; a String takes its own. Every
+    // one of these answered "List is empty." before, and the string rows ABORTED the
+    // run uncatchably. All of it is stdlib SOURCE and not a measurement: java cannot
+    // answer a kotlin-stdlib message and there is no kotlinc here. docs/todo.md 1.5.
+    val eset = setOf<Int>()
+    val emap = mapOf<Int, Int>()
+    val erange = 1..0
+    check("ax84B", s84text { eset.first() } == nse + ": Collection is empty." &&
+        s84text { eset.last() } == nse + ": Collection is empty." &&
+        s84text { eset.single() } == nse + ": Collection is empty.")
+    // random() is declared on COLLECTION and never on List, so even a LIST receiver
+    // takes the Collection wording - which is why that one site already spelled it
+    // that way while first()/last()/single() did not.
+    check("ax84C", s84text { eset.random() } == nse + ": Collection is empty." &&
+        s84text { emp.random() } == nse + ": Collection is empty.")
+    check("ax84D", s84text { eset.reduce { a, b -> a + b } } ==
+        "java.lang.UnsupportedOperationException: Empty collection can't be reduced.")
+    // max()/maxBy()/maxOf() are `?: throw NoSuchElementException()` on every
+    // receiver, so their message stays genuinely null for a Set too.
+    check("ax84E", s84text { eset.max() } == nse && s84text { eset.maxBy { it } } == nse &&
+        s84text { eset.minOf { it } } == nse && s84text { eset.minBy { it } } == nse)
+    check("ax84F", s84text { setOf(1, 2, 3).single() } ==
+        "java.lang.IllegalArgumentException: Collection has more than one element.")
+    // last(predicate) is the ONE predicate form with a List overload, so it is the
+    // one whose predicate message follows the receiver: "List contains no ..." for a
+    // list (ax84z) and "Collection contains no ..." for a Set. first(predicate) and
+    // single(predicate) exist only on Iterable, so they say "Collection" for BOTH.
+    check("ax84G", s84text { setOf(1, 2, 3).last { it > 9 } } ==
+        nse + ": Collection contains no element matching the predicate.")
+    check("ax84H", s84text { setOf(1, 2, 3).first { it > 9 } } ==
+        nse + ": Collection contains no element matching the predicate." &&
+        s84text { setOf(1, 2, 3).single { it > 9 } } ==
+        nse + ": Collection contains no element matching the predicate.")
+    // A Map's keys and entries are SETS (java.util.Map's keySet/entrySet), so they
+    // take the Collection wording too. `values` is a Collection VIEW and would as
+    // well, but it is a bare host array in this value model - the same array a List
+    // is - so it answers "List is empty." and is deliberately NOT asserted here
+    // rather than pinned: recovering it is docs/todo.md 2.2's nominal type on the
+    // value, and an Array ("Array is empty.") and a Sequence ("Sequence is empty.")
+    // are unreachable for exactly the same reason.
+    check("ax84I", s84text { emap.keys.first() } == nse + ": Collection is empty." &&
+        s84text { emap.entries.first() } == nse + ": Collection is empty." &&
+        s84text { emap.keys.last() } == nse + ": Collection is empty.")
+    check("ax84J", s84text { mapOf(1 to 2, 3 to 4).keys.single() } ==
+        "java.lang.IllegalArgumentException: Collection has more than one element.")
+    // An IntRange is an Iterable and not a List. Materializing it into its elements
+    // is what used to lose that, and `random()` on one has its own message from
+    // kotlin.ranges (Random.nextInt's text, rethrown as NoSuchElementException).
+    check("ax84K", s84text { erange.first() } == nse + ": Collection is empty." &&
+        s84text { erange.last() } == nse + ": Collection is empty." &&
+        s84text { erange.single() } == nse + ": Collection is empty.")
+    check("ax84L", s84text { erange.random() } ==
+        nse + ": Cannot get random in empty range: 1..0")
+    // A CharSequence's own family, from _Strings.kt. All five of these ABORTED the
+    // run before - `fail("first() on an empty string")` - which is not catchable at
+    // all, so this is a change of CLASS and not only of wording.
+    val estr = arrayOf("", "abc", "z")
+    check("ax84M", s84text { estr[0].first() } == nse + ": Char sequence is empty." &&
+        s84text { estr[0].last() } == nse + ": Char sequence is empty." &&
+        s84text { estr[0].single() } == nse + ": Char sequence is empty.")
+    check("ax84N", s84text { estr[0].random() } == nse + ": Char sequence is empty.")
+    check("ax84O", s84text { estr[1].single() } ==
+        "java.lang.IllegalArgumentException: Char sequence has more than one element.")
+    check("ax84P", s84text { estr[0].reduce { a, b -> b } } ==
+        "java.lang.UnsupportedOperationException: Empty char sequence can't be reduced.")
+    // first(predicate) / last(predicate) on a String IGNORED the lambda in every
+    // engine and answered the first or last character - agreed and wrong, the class
+    // only an oracle can see. So did firstOrNull/lastOrNull with one.
+    check("ax84Q", s84text { estr[1].first { it == 'z' } } ==
+        nse + ": Char sequence contains no element matching the predicate." &&
+        s84text { estr[1].last { it == 'z' } } ==
+        nse + ": Char sequence contains no element matching the predicate.")
+    check("ax84R", s84text { estr[1].single { it == 'z' } } ==
+        nse + ": Char sequence contains no element matching the predicate.")
+    check("ax84S", s84text { estr[1].single { it != 'q' } } ==
+        "java.lang.IllegalArgumentException: Char sequence contains more than one matching element.")
+    check("ax84T", estr[1].first { it == 'b' } == 'b' && estr[1].last { it != 'c' } == 'b' &&
+        estr[1].single { it == 'b' } == 'b' && estr[2].single() == 'z')
+    check("ax84U", estr[1].firstOrNull { it == 'c' } == 'c' &&
+        estr[1].lastOrNull { it == 'a' } == 'a' && estr[0].firstOrNull() == null &&
+        estr[1].first() == 'a' && estr[1].last() == 'c')
+    // lastOrNull(predicate) on a LIST had the same defect: the arm answered the last
+    // element and the findLast arm that names lastOrNull never saw a call.
+    check("ax84V", many.lastOrNull { it < 3 } == 2 && many.findLast { it < 3 } == 2 &&
+        many.lastOrNull { it > 9 } == null && many.lastOrNull() == 4)
+    // The reduce family beyond reduce(): all three spellings aborted with "unknown
+    // list method" in every engine. reduceRight/reduceRightIndexed are the LIST
+    // overloads, which is where "Empty list can't be reduced." comes from - the one
+    // wording in this section that no other member can produce.
+    check("ax84W", listOf("a", "b", "c").reduceRight { a, b -> a + b } == "abc" &&
+        many.reduceIndexed { i, a, b -> i + a + b } == 16 &&
+        many.reduceRightIndexed { i, a, b -> i + a + b } == 13)
+    check("ax84X", s84text { emp.reduceRight { a, b -> a + b } } ==
+        "java.lang.UnsupportedOperationException: Empty list can't be reduced." &&
+        s84text { emp.reduceIndexed { i, a, b -> a + b } } ==
+        "java.lang.UnsupportedOperationException: Empty collection can't be reduced.")
+    check("ax84Y", s84text { estr[0].reduceRight { a, b -> b } } ==
+        "java.lang.UnsupportedOperationException: Empty char sequence can't be reduced." &&
+        estr[1].reduceRight { a, b -> b } == 'c')
+    // The non-empty and OrNull spellings of every kind are untouched.
+    check("ax84Z", setOf(7).single() == 7 && setOf(3, 4).first() == 3 &&
+        setOf(3, 4).last() == 4 && (1..3).first() == 1 && (1..3).last() == 3 &&
+        eset.firstOrNull() == null && emap.keys.firstOrNull() == null)
 }
 
 

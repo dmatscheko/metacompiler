@@ -1408,6 +1408,7 @@ func init() {
 			// 'toDouble' on a number" while the interpreter answered 7.0 - a live
 			// cross-half divergence that no test happened to exercise.
 			recv, mname := u(a[0]), rt.toString(u(a[1]))
+			recvKind := ktKindList
 			// A callable reference receiver: get / set / invoke, with the receiver as
 			// the FIRST argument when the reference is unbound (Kotlin's
 			// KProperty1.get(receiver)). The twin is the __propref arm of mcall in
@@ -1519,7 +1520,11 @@ func init() {
 						return w(ktRangeAt(rg, ktRndBelow(rt.ktRndOf(arr.elems), cnt)))
 					}
 				}
+				// A range materialized into its elements is still not a List:
+				// IntRange is an Iterable, so its empty-receiver messages are the
+				// Collection ones. docs/todo.md 1.5.
 				recv = &jsArray{elems: ktRangeList(rg)}
+				recvKind = ktKindColl
 			}
 			// kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a
 			// NULL receiver answers them rather than throwing (java's
@@ -1581,7 +1586,7 @@ func init() {
 				}
 			}
 			if lst, isArr := recv.(*jsArray); isArr {
-				if v, handled := rt.ktSeqMethod(lst, mname, arr.elems); handled {
+				if v, handled := rt.ktSeqMethodK(lst, mname, arr.elems, recvKind); handled {
 					return rt.wrap(v)
 				}
 			}
@@ -2814,37 +2819,36 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 			rt.fail("charAt(%d) out of range for %s", i, s)
 		}
 		return jsChar{code: int32(rt.strCodeAt(s, i))}, true
-	case "first":
-		if n == 0 {
-			rt.fail("first() on an empty string")
-		}
-		return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
-	case "last":
-		if n == 0 {
-			rt.fail("last() on an empty string")
-		}
-		return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
-	case "single":
-		// single(predicate) filters first - the predicate used to be IGNORED, so
-		// `"hello".single { it == 'h' }` aborted with "single() on a string of length
-		// 5" in both halves instead of answering 'h'.
+	// first/last/single/firstOrNull/lastOrNull with a PREDICATE, and every empty or
+	// over-long receiver, are kotlin.text's own CharSequence family in _Strings.kt and
+	// are answered by the shared table under the "Char sequence" kind. Three defects
+	// lived in these cases, all of them agreed in every engine: `"abc".first { it ==
+	// 'z' }` IGNORED the predicate and answered 'a', `"".first()` was an uncatchable
+	// ABORT where CharSequence.first() throws NoSuchElementException("Char sequence is
+	// empty."), and `"abc".single()` aborted where it throws
+	// IllegalArgumentException("Char sequence has more than one element."). The
+	// single-character fast paths stay, so the cost of materializing the chars is paid
+	// only where a throw or a lambda is due.
+	case "first", "last", "single", "firstOrNull", "lastOrNull":
 		if len(args) > 0 && isCallable(args[0]) {
-			return rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+			return rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
 		}
-		if n != 1 {
-			rt.fail("single() on a string of length %d", n)
+		if name == "firstOrNull" || name == "lastOrNull" {
+			if n == 0 {
+				return jsNull, true
+			}
+			if name == "firstOrNull" {
+				return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
+			}
+			return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
+		}
+		if n == 0 || (name == "single" && n != 1) {
+			return rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
+		}
+		if name == "last" {
+			return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
 		}
 		return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
-	case "firstOrNull":
-		if n == 0 {
-			return jsNull, true
-		}
-		return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
-	case "lastOrNull":
-		if n == 0 {
-			return jsNull, true
-		}
-		return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
 	case "toCharArray", "toList":
 		return &jsArray{elems: chars()}, true
 	case "trim":
@@ -3031,7 +3035,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 				return rt.strRange(s, int(rg.from), int(rg.to)+1), true
 			}
 			if name == "slice" {
-				v, _ := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+				v, _ := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
 				return ktCharsStr(v), true
 			}
 		}
@@ -3058,12 +3062,12 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 			return rt.strRange(s, begin, end), true
 		}
 	case "filter", "filterNot", "filterIndexed", "takeWhile", "dropWhile", "onEach":
-		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+		v, handled := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
 		if handled {
 			return ktCharsStr(v), true
 		}
 	case "partition":
-		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+		v, handled := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
 		if handled {
 			po := v.(*jsObject)
 			p := newJSObject()
@@ -3083,7 +3087,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 				rest = append(rest, a)
 			}
 		}
-		v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, rest)
+		v, handled := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, rest, ktKindChar)
 		if handled {
 			out := []interface{}{}
 			for _, piece := range v.(*jsArray).elems {
@@ -3099,7 +3103,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	}
 	// Everything a String shares with a List of Char - map/filter/forEach/any/all/
 	// count/fold/joinToString/... - goes through the collection surface.
-	if v, handled := rt.ktSeqMethod(&jsArray{elems: chars()}, name, args); handled {
+	if v, handled := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar); handled {
 		return v, true
 	}
 	return nil, false
@@ -4158,7 +4162,16 @@ func (rt *jsrt) ktStrArg(v interface{}) string {
 	return rt.ktStr2(v)
 }
 
-// ktSeqMethod is the kotlin.collections surface over a list. The shared js_mcall
+// ktSeqMethod is ktSeqMethodK for a LIST receiver, which is also every receiver
+// whose kind this value model cannot recover: an Array, a Sequence and a Map's
+// `values` view are the same host array. Every caller that DOES still know its
+// receiver's kind - a Set, a Map, a range, a String - calls ktSeqMethodK with the
+// word kotlin-stdlib's overload for that kind uses. See ktNoElemKind.
+func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interface{}, bool) {
+	return rt.ktSeqMethodK(o, name, args, ktKindList)
+}
+
+// ktSeqMethodK is the kotlin.collections surface over a list. The shared js_mcall
 // already carries add/size/get/contains/map/filter/sumOf/forEach/count/any; this
 // answers the rest, and answers (nil, false) for a name it does not know so the
 // shared table keeps whatever behaviour it had.
@@ -4166,7 +4179,11 @@ func (rt *jsrt) ktStrArg(v interface{}) string {
 // `sumOf` is re-answered here because the shared one accumulates in int32 and
 // Kotlin's sumOf takes the type of the selector's result - a Long selector sums to
 // a Long, which is the difference between 3000000000 and -1294967296.
-func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interface{}, bool) {
+//
+// `kind` is the receiver's COLLECTION KIND, and it exists because the elements are
+// already materialized by the time an empty-receiver message is chosen. See
+// ktNoElemKind for what the word is and where the two unreachable kinds went.
+func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind string) (interface{}, bool) {
 	es := o.elems
 	f := argAt(args, 0)
 	arr := func(v []interface{}) *jsArray { return &jsArray{elems: v} }
@@ -4237,10 +4254,10 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 					return e, true
 				}
 			}
-			rt.ktNoElem("Collection contains no element matching the predicate.")
+			rt.ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
 		}
 		if len(es) == 0 {
-			rt.ktNoElem("List is empty.")
+			rt.ktNoElemKind(kind)
 		}
 		return es[0], true
 	case "last":
@@ -4254,10 +4271,10 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 					return es[i], true
 				}
 			}
-			rt.ktNoElem("List contains no element matching the predicate.")
+			rt.ktNoElem(kind + " contains no element matching the predicate.")
 		}
 		if len(es) == 0 {
-			rt.ktNoElem("List is empty.")
+			rt.ktNoElemKind(kind)
 		}
 		return es[len(es)-1], true
 	case "single":
@@ -4270,18 +4287,18 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 				}
 			}
 			if n == 0 {
-				rt.ktNoElem("Collection contains no element matching the predicate.")
+				rt.ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
 			}
 			if n > 1 {
-				rt.ktRaise("IllegalArgumentException", "Collection contains more than one matching element.")
+				rt.ktRaise("IllegalArgumentException", ktPredWord(kind)+" contains more than one matching element.")
 			}
 			return hit, true
 		}
 		if len(es) == 0 {
-			rt.ktNoElem("List is empty.")
+			rt.ktNoElemKind(kind)
 		}
 		if len(es) > 1 {
-			rt.ktRaise("IllegalArgumentException", "List has more than one element.")
+			rt.ktRaise("IllegalArgumentException", kind+" has more than one element.")
 		}
 		return es[0], true
 	case "firstOrNull":
@@ -4297,7 +4314,19 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			return jsNull, true
 		}
 		return es[0], true
+	// lastOrNull(predicate) is the last MATCHING element, and this case used to
+	// ignore the lambda and answer the last element - `listOf(1,2,3).lastOrNull
+	// { it < 2 }` was 3 in every engine where Kotlin says 1. The findLast case
+	// further down names lastOrNull too and never saw a call because of it.
 	case "lastOrNull":
+		if len(args) == 1 && isCallable(f) {
+			for i := len(es) - 1; i >= 0; i-- {
+				if rt.truthy(rt.ktCall(f, es[i])) {
+					return es[i], true
+				}
+			}
+			return jsNull, true
+		}
 		if len(es) == 0 {
 			return jsNull, true
 		}
@@ -4345,13 +4374,34 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			acc = rt.ktCall(argAt(args, 1), es[i], acc)
 		}
 		return acc, true
-	case "reduce":
+	case "reduce", "reduceIndexed":
 		if len(es) == 0 {
-			rt.ktRaise("UnsupportedOperationException", "Empty collection can't be reduced.")
+			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, false)+" can't be reduced.")
 		}
 		acc := es[0]
-		for _, e := range es[1:] {
-			acc = rt.ktCall(f, acc, e)
+		for i := 1; i < len(es); i++ {
+			if name == "reduce" {
+				acc = rt.ktCall(f, acc, es[i])
+			} else {
+				acc = rt.ktCall(f, float64(i), acc, es[i])
+			}
+		}
+		return acc, true
+	// reduceRight folds from the END with the accumulator as the SECOND parameter,
+	// and it is declared on List (and CharSequence), which is the only place the
+	// "Empty list can't be reduced." wording comes from. Both spellings used to
+	// abort with "unknown list method" in all three engines.
+	case "reduceRight", "reduceRightIndexed":
+		if len(es) == 0 {
+			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, true)+" can't be reduced.")
+		}
+		acc := es[len(es)-1]
+		for i := len(es) - 2; i >= 0; i-- {
+			if name == "reduceRight" {
+				acc = rt.ktCall(f, es[i], acc)
+			} else {
+				acc = rt.ktCall(f, float64(i), es[i], acc)
+			}
 		}
 		return acc, true
 	case "sumOf":
@@ -4488,7 +4538,11 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			if name == "randomOrNull" {
 				return jsNull, true
 			}
-			rt.ktRaise("NoSuchElementException", "Collection is empty.")
+			// random() is declared on COLLECTION (and on CharSequence), never on
+			// List, so a list receiver takes the Collection wording too - which is
+			// why this site already spelled it that way while first()/last() did
+			// not, and is the "why does that site have it" of docs/todo.md 1.5.
+			rt.ktRaise("NoSuchElementException", ktPredWord(kind)+" is empty.")
 		}
 		return es[ktRndBelow(rt.ktRndOf(args), len(es))], true
 	case "distinct":
@@ -5299,7 +5353,7 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	case "toSortedSet":
 		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
 	}
-	return rt.ktSeqMethod(keys, name, args)
+	return rt.ktSeqMethodK(keys, name, args, ktKindColl)
 }
 
 // ktIsCollection reports the shapes kotlin.collections.plus/minus treat as a
@@ -5655,7 +5709,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		return out, true
 	}
 	// map/filter/forEach/any/... over the entry sequence.
-	return rt.ktSeqMethod(&jsArray{elems: ktElems(rt, m)}, name, args)
+	return rt.ktSeqMethodK(&jsArray{elems: ktElems(rt, m)}, name, args, ktKindColl)
 }
 
 // ============================================================================
@@ -7065,6 +7119,54 @@ func (rt *jsrt) ktNoElem(text interface{}) {
 		return
 	}
 	rt.ktRaise("NoSuchElementException", text.(string))
+}
+
+// The KIND WORD in those messages is the OVERLOAD the call resolved to and not the
+// element type. `first()` has a List overload that says "List is empty." and an
+// Iterable one that says "Collection is empty." (_Collections.kt); CharSequence has
+// its own family in _Strings.kt ("Char sequence is empty."). A Set, a Map's
+// keys/entries and a range are all Iterable and none of them is a List, so they take
+// the Collection wording. ktSeqMethodK carries the word from the receiver that still
+// knows it, because ktElems/ktChars/ktRangeList have already materialized the
+// elements by the time the message is chosen. Two kinds are NOT reachable and both
+// are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
+// empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
+// a Sequence and a Map's `values` view are all the SAME host array as a List in this
+// value model - telling them apart is docs/todo.md 2.2's nominal type on the value.
+// Spec-derived, not measured, exactly as above. docs/todo.md 1.5.
+const (
+	ktKindList = "List"
+	ktKindColl = "Collection"
+	ktKindChar = "Char sequence"
+)
+
+func (rt *jsrt) ktNoElemKind(kind string) {
+	rt.ktNoElem(kind + " is empty.")
+}
+
+// first(predicate) and single(predicate) exist ONLY on Iterable and on CharSequence,
+// so a List receiver resolves to the Iterable overload and says "Collection contains
+// no element matching the predicate." - the predicate word is NOT the receiver word.
+// last(predicate) does have a List overload, so that one takes the receiver word.
+func ktPredWord(kind string) string {
+	if kind == ktKindChar {
+		return ktKindChar
+	}
+	return ktKindColl
+}
+
+// reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be reduced.");
+// reduceRight()/reduceRightIndexed() are the List ones ("Empty list can't be
+// reduced."). Both spell CharSequence's as "Empty char sequence can't be reduced."
+// (_Strings.kt).
+func ktRedWord(kind string, fromRight bool) string {
+	if kind == ktKindChar {
+		return "char sequence"
+	}
+	if fromRight {
+		return "list"
+	}
+	return "collection"
 }
 
 // ktRunCatching runs a lambda and boxes its completion as a kotlin.Result.
