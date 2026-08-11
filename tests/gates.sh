@@ -128,7 +128,20 @@ FULL_TIMEOUT=900
 # 2026-08-09: raised to 8123 AFTER the ten-item round was committed
 # (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
 # correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9665      # NINETEENTH round, +197 over the eighteenth's 9468:
+FULL_ASSERTIONS=9679      # NINETEENTH round, SECOND raise: +14 for the three
+                          # wave-2 items, on top of the +197 below. unicode +8 (real
+                          # ID_Start/ID_Continue for js/ts), ruby +4 and dart +2
+                          # (defined? kinds, and extensions on a builtin receiver).
+                          # stmtPos contributed +0 BY CONSTRUCTION - its modules are
+                          # byte-identical with tracing off, so it cannot add
+                          # assertions, and that agent correctly refused credit for
+                          # a +3 that was another agent's in-flight ratchet edit.
+                          #
+                          # +14 IS EXACTLY 8+4+2, again the agents' own isolated
+                          # numbers, so the no-interference cross-check holds twice
+                          # in one round.
+                          #
+                          # THE FIRST RAISE OF THIS ROUND, +197 over the eighteenth's 9468:
                           # js +43 and typescript +43 (a function's name and length
                           # in both halves, and its own name BOUND inside its body
                           # via a spec funcEnv), ruby +33 (to_c, an empty block
