@@ -79,10 +79,13 @@
 #                                  the note below; 1 draw measures nothing
 #   tests/bench.sh --tol P         flag a delta beyond P percent (default 2.5)
 #   tests/bench.sh --paired DIR    compare against another CHECKOUT draw by draw,
-#                                  building both to the SAME path so the layout term
-#                                  cancels. This is the instrument to reach for when a
-#                                  delta is smaller than the row's own spread - it has
-#                                  settled such questions in BOTH directions.
+#                                  building both to the SAME path. It cancels the
+#                                  OUTPUT PATH term and nothing else - it is a SIGN
+#                                  TEST, not cancellation. Reach for it when a delta is
+#                                  smaller than the row's own spread; it has settled
+#                                  such questions in BOTH directions. But see the
+#                                  DEAD-CODE MATCHED CONTROL note below before trusting
+#                                  a unanimous sign on a SHARED layer-2 file.
 #
 # Exit 0 iff nothing regressed beyond the tolerance. A row that IMPROVES is
 # reported and does not fail the gate - but re-record the baseline when you land
@@ -204,6 +207,31 @@ instructions_of() {
 # ALWAYS corroborate a paired verdict with an exact counter (module bytes,
 # MEC_GC_STATS, binary size). Counters are exempt from the lottery; timings are
 # not, and this is still a timing.
+#
+# AND THE ONE CASE WHERE A UNANIMOUS SIGN IS STILL NOT EVIDENCE - added 2026-08-11
+# after it produced a wrong answer that looked exactly like a right one.
+#
+# ADDING A NAME TO `languages/lib/runtime.metajs` RENUMBERS THE `@str.N` INTERN
+# TABLE OF EVERY IMPORTING MODULE. Measured: 148 added lines of runtime.metajs
+# produce 7,705 insertions and 7,639 deletions in python-rt.ll alone, with the line
+# count essentially unchanged. So the module handed to clang is shifted WHOLESALE,
+# the same way in every pair - and `--paired`, which holds the PATH constant, cannot
+# see that at all. The sign comes out unanimous because the perturbation is
+# identical in all N pairs, not because the change costs anything.
+#
+# It read +1.08% "slower in 8 of 9 pairs" for a nine-line body that nothing hot
+# calls. The control that settles it: the same base plus that body with NOTHING
+# CALLING IT reads +0.95%, slower in 8 of 9. Base against base reads +0.13%.
+#
+# SO, FOR ANY CHANGE THAT TOUCHES A SHARED LAYER-2 FILE: build a DEAD-CODE MATCHED
+# CONTROL - the same insertion, uncalled - and measure against THAT, not against
+# base. The same round's real result shows what a true effect looks like through the
+# same instrument: python -12.66% on medians, 9 of 9 paired, and collections
+# 3,574 -> 3,017 on an exact counter.
+#
+# The general form: `--paired` cancels the OUTPUT PATH and nothing else. Any
+# perturbation that is constant across pairs survives it, and a shared intern table
+# is exactly that.
 #
 # The other tree must be a full checkout that builds - `git archive <rev> | tar x`
 # then `go build` INSIDE it (manual chapter 4: mec reads its grammar from the path

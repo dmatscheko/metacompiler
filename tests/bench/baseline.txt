@@ -13,6 +13,26 @@
 # fourteen rows. Everything below was paid for and is not re-derivable from the
 # numbers - which is why it is now the script's job to keep it.
 #
+# RE-RECORDED at cd75454, 9 draws per row. ONE ROW MOVED AND IT IS THE POINT OF THE
+# COMMIT: python 26,956,903,341 -> 23,549,626,053, **-12.64% against its own 1.04%
+# spread**, from merging `pyTag`/`rbTag` into an INLINED `rtTag` - one scope frame
+# removed from the hottest predicate in the file. Corroborated by an exact counter,
+# which is the part that makes it believable: collections 3,574 -> 3,017.
+#
+# Nothing else moved. csharp -0.31 (spread 0.36), dart -0.36 (0.48), kotlin -1.22
+# (1.26), ruby -0.54 (0.83), and java/php/swift/js/go/lua/metajs/bash/batch/c all
+# within 0.06 of zero. csharp, dart and kotlin IMPORT runtime.metajs and do not call
+# the three new bodies, so their staying inside their spreads for +274 IR lines is
+# manual 7.13's "a non-caller pays nothing" verified rather than assumed.
+#
+# AND A WARNING ABOUT THE INSTRUMENT, which this round paid for: `--paired` cancels
+# the output PATH and nothing else. Adding a name to runtime.metajs renumbers the
+# @str.N intern table of every importing module (148 source lines -> 7,705
+# insertions and 7,639 deletions in python-rt.ll), and that shift is IDENTICAL in
+# every pair, so it reads as a UNANIMOUS SIGN. A nine-line uncalled body measured
+# "+0.95%, slower in 8 of 9". For a shared layer-2 file, measure against a DEAD-CODE
+# MATCHED CONTROL, not against base. Full note in tests/bench.sh's header.
+#
 # RE-RECORDED at 61aa3de (the NINETEENTH round), clean `git archive` tree, 9 draws
 # per row. FOUR ROWS MOVED BEYOND THEIR OWN SPREAD AND NOT ONE OF THEM IS THIS
 # ROUND'S WORK:
@@ -621,18 +641,19 @@
 # re-recorded at commit 27cdf8d, 9 draws, min of 3 runs per build.
 # recorded at commit unknown, 9 draws, min of 3 runs.
 # recorded at commit unknown, 9 draws, min of 3 runs.
-bash       52765827         -          -
-batch      33842018         -          -
-c          10781531         -          -
-csharp     19242059787      11558256   2345
-dart       3552180262       11556976   446
-go         753396825        11560816   75
-java       7885649822       11556976   1054
-js         1155979219       11577456   131
-kotlin     15314802526      11627376   1880
-lua        1409088293       10498176   121
-metajs     221405238        11537792   4
-php        7046568127       11560816   968
-python     26956903341      11627376   3574
-ruby       5099679726       11622256   466
-swift      4035601042       11556976   470
+# recorded at commit unknown, 9 draws, min of 3 runs.
+bash       52735738         -          -
+batch      33827395         -          -
+c          10778282         -          -
+csharp     19182900487      11558256   2345
+dart       3539334944       11556976   446
+go         753282211        11560816   75
+java       7887697011       11556976   1054
+js         1155867857       11577456   131
+kotlin     15128556208      11627376   1880
+lua        1408903406       10498176   121
+metajs     221403632        11537792   4
+php        7048943096       11560816   968
+python     23549626053      11627376   3017
+ruby       5071919899       11622256   466
+swift      4035881746       11556976   470
