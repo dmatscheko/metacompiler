@@ -2853,6 +2853,176 @@ function s47(): void {
     check("fnp17", Object.assign({}, s47fn).q === 2 && ({ ...s47fn }).q === 2);
 }
 
+// ===== SECTION 48: a function's own `name`, `length` and SELF NAME (docs/todo.md 1.4) =====
+// Every function has two own properties nothing in the program writes. This half
+// answered ""/0 for both and BOTH COMPILED HALVES answered `undefined`, so the pair
+// was a halves divergence as well as a wrong answer; node says `f`/1 for
+// `function f(a){}`. Every value below was read off node 24 before it was asserted.
+//
+// `length` is the parameters BEFORE the first default and before the rest parameter,
+// and a destructuring pattern counts as ONE - which is why fn9 is 3 and not 4.
+//
+// What is deliberately NOT asserted, because no engine here can answer it: the other
+// three own names node reports on a function declaration (`arguments`, `caller`,
+// `prototype` - there is no prototype chain and no call-site frame in this value
+// model), and `f.constructor`, which diverges goja vs -frozen and is left unasserted
+// on purpose so that no assertion pins the divergence.
+function s48() {
+    function fnDecl(a) { return a }
+    var fnNamedExpr = function fnInner(a, b) { return a + b }
+    var fnArrow = (x) => x;
+    var fnAnon = function () { return 1 }
+    var fnDflt = function (a, b = 1, c) { return a }
+    var fnRest = function (...r) { return r.length }
+    var fnDestr = function ({ a }, [b], c) { return c }
+    var fnDrest = function (a, ...r) { return a }
+    var fnZero = () => 0;
+    check("fnm01", fnDecl.name === "fnDecl" && fnDecl.length === 1);
+    // A NAMED function expression keeps ITS OWN name, and does not take the binding's.
+    check("fnm02", fnNamedExpr.name === "fnInner" && fnNamedExpr.length === 2);
+    // NamedEvaluation: an ANONYMOUS form takes the name of the binding it is
+    // DIRECTLY assigned to.
+    check("fnm03", fnArrow.name === "fnArrow" && fnArrow.length === 1);
+    check("fnm04", fnAnon.name === "fnAnon" && fnAnon.length === 0);
+    check("fnm05", fnZero.name === "fnZero" && fnZero.length === 0);
+    check("fnm06", fnDflt.length === 1);
+    check("fnm07", fnRest.length === 0);
+    check("fnm08", fnDrest.length === 1);
+    check("fnm09", fnDestr.length === 3);
+    // ...and only when it IS the initializer: node names nothing in `f(function(){})`.
+    function s48id(x) { return x }
+    var fnVia = s48id(function () { return 2 });
+    check("fnm10", fnVia.name === "" && fnVia.length === 0);
+    var fnAssigned;
+    fnAssigned = function () { return 3 }
+    check("fnm11", fnAssigned.name === "fnAssigned");
+    var s48obj = {
+        mExpr: function () { return 1 },
+        mShort(a) { return a },
+        mArrow: (a, b) => a,
+        deep: { inner: function () { return 4 } }
+    }
+    check("fnm12", s48obj.mExpr.name === "mExpr" && s48obj.mExpr.length === 0);
+    check("fnm13", s48obj.mShort.name === "mShort" && s48obj.mShort.length === 1);
+    check("fnm14", s48obj.mArrow.name === "mArrow" && s48obj.mArrow.length === 2);
+    check("fnm15", s48obj.deep.inner.name === "inner");
+    async function s48async(a, b) { return a }
+    function* s48gen(a) { yield a }
+    check("fnm16", s48async.name === "s48async" && s48async.length === 2);
+    check("fnm17", s48gen.name === "s48gen" && s48gen.length === 1);
+    class S51C {
+        constructor(a) { this.a = a }
+        meth(x) { return x }
+        static stat(a, b) { return a }
+        async am(a) { return a }
+        *gm() { yield 1 }
+    }
+    var s48i = new S51C(1);
+    // A method read as a VALUE answers the method's own name and arity: the receiver
+    // arrives as a hidden first argument here and is not a declared parameter.
+    check("fnm18", s48i.meth.name === "meth" && s48i.meth.length === 1);
+    check("fnm19", S51C.stat.name === "stat" && S51C.stat.length === 2);
+    check("fnm20", s48i.am.name === "am" && s48i.am.length === 1);
+    check("fnm21", s48i.gm.name === "gm" && s48i.gm.length === 0);
+    // A BOUND function: "bound " + the target's name, and the target's length less the
+    // arguments already supplied, floored at 0.
+    var fnBound = fnDecl.bind(null);
+    var fnBound2 = fnNamedExpr.bind(null, 1);
+    check("fnm22", fnBound.name === "bound fnDecl" && fnBound.length === 1);
+    check("fnm23", fnBound2.name === "bound fnInner" && fnBound2.length === 1);
+    check("fnm24", fnRest.bind(null, 1, 2, 3).length === 0);
+    // Both are OWN properties, and NON-ENUMERABLE: getOwnPropertyNames reports them,
+    // Object.keys and for-in do not. The list is asserted on an ARROW, where node's own
+    // answer is exactly ["length","name"]; a function DECLARATION has three more there
+    // (`arguments`, `caller`, `prototype`) and no engine here can answer any of them -
+    // there is no prototype chain and no call-site frame in this value model - so for
+    // that shape only the two names' PRESENCE is asserted, which is true in node too.
+    var g = Object.getOwnPropertyNames(fnZero);
+    check("fnm25", g.length === 2 && g[0] === "length" && g[1] === "name");
+    var gd = Object.getOwnPropertyNames(fnDecl);
+    check("fnm26", gd.indexOf("length") >= 0 && gd.indexOf("name") >= 0);
+    check("fnm27", Object.keys(fnDecl).length === 0);
+    check("fnm28", fnDecl.hasOwnProperty("name") && fnDecl.hasOwnProperty("length"));
+    check("fnm29", !fnDecl.propertyIsEnumerable("name"));
+    var fnKeys = [];
+    for (var fk in fnDecl) { fnKeys.push(fk) }
+    check("fnm30", fnKeys.length === 0);
+    // Both are NON-WRITABLE: the write is dropped, silently, as it is in sloppy node.
+    fnDecl.name = "zzz";
+    fnDecl.length = 99;
+    check("fnm31", fnDecl.name === "fnDecl" && fnDecl.length === 1);
+    // ...and a function can still carry own properties of its own beside them.
+    fnZero.tag = 7;
+    var g2 = Object.getOwnPropertyNames(fnZero);
+    check("fnm32", fnZero.tag === 7 && g2.length === 3 && g2[2] === "tag");
+    check("fnm33", fnZero.hasOwnProperty("tag") && fnZero.propertyIsEnumerable("tag"));
+    check("fnm34", Object.keys(fnZero).length === 1 && Object.keys(fnZero)[0] === "tag");
+    // ----- a named function EXPRESSION sees its OWN NAME (ES2023 15.2.5) -----
+    // The optional name was accepted and dropped, so this whole group answered
+    // *ReferenceError* in all four engines. The spec's funcEnv - one scope, one binding
+    // of the name to the function object, between the definition site and the function's
+    // own scope - is what all nine rows below come out of; every value was read off
+    // node 24 first.
+    var s48fact = function fact(n) { return n < 2 ? 1 : n * fact(n - 1) }
+    check("fns01", s48fact(5) === 120);
+    // The name does NOT leak into the enclosing scope.
+    var s48hid = function hidden48() { return 1 }
+    check("fns02", typeof hidden48 === "undefined");
+    // An outer variable of the same name is SHADOWED inside and untouched outside.
+    var shad48 = 7;
+    var s48shad = function shad48() { return typeof shad48 }
+    check("fns03", s48shad() === "function" && shad48 === 7);
+    // A DECLARATION is unchanged: it binds in the ENCLOSING scope, and only there.
+    check("fns04", s48decl(5) === 120 && typeof s48decl === "function");
+    // A `var` of the same name IN THE BODY shadows the self binding, so this is 2.
+    var s48var = function v48() { var v48 = 1; v48 = 2; return v48 }
+    check("fns05", s48var() === 2);
+    // The name IS the function - one object, bound after it exists.
+    var s48id = function self48() { return self48 === s48id }
+    check("fns06", s48id() === true);
+    // A PARAMETER of the same name wins over the self binding.
+    var s48par = function p48(p48) { return p48 }
+    check("fns07", s48par(42) === 42);
+    // ...and a NESTED function still sees it.
+    var s48nest = function o48() { return (function () { return typeof o48 })() }
+    check("fns08", s48nest() === "function");
+    // A generator function EXPRESSION binds its own name too, which is what lets it
+    // delegate to itself. Driven by next() rather than by spread: spreading a generator
+    // answers an empty array in both halves, which is older than this section and is
+    // recorded as its own gap.
+    var s48gen = function* gen48(n) { yield n; if (n > 0) { yield* gen48(n - 1) } }
+    var s48out = "";
+    var s48it = s48gen(2);
+    var s48r = s48it.next();
+    while (!s48r.done) { s48out = s48out + s48r.value; s48r = s48it.next() }
+    check("fns09", s48out === "210");
+    // NOT asserted, and deliberately: an ASSIGNMENT to the name inside the body. node
+    // ignores it silently in sloppy code and raises a TypeError in strict code, because
+    // the binding is IMMUTABLE; the write lands on the funcEnv slot in BOTH halves here,
+    // so they agree and an assertion would pin the divergence. The mechanism it would
+    // take is written up at fnSelf in both grammars.
+}
+// The declaration s48decl is used by fns04 from inside s48, and a declaration binds in
+// the scope AROUND the function it is written in - so it is a top-level sibling here,
+// which is also what makes it the control for the whole group: it must keep working
+// exactly as it did.
+function s48decl(n) { return n < 2 ? 1 : n * s48decl(n - 1) }
+
+// ===== END SECTIONS =====
+
+function main() {
+    s44() // SECTION-CALL 44;
+    s45() // SECTION-CALL 45;
+    s46() // SECTION-CALL 46;
+    s47() // SECTION-CALL 47;
+    s48() // SECTION-CALL 48;
+    s49() // SECTION-CALL 49;
+    s50() // SECTION-CALL 50;
+    s48() // SECTION-CALL 48;
+    println("full: " + checks + " checks, " + failures + " failures");
+    return failures;
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -2901,6 +3071,7 @@ function main(): number {
     s45(); // SECTION-CALL 45
     s46(); // SECTION-CALL 46
     s47(); // SECTION-CALL 47
+    s48(); // SECTION-CALL 48
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

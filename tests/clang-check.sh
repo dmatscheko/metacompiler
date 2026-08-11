@@ -91,19 +91,27 @@ printf -- '------------------------------------------------------------\n'
 rc=0 n=0 bad=0
 for f in tests/*-test-full.*; do
     base="$(basename "$f")"; lang="${base%%-test-full.*}"
+    # A language may have MORE THAN ONE ratchet file (js was split in two - see
+    # docs/todo.md 6.2). The glob picks the second one up on its own; `lang` still names
+    # the grammar pair, and the LABEL gets the file's own suffix so that two rows of one
+    # language are told apart ("js" and "js2"). A named-language argument still selects
+    # by lang, so `tests/clang-check.sh js` checks both files.
+    label="$lang"
+    sfx="${base#*-test-full.}"
+    case "$sfx" in *.*) label="$lang${sfx%%.*}" ;; esac
     if [ "$#" -gt 0 ]; then
         want=0
         for a in "$@"; do [ "$a" = "$lang" ] && want=1; done
         [ "$want" -eq 1 ] || continue
     fi
     g="languages/$lang-to-llvm-ir.abnf"
-    [ -f "$g" ] || { printf '%-12s %8s  (no compiler grammar)\n' "$lang" -; continue; }
+    [ -f "$g" ] || { printf '%-12s %8s  (no compiler grammar)\n' "$label" -; continue; }
     n=$((n + 1))
     ll="$WORK/$lang.ll"
     "$BIN" "$g" "$f" -q 2>/dev/null | module_only > "$ll"
     lines="$(wc -l < "$ll" | tr -d ' ')"
     if [ "$lines" -lt 5 ]; then
-        printf '%-12s %8s  no module emitted - check this, it should not happen\n' "$lang" "$lines"
+        printf '%-12s %8s  no module emitted - check this, it should not happen\n' "$label" "$lines"
         bad=$((bad + 1)); rc=1; continue
     fi
     if clang -S -x ir "$ll" -o /dev/null 2>"$ll.err"; then
@@ -144,30 +152,30 @@ for f in tests/*-test-full.*; do
         # and the row below says so rather than going quiet. Deleting that line from
         # the grammar is the whole of turning the row on.
         if grep -q 'clang-check: native-row-held' "languages/$lang-to-llvm-ir.abnf" 2>/dev/null; then
-            printf '%-12s %8s  ok (module only - links natively, row HELD: see the grammar)\n' "$lang" "$lines"
+            printf '%-12s %8s  ok (module only - links natively, row HELD: see the grammar)\n' "$label" "$lines"
             continue
         fi
         if grep -q 'exePath' "languages/$lang-to-llvm-ir.abnf" 2>/dev/null; then
             exe="$WORK/$lang.exe"
             if ! "$BIN" "$g" "$f" -q -exe "$exe" >/dev/null 2>"$ll.exe.err"; then
-                printf '%-12s %8s  ok (module), BUT -exe FAILED TO BUILD\n' "$lang" "$lines"
+                printf '%-12s %8s  ok (module), BUT -exe FAILED TO BUILD\n' "$label" "$lines"
                 sed -n '1,4p' "$ll.exe.err" | sed 's/^/                       /'
                 bad=$((bad + 1)); rc=1; continue
             fi
             out="$("$exe" 2>&1)"; erc=$?
             if [ "$erc" -eq 0 ]; then
-                printf '%-12s %8s  ok, and the clang executable agrees\n' "$lang" "$lines"
+                printf '%-12s %8s  ok, and the clang executable agrees\n' "$label" "$lines"
             else
-                printf '%-12s %8s  ok (module), BUT THE NATIVE RUN DISAGREES\n' "$lang" "$lines"
+                printf '%-12s %8s  ok (module), BUT THE NATIVE RUN DISAGREES\n' "$label" "$lines"
                 printf '%s\n' "$out" | grep -E '^(FAIL|full:)' | head -8 | sed 's/^/                       /'
                 printf '                       (llvm.Run passes this file; clang does not - the class -exe exists for)\n'
                 bad=$((bad + 1)); rc=1
             fi
             continue
         fi
-        printf '%-12s %8s  ok (module only - handle IR, nothing to link)\n' "$lang" "$lines"
+        printf '%-12s %8s  ok (module only - handle IR, nothing to link)\n' "$label" "$lines"
     else
-        printf '%-12s %8s  CLANG REJECTS\n' "$lang" "$lines"
+        printf '%-12s %8s  CLANG REJECTS\n' "$label" "$lines"
         sed -n '1,6p' "$ll.err" | sed 's/^/                       /'
         bad=$((bad + 1)); rc=1
     fi

@@ -376,6 +376,77 @@ function jvFnPropsOf(o) {
     return jvFnPropsFind(o)
 }
 
+// ============================================ a function's name and length ==
+//
+// Every function has two own properties nothing in the program writes: `name`, the
+// identifier it was DEFINED under, and `length`, its declared arity. Both answered
+// `undefined` in this half where the interpreters answered ""/0 and node answers
+// `f`/1 for `function f(a){}` - a halves divergence as well as a wrong answer.
+//
+// js_jsfnmeta(closure, name, length) -> closure is the extern the EMITTER wraps every
+// named or parameter-taking closure in, at its creation site; it is python's
+// js_pyfnname (the name a `def` bound a closure under, so f.__name__ can answer)
+// exactly. The pair lives in the identity-keyed side table jvFnProps uses above, and
+// for the same reason: there is no slot on a closure handle. It is a SEPARATE table
+// on purpose - jvFnProps' whole cheapness is the jvFnPropsN guard, and filling it at
+// every function DEFINITION would put a scan on every member read in the program.
+//
+// The DEFAULTS are ""/0 and not "absent": every function has both properties, and a
+// function this table never saw - a host builtin, or one of the emitter's own
+// internal thunks - answers what the interpreter halves answer for it, which is what
+// keeps the two halves equal. Twin: jsvFnMeta in abnf/jsrtjsprint.go; the
+// interpreters keep the same table as fnMeta*. docs/todo.md 1.4.
+var jvFnMetaK = []
+var jvFnMetaNm = []
+var jvFnMetaLn = []
+var jvFnMetaN = 0
+// A repeat for the same value OVERWRITES, as the Go twin's map assignment does, so a
+// re-registration (jvBindShim naming the function it just built) is the answer.
+function js_jsfnmeta(f, nm, ln) {
+    var i = 0
+    while (i < jvFnMetaN) {
+        if (jvFnMetaK[i] === f) {
+            jvFnMetaNm[i] = nm
+            jvFnMetaLn[i] = ln
+            return f
+        }
+        i = i + 1
+    }
+    jvFnMetaK.push(f)
+    jvFnMetaNm.push(nm)
+    jvFnMetaLn.push(ln)
+    jvFnMetaN = jvFnMetaN + 1
+    return f
+}
+function jvFnMetaAt(f) {
+    var i = jvFnMetaN - 1
+    while (i >= 0) {
+        if (jvFnMetaK[i] === f) { return i }
+        i = i - 1
+    }
+    return 0 - 1
+}
+function jvFnNameOf(f) {
+    if (jvFnMetaN == 0) { return "" }
+    var i = jvFnMetaAt(f)
+    if (i < 0) { return "" }
+    return jvFnMetaNm[i]
+}
+function jvFnLenOf(f) {
+    if (jvFnMetaN == 0) { return 0 }
+    var i = jvFnMetaAt(f)
+    if (i < 0) { return 0 }
+    return jvFnMetaLn[i]
+}
+// HOW THE READ SITES ASK. Not through a helper: both arms are written out inline in
+// js_jsvget and js_jsmget as two comparisons against interned literals, because the
+// arm sits on the path an ORDINARY member read takes and the head comment of
+// js_jsmget measures what anything else costs there - an out-of-line call for the
+// value read was +42% and one hash lookup +21% to +43% on a member-read loop.
+// `typeof o == "function"` is spelled out for the same reason rather than calling
+// jvIsCallable: the receiver of `a.length` is an array, and an array length read is
+// as hot as this file gets.
+
 function jvIsAcc(v) {
     if (v === undefined) { return false }
     if (v === null) { return false }
@@ -738,8 +809,13 @@ function js_jskeys(o) {
 // The KEY LIST is asked, not the value, so a property holding undefined answers true.
 // toString agrees with jvStr(f) rather than inventing a second spelling: no engine
 // here keeps a function's source text and String(f) has always said "[function]".
-function jvFnHasOwnShim(f) {
+function jvFnHasOwnShim(f, enumerable) {
     return function (k) {
+        // `name` and `length` are own properties of every function, so hasOwnProperty
+        // says true - and they are the one pair here for which propertyIsEnumerable
+        // says FALSE, which is what the flag is for. docs/todo.md 1.4.
+        var kk = jvStr(k)
+        if (kk === "name" || kk === "length") { return !enumerable }
         if (jvFnPropsN == 0) { return false }
         var fp = anytype
         fp = jvFnPropsFind(f)
@@ -760,7 +836,7 @@ function jvFnMethod(o, key) {
     var r = anytype
     r = undefined
     if (key == "hasOwnProperty" || key == "propertyIsEnumerable") {
-        if (jvIsCallable(o)) { return jvFnHasOwnShim(o) }
+        if (jvIsCallable(o)) { return jvFnHasOwnShim(o, key == "propertyIsEnumerable") }
         return r
     }
     if (key == "toString") {
@@ -1078,7 +1154,12 @@ function jvBindShim(f) {
             pre.push(arguments[i])
             i = i + 1
         }
-        return jvBoundFn(f, self, pre)
+        var bl = jvFnLenOf(f) - pre.length
+        if (bl < 0) { bl = 0 }
+        // A bound function's own name is "bound " + the target's, and its length is
+        // the target's less the arguments already supplied, floored at 0 - node says
+        // "bound f"/1 for `f.bind(null)` of `function f(a){}`. docs/todo.md 1.4.
+        return js_jsfnmeta(jvBoundFn(f, self, pre), "bound " + jvFnNameOf(f), bl)
     }
 }
 
@@ -1134,6 +1215,13 @@ function js_jsmget(o, key) {
             }
         }
         if (jvHides(o, key)) { return undefined }
+        // `f.name` and `f.length` - see js_jsvget above. docs/todo.md 1.4.
+        if (key == "name" || key == "length") {
+            if (typeof o == "function") {
+                if (key == "name") { return jvFnNameOf(o) }
+                return jvFnLenOf(o)
+            }
+        }
         // An own property written onto a FUNCTION lives in the side table. Placed at
         // the very end, on the path where every arm above has already declined, so a
         // program that never writes one pays a single global load and compare - the
@@ -1288,6 +1376,16 @@ function js_jsvget(o, key) {
             }
         }
         if (jvHides(o, key)) { return jvBoundBuiltin(o, key) }
+        // `f.name` and `f.length` - two inline comparisons, no call (see the comment
+        // beside jvFnMeta*). Before the own-property side table, because both are
+        // non-writable in node and js_jsmset drops a write to either.
+        // docs/todo.md 1.4.
+        if (key == "name" || key == "length") {
+            if (typeof o == "function") {
+                if (key == "name") { return jvFnNameOf(o) }
+                return jvFnLenOf(o)
+            }
+        }
         // An own property written onto a FUNCTION lives in the side table, not on
         // the closure. docs/todo.md 2.10.
         if (jvFnPropsN > 0) {
@@ -1329,7 +1427,12 @@ function jvValueMiss(o, key) {
         }
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
-            if (fn !== undefined) { return jvBoundMethod(fn, o) }
+            // The shim IS the method as a value, so it answers the method's own name
+            // and arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The
+            // method closure's registered length already excludes the receiver, which
+            // is PREPENDED to the arguments and is not a declared parameter.
+            // docs/todo.md 1.4.
+            if (fn !== undefined) { return js_jsfnmeta(jvBoundMethod(fn, o), key, jvFnLenOf(fn)) }
             return undefined
         }
     }
@@ -1424,6 +1527,12 @@ function js_jsmset(o, key, v) {
     // A write onto a FUNCTION goes to the side table: the floor's set_member has no
     // arm for a closure and killed the program. docs/todo.md 2.10.
     if (jvIsCallable(o)) {
+        // `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
+        // sloppy code (and raises a TypeError in strict code, which no engine here
+        // does). Dropping it keeps one answer for the read, for hasOwnProperty and for
+        // getOwnPropertyNames. docs/todo.md 1.4.
+        var wk = jvStr(key)
+        if (wk === "name" || wk === "length") { return undefined }
         var fp = jvFnPropsMake(o)
         fp[jvStr(key)] = v
         return undefined
@@ -2851,6 +2960,18 @@ function jvObjectGlobalMethod(name, args) {
     var src = jvArg(args, 0)
     if (name == "keys" || name == "getOwnPropertyNames") {
         var out = []
+        // getOwnPropertyNames is Object.keys plus the NON-ENUMERABLE own names, and a
+        // FUNCTION has two of them: node answers ["length","name"] for an arrow, and
+        // ["length","name","arguments","caller","prototype"] for a function
+        // declaration - the last three cannot exist in a value model with no prototype
+        // chain and no call-site frame. keys, values, entries and assign keep the
+        // enumerable half, and so does for-in, which preserves node's empty
+        // `for (k in f)`. Twins: jsvGopnKeys in abnf/jsrtjsprint.go and jsGopnKeys in
+        // both *-interpreter.abnf. docs/todo.md 1.4.
+        if (name == "getOwnPropertyNames" && jvIsCallable(src)) {
+            out.push("length")
+            out.push("name")
+        }
         var ks = jvOwnKeys(src)
         var i = 0
         while (i < ks.length) {
@@ -2982,7 +3103,12 @@ function js_jsmcall(recv, key, args) {
                 bpre.push(args[bi])
                 bi = bi + 1
             }
-            return jvBoundFn(recv, bself, bpre)
+            var bl2 = jvFnLenOf(recv) - bpre.length
+            if (bl2 < 0) { bl2 = 0 }
+            // "bound f", and the target's length less the arguments already supplied -
+            // the same pair jvBindShim records for the value-read form.
+            // docs/todo.md 1.4.
+            return js_jsfnmeta(jvBoundFn(recv, bself, bpre), "bound " + jvFnNameOf(recv), bl2)
         }
     }
     // Promise.prototype.then / catch / finally, and the Promise statics on the

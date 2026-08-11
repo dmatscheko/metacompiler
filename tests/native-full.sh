@@ -126,7 +126,14 @@ trap 'rm -rf "$OUT"' EXIT
 #            on it.
 #   lisp     and tinyc are toys with a feature file and no ratchet; both follow the
 #   tinyc    self-check protocol exactly (see the second-table comment above).
-ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java js:js kotlin:kt
+#   js       has TWO ratchet files. tests/js-test-full.js was split in two because its
+#            -frozen interpreter leg had reached 70% of ./test.sh --full's brake and had
+#            been KILLED under gate load (docs/todo.md 6.2); the second half is
+#            tests/js-test-full.2.js and tests/js-test-full.3.js, and the kinds `full.2`
+#            and `full.3` are what name them here. The
+#            THIRD FIELD IS COMMA-SEPARATED, because ROWS itself is split on whitespace.
+ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
+      js:js:full,features,full.2,full.3
       lua:lua metajs:js php:php python:py ruby:rb swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"
 
@@ -243,7 +250,7 @@ for row in $ROWS; do
     L="${row%%:*}"
     rest="${row#*:}"
     e="${rest%%:*}"
-    case "$rest" in *:*) kinds="${rest#*:}" ;; *) kinds="full features" ;; esac
+    case "$rest" in *:*) kinds="$(echo "${rest#*:}" | tr , ' ')" ;; *) kinds="full features" ;; esac
     if [ -n "$WANT" ]; then
         case " $WANT " in *" $L "*) ;; *) continue;; esac
     fi

@@ -345,7 +345,10 @@ full_probe() {
     echo UNMEASURED > "$R.flag"
     echo 0          > "$R.gaps"
     {
-        printf '%s:\n' "$(basename "$G" .abnf)"
+        # The FILE is named beside the grammar: a language whose ratchet is split runs
+        # the same grammar pair twice, and two identical headers in the report would be
+        # unreadable (docs/todo.md 6.2).
+        printf '%s (%s):\n' "$(basename "$G" .abnf)" "$(basename "$F")"
         while :; do
             iter=$((iter + 1))
             if [ "$iter" -gt 60 ]; then printf '    (stopped after 60 rounds)\n'; break; fi
@@ -547,16 +550,39 @@ if [ "$FULL" -eq 1 ]; then
     mkfifo "$SEM"; exec 4<>"$SEM"; rm -f "$SEM"
     i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&4; i=$((i + 1)); done
 
+    # A LANGUAGE MAY HAVE ITS RATCHET IN MORE THAN ONE FILE, and the two names it
+    # needs are then different things (docs/todo.md 6.2):
+    #
+    #   lang  picks the GRAMMAR PAIR, and comes from the name up to '-test-full.'
+    #   unit  is the ACCOUNTING KEY of the check-count agreement below, and is one
+    #         per FILE
+    #
+    # tests/js-test-full.js and tests/js-test-full.2.js are both js, so both run
+    # through languages/js-{interpreter,to-llvm-ir}.abnf - but their assertion counts
+    # are of DIFFERENT FILES and must not be compared with each other. The agreement
+    # rule is "the two halves of one language run the same file, so they must agree";
+    # what that is really about is one FILE through two grammars, which is what `unit`
+    # keys. Grouping both files under "js" would have reported the split as a
+    # MISMATCH - the most serious word this group prints - for no defect at all.
+    #
+    # The suffix a second file carries is the part between '-test-full.' and the
+    # extension, so js-test-full.2.js is unit "js2". It stays [a-z0-9]+ on purpose:
+    # tests/gates.sh detects a half that recorded no count with a
+    # `^  [a-z0-9]+ +-$` grep over the per-unit lines below, and a label with a dash
+    # or a dot in it would slip past that detector.
     n=0; REPORTS=""
     for f in $FILES; do
         base="$(basename "$f")"; lang="${base%%-test-full.*}"
+        unit="$lang"
+        sfx="${base#*-test-full.}"           # '<part>.<ext>' for a split file, '<ext>' otherwise
+        case "$sfx" in *.*) unit="$lang${sfx%%.*}" ;; esac
         for G in "languages/$lang-interpreter.abnf" "languages/$lang-to-llvm-ir.abnf"; do
-            hay="$lang $G $f"
+            hay="$lang $unit $G $f"
             if [ -n "$FILTER" ] && ! printf '%s' "$hay" | grep -qiF -- "$FILTER"; then continue; fi
             n=$((n + 1))
             r="$RESDIR/full.$(printf '%03d' "$n")"
             REPORTS="$REPORTS $r"
-            printf '%s\n' "$lang" > "$r.lang"
+            printf '%s\n' "$unit" > "$r.lang"
             if [ ! -f "$G" ]; then
                 printf '%s:\n    (grammar not found, skipped)\n' "$(basename "$G" .abnf)" > "$r"
                 continue
@@ -580,7 +606,7 @@ if [ "$FULL" -eq 1 ]; then
     # else is a defect in whichever half runs fewer. This is cheap and
     # self-maintaining: it needs no expected number checked into the repo.
     echo
-    echo "assertion counts (both halves of a language run the same file, so they must agree)"
+    echo "assertion counts (both halves run the SAME FILE, so they must agree)"
     # A KILLED RUN IS NOT A MISMATCH, and calling it one is docs/todo.md 4.3.
     # MISMATCH is the most serious word this group prints - it means the two
     # halves of a language computed different numbers of assertions from one

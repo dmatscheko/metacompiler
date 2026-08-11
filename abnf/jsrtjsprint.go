@@ -316,6 +316,22 @@ func jsvOwnKeys(v interface{}) []string {
 	return []string{}
 }
 
+// Object.getOwnPropertyNames: jsvOwnKeys plus the non-enumerable own names. A FUNCTION
+// has `length` and `name`, in that order, before anything the program wrote onto it -
+// node answers ["length","name"] for an arrow and
+// ["length","name","arguments","caller","prototype"] for a function declaration, and the
+// last three cannot exist in a value model with no prototype chain and no call-site
+// frame. Object.keys, values, entries and assign keep reading jsvOwnKeys, and so does
+// for-in, which is what preserves node's empty `for (k in f)`. Twins: jvGopnKeys in
+// languages/lib/js-rt.metajs and jsGopnKeys in both *-interpreter.abnf.
+// docs/todo.md 1.4.
+func jsvGopnKeys(v interface{}) []string {
+	if !jsvIsFnLike(v) {
+		return jsvOwnKeys(v)
+	}
+	return append([]string{"length", "name"}, jsvOwnKeys(v)...)
+}
+
 // jsvFnProps -- `f.p = 1` on a FUNCTION. A function value here is a *jsClosure or
 // a *hostFunc and neither carries a property map, so a member write on one aborted
 // with "cannot set field 'p' on *abnf.jsClosure" - while node gives every function
@@ -329,6 +345,44 @@ func jsvOwnKeys(v interface{}) []string {
 // Twin: jvFnProps* in languages/lib/js-rt.metajs. The interpreter halves keep the
 // same table under the same name. docs/todo.md 2.10.
 var jsvFnProps = map[interface{}]*jsObject{}
+
+// jsvFnMeta -- the declared NAME and ARITY of a function, filled by js_jsfnmeta at the
+// closure's creation site. `f.name` and `f.length` answered `undefined` in both compiled
+// halves where the interpreters answered ""/0 and node answers `f`/1 for
+// `function f(a){}`, so the pair was a HALVES DIVERGENCE as well as a wrong answer. A
+// closure here is a *jsClosure or a *hostFunc and neither can carry the two, so they live
+// beside it in this table - the same shape and the same reason as jsvFnProps above, and
+// the same shape as rt.pyFuncNames, which python's js_pyfnname fills for f.__name__.
+// Package level for jsvOwnKeys' reason: the readers have no runtime. Twins: js_jsfnmeta
+// in languages/lib/js-rt.metajs and fnMeta* in both *-interpreter.abnf.
+// docs/todo.md 1.4.
+type jsvFnInfo struct {
+	name   string
+	length int
+}
+
+var jsvFnMeta = map[interface{}]jsvFnInfo{}
+
+// The value of `f.name` / `f.length`, or nil for any other name and any receiver that is
+// not a function. The DEFAULTS are ""/0 and not "absent": every function has both
+// properties, and a function this table never saw - a host builtin like a String method,
+// or one of the emitter's own internal thunks - answers what the interpreter halves
+// answer for it, which is what keeps the two halves equal. It is asked on the MISS path
+// of js_jsvget and js_jsmget, before jsvFnMethod, and BEFORE the own-property side table
+// would be consulted for a write that node drops (both are non-writable there).
+func jsvFnIntrinsic(v interface{}, name string) interface{} {
+	if name != "name" && name != "length" {
+		return nil
+	}
+	if !jsvIsFnLike(v) {
+		return nil
+	}
+	mi := jsvFnMeta[v]
+	if name == "name" {
+		return mi.name
+	}
+	return float64(mi.length)
+}
 
 func jsvIsFnLike(v interface{}) bool {
 	switch v.(type) {
@@ -386,7 +440,15 @@ func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
 	}
 	switch name {
 	case "hasOwnProperty", "propertyIsEnumerable":
+		enumerable := name == "propertyIsEnumerable"
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			// `name` and `length` are own properties of every function, so
+			// hasOwnProperty says true - and they are the one pair here for which
+			// propertyIsEnumerable says FALSE, which is why the two questions no
+			// longer share one answer. docs/todo.md 1.4.
+			if k := rt.toString(argAt(args, 0)); k == "name" || k == "length" {
+				return !enumerable
+			}
 			p := jsvFnPropsOf(recv)
 			if p == nil {
 				return false
@@ -716,9 +778,18 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			pre = append([]interface{}{}, args[1:]...)
 		}
 		fn := target
-		return jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
+		bound := jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
 			return rt.call(fn, self, append(append([]interface{}{}, pre...), later...))
-		}), true
+		})
+		// A bound function's own name is "bound " + the target's, and its length is the
+		// target's less the arguments already supplied, floored at 0 - node says
+		// "bound f"/1 for `f.bind(null)` of `function f(a){}`. docs/todo.md 1.4.
+		bl := jsvFnMeta[fn].length - len(pre)
+		if bl < 0 {
+			bl = 0
+		}
+		jsvFnMeta[bound] = jsvFnInfo{name: "bound " + jsvFnMeta[fn].name, length: bl}
+		return bound, true
 	}
 	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
 	if bi, ok := target.(*jsBigInt); ok {
@@ -765,7 +836,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			return out, true
 		case "getOwnPropertyNames":
 			out := &jsArray{}
-			for _, k := range jsvOwnKeys(argAt(args, 0)) {
+			for _, k := range jsvGopnKeys(argAt(args, 0)) {
 				out.elems = append(out.elems, k)
 			}
 			return out, true
@@ -1779,6 +1850,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		recv, isObj := u(a[0]).(*jsObject)
 		if !isObj {
+			// `f.name` and `f.length`, before the own-property side table because both
+			// are non-writable in node: an `f.name = "q"` that reached the table must
+			// not win, and js_jsmset drops it for the same reason. docs/todo.md 1.4.
+			if v := jsvFnIntrinsic(u(a[0]), rt.toString(u(a[1]))); v != nil {
+				return w(v)
+			}
 			// An own property written onto a FUNCTION lives in the side table, not
 			// on the closure. docs/todo.md 2.10.
 			if p := jsvFnPropsOf(u(a[0])); p != nil {
@@ -1807,7 +1884,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		if fn, found := jsvFindClassMethod(recv, name); found {
 			bound := fn
-			return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			shim := jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				// AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the
 				// method on x in node; this shim used to ignore `this` and always
 				// re-enter with the receiver the READ was made with, so every
@@ -1820,7 +1897,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					self = u(this)
 				}
 				return rt.call(bound, jsUndef, append([]interface{}{self}, args...))
-			}))
+			})
+			// The shim IS the method as a value, so it answers the method's own name and
+			// arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The method
+			// closure's registered length already excludes the receiver, which is
+			// PREPENDED to the arguments and is not a declared parameter.
+			// docs/todo.md 1.4.
+			jsvFnMeta[shim] = jsvFnInfo{name: name, length: jsvFnMeta[bound].length}
+			return w(shim)
 		}
 		return r
 	}
@@ -1903,6 +1987,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					return v
 				}))
 			}
+		}
+		// `f.name` and `f.length` - see js_jsvget above. docs/todo.md 1.4.
+		if v := jsvFnIntrinsic(u(a[0]), rt.toString(u(a[1]))); v != nil {
+			return w(v)
 		}
 		// An own property written onto a FUNCTION lives in the side table, at the end
 		// so a program that never writes one pays one map-length test.
@@ -2085,6 +2173,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			jsvSfTrack(t, name)
 			return 0
 		}
+		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
+		// sloppy code (and raises a TypeError in strict code, which no engine here
+		// does). Dropping it keeps one answer for the read, for hasOwnProperty and for
+		// getOwnPropertyNames. docs/todo.md 1.4.
+		if jsvIsFnLike(u(a[0])) {
+			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
+				return 0
+			}
+		}
 		// A write onto a FUNCTION goes to the side table: neither *jsClosure nor
 		// *hostFunc has a property map, and rt.setMember's reflect fallback aborted
 		// with "cannot set field 'p' on *abnf.jsClosure". docs/todo.md 2.10.
@@ -2093,6 +2190,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		return baseSet(a)
+	}
+
+	// (closure, name, length) -> closure. The emitter calls it at the creation site of
+	// every function that HAS a name or a parameter, which is python's js_pyfnname
+	// pattern exactly. A repeat for the same value overwrites, as a Go map assignment
+	// does and as the interpreters' end-first scan does, so a closure re-created in a
+	// loop keeps one entry and `f.bind(g)` can re-register the value it just built.
+	// docs/todo.md 1.4.
+	m["js_jsfnmeta"] = func(a []uint64) uint64 {
+		if v := u(a[0]); jsvIsFnLike(v) {
+			jsvFnMeta[v] = jsvFnInfo{name: rt.toString(u(a[1])), length: int(rt.toNumber(u(a[2])))}
+		}
+		return a[0]
 	}
 
 	// Wrap a compiled closure into an ASYNC function: calling the result runs the

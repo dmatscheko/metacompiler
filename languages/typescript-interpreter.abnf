@@ -332,7 +332,7 @@ VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
 Declarator  = PatternDeclarator | NameDeclarator ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern [ TypeAnnot ] "=" AssignExpr ;
-NameDeclarator <~~ push(makeDecl(takeAll())) ~~>
+NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
             = NotBindName Id <~~ push(up.in) ~~> [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
@@ -496,7 +496,7 @@ NoRefPrimary = NewTarget | NewExpr | NewWidened | SuperProp | AsyncFuncExpr | Ge
              | FunctionExpr | ClassExpr | ClassExprWidened | TemplateLit | RegexLit | ObjectLit
              | ArrayLit | StringLit | NumberLit | True | False | Null | Undefined | VarRef ;
 NoRefSuffix = CallSuffix | DotSuffix | IndexSuffix ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ push(makeAssign(takeAll(), up.in)) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // Destructuring as an ASSIGNMENT rather than a declaration: '[a, b] = [b, a]' swaps two
@@ -901,15 +901,21 @@ SuperKeyIdx <~~ push({skey: pop()}) ~~>
 // with, since it contains a '.'), so reading it is an ordinary scope lookup.
 NewTarget   <~~ push(makeVarRef("new.target")) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ push(makeAsyncArrow(takeAll())) ~~>
+AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
             = KwAsync ArrowParams NoLineBreak "=>" ArrowBody ;
 // 'async function [*] [name](...) {}' as an expression. The optional name is accepted
 // and, like a plain function expression's, not bound.
-AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] [ AsyncExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
-AsyncExprName = NotBindName Id ;
-GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
-            = KwFunction GenMark [ AsyncExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
+            = KwAsync KwFunction [ GenMark ] [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+// The optional name of a function expression, in every one of its three forms. It
+// pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
+// `f.name` and never takes the one of the binding it is assigned to, which is the whole
+// difference between `const g = function named(){}` (node says "named") and
+// `const g = function(){}` (node says "g"). Same shape as ClassExprName below.
+FnExprName  <~~ push({fname: up.in}) ~~>
+            = NotBindName Id ;
+GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
+            = KwFunction GenMark [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 // 'var C = class { ... }' - a class as a VALUE, with or without a name. It builds the
 // same descriptor a declaration does; nothing is bound, the value is simply returned.
 // An anonymous class expression still supports super(), because a method finds its own
@@ -930,8 +936,8 @@ ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
               [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name of a function expression is accepted but not bound.
-FunctionExpr <~~ push(makeFunctionExprItems(takeAll())) ~~>
-            = KwFunction [ NotBindName Id ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
+            = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 
 // The object literal, with the whole ES2022 property surface: 'key: value', spread
 // ('...o'), computed keys ('[k]: v'), getters and setters, shorthand methods (including
@@ -941,7 +947,7 @@ FunctionExpr <~~ push(makeFunctionExprItems(takeAll())) ~~>
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
             = "{" [ ObjMember { "," ObjMember } [ "," ] ] "}" ;
 ObjMember   = SpreadProp | ComputedProp | GetSetProp | MethodProp | PropDef | ShorthandProp ;
-PropDef     <~~ push(makeProp(pop(), pop())) ~~>
+PropDef     <~~ push(makeProp(pop(), pop(), up.in)) ~~>
             = PropKey ":" AssignExpr ;
 // A key is a PROPERTY position: reserved words are legal there ('{ class: 1 }'), which
 // is why Id is used unguarded. A numeric key is stringified, like in JavaScript.
@@ -1004,7 +1010,7 @@ ArrayHole   <~~ push(makeConst(undefined)) ~~>
 // No line terminator is allowed between the parameters and the '=>': automatic semicolon
 // insertion ends the statement at the break, so '(a)\n=> 0' is a syntax error rather than
 // an arrow function. NoLineBreak is the same guard 'break'/'continue' use for their label.
-ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
+ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
             = ArrowParams NoLineBreak "=>" ArrowBody ;
 // A TypeScript arrow may be GENERIC ('<T>(xs: T[]): T => xs[0]') and may carry a return
 // type; both are type-layer only. The parenthesized form is tried first, so the leading
@@ -3069,6 +3075,21 @@ NotFuncHead = :script(~~
         for (var i = 0; i < ks.length; i++) { if (!isInternalKey(ks[i])) { out.push(ks[i]) } }
         return out
     }
+    // Object.getOwnPropertyNames: jsOwnKeys plus the non-enumerable own names. A
+    // FUNCTION has `length` and `name`, in that order, before anything the program
+    // wrote onto it - node answers ["length","name"] for an arrow and
+    // ["length","name","arguments","caller","prototype"] for a function declaration,
+    // and the last three cannot exist in a value model with no prototype chain and no
+    // call-site frame (fnMetaPut's head comment says so at the site). Twins:
+    // jsvGopnKeys in abnf/jsrtjsprint.go, jvGopnKeys in languages/lib/js-rt.metajs.
+    // docs/todo.md 1.4.
+    function jsGopnKeys(v) {
+        if (typeof v != "function") { return jsOwnKeys(v) }
+        var out = ["length", "name"]
+        var ks = jsOwnKeys(v)
+        for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
+        return out
+    }
 
     // ----- Promises and the microtask queue -----
     // The twin of the promise machinery in abnf/jsrt.go (promNew ... asyncStep) and
@@ -3581,7 +3602,12 @@ NotFuncHead = :script(~~
     }
     function jsObjectStatic(name, args) {
         var src = args[0]
-        if (name == "keys" || name == "getOwnPropertyNames") { return {v: jsOwnKeys(src)} }
+        if (name == "keys") { return {v: jsOwnKeys(src)} }
+        // getOwnPropertyNames is Object.keys plus the NON-ENUMERABLE own names, and a
+        // function has two of them. It is the only caller here that must differ: keys,
+        // values, entries and assign all see the enumerable half, and for-in reads the
+        // same list, so node's empty `for (k in f)` is preserved. docs/todo.md 1.4.
+        if (name == "getOwnPropertyNames") { return {v: jsGopnKeys(src)} }
         if (name == "values") {
             var vs = []
             var kv = jsOwnKeys(src)
@@ -4198,6 +4224,13 @@ NotFuncHead = :script(~~
             if (k == "call") { return fnCallShim(o) }
             if (k == "apply") { return fnApplyShim(o) }
             if (k == "bind") { return fnBindShim(o) }
+            // `f.name` and `f.length` - the two own properties every function has and
+            // no program writes. Asked BEFORE the own-property side table because both
+            // are non-writable in node, so an `f.name = "q"` that reached the table
+            // must not win; setMember drops that write for the same reason.
+            // docs/todo.md 1.4.
+            if (k == "name") { return fnNameOf(o) }
+            if (k == "length") { return fnLenOf(o) }
             // An own property written onto a FUNCTION lives in the side table, since
             // the host's function value cannot carry one under -frozen. Asked after
             // the three shims, which no program can shadow. docs/todo.md 2.10.
@@ -4238,7 +4271,7 @@ NotFuncHead = :script(~~
             // engine here keeps the source, String(f) has always said "[function]" in
             // all four legs, and agreeing with String(f) is the answer that costs no
             // new divergence. docs/todo.md 2.10.
-            if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return fnHasOwnShim(o) }
+            if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return fnHasOwnShim(o, k == "propertyIsEnumerable") }
             if (k == "toString") { return fnToStringShim(o) }
             if (k == "valueOf") { return fnValueOfShim(o) }
         }
@@ -4416,6 +4449,13 @@ NotFuncHead = :script(~~
         return undefined
     }
     function boundMethodShim(o, k) {
+        // The shim IS the method as a value, so it answers the method's own name and
+        // arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The underlying
+        // closure's registered length already excludes the receiver, which arrives as
+        // arguments[0] and is not a declared parameter. docs/todo.md 1.4.
+        return fnMetaPut(boundMethodShimFn(o, k), "" + k, fnLenOf(findClassMethod(o, k)))
+    }
+    function boundMethodShimFn(o, k) {
         return function() {
             // AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the method on
             // x in node; this shim used to ignore x entirely and re-dispatch on o, so
@@ -4442,6 +4482,194 @@ NotFuncHead = :script(~~
             return mcall(o, k, a, "(intermediate value)." + k)
         }
     }
+    // ----- The intrinsic `name` and `length` of a FUNCTION -----
+    // Every function has two own properties nothing in the program writes: `name`, the
+    // identifier it was DEFINED under, and `length`, its declared arity. This half
+    // answered ""/0 for both - the host closure makeClosure hands back declares no
+    // parameters and carries no name of its own - and BOTH COMPILED HALVES answered
+    // `undefined`, so it was a halves divergence as well as a wrong answer. node says
+    // `f`/1 for `function f(a){}`, `named`/2 for `const g = function named(a,b){}` and
+    // `h`/1 for `const h = (x)=>x`. docs/todo.md 1.4.
+    //
+    // The pair lives in a side table keyed by the closure, the shape fnProps* below
+    // uses and for its reason: under -frozen a function value is a Go *jsClosure and
+    // cannot carry a field. It is a SEPARATE table on purpose. fnProps' cheapness is
+    // entirely the `fnPropsN > 0` guard, and a program that merely DEFINES a function
+    // would fill fnProps and put an identity scan on every member read it makes.
+    //
+    // Registration is a PUSH and never a lookup: fnDef registers a value that was just
+    // created, so it cannot already be there. A function with no name and no parameters
+    // registers NOTHING - the defaults are ""/0 - which is the whole of the anonymous
+    // zero-arity thunks this engine builds for itself.
+    //
+    // What is deliberately NOT modelled, and cannot be without a prototype chain:
+    // `arguments`, `caller` and `prototype`, the other three own names node reports on
+    // a function declaration. `name` and `length` are non-writable in node, which IS
+    // modelled - setMember drops a write to either - but a write in STRICT mode raises
+    // a TypeError there and is silently dropped here.
+    // Twins: fnMeta* in js-interpreter.abnf, jsvFnMeta* in
+    // abnf/jsrtjsprint.go, jvFnMeta* in languages/lib/js-rt.metajs.
+    var fnMetaK = []      // the closure
+    var fnMetaNm = []     // the name it was defined under, same index
+    var fnMetaLn = []     // its arity, same index
+    var fnMetaN = 0
+    function fnMetaPut(f, nm, ln) {
+        if (typeof f != "function") { return f }
+        if (nm === "" && ln === 0) { return f }
+        fnMetaK.push(f)
+        fnMetaNm.push(nm)
+        fnMetaLn.push(ln)
+        fnMetaN = fnMetaN + 1
+        return f
+    }
+    // The table index of f, or -1. Scanned from the END so that the most recent
+    // registration of one value wins, which is what makes fnBindShim's re-registration
+    // of a bound function the answer.
+    function fnMetaAt(f) {
+        for (var i = fnMetaN - 1; i >= 0; i = i - 1) {
+            if (fnMetaK[i] === f) { return i }
+        }
+        return -1
+    }
+    function fnNameOf(f) {
+        if (fnMetaN == 0) { return "" }
+        var i = fnMetaAt(f)
+        if (i < 0) { return "" }
+        return fnMetaNm[i]
+    }
+    function fnLenOf(f) {
+        if (fnMetaN == 0) { return 0 }
+        var i = fnMetaAt(f)
+        if (i < 0) { return 0 }
+        return fnMetaLn[i]
+    }
+    // FunctionDeclarationInstantiation's `length`: the parameters BEFORE the first one
+    // that has a default and before the rest parameter; a destructuring pattern counts
+    // as one. Measured against node: `(a,b=1,c)` is 1, `(...r)` is 0, `({a},[b],c)` is
+    // 3, `(a,...r)` is 1. The descriptor shapes are bindParams'.
+    function fnArity(params) {
+        var n = 0
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (typeof p == "string") { n = n + 1; continue }
+            if (p.rest == true) { return n }
+            if (p.dflt != null) { return n }
+            n = n + 1
+        }
+        return n
+    }
+    // Every function-VALUE builder ends here: fnDef wraps the value thunk so that the
+    // function it creates carries its name and its arity. The name is held in a
+    // one-element array rather than captured directly, because an ANONYMOUS function may
+    // still be named after the fact - see fnAnonNote.
+    function fnDef(t, nm, params, txt) {
+        var ln = fnArity(params)
+        // A caller that has no name at all passes undefined; the DEFAULT is "", and it
+        // has to be normalised here rather than at nine call sites, because an undefined
+        // reaching emitStr would put the literal text "undefined" in the module.
+        var slot = [(nm == undefined) ? "" : nm]
+        fnAnonNote(slot, nm, txt)
+        return function() { return fnMetaPut(t(), slot[0], ln) }
+    }
+    // ----- A named function EXPRESSION sees its own name (ES2023 15.2.5) -----
+    // `const f = function fact(n){ return n < 2 ? 1 : n * fact(n-1) }` recurses through
+    // `fact` in node, and every engine here answered
+    // *ReferenceError: fact is not defined*: the optional name of a function expression
+    // was accepted and dropped. FnExprName records it now (that is what `f.name` reads),
+    // so the binding is the rest of the work.
+    //
+    // The spec creates a funcEnv - ONE scope, holding ONE binding of the name to the
+    // function object, between the DEFINITION site and the function's own scope - and
+    // that shape is what makes every neighbouring case fall out for free, measured
+    // against node 24 rather than reasoned about:
+    //
+    //   the name does NOT leak outwards        the scope is inside the definition site
+    //   an outer variable of the same name      shadowed inside, untouched outside
+    //   a PARAMETER of the same name wins       the parameter scope is inside funcEnv
+    //   a `var` of the same name in the body    same, so `{ var v = 1; v = 2 }` is 2
+    //   a nested function still sees it         it is an ordinary scope in the chain
+    //   the name IS the function                one object, bound after it exists
+    //   a function DECLARATION is unchanged     it never comes through here
+    //
+    // The ONE case this does not reproduce is an ASSIGNMENT to the name inside the body:
+    // node ignores it silently in sloppy code (`nm = 5; typeof nm` is still "function")
+    // and raises a TypeError in strict code, because the binding is IMMUTABLE. Here the
+    // write lands on the funcEnv slot in BOTH halves - so they agree, and no assertion
+    // pins it. Making it immutable needs either a const flag on the C floor's scope,
+    // which is the floor of sixteen languages, or a js-only scope-WALKING extern in
+    // place of js_scope_set at every plain-name assignment - and js_jsmget's own head
+    // comment measures what a call on that path costs (+21% to +43%). Out of proportion
+    // to one exotic shape; recorded here instead.
+    //
+    // Wrapping the VALUE THUNK is what makes one helper serve all four function-value
+    // forms: the plain closure, the generator, the async function and the async
+    // generator each capture `scopes` when the value is built, so pushing the funcEnv
+    // before that call puts it in the captured chain, and the binding is written after
+    // the value exists. Twin: fnSelf in js-to-llvm-ir.abnf. docs/todo.md 1.4.
+    function fnSelf(t, nm) {
+        if (nm == undefined || nm === "") { return t }
+        return function() {
+            var sc = {}
+            var saved = scopes
+            scopes = concat2impl(scopes, [sc])
+            var f = t()
+            scopes = saved
+            scopePut(sc, nm, f)
+            return f
+        }
+    }
+
+    // NamedEvaluation (ES2023 8.4.5): an ANONYMOUS function expression or arrow takes
+    // the name of the binding it is directly assigned to, so `const h = x => x` has
+    // h.name === "h", while a named one keeps its own.
+    //
+    // The hint cannot be a "pending name" the way pendingLabel is, because it must NOT
+    // reach a function that is merely nested inside the initializer: node names nothing
+    // in `const q = f(function(){})`. What decides is therefore the SOURCE TEXT - the
+    // binder names the pending function only when its own text ends in `=` (or `:`)
+    // followed by exactly that function's own text, with any number of wrapping
+    // parentheses allowed, since `const q = (function(){})` is named in node too.
+    //
+    // THE OBVIOUS MECHANISM DOES NOT WORK AND THE FAILURE IS SILENT. The first
+    // implementation compared THUNK IDENTITY: the anonymous builder remembered the
+    // thunk it produced and a binder named it when its own initializer WAS that thunk.
+    // It matched nothing at all, because a value pushed onto the ABNF tag stack is
+    // DEEP-COPIED (manual chapter 4) - the thunk that comes back out of takeAll() is a
+    // fresh goja bridge wrapper, so `items[1] === noted` is false for every function in
+    // every program. Both halves read `""` and nothing failed. Text is the one thing
+    // that survives the round trip.
+    //
+    // All three binders and all four anonymous forms pass their own `up.in`, which
+    // arrives with whitespace already stripped in both, so the two texts are directly
+    // comparable.
+    var fnAnonTxt = ""    // the source text of the last anonymous function form built
+    var fnAnonSlot = []   // that form's one-element name slot
+    function fnAnonNote(slot, nm, txt) {
+        if (nm !== "" || txt == undefined || txt === "") { fnAnonTxt = ""; return }
+        fnAnonTxt = txt
+        fnAnonSlot = slot
+    }
+    // txt is the whole text of the binder ("h=(x)=>x"), sep its separator ("=" or ":").
+    // Consuming clears the pending form, which is what makes `x = y = function(){}` name
+    // it "y" and not "x": the inner assignment reduces first and takes it.
+    function fnAnonName(nm, sep, txt) {
+        if (fnAnonTxt === "") { return }
+        if (txt == undefined) { return }
+        var cand = fnAnonTxt
+        for (var i = 0; i < 3; i++) {
+            if (strEndsWith(txt, sep + cand)) {
+                fnAnonSlot[0] = nm
+                fnAnonTxt = ""
+                return
+            }
+            cand = "(" + cand + ")"
+        }
+    }
+    function strEndsWith(s, suf) {
+        if (suf.length > s.length) { return false }
+        return s.substring(s.length - suf.length, s.length) === suf
+    }
+
     // ----- Own properties of a FUNCTION -----
     // `f.p = 1`. In JavaScript every function is an ordinary object with an own
     // property map, and `f.cache = {}` is a common idiom. A function value here is the
@@ -4500,6 +4728,12 @@ NotFuncHead = :script(~~
         // A write onto a FUNCTION goes to the side table: the host's function value
         // cannot carry an expando under -frozen. docs/todo.md 2.10.
         if (typeof o == "function") {
+            // `name` and `length` are non-writable: node drops `f.name = "q"` silently
+            // in sloppy code (and raises a TypeError in strict code, which this engine
+            // does not - see fnMetaPut's head comment). Dropping it here is what keeps
+            // one answer for the read, the key list and getOwnPropertyNames.
+            // docs/todo.md 1.4.
+            if (k === "name" || k === "length") { return }
             var fp = fnPropsMake(o)
             scopePut(fp, "" + k, v)
             trackKey(fp, "" + k)
@@ -4512,10 +4746,16 @@ NotFuncHead = :script(~~
     // property a program can write onto a function here is an ordinary enumerable data
     // property, so the two questions have the same answer and share one shim. The KEY
     // LIST is asked, not the value, so a property holding undefined still answers true.
-    function fnHasOwnShim(fn) {
+    function fnHasOwnShim(fn, enumerable) {
         return function() {
             var k = anytype // The queried key may be any value; it is compared as text.
             k = (arguments.length > 0) ? arguments[0] : undefined
+            // `name` and `length` are own properties of every function, so
+            // hasOwnProperty says true - and they are the one pair here for which
+            // propertyIsEnumerable says FALSE, which is what the `enumerable` flag is
+            // for and why the two questions no longer share one answer.
+            // docs/todo.md 1.4.
+            if (k === "name" || k === "length") { return !enumerable }
             if (fnPropsN == 0) { return false }
             var fp = anytype
             fp = fnPropsFind(fn)
@@ -4557,12 +4797,18 @@ NotFuncHead = :script(~~
             self = (arguments.length > 0) ? arguments[0] : undefined
             var pre = []
             for (var i = 1; i < arguments.length; i++) { pre.push(arguments[i]) }
-            return function() {
+            var bl = fnLenOf(fn) - pre.length
+            if (bl < 0) { bl = 0 }
+            // A bound function's own name is "bound " + the target's, and its length is
+            // the target's less the arguments already supplied, floored at 0 - measured
+            // against node, which says "bound f"/1 for `f.bind(null)` of
+            // `function f(a){}`. docs/todo.md 1.4.
+            return fnMetaPut(function() {
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
                 return callWithThis(fn, self, a)
-            }
+            }, "bound " + fnNameOf(fn), bl)
         }
     }
 
@@ -5957,8 +6203,12 @@ NotFuncHead = :script(~~
     }
     // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk
     // (calling the pure thunk once at build time yields the key text).
-    function makeProp(valT, key) {
-        return {k: (typeof key == "string") ? key : key(), t: valT}
+    function makeProp(valT, key, txt) {
+        var k = (typeof key == "string") ? key : key()
+        // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
+        // docs/todo.md 1.4.
+        fnAnonName("" + k, ":", txt)
+        return {k: k, t: valT}
     }
     // Objects carry a hidden __keys array recording their own keys in insertion order.
     // The tag dialect has no for-in and no Object.keys, and the -frozen engine cannot
@@ -6018,7 +6268,7 @@ NotFuncHead = :script(~~
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
         var key = items[1]
-        var fn = makeFunctionExpr(items[3], items[2], st)
+        var fn = makeFunctionExpr(items[3], items[2], st, (typeof key == "string") ? (items[0].acc + " " + key) : "")
         if (typeof key == "string") { return {acc: items[0].acc, k: key, fn: fn} }
         return {acc: items[0].acc, kt: key, fn: fn}
     }
@@ -6039,8 +6289,11 @@ NotFuncHead = :script(~~
         var key = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
-        var fn = isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
-        if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st) : makeAsyncFn(params, body, st) }
+        // A method's own name is its KEY - node says `n` for `{ n(){} }`. A COMPUTED
+        // key is only known at run time, so those stay anonymous. docs/todo.md 1.4.
+        var mnm = (typeof key == "string") ? key : ""
+        var fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm)
+        if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st, mnm) : makeAsyncFn(params, body, st, mnm) }
         if (typeof key == "string") { return {k: key, t: fn} }
         return {kt: key, t: fn}
     }
@@ -6070,15 +6323,31 @@ NotFuncHead = :script(~~
         return ownKeys(o)
     }
 
-    function makeFunctionExpr(bodyT, params, ownStrict) {
-        return function() { return makeClosure(params, bodyT, scopes, ownStrict) }
+    // nm is the name the function was DEFINED under - "" for an anonymous form, which
+    // fnDef then lets a binder name (see fnAnonNote). Every function-value builder in
+    // this file ends in fnDef for that reason. docs/todo.md 1.4.
+    function makeFunctionExpr(bodyT, params, ownStrict, nm, txt) {
+        return fnDef(function() { return makeClosure(params, bodyT, scopes, ownStrict) }, nm, params, txt)
     }
     // items = [params, (UseStrictMark)?, bodyThunk] - the optional function-expression
     // name pushes nothing.
-    function makeFunctionExprItems(items) {
+    // items = [({fname})?, params, (UseStrictMark)?, bodyThunk]. Indexed from the END,
+    // because the optional name FnExprName pushes in front of the parameter list (the
+    // type parameters and the return-type annotation push nothing at all).
+    function makeFunctionExprItems(items, txt) {
         var st = itemsStrict(items)
         var a = itemsNoStrict(items)
-        return makeFunctionExpr(a[1], a[0], st)
+        // fnSelf: a NAMED function expression sees its own name inside its body.
+        var enm = itemsFnName(a)
+        return fnSelf(makeFunctionExpr(a[a.length - 1], a[a.length - 2], st, enm, txt), enm)
+    }
+    // The recorded name of a function EXPRESSION - {fname}, pushed by FnExprName - or ""
+    // when the form is anonymous. docs/todo.md 1.4.
+    function itemsFnName(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].fname != undefined) { return items[i].fname }
+        }
+        return ""
     }
 
     // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
@@ -6091,14 +6360,14 @@ NotFuncHead = :script(~~
         var et = bm.ebody
         return function() { return {isRet: true, v: et()} }
     }
-    function makeArrow(items) {
+    function makeArrow(items, txt) {
         var params = items[0].aparams
         var bodyT = arrowBodyT(items[1])
-        return function() { return makeArrowClosure(params, bodyT, scopes) }
+        return fnDef(function() { return makeArrowClosure(params, bodyT, scopes) }, "", params, txt)
     }
     // An async arrow. `this` is the defining scope's, exactly as in makeArrow.
-    function makeAsyncArrow(items) {
-        return makeAsyncFn(items[0].aparams, arrowBodyT(items[1]))
+    function makeAsyncArrow(items, txt) {
+        return makeAsyncFn(items[0].aparams, arrowBodyT(items[1]), false, "", txt)
     }
 
     // Template literal: items = [{str:"chunk"} | {expr: thunk}...] -> string thunk.
@@ -6548,8 +6817,8 @@ NotFuncHead = :script(~~
     }
     // The value a generator FUNCTION is: calling it runs nothing, it only captures the
     // arguments and hands back a fresh generator object.
-    function makeGenerator(params, bodyT, ownStrict) {
-        return function() {
+    function makeGenerator(params, bodyT, ownStrict, nm, txt) {
+        return fnDef(function() {
             var env = scopes.slice()
             var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
@@ -6561,13 +6830,13 @@ NotFuncHead = :script(~~
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
                 return newGenObject(params, bodyT, env, self, args, false)
             }
-        }
+        }, nm, params, txt)
     }
     // The value an ASYNC function is: calling it creates the generator its body compiled
     // to, runs it to its first await and answers a promise for its completion. The whole
     // difference from makeGenerator is the driver - the body is compiled identically.
-    function makeAsyncFn(params, bodyT, ownStrict) {
-        return function() {
+    function makeAsyncFn(params, bodyT, ownStrict, nm, txt) {
+        return fnDef(function() {
             var env = scopes.slice()
             var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
@@ -6582,14 +6851,14 @@ NotFuncHead = :script(~~
                 jpAsyncStep(g, p, undefined, false)
                 return p
             }
-        }
+        }, nm, params, txt)
     }
     // The value an ASYNC GENERATOR function is: the same replay generator, handed to
     // the request-queue driver instead of the one-shot async driver. Its yields and
     // its awaits share ONE suspension channel and are told apart by the {__awt} marker
     // makeAwait puts on every awaited operand (see jpAgStep).
-    function makeAsyncGen(params, bodyT, ownStrict) {
-        return function() {
+    function makeAsyncGen(params, bodyT, ownStrict, nm, txt) {
+        return fnDef(function() {
             var env = scopes.slice()
             var strictHere = (ownStrict === true) || strictAt(env)
             return function() {
@@ -6601,7 +6870,7 @@ NotFuncHead = :script(~~
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
                 return jpAgNew(newGenObject(params, bodyT, env, self, args, true))
             }
-        }
+        }, nm, params, txt)
     }
     // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR.
     function makeAsyncFuncDecl(itemsIn) {
@@ -6609,19 +6878,20 @@ NotFuncHead = :script(~~
         var items = itemsNoStrict(itemsIn)
         var isGen = items[0] != undefined && items[0].isgen != undefined
         var name = items[items.length - 3]
-        var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1], st)
-                       : makeAsyncFn(items[items.length - 2], items[items.length - 1], st)
+        var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1], st, name)
+                       : makeAsyncFn(items[items.length - 2], items[items.length - 1], st, name)
         return function() { declVar(name, mk()) }
     }
     // The expression form: the optional name is accepted and, like a plain function
     // expression's, not bound.
-    function makeAsyncFuncExpr(itemsIn) {
+    function makeAsyncFuncExpr(itemsIn, txt) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
+        var enm = itemsFnName(items)
         if (items[0] != undefined && items[0].isgen != undefined) {
-            return makeAsyncGen(items[items.length - 2], items[items.length - 1], st)
+            return fnSelf(makeAsyncGen(items[items.length - 2], items[items.length - 1], st, enm, txt), enm)
         }
-        return makeAsyncFn(items[items.length - 2], items[items.length - 1], st)
+        return fnSelf(makeAsyncFn(items[items.length - 2], items[items.length - 1], st, enm, txt), enm)
     }
     // isAg says the body is an ASYNC generator's. It only reaches doYield, which
     // needs it for two things a plain generator has no driver for: unpacking a
@@ -6746,12 +7016,12 @@ NotFuncHead = :script(~~
         var name = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
-        var mk = isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
+        var mk = isGen ? makeGenerator(params, body, st, name) : makeFunctionExpr(body, params, st, name)
         return function() { declVar(name, mk()) }
     }
     // The expression form. The optional name is accepted and, like a plain function
     // expression's, not bound - so what is left after the marker is params and body.
-    function makeGenOrFuncExpr(itemsIn) {
+    function makeGenOrFuncExpr(itemsIn, txt) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
         var isGen = false
@@ -6759,7 +7029,9 @@ NotFuncHead = :script(~~
         if (items[0] != undefined && items[0].isgen != undefined) { isGen = true; at = 1 }
         var params = items[items.length - 2]
         var body = items[items.length - 1]
-        return isGen ? makeGenerator(params, body, st) : makeFunctionExpr(body, params, st)
+        var enm = itemsFnName(items)
+        return fnSelf(isGen ? makeGenerator(params, body, st, enm, txt)
+                            : makeFunctionExpr(body, params, st, enm, txt), enm)
     }
 
     // A destructuring binding. makeDField turns a parsed object field into
@@ -7184,14 +7456,20 @@ NotFuncHead = :script(~~
             // it by construction now. docs/todo.md 2.13.
             for (var mi = 0; mi < methods.length; mi++) {
                 var mm2 = methods[mi]
-                scopePut(mm2.statik ? statics : cls, memberKey(mm2), classMemberFn(mm2, mscopes))
+                var mk2 = memberKey(mm2)
+                scopePut(mm2.statik ? statics : cls, mk2, classMemberFn(mm2, mscopes, mk2))
             }
             // An accessor is called with the receiver in the one-shot slot, never as
             // arguments[0], so a static and an instance accessor are built the same way.
             for (var ai = 0; ai < accessors.length; ai++) {
                 var aa = accessors[ai]
-                addAccessor(aa.statik ? statics : cls, aa.acc, memberKey(aa),
-                            makeClosure(aa.params, aa.body, mscopes, true))
+                var ak = memberKey(aa)
+                // node names an accessor function "get k" / "set k"; nothing in this
+                // subset can read one as a value, so the name is recorded for the
+                // engines to agree rather than for a program to see. docs/todo.md 1.4.
+                addAccessor(aa.statik ? statics : cls, aa.acc, ak,
+                            fnMetaPut(makeClosure(aa.params, aa.body, mscopes, true),
+                                      aa.acc + " " + ak, fnArity(aa.params)))
             }
             if (ctorInfo != null) {
                 cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, false, false)
@@ -7226,7 +7504,16 @@ NotFuncHead = :script(~~
     // ordinary function - one that reads its receiver from the pendingThis slot, the way
     // 'original.call(this, n)' expects - so the method is built in that shape, decorated,
     // and the result is then adapted back to mcall's arguments[0] convention.
-    function classMemberFn(m, mscopes) {
+    // A method carries its KEY as its name and its declared parameters as its length,
+    // static and instance alike - node says `meth`/1 for `meth(x){}` read off the
+    // prototype, and this engine's instance methods take the receiver as arguments[0],
+    // which is not a declared parameter and so does not count. A DECORATED method keeps
+    // the same pair: what a decorator replaces is the body, not the declaration.
+    // docs/todo.md 1.4.
+    function classMemberFn(m, mscopes, mnm) {
+        return fnMetaPut(classMemberFnRaw(m, mscopes, mnm), mnm, fnArity(m.params))
+    }
+    function classMemberFnRaw(m, mscopes, mnm) {
         var decs = m.decs
         if (decs != undefined && decs != null && decs.length > 0 && !m.statik && !m.isGen) {
             var user = makeClosure(m.params, m.body, mscopes, true)
@@ -7241,9 +7528,9 @@ NotFuncHead = :script(~~
         if (m.statik) {
             var sfn = anytype // The static method's function value.
             sfn = makeClosure(m.params, m.body, mscopes, true)
-            if (m.isGen) { sfn = makeGenerator(m.params, m.body, true)() }
-            if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body, true)() }
-            if (m.isGen && m.isAsync) { sfn = makeAsyncGen(m.params, m.body, true)() }
+            if (m.isGen) { sfn = makeGenerator(m.params, m.body, true, mnm)() }
+            if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body, true, mnm)() }
+            if (m.isGen && m.isAsync) { sfn = makeAsyncGen(m.params, m.body, true, mnm)() }
             return applyDecorators(decs, sfn, "method", m.name, true)
         }
         if (m.isGen && m.isAsync) { return makeInstanceAsyncGen(m.params, m.body, mscopes) }
@@ -8245,10 +8532,13 @@ NotFuncHead = :script(~~
     }
 
     // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
-    function makeAssign(items) {
+    function makeAssign(items, txt) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // NamedEvaluation, the assignment form: `f = function(){}` names it "f", and
+        // only for a plain '=' to a bare NAME. docs/todo.md 1.4.
+        if (op == "=" && ref.path.length == 0) { fnAnonName(ref.name, "=", txt) }
         return function() {
             var v = anytype // A compound assignment (s += n) may change the value's type.
             v = valT()
@@ -8311,9 +8601,11 @@ NotFuncHead = :script(~~
 
     // An expression in statement position: evaluate and discard the value.
     // items = [name] or [name, initThunk].
-    function makeDecl(items) {
+    function makeDecl(items, txt) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(undefined)
+        // NamedEvaluation: `const h = x => x` names the arrow "h". docs/todo.md 1.4.
+        if (items.length > 1) { fnAnonName(name, "=", txt) }
         return function() { declVar(name, init()) }
     }
     // ----- Labels -----
@@ -8473,7 +8765,8 @@ NotFuncHead = :script(~~
         var name = a[0]
         var paramNames = a[1]
         var bodyT = a[2]
-        return function() { declVar(name, makeClosure(paramNames, bodyT, scopes, st)) }
+        var mk = fnDef(function() { return makeClosure(paramNames, bodyT, scopes, st) }, name, paramNames)
+        return function() { declVar(name, mk()) }
     }
 
     // Build the program thunk out of the parsed source.
