@@ -1,5 +1,5 @@
 // Recognition test for the widened TypeScript grammar: a real-world-looking module that
-// USES the constructs the grammar now PARSES but does not lower. Each such construct is
+// USES the constructs the grammar PARSES but does not lower. Each such construct is
 // reported as not-implemented, so:
 //   - a plain run ABORTS at the first one (this file SHOULD fail by default), and
 //   - a -warn-unsupported run warns on each, substitutes a placeholder, and still runs,

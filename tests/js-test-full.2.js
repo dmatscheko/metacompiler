@@ -1,30 +1,18 @@
 // Full-syntax test: JavaScript - part 2 of 3, sections 36-43.
 //
-// THE JS RATCHET IS THREE FILES, and this is docs/todo.md 6.2. As one file its
-// -frozen INTERPRETER leg measured 627 s wall against ./test.sh --full's 900 s brake
-// and had been KILLED outright under concurrent gate load, which reads as RUN-FAILED:
-// a red gate for a reason that is not a defect.
-//
-// WHY SPLITTING IS WORTH FAR MORE THAN A THIRD EACH, and it is MEMORY rather than
-// arithmetic. Peak RSS of that leg, which is an exact counter and needs no draws:
-// the unsplit file 23,470 MB; the three parts 11,907, 3,141 and 4,765 MB. At 23 GB the
-// machine is paging while several gate legs run beside it, which is why the same file
-// measured 330 s on an idle machine and was still running past 1,140 s - the brake is
-// 900 s - under a load average of 50. The parts measured 102, 35 and 39 s wall under
-// that same load. The fifty sections also cost 57 s of CPU when each is parsed alone
-// against 356 s in one file, so the underlying growth is superlinear in one file's
-// content; the RSS numbers are what say where it goes.
+// THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
+// ./test.sh --full's time brake (peak memory grew superlinearly with the file).
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
 //   tests/js-test-full.3.js   sections 44-51, the call/class/private-name model
 //
-// Nothing else moved. The section NUMBERS are the ones they have always had (grammar
-// comments and docs cite them), the three files together run the same assertions in
-// the same order, and ./test.sh --full reports them as the units js, js2 and js3 - one
-// per FILE, because the check-count agreement rule compares the two GRAMMARS of one
-// file and never two files of one language. Add a new section to whichever file it
-// belongs in, and keep the numbers globally unique across the three.
+// The section NUMBERS are global (grammar comments and docs cite them), the three
+// files together run the assertions in order, and ./test.sh --full reports them as the
+// units js, js2 and js3 - one per FILE, because the check-count agreement rule
+// compares the two GRAMMARS of one file and never two files of one language. Add a
+// new section to whichever file it belongs in, and keep the numbers globally unique
+// across the three.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full
@@ -54,21 +42,13 @@ function check(id, cond) {
 }
 
 // ===== SECTION 36: delete, key order, and template-literal ToString =====
-// Two defects that were invisible to every suite in the repo until this section
-// existed, both measured against node v24 and both fixed in all three engines.
-//
-// DELETE. The C floor had no js_del at all, so JavaScript's layer 2 blanked the slot
-// and kept a side table of what it had blanked. `delete` + `in` + Object.keys were
-// right; key ORDER after a delete-then-reinsert, for-in and object spread were not,
-// and the table was quadratic and leaked (61 s for 4,000 deletions, 0.05 s now).
-// The floor exports js_del now, so all four walk the same key array.
+// DELETE removes the key and its key-order entry (the floor's js_del), so key ORDER
+// after a delete-then-reinsert, for-in and object spread are node's answers.
 //
 // TEMPLATE LITERAL. `${v}` is ToString(v), which is ToPrimitive with hint STRING -
 // so an object's own `toString` runs, an object with only a `valueOf` still spells
-// "[object Object]", and a BigInt spells its digits. The compiler halves joined the
-// RAW parts with the floor's js_add ("[object Object]" for every object), and the
-// interpreter halves used host concatenation, which is hint DEFAULT and calls
-// `valueOf` first. Both emit / call ToString per PART now.
+// "[object Object]", and a BigInt spells its digits. Every engine converts each PART
+// with ToString (host concatenation would be hint DEFAULT and call `valueOf` first).
 function s36() {
     var o = { a: 1, b: 2, c: 3 }
     check("del1", (delete o.b) === true && o.b === undefined)
@@ -90,7 +70,7 @@ function s36() {
     // On an ARRAY the length is unchanged and the slot reads as undefined.
     var arr = [1, 2, 3]
     check("del10", (delete arr[1]) === true && arr.length === 3 && arr[1] === undefined)
-    // The shape that was quadratic, and one that checks the surviving ORDER.
+    // Many deletions, and one that checks the surviving ORDER.
     var big = {}
     for (var i = 0; i < 300; i++) { big["k" + i] = i; delete big["k" + i] }
     check("del11", Object.keys(big).length === 0)
@@ -109,12 +89,11 @@ function s36() {
     var t = { toString: function () { return "T" } }
     check("tpl8", `a${t}b${t}c` === "aTbTc")
 
-    // The implicit global, which is the third floor addition of this change.
-    // A plain `=` to a name that is on NO scope of the chain creates the binding in
-    // the ROOT scope (js_scope_set_or_create), so it outlives the function that
-    // wrote it. js_scope_typeof cannot be used to build this in an emitter - it
-    // answers "undefined" for an absent name and for a slot HOLDING undefined
-    // alike - which is why the C floor now carries the walk itself.
+    // The implicit global. A plain `=` to a name that is on NO scope of the chain
+    // creates the binding in the ROOT scope (js_scope_set_or_create), so it outlives
+    // the function that wrote it. js_scope_typeof cannot be used to build this in an
+    // emitter - it answers "undefined" for an absent name and for a slot HOLDING
+    // undefined alike - which is why the C floor carries the walk itself.
     check("ig1", mkGlobal36() === 100)
     check("ig2", implicitGlobal36 === 100)
     implicitGlobal36 = implicitGlobal36 + 1
@@ -142,22 +121,13 @@ function keyStr36(o) {
 }
 
 // ===== SECTION 37: an iterator is CLOSED on an early exit =====
-// Making for-of lazy (SECTION 33's python twin, docs/todo.md 1.6) left a
-// generator SUSPENDED when the loop left early: a second loop over it RESUMED
-// where node closes it, and a `finally` around the yield never ran. It could not
-// be fixed in the emitter alone - the floor's generator cell answered `next`
-// alone - so runtime.c grew gen_close (a GEN_EXIT sentinel thrown INTO the
-// suspended body, so its finally clauses unwind normally), abnf/jsrt.go grew the
-// matching closeBody, and makeForOf now calls the iterator's `return()` on break.
-//
-// WHAT THE TWO HALVES AGREE ON, and what they cannot: this half's generators
-// REPLAY, so the body's finally has already run once per next() and .return()
-// only sets the done flag. Every assertion below is therefore about the CLOSED
-// STATE (a second loop yields nothing, next() answers done) and about a count
-// taken after exactly ONE step, where replay's one finally and the compiler's
-// one close-time finally give the same number by different routes. The ORDER of
-// the print is a halves divergence, stated in js-interpreter.abnf's :description
-// and deliberately not asserted.
+// for-of over a generator is lazy, so a loop that leaves early has to CLOSE the
+// generator: a second loop over it is empty, as in node, and a `finally` around the
+// yield runs. runtime.c's gen_close throws a GEN_EXIT sentinel INTO the suspended
+// body (so its finally clauses unwind normally), abnf/jsrt.go's closeBody does the
+// same, and makeForOf calls the iterator's `return()` on break. The moment the
+// finally runs is SECTION 39's subject; this one asserts the closed STATE and counts
+// taken after exactly ONE step.
 function s37() {
     var fins = 0
     function* g37() {
@@ -237,24 +207,21 @@ function s37() {
     function* pg37() { yield [1, 2]; yield [3, 4] }
     for (var [pa, pb] of pg37()) { pairs.push(pa + pb); break }
     check("itc17", pairs.length === 1 && pairs[0] === 3)
-    // A RETURN out of the loop body and a LABELED BREAK to an OUTER statement now
-    // close it, exactly as node does. Neither reaches a block makeForOf owns - one
-    // rets the frame, the other branches to the outer label's exit - so the compiler
-    // halves emit js_jsiterclose on the loop's own iterable handle, which the loop's
-    // entry block dominates, while the interpreter half reads the body's completion
-    // record. docs/todo.md 1.8.
+    // A RETURN out of the loop body and a LABELED BREAK to an OUTER statement close
+    // it, exactly as node does. Neither reaches a block makeForOf owns - one rets the
+    // frame, the other branches to the outer label's exit - so the compiler halves
+    // emit js_jsiterclose on the loop's own iterable handle, which the loop's entry
+    // block dominates, while the interpreter half reads the body's completion record.
     var rg = g37()
     check("itc18", takeOne37(rg) === 1)
     check("itc19", rg.next().done === true)
     var tg = g37()
     try { for (var tv of tg) { throw "x" } } catch (te) { }
-    // A THROW through the loop body still does NOT close it, in both halves. The
-    // only route an emitter has is a runtime open-iterator stack unwound at each
-    // try, and `for await` suspends INSIDE its own for-of - so a suspended body
-    // leaves an entry on that stack while unrelated frames run, and the unwind
-    // closes the wrong loop. That was BUILT AND MEASURED: it made SECTION 38's
-    // `for await` see one element instead of three, because SECTION 16's
-    // `try { await Promise.reject(r) } catch` unwound past it. Pinned here.
+    // A THROW through the loop body does NOT close it, in both halves: the only route
+    // an emitter has is a runtime open-iterator stack unwound at each try, and
+    // `for await` suspends INSIDE its own for-of, so such a stack closes the wrong
+    // loop (SECTION 38's `for await` against SECTION 16's caught rejection). Pinned
+    // here.
     check("itc20", tg.next().done === false)
     // A labeled break to an OUTER statement, which leaves the loop without ever
     // reaching its own closing block.
@@ -291,7 +258,7 @@ function retThroughTry37j(g) { for (var x of g) { try { return x } finally { } }
 function takeOne37(g) { for (var x of g) { return x } return 0 }
 
 // ===== SECTION 38: for await, and async generators =====
-// docs/todo.md 1.7. An async generator body carries its yields AND its awaits on
+// An async generator body carries its yields AND its awaits on
 // ONE suspension channel; they are told apart by a marker record the emitter puts
 // on every awaited operand (js_jsawaitmark), which is why the generator model
 // needed nothing added to it and the C floor is not touched. `for await` drives an
@@ -319,10 +286,7 @@ function s38() {
     check("fa1", typeof nums === "function")
     check("fa2", typeof agExpr === "function")
     check("fa3", typeof agObj.m === "function")
-    // A class method is not an own property of the instance in this value model
-    // (it lives on the __class descriptor), so `typeof inst.m` is undefined in both
-    // halves - a documented limitation, unrelated to this section. The async
-    // generator OBJECT the call answers is what this asserts.
+    // The async generator OBJECT the method call answers is what this asserts.
     check("fa4", typeof new AGC().m().next === "function")
     check("fa5", typeof nums().next === "function")
     // for await over an async generator.
@@ -414,16 +378,11 @@ function s38() {
         check("fa7", ordOk)
         if (!ordOk) { exit(1) }
     })
-    // ----- docs/todo.md 1.8: yield* inside an async generator, and ag.throw() -----
-    // Every value below is byte-identical to node v24, measured four ways (the
-    // interpreter half, llvm.Run, a native -exe binary, and node). Each trace is built
-    // in a LOCAL created per call, so replay repeats no observable write.
-    //
-    // At ae0c62b these were the two residues. `yield* someAsyncGen()` did not merely
-    // delegate synchronously: an async generator's next() answers a PROMISE, whose
-    // `done` is undefined, so the unawaited drive never terminated - the interpreter
-    // half HUNG and llvm.Run died on the step limit. And ag.throw(e) closed the body
-    // and rejected instead of raising at the yield.
+    // ----- yield* inside an async generator, and ag.throw() -----
+    // Every value below is node v24's. Each trace is built in a LOCAL created per
+    // call, so replay repeats no observable write. `yield* someAsyncGen()` has to
+    // AWAIT each step (an async generator's next() answers a promise, whose `done` is
+    // undefined), and ag.throw(e) raises at the yield rather than closing the body.
     function rec38(r) { return "" + r.value + "/" + r.done }
     var agRan38 = 0 // Counts entries into never38's body; a suspendedStart throw must not.
     // yield* over an ASYNC delegate: each step awaited, and the value of the
@@ -494,13 +453,10 @@ function s38() {
         var r = await g.next()
         return s + "|" + rec38(r) + "|ran=" + agRan38
     }
-    // docs/todo.md 1.6: a throw that arrives while the body is parked at a `yield*` is
-    // FORWARDED to the delegate's throw(). The delegate catches, the throw() request
-    // RESOLVES with the value the delegate's catch yields, and the delegate is left
-    // where it can be resumed rather than suspended forever. Until this it raised AT
-    // the yield*, so delegOuter38's own (absent) handler saw it, the request rejected,
-    // and 40/false|rej:t was pinned here as the gap. All four fields below are node
-    // v24's, measured by running this section under it.
+    // A throw that arrives while the body is parked at a `yield*` is FORWARDED to the
+    // delegate's throw(). The delegate catches, the throw() request RESOLVES with the
+    // value the delegate's catch yields, and the delegate is left where it can be
+    // resumed rather than suspended forever. All four fields below are node v24's.
     async function* deleg38() { try { yield 40 } catch (e) { yield "d:" + e } }
     async function* delegOuter38() { yield* deleg38(); yield 41 }
     async function agThrowIntoDelegate() {
@@ -524,8 +480,7 @@ function s38() {
         return rec38(r1) + "|" + s
     }
     // The other half of the same loop: g.next(v) forwards v to the DELEGATE (the
-    // specification's `received.value`). Before 1.6 the delegate's next() was called
-    // with no argument at all, so `a` below read undefined in every engine.
+    // specification's `received.value`), so `a` below reads the sent value.
     async function* sendInner38() { var a = yield 60; yield "a=" + a; return "R" }
     async function* sendOuter38() { var r = yield* sendInner38(); yield "r=" + r }
     async function agSendThroughDelegate() {
@@ -562,8 +517,7 @@ function s38() {
     })
     // A PLAIN generator's yield* answers the delegate's return value too - the same
     // one line in the emitter, and synchronous, so it is asserted directly. next(v)
-    // reaches the delegate here as well: a plain generator has no throw-in channel and
-    // no .throw() at all, but the sent value goes through the identical loop.
+    // reaches the delegate here as well, through the identical loop.
     var ysync = []
     // The sent value is YIELDED BACK rather than pushed to ysync: this half replays a
     // generator body once per next(), so a write from inside the DELEGATE would repeat.
@@ -580,29 +534,22 @@ function s38() {
 function* sg38() { yield 1; yield 2 }
 
 // ===== SECTION 39: WHEN a generator's finally runs, and closing a yield* delegate =====
-// docs/todo.md 1.10 and the js half of 2.6. Two defects, both about the MOMENT a
-// finally runs, and neither visible to SECTION 37 - every assertion there is about
-// the closed STATE or about a count, which both halves reached by different routes.
+// When a finally runs, and closing a yield* delegate - neither visible to SECTION
+// 37, whose assertions are about the closed STATE or a count.
 //
-// THE INTERPRETER RAN THE FINALLY AT THE FIRST next(). A generator suspends there by
-// throwing a host-level signal, and interp-core's excTry ran the program's `finally`
-// for any unwinding - so `try { yield } finally { f() }` printed f before the first
-// next() had even returned, and again at every step after. That is not replay
-// repetition, it is the wrong ORDER, and it was a live halves divergence: the two
-// compiled halves have real coroutines and were right. js-interpreter.abnf now has
-// its own jsExcTry that lets the suspension through untouched.
+// A generator suspends in the interpreter half by throwing a host-level signal, so
+// its jsExcTry lets that signal through untouched; otherwise `try { yield } finally
+// { f() }` would print f at every suspension instead of when node runs it.
 //
-// THE COMPILER HALVES DID NOT CLOSE A yield* DELEGATE. g.return() is gen_close, which
-// throws the GEN_EXIT sentinel at the suspended yield; the outer body's finally ran
-// and the DELEGATE was left suspended, where node runs its finally first. The emitted
-// yield* loop now yields inside a js_try whose finally runs IteratorClose on the
-// delegate (js-to-llvm-ir.abnf's emitYieldStarClose), and the interpreter half raises
-// the same close at the same yield (jpYieldDeleg).
+// g.return() is gen_close, which throws the GEN_EXIT sentinel at the suspended
+// yield; the emitted yield* loop yields inside a js_try whose finally runs
+// IteratorClose on the DELEGATE (js-to-llvm-ir.abnf's emitYieldStarClose), so the
+// delegate's finally runs first, as in node. The interpreter half raises the same
+// close at the same yield (jpYieldDeleg).
 //
 // Every log below is written only in a `finally` or from the DRIVER, never before the
 // yield the body parks at - a write before that yield repeats once per replay in the
-// interpreter half and the two halves would disagree about the count, not the order.
-// Measured byte-for-byte against node v24.
+// interpreter half. Every log is node v24's.
 function s39() {
     var lg = []
     function* g39() { try { yield 1; yield 2 } finally { lg.push("fin") } }
@@ -675,7 +622,7 @@ function s39() {
     j39.next()
     j39.return(0)
     check("gcl11", l9.join(",") === "in,out")
-    // g.throw(v) on a PLAIN generator (docs/todo.md 1.4). Here as well as in the
+    // g.throw(v) on a PLAIN generator. Here as well as in the
     // features file because the features file is never BUILT NATIVELY, and the
     // yield*-forwarding arm is emitter code that clang-check and native-full are the
     // only gates that reach. Every push is in the driver or in a finally: a write
@@ -728,8 +675,7 @@ function s39() {
     check("gth6", f6_39.throw("V").value ===
           "a:TypeError: The iterator does not provide a 'throw' method.")
     // A `yield` inside a CATCH ARM is a suspension like any other: the enclosing
-    // finally belongs to the close, not to it. Reachable with no throw() at all,
-    // and the interpreter halves used to run the finally at the suspension.
+    // finally belongs to the close, not to it. Reachable with no throw() at all.
     var t7 = []
     function* gt7_39() { try { throw 1 } catch (e) { yield 99 } finally { t7.push("f7c") } }
     var g7c39 = gt7_39()
@@ -749,36 +695,25 @@ function firsts39(xs) {
 }
 
 // ===== SECTION 40: methods as values, Object.prototype, bind, and a catchable BigInt =====
-// docs/todo.md 2.5 and 2.6. Everything here ABORTED or answered "undefined" before,
-// and the split across the engines is the interesting part - three of the six
-// entries below were LIVE HALVES DIVERGENCES that --cross could not see, because no
-// test reached them.
+// A METHOD IS NOT AN OWN PROPERTY: an instance keeps its methods on its __class
+// descriptor, yet `typeof p.m` is "function" and `"m" in p` is true in node.
+// getMember / js_jsvget / js_jshas walk the descriptor chain for a VALUE read (the
+// call site still reads raw, so an ordinary p.m() allocates nothing).
 //
-// A METHOD IS NOT AN OWN PROPERTY. An instance keeps its methods on its __class
-// descriptor, so `typeof p.m` read "undefined" in all four engines where node says
-// "function", and `"m" in p` was false. getMember / js_jsvget / js_jshas now walk
-// the descriptor chain for a VALUE read (the call site still reads raw, so an
-// ordinary p.m() allocates nothing).
+// typeof [].push must be "function" in every engine: llvm.Run reads a plain member
+// through the shared js_get, a native build through js_jsmget's method-name hiding,
+// and one extern for the value read covers both.
 //
-// typeof [].push WAS ENGINE-DEPENDENT: "function" under llvm.Run, which reads a
-// plain member through the shared js_get, and "undefined" natively, where the read
-// went through js_jsmget's method-name hiding. One extern for the value read fixes
-// both directions at once.
+// Object.prototype.toString.call(v) is the classic type probe; every engine builds
+// its own `Object` prototype with toString / valueOf / hasOwnProperty.
 //
-// Object.prototype.toString.call(v) is the classic type probe and it aborted BOTH
-// compiled halves ("member 'call' of undefined" under llvm.Run, "member 'toString'
-// of undefined" natively): the `Object` global carried no usable prototype. All
-// three engines now build their own, with toString / valueOf / hasOwnProperty.
+// Function.prototype.bind, and f.call(o) / f.apply(o) with the receiver arriving.
 //
-// Function.prototype.bind existed in NO engine, and f.call(o) in the js interpreter
-// half silently ignored its receiver while the typescript half had had the shim
-// since it was written.
-//
-// A BIGINT TypeError WAS NOT CATCHABLE. `1n + 1` is a TypeError in node and a
-// program may catch it; here it aborted the process. Every BigInt-family raise -
-// the mixed-operand TypeError, ToBigInt's SyntaxError, the RangeErrors - is now a
-// real throw in all four engines. The operands come out of an ARRAY so the
-// constant folder cannot evaluate any of it at compile time.
+// A BIGINT TypeError IS CATCHABLE. `1n + 1` is a TypeError in node and a program may
+// catch it. Every BigInt-family raise - the mixed-operand TypeError, ToBigInt's
+// SyntaxError, the RangeErrors - is a real throw in all four engines. The operands
+// come out of an ARRAY so the constant folder cannot evaluate any of it at compile
+// time.
 function s40() {
     class S40A { am() { return "a" + this.v } }
     class S40B extends S40A { constructor() { super(); this.v = 1 } bm() { return "b" } }
@@ -831,7 +766,6 @@ function s40() {
 
     // new through a constructor that RETURNS a function, and `new` with no argument
     // list: [[Construct]] keeps an explicitly returned object and a function is one.
-    // The interpreter half dropped it and then said "unknown class: expression".
     function S40Meta() { return function() { this.q = 8 } }
     check("nw1", (new (new S40Meta())()).q === 8)
     function S40Plain() { this.q = 9 }
@@ -853,12 +787,8 @@ function s40() {
 }
 
 // ===== SECTION 41: the Error hierarchy =====
-// docs/todo.md 1.1. Before this, `new TypeError("x")` was *variable not defined*
-// in all six js/ts engines, so every error the engine raised had to be caught as
-// a STRING - e.message and `e instanceof TypeError` did not exist, and that was
-// the stated ceiling on every "make X catchable" item. The classes are ordinary
-// {__isclass, __name, __super, __ctor} descriptors, so instanceof, `new` and
-// `extends` are the machinery that was already there.
+// The classes are ordinary {__isclass, __name, __super, __ctor} descriptors, so
+// instanceof, `new` and `extends` are the ordinary class machinery.
 //
 // Every row below is node v24's answer, except s41keys - see the comment there.
 function s41() {
@@ -874,8 +804,8 @@ function s41() {
     check("err4", te instanceof TypeError && te instanceof Error)
     check("err5", !(te instanceof RangeError) && !(te instanceof ReferenceError))
 
-    // The five. EvalError and URIError are deliberately absent - see the
-    // jsErrClassNames table in the emitters for the measurement that decided it.
+    // The five. EvalError and URIError are deliberately absent (see the
+    // jsErrClassNames table in the emitters).
     var mk = [new Error(xs[0]), new TypeError(xs[0]), new RangeError(xs[0]),
               new ReferenceError(xs[0]), new SyntaxError(xs[0])]
     var nm = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError"]
@@ -909,9 +839,7 @@ function s41() {
     var m3 = new S41Deep(xs[0])
     check("err12", m3.message === "boom" && m3.name === "TypeError" && m3.code === 7)
 
-    // A default DERIVED constructor forwards its arguments. It passed none, so
-    // this was `undefined` in all four engines where node says 5 - both halves
-    // agreeing and both wrong, which is the defect class only an oracle sees.
+    // A default DERIVED constructor forwards its arguments: node says 5.
     class S41Base { constructor(a, b) { this.a = a; this.b = b } }
     class S41Sub extends S41Base {}
     var sb = new S41Sub(xs[2], xs[3])
@@ -926,11 +854,9 @@ function s41() {
     }
     check("err14", seen === "RangeError/boom/true/true")
 
-    // ----- the ENGINE's own errors are instances of these classes now -----
-    // The BigInt mix error and the iterator-throw TypeError are the two the item
-    // named; the number toString() radix is a third, which used to be an
-    // uncatchable abort on the number path while the BigInt path beside it
-    // raised a real RangeError.
+    // ----- the ENGINE's own errors are instances of these classes -----
+    // The BigInt mix error, the iterator-throw TypeError, and the number
+    // toString() radix RangeError.
     var got = []
     try { got.push("v" + (xs[1] + xs[2])) } catch (e) {
         got.push("mix:" + (e instanceof TypeError) + (e.message.indexOf("Cannot mix BigInt") === 0))
@@ -954,7 +880,7 @@ function s41() {
     check("err17", xs[1] + xs[1] === 2n)
 
     // The message text survives the round trip unchanged, which is what keeps
-    // every pre-existing `("" + e).indexOf(...)` assertion in this file honest.
+    // every `("" + e).indexOf(...)` assertion in this file honest.
     check("err18", ("" + new TypeError(xs[0])).indexOf("TypeError: ") === 0)
 
     // name / message / stack are NOT enumerable: Object.keys(new Error("x")) is [],
@@ -974,19 +900,13 @@ function s41() {
 function* s41deleg() { yield* [3, 4] }
 
 // ===== SECTION 42: the Math object =====
-// docs/todo.md 1.1. Math's MEMBERS diverged across the three engines that
-// implement a host global (manual 7.2): languages/lib/runtime.c seeded eleven
-// methods and two properties, abnf/jsrt.go's standardJSBindings offered
-// thirty-two and eight, and goja - the grammar host both interpreter halves run
-// on - thirty-five and eight. So `Math.sin(1)` answered under llvm.Run and died
-// with `unknown method 'sin'` in the NATIVE binary, `Math.clz32` existed only
-// under goja, and Math.hypot overflowed in two of the three. The floor now
-// carries Go's own math package, ported (runtime.c, "the transcendentals"), and
-// abnf/hostglobals_test.go's TestMathMembersAgree pins the member set.
+// Math's MEMBERS are the same set in every engine that implements a host global
+// (manual 7.2): the floor carries Go's own math package, ported (runtime.c, "the
+// transcendentals"), and abnf/hostglobals_test.go's TestMathMembersAgree pins the
+// member set.
 //
 // Every row is node v24's answer except the two marked GO-vs-V8: Go's math
-// package and V8 differ in the last ulp there, both engines here are Go's, and
-// that divergence is older than this section.
+// package and V8 differ in the last ulp there, and both engines here are Go's.
 //
 // Every operand is read out of an array so the constant folders cannot answer
 // at compile time (manual chapter 3).
@@ -1014,14 +934,14 @@ function s42() {
     check("math17", Math.cbrt(a[8]) === 3 && Math.cbrt(a[12]) === -1)
     check("math18", Math.atan2(a[0], a[1]) === 0.4636476090008061)
 
-    // hypot: variadic, and it must overflow only when the RESULT does. The naive
-    // sum of squares answered Infinity for the first row and 0 for the second.
+    // hypot: variadic, and it must overflow only when the RESULT does (a naive sum
+    // of squares gives Infinity for the first row and 0 for the second).
     check("math19", Math.hypot(a[3], a[5]) === 8.54400374531753)
     check("math20", Math.hypot(a[10], a[10]) === 1.4142135623730952e+300)
     check("math21", Math.hypot(a[11], a[11]) === 1.4142135623730952e-300)
     check("math22", Math.hypot(a[5], a[6]) === 5 && Math.hypot(a[5], a[6], a[13]) === 16.76305461424021)
 
-    // clz32 and fround existed ONLY in goja until this item.
+    // clz32 and fround.
     check("math23", Math.clz32(a[0]) === 31 && Math.clz32(a[7]) === 32)
     check("math24", Math.clz32(a[15]) === 0 && Math.clz32(a[1]) === 30)
     check("math25", Math.fround(a[14]) === 0.10000000149011612)
@@ -1038,8 +958,7 @@ function s42() {
     check("math34", Math.atanh(a[12]) === -Infinity)
 
     // Operands outside the int32 range. ToInt32 is a modulo 2^32, so 4294967297 is 1
-    // and 1e300 is 0. goja's own Math.imul(1e300, 4294967297) was -1 and
-    // Math.clz32(1e300) 0, in the interpreter half only. Values read off node 24.
+    // and 1e300 is 0. Values read off node 24.
     var b = [4294967296, 4294967297, 1e300, -1e300, 1e20, 16777217, 0.49999999999999994, -0.4, 2.5, -2.5, 0, 3.4028236e38]
     var nz = -b[10]
     check("math35", Math.imul(b[2], b[1]) === 0 && Math.imul(b[1], b[1]) === 1 && Math.imul(b[0], b[5]) === 0)
@@ -1062,22 +981,16 @@ function s42() {
 }
 
 // ===== SECTION 43: three uncatchable aborts become catchable throws =====
-// docs/todo.md 1.8 and 3.2. A name with no binding, a member read on
-// null/undefined and `new Promise(5)` were UNCATCHABLE `fail` aborts in all six
-// js/ts engines: the program stopped dead where node throws a ReferenceError or
-// a TypeError that a plain try/catch recovers. The first two live in the FLOOR's
-// scope_get / get_member (and abnf/jsrt.go's scopeGet / getMember), shared by
-// all sixteen languages, so they are reached through a per-language hook the
-// emitter registers - js_rt_missvar / js_rt_missmem - and a language that
-// registers none is unchanged, which is what keeps the three SHOULD-ABORT matrix
-// rows where they are.
+// A name with no binding, a member read on null/undefined and `new Promise(5)` throw
+// a ReferenceError or a TypeError in node that a plain try/catch recovers. The first
+// two live in the FLOOR's scope_get / get_member (and abnf/jsrt.go's scopeGet /
+// getMember), shared by all sixteen languages, so they are reached through a
+// per-language hook the emitter registers - js_rt_missvar / js_rt_missmem - and a
+// language that registers none is unchanged, which is what keeps the three
+// SHOULD-ABORT matrix rows where they are.
 //
-// Two pre-existing divergences ride along: `typeof K` for a class was "object"
-// where node says "function" (a class here is an ordinary object carrying
-// __isclass), and the BigInt mix message carried an `(operator '+')` suffix node
-// does not print.
-//
-// Every row is node v24's answer, verified against it.
+// Also here: `typeof K` for a class is "function", and the BigInt mix message has
+// no operator suffix. Every row is node v24's answer.
 function s43() {
     var xs = [null, undefined, {a: 1}, 5, "k", 1n]
 
@@ -1103,7 +1016,7 @@ function s43() {
     catch (e) { r4 = (e instanceof TypeError) + "|" + e.message }
     check("ref5", r4 === "true|Promise resolver 5 is not a function")
 
-    // The program CONTINUES afterwards - the point of the whole item.
+    // The program CONTINUES afterwards.
     var n = 0
     for (var i = 0; i < 3; i++) {
         try { n = n + xs[0].len }

@@ -4,8 +4,7 @@
  * WHAT IT IS FOR
  *
  * metajs-to-llvm-ir.abnf emits HANDLE IR: every value is an i64 handle and the
- * semantics live in js_* externs. Until the C floor of phase 3 exists there is
- * nothing to link those against, so this file defines exactly the ten symbols
+ * semantics live in js_* externs. This file defines exactly the ten symbols
  * that tests/metajs-link-hello.js declares - by hand, one line each - and a main()
  * that calls jsmain(). That is enough to prove the LINKING FEATURE end to end:
  *
@@ -16,8 +15,8 @@
  *
  * WHAT IT IS NOT
  *
- * It is not a runtime and must not grow into one - docs/runtime-rework-plan.md
- * phase 3 owns that, in C compiled by c-to-llvm-ir.abnf, not in clang-compiled C
+ * It is not a runtime and must not grow into one - the real C floor is
+ * languages/lib/runtime.c, compiled by c-to-llvm-ir.abnf, not clang-compiled C
  * checked in beside the tests. Nothing here allocates, dispatches or answers
  * anything: js_call cannot call the closure it is handed, because the emitted
  * module has no function table for it to index. The binary therefore builds and

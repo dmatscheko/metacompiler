@@ -10,8 +10,7 @@
 //
 // It has a THIRD reader: tests/clang-check.sh builds it into a NATIVE BINARY
 // (metajs-to-llvm-ir.abnf carries exePath, so clang-check runs it that way) and
-// requires the binary to exit 0. That makes this file the gate of phase 3 of
-// docs/runtime-rework-plan.md: the same source has to answer identically under
+// requires the binary to exit 0, so the same source has to answer identically under
 // the Go runtime (abnf/jsrt.go, via llvm.Run) and under the C floor
 // (languages/lib/runtime.c, compiled by c-to-llvm-ir.abnf and linked by clang).
 //
@@ -23,28 +22,15 @@
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
-// The HOST GLOBALS used to be asserted only at the INTERSECTION of the two
-// halves, which was smaller than either: metajs-interpreter.abnf bound eleven
-// names while the compiler half (abnf/jsrt.go standardJSBindings) also had
-// Infinity, NaN, Array, Object, byteLen, sprint and rawSet - and no check on the
-// difference was possible, because it would fail on one half by construction.
-//
-// THAT IS CLOSED (docs/todo.md 4.1). All three engines now bind the SAME 50
-// names - the C floor's seed_root list in languages/lib/runtime.c is the
-// authority, the interpreter gained the six it was missing, and the two that only
-// the grammar's own tag scripts ever wanted (Object, rawSet) left the program set.
-// SECTION 31 asserts every one of the 50 on both halves, which is only possible
-// because they agree; abnf/hostglobals_test.go parses the three sources and fails
+// All three engines bind the SAME 50 host globals - the C floor's seed_root list in
+// languages/lib/runtime.c is the authority. SECTION 31 asserts every one of them on
+// both halves; abnf/hostglobals_test.go parses the three sources and fails
 // `go test ./abnf/` if a future name lands in fewer than three of them.
 //
-// SECTION 32 is the other half of that item: string CASE MAPPING. All four
-// engines now use the SIMPLE per-rune mapping (Go's strings.ToUpper), so
-// "ss".toUpperCase() keeps one character. goja used to give real JavaScript's
-// full mapping ("SS") - a live goja-vs--frozen divergence in this half that no
-// gate could reach - and installGojaCaseMapping in abnf/commonscript.go now
-// routes it through the same Go function the other three engines call. The
-// direction was forced: full case mapping in the C floor is `case_map`, measured
-// at 135x and reverted.
+// SECTION 32 is string CASE MAPPING: all four engines use the SIMPLE per-rune
+// mapping (Go's strings.ToUpper), so "ss".toUpperCase() keeps one character, and
+// installGojaCaseMapping in abnf/commonscript.go routes goja through the same Go
+// function the other three engines call.
 //
 // Deliberately out of scope, because MetaJS does not have them (they belong to
 // tests/js-test-full.js): classes, arrow functions, template literals,
@@ -52,13 +38,10 @@
 // expression literals, getters/setters, Symbol, BigInt, labelled statements,
 // optional chaining, exponentiation.
 //
-// The last bit of an INEXACT floating point result IS asserted, in section 22.
-// It used to be out of scope here: the C floor computes with the soft float
-// c-to-llvm-ir.abnf emits, which truncated where IEEE-754 rounds to nearest
-// even, so 0.1 + 0.2 came out one ulp below the Go runtime's answer. That is
-// exactly the kind of divergence ./test.sh cannot see - both of its engines are
-// the Go runtime - so it is pinned here instead, where tests/clang-check.sh runs
-// this file as a NATIVE BINARY and the C floor has to give the same answer.
+// The last bit of an INEXACT floating point result IS asserted, in section 22: the C
+// floor computes with the soft float c-to-llvm-ir.abnf emits, and ./test.sh cannot
+// see a divergence there - both of its engines are the Go runtime - so it is pinned
+// here, where tests/clang-check.sh runs this file as a NATIVE BINARY.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code).
@@ -164,20 +147,17 @@ function s04() {
     check("bit13", (2147483647 + 1 | 0) === -2147483648)
     check("bit14", (0xffffffff | 0) === -1)
     check("bit15", (5 << 33) === 10)
-    // ToInt32 OUTSIDE the int64 range. It is a MODULO, not a range test, and
-    // all three engines used to get it wrong in three different ways: the C
-    // floor answered 0 from an explicit `d_in_long` test, abnf/jsrt.go's
-    // rt.toInt32 ended in `int32(int64(f))` - implementation defined in Go, -1
-    // here on arm64 - and goja's own operator does the same int64 conversion.
-    // Every value below is checked against node; see docs/runtime-next-plan.md
-    // part 2. Written as decimal literals because MetaJS has no exponent form.
+    // ToInt32 OUTSIDE the int64 range. It is a MODULO, not a range test (and an
+    // `int32(int64(f))` conversion is implementation defined in Go). Every value
+    // below is checked against node. Written as decimal literals because MetaJS has
+    // no exponent form.
     check("bit16", (10000000000000000000 | 0) === -1981284352)
     check("bit17", (100000000000000000000 | 0) === 1661992960)
     check("bit18", ((0 - 10000000000000000000) | 0) === 1981284352)
     check("bit19", ((0 - 100000000000000000000) | 0) === -1661992960)
-    // A value whose low 32 bits are genuinely zero, so 0 is the RIGHT answer -
-    // the assertion that says the fix did not just replace one constant with
-    // another. 2^63 exactly, and a value far above the 2^84 cutoff.
+    // A value whose low 32 bits are genuinely zero, so 0 is the RIGHT answer and a
+    // constant answer cannot pass. 2^63 exactly, and a value far above the 2^84
+    // cutoff.
     check("bit20", (9223372036854775808 | 0) === 0 &&
         (1000000000000000019884624838656 | 0) === 0)
     // The int64 boundary from below is unchanged, which is what says the fast
@@ -239,13 +219,10 @@ function s07() {
     check("str6", s.slice(-5) === "world")
     check("str7", s.toUpperCase() === "HELLO WORLD")
     check("str8", "ABC".toLowerCase() === "abc")
-    // The case mapping is the full Unicode SIMPLE mapping, not ASCII: the C floor
-    // used to change only the 26 letters, which is 2,321 code points on which the two
-    // engines answered differently. Latin-1, Latin Extended-A (whose pairs alternate),
-    // Greek, Cyrillic and an astral block, one from each shape of the table.
-    // (not the sharp s: its uppercase is the two letters SS, which is a FULL mapping,
-    // and the two halves of MetaJS disagree about it - pre-existing drift, and the
-    // one thing in this area that is not settled)
+    // The case mapping is the full Unicode SIMPLE mapping, not ASCII: Latin-1, Latin
+    // Extended-A (whose pairs alternate), Greek, Cyrillic and an astral block, one from
+    // each shape of the table. (The sharp s, whose FULL uppercase is the two letters
+    // SS, is SECTION 32's.)
     check("str7a", "\u00e9\u00fc\u00e0".toUpperCase() === "\u00c9\u00dc\u00c0")
     check("str7b", "\u0101\u0103\u0105".toUpperCase() === "\u0100\u0102\u0104")
     check("str7c", "\u03b1\u03b2\u03c9".toUpperCase() === "\u0391\u0392\u03a9")
@@ -486,21 +463,19 @@ function s14() {
     try { throw "y" } catch (e) { noBinding = 1 }
     check("exc12", noBinding === 1)
 
-    // ----- the try-barrier POOL, which coroutines made per-stack -------------
+    // ----- the try-barrier POOL, per stack -------------------------------------
     //
-    // languages/lib/runtime.c used to hold one global `long JB[512]` of jmp_bufs
-    // indexed by JB_DEPTH. A generator body runs on its OWN C stack, and a
-    // setjmp is only valid on the stack that took it, so that one pool became a
-    // pointer (JBP) to the pool of whichever stack is RUNNING - main's, or the
-    // coroutine's - swapped by the side that gains control, exactly as
-    // GC_STACK_BASE is. The assertions below are what that refactor has to keep
-    // true, and they run in all three engines.
+    // A generator body runs on its OWN C stack, and a setjmp is only valid on the
+    // stack that took it, so languages/lib/runtime.c keeps a pointer (JBP) to the
+    // jmp_buf pool of whichever stack is RUNNING - main's, or the coroutine's -
+    // swapped by the side that gains control, exactly as GC_STACK_BASE is. The
+    // assertions below are what that has to keep true, and they run in all three
+    // engines.
     //
     // WHERE THEY DISCRIMINATE, stated like SECTION 25's: the pool only exists in
     // the NATIVE binary. In the other two engines a throw is a Go panic or a
-    // host-engine exception, so these are ordinary correctness checks there.
-    // Measured against a floor whose pool is indexed wrongly, the deep nest
-    // below is the one that fails first.
+    // host-engine exception, so these are ordinary correctness checks there. The
+    // deep nest below is the one a wrongly indexed pool fails first.
     function nest(n) {
         if (n === 0) { throw "floor" }
         try { return nest(n - 1) } catch (e) { throw e }
@@ -772,9 +747,9 @@ function s21() {
 // Every value here is INEXACT: it needs correct round-to-nearest-ties-to-even in
 // the emitted soft float (add, subtract, multiply, divide, and the conversion of
 // an integer above 2^53), correct rounding in Math.sqrt, and an exact shortest
-// decimal in the formatter. Under the truncating soft float the C floor shipped
-// with until 2026-08-02, 0.1 + 0.2 printed 0.29999999999999991 and 10 / 3
-// printed 3.333333333333333. The oracle is the Go runtime, which is JS.
+// decimal in the formatter. A truncating soft float prints 0.29999999999999991
+// for 0.1 + 0.2 and 3.333333333333333 for 10 / 3. The oracle is the Go runtime,
+// which is JS.
 function s22() {
     check("ieee1", 0.1 + 0.2 === 0.30000000000000004)
     check("ieee2", "" + (0.1 + 0.2) === "0.30000000000000004")
@@ -808,12 +783,10 @@ function s22() {
     // exact cases stay exact
     check("ieee23", 1 / 1048576 * 1048576 === 1)
     check("ieee24", 4 / 3 * 3 === 4)
-    // Math.pow with a NON-INTEGER exponent. It used to answer NaN outright: repeated
-    // multiplication cannot reach one, and an approximation would have disagreed with
-    // the Go twin in the last bits. The C floor now carries a faithful port of Go's
-    // own math.Pow (and the math.Exp, math.Log, math.Frexp, math.Ldexp and math.Modf
-    // underneath it), which gives the same bits because the arithmetic under it is
-    // now correctly rounded.
+    // Math.pow with a NON-INTEGER exponent: repeated multiplication cannot reach one,
+    // so the C floor carries a faithful port of Go's own math.Pow (and the math.Exp,
+    // math.Log, math.Frexp, math.Ldexp and math.Modf underneath it), which gives the
+    // same bits because the arithmetic under it is correctly rounded.
     check("pow1", "" + Math.pow(2, 0.5) === "1.4142135623730951")
     check("pow2", "" + Math.pow(2, 1.5) === "2.82842712474619")
     check("pow3", "" + Math.pow(10, 1 / 3) === "2.154434690031884")
@@ -835,14 +808,14 @@ function s22() {
 //
 // languages/lib/runtime.c shares cells: one string cell per string-literal
 // ADDRESS (str_intern), one number cell per small integer (mk_num/js_num_i), and
-// a scope that starts with no buffers at all. Phase 4a of
-// docs/runtime-rework-plan.md did that to stop the arena growing 18 KB per loop
-// iteration, and the whole argument for its being safe is that a shared cell is
-// INDISTINGUISHABLE from a fresh one. This section is that claim, written down.
+// a scope that starts with no buffers at all. That keeps the arena from growing on
+// every loop iteration, and the whole argument for its being safe is that a shared
+// cell is INDISTINGUISHABLE from a fresh one. This section is that claim, written
+// down.
 // ./test.sh cannot see it - both of its engines are the Go runtime - so it is
 // here, where tests/clang-check.sh runs the file as a native binary.
 function s23() {
-    // literals, computed strings and the coercions that used to allocate
+    // literals, computed strings and the coercions
     var a = "abc"
     var b = "abc"
     var c = "ab" + "c"
@@ -863,15 +836,14 @@ function s23() {
         i = i + 1
     }
     check("intern09", bad === -1)
-    // (spelled as a STRING: the interpreter half does not bind Infinity - see the
-    // host-globals note in the header)
+    // (spelled as a STRING)
     check("intern10", 0 === 0 && -0 === 0 && "" + (1 / -0) === "-Infinity")
     check("intern11", "" + -0 === "0" && "" + (0 - 0.0) === "0")
     check("intern12", 1024 + 1 === 1025 && 1025 - 1 === 1024)
     check("intern13", -256 + 0 === -256 && -257 + 0 === -257)
     check("intern14", "" + (0.1 + 0.2) === "0.30000000000000004")
     check("intern15", 10 % 3 === 1 && "" + (10 % 0.1) === "0.09999999999999945")
-    // the method-name compare that no longer builds a string per candidate
+    // the method-name compare, which builds no string per candidate
     var arr = [3, 1, 2]
     check("intern16", arr.length === 3 && arr.indexOf(2) === 2)
     check("intern17", arr.join("-") === "3-1-2" && arr.slice(1).join(",") === "1,2")
@@ -915,7 +887,7 @@ function s23() {
 // and the {__sz} pair box of lib/interp-core.js in the interpreter half - three
 // implementations of one specification, reached from a MetaJS source program
 // through the eleven sint* names, which is what makes this section able to pin
-// them at all. See docs/runtime-next-plan.md part 2.
+// them at all.
 //
 // The invariant every assertion below rests on: an integer that a double holds
 // exactly IS a plain number, and only the rest is boxed. That is why `typeof` is
@@ -1028,7 +1000,7 @@ function s24() {
     check("sint65", acc === 5)
 
     // ----- the four rules that only a 64 BIT operand can see -----
-    // Measured: with an 8 bit operand each of these passes whatever the
+    // With an 8 bit operand each of these passes whatever the
     // implementation does, because the truncation to the width hides it. They
     // are the assertions that discriminate, so they are spelled at 64 bits.
     // A shift count at or above 64: the clamp to w-1 and the "everything out"
@@ -1050,17 +1022,13 @@ function s24() {
     // si_norm UNBOXES a signed 64 bit value a double holds exactly, and that is
     // exactly what a statically typed language's `long` must not do: Java's
     // `1000000L * 1000000L` is 1000000000000 where `1000000 * 1000000` is
-    // -727379968. Every other sint* builtin goes through si_norm, so until this
-    // existed layer 2 had NO constructor for a small boxed value, and java
-    // worked around it by marking the box UNSIGNED - the one shape si_norm will
-    // not unbox - and re-supplying the six operations whose signed reading the
-    // floor then got wrong, in ~90 lines. See docs/runtime-next-plan.md part 3.
+    // -727379968. Every other sint* builtin goes through si_norm, so sintRaw is
+    // layer 2's only constructor for a small boxed SIGNED value.
     var r5 = sintRaw(0, 5, 64, 0)
     check("sint72", sintIs(r5) === true && sintIs(sint(0, 5, 64, 0)) === false)
     check("sint73", typeof r5 === "number" && sintStr(r5) === "5" && sintNum(r5) === 5)
-    // SIGNED and small, the shape sint() cannot build at all. The six
-    // operations java had to re-supply are asserted on a raw SIGNED box below,
-    // and every one of them is the plain sint* builtin.
+    // SIGNED and small, the shape sint() cannot build at all. The signed operations
+    // are asserted on a raw SIGNED box below, each through the plain sint* builtin.
     check("sint74", sintWidth(r5) === 64 && sintUns(r5) === false)
     var rn1 = sintRaw(4294967295, 4294967295, 64, 0)        // -1, as a signed box
     check("sint75", sintStr(rn1) === "-1" && sintNum(rn1) === -1)
@@ -1085,7 +1053,7 @@ function s24() {
     // sintConv still normalises: sintRaw is the ONLY door past si_norm, and a
     // raw box converted back to signed 64 bits is a plain number again.
     check("sint87", sintConv(r5, 64, 0) === 5 && sintIs(sintConv(r5, 64, 0)) === false)
-    // Measured: the two rules above have to be asserted where the width is WIDE
+    // The two rules above have to be asserted where the width is WIDE
     // enough for the truncation to change the value, and at 64 bits for the
     // signedness - the same rule sint66-sint71 record. At 8 bits an unsigned
     // box's payload is never negative, so "unsigned ignored" hides; at 64 bits
@@ -1099,8 +1067,7 @@ function s24() {
 }
 
 // ===== SECTION 25: the garbage collector (mark/sweep over the heap) =====
-// languages/lib/runtime.c allocated from a bump arena that was never freed until
-// docs/runtime-next-plan.md part 1b replaced it with a mark/sweep heap. The worst
+// languages/lib/runtime.c allocates from a mark/sweep heap. The worst
 // failure mode a collector has is freeing something that is still LIVE, and the
 // assertions below are the shapes that would show it: data held across a call
 // that allocates heavily, a closure that keeps the scope defining it, a value
@@ -1110,11 +1077,9 @@ function s24() {
 //
 // WHERE THEY DISCRIMINATE. Only in the NATIVE binary: the other two engines are
 // garbage collected by Go and by the host JS engine, so there they are ordinary
-// correctness checks and cannot fail for a collector reason. The measured
-// discriminating power against a deliberately broken collector is in part 1b of
-// docs/runtime-next-plan.md; run the native binary with MEC_GC=stress (collect at
-// every allocation) or MEC_GC=poison (and never reuse a swept block) to make a
-// rare use-after-free a deterministic one.
+// correctness checks and cannot fail for a collector reason. Run the native binary
+// with MEC_GC=stress (collect at every allocation) or MEC_GC=poison (and never reuse
+// a swept block) to make a rare use-after-free a deterministic one.
 function s25() {
     // Enough churn to cross the collector's threshold in the native binary, and
     // small enough that the interpreter half still runs this file quickly.
@@ -1202,34 +1167,23 @@ function s25() {
     gcPad("n", churn)
     check("gc07", f() === 7)
 
-    // ----- WHY gc_grow IS NOT ASSERTED HERE, measured rather than assumed -----
-    // gc_grow doubles the mark stack when the marking frontier outgrows it, and
-    // the Part B coverage instrumentation (docs/runtime-next-plan.md) found it
-    // at ZERO calls across all 34 native corpus builds. Every shape above has a
-    // frontier of a handful of pairs, because gc_drain pops as it goes; the one
-    // shape that fills the stack is a single array whose slots are all distinct
-    // traced blocks, which drain pushes in one go. GC_MCAP starts at 65536 longs
-    // and the stack holds PAIRS, so the frontier has to pass 32,768 - measured
-    // natively, 30,000 elements never call gc_grow and 33,000 always do.
-    //
-    // That assertion cannot live in this file. 33,000+ object allocations inside
-    // main() cost more than the -frozen half's 100,000,000-instruction safety
-    // valve allows (the metajs INTERPRETER is itself a MetaJS program running on
-    // abnf/jsrt.go's IR interpreter there), so the ratchet reports
-    // "FULL under goja, BUT -frozen fails or differs" - tried at 40,000, and it
-    // is the step limit and not the collector that stops it. There is no cheaper
-    // shape: the frontier IS the count of live traced blocks, so any spelling
-    // costs the same 33,000 allocations. gc_grow is therefore proved reachable
-    // by a native probe recorded in docs/runtime-next-plan.md and left unasserted
-    // here on purpose, rather than left looking untested by accident.
+    // ----- WHY gc_grow IS NOT ASSERTED HERE -----
+    // gc_grow doubles the mark stack when the marking frontier outgrows it. Every
+    // shape above has a frontier of a handful of pairs, because gc_drain pops as it
+    // goes; the one shape that fills the stack is a single array whose slots are all
+    // distinct traced blocks. GC_MCAP starts at 65536 longs and the stack holds PAIRS,
+    // so the frontier has to pass 32,768 - and 33,000+ object allocations inside
+    // main() cost more than the -frozen half's instruction safety valve allows (the
+    // metajs INTERPRETER is itself a MetaJS program there). There is no cheaper shape:
+    // the frontier IS the count of live traced blocks. gc_grow is left unasserted here
+    // on purpose, rather than left looking untested by accident.
 }
 
 // ===== SECTION 26: boxed doubles (the flo* host globals) =====
 // The SECOND primitive type MetaJS itself does not have, and the one ten of the
 // eleven remaining languages need: tag 14 of languages/lib/runtime.c natively,
 // jsJFlo of abnf/jsrtjvm.go under llvm.Run, and the {__fl} box of
-// metajs-interpreter.abnf in the interpreter half. See docs/runtime-next-plan.md
-// part 2.
+// metajs-interpreter.abnf in the interpreter half.
 //
 // It exists because a statically typed language has to tell `1.0 / 3.0` from
 // `1 / 3`, which are the SAME two operands when every number is one double.
@@ -1245,7 +1199,7 @@ function s25() {
 //     hole for the same reason.
 //   - THE SIGN OF A ZERO PRODUCT. goja represents an integral number as an
 //     int64, so `0 * -2718281` is +0 under the goja interpreter and -0 in real
-//     JS, in the frozen engine and in the C floor. Measured: `1 / (0 * -2718281)`
+//     JS, in the frozen engine and in the C floor: `1 / (0 * -2718281)`
 //     is +Inf under goja and -Inf in the other three. A -0.0 that comes from a
 //     SMALL product (flo00 below) is safe and is asserted.
 function s26() {
@@ -1321,8 +1275,8 @@ function s26() {
     // contract, not a language's - Java's and C#'s `==` promotes the integral
     // operand to double first (JLS 15.21.1 / ECMA-334 12.12.9) and so answers
     // TRUE for `0L == 0.0`, which is why lib/runtime-jvm.metajs's rtjStrictEq
-    // does that promotion BEFORE it calls floEq. Both compiler halves used to get
-    // that wrong; see java-test-full's flt10e-g and csharp-test-full's flt11a-c.
+    // does that promotion BEFORE it calls floEq; see java-test-full's flt10e-g and
+    // csharp-test-full's flt11a-c.
     check("flo38", floEq(flo(1, 0), sint(0, 1, 8, 0)) === false)
     // === is the same two arms, reached through the operator; == is NOT, because
     // loose_eq sees a box as neither a number nor a string. Faithfully odd, and
@@ -1348,11 +1302,9 @@ function s26() {
     check("flo50", floIs(floAbs(flo(0 - 2.5, 0))) === true && floIs(floAbs(0 - 3)) === false)
     // floAbs of a SIGNED 64 bit box, which is the one arm of this primitive that
     // NO LAYER-2 FILE REACHES - java-rt.metajs and kotlin-rt.metajs both handle
-    // their long case before the call - so it carried a to_int32 wrap in all
-    // THREE engines for as long as it existed. These rows are the only thing that
-    // reaches it, and they are here because a primitive with no caller is exactly
-    // the kind that goes wrong quietly. sintRaw is the one door past si_norm, so
-    // it is how a big signed box is built at all (see sint72 above).
+    // their long case before the call - so these rows are the only thing that
+    // reaches it. sintRaw is the one door past si_norm, so it is how a big signed
+    // box is built at all (see sint72 above).
     var absBig = sintRaw(0, 3000000000, 64, 0)               // 3e9, past int32
     var absNeg = sintRaw(4294967295, 1294967296, 64, 0)      // -3e9, as a signed box
     check("flo51", sintStr(floAbs(absNeg)) === "3000000000" && sintStr(floAbs(absBig)) === "3000000000")
@@ -1424,11 +1376,10 @@ function s27() {
 
     // ----- the sign of a power that underflows to zero -----
     // Math.pow(-0.5, a large odd integer) is -0, not +0: d_ldexp has to put the
-    // sign back on the underflowed zero. The native floor answered +0 until
-    // 2026-08-03 while node and the Go twin answered -0 - and only
-    // tests/clang-check.sh runs the native binary, so nothing else would see it.
-    // Spelled as a division because -0 === 0 is true and MetaJS has no Infinity
-    // global in both halves: 1 / -0 is -Infinity, which IS negative.
+    // sign back on the underflowed zero. Only tests/clang-check.sh runs the native
+    // binary, so nothing else would see a wrong sign.
+    // Spelled as a division because -0 === 0 is true: 1 / -0 is -Infinity, which
+    // IS negative.
     check("pow01", 1 / Math.pow(0 - 0.5, 2147483647) < 0)
     check("pow02", 1 / Math.pow(0 - 0.5, 9007199254740991) < 0)
     check("pow03", 1 / Math.pow(0.5, 2147483647) > 0)      // the positive base stays +0
@@ -1436,10 +1387,8 @@ function s27() {
     check("pow05", Math.pow(0 - 0.5, 0 - 2147483647) < 0)  // overflow keeps it too
 
     // ----- an INFINITE base, which is the only way into d_odd_int -----
-    // The Part B coverage instrumentation (docs/runtime-next-plan.md) counted
-    // every call to every body of the C floor across all 34 native corpus
-    // builds and found d_odd_int at ZERO. It is reachable and nothing reached
-    // it: d_pow only consults it when the base is a signed zero, and the one
+    // d_odd_int is reachable only this way: d_pow only consults it when the base
+    // is a signed zero, and the one
     // spelling of a signed zero that needs no -0.0 literal and no Infinity
     // global is pow(-Inf, y) - d_pow answers that by recursing on 1.0/x, which
     // IS -0.0, with the exponent's sign flipped. So the four cases below walk
@@ -1458,19 +1407,18 @@ function s27() {
     check("pow11", Math.pow(ninf, 9007199254740994) === 1 / 0)
 
     // ----- sprintf %v, which is the only way into fmt_val -----
-    // Same finding, same file: fmt_top was reached by the whole corpus and
-    // fmt_val was not, because every fmt_top the corpus takes gets a STRING and
-    // returns at the tag-4 test one line in. %v on a non-string is the shortest
-    // way past it, and sprintf is one of the eleven host globals BOTH halves
-    // bind (see the header note on sprint, which only the compiler half has).
+    // fmt_val is reached only this way: every fmt_top the corpus takes gets a
+    // STRING and returns at the tag-4 test one line in. %v on a non-string is the
+    // shortest way past it, and sprintf is one of the host globals BOTH halves
+    // bind.
     check("fmtv01", sprintf("%v", 42) === "42")
     check("fmtv02", sprintf("%v", true) === "true")
     check("fmtv03", sprintf("%v", 1.5) === "1.5")
     check("fmtv04", sprintf("%v|%v", "hi", 7) === "hi|7")
     // An ARRAY operand is deliberately NOT asserted: the interpreter half's own
     // sprintf renders it as JavaScript does and the compiler half as Go's %v
-    // does, so a check on it would fail on one half by construction - the same
-    // rule the header states for the host globals. Go's [1 2 3] rendering is
+    // does, so a check on it would fail on one half by construction. Go's [1 2 3]
+    // rendering is
     // pinned in tests/go-test-full.go, where it is the language's own answer.
     check("fmtv05", sprintf("%v", 0 - 0.125) === "-0.125")
 }
@@ -1480,9 +1428,8 @@ function s27() {
 // object; delKey lets it PRUNE one. It is a builtin and not an extern for the same
 // reason - an extern is only callable from an emitter - and MetaJS has no `delete`
 // operator at all, so without it a runtime library can only BLANK a slot and keep a
-// side table of what it blanked. JavaScript's layer 2 did exactly that, and it was
-// quadratic (61 s for 4,000 delete-in-a-loop iterations, 0.05 s now), it leaked, and
-// it could not repair key ORDER after a delete-then-reinsert.
+// side table of what it blanked, which is quadratic, leaks, and cannot repair key
+// ORDER after a delete-then-reinsert.
 //
 // Three implementations again, and this section is what keeps them in step: host id
 // 63 of languages/lib/runtime.c, keysBindings of abnf/jsrtint.go, and - because the
@@ -1516,7 +1463,7 @@ function s28() {
     var d = {__class: 1, n: 2}
     check("del11", delKey(d, "__class") === true && d.__class === undefined)
     check("del12", keysOf(d).length === 1 && keysOf(d)[0] === "n")
-    // Many keys, deleted in a loop: this is the shape that was quadratic.
+    // Many keys, deleted in a loop: the shape a side table makes quadratic.
     var big = {}
     var i = 0
     while (i < 400) { big["k" + i] = i; delKey(big, "k" + i); i = i + 1 }
@@ -1556,11 +1503,7 @@ function s28() {
 // floor's private storage: an emitter hands a layer-2 function a scope handle -
 // js_pyset_var's `s`, and every `defined?` / `isset` / `global` / `nonlocal`
 // probe - and layer 2 could do NOTHING with it, because MetaJS cannot open a cell
-// and an extern is not callable from MetaJS source. Six languages answered that
-// by lowering the probe into their EMITTER instead (docs/runtime-next-plan.md:
-// swift, dart, go, ruby, kotlin's nine helpers, python's six), which is the same
-// IR-building written out once per language for one language-neutral question.
-// Three migration reports asked for this API by name.
+// and an extern is not callable from MetaJS source.
 //
 // Three implementations, and this section is what keeps them in step: host ids
 // 64..68 of languages/lib/runtime.c (the REAL tag-11 scope, so a layer-2 file
@@ -1574,7 +1517,7 @@ function s28() {
 // handle 0 that means "global" to an emitter never arrives, and a chain running
 // into the host globals has no twin in the interpreter half), and scopeHas is the
 // OWN-scope test with no chain walk (sco03/sco04), which is the one question
-// js_scope_typeof cannot answer and the one python asked for by name.
+// js_scope_typeof cannot answer.
 function s29() {
     var root = scopeNew()
     scopeDecl(root, "x", 1)
@@ -1629,11 +1572,8 @@ function s29() {
 
 // ===== SECTION 30: isGenerator =====
 // The floor's tag-15 test, host id 69 - the value js_gen_create makes and
-// js_gen_next drives. It exists because layer 2 had no way to ask "is this a
-// generator" and languages/lib/php-rt.metajs had to GUESS: exclude __dict,
-// __refcell, __isclass, __class and length one at a time, then test whether
-// v["next"] is callable. PHP's own migration report calls that "the one guess in
-// this port", and it is wrong in principle for any object with a callable `next`.
+// js_gen_next drives. It lets layer 2 ask "is this a generator" instead of guessing
+// from the shape (an object with a callable `next` is not one).
 //
 // A NUMERIC js_tag(v) was considered and rejected: js_genfn is a tag 16 CELL in
 // the C floor and a *hostFunc in abnf/jsrt.go, so one number would be 16 in one
@@ -1647,8 +1587,8 @@ function s29() {
 // so no MetaJS program can construct one in ANY engine. The true arm is reachable
 // only from an emitter, i.e. only from a layer-2 file of a language that has
 // generators. What is pinned here is that all three halves answer false for every
-// value a MetaJS program can build, INCLUDING the shape php-rt.metajs's guess
-// gets wrong (gen05: an ordinary object with a callable `next`).
+// value a MetaJS program can build, INCLUDING an ordinary object with a callable
+// `next` (gen05).
 function s30() {
     check("gen01", isGenerator(1) === false && isGenerator("s") === false)
     check("gen02", isGenerator(undefined) === false && isGenerator(null) === false)
@@ -1664,12 +1604,8 @@ function s30() {
 }
 
 // ===== SECTION 31: the host-global SET, all 50 names on both halves =====
-// docs/todo.md 4.1. This section exists because it COULD NOT BE WRITTEN before:
-// the --full runner makes both halves run this same file and report the same
-// assertion count, so a check on a name only one half bound failed on the other
-// by construction, and it could not be guarded either - `typeof sprint` answered
-// "function" under the compiler and a hard `variable not defined: sprint` under
-// the interpreter, which is an abort and not a false.
+// The --full runner makes both halves run this same file and report the same
+// assertion count, so these rows hold only because the halves bind the same set.
 //
 // The set is the C floor's seed_root list in languages/lib/runtime.c, and that is
 // the authority for the other two engines (programJSBindings in abnf/jsrtint.go,
@@ -1727,17 +1663,13 @@ function s31() {
     check("hg23", typeof Math === "object" && typeof anytype === "object")
     // String and Array are PLAIN OBJECTS carrying one method each, not the host
     // engine's constructors: seed_host(strobj, "fromCharCode", 30) and
-    // seed_host(arrobj, "isArray", 31) in the floor's boot(). The interpreter used
-    // to bind the grammar host's own String here, which answered "function".
+    // seed_host(arrobj, "isArray", 31) in the floor's boot().
     check("hg24", typeof String === "object" && typeof Array === "object")
     check("hg25", typeof String.fromCharCode === "function" && typeof Array.isArray === "function")
 
-    // ----- Math's MEMBERS, docs/todo.md 1.1 -----
+    // ----- Math's MEMBERS -----
     // hg23 above says `typeof Math === "object"` and says nothing about what is
-    // IN it, and for a long time the three engines disagreed wildly: the C floor
-    // seeded eleven methods and two properties, abnf/jsrt.go thirty-two and
-    // eight, and goja - the grammar host THIS half runs on - thirty-five and
-    // eight. abnf/hostglobals_test.go's TestMathMembersAgree is the source-parse
+    // IN it. abnf/hostglobals_test.go's TestMathMembersAgree is the source-parse
     // half of the statement (and the only place goja's own set can be read);
     // these rows are the runtime half, and they are what makes the assertion
     // reach the C FLOOR, which no Go test can run.
@@ -1766,7 +1698,7 @@ function s31() {
     check("hg25s", Math.clz32(mv[0]) === 31 && Math.fround(mv[3]) === 0.5)
     check("hg25t", Math.LN2 === 0.6931471805599453 && Math.SQRT2 === 1.4142135623730951)
     // Operands outside the int32 range (ToInt32 is a modulo 2^32), and round / max /
-    // min on the zeros - goja's own Math disagreed with the other engines here.
+    // min on the zeros.
     var mb = [4294967296, 4294967297, 100000000000000000000, 16777217, 0.49999999999999994, 0.4, 0]
     var mnz = -mb[6]
     check("hg25u", Math.imul(mb[1], mb[1]) === 1 && Math.imul(mb[3], mb[2]) === 1661992960 && Math.imul(mb[0], mb[3]) === 0)
@@ -1774,7 +1706,7 @@ function s31() {
     check("hg25w", Math.round(mb[4]) === 0 && 1 / Math.round(-mb[5]) === -Infinity && 1 / Math.round(mnz) === -Infinity)
     check("hg25x", 1 / Math.max(mnz, mb[6]) === Infinity && 1 / Math.min(mb[6], mnz) === -Infinity)
 
-    // The six names the interpreter half gained, exercised rather than named.
+    // Six of the names, exercised rather than named.
     check("hg26", Infinity - 1 === Infinity && 0 - Infinity < 0)
     check("hg27", NaN !== NaN && !(NaN === NaN))
     check("hg28", Array.isArray([1, 2]) === true)
@@ -1802,23 +1734,14 @@ function s31() {
 }
 
 // ===== SECTION 32: string case mapping is the SIMPLE per-rune mapping =====
-// docs/todo.md 4.1, the second half. Real JavaScript uses the FULL Unicode case
-// mapping, in which a few characters change length: "ss".toUpperCase() is "SS" in
-// node, "fi" (the U+FB01 ligature) becomes "FI", and "I" (U+0130) lowercases to
-// "i" plus a combining dot. This project answers the SIMPLE per-rune mapping in
-// all four engines instead - Go's strings.ToUpper / strings.ToLower.
-//
-// THE DECISION, and why it went this way rather than toward the JS spec: full
-// case mapping in the C floor is `case_map`, which was built, passed every gate,
-// was measured at 135x on a real workload and was reverted
-// (docs/working-on-this-project.md chapter 5). Three of the four engines already
-// did simple mapping; the fourth was goja, and moving goja costs nothing - it now
-// calls the same Go function the frozen engine calls
-// (installGojaCaseMapping in abnf/commonscript.go).
-//
-// Until then this was a LIVE goja-vs--frozen divergence in the interpreter half
-// that ./test.sh could not see, because no matrix entry upper-cased a non-ASCII
-// string. These rows are what makes it visible from now on.
+// Real JavaScript uses the FULL Unicode case mapping, in which a few characters
+// change length: "ss".toUpperCase() is "SS" in node, "fi" (the U+FB01 ligature)
+// becomes "FI", and "I" (U+0130) lowercases to "i" plus a combining dot. This
+// project answers the SIMPLE per-rune mapping in all four engines instead - Go's
+// strings.ToUpper / strings.ToLower. Full case mapping in the C floor (`case_map`)
+// was too slow on a real workload (docs/working-on-this-project.md chapter 5); goja
+// calls the same Go function the frozen engine calls (installGojaCaseMapping in
+// abnf/commonscript.go).
 function s32() {
     check("cm01", "abc".toUpperCase() === "ABC" && "ABC".toLowerCase() === "abc")
     check("cm02", "é".toUpperCase() === "É" && "É".toLowerCase() === "é")

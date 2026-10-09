@@ -202,9 +202,8 @@ function s07() {
     const p = new Pt7(1, 2, 3);
     check("cls4", p.sum() === 6 && p.x === 1 && p.z === 3);
 
-    // STATIC MEMBERS ARE INHERITED (docs/todo.md 1.2). `class D extends C {}` then
-    // `D.s()` was "TypeError: D.s is not a function" in all four engines, where node
-    // walks the class object's own prototype chain. Every value below is
+    // STATIC MEMBERS ARE INHERITED: `class D extends C {}` then `D.s()` walks the
+    // class object's own prototype chain in node. Every value below is
     // `new vm.Script(src)`'s. The operands come out of an ARRAY so the constant
     // folder cannot answer any of it at compile time.
     const sA: number[] = [1, 2, 3, 4, 5];
@@ -245,8 +244,7 @@ function s07() {
     // The engine's own descriptor slots are never inherited.
     check("cls18", SE7.own(sA[0]) === "SD.own:6");
     // A class's own NAME is bound inside its body, and bound BEFORE the static
-    // initializers run - this half used to raise "ReferenceError: SG7 is not
-    // defined" while both compiled halves and node answered.
+    // initializers run.
     class SG7 { static f: number = sA[2]; static blk: number; static { SG7.blk = SG7.f + sA[0]; } }
     check("cls19", SG7.blk === 4);
 }
@@ -517,10 +515,9 @@ function s19() {
     // awaits are its yields, and a microtask queue drained after main() drives them
     // (see makeAsyncFn / js_jsasyncfn). The ORDERING below is byte-identical to node,
     // which is the only part a wrong implementation cannot get right by accident.
-    // Two shapes are deliberately avoided: an async body must have NO side effect
+    // One shape is deliberately avoided: an async body must have NO side effect
     // before its last await (this half drives one by REPLAY, so a print before an
-    // await would repeat), and `for await` / `async function*` are not implemented
-    // and ABORT, which is why an async generator is no longer declared here.
+    // await would repeat). `for await` and `async function*` are SECTION 35's.
     check("asy5", typeof Promise === "function");
     const alog: string[] = [];
     async function step(tag: string): Promise<void> { await 0; alog.push(tag); }
@@ -745,10 +742,7 @@ function s21() {
 // operators, instanceof over a plain constructor, delete on an array element, the
 // Object statics and the String/Array/Number method surface. Every expected value
 // below was verified against node v24 (the same section runs green under node with
-// the type annotations stripped). Before this section the two halves and the two
-// ENGINES disagreed on all of it: the compiler printed Go's %v ("<nil>", "[1 2 3]",
-// "map[a:1]"), the interpreter leaked its hidden __keys slot out of Object.keys, and
-// under -frozen the interpreter had neither ToPrimitive nor a method surface.
+// the type annotations stripped).
 function Plain22(this: any): void { this.k = 1; }
 class Kls22 { }
 function s22(): void {
@@ -929,8 +923,7 @@ function s28(): void {
 
     // The Annex B legacy OCTAL string escape. The one-digit form is octal on its own -
     // '"\1"' is U+0001, not the character '1' - and only '\0' with nothing after it is the
-    // NUL escape. The interpreter half decoded no octal escape at all until this check
-    // existed (a live halves divergence: the compiled half was already correct).
+    // NUL escape.
     check("oct1", "\1".charCodeAt(0) === 1 && "\1".length === 1);
     check("oct2", "\101" === "A" && "\0".charCodeAt(0) === 0 && "\0".length === 1);
 }
@@ -1062,12 +1055,11 @@ function s31(): void {
 
 // ===== SECTION 32: shift and logical assignment through an expression member =====
 // '[o][0].a >>= 1' assigns through a member of an arbitrary expression, which only
-// LhsAssign can express. Two things were wrong there. The forward scan that decides
-// whether an assignment operator follows at all excluded EVERY '=' preceded by '<' or
-// '>', so it took the '=' of '<<=' / '>>=' / '>>>=' for the tail of a '<=' / '>=' and
-// never entered the production. And the three LOGICAL assignments were folded through the
-// compound-operator path, which evaluates the right side unconditionally - they SHORT
-// CIRCUIT. Ground truth from node 24 via new vm.Script (not `node --check`).
+// LhsAssign can express. The forward scan that decides whether an assignment operator
+// follows at all must take the '=' of '<<=' / '>>=' / '>>>=' as an assignment and not
+// as the tail of a '<=' / '>=', and the three LOGICAL assignments SHORT CIRCUIT rather
+// than going through the compound-operator path. Ground truth from node 24 via
+// new vm.Script (not `node --check`).
 function s32(): void {
     const o: any = { a: 8 };
     [o][0].a >>= 1;
@@ -1100,20 +1092,16 @@ function s32(): void {
 }
 
 // ===== SECTION 33: delete, key order, and template-literal ToString =====
-// Two defects that were invisible to every suite in the repo until this section
-// existed, both measured against node v24 and both fixed in all three engines.
-// TypeScript shares js's layer 2 and carries its own makeTemplate, so it needed both
-// fixes and gets its own copy of the ratchet.
+// TypeScript shares js's layer 2 and carries its own makeTemplate, so it gets its own
+// copy of the ratchet.
 //
-// DELETE. The C floor had no js_del at all, so layer 2 blanked the slot and kept a
-// side table of what it had blanked. `delete` + `in` + Object.keys were right; key
-// ORDER after a delete-then-reinsert, for-in and object spread were not, and the
-// table was quadratic and leaked. The floor exports js_del now.
+// DELETE removes the key and its key-order entry (the floor's js_del), so key ORDER
+// after a delete-then-reinsert, for-in and object spread are node's answers.
 //
 // TEMPLATE LITERAL. `${v}` is ToString(v) - ToPrimitive with hint STRING - so an
 // object's own `toString` runs, an object with only a `valueOf` still spells
 // "[object Object]", and a BigInt spells its digits. Both halves route every
-// interpolated PART through it now instead of concatenating the raw values.
+// interpolated PART through it instead of concatenating the raw values.
 function s33(): void {
     const o: any = { a: 1, b: 2, c: 3 };
     check("del1", (delete o.b) === true && o.b === undefined);
@@ -1135,7 +1123,7 @@ function s33(): void {
     // On an ARRAY the length is unchanged and the slot reads as undefined.
     const arr: any = [1, 2, 3];
     check("del10", (delete arr[1]) === true && arr.length === 3 && arr[1] === undefined);
-    // The shape that was quadratic, and one that checks the surviving ORDER.
+    // Many deletions, and one that checks the surviving ORDER.
     const big: any = {};
     for (let i: number = 0; i < 300; i++) { big["k" + i] = i; delete big["k" + i]; }
     check("del11", Object.keys(big).length === 0);
@@ -1154,12 +1142,11 @@ function s33(): void {
     const t: any = { toString: function (): string { return "T"; } };
     check("tpl8", `a${t}b${t}c` === "aTbTc");
 
-    // The implicit global, which is the third floor addition of this change.
-    // A plain `=` to a name that is on NO scope of the chain creates the binding in
-    // the ROOT scope (js_scope_set_or_create), so it outlives the function that
-    // wrote it. js_scope_typeof cannot be used to build this in an emitter - it
-    // answers "undefined" for an absent name and for a slot HOLDING undefined
-    // alike - which is why the C floor now carries the walk itself.
+    // The implicit global. A plain `=` to a name that is on NO scope of the chain
+    // creates the binding in the ROOT scope (js_scope_set_or_create), so it outlives
+    // the function that wrote it. js_scope_typeof cannot be used to build this in an
+    // emitter - it answers "undefined" for an absent name and for a slot HOLDING
+    // undefined alike - which is why the C floor carries the walk itself.
     check("ig1", mkGlobal33() === 100);
     check("ig2", implicitGlobal33 === 100);
     implicitGlobal33 = implicitGlobal33 + 1;
@@ -1187,22 +1174,13 @@ function keyStr33(o: any): string {
 }
 
 // ===== SECTION 34: an iterator is CLOSED on an early exit =====
-// Making for-of lazy (SECTION 33's python twin, docs/todo.md 1.6) left a
-// generator SUSPENDED when the loop left early: a second loop over it RESUMED
-// where node closes it, and a `finally` around the yield never ran. It could not
-// be fixed in the emitter alone - the floor's generator cell answered `next`
-// alone - so runtime.c grew gen_close (a GEN_EXIT sentinel thrown INTO the
-// suspended body, so its finally clauses unwind normally), abnf/jsrt.go grew the
-// matching closeBody, and makeForOf now calls the iterator's `return()` on break.
-//
-// WHAT THE TWO HALVES AGREE ON, and what they cannot: this half's generators
-// REPLAY, so the body's finally has already run once per next() and .return()
-// only sets the done flag. Every assertion below is therefore about the CLOSED
-// STATE (a second loop yields nothing, next() answers done) and about a count
-// taken after exactly ONE step, where replay's one finally and the compiler's
-// one close-time finally give the same number by different routes. The ORDER of
-// the print is a halves divergence, stated in typescript-interpreter.abnf's :description
-// and deliberately not asserted.
+// for-of over a generator is lazy, so a loop that leaves early has to CLOSE the
+// generator: a second loop over it is empty, as in node, and a `finally` around the
+// yield runs. runtime.c's gen_close throws a GEN_EXIT sentinel INTO the suspended
+// body (so its finally clauses unwind normally), abnf/jsrt.go's closeBody does the
+// same, and makeForOf calls the iterator's `return()` on break. The moment the
+// finally runs is SECTION 36's subject; this one asserts the closed STATE and counts
+// taken after exactly ONE step.
 function s34(): void {
     var fins = 0
     function* g34() {
@@ -1282,24 +1260,21 @@ function s34(): void {
     function* pg34() { yield [1, 2]; yield [3, 4] }
     for (var [pa, pb] of pg34()) { pairs.push(pa + pb); break }
     check("itc17", pairs.length === 1 && pairs[0] === 3)
-    // A RETURN out of the loop body and a LABELED BREAK to an OUTER statement now
-    // close it, exactly as node does. Neither reaches a block makeForOf owns - one
-    // rets the frame, the other branches to the outer label's exit - so the compiler
-    // halves emit js_jsiterclose on the loop's own iterable handle, which the loop's
-    // entry block dominates, while the interpreter half reads the body's completion
-    // record. docs/todo.md 1.8.
+    // A RETURN out of the loop body and a LABELED BREAK to an OUTER statement close
+    // it, exactly as node does. Neither reaches a block makeForOf owns - one rets the
+    // frame, the other branches to the outer label's exit - so the compiler halves
+    // emit js_jsiterclose on the loop's own iterable handle, which the loop's entry
+    // block dominates, while the interpreter half reads the body's completion record.
     var rg = g34()
     check("itc18", takeOne34(rg) === 1)
     check("itc19", rg.next().done === true)
     var tg = g34()
     try { for (var tv of tg) { throw "x" } } catch (te) { }
-    // A THROW through the loop body still does NOT close it, in both halves. The
-    // only route an emitter has is a runtime open-iterator stack unwound at each
-    // try, and `for await` suspends INSIDE its own for-of - so a suspended body
-    // leaves an entry on that stack while unrelated frames run, and the unwind
-    // closes the wrong loop. That was BUILT AND MEASURED: it made SECTION 35's
-    // `for await` see one element instead of three, because SECTION 16's
-    // `try { await Promise.reject(r) } catch` unwound past it. Pinned here.
+    // A THROW through the loop body does NOT close it, in both halves: the only route
+    // an emitter has is a runtime open-iterator stack unwound at each try, and
+    // `for await` suspends INSIDE its own for-of, so such a stack closes the wrong
+    // loop (a caught rejection in one async function would close another's suspended
+    // `for await`). Pinned here.
     check("itc20", tg.next().done === false)
     // A labeled break to an OUTER statement, which leaves the loop without ever
     // reaching its own closing block.
@@ -1336,7 +1311,7 @@ function retThroughTry37t(g: any): number { for (var x of g) { try { return x } 
 function takeOne34(g: any): number { for (var x of g) { return x } return 0 }
 
 // ===== SECTION 35: for await, and async generators =====
-// docs/todo.md 1.7. An async generator body carries its yields AND its awaits on
+// An async generator body carries its yields AND its awaits on
 // ONE suspension channel; they are told apart by a marker record the emitter puts
 // on every awaited operand (js_jsawaitmark), which is why the generator model
 // needed nothing added to it and the C floor is not touched. `for await` drives an
@@ -1364,10 +1339,7 @@ function s35(): number {
     check("fa1", typeof nums === "function")
     check("fa2", typeof agExpr === "function")
     check("fa3", typeof agObj.m === "function")
-    // A class method is not an own property of the instance in this value model
-    // (it lives on the __class descriptor), so `typeof inst.m` is undefined in both
-    // halves - a documented limitation, unrelated to this section. The async
-    // generator OBJECT the call answers is what this asserts.
+    // The async generator OBJECT the method call answers is what this asserts.
     check("fa4", typeof new AGC().m().next === "function")
     check("fa5", typeof nums().next === "function")
     // for await over an async generator.
@@ -1459,16 +1431,11 @@ function s35(): number {
         check("fa7", ordOk)
         if (!ordOk) { exit(1) }
     })
-    // ----- docs/todo.md 1.8: yield* inside an async generator, and ag.throw() -----
-    // Every value below is byte-identical to node v24, measured four ways (the
-    // interpreter half, llvm.Run, a native -exe binary, and node). Each trace is built
-    // in a LOCAL created per call, so replay repeats no observable write.
-    //
-    // At ae0c62b these were the two residues. `yield* someAsyncGen()` did not merely
-    // delegate synchronously: an async generator's next() answers a PROMISE, whose
-    // `done` is undefined, so the unawaited drive never terminated - the interpreter
-    // half HUNG and llvm.Run died on the step limit. And ag.throw(e) closed the body
-    // and rejected instead of raising at the yield.
+    // ----- yield* inside an async generator, and ag.throw() -----
+    // Every value below is node v24's. Each trace is built in a LOCAL created per
+    // call, so replay repeats no observable write. `yield* someAsyncGen()` has to
+    // AWAIT each step (an async generator's next() answers a promise, whose `done` is
+    // undefined), and ag.throw(e) raises at the yield rather than closing the body.
     function rec38(r: any): any { return "" + r.value + "/" + r.done }
     var agRan38 = 0 // Counts entries into never38's body; a suspendedStart throw must not.
     // yield* over an ASYNC delegate: each step awaited, and the value of the
@@ -1539,13 +1506,10 @@ function s35(): number {
         var r = await g.next()
         return s + "|" + rec38(r) + "|ran=" + agRan38
     }
-    // docs/todo.md 1.6: a throw that arrives while the body is parked at a `yield*` is
-    // FORWARDED to the delegate's throw(). The delegate catches, the throw() request
-    // RESOLVES with the value the delegate's catch yields, and the delegate is left
-    // where it can be resumed rather than suspended forever. Until this it raised AT
-    // the yield*, so delegOuter38's own (absent) handler saw it, the request rejected,
-    // and 40/false|rej:t was pinned here as the gap. All four fields below are node
-    // v24's, measured by running this section under it.
+    // A throw that arrives while the body is parked at a `yield*` is FORWARDED to the
+    // delegate's throw(). The delegate catches, the throw() request RESOLVES with the
+    // value the delegate's catch yields, and the delegate is left where it can be
+    // resumed rather than suspended forever. All four fields below are node v24's.
     async function* deleg38(): any { try { yield 40 } catch (e) { yield "d:" + e } }
     async function* delegOuter38(): any { yield* deleg38(); yield 41 }
     async function agThrowIntoDelegate(): any {
@@ -1569,8 +1533,7 @@ function s35(): number {
         return rec38(r1) + "|" + s
     }
     // The other half of the same loop: g.next(v) forwards v to the DELEGATE (the
-    // specification's `received.value`). Before 1.6 the delegate's next() was called
-    // with no argument at all, so `a` below read undefined in every engine.
+    // specification's `received.value`), so `a` below reads the sent value.
     async function* sendInner38(): any { var a = yield 60; yield "a=" + a; return "R" }
     async function* sendOuter38(): any { var r = yield* sendInner38(); yield "r=" + r }
     async function agSendThroughDelegate(): any {
@@ -1607,10 +1570,9 @@ function s35(): number {
     })
     // A PLAIN generator's yield* answers the delegate's return value too - the same
     // one line in the emitter, and synchronous, so it is asserted directly. next(v)
-    // reaches the delegate here as well: a plain generator has no throw-in channel and
-    // no .throw() at all, but the sent value goes through the identical loop. The sent
-    // value is YIELDED BACK rather than pushed to ysync: this half replays a generator
-    // body once per next(), so a write from inside the DELEGATE would repeat. ysync is
+    // reaches the delegate here as well, through the identical loop. The sent value is
+    // YIELDED BACK rather than pushed to ysync: this half replays a generator body
+    // once per next(), so a write from inside the DELEGATE would repeat. ysync is
     // written once, after the delegate is done - only one replay reaches it.
     var ysync = []
     function* ysInner38(): any { var a = yield 1; yield "a=" + a; return "r" }
@@ -1625,29 +1587,22 @@ function s35(): number {
 function* sg35(): any { yield 1; yield 2 }
 
 // ===== SECTION 36: WHEN a generator's finally runs, and closing a yield* delegate =====
-// docs/todo.md 1.10 and the js half of 2.6. Two defects, both about the MOMENT a
-// finally runs, and neither visible to SECTION 34 - every assertion there is about
-// the closed STATE or about a count, which both halves reached by different routes.
+// When a finally runs, and closing a yield* delegate - neither visible to SECTION
+// 34, whose assertions are about the closed STATE or a count.
 //
-// THE INTERPRETER RAN THE FINALLY AT THE FIRST next(). A generator suspends there by
-// throwing a host-level signal, and interp-core's excTry ran the program's `finally`
-// for any unwinding - so `try { yield } finally { f() }` printed f before the first
-// next() had even returned, and again at every step after. That is not replay
-// repetition, it is the wrong ORDER, and it was a live halves divergence: the two
-// compiled halves have real coroutines and were right. typescript-interpreter.abnf now has
-// its own jsExcTry that lets the suspension through untouched.
+// A generator suspends in the interpreter half by throwing a host-level signal, so
+// its jsExcTry lets that signal through untouched; otherwise `try { yield } finally
+// { f() }` would print f at every suspension instead of when node runs it.
 //
-// THE COMPILER HALVES DID NOT CLOSE A yield* DELEGATE. g.return() is gen_close, which
-// throws the GEN_EXIT sentinel at the suspended yield; the outer body's finally ran
-// and the DELEGATE was left suspended, where node runs its finally first. The emitted
-// yield* loop now yields inside a js_try whose finally runs IteratorClose on the
-// delegate (typescript-to-llvm-ir.abnf's emitYieldStarClose), and the interpreter half raises
-// the same close at the same yield (jpYieldDeleg).
+// g.return() is gen_close, which throws the GEN_EXIT sentinel at the suspended
+// yield; the emitted yield* loop yields inside a js_try whose finally runs
+// IteratorClose on the DELEGATE (typescript-to-llvm-ir.abnf's emitYieldStarClose),
+// so the delegate's finally runs first, as in node. The interpreter half raises the
+// same close at the same yield (jpYieldDeleg).
 //
 // Every log below is written only in a `finally` or from the DRIVER, never before the
 // yield the body parks at - a write before that yield repeats once per replay in the
-// interpreter half and the two halves would disagree about the count, not the order.
-// Measured byte-for-byte against node v24.
+// interpreter half. Every log is node v24's.
 function s36(): number {
     var lg = []
     function* g36(): any { try { yield 1; yield 2 } finally { lg.push("fin") } }
@@ -1720,7 +1675,7 @@ function s36(): number {
     j36.next()
     j36.return(0)
     check("gcl11", l9.join(",") === "in,out")
-    // g.throw(v) on a PLAIN generator (docs/todo.md 1.4). Here as well as in the
+    // g.throw(v) on a PLAIN generator. Here as well as in the
     // features file because the features file is never BUILT NATIVELY, and the
     // yield*-forwarding arm is emitter code that clang-check and native-full are the
     // only gates that reach. Every push is in the driver or in a finally: a write
@@ -1773,8 +1728,7 @@ function s36(): number {
     check("gth6", f6_39.throw("V").value ===
           "a:TypeError: The iterator does not provide a 'throw' method.")
     // A `yield` inside a CATCH ARM is a suspension like any other: the enclosing
-    // finally belongs to the close, not to it. Reachable with no throw() at all,
-    // and the interpreter halves used to run the finally at the suspension.
+    // finally belongs to the close, not to it. Reachable with no throw() at all.
     var t7 = []
     function* gt7_39() { try { throw 1 } catch (e) { yield 99 } finally { t7.push("f7c") } }
     var g7c39 = gt7_39()
@@ -1794,36 +1748,25 @@ function firsts39(xs) {
 }
 
 // ===== SECTION 37: methods as values, Object.prototype, bind, and a catchable BigInt =====
-// docs/todo.md 2.5 and 2.6. Everything here ABORTED or answered "undefined" before,
-// and the split across the engines is the interesting part - three of the six
-// entries below were LIVE HALVES DIVERGENCES that --cross could not see, because no
-// test reached them.
+// A METHOD IS NOT AN OWN PROPERTY: an instance keeps its methods on its __class
+// descriptor, yet `typeof p.m` is "function" and `"m" in p` is true in node.
+// getMember / js_jsvget / js_jshas walk the descriptor chain for a VALUE read (the
+// call site still reads raw, so an ordinary p.m() allocates nothing).
 //
-// A METHOD IS NOT AN OWN PROPERTY. An instance keeps its methods on its __class
-// descriptor, so `typeof p.m` read "undefined" in all four engines where node says
-// "function", and `"m" in p` was false. getMember / js_jsvget / js_jshas now walk
-// the descriptor chain for a VALUE read (the call site still reads raw, so an
-// ordinary p.m() allocates nothing).
+// typeof [].push must be "function" in every engine: llvm.Run reads a plain member
+// through the shared js_get, a native build through js_jsmget's method-name hiding,
+// and one extern for the value read covers both.
 //
-// typeof [].push WAS ENGINE-DEPENDENT: "function" under llvm.Run, which reads a
-// plain member through the shared js_get, and "undefined" natively, where the read
-// went through js_jsmget's method-name hiding. One extern for the value read fixes
-// both directions at once.
+// Object.prototype.toString.call(v) is the classic type probe; every engine builds
+// its own `Object` prototype with toString / valueOf / hasOwnProperty.
 //
-// Object.prototype.toString.call(v) is the classic type probe and it aborted BOTH
-// compiled halves ("member 'call' of undefined" under llvm.Run, "member 'toString'
-// of undefined" natively): the `Object` global carried no usable prototype. All
-// three engines now build their own, with toString / valueOf / hasOwnProperty.
+// Function.prototype.bind, and f.call(o) / f.apply(o) with the receiver arriving.
 //
-// Function.prototype.bind existed in NO engine, and f.call(o) in the js interpreter
-// half silently ignored its receiver while the typescript half had had the shim
-// since it was written.
-//
-// A BIGINT TypeError WAS NOT CATCHABLE. `1n + 1` is a TypeError in node and a
-// program may catch it; here it aborted the process. Every BigInt-family raise -
-// the mixed-operand TypeError, ToBigInt's SyntaxError, the RangeErrors - is now a
-// real throw in all four engines. The operands come out of an ARRAY so the
-// constant folder cannot evaluate any of it at compile time.
+// A BIGINT TypeError IS CATCHABLE. `1n + 1` is a TypeError in node and a program may
+// catch it. Every BigInt-family raise - the mixed-operand TypeError, ToBigInt's
+// SyntaxError, the RangeErrors - is a real throw in all four engines. The operands
+// come out of an ARRAY so the constant folder cannot evaluate any of it at compile
+// time.
 function s37(): number {
     class S37A { am() { return "a" + this.v } }
     class S37B extends S37A { constructor() { super(); this.v = 1 } bm() { return "b" } }
@@ -1876,7 +1819,6 @@ function s37(): number {
 
     // new through a constructor that RETURNS a function, and `new` with no argument
     // list: [[Construct]] keeps an explicitly returned object and a function is one.
-    // The interpreter half dropped it and then said "unknown class: expression".
     function S37Meta() { return function() { this.q = 8 } }
     check("nw1", (new (new S37Meta())()).q === 8)
     function S37Plain() { this.q = 9 }
@@ -1898,12 +1840,8 @@ function s37(): number {
 }
 
 // ===== SECTION 38: the Error hierarchy =====
-// docs/todo.md 1.1. Before this, `new TypeError("x")` was *variable not defined*
-// in all six js/ts engines, so every error the engine raised had to be caught as
-// a STRING - e.message and `e instanceof TypeError` did not exist, and that was
-// the stated ceiling on every "make X catchable" item. The classes are ordinary
-// {__isclass, __name, __super, __ctor} descriptors, so instanceof, `new` and
-// `extends` are the machinery that was already there.
+// The classes are ordinary {__isclass, __name, __super, __ctor} descriptors, so
+// instanceof, `new` and `extends` are the ordinary class machinery.
 //
 // Every row below is node v24's answer, except s38keys - see the comment there.
 function s38(): void {
@@ -1919,8 +1857,8 @@ function s38(): void {
     check("err4", te instanceof TypeError && te instanceof Error)
     check("err5", !(te instanceof RangeError) && !(te instanceof ReferenceError))
 
-    // The five. EvalError and URIError are deliberately absent - see the
-    // jsErrClassNames table in the emitters for the measurement that decided it.
+    // The five. EvalError and URIError are deliberately absent (see the
+    // jsErrClassNames table in the emitters).
     var mk = [new Error(xs[0]), new TypeError(xs[0]), new RangeError(xs[0]),
               new ReferenceError(xs[0]), new SyntaxError(xs[0])]
     var nm = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError"]
@@ -1954,9 +1892,7 @@ function s38(): void {
     var m3 = new S41Deep(xs[0])
     check("err12", m3.message === "boom" && m3.name === "TypeError" && m3.code === 7)
 
-    // A default DERIVED constructor forwards its arguments. It passed none, so
-    // this was `undefined` in all four engines where node says 5 - both halves
-    // agreeing and both wrong, which is the defect class only an oracle sees.
+    // A default DERIVED constructor forwards its arguments: node says 5.
     class S41Base { constructor(a, b) { this.a = a; this.b = b } }
     class S41Sub extends S41Base {}
     var sb = new S41Sub(xs[2], xs[3])
@@ -1971,11 +1907,9 @@ function s38(): void {
     }
     check("err14", seen === "RangeError/boom/true/true")
 
-    // ----- the ENGINE's own errors are instances of these classes now -----
-    // The BigInt mix error and the iterator-throw TypeError are the two the item
-    // named; the number toString() radix is a third, which used to be an
-    // uncatchable abort on the number path while the BigInt path beside it
-    // raised a real RangeError.
+    // ----- the ENGINE's own errors are instances of these classes -----
+    // The BigInt mix error, the iterator-throw TypeError, and the number
+    // toString() radix RangeError.
     var got = []
     try { got.push("v" + (xs[1] + xs[2])) } catch (e) {
         got.push("mix:" + (e instanceof TypeError) + (e.message.indexOf("Cannot mix BigInt") === 0))
@@ -1999,7 +1933,7 @@ function s38(): void {
     check("err17", xs[1] + xs[1] === 2n)
 
     // The message text survives the round trip unchanged, which is what keeps
-    // every pre-existing `("" + e).indexOf(...)` assertion in this file honest.
+    // every `("" + e).indexOf(...)` assertion in this file honest.
     check("err18", ("" + new TypeError(xs[0])).indexOf("TypeError: ") === 0)
 
     // name / message / stack are NOT enumerable: Object.keys(new Error("x")) is [],
@@ -2019,19 +1953,13 @@ function s38(): void {
 function* s38deleg(): Generator<number> { yield* [3, 4] }
 
 // ===== SECTION 39: the Math object =====
-// docs/todo.md 1.1. Math's MEMBERS diverged across the three engines that
-// implement a host global (manual 7.2): languages/lib/runtime.c seeded eleven
-// methods and two properties, abnf/jsrt.go's standardJSBindings offered
-// thirty-two and eight, and goja - the grammar host both interpreter halves run
-// on - thirty-five and eight. So `Math.sin(1)` answered under llvm.Run and died
-// with `unknown method 'sin'` in the NATIVE binary, `Math.clz32` existed only
-// under goja, and Math.hypot overflowed in two of the three. The floor now
-// carries Go's own math package, ported (runtime.c, "the transcendentals"), and
-// abnf/hostglobals_test.go's TestMathMembersAgree pins the member set.
+// Math's MEMBERS are the same set in every engine that implements a host global
+// (manual 7.2): the floor carries Go's own math package, ported (runtime.c, "the
+// transcendentals"), and abnf/hostglobals_test.go's TestMathMembersAgree pins the
+// member set.
 //
 // Every row is node v24's answer except the two marked GO-vs-V8: Go's math
-// package and V8 differ in the last ulp there, both engines here are Go's, and
-// that divergence is older than this section.
+// package and V8 differ in the last ulp there, and both engines here are Go's.
 //
 // Every operand is read out of an array so the constant folders cannot answer
 // at compile time (manual chapter 3).
@@ -2059,14 +1987,14 @@ function s39(): void {
     check("math17", Math.cbrt(a[8]) === 3 && Math.cbrt(a[12]) === -1);
     check("math18", Math.atan2(a[0], a[1]) === 0.4636476090008061);
 
-    // hypot: variadic, and it must overflow only when the RESULT does. The naive
-    // sum of squares answered Infinity for the first row and 0 for the second.
+    // hypot: variadic, and it must overflow only when the RESULT does (a naive sum
+    // of squares gives Infinity for the first row and 0 for the second).
     check("math19", Math.hypot(a[3], a[5]) === 8.54400374531753);
     check("math20", Math.hypot(a[10], a[10]) === 1.4142135623730952e+300);
     check("math21", Math.hypot(a[11], a[11]) === 1.4142135623730952e-300);
     check("math22", Math.hypot(a[5], a[6]) === 5 && Math.hypot(a[5], a[6], a[13]) === 16.76305461424021);
 
-    // clz32 and fround existed ONLY in goja until this item.
+    // clz32 and fround.
     check("math23", Math.clz32(a[0]) === 31 && Math.clz32(a[7]) === 32);
     check("math24", Math.clz32(a[15]) === 0 && Math.clz32(a[1]) === 30);
     check("math25", Math.fround(a[14]) === 0.10000000149011612);
@@ -2083,8 +2011,7 @@ function s39(): void {
     check("math34", Math.atanh(a[12]) === -Infinity);
 
     // Operands outside the int32 range. ToInt32 is a modulo 2^32, so 4294967297 is 1
-    // and 1e300 is 0. goja's own Math.imul(1e300, 4294967297) was -1 and
-    // Math.clz32(1e300) 0, in the interpreter half only. Values read off node 24.
+    // and 1e300 is 0. Values read off node 24.
     var b = [4294967296, 4294967297, 1e300, -1e300, 1e20, 16777217, 0.49999999999999994, -0.4, 2.5, -2.5, 0, 3.4028236e38];
     var nz = -b[10];
     check("math35", Math.imul(b[2], b[1]) === 0 && Math.imul(b[1], b[1]) === 1 && Math.imul(b[0], b[5]) === 0);
@@ -2107,22 +2034,16 @@ function s39(): void {
 }
 
 // ===== SECTION 40: three uncatchable aborts become catchable throws =====
-// docs/todo.md 1.8 and 3.2. A name with no binding, a member read on
-// null/undefined and `new Promise(5)` were UNCATCHABLE `fail` aborts in all six
-// js/ts engines: the program stopped dead where node throws a ReferenceError or
-// a TypeError that a plain try/catch recovers. The first two live in the FLOOR's
-// scope_get / get_member (and abnf/jsrt.go's scopeGet / getMember), shared by
-// all sixteen languages, so they are reached through a per-language hook the
-// emitter registers - js_rt_missvar / js_rt_missmem - and a language that
-// registers none is unchanged, which is what keeps the three SHOULD-ABORT matrix
-// rows where they are.
+// A name with no binding, a member read on null/undefined and `new Promise(5)` throw
+// a ReferenceError or a TypeError in node that a plain try/catch recovers. The first
+// two live in the FLOOR's scope_get / get_member (and abnf/jsrt.go's scopeGet /
+// getMember), shared by all sixteen languages, so they are reached through a
+// per-language hook the emitter registers - js_rt_missvar / js_rt_missmem - and a
+// language that registers none is unchanged, which is what keeps the three
+// SHOULD-ABORT matrix rows where they are.
 //
-// Two pre-existing divergences ride along: `typeof K` for a class was "object"
-// where node says "function" (a class here is an ordinary object carrying
-// __isclass), and the BigInt mix message carried an `(operator '+')` suffix node
-// does not print.
-//
-// Every row is node v24's answer, verified against it.
+// Also here: `typeof K` for a class is "function", and the BigInt mix message has
+// no operator suffix. Every row is node v24's answer.
 function s40() {
     var xs = [null, undefined, {a: 1}, 5, "k", 1n]
 
@@ -2148,7 +2069,7 @@ function s40() {
     catch (e) { r4 = (e instanceof TypeError) + "|" + e.message }
     check("ref5", r4 === "true|Promise resolver 5 is not a function")
 
-    // The program CONTINUES afterwards - the point of the whole item.
+    // The program CONTINUES afterwards.
     var n = 0
     for (var i = 0; i < 3; i++) {
         try { n = n + xs[0].len }
@@ -2183,10 +2104,7 @@ function s40() {
 }
 
 // ===== SECTION 41: calling a non-function is a catchable TypeError, worded as node does =====
-// docs/todo.md 1.4. `xs[1]()` with undefined in the slot was an UNCATCHABLE abort
-// in all three engines and each said something different: "call of a non function
-// value (method '1')" in the interpreter, "unknown list method '1'" under
-// llvm.Run and "unknown method '1' on object" natively. node says
+// `xs[1]()` with undefined in the slot is a catchable TypeError in node, worded
 // `xs[1] is not a function` - the callee's SOURCE TEXT, which V8 recovers by
 // re-printing the AST and which no runtime value carries, since `xs[1]` and
 // `xs[i]` reach the runtime as the same key.
@@ -2252,8 +2170,7 @@ function s41() {
     // A generator's member table, and a tagged template.
     check("nfn23", msg(function () { var g = xs[3]; return g`x` }) === "true|true|g is not a function")
 
-    // `new` on something that is not a constructor - the same abort, node's other
-    // wording, and previously THREE different messages across the engines.
+    // `new` on something that is not a constructor - node's other wording.
     check("nfn24", msg(function () { return new n() }) === "true|true|n is not a constructor")
     check("nfn25", msg(function () { return new o.nope() }) === "true|true|o.nope is not a constructor")
     check("nfn26", msg(function () { return new o() }) === "true|true|o is not a constructor")
@@ -2281,7 +2198,7 @@ function s41() {
     check("nfn30", r === "re:xs[1] is not a function")
 
     // A call in the MIDDLE of an assignment target, which is its own walk in every
-    // engine and aborted in all three ("call of a non function value: 5").
+    // engine.
     check("nfn31", msg(function () { n().x = 1 }) === "true|true|n is not a function")
     check("nfn32", msg(function () { o.sub.f().y = 1 }) === "true|true|o.sub.f is not a function")
     // super.m() with nothing on the __super chain: node has no source text for a
@@ -2292,15 +2209,12 @@ function s41() {
 }
 
 // ===== SECTION 42: the top-level 'this' is the global object (the Script goal) =====
-// docs/todo.md 1.4. These grammars parse the SCRIPT goal symbol - the Annex B
-// HTML-like comments are accepted (B.1.3 admits them in a Script only), the code
-// is sloppy unless a "use strict" directive says otherwise, and top-level `return`
-// is a syntax error, which rules out the CommonJS wrapper node's `--check` puts
-// around a file. So the top-level `this` is the GLOBAL OBJECT, and every value
-// below is `node -e 'vm.runInThisContext(src)'`'s, except where a comment says
-// otherwise. It used to be bound nowhere at all in the interpreter half (a bare
-// top-level `this` raised "ReferenceError: this is not defined") and to undefined
-// in the compiler half: a live halves divergence no test program reached.
+// These grammars parse the SCRIPT goal symbol - the Annex B HTML-like comments are
+// accepted (B.1.3 admits them in a Script only), the code is sloppy unless a
+// "use strict" directive says otherwise, and top-level `return` is a syntax error,
+// which rules out the CommonJS wrapper node's `--check` puts around a file. So the
+// top-level `this` is the GLOBAL OBJECT, and every value below is
+// `node -e 'vm.runInThisContext(src)'`'s, except where a comment says otherwise.
 var s42this = this
 var s42arrow = () => this
 var s42nested = () => (() => this)()
@@ -2339,8 +2253,7 @@ function s42() {
     // same reason: nothing in the value model marks this object as the global one.
     check("gthis10", ("" + s42this) === "[object Object]")
 
-    // A STATIC method's `this` is the class. The compiler half declared no `this`
-    // in a static method at all, so this used to answer the top-level binding.
+    // A STATIC method's `this` is the class.
     check("gthis11", S42C.who() === S42C)
     check("gthis12", S42C.viaThis() === "S42")
     check("gthis13", typeof S42C.who() === "function")
@@ -2352,9 +2265,7 @@ function s42() {
     check("gthis15", lit.m() === "L")
 
     // OrdinaryCallBindThis (ES2023 10.2.1.2), the per-function STRICT-MODE flag.
-    // Every value below is `new vm.Script(src)`'s. Until docs/todo.md 1.1 these
-    // engines behaved as a STRICT function does at every one of them, because no
-    // engine carried a per-function strict flag at all.
+    // Every value below is `new vm.Script(src)`'s.
     check("gthis16", s42plain() === globalThis)
     check("gthis18", s42plain.call(null) === globalThis)
     check("gthis19", s42plain.call(undefined) === globalThis)
@@ -2384,28 +2295,25 @@ function s42() {
     // under llvm.Run - and NOT in the native build, which is why there is no
     // assertion here. `js_this` is one global slot in layer 2, and the emitter arms
     // it with the RECEIVER of the `g.next()` call, so a generator body reads the
-    // generator object instead of the receiver its function was called with. That
-    // predates docs/todo.md 1.1 (measured at 455ce39: the interpreter and llvm.Run
-    // answer undefined, the native binary answers the generator object) and closing
-    // it needs a per-coroutine `this` in the C floor's control block, not a
-    // strictness flag. Recorded rather than asserted, since clang-check and
-    // native-full run this file natively.
+    // generator object instead of the receiver its function was called with.
+    // Closing it needs a per-coroutine `this` in the C floor's control block.
+    // Recorded rather than asserted, since clang-check and native-full run this file
+    // natively.
     // Not asserted: a sloppy body boxes a primitive receiver (s42plain.call(7) is a
     // Number object in node), and this value model has no wrapper objects.
     var detached = lit.m
     check("gthis17", typeof detached === "function")
 }
 
-// ===== SECTION 43: parentheses do not drop the receiver (docs/todo.md 2.13) =====
+// ===== SECTION 43: parentheses do not drop the receiver =====
 // `(o.m)()` calls m with `this` === o. A parenthesized expression evaluates to whatever
 // the inner expression evaluates to, and a MemberExpression evaluates to a REFERENCE,
 // which carries its base - so the parentheses are transparent to the receiver exactly
 // as they are to an assignment target ((a.b).c = 1 has always assigned where a.b.c = 1
-// does). All four engines used to hand the GLOBAL object over instead: a
-// both-halves-agree-and-both-are-wrong defect that the matrix and --cross cannot see by
-// construction, and only node could settle. The TypeScript-only postfix forms are part
-// of the same rule here: `(x as T).m()` and `(x!).m()` are type-layer only, so they must
-// keep the receiver too.
+// does). The matrix and --cross cannot see a both-halves-agree defect here, so every
+// row is node's answer. The TypeScript-only postfix forms are part of the same rule:
+// `(x as T).m()` and `(x!).m()` are type-layer only, so they must keep the receiver
+// too.
 //
 // The negative rows are the point of the section as much as the positive ones. Only a
 // parenthesized MemberExpression is a Reference: `(0, o.m)()` is the IDIOM for calling a
@@ -2448,7 +2356,7 @@ function s43(): void {
     var w: any = {nm: "w", g: function (): any { return {nm: "inner", h: function (): string { return s43tag(this) }} }};
     check("paren11", (w.g().h)() === "inner");
     check("paren12", (w.g)().nm === "inner");
-    // As a STATEMENT, not only in an expression: this line aborted the interpreter half.
+    // As a STATEMENT, not only in an expression.
     var arr: any[] = [s43a[2]];
     (arr.push)(s43a[3]);
     check("paren13", arr.length === 2 && arr[1] === 2);
@@ -2478,19 +2386,17 @@ function s43(): void {
     })() === "o.nope is not a function");
 }
 
-// ===== SECTION 44: a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) =====
+// ===== SECTION 44: a class's STATIC and INSTANCE namespaces =====
 // `class C { static m(){} m(){} }` is TWO members in JavaScript - one on the
-// constructor and one on the prototype - and this engine kept both in the descriptor's
-// own property map, where the second write simply won. So `C.m()` answered the INSTANCE
-// method, `class F extends E {}` resolved an inherited static to F's instance member,
-// and an instance could see every static (`typeof c.sonly` was "function" where node
-// says "undefined"). Every static member now lives in a separate `__statics` table on
-// the descriptor; instance members did not move, which is what keeps the shared js_get /
-// js_set / js_mcall - and therefore the other fifteen languages - untouched.
+// constructor and one on the prototype - so `C.m()` must answer the STATIC method,
+// `class F extends E {}` must resolve an inherited static to E's static, and an
+// instance must not see a static (`typeof c.sonly` is "undefined" in node). Every
+// static member lives in a separate `__statics` table on the descriptor; instance
+// members stay in the descriptor, which is what keeps the shared js_get / js_set /
+// js_mcall - and therefore the other fifteen languages - untouched.
 //
-// 11 of the 18 rows below fail at ec39aef, in all three legs. Every value is
-// `new vm.Script(src)`'s, and every operand comes out of s44a so the constant folder
-// cannot answer any of it.
+// Every value is `new vm.Script(src)`'s, and every operand comes out of s44a so the
+// constant folder cannot answer any of it.
 var s44a: any[] = [1, 2, 3, "m", "who"];
 class S44C {
     static m(): string { return "S-m" }
@@ -2515,7 +2421,7 @@ class S44G extends S44C {
     static viaSuper(): string { return super.m() }
     // `super[k]()`, without the `as any` a checker would want: `(super as any)[k]`
     // does not parse in either typescript grammar (a bare `super` is not a primary),
-    // which is a PARSER gap and not this item's.
+    // which is a separate parser gap.
     static viaSuperIdx(): string { return super[s44a[3]]() }
     viaSuperI(): string { return super.m() }
     viaSuperParen(): string { return (super.m)() }
@@ -2539,7 +2445,7 @@ function s44(): void {
     // `this.n()` inside a static resolves on the static side.
     check("stat10", S44H.viaThis() === "H-S-n" && (new S44H()).n() === "H-I-n");
     check("stat11", (s44a[3] in S44C) === true && ("ionly" in S44C) === false);
-    // Every class object has a `name`, and it is the class's own (docs/todo.md 2.13).
+    // Every class object has a `name`, and it is the class's own.
     check("stat12", S44C.name === "S44C" && S44F.name === "S44F");
     (S44C as any).zz = s44a[2];
     check("stat13", (S44C as any).zz === 3 && ((new S44C()) as any).zz === undefined);
@@ -2557,19 +2463,15 @@ function s44(): void {
 }
 
 // ===== SECTION 45: a class object's OWN KEYS, e.constructor, and a method value's
-//       OVERRIDABLE receiver (docs/todo.md 2.10) =====
-// Three holes in the object model, all of them agreed-and-wrong or wrong in two
-// different ways, and none of them asserted anywhere before:
+//       OVERRIDABLE receiver =====
 //
-//   Object.keys(<class>)  node lists the static FIELDS. This engine listed nothing
-//                         (interpreter: a descriptor has no __keys) or the INSTANCE
-//                         methods (compiler: js_keys reads the descriptor's own map).
-//                         A static method, a static accessor and a private static are
-//                         not enumerable; a runtime `C.zz = 1` is.
-//   e.constructor         undefined in all four engines; node hands back the class,
-//                         and the FUNCTION itself for `new F()`.
+//   Object.keys(<class>)  node lists the static FIELDS. A static method, a static
+//                         accessor and a private static are not enumerable; a
+//                         runtime `C.zz = 1` is.
+//   e.constructor         node hands back the class, and the FUNCTION itself for
+//                         `new F()`.
 //   f.call(x)             a method read AS A VALUE - `const f = o.m`, `super.m` -
-//                         kept the receiver the READ was made with and ignored x.
+//                         runs on x, not on the receiver the READ was made with.
 //
 // Every operand comes out of s45a so the constant folder cannot answer any of it.
 var s45a: any[] = [1, "two", 3, "m", "who", "constructor"];
@@ -2629,27 +2531,19 @@ function s45(): void {
 }
 
 // ===== SECTION 46: the PRIVATE-NAME model, and for-in over what is not a plain
-//       object (docs/todo.md 2.4) =====
-// Two defects with one root, and one plain abort on ordinary code.
+//       object =====
 //
-//   THE PRIVATE NAME. Both compiled halves store `#x` under the mangled key '__#x',
-//   which the engine's __-slot rule already hides; the interpreters filed it under
-//   its own '#x' spelling. So `Object.keys(p)` answered "#x|y" in the interpreters
-//   and "y" in the compilers and in node, AND `o["#x"] = 1` and a private `#x` were
-//   the SAME slot in the interpreters and two different slots in the compilers.
-//   The interpreters mangle now. The compilers were wrong in a second place: every
-//   __-name is skipped by the static-side test, so `C.#s` - a static private - read
-//   undefined in both of them while both interpreters answered. The mangled private
-//   spelling is the one exception now, in all four engines.
+//   THE PRIVATE NAME. `#x` is stored under the mangled key '__#x' in all four
+//   engines, which the engine's __-slot rule already hides: `Object.keys(p)` is "y"
+//   as in node, and `o["#x"] = 1` and a private `#x` are two different slots. Every
+//   __-name is skipped by the static-side test, so the mangled private spelling is
+//   the one exception there (`C.#s`, a static private, must read).
 //
-//   for (k in [7,8])  aborted BOTH compiled halves with "js_keys: not an object
-//   (got object)" and answered nothing at all in the interpreters. node yields the
-//   INDICES as strings. A string enumerates the same way; null, undefined and a
-//   primitive enumerate nothing rather than raising. `{...[7,8]}` took the same
-//   abort, through the same call.
+//   for (k in [7,8])  yields the INDICES as strings, as in node. A string enumerates
+//   the same way; null, undefined and a primitive enumerate nothing rather than
+//   raising. `{...[7,8]}` goes through the same call.
 //
-//   #x in o - ES2022's ergonomic brand check - existed in the typescript
-//   INTERPRETER alone. All four engines parse and answer it now.
+//   #x in o - ES2022's ergonomic brand check.
 //
 // Every operand comes out of s46a so the constant folder cannot answer any of it.
 const s46a: any[] = [0, 1, 2, "#x", "ab", 4];
@@ -2676,8 +2570,8 @@ function s46(): void {
     check("priv03", fi === "y,");
     // It is still readable and writable from inside the class body.
     check("priv04", p.val === 1 && p.run(s46a[5]) === 5 && p.val === 5);
-    // A STATIC private is reachable - this is what the __-slot skip broke in both
-    // compiled halves - and it is not an own key of the class object either.
+    // A STATIC private is reachable, and it is not an own key of the class object
+    // either.
     check("priv05", S46P.gets() === 4 && S46P.bumps() === 5 && S46P.gets() === 5);
     check("priv06", Object.keys(S46P).join("|") === "");
     // '#x' AS AN ORDINARY STRING KEY is a DIFFERENT SLOT from the private #x: the
@@ -2718,7 +2612,7 @@ function s46(): void {
     var bb = "";
     for (var b in arr) { if (b === "1") { break } bb = bb + b }
     check("fin06", bb === "0");
-    // The same call is what object spread makes, so it took the same abort.
+    // The same call is what object spread makes.
     const sa: any = { ...arr }
     check("fin07", Object.keys(sa).join("|") === "0|1|2" && sa[s46a[1]] === 4);
     const ss: any = { ...s46a[4] }
@@ -2727,29 +2621,23 @@ function s46(): void {
 }
 
 // ===== SECTION 47: for-in is a SNAPSHOT, a private name is per CLASS BODY, and a
-//       FUNCTION carries own properties (docs/todo.md 2.10) =====
-// Three defects every engine here AGREED on, so byte-identity could not see any of
-// them; node is the only witness. Each row below was measured against node v24.
+//       FUNCTION carries own properties =====
+// Three things every engine here could agree on wrongly, so byte-identity could not
+// see them; node is the only witness. Each row below was checked against node v24.
 //
 //   DELETING A KEY DURING for-in. js_jskeys / jsKeys answer a SNAPSHOT, so a key the
-//   body deleted before its turn came was still visited: `for (k in o) { s += k;
-//   delete o.c }` gave "abc" where node gives "ab". The compilers guard each
-//   iteration with js_jshas and the interpreters with propIn - both or neither, since
-//   one alone would be a halves divergence.
+//   body deleted before its turn came must be skipped: `for (k in o) { s += k;
+//   delete o.c }` gives "ab" in node. The compilers guard each iteration with
+//   js_jshas and the interpreters with propIn.
 //
 //   THE SAME PRIVATE NAME IN A SUBCLASS. `class A { #v } class B extends A { #v }` is
-//   TWO names in TypeScript and was ONE slot here, because the mangled key was per
-//   NAME ('__#v'). B's field initializer therefore overwrote A's, and A's own getter
-//   answered B's value. The key carries the CLASS BODY now ('__#<body>#v'), resolved
-//   to the innermost enclosing body that declares the name - so an inner class reading
-//   an outer class's private name still reaches it.
+//   TWO names in TypeScript, so the key carries the CLASS BODY ('__#<body>#v'),
+//   resolved to the innermost enclosing body that declares the name - so an inner
+//   class reading an outer class's private name still reaches it.
 //
-//   AN OWN PROPERTY ON A FUNCTION. `f.p = 1` killed both compiled halves outright
-//   ("cannot set field 'p' on *abnf.jsClosure" / "member assignment 'p' on
-//   [function]") and, in the INTERPRETERS, worked under goja and died under -frozen -
-//   a live goja-vs--frozen divergence no test reached. The map lives beside the
-//   function in a side table in all four engines now, and for-in, Object.keys,
-//   `in`, hasOwnProperty and delete all read it.
+//   AN OWN PROPERTY ON A FUNCTION. `f.p = 1`: the map lives beside the function in a
+//   side table in all four engines, and for-in, Object.keys, `in`, hasOwnProperty
+//   and delete all read it.
 //
 // Every operand comes out of s47a so the constant folder cannot answer any of it.
 const s47a: any[] = [0, 1, 2, 3, "a", "b", "c", "d"];
@@ -2861,12 +2749,8 @@ function s47(): void {
     check("fnp09", ("u" in s47fn) === true && Object.keys(s47fn).join("|") === "q|m|u");
 
     // ----- a FUNCTION's Object.prototype SURFACE, as methods -----
-    // These were a goja-vs--frozen divergence that PREDATES the side table: under goja
-    // a host function carries a real prototype chain and answered all four, while the
-    // frozen interpreter and both compiled halves died with "f.toString is not a
-    // function". The side table then made hasOwnProperty WORSE on the goja leg - it had
-    // answered true off goja's own expando and went to false once the property moved
-    // beside the function. All four are answered by this engine now, in all four legs.
+    // All four are answered by this engine, in all four legs (the host's own
+    // prototype chain exists under goja only).
     check("fnp10", s47fn.hasOwnProperty("q") === true && s47fn.hasOwnProperty(s47a[4]) === false);
     check("fnp11", s47fn.propertyIsEnumerable("q") === true && s47fn.propertyIsEnumerable(s47a[4]) === false);
     // toString agrees with String(f), which is the one spelling every leg already had;
@@ -2880,8 +2764,7 @@ function s47(): void {
     // A function with NO own properties answers false rather than throwing.
     check("fnp15", s47.hasOwnProperty("q") === false && s47.propertyIsEnumerable("q") === false);
     // The VALUES, not just the keys: Object.values / entries / assign / spread read a
-    // function's own properties through a different path from for-in, and each one of
-    // them answered the right keys with undefined values on at least one leg.
+    // function's own properties through a different path from for-in.
     const s47v: any[] = Object.values(s47fn);
     const s47e: any[] = Object.entries(s47fn);
     check("fnp16", s47v.length === 3 && s47v[0] === 2 && typeof s47v[1] === "function" && s47v[2] === undefined);
@@ -2889,11 +2772,10 @@ function s47(): void {
     check("fnp17", Object.assign({}, s47fn).q === 2 && ({ ...s47fn }).q === 2);
 }
 
-// ===== SECTION 48: a function's own `name`, `length` and SELF NAME (docs/todo.md 1.4) =====
-// Every function has two own properties nothing in the program writes. This half
-// answered ""/0 for both and BOTH COMPILED HALVES answered `undefined`, so the pair
-// was a halves divergence as well as a wrong answer; node says `f`/1 for
-// `function f(a){}`. Every value below was read off node 24 before it was asserted.
+// ===== SECTION 48: a function's own `name`, `length` and SELF NAME =====
+// Every function has two own properties nothing in the program writes; node says
+// `f`/1 for `function f(a){}`. Every value below was read off node 24 before it was
+// asserted.
 //
 // `length` is the parameters BEFORE the first default and before the rest parameter,
 // and a destructuring pattern counts as ONE - which is why fn9 is 3 and not 4.
@@ -3001,11 +2883,9 @@ function s48() {
     check("fnm35", fnLoop[0].name === "looped" && fnLoop[299].length === 2 && fnLoop[150] !== fnLoop[151]);
     check("fnm36", fnLoopB.name === "bound looped" && fnLoopB.length === 1 && fnLoopB(2) === 3 && fnLoop[150].name === "looped");
     // ----- a named function EXPRESSION sees its OWN NAME (ES2023 15.2.5) -----
-    // The optional name was accepted and dropped, so this whole group answered
-    // *ReferenceError* in all four engines. The spec's funcEnv - one scope, one binding
-    // of the name to the function object, between the definition site and the function's
-    // own scope - is what all nine rows below come out of; every value was read off
-    // node 24 first.
+    // The spec's funcEnv - one scope, one binding of the name to the function object,
+    // between the definition site and the function's own scope - is what all nine rows
+    // below come out of; every value was read off node 24 first.
     var s48fact = function fact(n) { return n < 2 ? 1 : n * fact(n - 1) }
     check("fns01", s48fact(5) === 120);
     // The name does NOT leak into the enclosing scope.
@@ -3031,8 +2911,7 @@ function s48() {
     check("fns08", s48nest() === "function");
     // A generator function EXPRESSION binds its own name too, which is what lets it
     // delegate to itself. Driven by next() rather than by spread: spreading a generator
-    // answers an empty array in both halves, which is older than this section and is
-    // recorded as its own gap.
+    // answers an empty array in both halves (a separate gap).
     var s48gen = function* gen48(n) { yield n; if (n > 0) { yield* gen48(n - 1) } }
     var s48out = "";
     var s48it = s48gen(2);

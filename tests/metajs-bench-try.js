@@ -1,8 +1,6 @@
-// The exception-path allocation benchmark of docs/runtime-rework-plan.md,
-// phase 4a. Every js_try used to malloc(512) for a jmp_buf per ENTRY - three of
-// them for a try/catch/finally - and nothing ever frees it, so this loop leaked
-// about 1.5 KB per iteration on top of the ordinary arena growth. The buffer is
-// now pooled per DEPTH.
+// The exception-path allocation benchmark. Every js_try needs a jmp_buf; the
+// buffers are pooled per DEPTH, so this loop must not grow beyond the ordinary
+// arena growth (a per-ENTRY allocation would leak about 1.5 KB per iteration).
 //
 // The answer is deterministic, so ./test.sh can compare the two engines on it;
 // tests/bench-alloc.sh runs it natively and reports time and peak RSS.

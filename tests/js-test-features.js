@@ -233,7 +233,7 @@ function* lazyDeleg() { yield* lazyCounter(); }
 var lazyDn = [];
 for (var dv of lazyDeleg()) { if (lazyDn.length === 2) { break; } lazyDn.push(dv); }
 check("yield-star-lazy", lazyDn.join(",") === "0,1" && lazyReached === 2);
-// docs/todo.md 1.6: g.next(v) forwards v to the DELEGATE of a `yield*` (the
+// g.next(v) forwards v to the DELEGATE of a `yield*` (the
 // specification's `received.value`), and the value of the yield* is the delegate's
 // return value. The sent value is yielded straight back rather than written to an
 // outer variable: the interpreter half REPLAYS a generator body once per next(), so
@@ -245,12 +245,11 @@ var sr1 = sg.next().value;
 var sr2 = sg.next("S").value;
 var sr3 = sg.next().value;
 check("yield-star-send", sr1 === 1 && sr2 === "a=S" && sr3 === "v=r");
-// docs/todo.md 2.6 and 1.10: WHEN the finally runs. A generator's finally belongs to
-// the close, not to the suspension - the interpreter half used to run it at the first
-// next(), because a suspension is a host throw and interp-core's excTry ran the
-// program's finally for any unwinding. And g.return() at a `yield*` closes the
-// DELEGATE first, which no compiled half did. Every push is in a finally or in the
-// driver: a write before the parked yield repeats once per replay in this half.
+// WHEN the finally runs. A generator's finally belongs to the close, not to the
+// suspension (in the interpreter half a suspension is a host throw, which jsExcTry
+// lets through), and g.return() at a `yield*` closes the DELEGATE first. Every push
+// is in a finally or in the driver: a write before the parked yield repeats once per
+// replay in this half.
 var clLog = [];
 function* clG() { try { yield 1; yield 2; } finally { clLog.push("fin"); } }
 var clA = clG();
@@ -266,13 +265,11 @@ clL2.push("n" + clB.next().value);
 clB.return(0);
 check("yield-star-close-delegate", clL2.join(",") === "n1,in,out");
 
-// docs/todo.md 1.4: g.throw(v) raises v AT the yield the body is parked at, so the
-// body's own catch takes it - and at a `yield*` node FORWARDS it to the delegate's
-// throw() instead, which is what emitYieldStarCatch turns the raised value back
-// into a throw-in record for. It was blocked in every language by the floor's
-// tag-15 member table, which offered next and return and nothing else. Every push
-// is in the driver or in a finally: a write before the parked yield repeats once
-// per replay in the interpreter half.
+// g.throw(v) raises v AT the yield the body is parked at, so the body's own catch
+// takes it - and at a `yield*` node FORWARDS it to the delegate's throw() instead,
+// which is what emitYieldStarCatch turns the raised value back into a throw-in
+// record for. Every push is in the driver or in a finally: a write before the parked
+// yield repeats once per replay in the interpreter half.
 function* thG() { try { yield 1; yield 2; } catch (e) { yield "c:" + e; } finally { thL.push("fin"); } }
 var thL = [];
 var thA = thG();
@@ -322,10 +319,7 @@ thF.next();
 check("yield-star-throw-no-method", thF.throw("V").value ===
       "a:TypeError: The iterator does not provide a 'throw' method.");
 // A `yield` inside a CATCH ARM is a suspension like any other: the enclosing
-// finally belongs to the close, not to it. The interpreter half used to run the
-// program's finally at that suspension - the same wrong order docs/todo.md 2.6
-// fixed for a yield inside the TRY, one arm further in, and reachable with no
-// throw() at all.
+// finally belongs to the close, not to it. Reachable with no throw() at all.
 var thCL = [];
 function* thCA() { try { throw 1; } catch (e) { yield 99; } finally { thCL.push("fin"); } }
 var thG2 = thCA();
@@ -373,11 +367,10 @@ check("class-override", pet.speak() === "Rex barks");
 check("class-super-inherit", pet.describe() === "Rex makes a sound, animal");
 check("class-base", new Animal("Cat").speak() === "Cat makes a sound");
 
-// ----- private names, and for-in over what is not a plain object (todo 2.4) -----
+// ----- private names, and for-in over what is not a plain object -----
 // A private field is a slot NO enumeration reports, and `o["#x"]` is a DIFFERENT
 // slot; a static private is reachable; for-in over an array yields the index
-// STRINGS and over null/a primitive yields nothing (it used to abort the compiled
-// halves with "js_keys: not an object").
+// STRINGS and over null/a primitive yields nothing.
 var fkA = [0, 1, 2, "#x"];
 class FKP {
     #x = fkA[1];
@@ -514,11 +507,10 @@ Promise.resolve().then(qnop).then(qnop).then(qnop).then(qnop).then(function() {
 
 
 // ----- methods as values, Object.prototype, bind, and a catchable BigInt -----
-// docs/todo.md 2.5 / 2.6. An instance's methods live on its __class descriptor, so a
-// VALUE read of one answered undefined in all four engines; Object.prototype carried
-// nothing in the two compiled halves; bind existed nowhere; and a BigInt TypeError
-// aborted the process instead of reaching a catch. The BigInt operands come out of an
-// ARRAY so the constant folder cannot evaluate them at compile time.
+// An instance's methods live on its __class descriptor, yet a VALUE read of one is a
+// function in node; Object.prototype, bind, and a BigInt TypeError that reaches a
+// catch. The BigInt operands come out of an ARRAY so the constant folder cannot
+// evaluate them at compile time.
 class FMv { m() { return "m" + this.k } }
 var fmv = new FMv(); fmv.k = 1;
 check("method-as-value-typeof", typeof fmv.m === "function");
@@ -552,11 +544,10 @@ check("bigint-mix-catchable", (function() {
 })() === true);
 check("bigint-after-catch", 1n + 1n === 2n);
 
-// ----- calling a non-function is a catchable TypeError (docs/todo.md 1.4) -----
-// `xs[1]()` with undefined in the slot used to END THE PROGRAM in all three
-// engines, each with its own wording. node's message is the callee's SOURCE TEXT,
-// which the grammars now render at parse time; the runtime only reports that
-// nothing claimed the call (js_rt_misscall, the fourth js_rt_miss* hook).
+// ----- calling a non-function is a catchable TypeError -----
+// node's message is the callee's SOURCE TEXT, which the grammars render at parse
+// time; the runtime only reports that nothing claimed the call (js_rt_misscall, the
+// fourth js_rt_miss* hook).
 check("noncall-index", (function() {
     var xs = [1, undefined];
     try { xs[1](); return "no"; } catch (e) { return (e instanceof TypeError) + "|" + e.message; }
@@ -579,7 +570,7 @@ check("noncall-continues", (function() {
     return k;
 })() === 3);
 
-// ----- the top-level 'this' (the Script goal; docs/todo.md 1.4) -----
+// ----- the top-level 'this' (the Script goal) -----
 var gThisTop = this;
 var gThisArrow = () => this;
 check("this-top-typeof", typeof gThisTop === "object");
@@ -591,8 +582,8 @@ check("this-static-method", (function() {
     return C.who() === C && C.viaThis() === "T" && typeof C.who() === "function";
 })());
 
-// Static members are INHERITED: node walks the class object's own prototype chain
-// (docs/todo.md 1.2). Read out of an array so the folder cannot answer it.
+// Static members are INHERITED: node walks the class object's own prototype chain.
+// Read out of an array so the folder cannot answer it.
 check("class-static-inherited", (function() {
     var a = [1, 2, 3];
     class C { static m(x) { return x + a[0]; } static f = a[1]; static get g() { return "g" + this.f; } static who() { return "C"; } static callsWho() { return this.who(); } }
@@ -602,7 +593,7 @@ check("class-static-inherited", (function() {
         && D.viaSuper(a[2]) === 4 && typeof E.m === "function";
 })());
 // A sloppy function's `this` is the global object; a strict one's is undefined,
-// and a function declared inside a strict one inherits the flag (docs/todo.md 1.1).
+// and a function declared inside a strict one inherits the flag.
 check("this-plain-call-sloppy", (function() { return this; })() === globalThis);
 check("this-plain-call-strict", (function() { "use strict"; return this; })() === undefined);
 check("this-call-null-sloppy", (function() { return this; }).call(null) === globalThis);
@@ -610,12 +601,10 @@ check("this-call-null-strict", (function() { "use strict"; return this; }).call(
 check("this-strict-inherited", (function() { "use strict"; function inner() { return this; } return inner(); })() === undefined);
 check("this-class-body-strict", (function() { class K { m() { function inner() { return this; } return inner(); } } return (new K()).m(); })() === undefined);
 
-// ----- parentheses do not drop the receiver (docs/todo.md 2.13) -----
+// ----- parentheses do not drop the receiver -----
 // `(o.m)()` is a call THROUGH A REFERENCE: the parentheses are transparent, so `this`
 // is o - while `(0, o.m)()` is the idiom for calling WITHOUT a receiver and must stay
-// the global object. `(arr.push)(x)` as a statement aborted the interpreter half
-// outright. The wide version of this, twenty-eight rows deep, is SECTION 46 of
-// tests/js-test-full.js; this is the smallest program that fails at ec39aef.
+// the global object. The wide version of this is SECTION 46 of tests/js-test-full.js.
 check("paren-receiver", (function() {
     var a = ["m", 1, 2];
     var o = {m: function() { return this }, n: function() { return this }};
@@ -628,11 +617,9 @@ check("paren-receiver", (function() {
         && (0, o.m)() === globalThis && (a[0] === "m" ? o.m : o.n)() === globalThis;
 })());
 
-// ----- a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) -----
+// ----- a class's STATIC and INSTANCE namespaces -----
 // `class C { static m(){} m(){} }` is two different members: one on the constructor,
-// one on the prototype. Both used to land in one table, where the second won. The
-// wide version is SECTION 47 of tests/js-test-full.js; this is the smallest program
-// that fails at ec39aef.
+// one on the prototype. The wide version is SECTION 47 of tests/js-test-full.js.
 check("static-namespace", (function () {
     var a = [1, "m"];
     class C { static m() { return "S" }  m() { return "I" }  static so() { return "so" }  io() { return "io" } }
@@ -649,11 +636,9 @@ check("static-namespace", (function () {
 })());
 
 // ----- a class object's OWN KEYS, e.constructor, and a method value's receiver -----
-// docs/todo.md 2.10: Object.keys of a class object listed nothing (interpreter) or the
-// INSTANCE methods (compiler) where node lists the static FIELDS; `e.constructor` was
-// undefined in all four engines; and a method read AS A VALUE ignored the receiver of
-// the .call/.apply/.bind that ran it. The wide version is SECTION 48 of
-// tests/js-test-full.js; this is the smallest program that fails at f1910a9.
+// Object.keys of a class object lists the static FIELDS; `e.constructor` is the class;
+// a method read AS A VALUE runs on the receiver of the .call/.apply/.bind that runs
+// it. The wide version is SECTION 48 of tests/js-test-full.js.
 check("object-model-2-10", (function () {
     var a = [1, "two", "x"];
     class C { static sf = a[0];  static sm() { return "sm" }  m() { return "m" }  get g() { return "g" } }

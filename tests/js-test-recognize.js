@@ -1,13 +1,13 @@
 // Recognition test for the widened JavaScript grammars (js-interpreter.abnf and
 // js-to-llvm-ir.abnf). It is a real-world-looking module that USES the modern syntax
-// these grammars now RECOGNIZE but do NOT lower: spread/rest, the modern object-literal
-// property forms, default parameters, optional chaining, nullish coalescing, **,
-// instanceof/in, delete/void/await/yield, async/generator functions, class expressions,
-// new.target, ES export, with/debugger, regex literals and the widened number
-// literals (binary/octal/BigInt/numeric-separator). (ES import is now a real feature -
-// project-file loading - so it is exercised by tests/js-test-multifile.js instead.)
+// these grammars RECOGNIZE: spread/rest, the modern object-literal property forms,
+// default parameters, optional chaining, nullish coalescing, **, instanceof/in,
+// delete/void/await/yield, async/generator functions, class expressions, new.target,
+// ES export, with/debugger, regex literals and the widened number literals
+// (binary/octal/BigInt/numeric-separator). ES import is project-file loading and is
+// exercised by tests/js-test-multifile.js instead.
 //
-// Each of those constructs is ACCEPTED (it parses) and routed to notImplemented, so:
+// A construct that is ACCEPTED but not lowered is routed to notImplemented, so:
 //   * a DEFAULT run of either grammar aborts cleanly at the first not-lowered construct
 //     (a "... not implemented (file:line); use -warn-unsupported to ignore" message);
 //   * a run WITH -warn-unsupported warns on each not-lowered construct, skips it, runs

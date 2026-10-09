@@ -1,30 +1,18 @@
 // Full-syntax test: JavaScript (ECMAScript 2022 core grammar) - part 1 of 3.
 //
-// THE JS RATCHET IS THREE FILES, and this is docs/todo.md 6.2. As one file its
-// -frozen INTERPRETER leg measured 627 s wall against ./test.sh --full's 900 s brake
-// and had been KILLED outright under concurrent gate load, which reads as RUN-FAILED:
-// a red gate for a reason that is not a defect.
-//
-// WHY SPLITTING IS WORTH FAR MORE THAN A THIRD EACH, and it is MEMORY rather than
-// arithmetic. Peak RSS of that leg, which is an exact counter and needs no draws:
-// the unsplit file 23,470 MB; the three parts 11,907, 3,141 and 4,765 MB. At 23 GB the
-// machine is paging while several gate legs run beside it, which is why the same file
-// measured 330 s on an idle machine and was still running past 1,140 s - the brake is
-// 900 s - under a load average of 50. The parts measured 102, 35 and 39 s wall under
-// that same load. The fifty sections also cost 57 s of CPU when each is parsed alone
-// against 356 s in one file, so the underlying growth is superlinear in one file's
-// content; the RSS numbers are what say where it goes.
+// THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
+// ./test.sh --full's time brake (peak memory grew superlinearly with the file).
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
 //   tests/js-test-full.3.js   sections 44-51, the call/class/private-name model
 //
-// Nothing else moved. The section NUMBERS are the ones they have always had (grammar
-// comments and docs cite them), the three files together run the same assertions in
-// the same order, and ./test.sh --full reports them as the units js, js2 and js3 - one
-// per FILE, because the check-count agreement rule compares the two GRAMMARS of one
-// file and never two files of one language. Add a new section to whichever file it
-// belongs in, and keep the numbers globally unique across the three.
+// The section NUMBERS are global (grammar comments and docs cite them), the three
+// files together run the assertions in order, and ./test.sh --full reports them as the
+// units js, js2 and js3 - one per FILE, because the check-count agreement rule
+// compares the two GRAMMARS of one file and never two files of one language. Add a
+// new section to whichever file it belongs in, and keep the numbers globally unique
+// across the three.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full
@@ -287,9 +275,8 @@ function s13() {
     function NT() { this.viaNew = new.target !== undefined }
     check("cls9", (new NT()).viaNew === true)
 
-    // STATIC MEMBERS ARE INHERITED (docs/todo.md 1.2). `class D extends C {}` then
-    // `D.s()` was "TypeError: D.s is not a function" in all four engines, where node
-    // walks the class object's own prototype chain. Every value below is
+    // STATIC MEMBERS ARE INHERITED: `class D extends C {}` then `D.s()` walks the
+    // class object's own prototype chain in node. Every value below is
     // `new vm.Script(src)`'s. The operands come out of an ARRAY so the constant
     // folder cannot answer any of it at compile time.
     var sA = [1, 2, 3, 4, 5]
@@ -330,8 +317,7 @@ function s13() {
     // The engine's own descriptor slots are never inherited.
     check("cls18", SE.own(sA[0]) === "SD.own:6")
     // A class's own NAME is bound inside its body, and bound BEFORE the static
-    // initializers run - this half used to raise "ReferenceError: SG is not
-    // defined" while both compiled halves and node answered.
+    // initializers run.
     class SG { static f = sA[2]; static { SG.blk = SG.f + sA[0] } }
     check("cls19", SG.blk === 4)
 }
@@ -447,11 +433,10 @@ function s15() {
 // that is the only part a wrong implementation can still get right by accident:
 // the whole trace below is byte-identical to node.
 //
-// Two shapes are deliberately avoided. An async body must have NO side effect
+// One shape is deliberately avoided: an async body must have NO side effect
 // before its last await - this half drives one by REPLAY (see the generator note
-// at the top of the file), so a print before an await would repeat - and
-// `for await` / `async function*` are not implemented and ABORT, which is why
-// they are no longer written here.
+// at the top of the file), so a print before an await would repeat. `for await`
+// and `async function*` are SECTION 38's.
 function s16() {
     async function af() { return 5 }
     check("asy1", typeof af === "function")
@@ -691,12 +676,11 @@ function s21() {
 }
 
 // ===== SECTION 22: value rendering (String / ToString) =====
-// The two halves used to hand the raw value to the shared println host function, so
-// Go's %v reached stdout: "<nil>" for null, "[1 2 3]" for an array and a map dump for
-// an object, where node's String() says "null", "1,2,3" and "[object Object]". Values
-// are node v24's. The println lines at the end ratchet the PRINT path itself, which no
-// check() can reach; node's console.log uses its own inspect format, so only the
-// check() assertions are settled against node.
+// Every engine renders a value with JavaScript's ToString: "null" for null, "1,2,3"
+// for an array and "[object Object]" for an object, not Go's %v. Values are node
+// v24's. The println lines at the end ratchet the PRINT path itself, which no check()
+// can reach; node's console.log uses its own inspect format, so only the check()
+// assertions are settled against node.
 function s22() {
     class Tagged { constructor(n) { this.n = n } toString() { return "T(" + this.n + ")" } }
     check("str1", String(null) === "null" && String(undefined) === "undefined")
@@ -740,9 +724,8 @@ function s23() {
 }
 
 // ===== SECTION 24: new, instanceof and delete =====
-// 'new F() instanceof F' was false in the compiler for a plain constructor FUNCTION
-// (only class descriptors carried an instanceof chain), an object RETURNED by a
-// constructor was discarded, and 'delete a[1]' was a silent no-op.
+// 'new F() instanceof F' for a plain constructor FUNCTION, an object RETURNED by a
+// constructor, and 'delete a[1]'.
 // NOTE: 'i in arr' stays TRUE after 'delete arr[i]' in both halves, where node says
 // false. A real hole needs per-slot state on the array, and the interpreter half's
 // arrays are host arrays that cannot carry any (the -frozen runtime rejects a

@@ -1,31 +1,19 @@
 // Full-syntax test: JavaScript - part 3 of 3, sections 44-52.
 //
-// THE JS RATCHET IS THREE FILES, and this is docs/todo.md 6.2. As one file its
-// -frozen INTERPRETER leg measured 627 s wall against ./test.sh --full's 900 s brake
-// and had been KILLED outright under concurrent gate load, which reads as RUN-FAILED:
-// a red gate for a reason that is not a defect.
-//
-// WHY SPLITTING IS WORTH FAR MORE THAN A THIRD EACH, and it is MEMORY rather than
-// arithmetic. Peak RSS of that leg, which is an exact counter and needs no draws:
-// the unsplit file 23,470 MB; the three parts 11,907, 3,141 and 4,765 MB. At 23 GB the
-// machine is paging while several gate legs run beside it, which is why the same file
-// measured 330 s on an idle machine and was still running past 1,140 s - the brake is
-// 900 s - under a load average of 50. The parts measured 102, 35 and 39 s wall under
-// that same load. The fifty sections also cost 57 s of CPU when each is parsed alone
-// against 356 s in one file, so the underlying growth is superlinear in one file's
-// content; the RSS numbers are what say where it goes.
+// THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
+// ./test.sh --full's time brake (peak memory grew superlinearly with the file).
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
 //   tests/js-test-full.3.js   sections 44-52, the call/class/private-name model,
 //                             plus the Unicode identifier tables
 //
-// Nothing else moved. The section NUMBERS are the ones they have always had (grammar
-// comments and docs cite them), the three files together run the same assertions in
-// the same order, and ./test.sh --full reports them as the units js, js2 and js3 - one
-// per FILE, because the check-count agreement rule compares the two GRAMMARS of one
-// file and never two files of one language. Add a new section to whichever file it
-// belongs in, and keep the numbers globally unique across the three.
+// The section NUMBERS are global (grammar comments and docs cite them), the three
+// files together run the assertions in order, and ./test.sh --full reports them as the
+// units js, js2 and js3 - one per FILE, because the check-count agreement rule
+// compares the two GRAMMARS of one file and never two files of one language. Add a
+// new section to whichever file it belongs in, and keep the numbers globally unique
+// across the three.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full
@@ -55,10 +43,7 @@ function check(id, cond) {
 }
 
 // ===== SECTION 44: calling a non-function is a catchable TypeError, worded as node does =====
-// docs/todo.md 1.4. `xs[1]()` with undefined in the slot was an UNCATCHABLE abort
-// in all three engines and each said something different: "call of a non function
-// value (method '1')" in the interpreter, "unknown list method '1'" under
-// llvm.Run and "unknown method '1' on object" natively. node says
+// `xs[1]()` with undefined in the slot is a catchable TypeError in node, worded
 // `xs[1] is not a function` - the callee's SOURCE TEXT, which V8 recovers by
 // re-printing the AST and which no runtime value carries, since `xs[1]` and
 // `xs[i]` reach the runtime as the same key.
@@ -124,8 +109,7 @@ function s44() {
     // A generator's member table, and a tagged template.
     check("nfn23", msg(function () { var g = xs[3]; return g`x` }) === "true|true|g is not a function")
 
-    // `new` on something that is not a constructor - the same abort, node's other
-    // wording, and previously THREE different messages across the engines.
+    // `new` on something that is not a constructor - node's other wording.
     check("nfn24", msg(function () { return new n() }) === "true|true|n is not a constructor")
     check("nfn25", msg(function () { return new o.nope() }) === "true|true|o.nope is not a constructor")
     check("nfn26", msg(function () { return new o() }) === "true|true|o is not a constructor")
@@ -153,7 +137,7 @@ function s44() {
     check("nfn30", r === "re:xs[1] is not a function")
 
     // A call in the MIDDLE of an assignment target, which is its own walk in every
-    // engine and aborted in all three ("call of a non function value: 5").
+    // engine.
     check("nfn31", msg(function () { n().x = 1 }) === "true|true|n is not a function")
     check("nfn32", msg(function () { o.sub.f().y = 1 }) === "true|true|o.sub.f is not a function")
     // super.m() with nothing on the __super chain: node has no source text for a
@@ -164,15 +148,12 @@ function s44() {
 }
 
 // ===== SECTION 45: the top-level 'this' is the global object (the Script goal) =====
-// docs/todo.md 1.4. These grammars parse the SCRIPT goal symbol - the Annex B
-// HTML-like comments are accepted (B.1.3 admits them in a Script only), the code
-// is sloppy unless a "use strict" directive says otherwise, and top-level `return`
-// is a syntax error, which rules out the CommonJS wrapper node's `--check` puts
-// around a file. So the top-level `this` is the GLOBAL OBJECT, and every value
-// below is `node -e 'vm.runInThisContext(src)'`'s, except where a comment says
-// otherwise. It used to be bound nowhere at all in the interpreter half (a bare
-// top-level `this` raised "ReferenceError: this is not defined") and to undefined
-// in the compiler half: a live halves divergence no test program reached.
+// These grammars parse the SCRIPT goal symbol - the Annex B HTML-like comments are
+// accepted (B.1.3 admits them in a Script only), the code is sloppy unless a
+// "use strict" directive says otherwise, and top-level `return` is a syntax error,
+// which rules out the CommonJS wrapper node's `--check` puts around a file. So the
+// top-level `this` is the GLOBAL OBJECT, and every value below is
+// `node -e 'vm.runInThisContext(src)'`'s, except where a comment says otherwise.
 var s45this = this
 var s45arrow = () => this
 var s45nested = () => (() => this)()
@@ -211,8 +192,7 @@ function s45() {
     // same reason: nothing in the value model marks this object as the global one.
     check("gthis10", ("" + s45this) === "[object Object]")
 
-    // A STATIC method's `this` is the class. The compiler half declared no `this`
-    // in a static method at all, so this used to answer the top-level binding.
+    // A STATIC method's `this` is the class.
     check("gthis11", S45C.who() === S45C)
     check("gthis12", S45C.viaThis() === "S45")
     check("gthis13", typeof S45C.who() === "function")
@@ -224,9 +204,7 @@ function s45() {
     check("gthis15", lit.m() === "L")
 
     // OrdinaryCallBindThis (ES2023 10.2.1.2), the per-function STRICT-MODE flag.
-    // Every value below is `new vm.Script(src)`'s. Until docs/todo.md 1.1 these
-    // engines behaved as a STRICT function does at every one of them, because no
-    // engine carried a per-function strict flag at all.
+    // Every value below is `new vm.Script(src)`'s.
     check("gthis16", s45plain() === globalThis)
     check("gthis18", s45plain.call(null) === globalThis)
     check("gthis19", s45plain.call(undefined) === globalThis)
@@ -256,28 +234,23 @@ function s45() {
     // under llvm.Run - and NOT in the native build, which is why there is no
     // assertion here. `js_this` is one global slot in layer 2, and the emitter arms
     // it with the RECEIVER of the `g.next()` call, so a generator body reads the
-    // generator object instead of the receiver its function was called with. That
-    // predates docs/todo.md 1.1 (measured at 455ce39: the interpreter and llvm.Run
-    // answer undefined, the native binary answers the generator object) and closing
-    // it needs a per-coroutine `this` in the C floor's control block, not a
-    // strictness flag. Recorded rather than asserted, since clang-check and
-    // native-full run this file natively.
+    // generator object instead of the receiver its function was called with.
+    // Closing it needs a per-coroutine `this` in the C floor's control block.
+    // Recorded rather than asserted, since clang-check and native-full run this file
+    // natively.
     // Not asserted: a sloppy body boxes a primitive receiver (s45plain.call(7) is a
     // Number object in node), and this value model has no wrapper objects.
     var detached = lit.m
     check("gthis17", typeof detached === "function")
 }
 
-// ===== SECTION 46: parentheses do not drop the receiver (docs/todo.md 2.13) =====
+// ===== SECTION 46: parentheses do not drop the receiver =====
 // `(o.m)()` calls m with `this` === o. A parenthesized expression evaluates to whatever
 // the inner expression evaluates to, and a MemberExpression evaluates to a REFERENCE,
 // which carries its base - so the parentheses are transparent to the receiver exactly
 // as they are to an assignment target ((a.b).c = 1 has always assigned where a.b.c = 1
-// does). All four engines used to hand the GLOBAL object over instead: a
-// both-halves-agree-and-both-are-wrong defect that the matrix and --cross cannot see by
-// construction, and only node could settle. 14 of the rows below fail at ec39aef in the
-// interpreter half and 13 in the other two, and `(arr.push)(x);` as a STATEMENT aborted
-// the interpreter half outright.
+// does). The matrix and --cross cannot see a both-halves-agree defect here, so every
+// row is node's answer.
 //
 // The negative rows are the point of the section as much as the positive ones. Only a
 // parenthesized MemberExpression is a Reference: `(0, o.m)()` is the IDIOM for calling a
@@ -322,7 +295,7 @@ function s46() {
     var w = {nm: "w", g: function () { return {nm: "inner", h: function () { return s46tag(this) }} }};
     check("paren11", (w.g().h)() === "inner");
     check("paren12", (w.g)().nm === "inner");
-    // As a STATEMENT, not only in an expression: this line aborted the interpreter half.
+    // As a STATEMENT, not only in an expression.
     var arr = [s46a[2]];
     (arr.push)(s46a[3]);
     check("paren13", arr.length === 2 && arr[1] === 2);
@@ -350,19 +323,17 @@ function s46() {
     })() === "o.nope is not a function");
 }
 
-// ===== SECTION 47: a class's STATIC and INSTANCE namespaces (docs/todo.md 2.13) =====
+// ===== SECTION 47: a class's STATIC and INSTANCE namespaces =====
 // `class C { static m(){} m(){} }` is TWO members in JavaScript - one on the
-// constructor and one on the prototype - and this engine kept both in the descriptor's
-// own property map, where the second write simply won. So `C.m()` answered the INSTANCE
-// method, `class F extends E {}` resolved an inherited static to F's instance member,
-// and an instance could see every static (`typeof c.sonly` was "function" where node
-// says "undefined"). Every static member now lives in a separate `__statics` table on
-// the descriptor; instance members did not move, which is what keeps the shared js_get /
-// js_set / js_mcall - and therefore the other fifteen languages - untouched.
+// constructor and one on the prototype - so `C.m()` must answer the STATIC method,
+// `class F extends E {}` must resolve an inherited static to E's static, and an
+// instance must not see a static (`typeof c.sonly` is "undefined" in node). Every
+// static member lives in a separate `__statics` table on the descriptor; instance
+// members stay in the descriptor, which is what keeps the shared js_get / js_set /
+// js_mcall - and therefore the other fifteen languages - untouched.
 //
-// 11 of the 18 rows below fail at ec39aef, in all three legs. Every value is
-// `new vm.Script(src)`'s, and every operand comes out of s47a so the constant folder
-// cannot answer any of it.
+// Every value is `new vm.Script(src)`'s, and every operand comes out of s47a so the
+// constant folder cannot answer any of it.
 var s47a = [1, 2, 3, "m", "who"];
 class S47C {
     static m() { return "S-m" }
@@ -407,7 +378,7 @@ function s47() {
     // `this.n()` inside a static resolves on the static side.
     check("stat10", S47H.viaThis() === "H-S-n" && (new S47H()).n() === "H-I-n");
     check("stat11", (s47a[3] in S47C) === true && ("ionly" in S47C) === false);
-    // Every class object has a `name`, and it is the class's own (docs/todo.md 2.13).
+    // Every class object has a `name`, and it is the class's own.
     check("stat12", S47C.name === "S47C" && S47F.name === "S47F");
     S47C.zz = s47a[2];
     check("stat13", S47C.zz === 3 && (new S47C()).zz === undefined);
@@ -425,19 +396,15 @@ function s47() {
 }
 
 // ===== SECTION 48: a class object's OWN KEYS, e.constructor, and a method value's
-//       OVERRIDABLE receiver (docs/todo.md 2.10) =====
-// Three holes in the object model, all of them agreed-and-wrong or wrong in two
-// different ways, and none of them asserted anywhere before:
+//       OVERRIDABLE receiver =====
 //
-//   Object.keys(<class>)  node lists the static FIELDS. This engine listed nothing
-//                         (interpreter: a descriptor has no __keys) or the INSTANCE
-//                         methods (compiler: js_keys reads the descriptor's own map).
-//                         A static method, a static accessor and a private static are
-//                         not enumerable; a runtime `C.zz = 1` is.
-//   e.constructor         undefined in all four engines; node hands back the class,
-//                         and the FUNCTION itself for `new F()`.
+//   Object.keys(<class>)  node lists the static FIELDS. A static method, a static
+//                         accessor and a private static are not enumerable; a
+//                         runtime `C.zz = 1` is.
+//   e.constructor         node hands back the class, and the FUNCTION itself for
+//                         `new F()`.
 //   f.call(x)             a method read AS A VALUE - `const f = o.m`, `super.m` -
-//                         kept the receiver the READ was made with and ignored x.
+//                         runs on x, not on the receiver the READ was made with.
 //
 // Every operand comes out of s48a so the constant folder cannot answer any of it.
 var s48a = [1, "two", 3, "m", "who", "constructor"];
@@ -497,27 +464,19 @@ function s48() {
 }
 
 // ===== SECTION 49: the PRIVATE-NAME model, and for-in over what is not a plain
-//       object (docs/todo.md 2.4) =====
-// Two defects with one root, and one plain abort on ordinary code.
+//       object =====
 //
-//   THE PRIVATE NAME. Both compiled halves store `#x` under the mangled key '__#x',
-//   which the engine's __-slot rule already hides; the interpreters filed it under
-//   its own '#x' spelling. So `Object.keys(p)` answered "#x|y" in the interpreters
-//   and "y" in the compilers and in node, AND `o["#x"] = 1` and a private `#x` were
-//   the SAME slot in the interpreters and two different slots in the compilers.
-//   The interpreters mangle now. The compilers were wrong in a second place: every
-//   __-name is skipped by the static-side test, so `C.#s` - a static private - read
-//   undefined in both of them while both interpreters answered. The mangled private
-//   spelling is the one exception now, in all four engines.
+//   THE PRIVATE NAME. `#x` is stored under the mangled key '__#x' in all four
+//   engines, which the engine's __-slot rule already hides: `Object.keys(p)` is "y"
+//   as in node, and `o["#x"] = 1` and a private `#x` are two different slots. Every
+//   __-name is skipped by the static-side test, so the mangled private spelling is
+//   the one exception there (`C.#s`, a static private, must read).
 //
-//   for (k in [7,8])  aborted BOTH compiled halves with "js_keys: not an object
-//   (got object)" and answered nothing at all in the interpreters. node yields the
-//   INDICES as strings. A string enumerates the same way; null, undefined and a
-//   primitive enumerate nothing rather than raising. `{...[7,8]}` took the same
-//   abort, through the same call.
+//   for (k in [7,8])  yields the INDICES as strings, as in node. A string enumerates
+//   the same way; null, undefined and a primitive enumerate nothing rather than
+//   raising. `{...[7,8]}` goes through the same call.
 //
-//   #x in o - ES2022's ergonomic brand check - existed in the typescript
-//   INTERPRETER alone. All four engines parse and answer it now.
+//   #x in o - ES2022's ergonomic brand check.
 //
 // Every operand comes out of s49a so the constant folder cannot answer any of it.
 var s49a = [0, 1, 2, "#x", "ab", 4];
@@ -544,8 +503,8 @@ function s49() {
     check("priv03", fi === "y,")
     // It is still readable and writable from inside the class body.
     check("priv04", p.val === 1 && p.run(s49a[5]) === 5 && p.val === 5)
-    // A STATIC private is reachable - this is what the __-slot skip broke in both
-    // compiled halves - and it is not an own key of the class object either.
+    // A STATIC private is reachable, and it is not an own key of the class object
+    // either.
     check("priv05", S49P.gets() === 4 && S49P.bumps() === 5 && S49P.gets() === 5)
     check("priv06", Object.keys(S49P).join("|") === "")
     // '#x' AS AN ORDINARY STRING KEY is a DIFFERENT SLOT from the private #x: the
@@ -586,7 +545,7 @@ function s49() {
     var bb = ""
     for (var b in arr) { if (b === "1") { break } bb = bb + b }
     check("fin06", bb === "0")
-    // The same call is what object spread makes, so it took the same abort.
+    // The same call is what object spread makes.
     var sa = { ...arr }
     check("fin07", Object.keys(sa).join("|") === "0|1|2" && sa[s49a[1]] === 4)
     var ss = { ...s49a[4] }
@@ -595,29 +554,23 @@ function s49() {
 }
 
 // ===== SECTION 50: for-in is a SNAPSHOT, a private name is per CLASS BODY, and a
-//       FUNCTION carries own properties (docs/todo.md 2.10) =====
-// Three defects every engine here AGREED on, so byte-identity could not see any of
-// them; node is the only witness. Each row below was measured against node v24.
+//       FUNCTION carries own properties =====
+// Three things every engine here could agree on wrongly, so byte-identity could not
+// see them; node is the only witness. Each row below was checked against node v24.
 //
 //   DELETING A KEY DURING for-in. js_jskeys / jsKeys answer a SNAPSHOT, so a key the
-//   body deleted before its turn came was still visited: `for (k in o) { s += k;
-//   delete o.c }` gave "abc" where node gives "ab". The compilers guard each
-//   iteration with js_jshas and the interpreters with propIn - both or neither, since
-//   one alone would be a halves divergence.
+//   body deleted before its turn came must be skipped: `for (k in o) { s += k;
+//   delete o.c }` gives "ab" in node. The compilers guard each iteration with
+//   js_jshas and the interpreters with propIn.
 //
 //   THE SAME PRIVATE NAME IN A SUBCLASS. `class A { #v } class B extends A { #v }` is
-//   TWO names in JavaScript and was ONE slot here, because the mangled key was per
-//   NAME ('__#v'). B's field initializer therefore overwrote A's, and A's own getter
-//   answered B's value. The key carries the CLASS BODY now ('__#<body>#v'), resolved
-//   to the innermost enclosing body that declares the name - so an inner class reading
-//   an outer class's private name still reaches it.
+//   TWO names in JavaScript, so the key carries the CLASS BODY ('__#<body>#v'),
+//   resolved to the innermost enclosing body that declares the name - so an inner
+//   class reading an outer class's private name still reaches it.
 //
-//   AN OWN PROPERTY ON A FUNCTION. `f.p = 1` killed both compiled halves outright
-//   ("cannot set field 'p' on *abnf.jsClosure" / "member assignment 'p' on
-//   [function]") and, in the INTERPRETERS, worked under goja and died under -frozen -
-//   a live goja-vs--frozen divergence no test reached. The map lives beside the
-//   function in a side table in all four engines now, and for-in, Object.keys,
-//   `in`, hasOwnProperty and delete all read it.
+//   AN OWN PROPERTY ON A FUNCTION. `f.p = 1`: the map lives beside the function in a
+//   side table in all four engines, and for-in, Object.keys, `in`, hasOwnProperty
+//   and delete all read it.
 //
 // Every operand comes out of s50a so the constant folder cannot answer any of it.
 var s50a = [0, 1, 2, 3, "a", "b", "c", "d"];
@@ -729,12 +682,8 @@ function s50() {
     check("fnp09", ("u" in s50fn) === true && Object.keys(s50fn).join("|") === "q|m|u")
 
     // ----- a FUNCTION's Object.prototype SURFACE, as methods -----
-    // These were a goja-vs--frozen divergence that PREDATES the side table: under goja
-    // a host function carries a real prototype chain and answered all four, while the
-    // frozen interpreter and both compiled halves died with "f.toString is not a
-    // function". The side table then made hasOwnProperty WORSE on the goja leg - it had
-    // answered true off goja's own expando and went to false once the property moved
-    // beside the function. All four are answered by this engine now, in all four legs.
+    // All four are answered by this engine, in all four legs (the host's own
+    // prototype chain exists under goja only).
     check("fnp10", s50fn.hasOwnProperty("q") === true && s50fn.hasOwnProperty(s50a[4]) === false)
     check("fnp11", s50fn.propertyIsEnumerable("q") === true && s50fn.propertyIsEnumerable(s50a[4]) === false)
     // toString agrees with String(f), which is the one spelling every leg already had;
@@ -748,8 +697,7 @@ function s50() {
     // A function with NO own properties answers false rather than throwing.
     check("fnp15", s50.hasOwnProperty("q") === false && s50.propertyIsEnumerable("q") === false)
     // The VALUES, not just the keys: Object.values / entries / assign / spread read a
-    // function's own properties through a different path from for-in, and each one of
-    // them answered the right keys with undefined values on at least one leg.
+    // function's own properties through a different path from for-in.
     var s50v = Object.values(s50fn)
     var s50e = Object.entries(s50fn)
     check("fnp16", s50v.length === 3 && s50v[0] === 2 && typeof s50v[1] === "function" && s50v[2] === undefined)
@@ -757,11 +705,10 @@ function s50() {
     check("fnp17", Object.assign({}, s50fn).q === 2 && ({ ...s50fn }).q === 2)
 }
 
-// ===== SECTION 51: a function's own `name`, `length` and SELF NAME (docs/todo.md 1.4) =====
-// Every function has two own properties nothing in the program writes. This half
-// answered ""/0 for both and BOTH COMPILED HALVES answered `undefined`, so the pair
-// was a halves divergence as well as a wrong answer; node says `f`/1 for
-// `function f(a){}`. Every value below was read off node 24 before it was asserted.
+// ===== SECTION 51: a function's own `name`, `length` and SELF NAME =====
+// Every function has two own properties nothing in the program writes; node says
+// `f`/1 for `function f(a){}`. Every value below was read off node 24 before it was
+// asserted.
 //
 // `length` is the parameters BEFORE the first default and before the rest parameter,
 // and a destructuring pattern counts as ONE - which is why fn9 is 3 and not 4.
@@ -869,11 +816,9 @@ function s51() {
     check("fnm35", fnLoop[0].name === "looped" && fnLoop[299].length === 2 && fnLoop[150] !== fnLoop[151])
     check("fnm36", fnLoopB.name === "bound looped" && fnLoopB.length === 1 && fnLoopB(2) === 3 && fnLoop[150].name === "looped")
     // ----- a named function EXPRESSION sees its OWN NAME (ES2023 15.2.5) -----
-    // The optional name was accepted and dropped, so this whole group answered
-    // *ReferenceError* in all four engines. The spec's funcEnv - one scope, one binding
-    // of the name to the function object, between the definition site and the function's
-    // own scope - is what all nine rows below come out of; every value was read off
-    // node 24 first.
+    // The spec's funcEnv - one scope, one binding of the name to the function object,
+    // between the definition site and the function's own scope - is what all nine rows
+    // below come out of; every value was read off node 24 first.
     var s51fact = function fact(n) { return n < 2 ? 1 : n * fact(n - 1) }
     check("fns01", s51fact(5) === 120)
     // The name does NOT leak into the enclosing scope.
@@ -899,8 +844,7 @@ function s51() {
     check("fns08", s51nest() === "function")
     // A generator function EXPRESSION binds its own name too, which is what lets it
     // delegate to itself. Driven by next() rather than by spread: spreading a generator
-    // answers an empty array in both halves, which is older than this section and is
-    // recorded as its own gap.
+    // answers an empty array in both halves (a separate gap).
     var s51gen = function* gen51(n) { yield n; if (n > 0) { yield* gen51(n - 1) } }
     var s51out = ""
     var s51it = s51gen(2)
@@ -921,25 +865,22 @@ function s51decl(n) { return n < 2 ? 1 : n * s51decl(n - 1) }
 
 // ===== SECTION 52: UNICODE IDENTIFIERS - the real ID_Start / ID_Continue tables =====
 // Every name below is legal JavaScript and node runs this section unchanged. The point is
-// that the two js grammars now decide with node's own ID_Start / ID_Continue tables
+// that the two js grammars decide with node's own ID_Start / ID_Continue tables
 // (lib/ident-unicode.abnf) instead of a range approximation, so the names are chosen out
-// of the code points where that approximation was wrong in BOTH directions:
-//   - U+FF41, a fullwidth 'a', is ID_Start. The interpreter's ranges stopped at U+FEFE
-//     and REFUSED it while the compiler's ran from U+FF21 and accepted it - a live halves
-//     divergence that --cross never reached, because no program had ever used one.
+// of the code points where an approximation goes wrong in either direction:
+//   - U+FF41, a fullwidth 'a', is ID_Start.
 //   - U+00B7, U+200C and U+203F are ID_Continue and NOT ID_Start: node parses
-//     'var a<U+00B7>b' and refuses 'var <U+00B7>b', and so do we now.
+//     'var a<U+00B7>b' and refuses 'var <U+00B7>b', and so do we.
 //   - U+2176 is a roman numeral (Nl) and IS ID_Start; U+1D7CB is a mathematical digit
 //     (Nd) and is ID_Continue only, so it may not lead a name.
-// No ESCAPED spelling is asserted here, and that is a finding rather than an omission:
-// a \u escape in a name is judged by the same guard as the raw character, but only the
-// COMPILER halves resolve it back to the name it spells (idName). 'var \u0061 = 1' binds
-// 'a' in js-to-llvm-ir and binds the literal text '\u0061' in js-interpreter, so
-// 'print(a)' prints 1 in one half and throws ReferenceError in the other. It predates
-// this section in both halves and it is ~30 'up.in' sites per interpreter grammar to fix,
-// which is why it is written down instead of bolted on here. The other half of that
-// guard - '\u002a' being an asterisk and no identifier however it is spelled - is a PARSE
-// error and so only the corpus (test262 fail/) can hold it.
+// No ESCAPED spelling is asserted here: a \u escape in a name is judged by the same
+// guard as the raw character, but only the COMPILER halves resolve it back to the name
+// it spells (idName). 'var \u0061 = 1' binds 'a' in js-to-llvm-ir and binds the literal
+// text '\u0061' in js-interpreter, so 'print(a)' prints 1 in one half and throws
+// ReferenceError in the other (fixing it touches every 'up.in' site of the interpreter
+// grammars). The other half of that guard - '\u002a' being an asterisk and no
+// identifier however it is spelled - is a PARSE error and so only the corpus (test262
+// fail/) can hold it.
 function s52() {
     var ａ = 11
     check("uni01", ａ === 11)
