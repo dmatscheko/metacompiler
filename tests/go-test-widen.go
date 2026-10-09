@@ -2,19 +2,14 @@
 
 // Go subset widening test.
 //
-// EVERY construct here is genuinely implemented now, in both grammars: the type
-// assertion x.(T), the type switch, the interface declaration (a no-op, since the value
-// model is dynamic and satisfaction is therefore implicit), the goroutine, the channel
-// make/send/receive, and the select. `go work(5)` really runs, so tally reaches 6 via a
-// genuine goroutine rather than via a warned no-op.
+// EVERY construct here is implemented in both grammars: the type assertion x.(T), the
+// type switch, the interface declaration (satisfaction is structural), the goroutine,
+// the channel make/send/receive, and the select. `go work(5)` really runs, so tally
+// reaches 6 via a genuine goroutine.
 //
 // The file runs to os.Exit(fails) with fails == 0, with or without -warn-unsupported,
-// and a run with the flag reports no unsupported construct at all.
-//
-// History: this was a by-design SHOULD-FAIL guard, because a flagless run aborted at the
-// first not-implemented construct (the Stringer interface). The full-syntax work
-// implemented all of them - concurrency last - which removed the guard's premise, so the
-// matrix entry became an ordinary one. Do not re-arm it.
+// and a run with the flag reports no unsupported construct at all. It is an ordinary
+// matrix entry, not a SHOULD-FAIL guard.
 
 package main
 
@@ -32,7 +27,7 @@ func check(name string, got int, want int) {
 	}
 }
 
-// Accepted, reported not implemented: an interface type declaration.
+// An interface type declaration.
 type Stringer interface {
 	String() string
 }
@@ -53,8 +48,7 @@ func main() {
 	check("assert direct", a.(int), 7)
 	check("assert in expr", a.(int)+3, 10)
 
-	// Accepted + not implemented; under -warn-unsupported these warn and their
-	// operands run (the goroutine callee below bumps tally to 5).
+	// The goroutine callee bumps tally to 5.
 	go work(5)
 
 	ch := make(chan int)
@@ -75,11 +69,8 @@ func main() {
 		tally += 2
 	}
 
-	// The goroutine callee ran (its call is visible) and the TYPE SWITCH is
-	// genuinely implemented now, so its 'case int' arm adds 1: 5 + 1 = 6. The
-	// channel and select bodies are still no-ops under -warn-unsupported.
-	// (This expected 5 while the type switch was merely recognised; that is the
-	// kind of assertion that has to move as the subset grows, not be defended.)
+	// The goroutine callee ran and the TYPE SWITCH's 'case int' arm adds 1:
+	// 5 + 1 = 6.
 	check("goroutine callee ran", tally, 6)
 
 	if fails == 0 {

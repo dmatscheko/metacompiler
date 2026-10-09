@@ -1,22 +1,16 @@
 //go:build ignore
 
-// Go subset RECOGNITION test - the second widening round.
+// Go subset RECOGNITION test.
 //
-// An earlier pass (see go-test-widen.go) covered goroutines, channels, select, type
-// switches and type assertions. This file exercises the constructs added by the second
-// round: they all newly PARSE. The ones that cannot be lowered are ACCEPTED and routed
-// to notImplemented, so WITHOUT a flag the compile stops at the first of them (the
-// grouped const block) with a clean file:line message - this file SHOULD FAIL by
-// default. WITH -warn-unsupported every not-implemented construct warns and the rest
-// runs, so main() reaches os.Exit(fails) with fails == 0.
+// Exercises declaration and literal forms beyond go-test-widen.go: grouped var and
+// const blocks, a grouped type block, every literal spelling, pointer, array and
+// variadic parameter types, slice expressions, keyed / empty / nested composite
+// literals and fallthrough. Only the grouped type block is still ACCEPTED and routed to
+// notImplemented, so WITHOUT a flag the compile stops there with a clean file:line
+// message - this file SHOULD FAIL by default. WITH -warn-unsupported that construct
+// warns and the rest runs, so main() reaches os.Exit(fails) with fails == 0.
 //
-// GENUINELY handled and checked below: grouped var, single const, nil, float / hex /
-// octal / binary / underscored-decimal / rune / raw-string literals, pointer types with
-// & and * as the identity, and array / variadic parameter types.
-//
-// Accepted + not implemented (present for recognition; their results are discarded, so
-// they never affect fails): a grouped const block, a grouped type block, slice
-// expressions, keyed / empty / nested composite literals, and fallthrough.
+// The constructs after the "results discarded" marker in main() are not asserted.
 
 package main
 
@@ -43,8 +37,7 @@ var (
 // A single const bound like a var (GENUINE).
 const limit = 7
 
-// A grouped const block: accepted, reported not implemented (iota and bit shifts are
-// not modeled, so kilo/mega are NOT bound - they are never read below).
+// A grouped const block (kilo/mega are never read below).
 const (
 	kilo = 1 << 10
 	mega = 1 << 20
@@ -66,8 +59,7 @@ type Node struct {
 // A pointer parameter, read through as the identity (structs behave like references).
 func headVal(p *Node) int { return p.val }
 
-// A variadic parameter type parses (its slice-collection semantics are not modeled, so
-// the call result is not asserted).
+// A variadic parameter type (the call result is not asserted).
 func announce(msg string, ns ...int) { _ = msg }
 
 func main() {
@@ -86,7 +78,7 @@ func main() {
 	check("grouped var", base+factor, 30)
 	check("const limit", limit, 7)
 
-	// Pointer type with address-of / dereference as the identity, and nil (GENUINE).
+	// Pointer type with address-of / dereference, and nil (GENUINE).
 	n := 42
 	p := &n
 	check("deref identity", *p, 42)
@@ -109,8 +101,7 @@ func main() {
 	_ = buf
 	announce("hi", 1, 2, 3)
 
-	// --- Accepted + not implemented below; under -warn-unsupported these warn and
-	// their results are discarded, so fails stays 0. ---
+	// --- Results discarded below: these only have to parse and run. ---
 
 	// Slice expressions (three forms and the three-index form).
 	s := []int{1, 2, 3, 4}

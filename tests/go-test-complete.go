@@ -2,10 +2,9 @@
 
 // Go subset completion self test.
 //
-// Exercises the range forms and receiver forms this pass completed:
-//   - for i, ch := range s  over a STRING: i is the index, ch is the i-th
-//     one-character substring (this subset yields the character, deterministic
-//     across the interpreter and the compiler).
+// Exercises the range forms and receiver forms:
+//   - for i, ch := range s  over a STRING: i is the byte offset, ch the rune
+//     (string(ch) rebuilds the text).
 //   - for _, ch := range s  the blank index form over a string.
 //   - for i := range slice  the single-variable (index only) range over a slice.
 //   - for i, v := range slice  the index+element form.
@@ -61,7 +60,7 @@ func (r Rect) dims() (int, int) { return r.w, r.h }
 func (r Rect) area() int        { return r.w * r.h }
 
 func main() {
-	// --- range over a string: index + one-character substring ---
+	// --- range over a string: byte offset + rune ---
 	rebuilt := ""
 	isum := 0
 	n := 0

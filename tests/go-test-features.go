@@ -1,13 +1,12 @@
 //go:build ignore
 
 // Fast feature-matrix test for the Go interpreter (go-interpreter.abnf) and the
-// LLVM-IR compiler (go-to-llvm-ir.abnf). It replaces the four algorithm-themed
-// go-test-big-* stress tests: instead of large loops (Ackermann, sieves, RPN
-// calculators) every implemented construct is exercised with the SMALLEST program
-// that can prove it works - loops run 0, 1, 3 or 4 times, recursion stays below
-// depth 6. A failed check prints "FAIL <id>" (so a diff pinpoints it) and main()
-// ends with os.Exit(fails); exit 0 and byte-identical output on all four legs
-// (interpreter/compiler x goja/-frozen) mean everything passed.
+// LLVM-IR compiler (go-to-llvm-ir.abnf). Every implemented construct is exercised
+// with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+// recursion stays below depth 6. A failed check prints "FAIL <id>" (so a diff
+// pinpoints it) and main() ends with os.Exit(fails); exit 0 and byte-identical
+// output on all four legs (interpreter/compiler x goja/-frozen) mean everything
+// passed.
 
 package main
 
@@ -227,7 +226,7 @@ func main() {
 	check("num-rune", 'A' == 65)
 	check("num-rune-escape", '\n' == 10)
 
-	// float literals compare as numbers (arithmetic is integer-only in the subset)
+	// float literals compare as numbers
 	pi := 3.5
 	check("float-compare", pi > 3.0 && pi < 4.0 && pi == 3.5)
 
@@ -248,10 +247,9 @@ func main() {
 	check("const", limit == 7)
 
 	// A two-name multi-assign whose first element is an INDEX, a map index or a
-	// type assertion. Each of those also starts a comma-ok form, and the
-	// comma-ok rules used to match just that first element and leave the
-	// statement stranded at the comma. Operands come out of containers so the
-	// constant folder cannot answer for them.
+	// type assertion. Each of those also starts a comma-ok form, which must not
+	// match just that first element and strand the statement at the comma.
+	// Operands come out of containers so the constant folder cannot answer for them.
 	zxs := []int{10, 20, 30}
 	zmp := map[string]int{"k": 7}
 	var ziv interface{} = 11
@@ -284,10 +282,8 @@ func main() {
 	raw := `a\nb`
 	check("str-raw", len(raw) == 4)
 
-	// range over a string yields (byte offset, rune) - NOT (index, one-char
-	// string). This block used to assert the latter, and len("héllo") == 5,
-	// which is not Go: the range variable is an int32 and len counts BYTES, so
-	// the é makes it 6. Verified against the real toolchain before fixing.
+	// range over a string yields (byte offset, rune), and len counts BYTES:
+	// the range variable is an int32 and the é makes len("héllo") 6.
 	rebuilt := ""
 	isum := 0
 	for j, ch := range "abc" {
@@ -547,9 +543,7 @@ func main() {
 	check("ptr-struct-param", headVal(&nd) == 5)
 
 	// ----- type assertion needs an interface -----
-	// This used to be 'av := 7' plus 'av.(int)', described as "the identity".
-	// Go rejects that outright: a type assertion is only legal on an interface
-	// value, and go vet says so. The assertion is genuine now.
+	// Go only allows a type assertion on an interface value.
 	var av interface{} = 7
 	check("type-assert", av.(int) == 7 && av.(int)+3 == 10)
 

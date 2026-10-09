@@ -149,10 +149,8 @@ func s05() {
 	check("dec6", keep == 2 && m == 4 && more == 5)
 	// A TWO-name multi-assign whose first element is an index, a map index, a
 	// type assertion or a channel receive: each of those is also the prefix of a
-	// comma-ok form, and the comma-ok rules used to swallow it and reject the
-	// statement at the comma. Every operand comes out of a container so nothing
-	// folds. Three names never hit it, and neither did a first element that
-	// could not start a comma-ok form.
+	// comma-ok form, which must not swallow it and reject the statement at the
+	// comma. Every operand comes out of a container so nothing folds.
 	xs05 := []int{10, 20, 30}
 	ys05 := []int{40, 50, 60}
 	mp05 := map[string]int{"k": 7}
@@ -183,9 +181,9 @@ func s05() {
 	ch05 <- 15
 	rv, rok := <-ch05
 	check("dec16", rv == 15 && rok)
-	// The comma-ok base is a whole postfix expression, not a bare name. A base
-	// carrying a suffix used to fall through to a two-name destructure of the
-	// single value, which is a SILENT wrong answer (<nil> <nil>), or not to parse.
+	// The comma-ok base is a whole postfix expression, not a bare name; a base
+	// carrying a suffix must not fall through to a two-name destructure of the
+	// single value (<nil> <nil>).
 	nst05 := map[string]map[string]int{}
 	nst05["o"] = mp05
 	n1, n2 := nst05["o"]["k"]
@@ -207,10 +205,8 @@ func s05() {
 	check("dec21", n9 == 31 && n10)
 	n11, n12 := ivs05[1].(int) // a failed assertion is the zero value, not a panic
 	check("dec22", n11 == 0 && !n12)
-	// The '=' spelling of comma-ok assigns to variables that already exist. The map
-	// form did not parse in either half (it fell through to a two-name destructure
-	// of one value, i.e. <nil> <nil>), and the assertion form declared a SHADOW
-	// instead of assigning - both silent.
+	// The '=' spelling of comma-ok assigns to variables that already exist: it must
+	// neither destructure one value nor declare a SHADOW.
 	var e1 int
 	var e2 bool
 	e1, e2 = mp05["k"]
@@ -228,10 +224,8 @@ func s05() {
 	check("dec26", e1 == 7 && e2 && e3 == 0 && !e4)
 	// A MISSING OUTER KEY YIELDS A NIL MAP, and a nil map READS like an empty one:
 	// it indexes to the zero value, has length 0, ranges over nothing and prints
-	// map[]. Both halves used to reject this outright ("the comma ok form needs a
-	// map" / "indexing a object") because the zero value of a map type was the null
-	// value; it is now a MARKED empty map, which keeps `== nil` true and keeps a
-	// STORE a panic. docs/todo.md 1.9.
+	// map[]. The zero value of a map type is a MARKED empty map, which keeps
+	// `== nil` true and keeps a STORE a panic.
 	n13, n14 := nst05["absent"]["k"]
 	check("dec27", n13 == 0 && !n14)
 	check("dec28", nst05["absent"]["k"] == 0 && len(nst05["absent"]) == 0)
@@ -240,19 +234,15 @@ func s05() {
 	nv05, nok05 := nilm05["k"]
 	check("dec30", nv05 == 0 && !nok05)
 	cnt05 := 0
-	// `for range m` with NO variables at all does not parse in the compiler half
-	// (it reads `for` as a variable and dies with `variable not defined: for`) -
-	// pre-existing, unrelated to the nil map, and stated here because this is where
-	// it was met. The one-variable form is the one both halves take.
+	// The one-variable range over a nil map.
 	for k05 := range nilm05 {
 		_ = k05
 		cnt05++
 	}
 	check("dec31", cnt05 == 0 && fmt.Sprint(nilm05) == "map[]")
-	// A for-INIT may be a comma-ok form. The interpreter said `unknown name: v`:
-	// only a ':=' recorded the names a Go 1.22 loop gives a per-iteration copy of,
-	// so the init inherited the last ':=' ANYWHERE EARLIER and the loop frame was
-	// rebuilt around those instead. The closure below is what per-iteration means.
+	// A for-INIT may be a comma-ok form, and it records its names for the Go 1.22
+	// per-iteration copy like a ':=' does. The closure below is what per-iteration
+	// means.
 	fs05 := []func() int{}
 	for fv05, fok05 := mp05["k"]; fok05; fok05 = false {
 		fs05 = append(fs05, func() int { return fv05 })
@@ -307,10 +297,8 @@ func s07() {
 	rows := [][]int{{1}, {2, 3}}
 	check("slc7", rows[1][1] == 3 && len(rows[0]) == 1)
 	// AN OUT OF RANGE INDEX IS A RECOVERABLE PANIC, and the bound is the LENGTH,
-	// not the backing array: `s[1:3]` has cap 4 here, and reading past its length
-	// used to answer the storage in both halves and `<nil>` (exit 0!) in the
-	// interpreter. Every index comes out of a slice so nothing folds.
-	// docs/todo.md 1.9. The message text is the engine's, not go's, in every half.
+	// not the backing array: `s[1:3]` has cap 4 here. Every index comes out of a
+	// slice so nothing folds. The message text is the engine's, not go's.
 	ix07 := []int{0, 2, 3, 7, -1}
 	check("slc8", panics07(func() { _ = s[ix07[3]] }) && panics07(func() { _ = s[ix07[4]] }))
 	check("slc9", panics07(func() { _ = sub[ix07[1]] }) && sub[ix07[0]] == 30)
@@ -320,8 +308,7 @@ func s07() {
 	str07 := []string{"abc"}
 	check("slc12", str07[0][ix07[1]] == 99 && panics07(func() { _ = str07[0][ix07[2]] }))
 	// A slice EXPRESSION is bounded by the capacity, and s[len:] is legal. Go's
-	// full rule is 0 <= lo <= hi <= max <= cap; the three-index form was unchecked
-	// in BOTH halves and built a header whose capacity was below its length.
+	// full rule is 0 <= lo <= hi <= max <= cap, the three-index form included.
 	check("slc13", len(s[ix07[2]:]) == 2 && panics07(func() { _ = s[ix07[3]:] }))
 	check("slc14", panics07(func() { _ = s[ix07[0]:ix07[2]:ix07[1]] }) &&
 		cap(s[ix07[0]:ix07[1]:ix07[2]]) == 3)
@@ -362,12 +349,9 @@ func s08() {
 	check("map5", len(made[1]) == 1 && made[1][0] == "a")
 	clear(ages) // Go 1.21 builtin
 	check("map6", len(ages) == 0)
-	// NESTED COMPOSITE LITERALS whose element type is a MAP. The compiler half
-	// rejected every one of these ("composite literal element of unsupported type")
-	// where the interpreter accepted them, and a doubly nested one then broke the
-	// interpreter instead, because both halves read a map type's VALUE text by
-	// scanning for the LAST ']' - which runs straight past the key of an inner map.
-	// docs/todo.md 1.9.
+	// NESTED COMPOSITE LITERALS whose element type is a MAP, including a doubly
+	// nested one: a map type's VALUE text has to be read by bracket depth, since
+	// the LAST ']' runs straight past the key of an inner map.
 	nst08 := map[string]map[string]int{"o": {"k": 1}, "p": {"z": 2}}
 	check("map7", nst08["o"]["k"] == 1 && nst08["p"]["z"] == 2 && len(nst08) == 2)
 	sl08 := []map[string]int{{"a": 1}, {"b": 2}}
@@ -822,13 +806,10 @@ func s22() {
 
 // ===== SECTION 23: floating point arithmetic =====
 // float64/float32 are a DIFFERENT type from int, and every value below was
-// checked against `go run` (go 1.26) before it was written down. The section
-// exists because both grammars used to evaluate every arithmetic operator in 32
-// bit integers: a/b with a = 1.0 and b = 3.0 was 0, 2.5 * 1.5 was 3, and +Inf /
-// -Inf / NaN did not exist at all. Note that the assertions run through
-// VARIABLES wherever the answer matters: Go folds untyped constants at
-// arbitrary precision, so `1.0/3.0 == 0.3333333333333333` is false in real Go
-// and would test the wrong thing.
+// checked against `go run`. The assertions run through VARIABLES wherever the
+// answer matters: Go folds untyped constants at arbitrary precision, so
+// `1.0/3.0 == 0.3333333333333333` is false in real Go and would test the wrong
+// thing.
 type point23 struct {
 	x float64
 }
@@ -882,15 +863,12 @@ func s23() {
 		sum += 0.25
 	}
 	check("flt23", sum == 1.0 && fs23(sum) == "1")
-	// DOUBLES THE SCRIPT HOST MIS-PRINTS. The interpreter half took a double's
-	// digits from `"" + a`, and goja's Number-to-String is not always the shortest
-	// ROUND-TRIPPING form (~1 in 9,000 doubles), while the frozen host's is exact -
-	// so this was three things at once: wrong against `go`, a live goja-vs-`-frozen`
-	// divergence no matrix entry reached, and unfixable from inside the dialect,
-	// since a script cannot ask its host for more digits than the printer gave. The
-	// digits now come from floPrec by ROUND-TRIP SEARCH (docs/todo.md 1.8). Every
-	// value here is one goja gets wrong, read out of a slice so nothing folds; the
-	// first is the one docs/working-on-this-project.md chapter 4 names.
+	// DOUBLES THE SCRIPT HOST MIS-PRINTS. goja's Number-to-String is not always the
+	// shortest ROUND-TRIPPING form (~1 in 9,000 doubles) while the frozen host's
+	// is exact, so the interpreter half takes a double's digits from floPrec by
+	// ROUND-TRIP SEARCH rather than from `"" + a`. Every value here is one goja
+	// gets wrong, read out of a slice so nothing folds; the first is the one
+	// docs/working-on-this-project.md chapter 4 names.
 	gm23 := []float64{
 		0.0013060363926342689,
 		-2.0313047603008369e-255,
@@ -909,15 +887,10 @@ func s23() {
 
 // ===== SECTION 24: fmt's value rendering =====
 // What fmt.Println actually writes for each kind of value. Every expected string
-// below was taken from `go run` (go 1.26.5) before it was written down. The
-// section exists because the COMPILER half used to hand the raw runtime value to
-// Go's %v - so a map printed as map[__dict:true keys:[a] vals:[1] zero:0] and a
-// struct as its class descriptor - and because both halves printed a map in
-// INSERTION order where fmt sorts the keys, and neither half honoured
-// fmt.Stringer. The assertions go through fmt.Sprint / fmt.Sprintf so they
-// compare strings.
+// below was taken from `go run`. The assertions go through fmt.Sprint /
+// fmt.Sprintf so they compare strings.
 //
-// Three renderings are deliberately NOT asserted here, because both halves
+// Two renderings are deliberately NOT asserted here, because both halves
 // knowingly differ from go (they agree with each other, which is what
 // ./test.sh --cross measures):
 //
@@ -926,10 +899,8 @@ func s23() {
 //	                                            pointer to it are one value
 //	&n (n an int)   go: 0xc00...  here: &5    - an address is not reproducible
 //
-// A nil map used to be the third: it printed <nil> where go prints map[], because
-// it was the null value in this model. Since docs/todo.md 1.9 the zero value of a
-// map type is a MARKED EMPTY MAP - so that it can also be READ like an empty one,
-// which is what go does - and it prints map[] in both halves. It is asserted below.
+// A nil map prints map[], as in go (the zero value of a map type is a MARKED
+// EMPTY MAP), and it is asserted below.
 type stringer24 struct{ n int }
 
 func (s stringer24) String() string { return "S<" + fmt.Sprint(s.n) + ">" }
@@ -1010,8 +981,7 @@ func s24() {
 	check("fmt34", fmt.Sprintf("%c|%q|%d|%d", u8b, u8b, u8b, bi) == "A|'A'|65|[42 -3]")
 	// The two BUILTINS. Real Go writes both to stderr and formats a pointer or a
 	// slice as an address; here they write to stdout and render the value, which
-	// is what makes them reproducible. Only their EXISTENCE can be asserted - the
-	// interpreter half used to abort with "unknown name: println" right here.
+	// is what makes them reproducible. Only their EXISTENCE can be asserted.
 	println("s24: builtin println", 1, true)
 	print("s24: builtin print", 2, "\n")
 }
@@ -1105,10 +1075,7 @@ func s25() {
 	check("int29", arr[2] == 9)
 	check("int30", fmt.Sprintf("%d %v", i8, u8) == "-128 0")
 
-	// AND NOT runs at the full width too. It used to be expanded in the compiler
-	// grammar as `a & (b ^ -1)` over the 32-bit bitwise pair, so every operand
-	// wider than an int32 was truncated; int31/int32 both answered 0 there while
-	// the interpreter half, which routes &^ through the sized box, was right.
+	// AND NOT runs at the full width too, not over a 32-bit bitwise pair.
 	var an int64 = 1<<40 | 7
 	var am int64 = 7
 	check("int31", fmt.Sprint(an&^am) == "1099511627776")
@@ -1119,10 +1086,8 @@ func s25() {
 	check("int33", aa == 0)
 
 	// A shift takes its result type from the LEFT operand alone - the count is a
-	// separate operand with a type of its own. Both halves used to read the width
-	// and signedness off whichever operand was boxed, so a signed value shifted by
-	// an unsigned count came back UNSIGNED and narrowed to the count's width:
-	// int34 answered 124 and int36 answered 0.
+	// separate operand with a type of its own, so a signed value shifted by an
+	// unsigned count stays signed and keeps its own width.
 	var sv int = -8
 	var sc8 uint8 = 1
 	check("int34", sv>>sc8 == -4)
@@ -1256,8 +1221,8 @@ func s26() {
 	wide.b++
 	check("slt21", wide.a == -2147483648 && wide.b == 2147483648)
 
-	// `var s T` of a struct type is a zero VALUE, not nil: writing a field of it
-	// on the very next line used to be an assignment on null.
+	// `var s T` of a struct type is a zero VALUE, not nil, so a field of it can be
+	// written on the very next line.
 	var one sized26
 	one.b = 255
 	check("slt22", one.b == 255 && one.n == 0 && len(one.xs) == 0)
@@ -1278,7 +1243,7 @@ func s26() {
 // A method may leave its receiver unnamed when the body does not use it; `type A = B`
 // declares an ALIAS (one type with two names, unlike `type A B`); a function TYPE may
 // name its parameters and results; and a declaration may carry the pre-1.0 trailing
-// semicolon. Verified against go1 (`go run`) before being pinned here.
+// semicolon. Verified against `go run`.
 type pt27 struct{ x, y int }
 type alias27 = pt27
 type ints27 = int
@@ -1323,7 +1288,7 @@ func s27() {
 // instantiation may carry several type arguments or one that is not an expression
 // (struct{}, [62]byte, map[string][]int); a conversion's target type may be
 // parenthesized; and `return` before a `case` label ends at the line break. Verified
-// against go1 (`go run`) before being pinned here.
+// against `go run`.
 type pair28[A any, B any] struct {
 	a A
 	b B
@@ -1379,8 +1344,8 @@ func s28() {
 // if/for/switch header: `if T{1} == T{2} {` is a syntax error while `if (T{1}) == (T{2}) {`
 // is legal, and so is `switch (T{1}) {`. An assignment target may likewise be
 // parenthesized - `(*p).f = v`, `(*sp)[i] = v`, `(v) = e` - which is how Go binds a
-// dereference to the field or index rather than to the whole expression. Verified against
-// go1 (`go run`) before being pinned here.
+// dereference to the field or index rather than to the whole expression. Verified
+// against `go run`.
 type pt29 struct {
 	x int
 	y int
@@ -1445,7 +1410,7 @@ func s29() {
 // declared length and zeroes the rest, and `type Q P; Q{1, 2}` is P's literal. `var l L`
 // zeroes the same way. An ARRAY is a VALUE - assigning one copies it - so &arr must be a
 // real pointer: h := &arr; h[0] = 5 is seen by arr, and len/cap/index/slice/range all
-// reach through it. Verified against go1 (`go run`) before being pinned here.
+// reach through it. Verified against `go run`.
 type ints30 []int
 type grid30 [][]int
 type quad30 [4]int
@@ -1549,8 +1514,8 @@ func s30() {
 // top-level shape (struct, defined slice/int/map, alias) is legal there. A LABEL may also
 // stand alone - `_:` at the end of a block is a labeled EMPTY statement, for which Go
 // writes no semicolon; gc rejects the same thing in front of a 'case' or 'default'
-// ("missing statement after label"), so the grammar does too. Verified against go1
-// (`go run`) before being pinned here.
+// ("missing statement after label"), so the grammar does too. Verified against
+// `go run`.
 func s31() {
 	// a type declaration in STATEMENT position, in every shape the top level has
 	type T31 struct {
@@ -1606,8 +1571,8 @@ _:
 // A conversion's target type may be spelled out in full: `[4]byte(s)`, `[3]int(a)`,
 // `map[string]int(m)`, `chan int(c)`, and it may carry the trailing comma a call may
 // carry. Converting a SLICE to an ARRAY copies (an array is a value); every other form
-// here is a RE-TYPING that keeps the same backing store, so []byte(bs) is bs. Verified
-// against go1 (`go run`) before being pinned here.
+// here is a RE-TYPING that keeps the same backing store, so []byte(bs) is bs.
+// Verified against `go run`.
 func s32() {
 	// a conversion whose target type is an ARRAY type written out. Converting a slice
 	// to an array COPIES (an array is a value), so the result does not alias the slice.
@@ -1660,7 +1625,7 @@ func s32() {
 // that must NOT fold (a written-out conversion rounds first, which is Go's rule
 // too), and cst16/cst19/cst31/cst32 are the reason a comparison of two constants
 // has to be exact as well - both sides round to the same double and Go still says
-// they are different constants. 16 of these 32 fail before the folder exists.
+// they are different constants.
 func s33() {
 	check("cst1", 0.1+0.2 == 0.3)
 	check("cst2", 0.3-0.1 == 0.2)
@@ -1788,8 +1753,8 @@ func s34() {
 	check("nc16", s34rangeVar([]int{9, 9, 9}) == 3)
 	check("nc17", s34inner())
 	check("nc18", s34switch(1) == 20.0 && s34switch(2) == 0.02)
-	// A COMPLEX constant is a PAIR of the same exact rationals, so it folds too - the
-	// unfolded path multiplied four already-rounded doubles and drifted in both parts.
+	// A COMPLEX constant is a PAIR of the same exact rationals, so it folds too
+	// (multiplying four already-rounded doubles drifts in both parts).
 	check("nc19", (0.1+0.2i)*(0.1+0.2i) == -0.03+0.04i)
 	check("nc20", c34z*c34z == -0.03+0.04i && c34z+c34w == 0.3+0.3i)
 	check("nc21", real(c34z*c34w) == 0 && imag(c34z*c34w) == 0.05 && 1+0i == 1)
@@ -1797,13 +1762,11 @@ func s34() {
 }
 
 // ===== SECTION 35: float32 is a real binary32 =====
-// A Go float32 is an IEEE-754 binary32, not a float64 spelled differently, and
-// every expected value below was read off `go run` before it was written down.
-// It used to be an alias of the float64 box, so float32(1)/float32(3) answered
-// 0.3333333333333333 and float32(1e20)*float32(1e20) answered 1e+40 - both
-// halves agreeing, and both wrong, which is the defect class byte-identity
-// cannot see. The operands come out of a SLICE on purpose: a probe of literals
-// tests the grammar's constant folder rather than the runtime.
+// A Go float32 is an IEEE-754 binary32, not a float64 spelled differently:
+// float32(1)/float32(3) is 0.33333334 and float32(1e20)*float32(1e20) is +Inf.
+// Every expected value below was read off `go run`. The operands come out of a
+// SLICE on purpose: a probe of literals tests the grammar's constant folder
+// rather than the runtime.
 func fs35(f float32) string { return fmt.Sprint(f) }
 
 func s35() {
@@ -1851,20 +1814,17 @@ func add35(x float32, y float32) float32 { return x + y }
 const cnz36 = -0.0
 
 // ===== SECTION 36: complex128 the way Go computes and prints it =====
-// Every expected string was read off `go run` before it was written down. Three
-// separate defects live here: unary minus on a complex answered 0 in both
-// compiled halves (js_gineg read the {re,im} box as NaN); both PARTS are
-// float64 and were printed with the integer rendering, so 1234567.125 came out
-// verbatim where go writes 1.234567125e+06 and an infinity came out
-// "Infinity"; and division used the textbook formula where Go's runtime uses
-// Smith's algorithm plus the C99 G.5.1 fixups.
+// Every expected string was read off `go run`. Unary minus is component-wise,
+// both PARTS are float64 and print with the float64 'g' rule (1.234567125e+06,
+// +Inf), and division is Smith's algorithm plus the C99 G.5.1 fixups, as Go's
+// runtime does it.
 func s36() {
 	big36 := []float64{1e300}
 	res := []float64{0.1, 4, 1234567.125, 0}
 	ims := []float64{0.2, 3, -0.5, 0}
 	a := complex(res[0], ims[0])
 	b := complex(res[1], ims[1])
-	// UNARY MINUS. This was `0` in llvm.Run and in the native binary.
+	// UNARY MINUS, component-wise.
 	check("cx1", fmt.Sprint(-a) == "(-0.1-0.2i)")
 	check("cx2", -a == complex(-res[0], -ims[0]) && -(-a) == a)
 	// A NEGATIVE ZERO survives the negation, which `0 - x` would lose.
@@ -1886,17 +1846,16 @@ func s36() {
 	// real() and imag() are float64 VALUES, so they render as one.
 	check("cx7", fmt.Sprint(real(complex(res[2], ims[2]))) == "1.234567125e+06")
 	check("cx8", real(a) == 0.1 && imag(a) == 0.2 && real(a)/2 == 0.05)
-	// The operators that already worked, kept as a regression fence.
+	// The basic operators.
 	check("cx9", a+b == complex(res[0]+res[1], ims[0]+ims[1]))
 	check("cx10", fmt.Sprint(b*b) == "(7+24i)")
 
 	// ----- THE SIGN OF A ZERO, at all six sites a complex product has -----
 	// (a+bi)(c+di) is (ac-bd) + (ad+bc)i: four products and two sums, each
 	// carrying its own zero sign. The ABNF tag dialect keeps an integral value
-	// as an INTEGER, so a bare `-0.0 * 3` answers +0 in the interpreter where
-	// both compiled halves answer -0.0 - a halves divergence, not a cosmetic
-	// one. The zeros are built at RUNTIME (`-pz36`), because a Go CONSTANT has
-	// no signed zero and `-0.0` written out is exactly 0.
+	// as an INTEGER, so the interpreter has to put the sign back by hand. The
+	// zeros are built at RUNTIME (`-pz36`), because a Go CONSTANT has no signed
+	// zero and `-0.0` written out is exactly 0.
 	pz36 := res[3]
 	nz36 := -pz36
 	check("cx12", fmt.Sprint(nz36) == "-0" && fmt.Sprint(pz36) == "0")
@@ -1918,17 +1877,14 @@ func s36() {
 	check("cx22", fmt.Sprint(-complex(nz36, pz36)) == "(0-0i)")
 	// real() and imag() hand the part back with its sign intact.
 	check("cx23", fmt.Sprint(real(complex(nz36, pz36))) == "-0" && fmt.Sprint(imag(complex(pz36, nz36))) == "-0")
-	// A SCALAR float64 product loses the sign at the same place, so it is
-	// pinned here too: this is what made the complex product diverge.
+	// A SCALAR float64 product, which loses the sign at the same place.
 	check("cx24", fmt.Sprint(pz36*-2) == "-0" && fmt.Sprint(nz36*3) == "-0" && fmt.Sprint(nz36*-3) == "0")
 	check("cx25", fmt.Sprint(pz36/-2) == "-0" && fmt.Sprint(nz36+nz36) == "-0" && fmt.Sprint(nz36-pz36) == "-0")
 
 	// ----- A Go CONSTANT HAS NO SIGNED ZERO -----
 	// `-0.0` is an untyped constant expression and Go evaluates it exactly, so
 	// it is 0 and not -0.0 - `complex(-0.0, 0.0)` is (0+0i) before the program
-	// ever runs. Every engine here answered -0 until unary minus became a fold
-	// site; it was the root of every remaining difference in a 346-value
-	// complex probe. A RUNTIME negation is unaffected, which cx12 pins.
+	// ever runs. A RUNTIME negation is unaffected, which cx12 pins.
 	k36 := -0.0
 	var v36 float64 = -0.0
 	check("cx26", fmt.Sprint(k36) == "0" && fmt.Sprint(v36) == "0" && fmt.Sprint(-0.0) == "0")
@@ -1937,28 +1893,24 @@ func s36() {
 }
 
 // ===== SECTION 37: nil slices, recovered results, `for range x`, panic text =====
-// The five gaps of docs/todo.md 1.7, plus the three the probe for it turned up.
-// Every expected value was read off `go run` before it was written down.
+// Every expected value was read off `go run`.
 //
 // WHAT EACH GROUP IS PINNING, because a passing assertion says nothing about why:
 //   - the zero value of a SLICE type compares equal to nil. It is still a usable
 //     empty HEADER (len/cap/range/append all work on it, as they do in Go), so
-//     nil-ness is a __nil MARK on the header - exactly the trade a nil MAP already
+//     nil-ness is a __nil MARK on the header - exactly the trade a nil MAP
 //     makes. `[]int{}`, make() and an appended header must NOT be nil, which is
 //     what tells a mark from a blanket "an empty slice is nil".
 //   - a function whose panic was RECOVERED answers the ZERO of its declared result
 //     types, not `<nil>`; and a NAMED result starts at the zero of its own type,
-//     not at the number 0. Both needed the result type texts, which RetTypes did
-//     not capture at all before.
-//   - integer divide by zero is a RECOVERABLE panic in every engine. It used to
-//     abort the interpreter (interp-core's `fail`) and abort a native binary (the
-//     floor's si_arith calls die(), which no js_gotry can catch) while llvm.Run
-//     recovered it - a three-way split.
+//     not at the number 0.
+//   - integer divide by zero is a RECOVERABLE panic in every engine (the
+//     interpreter, llvm.Run and a native binary).
 //   - `for range x` with no variables at all parses in both halves.
 //
-// A sixth gap, the DOUBLED PREFIX of an unrecovered panic in a native binary, is
-// deliberately not asserted here: a ratchet has to exit 0, so it cannot let a
-// panic escape. tests/probe.sh with the three legs is what settles that one.
+// The prefix of an UNRECOVERED panic in a native binary is deliberately not
+// asserted here: a ratchet has to exit 0, so it cannot let a panic escape.
+// tests/probe.sh with the three legs is what settles that one.
 type P37 struct{ N int }
 type Z37 struct {
 	xs []int
@@ -2055,11 +2007,10 @@ func s37() {
 	check("dz5", t37 == "runtime error: integer divide by zero")
 
 	// ----- a VALUE receiver gets a COPY that keeps its hidden slots -----
-	// goCopyVal makes the copy Go's value semantics require, and layer 2 built it
-	// through keysOf, which HIDES every __-prefixed slot - so the copy lost its
-	// __class and `func (v V37) ...` reading a slice field answered
-	// "len() of a object" in a NATIVE binary while llvm.Run printed the length. Only
-	// clang-check / native-full / a native -exe probe can see this row at all.
+	// goCopyVal makes the copy Go's value semantics require, and the copy has to
+	// keep the __-prefixed slots (keysOf hides them), or `func (v V37) ...`
+	// reading a slice field loses its __class. Only clang-check / native-full /
+	// a native -exe probe can see this row at all.
 	v37 := V37{xs: []int{1, 2, 3}, s: "v"}
 	check("vr1", v37.count() == 3 && v37.first() == 1)
 	check("vr2", v37.tag() == "v" && v37.mapped()["k"] == 7)
@@ -2109,34 +2060,27 @@ func divText37(a []int, i int, j int) (out string) {
 }
 
 // ===== SECTION 38: nil dereference, interfaces, multi-value calls, typed nil =====
-// The six residues of docs/todo.md 1.5, plus the two the probe for it turned up
-// (`append(s)` with nothing to add, and a func-typed field reached through a
-// pointer). Every expected value was read off `go run` before it was written down.
+// Every expected value was read off `go run`.
 //
 // WHAT EACH GROUP IS PINNING, because a passing assertion says nothing about why:
-//   - a NIL POINTER DEREFERENCE is a recoverable panic, and it was a THREE-WAY
-//     split: llvm.Run recovered it, the interpreter aborted in its own field/store
-//     paths and in the shared resolveRef, and a native binary died in the C floor's
-//     get_member/set_member. The read, the WRITE, a write one level down a path and
-//     a METHOD CALL are four different routes into it and each aborted somewhere.
-//   - a DECLARED INTERFACE is satisfied STRUCTURALLY. Nothing recorded an
-//     interface's method set, so `x.(Sp)` was false for a value that satisfies Sp,
-//     `case Sp:` never fired, and the single-result `x.(Sp)` never panicked. The
-//     concrete-type arms are here to pin that the change did NOT make every
-//     assertion a check - only an interface target is checked.
-//   - a MULTI-VALUE call that is the sole argument of a call EXPANDS. It could not,
-//     because the results travelled as a bare array that is indistinguishable from
-//     a Go ARRAY value; they now carry a mark, and the array cases below are what
-//     tells the mark from "any array spreads".
+//   - a NIL POINTER DEREFERENCE is a recoverable panic in every engine. The read,
+//     the WRITE, a write one level down a path and a METHOD CALL are four
+//     different routes into it.
+//   - a DECLARED INTERFACE is satisfied STRUCTURALLY: `x.(Sp)` holds for a value
+//     that satisfies Sp, `case Sp:` fires, and the single-result `x.(Sp)` panics
+//     for one that does not. The concrete-type arms pin that only an interface
+//     target is checked.
+//   - a MULTI-VALUE call that is the sole argument of a call EXPANDS. The results
+//     carry a mark, and the array cases below are what tells the mark from "any
+//     array spreads".
 //   - a RESULT VALUE adopts a map or slice declared type when it is nil, so
 //     `return nil` from a map result prints `map[]` and not `<nil>`. A nil POINTER
 //     result must still print `<nil>`, which is what separates this from "nil
 //     always becomes a container".
-//   - a FUNC-TYPED STRUCT FIELD is callable. Only the descriptor was consulted, so
-//     the interpreter and llvm.Run both said "unknown method 'f'" while the native
-//     binary answered - a live run-vs-native divergence.
+//   - a FUNC-TYPED STRUCT FIELD is callable, with no receiver.
 //   - SLICING A NIL SLICE keeps its nilness (Go carries the nil backing pointer
 //     over), while slicing an empty LITERAL does not.
+//   - `append(s)` with nothing to add is s itself.
 type P38 struct{ X int }
 type R38 struct{ In *P38 }
 type H38 struct {
@@ -2339,34 +2283,22 @@ func s38() {
 }
 
 // ===== SECTION 39: the error interface, deep promotion, interface{}() and nil asserts =====
-// The six residues of docs/todo.md 1.3. Every expected value was read off
-// `go run` before it was written down, and FIVE OF THE SIX WERE THE SAME SHAPE:
-// all three engines agreed and all three were wrong, which is the one class
-// ./test.sh --cross cannot see by construction.
+// Every expected value was read off `go run`.
 //
 // WHAT EACH GROUP PINS:
 //   - fmt CONSULTS Error() BEFORE String(), which is fmt's own handleMethods
-//     order. Error() was not consulted at all, so a value with `Error() string`
-//     printed the memberwise `{missing b}` where go prints `missing b`. The
-//     Stringer rows beside it pin that adding error did not displace String(),
+//     order. The Stringer rows beside it pin that error did not displace String(),
 //     and the both-methods row pins the PRECEDENCE rather than just presence.
-//   - FIELD PROMOTION IS BREADTH FIRST and more than one level deep. Only the
-//     directly embedded structs were searched, so a two-level `C{B{A{7}}}`
-//     answered <nil> for c.v; the shadowing row pins that a shallower field
-//     still wins over a deeper one of the same name.
-//   - interface{}(x) AS A CONVERSION EXPRESSION. `var x interface{} = v` always
-//     worked; the conversion aborted - the interpreter with `unknown name:
-//     interface`, the compiler with `composite literal not implemented`. The
-//     float and uint8 rows pin that it is the IDENTITY: routing it through the
-//     ordinary conversion path truncated a float64 and dropped a sized box.
-//   - A COMPOSITE LITERAL OF A DEFINED MAP TYPE. `type M map[string]int; M{...}`
-//     ran in the interpreter and was `composite literal not implemented` in the
-//     compiler, because a keyed element's key had to be an identifier and a
-//     string key did not parse. The struct rows are what pin that giving the key
-//     an expression form did not break `P{X: 1}`, whose key is a FIELD NAME and
-//     not a variable.
-//   - AN ELIDED ELEMENT OF POINTER TYPE. `[]*P{nil, {7}}` was `unknown name: *P`
-//     / `composite literal element of unsupported type *P`; a pointer to a struct
+//   - FIELD PROMOTION IS BREADTH FIRST and more than one level deep (`C{B{A{7}}}`);
+//     the shadowing row pins that a shallower field still wins over a deeper one
+//     of the same name.
+//   - interface{}(x) AS A CONVERSION EXPRESSION. The float and uint8 rows pin that
+//     it is the IDENTITY: the ordinary conversion path would truncate a float64 and
+//     drop a sized box.
+//   - A COMPOSITE LITERAL OF A DEFINED MAP TYPE, `type M map[string]int; M{...}`,
+//     whose keyed element's key is an expression. The struct rows pin that
+//     `P{X: 1}`, whose key is a FIELD NAME and not a variable, still works.
+//   - AN ELIDED ELEMENT OF POINTER TYPE, `[]*P{nil, {7}}`; a pointer to a struct
 //     IS the struct in this value model, so the star is dropped.
 //   - A NIL INTERFACE ASSERTED TO AN INTERFACE PANICS, and with a different text
 //     from the missing-method one - it names no method, because there is no
@@ -2429,8 +2361,7 @@ func s39() {
 	check("er5", fmt.Sprint(ES39{1}) == "E")
 	check("er6", fmt.Sprint([]error{E39{msgs[0]}}) == "[missing b]")
 	// AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt cannot reach its Error()
-	// or String() - and transitively so for everything under it. This was already
-	// wrong for Stringer before Error() was added, in all three engines.
+	// or String() - and transitively so for everything under it.
 	check("er7", fmt.Sprint(Exp39{E39{msgs[0]}}) == "{missing b}")
 	check("er8", fmt.Sprint(Unexp39{E39{msgs[0]}}) == "{{missing b}}")
 	check("er9", fmt.Sprint(ExpS39{S39{3}}) == "{S<3>}")
@@ -2489,16 +2420,12 @@ func s39() {
 }
 
 // ===== SECTION 40: a named constant as an array length, and multi-name const specs =====
-// Two residues of docs/todo.md 2.7, both of which all three engines got wrong
-// together.
-//   - `const size = 4; var a [size]int` was an EMPTY array in every engine, because
-//     every reader of a type text understands digits only - so len(a) was 0 where go
-//     says 4 and a[2] was an out-of-range panic. The literal-length rows beside it
-//     pin that nothing about `[4]int` changed, and the map row pins that `[string]`
-//     of a map type is not read as a length at all.
-//   - `const a, b = 0.1, 0.2` did not PARSE in the compiler half - its ungrouped
-//     const rule took one name and one expression where the grouped one and the
-//     interpreter half both took lists.
+//   - `const size = 4; var a [size]int` is a four element array: len(a) is 4 and
+//     a[2] is in range. The literal-length rows beside it pin that nothing about
+//     `[4]int` changed, and the map row pins that `[string]` of a map type is not
+//     read as a length at all.
+//   - `const a, b = 0.1, 0.2`: an ungrouped const spec binds a name LIST and an
+//     expression LIST, like the grouped one.
 const sz40 = 4
 const szt40 int = 3
 
@@ -2539,21 +2466,16 @@ func s40() {
 }
 
 // ===== SECTION 41: iota as an array length, and a struct-valued map key =====
-// Two residues of docs/todo.md 1.5, both of which all three engines got wrong
-// TOGETHER - so --cross was blind to each and only `go run` settles them.
+// Both settled by `go run`.
 //
-//   - An IOTA-GROUP constant as an array length. `const (R = iota; G; B)` binds no
-//     compile-time value at all in the old fold: a spec that mentions iota cannot be
-//     bound to one constant, and a spec with no '=' has no expression to bind. So
-//     `var a [B]int` was an EMPTY array (len 0 where go says 2) in all three engines,
-//     while `R`, `G` and `B` themselves printed correctly - the run-time iota was
-//     always right, only the compile-time value was missing. The fix keeps the fold
-//     ITSELF, as a function of iota, beside the constant.
+//   - An IOTA-GROUP constant as an array length. A spec that mentions iota cannot be
+//     bound to one constant, and a spec with no '=' has no expression to bind, so
+//     the fold is kept ITSELF, as a function of iota, beside the constant; then
+//     `const (R = iota; G; B); var a [B]int` has len 2.
 //   - A STRUCT- or ARRAY-VALUED map key. Both are Go VALUE types and `==` on them is
 //     element-by-element, so `m[Pair{1, 2}]` must find an entry stored under a
-//     different Pair holding the same fields; the key scan compared by identity and
-//     every read, comma-ok and delete missed. The literal `map[Pair]string{{1, 2}: "p"}`
-//     did not PARSE in either half either - an elided composite key was not a key form.
+//     different Pair holding the same fields - for a read, a comma-ok and a delete.
+//     The elided composite key `map[Pair]string{{1, 2}: "p"}` is a key form too.
 const (
 	r41 = iota
 	g41
@@ -2591,11 +2513,11 @@ type named41 struct {
 }
 
 func s41() {
-	// The values themselves were never wrong; these pin that they stay right.
+	// The values themselves.
 	check("io1", r41 == 0 && g41 == 1 && b41 == 2 && n41 == 3)
 	check("io2", x41 == 0 && y41 == 3 && z41 == 6)
 	check("io3", k41a == 1 && k41b == 2 && k41c == 4 && k41d == 8)
-	// ... and these are the rows that were 0 in every engine.
+	// ... and their compile-time values as array lengths.
 	var a [b41]int
 	check("io4", len(a) == 2)
 	var bb [n41]int
@@ -2610,9 +2532,7 @@ func s41() {
 	// Two dimensions, and a literal whose length comes from the group.
 	var ff [3][b41]int
 	check("io9", len(ff) == 3 && len(ff[0]) == 2)
-	// A constant EXPRESSION in the brackets, which the name substitution alone could
-	// not read: it understood a bare NAME and left everything else as written, so
-	// [b41 + 1] was the empty array in all three engines just as [b41] was.
+	// A constant EXPRESSION in the brackets, beyond a bare NAME.
 	var gg2 [b41 + 1]int
 	check("io12", len(gg2) == 3)
 	var hh2 [(n41 * 2) - 1]int
@@ -2647,7 +2567,7 @@ func s41() {
 	check("mk4", !miss)
 	delete(m, ks[2])
 	check("mk5", len(m) == 1 && m[ks[0]] == "")
-	// The elided-key literal form, which neither half could parse.
+	// The elided-key literal form.
 	m2 := map[pair41]string{{1, 2}: "p", {5, 6}: "q"}
 	check("mk6", len(m2) == 2 && m2[ks[0]] == "p")
 	// A NESTED struct key, compared field by field all the way down.
@@ -2663,7 +2583,7 @@ func s41() {
 	m4 := map[[2]int]string{}
 	m4[as[0]] = "arr"
 	check("mk9", m4[as[1]] == "arr" && m4[as[2]] == "")
-	// A string key still compares as it always did.
+	// A string key compares as before.
 	m5 := map[string]int{"a": 1}
 	check("mk10", m5["a"] == 1 && m5["b"] == 0)
 	// A map value keyed by a struct, ranged over: insertion order is the model's.
@@ -2675,20 +2595,15 @@ func s41() {
 }
 
 // ===== SECTION 42: an elided key on a NAMED map type, and keyed nested elements =====
-// Two more residues of docs/todo.md 1.5, both settled by `go run`.
+// Both settled by `go run`.
 //
-//   - `type Named map[Pair]string; Named{{1, 2}: "p"}` is legal Go and parsed in
-//     NEITHER half. The literal-type spelling map[Pair]string{{1, 2}: "p"} goes through
-//     MapLit, which knows the key type from the type it just parsed; the NAMED spelling
-//     goes through StructLit, whose key production took an Expression only - so an
-//     elided key was a parse failure and the native build failed with it. Both key
-//     productions take a brace group now, built against the map's declared key type.
-//     Nested defined types come with it: []Named{{{1, 2}: "a"}} reached the compiler
-//     half's element builder as the unresolved name "Named" and was refused.
-//   - A KEYED nested struct element - map[string]P{"x": {N: 1}} - was a live halves
-//     divergence: the interpreter built it and the compiler answered "a keyed nested
-//     struct element is not supported". The key's TEXT was thrown away at the nested
-//     element's key production, so the field name was not there to be used.
+//   - `type Named map[Pair]string; Named{{1, 2}: "p"}`: the NAMED spelling goes
+//     through StructLit rather than MapLit, so its key production takes a brace group
+//     too, built against the map's declared key type. Nested defined types come with
+//     it: []Named{{{1, 2}: "a"}}.
+//   - A KEYED nested struct element - map[string]P{"x": {N: 1}} - needs the key's
+//     TEXT at the nested element's key production, so the field name is there to be
+//     used.
 type pair42 struct {
 	A int
 	B int
@@ -2719,8 +2634,7 @@ func s42() {
 	// The zero value of a defined map type reads like an empty one.
 	var z named42
 	check("nm4", len(z) == 0 && z[ks[0]] == "")
-	// A nested brace group whose element type is a DEFINED map: the compiler half
-	// refused this with "composite literal element of unsupported type named42".
+	// A nested brace group whose element type is a DEFINED map.
 	ms := []named42{{{1, 2}: "a"}, {{1, 2}: "b"}}
 	check("nm5", len(ms) == 2 && ms[0][ks[0]] == "a" && ms[1][ks[0]] == "b")
 	mm := map[string]named42{"x": {{1, 2}: "z"}}
@@ -2745,7 +2659,7 @@ func s42() {
 }
 
 // ===== SECTION 43: the value recover() hands back for a run-time panic =====
-// Every expected string was read off `go run` (go 1.26.5). A runtime.Error prints
+// Every expected string was read off `go run`. A runtime.Error prints
 // "runtime error: " and go's bounds wording; a store into a nil map and a failed
 // interface conversion carry no such prefix.
 func rec43(f func()) (out string) {
