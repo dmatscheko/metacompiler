@@ -102,11 +102,9 @@ fun s04() {
     var g = ""; for (ch in 'a'..'c') { g += ch }
     check("rng6", g == "abc")
     // The INDEX properties: `val Collection<*>.indices`, `val CharSequence.indices`
-    // and the two lastIndex. `for (i in vs.indices)` ran in the interpreter and died
-    // in the compiler with "member 'length' of undefined" (todo.md 1.8); the string
-    // form was missing in BOTH halves. These live in the ratchet as well as in
+    // and the two lastIndex. These live in the ratchet as well as in
     // kotlin-test-features.kt because ONLY the ratchet is built natively, and the
-    // fix has a layer-2 arm (languages/lib/kotlin-rt.metajs) the matrix cannot see.
+    // runtime has a layer-2 arm (languages/lib/kotlin-rt.metajs) the matrix cannot see.
     val rl = listOf(10, 20, 30)
     var h = 0; for (i in rl.indices) { h = h * 10 + i }
     check("rng7", h == 12 && rl.lastIndex == 2 && rl.indices.toString() == "0..2")
@@ -118,55 +116,43 @@ fun s04() {
     check("rng9", m == 15 && ra.lastIndex == 2 && listOf<Int>().lastIndex == -1)
     // A progression read as a VALUE. IntProgression.last is the last ELEMENT (1..10
     // step 4 runs 1, 5, 9), and downTo's step carries the direction - "a progression
-    // ... with the step -1" in kotlin.ranges.downTo. This half had both wrong and the
-    // other could answer none of the three.
+    // ... with the step -1" in kotlin.ranges.downTo.
     val rp = listOf(1..5, 1..10 step 4, 5 downTo 1, 5 downTo 2 step 2, 0 until 3)
     var q = ""; for (p in rp) { q += "" + p.first + "/" + p.last + "/" + p.step + " " }
     check("rng10", q == "1/5/1 1/9/4 5/1/-1 5/3/-2 0/2/1 ")
     // A StringBuilder IS a CharSequence, so kotlin.text's two properties apply to it
-    // as well. Only `length` was answered, in BOTH halves - agreement, and both wrong.
+    // as well.
     val rb = StringBuilder("abcd")
     var t = 0; for (i in rb.indices) { t += i }
     check("rng11", t == 6 && rb.lastIndex == 3 && rb.indices.toString() == "0..3")
-    // A PROGRESSION IS A VALUE, NOT A MATERIALIZED LIST - todo.md 1.8.
-    // `(5..1).first` is 5 on the JVM: an IntRange keeps the bounds it was DECLARED
-    // with, only isEmpty() reports the emptiness, and `first()` - the FUNCTION - is
-    // the one that throws NoSuchElementException. Both compiled halves materialized
-    // the elements and recovered first/last/step from them, so an EMPTY progression
-    // answered kotlin.Unit for all five members while this half answered 5; there
-    // was no expected value the two could share and the item was left unasserted.
-    // The compiled halves now carry the same {__range, from, to, st, down, ch}
-    // value this one always had, so the whole surface is one answer everywhere.
-    // These are in the ratchet because ONLY the ratchet is built NATIVELY, and the
-    // fix has a layer-2 arm (languages/lib/kotlin-rt.metajs) no other gate sees.
+    // A PROGRESSION IS A VALUE, NOT A MATERIALIZED LIST. `(5..1).first` is 5 on the
+    // JVM: an IntRange keeps the bounds it was DECLARED with, only isEmpty() reports
+    // the emptiness, and `first()` - the FUNCTION - is the one that throws
+    // NoSuchElementException. These are in the ratchet because ONLY the ratchet is
+    // built NATIVELY, and the runtime has a layer-2 arm (languages/lib/kotlin-rt.metajs)
+    // no other gate sees.
     val re = listOf(5..1, 1 until 1, 'e'..'a', 3 downTo 7)
     var u = ""
     for (p in re) { u += "" + p.first + "/" + p.last + "/" + p.start + "/" + p.endInclusive + "/" + p.step + " " }
     check("rng12", u == "5/1/5/1/1 1/0/1/0/1 e/a/e/a/1 3/7/3/7/-1 ")
     check("rng13", (5..1).isEmpty() && (5..1).count() == 0 && (5..1).toList().toString() == "[]")
     // IntRange.toString is "$first..$last" and IntProgression.toString is
-    // "$first..$last step $step" / "$first downTo $last step ${-step}". Every engine
-    // printed the ELEMENT LIST instead - todo.md 1.10's `mr.range.toString()`, which
-    // read "[object Object]" in the compiled halves.
+    // "$first..$last step $step" / "$first downTo $last step ${-step}".
     check("rng14", (1..5).toString() == "1..5" && (5..1).toString() == "5..1" &&
         (1 until 5).toString() == "1..4" && ('a'..'e').toString() == "a..e")
     check("rng15", (1..10 step 4).toString() == "1..9 step 4" &&
         (10 downTo 1).toString() == "10 downTo 1 step 1" &&
         (10 downTo 1 step 3).toString() == "10 downTo 1 step 3" && "" + (2..4) == "2..4")
     // `in` on a STEPPED progression is Iterable.contains, a LINEAR membership test -
-    // IntProgression declares no contains at all. This half ignored the step and
-    // answered true where the compiled halves (searching the materialized elements)
-    // answered false: a live halves divergence, and THIS half was the wrong one.
+    // IntProgression declares no contains at all.
     check("rng16", 3 !in (1..10 step 4) && 5 in (1..10 step 4) && 5 !in (10 downTo 1 step 3) &&
         7 in (10 downTo 1 step 3))
     // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
-    // and hashCode is -1 for either. The old test here compared `a.step`, a field no
-    // range has (it is `st`), so every pair compared undefined with undefined.
+    // and hashCode is -1 for either.
     check("rng17", (5..1) == (7..3) && (1..5) == (1..5) && (1..5) != (1..5 step 2) &&
         (1..5).equals(1..5) && !(1..5).equals(listOf(1, 2, 3, 4, 5)))
     // IntProgression.hashCode is 31 * (31 * first + last) + step, and -1 when the
-    // progression is empty. `.hashCode()` on a range fell through to the
-    // materialized list in this half and answered the LIST fold.
+    // progression is empty.
     val rh = listOf(1..5, 5..1, 1..10 step 4, 'a'..'c')
     var v = ""
     for (p in rh) { v += "" + p.hashCode() + " " }
@@ -177,41 +163,36 @@ fun s04() {
     val rj: Any = 1..10 step 4
     check("rng18", ri is IntRange && ri is IntProgression && rj is IntProgression &&
         rj !is IntRange && ('a'..'c') is CharRange)
-    // A MatchResult's range is a real IntRange - it rendered "[object Object]".
+    // A MatchResult's range is a real IntRange.
     val rm = Regex("b+").find("abbbc")
     check("rng19", rm != null && rm!!.range.toString() == "1..3" && rm.range.first == 1 &&
         rm.range.last == 3 && rm.range.count() == 3)
     // toString() and hashCode() are members of kotlin.Any, so an UNQUALIFIED call
-    // resolves against the implicit receiver whatever its shape. `with(p)
-    // { toString() }` aborted with "unknown name: toString" in this half and
-    // "unknown list method 'toString'" in the compiled ones - todo.md 1.10.
+    // resolves against the implicit receiver whatever its shape (`with(p)
+    // { toString() }`).
     val rpair = Pair(1, "a")
     check("rng20", with(rpair) { toString() } == "(1, a)" && with(5) { toString() } == "5" &&
         with(listOf(1, 2)) { toString() } == "[1, 2]" && with(1..3) { toString() } == "1..3")
     check("rng21", with(rpair) { hashCode() } == rpair.hashCode() &&
         with(mapOf("k" to 1)) { entries.toString() } == "[k=1]")
     // equals(other) is the third Any member and is the same comparison `==` makes.
-    // `listOf(1, 2).equals(listOf(1, 2))` aborted with "unknown list method
-    // 'equals'" in BOTH compiled halves while this one answered true.
+    // `listOf(1, 2).equals(listOf(1, 2))` is true.
     check("rng21b", listOf(1, 2).equals(listOf(1, 2)) && !listOf(1, 2).equals(3) &&
         mapOf(1 to 2).equals(mapOf(1 to 2)) && setOf(1).equals(setOf(1)) &&
         with(rpair) { equals(Pair(1, "a")) })
     // A ClosedFloatingPointRange - `1.0..2.0` - declares no step and no iteration,
-    // and its contains is the BOUNDS test alone. Materializing it stepped 1 and
-    // answered `1.5 in 1.0..2.0` FALSE in every engine: agreement, and all three
-    // wrong. Its toString is "$start..$endInclusive", which prints the .0.
+    // and its contains is the BOUNDS test alone. Its toString is
+    // "$start..$endInclusive", which prints the .0.
     val rf = listOf(1.5, 0.5, 2.0)
     check("rng22", rf[0] in 1.0..2.0 && rf[1] !in 1.0..2.0 && rf[2] in 1.0..2.0 &&
         (1.0..2.0).toString() == "1.0..2.0" && (1.0..2.0).start == 1.0 &&
         (1.0..2.0).endInclusive == 2.0)
-    // NOT ASSERTED HERE, and the reason is worth knowing: an EXTENSION PROPERTY of one
-    // of those names WINS over the runtime's answer (the compiler resolves `extp$name`
-    // in the EMITTER, before js_ktfget is called at all, so the interpreter had to be
-    // taught to consult it first - kIdxExt in kotlin-interpreter.abnf - or
-    // `val List<Int>.first get() = 99` read 99 in one half and 1 in the other). It
-    // cannot be pinned in THIS file: an extension property is keyed by NAME alone and
-    // declared at top level, so `val String.indices` poisons rng8's own `s.indices`
-    // and every other section that reads one. Verified by probe instead.
+    // NOT ASSERTED HERE: an EXTENSION PROPERTY of one of those names WINS over the
+    // runtime's answer (the compiler resolves `extp$name` in the EMITTER, before
+    // js_ktfget is called at all, and the interpreter consults it first - kIdxExt in
+    // kotlin-interpreter.abnf). It cannot be pinned in THIS file: an extension property
+    // is keyed by NAME alone and declared at top level, so `val String.indices` would
+    // poison rng8's own `s.indices` and every other section that reads one.
 }
 
 // ===== SECTION 05: when forms =====
@@ -606,8 +587,7 @@ fun s22() {
 // interpreter, abnf/jsrtregex.go + abnf/jsrtregexkt.go for the compiler). Kotlin
 // has no regexp literal, so every pattern arrives as Regex("...") or
 // "...".toRegex(). Regex.escape is Pattern.quote and answers the same \Q...\E TEXT
-// the JVM does (verified against java.util.regex on this machine);
-// RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
+// the JVM does; RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
 // instead of being silently ignored, and lookbehind, POSIX brackets and \p{...}
 // are not implemented by the engine.
 fun s23() {
@@ -694,12 +674,9 @@ fun s23() {
 
 // ===== SECTION 24: floating point arithmetic =====
 // Double/Float are a DIFFERENT type from Int, and every value below was checked
-// against the equivalent Java program run on `java` (JDK 24) - Kotlin/JVM's
-// Double is java.lang.Double, its arithmetic is the JVM's and its toString is
+// against the equivalent Java program run on `java` - Kotlin/JVM's Double is
+// java.lang.Double, its arithmetic is the JVM's and its toString is
 // java.lang.Double.toString, so Java is the oracle here (no kotlinc available).
-// The section exists because both grammars used to evaluate every arithmetic
-// operator in 32 bit integers: 1.0 / 3.0 was 0, 2.5 * 1.5 was 3, println(1.0)
-// printed "1" and Infinity / NaN / -0.0 did not exist at all.
 class Money24(val amount: Double) {
     fun half(): Double = amount / 2
 }
@@ -753,9 +730,7 @@ fun sec24() {
     // ----- Float is a BINARY32, not a Double spelled differently -----
     // Kotlin's Float is an IEEE-754 single (kotlin.Float), its arithmetic is the
     // JVM's fadd/fmul/fdiv and Float.toString() delegates to
-    // java.lang.Float.toString, so `java` (JDK 24) settles every row below - and
-    // an 11,343-line probe over 210 float values, every operand read out of an
-    // array, is byte-identical to it in all three engines.
+    // java.lang.Float.toString, so `java` settles every row below.
     val fs = arrayOf(1.0f, 3.0f, 0.1f, 16777217.0f, 16777216.0f)
     // The headline: eight significant digits, not sixteen.
     check("f32a", s24f(fs[0] / fs[1]) == "0.33333334")
@@ -786,18 +761,15 @@ fun sec24() {
     check("f32j", s24f(Float.MAX_VALUE) == "3.4028235E38" && s24f(Float.MIN_VALUE) == "1.4E-45")
     // Unary minus and a signed zero survive the width.
     check("f32k", s24f(-fs[2]) == "-0.1" && s24f(fs[0] * 0.0f) == "0.0")
-    // THE PRE-EXISTING SIGNED-ZERO DEFECT this work turned up 96 times: an
-    // integral-valued operand times a zero lost its sign in the interpreter half
-    // only (0.0 where java, and both compiled halves, say -0.0). Reproduced at
-    // 15af058 in six lines of kotlin.
+    // An integral-valued operand times a zero keeps the sign of the product (-0.0, as
+    // java says), which the tag engine's integer representation would lose.
     val ds24 = arrayOf(-14447655.0, 0.0)
     check("f32l", s24(ds24[0] * ds24[1]) == "-0.0" && s24(ds24[1] / ds24[0]) == "-0.0")
     // ----- Float.hashCode() is floatToIntBits, a DIFFERENT function -----
     // Kotlin/JVM's Float.hashCode() IS java.lang.Float.hashCode(), which is
     // floatToIntBits(f) read as a SIGNED Int: the raw binary32 pattern, not the
-    // 64-bit XOR fold Double.hashCode() applies. While the width was invisible a
-    // Float answered the Double's hash at every value; both are measured on java
-    // 24.0.2 below, every operand read out of an array.
+    // 64-bit XOR fold Double.hashCode() applies. Both are checked against java below,
+    // every operand read out of an array.
     val fh = arrayOf(1.5f, -1.5f, -0.0f, 0.0f, 0.1f)
     val dh = arrayOf(1.5, -1.5, -0.0, 0.1)
     check("f32m", fh[0].hashCode() == 1069547520 && dh[0].hashCode() == 1073217536)
@@ -822,9 +794,8 @@ fun sec24() {
     check("f32s", listOf(fh[0]).hashCode() == 1069547551 &&
                   listOf(dh[0]).hashCode() == 1073217567)
     // ----- `is Float` and `is Double` are EXCLUSIVE -----
-    // Both were true for either width while nothing at runtime said which of the
-    // two a box held. On the JVM these are instanceof against java.lang.Float and
-    // java.lang.Double, which are unrelated classes.
+    // On the JVM these are instanceof against java.lang.Float and java.lang.Double,
+    // which are unrelated classes.
     check("f32t", isF24(fh[0]) && !isD24(fh[0]) && isD24(dh[0]) && !isF24(dh[0]))
     // Neither answer moves for the SHARED supertypes: java.lang.Float and
     // java.lang.Double both extend Number, implement Comparable and are Any.
@@ -839,14 +810,12 @@ fun sec24() {
     // ...and the class the value reports for itself agrees with `is`.
     check("f32x", fh[0]::class.simpleName == "Float" && dh[0]::class.simpleName == "Double")
     // ----- THE COLLECTION-KEY CONTRACT: a Float is not a Double KEY -----
-    // 30cd9f6 made the two widths HASH apart and left this behind. `==` on Kotlin's
-    // Any is java.lang.Float.equals / java.lang.Double.equals, and Float#equals
-    // answers true only "if the argument is not null and is a Float object", so
-    // 1.5f and 1.5 are TWO keys and every collection built on equals follows.
-    // Measured on java 24.0.2, which is a real oracle because Kotlin/JVM's Float IS
-    // java.lang.Float - the argument e5e68b5 and 30cd9f6 both used. UNREACHABLE
-    // from source Kotlin except through Any (kotlinc rejects `1.5f == 1.5`
-    // outright), so every row below goes through eq24 or a collection of Any.
+    // `==` on Kotlin's Any is java.lang.Float.equals / java.lang.Double.equals, and
+    // Float#equals answers true only "if the argument is not null and is a Float
+    // object", so 1.5f and 1.5 are TWO keys and every collection built on equals
+    // follows (java; Kotlin/JVM's Float IS java.lang.Float). UNREACHABLE from source
+    // Kotlin except through Any (kotlinc rejects `1.5f == 1.5` outright), so every row
+    // below goes through eq24 or a collection of Any.
     check("f32y", !eq24(fh[0], dh[0]) && !eq24(dh[0], fh[0]))
     // The same width still compares by VALUE, at both widths and both ways round.
     check("f32z", eq24(fh[0], 1.5f) && eq24(dh[0], 1.5) && !eq24(fh[4], 0.2f))
@@ -864,29 +833,24 @@ fun sec24() {
                   (setOf<Any>(fh[0], dh[0]) - setOf<Any>(dh[0])).size == 1)
     check("f33e", ka24.groupBy { it }.size == 2)
     // THE ORDERED COMPARISONS STILL PROMOTE across the width, and so does `+`: the
-    // fix is the equals contract, not the arithmetic one, and the two share the
-    // boxes. Float.compareTo(Double) is declared in kotlin.Float, so these three
-    // ARE reachable from ordinary Kotlin - which is the half that had to not move.
+    // equals contract is not the arithmetic one, and the two share the boxes.
+    // Float.compareTo(Double) is declared in kotlin.Float, so these three ARE reachable
+    // from ordinary Kotlin.
     check("f33f", fh[0] < 1.6 && fh[0] > 1.4 && fh[0] <= 1.5 && s24(fh[0] + dh[0]) == "3.0")
     // A boxed Int, Long and Char key must NOT move. An Int and a small Long are
-    // still ONE key here (docs/todo.md 2.12 - this value model has one
-    // representation per kind, not per declared class), and that is unchanged.
+    // ONE key here (this value model has one representation per kind, not per
+    // declared class).
     check("f33g", listOf(1, 2, 3).indexOf(3) == 2 && listOf(1L, 2L).contains(2L) &&
                   mapOf('a' to 1)['a'] == 1 && setOf(1, 2, 2).size == 2)
-    // The 2.12 RESIDUE, asserted as it IS rather than as java answers it, so the
-    // next change to this area has to look at it: java says false for all three of
-    // these (Integer#equals demands an Integer), and this model says true because
-    // the box carries the KIND and the promotion. It is left because the width is
-    // the only part of the declared class a box here can carry, and because none
-    // of the three is reachable from source Kotlin either.
+    // The RESIDUE, asserted as it IS rather than as java answers it, so the next
+    // change to this area has to look at it: java says false for all three of these
+    // (Integer#equals demands an Integer), and this model says true because the box
+    // carries the KIND and the promotion. None of the three is reachable from source
+    // Kotlin either.
     check("f33h", eq24(1, 1L) && eq24(1.toByte(), 1) && eq24(1, 1.0) && !eq24('a', "a"))
-    // ...but a sized integer against a FRACTIONAL double is false in both halves,
-    // which it was not: kEq's kSz TRUNCATED the double into the integer's width and
-    // the interpreter answered `1L == 1.5` TRUE while the compiler half (giEq,
-    // which promotes to a double) answered false. --cross never saw it because
-    // nothing in the matrix put a sized integer against a fractional double. Both
-    // readings of java 24.0.2 say false: 1L == 1.5 as a primitive (JLS 15.21.1
-    // promotes the long to double) and Long.valueOf(1).equals(1.5) as a boxed one.
+    // ...but a sized integer against a FRACTIONAL double is false in both halves. Both
+    // readings of java say false: 1L == 1.5 as a primitive (JLS 15.21.1 promotes the
+    // long to double) and Long.valueOf(1).equals(1.5) as a boxed one.
     check("f33i", !eq24(1L, 1.5) && !eq24(1.5, 1L) && !eq24(2L, 2.5f) &&
                   !eq24(1.toByte(), 1.5) && eq24(1L, 1.0) && eq24(100L, 100.0))
 }
@@ -911,24 +875,17 @@ fun kind24(x: Any): String = when (x) { is Float -> "F"; is Double -> "D"; is In
 
 // ===== SECTION 25: value rendering =====
 // What println / toString() / a string template make of a value. Every answer
-// below was checked against the equivalent Java program run on `java` (JDK 24):
-// Kotlin/JVM's String, Int and Double ARE java.lang.*, println IS
-// System.out.println, a List renders through java.util.AbstractCollection.toString
-// and an enum entry through java.lang.Enum.toString, so Java is the oracle here
-// (no kotlinc available). The section exists because both grammars leaked their
-// HOST's rendering instead: the interpreter printed a list through JavaScript's
-// Array.prototype.toString ("1,2") and the compiler handed the raw runtime value
-// to Go's %v ("<nil>" for null, "[1 2]" for a list, a map of pointer addresses for
-// an instance - and an infinite recursion for an enum entry).
+// below was checked against the equivalent Java program run on `java`: Kotlin/JVM's
+// String, Int and Double ARE java.lang.*, println IS System.out.println, a List
+// renders through java.util.AbstractCollection.toString and an enum entry through
+// java.lang.Enum.toString, so Java is the oracle here (no kotlinc available). Neither
+// half may leak its HOST's rendering (JavaScript's "1,2", Go's %v).
 // Not asserted here, because this value model cannot reproduce it: an Array
 // renders like a List, where real Kotlin prints "[Ljava.lang.Integer;@1b6d3586"
 // (arrayOf and listOf build the same value here), and a class without a toString
 // gets a FIXED synthetic hash, so only the "Name@" prefix is checked below.
-// The two data classes below deliberately name their properties x and y, like
-// every other data class in this file: the compiler grammar registers the
-// named-argument slots of the generated copy() under the METHOD name alone, so a
-// data class whose property names differ silently breaks .copy(y = 9) in an
-// earlier section. That limitation is orthogonal to rendering and pre-existing.
+// The two data classes below name their properties x and y, like every other data
+// class in this file.
 data class Pair25(val x: Int, val y: String)
 data class Holder25(val x: List<Int>, val y: Int)
 class Plain25(val x: Int)
@@ -968,42 +925,31 @@ fun sec25() {
     // The primitives keep the rendering they already had.
     check("ren19", true.toString() == "true" && 42.toString() == "42" && 1.5.toString() == "1.5")
     check("ren20", 'c'.toString() == "c" && "s".toString() == "s")
-    // Unit is a VALUE and renders as its name. Only toString() is asserted: the
-    // interpreter answered "null" for it where the compiler said "kotlin.Unit"
-    // (found sweeping todo.md 1.8). `println(unit25())` itself is NOT asserted -
-    // llvm.Run writes "kotlin.Unit" and the native binary a blank line, because
-    // MetaJS has no `arguments` object and layer 2's println cannot tell
-    // `println()` from `println(Unit)`; the reason and the cost of closing it are
-    // recorded at k2Line in languages/lib/kotlin-rt.metajs.
+    // Unit is a VALUE and renders as its name. Only toString() is asserted:
+    // `println(unit25())` natively cannot be told from `println()` by layer 2 (MetaJS
+    // has no `arguments` object); see k2Line in languages/lib/kotlin-rt.metajs.
     check("ren21", unit25().toString() == "kotlin.Unit" && "" + unit25() == "kotlin.Unit")
 }
 fun unit25(): Unit {}
 
 // ===== SECTION 26: the String member surface =====
-// The members java.lang.String / kotlin.text define on a String. The section
-// exists because the two halves carried DIFFERENT tables: kotlin-interpreter.abnf
-// answered nine names its own mcall implements, while the compiler dispatched to
-// the shared js_mcall, whose String switch is the JAVA one
-// (length/charAt/equals/substring/indexOf/isEmpty) - so "aBc".uppercase() printed
-// ABC in the interpreter and aborted the compiler with
-// `unknown String method: uppercase`. Every check below therefore runs in BOTH
-// halves; abnf/jsrtkotlin.go's js_ktsmcall is the Go twin of that mcall branch.
-// No kotlinc on this machine: the expected values are Kotlin's documented
-// semantics (kotlin.text.uppercase/lowercase are locale-invariant, hashCode is
-// java.lang.String.hashCode = the 31*h + char fold, compareTo is
-// lexicographic by code unit).
+// The members java.lang.String / kotlin.text define on a String. Every check below
+// runs in BOTH halves; abnf/jsrtkotlin.go's js_ktsmcall is the Go twin of the
+// interpreter's mcall String branch. No kotlinc on this machine: the expected values
+// are Kotlin's documented semantics (kotlin.text.uppercase/lowercase are
+// locale-invariant, hashCode is java.lang.String.hashCode = the 31*h + char fold,
+// compareTo is lexicographic by code unit).
 fun sec26() {
     val s = "aBc"
     // Kotlin 1.5 renamed toUpperCase/toLowerCase to uppercase/lowercase. Both
-    // spellings resolve (the old pair is deprecated, not removed), and BOTH halves
-    // must accept all four - the divergence this section pins.
+    // spellings resolve (the old pair is deprecated, not removed).
     check("str1", s.uppercase() == "ABC")
     check("str2", s.lowercase() == "abc")
     check("str3", s.toUpperCase() == "ABC")
     check("str4", s.toLowerCase() == "abc")
     check("str5", "".uppercase() == "" && "9!".lowercase() == "9!")
     check("str6", s.uppercase().lowercase() == "abc")
-    // The rest of the surface the compiler half was missing.
+    // The rest of the surface.
     check("str7", s.repeat(2) == "aBcaBc" && s.repeat(0) == "")
     check("str8", s.contains("B") && !s.contains("z") && s.contains(""))
     check("str9", s.plus("!") == "aBc!")
@@ -1016,26 +962,19 @@ fun sec26() {
     check("str15", s.length == 3 && s.isEmpty() == false && s.equals("aBc"))
     check("str16", s.substring(1) == "Bc" && s.indexOf("B") == 1)
     // charAt is the JAVA spelling. Real Kotlin has no String.charAt at all - it is
-    // get / the indexing operator - but both grammars carry it as a builtin, and it
-    // used to answer a one-character STRING while its two Kotlin spellings answered a
-    // Char, so `s.charAt(0) == 'a'` was FALSE. All three now answer a Char.
+    // get / the indexing operator - but both grammars carry it as a builtin, and all
+    // three spellings answer a Char.
     check("str18", s.charAt(0) == 'a' && s[0] == 'a' && s.get(0) == 'a')
     check("str17", s.toString() == "aBc")
 }
 
 // ===== SECTION 27: nested type declarations =====
 // A nested enum / interface / object / annotation class, in each of the four
-// things that can hold one. Genuine in both halves: the declaration lowers like a
-// top-level one and the enclosing descriptor gets it under its simple name, so
-// Outer.Kind.LEFT resolves. The section exists because the compiler half used to
-// report `nested type declaration not implemented (ignored)` for everything except
-// a plain nested class, which the interpreter has always built.
+// things that can hold one: the declaration lowers like a top-level one and the
+// enclosing descriptor gets it under its simple name, so Outer.Kind.LEFT resolves.
 // Every nested type below has a DISTINCT simple name, which keeps this section
 // about nesting itself; SECTION 29 is the one that makes the simple names COLLIDE
-// across owners. (Both work now. Until the compiler gave each nested declaration
-// its own scope, its flat class model bound every nested type into one shared
-// program scope under its simple name, so `class A { class Inner }` and
-// `class B { class Inner }` shared a slot and A.Inner().who() answered "B".)
+// across owners.
 class Holder27(val tag: Int) {
     enum class Kind27 { LEFT, RIGHT }
     interface Shape27 { fun area(): Int }
@@ -1076,11 +1015,8 @@ fun sec27() {
 // ===== SECTION 28: assignment to a computed target =====
 // An assignment whose left side is a postfix chain containing a CALL, so a plain
 // variable/field/index target cannot cover it: boxOf(9).tag = 100, boxes()[0] = 9.
-// Genuine in both halves - the chain up to the last step is evaluated ONCE and the
-// last `.name` / `[i]` step is written like any other slot. The section exists
-// because the compiler half used to report `assignment to a computed target not
-// implemented (ignored)` and silently write nothing, while the interpreter's
-// makeCallAssign performed the write.
+// The chain up to the last step is evaluated ONCE and the last `.name` / `[i]` step is
+// written like any other slot.
 class Box28(var tag: Int)
 val shared28 = Box28(1)
 val store28 = mutableListOf(1, 2, 3)
@@ -1117,14 +1053,12 @@ fun sec28() {
 }
 
 // ===== SECTION 29: nested types with COLLIDING simple names =====
-// Two owners each declaring a nested type of the SAME simple name. The compiler's
-// class model is flat - one program scope - so binding a nested declaration under
-// its simple name made the second owner's declaration win for both: A29.Inner29(1)
-// constructed B29's Inner29 and answered "B". Each nested declaration now runs in
-// its own child scope and the enclosing descriptor closes over THAT scope, so the
-// factory reaches the descriptor declared beside it whatever anyone else declares
-// under the same name. The simple name is still mirrored into the enclosing scope,
-// which is what keeps a bare `Inner29(...)` inside the owner's own body working.
+// Two owners each declaring a nested type of the SAME simple name. Each nested
+// declaration runs in its own child scope and the enclosing descriptor closes over
+// THAT scope, so the factory reaches the descriptor declared beside it whatever anyone
+// else declares under the same name. The simple name is still mirrored into the
+// enclosing scope, which is what keeps a bare `Inner29(...)` inside the owner's own
+// body working.
 // KNOWN RESIDUE, identical in BOTH halves (so not a divergence, and deliberately
 // not asserted here): an UNQUALIFIED reference to a nested class from inside its
 // owner's own body still goes through that one mirrored program-scope binding, so
@@ -1165,9 +1099,8 @@ fun sec29() {
 // ===== SECTION 30: a raw string ends at the LAST triple quote =====
 // A run of more than three quotes closing a raw string belongs to the CONTENT up to the
 // final three - Kotlin's own psi/stringTemplates/RawStringsWithManyQuotes.kt writes
-// runs of six, seven and eight quotes with a clean parse tree. Both halves used to stop
-// at the FIRST triple quote and then fail on the leftover quote, so a raw string could
-// not end with a quote character at all.
+// runs of six, seven and eight quotes with a clean parse tree, so a raw string can end
+// with a quote character.
 fun sec30() {
     val one = """""""
     val two = """"""""
@@ -1183,15 +1116,12 @@ fun sec30() {
 
 // ===== SECTION 31: Int and Long have real WIDTHS =====
 // Kotlin's integral types are fixed-width and their arithmetic WRAPS silently on
-// overflow (unlike Swift, which traps). Both grammars used to model every integer
-// as one JS double, so Int.MAX_VALUE + 1 grew instead of wrapping, 1L shl 40 was
-// 256 (a 32 bit shift), Long.MAX_VALUE could not be written down at all and
-// `Int` was an unknown name.
+// overflow (unlike Swift, which traps): Int.MAX_VALUE + 1 wraps, 1L shl 40 is a 64 bit
+// shift, and Long.MAX_VALUE is a value.
 //
 // Kotlin/JVM's Int and Long ARE java.lang's, so every value below was checked
-// against the EQUIVALENT JAVA PROGRAM run on `java` (JDK 24) - there is no
-// kotlinc on this machine. The Java probe and both halves of this grammar pair
-// print the same 60 lines under goja and under -frozen.
+// against the EQUIVALENT JAVA PROGRAM run on `java` - there is no kotlinc on this
+// machine.
 fun s31(v: Any?): String = "" + v
 fun zero31(): Int = 0
 fun sec31() {
@@ -1226,8 +1156,8 @@ fun sec31() {
     check("int21", -7 % 2 == -1 && 7 % -2 == 1)
     check("int22", Int.MIN_VALUE / -1 == Int.MIN_VALUE && Int.MIN_VALUE % -1 == 0)
     check("int23", Long.MIN_VALUE / -1L == Long.MIN_VALUE)
-    // Division and remainder by zero THROW a catchable ArithmeticException instead
-    // of quietly yielding 0, and the message is java.lang's.
+    // Division and remainder by zero THROW a catchable ArithmeticException, and the
+    // message is java.lang's.
     var caught = ""
     try { s31(1 / zero31()) } catch (e: ArithmeticException) { caught = "" + e.message }
     check("int24", caught == "/ by zero")
@@ -1235,7 +1165,7 @@ fun sec31() {
     try { s31(1 % zero31()) } catch (e: ArithmeticException) { caught = "" + e.message }
     check("int25", caught == "/ by zero")
     // A DECLARED type puts its width on the value, so the multiplication below is
-    // 64 bit throughout instead of wrapping at 32.
+    // 64 bit throughout.
     val big: Long = 1
     check("int26", s31(big * 1000000 * 1000000) == "1000000000000")
     // ++ steps at the value's own width, which is what makes a Byte wrap at 127.
@@ -1272,7 +1202,7 @@ fun sec31() {
 // the target's range and answers 0 for NaN, because Kotlin/JVM compiles
 // Double.toInt() to the JVM's d2i. Java's `(byte)` / `(int)` casts are the same
 // two instructions, so every value below was checked against the equivalent Java
-// program run on `java` (JDK 24).
+// program run on `java`.
 fun s32(v: Any?): String = "" + v
 fun sec32() {
     // An integral source is a pure bit truncation.
@@ -1292,8 +1222,7 @@ fun sec32() {
     check("cnv11", s32(Long.MAX_VALUE.toDouble()) == "9.223372036854776E18")
     // toChar() takes the low 16 bits.
     check("cnv12", 65.toChar() == 'A' && 65601.toChar() == 'A')
-    // The companion constants exist at all - `Int` was an unknown name in both
-    // halves before, and Long.MAX_VALUE cannot be written as a plain number.
+    // The companion constants exist; Long.MAX_VALUE cannot be written as a plain number.
     check("cnv13", Int.SIZE_BITS == 32 && Int.SIZE_BYTES == 4)
     check("cnv14", Long.SIZE_BITS == 64 && Long.SIZE_BYTES == 8)
     check("cnv15", s32(Double.POSITIVE_INFINITY) == "Infinity")
@@ -1369,8 +1298,7 @@ fun sec33() {
     check("uns22", s33(2147483648) == "2147483648")
     check("uns23", 0b1010 == 10 && 1_000_000 == 1000000)
     check("uns24", 0xFFFFFFFFL == 4294967295L)
-    // A value carries its real type into `is`, which the untyped value model could
-    // not answer before: every integer was an Int AND a Long at once.
+    // A value carries its real type into `is`.
     val a: Any = 10L
     val i: Any = 10
     val q: Any = 1u
@@ -1475,7 +1403,7 @@ fun sumWhilePositive34(xs: List<Int>): Int {
 }
 
 // ===== SECTION 35: the CALL SURFACE - a parenthesized callee, and a body's `;` =====
-// Every form here is ordinary Kotlin; each was refused by these grammars before.
+// Every form here is ordinary Kotlin.
 // SYNTAX ground truth is again Kotlin's own tree: psi/CallWithManyClosures.txt records
 // `val a = (f) {} {} {}` and `(f)() {} {} {}` with clean trees, psi/DoubleColon.txt has
 // `(a::b)()` as a CALL_EXPRESSION whose callee is a PARENTHESIZED expression, and
@@ -1550,9 +1478,9 @@ fun sec36() {
 // The kotlin.collections operations a real program leans on. Every one of them is a
 // METHOD, so both halves answer from the same table (kSeqMethod in
 // kotlin-interpreter.abnf, ktSeqMethod in abnf/jsrtkotlin.go) and --cross diffs them.
-// Values checked against the equivalent Java program under `java` (JDK 24) wherever
-// Kotlin's answer is java.util's: List.hashCode is the 31*h + element fold, and a
-// `sumOf` whose selector answers a Long sums at 64 bits.
+// Values checked against the equivalent Java program under `java` wherever Kotlin's
+// answer is java.util's: List.hashCode is the 31*h + element fold, and a `sumOf`
+// whose selector answers a Long sums at 64 bits.
 fun sec37() {
     val xs = listOf(1, 2, 3, 4, 5)
     check("col1", xs.fold(0) { a, b -> a + b } == 15)
@@ -1593,8 +1521,8 @@ fun sec37() {
     check("col33", listOf(1, 1, 2, 2, 3).distinct().toString() == "[1, 2, 3]")
     check("col34", xs.joinToString("-") == "1-2-3-4-5")
     check("col35", xs.joinToString(", ", "[", "]") == "[1, 2, 3, 4, 5]")
-    // IndexedValue is a data class, so withIndex() prints the generated toString -
-    // NOT the Pair form this used to pin in every engine. todo.md 1.5, sec78/rp38.
+    // IndexedValue is a data class, so withIndex() prints the generated toString,
+    // not the Pair form.
     check("col36", xs.withIndex().toString() ==
         "[IndexedValue(index=0, value=1), IndexedValue(index=1, value=2), " +
         "IndexedValue(index=2, value=3), IndexedValue(index=3, value=4), " +
@@ -1618,13 +1546,10 @@ fun sec37() {
 
 // ===== SECTION 38: Char is a real type, and the String is a sequence of it =====
 // Kotlin's String has no charAt: it is get / the indexing operator, both answering a
-// CHAR. Both halves used to answer a one-character STRING from charAt, so
-// `s.charAt(0) == 'a'` was false while `s[0] == 'a'` was true - the same expression
-// written two ways disagreeing with itself. Every Char-valued member now answers a
-// Char, and the Char member surface (.code, .digitToInt(), the isX predicates, the
-// case conversions) reads the CODE.
+// CHAR. Every Char-valued member answers a Char, and the Char member surface (.code,
+// .digitToInt(), the isX predicates, the case conversions) reads the CODE.
 // Kotlin's Char is java.lang.Character's, so the classification and case answers were
-// checked against the equivalent Java program under `java` (JDK 24).
+// checked against the equivalent Java program under `java`.
 fun sec38() {
     val s = "aBc"
     check("chr1", s[0] == 'a' && s.get(1) == 'B' && s.charAt(2) == 'c')
@@ -1650,12 +1575,11 @@ fun sec38() {
     // A String is a sequence of Char, so the collection operations apply to it.
     check("chr18", s.map { it.code }.toString() == "[97, 66, 99]")
     // kotlin.text declares `String.filter(predicate): String` - the char-SELECTING
-    // operators of _Strings.kt answer a String, not the List<Char> this used to
-    // pin in every engine. todo.md 1.5.
+    // operators of _Strings.kt answer a String, not a List<Char>.
     check("chr19", s.filter { it.isUpperCase() } == "B")
     check("chr20", s.count { it.isLetter() } == 3)
     check("chr21", s.any { it == 'B' } && !s.any { it == 'z' })
-    // The rest of the kotlin.text surface both halves were missing.
+    // The rest of the kotlin.text surface.
     check("str19", "  pad  ".trim() == "pad")
     check("str20", "  pad  ".trimStart() == "pad  " && "  pad  ".trimEnd() == "  pad")
     check("str21", "abc".startsWith("ab") && "abc".endsWith("bc") && !"abc".startsWith("b"))
@@ -1673,10 +1597,9 @@ fun sec38() {
     // kotlin.text.format is java.util.Formatter.
     check("str33", "%.2f".format(3.14159) == "3.14")
     check("str34", "%d/%s".format(42, "z") == "42/z")
-    // %f rounds HALF UP, which is java.util.Formatter's rule: `java` (JDK 24, with
-    // the locale forced to en_US) prints "  1.3|", "2.68" and "0.3" for these three,
-    // and Go's Sprintf - which rounds half to EVEN - printed "  1.2|", "2.67", "0.2"
-    // until the compiler half got its own fixed-point renderer.
+    // %f rounds HALF UP, which is java.util.Formatter's rule: `java` (with the locale
+    // forced to en_US) prints "  1.3|", "2.68" and "0.3" for these three, where Go's
+    // Sprintf - which rounds half to EVEN - would print "  1.2|", "2.67", "0.2".
     check("str35", "%5.1f|".format(1.25) == "  1.3|")
     check("str36", "%.2f".format(2.675) == "2.68" && "%.1f".format(0.25) == "0.3")
     check("str37", "%s|%b".format("q", true) == "q|true")
@@ -1716,9 +1639,7 @@ fun sec39() {
     check("map16", fromPairs.entries.size == 2)
     check("map17", fromPairs.containsValue("b") && !fromPairs.containsValue("z"))
     // A MISS answers null, not Unit: kotlin.Map.get is declared to return V?, and the
-    // indexed form is that same get. The compiler half used to answer the runtime's
-    // undefined here (printing "kotlin.Unit", so `m[9] == null` was false) while the
-    // interpreter answered null - a live cross-half divergence with no assertion on it.
+    // indexed form is that same get.
     check("map21", fromPairs[9] == null && fromPairs.get(9) == null)
     check("map22", "" + fromPairs[9] == "null")
     check("map23", byLen[7] == null && squares[9] == null)
@@ -1739,8 +1660,8 @@ fun sec39() {
 // A global NAME is declared by each grammar's own builtin block - hostGlobals in
 // kotlin-interpreter.abnf, js_scope_decl in kotlin-to-llvm-ir.abnf - not by the shared
 // runtime, so mapOf/Pair/Triple/with/StringBuilder/buildString/sequenceOf are
-// registered in BOTH by hand. What they BUILD is a shared shape whose whole member
-// surface lives in abnf/jsrtkotlin.go, so the compiler-side port was the declaration.
+// registered in BOTH. What they BUILD is a shared shape whose whole member surface
+// lives in abnf/jsrtkotlin.go.
 //
 // run / apply / with bind the receiver as `this`, so an unqualified `size` or
 // `append("a")` inside the lambda is a member call on it. The interpreter binds it
@@ -1789,11 +1710,9 @@ fun sec40() {
 
 // ===== SECTION 41: a declared type carries its WIDTH past the declaration =====
 // SECTION 31 pinned the width a LOCAL `val x: Long = 1` carries. The same rule applies
-// at every other binding site, and none of them had it: a property, a parameter, a
-// parameter DEFAULT, a function's return type and a field WRITE all dropped the
-// declared width, so a Long that never passed through a local was silently 32 bit.
-// Kotlin/JVM's Int and Long are java.lang's, so each value below is what the
-// equivalent Java program prints under `java` (JDK 24) - verified, not assumed.
+// at every other binding site: a property, a parameter, a parameter DEFAULT, a
+// function's return type and a field WRITE. Kotlin/JVM's Int and Long are java.lang's,
+// so each value below is what the equivalent Java program prints under `java`.
 class Widths41(val x: Long, val b: Byte = 127) {
     var y: Long = 1
 }
@@ -1821,10 +1740,10 @@ fun sec41() {
 
 // ===== SECTION 42: LOCAL type declarations =====
 // A class, an interface or an object declared INSIDE a function body. Every value
-// below is what the equivalent Java program prints under `java` (JDK 24) - a local
-// class, a local class implementing an interface, and a local class declared inside a
-// loop body were all written out and run; only the local `object` singleton has no
-// Java spelling and is asserted from the Kotlin specification.
+// below is what the equivalent Java program prints under `java` - a local class, a
+// local class implementing an interface, and a local class declared inside a loop
+// body; only the local `object` singleton has no Java spelling and is asserted from
+// the Kotlin specification.
 // Known limitation, deliberately NOT asserted: a local class body does not CAPTURE the
 // enclosing function's locals here (the constructor runs with a fresh scope chain, the
 // same one a top-level class gets), so a member reading an enclosing `val` is out of
@@ -1868,7 +1787,7 @@ fun sec42() {
 // `fun interface F { fun go(x: Int): Int }` declares a single-abstract-method
 // interface, and `F { ... }` converts a lambda into an instance of it. Java's
 // @FunctionalInterface is the same construct, so the equivalent Java program was
-// written and run under `java` (JDK 24): the values below are its output. The only
+// written and run under `java`: the values below are its output. The only
 // piece with no Java spelling is Kotlin's implicit single parameter `it`, which the
 // lambda sections already pin.
 fun interface Op43 {
@@ -1896,7 +1815,7 @@ fun sec43() {
 // `2147483648` on its own is out of Int range and is a Long; `-2147483648` is
 // Int.MIN_VALUE and stays 32 bit, because Kotlin types the negated CONSTANT rather than
 // negating a Long. Kotlin/JVM's Int is java.lang's, so the values below are what the
-// equivalent Java program prints under `java` (JDK 24) - verified, not assumed:
+// equivalent Java program prints under `java`:
 // -2147483648, 2147483647, 0 for x, x - 1 and x * 2, and -2147483649 for the Long.
 fun sec44() {
     val x = -2147483648
@@ -1918,11 +1837,10 @@ fun sec44() {
 // ===== SECTION 45: structural equality on the collection shapes =====
 // Kotlin's `==` is equals(), and a List, a Set, a Map, a Pair and a Triple all have
 // STRUCTURAL equality - they are java.util's on the JVM, so the answers below are the
-// ones the equivalent Java program prints under `java` (JDK 24): List.of(1,2).equals(
+// ones the equivalent Java program prints under `java`: List.of(1,2).equals(
 // List.of(1,2)) is true, Map.of(1,2).equals(Map.of(1,2)) is true, and the hashes are
-// 994 for [1, 2], 4066 for [a, b], 3 for {1=2} and 1025 for [[1, 2]]. Before this both
-// halves answered FALSE for every one of them while hashCode was already element-wise,
-// so equality and hash disagreed.
+// 994 for [1, 2], 4066 for [a, b], 3 for {1=2} and 1025 for [[1, 2]]. Equality and
+// hash must agree.
 data class Cfg45(val n: Int, val tags: List<String>)
 fun sec45() {
     check("seq1", listOf(1, 2) == listOf(1, 2))
@@ -1946,18 +1864,14 @@ fun sec45() {
     check("sq16", listOf(1, 2) in listOf(listOf(1, 2)))
     check("sq17", listOf(listOf(1, 2), listOf(3)).indexOf(listOf(3)) == 1)
     check("sq18", listOf(listOf(1), listOf(1)).distinct().size == 1)
-    // A named argument to `copy` must land in THIS class's slot. The compiler half
-    // keyed its parameter-name table by method name alone, so the second data class in
-    // a file overwrote the first one's slots and `Pt13(1, 2).copy(y = 9)` answered
-    // Pt13(x=9, y=2) - which is exactly what section 13 asserts, and which stayed green
-    // only because this file had one data class with a named copy in it.
+    // A named argument to `copy` must land in THIS class's slot, whatever other data
+    // class in the file declares a `copy` with different property names.
     check("sq19", "" + Cfg45(1, listOf("a")).copy(tags = listOf("b")) == "Cfg45(n=1, tags=[b])")
 }
 
 // ===== SECTION 46: sorting through a user Comparable, and Comparator =====
 // `sorted()` on a class that declares `operator fun compareTo` sorts by THAT, the way
-// `<` already did; before this the key comparison fell through to a numeric one, no
-// pair was ever "less", and the list came back in its original order in both halves.
+// `<` does.
 class V46(val n: Int) : Comparable<V46> {
     override fun compareTo(other: V46): Int = n - other.n
     override fun toString(): String = "V($n)"
@@ -1977,9 +1891,7 @@ fun sec46() {
 
 // ===== SECTION 47: the throwable hierarchy and typed catch =====
 // java.lang's chain is Kotlin/JVM's; every relation below was checked with `instanceof`
-// under `java` (JDK 24). The interpreter half used to parent every builtin directly to
-// Throwable (so `IllegalStateException("z") is Exception` was false) and the compiler
-// half used to run the FIRST catch clause whatever its declared type.
+// under `java`. The catch clause is selected by its declared type.
 fun sec47() {
     check("exc1", IllegalStateException("z") is Exception)
     check("exc2", IllegalStateException("z") is RuntimeException)
@@ -2010,10 +1922,9 @@ class MyExc47(m: String) : Exception(m)
 
 // ===== SECTION 48: implicit receivers form a stack =====
 // A name the innermost receiver does not answer falls through to the enclosing one:
-// `with(P) { tag }` inside a member of Q is this@Q.tag. Both halves used to stop at the
-// innermost `this` and fail with "unknown name: tag". And a bare `Inner()` built inside
-// its outer's own member captures that instance, so this@Outer answers the OUTER one -
-// before this it answered the inner instance in both halves.
+// `with(P) { tag }` inside a member of Q is this@Q.tag. And a bare `Inner()` built
+// inside its outer's own member captures that instance, so this@Outer answers the
+// OUTER one.
 class P48(val n: Int)
 class Q48(val tag: String) {
     fun viaWith(): String = with(P48(1)) { "" + n + tag }
@@ -2029,15 +1940,9 @@ fun sec48() {
     check("rcv3", Q48("O").make().bare() == "O")
     check("rcv4", Q48("Z").In48(1).who() == "Z/1")
     // A BUILTIN receiver: which shapes count as one, and whether an unqualified
-    // PROPERTY is read as a field or called as a method. Three defects met here, all
-    // found sweeping todo.md 1.8's neighbourhood:
-    //   * a SET was not a builtin receiver in EITHER half, so `with(setOf(1, 2)) { size }`
-    //     aborted with "unknown name" in both - agreement, and both wrong;
-    //   * a STRING receiver answered only `length` in the interpreter, so substring /
-    //     uppercase / lastIndex / indices all aborted there while the compiler ran them;
-    //   * the compiler's ktRecvMember CALLED the property name as a method, so `size`
-    //     worked (the list method table has one) and `lastIndex` died with "unknown list
-    //     method". The interpreter has always read it as a field.
+    // PROPERTY is read as a field or called as a method: a SET is a builtin receiver
+    // (`with(setOf(1, 2)) { size }`), a STRING receiver answers substring / uppercase
+    // / lastIndex / indices, and `lastIndex` is read as a field, not called.
     check("rcv5", with(setOf(1, 2, 2)) { size } == 2 && with(setOf(1, 2)) { contains(1) })
     check("rcv6", with("abcd") { substring(1) } == "bcd" && with("abcd") { uppercase() } == "ABCD")
     check("rcv7", with("abcd") { lastIndex } == 3 && with("abcd") { "" + indices } == "0..3")
@@ -2047,10 +1952,8 @@ fun sec48() {
 }
 
 // ===== SECTION 49: the stdlib members the subset was missing =====
-// Every call below aborted the run with "unknown list method" / "unknown String method"
-// / "unknown name" in BOTH halves. They are grouped rather than spread out because they
-// were added as one sweep over the kotlin.collections, kotlin.text and kotlin.ranges
-// member lists.
+// kotlin.collections, kotlin.text and kotlin.ranges members, grouped as one sweep over
+// their member lists.
 fun sec49() {
     check("std1", "" + listOf(1, null, 2).filterNotNull() == "[1, 2]")
     check("std2", "" + listOf(1, 2, 3).filterIndexed { i, _ -> i > 0 } == "[2, 3]")
@@ -2119,13 +2022,10 @@ fun sec49() {
     // same contract function under a name the file does not shadow.
     try { checkNotNull(null) } catch (e: IllegalStateException) { msg = e.message!! }
     check("st53", msg == "Required value was null.")
-    // joinToString's TRAILING LAMBDA is its transform, not its separator. Both halves
-    // read it as the separator and printed the lambda between the elements - a page of
-    // script text in the interpreter and "[function]" in the compiler.
+    // joinToString's TRAILING LAMBDA is its transform, not its separator.
     check("st54", listOf(1, 2, 3).joinToString { "" + it * 2 } == "2, 4, 6")
     check("st55", listOf(1, 2, 3).joinToString("-") { "" + it } == "1-2-3")
-    // `+` on a collection is kotlin.collections.plus. It used to fall through to the
-    // numeric/JavaScript tail: 0 in the interpreter, the string "1,23" in the compiler.
+    // `+` on a collection is kotlin.collections.plus.
     check("st56", "" + (listOf(1, 2) + listOf(3)) == "[1, 2, 3]")
     check("st57", "" + (listOf(1, 2) + 3) == "[1, 2, 3]")
     check("st58", "" + (mapOf("a" to 1) + ("b" to 2)) == "{a=1, b=2}")
@@ -2134,10 +2034,9 @@ fun sec49() {
 }
 
 // ===== SECTION 50: a Set is its own shape, not a List =====
-// Every set constructor used to be an alias of listOf, so a set did not
-// deduplicate, two sets with the same elements in different orders were unequal,
-// and a List compared EQUAL to a Set. A Set is its own value now.
-// The answers below are java's (JDK 24), because Kotlin/JVM's Set IS
+// A Set deduplicates, two sets with the same elements in different orders are equal,
+// and a List is never equal to a Set. The answers below are java's, because
+// Kotlin/JVM's Set IS
 // java.util.Set: Set.of(1, 2).equals(Set.of(2, 1)) is true, List.of(1).equals(
 // Set.of(1)) is false and Set.of(1, 2).hashCode() is 3 - AbstractSet's hash is the
 // plain SUM of the element hashes, where AbstractList's is the 31-fold.
@@ -2182,20 +2081,17 @@ fun sec50() {
     check("set25", m.keys.hashCode() == 195)
     // A set OF sets still compares structurally.
     check("set26", setOf(setOf(1), setOf(2)) == setOf(setOf(2), setOf(1)))
-    // A `-` on a LIST or a MAP is kotlin.collections.minus too; it used to fall
-    // through to the numeric tail and answer 0 in both halves.
+    // A `-` on a LIST or a MAP is kotlin.collections.minus too.
     check("set27", "" + (listOf(1, 2, 3) - 1) == "[2, 3]")
     check("set28", "" + (listOf(1, 2, 3) - listOf(2)) == "[1, 3]")
     check("set29", "" + (mapOf("a" to 1, "b" to 2) - "a") == "{b=2}")
 }
 
 // ===== SECTION 51: hashCode is java's, and it agrees with equals =====
-// Every answer below was read off the equivalent Java program under `java`
-// (JDK 24), because Kotlin/JVM's Double/Long/Boolean/String/Char hashCode ARE
-// java.lang's. The Double one was the defect: the value model used the TRUNCATED
-// value, so 1.5.hashCode() was 1 where java says 1073217536 (doubleToLongBits xor
-// its own high half). This matters beyond hashing, because hashCode must agree
-// with the structural equals the collections use.
+// Every answer below was read off the equivalent Java program under `java`, because
+// Kotlin/JVM's Double/Long/Boolean/String/Char hashCode ARE java.lang's:
+// 1.5.hashCode() is 1073217536 (doubleToLongBits xor its own high half), not the
+// truncated value. hashCode must agree with the structural equals the collections use.
 fun sec51() {
     check("hsh1", 1.5.hashCode() == 1073217536)
     check("hsh2", listOf(1.5).hashCode() == 1073217567)
@@ -2208,17 +2104,16 @@ fun sec51() {
     check("hsh8", Double.NEGATIVE_INFINITY.hashCode() == -1048576)
     // The subnormal floor: 4.9E-324 is the smallest positive Double, bits == 1.
     check("hsh9", (4.9E-324).hashCode() == 1)
-    // The rest of the family, unchanged but never pinned before.
+    // The rest of the family.
     check("hsh10", 1234567890123L.hashCode() == 1912276436 && 7.hashCode() == 7)
     check("hsh11", true.hashCode() == 1231 && false.hashCode() == 1237)
     check("hsh12", "ab".hashCode() == 3105 && 'a'.hashCode() == 97)
     check("hsh13", mapOf(1.5 to 2.5).hashCode() == 2147221504)
     // hashCode() and toString() are extensions on Any?, so a null receiver answers
-    // them instead of throwing; both halves used to abort the run.
+    // them instead of throwing.
     val n: String? = null
     check("hsh14", n.hashCode() == 0 && n.toString() == "null")
-    // Boolean owns hashCode/toString/not/compareTo; the compiled half used to abort
-    // with "method call 'hashCode' on a boolean".
+    // Boolean owns hashCode/toString/not/compareTo.
     check("hsh15", true.toString() == "true" && true.not() == false)
     check("hsh16", true.compareTo(false) == 1 && false.compareTo(false) == 0)
 }
@@ -2226,8 +2121,7 @@ fun sec51() {
 // ===== SECTION 52: Map.Entry is not a Pair =====
 // An entry destructures like a Pair - `for ((k, v) in m)` - but it renders as a=1
 // where a Pair renders as (a, 1), and it hashes as key XOR value where a Pair uses
-// the data-class 31-fold. Both halves used to print `[(a, 1)]` for m.entries.
-// java (JDK 24) on a LinkedHashMap {a=1, b=2}: entrySet() prints [a=1, b=2], one
+// the data-class 31-fold. java on a LinkedHashMap {a=1, b=2}: entrySet() prints [a=1, b=2], one
 // entry prints a=1, that entry hashes to 96 and the entry SET hashes to 192, which
 // is exactly the map's own hash.
 fun sec52() {
@@ -2256,12 +2150,10 @@ fun sec52() {
 }
 
 // ===== SECTION 53: lateinit is enforced =====
-// Reading an unassigned `lateinit var` used to answer null in both halves; Kotlin
-// throws UninitializedPropertyAccessException. A lateinit property cannot hold null,
-// so "the field is still null" IS "not initialized yet" and no per-instance flag is
-// needed. `::name.isInitialized` is the language's own test for it, and it used to
-// abort both halves with "property .isInitialized of null" because the bare `::name`
-// READ the property first.
+// Reading an unassigned `lateinit var` throws UninitializedPropertyAccessException. A
+// lateinit property cannot hold null, so "the field is still null" IS "not initialized
+// yet" and no per-instance flag is needed. `::name.isInitialized` is the language's
+// own test for it.
 class Li53 {
     lateinit var a: String
     var plain: String? = null
@@ -2295,9 +2187,8 @@ fun sec53() {
 }
 
 // ===== SECTION 54: the qualified stdlib paths =====
-// `kotlin.math.abs(-3)` resolved in NEITHER half ("unknown name: kotlin") while the
-// unqualified `abs(-3)` worked, because the builtins are global names here. A package
-// path is a value now and its last segment is looked up wherever the builtin lives.
+// `kotlin.math.abs(-3)` is the same function as the unqualified `abs(-3)`: a package
+// path is a value and its last segment is looked up wherever the builtin lives.
 fun sec54() {
     check("pkg1", kotlin.math.abs(-3) == 3 && abs(-3) == 3)
     check("pkg2", kotlin.math.max(1, 2) == 2 && kotlin.math.min(1, 2) == 1)
@@ -2309,12 +2200,11 @@ fun sec54() {
 }
 
 // ===== SECTION 55: coroutines, as a synchronous subset =====
-// launch / async / runBlocking / delay were UNDEFINED in both halves, so any program
-// with a coroutine in it stopped at the import. They run their block immediately and
-// to completion now. THE LIMITATION IS THE ORDERING, not the results: nothing
-// suspends, so a `launch` block runs before the statement after it rather than
-// concurrently. Both :description blocks state it; the assertions below only pin what
-// this subset actually promises - the VALUES.
+// launch / async / runBlocking / delay run their block immediately and to completion.
+// THE LIMITATION IS THE ORDERING, not the results: nothing suspends, so a `launch`
+// block runs before the statement after it rather than concurrently. Both :description
+// blocks state it; the assertions below only pin what this subset actually promises -
+// the VALUES.
 suspend fun work55(): Int { delay(1); return 42 }
 fun sec55() = runBlocking {
     val d = async { work55() }
@@ -2336,14 +2226,10 @@ fun sec55() = runBlocking {
 
 // ===== SECTION 57: the callable-reference surface =====
 // `b::v`, `b::w`, `b::method` and `b::class` are ordinary Kotlin (bound references
-// since 1.1) and the COMPILER aborted on every one of them with "callable reference
-// not implemented" while the interpreter answered them - a live cross-half divergence
-// that --cross never exercised because no test used one. Alongside it, an UNBOUND
-// reference's accessors gave a wrong answer in the interpreter: `(Box57::v).get(b)`
-// answered kotlin.Unit where Kotlin answers 3, because a type-qualified reference kept
-// the class DESCRIPTOR as its receiver instead of taking one from the call.
+// since 1.1), and an UNBOUND reference's accessors take the receiver from the call:
+// `(Box57::v).get(b)` is 3.
 //
-// Everything below is the KCallable / KClass surface both halves now implement, pinned
+// Everything below is the KCallable / KClass surface both halves implement, pinned
 // name by name. Semantics from the Kotlin documentation ("Callable references", "Class
 // references", "Reflection"): an unbound reference takes the receiver as the FIRST
 // argument of get/set/invoke, a bound one has it already; .name is the member's simple
@@ -2417,23 +2303,16 @@ fun sec57() {
     // "val Box57.v: kotlin.Int" and, without the reflection library on the class path,
     // "property v (Kotlin reflection is not available)"; neither is reproducible here,
     // so both halves agree on a short form and the divergence from the JVM is
-    // deliberate. The interpreter used to answer "3" for the line below - the value -
-    // where the compiled half rendered the reference.
+    // deliberate.
     check("ref31", ::Box57.name == "<init>")
     check("ref32", b::v.toString() == "" + b::v && b::v.toString() != "3")
 }
 
 // ===== SECTION 56: the enum statics, and the MutableList mutating surface =====
-// Two clusters found by probing next to the sections above, both wrong in BOTH
-// halves and therefore invisible to the cross-check:
-//   - `Col.values()` and `Col.valueOf(name)` aborted the COMPILED half outright
-//     ("unknown method 'values'") while the interpreter answered them, and
-//     `Col.entries` - Kotlin 1.9's EnumEntries property - answered kotlin.Unit in
-//     the interpreter and aborted the compiler.
-//   - every IN-PLACE MutableList mutator was missing in both halves while its
-//     copying twin was present: sort/sortDescending/sortBy/sortWith/reverse next to
-//     sorted/sortedBy/sortedWith/reversed, plus set, add(index, e), removeAll,
-//     retainAll and clear.
+// `Col.values()`, `Col.valueOf(name)` and `Col.entries` (Kotlin 1.9's EnumEntries
+// property), and every IN-PLACE MutableList mutator next to its copying twin:
+// sort/sortDescending/sortBy/sortWith/reverse next to sorted/sortedBy/sortedWith/
+// reversed, plus set, add(index, e), removeAll, retainAll and clear.
 enum class Col56 { RED, GREEN, BLUE }
 fun sec56() {
     check("enm1", "" + Col56.values().toList() == "[RED, GREEN, BLUE]")
@@ -2465,24 +2344,18 @@ fun sec56() {
     check("mut10", l.retainAll(listOf(2)) && "" + l == "[2]")
     l.clear()
     check("mut11", l.isEmpty() && "" + l == "[]")
-    // Pair/Triple.toList, which aborted both halves with "unknown method 'toList'".
+    // Pair/Triple.toList.
     check("mut12", "" + (1 to 2).toList() == "[1, 2]")
     check("mut13", "" + Triple(1, 2, 3).toList() == "[1, 2, 3]")
 }
 
 // ===== SECTION 58: a declaration in EVERY kind of block =====
-// A user report - ordinary application Kotlin that would not compile here - reduced to
-// a destructuring declaration inside a lambda body and inside a `when` branch. The
-// COMPILER half had two different block productions: Statement/PlainStmt (a function
-// body, an if/while/for body) and LamStmt/LamCtrl (a lambda body, and the `{ ... }` of
-// a when/if ARM, which is a ValueBlock made of LamStmt). LamCtrl admitted a strict
-// SUBSET of PlainStmt, so `val (a, b) = p`, a bare `val x: Int`, a modified local
-// (`private val x = 1`) and a delegated `val x by lazy { }` all parsed at statement
-// level and failed inside a lambda or a when branch. PEG's ordered choice never
-// retries a committed alternative, so a rule missing from a block production cannot be
-// recovered later - the two lists have to agree. The interpreter half had the mirror
-// gap: its LamCtrl was missing the keyword-less destructuring ASSIGNMENT and the local
-// `typealias`, which its own PlainStmt accepts. Every form below is therefore checked
+// Ordinary application Kotlin reduced to a destructuring declaration inside a lambda
+// body and inside a `when` branch. A grammar has more than one block production
+// (Statement/PlainStmt for a function body or an if/while/for body; LamStmt/LamCtrl for
+// a lambda body and the `{ ... }` of a when/if ARM), and PEG's ordered choice never
+// retries a committed alternative, so a rule missing from one block production cannot
+// be recovered later - the lists have to agree. Every form below is therefore checked
 // at all four sites: statement level, an if block, a lambda body and a when branch.
 fun mk58(): Pair<Int, Int> = Pair(1, 2)
 data class Named58(val first: Int, val second: Int)
@@ -2508,7 +2381,7 @@ fun sec58() {
         check("blk2", a2 + b2 == 3 && p3 + p4 == 3 && lz2 == 42)
     }
 
-    // 3. a LAMBDA body - the reported failure.
+    // 3. a LAMBDA body.
     val fromLambda = run {
         val (a3, b3) = mk58()
         [val p5, val p6] = mk58()
@@ -2521,7 +2394,7 @@ fun sec58() {
     }
     check("blk3", fromLambda == 3 + 3 + 10 + 2 + 5 + 3)
 
-    // 4. a `when` BRANCH block - the second reported failure. Same production.
+    // 4. a `when` BRANCH block. Same production.
     val fromWhen = when (a1) {
         1 -> {
             val (a4, b4) = mk58()
@@ -2535,12 +2408,11 @@ fun sec58() {
     }
     check("blk4", fromWhen == 3 + 3 + 100 + 6 + 4)
 
-    // 5. the reported program's own shape: a local `fun`, then a destructuring
-    //    declaration, inside the `{ }` of a when branch used as an expression body.
+    // 5. a local `fun`, then a destructuring declaration, inside the `{ }` of a when
+    //    branch used as an expression body.
     check("blk5", extract58(1) == "[1, 2]/[3]" && extract58(2) == "none")
     // The NAME based reading in full: reversing the entries must NOT reverse the
-    // values, and the same entries in BRACKETS must read positionally instead. The
-    // interpreter used to read the parenthesized form positionally too.
+    // values, and the same entries in BRACKETS must read positionally instead.
     (val second: Int, val first: Int) = Named58(10, 20)
     check("blk6", first == 10 && second == 20)
     [val q1, val q2] = Named58(10, 20)
@@ -2561,17 +2433,15 @@ fun extract58(cmd: Int): String = when (cmd) {
 }
 
 // ===== SECTION 59: the primitive-array builders and the array conversions =====
-// From the same user report. `byteArrayOf` was "unknown name" in BOTH halves - only
-// int/long/double/float/boolean/charArrayOf and arrayOf were declared - and so were
-// shortArrayOf, the four unsigned builders and emptyArray. The ARRAY-to-collection
-// surface was missing too: `asList` (the report's own call), sortedArray,
-// sortedArrayDescending, reversedArray, contentToString and contentEquals all aborted
-// with "unknown list method". An Array and a List are one shape in this value model, so
-// each of them is the list operator under Kotlin's array name; contentToString and
-// contentEquals matter because Kotlin's Array does NOT get a structural toString or
-// equals. The value model is also width-blind - `byteArrayOf(200)`, which kotlinc
-// rejects (200 is not a Byte; the legal spelling is `byteArrayOf((-56).toByte())`), is
-// accepted here, which is a TYPE question and is documented at both declaration sites.
+// Every primitive-array builder (byteArrayOf, shortArrayOf, the four unsigned builders,
+// emptyArray, ...) and the ARRAY-to-collection surface: asList, sortedArray,
+// sortedArrayDescending, reversedArray, contentToString and contentEquals. An Array and
+// a List are one shape in this value model, so each of them is the list operator under
+// Kotlin's array name; contentToString and contentEquals matter because Kotlin's Array
+// does NOT get a structural toString or equals. The value model is also width-blind -
+// `byteArrayOf(200)`, which kotlinc rejects (200 is not a Byte; the legal spelling is
+// `byteArrayOf((-56).toByte())`), is accepted here, which is a TYPE question and is
+// documented at both declaration sites.
 fun sec59() {
     check("arr1", byteArrayOf(1, 2, 3).size == 3)
     check("arr2", shortArrayOf(1, 2).size == 2)
@@ -2591,7 +2461,7 @@ fun sec59() {
     check("arr11", "" + bs.asList().map { it.toShort() } == "[-56, 1]")
     check("arr12", bs[0].toInt() == -56 && bs.size == 2)
 
-    // The conversions - asList was the reported one.
+    // The conversions.
     val xs = intArrayOf(3, 1, 2)
     check("arr13", "" + xs.asList() == "[3, 1, 2]")
     check("arr14", "" + xs.toList() == "[3, 1, 2]" && "" + xs.toMutableList() == "[3, 1, 2]")
@@ -2617,24 +2487,17 @@ fun sec59() {
 }
 
 // ===== SECTION 60: the supertype GRAPH, qualified `is`, and the enum companion =====
-// Four defects found by probing ordinary application Kotlin (a sealed hierarchy, an
-// interface with a default method, a companion factory), each one a cross-half
-// divergence or a wrong answer in both halves:
-//   - the interpreter's member lookup walked ONE chain (`__super`), so a second
-//     interface's default method, anything reached through an interface's own
-//     supertypes, and a superclass's interface seen from an OBJECT declaration were
-//     all invisible - while the compiled half answered every one of them. A nested
-//     object made it worse: it is built while its owner's body is walked, so it
-//     memoized an EMPTY parent list for the whole run.
+// Ordinary application Kotlin (a sealed hierarchy, an interface with a default method,
+// a companion factory):
+//   - member lookup walks the supertype GRAPH: a second interface's default method,
+//     anything reached through an interface's own supertypes, and a superclass's
+//     interface seen from an OBJECT declaration (a nested object is built while its
+//     owner's body is walked, so its parents resolve lazily).
 //   - `is Shape.Circle` - the QUALIFIED spelling of a nested class, which is how a
-//     sealed hierarchy is normally written - matched nothing in EITHER half, so the
-//     `is` branch of a `when (this)` silently fell through to the else.
-//   - an enum class's COMPANION was never attached by the compiled half ("unknown
-//     method 'of'"), and in the interpreter its members could not see the enum's own
-//     entries ("unknown name: A").
-//   - `Level.valueOf(bad)` aborted the run in both halves instead of throwing the
-//     IllegalArgumentException Kotlin throws, so the ordinary
-//     `runCatching { valueOf(s) }.getOrNull()` parse idiom could not be written.
+//     sealed hierarchy is normally written.
+//   - an enum class's COMPANION, whose members see the enum's own entries.
+//   - `Level.valueOf(bad)` throws IllegalArgumentException, so the ordinary
+//     `runCatching { valueOf(s) }.getOrNull()` parse idiom works.
 interface Aud60 { val label: String
                   fun audit(): String = "audit:" + label }
 interface Extra60 { fun extra(): String = "extra" }
@@ -2688,11 +2551,8 @@ fun sec60() {
 }
 
 // ===== SECTION 61: labelled returns, including to an OUTER lambda =====
-// `return@label` targeting a lambda was implemented for the INNERMOST lambda only:
-// the return builder walked the walk-time retLabels stack, accepted a match whose
-// kind was "fun", and reported everything else as "non-local labelled return not
-// implemented". A plain non-local `return` out of a lambda already worked, so the
-// unwinding machinery existed - what was missing was naming a target.
+// `return@label` may target the innermost lambda, an OUTER lambda or the enclosing
+// function.
 // Kotlin's rule is the one implemented here: `return@l` targets the NEAREST enclosing
 // function or lambda labelled `l`, with that frame's value. A lambda target raises a
 // {__lamret: l} marker rather than returning a control value, because the target may
@@ -2741,13 +2601,11 @@ fun sec61() {
 
 // ===== SECTION 62: MEMBER extension functions, including the bodiless ones =====
 // A member extension function - one declared inside a class or interface, whose `this`
-// is the extension receiver while `this@Class` is the enclosing instance - already
-// worked WITH a body. The BODILESS forms did not: `fun Int.qty(): String` in an
-// interface and `abstract fun Int.scaled(): Int` in an abstract class both fell
-// through to UnsupFun and aborted the whole run, even though the override beside them
-// was already understood. MemberExtAbs is AbstractFun's shape with a receiver in
-// front; like AbstractFun it contributes no implementation, and the override installs
-// the real entry, which the lookup reaches from the runtime receiver.
+// is the extension receiver while `this@Class` is the enclosing instance - with a body
+// and in its BODILESS forms: `fun Int.qty(): String` in an interface and `abstract fun
+// Int.scaled(): Int` in an abstract class. MemberExtAbs is AbstractFun's shape with a
+// receiver in front; like AbstractFun it contributes no implementation, and the
+// override installs the real entry, which the lookup reaches from the runtime receiver.
 interface Unit62 { fun Int.qty(): String }
 abstract class Base62 {
     abstract fun Int.scaled(): Int
@@ -2775,19 +2633,11 @@ fun sec62() {
 }
 
 // ===== SECTION 63: the whole `super` surface =====
-// Three defects, all found by probing and all wrong ANSWERS rather than missing
-// features:
-//   - `super.property` had no branch at all in the field reader, so the {__superref}
-//     marker fell through to the extension-property fallback and answered undefined:
-//     `override val v get() = super.v + 1` quietly evaluated to 0.
-//   - `super` inside an OBJECT EXPRESSION resolved its declaring class through the
-//     walk-time class name, which an anonymous object does not have - so it failed
-//     with "no super method". The object expression now pushes "<object>" (its
-//     descriptor's own name) and the lookup walks the RECEIVER's supertype graph.
-//   - a `super<Base>` qualifier was parsed and DROPPED, so both halves of
-//     `super<I1>.tag() + super<I2>.tag()` resolved to the first parent.
-// And one more the probe exposed underneath them: an object expression did not
-// CONSTRUCT its superclass, so `(object : B() {}).v` answered Unit in both halves.
+// `super.property` (`override val v get() = super.v + 1`), `super` inside an OBJECT
+// EXPRESSION (the object pushes "<object>", its descriptor's own name, and the lookup
+// walks the RECEIVER's supertype graph), a `super<Base>` qualifier choosing between two
+// parents (`super<I1>.tag() + super<I2>.tag()`), and an object expression constructing
+// its superclass (`(object : B() {}).v`).
 open class SB63 { open val v = 1
                   open val w: Int get() = 7
                   open fun g() = 10 }
@@ -2822,13 +2672,9 @@ fun sec63() {
 }
 
 // ===== SECTION 64: a lambda-with-receiver as a PARAMETER (the DSL builder shape) =====
-// `val f: T.() -> Unit = { ... }` bound the receiver to `this`; the same type used as a
-// FUNCTION PARAMETER did not, so every DSL builder - the commonest receiver-lambda
-// shape in real Kotlin - died with "unknown name: <member>" the moment the body called
-// a member of the receiver. The receiver arrived as the lambda's `it` instead of as
-// `this`. A parameter whose declared type is a receiver function type now gets the
-// same wrapper the local declaration already got, so both `t.body()` and `body(t)`
-// bind `this`.
+// `val f: T.() -> Unit = { ... }` binds the receiver to `this`, and so does the same
+// type used as a FUNCTION PARAMETER - the commonest receiver-lambda shape in real
+// Kotlin, the DSL builder - so both `t.body()` and `body(t)` bind `this`.
 class Node64(val name: String) {
     val kids = mutableListOf<Node64>()
     val attrs = mutableListOf<String>()
@@ -2853,17 +2699,12 @@ fun sec64() {
 }
 
 // ===== SECTION 65: super.property, and a setter that stores somewhere else =====
-// `super.p = v` had no reading in the interpreter half at all: `Target` is rooted at an
-// identifier and `super` matches one, so the write went to a variable named `super` and
-// aborted with "unknown name: super", while the compiler half answered correctly. The
-// same probe then exposed a second, deeper defect on this half only - a property setter
-// wrote its ENTRY snapshot of `field` back over the slot when it returned, so a setter
-// that stores anywhere else (`set(v) { super.p = v }`, the delegating override) had its
-// store silently undone: `d.p = 7` left the base's property at 1. Kotlin materializes a
-// backing field only when an accessor actually mentions `field`, which is what the
-// write-back now honours. UNVERIFIED against kotlinc (none on this machine); the Kotlin
-// documentation's "Calling the superclass implementation" and "Backing fields" sections
-// are the source.
+// `super.p = v` writes through the superclass's setter, and a property setter that
+// stores anywhere else (`set(v) { super.p = v }`, the delegating override) must not
+// have its store undone by a write-back of `field`: Kotlin materializes a backing field
+// only when an accessor actually mentions `field`. Spec-cited (no kotlinc here): the
+// Kotlin documentation's "Calling the superclass implementation" and "Backing fields"
+// sections are the source.
 open class Base65 {
     open var p: Int = 1
     open val tag: String get() = "base"
@@ -2906,13 +2747,10 @@ fun sec65() {
 }
 
 // ===== SECTION 66: the delegated-property protocol beyond a user getValue =====
-// Kotlin has four `by` delegate kinds. The interpreter half recognized only ONE of them
-// (a user object with getValue), because its check was a bare method lookup that does
-// not see the builtin Map surface - so `val a: Int by map`, the kotlin.properties
-// Delegates boxes and `provideDelegate` all warned "delegated property not implemented"
-// or aborted with "unknown name: Delegates", while the compiler half ran every one of
-// them. Under kotlinc this section additionally needs `import kotlin.properties.Delegates`
-// and `import kotlin.reflect.KProperty`.
+// Kotlin has four `by` delegate kinds: a user object with getValue, a Map (keyed by the
+// property name), the kotlin.properties.Delegates boxes, and anything a
+// `provideDelegate` substitutes. Under kotlinc this section additionally needs
+// `import kotlin.properties.Delegates` and `import kotlin.reflect.KProperty`.
 class Conf66(val map: Map<String, Any?>) {
     val name: String by map
     val size: Int by map
@@ -2966,16 +2804,11 @@ fun sec66() {
 }
 
 // ===== SECTION 67: a supertype declared LATER in the file =====
-// Kotlin has no forward-declaration rule: a class may extend one declared further down,
-// and forward-referenced FUNCTIONS already worked in both halves. The compiler half
-// emitted the top level in SOURCE order and resolved a supertype with a scope read at
-// the moment the class statement ran, so `class Inh : Base()` above `open class Base`
-// aborted with "variable not defined: Base" while the interpreter half answered. The
-// same read serves an INTERFACE supertype, so one fix covers both; the class items of
-// the top level are now emitted in topological order. A one-line interface body is here
-// too: `fun f(): Int;` - a bodiless member followed by the ordinary statement separator
-// - fell out of the compiler's member set and made the whole interface "not implemented",
-// while the identical interface written across lines worked.
+// Kotlin has no forward-declaration rule: a class may extend one declared further down
+// (`class Inh : Base()` above `open class Base`), and the same holds for an INTERFACE
+// supertype; the compiler half emits the top-level class items in topological order. A
+// one-line interface body is here too: `fun f(): Int;` - a bodiless member followed by
+// the ordinary statement separator.
 class Fwd67 : FwdBase67() {
     override fun label(): String = "fwd:" + super.label()
     fun total(): Int = seed + bonus67
@@ -3003,15 +2836,11 @@ fun sec67() {
 // ===== SECTION 68: member extension PROPERTIES (the DSL scope shape) =====
 // `val Int.scaled get() = this * factor` declared INSIDE a class is the property twin of
 // a member extension function, and the shape every scoped DSL (kotlinx.html, Compose
-// modifiers, a units scope) is built from. The interpreter half had it; the compiler half
-// dropped it into "property accessor not implemented (ignored)", so a read answered Unit
-// and a WRITE aborted with "cannot set member 'slot' on float64". The accessor pair is
-// now installed as extget$name / extset$name taking (dispatch, extensionReceiver[, value]),
-// exactly like the ext$name member extension FUNCTIONS beside it. Probing this also found
-// that a member extension declared in a COMPANION object was invisible to the compiled
-// half's runtime lookup - its members hang on the class descriptor, one level above the
-// method holder the lookup walked - so a companion member extension FUNCTION was broken
-// too, and is asserted here.
+// modifiers, a units scope) is built from. The accessor pair is installed as
+// extget$name / extset$name taking (dispatch, extensionReceiver[, value]), exactly like
+// the ext$name member extension FUNCTIONS beside it. A member extension declared in a
+// COMPANION object hangs on the class descriptor, one level above the method holder,
+// and is asserted here too.
 class Units68(val factor: Int) {
     var store = 0
     val Int.scaled: Int get() = this * factor
@@ -3060,15 +2889,10 @@ fun sec68() {
 
 // ===== SECTION 69: three collection builtins, and a call's EXPLICIT TYPE ARGUMENTS =====
 // Map.getOrPut, the PREDICATE overload of MutableList.removeAll/retainAll, and
-// List.filterIsInstance were missing from BOTH halves - the first two aborting with
-// "unknown Map method" / "not a sequence: <lambda>", which is what a builtin table that
-// lands on one half only looks like from the other side, so all three are added together.
-// filterIsInstance is the interesting one: both grammars spelled a method-call suffix as
-// `"." KId [ SkipAngle ] MArgs`, so a call's explicit type arguments were SKIPPED and
-// never captured. They are captured now (MTypeArgs) and delivered for the two things
-// that need them: filterIsInstance's element type, and a REIFIED type parameter of an
-// extension function called in method position - `"x".isA<String>()` answered false for
-// every T in both halves, because an extension's type-parameter list was skipped too.
+// List.filterIsInstance. A call's explicit type arguments are captured (MTypeArgs) and
+// delivered for the two things that need them: filterIsInstance's element type, and a
+// REIFIED type parameter of an extension function called in method position
+// (`"x".isA<String>()`).
 inline fun <reified T> Any.isA69(): Boolean = this is T
 class Bag69 { val n = 1 }
 fun sec69() {
@@ -3103,29 +2927,21 @@ fun sec69() {
     check("blt14", listOf(1, 2, 3).map<Int, Int> { it + 1 } == listOf(2, 3, 4))
 }
 
-// ===== SECTION 70: six defects one page of application Kotlin found =====
+// ===== SECTION 70: a page of application Kotlin =====
 // Written as ordinary application code (a value type with an infix extension, an enum
 // whose constants carry their own behaviour, a nullable-receiver extension property,
-// price strings, a range-dispatch `when`, and input parsing). Every assertion below
-// failed somewhere before:
+// price strings, a range-dispatch `when`, and input parsing):
 //   - `enum class L(w) { A(1) { override fun f() = ... }; abstract fun f() }` - an entry
-//     with its OWN CLASS BODY had no reading in the compiler half, so the whole
-//     declaration fell to "enum class not implemented" and the enum's NAME was then
-//     undefined for the rest of the program; the interpreter half ran it.
-//   - `infix fun Int.pctOf(m: Money)` used INFIX went through the method dispatcher in
-//     the compiler half and aborted with "method call 'pctOf' on a number", while the
-//     identical `25.pctOf(m)` in dotted form worked - and the interpreter half ran both.
-//   - `val String?.safeLen get() = this?.length ?: -1` on a NULL receiver aborted the
-//     interpreter half with "property .safeLen of null"; a nullable-receiver extension
-//     property is exactly where a null receiver is legal.
+//     with its OWN CLASS BODY.
+//   - `infix fun Int.pctOf(m: Money)` used INFIX as well as dotted.
+//   - `val String?.safeLen get() = this?.length ?: -1` on a NULL receiver; a
+//     nullable-receiver extension property is exactly where a null receiver is legal.
 //   - `"$"`, `"100$"`: a `$` not followed by an identifier or `{` is an ordinary
 //     character (psi/StringTemplates.txt records it as REGULAR_STRING_PART with no error
-//     element). BOTH halves refused every string containing a literal dollar.
-//   - two `when` arms in a row whose conditions are `in <range>`: the first arm's VALUE
-//     swallowed the next line's `in` as a membership operator and the parse died on the
-//     second arm, in BOTH halves. An `in` that opens a line is a condition.
-//   - `"nope".toInt()` aborted the program in both halves instead of THROWING
-//     NumberFormatException, so neither try/catch nor runCatching could see it.
+//     element).
+//   - two `when` arms in a row whose conditions are `in <range>`: an `in` that opens a
+//     line is a condition, not a membership operator continuing the previous arm.
+//   - `"nope".toInt()` THROWS NumberFormatException, so try/catch and runCatching see it.
 class Money70(val cents: Int) : Comparable<Money70> {
     operator fun plus(o: Money70) = Money70(cents + o.cents)
     operator fun times(n: Int) = Money70(cents * n)
@@ -3176,24 +2992,15 @@ fun sec70() {
     check("app15", runCatching { "x".toDouble() }.isFailure && "nope".toIntOrNull() == null)
 }
 
-// ===== SECTION 71: four more, from a registry/DTO page of application Kotlin =====
+// ===== SECTION 71: a registry/DTO page of application Kotlin =====
 //   - `buildList { addAll(listOf(2, 3)) }`: inside a builder lambda the implicit
-//     receiver claimed EVERY unqualified name, so the global `listOf` was bound as a
-//     method of the list under construction and the interpreter half aborted with
-//     "unknown list method: listOf" (its receiver lookup runs before the hostGlobals
-//     lookup). The compiler half consults the scope first and ran it.
+//     receiver must not claim the global `listOf`.
 //   - an unqualified read or write of the class's OWN computed or delegated property
 //     inside a member: the accessor pair lives on the DESCRIPTOR (js_defprop), not on
-//     the instance, so the compiler half's `this` fallback - which looked at own
-//     properties only - aborted with "unknown name: c" / "assignment to unknown name:
-//     m" where the interpreter half answered.
-//   - a NAMED argument filling a `vararg` parameter. Kotlin's rule is that the single
-//     named argument IS the array; the interpreter half bound the EMPTY list (it only
-//     collected the positional tail) and the compiler half wrapped the array in another
-//     array. Neither was Kotlin's answer.
-//   - named arguments to an OBJECT's method: an object registered its method NAMES but
-//     not their parameter lists, so `R.f(c = 9)` put 9 in the FIRST slot in the
-//     compiler half while the identical method on a class was correct.
+//     the instance.
+//   - a NAMED argument filling a `vararg` parameter: Kotlin's rule is that the single
+//     named argument IS the array.
+//   - named arguments to an OBJECT's method land in the right slots.
 object Reg71 {
     var writes = 0
     val doubled: Int get() = writes * 2
@@ -3235,16 +3042,11 @@ fun sec71() {
 
 // ===== SECTION 72: extension DELEGATED properties (the DataStore idiom) =====
 //   `val Ctx.store: Int by D()` - an extension property whose value comes from a
-//   delegate. Both halves reported "delegated property not implemented" and both
-//   grammars documented it as out of scope, on the grounds that an extension property
-//   "has no single owner to pass as thisRef". Kotlin's protocol answers that directly:
-//   the delegate belongs to the DECLARATION SITE (the `by` expression is evaluated once,
-//   at the declaration, not per instance) and getValue/setValue receive the EXTENSION
-//   RECEIVER as thisRef, supplied per access. This is `val Context.dataStore by
-//   preferencesDataStore(...)`, which is why a real Android application hit it at once.
-//   Also pinned here: a top-level extension property's SETTER, which the compiler half
-//   never emitted at all - the write fell through to a plain field store, so the setter
-//   body never ran while the interpreter half ran it.
+//   delegate. The delegate belongs to the DECLARATION SITE (the `by` expression is
+//   evaluated once, at the declaration, not per instance) and getValue/setValue receive
+//   the EXTENSION RECEIVER as thisRef, supplied per access. This is `val
+//   Context.dataStore by preferencesDataStore(...)`, the Android idiom.
+//   Also pinned here: a top-level extension property's SETTER runs its body.
 class Ctx72(val tag: String)
 class Store72 {
     var cell = 0
@@ -3296,19 +3098,12 @@ fun sec72() {
 
 // ===== SECTION 73: super in an enum entry body, and secondary-constructor delegation =====
 //   - an enum entry with a BODY is a subclass of its own enum class, so `super.g()` and
-//     `super.p` inside it are ordinary super calls. The compiler half never told its
-//     super-target resolver that, and answered "super call outside a subclass not
-//     implemented" / "super reference not implemented" while the interpreter ran both.
-//   - an enum class's own ACCESSOR property was never installed on the descriptor by the
-//     compiler half at all (only the class and object emitters did that), so `E.A.p`
-//     answered kotlin.Unit where the interpreter answered the value.
-//   - a secondary constructor delegating with `: super(...)` ran this class's OWN
-//     primary constructor with the delegation arguments in the interpreter half, so the
-//     superclass's `val` parameters were never stored and an inherited method died with
-//     "unknown name: n"; and in the compiler half a `: super(...)` skipped this class's
-//     property initializers and init blocks entirely.
-//   - a secondary constructor delegating with `: this(...)` always ran the PRIMARY in
-//     the compiler half, never the secondary of matching arity.
+//     `super.p` inside it are ordinary super calls.
+//   - an enum class's own ACCESSOR property (`E.A.p`).
+//   - a secondary constructor delegating with `: super(...)` stores the superclass's
+//     `val` parameters and still runs this class's property initializers and init blocks.
+//   - a secondary constructor delegating with `: this(...)` reaches the secondary of
+//     matching arity, not the primary.
 enum class Ent73 {
     A { override fun g() = super.g() + 1
         override val p: Int get() = super.p + 1 },
@@ -3369,18 +3164,12 @@ fun sec73() {
 }
 
 // ===== SECTION 74: a local enum class, and accessors on a delegated member =====
-//   - a LOCAL enum class (`fun f() { enum class E { A, B } }`) was offered only to the
-//     interpreter half's SKIP forms, so it warned "enum class not implemented" and then
-//     died with "unknown name: E", while the compiler half lowered it: a live cross-half
-//     divergence found while inventorying what each notImpl message can still reach.
-//   - a delegated MEMBER property that also declares accessors did not PARSE in either
-//     half. Kotlin's own PSI corpus records both spellings with a clean tree
-//     (propertyDelegate/PropertyWithGetter.kt on the next line,
-//     propertyDelegate/GetterInSameLine.kt on the same line) and rejects them
-//     semantically; here the accessors are consumed and dropped, and the delegate wins.
-//     The rule that was supposed to catch this shape (UnsupDelegate) was unreachable:
-//     RealPropDelegate matched up to the delegate and SUCCEEDED, and a PEG never
-//     re-enters a rule that succeeded, so the class body died on the `get` instead.
+//   - a LOCAL enum class (`fun f() { enum class E { A, B } }`) is a real enum.
+//   - a delegated MEMBER property that also declares accessors. Kotlin's own PSI corpus
+//     records both spellings with a clean tree (propertyDelegate/PropertyWithGetter.kt
+//     on the next line, propertyDelegate/GetterInSameLine.kt on the same line) and
+//     rejects them semantically; here the accessors are consumed and dropped, and the
+//     delegate wins.
 class Deleg74 {
     var cell = 0
     operator fun getValue(thisRef: Any?, property: KProperty<*>): Int = cell + 1
@@ -3411,31 +3200,21 @@ fun sec74() {
 }
 
 // ===== SECTION 75: WHICH supertype `super` names, and how that name RESOLVES =====
-// The fourth round on "super call outside a subclass". Every previous round fixed a
-// SHAPE; the root cause was one expression, repeated at four sites in the compiler half
-// and mirrored by ps[0] in the interpreter half:
-//     (supers.length > 0 && knownType(supers[0].name)) ? supers[0].name : null
-// It is wrong twice over, and both halves were reachable from ordinary Kotlin.
-//   (a) supers[0] - the FIRST supertype. Kotlin does not require the superclass to come
-//       first: `class C : I3, Base2()` is legal and common, the interface took the slot
-//       and Base2 was never seen. The superclass is the supertype written with a
+// WHICH supertype is the superclass, and how a supertype name resolves:
+//   (a) Kotlin does not require the superclass to come first: `class C : I3, Base2()`
+//       is legal and common. The superclass is the supertype written with a
 //       CONSTRUCTOR CALL; failing that (a class with only secondary constructors writes
 //       no parentheses anywhere) the first supertype that is a class rather than an
 //       interface; only then position. A delegated `I by d` is never the superclass.
-//   (b) knownType(name) - a LITERAL declared class name. A supertype named through a
-//       `typealias`, or written as a dotted path (`Outer.In`), resolved to nothing:
-//       the typealias form is what the user report was actually hitting, and the
-//       interpreter half failed on BOTH with "no super method". Every supertype name now
-//       goes through resolvedTypeName - generics and the dotted path dropped, then
-//       typealiases followed - in both halves, and the failure message names the
-//       supertype it could not resolve instead of claiming there is no subclass.
-// Fixing (a) also repaired two things that were never about `super` at all: with an
-// interface listed first, the SUPERCLASS CONSTRUCTOR was not run (emitSuperCtor saw a
-// supertype with no argument list and returned), and the interface's own default
-// methods were never copied in (the copy loop started at index 1, i.e. skipped it).
-// UNVERIFIED against kotlinc (none on this machine); the Kotlin documentation's
-// "Inheritance" / "Calling the superclass implementation" and "Type aliases" sections
-// are the source for every expected value below.
+//       With the interface listed first, the superclass constructor still runs and the
+//       interface's own default methods are still copied in.
+//   (b) a supertype named through a `typealias`, or written as a dotted path
+//       (`Outer.In`), resolves through resolvedTypeName - generics and the dotted path
+//       dropped, then typealiases followed - in both halves, and a failure names the
+//       supertype it could not resolve.
+// Spec-cited (no kotlinc here): the Kotlin documentation's "Inheritance" / "Calling the
+// superclass implementation" and "Type aliases" sections are the source for every
+// expected value below.
 interface XI75 { fun h() = 40 }
 interface XJ75 { fun j() = 50 }
 open class XBase75(val seed: Int = 2) { open fun g() = 1
@@ -3465,12 +3244,9 @@ class XQualGen75 : XGen75<Int>() { override fun g() = super<XGen75<Int>>.g() + 3
 class XWhere75<T> : XBase75() where T : Comparable<T> { override fun g() = super.g() + 3 }
 class XGenGen75<T> : XGen75<T>() { override fun g() = super.g() + 3 }
 // Delegation combined with a superclass, in BOTH orders. The delegated interface is
-// declared with an ABSTRACT member on purpose: an interface with a DEFAULT body is a
-// separate, older divergence - the interpreter half lets the inherited default win over
-// the `by` delegate while the compiler half lets the delegate win (Kotlin's rule, from
-// the documentation's "Delegation" section: the compiler generates forwarders for every
-// member the class does not itself override) - and it reproduces with no `super` in
-// sight, so it does not belong to this section.
+// declared with an ABSTRACT member on purpose: with a DEFAULT body the interpreter half
+// lets the inherited default win over the `by` delegate while the compiler half lets
+// the delegate win (Kotlin's rule) - a known divergence unrelated to `super`.
 interface XK75 { fun k(): Int }
 class XDelegImpl75 : XK75 { override fun k() = 7 }
 class XDelegAfter75(d: XK75) : XBase75(), XK75 by d { override fun g() = super.g() + 3 }
@@ -3532,52 +3308,32 @@ fun sec75() {
 // ===== END SECTIONS =====
 
 // ===== SECTION 76: the IMPLICIT RECEIVER, and WHICH read answers it =====
-// todo.md 1.10. The compiler half resolves an unqualified name through kt_ktget
-// (kotlin-to-llvm-ir.abnf), whose `this` probe asked js_typeof == "object" and then
-// read the receiver with the SHARED js_get. That is the right read for a class
-// instance and the wrong one for every OBJECT-SHAPED BUILTIN - a Map, a List, a Set,
-// a StringBuilder, a Result, a lazy - which are all "object" too. Two live
-// divergences came out of the one line:
-//   * `with(m) { entries }` answered js_get's dict arm, a raw Pair list printing
-//     `[(a, 1), (b, 2)]`, where `m.entries` written out, the interpreter and the
-//     native binary all say `[a=1, b=2]`.
-//   * `val List<Int>.mid get() = this[size / 2]` aborted with *unknown name: size*:
-//     js_get misses `size` on an array, and the accessor probe behind it finds no
-//     {__acc} on a receiver that carries no class descriptor at all.
-// The test is now `__class`, and a builtin receiver then splits AGAIN on the
-// ktRecvProp table - the SAME table the interpreter's kRecvProps and layer 2's
-// k4RecvProp use - because js_ktfget answers `first`/`last`/`step` off a
-// MATERIALIZED range and an ungated route made `with(listOf(4, 5)) { first() }` call
-// the number 4. kr9 is that guard.
-// The sweep around it found four more, all of them run-vs-native or
-// interpreter-vs-run splits that no gate here can see:
-//   * a PLAIN OBJECT receiver (Pair, Triple, Map.Entry) aborted NATIVELY, because
-//     `with` binds a scope `this` under llvm.Run and only pushes ktRecvStack
-//     natively, and ktRecvMember had no arm for an object that is neither a class
-//     instance nor a collection (kr12-kr14);
+// The compiler half resolves an unqualified name through kt_ktget
+// (kotlin-to-llvm-ir.abnf). A class instance is read with the shared js_get; an
+// OBJECT-SHAPED BUILTIN - a Map, a List, a Set, a StringBuilder, a Result, a lazy - is
+// not an instance and takes Kotlin's field read: `with(m) { entries }` is `[a=1, b=2]`,
+// and `val List<Int>.mid get() = this[size / 2]` reads the list's `size`. A builtin
+// receiver then splits AGAIN on the ktRecvProp table - the SAME table the
+// interpreter's kRecvProps and layer 2's k4RecvProp use - so `with(listOf(4, 5))
+// { first() }` stays a method call (kr9).
+// The rest of the sweep, all run-vs-native or interpreter-vs-run splits that only the
+// ratchet's native build sees:
+//   * a PLAIN OBJECT receiver (Pair, Triple, Map.Entry): `with` binds a scope `this`
+//     under llvm.Run and only pushes ktRecvStack natively (kr12-kr14);
 //   * kotlin.Lazy's value / isInitialized, kotlin.Result's isSuccess / isFailure,
-//     MatchResult.value and Char.code are `val`s the runtime SYNTHESISES, so they
-//     are neither own properties nor collection properties and reached nothing
-//     (kr15-kr17);
-//   * a Unit-valued LOCAL is a slot holding `undefined`, which js_scope_typeof
-//     cannot tell from an absent name, so the native binary aborted on `println(x)`
-//     where llvm.Run printed kotlin.Unit. js_scope_has is the own-scope test that
-//     separates the two, and this is its first use from an emitter (kr20);
-//   * `println(f())` for a Unit-returning f printed a BLANK LINE natively and
-//     kotlin.Unit everywhere else, because MetaJS has no `arguments` and layer 2
-//     could not tell it from `println()`. The emitter now passes the empty string
-//     for a no-argument println under -exe, which Kotlin renders identically. The
-//     two bare prints at the end of this section are that pair; they are OUTPUT, not
+//     MatchResult.value and Char.code are `val`s the runtime SYNTHESISES, neither own
+//     properties nor collection properties (kr15-kr17);
+//   * a Unit-valued LOCAL is a slot holding `undefined`, which js_scope_typeof cannot
+//     tell from an absent name; js_scope_has is the own-scope test that separates the
+//     two (kr20);
+//   * `println(f())` for a Unit-returning f must print kotlin.Unit natively too: the
+//     emitter passes the empty string for a no-argument println under -exe. The two
+//     bare prints at the end of this section are that pair; they are OUTPUT, not
 //     assertions, and only --cross and a native probe can see them.
-// STILL OPEN and deliberately not chased: `with(1..7 step 2) { first }` answers a
-// bound method in both compiled halves and aborts in the interpreter. A range is
-// materialized as a plain list here, `first`/`last` are member FUNCTIONS on List and
-// PROPERTIES on IntProgression, and the name alone cannot decide which - so any
-// answer breaks the other shape. `with(Regex("a")) { pattern }` misses in all three.
-// UNVERIFIED against kotlinc (none on this machine). Expected values are the
-// interpreter half's, which is this project's reference for Kotlin semantics, cross-
-// read against the kotlin.collections / kotlin.text / kotlin.Lazy / kotlin.Result
-// API documentation for the member kinds (`val` versus `fun`).
+// Spec-cited (no kotlinc here). Expected values are the interpreter half's, which is
+// this project's reference for Kotlin semantics, cross-read against the
+// kotlin.collections / kotlin.text / kotlin.Lazy / kotlin.Result API documentation for
+// the member kinds (`val` versus `fun`).
 val List<Int>.mid76: Int get() = this[size / 2]
 val String.midc76: Char get() = this[length / 2]
 fun List<Int>.li76() = lastIndex
@@ -3603,7 +3359,7 @@ fun sec76() {
     check("kr8", with(xs) { size } == 3 && with(xs) { lastIndex } == 2 &&
                  with(xs) { indices.toString() } == "0..2")
     // A builtin receiver's METHODS stay methods. Reading `first` as a property here
-    // would answer the number 1 and the call would then abort.
+    // would answer the number 1 and the call would abort.
     check("kr9", with(xs) { first() } == 1 && with(xs) { last() } == 3 && with(xs) { sum() } == 6)
     check("kr10", mutableListOf(1).apply { add(3) }.toString() == "[1, 3]")
     // An INSTANCE keeps the ordinary member read, so a class member named like a
@@ -3637,79 +3393,45 @@ fun sec76() {
 
 
 // ===== SECTION 77: THE SYNTACTIC POSITION, and the two receiver shapes a NAME cannot decide =====
-// todo.md 1.6. The item named two defects and concluded that the first needed "the
-// receiver's ORIGIN carried on the value, not a bigger table". It needs neither. What
-// the NAME cannot decide, the SITE can:
-//
-//   `first` is `val IntProgression.first` (kotlin.ranges) and `fun <T> List<T>.first()`
-//   (kotlin.collections) - a property on one shape and a member function on the other -
-//   and this project MATERIALIZES a range as a plain list, so the two shapes arrive as
-//   the same value. But `first` and `first()` are DIFFERENT PRODUCTIONS, in all three
-//   engines, and Kotlin has no unqualified name in VALUE position that means a bound
-//   method: that spelling is `::first`. So the field read is tried first in value
-//   position and not at all in call position, and both shapes answer correctly at once.
-//   kr9 - `with(listOf(4, 5)) { first() }` must not call the number 4 - is the guard
-//   the previous round left for exactly this attempt, and rg7 restates it at the new
-//   gate.
+// `first` is `val IntProgression.first` (kotlin.ranges) and `fun <T> List<T>.first()`
+// (kotlin.collections) - a property on one shape and a member function on the other -
+// so the NAME cannot decide which read an unqualified `first` wants. The SITE can:
+// `first` and `first()` are DIFFERENT PRODUCTIONS in all three engines, and Kotlin has
+// no unqualified name in VALUE position that means a bound method (that spelling is
+// `::first`). So the field read is tried first in value position and not at all in
+// call position, and both shapes answer correctly. rg7 restates kr9's guard -
+// `with(listOf(4, 5)) { first() }` must not call the number 4 - at this gate.
 //
 // The flag travels as a third parameter of kt_ktgetp (kotlin-to-llvm-ir.abnf), a
 // second of js_ktglobal, a third of js_ktget, an argument of ktRecvMember in both
 // runtimes, and the one-shot kCallPos in kotlin-interpreter.abnf's makeCall. It has to
 // reach layer 2 because NATIVELY `with` binds no scope `this` at all - layer 2 cannot
 // make a scope - so js_ktglobal's walk of ktRecvStack is the only place the receiver
-// is ever seen there.
+// is seen there.
 //
-// CARRYING THE ORIGIN WAS ALSO NOT AVAILABLE: a floor array holds no properties.
-// jsrt.go's setMember rejects every non-numeric key but `length`, and the C floor's
-// array is the same shape - so marking the materialized progression would have meant
-// changing languages/lib/runtime.c, or a side registry keyed by array identity that
-// nothing frees.
+// The RECEIVER SHAPES a Regex, a MatchResult, a kotlin.Result and a Char each have a
+// real method surface in js_ktsmcall / mcall and a real property surface in js_ktfget /
+// kGetField, so they are builtin receivers: `with(Regex("a")) { pattern }`, an
+// unqualified `find()`, `with(runCatching { 7 }) { getOrNull() }` and
+// `with('q') { isLetter() }`. Also here: `val IntRange.start` / `val
+// IntRange.endInclusive` (the ClosedRange members), and `re.run { ... }` /
+// `re.let { ... }` on a Regex receiver.
 //
-// THE SECOND BULLET was a missing RECEIVER SHAPE rather than a missing rule: a Regex, a
-// MatchResult, a kotlin.Result and a Char were in no engine's builtin-receiver set, so
-// they took the plain-object arm, which reads own properties and binds no method at
-// all. `with(Regex("a")) { pattern }` and an unqualified `find()` reached nothing in all
-// three engines, consistently - and so did `with(runCatching { 7 }) { getOrNull() }` and
-// `with('q') { isLetter() }`, which the item did not name. Each of the four has a real
-// method surface in js_ktsmcall / mcall and a real property surface in js_ktfget /
-// kGetField, which is what the predicate is asking about.
+// KNOWN DIVERGENCE, not asserted: an EXTENSION PROPERTY that shadows one of the seven
+// runtime index properties, read UNQUALIFIED against an implicit receiver. `val
+// List<Int>.lastIndex get() = 99` makes `with(xs) { lastIndex }` answer 99 in the
+// interpreter (kIdxExt) and 2 in both compiled halves. It cannot be closed in the
+// emitter alone: natively `with` binds no scope `this`, the read is answered by layer
+// 2's walk of ktRecvStack, and layer 2 cannot read the `extp$name` binding out of a
+// scope - so an emitter-only probe would trade a halves divergence for a
+// run-versus-native one.
 //
-// FOUND ON THE SWEEP AND FIXED HERE TOO:
-//   * `val IntRange.start` / `val IntRange.endInclusive` (the ClosedRange members)
-//     answered kotlin.Unit in ALL THREE engines - agreement, and all three wrong.
-//   * `re.run { ... }` and `re.let { ... }` aborted in the INTERPRETER with *unknown
-//     Regex method: run*, because mcall reaches krxMethod - which fails on an unknown
-//     name - before kScopeMethod, while both compiled halves ran them.
-//
-// FOUND AND NOT FIXED, deliberately:
-//   * an EMPTY range. `(5..1).first` is 5 and `.last` is 1 in Kotlin (they are the
-//     constructor arguments, and only `first()` throws), and the interpreter's real
-//     {__range} answers both - but the compiled halves materialize an EMPTY LIST, from
-//     which no bound is recoverable. A live halves divergence, unreachable without
-//     changing the materialized representation, and NOT asserted here because no single
-//     expected value can hold for both halves.
-//   * `with(Pair(1, "x")) { toString() }` and the same on a Map.Entry: unqualified
-//     toString on a receiver that is neither a class instance nor a builtin. Consistent
-//     across all three engines, so it is a gap and not a divergence.
-//   * `mr.range.toString()` and `mr.groups.toString()` render "[object Object]" in all
-//     three, where Kotlin says "1..3". That is the range MATERIALIZATION deviation
-//     (`(1..3).toString()` is "[1, 2, 3]" here), recorded at makeRange.
-//   * an EXTENSION PROPERTY that shadows one of the seven runtime index properties,
-//     read UNQUALIFIED against an implicit receiver. `val List<Int>.lastIndex get() =
-//     99` makes `with(xs) { lastIndex }` answer 99 in the interpreter (kIdxExt) and 2
-//     in both compiled halves - measured on d473319 and UNCHANGED by this round, so it
-//     is a pre-existing divergence and not one the new value-position read introduced.
-//     It cannot be closed in the emitter alone: natively `with` binds no scope `this`,
-//     the read is answered by layer 2's walk of ktRecvStack, and layer 2 cannot read
-//     the `extp$name` binding out of a scope - so an emitter-only probe would trade a
-//     halves divergence for a run-versus-native one.
-//
-// UNVERIFIED against kotlinc - there is none on this machine. The expected values are
-// read from the kotlin.ranges (IntProgression.first/last/step, ClosedRange.start/
-// endInclusive), kotlin.collections (first()/last()/sum()), kotlin.text (Regex.pattern/
-// options/find/matches/containsMatchIn/replace/split, MatchResult.value/groupValues/
-// next) and kotlin.Result API documentation, cross-read against the interpreter half,
-// which is this project's reference for Kotlin semantics.
+// Spec-cited (no kotlinc here). The expected values are read from the kotlin.ranges
+// (IntProgression.first/last/step, ClosedRange.start/endInclusive), kotlin.collections
+// (first()/last()/sum()), kotlin.text (Regex.pattern/options/find/matches/
+// containsMatchIn/replace/split, MatchResult.value/groupValues/next) and kotlin.Result
+// API documentation, cross-read against the interpreter half, which is this project's
+// reference for Kotlin semantics.
 fun helper77() = 5
 fun sec77() {
     // Every operand comes out of an array so the constant folder cannot answer any of
@@ -3759,12 +3481,10 @@ fun sec77() {
 
 
 // ===== SECTION 78: THE RANGE / PROGRESSION / STRING-SLICE SURFACE =====
-// todo.md 1.5. The previous round made a range a first-class PROGRESSION instead of
-// a materialized list; this is the surface that did not get converted with it, swept
-// rather than fixed at its four named examples. Every fact below is
-// kotlin.ranges / kotlin.text / kotlin.collections as documented - there is no
-// kotlinc on this machine (manual chapter 5), so the stdlib declarations and
-// IntProgression's own toString/equals/reversed contracts are the oracle:
+// The range / progression / string-slice surface. Every fact below is kotlin.ranges /
+// kotlin.text / kotlin.collections as documented - there is no kotlinc on this machine
+// (manual chapter 5), so the stdlib declarations and IntProgression's own
+// toString/equals/reversed contracts are the oracle:
 //
 //   IntProgression.reversed(): IntProgression   = fromClosedRange(last, first, -step)
 //   IntProgression.toString()                   = "$first..$last step $step", and the
@@ -3824,8 +3544,7 @@ fun sec78() {
                   n[3].downTo(n[0]).toString() == "5 downTo 1 step 1")
     check("rp16", cs[0].rangeTo(cs[2]).toString() == "a..c" &&
                   ls[0].rangeTo(ls[1]).toString() == "1..5")
-    // A Long step reached the interpreter half's `st` slot unconverted and printed
-    // "1..NaN step [object Object]" there while the compiled halves said "1..5 step 2".
+    // A Long step: `1L..5L step 2L` is "1..5 step 2".
     check("rp17", (ls[0]..ls[1] step ls[2]).toString() == "1..5 step 2" &&
                   (ls[0]..ls[1] step ls[2]).toList().toString() == "[1, 3, 5]")
 
@@ -3924,8 +3643,8 @@ fun sec78() {
                   (kotlin.random.Random.nextBoolean() || true))
     // withIndex() answers Iterable<IndexedValue<T>>, and IndexedValue is a DATA
     // class - its toString is the generated "IndexedValue(index=0, value=10)", not
-    // the Pair "(0, 10)" every engine printed. Destructuring, .index and .value are
-    // unchanged, which is what the second half of this asserts.
+    // the Pair "(0, 10)". Destructuring, .index and .value are what the second half
+    // of this asserts.
     var wiTxt = ""
     for ((wi, wv) in xs.withIndex()) { wiTxt += "" + wi + ":" + wv + " " }
     check("rp38", xs.withIndex().toList()[n[4]].toString() == "IndexedValue(index=0, value=10)" &&
@@ -3939,16 +3658,13 @@ fun sec78() {
 // SECTION 79 - THE SCOPE CHAIN: what an emitter could not see
 // ============================================================================
 //
-// Ten of Kotlin's externs take a SCOPE HANDLE, and for as long as a scope was the
-// C floor's private storage they were lowered into ~500 lines of IR in
-// languages/kotlin-to-llvm-ir.abnf that could reach the INNERMOST binding and the
-// INNERMOST `this` and no further. The scope host builtins (scopeNew /
-// scopeParent / scopeGet / scopeHas / scopeDecl, ids 64..68) moved the chain walk
-// into languages/lib/kotlin-rt.metajs SECTION 6, and this section is what that
-// bought. Every assertion here is a shape the OLD lowering got wrong, and the two
-// marked NATIVE-ABORT did not merely answer wrongly - they killed the native
-// binary while the interpreter and llvm.Run were green, which is the exact blind
-// spot docs/working-on-this-project.md chapter 3 warns about.
+// Ten of Kotlin's externs take a SCOPE HANDLE. Emitted IR can reach only the INNERMOST
+// binding and the INNERMOST `this`; the chain walk lives in
+// languages/lib/kotlin-rt.metajs SECTION 6, over the scope host builtins (scopeNew /
+// scopeParent / scopeGet / scopeHas / scopeDecl, ids 64..68). Every assertion here is a
+// shape an innermost-only lowering gets wrong, and the ones marked NATIVE-ABORT kill the
+// native binary while the interpreter and llvm.Run stay green - the blind spot
+// docs/working-on-this-project.md chapter 3 warns about.
 //
 // There is no kotlinc on this machine (manual chapter 5), so the expected values
 // are cited from the Kotlin specification: `for`/`with`/`apply` receivers and
@@ -3982,8 +3698,8 @@ class S79Host(val base: Int) {
     val boxed: String by S79Del("H")
     fun Int.scaled(): Int = this * base
     val Int.s79Doubled: Int get() = this * 2 * base
-    // NATIVE-ABORT before the conversion: `an` is a member of the ENCLOSING class
-    // read from inside an apply block, so the innermost `this` is the S79Side and
+    // NATIVE-ABORT under an innermost-only lowering: `an` is a member of the ENCLOSING
+    // class read from inside an apply block, so the innermost `this` is the S79Side and
     // the answer is one frame further out.
     fun viaApply(): Int {
         var r = 0
@@ -4009,13 +3725,11 @@ fun sec79() {
     val n = arrayOf(1, 2, 3, 4, 5)
 
     // ----- a slot that HOLDS undefined is BOUND, and that is not "absent" -----
-    // NATIVE-ABORT before the conversion. A Unit-valued local is a scope slot
-    // holding undefined; js_scope_typeof answers "undefined" for that and for an
-    // absent name alike, and js_scope_has does not walk, so a read from an
-    // ENCLOSING scope had no way to resolve and the native binary died with
-    // "js_ktget(u) needs to WALK a scope chain". scopeHas + scopeParent is exactly
-    // the question it could not ask. This is the same defect that made python's
-    // comprehensions answer [NaN, NaN, NaN, NaN] (manual 7.3).
+    // NATIVE-ABORT under an innermost-only lowering. A Unit-valued local is a scope slot
+    // holding undefined; js_scope_typeof answers "undefined" for that and for an absent
+    // name alike, and js_scope_has does not walk, so a read from an ENCLOSING scope needs
+    // scopeHas + scopeParent. The same defect class made python's comprehensions answer
+    // [NaN, NaN, NaN, NaN] (manual 7.3).
     val u: Unit = s79Unit()
     var uOut = ""
     run { uOut = "" + u }
@@ -4025,7 +3739,7 @@ fun sec79() {
     check("sc02", uOut2 == "kotlin.Unit")
 
     // ----- an enclosing class member from inside an implicit-receiver lambda -----
-    // NATIVE-ABORT before the conversion.
+    // NATIVE-ABORT under an innermost-only lowering.
     check("sc03", S79Host(n[3]).viaApply() == 9)
 
     // ----- this@Label past a nested `this`, and from inside lambdas -----
@@ -4068,7 +3782,7 @@ fun sec79() {
     // ----- a `for` loop variable is a FRESH binding each iteration, so a lambda
     // that captures it keeps THAT iteration's value. The Kotlin specification
     // defines the loop by desugaring to `val <v> = iterator.next()` INSIDE the body.
-    // Every engine here answered "3 3 3" before, and nothing asserted it.
+    // A shared cell would make every lambda answer "3 3 3".
     val fs = mutableListOf<() -> Int>()
     for (i in n[0]..n[2]) { fs.add({ i }) }
     var fsOut = ""
@@ -4101,23 +3815,21 @@ fun sec79() {
 // SECTION 80 - MEMBER EXTENSIONS, NAME SHADOWING, and java.util.Formatter's %f
 // ============================================================================
 //
-// todo.md 1.3, 1.4 and 1.11. Three defects that shared one file set, and each of
-// them had at least one leg answering differently from the other two - which is
-// the class ./test.sh --cross exists for and, for the native-only one, cannot see
-// at all (manual chapter 3: the matrix, --full and --cross all run llvm.Run).
+// Three receiver/format rules, each with at least one leg that could answer differently
+// from the other two - the class ./test.sh --cross exists for and, for the native-only
+// one, cannot see at all (manual chapter 3: the matrix, --full and --cross all run
+// llvm.Run).
 //
-// There is no kotlinc on this machine (manual chapter 5). The receiver rules
-// below are cited from the Kotlin specification; the %f values are MEASURED
-// against `java` 24.0.2, which is the toolchain Kotlin/JVM's String.format is,
-// with the locale forced to ROOT so the separator is a point.
+// There is no kotlinc on this machine (manual chapter 5). The receiver rules below are
+// cited from the Kotlin specification; the %f values are checked against `java`, which
+// is the toolchain Kotlin/JVM's String.format is, with the locale forced to ROOT so the
+// separator is a point.
 interface S80Iface {
     // Nothing calls this through the interface. It exists so that the name `f80`
-    // is a member-method name SOMEWHERE in the file, which is all the compiler
-    // half's whole-file classMethodNames set used to need to hijack the local
-    // `val f80 = { ... }` inside S80Local below - aborting llvm.Run and the native
-    // binary with *unknown method 'f80' on an instance* while the interpreter half
-    // was right. Kotlin resolves a call against the innermost scope declaring the
-    // name and a local declaration is inside the class body's scope.
+    // is a member-method name SOMEWHERE in the file, which puts it in the compiler
+    // half's whole-file classMethodNames set; the local `val f80 = { ... }` inside
+    // S80Local below must still win. Kotlin resolves a call against the innermost scope
+    // declaring the name and a local declaration is inside the class body's scope.
     fun f80(): Int
 }
 
@@ -4155,10 +3867,8 @@ class S80Recv {
 // through the member-extension setter path, in every scope in the file. When the
 // lookup misses - as it does here, at top level, where there is no receiver at
 // all - the fall-back is an ordinary member write, and an ordinary member write
-// runs the accessor. Layer 2 used to do a raw slot store instead, so `c.s80Ctr =
-// 10` left `raw` at 0 in the NATIVE binary while the interpreter and llvm.Run
-// both said 5. Kotlin says members beat extensions, and here the extension's
-// receiver type (Int) does not even match.
+// runs the accessor (`c.s80Ctr = 10` sets `raw` to 5). Kotlin says members beat
+// extensions, and here the extension's receiver type (Int) does not even match.
 class S80Host {
     var Int.s80Ctr: Int
         get() = this * 2
@@ -4176,14 +3886,13 @@ class S80Counted {
 fun sec80() {
     val n = arrayOf(1, 2, 3, 4, 5)
 
-    // ----- todo.md 1.4, case 1: a local binding beats a member method -----
+    // ----- a local binding beats a member method -----
     check("mx01", S80Impl().f80() == 111)
     check("mx02", S80Local().useLocal(n[2]) == 6)
     check("mx03", S80Local().useMember() == 999)
 
-    // ----- todo.md 1.3: an ADDED implicit receiver does not hide the member
-    // extension of the enclosing class. Before the fix the native binary answered
-    // and the interpreter and llvm.Run reported the name unresolved.
+    // ----- an ADDED implicit receiver does not hide the member extension of the
+    // enclosing class.
     val r = S80Recv()
     check("mx04", r.plain(n[1]) == 6)
     check("mx05", r.viaWith(n[1]) == 6)
@@ -4191,22 +3900,21 @@ fun sec80() {
     check("mx07", r.viaApply(n[1]) == 6)
     check("mx08", r.viaRun(n[1]) == 6)
 
-    // ----- todo.md 1.4, case 2: the member-extension write path's MISS still runs
-    // the unrelated class's setter. NATIVE-ONLY before the fix.
+    // ----- the member-extension write path's MISS still runs the unrelated class's
+    // setter (a native-only case).
     check("mx09", S80Host().probe(n[3]) == 8)
     val c = S80Counted()
     c.s80Ctr = n[4] * 2
     check("mx10", c.raw == 5 && c.s80Ctr == 10)
 
-    // ----- todo.md 1.11: java.util.Formatter's %f -----
+    // ----- java.util.Formatter's %f -----
     // Every value is read out of an array so the constant folder cannot answer
     // these at compile time (manual chapter 3).
     val fv = doubleArrayOf(1.3379870716132959e18, 0.1, 0.15, 0.25, 0.35, 2.675,
                            1e22, 1e300, 4.9e-324, 1.0 / 3.0, 12345.6789, 2.5, -2.5)
-    // PAST 2^53, and the value the item had backwards: java's %f renders from
-    // Double.toString's SHORTEST round-tripping digits padded with zeros, so this
-    // is 1337987071613295900 and NOT the double's exact 1337987071613295872.
-    // Math.floor(x*10^p + 0.5) reached neither.
+    // PAST 2^53: java's %f renders from Double.toString's SHORTEST round-tripping
+    // digits padded with zeros, so this is 1337987071613295900 and NOT the double's
+    // exact 1337987071613295872.
     check("fx01", "%.0f".format(fv[0]) == "1337987071613295900")
     check("fx02", "%.2f".format(fv[0]) == "1337987071613295900.00")
     // Same rule at high precision: the padding is zeros, not the exact expansion.
@@ -4222,15 +3930,14 @@ fun sec80() {
     // HALF_UP is away from zero, so a negative tie goes down.
     check("fx09", "%.0f".format(fv[11]) == "3" && "%.0f".format(fv[12]) == "-3")
     // A magnitude the host prints in exponent form must not leak the "e+22" into
-    // the integer part, and prec 17 of 1e300 must not overflow to Infinity - the
-    // old scaled product did both.
+    // the integer part, and prec 17 of 1e300 must not overflow to Infinity.
     check("fx10", "%.0f".format(fv[6]) == "10000000000000000000000")
     check("fx11", "%.3f".format(fv[7]).length == 301 + 4)
     check("fx12", "%.17f".format(fv[7]).substring(0, 4) == "1000")
     // The smallest subnormal is all zeros at any reachable precision.
     check("fx13", "%.30f".format(fv[8]) == "0." + "0".repeat(30))
     check("fx14", "%.6f".format(fv[10]) == "12345.678900")
-    // -0.0 keeps its sign; the old body compared `f < 0` and lost it.
+    // -0.0 keeps its sign.
     val negZero = 0.0 / (0.0 - 1.0)
     check("fx15", "%.0f".format(negZero) == "-0" && "%.2f".format(negZero) == "-0.00")
     check("fx16", "%.2f".format(0.0) == "0.00")
@@ -4242,7 +3949,7 @@ fun sec80() {
 // "\u0130".lowercase() is "i" + U+0307. These engines answer the SIMPLE per-rune
 // mapping (full mapping in the C floor is too slow, manual chapter 5), so the
 // characters that grow under the full map are deliberately not asserted; every row
-// here matches java 24's toUpperCase/toLowerCase(Locale.ROOT).
+// here matches java's toUpperCase/toLowerCase(Locale.ROOT).
 //
 // Every character is a \uXXXX ESCAPE, never a raw literal: manual chapter 4,
 // test specific characters by CODE.
@@ -4256,21 +3963,16 @@ fun sec81() {
 }
 
 // ===== SECTION 82: OUT-OF-RANGE INDEXING, and a nested throwable's BINARY name =====
-// docs/todo.md 2.9. The indexed read is bounds-checked and what it raises is a
-// CATCHABLE throwable, not an abort: `listOf(1,2)[5]` and `arrayOf(1,2)[5]`
-// answered kotlin.Unit in both halves, and `"ab"[5]` was a LIVE HALVES DIVERGENCE -
-// a blank character in the interpreter, an abort ("string index 5 out of range")
-// under llvm.Run and natively. Against a clean `git archive db6bf43` tree this
-// section fails and then ABORTS in every leg.
+// The indexed read is bounds-checked and what it raises is a CATCHABLE throwable, not
+// an abort.
 //
-// THE MESSAGES ARE java 24.0.2's, VERBATIM, and that is a citation of a measurement
-// and not of a document: Kotlin's throwables ARE java.lang's (typealiases), and
-// there is no kotlinc on this machine. The CLASS for a collection read is the one
-// place this cannot be exact - the JVM raises ArrayIndexOutOfBoundsException from
-// Arrays$ArrayList (what listOf and arrayOf both produce) and plain
-// IndexOutOfBoundsException from an ArrayList, while this value model has ONE array
-// type - so the common SUPERTYPE is what is asserted, and a real Kotlin
-// `catch (e: IndexOutOfBoundsException)` catches either.
+// THE MESSAGES ARE java's, VERBATIM: Kotlin's throwables ARE java.lang's
+// (typealiases), and there is no kotlinc on this machine. The CLASS for a collection
+// read is the one place this cannot be exact - the JVM raises
+// ArrayIndexOutOfBoundsException from Arrays$ArrayList (what listOf and arrayOf both
+// produce) and plain IndexOutOfBoundsException from an ArrayList, while this value
+// model has ONE array type - so the common SUPERTYPE is what is asserted, and a real
+// Kotlin `catch (e: IndexOutOfBoundsException)` catches either.
 //
 // Every index is READ OUT OF AN ARRAY: a probe of literals tests the constant
 // folder, not the runtime (manual chapter 3).
@@ -4306,15 +4008,14 @@ fun sec82() {
     // The METHOD spellings of the same read.
     check("ix82h", s82text { li.get(ix[0]) } == oob && s82text { st.get(ix[0]) } == soob)
     check("ix82i", s82text { li.elementAt(ix[0]) } == oob)
-    // In-range reads are untouched - including the StringBuilder, which answered
-    // kotlin.Unit for EVERY index before.
+    // In-range reads are untouched - including the StringBuilder.
     check("ix82j", li[ix[3]] == 20 && st[ix[3]] == 'b' && sb[ix[2]] == 'a' &&
         ar[ix[2]] == 10 && li.get(ix[2]) == 10 && li.elementAt(ix[2]) == 10)
     // ...and the OrNull / OrElse family still answers rather than throwing.
     check("ix82k", li.getOrNull(ix[0]) == null && li.getOrElse(ix[0]) { -7 } == -7 &&
         li.elementAtOrNull(ix[0]) == null)
     // Catchable by name; StringIndexOutOfBoundsException is UNDER
-    // IndexOutOfBoundsException (instanceof, java 24.0.2), not beside it.
+    // IndexOutOfBoundsException (java instanceof), not beside it.
     var by = "none"
     try { li[ix[0]] } catch (e: IndexOutOfBoundsException) { by = "io:" + e.message }
     check("ix82l", by == "io:Index 5 out of bounds for length 2")
@@ -4325,12 +4026,12 @@ fun sec82() {
     try { st[ix[0]] } catch (e: StringIndexOutOfBoundsException) { by3 = "exact" }
     check("ix82n", by3 == "exact")
     // A CLASS INSTANCE carrying a numeric `length` field of its own is NOT an array:
-    // its indexed read still answers kotlin.Unit. Without the exact Array.isArray
-    // test on the miss path this threw in the NATIVE leg only.
+    // its indexed read still answers kotlin.Unit (the exact Array.isArray test on the
+    // miss path; the NATIVE leg is the one that would see it).
     check("ix82r", "" + S82Len(3)[ix[0]] == "kotlin.Unit")
     // A nested throwable's BINARY name. The dollar is ESCAPED - an unescaped one is
     // a string template. java.lang.Class#getName spells a nested type Outer$Inner,
-    // and Throwable#toString is that name; this rendered "S82Inner: in".
+    // and Throwable#toString is that name.
     check("ix82o", S82Outer.S82Inner("in").toString() == "S82Outer\$S82Inner: in")
     // A TOP-LEVEL user throwable is unchanged: its simple name IS its binary name.
     check("ix82p", S82Top("t").toString() == "S82Top: t")
@@ -4342,23 +4043,18 @@ fun sec82() {
 
 
 // ===== SECTION 83: A USER THROWABLE'S HIERARCHY, and three levels of nesting =====
-// docs/todo.md 2.9, both halves of it.
 //
-// (a) `class S83Top(m: String) : Exception(m)` then `S83Top("x") is Exception` was
-// TRUE in the interpreter half and FALSE under llvm.Run and natively: the compiler
-// half emits no descriptor for a builtin throwable, so the class's __super slot was
-// left absent and js_ktis' chain walk had nothing to walk. A live halves divergence
-// --cross is blind to, because --cross diffs a program's OUTPUT and no program asked.
-// js_ktexccls now hands emitSuperLinks the same descriptor js_ktnewexc constructs
-// from. Every row below was checked with `instanceof` under java 24.0.2 through an
-// Object-typed variable (javac REJECTS a statically impossible instanceof, which is
-// why the oracle needs the cast) - Kotlin's Exception / RuntimeException / Error are
-// TYPEALIASES to java.lang's, so java is the oracle and there is no kotlinc here.
+// (a) `class S83Top(m: String) : Exception(m)` then `S83Top("x") is Exception` is
+// TRUE: the compiler half emits no descriptor for a builtin throwable, so js_ktexccls
+// hands emitSuperLinks the same descriptor js_ktnewexc constructs from. Every row below
+// was checked with `instanceof` under java through an Object-typed variable (javac
+// REJECTS a statically impossible instanceof, which is why the oracle needs the cast) -
+// Kotlin's Exception / RuntimeException / Error are TYPEALIASES to java.lang's, so java
+// is the oracle and there is no kotlinc here.
 //
-// (b) `S83A.S83B.S83C(7)` - three levels - aborted both compiled halves outright
-// with *method call 'S83C' on a function*: the slot a nested class occupies on its
-// owner holds a CONSTRUCTION FACTORY, so the plain read `S83A.S83B` answered that
-// function. The descriptor now rides beside it under a `__`-prefixed slot.
+// (b) `S83A.S83B.S83C(7)` - three levels: the slot a nested class occupies on its
+// owner holds a CONSTRUCTION FACTORY, so the descriptor rides beside it under a
+// `__`-prefixed slot for the plain read `S83A.S83B`.
 //
 // Every subject is read out of an array: a probe of literals tests the constant
 // folder, not the runtime (manual chapter 3).
@@ -4389,7 +4085,7 @@ fun s83text(f: () -> Any?): String {
 
 fun sec83() {
     val vs = arrayOf<Any>(S83Top("a"), S83Sub("b"), S83Err("c"), S83Ise("d"), S83Plain(1))
-    // java 24.0.2, `new S83Top("a") instanceof ...` through an Object: T,E,-,-.
+    // java, `new S83Top("a") instanceof ...` through an Object: T,E,-,-.
     check("hi83a", s83flags(vs[0]) == "truetruefalsefalse")
     // A subclass of a user throwable inherits the whole chain.
     check("hi83b", s83flags(vs[1]) == "truetruefalsefalse")
@@ -4401,9 +4097,8 @@ fun sec83() {
     // A class that extends nothing is untouched by the __super link.
     check("hi83e", s83flags(vs[4]) == "falsefalsefalsefalse")
     check("hi83f", vs[0] is S83Top && vs[1] is S83Top && !(vs[0] is S83Sub))
-    // The CATCH-CLAUSE selection follows the same chain now: a `: Exception` class
-    // is NOT caught by `catch (e: RuntimeException)`. js_ktexcmatch's "an
-    // intermediate root accepts a non-throwable" arm used to catch it there.
+    // The CATCH-CLAUSE selection follows the same chain: a `: Exception` class is NOT
+    // caught by `catch (e: RuntimeException)`.
     var by = "none"
     try { throw (vs[0] as Throwable) } catch (e: RuntimeException) { by = "rte" } catch (e: Exception) { by = "exc" }
     check("hi83g", by == "exc")
@@ -4419,12 +4114,9 @@ fun sec83() {
     // An object EXPRESSION extending a builtin throwable gets the chain too.
     val anon = object : IllegalArgumentException("q") {}
     check("hi83k", anon is IllegalArgumentException && anon is RuntimeException && anon is Exception)
-    // TODO() / NotImplementedError. Both compiled halves printed "[object Object]"
-    // for it and could not construct the class by name at all, because
-    // ktExcHierarchy was missing the entry its own ktRaise call already named -
-    // found while linking the chain above. kotlin-stdlib: `class
-    // NotImplementedError(message: String = "An operation is not implemented.") :
-    // Error(message)`, and TODO(reason) prepends "An operation is not implemented: ".
+    // TODO() / NotImplementedError. kotlin-stdlib: `class NotImplementedError(message:
+    // String = "An operation is not implemented.") : Error(message)`, and TODO(reason)
+    // prepends "An operation is not implemented: ".
     check("hi83l", s83text { TODO("soon") } ==
         "kotlin.NotImplementedError: An operation is not implemented: soon")
     check("hi83m", s83text { TODO() } ==
@@ -4449,14 +4141,11 @@ fun sec83() {
 }
 
 // ===== SECTION 84: THE INDEX FAMILY - every message, and the empty receiver =====
-// docs/todo.md 1.2. Each of these used to ABORT the run - an abort is not catchable
-// at all, so no Kotlin program could recover from an out-of-range write or an empty
-// first(). Against a clean `git archive 22e7b44` tree this section aborts in every
-// leg on its first row.
+// Each of these raises a CATCHABLE throwable - an abort would not be catchable at all,
+// so no Kotlin program could recover from an out-of-range write or an empty first().
 //
-// THE MESSAGES ARE java 24.0.2's, VERBATIM (measured on this machine), and the JVM
-// spells the family THREE different ways, which is the whole reason this is a
-// section rather than one helper:
+// THE MESSAGES ARE java's, VERBATIM, and the JVM spells the family THREE different
+// ways, which is the whole reason this is a section rather than one helper:
 //     l.removeAt(9) / l.set(9,x) / l[9]     Index 9 out of bounds for length 2
 //     l.add(9, x)                           Index: 9, Size: 2
 //     "ab".substring(5)                     Range [5, 2) out of bounds for length 2
@@ -4464,7 +4153,7 @@ fun sec83() {
 // rangeCheckForAdd, the third through String's checkBoundsBeginEnd. All three raise
 // IndexOutOfBoundsException or its StringIndexOutOfBoundsException subclass.
 //
-// The EMPTY-RECEIVER rows are kotlin-stdlib's own messages, measured by calling the
+// The EMPTY-RECEIVER rows are kotlin-stdlib's own messages, read by calling the
 // kotlin-stdlib 2.2.21 jar's CollectionsKt / StringsKt / RangesKt from java.
 //
 // Every index is read out of an array (manual chapter 3).
@@ -4481,10 +4170,8 @@ fun sec84() {
     check("ax84b", s84text { mutableListOf(1, 2).removeAt(ix[1]) } == io + "Index -1 out of bounds for length 2")
     check("ax84c", s84text { mutableListOf(1, 2).set(ix[0], 5) } == io + "Index 9 out of bounds for length 2")
     check("ax84d", s84text { mutableListOf(1, 2).set(ix[2], 5) } == io + "Index 2 out of bounds for length 2")
-    // The INDEXED WRITE is MutableList.set and raises the same thing. It used to
-    // grow the list silently for a positive index, and it was a live halves
-    // divergence for a negative one - a silent no-op in the interpreter, an
-    // uncatchable "invalid array index -1" in both compiled halves.
+    // The INDEXED WRITE is MutableList.set and raises the same thing, for a positive
+    // and a negative index.
     check("ax84e", s84text { val l = mutableListOf(1, 2); l[ix[0]] = 5; l.size } == io + "Index 9 out of bounds for length 2")
     check("ax84f", s84text { val l = mutableListOf(1, 2); l[ix[1]] = 5; l.size } == io + "Index -1 out of bounds for length 2")
     // add(index, element) is the one member with the OTHER format, and its upper
@@ -4493,7 +4180,7 @@ fun sec84() {
     check("ax84h", s84text { mutableListOf(1, 2).add(ix[1], 5) } == io + "Index: -1, Size: 2")
     check("ax84i", s84text { val l = mutableListOf(1, 2); l.add(ix[2], 5); "" + l } == "[1, 2, 5]")
     // substring: a RANGE, and the end of a one-argument call is the receiver's
-    // length. All three engines answered "" here, because JS substring clamps.
+    // length (JS substring would clamp).
     val ss = arrayOf("ab", "abcdef")
     check("ax84j", s84text { ss[0].substring(ix[0]) } == sio + "Range [9, 2) out of bounds for length 2")
     check("ax84k", s84text { ss[1].substring(ix[0]) } == sio + "Range [9, 6) out of bounds for length 6")
@@ -4523,8 +4210,7 @@ fun sec84() {
         nse + ": Collection contains no element matching the predicate.")
     check("ax84x", s84text { many.single { it > 2 } } ==
         "java.lang.IllegalArgumentException: Collection contains more than one matching element.")
-    // last(predicate) used to IGNORE the lambda and answer the last element, in
-    // every engine - agreed and wrong, and only an oracle can see that class.
+    // last(predicate) is the last MATCHING element.
     check("ax84y", many.last { it < 3 } == 2 && many.first { it > 2 } == 3)
     check("ax84z", s84text { many.last { it > 9 } } ==
         nse + ": List contains no element matching the predicate.")
@@ -4538,9 +4224,8 @@ fun sec84() {
     //                    Iterable overload  "Collection is empty."
     //   _Strings.kt      CharSequence       "Char sequence is empty."
     // A Set, a Map's keys/entries and a range are Iterable and none of them is a
-    // List, so all three take the Collection wording; a String takes its own. Every
-    // one of these answered "List is empty." before, and the string rows ABORTED the
-    // run uncatchably.
+// List, so all three take the Collection wording; a String takes its own, and its
+// rows throw rather than abort.
     val eset = setOf<Int>()
     val emap = mapOf<Int, Int>()
     val erange = 1..0
@@ -4548,8 +4233,7 @@ fun sec84() {
         s84text { eset.last() } == nse + ": Collection is empty." &&
         s84text { eset.single() } == nse + ": Collection is empty.")
     // random() is declared on COLLECTION and never on List, so even a LIST receiver
-    // takes the Collection wording - which is why that one site already spelled it
-    // that way while first()/last()/single() did not.
+    // takes the Collection wording.
     check("ax84C", s84text { eset.random() } == nse + ": Collection is empty." &&
         s84text { emp.random() } == nse + ": Collection is empty.")
     check("ax84D", s84text { eset.reduce { a, b -> a + b } } ==
@@ -4573,10 +4257,9 @@ fun sec84() {
     // A Map's keys and entries are SETS (java.util.Map's keySet/entrySet), so they
     // take the Collection wording too. `values` is a Collection VIEW and would as
     // well, but it is a bare host array in this value model - the same array a List
-    // is - so it answers "List is empty." and is deliberately NOT asserted here
-    // rather than pinned: recovering it is docs/todo.md 2.2's nominal type on the
-    // value, and an Array ("Array is empty.") and a Sequence ("Sequence is empty.")
-    // are unreachable for exactly the same reason.
+    // is - so it answers "List is empty." and is deliberately NOT asserted here:
+    // recovering it needs a nominal type on the value, and an Array ("Array is empty.")
+    // and a Sequence ("Sequence is empty.") are unreachable for exactly the same reason.
     check("ax84I", s84text { emap.keys.first() } == nse + ": Collection is empty." &&
         s84text { emap.entries.first() } == nse + ": Collection is empty." &&
         s84text { emap.keys.last() } == nse + ": Collection is empty.")
@@ -4602,9 +4285,7 @@ fun sec84() {
         nse + ": Collection contains no element matching the predicate.")
     check("ax84L", s84text { erange.random() } ==
         nse + ": Cannot get random in empty range: 1..0")
-    // A CharSequence's own family, from _Strings.kt. All five of these ABORTED the
-    // run before - `fail("first() on an empty string")` - which is not catchable at
-    // all, so this is a change of CLASS and not only of wording.
+    // A CharSequence's own family, from _Strings.kt - catchable throwables.
     val estr = arrayOf("", "abc", "z")
     check("ax84M", s84text { estr[0].first() } == nse + ": Char sequence is empty." &&
         s84text { estr[0].last() } == nse + ": Char sequence is empty." &&
@@ -4614,9 +4295,8 @@ fun sec84() {
         "java.lang.IllegalArgumentException: Char sequence has more than one element.")
     check("ax84P", s84text { estr[0].reduce { a, b -> b } } ==
         "java.lang.UnsupportedOperationException: Empty char sequence can't be reduced.")
-    // first(predicate) / last(predicate) on a String IGNORED the lambda in every
-    // engine and answered the first or last character - agreed and wrong, the class
-    // only an oracle can see. So did firstOrNull/lastOrNull with one.
+    // first(predicate) / last(predicate) on a String apply the lambda, and so do
+    // firstOrNull/lastOrNull with one.
     check("ax84Q", s84text { estr[1].first { it == 'z' } } ==
         nse + ": Char sequence contains no character matching the predicate." &&
         s84text { estr[1].last { it == 'z' } } ==
@@ -4630,12 +4310,10 @@ fun sec84() {
     check("ax84U", estr[1].firstOrNull { it == 'c' } == 'c' &&
         estr[1].lastOrNull { it == 'a' } == 'a' && estr[0].firstOrNull() == null &&
         estr[1].first() == 'a' && estr[1].last() == 'c')
-    // lastOrNull(predicate) on a LIST had the same defect: the arm answered the last
-    // element and the findLast arm that names lastOrNull never saw a call.
+    // lastOrNull(predicate) on a LIST is the last MATCHING element too.
     check("ax84V", many.lastOrNull { it < 3 } == 2 && many.findLast { it < 3 } == 2 &&
         many.lastOrNull { it > 9 } == null && many.lastOrNull() == 4)
-    // The reduce family beyond reduce(): all three spellings aborted with "unknown
-    // list method" in every engine. reduceRight/reduceRightIndexed are the LIST
+    // The reduce family beyond reduce(). reduceRight/reduceRightIndexed are the LIST
     // overloads, which is where "Empty list can't be reduced." comes from - the one
     // wording in this section that no other member can produce.
     check("ax84W", listOf("a", "b", "c").reduceRight { a, b -> a + b } == "abc" &&
