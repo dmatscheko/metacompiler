@@ -3449,7 +3449,15 @@ KwLet       = "let" KwEnd ;
         return function() {
             if (ref.path.length == 0) {
                 var fr = csFrameOf(ref.name)
-                if (fr == null) { declVar(ref.name, null); fr = csFrameOf(ref.name) }
+                // A name that is not a local is a FIELD of the enclosing type
+                // (ECMA-334 12.8.4): the box is over its slot on `this`, or on the
+                // declaring class' descriptor for a static.
+                if (fr == null) {
+                    var own = csSelfWith(ref.name)
+                    if (own != null) { return csPlaceBox(own, ref.name, false) }
+                    declVar(ref.name, null)
+                    fr = csFrameOf(ref.name)
+                }
                 // Passing a `ref` PARAMETER on as a `ref` argument aliases the SAME
                 // variable one level further out, so the existing box travels rather
                 // than being wrapped again.

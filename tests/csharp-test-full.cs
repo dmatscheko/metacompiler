@@ -1935,6 +1935,20 @@ b";                                                   // verbatim keeps the newl
             public static void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
             public static bool TryGet(int k, out int v) { v = k * 2; return k > 0; }
             public static void Cat(ref string s) { s = s + "!"; }
+            // A FIELD passed by reference: the alias is the field's own slot.
+            public static int SFld;
+            public double DFld;
+            public S32Ref Peer;
+            public static void Inc(ref int x) { x++; }
+            public static void Put(out int x, int v) { x = v; }
+            public static void Half(ref double d) { d = d / 2; }
+            public void IncOwn() { Inc(ref Fld); Inc(ref Fld); Inc(ref this.Fld); }
+            public void IncStatic() { Inc(ref SFld); }
+            public static void StaticCtx() { Inc(ref SFld); }
+            public void PutOwn(int v) { Put(out Fld, v); Put(out SFld, v + 1); }
+            public void IncPeer() { Inc(ref Peer.Fld); Inc(ref Arr[0]); }
+            public void Shadowed() { int Fld = 50; Inc(ref Fld); Arr[2] = Fld; }
+            public void HalfOwn() { Half(ref DFld); }
         }
 
         static void S32()
@@ -2005,6 +2019,27 @@ b";                                                   // verbatim keeps the newl
             int keep = n[0];
             r.ByVal(keep);
             Program.Check("s32rf10", keep == n[0]);
+            // ----- a FIELD as the `ref` / `out` argument -----
+            S32Ref f = new S32Ref();
+            f.Fld = n[0];
+            f.IncOwn();
+            Program.Check("s32rf11", f.Fld == 4);
+            S32Ref.SFld = n[1];
+            f.IncStatic();
+            S32Ref.StaticCtx();
+            Program.Check("s32rf12", S32Ref.SFld == 4);
+            f.PutOwn(n[2] * 10);
+            Program.Check("s32rf13", f.Fld == 30 && S32Ref.SFld == 31);
+            f.Peer = new S32Ref();
+            f.Peer.Fld = n[2];
+            f.IncPeer();
+            Program.Check("s32rf14", f.Peer.Fld == 4 && f.Arr[0] == 2 && f.Fld == 30);
+            // A local of the same name shadows the field, and the field stays put.
+            f.Shadowed();
+            Program.Check("s32rf15", f.Fld == 30 && f.Arr[2] == 51);
+            f.DFld = n[2];
+            f.HalfOwn();
+            Program.Check("s32rf16", f.DFld == 1.5);
         }
 
         // ===== END SECTIONS =====

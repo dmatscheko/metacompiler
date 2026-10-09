@@ -3137,19 +3137,45 @@ KwLet       = "let" KwEnd ;
         return csMakeBox(b, callExt(b, "js_closure", [handle(csRefNameRdFn(name)), curScopeV]),
                             callExt(b, "js_closure", [handle(csRefNameWrFn(name)), curScopeV]))
     }
+    function csPlaceBox(b, objV, keyV, isField) {
+        var scV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbo"), objV])
+        callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbk"), keyV])
+        var rk = isField ? "fieldrd" : "idxrd"
+        var wk = isField ? "fieldwr" : "idxwr"
+        return csMakeBox(b, callExt(b, "js_closure", [handle(csRefPlaceFn(rk)), scV]),
+                            callExt(b, "js_closure", [handle(csRefPlaceFn(wk)), scV]))
+    }
     function csRefArg(items) {
         var ref = items[1]
+        var defClass = curClassName
         return function(b) {
-            if (ref.path.length == 0) { return {b: b, v: csNameBox(b, ref.name)} }
-            var p = emitRefPath(b, ref)
-            b = p.b
-            var scV = callExt(b, "js_scope_new", [curScopeV])
-            callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbo"), p.obj])
-            callExt(b, "js_scope_decl", [scV, emitStr(b, "$rbk"), p.key])
-            var rk = p.isField ? "fieldrd" : "idxrd"
-            var wk = p.isField ? "fieldwr" : "idxwr"
-            return {b: b, v: csMakeBox(b, callExt(b, "js_closure", [handle(csRefPlaceFn(rk)), scV]),
-                                          callExt(b, "js_closure", [handle(csRefPlaceFn(wk)), scV]))}
+            if (ref.path.length == 0) {
+                // A data member of the enclosing type (ECMA-334 12.8.4) unless a local
+                // of the same name shadows it, which only the run can tell - the same
+                // js_scope_typeof branch csUnqualWrite takes. The member arm boxes the
+                // slot on `this`, or on the declaring class' descriptor for a static.
+                var mi = csMemberInfo(defClass, ref.name)
+                if (mi == null || !mi.dat) { return {b: b, v: csNameBox(b, ref.name)} }
+                var localB = curF.NewBlock("")
+                var fieldB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, ref.name)])
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+                var lv = csNameBox(localB, ref.name)
+                localB.NewBr(mergeB)
+                var fv = csPlaceBox(fieldB, csUnqualOwner(fieldB, mi), emitStr(fieldB, ref.name), true)
+                fieldB.NewBr(mergeB)
+                return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
+            }
+            // The root of `ref o.f` / `ref a[i]` is read as any simple name is, so a
+            // member of the enclosing type (or a `ref` parameter) resolves.
+            var pref = ref
+            if (ref.base == undefined) {
+                pref = {name: "", path: ref.path, base: function(bb) { return csEmitVarRead(bb, defClass, ref.name) }}
+            }
+            var p = emitRefPath(b, pref)
+            return {b: p.b, v: csPlaceBox(p.b, p.obj, p.key, p.isField)}
         }
     }
     // `M(out int x)`: bind the name before the call so the uses after it resolve, and
