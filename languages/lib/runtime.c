@@ -1,11 +1,11 @@
 /*
- * runtime.c - the C floor of the self-hosted runtime (docs/runtime-rework-plan.md,
- * phase 3). It implements the js_* externs that metajs-to-llvm-ir.abnf declares,
+ * runtime.c - the C floor of the self-hosted runtime. It implements the js_*
+ * externs that metajs-to-llvm-ir.abnf declares,
  * so that a MetaJS program compiled to handle IR can be linked into a NATIVE
  * BINARY instead of being interpreted with the Go runtime in abnf/jsrt.go.
  *
  * IT IS COMPILED BY languages/c-to-llvm-ir.abnf, NOT BY CLANG.
- * That is the point of the phase: every layer of the stack is compiled by this
+ * That is the point: every layer of the stack is compiled by this
  * repository. The link input is languages/lib/runtime.ll, regenerated with
  *
  *     tests/gen-runtime-ll.sh
@@ -14,24 +14,19 @@
  * ever sees IR that came out of a grammar in languages/.
  *
  * WHAT IT IS NOT
- *   - It is not a MOVING or an incremental collector. Since 2026-08-03 it does
- *     collect: a stop-the-world mark/sweep over the heap, with the C stack
- *     scanned conservatively so no shadow stack has to be emitted (see "the heap
- *     and its GC" below, and docs/runtime-next-plan.md part 1b). Nothing is ever
- *     moved - conservative roots forbid it - so there is no compaction, and a
- *     chunk once malloc'd is never handed back to the OS.
+ *   - It is not a MOVING or an incremental collector. It is a stop-the-world
+ *     mark/sweep over the heap, with the C stack scanned conservatively so no
+ *     shadow stack has to be emitted (see "the heap and its GC" below). Nothing
+ *     is ever moved - conservative roots forbid it - so there is no compaction,
+ *     and a chunk once malloc'd is never handed back to the OS.
  *   - It is not a full ECMAScript runtime. It implements the MetaJS subset that
  *     metajs-to-llvm-ir.abnf emits, matching abnf/jsrt.go where it can.
  *   - It is not Unicode-complete. Strings carry the UTF-16 code unit view that
  *     abnf/jsrt.go exposes (.length, charCodeAt, charAt, slice, substring,
- *     indexOf, split, and the WTF-8 half of an astral pair), but case mapping
- *     is ASCII-only where the Go twin uses strings.ToUpper.
- *   - Floating point is the SOFT FLOAT that c-to-llvm-ir.abnf emits, which
- *     truncates where IEEE-754 rounds to nearest even. Every exactly
- *     representable value agrees with the Go runtime bit for bit; a
- *     non-representable fraction can be one ulp low (0.1 + 0.2 is
- *     0.29999999999999991 here and 0.30000000000000004 there). Measured, with
- *     the whole table, in the phase 3 section of the plan.
+ *     indexOf, split, and the WTF-8 half of an astral pair), and case mapping
+ *     is the simple Unicode mapping only (see "Unicode simple case mapping").
+ *   - Floating point is the soft float that c-to-llvm-ir.abnf emits, correctly
+ *     rounded IEEE-754, so it agrees with the Go runtime bit for bit.
  *
  * VALUE REPRESENTATION
  * A handle is a pointer to a Cell, carried in the i64 the emitted IR passes
@@ -41,12 +36,12 @@
  * them without dereferencing anything (see tag_of / fa).
  *
  * C SUBSET NOTES - constructs deliberately avoided because c-to-llvm-ir.abnf
- * does not handle them (each one measured; see the phase 3 section of the plan):
- *   - a `double` PARAMETER does not compile, and a `double` RETURN VALUE
- *     silently answers the wrong number. Every number therefore travels through
- *     this file as its raw IEEE-754 BIT PATTERN in a long, and a double is
- *     materialised only inside the function that computes with it, through
- *     `union DB`.
+ * does not handle them:
+ *   - Much of this file carries a number as its raw IEEE-754 BIT PATTERN in a
+ *     long and materialises a double only inside the function that computes
+ *     with it, through `union DB`: an earlier c-to-llvm-ir.abnf could not pass
+ *     or return a double. The later ports (pow, the Math members) take and
+ *     return doubles directly.
  *   - `*p = v` through a `long *` does not compile ("store operands are not
  *     compatible: src=i64; dst=i32*"). `p[0] = v` compiles and is used instead.
  *   - object-like #define is parsed but NOT expanded, so there are no macros.
@@ -68,12 +63,12 @@ void exit(int code);
  * pthread_cond_t and pthread_attr_t are all reached through a POINTER to an
  * OVER-ALLOCATED zeroed buffer that the matching *_init fills in, so this file
  * never needs to know their layout or size - which is what makes the same
- * source work on darwin and on linux.  makecontext/swapcontext were measured
- * first and rejected for exactly that reason: ucontext_t's uc_stack and uc_link
- * have to be written by OFFSET, and the offsets differ per platform.
+ * source work on darwin and on linux.  makecontext/swapcontext are not used for
+ * exactly that reason: ucontext_t's uc_stack and uc_link have to be written by
+ * OFFSET, and the offsets differ per platform.
  *
  * dlopen/dlsym exist for one reason: c-to-llvm-ir.abnf compiles a function NAME
- * used as a value to its funcId (measured - `pthread_create(&t, 0, worker, 0)`
+ * used as a value to its funcId (`pthread_create(&t, 0, worker, 0)`
  * emits `inttoptr i32 1`), so there is no way to spell a real code address in
  * this C subset.  dlsym gives one at run time, with no compiler change at all. */
 void *dlopen(const char *path, int mode);
@@ -118,9 +113,8 @@ long DINF;      /* bits of +Inf  */
 long DNINF;     /* bits of -Inf  */
 
 /* d_from_long / d_to_long / d_trunc are done with BIT ARITHMETIC rather than
- * through the soft float's i2d/d2i. Measured: the emitted i2d loses the low bits
- * above 2^53 (the literal 9007199254740993 came out as 4503599627370496, half
- * its value) and the d2i round trip made a large integral double look
+ * through the soft float's i2d/d2i: the emitted i2d loses the low bits above
+ * 2^53 and the d2i round trip can make a large integral double look
  * non-integral. Bits are exact, and round-to-nearest-even here matches Go's
  * float64(int64). */
 long d_from_long(long i) {
@@ -134,9 +128,7 @@ long d_from_long(long i) {
 	if (i == 0) { return 0; }
 	/* INT64_MIN has no positive counterpart - `0 - i` wraps back to itself and
 	 * the top-bit scan below then runs zero times and builds nonsense. It is
-	 * exactly -2^63, so it is answered directly. Latent until the sized-integer
-	 * tag made si_float pass a raw int64 in: found by the 97,664-line
-	 * differential probe against abnf/jsrtint.go, which read -1. */
+	 * exactly -2^63, so it is answered directly (si_float passes a raw int64). */
 	if (i == (0 - 9223372036854775807 - 1)) { return -4332462841530417152; }   /* -2^63 */
 	if (i < 0) { neg = 1; u = 0 - i; } else { u = i; }
 	t = u;
@@ -214,14 +206,11 @@ long d_div(long x, long y) {
 	a.l = x; b.l = y; r.d = a.d / b.d; return r.l;
 }
 /* JS % is fmod: the remainder keeps the sign of the dividend. */
-/* The truncated remainder. It USED to be x - trunc(x/y)*y, which is right only
- * while the quotient fits 53 bits: `10 % 0.1` answered 0 where the Go runtime
- * answers 0.09999999999999945, and 26 of a 90 case differential probe diverged
- * between llvm.Run and the native binary. fmod is EXACT for every pair of
- * doubles, so this is now a faithful port of Go's own math.Mod - the same
- * algorithm on the same Frexp/Ldexp this file already carries (see the note
- * above d_frexp: "close enough" is not an answer here). The body is defined
- * further down, after d_frexp/d_ldexp. */
+/* The truncated remainder, a faithful port of Go's math.Mod on the same
+ * Frexp/Ldexp this file already carries. x - trunc(x/y)*y is NOT enough: it is
+ * right only while the quotient fits 53 bits (`10 % 0.1` must be
+ * 0.09999999999999945, not 0). The body is defined further down, after
+ * d_frexp/d_ldexp. */
 long d_mod(long x, long y) { return d_mod_go(x, y); }
 
 /* Ordering. Only ever called with two non-NaN operands. */
@@ -281,13 +270,9 @@ long to_int32(long bits) {
 	if (d_is_nan(bits) || d_is_inf(bits)) { return 0; }
 	t = d_trunc(bits);
 	if (d_in_long(t) == 0) {
-		/* |t| >= 2^63, and ToInt32 is a MODULO, not a range test. This used to
-		 * answer 0, which is wrong: real JS says `1e20 | 0` is 1661992960 and
-		 * `1e19 | 0` is -1981284352. Measured against node; recorded in
-		 * docs/runtime-next-plan.md part 2 as 63 lines of the jsJFlo probe,
-		 * where the Go twin's `int32(int64(f))` answered -1 on arm64 and this
-		 * answered 0 - three implementations, three answers, none of them JS.
-		 * abnf/jsrt.go's rt.toInt32 is fixed to match.
+		/* |t| >= 2^63, and ToInt32 is a MODULO, not a range test: `1e20 | 0` is
+		 * 1661992960 and `1e19 | 0` is -1981284352. abnf/jsrt.go's rt.toInt32
+		 * matches.
 		 *
 		 * t is an exact integer here, so the low 32 bits are exact too: the
 		 * value is m * 2^(e-52) with m the 53 bit significand, so the shift
@@ -318,21 +303,15 @@ long to_uint32(long bits) {
 
 /* -------------------------------------------------- the heap and its GC -- */
 /*
- * THIS USED TO BE A BUMP ARENA THAT WAS NEVER FREED. It is now a MARK/SWEEP
- * heap (docs/runtime-next-plan.md, part 1b). The allocation per iteration of a
- * loop had been cut 5x by the emitter work of part 1a and was still exactly
- * LINEAR, because what remains is live data rather than waste: no further
- * reduction fixes a program that runs for a minute.
+ * A MARK/SWEEP heap.
  *
  * WHY MARK/SWEEP AND NOT REFCOUNTING. A scope holds its parent and a closure
  * holds its defining scope, so a closure defined inside a function CYCLES with
  * the scope that names it - the common case, not an edge case.
  *
  * WHY THE C STACK IS SCANNED CONSERVATIVELY, AND NOT A SHADOW STACK IN THE
- * EMITTER. The plan's sequence said "shadow stack first". A shadow stack was
- * costed and rejected for a reason the plan itself states one paragraph later:
- * the emitted IR runs in TWO worlds - natively a handle is a Cell *, under
- * llvm.Run it is an index into a Go table - and the two must stay
+ * EMITTER. The emitted IR runs in TWO worlds - natively a handle is a Cell *,
+ * under llvm.Run it is an index into a Go table - and the two must stay
  * byte-identical. Every push/pop a shadow stack emits is IR that the Go half
  * would have to carry and ignore, at every expression temporary, in fifteen
  * emitters. Scanning the real C stack needs NO emitted instruction at all, so
@@ -350,20 +329,17 @@ long to_uint32(long bits) {
  * allocator here must keep is: between an ar_alloc and the store of its result
  * into a reachable object, do not allocate again. Checked at every site.
  *
- * INTERIOR POINTERS ARE ROOTS. The first version required an exact block
- * address and that was unsound at -O2 - see gc_try. Resolving one is exact and
+ * INTERIOR POINTERS ARE ROOTS (an exact-address test is unsound at -O2 - see
+ * gc_try). Resolving one is exact and
  * constant time here: a block's address is base + idx * bsize, so the index is a
  * division.
  *
  * LAYOUT: SIZE-CLASS REGIONS WITH THE METADATA IN SIDE BITMAPS, AND NO PER-BLOCK
- * HEADER AT ALL. The first collector (1cd6a41) gave every allocation a 16 byte
- * header holding its size, two flags and a mark epoch, and that header cost
- * +25.4% of allocation - 4,557 bytes per iteration of the Lua benchmark against
- * 3,633 without a collector. It is gone: a CHUNK serves exactly one size class
- * and one kind, so the size and the kind are properties of the chunk, and the
- * "allocated" and "marked" flags are one bit each in two side bitmaps indexed by
- * the block's slot number. A handle IS the block address; there is nothing in
- * front of it.
+ * HEADER AT ALL (a per-block header was measurably costly). A CHUNK serves
+ * exactly one size class and one kind, so the size and the kind are properties
+ * of the chunk, and the "allocated" and "marked" flags are one bit each in two
+ * side bitmaps indexed by the block's slot number. A handle IS the block
+ * address; there is nothing in front of it.
  *
  *   chunk: [0] next chunk   [1] block size   [2] slot count   [3] slots bumped
  *          [4] alloc bitmap [5] mark bitmap  [6] kind (1 = cells)  [7] unused
@@ -374,8 +350,7 @@ long to_uint32(long bits) {
  * coalesced and never split, so a slot number means the same thing for ever.
  *
  * The mark bitmap is CLEARED at the start of a collection rather than carrying
- * an epoch, which is what the header used to buy: clearing is heap/bsize/8
- * bytes - 6 KB for a 3 MB heap of cells - against 16 bytes on every object.
+ * an epoch: clearing is heap/bsize/8 bytes - 6 KB for a 3 MB heap of cells.
  */
 
 long AR_CHUNKS;      /* head of the chunk list */
@@ -402,13 +377,10 @@ long GC_STACK_BASE;
  *             generator may drive another), so this is a LIFO.  RES_JBP/RES_JBD
  *             are the resumer's try-barrier pool and depth, parked with it.
  *
- * Both are GROWN rather than fixed. A fixed CORO[256] was what the proof of
- * concept shipped, and it would have been a hard die() at the 257th live
- * generator - which is not a limit a language can be built on: 10,000 suspended
- * generators is a measured, working workload (~18 KB each, and the thread stack
- * is the whole of it). The old array is not freed, so doubling costs less than
- * one extra copy of the final array in total - the same bargain every other
- * malloc in this file makes. */
+ * Both are GROWN rather than fixed: 10,000 suspended generators is a working
+ * workload (~18 KB each, and the thread stack is the whole of it). The old array
+ * is not freed, so doubling costs less than one extra copy of the final array in
+ * total - the same bargain every other malloc in this file makes. */
 long CORO;           /* long *: the live coroutines' control blocks */
 long CORO_N;
 long CORO_CAP;
@@ -441,10 +413,10 @@ long GC_COUNT;
 long PINS[8192];     /* js_gc_pin: module globals that hold a handle for ever */
 long PIN_N;
 
-/* ----- the three RECOVERABLE-ERROR HOOKS (docs/todo.md 1.8 / 3.2) ---------
+/* ----- the three RECOVERABLE-ERROR HOOKS -----------------------------------
  *
- * scope_get, get_member and set_member are shared by all sixteen languages, and
- * all three used to end in an uncatchable abort: `x` with no binding and `null.x` stopped the
+ * scope_get, get_member and set_member are shared by all sixteen languages. By
+ * default a miss is an uncatchable abort: `x` with no binding and `null.x` stop the
  * program dead where node throws a ReferenceError / a TypeError and CPython a
  * NameError. Making the abort a throw UNCONDITIONALLY is wrong - kotlin, swift,
  * java and metajs mean "this program is broken" by it, and the three
@@ -453,7 +425,7 @@ long PIN_N;
  *
  * The mechanism is a registered closure per site, and it costs nothing on the
  * hot path: the test is on the MISS path only, and a language that registers
- * nothing behaves exactly as before. The closure ANSWERS the value to throw
+ * nothing gets the abort. The closure ANSWERS the value to throw
  * rather than throwing it itself, which is what makes the hook non-recursive -
  * the slot is cleared for the duration of the call, so a handler that itself
  * reads a name nowhere bound aborts with the original diagnostic instead of
@@ -497,20 +469,12 @@ long bm_new(long nblk) {
  *
  * A sorted array of (payloadLo, payloadHi, chunk) triples, binary searched.
  * It exists because "which chunk holds this address" is THE HOTTEST QUESTION IN
- * THE COLLECTOR and it used to be a linear walk of the chunk list: gc_try below
- * asks it for EVERY WORD of the conservatively scanned C stack, of every raw
- * buffer, and of every field of every traced cell - and the overwhelming
- * majority of those are not pointers at all, so they walked the WHOLE list
- * before answering 0.
- *
- * That made the collector's cost O(chunks) per candidate word, and chunks are
- * not few: ar_block below takes 1 MB PER PARTITION, of which there are up to
- * 130, so a 10 MB heap is a dozen chunks and a big program many more. It showed
- * up as a step function - seeding twenty-nine more Math members on the root
- * scope (docs/todo.md 1.1) added 4.8 KB of permanently live data, which pushed
- * java's heap into two more chunks, which cost 6.87% of the whole benchmark. The
- * fix pays that back and keeps paying: see the measurements at the Math seeding
- * in boot() and in the report for this item.
+ * THE COLLECTOR: gc_try below asks it for EVERY WORD of the conservatively
+ * scanned C stack, of every raw buffer, and of every field of every traced
+ * cell - and the overwhelming majority of those are not pointers at all. A
+ * linear walk of the chunk list makes the collector O(chunks) per candidate
+ * word, and chunks are not few: ar_block below takes 1 MB PER PARTITION, of
+ * which there are up to 130.
  *
  * WHY AN ARRAY AND NOT A HASH. Chunk payloads are DISJOINT ADDRESS RANGES, not
  * keys - a candidate word points into the middle of one, never at its base - so
@@ -559,8 +523,7 @@ void ar_ix_add(long c, long lo, long hi) {
 
 /* The chunk whose PAYLOAD contains v, or 0. The ranges are disjoint (each is one
  * malloc), so the answer is the last range whose lo is <= v, if v is inside it.
- * An address in a chunk's 128 byte HEADER is inside no payload and answers 0,
- * exactly as the linear walk did. */
+ * An address in a chunk's 128 byte HEADER is inside no payload and answers 0. */
 long ar_ix_find(long v) {
 	long *a;
 	long lo = 0;
@@ -591,8 +554,8 @@ long chunk_new(long bsize, long nblk, long kind) {
 	w[7] = 0;
 	AR_CHUNKS = c;
 	GC_HEAP = GC_HEAP + bsize * nblk;
-	/* The linked list stays: the SWEEP wants every chunk in some order and does
-	 * not care which. Only the address LOOKUP moves to the index. */
+	/* The SWEEP walks the linked list (it wants every chunk, in any order); the
+	 * address LOOKUP uses the index. */
 	ar_ix_add(c, c + 128, c + 128 + bsize * nblk);
 	return c;
 }
@@ -800,26 +763,18 @@ void gc_mark(long c, long idx, int deep) {
 /* Does v point into a block, and if so, which one?
  *
  * INTERIOR POINTERS ARE ACCEPTED, and that is not conservatism for its own sake:
- * the first version required an EXACT payload address, on the argument that a
- * buffer's owning cell is always reachable too and marks the buffer precisely.
- * That argument is false at -O2, and the whole native lua suite said so. In
- * u_slice the only surviving reference during str_from_units' allocation is
- * `u + b`, an interior pointer into the UTF-16 unit buffer: the compiler had
- * already dropped the string handle `h` after reading fc(h) out of it, so the
- * cell was unreachable, the collector freed it, and the unit buffer went with
- * it. MEC_GC=stress turned that into 9 failures in tests/lua-test-features.lua
- * and 3 in tests/lua-test-complete.lua, all in string.sub. Requiring exact
- * pointers is a standing bet that no optimiser will ever keep only a derived
- * pointer, and that bet does not hold.
+ * at -O2 a derived pointer can be the only surviving reference. In u_slice, during
+ * str_from_units' allocation, the only live reference may be `u + b`, an interior
+ * pointer into the UTF-16 unit buffer, after the compiler has dropped the string
+ * handle `h`. An exact-address test would free the cell and its unit buffer with
+ * it (MEC_GC=stress shows it in string.sub).
  *
- * Resolving one is now EXACT and needs no start bitmap: a chunk holds one size
+ * Resolving one is EXACT and needs no start bitmap: a chunk holds one size
  * class, so the slot is `(v - base) / bsize` and the block is that slot.
  *
  * THIS IS THE HOTTEST FUNCTION IN THE COLLECTOR: it is asked about every word of
  * the conservatively scanned C stack and of every raw buffer, and most of those
- * are not pointers. It used to walk the chunk LIST, which made the whole
- * collector O(chunks) per candidate word; ar_ix_find above is the binary search
- * that replaced it, and the header there has the measurement. */
+ * are not pointers. The chunk lookup is ar_ix_find's binary search. */
 void gc_try(long v, int deep) {
 	long c;
 	long *w;
@@ -849,7 +804,7 @@ void gc_trace(long b, long c) {
 		return;
 	}
 	/* w[0..6] IS the Cell: tag, a, b, c, d, e, f - the block address is the
-	 * cell address now that there is no header in front of it. */
+	 * cell address (there is no header in front of it). */
 	t = w[0];
 	if (t == 4)  { gc_try(w[1], 0); gc_try(w[3], 0); return; }  /* bytes, units */
 	if (t == 5)  { gc_try(w[1], 1); return; }                   /* array elements */
@@ -887,8 +842,7 @@ void gc_scan_range(long lo, long hi) {
 }
 
 /* The marks are CLEARED here rather than carried in a per-block epoch: it is one
- * pass over (slots bumped)/8 bytes per chunk, which is what the 16 byte header
- * used to be paying for. */
+ * pass over (slots bumped)/8 bytes per chunk. */
 void gc_clear_marks(void) {
 	long c = AR_CHUNKS;
 	while (c != 0) {
@@ -1051,16 +1005,14 @@ long mk_str(const char *p, long n) {
  * (pointer, length) pair is cached - the same thing abnf/jsrt.go's strMemCache
  * does.
  *
- * THIS USED TO BE DIRECT-MAPPED ON `p >> 3`, AND IT THRASHED. String literals
- * are laid out CONTIGUOUSLY in the module, most of them a handful of bytes
- * long, so `p >> 3` maps every literal inside an eight-byte window onto the
- * same slot: a module with 236 distinct literals collided its way to 60 MISSES
- * PER ITERATION of a `s = s + i %% 7` Lua loop (182.7 calls, 600,133 misses over
- * 10,000 iterations), and each miss is a fresh string cell plus a fresh byte
- * buffer that the arena never reclaims. Open addressing on the low pointer bits
- * with linear probing and NO eviction gives exactly one allocation per distinct
- * literal for the lifetime of the program. The probe is bounded, so a table
- * that somehow fills degrades to the old behaviour instead of looping. */
+ * NOT DIRECT-MAPPED ON `p >> 3`: string literals are laid out CONTIGUOUSLY in
+ * the module, most of them a handful of bytes long, so `p >> 3` would map every
+ * literal inside an eight-byte window onto the same slot and thrash, and each
+ * miss is a fresh string cell plus a fresh byte buffer. Open addressing on the
+ * low pointer bits with linear probing and NO eviction gives exactly one
+ * allocation per distinct literal for the lifetime of the program. The probe is
+ * bounded, so a table that somehow fills degrades to allocating instead of
+ * looping. */
 long SMC_PTR[8192];
 long SMC_LEN[8192];
 long SMC_VAL[8192];
@@ -1311,13 +1263,11 @@ int str_eq(long x, long y) {
 	return 1;
 }
 
-/* str_eq against a C literal, WITHOUT building a string cell for the literal.
- * method_id_array/method_id_string used to spell every candidate name as
- * `str_eq_c(name, "push")`, which allocated a cell and a byte buffer per
- * CANDIDATE on every member lookup of an array or a string - 20 dead string
- * cells per iteration of the Lua benchmark, and it also defeated str_eq's
- * identity fast path. A NUL inside the JS string is compared honestly: the
- * literal ends there, so the answer is false rather than an over-read. */
+/* str_eq against a C literal, WITHOUT building a string cell for the literal:
+ * method_id_array/method_id_string test every candidate name this way on every
+ * member lookup, so allocating here would be a dead cell per candidate. A NUL
+ * inside the JS string is compared honestly: the literal ends there, so the
+ * answer is false rather than an over-read. */
 int str_eq_c(long x, const char *s) {
 	long n = str_len(x);
 	long i = 0;
@@ -1354,12 +1304,11 @@ long str_slice(long h, long begin, long end) {
 }
 
 /* Every mk_cstr argument in this file is a C STRING LITERAL, so its address is
- * fixed for the life of the process (checked: the only two call sites that pass
- * a variable, seed_host and seed_root, are themselves called with literals from
- * boot). It therefore goes through the same literal cache js_str_mem uses, and
- * `to_string(undefined)`, `typeof x` and the array/string method names stop
- * allocating a cell and a byte buffer per CALL: 19 dead string cells per
- * iteration of the Lua benchmark became 0. */
+ * fixed for the life of the process (the only two call sites that pass a
+ * variable, seed_host and seed_root, are themselves called with literals from
+ * boot). It therefore goes through the same literal cache js_str_mem uses, so
+ * `to_string(undefined)`, `typeof x` and the array/string method names do not
+ * allocate per CALL. */
 long mk_cstr(const char *s) {
 	long n = 0;
 	while (s[n] != 0) { n = n + 1; }
@@ -1465,9 +1414,8 @@ void obj_put(long h, long key, long v) {
 
 /* ----- Unicode simple case mapping -----
  *
- * toUpperCase/toLowerCase used to be ASCII ONLY, byte by byte, while the Go twin is
- * strings.ToUpper - the full Unicode simple mapping. That is 2,879 code points the
- * two engines answered differently. The table below is the same mapping as ranges:
+ * toUpperCase/toLowerCase match the Go twin's strings.ToUpper - the full Unicode
+ * simple mapping. The table below is that mapping as ranges:
  * mode 0 gives every code point in [lo,hi] the two deltas as they stand, mode 1 is
  * the alternating upper/lower pairing of the Latin, Greek and Cyrillic extension
  * blocks (Go's own UpperLower case). It was GENERATED FROM THE GO RUNTIME'S OWN
@@ -1615,12 +1563,10 @@ long pow10(long n) {
  * work on decimal digit arrays (ONE DIGIT PER BYTE, least significant first),
  * which is the representation that makes those digits fall straight out.
  *
- * The float-arithmetic version this replaces generated digits by repeatedly
- * multiplying the remainder by ten, which is right to about sixteen digits and
- * therefore WRONG IN THE LAST PLACE of every seventeen-digit number: 10.0/3.0
- * printed as 3.3333333333333334 where the value is 3.3333333333333335, and the
- * shortest-form search it drove could not find the sixteen-digit form of
- * 0.9999999999999999 at all. Nothing here touches a double. */
+ * Generating digits by repeatedly multiplying a float remainder by ten is right
+ * to only about sixteen digits, so it is WRONG IN THE LAST PLACE of every
+ * seventeen-digit number (10.0/3.0 is 3.3333333333333335, not ...334). Nothing
+ * here touches a double. */
 
 /* a = a * k, in place; k must be small enough that 9*k plus a carry stays inside
  * a long, which every caller here satisfies (the largest k is a 53-bit
@@ -1710,22 +1656,12 @@ long g_mindig = 1;
  * value rounded to that many significant digits, nearest with ties to even,
  * whether or not it reads back. That is a different question from the one the
  * rest of this function asks, and floPrec (host id 70) is the caller that wants
- * it - see docs/todo.md 2.8.
- *
- * WHY THE DIFFERENCE MATTERED. g_mindig = n only starts the SEARCH at k = n, so
- * a value whose shortest round-tripping form is longer than n came back with the
- * shortest form instead: floPrec(1/3, 1) answered "3333333333333333e-1" here and
- * "3e-1" in floPrecStr (abnf/commonscript.go), the Go/goja/frozen twin - a
- * latent halves divergence for every layer-2 caller, invisible only because the
- * one live caller (lua's %g, luaGStr) always asks for an n at least as large as
- * the shortest form, where the two answers coincide. Exactly-n is the contract
- * that is kept, because it is the one a %e / %g formatter needs and the one a
- * script CANNOT build for itself: "at least n" is derivable from exactly-n plus
- * the host's shortest form ("" + v), and exactly-n is not derivable from "at
- * least n" at all. python's pyPctSig / pyBPctSig exist only because of this, and
- * languages/python-interpreter.abnf records the symptom it cost: %e of
- * 1234.5678 printed 1.234567e+03 natively, a TRUNCATION of the shortest eight
- * digit form rather than the correctly rounded seven digit one.
+ * it. g_mindig = n would only start the SEARCH at k = n, so a value whose
+ * shortest form is longer than n would come back with the shortest form
+ * (floPrec(1/3, 1) must be "3e-1", as floPrecStr in abnf/commonscript.go - the
+ * Go/goja/frozen twin - answers). Exactly-n is the contract a %e / %g formatter
+ * needs and the one a script CANNOT build for itself: "at least n" is derivable
+ * from exactly-n plus the host's shortest form ("" + v), not the other way round.
  *
  * k is clamped to the exact expansion's own length: asking for more digits than
  * the value has can only add trailing zeros, and every caller strips those. */
@@ -1964,8 +1900,8 @@ int is_space(int c) { return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 
  * The double nearest N * 10^e10, where N is the whole number whose digits are
  * dig[0..nd-1], LEAST SIGNIFICANT FIRST. No float arithmetic takes part in the
  * decision, which is the point: multiplying by a power of ten built up by
- * repeated multiplication rounds once per step, so "1.7976931348623157e308"
- * came out as +Inf and "1e100" one part in 10^16 too large.
+ * repeated multiplication rounds once per step, which would turn
+ * "1.7976931348623157e308" into +Inf and "1e100" one part in 10^16 too large.
  *
  * The mantissa m of the answer is T * 2^(-e) for the right binary exponent e,
  * and THAT is reachable with decimal arithmetic alone: 2^(-e) is 5^e / 10^e
@@ -2407,10 +2343,9 @@ long d_from_ulong(long i) {
  * NOT EXACTLY MATCHABLE, and the mismatch is in the Go twin rather than here:
  * giFromFloat's last line is `int64(m)` on a value that is NaN when the operand
  * is an infinity, and Go leaves that conversion implementation defined. On this
- * machine (darwin/arm64) it answers 0, measured; on amd64 the same expression
- * answers -9223372036854775808. 0 is what is implemented here, so the two
- * halves agree on arm64 and both would differ from a Go twin built for amd64.
- * The same architecture dependence bit the float %% of phase 4a. */
+ * machine (darwin/arm64) it answers 0; on amd64 the same expression answers
+ * -9223372036854775808. 0 is what is implemented here, so the two halves agree
+ * on arm64 and both would differ from a Go twin built for amd64. */
 long si_from_float(long b) {
 	long m;
 	long lim = 1086;                 /* 2^63  */
@@ -2532,40 +2467,12 @@ long si_apply(long code, long l, long r) {
 	 * JLS 15.19, ECMA-334 12.11, Kotlin's shl/shr/ushr (the count is always an
 	 * Int) and Swift's `>> <RHS: BinaryInteger>` (the result is Self).
 	 *
-	 * MEASURED, 2026-08-04: this is a guard, not a repair. A fatal probe placed
-	 * here and at the other three sites (giArith in abnf/jsrtint.go, szArithSlow
-	 * in lib/interp-core.js, siOp in metajs-interpreter.abnf) fired ZERO times
-	 * across matrix 325/325, --full 5,800 assertions, --cross 119 programs and
-	 * clang-check 16/16: every language's layer 2 already hands the count over as
-	 * a plain number or a 64-bit signed box (jvShift masks to & 31 / & 63,
-	 * k1Shift to k1I32(r) & mask, csShift through csShiftCount, js_swshift
-	 * through sintConv(n, 64, false), dart's ints are all 64-bit signed), and Go's
-	 * emitter wraps the count in js_gival. Real `java` 24 and `swiftc` 6.1.2
-	 * confirmed both halves already right on the shapes those two languages can
-	 * actually express (int >> byte, long >> short, int << long, int >>> char,
-	 * Int >> UInt8, Int64 >> UInt16, Int << UInt32, UInt8 >> Int, Int8 >> UInt64).
-	 * Kotlin, C# and Dart cannot express a non-int count at all; no toolchain for
-	 * those three is installed here, so that rests on the specifications named
-	 * above.
-	 *
-	 * 2026-08-08, docs/todo.md 4.2: the two `die("PROBE-C <<" / ">>")` calls that
-	 * measurement left behind in the two shift arms are REMOVED, and the "fired
-	 * zero times" reading above must not be quoted for the C engine, because the
-	 * C probe COULD NOT HAVE FIRED. It read
-	 *     if (si_width_of(l, l) != w || si_uns_of(l, l) != u) die(...)
-	 * *after* the `if (code == 9 || code == 10)` line below had already assigned
-	 * w = si_width_of(l, l) and u = si_uns_of(l, l) - so both operands of both
-	 * comparisons were the same expression and the condition was false by
-	 * construction. It was a tautology, not evidence. (The other three sites named
-	 * above were removed when the measurement finished; only these two were left,
-	 * which is what made them read as scaffolding.)
-	 *
-	 * Nothing is lost by removing them: the override on the line below is
-	 * UNCONDITIONAL, so the shift arms already compute at the left operand's own
-	 * width and signedness whatever type the count arrived with. A guard that
-	 * fires would therefore have aborted a program that was about to produce the
-	 * RIGHT answer. The invariant is enforced by that assignment, not checked by a
-	 * predicate, and this comment is the record. */
+	 * The override on the line below is UNCONDITIONAL, so the shift arms compute
+	 * at the left operand's own width and signedness whatever type the count
+	 * arrived with. In practice every language's layer 2 already hands the count
+	 * over as a plain number or a 64-bit signed box, so this is a backstop.
+	 * Twins: giArith in abnf/jsrtint.go, szArithSlow in lib/interp-core.js, siOp
+	 * in metajs-interpreter.abnf. */
 	long a = si_val(l);
 	long b = si_val(r);
 	long x = 0;
@@ -2678,12 +2585,9 @@ long jf_style_of(long l, long r) {
  * computerized scientific notation ("1.0E20") outside that range. The two
  * bounds are compared as DOUBLES, the way Go's `a >= 1e-3 && a < 1e7` does.
  *
- * MEASURED, not assumed: testing the decimal exponent instead (e10 >= -3 &&
- * e10 < 7) is INDISTINGUISHABLE - 0 of 51 ratchet assertions and 0 of 10,149
- * probe lines, over 24 mantissas x 61 exponents x both signs. The shortest form
- * of a double at or above 1e-3 always has e10 >= -3, so the two formulations
- * agree everywhere the probe could reach. The value test is kept because it is
- * what the Go source says, not because it was shown to matter. */
+ * Testing the decimal exponent instead (e10 >= -3 && e10 < 7) gives the same
+ * answers - the shortest form of a double at or above 1e-3 always has
+ * e10 >= -3 - but the value test is what the Go source says. */
 long JF_1EM3 = 4562254508917369340;      /* the bits of 1e-3 */
 long JF_1EM5 = 4532020583610935537;      /* the bits of 1e-5 */
 
@@ -2704,10 +2608,9 @@ long jvm_flo_str(long bits) {
 	 * It shows only among the SUBNORMALS, where the gap between neighbours is
 	 * comparable to the value itself: Double.MIN_VALUE is 4.9406564584124654E
 	 * -324, which java renders "4.9E-324" and the shortest-plus-".0" rule
-	 * renders "5.0E-324". Measured against real java 24.0.2; it was 254 lines
-	 * of the 17,674 line java probe (docs/runtime-next-plan.md part 3). Every
-	 * NORMAL double is within about 1e-16 of its one digit form, a thousandth
-	 * of a two digit step, so the two rules agree everywhere else. */
+	 * renders "5.0E-324" (java 24.0.2). Every NORMAL double is within about
+	 * 1e-16 of its one digit form, a thousandth of a two digit step, so the two
+	 * rules agree everywhere else. */
 	g_mindig = 2;
 	e10 = shortest_digits(a, digs);
 	g_mindig = 1;
@@ -2874,8 +2777,8 @@ long jf_minmax(long l, long r, int take_l) {
  * Math.max(-0.0, 0.0) is 0.0 ("if one argument is positive zero and the other
  * negative zero, the result of min is negative zero", and of max positive
  * zero), and Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the
- * result is NaN"). Both comparisons are FALSE, so a bare `<` took the right
- * operand and answered 0.0 and 1.0. Everything else is the ordinary
+ * result is NaN"). Both comparisons are FALSE, so a bare `<` would take the
+ * right operand and answer 0.0 and 1.0. Everything else is the ordinary
  * comparison, a tie still going to the right operand. */
 int jf_take_l(long a, long b, int want_max) {
 	if (d_is_nan(a)) { return 1; }             /* the left one is the NaN */
@@ -2892,9 +2795,8 @@ int jf_take_l(long a, long b, int want_max) {
  * wraps to 32 bits the way the compiler's integer arithmetic does. */
 long jf_abs(long v) {
 	if (tag_of(v) == 14) { return jf_make(d_abs(fa(v)), fb(v)); }
-	/* A SIGNED 64 bit box is negated IN THE BOX. The fallthrough's to_int32
-	 * truncates a long, so jf_abs(3000000000L) answered -1294967296 and
-	 * jf_abs(Long.MAX_VALUE) answered 0. Two's-complement negation maps
+	/* A SIGNED 64 bit box is negated IN THE BOX: the fallthrough's to_int32
+	 * would truncate a long. Two's-complement negation maps
 	 * Long.MIN_VALUE to itself, which is the answer JLS 15.15.4 asks for, and
 	 * an UNSIGNED box is a magnitude already. This is the third engine of the
 	 * primitive: abnf/jsrtjvm.go's floAbs and languages/metajs-interpreter.abnf's
@@ -2966,27 +2868,9 @@ long G_ROOT;
  * word keeps the load factor at or below 1/2, which is also what guarantees the
  * probe loop terminates: there is always an empty slot.
  *
- * A FATTER SLOT WAS TRIED AND IS WORSE. Carrying the name handle beside the
- * index makes a hit one memory access instead of two (the slot, then
- * names[idx]), which looked like the reason a small module lost. Measured: lua
- * +6.1% against +3.9%, kotlin -40.4% against -42.1%.
- *
- * RE-MEASURED 2026-08-09 (docs/todo.md 7.2) BECAUSE THOSE WERE SINGLE BUILDS,
- * and the verdict SURVIVES. Built as `return cap * 4` here plus a two-word slot
- * (name, idx+1) in scope_hput and scope_find, against a clean archive of
- * 455ce39, 9 draws for medians and 13 paired builds:
- *
- *     lua      -0.20%   faster in 13 of 13 pairs   (own spread 0.05%)
- *     python   +0.66%   SLOWER in 11 of 13 pairs   (2.66%)
- *     kotlin   +0.83%   no difference              (2.21%)
- *     c        -0.08%   no difference              - the semantic control
- *
- * It buys lua back 0.20 points of the ~4 the index costs it, charges python for
- * them, and it is the only variant tried here that moves an EXACT counter the
- * wrong way: the table doubles, so MEC_GC_STATS heap steps +5,120 B on lua and
- * +37,376 B on kotlin and python. Declined a second time, on numbers that can
- * now carry the word. The arm that DID buy lua back is the out-of-line one at
- * scope_find. */
+ * NOT A FATTER SLOT: carrying the name handle beside the index would make a hit
+ * one memory access instead of two (the slot, then names[idx]), but it doubles
+ * the table and measured slower overall. */
 long scope_hwords(long cap) {
 	if (cap < 32) { return 0; }
 	return cap * 2;
@@ -3002,21 +2886,12 @@ void scope_hput(long *names, long cap, long idx) {
 	tab[slot] = idx + 1;
 }
 
-/* Capacity 4, not 8. A scope is allocated on EVERY function call, so its size is
- * the per-call cost - and it was the growth rate of a long-running program too
- * back when nothing was freed: 8 cost 248 bytes a call, 4 costs 152. Almost every scope
- * holds a handful of names (parameters plus a few locals) and scope_put doubles
- * when it does not. Measured on a 2M-iteration Lua loop: the resident set and the
- * system time both fell by about a third. */
-/* A scope now starts EMPTY - capacity 0, no buffers - and scope_put allocates
- * the first time a name is declared in it.
+/* A scope starts EMPTY - capacity 0, no buffers - and scope_put allocates
+ * the first time a name is declared in it (growing 4, 8, 16, ...).
  *
- * The reason is measured. lib/compile-core.js's makeBlockStmt opens a scope for
- * every BLOCK, not only for every call, so a `s = s + i %% 7` Lua loop through
- * layer 2 allocated 33 scopes per iteration against 9 calls: roughly three
- * quarters of them are block scopes that never declare a single name, and each
- * was paying for three four-slot buffers it never wrote to. An empty scope costs
- * one 56-byte cell and one arena call instead of four calls and 152 bytes.
+ * lib/compile-core.js's makeBlockStmt opens a scope for every BLOCK, not only
+ * for every call, and most block scopes never declare a single name. An empty
+ * scope costs one 56-byte cell and one arena call.
  *
  * The three buffers are also ONE allocation rather than three: names, values and
  * type classes are the three consecutive `cap`-sized thirds of a single block,
@@ -3034,55 +2909,26 @@ long mk_scope(long parent) {
 long scope_of(long h) { if (h == 0) { return G_ROOT; } return h; }
 
 /* THE HOTTEST LOOP IN THE RUNTIME. Every global reference in every one of the
- * sixteen languages ends here, and until the hash arm it was a LINEAR SCAN of
- * the module scope: 461 entries for a kotlin program, walked by every `+`.
- * Measured on kotlin (40,000 x `s = s + i %% 7`, native -exe, instructions
- * retired) the whole collector was 5.09 G of 30.5 G and this scan was worth more
- * - and it made the POSITION of a declaration matter, which is what
- * docs/runtime-merge-plan.md's "live-body tax" turned out to be.
+ * sixteen languages ends here. A module scope has hundreds of entries (461 for a
+ * kotlin program), so a scope of n >= 32 is searched through its hash table;
+ * a linear scan would also make the POSITION of a declaration matter.
  *
- * The answer is unchanged in every case: the table indexes the same array and
- * the winner is still the FIRST matching entry, because scope_put never inserts
- * a duplicate (it assigns instead) and nothing ever removes an entry, so at most
- * one index in the table can match. js_scope_get / scopeHas / js_scope_has
- * therefore see exactly what they saw before.
+ * Both arms give the same answer: the table indexes the same array and the
+ * winner is the FIRST matching entry, because scope_put never inserts a
+ * duplicate (it assigns instead) and nothing ever removes an entry, so at most
+ * one index in the table can match.
  *
  * The arm is chosen on n, which the linear scan needs anyway, and NOT on the
  * capacity: reading fe(s) here as well is another load on the path every small
- * scope takes, and it measured (lua +2.5% for that alone). n <= cap and cap is a
+ * scope takes, and it is measurable. n <= cap and cap is a
  * power of two, so n >= 32 guarantees cap >= 32 and therefore that scope_hwords
  * gave this scope a table.
  *
- * THE ARM IS NOT FREE FOR A LANGUAGE THAT CANNOT USE IT, and the reason is
- * inlining. When the hash arm was written INLINE here, this function was too big
- * for clang to keep inlining into scope_get, scope_put and js_tdecl, and lua -
- * whose 84-declaration module scope is the smallest of the sixteen and whose
- * benchmark is dominated by SMALL scopes - paid +3.9%. Isolated: a bare
- * `if (n >= 1000000) return <call>` that never fires already cost it +2.8%, so
- * it is the shape of the function and not the hashing.
- *
- * 2026-08-09, docs/todo.md 7.2: THAT IS WHY THE HASH ARM IS NOW OUT OF LINE, in
- * scope_find_hashed below. It had been measured as WORSE (+4.7%) and the number
- * was a SINGLE BUILD against a row whose own spread is larger than the effect -
- * the trap in the manual's chapter 4. Re-measured properly, 9 draws for the
- * medians and 13 paired builds for the sign test, against a clean `git archive`
- * of 455ce39, `tests/bench.sh`:
- *
- *     lua      -2.31%   faster in 13 of 13 pairs   (own 9-draw spread 0.08%)
- *     python   -1.52%   faster in 13 of 13 pairs   (0.54%)
- *     kotlin   -1.48%   faster in 12 of 13 pairs   (1.91%)
- *     c        -0.10%   no difference              - the semantic control
- *
- * So it is a win for the language the index HURT and for the two it helps most,
- * and MEC_GC_STATS heap and collection count are unmoved in every row (exact
- * counters, exempt from the layout lottery), which is what says this is codegen
- * and not allocation. The mechanism is the one the paragraph above names: with
- * the hash arm gone from the body, scope_find is small again and clang inlines
- * it back into its three callers, so the small-scope path stops paying for an
- * arm it never takes.
- *
- * THE OTHER PROPOSED BUY-BACK, carrying the name handle beside the index in the
- * slot, WAS RE-MEASURED THE SAME WAY AND REMAINS A LOSS - see scope_hwords. */
+ * THE HASH ARM IS OUT OF LINE, in scope_find_hashed below, on purpose: written
+ * inline it makes this function too big for clang to keep inlining into
+ * scope_get, scope_put and js_tdecl, and then every SMALL scope pays for an arm
+ * it never takes (measurable on lua, whose benchmark is dominated by small
+ * scopes). Keep this function small. */
 long scope_find_hashed(long *names, long cap, long name) {
 	long *tab = names + cap * 3;
 	long m = cap * 2 - 1;
@@ -3329,20 +3175,19 @@ long get_member(long obj, long key) {
 	}
 	if (t == 6) { return obj_get(obj, to_string(key)); }
 	/* A generator's iterator protocol. The floor owns `next` only; current /
-	 * key / valid / send / getReturn are layer 2 over it (see the cost table in
-	 * docs/runtime-next-plan.md). */
+	 * key / valid / send / getReturn are layer 2 over it. */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "next")) { return mk_bound(obj, 60); }
 	/* g.return(v): the CLOSING half of the iterator protocol. It is answered
 	 * here and not left to layer 2 because a generator is a floor cell - nothing
-	 * can be stored on one - so python-rt.metajs used to keep a closed-ness side
-	 * table that the native for-loop never consulted. See gen_close. */
+	 * can be stored on one - and a layer-2 closed-ness side table would not be
+	 * consulted by the native for-loop. See gen_close. */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "return")) { return mk_bound(obj, 61); }
 	/* g.throw(v): raise v AT the yield the body is parked at, so the body's own
 	 * try/catch and finally clauses see it. Like `return` it belongs on the floor
 	 * and not in layer 2, because the record travels on the RESUME VALUE - the
 	 * cell's f slot, which only the yield this generator is parked at ever reads.
 	 * That is what makes it per-coroutine by construction rather than by care
-	 * (docs/todo.md 2.1 died on a per-PROGRAM depth stack). See gen_throw. */
+	 * (a per-PROGRAM depth stack does not work). See gen_throw. */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "throw")) { return mk_bound(obj, 62); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
@@ -3614,10 +3459,8 @@ long fmt_sprint(long args) {
 
 long mk_ctl(long kind, long value) { long h = cell_new(10); sa(h, kind); sb(h, value); return h; }
 
-/* One jmp_buf per DEPTH, allocated once and reused. It used to be a fresh
- * malloc(512) per js_try - three of them for a try/catch/finally - and nothing
- * ever frees it, so a `try { throw } catch {} finally {}` in a loop leaked about
- * 1.5 KB per iteration: 200,000 of them cost 499 MB, of which this was 261 MB.
+/* One jmp_buf per DEPTH, allocated once and reused: this file never frees a
+ * malloc, so a fresh buffer per js_try would leak in every loop with a try.
  * A buffer at depth d is only live while JB_DEPTH > d, and js_try restores
  * JB_DEPTH before it returns, so two try statements at the same depth are
  * sequential and can share the buffer. THE SETJMP MUST STILL BE DONE ONCE PER
@@ -3626,8 +3469,7 @@ long mk_ctl(long kind, long value) { long h = cell_new(10); sa(h, kind); sb(h, v
  * THE POOL IS PER STACK, not per process. A generator body runs on its own C
  * stack, so a setjmp it takes is only valid on that stack and a longjmp to a
  * buffer the RESUMER filled in would jump into another thread's frame - the
- * undefined behaviour docs/runtime-next-plan.md named as the gate on this
- * primitive. JBP therefore points at the pool of the stack that is RUNNING:
+ * undefined behaviour. JBP therefore points at the pool of the stack that is RUNNING:
  * main's for main, and cb[9] for a coroutine, swapped by whichever side gains
  * control (exactly as GC_STACK_BASE is). JB_CAP is that pool's length. */
 long JBP;            /* long *: the running stack's jmp_buf pool */
@@ -3688,7 +3530,7 @@ long js_call(long callee, long self, long args) {
  * are STRICTLY ALTERNATING - at any moment exactly one side runs - so neither
  * needs a lock around the runtime's own state.
  *
- * WHY A THREAD AND NOT A SECOND STACK. Measured, not assumed:
+ * WHY A THREAD AND NOT A SECOND STACK:
  *   - makecontext/swapcontext work on this machine (macOS 15, arm64) but are
  *     deprecated there, and every field this file would have to write into a
  *     ucontext_t (uc_stack.ss_sp, ss_size, uc_link) has a PLATFORM-DEPENDENT
@@ -3802,7 +3644,7 @@ void *coro_entry(void *arg) {
 	 * a throw inside a generator body would jump to a jmp_buf the RESUMER
 	 * setjmp'd - i.e. into another thread's frame, which only appears to work
 	 * while the resumer stays parked and produces a WRONG ANSWER as soon as a
-	 * collection moves the timing (MEC_GC=stress caught it). The body therefore
+	 * collection moves the timing. The body therefore
 	 * unwinds only to here; the value travels back in the cell, and gen_resume
 	 * re-raises it on the resumer's own stack. That is exactly the three steps
 	 * abnf/jsrt.go takes with recover() and a re-panic. */
@@ -4022,8 +3864,7 @@ long gen_return(long g, long args) {
 /* g.throw(v): raise v at the yield the body is parked at. The twin of
  * abnf/jsrt.go's (*jsGenerator).throwInto.
  *
- * Three shapes, and both node and CPython 3.14 agree on all three (probed, not
- * reasoned about):
+ * Three shapes, and both node and CPython 3.14 agree on all three:
  *   - SUSPENDED: the value is raised inside the body. A body that catches it and
  *     yields again answers {value, false}; one that catches and returns answers
  *     {value: ret, true}; one that does not catch propagates out of throw()
@@ -4380,9 +4221,8 @@ long d_sqrt(long x) {
 	a.l = x;
 	/* HALVE THE EXPONENT for the starting guess: shifting the bit pattern right by
 	 * one and adding back half the bias lands within a few percent of the root, so
-	 * Newton converges in half a dozen steps. Starting from the VALUE ITSELF, as this
-	 * did, needs one step per power of two - eighty were not enough for sqrt(1e100),
-	 * which came out 8.27e+75. */
+	 * Newton converges in half a dozen steps. Starting from the VALUE ITSELF would
+	 * need one step per power of two. */
 	g.l = (x >> 1) + 2305702271725338624L;      /* 1023 << 51 */
 	two.d = 2.0;
 	while (i < 30) { g.d = (g.d + a.d / g.d) / two.d; i = i + 1; }
@@ -4414,15 +4254,12 @@ double d_sqrt_d(double v) { union DB u; u.d = v; u.l = d_sqrt(u.l); return u.d; 
 
 /* ----- pow -----
  *
- * A NON-INTEGER exponent used to answer NaN: repeated multiplication cannot reach
- * one, and any approximation of exp/log would have disagreed with the Go twin in the
- * last bits, which is the divergence this whole floor exists to avoid. What follows
- * is therefore a FAITHFUL PORT of Go's own math.Pow, math.Exp, math.Log, math.Frexp,
- * math.Ldexp and math.Modf - the same constants, the same polynomials, the same order
- * of operations. Now that the emitted arithmetic is correctly rounded IEEE-754, the
- * same sequence of operations gives the same bits, and it does: verified against the
- * Go runtime over a differential probe of every shape of argument. Ported rather than
- * invented precisely because "close enough" is not an answer here. */
+ * A FAITHFUL PORT of Go's own math.Pow, math.Exp, math.Log, math.Frexp,
+ * math.Ldexp and math.Modf - the same constants, the same polynomials, the same
+ * order of operations. The emitted arithmetic is correctly rounded IEEE-754, so
+ * the same sequence of operations gives the same bits as the Go twin. Any other
+ * approximation of exp/log would disagree with it in the last bits, and "close
+ * enough" is not an answer here. */
 
 double d_frexp(double f, long *eout) {
 	union DB u;
@@ -4454,8 +4291,8 @@ double d_ldexp(double frac, long exp) {
 	/* UNDERFLOW KEEPS THE SIGN. Spelled with the sign BIT rather than as the
 	 * literal `-0.0`, because unary minus on a double is emitted as `0.0 - x` by
 	 * languages/c-to-llvm-ir.abnf and `0.0 - 0.0` is +0.0 - so the literal
-	 * silently lost the sign here and `Math.pow(-0.5, 2147483647)` was +0
-	 * natively against -0 in node and in the Go twin. The infinity below is
+	 * would lose the sign (`Math.pow(-0.5, 2147483647)` is -0 in node and in
+	 * the Go twin). The infinity below is
 	 * unaffected: `-1.0 / 0.0` computes the sign rather than writing it. */
 	if (exp < -1075) {
 		union DB z;
@@ -4501,10 +4338,7 @@ long d_mod_go(long x, long y) {
 	ur.d = r;
 	/* The sign is put back by FLIPPING THE BIT, not by `0.0 - r`: Go's math.Mod
 	 * negates x itself, so a zero remainder keeps x's sign and Mod(-1, 1) is
-	 * -0.0 - where `0.0 - 0.0` is +0.0 and loses it. Invisible until the boxed
-	 * double arrived, because the JS rendering of -0.0 is "0" while Java's is
-	 * "-0.0"; found by the 10,149 line jsJFlo probe against jsrtjvm.go, 18 lines
-	 * of which read "0.0" here and "-0.0" in the Go twin. */
+	 * -0.0 - where `0.0 - 0.0` is +0.0 and loses it (Java prints "-0.0"). */
 	if (neg) { return d_neg(ur.l); }
 	return ur.l;
 }
@@ -4656,43 +4490,26 @@ long d_pow(long xb, long yb) {
 /* ----- the transcendentals: sin cos tan asin acos atan sinh cosh tanh
  * asinh acosh atanh expm1 log1p log2 log10 cbrt atan2 hypot -----
  *
- * WHY THEY ARE HERE AND WHY THEY ARE PORTS. Math's MEMBERS used to diverge
- * between the three engines: seed_root("Math", ...) below offered eleven methods
- * and two properties, while abnf/jsrt.go's standardJSBindings offers thirty-two
- * and eight, and the grammar host offers the host's own Math. So a js, ts or
- * ruby program calling Math.sin answered 0.8414709848078965 under llvm.Run and
- * died with `unknown method 'sin'` in the native binary - the largest live
- * run-vs-native divergence in the tree (docs/todo.md 1.1).
- *
- * Converging DOWNWARD (trimming the Go twin to eleven) loses capability in every
- * language, so these converge upward, and the only honest way to do that is the
- * one d_pow / d_exp / d_log already took: a FAITHFUL PORT of Go's own math
+ * WHY THEY ARE PORTS. The native binary and llvm.Run have to print the SAME
+ * DIGITS for every Math member abnf/jsrt.go's standardJSBindings offers, so these
+ * take the road d_pow / d_exp / d_log took: a FAITHFUL PORT of Go's own math
  * package - the same constants, the same polynomials, the same order of
- * operations - because the native binary and llvm.Run have to print the SAME
- * DIGITS. An implementation that is merely accurate is a run-vs-native
- * divergence one ulp wide, which is worse than the missing method it replaced.
- * Every function below is $GOROOT/src/math/<name>.go line for line; the
- * measurement is in the differential probe, not in the reading.
+ * operations. An implementation that is merely accurate is a run-vs-native
+ * divergence one ulp wide. Every function below is $GOROOT/src/math/<name>.go
+ * line for line.
  *
- * WHAT THE PORT CANNOT REACH, AND WHY llvm.fma.f64 IS NOT THE ANSWER. 21 of a
- * 6,734 row probe still differ from llvm.Run by ONE ULP, in six expressions:
- * `(x - y*PI4A)` and its two continuations in sin/cos/tan, tan's `z + z*q`,
- * xatan's `x*z + x`, asin's `1 - x*x`, and log2's `Log(frac)*(1/Ln2) + exp`. The
- * cause is not the port: THE GO COMPILER CONTRACTS `a*b + c` INTO AN FMA ON
- * arm64 and the C here emits a separate fmul and fadd. Proved three ways -
- * math.Tan's source replicated in Go gives ...399, the same source in C gives
- * ...400, and Python's math.fma of the same two operands gives ...399.
- *
- * Emitting an FMA here to match was considered and declined, for three reasons
- * and in this order:
+ * WHAT THE PORT CANNOT REACH, AND WHY llvm.fma.f64 IS NOT THE ANSWER. A small
+ * fraction of arguments still differ from llvm.Run by ONE ULP, in six
+ * expressions: `(x - y*PI4A)` and its two continuations in sin/cos/tan, tan's
+ * `z + z*q`, xatan's `x*z + x`, asin's `1 - x*x`, and log2's
+ * `Log(frac)*(1/Ln2) + exp`. THE GO COMPILER CONTRACTS `a*b + c` INTO AN FMA ON
+ * arm64 and the C here emits a separate fmul and fadd. Emitting an FMA here to
+ * match is declined:
  *
  *   1. IT WOULD BE WRONG ON amd64. Go contracts on arm64/ppc64/s390x/riscv64/
  *      loong64 and NOT on amd64/386, so the TWIN's digits are already
- *      architecture-dependent. Fusing here pins the floor to arm64-Go and makes
- *      it disagree with amd64-Go by the same 21 rows in the other direction.
- *      There is no spelling that matches both.
- *   2. IT IS A PER-EXPRESSION AUDIT, NOT A FLAG. LLVM only contracts under the
- *      `contract` fast-math flag, so each of the six sites would have to be
+ *      architecture-dependent. There is no spelling that matches both.
+ *   2. IT IS A PER-EXPRESSION AUDIT, NOT A FLAG. Each site would have to be
  *      identified against Go's arm64 SSA output by hand and re-audited on every
  *      Go release - the fusion decisions belong to the Go compiler and are
  *      specified nowhere.
@@ -4701,11 +4518,9 @@ long d_pow(long xb, long yb) {
  *      (shared with bash, batch and c) or declaring libm's fma() - which breaks
  *      the standing property that `nm -u` on a native binary shows libc alone.
  *
- * The alternative of making the TWIN unfused instead (Go ports with explicit
- * float64() conversions, which do defeat contraction - measured) only MOVES the
- * divergence: standardJSBindings is also the frozen grammar host, so it would
- * diverge from goja's Math in every interpreter half. The price of leaving it is
- * one ulp on 0.3% of arguments in functions that were a hard abort before.
+ * Making the TWIN unfused instead (explicit float64() conversions) only MOVES
+ * the divergence: standardJSBindings is also the frozen grammar host, so it
+ * would diverge from goja's Math in every interpreter half.
  *
  * The one that is not a straight transliteration is trigReduce's 128-bit
  * arithmetic: Go writes it with math/bits, and the C subset here has no 128-bit
@@ -5252,7 +5067,7 @@ double d_cbrt(double x) {
 
 /* Math.fround: the double nearest x that a float32 can hold. `float` is ACCEPTED
  * by c-to-llvm-ir.abnf and silently means `double` - `(float)0.1` came back as
- * plain 0.1, measured - so the narrowing is done on the bit pattern here.
+ * plain 0.1 - so the narrowing is done on the bit pattern here.
  * Round to nearest, ties to even, over the 24-bit significand, with the float32
  * subnormal range and the overflow to infinity both explicit. */
 double d_fround(double x) {
@@ -5294,11 +5109,11 @@ long d_clz32(long v) {
 
 /* Math.hypot is VARIADIC in JavaScript, so it cannot be Go's two-argument
  * math.Hypot; the loop lives in host_call below and its twin is jsrt.go's
- * mathObj "hypot". Both were the naive sum of squares until this change, which
- * makes Math.hypot(1e300, 1e300) Infinity where node answers 1.41...e+300 -
- * ECMA-262 asks implementations to avoid exactly that overflow. Both engines now
- * scale by the largest magnitude first, which for TWO arguments is bit for bit
- * Go's own math.Hypot (p*Sqrt(1+(q/p)^2), since (p/p)^2 is exactly 1). */
+ * mathObj "hypot". The naive sum of squares makes Math.hypot(1e300, 1e300)
+ * Infinity where node answers 1.41...e+300 - ECMA-262 asks implementations to
+ * avoid exactly that overflow - so both engines scale by the largest magnitude
+ * first, which for TWO arguments is bit for bit Go's own math.Hypot
+ * (p*Sqrt(1+(q/p)^2), since (p/p)^2 is exactly 1). */
 
 /* UTF-8 encode one code unit, the strFromUnits of abnf/jsrt.go for everything
  * that is not half of a surrogate pair. */
@@ -5487,7 +5302,7 @@ long host_call(long id, long self, long args) {
 		return H_UNDEF;
 	}
 	if (id == 35) { return fmt_sprint(args); }             /* sprint */
-	/* ----- the SIZED INTEGER, for layer 2 (docs/runtime-next-plan.md part 2).
+	/* ----- the SIZED INTEGER, for layer 2.
 	 * A MetaJS runtime library cannot make a new primitive type, so the floor
 	 * hands it the constructor and the three readers. The value travels as two
 	 * 32 bit halves because a MetaJS number is a double and cannot carry 64 bits
@@ -5573,18 +5388,11 @@ long host_call(long id, long self, long args) {
 	/* sintRaw(hi, lo, bits, unsigned): sint() WITHOUT si_norm - always a tag 13
 	 * cell, never a plain number.
 	 *
-	 * WHY IT EXISTS (docs/runtime-next-plan.md part 3, the java migration).
-	 * si_norm's whole job is to UNBOX a signed 64 bit value a double holds
-	 * exactly, and that is precisely what a statically typed language's 64 bit
-	 * signed type must NOT do: Java's `1000000L * 1000000L` is 1000000000000
-	 * while `1000000 * 1000000` is -727379968, so a small long has to stay a
-	 * long. Every one of the eleven sint* builtins goes through si_norm, so
-	 * layer 2 had no constructor for a small BOXED value at all. Java worked
-	 * around it by marking the box UNSIGNED - the one shape si_norm will not
-	 * unbox - and then re-supplying six signed operations (/ % >>, compare,
-	 * decimal text, double reading) in about 90 lines of java-rt.metajs. That
-	 * workaround is owed once per language, and csharp, go, kotlin, swift and
-	 * dart all have a 64 bit signed type.
+	 * WHY IT EXISTS. si_norm's whole job is to UNBOX a signed 64 bit value a
+	 * double holds exactly, and that is precisely what a statically typed
+	 * language's 64 bit signed type must NOT do: Java's `1000000L * 1000000L` is
+	 * 1000000000000 while `1000000 * 1000000` is -727379968, so a small long has
+	 * to stay a long. Every other sint* builtin goes through si_norm.
 	 *
 	 * si_trunc IS still applied, so the cell keeps the invariant its header
 	 * states (`the value already truncated to the width and sign extended`) -
@@ -5600,7 +5408,7 @@ long host_call(long id, long self, long args) {
 	/* delKey(o, key): remove an own property, key-order entry and all. It is
 	 * js_del, and it is here for the reason keysOf is: an EXTERN is only callable
 	 * from an emitter, and MetaJS has no `delete`, so a layer-2 file could not
-	 * remove a key AT ALL - it had to blank the slot and keep a side table. Every
+	 * remove a key AT ALL. Every
 	 * language whose runtime models `delete`, `unset`, `remove` or a map erase
 	 * needs it. Answers true whether or not the key was there, like the twin. */
 	if (id == 63) { return js_del(arg_at(args, 0), arg_at(args, 1)); }
@@ -5617,10 +5425,9 @@ long host_call(long id, long self, long args) {
 	 * WHY THEY ARE HERE. A scope is the floor's private storage: an emitter
 	 * hands a layer-2 function a scope handle (js_pyset_var's `s`, every
 	 * `defined?`/`isset`/`global` probe) and layer 2 could do NOTHING with it -
-	 * MetaJS has no way to open a cell. Six languages answered that by lowering
-	 * the probe into their EMITTER instead (docs/runtime-next-plan.md: swift,
-	 * dart, go, ruby, kotlin's nine helpers, python's six), which is IR-building
-	 * duplicated per language for what is one language-neutral question.
+	 * MetaJS has no way to open a cell - short of lowering every such probe
+	 * into each language's EMITTER, which is IR-building duplicated per language
+	 * for one language-neutral question.
 	 * scopeHas is deliberately the OWN-scope test and not a chain walk, because
 	 * that is the one thing js_scope_typeof cannot express (it answers
 	 * "undefined" for an absent name and for a slot holding undefined alike)
@@ -5664,10 +5471,8 @@ long host_call(long id, long self, long args) {
 	 * already answered by a name layer 2 has: typeof (undefined / boolean /
 	 * number / string / function / object), sintIs, floIs, and `typeof
 	 * v.length == "number"` for an array. A generator is the one shape with no
-	 * such name, and php-rt.metajs's phIsGen is the evidence: it excludes
-	 * __dict / __refcell / __isclass / __class / length one by one and then
-	 * tests whether v["next"] is callable, which its own report calls "the one
-	 * guess in this port".
+	 * such name (without this, a layer 2 can only guess - exclude every other
+	 * box and test whether v["next"] is callable).
 	 *
 	 * A generator is an OBJECT to typeof in all three halves, so this is a
 	 * refinement of typeof and never contradicts it. */
@@ -5684,8 +5489,8 @@ long host_call(long id, long self, long args) {
 	 * shortest_digits already IS the algorithm: its candidate for k digits is
 	 * the exact value rounded to k, nearest with ties to even, which is what
 	 * "%.ke" writes. g_fixdig = n takes THAT candidate and nothing else - see
-	 * its comment for why g_mindig = n, which only started the search there, was
-	 * a different function and disagreed with the Go twin (docs/todo.md 2.8).
+	 * its comment for why g_mindig = n, which only starts the search there, is
+	 * a different function.
 	 * The trailing zeros come off here, because the CALLER decides how many
 	 * digits to show.
 	 *
@@ -5718,63 +5523,21 @@ long host_call(long id, long self, long args) {
 		return mk_str(out, o);
 	}
 	/* THE MATH TRANSCENDENTALS LIVE AT THE COLD END OF THIS CHAIN, ON PURPOSE.
-	 * host_call dispatches on a LINEAR if-chain, so twenty-three new arms placed
-	 * next to their neighbours (after id 20) put twenty-three extra integer
-	 * compares in front of every sint / flo / scope call - and java's benchmark,
-	 * which is nothing but boxed doubles and sized integers, measured +7.08%
-	 * against a 4.07% spread for exactly that, with every correctness gate green
-	 * (isolated: base + only this item's files, tests/bench.sh --draws 5).
+	 * host_call dispatches on a LINEAR if-chain, so arms placed next to their
+	 * neighbours (after id 20) would put extra integer compares in front of every
+	 * sint / flo / scope call - measurable on java, which is nothing but boxed
+	 * doubles and sized integers. Ids 71..93 are the coldest names in the
+	 * runtime; the hot ones keep their position. Whether a new arm costs an
+	 * existing id a compare can be checked by diffing host_call's `icmp eq i64`
+	 * sites in languages/lib/runtime.ll.
 	 *
-	 * With the block moved here the effect is not merely inside the spread, it is
-	 * STRUCTURALLY ZERO, and that is checkable without a benchmark at all: the
-	 * first seventy `icmp eq i64` sites of host_call in languages/lib/runtime.ll
-	 * are register-for-register identical to the base module's (%13 through
-	 * %1206); the new arms are appended after all of them. No pre-existing host id pays one
-	 * extra compare. Manual chapter 4 says a single build cannot measure 2%; this
-	 * is the kind of question to answer by diffing the module instead.
-	 *
-	 * Ids 71..93 are the coldest names in the runtime; the hot ones keep their old
-	 * position.
-	 *
-	 * WHAT THE SEEDING COST, AND WHY IT WAS NOT WHERE ANYONE WOULD LOOK. It is paid
-	 * back several times over by the chunk index at gc_try (see ar_ix_find), which
-	 * this very measurement is what found - but the mechanism stays written down,
-	 * because ANY change that adds a few kilobytes to the live set can trip it.
-	 * Twenty-nine more members on the Math object is twenty-nine more cells plus
-	 * their key strings, held by the root scope forever - about 4.8 KB. Measured
-	 * against a clean `git archive` of the base with only this item's files copied
-	 * in (manual chapter 6), on tests/bench/mod.js and tests/bench/mod.java:
-	 *
-	 *              collections   live            heap                instructions
-	 *   js  base   131           162528          10528880            1314265222
-	 *   js  new    131           168304 (+3.6%)  11577456 (+1 chunk) 1330180183 (+1.21%)
-	 *   java base  1054          129296           8411264            8643313419
-	 *   java new   1054          134144 (+3.8%)  10508416 (+2 chunks) 9236746858 (+6.87%)
-	 *
-	 *   MEC_GC=off  js  991068525 -> 993023645 (+0.20%)
-	 *               java 6551630122 -> 6553712635 (+0.03%)
-	 *   --paired    js SLOWER 14/15 pairs mean +2.53%; java 15/15 mean +4.50%
-	 *
-	 * With the collector off the cost was ZERO, so all of it was the GC - and NOT
-	 * the extra marking, which is only 3.8%: java's heap crossed into TWO more
-	 * 1 MB chunks, and gc_try walked the chunk LIST linearly for every candidate
-	 * word of the conservatively scanned stack. Twenty-five percent more chunks is
-	 * what the 6.87% was. That was a PRE-EXISTING O(chunks) factor in the hottest
-	 * loop in the collector, not a property of these twenty-nine members, and it
-	 * is now gone: ar_ix_find is a binary search over a sorted array of chunk
-	 * ranges, and the six benchmark languages are 5.69% to 21.22% FASTER than the
-	 * base, 15 of 15 pairs each. The numbers and the validation are in that
-	 * header.
-	 *
-	 * What the seeding buys: twenty-one methods and six constants that used to abort the
-	 * native binary outright, in four languages, plus three latent goja-vs-frozen
-	 * divergences. Making the seeding lazy needs a property-miss hook the floor
-	 * does not have. (docs/todo.md 1.1.)
+	 * Seeding the Math members puts a few kilobytes on the live set for good
+	 * (cells plus key strings held by the root scope). Making the seeding lazy
+	 * would need a property-miss hook the floor does not have.
 	 */
 	/* The transcendental members of Math, host ids 71..91 - the set
-	 * standardJSBindings in abnf/jsrt.go has offered all along and this floor did
-	 * not, so `Math.sin(1)` answered under llvm.Run and died in the native binary
-	 * (docs/todo.md 1.1). Each body is Go's own math package, ported above. */
+	 * standardJSBindings in abnf/jsrt.go offers. Each body is Go's own math
+	 * package, ported above. */
 	if (id == 71) { return mk_dnum(d_sin(arg_d(args, 0))); }
 	if (id == 72) { return mk_dnum(d_cos(arg_d(args, 0))); }
 	if (id == 73) { return mk_dnum(d_tan(arg_d(args, 0))); }
@@ -5796,7 +5559,7 @@ long host_call(long id, long self, long args) {
 	if (id == 89) { return mk_dnum(d_cbrt(arg_d(args, 0))); }
 	if (id == 90) { return mk_dnum(d_atan2(arg_d(args, 0), arg_d(args, 1))); }
 	if (id == 91) {
-		/* Math.hypot, variadic and scaled - see the note where d_hypot used to be.
+		/* Math.hypot, variadic and scaled - see the Math.hypot note above.
 		 * ECMA-262 orders the special cases: an infinity wins over a NaN. */
 		double mx = 0.0;
 		double sum = 0.0;
@@ -5849,12 +5612,8 @@ long host_call(long id, long self, long args) {
 
 /* THE TEXT OF AN EXCEPTION NOBODY CAUGHT. to_string of an object is
  * "[object Object]" - the correct answer for String(o) and a useless one here,
- * and it is what every uncaught throw in both compiled halves used to print:
- * an uncaught `new TypeError("boom")` in a NATIVE js binary read
- * "js runtime error: uncaught exception: [object Object]" while llvm.Run, whose
- * jsvString consults the value's own toString, read "TypeError: boom". That was
- * a live halves divergence, and every throw docs/todo.md 1.8 and 3.2 add lands
- * on it.
+ * so an uncaught `new TypeError("boom")` must print "TypeError: boom", as
+ * llvm.Run does (its jsvString consults the value's own toString).
  *
  * Two shapes are recognised, and they are the two the exception hierarchies in
  * this project actually use - this is deliberately NOT a toString dispatch,
@@ -6043,8 +5802,7 @@ long js_gc_pin(long v) {
  * (or a member read on null/undefined) to be a CATCHABLE exception registers a
  * closure here in its boot block; one that wants the abort registers nothing.
  * See the note at RT_MISS_VAR for why the closure answers the value instead of
- * throwing it. The twins are abnf/jsrt.go's js_rt_missvar / js_rt_missmem.
- * docs/todo.md 1.8 and 3.2. */
+ * throwing it. The twins are abnf/jsrt.go's js_rt_missvar / js_rt_missmem. */
 long js_rt_missvar(long clo) { RT_MISS_VAR = clo; return 0; }
 long js_rt_missmem(long clo) { RT_MISS_MEM = clo; return 0; }
 long js_rt_missset(long clo) { RT_MISS_SET = clo; return 0; }
@@ -6055,9 +5813,9 @@ long js_str_mem(const char *p, long n) { return str_intern(p, n); }
 
 /* Small-integer cache. js_num_i is how EVERY numeric literal in the emitted IR
  * becomes a value, and layer 2 is full of them - operator indices, 0, 1, 2, the
- * bit widths - so it ran 58.7 times per iteration of the Lua benchmark, each one
- * a fresh 56-byte cell the arena never reclaims. A number cell is written once,
- * in mk_num, and never mutated (checked: no other sa/sb/... touches a tag-3
+ * bit widths - so a fresh 56-byte cell per evaluation would be a large share of
+ * all allocation. A number cell is written once, in mk_num, and never mutated
+ * (no other sa/sb/... touches a tag-3
  * cell), and every number comparison in the runtime is by BIT PATTERN, never by
  * handle identity - so one shared cell per small integer is indistinguishable
  * from a fresh one. -256..1024 covers the literals a compiled module emits. */
@@ -6155,15 +5913,12 @@ long js_scope_set_or_create(long s, long name, long v) {
 }
 
 /* Is `name` bound in THIS scope - no chain walk. It is the EXTERN twin of the
- * scopeHas BUILTIN (host 67 below, and jsrtint.go's scBindings), which layer 2
- * has had since d9014d7 and an EMITTER could not reach: a builtin is callable
- * from MetaJS, an extern from emitted IR, and the own-scope question was only
- * ever answerable on one side.
+ * scopeHas BUILTIN (host 67 below, and jsrtint.go's scBindings): a builtin is
+ * callable from MetaJS, an extern from emitted IR.
  *
  * js_scope_typeof is the chain walk and cannot express it - it answers
  * "undefined" for an absent name and for a slot holding undefined alike, and it
- * finds a name an ENCLOSING scope binds. See abnf/jsrt.go's twin for the class
- * fill that used it as an own-scope test and copied a module name onto a class. */
+ * finds a name an ENCLOSING scope binds. */
 long js_scope_has(long s, long name) {
 	return mk_bool(scope_find(scope_of(s), name) >= 0);
 }
@@ -6202,8 +5957,7 @@ long js_pyset_var(long s, long name, long v) {
  * Why it is in the floor rather than in a layer 2: obj_put/obj_get are all a
  * layer-2 file can reach, so without this a runtime has to BLANK the slot and
  * remember the key in a side table that every own-keys walk then consults. That
- * table is quadratic in the number of deletions and never freed - JavaScript's
- * measured 61 s for 4000 delete-in-a-loop iterations against 0.03 s here - and it
+ * table is quadratic in the number of deletions and never freed, and it
  * still cannot repair key ORDER after a delete-then-reinsert, for-in, or object
  * spread, because those walk the floor's own key array.
  *
@@ -6339,7 +6093,7 @@ long js_ge(long a, long b)  { long c = js_compare(a, b); return mk_bool(c == 1 |
  * java / kotlin / csharp will emit; the C floor implements them so those four
  * can be linked natively.
  *
- * THE jsJFlo ARMS ARE HERE NOW (they were the one stated gap of f19a8ad):
+ * The jsJFlo arms:
  * jsrtint.go's js_giarith and js_giadd route a boxed double to jvmArith before
  * reaching giArith, and tag 14 is that box. giIsIntegral deliberately does NOT
  * include it - si_integral is still {3, 13} - so a float operand keeps
@@ -6371,22 +6125,14 @@ long js_gineg(long v) {
 	if (tag_of(v) == 14) { return jf_make(d_neg(fa(v)), fb(v)); }
 	return si_norm(0 - si_val(v), si_width_of(v, v), si_uns_of(v, v));
 }
-/* WHY THERE IS NO js_gicmp / js_gieq / js_ginot / js_ginum / js_gistr / js_giis
- * HERE, and why adding one back would be a mistake. All six were written for a
- * sized-integer surface no emitter ever grew: languages/go-to-llvm-ir.abnf sends
- * `==` and `!=` to the shared js_seq (strict_eq's tag-13 arm at the top of this
- * file does the width-exact compare), the ordered comparisons to
+/* There is deliberately NO js_gicmp / js_gieq / js_ginot / js_ginum / js_gistr /
+ * js_giis: no emitter needs them. languages/go-to-llvm-ir.abnf sends `==` and
+ * `!=` to the shared js_seq (strict_eq's tag-13 arm at the top of this file does
+ * the width-exact compare), the ordered comparisons to
  * js_gilt/js_gile/js_gigt/js_gige, `^x` to emitBin("^") + js_band at the
  * operand's width, fmt.Sprint to the shared to_string, and float64(x) to
- * js_giconv. Every one of those answers was checked against real `go run`
- * (uint64max == uint64max, 9007199254740993 == 9007199254740992, ^uint8(0xF0),
- * ^uint64(0), fmt.Sprint(uint64max), float64(uint64max), NaN != NaN) in
- * llvm.Run AND in a native -exe build, and all three agree. The bodies were
- * dead surface - zero calls in the emitted IR of all 34 corpus programs, zero
- * declares, zero internal callers - and the Part B coverage instrumentation
- * found them by never reaching them. Deleted 2026-08-04; see the "settling the
- * 24" section of docs/runtime-next-plan.md. If a language ever DOES need one,
- * write it then, with the ratchet assertion that reaches it. */
+ * js_giconv. If a language ever DOES need one, write it then, with the ratchet
+ * assertion that reaches it. */
 /* The UNBOXER: a sized integer becomes its plain number, everything else passes
  * through untouched. */
 long js_gival(long v) { if (tag_of(v) == 13) { return mk_num(si_float(v)); } return v; }
@@ -6421,19 +6167,13 @@ long js_giadd(long l, long r) {
  * type the floor does not have, and approximating them silently is how this
  * project gets silently wrong answers.
  *
- * js_jfsub / js_jfmul / js_jfmod / js_jfneg / js_jfint used to sit here too and
- * are gone for the same reason the six js_gi* names above are: NOTHING EMITS
- * THEM. Java routes -, *, / and % through js_jvarith, unary minus through
+ * There is no js_jfsub / js_jfmul / js_jfmod / js_jfneg / js_jfint: NOTHING
+ * EMITS THEM. Java routes -, *, / and % through js_jvarith, unary minus through
  * js_jvneg and (int) through js_jvint / makePrimCast's width-exact narrowing;
  * Go's own floExt map still names js_jfsub/js_jfmul/js_jfmod but is unreachable,
  * because emitBinNum consults giBase FIRST and giBase already holds every key
- * floExt has, so those ops leave through js_giarith - whose tag-14 arm calls the
- * same jf_arith these wrappers did. js_jfdiv is the one survivor and it IS
- * emitted (one declare in go-test-full's module). Checked against real `go run`
- * and real `java` on 2.5-1.5, 2.5*1.5, 2.5/1.5, 2.5%1.5, -2.5, 1.0/0.0, -1.0/0.0,
- * 0.0/0.0, -0.0, float32 arithmetic, compound -=/*=//=/%=, (int)3.9, (int)-3.9,
- * (int)3000000000L and -5L: llvm.Run and a native -exe both agree with the real
- * toolchain, with these bodies deleted. See docs/runtime-next-plan.md. */
+ * floExt has, so those ops leave through js_giarith - whose tag-14 arm calls
+ * jf_arith. js_jfdiv IS emitted. */
 long js_jflo(long v)  { return jf_make(to_number(v), 0); }
 long js_gflo(long v)  { return jf_make(to_number(v), 1); }
 long js_csflo(long v) { return jf_make(to_number(v), 2); }
@@ -6497,73 +6237,26 @@ long js_ushr(long a, long b) {
  * this file already holds the bytes (a string cell IS its UTF-8 bytes plus a
  * length in fb), so the body is one line.
  *
- * THIS HALF IS NOT COMMITTABLE ALONE, AND THAT IS A MEASUREMENT, NOT A JUDGEMENT.
- * languages/lib/php-rt.metajs also spells `function js_bytelen(s) { return
- * byteLen(s) }`, which -rt-lib turns into a `define i64 @js_bytelen` in
- * lib/php-rt.ll. Both modules are handed to clang, so with both halves present
- * every PHP native build fails:
- *
- *     duplicate symbol '_js_bytelen' in: ... ld: 1 duplicate symbols
- *
- * (measured 2026-08-04 from a clean archive of ad922a0 with only this body added:
- * tests/php-test-features.php, -exe, MEC_CLANG capturing clang's own output; the
- * metacompiler reports it as "1 unresolved symbol(s)" because undefinedSymbols()
- * only checks whether clang MENTIONED the name - see abnf/linkdiag_test.go.)
- *
- * So this line and the DELETION of php-rt.metajs's two lines plus a regenerated
- * lib/php-rt.ll (tests/gen-php-rt-ll.sh) are ONE commit. Either half alone is a
- * loss: this half alone breaks every PHP native build, and the deletion alone
- * leaves js_bytelen unresolvable.
- *
- * AND THE GENERAL RULE THIS PRODUCED: every extern a layer-2 file DEFINES is a
- * name this file may not also define. Before moving any js_* body in here, run
- * `grep -l 'function js_<name>' languages/lib/*.metajs` first. */
+ * THE GENERAL RULE: every extern a layer-2 file DEFINES is a name this file may
+ * not also define - both modules are handed to clang, so two definitions are
+ * `ld: duplicate symbol` (which the metacompiler reports as "1 unresolved
+ * symbol(s)", see abnf/linkdiag_test.go). Before moving any js_* body in here,
+ * run `grep -l 'function js_<name>' languages/lib/*.metajs` and delete the
+ * layer-2 copy (and regenerate its .ll) in the same commit. */
 long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
 
 /* js_gospread: Go's f(xs...) and C#'s params-array call. Flatten the LAST element
  * of the argument array IN PLACE, so the callee sees the slice's elements as
  * separate arguments; a nil/undefined tail contributes nothing.
  *
- * THE SECOND FLOOR MOVE, AND THE FIRST DOWNWARD ONE. It is here and not in the
- * shared MetaJS layer because - unlike js_has and js_goslice, its two neighbours
- * in that plan item - it carried ONE specification, not two: go-rt.metajs and
- * csharp-rt.metajs spelled the same body character for character in intent (the
- * Go twin's "js_gospread" in abnf/jsrt.go is the third copy and the authority).
- * js_has and js_goslice must STAY split, because Go counts a string in BYTES and
- * C# in UTF-16 code units - that split landed in 33923d4 and is not a debt.
+ * It is here and not in the shared MetaJS layer because it has ONE
+ * specification across Go and C# (the Go twin's "js_gospread" in abnf/jsrt.go
+ * is the authority). Its neighbours js_has and js_goslice must STAY per
+ * language, because Go counts a string in BYTES and C# in UTF-16 code units.
  *
- * MEASURED, because "downward dedup is free" is a prediction and predictions are
- * not measurements (docs/runtime-merge-plan.md Part B, the case_map result: an
- * upcall costs 120 ns, MetaJS data-structure work costs 3.2 us). This body IS
- * MetaJS data-structure work moving the other way, so it should be a gain, and it
- * is a small one. Probe: 4,000 calls that each spread a 500-element slice into a
- * variadic callee - 2,000,000 elements moved - native -exe from
- * go-to-llvm-ir.abnf, six runs interleaved before/after so drift cannot favour
- * either:
- *
- *     layer 2   27.3 / 28.0 / 27.9 s        floor   26.1 / 26.7 / 27.3 s
- *
- * every pair the same way round: about 1.0 s, i.e. 500 ns per element for the
- * MetaJS body. The floor body does not appear AT ALL in 3,878 `sample` frames of
- * the after binary, so its own share is under 35 ms for the same 2,000,000
- * elements - at least 30x, and the case_map ratio is confirmed with its sign
- * flipped.
- *
- * IT IS ONLY 3.7% OF THAT PROGRAM, AND THAT IS THE MORE USEFUL NUMBER. `sample`
- * says the spread-heaviest Go program one can write is dominated by `scope_get`
- * and `ar_block` - the VARIADIC CALLEE's own prologue, which packs the 500
- * arguments back into a slice and is still layer-2 MetaJS in both builds. The
- * caller-side splice was never the expensive half. A future move should aim
- * there, not here.
- *
- * It does NOT upcall, so the five-file rule the
- * case_map probe found (js-rt.metajs and lua-rt.metajs must import runtime.metajs,
- * and tests/coro-poc/gen.ll links the floor with NO layer 2 at all) does not bite
- * here - but tests/coro-poc/gen.ll is exactly why the body may not call back out.
- *
- * The deletions in go-rt.metajs and csharp-rt.metajs are part of THIS change: two
- * definitions of the name is `ld: duplicate symbol '_js_gospread'`, the general
- * rule js_bytelen produced eleven lines above. */
+ * It does NOT upcall, and may not: tests/coro-poc/gen.ll links the floor with
+ * NO layer 2 at all. go-rt.metajs and csharp-rt.metajs must not define it (see
+ * the rule at js_bytelen above). */
 long js_gospread(long args) {
 	long n;
 	long m;
@@ -6689,14 +6382,11 @@ void boot(void) {
 	seed_host(math, "sign", 18);
 	seed_host(math, "sqrt", 19);
 	seed_host(math, "pow", 20);
-	/* THE MEMBERS OF Math ARE PINNED IN THREE PLACES, and they used to disagree:
-	 * this list, standardJSBindings in abnf/jsrt.go (the Go twin, llvm.Run) and
-	 * the grammar host's own Math that languages/metajs-interpreter.abnf binds.
-	 * The floor had eleven methods and two properties against the twin's
-	 * thirty-two and eight, so `Math.sin(1)` was a live run-vs-native divergence
-	 * in js, typescript and ruby (docs/todo.md 1.1). abnf/hostglobals_test.go's
-	 * TestMathMembersAgree now reads all three out of their own sources and fails
-	 * if one of them gains or loses a member. */
+	/* THE MEMBERS OF Math ARE PINNED IN THREE PLACES: this list,
+	 * standardJSBindings in abnf/jsrt.go (the Go twin, llvm.Run) and the grammar
+	 * host's own Math that languages/metajs-interpreter.abnf binds.
+	 * abnf/hostglobals_test.go's TestMathMembersAgree reads all three out of
+	 * their own sources and fails if one of them gains or loses a member. */
 	seed_host(math, "sin", 71);
 	seed_host(math, "cos", 72);
 	seed_host(math, "tan", 73);
@@ -6751,7 +6441,7 @@ void boot(void) {
 	seed_root("Array", arrobj);
 
 	/* The collector's trigger, made explicit and testable rather than implicit.
-	 *   MEC_GC=off      never collect (the pre-1b behaviour, for measurement)
+	 *   MEC_GC=off      never collect (for measurement)
 	 *   MEC_GC=stress   collect at EVERY allocation - turns a rare use-after-free
 	 *                   into a deterministic one
 	 *   MEC_GC=poison   collect on the ordinary threshold, but RETIRE every swept
