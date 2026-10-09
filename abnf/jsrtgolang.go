@@ -1063,7 +1063,6 @@ func init() {
 			// missing method Fly`; there is no package concept in this value
 			// model, so the names are bare.
 			panic("interface conversion: " + goTypeNameOf(rt, v) + " is not " + rt.toString(u(a[1])) + ": missing method " + miss)
-			return a[0]
 		}
 
 		// A MULTI-VALUE RESULT IS MARKED with a __gomv slot, because Go EXPANDS a
