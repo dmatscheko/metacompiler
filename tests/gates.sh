@@ -3,68 +3,35 @@
 # gates.sh - run EVERY gate this project has, in one command, and report one
 # verdict.
 #
-# Why this exists: the gates are eight separate commands with three different
-# reporting conventions, and two of them are only correct when you also grep
-# their output. Getting that wrong is not hypothetical - a `-frozen`-only
-# divergence never reached `--full`'s summary line at all until 52dff5e, and the
-# default suite is STRUCTURALLY BLIND to every languages/lib/*-rt.metajs change
-# because ./test.sh, --full and --cross all run llvm.Run, which resolves js_* to
-# the Go twin and never touches layer 2. Only clang-check, native-full and a
-# native -exe probe can see layer 2 at all.
-#
-# So the rule this script encodes: green means EVERY gate, including the greps AND
-# the RECORDED NUMBERS below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS,
-# MATRIX_ENTRIES, LINT_FINDINGS) - a gate that prints a smaller number without
-# complaining is worse than no gate, and this one used to do exactly that.
-#
-# 2026-08-10 (docs/todo.md 6.1): two of the greps below were only correct BY
-# OVERLAP. A ratchet half that recorded no assertion count printed `-`, which the
-# `blank=` grep caught when BOTH halves did it and which the MISMATCH grep caught
-# when only one did (`MISMATCH: - 384`). Neither grep was aimed at the class and
-# neither said what had happened. test.sh now names it - a `NO-COUNT:` line - and
-# the check below reads that line. The same change makes a gapped half report the
-# assertions it really ran instead of nothing, which is why FULL_GAPS exists: the
-# total can no longer be the thing that notices a section falling out.
+# Green means every gate, including the output greps and the RECORDED NUMBERS
+# below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS, MATRIX_ENTRIES, LINT_FINDINGS):
+# a gate that prints a smaller number without complaining is worse than no gate.
+# ./test.sh, --full and --cross run llvm.Run, which resolves js_* to the Go twin,
+# so they cannot see layer 2 (languages/lib/*-rt.metajs); only clang-check,
+# native-full and a native -exe probe can.
 #
 # Usage:
 #   tests/gates.sh              every gate (~5-6 minutes)
 #   tests/gates.sh --quick      skip the two slowest (clang-check, native-full).
 #                               NOT sufficient for a layer-2 change - it says so.
-#   tests/gates.sh --gen        also re-check all fifteen checked-in .ll files
-#                               reproduce from source (MANDATORY after any
-#                               runtime.c / *-rt.metajs edit; via tests/gen-all.sh,
-#                               which shares one binary and runs them in parallel)
+#   tests/gates.sh --gen        also check all checked-in .ll files reproduce from
+#                               source (MANDATORY after any runtime.c /
+#                               *-rt.metajs edit)
 #   tests/gates.sh --freeze     also check `-freeze` is a fixed point (MANDATORY
 #                               after any metajs-to-llvm-ir.abnf / compile-core.js
-#                               edit). Always runs LAST and alone - it REWRITES
-#                               abnf/jsbootstrap.ll and abnf/jsagrammar.go, which
-#                               every other gate reads.
-#   tests/gates.sh --serial     run the gates one at a time (the old behaviour).
-#                               Use on a low-core machine, or to get clean timings.
-#   tests/gates.sh --bench      also check native PERFORMANCE against the recorded
-#                               baselines (tests/bench.sh). Not on by default
-#                               because it is slow - but see below for why you
-#                               should use it before believing a refactor is free.
+#                               edit). Runs LAST and alone: it rewrites
+#                               abnf/jsbootstrap.ll and abnf/jsagrammar.go.
+#   tests/gates.sh --serial     run the gates one at a time (low-core machine,
+#                               clean timings).
+#   tests/gates.sh --bench      also check native performance against the recorded
+#                               baselines (tests/bench.sh). Slow, so not default.
+#   tests/gates.sh --all        --gen --freeze --bench
 #
-# THE GATES RUN CONCURRENTLY, and the reason it is safe is worth stating because a
-# false green here is the worst outcome this repo has available:
-#
-#   ./test.sh          builds its OWN binary (mktemp) and keeps results in mktemp.
-#                      Its only writes inside the repo are the `-exe PATH` targets
-#                      named in .vscode/launch.json (tests/*.out), and only the
-#                      MATRIX run uses those - --full and --cross do not.
-#   clang-check.sh     its own mktemp binary, its own mktemp work dir.
-#   native-full.sh     mktemp output dir; READS ./mec, never writes it.
-#   gen-all.sh         its own temp binary; --check writes nothing.
-#   go test            writes nothing.
-#   shape-scan         reads languages/lib/*.metajs; writes nothing.
-#   metajs-lint        reads languages/lib/* and languages/*.abnf; writes nothing.
-#                      Runs twice: once over the corpus, once as -selftest.
-#
-# So no two concurrent gates write the same path, and ./mec is written exactly
-# once, before the fan-out. The VERDICT LOGIC BELOW IS UNCHANGED - only when each
-# command runs is different, and each verdict still reads that gate's own captured
-# output.
+# The gates run concurrently. That is safe because no two write the same path:
+# test.sh and clang-check build their own binaries and work in mktemp dirs (the
+# matrix's only in-repo writes are the -exe targets in .vscode/launch.json);
+# native-full only reads ./mec, which is built once before the fan-out; gen-all
+# --check, go test, shape-scan and metajs-lint write nothing.
 #
 # Exit 0 iff every gate that ran passed.
 
@@ -80,244 +47,51 @@ for a in "$@"; do
         --serial) SERIAL=1 ;;
         --bench)  BENCH=1 ;;
         --all)    GEN=1; FREEZE=1; BENCH=1 ;;
-        -h|--help) sed -n "2,48p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,36p" "$0"; exit 0 ;;
         *) echo "gates.sh: unknown flag $a" >&2; exit 2 ;;
     esac
 done
 
 # ----------------------------------------------------------------------------
-# The two recorded expectations, and why a gate that only prints a number is not
-# a gate.
-#
-# THE RATCHET UNDER-REPORTS SILENTLY WHEN A RUN IS KILLED. ./test.sh --full
-# defaults to a 120 s per-run timeout; the js compiler half takes ~19 s idle and
-# 82 s AT LOAD 16. With several agents on the machine this script has been seen
-# reporting the ratchet 437 ASSERTIONS BELOW BASELINE WITH NO FAILURE ANYWHERE -
-# the js and kotlin probes had been killed, both halves of each recorded no count
-# at all, the halves therefore AGREED, and the summary faithfully printed a
-# smaller number as though it were the answer.
-#
-# Two changes close it. FULL_TIMEOUT raises the brake so a loaded machine does
-# not trip it, and FULL_ASSERTIONS says what the answer is supposed to be, so a
-# short read is a FAILURE rather than a smaller number. (test.sh now also emits
-# RUN-FAILED when a probe run is killed, which the grep below catches - but that
-# is the mechanism, and this is the invariant. Both, because the class of bug
-# being defended against is "the gate said nothing".)
-#
-# FULL_ASSERTIONS is a FLOOR, not an equality: the ratchet files legitimately
-# grow. Growing it is a one-line edit and the script tells you the new number.
-#
-# 2026-08-10: 600 -> 900. Measured, not guessed: the js ratchet's `-frozen`
-# interpreter leg takes 456 s AT BASE on this machine and 482 s after the
-# fifteenth round's additions - 80% of a 600 s budget, before any concurrent
-# load. Under five agents it was killed outright in four separate gate runs, and
-# every one of those printed `js MISMATCH: RUN-FAILED`, i.e. a RED GATE FOR A
-# REASON THAT IS NOT A DEFECT. That is the same class this constant exists to
-# prevent, one level up: a brake tight enough to fire on load teaches people to
-# ignore the gate. If js grows much further the answer is to split its ratchet,
-# not to keep raising this.
-FULL_TIMEOUT=900
-#
-# SET IT FROM A COMMITTED TREE, NOT A WORKING ONE. On 2026-08-08 this was
-# deliberately left at the parent's 7625 while the tree measured 7720, because
-# other agents' ratchet additions were in flight and uncommitted - a floor must not
-# be set from a tree that may not be the one that gets committed. The gate says
-# "+N, RAISE FULL_ASSERTIONS" until someone does, and that message IS the ratchet
-# doing its job rather than a nag.
-#
-# 2026-08-09: raised to 8123 AFTER the ten-item round was committed
-# (d945bb9..d0f4db3, +357). Six agents contributed to that number and each one
-# correctly refused to raise it themselves for the reason above.
-FULL_ASSERTIONS=9688      # NINETEENTH round, THIRD raise: +9 for wave 3's goal-symbol
-                          # work (js SECTION 34's Script-goal rows +7, typescript
-                          # SECTION 28's octal escapes +2). The ruby/python merge pass
-                          # that landed beside it contributed +0 DELIBERATELY: its
-                          # output is byte-identical to base, so an assertion there
-                          # would have zero discriminating power, and the agent
-                          # measured that rather than assuming it.
-                          #
-                          # THE SECOND RAISE, +14 for the three
-                          # wave-2 items, on top of the +197 below. unicode +8 (real
-                          # ID_Start/ID_Continue for js/ts), ruby +4 and dart +2
-                          # (defined? kinds, and extensions on a builtin receiver).
-                          # stmtPos contributed +0 BY CONSTRUCTION - its modules are
-                          # byte-identical with tracing off, so it cannot add
-                          # assertions, and that agent correctly refused credit for
-                          # a +3 that was another agent's in-flight ratchet edit.
-                          #
-                          # +14 IS EXACTLY 8+4+2, again the agents' own isolated
-                          # numbers, so the no-interference cross-check holds twice
-                          # in one round.
-                          #
-                          # THE FIRST RAISE OF THIS ROUND, +197 over the eighteenth's 9468:
-                          # js +43 and typescript +43 (a function's name and length
-                          # in both halves, and its own name BOUND inside its body
-                          # via a spec funcEnv), ruby +33 (to_c, an empty block
-                          # after proc/lambda, an exact Float#to_r, a power-of-two
-                          # scaled hypot, and MRI's whole %d coercion table),
-                          # swift +28 (a fresh per-iteration binding for a captured
-                          # for-in variable, across all four loop makers), kotlin
-                          # +25 (the collection KIND reaching the throw site, and
-                          # the String members that were aborting or ignoring their
-                          # predicate), python +9 and php +16 (global/nonlocal arm
-                          # order in all three engines, and isset/unset diagnosing
-                          # nothing as PHP 8 requires).
-                          #
-                          # +197 IS EXACTLY 28+25+86+25+33, the five agents' own
-                          # isolated numbers, which is the evidence that no change
-                          # interfered with another - the same cross-check the
-                          # seventeenth round used.
-                          #
-                          # FIVE AGENTS RAN IN THIS ROUND and every one of them saw
-                          # "+N, RAISE FULL_ASSERTIONS" and left it alone, which is
-                          # the thirty-seventh through forty-first in a row. Raised
-                          # here afterwards from a COMMITTED tree (44bdde7).
-                          #
-                          # The eighteenth round's note: +249 over the seventeenth's 9219:
-                          # ruby +61 (too-few-arguments raising, Rational/Complex
-                          # round/floor/ceil/truncate/abs, equal?, and Method
-                          # values for user AND kernel methods), js +36 and
-                          # typescript +36 (a function carrying own properties at
-                          # all, plus its Object.prototype surface), kotlin +49
-                          # (user throwables linking to the builtin hierarchy,
-                          # three levels of nesting, and the whole index family
-                          # throwing the JVM's own messages), swift +36 (value
-                          # semantics on assignment, argument passing and pattern
-                          # binding), python +31 (unhashable dict/set keys raising
-                          # CPython's TypeError, and structural tuple keys).
-                          #
-                          # FIVE AGENTS RAN IN THIS ROUND and every one of them saw
-                          # "+N, RAISE FULL_ASSERTIONS" and left it alone. Raised
-                          # here afterwards from a COMMITTED tree (3610ad6), which
-                          # is the rule this constant exists to enforce.
-                          #
-                          # The seventeenth round's note, kept because the pattern
-                          # is the point: +149 over the sixteenth's 9070:
-                          # ruby +47 (Float/Integer round/floor/ceil with a digit
-                          # count, and malformed format strings raising MRI's own
-                          # ArgumentError messages), swift +44 (nineteen Array and
-                          # String members, ranges as values, and one abort
-                          # wording), js +20 and typescript +20 (private names
-                          # mangled identically in all four engines, a total
-                          # js_jskeys, and the ES2022 brand check), kotlin +18
-                          # (out-of-range indexing throwing the JVM's exceptions,
-                          # and nested throwable names).
-                          #
-                          # SIX AGENTS RAN IN THIS ROUND and every one of them saw
-                          # "+N, RAISE FULL_ASSERTIONS" and left it alone, which is
-                          # the twenty-sixth through thirty-first in a row. Raised
-                          # here afterwards from a COMMITTED tree (d5360cc),
-                          # measured by ONE whole-tree sweep of all six changes
-                          # together rather than by adding up the isolated runs:
-                          # 9219 is exactly 9070 + 47 + 44 + 20 + 20 + 18, which is
-                          # the evidence that no change interfered with another.
-                          # Each was also verified alone, in a tree built from a
-                          # clean archive with only that agent's files copied in.
+# Recorded expectations. A gate that only prints a number is not a gate: a killed
+# run, a deleted matrix row or a section that stops parsing all make the suite
+# SMALLER while still printing "green". Each constant below turns that into a
+# failure. Set them from a COMMITTED tree, never from a working tree with other
+# changes in flight; the gate prints the new value when one should be raised.
 
-# SECTION GAPS in the ratchet, summed per half over all sixteen languages.
-#
-# docs/todo.md 6.1. Until 2026-08-10 a half with ANY gap recorded NO COUNT: the
-# per-language line read `-`, the language contributed ZERO to the total, and one
-# unparsable line in tests/lua-test-full.lua took 384 assertions off the number
-# this project is gated on. MEASURED at db6bf43, both shapes:
-#
-#   gap in BOTH halves       `lua          -`            total 0, "0 halves disagree"
-#   gap in ONE half          `lua MISMATCH: - 384`       total 0
-#
-# The first was caught by gates.sh only because a count of `-` matched the
-# `blank=` grep; the second only because `- 384` happens to print the word
-# MISMATCH. Two greps overlapping is not a design. test.sh now records the count,
-# the verdict and the gap count as SEPARATE fields, so a gapped half contributes
-# the assertions it really ran (375, above) and says PARTIAL - which means the
-# TOTAL no longer moves much when a section stops parsing, and the total can
-# therefore no longer be the thing that notices. This constant is what notices.
-#
-# A CEILING, not a floor, and the opposite direction from FULL_ASSERTIONS: gaps
-# should only ever go down. 0 is not aspirational - all sixteen languages run
-# their whole ratchet today, on both halves.
+# Per-run brake for ./test.sh --full. The js ratchet's -frozen interpreter leg is
+# the slowest run in the suite and needs headroom under concurrent load; a kill
+# is reported as RUN-FAILED, which is red for a reason that is not a defect.
+FULL_TIMEOUT=900
+
+# A FLOOR on the total ratchet assertion count (the files legitimately grow).
+FULL_ASSERTIONS=9688
+
+# A CEILING on section gaps, summed per half over all languages. A gapped half
+# still reports the assertions it ran, so the total barely moves when a section
+# stops parsing; this is what notices. Gaps should only ever go down.
 FULL_GAPS=0
 
-SHAPE_GROUPS=15           # recorded 2026-08-08 at 6f60337
-SHAPE_LINES=481           # recoverable lines, same commit
+# The shape ratchet (tools/shape-scan): layer-2 bodies identical modulo names
+# across files. BOTH numbers, because a body copied into a third language joins
+# an existing group without moving the group count; only the recoverable-lines
+# count sees it.
+SHAPE_GROUPS=15
+SHAPE_LINES=481
 
-# MetaJS DIALECT-GAP findings (docs/todo.md 6.4), a CEILING.
-#
-# docs/abnf-dialect-gotchas.md lists a dozen ways MetaJS is not JavaScript and
-# NOTHING ENFORCED ANY OF THEM until tools/metajs-lint. Every gap in that list is
-# discovered the same way: a confusing failure under -frozen only, or - for the
-# `\f` one - in the NATIVE BINARY ONLY, where the matrix, --full and --cross are
-# all structurally blind. That is the exact profile of a defect that needs a
-# static check, because no dynamic gate here can have one.
-#
-# ALL THREE WERE REAL AND ALL THREE ARE NOW FIXED. Both were confirmed by running
-# them, and both are kept here because the class will recur:
-#
-#   languages/lib/ruby-rt.metajs  rbIsSpaceCh tested c == "\f", which compiles to
-#       c == "f", so the NATIVE ruby binary stripped the letter f:
-#       "ffoo barf".strip was "oo bar" natively and "ffoo barf" in the
-#       interpreter and in real Ruby. The vertical tab in the SAME EXPRESSION was
-#       already spelled \u000b, which is how the broken one survived.
-#   languages/lib/regex.js:277    rxIsMetaCh's meta set contained \f and \v, which
-#       become the letters f and v. Measured: kotlin
-#       Regex(Regex.escape("f")+Regex.escape("v")+Regex.escape("x")) matching
-#       "fvx" was true under goja, FALSE under -frozen and FALSE in the native
-#       binary, where real Kotlin says true. abnf/jsrtregex.go is a line-by-line
-#       port of that file and is written in Go, where \f and \v are real - so the
-#       TWIN was right and only the MetaJS side was wrong, which is exactly why no
-#       dynamic gate could see it.
-#
-# Raise this ONLY to record a finding you have decided to accept, and say why
-# here. It must never go up silently.
+# A CEILING on tools/metajs-lint findings (MetaJS constructs that do not mean what
+# they mean in JavaScript, e.g. "\f" compiling to "f"). Only the native binary can
+# see most of them, so no dynamic gate is a substitute. Raise this only to accept
+# a finding deliberately, and say why here.
 LINT_FINDINGS=0
 
-# The matrix ENTRY COUNT, for the same reason FULL_ASSERTIONS exists: the matrix
-# is .vscode/launch.json, so a row that is deleted, renamed out of its mode, or
-# commented out makes the suite SMALLER and still prints "all green". That is the
-# failure mode this whole file is written against, and until now the matrix was
-# the one gate with no recorded number at all.
-#
-# It matters more since the abort-text rows landed (docs/todo.md 4.1), because
-# those rows are the ONLY thing in the suite that can see an abort message: a
-# "SHOULD ABORT" row silently losing its "ALL HALVES" token, or an -exe row
-# losing the "SHOULD ABORT" words, downgrades a real comparison to "does this
-# link" without failing anything.
-#
-# A FLOOR, not an equality - rows are added often, and the gate says so.
-MATRIX_ENTRIES=385        # 2026-08-11: +2 for swift's abort pair (docs/todo.md
-                          # 6.2). Both swift probe files now carry the
-                          # interpreter SHOULD FAIL + native SHOULD ABORT, ALL
-                          # HALVES pair every other language has; ABORT_ROWS and
-                          # ABORT_ALL_ROWS below moved with them. Set from the
-                          # committed tree 3610ad6.
-                          #
-                          # 2026-08-09: 357 + 26 abort-text rows (13 languages x
-                          # {interpreter SHOULD FAIL, native SHOULD ABORT}); the
-                          # three MetaJS SHOULD ABORT rows were promoted in place.
-                          #
-                          # It was LEFT at 383 while the round was in flight, and
-                          # the agent that added the two rows correctly refused to
-                          # raise it, for the reason FULL_ASSERTIONS states above: a
-                          # floor is set from a COMMITTED tree, by whoever commits,
-                          # not from a working one with other agents' rows in
-                          # flight. The gate said "RAISE them" until this commit,
-                          # and that message IS the ratchet working.
-# And the abort rows specifically, since the count above cannot tell WHICH 385.
+# A FLOOR on the matrix entry count (.vscode/launch.json), and on the abort rows
+# specifically: they are the only rows that compare abort messages, and a row
+# losing its "SHOULD ABORT" or "ALL HALVES" token silently downgrades it.
+MATRIX_ENTRIES=385
 ABORT_ROWS=17             # rows whose name says SHOULD ABORT
 ABORT_ALL_ROWS=15         # of those, the ones that also compare the interpreter
-                          # half (ALL HALVES). Raising this is how a language
-                          # closes its interpreter-vs-compiler abort divergence.
-                          # 2026-08-10: 16/14 -> 17/15, docs/todo.md 6.2. Swift's
-                          # array-index probe carried ONLY an interpreter SHOULD
-                          # FAIL row, because its two compiler halves used to
-                          # disagree ("uncaught exception: list index out of range"
-                          # under llvm.Run against "list index out of range"
-                          # natively); it has the native ALL HALVES row now, and the
-                          # throw probe gained the interpreter row it was missing,
-                          # so BOTH files carry the full pair and nothing was
-                          # traded away. Closing docs/todo.md 1.1 was not what made
-                          # this possible - measured at 22e7b44, all five legs of
-                          # both files already agreed, so the two file headers were
-                          # the last place the old divergence survived.
+                          # half (ALL HALVES)
 
 FAILED=()
 pass() { printf '  %-24s %s\n' "$1" "$2"; }
@@ -346,22 +120,15 @@ rc_of() { cat "$log/$1.rc" 2>/dev/null || echo 127; }
 
 echo "== gates$([ "$SERIAL" = 1 ] && echo ' (serial)')"
 
-# --timeout on all three: this script runs six gates CONCURRENTLY, so every run
-# here is by construction a run at load, and test.sh's 120 s default is not sized
-# for that (js's compiler half: ~19 s idle, 82 s at load 16). The matrix and
-# --cross fail LOUDLY on a killed run - they compare exit codes between two legs -
-# so for them this only removes false reds; --full is the one where a kill used to
-# be silent, and it is the reason the number below is checked as well.
+# --timeout on all three: the gates run concurrently, so every run is a run at
+# load and test.sh's 120 s default is too tight.
 start matrix ./test.sh --timeout "$FULL_TIMEOUT"
 start full   ./test.sh --full  --timeout "$FULL_TIMEOUT"
 start cross  ./test.sh --cross --timeout "$FULL_TIMEOUT"
 start gotest go test ./abnf/
 start shape  go run ./tools/shape-scan -max "$SHAPE_GROUPS" -max-lines "$SHAPE_LINES"
-# Two runs, and the second one is the point. -selftest asserts every rule still
-# fires on its own construct: a linter whose rules have stopped matching reports
-# ZERO FINDINGS and is indistinguishable from a clean tree, which is the same
-# false-green shape every recorded number in this file exists to prevent. Both
-# are sub-second after the first go build.
+# -selftest asserts every rule still fires on its own construct: a linter whose
+# rules stopped matching would report zero findings, like a clean tree.
 start lint   go run ./tools/metajs-lint -grammars -q
 start lintst go run ./tools/metajs-lint -selftest
 if [ "$QUICK" = 0 ]; then
@@ -399,23 +166,11 @@ fi
 #    line is not a verdict and the grep is the actual gate.
 bad=$(grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF|RUN-FAILED' "$log/full")
 n=$(grep -E 'assertions in total' "$log/full" | tail -1)
-# A half that recorded NO ASSERTION COUNT AT ALL. test.sh names this case
-# explicitly now - `NO-COUNT: <n> language(s) had a half that recorded NO
-# ASSERTION COUNT AT ALL: <names>` - and THIS GREP IS THE DESIGNED DETECTOR.
-# Before it, the class was caught only by two greps overlapping: both halves
-# silent printed a count of `-` and matched the `blank=` line below, one half
-# silent printed `MISMATCH: - 384` and matched the `bad=` line above. Neither
-# was aimed at it, and neither says what happened.
+# A half that recorded NO ASSERTION COUNT AT ALL (test.sh's NO-COUNT: line).
 nocount=$(sed -n 's/^  NO-COUNT: [0-9]* language(s) had a half that recorded NO ASSERTION COUNT AT ALL://p' "$log/full")
-# The old detector, kept as a backstop rather than as the reason: a language
-# whose count column is literally '-' should now be impossible (test.sh writes a
-# named flag for every exit path out of the probe), so if this ever fires again
-# it means a NEW path out of full_probe forgot to record one.
+# Backstop: a count column of '-' means a path out of full_probe wrote no flag.
 blank=$(grep -E '^  [a-z0-9]+ +-$' "$log/full" | awk '{print $1}' | tr '\n' ' ')
-# Section gaps, against the recorded ceiling. The total can no longer be relied
-# on to notice these - that is the POINT of the 6.1 fix, since a gapped half now
-# contributes its real count - so they are checked on their own line. No GAPS:
-# line at all means zero.
+# Section gaps, against the recorded ceiling. No GAPS: line at all means zero.
 gaps=$(sed -n 's/^  GAPS: \([0-9][0-9]*\) section-gap(s).*/\1/p' "$log/full" | tail -1)
 [ -z "$gaps" ] && gaps=0
 # The total itself, as a number, against what it is supposed to be.
@@ -455,8 +210,8 @@ esac
 if [ "$(rc_of gotest)" = 0 ]; then pass "go test" "$(tail -1 "$log/gotest")"
 else fail "go test" "$(tail -3 "$log/gotest" | tr '\n' ' ')"; fi
 
-# 5. The layer-2 shape ratchet (docs/todo.md 7.8). Cheap, and the only gate that
-#    can see a body copy-pasted into a second language.
+# 5. The layer-2 shape ratchet: the only gate that can see a body copy-pasted
+#    into a second language.
 srcv=$(rc_of shape)
 ss=$(grep -E 'cross-language groups' "$log/shape" | tail -1)
 sg=$(printf '%s\n' "$ss" | sed -n 's/^\([0-9][0-9]*\) cross-language groups.*/\1/p')
@@ -470,9 +225,8 @@ else
     pass shape-scan "${ss:-ok}"
 fi
 
-# 5b. The MetaJS dialect gaps (docs/todo.md 6.4). Static, so unlike every other
-#     gate here it can see the `\f` class at all - that one is wrong in the
-#     native binary only, and no dynamic gate in this repository reaches it.
+# 5b. The MetaJS dialect gaps. Static, so it sees defects that show up only in
+#     the native binary.
 lrc=$(rc_of lintst)
 ls_=$(grep -E '^metajs-lint: [0-9]+ finding' "$log/lint" | tail -1)
 lf=$(printf '%s\n' "$ls_" | sed -n 's/^metajs-lint: \([0-9][0-9]*\) finding.*/\1/p')
@@ -492,12 +246,7 @@ fi
 
 if [ "$QUICK" = 0 ]; then
     # 6 and 7 are THE ONLY GATES THAT SEE LAYER 2.
-    # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS and for the same reason: the
-    # number legitimately GROWS (the js ratchet split added js2 and js3, taking it
-    # 16 -> 18) and must never SHRINK. A hard-coded 16 in the message printed
-    # "18/16 agreeing", which reads as a fault when it is the opposite; a hard-coded
-    # EQUALITY would have gone red for a split that broke nothing. Raise it in the
-    # same way and at the same time as FULL_ASSERTIONS - from a COMMITTED tree.
+    # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS: it may grow, never shrink.
     CLANG_MODULES=18
     crc=$(rc_of clang)
     held=$(grep -c 'row HELD' "$log/clang")
@@ -519,8 +268,6 @@ else
 fi
 
 if [ "$GEN" = 1 ]; then
-    # tests/gen-all.sh builds mec once, exports MEC_BIN so the fifteen generators
-    # skip their own go build, and fans them out. Same fifteen checks, ~6x faster.
     # Its exit status is the verdict; the summary line is the last line.
     grc=$(rc_of gen)
     gs=$(grep -E '^gen-all: ' "$log/gen" | tail -1)
@@ -529,10 +276,7 @@ if [ "$GEN" = 1 ]; then
 fi
 
 if [ "$BENCH" = 1 ]; then
-    # THE GATE THAT WOULD HAVE CAUGHT a8e6aa2's PARENT. Every one of the eight gates
-    # above checks CORRECTNESS, and all of them were green while a merge in 120ba0f
-    # cost python 41% and ruby 11% for four commits - because a 41% slowdown is not
-    # a wrong answer. bench.sh existed and nothing ran it. This is that gap.
+    # Every other gate checks correctness; a slowdown is not a wrong answer.
     tests/bench.sh --draws 5 >"$log/bench" 2>&1; brc=$?
     bs=$(grep -E 'no regression|REGRESSED' "$log/bench" | tail -1)
     if [ "$brc" = 0 ]; then pass bench "${bs:-ok}"

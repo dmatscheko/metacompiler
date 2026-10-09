@@ -1,5 +1,5 @@
-// A hot loop with no regexp, no float and no allocation in the body: this is the
-// harness every perf measurement in docs/runtime-merge-plan.md uses.
+// The bench loop for tests/bench.sh: no regexp, no float and no allocation in
+// the body. Every mod.* file runs the same loop.
 fun main() {
     var s = 0
     var i = 0

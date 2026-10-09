@@ -2,108 +2,49 @@
 #
 # bench.sh - the native performance gate, with baselines checked in.
 #
-# WHY IT MEASURES INSTRUCTIONS AND NOT TIME. Every perf number in this project
-# used to be wall clock in a plan document's prose, and wall clock cannot settle
-# the questions that get asked here: with other work on the machine, a
-# 40,000-iteration kotlin loop varies +-8% between runs of THE SAME BINARY, which
-# is larger than most effects being argued about. `/usr/bin/time -l`'s
-# "instructions retired" does not care what else is running: re-running ONE
-# BINARY reproduces to ~0.02%. So: instructions, always, min of N runs.
+# It measures INSTRUCTIONS RETIRED (min of N runs), not wall clock: re-running one
+# binary reproduces to ~0.02% regardless of machine load.
 #
-# AND WHY THAT IS NOT ENOUGH - THE PART THAT COST TWO AGENTS AND ME A WRONG
-# ANSWER EACH. A binary's INSTRUCTION COUNT DEPENDS ON ITS CODE LAYOUT, and the
-# layout is perturbed by things that change no semantics at all. Measured here on
-# ONE unchanged kotlin source, varying nothing but the length of the -exe output
-# path:
+# But a binary's instruction count depends on its CODE LAYOUT, which moves for
+# reasons that change no semantics - even the length of the -exe output path
+# (one unchanged kotlin source spread 4.8%, bimodally, over ten path lengths).
+# Changing the module perturbs layout the same way. Hence:
+#   - a single build cannot measure a sub-2% effect;
+#   - each program is built to several output paths ("layout draws") and the row
+#     reports the MEDIAN with its spread, plus the MEAN, and flags a bimodal
+#     sample (there the median can jump between clusters; read the mean and
+#     settle it with --paired);
+#   - the default tolerance is 2.5%. To resolve less, raise --draws and quote the
+#     interval, not the point.
 #
-#   17.353  17.494  17.620  17.911  17.915  17.916  17.916  18.018  18.023  18.182  G
+# The programs in tests/bench/mod.* are the same loop in every language
+# (`s = s + i % 7`, no float, no regexp, no allocation in the body). c, bash and
+# batch compile to self-contained IR against a C runtime and are the CONTROLS: a
+# floor or layer-2 change that moves them is measuring the machine. The other
+# rows link lib/runtime.ll plus lib/<lang>-rt.ll. Never compare a row of one
+# family against the other. mod.sh runs fewer iterations because bash's arena is
+# uncollected. typescript has no program: it links the same layer 2 as js.
 #
-# A 4.8% spread, VISIBLY BIMODAL, from a file NAME. The module's own content
-# perturbs layout the same way and by the same magnitude, so holding the output
-# path fixed does NOT cancel it - changing the module draws a fresh sample either
-# way, and no pairing makes layout go away. What --paired below buys is a SIGN
-# TEST over matched builds, which is a different and weaker claim than
-# cancellation, and it is the strongest one available here.
-#
-# Note "bimodal" specifically: these values cluster around ~17.9 and ~18.02, they
-# do not spread evenly. That is why the MEDIAN can be the wrong statistic - with
-# draws split between clusters it is decided by which side the middle element
-# lands on, and it can jump the whole gap while the code is unchanged. The rows
-# below therefore print the mean too, and say so when a sample looks bimodal.
-#
-# Two consequences, and they are the whole reason this file works the way it does:
-#
-#   1. A SINGLE BUILD CANNOT MEASURE A SUB-2% EFFECT. Two agents and I each
-#      A/B'd one build against one build and got +0.04%, +0.65% and -1.72% for
-#      the same change. All three were draws from the distribution above.
-#   2. The only sound estimator is a STATISTIC OVER MANY LAYOUT DRAWS. This
-#      script builds each program to several different output paths and reports
-#      the MEDIAN, with the observed spread next to it so you can see the width
-#      of the lottery you are sampling.
-#
-# So the default tolerance is 2.5%, not 1%: below that, this instrument cannot
-# tell you anything, and a gate that fires below its own noise floor is worse
-# than no gate. If you need to resolve something smaller, raise --draws until the
-# interval is tight enough, and quote the interval and not the point.
-#
-# The programs in tests/bench/ are deliberately the same loop in every language
-# (`s = s + i % 7`, 40,000 iterations, no float, no regexp, no allocation in the
-# body) - that is the harness docs/runtime-merge-plan.md's measurements use, so
-# the numbers here are comparable to the ones written up there. `mod.c` is the
-# CONTROL: it compiles to self-contained IR with no js_* extern at all, so a
-# floor or layer-2 change that moves it is measuring the machine, not the change.
-#
-# THE ROWS FALL INTO TWO FAMILIES AND ONLY ONE OF THEM SEES LAYER 2. c, bash and
-# batch compile to SELF-CONTAINED IR against a C runtime (lib/runtime.ll,
-# lib/bash-rt.c, lib/batch-rt.c) - unboxed machine words, no js_* extern, no
-# MetaJS at all. The other twelve compile to HANDLE IR and link lib/runtime.ll
-# plus lib/<lang>-rt.ll, so they are the rows a layer-2 or floor change can move.
-# Never read a self-contained row against a handle-IR one: they differ by two
-# orders of magnitude by construction. bash and batch are here because their C
-# runtimes had no performance gate of any kind and their arenas are UNCOLLECTED
-# (manual 7.8); each program's header records the arena ceiling it runs under,
-# and mod.sh runs 10,000 iterations instead of 40,000 because 40,000 overflows
-# bash's arena and segfaults.
-#
-# typescript deliberately has no program: it links lib/js-rt.ll, the same layer 2
-# and the same Go twin as js, so mod.ts would measure mod.js's code twice and
-# double the gate's runtime. The residual gap is the typescript EMITTER's own
-# codegen; add mod.ts the first time a change lands in only one of the two.
+# Every handle-IR row also prints `heap` and `collections` from MEC_GC_STATS.
+# They are exact counters, exempt from the layout lottery. The heap grows in
+# whole ~1 MiB chunks the first time a size class is used, which costs nothing
+# measurable; a changed collection count means the row executes different work.
 #
 # Usage:
 #   tests/bench.sh                 run every program, diff against the baseline
 #   tests/bench.sh kotlin python   run only these
-#   tests/bench.sh --record        overwrite the baseline with today's numbers
+#   tests/bench.sh --record        overwrite the measured rows of the baseline
+#                                  (header and unmeasured rows are kept)
 #   tests/bench.sh --runs N        min of N runs per BUILD (default 3)
-#   tests/bench.sh --draws N       N layout draws per program (default 5) - see
-#                                  the note below; 1 draw measures nothing
+#   tests/bench.sh --draws N       N layout draws per program (default 5)
 #   tests/bench.sh --tol P         flag a delta beyond P percent (default 2.5)
 #   tests/bench.sh --paired DIR    compare against another CHECKOUT draw by draw,
-#                                  building both to the SAME path. It cancels the
-#                                  OUTPUT PATH term and nothing else - it is a SIGN
-#                                  TEST, not cancellation. Reach for it when a delta is
-#                                  smaller than the row's own spread; it has settled
-#                                  such questions in BOTH directions. But see the
-#                                  DEAD-CODE MATCHED CONTROL note below before trusting
-#                                  a unanimous sign on a SHARED layer-2 file.
+#                                  both built to the SAME path - a sign test over
+#                                  matched builds, not a cancellation of layout
+#                                  (see the note at the --paired block)
 #
-# Exit 0 iff nothing regressed beyond the tolerance. A row that IMPROVES is
-# reported and does not fail the gate - but re-record the baseline when you land
-# the improvement, or the next person inherits a stale one.
-#
-# THE ARENA LINE, AND WHY THERE IS ONE. Every handle-IR row also prints `heap`
-# and `collections` from MEC_GC_STATS, and the baseline records them in columns 3
-# and 4. They are EXACT counters - they do not vary with the -exe path, so one
-# draw answers them - which makes them the one thing in this file that is exempt
-# from the layout lottery above. They are here because the arena's heap is a STEP
-# function - it grows a whole ~1 MiB chunk the first time a SIZE CLASS is
-# allocated in, however few bytes go into it - and a step used to be invisible,
-# so a commit that took one and also grew the module got the whole timing move
-# blamed on the arena. It happened: docs/todo.md 2.9 existed for a day on exactly
-# that mistake. A step costs NOTHING measurable (+0.20% over 45 paired builds,
-# slower in 26 of 45); printing it is what lets you say so instead of guessing.
-# tests/bench/baseline.txt's ARENA OCCUPANCY section has the per-row occupancy,
-# the measurement, and the recipe to redo it.
+# Exit 0 iff nothing regressed beyond the tolerance. An improvement does not fail
+# the gate, but re-record the baseline when you land it.
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
@@ -117,7 +58,7 @@ while [ $# -gt 0 ]; do
         --draws)  DRAWS="$2"; shift ;;
         --paired) PAIRED="$2"; shift ;;
         --tol)    TOL="$2"; shift ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
         -*) echo "bench.sh: unknown flag $1" >&2; exit 2 ;;
         *) WANT+=("$1") ;;
     esac
@@ -130,20 +71,13 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# The draws are taken by building to output paths of DIFFERENT LENGTHS. That is
-# the cheapest available handle on layout: it changes no semantics, and the
-# spread it produces is the same spread a real module edit produces. The absolute
-# directory is FIXED so that two CHECKOUTS draw from the same set of paths and
-# their medians are comparable - which is the whole reason it cannot be a mktemp
-# directory (see the baseline file's header).
+# Draws build to output paths of different lengths (a semantics-free handle on
+# layout). The directory is FIXED so two checkouts draw from the same paths and
+# their medians compare - so it cannot be a mktemp directory, and concurrent runs
+# must be serialised by a lock (mkdir is atomic; flock is not on darwin).
 EXEDIR=/tmp/mec-bench
 mkdir -p "$EXEDIR"
 
-# ...and because it is fixed, TWO CONCURRENT RUNS WOULD OVERWRITE EACH OTHER'S
-# BINARIES. That is not hypothetical: with four agents each running gates.sh, one
-# reported `csharp BUILD FAILED` purely from the collision, which reads exactly
-# like a real regression. So take a lock for the whole run. `mkdir` is the atomic
-# primitive that exists everywhere; flock is not on darwin.
 LOCK="$EXEDIR/.lock"
 waited=0
 until mkdir "$LOCK" 2>/dev/null; do
@@ -188,54 +122,18 @@ instructions_of() {
 }
 
 # ---------------------------------------------------------------------------
-# --paired OTHERTREE: the instrument that settles a sub-spread question.
+# --paired OTHERTREE: a SIGN TEST over matched builds. Pairing holds the output
+# path constant; it does NOT cancel layout, because a content change perturbs
+# layout too. A consistent sign across most pairs is evidence, a mix is not.
+# Corroborate with an exact counter (module bytes, MEC_GC_STATS, binary size).
 #
-# It is a SIGN TEST over matched builds, and it is not magic: pairing does NOT
-# cancel layout, because a content change perturbs layout too. What it does is
-# hold the PATH constant and give you N matched comparisons instead of two summary
-# statistics, so the question becomes "does the change win consistently?" rather
-# than "which cluster did each median land in?". A consistent sign across most
-# pairs is evidence; a mix is not, however large the mean gap looks.
+# A unanimous sign is still NOT evidence for a change to a SHARED layer-2 file:
+# adding a name to languages/lib/runtime.metajs renumbers the @str.N intern table
+# of every importing module, a perturbation identical in every pair. Measure
+# against a dead-code matched control (the same insertion, uncalled), not base.
 #
-# It has settled two questions that medians got wrong in OPPOSITE directions:
-# swift's Array.insert read +2.73% on 21-draw medians and is 12-of-14 pairs
-# IDENTICAL - a bimodal median artifact, corroborated by an md5-identical emitted
-# module - while python's builtin table read +2.67% on medians and is genuinely
-# higher in 11 of 12 pairs, corroborated by MEC_GC_STATS showing the heap step a
-# whole 2 MiB arena doubling.
-#
-# ALWAYS corroborate a paired verdict with an exact counter (module bytes,
-# MEC_GC_STATS, binary size). Counters are exempt from the lottery; timings are
-# not, and this is still a timing.
-#
-# AND THE ONE CASE WHERE A UNANIMOUS SIGN IS STILL NOT EVIDENCE - added 2026-08-11
-# after it produced a wrong answer that looked exactly like a right one.
-#
-# ADDING A NAME TO `languages/lib/runtime.metajs` RENUMBERS THE `@str.N` INTERN
-# TABLE OF EVERY IMPORTING MODULE. Measured: 148 added lines of runtime.metajs
-# produce 7,705 insertions and 7,639 deletions in python-rt.ll alone, with the line
-# count essentially unchanged. So the module handed to clang is shifted WHOLESALE,
-# the same way in every pair - and `--paired`, which holds the PATH constant, cannot
-# see that at all. The sign comes out unanimous because the perturbation is
-# identical in all N pairs, not because the change costs anything.
-#
-# It read +1.08% "slower in 8 of 9 pairs" for a nine-line body that nothing hot
-# calls. The control that settles it: the same base plus that body with NOTHING
-# CALLING IT reads +0.95%, slower in 8 of 9. Base against base reads +0.13%.
-#
-# SO, FOR ANY CHANGE THAT TOUCHES A SHARED LAYER-2 FILE: build a DEAD-CODE MATCHED
-# CONTROL - the same insertion, uncalled - and measure against THAT, not against
-# base. The same round's real result shows what a true effect looks like through the
-# same instrument: python -12.66% on medians, 9 of 9 paired, and collections
-# 3,574 -> 3,017 on an exact counter.
-#
-# The general form: `--paired` cancels the OUTPUT PATH and nothing else. Any
-# perturbation that is constant across pairs survives it, and a shared intern table
-# is exactly that.
-#
-# The other tree must be a full checkout that builds - `git archive <rev> | tar x`
-# then `go build` INSIDE it (manual chapter 4: mec reads its grammar from the path
-# you give it, so an old binary run here silently uses THIS tree's grammar).
+# The other tree must be a full checkout that builds: `git archive <rev> | tar x`
+# then `go build` INSIDE it (mec reads its grammar from the path you give it).
 # ---------------------------------------------------------------------------
 if [ -n "$PAIRED" ]; then
     [ -x "$PAIRED/mec" ] || { echo "bench.sh: $PAIRED/mec is not built - run 'go build -o mec .' inside it" >&2; exit 2; }
@@ -316,13 +214,8 @@ for f in tests/bench/mod.*; do
             printf '%-10s %16s - /usr/bin/time -l reported no counter\n' "$lang" "NO COUNTER"
             bad_draw=1; break
         fi
-        # THE ARENA COUNTERS, taken once. `heap` and `collections` are EXACT and
-        # exempt from the layout lottery (manual chapter 4) - they do not vary
-        # with the -exe path, so one draw answers them - and they are what makes
-        # a heap STEP predictable instead of a mystery in the instruction column.
-        # See the ARENA OCCUPANCY section of tests/bench/baseline.txt for what a
-        # step is, what it costs, and what triggers one. The self-contained rows
-        # (c, bash, batch) have no collector and print nothing; they record "-".
+        # The arena counters are exact and layout-independent: one draw answers
+        # them. The self-contained rows have no collector and record "-".
         if [ "$d" = 1 ]; then
             gcline=$(MEC_GC_STATS=1 "$exe" 2>&1 >/dev/null | sed -n 's/^gc: //p')
             heap=$(printf '%s\n' "$gcline" | tr ' ' '\n' | sed -n 's/^heap=//p')
@@ -335,18 +228,8 @@ for f in tests/bench/mod.*; do
     done
     if [ "$bad_draw" = 1 ]; then rc=1; continue; fi
 
-    # The MEDIAN over draws, not the min: the min chases the luckiest layout and
-    # is exactly as unstable as a single build.
-    #
-    # BUT THE MEDIAN IS THE WRONG STATISTIC WHEN THE SAMPLE IS BIMODAL, which on
-    # this target it often is - layout tends to land in one of two clusters, not
-    # on a continuum. With half the draws in each cluster the median is decided by
-    # which side the middle element falls on, so it can jump the whole gap between
-    # clusters while nothing about the code changed. That is not hypothetical: a
-    # swift change measured +2.73% on 21-draw medians and 0% paired, and the
-    # emitted module was md5-identical. So the mean is reported too, and a bimodal
-    # sample is called out - on one, believe the MEAN and then go and settle it
-    # with --paired.
+    # The MEDIAN over draws, not the min (the min chases the luckiest layout).
+    # The mean is reported too, for bimodal samples.
     read -r n lo hi mean gap gaplo < <(sort -n "$work/$lang.draws" | awk '
         {v[NR] = $1; s += $1}
         END {
@@ -371,11 +254,8 @@ for f in tests/bench/mod.*; do
         printf '%-10s %16s %16s %8s%%  %s%% over %d draws\n' "$lang" "$n" "$old" "$delta" "$spread" "$DRAWS"
         printf '           mean %s (%s%%)%s\n' "$mean" "$mdelta" \
             "$([ "$bimodal" = 1 ] && echo '  <- BIMODAL sample: the median is unreliable here, read the mean and settle it with --paired')"
-        # A delta smaller than THIS PROGRAM'S OWN layout spread is not evidence
-        # of anything, whichever way it points and however big it looks. It must
-        # not fail the gate: java has been seen at +3.20% with a 3.21% spread,
-        # which is a coin landing heads, not a regression. Failing on it would
-        # train everyone to ignore this gate, which is the worst outcome.
+        # A delta inside this program's own layout spread is not evidence either
+        # way and must not fail the gate.
         noise=$(awk -v d="$delta" -v s="$spread" 'BEGIN {d = (d < 0) ? -d : d; print (d < s) ? 1 : 0}')
         over=$(awk -v d="$delta" -v t="$TOL" 'BEGIN {print (d > t) ? 1 : 0}')
         if [ "$noise" = 1 ]; then
@@ -385,13 +265,7 @@ for f in tests/bench/mod.*; do
         fi
     fi
 
-    # THE ARENA LINE. Exact counters, printed beside the row they explain, so a
-    # heap STEP is visible as a step rather than being guessed at from the
-    # instruction column - which is how it was got wrong once already. It never
-    # fails the gate: a step is a legitimate thing for a change to cause, it
-    # costs nothing measurable, and the number above is the one under tolerance.
-    # What it buys is ATTRIBUTION - see baseline.txt's ARENA OCCUPANCY section
-    # for the three ways the heap grows and what each is worth.
+    # The arena line never fails the gate; it attributes a heap step.
     oheap=$(awk -v l="$lang" '$1 == l {print $3}' "$BASE" 2>/dev/null)
     ocoll=$(awk -v l="$lang" '$1 == l {print $4}' "$BASE" 2>/dev/null)
     if [ "$heap" = "-" ]; then
@@ -405,11 +279,7 @@ for f in tests/bench/mod.*; do
             if [ "$chunks" != "+0" ] && [ "$chunks" != "-0" ]; then
                 printf '                  = %s arena chunk(s) of 1 MiB' "$chunks"
                 [ "$rest" != 0 ] && printf ' plus %s bytes of big blocks' "$rest"
-                printf '. A chunk is one SIZE CLASS\n'
-                printf '                  touched for the FIRST time, which is almost never a full arena -\n'
-                printf '                  every row has megabytes free in the classes it already uses. It\n'
-                printf '                  costs nothing measurable, so do not attribute the column above to\n'
-                printf '                  it. baseline.txt ARENA OCCUPANCY has this row and the measurement.\n'
+                printf ' (a size class used for the first time; costs nothing measurable)\n'
             else
                 printf '                  under one chunk, so this is big-block traffic (>1024 bytes a\n'
                 printf '                  block), which costs exactly its own bytes and no chunk.\n'
@@ -425,21 +295,15 @@ for f in tests/bench/mod.*; do
 done
 
 if [ "$RECORD" = 1 ]; then
-    # --record USED TO DELETE THE HEADER, and the header is where every
-    # attribution this file has ever paid for is written - which row moved, at
-    # which commit, and why. It was restored by hand three times and the
-    # instruction to do so was itself a note in the file. It now carries every
-    # existing `#` line through verbatim, so re-recording is safe.
-    #
-    # A row NOT measured in this run keeps its recorded line: `bench.sh --record
-    # python` used to throw the other fourteen rows away.
+    # Carries every `#` header line through (except the previous provenance
+    # line) and keeps the rows this run did not measure.
     {
         if grep -q '^#' "$BASE" 2>/dev/null; then
-            grep '^#' "$BASE"
+            grep '^#' "$BASE" | grep -v '^# recorded at commit'
         else
             echo "# tests/bench.sh baselines. Columns: language, instructions retired"
             echo "# (MEDIAN over layout draws, min of $RUNS runs each), then the two EXACT"
-            echo "# arena counters heap and collections - see the ARENA OCCUPANCY section."
+            echo "# arena counters heap and collections (MEC_GC_STATS)."
             echo "# Native -exe binaries built from tests/bench/mod.*. Re-record with"
             echo "# tests/bench.sh --record when you land an intended change, and say"
             echo "# in the commit message which rows moved and why."

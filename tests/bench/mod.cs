@@ -1,7 +1,4 @@
-// See mod.kt. csharp is here because it shares lib/runtime-jvm.metajs with java -
-// including rtjIsIntegral, whose fifteen call sites made a one-line delegation
-// cost java +5.7% (see that body's comment). A shared hot predicate needs BOTH
-// its callers measured, and until this row existed only java's was.
+// See mod.kt.
 using System;
 
 namespace Bench

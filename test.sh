@@ -426,31 +426,20 @@ full_probe() {
                     # gaps > 0 path had reached here would compare two failures.
                     RUN "$BIN" "$G" "$work" -q          > "$work.g" 2>"$work.ge"; grc=$?
                     RUN "$BIN" "$G" "$work" -q -frozen  > "$work.f" 2>"$work.fe"; frc=$?
-                    # THE EXIT CODES MATTER, and not checking them produced a
-                    # FALSE FROZEN-DIFF that went unexplained for a week. If a RUN
-                    # is killed by the per-run timeout its output file is
-                    # TRUNCATED, and a truncated file is exactly what `cmp -s`
-                    # reports as "differs" - so a slow machine was indistinguishable
-                    # from a real goja-vs-frozen divergence, on the single most
-                    # expensive ratchet in the suite.
-                    #
-                    # Measured: the js compiler half takes ~19 s idle and **82 s at
-                    # load 16**, against a 120 s default. Above that load it is
-                    # killed, and the `-frozen` leg is the slow one (there the
-                    # MetaJS interpreter is itself a MetaJS program running on the
-                    # IR interpreter). Three consecutive runs under agent load gave
-                    # FROZEN-DIFF, `-`, FROZEN-DIFF; idle, the same tree is clean.
-                    #
-                    # So say which happened. A failed run is still a problem worth
-                    # reporting - it is just not the SAME problem, and calling it a
-                    # divergence sends the next person hunting a defect that is not
-                    # there. Raise --timeout on a loaded machine.
-                    if [ "$grc" -ne 0 ] || [ "$frc" -ne 0 ]; then
-                        printf '    RUN-FAILED - goja exit %s, -frozen exit %s (124 = killed by the %ss --timeout;\n' \
+                    # A run killed by the timeout leaves a truncated output file,
+                    # which cmp would report as a divergence. Only a kill is
+                    # RUN-FAILED; any other non-zero exit is a real
+                    # goja-vs-frozen divergence and falls through to the else arm.
+                    killed=0
+                    for rc in "$grc" "$frc"; do
+                        case "$rc" in 124|137|142|143) killed=1 ;; esac
+                    done
+                    if [ "$killed" -eq 1 ]; then
+                        printf '    RUN-FAILED - goja exit %s, -frozen exit %s: killed by the %ss --timeout;\n' \
                             "$grc" "$frc" "$TIMEOUT"
-                        printf '                 this is NOT a frozen divergence - re-run, or raise --timeout)\n'
+                        printf '                 this is NOT a frozen divergence - re-run, or raise --timeout\n'
                         echo - > "$R.checks"; echo RUN-FAILED > "$R.flag"
-                    elif cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
+                    elif [ "$grc" -eq 0 ] && [ "$frc" -eq 0 ] && cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
                         if [ "$gaps" -eq 0 ]; then
                             echo FULL > "$R.flag"
                             printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"

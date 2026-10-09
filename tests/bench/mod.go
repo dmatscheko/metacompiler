@@ -1,4 +1,4 @@
-// See mod.kt. Same loop, so the languages are comparable to each other.
+// See mod.kt.
 package main
 
 import "fmt"
