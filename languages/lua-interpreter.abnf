@@ -148,8 +148,7 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 Require     <~~ push(luaImport(takeAll(), up.pos)) ~~>
             = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) NoReqSuffix ;
 // `require "mod"` is a statement, but `require"tracegc".start()` (lua-tests/all.lua) is an
-// ordinary call expression whose RESULT is indexed and called. Committing to the statement
-// form there left the `.start()` behind with nothing to attach it to. This guard declines
+// ordinary call expression whose RESULT is indexed and called. This guard declines
 // the statement form whenever a suffix follows on the same line, so the whole thing falls
 // through to CallStat and parses as the call chain it is. It scans only spaces and tabs -
 // stopping at a newline is what keeps the next statement's own `::label::` from looking
@@ -232,11 +231,9 @@ VarargPar   <~~ push("...") ~~>
 
 // `return` takes an OPTIONAL expression list, and the guard in front of it is what makes
 // the option optional in practice: `end`, `else`, `elseif` and `until` are ordinary
-// identifiers to the Id rule, so a bare `return` followed by `end` used to parse as
-// `return end` - returning a variable named `end` - and the block then ate the NEXT `end`.
-// Nothing failed at the mistake; the parse slid one `end` out of step and died at EOF.
-// That single missing guard cost four files of the reference corpus (api, code, gengc,
-// coroutine). NotEnders consumes nothing and only fails on those four whole words.
+// identifiers to the Id rule, so without it a bare `return` followed by `end` would parse
+// as `return end` - returning a variable named `end` - and the block would eat the NEXT
+// `end`. NotEnders consumes nothing and only fails on those four whole words.
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ NotEnders ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
@@ -260,8 +257,7 @@ AssignStat  <~~ push(makeAssign(takeAll())) ~~>
 // A target is Lua's `var`, and Lua's `var` is `prefixexp '.' Name | prefixexp '[' exp ']'`
 // - so everything a prefixexp may contain sits in front of the final field or index,
 // CALLS included: `getmetatable(t).__index = f`, `a[1], f(a)[2], b = ...` and `o:m().x = 1`
-// are all ordinary Lua. Restricting the chain to DotSfx / IndexSfx made those unparseable
-// and cost six files of the reference corpus. The chain is therefore the SAME one an
+// are all ordinary Lua. The chain is therefore the SAME one an
 // expression parses; assignTarget walks all but the last step and writes into the slot the
 // last step names. (A trailing call - `f(a) = 1` - is not valid Lua and simply fails at
 // run time, which is where an assignment to a non-slot belongs anyway.)
@@ -366,10 +362,8 @@ LongBracket = :script(~~
         var no = abnf.newToken("\x01not-a-long-bracket", 0)
         // A :script sees the raw input, so what sits in front of the literal has to be
         // stepped over here; the token returned starts AT the bracket, which is where
-        // the parser looks once it has skipped the same run itself.
-        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
-        // to a closing bracket of its own level and may span lines and hold ']]', so it
-        // cannot be treated as a '--' line comment.
+        // the parser looks once it has skipped the same run itself. The skip is
+        // NotEnders' (blanks and both comment forms); see the comment there.
         var off = 0
         var scanning = true
         while (scanning) {
@@ -423,8 +417,7 @@ LongBracket = :script(~~
         // c.peek returns BYTES, and a returned token must match the input LITERALLY -
         // so a byte above 127 cannot be appended as its own code point (it would be
         // re-encoded as two bytes on the way into Go and the token would no longer
-        // match). Decode UTF-8 by hand instead; [[h<e-acute>llo]] did not parse at all
-        // before this, in either grammar.
+        // match). Decode UTF-8 by hand instead.
         var j = off
         while (j < i) {
             var b0 = c.peek(j)
@@ -628,8 +621,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Box n as a float when it would otherwise read back as an integer. (n - n === 0
     // rejects the infinities and NaN, which are floats already and never need a box.)
     function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
-    // A Lua TABLE. Both number boxes are host objects too, so every place that used to
-    // test `typeof v == "object"` has to exclude them.
+    // A Lua TABLE. Both number boxes are host objects too, so a plain
+    // `typeof v == "object"` test has to exclude them.
     function isTbl(v) { return v !== null && v !== undefined && typeof v == "object" && !isFlt(v) && !szIs(v) }
     // The two ends of the signed 64 bit range, built from their bit pattern because
     // neither survives a double: math.maxinteger reads back as 9223372036854775808.
@@ -1005,16 +998,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A FLOAT KEY'S TEXT COMES FROM luaFloKey AND NOT FROM `"" + n`, for the same
     // reason luaGStr's digits do (see its comment): goja's Number-to-String is not
     // always the shortest round-tripping form, and a key text that does not
-    // round-trip is not an injective name for the double. Both symptoms were live
-    // here, and neither needed a print of the number itself:
-    //   - TWO DISTINCT DOUBLES COLLIDED IN ONE SLOT. goja renders both
-    //     1.7385704740834339e+92 and its neighbour 1.738570474083434e+92 as
-    //     "1.738570474083434e+92", so t[a] and t[b] were the same key under goja
-    //     and different keys under -frozen and under lua 5.5.0.
-    //   - pairs() HANDED BACK THE WRONG NUMBER. luaKeyBack re-reads the key text,
-    //     so the key came back as the double the truncated text names, and at the
-    //     subnormal boundary it came back as the STRING "<.950476795525063e-309" -
-    //     goja emits a non-digit character there outright.
+    // round-trip is not an injective name for the double - two neighbouring doubles
+    // (1.7385704740834339e+92 and 1.738570474083434e+92) would share one slot, and
+    // pairs(), whose luaKeyBack re-reads the key text, would hand back the wrong number.
     function luaKey(k) {
         if (szIs(k)) { return szStr(k) }
         if (isNum(k)) {
@@ -1039,7 +1025,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return "" + k
     }
     // JavaScript's exponent form rewritten into C's %g one - always signed, at least
-    // two digits. Only the INTEGER arm of luaNumStr uses it now (where it is the
+    // two digits. Only the INTEGER arm of luaNumStr uses it (where it is the
     // identity, an integer's text being digits only); the float arm builds its own
     // exponent, because it also has to know the PRECISION that produced it.
     function luaExpFix(s) {
@@ -1061,41 +1047,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ".0" when the text came out as nothing but a sign and digits. The format is
     // "%.14g" in the manual and lua_Number2str in luaconf.h, but 5.5's tostring
     // goes through lua_number2strx's round-trip loop: it tries "%.15g" and, if the
-    // text does not read back as the same double, "%.17g". It never tries 16.
-    // SETTLED against the local lua 5.5.0 over 91 values - 31 hand-picked plus 60
-    // random 64-bit patterns: a 15/16/17 model differs from lua on 10 of them
-    // (1/3 is "0.33333333333333331", not the 16-digit shortest form), 15-then-17
-    // matches all 91.
+    // text does not read back as the same double, "%.17g". It never tries 16
+    // (1/3 is "0.33333333333333331", not the 16-digit shortest form) - checked
+    // against lua 5.5.0.
     //
     // THE 15-OR-17 CHOICE IS MADE BY ROUND-TRIP, NOT BY COUNTING THE HOST'S
-    // PRINTED DIGITS, and that is the opposite of what this comment used to say
-    // (docs/todo.md 1.8). The old body asked luaSigCount("" + n) <= 15, on the
-    // argument that "%.15g" reads back exactly when the SHORTEST round-tripping
-    // form has at most 15 significant digits. The equivalence is sound; the
-    // premise that `"" + n` IS the shortest round-tripping form is not.
-    //
-    // goja's Number-to-String is not always shortest: it prints the double
-    // -0x1.7d087308f48b7p-691 as "-1.44875726569101e-208", fifteen digits that
-    // read back as a DIFFERENT double, where the frozen host and lua both need
-    // seventeen - and at some subnormal boundaries it emits a non-digit character
-    // outright (0x1.ae6c07415a67ap-1023 comes out "B.70548258834231e-309"). So
-    // counting was three things at once: a wrong answer against `lua` 5.5.0, a
-    // live goja-vs--frozen divergence no matrix entry happened to reach, and
-    // unfixable from inside the dialect, since a script cannot ask the host for
-    // more digits than its printer chose to give.
+    // PRINTED DIGITS: goja's Number-to-String is not always the shortest
+    // round-tripping form (it prints -0x1.7d087308f48b7p-691 with fifteen digits
+    // that read back as a DIFFERENT double, and at some subnormal boundaries emits
+    // a non-digit character), so counting `"" + n` would diverge between hosts.
     //
     // Asking floPrec(n, 15) and parsing it back is lua's OWN test, verbatim -
     // lua_number2strx writes "%.15g", reads it back with strtod and moves to
     // "%.17g" only when it differs - and it is host-independent by construction.
     // floPrec (host id 70 of languages/lib/runtime.c, floPrecStr in
-    // abnf/commonscript.go) answers EXACTLY n significant digits in both
-    // implementations since docs/todo.md 2.8; the note below about the two
-    // disagreeing is gone because the disagreement is. That fixed-n rounding is
-    // what the dialect cannot express and is NOT the shortest form padded with
-    // zeros: 5e-324's fifteen digits are 4.94065645841247e-324. parseFloat is
-    // exact in both hosts (jsParseFloat in abnf/jsrt.go is strconv.ParseFloat;
-    // goja's is too), which is what makes the test decide rather than
-    // approximate.
+    // abnf/commonscript.go) answers EXACTLY n significant digits, which is NOT the
+    // shortest form padded with zeros: 5e-324's fifteen digits are
+    // 4.94065645841247e-324. parseFloat is exact in both hosts, which is what makes
+    // the test decide rather than approximate.
     function luaAtoi(s) {
         var neg = s.charAt(0) == "-"
         var i = neg ? 1 : 0
@@ -1191,7 +1160,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A finite float. The sign is split off first, so -0.0 keeps its sign where
     // JavaScript's String(-0) is "0" - and so that %g never sees a negative. Then
     // tostringbuff's rule: ".0" only when the text is nothing but digits, which an
-    // exponent form is not (the old body wrote "1e+21.0").
+    // exponent form is not ("1e+21", never "1e+21.0").
     function luaFloStr(n) {
         var neg = n < 0 || (n == 0 && 1 / n < 0)
         var a = neg ? 0 - n : n
@@ -1418,12 +1387,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var a = toNumV(v)
             if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(v) + " value") }
             // A FLOAT negates by IEEE sign flip, NOT by `0 - v`: `0 - 0.0` is
-            // +0.0, so `-0.0` and `-(0.0)` used to print 0.0 where lua prints
-            // -0.0. `v * (0 - 1)` is exact for every double - zeros, infinities
-            // and NaN included - and is the same shape the compiled half now
-            // emits (lua_arith MUL by -1 instead of SUB from 0). Beware
-            // `v * 0`: this dialect keeps an integral value as an INTEGER, so
-            // that spelling loses the sign; multiplying by -1 does not.
+            // +0.0, while lua prints -0.0 for `-0.0`. `v * (0 - 1)` is exact for
+            // every double - zeros, infinities and NaN included - and is the same
+            // shape the compiled half emits (lua_arith MUL by -1). Beware `v * 0`:
+            // this dialect keeps an integral value as an INTEGER, so that spelling
+            // loses the sign; multiplying by -1 does not.
             if (isFlt(a)) { return mkFlt(a.v * (0 - 1)) }
             // An integer negates at 64 bits and WRAPS: -math.mininteger is
             // math.mininteger, the one value that is its own negation.
@@ -1752,7 +1720,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (r === BRK) { break }
                     if (r !== CONT) { res = r; break }
                 }
-                // The step WRAPS at 64 bits now that an integer really is one, so a loop
+                // The step WRAPS at 64 bits, so a loop
                 // whose limit is math.maxinteger would step from it to math.mininteger
                 // and run forever. Real Lua cannot: it precomputes the iteration count.
                 // The same stop, expressed on the values themselves - a step that does
@@ -1980,14 +1948,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (n - n !== 0 || Math.floor(n) !== n) { return undefined }
             return luaI64(n)
         },
-        // ----- the float-only half of the library, docs/todo.md 1.1 -----
+        // ----- the float-only half of the library -----
         // Every one of these answers a FLOAT whatever its argument's subtype was
-        // (math.sqrt(4) is 2.0), so none of them touches the integer subtype. They
-        // were MISSING ENTIRELY from both halves - `math.sqrt(2)` was "attempt to
-        // call a nil value" - because the C floor's Math had eleven members and a
-        // native binary calling Math.sin died outright. The compiler half routes
-        // the same calls through the same host Math (libMath1 in
-        // lua-to-llvm-ir.abnf). Checked against lua 5.5.0, which is installed.
+        // (math.sqrt(4) is 2.0), so none of them touches the integer subtype. The
+        // compiler half routes the same calls through the same host Math (libMath1
+        // in lua-to-llvm-ir.abnf). Checked against lua 5.5.0.
         sqrt: function(x) { return mkFlt(Math.sqrt(mathArg(x, "sqrt"))) },
         sin: function(x) { return mkFlt(Math.sin(mathArg(x, "sin"))) },
         cos: function(x) { return mkFlt(Math.cos(mathArg(x, "cos"))) },
@@ -2076,12 +2041,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // sub(s, i, j) is NOT JS slice(i-1, j). Lua's negative index counts from the end
     // INCLUSIVELY and 1-based - -1 is the last character, so it normalises to len+i+1,
-    // not to len+i - and both ends are then clamped into 1..len rather than reinterpreted.
-    // Passing i-1 straight to slice got every negative case wrong by one in both
-    // directions: ("hello"):sub(-3) answered "ello" where Lua answers "llo", and
-    // ("hello"):sub(2, -2) answered "e" where Lua answers "ell". luaSubRange is the
-    // normalisation on its own so the compiler half's lua_subi / lua_subj helpers can
-    // implement exactly the same three steps.
+    // not to len+i - and both ends are then clamped into 1..len rather than reinterpreted:
+    // ("hello"):sub(-3) is "llo" and ("hello"):sub(2, -2) is "ell". luaSubStart /
+    // luaSubEnd are the normalisation on its own, so the compiler half's lua_subi /
+    // lua_subj helpers implement exactly the same steps.
     globalScope["string"] = {
         len: function(s) { return s.length },
         // ASCII only: real Lua case-maps with the C library in the C locale, which leaves

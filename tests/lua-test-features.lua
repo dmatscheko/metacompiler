@@ -75,8 +75,7 @@ check("str-len-op", #"hello", 5)
 check("str-len-op-var", (function() local s = "abc" return #s end)(), 3)
 check("str-len-empty", string.len(""), 0)
 -- A Lua string is a BYTE string, so its length is its byte count, not its character
--- count: lua 5.5 answers 6 here, and this line used to assert 5 - the answer both
--- halves gave while they held UTF-16 text. Both now hold one host character per byte.
+-- count: lua 5.5 answers 6 here.
 check("str-len-unicode", string.len("héllo"), 6)
 check("str-len-bytes", #"日本", 6)                       -- three bytes per character
 check("str-sub-bytes", string.sub("héllo", 1, 3), "hé") -- sub cuts at BYTE offsets
@@ -406,15 +405,13 @@ end
 check("combined-pipeline", transform({1, 2, -3}), "o1e2x")
 
 -- ----- float rendering: the 15-then-17 window, chosen by ROUND-TRIP -----
--- docs/todo.md 1.8. lua 5.5.0 writes a float with "%.15g" and falls back to
--- "%.17g" only when the text does not read back; it NEVER tries 16. luaGStr used
--- to pick between them by counting the digits the host printed for `"" + n`, and
--- goja's Number-to-String is not always the shortest round-tripping form: for the
--- first seven values below it prints fifteen digits that read back as a DIFFERENT
--- double (and for #4..#6, which sit at the subnormal boundary, it emits a
--- non-digit character outright - "B.70548258834231e-309"). The choice is now made
--- the way lua makes it, by parsing floPrec(n, 15) back, so the answer is the same
--- under goja, under -frozen, in the compiled half and natively.
+-- lua 5.5.0 writes a float with "%.15g" and falls back to "%.17g" only when the
+-- text does not read back; it NEVER tries 16. The choice must not count the digits
+-- the host printed for `"" + n`: goja's Number-to-String is not always the shortest
+-- round-tripping form - for the first seven values below it prints fifteen digits
+-- that read back as a DIFFERENT double (and for #4..#6, at the subnormal boundary,
+-- a non-digit character). Parsing floPrec(n, 15) back, as lua does, gives the
+-- same answer under goja, under -frozen, in the compiled half and natively.
 --
 -- Every operand is read out of THIS TABLE, never written as a literal at the
 -- check, so the constant folder cannot answer in the renderer's place. All twelve
@@ -449,13 +446,11 @@ check("flostr-1e16", "" .. gflo[12], "1e+16")
 -- ----- float TABLE KEYS: the key TEXT has to round-trip as well -----
 -- The same goja defect one level down, and it needs no print of a number to
 -- show. A table addresses its keys by their string form, so a float key's text
--- must name exactly ONE double - and `"" + n` did not. goja renders both
+-- must name exactly ONE double, and `"" + n` under goja does not: it renders both
 -- 1.7385704740834339e+92 and the double one ulp above it as the sixteen-digit
--- "1.738570474083434e+92", so the two landed in ONE slot under goja while
--- -frozen, the compiled half and lua 5.5.0 all kept them apart; at the subnormal
--- boundary the text was not even a number ("<.950476795525063e-309"). luaKey
--- spells a float key with the shortest ROUND-TRIPPING decimal now (luaFloKey
--- over floPrec), so all four legs agree.
+-- "1.738570474083434e+92", and at the subnormal boundary the text is not even a
+-- number. luaKey spells a float key with the shortest ROUND-TRIPPING decimal
+-- (luaFloKey over floPrec), so all four legs agree with lua 5.5.0.
 --
 -- Every operand is read out of THIS TABLE, never written as a literal at the
 -- check, so the constant folder cannot answer in the key's place.

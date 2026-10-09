@@ -8,11 +8,9 @@
 
       mec languages/lua-to-llvm-ir.abnf tests/lua-test-recognize.lua -q
 
-  History: several of these constructs used to be recognised but routed to
-  notImplemented, so a plain run aborted at the first of them and this file was
-  a by-design SHOULD-FAIL guard, mirroring the widen tests of the other
-  languages. The full-syntax work implemented all of them, which removed the
-  guard's premise, so the matrix entry became an ordinary one. Do not re-arm it.
+  It is an ordinary matrix entry, not a SHOULD-FAIL guard like the recognize
+  tests of the other languages. (The trailing "notImplemented" notes below are
+  stale: every construct runs.)
 ]]
 
 -- Genuine, fully supported additions ----------------------------------------
@@ -36,10 +34,9 @@ print("TINY = " .. TINY)
 
 --[=[ a level-1 long comment, whose body may itself contain ]] without ending ]=]
 
--- Not-yet-implemented surface (accepted, warned under -warn-unsupported) ------
+-- Further surface ------------------------------------------------------------
 
--- Bitwise operators and exponentiation: the handle runtime has no bit ops and
--- no pow, so each is accepted structurally and reported as not implemented.
+-- Bitwise operators and exponentiation.
 local pow  = 2 ^ 10                -- notImplemented: ^
 local band = MASK & HEXY           -- notImplemented: bitwise &
 local bor  = 1 | 2                 -- notImplemented: bitwise |
@@ -48,16 +45,15 @@ local shr  = 256 >> 2              -- notImplemented: >>
 local bnot = ~0                    -- notImplemented: unary ~
 print("pow", pow, "band", band, "bor", bor, "shl", shl, "shr", shr, "bnot", bnot)
 
--- Varargs: the parameter list accepts a trailing '...'; using it in the body
--- is not implemented (the subset passes only the named parameters).
+-- Varargs: the parameter list accepts a trailing '...', and '...' in the body
+-- yields the extra arguments.
 local function firstOf(label, ...)
   local rest = ...                 -- notImplemented: varargs ...
   return rest
 end
 print("firstOf", firstOf("xs", 10, 20, 30))
 
--- goto and its target label (Lua 5.2+): both accepted, not implemented, so the
--- jump is a no-op and every iteration falls through and prints.
+-- goto and its target label (Lua 5.2+): the jump skips the print for i == 2.
 for i = 1, 3 do
   if i == 2 then goto continue end -- notImplemented: goto
   print("i", i)

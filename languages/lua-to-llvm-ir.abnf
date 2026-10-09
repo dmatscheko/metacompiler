@@ -33,10 +33,7 @@ math/string/table libraries plus next/ipairs/pairs are emitted as IR functions, 
 when the program names them. The whole file becomes jsmain(env, args) and runs top to
 bottom. Self checking programs count their failures and end with exit(fails).
 
-Two gaps against the interpreter remain, both in the bitwise operators: and/or/xor map to
-the runtime's 32-bit externals rather than Lua's 64-bit ones (only the shift COUNT is
-Lua exact, via lua_shift), and arithmetic on a value that is not a number yields a NaN
-instead of an error. The same language is interpreted directly by lua-interpreter.abnf.") ;
+The same language is interpreted directly by lua-interpreter.abnf.") ;
 
 // --- main rules
 
@@ -53,10 +50,8 @@ instead of an error. The same language is interpreted directly by lua-interprete
 // jsmain (compiler). Block collects the statement thunks of exactly its own subtree.
 Chunk       <~~ buildChunk(takeAll()) ~~>
             = [ ShebangLine ] Block ;
-// Lua drops a FIRST line that starts with '#', so a chunk can carry a '#!/usr/bin/lua'
-// line (lua-tests/all.lua) or a plain '# comment' one (lua-tests/main.lua). Anywhere else
-// '#' is the length operator, so AtFileStart pins this to offset 0: c.peek answers -1 out
-// of range, and only at offset 0 is there no byte before us.
+// Lua drops a FIRST line that starts with '#'. Twin of ShebangLine in
+// lua-interpreter.abnf; see there.
 ShebangLine = AtFileStart "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 AtFileStart = :script(~~
     (function() {
@@ -67,14 +62,9 @@ Block       <~~ push(makeSeq(takeAll())) ~~>
             = { NotEnders Statement } ;
 
 // NotEnders stops a block at the keywords that terminate it (end / else / elseif /
-// until), which the plain identifier statements would otherwise swallow. It consumes
-// nothing and only fails (via the impossible-token trick) when one of those words - as
-// a whole word, not merely a prefix like 'ending' - is next.
+// until). Twin of NotEnders in lua-interpreter.abnf; see there.
 NotEnders = :script(~~
     (function() {
-        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
-        // to a closing bracket of its own level and may span lines and hold ']]', so it
-        // cannot be treated as a '--' line comment.
         var off = 0
         var scanning = true
         while (scanning) {
@@ -152,13 +142,8 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // back to a normal call. A flat module model (the module's return value is not bound).
 Require     <~~ push(luaImport(takeAll(), up.pos)) ~~>
             = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) NoReqSuffix ;
-// `require "mod"` is a statement, but `require"tracegc".start()` (lua-tests/all.lua) is an
-// ordinary call expression whose RESULT is indexed and called. Committing to the statement
-// form there left the `.start()` behind with nothing to attach it to. This guard declines
-// the statement form whenever a suffix follows on the same line, so the whole thing falls
-// through to CallStat and parses as the call chain it is. It scans only spaces and tabs -
-// stopping at a newline is what keeps the next statement's own `::label::` from looking
-// like a `:method` suffix of this one.
+// Declines the statement form of require when a call suffix follows on the same line.
+// Twin of NoReqSuffix in lua-interpreter.abnf; see there.
 NoReqSuffix = :script(~~
     (function() {
         var i = 0
@@ -235,13 +220,8 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 VarargPar   <~~ push("...") ~~>
             = "..." ;
 
-// `return` takes an OPTIONAL expression list, and the guard in front of it is what makes
-// the option optional in practice: `end`, `else`, `elseif` and `until` are ordinary
-// identifiers to the Id rule, so a bare `return` followed by `end` used to parse as
-// `return end` - returning a variable named `end` - and the block then ate the NEXT `end`.
-// Nothing failed at the mistake; the parse slid one `end` out of step and died at EOF.
-// That single missing guard cost four files of the reference corpus (api, code, gengc,
-// coroutine). NotEnders consumes nothing and only fails on those four whole words.
+// The NotEnders guard keeps a bare `return` before `end` from parsing as `return end`.
+// Twin of Return in lua-interpreter.abnf; see there.
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ NotEnders ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
@@ -265,8 +245,7 @@ AssignStat  <~~ push(makeAssign(takeAll())) ~~>
 // A target is Lua's `var`, and Lua's `var` is `prefixexp '.' Name | prefixexp '[' exp ']'`
 // - so everything a prefixexp may contain sits in front of the final field or index,
 // CALLS included: `getmetatable(t).__index = f`, `a[1], f(a)[2], b = ...` and `o:m().x = 1`
-// are all ordinary Lua. Restricting the chain to DotSfx / IndexSfx made those unparseable
-// and cost six files of the reference corpus. The chain is therefore the SAME one an
+// are all ordinary Lua. The chain is therefore the SAME one an
 // expression parses; emitTargetWrite walks all but the last step and writes into the slot
 // the last step names.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
@@ -288,11 +267,8 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
             = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BOrExpr } ;
 
-// The bitwise operators of Lua 5.3+, each on its own precedence level: | binds loosest,
-// then binary ~ (exclusive or), then &, then the shifts - all below the comparisons and
-// above concatenation. They work on 64-bit two's complement integers (luaBitOp), so a
-// float operand with an integral value converts and everything else is an error. Binary
-// '~' carries a !"=" lookahead so that a '~=' comparison is left to CmpExpr above.
+// The bitwise operators of Lua 5.3+, one precedence level each. Twin of BOrExpr in
+// lua-interpreter.abnf; see there.
 BOrExpr     <~~ push(foldBinary(takeAll())) ~~>
             = BXorExpr { "|" <~~ push(up.in) ~~> BXorExpr } ;
 BXorExpr    <~~ push(foldBinary(takeAll())) ~~>
@@ -358,22 +334,14 @@ Primary     = ParenExpr | FuncExpr | TableLit | LongString | VarargExpr
 ParenExpr   <~~ push(luaParen(pop())) ~~>
             = "(" Expression ")" ;
 
-// Long-bracket string literals [[ ... ]], [=[ ... ]=], [==[ ... ]==] - with ANY number
-// of '=' signs between the brackets. The closing bracket has to repeat the opening
-// level, which no fixed token can express, so one :script scans the whole literal and
-// hands the parser back a token for exactly those bytes. The body is verbatim (no
-// escape processing) and a single leading newline is dropped, matching Lua.
+// Long-bracket string literals [[ ... ]], [=[ ... ]=] of any level. Twin of LongString
+// in lua-interpreter.abnf; see there.
 LongString  <~~ push(makeConst(luaLong(luaLongBody(up.in)))) ~~>
             = LongBracket :whitespace(Whitespace) ;
 LongBracket = :script(~~
     (function() {
         var no = abnf.newToken("\x01not-a-long-bracket", 0)
-        // A :script sees the raw input, so what sits in front of the literal has to be
-        // stepped over here; the token returned starts AT the bracket, which is where
-        // the parser looks once it has skipped the same run itself.
-        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
-        // to a closing bracket of its own level and may span lines and hold ']]', so it
-        // cannot be treated as a '--' line comment.
+        // Twin of LongBracket in lua-interpreter.abnf, which explains the scan.
         var off = 0
         var scanning = true
         while (scanning) {
@@ -424,11 +392,7 @@ LongBracket = :script(~~
             } else { i = i + 1 }
         }
         var s = ""
-        // c.peek returns BYTES, and a returned token must match the input LITERALLY -
-        // so a byte above 127 cannot be appended as its own code point (it would be
-        // re-encoded as two bytes on the way into Go and the token would no longer
-        // match). Decode UTF-8 by hand instead; [[h<e-acute>llo]] did not parse at all
-        // before this, in either grammar.
+        // Decode UTF-8 by hand: the token must match the input LITERALLY.
         var j = off
         while (j < i) {
             var b0 = c.peek(j)
@@ -462,19 +426,12 @@ VarargExpr  <~~ push(makeVararg()) ~~>
             = "..." ;
 AnyByte     = "\x00"..."\U0010ffff" ;
 
-// Lua string literals. Their escapes are Lua's own, so the shared DqString / SqString
-// of lib/dq-strings.abnf - which allow only a printable byte after the backslash - are
-// replaced here: a backslash may be followed by any character, a real line break
-// included (that form stands for a newline), and the z escape swallows the whole
-// whitespace run behind it. luaUnesc resolves them all.
+// Lua string literals with Lua's own escapes. Twin of LuaDq in lua-interpreter.abnf.
 LuaDq       = '"' :whitespace() { LuaZSkip | LuaEsc | DqPlain | LuaRawByte } <~~ push(makeConst(luaUnesc(up.in))) ~~> '"' :whitespace(Whitespace) ;
 LuaSq       = "'" :whitespace() { LuaZSkip | LuaEsc | SqPlain | LuaRawByte } <~~ push(makeConst(luaUnesc(up.in))) ~~> "'" :whitespace(Whitespace) ;
 LuaZSkip    = "\\z" { @+" \t\r\n" } ;
 LuaEsc      = "\\" AnyByte ;
-// A Lua string is a BYTE string, and Lua's own test suite is written in Latin-1: files.lua,
-// pm.lua, sort.lua and strings.lua all embed a raw 0xe1 / 0xe3 that is not valid UTF-8, so
-// DqPlain's rune range - which has to decode - cannot match it. This BYTE range (..b) can.
-// It comes last, so well-formed UTF-8 still matches DqPlain as a rune and is unaffected.
+// A raw non-UTF-8 byte inside a string literal. Twin of LuaRawByte in lua-interpreter.abnf.
 LuaRawByte  = "\x80"..b"\xff" ;
 
 FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
@@ -492,11 +449,7 @@ NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
 PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
             = Expression ;
 
-// Numbers, in every form Lua writes them: hexadecimal integers (0xff, 0XFF), hexadecimal
-// floats with a binary exponent (0x1p4, 0xA.8p0, 0x.8p1), and decimals with an optional
-// fraction and an optional decimal exponent (255, 1e3, 2.5e-2, .5, 3.). luaNumVal reads
-// the spelling and decides whether the literal is an integer or a float. The fraction
-// dot carries a !"." lookahead, so '1 .. 2' concatenates instead of reading '1.' first.
+// Numbers, in every form Lua writes them. Twin of Number in lua-interpreter.abnf.
 Number      = HexNum | DecNum | DotNum ;
 HexNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
             = ( "0x" | "0X" ) :whitespace() HexBody :whitespace(Whitespace) ;
@@ -535,10 +488,8 @@ KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
-// Lua whitespace: blanks and newlines plus comments. A long comment --[[ ... ]] is a
-// '--' followed by a long bracket of any level, so it is scanned by the same :script as
-// a long string (LongCmtBracket below) and has to be tried before the line comment,
-// which '--[[' would otherwise start. A line comment runs to the end of the line.
+// Lua whitespace: blanks and newlines plus comments. Twin of Whitespace in
+// lua-interpreter.abnf; see there.
 Whitespace  = { @+" \t\r\n" | Comment } ;
 Comment     = LongCmt | LineComment ;
 LongCmt     = LongCmtBracket ;
@@ -610,8 +561,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An INTEGER literal is exact to 64 bits, which a host double is not, so the reader
     // does not compute its value at all - it hands makeConst the DIGIT TEXT in an
     // {__ilit} descriptor and js_lulit (abnf/jsrtlua.go) reads it in the emitted
-    // program. Going through emitNum would already have rounded 9223372036854775807 to
-    // 9223372036854776000 on the way into the module, and would have lost the two rules
+    // program. Going through emitNum would round 9223372036854775807 to
+    // 9223372036854776000 on the way into the module, and would lose the two rules
     // that differ between the bases: a decimal literal too large for a 64 bit integer
     // is a FLOAT, a hexadecimal one WRAPS.
     function isFlt(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f === true }
@@ -713,7 +664,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // its subtype apart from 1 all the way to the concatenation that renders it, and an
     // integer literal is read from its digits by js_lulit so that it is exact to 64 bits.
     // A SMALL decimal integer skips the call and goes in as a plain number - which is
-    // every literal an ordinary program writes, so the emitted IR is unchanged there.
+    // every literal an ordinary program writes.
     var coreMakeConst = makeConst
     makeConst = function(v) {
         if (isILit(v)) {
@@ -1039,7 +990,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (name == "lua_res") {
-            // Kept for the arity table only: js_luarith now applies the subtype rule of
+            // Kept for the arity table only: js_luarith applies the subtype rule of
             // + - * // and % itself, together with the 64 bit wrapping it needs.
             b.NewRet(callLua(b, "lua_mkflt", [ps[2]]))
             return
@@ -1092,9 +1043,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             s2B.NewCondBr(rawTruthy(s2B, callLua(s2B, "lua_isnum", [ps[0]])), smB, s3B)
             // A table and a function have no printable value in Lua (real Lua prints
             // `table: 0x...`, an address nothing here can reproduce), so they render by
-            // TYPE NAME, which is what lua-interpreter.abnf's luaToStr already did. The
-            // shared js_pystr spelled them "[object Object]" and "[function]" - two
-            // divergences between the halves that no test happened to print.
+            // TYPE NAME, as lua-interpreter.abnf's luaToStr does (the shared js_pystr
+            // would spell them "[object Object]" and "[function]").
             var sgB = curF.NewBlock("")
             var soB = curF.NewBlock("")
             var spB = curF.NewBlock("")
@@ -1118,7 +1068,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (name == "lua_shift") {
-            // Kept for the arity table only: emitBin now sends every bitwise operator,
+            // Kept for the arity table only: emitBin sends every bitwise operator,
             // the shifts included, straight to js_lubit. p0 is 1 for '<<', 0 for '>>'.
             b.NewRet(callExt(b, "js_lubit", [b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ps[0], handle(1)), handle(3), handle(4)), ps[1], ps[2]]))
             return
@@ -1267,12 +1217,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // a ^ b, and every float-only member of the math library: there is no js_pow
     // external and none is needed - the host's Math lives in the same runtime, so
-    // the operation is a method call on it. Since docs/todo.md 1.1 that Math is
-    // the SAME object in all three engines (thirty-four methods and eight
-    // constants in languages/lib/runtime.c, abnf/jsrt.go and goja alike), which is
-    // what makes math.sqrt / math.sin / ... below cost no extern at all: they were
-    // simply absent before, because the C floor had eleven members and a native
-    // binary calling Math.sin died with `unknown method 'sin'`.
+    // the operation is a method call on it. That Math is the SAME object in all
+    // three engines (languages/lib/runtime.c, abnf/jsrt.go and goja alike), which
+    // is what makes math.sqrt / math.sin / ... below cost no extern at all.
     function emitMathN(b, name, argVs) {
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         var argsV = callExt(b, "js_arr_new", [])
@@ -1292,8 +1239,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: callLua(b, "lua_mkflt", [emitPow(b, callLua(b, "lua_num", [rl.v]), callLua(b, "lua_num", [rr.v]))])}
         }
     }
-    // Unary bitwise not: the exact 64 bit complement (js_bxor was JavaScript's 32 bit
-    // one, so ~0x100000000 lost its top half).
+    // Unary bitwise not: the exact 64 bit complement (not js_bxor, which is
+    // JavaScript's 32 bit one).
     function makeBNot(t) {
         return function(b) {
             var r = t(b)
@@ -1303,7 +1250,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // The standard-library tables (math/string/table) and the global next() are emitted
     // into jsmain's scope only when the program actually references them, so a program
-    // that uses none of them compiles to exactly the IR it did before. makeVarRef is the
+    // that uses none of them emits none of them. makeVarRef is the
     // single read path for a bare name, so it is where a reference is noticed.
     var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false}
     makeVarRef = function(name) {
@@ -1327,20 +1274,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- Expression thunks: function(block) -> {b, v} -----
 
     // Unary minus is x * -1, which keeps the operand's number subtype and coerces
-    // a string exactly like the binary operator does - and, unlike the `0 - x`
-    // this used to be, keeps a ZERO's SIGN: `0 - 0.0` is +0.0 in IEEE, so
-    // `-0.0` and `-(0.0)` printed 0.0 where lua prints -0.0. On the integer side
-    // MUL by -1 is the same 64-bit wrapping negation SUB was, math.mininteger
-    // (its own negation) included, because i64Mul wraps.
+    // a string exactly like the binary operator does - and, unlike `0 - x`, keeps
+    // a ZERO's SIGN: `0 - 0.0` is +0.0 in IEEE, while lua prints -0.0 for `-0.0`.
+    // On the integer side MUL by -1 is the 64-bit wrapping negation,
+    // math.mininteger (its own negation) included, because i64Mul wraps.
     //
-    // The reason this was recorded and not fixed before was that changing SUB to
-    // MUL would send a TABLE operand to __mul instead of __sub. THAT OBJECTION IS
-    // VOID HERE: metatables are not in the subset at all - `setmetatable` is not
-    // bound in either half (this grammar and lua-interpreter.abnf, whose header
-    // says so at line 28), so a table operand reaches no metamethod by either
-    // spelling and simply fails with "attempt to perform arithmetic on a table
-    // value". Whichever half implements metatables first must implement __unm
-    // with it; neither operator is the right one for that.
+    // Metatables are not in the subset, so a table operand reaches no metamethod
+    // and fails with "attempt to perform arithmetic on a table value". Whichever
+    // half implements metatables must implement __unm with it (not __mul).
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
@@ -1417,12 +1358,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // external: the arithmetic has to know the two number subtypes and to coerce a
     // string operand, and the comparisons have to see through a float box.
     //
-    // The bitwise operators used to map to the runtime's externals, which are
-    // JavaScript's 32-BIT ones: `1 << 62' answered 0 and `0xff00ff00ff & -1' lost the
-    // top half. They are 64 bit in Lua and integer-only, so all five now go to
+    // The bitwise operators are 64 bit in Lua and integer-only, so all five go to
     // js_lubit (abnf/jsrtlua.go), which is exact and raises Lua's own two errors -
-    // and they must NOT go through lua_num, whose double reading is exactly the
-    // precision the operator is supposed to keep.
+    // not to the runtime's 32-bit externals, and NOT through lua_num, whose double
+    // reading is exactly the precision the operator is supposed to keep.
     binExt = {}
     wraps = {}
     var arithCode = {"+": 0, "-": 1, "*": 2, "/": 3, "//": 4, "%": 5}
@@ -1591,8 +1530,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // ONE target, ONE value is the assignment nearly every program writes, and
             // it does not need the positional array at all: lua_first(v) IS
             // js_get(appendall([], v), 0) for every v, the empty multi-value included
-            // (both answer nil). The array cost an arena cell and a four-slot buffer per
-            // execution - 96 bytes inside every loop body that assigns.
+            // (both answer nil), and the array would be an allocation per execution.
             if (targets.length == 1 && vals.length == 1) {
                 var r1 = vals[0](b)
                 return emitTargetWrite(r1.b, targets[0], callLua(r1.b, "lua_first", [r1.v]))
@@ -1787,10 +1725,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
             // The step is written once, at the head of the loop, and nothing can
             // reassign $fs (the name is unspellable in Lua), so its SIGN is loop
-            // invariant. It used to be recomputed TWICE per iteration - lua_num(step)
-            // is a layer-2 call, so that was two function frames and two scopes of
-            // garbage per iteration for a value that cannot change. Computed once here,
-            // in the preheader, and used by both tests below.
+            // invariant: lua_num(step) (a layer-2 call) is computed once here, in the
+            // preheader, and used by both tests below.
             var stepPos = truthy(b, callExt(b, "js_gt", [callLua(b, "lua_num", [stepV]), emitNum(b, 0)]))
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -1804,9 +1740,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // rather than through the raw doubles: a loop that runs near math.maxinteger
             // has to stop on the exact value, not on the rounded one.
             //
-            // A SELECT evaluates both of its operands, so the old form called lua_cmp
-            // twice per iteration and threw one answer away - a whole layer-2 frame of
-            // garbage for nothing. A branch runs the one test that is asked for.
+            // A branch, not a SELECT: a select evaluates both of its operands, which
+            // would call lua_cmp twice per iteration; a branch runs the one test asked for.
             var upB = curF.NewBlock("")
             var downB = curF.NewBlock("")
             var testB = curF.NewBlock("")
@@ -1824,7 +1759,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
             var nextV = callLua(postB, "lua_arith", [handle(0), iV2, stpV2])
-            // The step WRAPS at 64 bits now that an integer really is one, so a loop
+            // The step WRAPS at 64 bits, so a loop
             // whose limit is math.maxinteger would step from it to math.mininteger and
             // run forever. Real Lua cannot: it precomputes the iteration count. The same
             // stop, expressed on the values themselves - a step that does not move the
@@ -1997,11 +1932,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // its argument's subtype was (math.sqrt(4) is 2.0), so none of them needs to
     // know about the integer subtype and none needs an extern - lua_num coerces
     // the argument the way arithmetic does (a numeric STRING converts), the root
-    // Math does the work, and lua_mkflt puts the float subtype back on.
-    //
-    // They were MISSING ENTIRELY from both halves until now: `math.sqrt(2)` was
-    // "attempt to call a nil value". Checked against lua 5.5.0, which is installed
-    // on this machine, in tests/lua-test-full.lua SECTION 21.
+    // Math does the work, and lua_mkflt puts the float subtype back on. Checked
+    // against lua 5.5.0 in tests/lua-test-full.lua SECTION 21.
     function libMath1(name) {
         return function(bb, argsH) {
             var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
@@ -2103,8 +2035,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libLower(bb, argsH) { return libCase(bb, argsH, luaUpper, luaLower) }
     // string.sub is NOT JS slice(i-1, j): Lua's negative index is INCLUSIVE and 1-based
     // (-1 is the last character, so it normalises to len+i+1) and both ends clamp into
-    // 1..len instead of being reinterpreted. Handing i-1 to slice was wrong by one on
-    // every negative index. The whole normalisation lives in the emitted lua_sub helper
+    // 1..len instead of being reinterpreted. The whole normalisation lives in the emitted lua_sub helper
     // so the branching is written once; the interpreter half's luaSubStart / luaSubEnd
     // are the same three steps.
     function libSub(bb, argsH) {
@@ -2242,8 +2173,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_set", [obj, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
-    // Emit only the referenced libraries; a program that uses none emits nothing here and
-    // its IR is unchanged from before this feature existed.
+    // Emit only the referenced libraries; a program that uses none emits nothing here.
     function emitLibs(b) {
         if (libNeed.ipairs) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ipairs"), callExt(b, "js_closure", [handle(emitLibFunc(libIpairs)), curScopeV])])
@@ -2326,8 +2256,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var pb = pf.NewBlock("entry")
         // js_luaprint joins with a TAB, which is what Lua's print does (js_pyprint
-        // joined with a space - Python's rule - so every multi-argument print
-        // differed from lua-interpreter.abnf and from real Lua).
+        // would join with a space - Python's rule).
         pb.NewCall(getExtern("js_luaprint", 1), [callLua(pb, "lua_strall", [pf.Params[1]])])
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
@@ -2374,7 +2303,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-rework-plan.md phase 4) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -2382,7 +2311,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // jsdispatch_ext, the same table emitted by the layer-2 runtime library
     // (lib/lua-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
     // are offset by a million, so the two chains cannot overlap and one js_call reaches
-    // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
+    // either module. Emitted ONLY for -exe.
     function emitDispatch() {
         var idxs = []
         var fns = []
@@ -2423,7 +2352,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // The two runtime inputs live next to THIS grammar, so the build does not depend on
-    // the working directory: lib/runtime.ll is the C floor (phase 3) and lib/lua-rt.ll
+    // the working directory: lib/runtime.ll is the C floor and lib/lua-rt.ll
     // is Lua's own layer 2. An explicit -rt REPLACES both.
     function libPath(name) {
         var mn = moduleName()

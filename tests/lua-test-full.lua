@@ -96,10 +96,8 @@ function s04()
     check("lng2", [==[level two]==], "level two")
     check("lng3", [=[holds ]] safely]=], "holds ]] safely")
     check("lng4", string.len([[a\nb]]), 4) -- no escape processing
-    -- A long literal holding non-ASCII text did not PARSE in either grammar: the
-    -- :script that scans it built its token one c.peek BYTE at a time, and a byte above
-    -- 127 appended as its own code point is re-encoded as two bytes on the way into Go,
-    -- so the token no longer matched the input. It decodes UTF-8 by hand now.
+    -- A long literal holding non-ASCII text: the :script that scans it reads
+    -- c.peek BYTES and has to decode the UTF-8 itself for the token to match.
     check("lng6", [[héllo]], "héllo")
     check("lng7", #[[héllo]], 6)           -- and a long literal is a BYTE string too
     local ml = [[
@@ -270,14 +268,14 @@ function s11()
     check("ift9", (1 / 0 > 1e308) and (0 / 0 ~= 0 / 0), true) -- inf and NaN
     -- Lua appends ".0" only when the text is nothing but a sign and digits
     -- (lobject.c tostringbuff runs strspn over "-0123456789"), so an EXPONENT form
-    -- must not get one: this used to print "1e+21.0", which is not a number in any
-    -- notation. And the exponent goes through C's %g, so it is always signed and at
+    -- must not get one ("1e+21.0" is not a number in any notation). And the
+    -- exponent goes through C's %g, so it is always signed and at
     -- least two digits - "1e-07", never JavaScript's "1e-7". lua 5.5.0's own answers.
     check("ift10", "" .. 1e21, "1e+21")
     check("ift11", "" .. 1e100, "1e+100")
     check("ift12", "" .. 1e-7, "1e-07")
-    -- Unary minus on a FLOAT is an IEEE sign flip, not `0 - x`: `0 - 0.0` is
-    -- +0.0, so these three used to print "0.0". The integer -0 stays "0" (lua has
+    -- Unary minus on a FLOAT is an IEEE sign flip, not `0 - x` (`0 - 0.0` is
+    -- +0.0), so these three print "-0.0". The integer -0 stays "0" (lua has
     -- no negative integer zero), and math.mininteger is its own negation because
     -- the 64-bit negate WRAPS. lua 5.5.0's own answers.
     local ift13z = 0.0
@@ -448,10 +446,9 @@ function s18()
 end
 
 -- ===== SECTION 19: interpreter/compiler agreement ratchet =====
--- Shifts are 64-BIT and logical in Lua. lua-to-llvm-ir.abnf emitted JavaScript's
--- 32-bit js_shl / js_ushr (with the count masked to 5 bits), so 1 << 32 was 1 and
--- 255 << 24 was -16777216 while lua-interpreter.abnf and real Lua 5.4 answered
--- 4294967296 and 4278190080. Values below are from /opt/homebrew/bin/lua.
+-- Shifts are 64-BIT and logical in Lua: 1 << 32 is 4294967296 and 255 << 24 is
+-- 4278190080 (JavaScript's 32-bit shifts would give 1 and -16777216). Values below
+-- are real Lua's.
 local function s19()
   check("agr1", 1 << 32, 4294967296)
   check("agr2", 1 << 33, 8589934592)
@@ -466,9 +463,8 @@ local function s19()
   check("agr11", ~0, -1)
 end
 -- ===== SECTION 20: the syntax the reference corpus asked for =====
--- Every check below is a construct Lua's OWN test suite writes and neither
--- grammar could parse. They took the lua-tests corpus from 54.5% to 100.0% in
--- both halves, so this section is the ratchet that keeps them.
+-- Every check below is a construct Lua's OWN test suite writes; this section is
+-- the ratchet that keeps both grammars parsing them.
 local function s20()
   -- A target is Lua's `var`, so a CALL may sit in front of the final field or
   -- index: getmetatable(t).__index = f is the shape the suite uses 5 times.
@@ -500,9 +496,8 @@ local function s20()
 
   -- A bare `return` is followed by a block terminator, not by an expression.
   -- `end`, `else`, `elseif` and `until` are ordinary identifiers to the Id rule,
-  -- so `return end` used to parse as "return the variable named end" and the
-  -- block then ate the NEXT `end`: the parse slid one keyword out of step and
-  -- died at EOF, four files later.
+  -- so without the guard `return end` would parse as "return the variable named
+  -- end" and the block would eat the NEXT `end`.
   local function bareIf(n)
     if n == 0 then return end
     return n
@@ -647,16 +642,12 @@ end
 -- float differently. These assertions are the pin for that, and every value below
 -- was measured across all three AND against the installed lua 5.5.
 --
--- The '%' cases are the reproducing ones. Lua's float modulo is luai_nummod -
--- fmod, then one correction - and it was written in all three halves as
--- a - floor(a/b)*b, which agrees only while a/b fits 53 bits. Two separate
--- defects sat behind that:
---   - real lua answers 10 % 0.1 with 0.09999999999999945; the floor form gives 0
---   - on arm64 Go CONTRACTS a - floor(a/b)*b into a fused multiply-subtract,
---     which goja and the C floor cannot do, so the two Go halves of this one
---     language disagreed in 128 of a 12,557-line differential probe
--- The comparisons against the floor form are deliberate: they are what fails if
--- anyone puts the old formula back.
+-- The '%' cases are the discriminating ones. Lua's float modulo is luai_nummod -
+-- fmod, then one correction - and NOT a - floor(a/b)*b, which agrees only while
+-- a/b fits 53 bits (real lua answers 10 % 0.1 with 0.09999999999999945; the floor
+-- form gives 0) and which Go on arm64 contracts into a fused multiply-subtract
+-- that goja and the C floor cannot match. The comparisons against the floor form
+-- are deliberate: they are what fails if anyone puts that formula back.
 function s23()
     local x = 10.0
     local y = 3.14159265358979
@@ -699,18 +690,11 @@ end
 -- Section 22 pins the exact 64-bit VALUES; this one pins the TYPE that carries
 -- them. An integer outside +-2^53 cannot live in a double, so both halves put it
 -- in a sized integer: abnf/jsrtint.go's jsGInt in the Go runtime, tag 13 of
--- languages/lib/runtime.c in the native binary (added 2026-08 - before that the
--- native half had only an object box, for which js_typeof answered "object"
--- where the Go twin answers "number").
+-- languages/lib/runtime.c in the native binary.
 --
--- MEASURED DISCRIMINATING POWER, and it is the finding rather than a weakness:
--- 0 of these 67 fail against a clean archive of 660c47a, in all three engines.
--- No LUA-LEVEL program can tell the object box from the tag - which is exactly
--- the "Lua survived by luck of ordering" result of the phase-4 probe, restated
--- as a measurement. What they do catch is the conversion's own failure modes:
--- against a build whose js_lucmp asks `typeof` instead of luPlain, 2 fail;
--- against one whose js_lutype does, 3 fail. Every one of the 67 is also checked
--- against the installed lua 5.5.
+-- What these catch is the sized-integer type's own failure modes - e.g. a
+-- js_lucmp or js_lutype that asks `typeof` where it means luPlain. Every one is
+-- also checked against lua 5.5.
 function s24()
     -- The 2^53 boundary. Below it a Lua integer is one double; at and above it
     -- the runtime carries a SIZED INTEGER (abnf/jsrtint.go's jsGInt in the Go
@@ -778,10 +762,8 @@ function s24()
     check("si42", ("" .. (e + 1)) .. "|", "9007199254740993|")
 
     -- ORDERING INDEPENDENCE. The runtime renders a value by asking a series of
-    -- type questions. When a big integer was an OBJECT box the "is it a table"
-    -- question had to be asked last or a big integer printed as a table; the
-    -- sized-integer tag answers "number" to the type question, so the order no
-    -- longer matters. These pin the answers the order used to decide.
+    -- type questions; the sized-integer tag answers "number" to the type
+    -- question, so a big integer must never render as a table whatever the order.
     check("si43", math.type(e + 1) ~= nil, true)      -- it IS a number, not a table
     check("si44", (e + 1) == (e + 1), true)
     local t = {}
@@ -834,8 +816,7 @@ function s24()
 end
 
 -- ===== SECTION 25: the garbage collector (mark/sweep over the heap) =====
--- languages/lib/runtime.c allocated from a bump arena that was never freed until
--- docs/runtime-next-plan.md part 1b replaced it with a mark/sweep heap. The worst
+-- languages/lib/runtime.c allocates from a mark/sweep heap. The worst
 -- failure mode a collector has is freeing something still LIVE, and these are the
 -- shapes that would show it: data held across a call that allocates heavily, a
 -- closure keeping the scope that defines it (the cycle refcounting could not
@@ -846,9 +827,7 @@ end
 -- WHERE THEY DISCRIMINATE: only in the NATIVE binary. Under llvm.Run the memory
 -- is Go's, so there they are ordinary correctness checks. Run the native binary
 -- with MEC_GC=stress (collect at every allocation) or MEC_GC=poison (and never
--- reuse a swept block) to turn a rare use-after-free into a deterministic one;
--- the measured discriminating power against a deliberately broken collector is
--- in part 1b of docs/runtime-next-plan.md.
+-- reuse a swept block) to turn a rare use-after-free into a deterministic one.
 function s25()
     -- Enough churn to cross the collector's threshold, small enough to stay fast.
     local churn = 2000
@@ -948,27 +927,14 @@ s22() -- SECTION-CALL 22
 s23() -- SECTION-CALL 23
 s24() -- SECTION-CALL 24
 -- ===== SECTION 26: the math library =====
--- docs/todo.md 1.1. Lua's math table carried ten of its twenty-nine members:
--- `math.sqrt(2)` was "attempt to call a nil value" in BOTH halves, and so were
--- sin cos tan asin acos exp log deg rad atan modf ult pi and huge. The item that
--- sent me here claimed lua read the host Math out of the root scope and died
--- natively on Math.sin; it does not - the only host Math lua ever reached was
--- Math.pow for the `^` operator, which the C floor already had. The real gap was
--- that the library was simply missing, identically in both halves, so --cross
--- could never see it.
+-- sqrt sin cos tan asin acos exp log deg rad atan modf ult pi huge. The float-only
+-- functions are a method call on the root Math (the same in every engine) and
+-- cost no extern (libMath1 in lua-to-llvm-ir.abnf); only atan/log/modf/ult need
+-- one, because an argument COUNT or the integer SUBTYPE decides their answer.
 --
--- What made it cheap to close is the OTHER half of that item: the C floor's Math
--- now has the same thirty-four members as the Go twin and as goja, so the
--- float-only functions are a method call on the root Math and cost no extern at
--- all (libMath1 in lua-to-llvm-ir.abnf). Only atan/log/modf/ult need one, because
--- an argument COUNT or the integer SUBTYPE decides their answer.
---
--- EVERY ROW BELOW IS lua 5.5.0's OWN ANSWER, which is installed on this machine.
--- A 641-row differential probe over 31 arguments puts all four legs (both
--- interpreter hosts, llvm.Run and the native binary) on the same output, and 68
--- of those rows differ from real lua in the last ulp because every engine here
--- uses Go's math package where lua uses the platform libm - a pre-existing class,
--- and the values chosen here deliberately avoid it.
+-- EVERY ROW BELOW IS lua 5.5.0's OWN ANSWER. Every engine here uses Go's math
+-- package where lua uses the platform libm, so some arguments differ from real
+-- lua in the last ulp; the values chosen here deliberately avoid those.
 --
 -- THE POINT OF HALF THESE ROWS IS THE SUBTYPE: math.sqrt(4) is the FLOAT 2.0 and
 -- not the integer 2, and math.modf's first result is an integer while its second

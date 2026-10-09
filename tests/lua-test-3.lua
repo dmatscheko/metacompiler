@@ -1,6 +1,5 @@
 -- Generic for over pairs(t): full key/value enumeration in insertion order.
--- (Since the language-completion pass, pairs is genuinely implemented via the
--- js_keys extern - this file used to be a not-implemented demo.) Self-checking:
+-- (In the compiler, pairs is implemented via the js_keys extern.) Self-checking:
 -- the program exits 0 only when the pairs traversal sums the values correctly,
 -- and the two engines must agree byte for byte.
 
