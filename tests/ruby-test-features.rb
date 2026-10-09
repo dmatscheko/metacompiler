@@ -1,14 +1,9 @@
 # Fast feature-matrix test for the Ruby interpreter (ruby-interpreter.abnf) and the
-# LLVM-IR compiler (ruby-to-llvm-ir.abnf). It replaces the four algorithm-themed
-# ruby-test-big-* stress tests: instead of large loops (five sorting routines,
-# Ackermann, sieves, Roman numerals) every implemented construct is exercised with
-# the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
-# recursion stays below depth 6. Floats, class inheritance, modules-as-namespaces,
-# def self.x, ||=, %w literals, for-in and yield are recognized but not implemented
-# (see ruby-test-recognize.rb) and stay out. A failed check prints its id (so a
-# diff pinpoints it) and the file ends with exit(fails); exit 0 and byte-identical
-# output on all four legs (interpreter/compiler x goja/-frozen) mean everything
-# passed.
+# LLVM-IR compiler (ruby-to-llvm-ir.abnf). Every implemented construct is exercised
+# with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+# recursion stays below depth 6. A failed check prints its id (so a diff pinpoints
+# it) and the file ends with exit(fails); exit 0 and byte-identical output on all
+# four legs (interpreter/compiler x goja/-frozen) mean everything passed.
 
 fails = 0
 checks = 0
@@ -93,10 +88,8 @@ check("str-compare-lt", "apple" < "banana", true)
 check("str-unicode-len", "héllo".length, 5)
 check("symbol-not-string", :hello == "hello", false)  # a Symbol is its own type
 
-# ----- Kernel#format directives that reached no engine's table -----
-# %u, %B, %c and %p: the compiled halves printed the conversion LETTER and
-# consumed no argument, the interpreter printed the OPERAND. A width and a
-# precision count CHARACTERS in MRI and all three engines counted BYTES.
+# ----- Kernel#format directives %u, %B, %c and %p -----
+# A width and a precision count CHARACTERS in MRI, not bytes.
 check("fmt-u", "%u" % -5, "-5")
 check("fmt-B", "%#B" % 5, "0B101")
 check("fmt-c", "%c" % 65, "A")
@@ -105,11 +98,8 @@ check("fmt-width-chars", "%6s|" % "café", "  café|")
 check("fmt-prec-chars", "%.2s" % "café", "ca")
 
 # ----- the ARGUMENT SELECTORS and %a/%A -----
-# WHICH argument a directive takes. A live three-way divergence: "%1$s-%2$s" was
-# "a- b" in the interpreter (the digits read as WIDTHS), "$s- $s" in both compiled
-# halves (the "$" read as the CONVERSION) and "a-b" in MRI. %a/%A - the hex-float
-# form - reached the default arm in every engine and printed its own letter.
-# docs/todo.md 1.5.
+# WHICH argument a directive takes (MRI: "%1$s-%2$s" % ["a", "b"] is "a-b"), and
+# %a/%A, the hex-float form.
 check("fmt-numbered", "%2$s-%1$s" % ["a", "b"], "b-a")
 check("fmt-named", "%<x>03d/%{y}" % {:x => 7, :y => "z"}, "007/z")
 check("fmt-star", "%*.*f|" % [8, 2, 3.14159], "    3.14|")
@@ -119,10 +109,7 @@ check("fmt-hexfloat-sub", "%a" % 5.0e-324, "0x1p-1074")
 check("fmt-hexfloat-pad", "%020a" % 100.0, "0x0000000000001.9p+6")
 
 # ----- a MALFORMED format string raises, and #round/#floor/#ceil take digits ---
-# docs/todo.md 1.2 and 1.3. Both were LIVE halves divergences: 2.345.round(2) was
-# 2 in the interpreter half and 2.35 in the compiled ones, and "%5" % 5 was "%5"
-# in the two interpreted halves and "" in the native binary (layer 2's `break`
-# discarded the rest of the string). Values and messages off ruby 2.6.10.
+# Values and messages off ruby 2.6.10.
 def mfmt(f, a)
   begin
     return "OK:" + (f % a)
@@ -143,10 +130,7 @@ check("round-int-digits", [15.round(-1), (-25).round(-1), 5.ceil, (-1234).floor(
 check("round-big-digits", 12345678901234567890.round(-5).to_s, "12345678901234600000")
 
 # ----- Float's scoped constants, and the Float -> Integer domain error -----
-# `Float::INFINITY' aborted the interpreter with *uninitialized constant* and
-# printed an EMPTY LINE in both compiled halves. #to_i of a non-finite Float
-# answered the infinity in all three where MRI raises FloatDomainError, and
-# #nan? / #infinite? / #finite? existed nowhere at all. docs/todo.md 1.5.
+# #to_i of a non-finite Float raises FloatDomainError; #nan? / #infinite? / #finite?.
 check("float-inf-const", Float::INFINITY.to_s, "Infinity")
 check("float-nan-const", Float::NAN.nan?, true)
 check("float-max-const", Float::MAX.to_s, "1.7976931348623157e+308")
@@ -405,10 +389,7 @@ end
 def apply_fn(fx, nx)
   fx.call(nx)
 end
-# A method AS A VALUE is `method(:name)'. It used to be written `double', which
-# worked only because a bare name for a method WITH parameters was left uncalled
-# here - and that guard also swallowed `def q(a = 1); end; q', an ordinary call in
-# MRI (docs/todo.md 1.9). Every def is auto-called now, so this is the spelling.
+# A method AS A VALUE is `method(:name)'; a bare name is always a call.
 check("fn-first-class", apply_fn(method(:double), 21), 42)
 funcs = [method(:double), method(:negate)]
 fsel = funcs[1]
@@ -588,10 +569,7 @@ class Coll
   def initialize(items)
     @items = items
   end
-  # The block is named with &fx, which is how Ruby spells it. It used to be an
-  # ORDINARY parameter that the block bound to because a block travelled as the
-  # bare trailing argument; the block marker ended that, and MRI raised
-  # ArgumentError on the old shape anyway (docs/todo.md 1.9).
+  # The block is named with &fx, which is how Ruby spells it.
   def my_map(&fx)
     mout = []
     @items.each { |x| mout << fx.call(x) }
@@ -852,12 +830,9 @@ end
 check("rethrow", rethrow(), "deeper")
 
 # ----- yield across a begin/rescue, and block_given? without a method -----
-# `yield' inside a begin/rescue used to ABORT the compiler half ("call of a non
-# function value: null") while the interpreter answered: js_rblock read the block
-# out of the argument array of the IR function being emitted, and inside a
-# begin/rescue that is the ctl closure, not the method. The block is published into
-# the method's scope now and every yield site reads it through the scope chain, so a
-# yield nested in a rescue / ensure / block still finds the method's block.
+# A yield nested in a rescue / ensure / block still finds the method's block (the
+# compiler half reads it through the scope chain, not out of the ctl closure's own
+# argument array).
 def yr(l)
   begin
     return l + (yield).to_s
@@ -898,13 +873,12 @@ def bg1
 end
 check("blockgiven-no-block", bg1.inspect, "[false, false]")
 check("blockgiven-with-block", (bg1 { 1 }).inspect, "[true, true]")
-# block_given? at the TOP LEVEL is false in MRI; it used to fail the interpreter's
-# scope lookup outright ("unknown name: $blk").
+# block_given? at the TOP LEVEL is false in MRI.
 check("blockgiven-toplevel", block_given?, false)
 
 # ----- Hash defaults -----
 # Hash.new(v) and Hash.new { |h, k| } keep the default in a hidden slot honoured at
-# EVERY read - including the op-assign and the append reads, which bypassed Hash#[].
+# EVERY read - including the op-assign and the append reads, which do not go through Hash#[].
 hd = Hash.new(7)
 check("hash-default-value", hd["nope"], 7)
 check("hash-default-no-insert", hd.size, 0)
@@ -997,9 +971,8 @@ cb = []
 check("comb-block", cb.inspect, "[\"ab\", \"ac\", \"bc\"]")
 
 # ----- a BARE rand -----
-# `rand` without parentheses used to resolve to the host function value in the
-# interpreter (so rand.class said Proc) and to abort the compiler with "variable not
-# defined: rand", while `rand()` worked everywhere.
+# `rand` without parentheses is a call of Kernel#rand (rand.class is Float), the
+# same as `rand()`.
 check("bare-rand-class", rand.class.to_s, "Float")
 check("bare-rand-range", rand >= 0 && rand < 1, true)
 check("paren-rand-class", rand().class.to_s, "Float")
@@ -1029,9 +1002,6 @@ check("combined-pipeline", tres[0] + tres[1] + tres[2], "o1e2x")
 # everything after a *splat is counted from the END of the argument list, an
 # OPTIONAL one only takes an argument when there are SPARE ones beyond what the
 # required parameters need, and a trailing keyword Hash is not positional at all.
-# The compiler half read each parameter from the front by index and answered
-# "1|2|[3, 1]|3" for the first row - a live halves divergence --cross never reached
-# because no program here had a parameter after a splat (docs/todo.md 1.5).
 def pb_post(a, b = 2, *r, c); "#{a}|#{b}|#{r.inspect}|#{c}"; end
 def pb_tail(a, *r, c, d); "#{a}|#{r.inspect}|#{c}|#{d}"; end
 def pb_kwsplat(*a, **k); "#{a.inspect}|#{k.size}"; end
@@ -1043,13 +1013,8 @@ check("param-two-after-splat", pb_tail(1, 2, 3, 4), "1|[2]|3|4")
 check("param-splat-kwrest", pb_kwsplat(1, 2, z: 3), "[1, 2]|1")
 check("param-opt-spare", pb_optz(1) + " " + pb_optz(1, 2), "1|2|1 1|2|2")
 check("param-block-object", pb_blk { |q, r| q }, "false|Proc|2")
-# A Proc handed over as an ORDINARY argument is not the call's block. Until the
-# BLOCK MARKER existed the two were the same thing in the argument list - the
-# block went in as the bare closure and the callee guessed "the trailing callable
-# is the block" - so an optional parameter took its default instead of the proc,
-# `block_given?' was true for a call that was given no block, and `&b' bound the
-# positional proc. The last two were a live halves divergence the interpreter got
-# right and both compiled halves got wrong (docs/todo.md 1.9).
+# A Proc handed over as an ORDINARY argument is not the call's block: an optional
+# parameter takes the proc, `block_given?' is false, and `&b' is nil.
 pb_proc = proc { |v| v }
 def pb_opt_proc(f = 3); f.class.to_s; end
 def pb_splat_proc(*r); r.size.to_s; end
@@ -1062,17 +1027,13 @@ check("blockmark-given", pb_bg(pb_proc) + "/" + pb_bg { 1 }, "noblk/blk")
 check("blockmark-amp", pb_amp(pb_proc), "Proc|true")
 check("blockmark-real-block", pb_yield { |v| v + 1 }, 6)
 # `&nil' is Ruby for "no block", and it is how a method forwards a block it may
-# not have been given. This half aborted on it with "& needs a proc or a symbol"
-# where both compiled halves answered - a live halves divergence --cross had
-# never reached, found probing docs/todo.md 1.9.
+# not have been given.
 def fwd_target(a = 1, &b); "#{a.class}|#{b.nil?}"; end
 def fwd_caller(*fa, &fb); fwd_target(*fa, &fb); end
 check("forward-absent-block", fwd_caller(7), "Integer|true")
 check("forward-given-block", fwd_caller(7) { }, "Integer|false")
-# Object#send / #__send__ / #public_send were implemented in NO engine: every
-# spelling aborted with "unknown <Type> method: send" in all four legs, so the
-# two halves agreed and --cross was blind. An OPERATOR reached by name is the
-# one shape a type's method table cannot answer.
+# Object#send / #__send__ / #public_send. An OPERATOR reached by name is the one
+# shape a type's method table cannot answer.
 class SendC
   def sm(a = 1); a.class.to_s; end
   def +(o); "plus#{o}"; end
@@ -1086,55 +1047,46 @@ check("send-operator-str", sd[1].send(:+, "b"), "ab")
 check("send-operator-cmp", sd[0].send(:<=>, 4), -1)
 check("send-operator-user", sd[3].send(:+, 5), "plus5")
 check("send-aliases", sd[0].public_send(:abs).to_s + sd[0].__send__(:zero?).to_s, "3false")
-# String#inspect is the quoted SOURCE form, so it ESCAPES - all three engines
-# printed the characters raw, and no gate here can see that because they agreed.
-# The four control spellings Ruby has and JavaScript does not (\a \b \f \v \e),
-# \s, octal and the braced \u{...} were wrong in the LEXER for the same reason
-# (docs/todo.md 1.6).
+# String#inspect is the quoted SOURCE form, so it ESCAPES. The four control
+# spellings Ruby has and JavaScript does not (\a \b \f \v \e), \s, octal and the
+# braced \u{...} are escapes the LEXER has to know.
 check("inspect-escapes", ["a\nb", 1].inspect, '["a\nb", 1]')
 check("inspect-quote-backslash", "g\"h\\i".inspect, '"g\"h\\\\i"')
 check("inspect-control", "\0".inspect + "\x7f".inspect, '"\\u0000""\\u007F"')
 check("inspect-interp-hash", "p#{1}#q".inspect + "r\#{s".inspect, '"p1#q""r\#{s"')
 check("escape-named", "\a".ord + "\b".ord + "\f".ord + "\v".ord + "\e".ord, 65)
 check("escape-space-octal", "\s" + "\101\102" + "\1010" + "\u{41}", " ABA0A")
-# Proc#arity needs the closure's parameter shape, which no function value carries:
-# the interpreter answered 0 for everything and the compiler half aborted.
+# Proc#arity needs the closure's parameter shape, which no function value carries.
 check("arity-proc", "#{proc { }.arity}|#{proc { |x| }.arity}|#{proc { |*x| }.arity}|#{proc { |x, y = 1| }.arity}", "0|1|-1|1")
 check("arity-lambda", "#{lambda { |x| }.arity}|#{lambda { |x = 1| }.arity}|#{->(a, b = 10) { }.arity}", "1|-1|-2")
 
-# ----- Method objects, Proc#to_s and the argument count (docs/todo.md 1.5) -----
+# ----- Method objects, Proc#to_s and the argument count -----
 #
 # The behaviour is asserted natively by SECTION 39 of tests/ruby-test-full.rb -
-# a matrix row is only BUILT, never run (docs/todo.md 4.3), and half of this
-# lives in layer 2. What is here is the EXACT rendering and the exact messages,
-# which the ratchet deliberately does not pin because two of them are recorded
-# divergences from MRI rather than MRI itself.
+# a matrix row is only BUILT, never run, and half of this lives in layer 2. What
+# is here is the EXACT rendering and the exact messages, which the ratchet
+# deliberately does not pin because two of them are recorded divergences from
+# MRI rather than MRI itself.
 def arity_def(a, b = 1); a + b; end
 def arity_none; 0; end
-# A def closure's parameter shape reaches Proc#arity now, gated exactly as before:
+# A def closure's parameter shape reaches Proc#arity, gated as a block's is:
 # markParamArity / emitArity record nothing unless the program names `arity`.
 # A METHOD counts optionals like a LAMBDA and not like a proc, so `def m(a, b = 1)`
-# is -2 and not 1 - every engine answered the proc's 1 until Method existed.
-# Measured against /usr/bin/ruby 2.6.10; #arity is unchanged in 3.x.
+# is -2 and not 1 (/usr/bin/ruby 2.6.10; #arity is unchanged in 3.x).
 check("arity-def", "#{method(:arity_def).arity}|#{method(:arity_none).arity}", "-2|0")
 # HOW A PROC AND A METHOD PRINT. MRI writes `#<Proc:0x0000...@f.rb:12 (lambda)>`
 # and, for a Method, `#<Method: Object#arity_none>`. A Proc's address and source
 # location are the process's own and cannot be matched, so they are LEFT OFF rather
-# than invented - the same rule python's `<function fn>` follows (da43fee). THE
-# METHOD FORM CARRIES NO ADDRESS AT ALL in MRI 2.6 (3.0 appends a source location),
-# so that row is byte-exact against the oracle rather than a near miss. Before this,
-# the interpreter half printed the closure's whole MetaJS SOURCE TEXT and both
-# compiled halves printed the C floor's `[function]`. docs/todo.md 2.5.
+# than invented - the same rule python's `<function fn>` follows. THE METHOD FORM
+# CARRIES NO ADDRESS AT ALL in MRI 2.6 (3.0 appends a source location), so that
+# row is byte-exact against the oracle rather than a near miss.
 check("proc-to-s", "#{proc { }}|#{->(x) { x }}|#{lambda { |x| x }}", "#<Proc>|#<Proc (lambda)>|#<Proc (lambda)>")
 check("method-to-s", "#{method(:arity_none)}|#{method(:arity_none).class}", "#<Method: Object#arity_none>|Method")
 # Method#name, #to_proc and the two type tests. A Method is NOT a Proc in MRI and a
 # Method#to_proc IS one - a LAMBDA one, carrying the Method's arity.
 check("method-name", "#{method(:arity_def).name.inspect}|#{method(:arity_def).is_a?(Method)}|#{method(:arity_def).is_a?(Proc)}", ":arity_def|true|false")
 check("method-to-proc", "#{method(:arity_def).to_proc.class}|#{method(:arity_def).to_proc.arity}|#{method(:arity_def).to_proc.lambda?}", "Proc|-2|true")
-# method(:name) reaches an INSTANCE METHOD of the running self, bound to it. It
-# aborted with "undefined method 'inst' for class 'Object'" in every engine, and
-# the note that said so called a variadic bound closure impossible in layer 2 -
-# MetaJS does have `arguments`.
+# method(:name) reaches an INSTANCE METHOD of the running self, bound to it.
 class MethodValC
   def inst(a); a + 10; end
   def probe; "#{method(:inst).call(5)}|#{method(:inst).arity}|#{method(:inst).class}"; end
@@ -1184,13 +1136,11 @@ check("argc-optional", argc_msg2, "wrong number of arguments (given 0, expected 
 check("argc-splat", argc_msg3, "wrong number of arguments (given 0, expected 1+)")
 
 
-# ----- docs/todo.md 1.3: the ruby residue -----------------------------------
-# Every value here was measured against /usr/bin/ruby 2.6.10, whose behaviour on
-# all of it is unchanged in 3.x.
+# ----- assorted MRI behaviours ----------------------------------------------
+# Every value here is /usr/bin/ruby 2.6.10's answer, unchanged in 3.x.
 
-# super(m) inside a user Exception subclass' initialize. The superclass is a
-# BUILTIN and carries no compiled `initialize', so both compiled halves aborted
-# with *unknown super method 'initialize'* while this half ran it.
+# super(m) inside a user Exception subclass' initialize: the superclass is a
+# BUILTIN and carries no compiled `initialize'.
 class T13Err < StandardError
   def initialize(m)
     super("wrapped: " + m)
@@ -1242,8 +1192,8 @@ def t13_zde
 end
 check("t13-zerodiv-catchable", t13_zde, "divided by 0")
 
-# Kernel#Integer / #Float / #String / #Array: the conversion functions, which
-# resolved to the CLASS object in every engine.
+# Kernel#Integer / #Float / #String / #Array: the conversion functions, not the
+# classes of the same name.
 check("t13-kernel-int", Integer("0x1f"), 31)
 check("t13-kernel-int-base", Integer("ff", 16), 255)
 check("t13-kernel-int-under", Integer("1_000"), 1000)
@@ -1295,8 +1245,8 @@ t13_r4 = 1..3
 check("t13-range-size", t13_r4.size, 3)
 check("t13-range-min-empty", t13_r.min, nil)
 
-# The String surface. bytes / tr / center / ljust / rjust / count / delete were
-# the six the item named; seventy-eight were missing.
+# The String surface: bytes / tr / center / ljust / rjust / count / delete and
+# their families.
 check("t13-bytes", "caf\u00e9".bytes, [99, 97, 102, 195, 169])
 check("t13-bytesize", "caf\u00e9".bytesize, 5)
 check("t13-getbyte", "hello".getbyte(1), 101)
@@ -1358,14 +1308,11 @@ check("t13-upto", t13_up, ["ab", "ac", "ad"])
 
 # ----- mixins as ancestors: is_a?, ancestors, and the module operators -----
 # ruby-to-llvm-ir.abnf FLATTENS `include M' at build time - M's method bodies are
-# re-emitted into the including class - so nothing at run time knew M had ever been
-# there: `obj.is_a?(M)' and `case obj when M' answered FALSE in both compiled halves
-# and TRUE in the interpreter, a live halves divergence --cross had never reached.
-# The emitter now records the ancestry ($mix$/$xmix$ + __mixorder/__preorder) and
-# all three engines read it. A module included INTO A MODULE was invisible in every
-# engine, and Module#ancestors / #include? / #< / #<= / #> / #>= existed in none of
-# them. docs/todo.md 1.3. Every want here is /usr/bin/ruby 2.6.10's answer, and the
-# constructs are all Ruby-2 forms whose behaviour is unchanged in 3.x.
+# re-emitted into the including class - so the ancestry is recorded separately
+# ($mix$/$xmix$ + __mixorder/__preorder) for `obj.is_a?(M)', `case obj when M',
+# Module#ancestors / #include? / #< / #<= / #> / #>= and a module included INTO A
+# MODULE. Every want here is /usr/bin/ruby 2.6.10's answer, and the constructs
+# are all Ruby-2 forms whose behaviour is unchanged in 3.x.
 module MixM
   def mix_hello; "hi"; end
 end
@@ -1422,7 +1369,7 @@ check("mix-extend-inst", MixD.new.is_a?(MixM), false)
 check("mix-prepend-super", MixW.new.mix_word, "ABC")
 check("mix-prepend-isa", MixW.new.is_a?(MixL), true)
 check("mix-prepend-order", MixW.ancestors, [MixL, MixW, MixM, Object, Kernel, BasicObject])
-# Comparable is NOT universal - the interpreter half answered true for everything.
+# Comparable is NOT universal.
 check("mix-comparable-yes", MixSz.new(1).is_a?(Comparable), true)
 check("mix-comparable-no", mix_a.is_a?(Comparable), false)
 check("mix-comparable-op", (MixSz.new(1) < MixSz.new(2)), true)
@@ -1456,15 +1403,10 @@ check("mix-superclass-exc", MixErr.superclass, StandardError)
 check("mix-superclass-prepend", MixW.superclass, Object)
 
 # ----- a Range is a VALUE, not a materialized Array -----
-# A bounded range literal used to be MATERIALIZED into an Array by both compiled
-# halves, so `p (1..3)' printed [1, 2, 3], `.begin' aborted with *unknown Array
-# method*, `r.class' said Array, a range could not be a Hash key and `case v when r'
-# (a range in a VARIABLE) never matched. The interpreter half had a real Range and
-# was wrong the other way: it printed the array for #inspect, wrapped `*r' as one
-# element and had no #step. Every want below is /usr/bin/ruby 2.6.10's own answer -
-# ranges are a Ruby-2 construct whose behaviour is unchanged in 3.x - EXCEPT the
-# five beginless-range rows at the end, which 2.6 cannot even parse (beginless
-# ranges are 2.7) and which are therefore spec-derived and marked. docs/todo.md 1.5.
+# Every want below is /usr/bin/ruby 2.6.10's own answer - ranges are a Ruby-2
+# construct whose behaviour is unchanged in 3.x - EXCEPT the five beginless-range
+# rows at the end, which 2.6 cannot even parse (beginless ranges are 2.7) and
+# which are therefore spec-derived and marked.
 rng_lo = [1, 3, 'a', 5, 1, 1]
 rng_hi = [3, 1, 'e', 5, -1, 1]
 rng_r   = (rng_lo[0]..rng_hi[0])
@@ -1529,14 +1471,14 @@ rng_acc = []
 rng_each_ret = rng_r.each { |v| rng_acc << v }
 check("rng-each", rng_acc, [1, 2, 3])
 check("rng-each-returns-self", rng_each_ret, rng_r)
-# Range#step existed in NO engine, interpreter included.
+# Range#step.
 check("rng-step", (1..10).step(3).to_a, [1, 4, 7, 10])
 check("rng-step-str", ('a'..'e').step(2).to_a, ["a", "c", "e"])
 rng_st = []
 (1..7).step(3) { |v| rng_st << v }
 check("rng-step-block", rng_st, [1, 4, 7])
 # for-in, splat and destructuring - all three lower to js_pylen + js_pyget, which
-# answered 0 and had no range arm at all, so each would have run ZERO times.
+# need a range arm or each would run ZERO times.
 rng_for = []
 for rng_v in (1..3)
   rng_for << rng_v
@@ -1548,7 +1490,7 @@ check("rng-splat-destructure", [rng_p1, rng_p2, rng_p3], [1, 2, 3])
 def rng_three(a, b, c); [a, b, c]; end
 check("rng-splat-args", rng_three(*rng_r), [1, 2, 3])
 # Membership, ===, and case/when - both as a literal and through a VARIABLE, which
-# is the form that did not reach js_rcase.
+# is the form that has to reach js_rcase.
 check("rng-include", rng_r.include?(2), true)
 check("rng-include-no", rng_r.include?(4), false)
 check("rng-include-excl", rng_x.include?(3), false)
@@ -1565,7 +1507,7 @@ rng_h = {(1..2) => "a", (3..4) => "b"}
 check("rng-hash-key", rng_h[(3..4)], "b")
 check("rng-hash-keys", rng_h.keys, [(1..2), (3..4)])
 check("rng-hash-size", rng_h.size, 2)
-# SLICING, which was the half that was already right and must not regress.
+# SLICING.
 check("rng-slice-arr", rng_arr[rng_r], [20, 30, 40])
 check("rng-slice-lit", rng_arr[1..2], [20, 30])
 check("rng-slice-lit-excl", rng_arr[1...3], [20, 30])
@@ -1601,11 +1543,10 @@ check("rng-beginless-include", rng_bl.include?(1), true)
 check("rng-beginless-include-no", rng_bl.include?(9), false)
 check("rng-beginless-slice", "hello"[..4], "hello")
 
-# ----- the per-object singleton method table (docs/todo.md 1.3) -----
-# `o.extend(M)' was "unknown method 'extend'" in all three engines and a def
-# inside `class << VALUE' was notImplemented in the emitter: there was no
-# per-object table to check ahead of the __class chain. Every want is
-# /usr/bin/ruby 2.6.10's answer; all the forms here are Ruby-2 syntax. The
+# ----- the per-object singleton method table -----
+# `o.extend(M)' and a def inside `class << VALUE' go to a per-object table that
+# is checked ahead of the __class chain. Every want is /usr/bin/ruby 2.6.10's
+# answer; all the forms here are Ruby-2 syntax. The
 # ratchet's SECTION 42 carries the ordering rules; these are the rows the ratchet
 # does not repeat - a module that includes another, and a CLASS object as the
 # receiver, where `extend' has to reach the class-method side.
@@ -1643,12 +1584,11 @@ class << sg_f
   def sg_cm; "override"; end
 end
 check("sing-eigen", sg_f.sg_cm + SgC.new.sg_cm, "overrideC")
-# ----- Symbol is Comparable (docs/todo.md 1.3) -----
+# ----- Symbol is Comparable -----
 # Symbol#<=> compares the NAMES, so #sort / #min / #max / #between? and the four
-# relational operators all work on symbols. Every engine here raised
-# *comparison of Symbol with :a failed* instead, which made `h.keys.sort'
-# unusable. `:a <=> 1' is nil, which is what makes the mixed pair still raise.
-# Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's answer.
+# relational operators all work on symbols. `:a <=> 1' is nil, which is what makes
+# the mixed pair still raise. Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's
+# answer.
 check("sym-sort", [:b, :a, :c].sort, [:a, :b, :c])
 check("sym-cmp", [(:a <=> :b), (:b <=> :a), (:a <=> :a)], [-1, 1, 0])
 check("sym-cmp-num", (:a <=> 1), nil)

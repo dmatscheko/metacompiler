@@ -1,11 +1,10 @@
 # Ruby begin/rescue/else/ensure and raise, genuinely executed (interpreter and
 # compiler).
 #
-# A raise unwinds through calls to the first rescue (exception types are parsed but not
-# discriminated), which binds the value with `=> e`; else runs only when the body raised
-# nothing; ensure always runs. A return/break/next leaving a begin body works in both
-# engines. (Exceptions are raised as plain values here - integers, strings and a hash -
-# since builtin exception classes are outside the subset.)
+# A raise unwinds through calls to the first matching rescue, which binds the
+# value with `=> e`; else runs only when the body raised nothing; ensure always
+# runs. A return/break/next leaving a begin body works in both engines. This file
+# raises plain values - integers, strings and a hash.
 #
 # The program runs top to bottom and ends with exit(fails), so it exits 0 exactly when
 # every check passes; the interpreter and compiler must agree.

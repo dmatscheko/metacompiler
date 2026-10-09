@@ -82,9 +82,8 @@ def s02
   check("num7", 10_000_000_000 * 10 == 100_000_000_000)
   # The FUSED `x - floor(x/y)*y`. Read out of an array so nothing folds it, and
   # written where fusion CAN bite: q*y leaves the exactly-representable range, so
-  # the two-rounding answer is one whole unit out. abnf/jsrt.go says math.FMA,
-  # ruby-rt.metajs says rbFmaSub and ruby-interpreter.abnf says fmaSub; all three
-  # answer what /usr/bin/ruby answers, which is the fused one.
+  # the two-rounding answer is one whole unit out. /usr/bin/ruby answers the fused
+  # one.
   fm = [9007199254740991, -3, -7, 9007199254740992, 18014398509481982]
   check("num8", fm[0] % fm[1] == -2 && fm[0] % fm[2] == -4)
   check("num9", fm[3] % fm[1] == -1 && fm[3] % fm[2] == -3 && fm[4] % fm[2] == -1)
@@ -102,13 +101,11 @@ def s03
   check("pct3", %w[one two three] == ["one", "two", "three"])
   check("pct4", %W[a#{1} b#{2}] == ["a1", "b2"])
   check("pct5", %i[x y] == [:x, :y] && %I[k#{9}] == [:k9])
-  # The escapes Ruby has and JavaScript does not: unescapeJs of the shared core
-  # copied \a \b \f \v \e through as the bare letter, read "\101" as NUL followed
-  # by "01" and did not know \s or the braced \u{...} at all (docs/todo.md 1.6).
+  # The escapes Ruby has and JavaScript does not: \a \b \f \v \e, an octal byte
+  # ("\101" is "A"), \s and the braced \u{...}.
   check("str6", "\a".ord == 7 && "\b".ord == 8 && "\f".ord == 12 && "\v".ord == 11 && "\e".ord == 27 && "\s" == " ")
   check("str7", "\101\102" == "AB" && "\1010" == "A0" && "\u{41}" == "A" && "\x4".ord == 4)
-  # String#inspect is the quoted SOURCE form, so it ESCAPES. All three engines
-  # printed the characters raw, which no gate here can see because they agreed.
+  # String#inspect is the quoted SOURCE form, so it ESCAPES.
   check("str8", "a\nb".inspect == '"a\nb"' && "g\"h".inspect == '"g\"h"' && "e\\f".inspect == '"e\\\\f"')
   check("str9", ["a\nb", 1].inspect == '["a\nb", 1]' && "\0".inspect == '"\\u0000"' && "\x7f".inspect == '"\\u007F"')
   check("str10", "p#{1}#q".inspect == '"p1#q"' && "r\#{s".inspect == '"r\#{s"')
@@ -137,11 +134,8 @@ def s05
   check("rng1", (1..4).to_a == [1, 2, 3, 4] && (1...4).to_a == [1, 2, 3])
   check("rng2", ("a".."c").to_a == ["a", "b", "c"] && ((1..3) === 2) == true)
   check("rng3", (1..9).include?(5) && (5..).cover?(99) && !(5..).cover?(4))
-  # A Range is a VALUE, not a materialized Array. Both compiled halves used to
-  # MATERIALIZE a bounded range literal, so `p (1..3)' printed [1, 2, 3], `.begin'
-  # aborted, `r.class' said Array and a range could not be a Hash key; the
-  # interpreter half printed the array for #inspect, wrapped `*r' as one element
-  # and had no #step. docs/todo.md 1.5.
+  # A Range is a VALUE, not a materialized Array: `p (1..3)' prints 1..3, `.begin'
+  # works, `r.class' is Range, a range can be a Hash key and `*r' splices.
   rr = (1..3)
   check("rng4", rr.inspect == "1..3" && rr.to_s == "1..3" && "#{rr}" == "1..3")
   check("rng5", ("a".."c").inspect == "\"a\"..\"c\"" && ("a".."c").to_s == "a..c")
@@ -150,8 +144,8 @@ def s05
   check("rng8", rr.first(2) == [1, 2] && rr.last(2) == [2, 3] && rr.first == 1)
   check("rng9", rr.size == 3 && rr.min == 1 && rr.max == 3 && (1...3).max == 2)
   check("rng10", rr == (1..3) && rr != (1...3) && (1..3).eql?((1..3)))
-  # for-in, splat and destructuring all lower to js_pylen + js_pyget, which
-  # answered 0 for a range and had no range arm - each would have run ZERO times.
+  # for-in, splat and destructuring all lower to js_pylen + js_pyget, which need a
+  # range arm.
   rng_acc = []
   for rv in (1..3)
     rng_acc << rv
@@ -159,11 +153,11 @@ def s05
   p1, p2, p3 = *rr
   check("rng11", rng_acc == [1, 2, 3] && [*rr] == [1, 2, 3] && [p1, p2, p3] == [1, 2, 3])
   check("rng12", (1..10).step(3).to_a == [1, 4, 7, 10] && ("a".."e").step(2).to_a == ["a", "c", "e"])
-  # `when' with the range in a VARIABLE is the form that does not reach js_rcase.
+  # `when' with the range in a VARIABLE has to reach js_rcase too.
   check("rng13", (case 2 when rr then "in" else "out" end) == "in")
   rh = {(1..2) => "a", (3..4) => "b"}
   check("rng14", rh[(3..4)] == "b" && rh.size == 2 && [(1..2), (1..2)].uniq.size == 1)
-  # The slicing half, which was already right and must not regress.
+  # Slicing.
   ra = [10, 20, 30, 40]
   rw = [10, 20, 30, 40]
   rw[1..2] = [9]
@@ -198,12 +192,11 @@ def s06
   check("fmt16", "%#012.3g" % -1.5 == "-00000001.50" && "%#+g" % 1.5 == "+1.50000" && "%#g" % (1.0 / 0.0) == "Inf")
   check("fmt17", "%#x" % 255 == "0xff" && "%#X" % 255 == "0XFF" && "%#o" % 8 == "010" && "%#b" % 5 == "0b101" && "%#x" % 0 == "0")
   check("fmt18", "%#010x" % 255 == "0x000000ff" && "%#-10x" % 255 == "0xff      " && ("%#g %d" % [1.5, 7]) == "1.50000 7" && "%#.0f" % 1.0 == "1." && "%#.0e" % 1.0 == "1.e+00")
-  # %d TRUNCATES a negative float, it does not floor it. The interpreter floored.
+  # %d TRUNCATES a negative float, it does not floor it.
   check("fmt19", "%d" % -1.5 == "-1" && "%d" % -0.5 == "0" && "%i" % 2.9 == "2" && "%05d" % -1.5 == "-0001")
   # ----- the three integer directives, all read out of an ARRAY ---------------
   # An integer directive converts the Float with to_i and prints the resulting
-  # Integer EXACTLY. %d used to print the double's shortest form ("1e+30") and
-  # %x/%o/%b saturated at int64 ("7fffffffffffffff").
+  # Integer EXACTLY - never the double's shortest form, never saturated at int64.
   big = [1.0e20, 1.0e30, -1.0e20, 9007199254740992.0, 1.0e300]
   check("fmt20", "%d" % big[0] == "100000000000000000000" && "%d" % big[1] == "1000000000000000019884624838656")
   check("fmt21", "%x" % big[0] == "56bc75e2d63100000" && "%o" % big[3] == "400000000000000000" &&
@@ -228,13 +221,8 @@ def s06
   check("fmt30", "%#.5o" % zed[1] == "00377" && "%#.1o" % zed[1] == "0377" && "%#.5x" % zed[1] == "0x000ff")
   # A NON-FINITE float reaching an INTEGER directive raises, because MRI's %d/%x/
   # %o/%b convert the operand with to_i and Float::INFINITY.to_i is a
-  # FloatDomainError. This used to answer the value's own word or Go's int64
-  # saturation - agreed across the three engines and wrong against MRI - and
-  # 9102c91 pinned only "the row terminates with digits" precisely BECAUSE the
-  # saturation is architecture-dependent (manual 7.9's giFromFloat note, +Inf is
-  # MaxInt64 on arm64 and MinInt64 on amd64). Raising removes the architecture
-  # dependence rather than papering over it. The FLOAT directives do not raise:
-  # "%f" % Float::INFINITY is "Inf". docs/todo.md 1.5.
+  # FloatDomainError. The FLOAT directives do not raise: "%f" % Float::INFINITY is
+  # "Inf".
   inf = [1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0]
   check("fmt31", (("%x" % inf[0]) rescue "R") == "R" && (("%o" % inf[1]) rescue "R") == "R" &&
                  (("%b" % inf[2]) rescue "R") == "R")
@@ -243,10 +231,7 @@ def s06
                  (begin; "%d" % inf[2]; rescue FloatDomainError => e; e.message; end) == "NaN")
   check("fmt44", "%f" % inf[0] == "Inf" && "%e" % inf[1] == "-Inf" && "%s" % inf[2] == "NaN" &&
                  "%+f" % inf[0] == "+Inf")
-  # %u, %B, %c and %p were in no engine's directive table: the two compiled halves
-  # printed the conversion LETTER and consumed no argument, while the interpreter
-  # printed the OPERAND - a live halves divergence in both directions, which
-  # --cross never saw because no test used any of the four. MRI: %u is %d (the
+  # MRI: %u is %d (the
   # 1.8 "unsigned" meaning is long gone), %B is %b with an UPPERCASE # prefix,
   # %c is a code point and %p is #inspect. Settled against ruby 2.6.10; the
   # integer directives are unchanged in 3.x.
@@ -260,19 +245,12 @@ def s06
   check("fmt38", "%p" % "a" == "\"a\"" && "%p" % nil == "nil" && "%p" % 1.0 == "1.0" && "%10p|" % 1 == "         1|")
   check("fmt39", "%p" % [[1, "a", nil]] == "[1, \"a\", nil]" && "%.2p" % "abcdef" == "\"a" && "%-6p|" % 1 == "1     |")
   # A width and a precision count CHARACTERS in MRI, not bytes: "%10s" % "café"
-  # is SIX spaces and a result of String#length 10 and #bytesize 11. All three
-  # engines counted BYTES - layer 2 was written to match abnf/jsrt.go's len(body)
-  # and that was never checked against MRI - and chapter 7.7 of the manual states
-  # the byte rule and cites this very example. Both halves agreeing and both
-  # wrong, the one class byte-identity cannot see. The interpreter half dropped a
-  # %s precision entirely, which was a third live divergence in the same spot.
+  # is SIX spaces and a result of String#length 10 and #bytesize 11.
   check("fmt40", "%10s|" % "café" == "      café|" && "%.2s" % "café" == "ca" && "%.1s" % "日本語" == "日")
   check("fmt41", "%10s|" % "日本語" == "       日本語|" && "%-6s|" % "日本" == "日本    |" && "%.3s" % "日本語" == "日本語")
   # An ASTRAL character is ONE character to MRI and two UTF-16 units to the floor.
   check("fmt42", "%5c|" % 128512 == "    😀|" && "%-3c|" % 128512 == "😀  |")
   # A STRING operand must be EXACTLY one character, and MRI's message is its own.
-  # This used to be listed here as one of three deliberate divergences - all three
-  # engines took the FIRST character, and "" answered "" - and it is closed now.
   check("fmt43", s06c("zed") == "AE:%c requires a character" &&
                  s06c("") == "AE:%c requires a character" &&
                  s06c("z") == "OK:z" && s06c("日") == "OK:日")
@@ -287,10 +265,7 @@ def s06
   # messages is expressible without an encoding concept, so both engines answer "".
   check("fmt43b", "%c" % 1114112 == "" && "%c" % -1 == "")
   # ----- the ARGUMENT SELECTORS -----
-  # WHICH argument a directive takes. A three-way divergence until now:
-  # "%1$s-%2$s" % ["a","b"] was "a- b" in the interpreter (the 1 and the 2 read as
-  # WIDTHS), "$s- $s" in both compiled halves (the "$" read as the CONVERSION) and
-  # "a-b" in MRI. docs/todo.md 1.5.
+  # WHICH argument a directive takes: "%1$s-%2$s" % ["a","b"] is "a-b" in MRI.
   ab = ["a", "b", "c"]
   check("fmt45", "%1$s-%2$s" % ab == "a-b" && "%2$s-%1$s" % ab == "b-a" &&
                  "%1$s-%1$s" % ab == "a-a" && "%3$s%1$s%2$s" % ab == "cab")
@@ -312,7 +287,6 @@ def s06
   check("fmt50", (("%{z}" % hh) rescue "K") == "K" && (("%{x}" % {"x" => 1}) rescue "K") == "K" &&
                  (("%<x>s" % [1]) rescue "A") == "A")
   # ----- %a / %A, the hex-float form -----
-  # Missing in all three engines: the default arm printed the conversion LETTER.
   # [-]0x1.<hex fraction>p<binary exponent>, normalised so the leading digit is 1
   # for every non-zero value - A SUBNORMAL IS NORMALISED TOO, which is the row
   # 5.0e-324 pins - and 0x0p+0 for zero. No precision means no trailing zeros.
@@ -350,14 +324,11 @@ def s06
   # with no precision all print the exact digits, and MRI is right again at 12 and
   # at 14 - a tie test firing on an exact value in sprintf.c, not a rule. All
   # three engines here print the exact digits; the other 20 rows of the selector
-  # and %a blocks were run under /usr/bin/ruby verbatim and all 20 are true.
+  # and %a blocks are true under /usr/bin/ruby verbatim.
   check("fmt59", "%a" % 5 == "0x1.4p+2" && "%.13a" % hf[7] == "0x1.5555555555555p-2")
   # ----- Float's scoped constants -----
   # `Float::INFINITY' - the ordinary way to write an infinity in Ruby and the only
-  # way to write a NaN - aborted the interpreter half with *uninitialized constant
-  # Float::INFINITY* and printed an EMPTY LINE in both compiled halves (js_get of a
-  # slot no class object carries answers nil). A hard error against a silent wrong
-  # answer, and --cross saw neither because nothing named one. docs/todo.md 1.5.
+  # way to write a NaN.
   check("flc1", Float::INFINITY.to_s == "Infinity" && (-Float::INFINITY).to_s == "-Infinity" &&
                 Float::NAN.nan? == true)
   one = [1.0, 0.0]
@@ -416,16 +387,13 @@ def s07
   check("var4", defined?(S07_LIMIT) == "constant" && defined?($s07_hits) == "global-variable")
   check("var5", defined?(local) == "local-variable" && defined?(puts) == "method" && defined?(zz_undefined) == nil)
   # defined? on a block parameter the caller did NOT supply. The slot holds
-  # undefined, js_scope_typeof cannot tell that from absent, and both compiled
-  # halves therefore answered nil where MRI says "local-variable" (docs/todo.md
-  # 5.3: the probe moved to lib/ruby-rt.metajs, where scopeHas CAN tell).
+  # undefined, which js_scope_typeof cannot tell from absent, so the probe lives in
+  # lib/ruby-rt.metajs, where scopeHas CAN tell. MRI says "local-variable".
   check("var6", [7].map { |x, y| defined?(y) } == ["local-variable"])
   check("var7", (proc { |q, r| [defined?(q), defined?(r)] }.call(1)) == ["local-variable", "local-variable"])
-  # `self` has its own kind in MRI and is always defined; the scope probe answered
-  # "local-variable" inside a method and nil at top level.
+  # `self` has its own kind in MRI and is always defined.
   check("var8", defined?(self) == "self")
-  # MRI gives each keyword literal its own kind. Both halves used to answer
-  # "expression" for all three - agreed, and contradicted by the oracle.
+  # MRI gives each keyword literal its own kind.
   check("var9", defined?(nil) == "nil" && defined?(true) == "true" && defined?(false) == "false")
 end
 # ===== SECTION 08: multiple assignment and splats =====
@@ -505,9 +473,8 @@ def s12
   check("prc4", add.lambda? == true && pr.lambda? == false)
   check("prc5", Proc.new { |x| x + 1 }.call(41) == 42)
   check("prc6", -> { return 7 }.call == 7)
-  # Proc#arity needs the closure's parameter shape, which no function value carries:
-  # both halves used to answer 0 (the compiler half aborted outright), and a proc
-  # and a lambda count OPTIONAL parameters differently (docs/todo.md 1.6).
+  # Proc#arity needs the closure's parameter shape, which no function value carries,
+  # and a proc and a lambda count OPTIONAL parameters differently.
   check("prc7", pr.arity == 2 && sq.arity == 1 && proc { |*a| }.arity == -1 && proc { }.arity == 0)
   check("prc8", add.arity == -2 && lambda { |x = 1| }.arity == -1 && proc { |x = 1| }.arity == 0)
   check("prc9", sq.class.to_s == "Proc" && sq.nil? == false)
@@ -537,9 +504,7 @@ def s13
   # Ruby does not bind positional parameters left to right at fixed indices:
   # everything after a *splat is counted from the END, an optional one only takes an
   # argument when there are SPARE ones, and a trailing keyword Hash is not
-  # positional at all. The compiler half read each by index and answered
-  # "1|2|[3, 1]|3" for the first row - a live halves divergence --cross never
-  # reached (docs/todo.md 1.5).
+  # positional at all.
   check("mth8", s13_post(1, 2, 3, 1) == "1|2|[3]|1" && s13_post(1, 2) == "1|2|[]|2")
   check("mth9", s13_tail(1, 2, 3, 4) == "1|[2]|3|4" && s13_tail(1, 2, 3) == "1|[]|2|3")
   check("mth10", s13_kwsplat(1, 2, z: 3) == "[1, 2]|1" && s13_optz(1) == "1|2|1" && s13_optz(1, 2) == "1|2|2")
@@ -645,9 +610,9 @@ class S17Size
   def initialize(n); @n = n; end
   def <=>(o); n <=> o.n; end
 end
-# A module included INTO A MODULE, and a mixin inherited through a superclass:
-# both were invisible in every engine, and the mixin was invisible to is_a? in
-# the two COMPILED halves, which flatten `include' at build time. docs/todo.md 1.3.
+# A module included INTO A MODULE, and a mixin inherited through a superclass.
+# The two COMPILED halves flatten `include' at build time, so is_a? needs the
+# recorded ancestry.
 module S17Inner2; def deep_tag; "deep"; end; end
 module S17Mid; include S17Inner2; end
 class S17Deep; include S17Mid; end
@@ -1183,20 +1148,19 @@ def s31
   check("m15", a == 3)
 end
 # ===== SECTION 32: interpreter/compiler agreement ratchet =====
-# Every check here is a divergence that WAS live between ruby-interpreter.abnf
-# and ruby-to-llvm-ir.abnf (or a silent data loss in the shared runtime), with
-# the expected value taken from MRI itself. The matrix cannot see this class of
-# bug - it compares each engine against itself under goja and -frozen - so the
-# assertions live here.
+# Every check here is a place where ruby-interpreter.abnf and ruby-to-llvm-ir.abnf
+# (or the shared runtime) are easy to get apart, with the expected value taken
+# from MRI itself. The matrix cannot see this class of bug - it compares each
+# engine against itself under goja and -frozen - so the assertions live here.
 class S32Klass
 end
 def s32
-  # Array#push is variadic; the compiler runtime kept only the first argument.
+  # Array#push is variadic.
   a = [1]
   a.push(2, 3, 4)
   check("n01", a.length == 4)
   check("n02", a == [1, 2, 3, 4])
-  # nil's conversions. nil.to_s was "null" in the compiler and "" in the interpreter.
+  # nil's conversions: nil.to_s is "".
   check("n03", nil.to_s == "")
   check("n04", "[" + nil.to_s + "]" == "[]")
   check("n05", "[#{nil}]" == "[]")
@@ -1207,11 +1171,11 @@ def s32
   check("n09", S32Klass.to_s == "S32Klass")
   check("n10", "#{S32Klass}" == "S32Klass")
   check("n11", 1.class.to_s == "Integer")
-  # MatchData#to_a aborted in the compiler (the .to_a suffix was the identity).
+  # MatchData#to_a.
   m = "hello world".match(/(\w+) (\w+)/)
   check("n12", m.to_a == ["hello world", "hello", "world"])
   check("n13", m.captures == ["hello", "world"])
-  # Hash#to_a is the list of pairs; it used to return the hash itself.
+  # Hash#to_a is the list of pairs.
   h = {"a" => 1, "b" => 2}
   check("n14", h.to_a == [["a", 1], ["b", 2]])
   # Ruby to_s rendering of the container types.
@@ -1220,36 +1184,31 @@ def s32
   # Float#to_s uses RUBY'S exponent window, not JavaScript's: numeric.c flo_to_s
   # goes exponential when decpt < -3 or decpt > 15, the mantissa always carries a
   # fraction digit and the exponent is always signed and at least two digits. Every
-  # literal below is ruby 2.6.10p210's own answer. Before the fix the right-hand
-  # sides read 1000000000000000.0 / 1234567890123456.0 / 0.00001 / 100000000000000000000.
+  # literal below is ruby 2.6.10p210's own answer.
   check("n16b", 1e15.to_s == "1.0e+15" && 999999999999999.0.to_s == "999999999999999.0")
   check("n16c", 1234567890123456.0.to_s == "1.234567890123456e+15" &&
                 1e20.to_s == "1.0e+20")
   check("n16d", 1e-5.to_s == "1.0e-05" && 0.0001.to_s == "0.0001" &&
                 5.0e-324.to_s == "5.0e-324")
-  # -0.0 keeps its sign. The compiled half already answered this; the interpreter's
-  # unary minus was `0 - x`, which returns +0.0 for a zero operand.
+  # -0.0 keeps its sign: unary minus is not `0 - x`, which returns +0.0 for a zero
+  # operand.
   check("n16e", (-0.0).to_s == "-0.0" && 0.0.to_s == "0.0" &&
                 (-1e16).to_s == "-1.0e+16")
   # Float#% - numeric.c flodivmod. The remainder takes the DIVISOR's sign, but a
   # ZERO remainder keeps the DIVIDEND's, because flodivmod starts from fmod and
-  # its `mod += y` correction cannot fire on a zero. Ours computed
-  # x - floor(x/y)*y, where -4.0 - (-4.0) is +0.0 and the sign was lost. Every
-  # right-hand side below is ruby 2.6.10p210's own answer.
+  # its `mod += y` correction cannot fire on a zero; x - floor(x/y)*y would lose
+  # the sign. Every right-hand side below is ruby 2.6.10p210's own answer.
   check("n16f", (-0.0 % 1.0).to_s == "-0.0" && (0.0 % 1.0).to_s == "0.0")
   check("n16g", (-4.0 % 2.0).to_s == "-0.0" && (4.0 % 2.0).to_s == "0.0")
   check("n16h", (-4.0 % -2.0).to_s == "-0.0" && (4.0 % -2.0).to_s == "0.0" &&
                 (-7.5 % 2.5).to_s == "-0.0")
-  # ...and the non-zero remainders, which the divisor's sign already governed and
-  # which the fix must leave exactly where they were.
+  # ...and the non-zero remainders, which the divisor's sign governs.
   check("n16i", (-5.0 % 2.0).to_s == "1.0" && (5.0 % -2.0).to_s == "-1.0" &&
                 (-0.0 % -1.0).to_s == "-0.0" && (0.0 % -1.0).to_s == "0.0")
   # ...and the DIVIDENDS BIG ENOUGH THAT floor(x/y)*y IS NO LONGER EXACT, which is
-  # the rest of flodivmod and the reason `%` is now literally
-  # `mod = fmod(x, y); if (y*mod < 0) mod += y`. The old x - floor(x/y)*y answered
-  # 0.0 for all of these in the interpreter and a rounded multiple of y in the
-  # compiler - the two halves did not even agree. 1e16 is the smallest one here:
-  # it is not an astronomical corner. Every right-hand side is ruby 2.6.10p210's.
+  # the rest of flodivmod: `%` is literally `mod = fmod(x, y); if (y*mod < 0) mod += y`.
+  # 1e16 is the smallest one here: it is not an astronomical corner. Every
+  # right-hand side is ruby 2.6.10p210's.
   check("n16j", (1.0e308 % 3.0).to_s == "2.0" && (-1.0e308 % 3.0).to_s == "1.0")
   check("n16k", (1.0e308 % 2.5).to_s == "1.0" && (-1.0e308 % 2.5).to_s == "1.5" &&
                 (1.0e16 % 3.0).to_s == "1.0")
@@ -1352,16 +1311,14 @@ def s33
 end
 
 # ===== SECTION 34: the value-key rule, Comparable and the Kernel writers =====
-# docs/todo.md 1.6, 2.9 and 2.11. Every right-hand side is ruby 2.6.10p210's own
-# answer, taken from tests/probe.sh's oracle leg; the four legs (interpreter,
-# llvm.Run, the native binary and MRI) agree on all of it.
+# Every right-hand side is ruby 2.6.10p210's own answer, taken from
+# tests/probe.sh's oracle leg.
 def s34
   # Float#to_s: MRI's HIGH test has TWO parts. `decpt > 15` alone is not it -
   # exponential also needs `decpt >= digits.length`, i.e. it is used only when the
   # fixed form would have to pad with zeros. So a 16-digit-point value with 17
-  # digits stays fixed while one with 16 digits does not. Before the fix the first
-  # right-hand side read 3.0023997515803305e+15. Settled against /usr/bin/ruby
-  # over 3,000 random doubles in [1e15, 1e19).
+  # digits stays fixed while one with 16 digits does not (settled against
+  # /usr/bin/ruby over 3,000 random doubles in [1e15, 1e19)).
   check("v01", 9007199254740991.fdiv(3).to_s == "3002399751580330.5")
   check("v02", 1234567890123456.5.to_s == "1234567890123456.5")
   check("v03", 1234567890123456.0.to_s == "1.234567890123456e+15")
@@ -1371,9 +1328,9 @@ def s34
   check("v06", {1 => 2}.to_s == "{1=>2}")
   check("v07", {1 => 2, "a" => [1, 2], :b => nil}.inspect == "{1=>2, \"a\"=>[1, 2], :b=>nil}")
   check("v08", {1 => {2 => 3}}.to_s == "{1=>{2=>3}}")
-  # An ARRAY is a VALUE key: Array#hash and Array#eql? are structural. This was
-  # nil in all three engines, and it is the language's own dict path that decides
-  # it - not the strict_eq / rtDictFind that nine languages share.
+  # An ARRAY is a VALUE key: Array#hash and Array#eql? are structural. It is the
+  # language's own dict path that decides it - not the strict_eq / rtDictFind that
+  # nine languages share.
   vh = {[1] => 5, [1, 2] => 8}
   check("v09", vh[[1]] == 5 && vh[[1, 2]] == 8)
   check("v10", vh[[2]] == nil)
@@ -1383,8 +1340,7 @@ def s34
   check("v11", vh2[[3, 4]] == 10 && vh2.size == 1)
   check("v12", {{1 => 2} => 3}[{1 => 2}] == 3)
   check("v13", [[1], [2]].include?([2]) && [[1]].index([1]) == 0)
-  # Array#- and Array#*: the interpreter had neither. `-` ABORTED and `*`
-  # answered a silent NaN, which is the worse of the two.
+  # Array#- and Array#*.
   v14a = [1, 2, 3, 2]
   check("v14", (v14a - [2]) == [1, 3])
   check("v15", (v14a * 2) == [1, 2, 3, 2, 1, 2, 3, 2] && ([1] * 0) == [])
@@ -1398,52 +1354,45 @@ def s34
   check("v20", "m".between?("a", "z") && "A".clamp("a", "z") == "a")
   check("v21", (2 ** 64 + 1).between?(2 ** 64, 2 ** 64 + 2))
   check("v22", (2 ** 64).clamp(2 ** 64 + 1, 2 ** 64 + 2) == 2 ** 64 + 1)
-  # Array#inspect / index / rindex / uniq, and Hash#inspect: missing from EVERY
-  # engine. index and uniq compare by value, like the Hash key rule above.
+  # Array#inspect / index / rindex / uniq, and Hash#inspect. index and uniq compare
+  # by value, like the Hash key rule above.
   v23a = [1, 2, 3, 2, 4]
   check("v23", v23a.inspect == "[1, 2, 3, 2, 4]" && [1, "a", nil, 2.5].inspect == "[1, \"a\", nil, 2.5]")
   check("v24", v23a.index(2) == 1 && v23a.rindex(2) == 3 && v23a.index(99) == nil)
   check("v25", v23a.uniq == [1, 2, 3, 4] && [[1], [2], [1]].uniq == [[1], [2]])
   check("v26", {1 => 2}.inspect == "{1=>2}")
-  # TrueClass / FalseClass to_s and inspect: both compiled halves aborted with
-  # "method call 'inspect' on a boolean".
+  # TrueClass / FalseClass to_s and inspect.
   check("v27", true.inspect == "true" && false.inspect == "false" && (1 == 1).inspect == "true")
   # Kernel#p answers its argument (the whole list for more than one) and writes
-  # INSPECT. Kernel#printf is print(format(...)): the compiler used to resolve the
-  # bare name to the SHARED host printf, which is not Ruby's and was not even one
-  # answer between llvm.Run and the native binary.
+  # INSPECT. Kernel#printf is print(format(...)) - Ruby's, not the shared host
+  # printf.
   check("v28", (p "a") == "a")
   check("v29", (p 1, 2) == [1, 2])
   check("v30", sprintf("%05.2f", 1.5) == "01.50" && format("%d", 3) == "3")
   # Ruby draws a line between == and eql?, and the Array methods do not all sit
   # on the same side of it: include?/index are ==, so 1 and 1.0 match; uniq and
-  # Array#- are eql?/hash, so they do NOT. Every engine used to answer the `===`
-  # of the shared runtime for all four, which is neither.
+  # Array#- are eql?/hash, so they do NOT.
   check("v31", [1].include?(1.0) && [1].index(1.0) == 0)
   check("v32", [1, 1.0, 1].uniq == [1, 1.0] && ([1, 2.0] - [2]) == [1, 2.0])
   check("v33", ([2.0] - [2.0]) == [] && [2.0, 2.0].uniq == [2.0])
-  # String#inspect is the QUOTED form, and it was missing from both compiled
-  # halves - so `p "a"` and any .inspect reaching a String diverged.
+  # String#inspect is the QUOTED form.
   check("v34", "a".inspect == "\"a\"" && nil.inspect == "nil" && :y.inspect == ":y")
-  # A Float is a BOX, and two boxes of one value are two objects: `[1.0] == [1.0]`
-  # was FALSE in the NATIVE BINARY and true under llvm.Run (whose Float is a Go
-  # value struct) and in MRI. A run-vs-native divergence in layer 2 that the
-  # matrix, --full and --cross are all blind to by construction.
+  # A Float is a BOX, and two boxes of one value are two objects, so Array#== has
+  # to compare them by value - in the native binary as much as under llvm.Run,
+  # whose Float is a Go value struct.
   check("v35", [1.0] == [1.0] && [1, 1.0] == [1, 1.0] && [1] == [1.0])
   check("v36", ({1 => 1.0} == {1 => 1.0}) && [[1.5]] == [[1.5]])
 end
 
 # ===== SECTION 35: the Array / Enumerable surface =====
-# docs/todo.md 1.4. Every right-hand side is ruby 2.6.10p210's own answer, taken
-# from a 5,729-line four-leg probe (interpreter, llvm.Run, the native binary and
-# MRI) on which all four legs are byte-identical. Each operand is read out of an
-# array, so no constant folder can answer these at compile time.
+# Every right-hand side is ruby 2.6.10p210's own answer. Each operand is read out
+# of an array, so no constant folder can answer these at compile time.
 def s35
   a = [3, 1, 2]
   b = [1, [2, [3, [4]]]]
   c = [1, nil, 2, nil]
   d = ["bb", "a", "ccc"]
-  # The twelve that aborted in BOTH halves.
+  # sort, with and without a block.
   check("w01", a.sort == [1, 2, 3] && a.sort { |x, y| y <=> x } == [3, 2, 1])
   # join RECURSES into a nested array with the same separator and uses to_s, so
   # nil contributes "".
@@ -1470,23 +1419,21 @@ def s35
   f.each_slice(2) { |g| sl << g }
   check("w14", sl == [[1, 2], [3, 4], [5]])
   check("w15", f.each_cons(2).to_a == [[1, 2], [2, 3], [3, 4], [4, 5]])
-  # Array#& and Array#| aborted in ALL THREE engines with "not a number in '&'".
+  # Array#& and Array#|.
   # Both keep the LEFT-hand order, both dedupe, and both compare with eql?.
   check("w16", ([1, 2, 3] & [3, 2, 9]) == [2, 3] && ([2, 1] | [1, 3]) == [2, 1, 3])
   check("w17", ([1, 1, 2] & [1, 2]) == [1, 2] && ([1, 1] | []) == [1])
   check("w18", ([1] & [1.0]) == [] && ([1] | [1.0]) == [1, 1.0])
-  # first/last/pop/shift take a COUNT and then answer an ARRAY. Without it they
-  # answered the single element in every engine - a SILENT wrong answer.
+  # first/last/pop/shift take a COUNT and then answer an ARRAY.
   check("w19", [1, 2, 3].first(2) == [1, 2] && [1, 2, 3].last(2) == [2, 3])
   g = [1, 2, 3]
   check("w20", g.pop(2) == [2, 3] && g == [1])
   h = [1, 2, 3]
   check("w21", h.shift(2) == [1, 2] && h == [3])
-  # Array.new answered a bare object in the interpreter and the argument itself
-  # under llvm.Run - wrong, and differently wrong, in every engine.
+  # Array.new.
   check("w22", Array.new(3, 0) == [0, 0, 0] && Array.new == [] && Array.new(2) == [nil, nil])
   check("w23", Array.new(3) { |i| i * i } == [0, 1, 4])
-  # sum accumulated through ToInt32, so it truncated Floats and wrapped at 2^31.
+  # sum is ordinary + (no 32-bit truncation, Floats kept).
   check("w24", [1.5, 2.5].sum == 4.0 && [1, 2, 3].sum == 6 && [1, 2].sum(10) == 13)
   check("w25", [1, 2, 3].sum { |x| x * 2 } == 12)
   # inject/reduce in all four forms, including the Symbol one.
@@ -1529,30 +1476,25 @@ def s35
   check("w56", i.map! { |x| x * 2 } == [2, 4, 6] && i == [2, 4, 6])
   j = [3, 1]
   check("w57", j.sort! == [1, 3] && j == [1, 3] && [1, 2].reverse! == [2, 1])
-  # Array#* is repetition with an Integer and JOIN with a String. The String form
-  # answered an EMPTY ARRAY in both compiled halves - a silent wrong answer.
+  # Array#* is repetition with an Integer and JOIN with a String.
   check("w58", ([1, 2] * ",") == "1,2" && ([1, 2] * 2) == [1, 2, 1, 2])
-  # The three halves divergences: String#to_f, String#to_i and Kernel#rand all
-  # worked in the interpreter and aborted in the compiler.
+  # String#to_f, String#to_i and Kernel#rand.
   check("w59", "3.5".to_f == 3.5 && "-2.75".to_f == -2.75 && "abc".to_f == 0.0)
   check("w60", "12abc".to_i == 12 && "abc".to_i == 0 && "3".to_i == 3)
   # rand is deterministically zero here (no random source can be byte-identical
   # across the engines), but zero OF THE RIGHT CLASS, which is what is testable.
   check("w61", rand(5).is_a?(Integer) && rand().is_a?(Float) && rand(0).is_a?(Float))
   check("w62", rand(5) >= 0 && rand(5) < 5 && rand() < 1.0)
-  # Kernel.format with an explicit receiver aborted in both halves, where the
-  # bare name has always worked.
+  # Kernel.format with an explicit receiver.
   check("w63", Kernel.format("%05.2f", 3.14159) == "03.14" && Kernel.format("%d", 5) == "5")
-  # true/false are their own classes: `false == 0` is FALSE. The shared pyEqual
-  # said true, so `[true, false].include?(0)` was a run-vs-everything divergence.
+  # true/false are their own classes: `false == 0` is FALSE.
   check("w64", ![true, false, nil].include?(0) && [false].include?(false))
-  # A bare Hash.new is an empty Hash - it answered a bare object here.
+  # A bare Hash.new is an empty Hash.
   k = Hash.new
   k[:a] = 1
   check("w65", k == {:a => 1})
-  # docs/todo.md 1.4, the rest of it. Hash.new(v) / Hash.new { |h, k| } keep their
-  # default in a hidden slot honoured at EVERY read, including the op-assign and the
-  # append reads, which used to go straight to dictFind and answer nil.
+  # Hash.new(v) / Hash.new { |h, k| } keep their default in a hidden slot honoured
+  # at EVERY read, including the op-assign and the append reads.
   hd = Hash.new(7)
   check("w66", hd["nope"] == 7 && hd.size == 0 && hd.keys == [] && hd.inspect == "{}")
   hd[:a] = 1
@@ -1594,10 +1536,9 @@ def s35
   check("w82", ["a", "b", "c"].combination(2).to_a == [["a", "b"], ["a", "c"], ["b", "c"]])
   check("w83", ["a", "b", "c"].permutation(2).to_a.length == 6 && ea.combination(0).to_a == [[]])
   check("w84", ea.combination(9).to_a == [] && ea.cycle(2).to_a.length == 10)
-  # A BARE rand: it used to resolve to the host function value here and abort the
-  # compiler with "variable not defined: rand", while rand() worked everywhere.
+  # A BARE rand is a call of Kernel#rand.
   check("w85", rand.class.to_s == "Float" && rand >= 0 && rand < 1 && rand().class.to_s == "Float")
-  # yield inside a begin/rescue ABORTED the compiler half while this one answered.
+  # yield inside a begin/rescue.
   y1 = s35y("a") { 1 }
   y2 = s35y2 { |m| m.upcase }
   check("w86", y1 == "a1" && y2 == "BOOM")
@@ -1628,10 +1569,7 @@ def s35bg
 end
 
 # ===== SECTION 36: Array is Comparable, and the two errors sort and sum raise =====
-# The interpreter half had NO Array#<=> while both compiled halves did, so
-# `[[2],[1]].sort` aborted there and worked everywhere else - a halves divergence
-# ./test.sh --cross could not see, because no test program sorts an array of
-# arrays. Every right-hand side below is ruby 2.6.10p210's own answer.
+# Every right-hand side below is ruby 2.6.10p210's own answer.
 def s36
   # Element-wise, recursing into nested arrays, and a shorter array that is a
   # PREFIX of the longer one sorts first.
@@ -1642,12 +1580,12 @@ def s36
   check("x05", [[[2]], [[1]]].sort == [[[1]], [[2]]])
   check("x06", [[1, [2]], [1, [3]]].sort == [[1, [2]], [1, [3]]])
   # The answer is NORMALISED to -1/0/1: `[1,2,3] <=> [1]` is 1, not the length
-  # difference 2, which is what a first shape of this answered.
+  # difference 2.
   check("x07", ([1, 2] <=> [1, 3]) == -1 && ([1, 2, 3] <=> [1]) == 1)
   check("x08", ([1] <=> [1, 2, 3]) == -1 && ([] <=> []) == 0 && ([1, 2, 3] <=> [1, 2, 3]) == 0)
   check("x09", ([["b"]] <=> [["a"]]) == 1 && ([[1, 2]] <=> [[1, 3]]) == -1)
-  # ONE incomparable element pair makes the WHOLE comparison nil - carrying on to
-  # the next element made `[1,"a"] <=> [1,2]` answer 0.
+  # ONE incomparable element pair makes the WHOLE comparison nil: `[1,"a"] <=> [1,2]`
+  # is nil, not 0.
   check("x10", ([1, "a"] <=> [1, 2]) == nil && ([1, 2] <=> [1, "a"]) == nil)
   check("x11", ([1, 2] <=> "x") == nil && (1 <=> "a") == nil)
   # min / max / sort_by go through the same comparator.
@@ -1689,8 +1627,7 @@ def s36
   end
   check("x20", caught4 == "comparison of Integer with String failed")
   # sum REFUSES a non-numeric element against a numeric accumulator with a
-  # catchable TypeError. It used to answer 0 (the ToInt32 accumulator swallowed
-  # everything) and then "0bac" once the accumulator became a real +.
+  # catchable TypeError.
   caught5 = nil
   begin
     ["b", "a", "c"].sum
@@ -1718,14 +1655,12 @@ def s36
   check("x25", [1, 2].sum == 3 && [1.5, 2.5].sum == 4.0)
 end
 # ===== SECTION 37: block binding, non-local return and the Hash Enumerable surface =====
-# docs/todo.md 1.4, 1.5 and 1.6. Every right-hand side is ruby 2.6.10p210's own
-# answer. Each operand is read out of an array or a method, so no constant folder
-# can answer these at compile time.
+# Every right-hand side is ruby 2.6.10p210's own answer. Each operand is read out
+# of an array or a method, so no constant folder can answer these at compile time.
 def s37
   v = [5, 7, 2]
-  # 1.4: a literal block is NOT a positional argument. Before this, the block was
-  # bound to the optional / *splat parameter: the interpreter answered NaN and the
-  # compiler aborted with "not a number in '*'".
+  # A literal block is NOT a positional argument: it does not bind to an optional
+  # or *splat parameter.
   check("y01", s37_deflt { |x| x * 2 } == 10)
   check("y02", s37_deflt(v[1]) { |x| x * 2 } == 14)
   check("y03", s37_splat { |n| n + 100 } == 100)
@@ -1735,7 +1670,7 @@ def s37
   check("y06", s37_req(lambda { |z| z * 3 }) == 6)
   # The keyword Hash sits BEFORE the block, not behind it.
   check("y07", s37_kw { |x| x * 4 } == 28 && s37_kw(:a => v[2]) { |x| x * 4 } == 8)
-  # 1.5: `return` inside a block leaves the enclosing METHOD, not the block.
+  # `return` inside a block leaves the enclosing METHOD, not the block.
   check("y08", s37_ret == 200)
   check("y09", s37_ret_nested == 13)
   check("y10", s37_ret_upto == 52)
@@ -1751,7 +1686,7 @@ def s37
   # A proc auto-splats and is arity-tolerant where a lambda is strict.
   check("y17", proc { |a, b| [a, b] }.call(v[0]) == [5, nil])
   check("y18", lambda { |a, b| [a, b] }.call(v[0], v[1]) == [5, 7])
-  # 1.6: Hash is Enumerable and yields [key, value] PAIRS.
+  # Hash is Enumerable and yields [key, value] PAIRS.
   h = {"a" => 1, "b" => 2, "c" => 3}
   check("y19", h.map { |k, n| "#{k}#{n}" } == ["a1", "b2", "c3"])
   check("y20", h.map { |pair| pair } == [["a", 1], ["b", 2], ["c", 3]])
@@ -1783,8 +1718,7 @@ def s37
   check("y39", hb.dup["q"] == "qq" && hb.merge({"a" => 1})["q"] == "qq")
   check("y40", h.values_at("a", "c") == [1, 3] && h.invert == {1 => "a", 2 => "b", 3 => "c"})
   check("y41", h.key(2) == "b" && h.transform_values { |n| n * 2 } == {"a" => 2, "b" => 4, "c" => 6})
-  # A blockless map / select is an ENUMERATOR, not a crash, and with_index works
-  # on it - which is why 1.4's arity model had to be right first.
+  # A blockless map / select is an ENUMERATOR, and with_index works on it.
   check("y42", h.map.class == Enumerator && h.select.class == Enumerator)
   check("y43", h.map.with_index { |(k, n), i| "#{k}#{i}" } == ["a0", "b1", "c2"])
   check("y44", [10, 20].map.with_index { |x, i| x + i } == [10, 21])
@@ -1861,38 +1795,34 @@ def s37_lam
   f.call(3) + 1
 end
 # ===== SECTION 38: bare method calls, the block marker and Object#send =====
-# docs/todo.md 1.9. Every right-hand side is ruby 2.6.10p210's own answer, and
-# none of these forms changed between 2.6 and 3.x. Section 37 covers the case a
-# LITERAL block is bound wrongly; this one covers the case a PROC passed as an
-# ordinary argument was mistaken for one, which no engine could tell apart until
-# the argument list carried a block marker. Every operand is read out of an array
-# so no constant folder can answer these at compile time.
+# Every right-hand side is ruby 2.6.10p210's own answer, and none of these forms
+# changed between 2.6 and 3.x. Section 37 covers a LITERAL block; this one covers
+# a PROC passed as an ordinary argument, which only the block marker in the
+# argument list tells apart. Every operand is read out of an array so no constant
+# folder can answer these at compile time.
 def s38
   v = [proc { |x| x }, 4, "b"]
   # A bare name is a CALL whatever the parameters are, as long as none of them is
-  # required - `def q(a = 1); end; q` is an ordinary call in MRI. All four of
-  # these used to answer the METHOD OBJECT instead of calling it.
+  # required - `def q(a = 1); end; q` is an ordinary call in MRI.
   check("z01", s38_opt == 5 && s38_splat == 0)
   check("z02", s38_kw == 5 && s38_blk == 7)
   # A Proc handed over as an ORDINARY argument is not the call's block: it fills
   # the optional parameter, it joins the *splat, `block_given?` stays false and
-  # `&b` stays nil. The last two were a live halves divergence.
+  # `&b` stays nil.
   check("z03", s38_optp(v[0]) == "Proc" && s38_splatp(v[0]) == 1)
   check("z04", s38_bg(v[0]) == "noblk" && s38_bg { 1 } == "blk")
   check("z05", s38_amp(v[0]) == "Proc|true" && s38_amp(v[0]) { } == "Proc|false")
   # ... and a real block still is one.
   check("z06", s38_yield { |x| x + 1 } == 6)
   # `&nil` is Ruby for "no block", which is how a method forwards a block it may
-  # not have been given. The interpreter half aborted on it outright.
+  # not have been given.
   check("z07", s38_fwd(v[1]) == "Integer|true" && s38_fwd(v[1]) { } == "Integer|false")
   # A method AS A VALUE is `method(:name)` - Ruby has no bare method reference.
   check("z08", s38_apply(method(:s38_double), v[1]) == 8)
   fs = [method(:s38_double), method(:s38_negate)]
-  # #arity too, since docs/todo.md 1.5: a def closure now enters the shape registry
-  # like a block and a lambda already did, so this answers MRI's 1 rather than the 0
-  # an UNRECORDED closure answers. The retention gate the note here used to describe
-  # is UNCHANGED - nothing is recorded unless the program names `arity`, which this
-  # file does (section 12).
+  # #arity too: a def closure enters the shape registry like a block and a lambda,
+  # so this answers MRI's 1 rather than the 0 an UNRECORDED closure answers. Nothing
+  # is recorded unless the program names `arity`, which this file does (section 12).
   check("z09", fs[1].call(v[1]) == -4 && fs[0].call(v[1]) == 8 && fs[0].arity == 1)
   # Object#send / #__send__ / #public_send, including an OPERATOR by name, which
   # is the one shape a type's method table cannot answer.
@@ -1922,30 +1852,25 @@ class S38C
   def +(o); "plus#{o}"; end
 end
 # ===== SECTION 39: Method objects, Proc#to_s and the argument count =====
-# docs/todo.md 1.5. Every right-hand side is ruby 2.6.10p210's own answer, and none
-# of these forms changed between 2.6 and 3.x. THIS SECTION IS THE ONE THAT RUNS
-# NATIVELY (docs/todo.md 4.3): the printing arm and the count check both live in
-# layer 2 as well as in the twin, and a feature-matrix assertion is only ever
-# BUILT. Every operand is read out of an array so no constant folder can answer
-# these at compile time.
+# Every right-hand side is ruby 2.6.10p210's own answer, and none of these forms
+# changed between 2.6 and 3.x. THIS SECTION IS THE ONE THAT RUNS NATIVELY: the
+# printing arm and the count check both live in layer 2 as well as in the twin,
+# and a feature-matrix assertion is only ever BUILT. Every operand is read out of
+# an array so no constant folder can answer these at compile time.
 def s39
   v = [3, 5, "x"]
   # A def closure's PARAMETER SHAPE reaches Proc#arity, including through a Method
-  # value bound to the running self. It answered 0 for every def.
+  # value bound to the running self.
   check("aa01", method(:s39_double).arity == 1 && method(:s39_none).arity == 0)
   check("aa02", method(:s39_double).call(v[0]) == 6)
-  # method(:name) reaches an INSTANCE METHOD OF THE RUNNING SELF, bound to it -
-  # `undefined method 'inst' for class 'Object'` in every engine before, and the
-  # note that said so called a variadic bound closure impossible in layer 2.
+  # method(:name) reaches an INSTANCE METHOD OF THE RUNNING SELF, bound to it.
   check("aa03", S39C.new.bound_call(v[1]) == 15 && S39C.new.bound_arity == 1)
   check("aa04", S39C.new.bound_zero == "S39C" && S39D.new.inherited_call(v[0]) == 13)
   # A PROC PRINTS AS A PROC. MRI writes `#<Proc:0x...@file:line (lambda)>`; the
   # address and the source location are its own and are left off here rather than
   # invented (python's `<function fn>` rule), so what is asserted is the part that
   # is MRI's: it names Proc, it is one line, and it is not the host's function text.
-  # The interpreter half used to print the closure's whole MetaJS SOURCE and both
-  # compiled halves the C floor's `[function]` - a live halves divergence. A Method
-  # VALUE now says so, and that one is BYTE-EXACT rather than an envelope: MRI 2.6
+  # A Method VALUE is BYTE-EXACT rather than an envelope: MRI 2.6
   # writes `#<Method: Object#s39_double>` with no address in it (only 3.0 appends a
   # source location). SECTION 48 is the rest of the Method surface.
   s = method(:s39_double).to_s
@@ -1953,9 +1878,8 @@ def s39
   t = "#{s39_lam}"
   check("aa06", t.include?("Proc") && !t.include?("function") && !t.include?("\n"))
   # TOO FEW POSITIONAL ARGUMENTS IS AN ArgumentError, with MRI's own message and
-  # its three shapes for the expectation. A bare name for a method with a required
-  # parameter is the form docs/todo.md 1.5 names, but `s39_double()` and a lambda
-  # called short were swallowed just as quietly - all of them bound nil and ran.
+  # its three shapes for the expectation - for a bare name, an explicit `()' call
+  # and a lambda called short alike.
   check("aa07", s39_argerr { s39_double } == "wrong number of arguments (given 0, expected 1)")
   check("aa08", s39_argerr { s39_double() } == "wrong number of arguments (given 0, expected 1)")
   check("aa09", s39_argerr { s39_opt2 } == "wrong number of arguments (given 0, expected 1..2)")
@@ -1967,8 +1891,7 @@ def s39
   # call that does supply the arguments.
   check("aa13", s39_alloptional == 1 && s39_double(v[0]) == 6 && s39_star(v[0]) == 1)
   check("aa14", s39_blockshort == "nil" && s39_opt2(v[0]) == 5)
-  # method(:missing) raises a CATCHABLE NameError. It was a host abort, which the
-  # interpreter half wrote on stdout and the compiled halves on stderr.
+  # method(:missing) raises a CATCHABLE NameError.
   check("aa15", s39_nameerr == "NameError")
 end
 def s39_double(n); n * 2; end
@@ -2045,12 +1968,12 @@ s36() # SECTION-CALL 36
 s37() # SECTION-CALL 37
 s38() # SECTION-CALL 38
 # ===== SECTION 40: subsequences, prefix tests and the lambda argument count =====
-# docs/todo.md 1.6, 1.7 and 1.10. Every right-hand side is ruby 2.6.10p210's own
-# answer, and none of these forms changed between 2.6 and 3.x. THIS SECTION RUNS
-# NATIVELY (docs/todo.md 4.3): the subsequence rule, String#start_with?, the
-# argument-count check and Exception#backtrace all live in layer 2 as well as in
-# the twin, and a feature-matrix assertion is only ever BUILT. Every operand is
-# read out of an array so no constant folder can answer these at compile time.
+# Every right-hand side is ruby 2.6.10p210's own answer, and none of these forms
+# changed between 2.6 and 3.x. THIS SECTION RUNS NATIVELY: the subsequence rule,
+# String#start_with?, the argument-count check and Exception#backtrace all live
+# in layer 2 as well as in the twin, and a feature-matrix assertion is only ever
+# BUILT. Every operand is read out of an array so no constant folder can answer
+# these at compile time.
 def s40_try
   begin
     yield
@@ -2073,8 +1996,7 @@ def s40
   v = [0, 6, 1, 2, 3, 100]
   s = ["hello world", "abc", ""]
   a = [[10, 20, 30, 40, 50]]
-  # s[start, len]: only the FIRST subscript argument used to be evaluated, so this
-  # answered ONE CHARACTER in every engine.
+  # s[start, len]: both subscript arguments count.
   check("ab01", s[0][v[0], v[1]] == "hello ")
   check("ab02", s[0][v[2], v[3]] == "el")
   # A negative start counts back from the end; a negative length is nil; a start
@@ -2082,32 +2004,27 @@ def s40
   check("ab03", s[0][0 - v[4], v[3]] == "rl")
   check("ab04", s[0][v[2], 0 - v[3]].nil?)
   check("ab05", s[0][s[0].length, v[3]] == "" && s[0][v[5], v[3]].nil?)
-  # A RANGE subscript is a subsequence too. The compiler halves materialize a
-  # bounded range as an array and answered the element at the range's own first
-  # value, while the interpreter answered nil - a live halves divergence.
+  # A RANGE subscript is a subsequence too.
   check("ab06", s[0][0..4] == "hello" && s[0][0...4] == "hell")
   check("ab07", a[0][0..2] == [10, 20, 30] && a[0][1...3] == [20, 30])
   check("ab08", a[0][v[2], v[3]] == [20, 30] && a[0][v[2], v[5]] == [20, 30, 40, 50])
   check("ab09", a[0][0 - v[4]..0 - v[2]] == [30, 40, 50])
-  # An ENDLESS range subscript keeps its endpoints in the Range object itself, so it
-  # is exact in every engine; both compiled halves answered the FIRST character.
+  # An ENDLESS range subscript keeps its endpoints in the Range object itself.
   check("ab09b", s[0][6..] == "world" && s[0][v[5]..].nil? && a[0][2..] == [30, 40, 50])
-  # String#start_with? / #end_with? existed only in the interpreter half; both
-  # compiled halves aborted with "unknown String method". MRI takes a LIST.
+  # String#start_with? / #end_with?. MRI takes a LIST.
   check("ab10", s[0].start_with?("hell") && !s[0].start_with?("xx"))
   check("ab11", s[1].start_with?("z", "a") && !s[1].start_with?("y", "z"))
   check("ab12", s[0].end_with?("rld") && !s[0].end_with?("rl"))
   check("ab13", s[1].end_with?("z", "bc") && s[1].start_with?(s[2]))
-  # A LAMBDA IS ARITY-CHECKED AND A BLOCK IS NOT. Kernel#lambda used to check
-  # neither bound and the -> literal only the lower one, so every one of these
-  # ran and dropped or nil-bound its arguments.
+  # A LAMBDA IS ARITY-CHECKED AND A BLOCK IS NOT, at both bounds, for Kernel#lambda
+  # and the -> literal alike.
   la = [lambda { |x| x }, lambda { 7 }, lambda { |*r| r.size }, lambda { |x, y = 1| x + y }]
   check("ab14", s40_try { la[0].call(v[2], v[3]) } == "wrong number of arguments (given 2, expected 1)")
   check("ab15", s40_try { la[0].call } == "wrong number of arguments (given 0, expected 1)")
   check("ab16", s40_try { la[1].call(v[2]) } == "wrong number of arguments (given 1, expected 0)")
   check("ab17", s40_try { la[3].call(v[2], v[3], v[4]) } == "wrong number of arguments (given 3, expected 1..2)")
   # ... and the shapes that must still be accepted, plus Proc#arity, which the
-  # wrapper Kernel#lambda now builds must not lose.
+  # wrapper Kernel#lambda builds must not lose.
   check("ab18", la[2].call(v[2], v[3], v[4]) == 3 && la[3].call(v[2]) == 2)
   check("ab19", la[0].arity == 1 && la[2].arity == -1 && la[3].arity == -2)
   check("ab20", la[0].lambda? && !proc { |x| x }.lambda?)
@@ -2116,7 +2033,7 @@ def s40
   pr = [proc { |x, y| [x, y] }]
   check("ab21", pr[0].call(v[2], v[3], v[4]) == [1, 2] && pr[0].call(v[2]) == [1, nil])
   check("ab22", pr[0].call([v[2], v[3]]) == [1, 2])
-  # A METHOD is arity-checked at both bounds as well; only too few used to raise.
+  # A METHOD is arity-checked at both bounds as well.
   check("ab23", s40_try { s40_one(v[2], v[3]) } == "wrong number of arguments (given 2, expected 1)")
   check("ab24", s40_one(v[4]) == 3)
   # Exception#backtrace is the raise SITE, in MRI's own spelling, which is what
@@ -2134,10 +2051,8 @@ def s40
   check("ab25", !bt.nil? && bt.length >= 1 && bt[0].end_with?("in `s40_where\'"))
   check("ab26", bt[0].end_with?(":" + bw[1].to_s + ":in `s40_where\'") &&
         RuntimeError.new("x").backtrace.nil?)
-  # THE REST OF THE STRING METHOD SET, which existed only in the interpreter half:
-  # every one of these aborted both compiled halves with "unknown String method",
-  # so ordinary text work - not just the start_with? the item named - was a halves
-  # divergence. `"a  b".split(" ")` is deliberately NOT asserted: MRI reads a single
+  # THE REST OF THE STRING METHOD SET. `"a  b".split(" ")` is deliberately NOT
+  # asserted: MRI reads a single
   # space as the awk separator (any run of whitespace) and all three engines here
   # split on the literal separator.
   w = ["Hello World", "  pad  ", "", "abc", "a,b,,c"]
@@ -2146,9 +2061,8 @@ def s40
   check("ab29", w[4].split(",") == ["a", "b", "", "c"] && w[0].split(" ") == ["Hello", "World"])
   check("ab30", w[0].index("World") == 6 && w[0].index("zz").nil? && w[2].empty? && !w[3].empty?)
   check("ab31", w[3].succ == "abd" && w[3].next == "abd")
-  # A STRING PATTERN reaches the regexp half: MRI compiles one to a Regexp, and the
-  # gate on js_rxmcall / js_rxmcall's twin used to demand a real Regexp, so
-  # `s.sub("o", "0")` died where `s.sub(/o/, "0")` worked.
+  # A STRING PATTERN reaches the regexp half: MRI compiles one to a Regexp, so
+  # `s.sub("o", "0")` works like `s.sub(/o/, "0")`.
   check("ab32", w[0].sub("o", "0") == "Hell0 World" && w[0].gsub("o", "0") == "Hell0 W0rld")
   check("ab33", w[0].match?("Wor") && !w[0].match?("zz") && (w[0] =~ /World/) == 6)
   ecs = ""
@@ -2156,15 +2070,9 @@ def s40
   check("ab34", ecs == "a-b-c-")
 end
 # ===== SECTION 41: the Math module =====
-# docs/todo.md 1.1. `Math` was in ruby-interpreter.abnf's builtin-class list and
-# carried NOTHING, so `Math.sin(1)` aborted that half with "unknown class method
-# 'sin'"; it was NOT in ruby-to-llvm-ir.abnf's list, so the name fell through to
-# the root scope's JavaScript Math - which answered the integer 2 for
-# Math.sqrt(4) where Ruby answers 2.0, answered nil for Math::PI, and, for every
-# member the C floor did not carry, worked under llvm.Run and killed the native
-# binary with `unknown method 'sin'`. Four engines: rubyMathCall in
-# abnf/jsrt.go, rbMathCall in languages/lib/ruby-rt.metajs, the "$s$" methods on
-# hostGlobals["Math"] in ruby-interpreter.abnf, and the Math the C floor seeds.
+# `Math` answers Floats. Four engines: rubyMathCall in abnf/jsrt.go, rbMathCall
+# in languages/lib/ruby-rt.metajs, the "$s$" methods on hostGlobals["Math"] in
+# ruby-interpreter.abnf, and the Math the C floor seeds.
 #
 # Every row is /usr/bin/ruby 2.6.10's answer (Math is unchanged in 3.x). Every
 # operand is read out of an array so no constant folder can answer at compile
@@ -2178,8 +2086,8 @@ def s41
   # GO-vs-MRI: Math.asin(0.5) is 0.5235987755982988 under /usr/bin/ruby (the
   # platform libm) and ...89 in all four engines here, which are all Go's math
   # package. Math.atanh(0.5) below is the same one-ulp story (MRI ...549). Both
-  # are older than this section and are the reason those two rows are asserted
-  # against OUR answer with the divergence written down rather than dropped.
+  # are the reason those two rows are asserted against OUR answer with the
+  # divergence written down rather than dropped.
   check("rmath5", Math.asin(a[4]) == 0.5235987755982989 && Math.atan(a[3]) == 0.7853981633974483)
   check("rmath6", Math.sinh(a[3]) == 1.1752011936438014 && Math.cosh(a[3]) == 1.5430806348152437)
   check("rmath7", Math.tanh(a[3]) == 0.7615941559557649 && Math.atanh(a[4]) == 0.5493061443340548)
@@ -2193,18 +2101,15 @@ def s41
   check("rmath14", Math.hypot(a[5], a[0]).to_s == "5.0")
   check("rmath15", Math.atan2(a[3], a[1]) == 0.4636476090008061)
   # The two module constants, which read as scoped constants (Math::PI), not as
-  # method calls, and answered nil in both compiled halves.
+  # method calls.
   check("rmath16", Math::PI == 3.141592653589793 && Math::E == 2.718281828459045)
   check("rmath17", Math::PI.class == Float && Math.sqrt(a[0]).class == Float)
 end
 
 # ===== SECTION 42: the per-object singleton method table =====
-# docs/todo.md 1.3. Every object has a singleton ("eigen") class in front of its
-# own class; `def obj.m', `class << obj', #define_singleton_method write it and
-# #extend inserts a module into it. NONE of that existed: `o.extend(M)' was
-# "unknown method 'extend'" in all three engines and a def inside a
-# `class << VALUE' was notImplemented in the emitter outright, because there was
-# no per-object table to check ahead of the __class chain.
+# Every object has a singleton ("eigen") class in front of its own class;
+# `def obj.m', `class << obj', #define_singleton_method write it and #extend
+# inserts a module into it, all checked ahead of the __class chain.
 #
 # Every row is /usr/bin/ruby 2.6.10's answer; all five forms are Ruby-2 syntax.
 # ORDER is the point of several of them: a direct `def obj.m' beats a module
@@ -2298,8 +2203,7 @@ def s42
   # #dup and #clone differ in EXACTLY ONE thing: the singleton class. Both are
   # shallow copies of the instance variables (independent afterwards), both keep
   # the class, and #clone carries the singleton table and the extended modules
-  # while #dup drops them. All of it aborted in every engine before, which is why
-  # the semantics could still be settled rather than preserved.
+  # while #dup drops them.
   # `clone(freeze: false)' is not modelled: nothing here has a frozen bit.
   k = S42Kid.new
   def k.only; "K1"; end
@@ -2345,13 +2249,9 @@ def s43
 end
 
 # ===== SECTION 44: #round / #floor / #ceil with a DIGIT COUNT =====
-# docs/todo.md 1.2. Every engine ignored ndigits for #floor / #ceil, and for
-# #round ruby-interpreter.abnf ignored it while the two compiled halves applied
-# `floor(x * 10**n + 0.5) / 10**n` - a LIVE halves divergence (2.345.round(2) was
-# 2 in one half and 2.35 in the other) sitting on top of three defects all three
-# shared: half-away-from-zero where MRI corrects toward the DECIMAL the double
-# prints as, a Float where a negative ndigits answers an INTEGER, and
-# Infinity/NaN where MRI answers the receiver.
+# MRI corrects toward the DECIMAL the double prints as (not half-away-from-zero on
+# the true value), a negative ndigits answers an INTEGER, and an overflow answers
+# the receiver rather than Infinity/NaN.
 #
 # Every expected value below was read off /usr/bin/ruby 2.6.10, whose
 # Float#round / #floor / #ceil are unchanged in 3.x. THIS SECTION RUNS UNDER
@@ -2368,8 +2268,7 @@ def s44
   check("rd44d", 9.995.round(2) == 10.0 && 9.995.floor(10) == 9.9949999999 && 0.135.round(2) == 0.14)
   check("rd44e", 0.125.round(2) == 0.13 && 0.05.round(1) == 0.1 && (-1.5e-5).round(5) == -2.0e-05)
   # The RESULT TYPE rule: a positive ndigits answers a Float, 0 and negatives an
-  # Integer. This is the row the compiled halves failed outright - they answered
-  # the Float 1200.0 where MRI answers the Integer 1200.
+  # Integer: MRI answers the Integer 1200, not the Float 1200.0.
   check("rd44f", 1234.567.round(-2) == 1200 && 1234.567.round(-2).class == Integer)
   check("rd44g", 1234.567.round(2).class == Float && 1234.567.round(0).class == Integer)
   check("rd44h", 1234.567.round(-1) == 1230 && 1234.567.floor(-2) == 1200 && 1234.567.ceil(-2) == 1300)
@@ -2407,8 +2306,7 @@ def s44
     raised = raised + 1
   end
   check("rd44r", raised == 2)
-  # Integer#round / #floor / #ceil. #ceil and #round were absent from the plain
-  # Integer arm outright - `5.ceil` aborted with *unknown Integer method: ceil*.
+  # Integer#round / #floor / #ceil.
   check("rd44s", 5.ceil == 5 && 5.round == 5 && 5.floor == 5 && 15.round(2) == 15)
   check("rd44t", 15.round(-1) == 20 && 25.round(-1) == 30 && (-25).round(-1) == -30)
   check("rd44u", 1250.round(-2) == 1300 && 1250.round(-1) == 1250 && 1250.floor(-2) == 1200)
@@ -2428,11 +2326,9 @@ def s44
                   12345678901234567890.round(3) == 12345678901234567890)
   # A Float past 2**53 with a negative ndigits answers the exact Integer.
   check("rd44ab", 1.0e20.round(-5) == 100000000000000000000 && 1.0e20.round(2) == 1.0e20)
-  # #truncate IS ONE OF THE FOUR and IGNORED ITS ndigits in every engine, which is
-  # docs/todo.md 1.3's second argument-list rule: `1.567.truncate(1)` answered the
-  # Integer 1 where MRI answers the Float 1.5, and `1234.truncate(-2)` answered
-  # 1234 where MRI answers 1200. Truncation is toward zero at every sign, so it is
-  # floor above zero and ceil below it and it never carries.
+  # #truncate IS ONE OF THE FOUR and takes ndigits too: `1.567.truncate(1)` is the
+  # Float 1.5 and `1234.truncate(-2)` is 1200. Truncation is toward zero at every
+  # sign, so it is floor above zero and ceil below it and it never carries.
   check("rd44ac", 1.567.truncate(1) == 1.5 && (-1.567).truncate(1) == -1.5)
   check("rd44ad", 1.567.truncate(1).class == Float && 1.0.truncate(3) == 1.0)
   check("rd44ae", 1234.5678.truncate(-2) == 1200 && 1234.5678.truncate(-2).class == Integer)
@@ -2442,23 +2338,18 @@ def s44
 end
 
 # ===== SECTION 46: Rational and Complex - the exact ones =====
-# docs/todo.md 1.3. Four defects, all four AGREED ACROSS EVERY ENGINE and all four
-# wrong, so nothing but an oracle could see them. Every right-hand side below is
-# /usr/bin/ruby 2.6.10's own answer and none of these forms changed in 3.x.
+# Every right-hand side below is /usr/bin/ruby 2.6.10's own answer and none of
+# these forms changed in 3.x:
 #
-#   Kernel#Rational / #Complex did not exist. `Rational(1, 3)` built an INSTANCE
-#   of the class Rational in the interpreter half (every operator on it then
-#   aborted) and aborted both compiled halves with *call of a non function value*.
-#   The literal spellings 2r/3r and 3+4i were the only ones any test used.
+#   Kernel#Rational / #Complex, the only spellings that build either from two
+#   parts.
 #
-#   #round / #floor / #ceil / #truncate went through to_f, so `(2r/3r).round(1)`
-#   answered the Float 0.7 where MRI keeps the Rational (7/10).
+#   #round / #floor / #ceil / #truncate keep a Rational exact: `(2r/3r).round(1)`
+#   is (7/10), not the Float 0.7.
 #
-#   #abs went through to_f too: `(2r/3r).abs` answered a Float and `(3+4i).abs`
-#   answered 3.0 - THE REAL PART - where MRI answers 5.0.
+#   #abs: `(2r/3r).abs` stays a Rational and `(3+4i).abs` is 5.0, the magnitude.
 #
-#   #inspect was #to_s, so the parentheses were missing, and Complex#to_s wrote
-#   its "+" unconditionally, so Complex(3, -4) rendered `3+-4i`.
+#   #inspect parenthesizes, and Complex(3, -4) renders `3-4i'.
 def s46
   v = [1, 3, 4, 2]
   # Kernel#Rational: one argument is #to_r, two are a quotient, the sign moves to
@@ -2498,12 +2389,11 @@ def s46
   check("rc46s", Rational(-2, 3).abs == Rational(2, 3) && Rational(-2, 3).abs.class == Rational)
   check("rc46t", Complex(v[1], v[2]).abs == 5.0 && Complex(-3, -4).magnitude == 5.0)
   check("rc46u", Complex(v[1], v[2]).abs.class == Float && Rational(v[3], v[1]).abs.to_s == "2/3")
-  # ----- Float#to_r is EXACT (docs/todo.md 2.4) -------------------------------
-  # A double IS m * 2^e, so its Rational is exact. Every engine answered `x/1` with
-  # the double itself as the "numerator" - (1.5).to_r was (1.5/1) - agreed and wrong
-  # in all four legs. The denominators below are 2, 4, 2^55, 2^60 and 2^16, so they
-  # also pin Rational#to_s using the EXACT integer expansion and not the shortest
-  # round-tripping form: `"" + 2**55` is 36028797018963970, one ulp out.
+  # ----- Float#to_r is EXACT ---------------------------------------------------
+  # A double IS m * 2^e, so its Rational is exact: (1.5).to_r is (3/2). The
+  # denominators below are 2, 4, 2^55, 2^60 and 2^16, so they also pin Rational#to_s
+  # using the EXACT integer expansion and not the shortest round-tripping form:
+  # `"" + 2**55` is 36028797018963970, one ulp out.
   f = [1.5, -1.5, 0.1, 3.25, 0.001, 2.0, 0.0, -0.0, 0.0000152587890625, -0.25]
   check("rc46v", f[0].to_r.to_s == "3/2" && f[1].to_r.to_s == "-3/2" && f[9].to_r.to_s == "-1/4")
   check("rc46w", f[2].to_r.to_s == "3602879701896397/36028797018963968" &&
@@ -2516,15 +2406,13 @@ def s46
   # #numerator / #denominator read the same exact pair, and Kernel#Rational inherits it.
   check("rc46aa", f[0].numerator == 3 && f[0].denominator == 2 &&
                   Rational(f[0]).to_s == "3/2" && Rational(f[0], 2).to_s == "3/4")
-  # An infinity and a NaN have no Rational: MRI raises FloatDomainError, and WITHOUT
-  # the guard this HUNG - the gcd's `x % y` never terminates with y = NaN.
+  # An infinity and a NaN have no Rational: MRI raises FloatDomainError (and the
+  # gcd's `x % y` would never terminate with y = NaN).
   check("rc46ab", s46_tor(1.0 / 0.0) == "FloatDomainError:Infinity" &&
                   s46_tor(-1.0 / 0.0) == "FloatDomainError:-Infinity" &&
                   s46_tor(0.0 / 0.0) == "FloatDomainError:NaN")
-  # ----- Integer#to_c / Float#to_c (docs/todo.md 1.2) -------------------------
-  # Missing from BOTH compiled halves outright: `5.to_c` died with *method call
-  # 'to_c' on a number* while the interpreter half answered 5+0i - a live halves
-  # divergence at base, which is why the class row matters as much as the text.
+  # ----- Integer#to_c / Float#to_c ---------------------------------------------
+  # The class row matters as much as the text.
   check("rc46ac", v[3].to_c.to_s == "2+0i" && (0 - v[1]).to_c.to_s == "-3+0i")
   check("rc46ad", v[3].to_c.class == Complex && v[3].to_c.inspect == "(2+0i)")
   # A Complex passes through unchanged. What is NOT asserted, because no engine here
@@ -2533,15 +2421,15 @@ def s46
   # RAW DOUBLES and answers (5+0i) and (0.3333333333333333+0i). It is the same
   # part-ness gap Complex(0, 0).abs has - MRI answers the Integer 0 there and every
   # engine here a Float - and closing it means Complex parts becoming full tower
-  # values with promotion rules of their own, the same class of change as the
-  # bignum-Rational docs/todo.md 2.4 names. All four legs agree on the answer given.
+  # values with promotion rules of their own. All four legs agree on the answer
+  # given.
   check("rc46ae", Complex(v[1], v[2]).to_c.to_s == "3+4i" &&
                   Complex(v[1], v[2]).to_c.class == Complex)
   # ----- Complex#abs is HYPOT, so it must not overflow or underflow -----------
-  # docs/todo.md 2.4 named this and it does NOT reproduce at Complex(3, 4), which is
-  # 5.0 under either formula. It reproduces where the SQUARES leave the double's
-  # range: sqrt(re*re + im*im) answered Infinity for the first pair and 0.0 for the
-  # second, in all four legs, where MRI answers the magnitude.
+  # It does not show at Complex(3, 4), which is 5.0 under either formula, only
+  # where the SQUARES leave the double's range: sqrt(re*re + im*im) would answer
+  # Infinity for the first pair and 0.0 for the second, where MRI answers the
+  # magnitude.
   g = [1.0e200, 1.0e-200, 1.0e300, 1.0e-300, 1.0e154, 1.0e-154, 1.0e308]
   check("rc46af", Complex(g[0], g[0]).abs.to_s == "1.414213562373095e+200" &&
                   Complex(g[1], g[1]).abs.to_s == "1.414213562373095e-200")
@@ -2575,11 +2463,6 @@ def s46_zerodiv
 end
 
 # ===== SECTION 47: BasicObject#equal? =====
-# docs/todo.md 2.5, and manual 7.6's `is`/`strictEq` under-read one language over.
-# It existed in NO engine: `1.equal?(1)` aborted with *unknown Integer method:
-# equal?* in the interpreter half and *method call 'equal?' on a number* in both
-# compiled halves, so --cross could never see it either.
-#
 # The rule is NOT a bare `===`. A Float compares by its DOUBLE (MRI's Float is a
 # flonum, so `1.0.equal?(1.0)` is true and NaN's false falls out); a String, a
 # Rational and a Complex answer FALSE always (MRI allocates a fresh object per
@@ -2595,7 +2478,7 @@ def s47
   check("eq47a", v[0].equal?(1) && !1.equal?(1.0) && !1.0.equal?(1))
   check("eq47b", v[5].equal?(1.0) && !(0.0 / 0.0).equal?(0.0 / 0.0))
   # Two equal Strings are DISTINCT objects in MRI, and this model has no string
-  # identity at all - so both spellings answer false, in all four engines.
+  # identity at all - so both spellings answer false.
   check("eq47c", !v[1].equal?("a") && !"a".equal?("a"))
   # A Symbol is INTERNED, and nil / true / false are singletons.
   check("eq47d", v[2].equal?(:a) && v[3].equal?(nil) && v[4].equal?(true) && !nil.equal?(false))
@@ -2605,13 +2488,9 @@ def s47
   r = (1..2)
   check("eq47e", a.equal?(a) && h.equal?(h) && r.equal?(r))
   check("eq47f", ![1].equal?([1]) && !({}).equal?({}) && !(1..2).equal?(1..2))
-  # The block bodies below are non-empty for no reason any more: `x = proc { }` with
-  # an EMPTY body used to be read as the bare name `proc` followed by an empty HASH
-  # literal, so the interpreter half said *unknown Hash method: lambda?* and both
-  # compiled halves *variable not defined: proc*. CmdArgAhead now refuses to open a
-  # parenthesis-less argument list with `{`, which is Ruby's own rule - a brace after
-  # a method name is always a block - and the eq47k..eq47n rows below assert it.
-  # docs/todo.md 1.3.
+  # The eq47k..eq47n rows below assert that `x = proc { }` with an EMPTY body is a
+  # block, not the bare name `proc` followed by an empty HASH literal: a brace
+  # after a method name is always a block (Ruby's own rule, CmdArgAhead).
   pr = proc { 1 }
   pr2 = proc { 1 }
   check("eq47g", pr.equal?(pr) && !pr.equal?(pr2))
@@ -2621,13 +2500,10 @@ def s47
   # Complex are rebuilt by every operation.
   check("eq47i", !(2 ** 70).equal?(2 ** 70) && !Rational(1, 3).equal?(Rational(1, 3)))
   check("eq47j", !Complex(1, 2).equal?(Complex(1, 2)) && !v[0].equal?("1"))
-  # ----- an EMPTY block on an assignment's right-hand side (docs/todo.md 1.3) -
-  # `x = proc { }` was `x = proc({})`, because a parenthesis-less command argument
-  # list would open on `{`. In Ruby a brace after a method name is ALWAYS a block:
-  # MRI needs parentheses for a Hash argument and rejects `f {a: 1}` outright with
-  # *syntax error, unexpected ':'*. The empty block is what made it visible; the
-  # non-empty one always worked, and so did `p proc { }.lambda?`, which reaches the
-  # brace through Primary -> Call rather than through the command form.
+  # ----- an EMPTY block on an assignment's right-hand side ----------------------
+  # In Ruby a brace after a method name is ALWAYS a block: MRI needs parentheses
+  # for a Hash argument and rejects `f {a: 1}` outright with *syntax error,
+  # unexpected ':'*.
   ep = proc { }
   el = lambda { }
   check("eq47k", !ep.lambda? && el.lambda? && ep.call.nil? && el.call.nil?)
@@ -2652,10 +2528,9 @@ class S47C
 end
 
 # ===== SECTION 48: `method(:x)` answers a METHOD, not a Proc =====
-# docs/todo.md 2.5. MRI's Method is a class of its own: #class is Method, #to_s is
+# MRI's Method is a class of its own: #class is Method, #to_s is
 # `#<Method: Object#x>`, #arity counts optionals the way a LAMBDA does, and a
-# Method is not a Proc. Every engine here answered Proc, `#<Proc>` and a proc's
-# arity. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+# Method is not a Proc. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
 #
 # THE RENDERING IS BYTE-EXACT and not an approximation, unlike Proc#to_s: MRI 2.6
 # writes exactly `#<Method: Object#s48_opt>` with no address in it, and only 3.0
@@ -2675,8 +2550,7 @@ def s48
   check("mv48g", m.to_proc.call(v[0]) == 4 && !m.to_proc.is_a?(Method))
   # A BOUND method names the receiver's class.
   check("mv48h", S48C.new.probe == "Method|#<Method: S48C#inst>|1|15")
-  # A KERNEL METHOD IS A METHOD TOO, and every engine raised NameError for it -
-  # agreed and wrong, so --cross was blind to it. MRI hands `method(:puts)` out as
+  # A KERNEL METHOD IS A METHOD TOO. MRI hands `method(:puts)` out as
   # `#<Method: Object(Kernel)#puts>` with arity -1, and it is byte-exact here for
   # the same reason the user-method form is: MRI 2.6 puts no address in it. The
   # list of names is at kernelMethodNames in languages/ruby-interpreter.abnf, with
@@ -2702,8 +2576,7 @@ def s48
   # A `def` of the program's own STILL WINS - the Kernel table is consulted after
   # the scope walk and after the self-method lookup. `printf` is the row that
   # matters: MetaJS's own host globals carry a `print` / `printf` / `sprintf` (Go's
-  # fmt, not Ruby's) in the ROOT scope, so the compiled halves used to answer
-  # `#<Method: Object#printf>` with arity 0 while this half answered MRI's.
+  # fmt, not Ruby's) in the ROOT scope.
   check("mv48p", method(:s48_printf).arity == 1 && method(:s48_printf).call(v[0]) == "mine:3")
   check("mv48q", method(:printf).to_s == "#<Method: Object#printf>" && method(:printf).arity == 1)
 end
@@ -2722,20 +2595,10 @@ class S48C
 end
 
 # ===== SECTION 45: a MALFORMED format string raises =====
-# docs/todo.md 1.3. A directive MRI rejects was accepted here, in three
-# DIFFERENT ways: "%z" % 5 answered "5" in ruby-interpreter.abnf (its unknown
-# arm is %s) and "z" in the other two (theirs prints the letter), and "%5" % 5
-# answered "%5" in the two interpreted halves and "" in the NATIVE binary - layer
-# 2's `break` discarded the rest of the string, which nothing but a native probe
-# could see. Converging means raising, and it is the whole of the decision.
+# A directive MRI rejects raises ArgumentError, with MRI's own message.
 #
 # Every message below was read off /usr/bin/ruby 2.6.10, whose sprintf is
 # unchanged in 3.x. THIS SECTION RUNS UNDER REAL RUBY unchanged.
-#
-# NOT converged, and older than this item: MRI's "too few arguments". Running
-# off the end of the ARGUMENT list answers nil in all three engines here, so
-# "%d" % [] is "0" and not a raise, and the two rows where MRI reports the
-# shortage BEFORE the malformed head ("%s%" % []) keep this file's message.
 def s45m(f, a)
   begin
     return "OK:" + (f % a)
@@ -2786,10 +2649,8 @@ def s45
                  s45m("%#x", 255) == "OK:0xff")
   check("mf45s", s45m("%1$s-%1$s", ["a"]) == "OK:a-a" && s45m("%{x}", {:x => 1}) == "OK:1" &&
                  s45m("%<x>d", {:x => 7}) == "OK:7")
-  # A SHORT ARGUMENT LIST is MRI's *too few arguments*, and every engine here
-  # answered nil for it - `"%s %s" % ["a"]` read "a " in all three, agreed and
-  # wrong. docs/todo.md 1.3, and the decline it replaced is at fmtTooFew in
-  # languages/ruby-interpreter.abnf. It fires for a plain directive, for one
+  # A SHORT ARGUMENT LIST is MRI's *too few arguments*. It fires for a plain
+  # directive, for one
   # carrying flags or a width, for an explicit SELECTOR out of range, and for a `*`
   # width or precision - the star is read BEFORE the value, so "%*d" % [5] is short
   # too.
@@ -2814,13 +2675,11 @@ def s45
                  s45m("%1$d %1$d", [1]) == "OK:1 1")
   check("mf45z", s45m("%s", nil) == "OK:" && s45m("%s", {:a => 1}) == "OK:{:a=>1}" &&
                  s45m("abc", []) == "OK:abc" && s45m("%%", []) == "OK:%")
-  # ----- what a NUMERIC directive may be given (docs/todo.md 2.4) -------------
+  # ----- what a NUMERIC directive may be given ---------------------------------
   # MRI's numeric directives CONVERT the operand with Kernel#Integer / Kernel#Float
   # rules: they raise on a value with no number in it, and they PARSE one whose text
-  # has a number. Every engine went straight to to_f, whose answer is 0 for nil,
-  # true, a Symbol and an Array - AND 0 for the perfectly good string "12". Agreed
-  # and wrong in all four legs. nil/true/false name THEMSELVES in the message and
-  # everything else names its CLASS, which is MRI's own wording.
+  # has a number. nil/true/false name THEMSELVES in the message and everything else
+  # names its CLASS, which is MRI's own wording.
   check("mf45aa", s45t("%d", [nil]) == "TE:can't convert nil into Integer" &&
                   s45t("%d", [true]) == "TE:can't convert true into Integer" &&
                   s45t("%d", [false]) == "TE:can't convert false into Integer")
@@ -2831,8 +2690,7 @@ def s45
                   s45t("%o", [nil]) == "TE:can't convert nil into Integer" &&
                   s45t("%b", [nil]) == "TE:can't convert nil into Integer" &&
                   s45t("%u", [nil]) == "TE:can't convert nil into Integer")
-  # ...and every float directive says Float, including %a, which is rendered by a
-  # different file in the compiler half and needed the check of its own.
+  # ...and every float directive says Float, including %a.
   check("mf45ad", s45t("%f", [nil]) == "TE:can't convert nil into Float" &&
                   s45t("%e", [nil]) == "TE:can't convert nil into Float" &&
                   s45t("%g", [nil]) == "TE:can't convert nil into Float" &&
@@ -2857,9 +2715,7 @@ def s45
                   s45t("%f", [Rational(3, 2)]) == "OK:1.500000" && s45t("%c", [65]) == "OK:A")
   # A USER OBJECT is converted with the two names Kernel#Integer tries - #to_int, then
   # #to_i - and with #to_f for a float directive. Without one it raises, and the message
-  # names ITS OWN CLASS: rbClassName / rubyClassName answer "" for a user object, so
-  # both compiled halves said "Object" where the interpreter said "S45Plain" until a
-  # native probe caught it. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+  # names ITS OWN CLASS. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
   check("mf45ak", s45t("%d", [S45Int.new]) == "OK:7" && s45t("%x", [S45Int.new]) == "OK:7" &&
                   s45t("%d", [S45Toi.new]) == "OK:42")
   check("mf45al", s45t("%f", [S45Flo.new]) == "OK:2.500000" && s45t("%c", [S45Int.new]) == "OK:\a")

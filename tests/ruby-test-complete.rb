@@ -1,5 +1,4 @@
-# Ruby subset self test 5: the constructs added to complete the language.
-# Exercises exactly the newly implemented features:
+# Ruby subset self test 5. Exercises:
 #   * safe navigation  obj&.m / obj&.m(args) / obj&.field  (nil-safe, args skipped
 #     when the receiver is nil),
 #   * trailing statement modifiers  STMT if / unless / while / until COND,

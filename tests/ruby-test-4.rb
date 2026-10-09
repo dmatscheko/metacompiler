@@ -1,5 +1,5 @@
-# Ruby subset: the string / array / hash methods that the interpreter always
-# had but the LLVM-IR compiler only gained with js_rmcall (rt.rubyMethod). Both
+# Ruby subset: string / array / hash methods (js_rmcall / rt.rubyMethod in the
+# compiler). Both
 # engines run this file and must agree; it counts failures and exits with the
 # count, so exit 0 means full parity.
 

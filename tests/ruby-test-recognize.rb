@@ -1,14 +1,11 @@
-# A real-world-looking Ruby file that exercises constructs the metacompiler now
-# RECOGNIZES (parses) but does not fully implement. Each such construct emits a
-# "not implemented (ignored)" warning under -warn-unsupported and is skipped or
-# approximated. A normal run aborts at the first one - so this file is a
-# SHOULD-FAIL by default and only exits 0 under -warn-unsupported. The output
-# is byte-identical under goja and -frozen for both the interpreter and the
-# LLVM-IR compiler. The constructs covered: module, class superclass, singleton
-# methods (def self.x), default / splat / double-splat / keyword / block
+# A real-world-looking Ruby file mixing many constructs: module, class superclass,
+# singleton methods (def self.x), default / splat / double-splat / keyword / block
 # parameters, keyword / splat / block call arguments, ||= conditional assignment,
 # float literals, scoped constants (::), %w / %i percent literals, for-in loops,
-# and yield. Symbol-key hashes { name: v } are genuinely lowered (no warning).
+# yield and symbol-key hashes { name: v }. ||= is still not implemented: a normal
+# run aborts there, so this file is a SHOULD-FAIL by default and only exits 0
+# under -warn-unsupported. The output is byte-identical under goja and -frozen
+# for both the interpreter and the LLVM-IR compiler.
 
 # ----- module with a constant and a singleton method -----
 module Config
@@ -49,9 +46,6 @@ end
 # *name, not a required `name`: this section is about the CALL-SITE syntax, and
 # with one required parameter two of the three calls below are programs MRI
 # itself rejects - `render(*parts)` passes three arguments and `render(&:upcase)`
-# passes none, both ArgumentError. That was invisible until docs/todo.md 1.5 made
-# too few arguments raise here as well, and it then showed up as a halves
-# divergence in ./test.sh --cross rather than as anything about this file.
 def render(*name)
   name
 end
@@ -61,7 +55,7 @@ render(name: "widget")
 render(*parts)
 render(&:upcase)
 
-# ----- symbol-key hash (genuinely lowered) and ||= conditional assignment -----
+# ----- symbol-key hash and ||= conditional assignment (not implemented) -----
 options = { color: "red", size: 4, tag: :main }
 puts options[:color]
 
@@ -69,7 +63,7 @@ cache = nil
 cache ||= "warm"
 puts cache
 
-# ----- float literal and scoped constant (recognized, not implemented) -----
+# ----- float literal and scoped constant -----
 ratio = 3.14
 scope = Config::DEFAULTS
 puts "computed"
@@ -79,12 +73,12 @@ names = %w[alice bob carol]
 flags = %i[read write execute]
 puts "listed"
 
-# ----- for-in loop (recognized, not implemented) -----
+# ----- for-in loop -----
 for n in [10, 20, 30]
   puts n
 end
 
-# ----- yield inside a method (recognized, not implemented); defined only -----
+# ----- yield inside a method; defined only -----
 def each_pair
   yield 1, 2
 end
