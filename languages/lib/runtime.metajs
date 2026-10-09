@@ -2,26 +2,18 @@
 //
 // Layer 2 is the per-language runtime written in MetaJS and compiled by
 // languages/metajs-to-llvm-ir.abnf with -rt-lib into <lang>-rt.ll, which the
-// language's own -exe links next to lib/runtime.ll (the C floor). Eleven such
-// files exist, and docs/runtime-merge-plan.md measured that 29 extern names have
-// between two and nine implementations of the SAME function, costing 1,427 lines.
-// This file is where those merge.
+// language's own -exe links next to lib/runtime.ll (the C floor). A body that more
+// than one language's layer 2 needs lives here, once.
 //
-// IF YOU ARRIVED HERE LOOKING FOR runtime-decimal.metajs, runtime-bignum.metajs
-// OR runtime-jvm.metajs, they are HERE. They were folded back into this file on
-// 2026-08-09 (docs/todo.md 5.2): the split existed only to keep scope_find's
-// linear module-scope scan off non-callers, and the hash index removed that cost,
-// so the three files bought nothing and cost an import edge each. Comments across
-// the repo still name them, and those names are PROVENANCE - they are accurate
-// about where a body lived when the comment was written, and repointing them here
-// would turn a true historical statement into a false one. Grep this file for the
-// body. runtime-dartswift.metajs was the fourth and last split; it followed
-// them on 2026-08-10 (docs/todo.md 5.5) and is at the FOOT of this file.
+// The former split files runtime-decimal.metajs, runtime-bignum.metajs,
+// runtime-jvm.metajs and runtime-dartswift.metajs are sections of this file now
+// (the last one at its FOOT); a comment elsewhere naming one of them means the
+// section here. Grep this file for the body.
 //
-// The mechanism is the one ruby proved with `import "./regex.js"`: a layer-2 file
-// may import a shared MetaJS source, metajs-to-llvm-ir.abnf resolves the relative
-// path, and -rt-lib's lazy boot runs both into the SAME pinned scope. So a
-// definition here is indistinguishable from one written in the importing file.
+// A layer-2 file imports this one (`import "./runtime.metajs"`);
+// metajs-to-llvm-ir.abnf resolves the relative path, and -rt-lib's lazy boot runs
+// both into the SAME pinned scope. So a definition here is indistinguishable from
+// one written in the importing file.
 //
 // ----- how a language parameterises a shared body ----------------------------
 //
@@ -50,17 +42,7 @@
 
 // ===================================================== int32 ================
 //
-// Go: isInt32Value (abnf/jsrt.go:8420). NINE layer-2 files carried a private copy
-// of this predicate under nine names (csIsInt32Value, dtIsInt32, jvIsInt32Value,
-// goIsInt32Value, phIsInt32, pyAIsInt32, swIsInt32, k1IsInt32Value, rbIsInt32).
-// They differed in three ways, all of them measured to be the same function:
-//   - Math.trunc(n) !== n  vs  Math.floor(n) !== n. They disagree on which value
-//     a non-integer maps to (-1 vs -2 for -1.5) and agree on the only thing asked,
-//     which is whether it equals n.
-//   - `!=` (python) vs `!==` (everyone else). Both operands are numbers, so the
-//     loose compare never coerces.
-//   - the low bound written `n >= 0 - 2147483648` (no negative literals in the
-//     dialect at the time) vs python's `n >= -2147483648`.
+// Go: isInt32Value (abnf/jsrt.go).
 function rtIsInt32(n) {
     if (n !== n) { return false }
     if (Math.trunc(n) !== n) { return false }
@@ -68,17 +50,8 @@ function rtIsInt32(n) {
     return n >= 0 - 2147483648
 }
 
-// Go: float64(int32(x)), i.e. ToInt32. Eight private copies (csWrap32, jvWrap32,
-// goWrap32, dtWrap32, swWrap32, phWrap32, ktNorm(x,32,0), and python/ruby's bare
-// `| 0`). Two shapes existed:
-//   - csharp/java guarded NaN and the infinities to 0 FIRST; the other six did
-//     not. `x - Math.floor(x/2^32)*2^32` on a NaN or an infinity is NaN, so the
-//     guard is a real difference - it is just unreachable from js_jadd, whose
-//     float arm has already taken every non-finite operand. Kept, because it is
-//     the correct answer and costs nothing.
-//   - the fold-down test written `m >= 2147483648` (csharp/java) vs
-//     `m > 2147483647` (the rest). Identical on an integer m, and m is always an
-//     integer here because x is.
+// Go: float64(int32(x)), i.e. ToInt32. NaN and the infinities answer 0 (unreachable
+// from js_jadd, whose float arm has already taken every non-finite operand).
 function rtWrap32(x) {
     if (x !== x) { return 0 }
     if (x == Infinity) { return 0 }
@@ -92,78 +65,29 @@ function rtWrap32(x) {
 //
 // EXPORTED DIRECTLY. -rt-lib reads its exported surface off the SOURCE TEXT -
 // every line starting in column 0 with `function js_` - because a MetaJS function
-// is a value in a scope and its name is not in the IR. It used to scan only the
-// MAIN file, so a `function js_jadd` written here compiled, ran correctly under
-// llvm.Run, and was UNDEFINED AT LINK TIME; the matrix and --cross are blind to
-// that and tests/clang-check.sh was the only gate that saw it. The scan now
-// covers the imported files too (metajs-to-llvm-ir.abnf, the -rt-lib block), so
-// a shared extern is written here under its real name and needs no forwarder.
+// is a value in a scope and its name is not in the IR. The scan covers the imported
+// files too (metajs-to-llvm-ir.abnf, the -rt-lib block), so a shared extern is
+// written here under its real name and needs no forwarder. Only
+// tests/clang-check.sh sees an export that fails to link; the matrix and --cross
+// run under llvm.Run and are blind to it.
 //
-// Go: js_jadd (abnf/jsrt.go:5151). Java/C# `+`: string concat when either side is
+// Go: js_jadd (abnf/jsrt.go). Java/C# `+`: string concat when either side is
 // a string, a 32 bit wrapping add when both sides are int32-valued, a boxed
 // double when either side is one, a plain double add otherwise.
 //
-// NINE implementations merged. The differences found, and how each was classified
-// (docs/runtime-merge-plan.md asks for this list; it is the deliverable):
+// Knobs: rtkStr (how `+` renders an operand: java renders an array as `[I@1b6d3586`,
+// kotlin a Char as its character, ruby nil as "null") and rtkNum (dart answers NaN
+// for a non-number where csharp answers 0; kotlin answers 0 for null and NaN for
+// undefined, since kotlin.Unit arrives as undefined; php raises on an array).
 //
-//  1. KNOB - the string renderer. csJavaStr / dtJavaStr / jpStr / goJavaStr /
-//     phJavaStr / pyAJavaStr / swJavaStr / k1JStr / rbJStr. Nine genuinely
-//     different functions: java renders an array as `[I@1b6d3586` and recurses
-//     into objects, kotlin renders a Char as its character, ruby spells nil
-//     "null", go delegates to gopStr. Irreducible - this is rtkStr.
+// The float arm is the floor's rt.jvmArith spelled out: abnf/jsrtjvm.go answers
+// `jsJFlo{f: rt.toNumber(l)+rt.toNumber(r), sty: jvmStyleOf(l, r)}` whenever either
+// side is a box. php, python and ruby never reach it (their emitters use js_jadd only
+// on internal counters or with a string seed); it is right for them anyway.
 //
-//  2. KNOB - the numeric coercion. csNum / dtNumOf / jvNum / goNum /
-//     phNumOf(phToNum(v)) / pyNum / swNum / ktNum / rbToF. Also genuinely
-//     different, and the differences are load-bearing: dart answers NaN for a
-//     non-number where csharp answers 0; kotlin answers 0 for null and NaN for
-//     undefined (a comment at ktNum records that answering 0 for undefined made
-//     `size + f()` of a Unit-returning f print the size where the Go twin prints
-//     NaN); php's raises "unsupported operand type: array used as a number".
-//     Irreducible - this is rtkNum.
-//
-//  3. NOT A DIFFERENCE - the float arm's two shapes. The plan's headline example
-//     is java's `jvmArith("+", l, r)` against swift's
-//     `flo(swNum(l) + swNum(r), floStyle(floIs(l) ? l : r))`, and asks whether
-//     they agree on every input. They do, and the reason is worth recording:
-//     jvmArith/csFloArith are `floOp(0, operand(l), operand(r))`, floOp is
-//     abnf/jsrtjvm.go:285 which calls rt.jvmArith, and rt.jvmArith (jsrtjvm.go:176)
-//     is `jsJFlo{f: rt.toNumber(l)+rt.toNumber(r), sty: jvmStyleOf(l, r)}` whenever
-//     either side is a box - the same expression, spelled through the floor. The
-//     one place the two spellings could part is the operand mapping: java's
-//     jvmOperand is `floIs(v) ? v : jvNum(v)` and is exactly rtkNum, while
-//     csharp's csFloOperand passes a non-flo operand through UNCHANGED for the
-//     floor's own rt.toNumber to coerce. Those agree on every type csNum and
-//     rt.toNumber both handle (flo, char, sized int, number, bool) and part only
-//     on an object/array/undefined operand, where rt.toNumber says NaN and csNum
-//     says 0 - see the DEFECT below.
-//
-//  4. NOT A DIFFERENCE - the style argument. go wrote goStyleOf(l, r), kotlin
-//     wrote k1StyleOf(l, r), swift and dart wrote floStyle(floIs(l) ? l : r).
-//     goStyleOf and k1StyleOf are the same function EXCEPT for their final arm,
-//     which returns 1 (floGo) in go and 0 (floJava) in kotlin - and that arm is
-//     reachable only when NEITHER side is a box, which is precisely the case the
-//     caller has already excluded. Dead code, correct-for-its-language in both,
-//     never observed. Merged to the swift/dart spelling.
-//
-//  5. KNOB, documented - php, python and ruby have NO float arm at all. Each of
-//     the three carries a comment saying why: php's emitter emits js_jadd only
-//     for its own loop counters, python's reaches it only through
-//     makeStrConcat/makeFString/emitSpecText which seed the chain with
-//     emitStr(b, "") so the string arm always wins, and ruby's emits it only as
-//     js_jadd(i, 1) on an internal counter. The arm is therefore unreachable
-//     rather than wrong, and the merged body simply HAS it: a superset that costs
-//     those three nothing, and that the day one of them starts emitting js_jadd on
-//     a user value will already be right.
-//
-//  6. DEFECT (csharp), fixed here - see point 3. csharp reached the float arm
-//     through the floor's rt.toNumber and now reaches it through csNum, whose
-//     last arm answers 0 where rt.toNumber answers NaN, for an object, an array,
-//     or undefined. The Go twin is the oracle and says NaN. Measured: the only
-//     C# operand that can be a bare object on the double path is a `dynamic` or a
-//     boxed `object`, which csharp-to-llvm-ir.abnf does not emit, so the arm is
-//     unreachable today and neither half changed an answer. Recorded rather than
-//     tuned: csNum's fallback should be NaN, not 0, and that is csharp-rt.metajs's
-//     own bug rather than js_jadd's.
+// Known gap: csNum's fallback answers 0 where the Go twin's rt.toNumber answers NaN
+// for an object, an array or undefined. No C# program this tree compiles can put a
+// bare object on the double path, and the fix belongs in csharp-rt.metajs.
 function js_jadd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return rtkStr(l) + rtkStr(r) }
     if (floIs(l) || floIs(r)) { return flo(rtkNum(l) + rtkNum(r), floStyle(floIs(l) ? l : r)) }
@@ -177,71 +101,22 @@ function js_jadd(l, r) {
 //
 // Exported directly, for the reason recorded at js_jadd.
 //
-// Go: js_is_type -> rt.isTypeName (abnf/jsrt.go:8432). `x is T` / `x as? T`:
+// Go: js_is_type -> rt.isTypeName (abnf/jsrt.go). `x is T` / `x as? T`:
 // strip a generic argument list and a trailing `?`, answer the nullable flag for
 // a null, then a fixed table of well-known type names, then walk __class/__super.
 //
-// SIX of the eight implementations merged here - csharp, java, kotlin, python,
-// ruby, swift. go and dart are deliberately NOT merged; see the end of this note.
-// The differences found, and how each was classified:
+// Shared by csharp, java, kotlin, python, ruby and swift. Knobs: rtkIsChar (only
+// csharp, java and kotlin have a boxed Char) and rtkIsArr (swift's arrays are
+// OBJECTS carrying a length). The numeric test is the strict rtIsPlainNum, matching
+// the oracle's `v.(float64)`.
 //
-//  1. NOT A DIFFERENCE - the `<` strip and the `?` strip. csharp/java/python/
-//     ruby/swift inlined indexOf/substring; kotlin called k4bStripAngle /
-//     k4bEndsQ / k4bStripQ, which are the same three lines under names. csharp
-//     and java guarded the `?` test with a nested `if (nm.length > 0) {...}`
-//     where python/ruby/swift used `&&`; identical.
+// DIVERGENCE FROM THE ORACLE, kept deliberately: the __class/__super walk is capped
+// at 64 steps where jsrt.go loops until the chain ends. The oracle HANGS on a cyclic
+// __super and the cap answers false; none of the six languages can express a
+// 65-deep hierarchy in a program this tree compiles.
 //
-//  2. NOT A DIFFERENCE - the null test. csharp/java/kotlin/swift wrote
-//     `v === undefined || v === null`; python called pyIsNone and ruby rbIsNil,
-//     and BOTH of those are exactly `v === null || v === undefined`. Python's
-//     None and Ruby's nil are the JS null in this value model, so no knob.
-//
-//  3. NOT A DIFFERENCE - the object walk. csharp/java tested
-//     `typeof v != "object"` then `Array.isArray(v)`; python/ruby called
-//     pyIsObj/rbIsObj, which are those two tests; kotlin/swift called
-//     ktIsObj/swIsObj, which admit an array - but an array's `__class` is
-//     undefined, so the walk exits on the first step and the answer is the same
-//     false.
-//
-//  4. KNOB - the Char test. csharp, java and kotlin have a boxed Char
-//     (csIsChar/jvIsChar/ktIsChar; csharp's and java's are byte-for-byte the same
-//     function). python, ruby and swift have no Char in their value model at all
-//     and omitted the arm. rtkIsChar, answering false for those three, restores
-//     the oracle's arm order for the three that have one and costs the others a
-//     predicate call.
-//
-//  5. KNOB - the array test. csharp/java/kotlin/python/ruby all use
-//     Array.isArray; swift's arrays are OBJECTS carrying a length, so swIsArr is
-//     a real difference. rtkIsArr.
-//
-//  6. NOT A DIFFERENCE, though it looked like one - the numeric predicate.
-//     csharp/java/kotlin used isPlainNum (`typeof v == "number"` AND NOT a sized
-//     integer AND NOT a boxed double), swift inlined the same three tests, and
-//     python and ruby used a BARE `typeof v == "number"`. The oracle is
-//     `v.(float64)`, which a jsGInt and a jsJFlo both fail, so the bare test
-//     would be a defect - except that python-rt.metajs and ruby-rt.metajs
-//     mention sintIs/floIs ZERO times each: neither language's value model has a
-//     tagged number, so on their values the two spellings cannot differ. The
-//     strict form is shared, and it is the correct one the day either language
-//     grows a box.
-//
-//  7. DIVERGENCE FROM THE ORACLE, kept deliberately - the walk bound. csharp,
-//     java, kotlin and swift cap the __class/__super walk at 64 steps; python and
-//     ruby loop until the chain ends, which is what jsrt.go:8472 does. The
-//     oracle HANGS on a cyclic __super and the guard answers false, and neither
-//     C#, Java, Kotlin, Swift, Python nor Ruby can express a 65-deep hierarchy in
-//     a program this tree compiles. The guard is taken for all six: it is the
-//     safe answer, and the case that distinguishes them is unconstructible.
-//
-//  8. NOT MERGED - go. go-rt.metajs's js_is_type is a different function, not a
-//     variant: it does not strip `<` or `?`, answers FALSE (not opt) for a null,
-//     has no numeric/Char/nullable arms at all, and reads the class name through
-//     goStrOf. Go's type switch has none of the nullable-generic surface the
-//     other six share, so there is nothing to parameterise - merging it would
-//     mean adding six knobs to skip six arms.
-//
-//  9. NOT MERGED - dart. dart-rt.metajs's js_is_type is
-//     `return dtTypeName(v, t)`, a Dart-specific type-name resolver. Same reason.
+// go and dart keep their own js_is_type: go's does not strip `<` or `?`, answers
+// false for a null and has no numeric/Char arms; dart's is dtTypeName(v, t).
 function js_is_type(v, t) {
     var nm = t
     var lt = nm.indexOf("<")
@@ -254,7 +129,7 @@ function js_is_type(v, t) {
     if (v === undefined) { return opt }
     if (v === null) { return opt }
     // Kotlin's Char is its own type: `c is Char` holds, `c is Int` does not.
-    // Tested before the name switch, exactly as jsrt.go:8448 does.
+    // Tested before the name switch, exactly as jsrt.go does.
     if (rtkIsChar(v)) {
         if (nm == "Char") { return true }
         if (nm == "Character") { return true }
@@ -287,8 +162,6 @@ function js_is_type(v, t) {
 
 // The oracle's `v.(float64)`: an ordinary double, which a SIZED INTEGER (tag 13)
 // and a BOXED DOUBLE (tag 14) are not, even though `typeof` calls both "number".
-// Was csIsPlainNum / jvIsPlainNum / k4bIsPlainNum (three identical bodies) and
-// swift's inline spelling of the same three tests.
 function rtIsPlainNum(v) {
     if (typeof v != "number") { return false }
     if (sintIs(v)) { return false }
@@ -297,41 +170,27 @@ function rtIsPlainNum(v) {
 
 // ===================================================== js_dict_new ==========
 //
-// Go: js_dict_new (abnf/jsrt.go:6369). The empty dict / map / Map / Dictionary
+// Go: js_dict_new (abnf/jsrt.go). The empty dict / map / Map / Dictionary
 // every language builds: a marked object with two PARALLEL, INSERTION-ORDERED
 // arrays. The order is the observable part - Python 3.7+, Ruby, Dart's Map, C#'s
 // Dictionary and Swift's ordered rendering all depend on it - which is why this
 // is not a JS object with real properties.
-//
-// SIX implementations merged, and the difference list for this one is EMPTY.
-// csharp, dart, go and swift each wrote the object literal inline; python and
-// ruby delegated to a pyNewDict / rbNewDict that returns the same literal. All
-// six are byte-for-byte identical, and identical to the oracle. That is worth
-// stating rather than skipping: the 29-name table counts implementations, not
-// disagreements, and a row can be six copies of one line. This one was.
 function js_dict_new() { return {__dict: true, keys: [], vals: []} }
 
 // ===================================================== the object test ======
 //
-// "not null, not undefined, and typeof object". dtIsObj / ktIsObj / swIsObj were
-// three byte-identical bodies; csharp, java and php inlined the same three tests
-// at every site. rbIsObj and pyIsObj add `&& !Array.isArray(v)`, and that fourth
-// test is NOT merged in: every caller here walks __class / __super, an array
-// carries neither, so the walk exits on its first step and the answer is the same
-// either way. The name is deliberately rt (shared) and not rtk (knob): there is no
-// language for which this is a different question.
+// "not null, not undefined, and typeof object". rbIsObj and pyIsObj also reject
+// arrays; that test is not needed here, because every caller walks __class /
+// __super and an array carries neither. rt (shared) rather than rtk (knob): there
+// is no language for which this is a different question.
 function rtIsObj(v) {
     if (v === undefined) { return false }
     if (v === null) { return false }
     return typeof v == "object"
 }
 
-// The receiver-prepend every dispatcher does before `apply`. Was csPrepend,
-// jpPrepend, pyDPrepend (three byte-identical bodies), jvPrepend, k4bPrepend, and
-// an inline `var av = [recv] ...` loop in php-rt and swift-rt. k4bPrepend was the
-// only one that guarded a null/undefined `args`; the guard is kept, because it is
-// the answer a caller with no argument array wants and costs the others two
-// compares on a path that already allocates.
+// The receiver-prepend every dispatcher does before `apply`. A null/undefined
+// `args` answers just [v].
 function rtPrepend(v, args) {
     var out = []
     out.push(v)
@@ -347,17 +206,10 @@ function rtPrepend(v, args) {
 
 // ===================================================== the Char box =========
 //
-// Go: jsChar (abnf/jsrt.go:6077). C#'s char, Java's char and Kotlin's Char are a
+// Go: jsChar (abnf/jsrt.go). C#'s char, Java's char and Kotlin's Char are a
 // type of their own - `c is Char` holds where `c is Int` does not, and `'a' + 1`
-// is an Int while `"" + 'a'` is "a" - so the three languages box one, and they
-// boxed it three times: csChar / jvChar / ktChar were byte-for-byte identical, and
-// so were csIsChar / jvIsChar.
-//
-// ktIsChar was the one that read differently - `ktIsObj(v) && typeof v["__char"]
-// == "number"` against csharp's and java's `v["__char"] !== undefined` - and it is
-// the same predicate: nothing but rtCharBox ever writes __char, and it writes a
-// number. Merged to the strict spelling, which is also the cheaper one to be wrong
-// about.
+// is an Int while `"" + 'a'` is "a" - so those three languages box one. Nothing but
+// rtCharBox ever writes __char, and it writes a number.
 //
 // Dart, Go, PHP, Python, Ruby and Swift have no Char in their value model at all;
 // their rtkIsChar answers a constant false and they never call rtCharBox.
@@ -374,81 +226,43 @@ function rtIsCharBox(v) {
 
 // ===================================================== js_char ==============
 //
-// Go: `js_char` (abnf/jsrt.go:6077) is `jsChar{code: int32(a[0])}`. THREE
-// implementations, and all three were the same one-line delegation to the boxer
-// above: `return csChar(code_raw)` / `jvChar` / `ktChar`.
+// Go: `js_char` (abnf/jsrt.go) is `jsChar{code: int32(a[0])}`.
 //
 // The parameter keeps its `_raw` suffix, which is not cosmetic: -rt-lib reads the
 // signature off this source line and a name ending in _raw marks the argument as
 // an UNBOXED integer, so renaming it would hand the boxer a value handle.
 //
-// NOT MERGED - swift. swift-rt's js_char is a different function: Swift has no
-// Char box (a Character is a String), so it converts a code POINT to UTF-16,
-// emitting a surrogate pair above 0xFFFF. It keeps its own definition, which wins
-// over this one because a layer-2 file's top level runs after its imports.
+// swift keeps its own js_char (it has no Char box: a Character is a String, so it
+// converts a code POINT to UTF-16, with a surrogate pair above 0xFFFF); a layer-2
+// file's own definition wins because its top level runs after its imports.
 //
-// A DIVERGENCE FROM THE ORACLE, recorded not fixed: the oracle truncates the code
-// to int32 and none of the three does. Unreachable - every emitter feeds js_char a
-// character literal's code or a `Char(i)` conversion the front end has already
-// range-checked - and narrowing here would be a guess about which language's
-// overflow rule to apply.
+// The oracle truncates the code to int32 and this does not. Unreachable: every
+// emitter feeds js_char a character literal's code or a range-checked `Char(i)`.
 function js_char(code_raw) { return rtCharBox(code_raw) }
 
 // ===================================================== js_char_code =========
 //
-// Go: `js_char_code` (abnf/jsrt.go:6080) is `rt.wrapNum(rt.toNumber(v))` - plain
-// toNumber, nothing more. THREE implementations:
-//
-//  1. NOT A DIFFERENCE - csharp's `csIsChar(v) ? v["__char"] : csNum(v)`. csNum's
-//     SECOND arm is already `csIsChar(v) -> v["__char"]`, and the arm before it
-//     (floIs) cannot hold for an object, so the leading test is dead: the whole
-//     body is csNum(v).
-//  2. NOT A DIFFERENCE - kotlin's bare `ktNum(v)`, which is the oracle spelled
-//     directly. ktNum's first arm unboxes a Char.
-//  3. NOT MERGED - swift. `typeof v != "string" ? sintNum(v) : v.charCodeAt(0)`,
-//     with NaN for an empty string. Swift has no Char box and swNum on a string is
-//     parseFloat, so rtkNum is the wrong function here; swift keeps its own.
-//
-// So the merged body is rtkNum, which IS each language's rt.toNumber.
+// Go: `js_char_code` (abnf/jsrt.go) is `rt.wrapNum(rt.toNumber(v))`, so this is
+// rtkNum, each language's rt.toNumber (which unboxes a Char first). swift keeps its
+// own: it has no Char box and reads a string's first code unit.
 function js_char_code(v) { return rtkNum(v) }
 
 // ===================================================== js_supercall =========
 //
-// Go: js_supercall (abnf/jsrt.go:5058). `super.m(...)`: walk __super from the
+// Go: js_supercall (abnf/jsrt.go). `super.m(...)`: walk __super from the
 // class the caller already resolved, and call the first callable found with the
 // receiver PREPENDED to the argument list.
 //
-// FOUR of the five implementations merged - csharp, java, kotlin, ruby. The
-// differences found:
+// Shared by csharp, java, kotlin and ruby. Knob: rtkCall, the call itself. Most
+// languages spell it `m.apply(undefined, argv)` - `this` deliberately undefined
+// because the receiver travels as argv[0]; kotlin's k4bCallAcc sets the k4bThis
+// global around the call, which is how an accessor declared in a superclass sees
+// its receiver.
 //
-//  1. NOT A DIFFERENCE - the callable test. csIsFn, ktIsFn and rbIsFn are three
-//     byte-identical `typeof v == "function"`, and java inlined
-//     `m !== undefined && typeof m == "function"`, whose first half is implied by
-//     the second (typeof undefined is "undefined"). No knob.
-//
-//  2. NOT A DIFFERENCE - the walk-exit test. csharp/java wrote the three tests
-//     inline, kotlin called ktIsObj and ruby rbIsObj; see rtIsObj above.
-//
-//  3. NOT A DIFFERENCE - the prepend. csPrepend / jpPrepend / k4bPrepend and an
-//     inline loop in ruby; see rtPrepend above.
-//
-//  4. KNOB - the call itself. csharp, java and ruby all spell it
-//     `m.apply(undefined, argv)`: the oracle's `rt.call(m, jsUndef, ...)`, `this`
-//     deliberately undefined because the receiver travels as argv[0]. Kotlin
-//     cannot: k4bCallAcc sets the k4bThis global around the call, which is how a
-//     Kotlin accessor declared in a superclass sees its receiver. rtkCall.
-//
-//  5. DIVERGENCE FROM THE ORACLE, kept - the walk bound. csharp/java/kotlin cap it
-//     at 64 and ruby does not; the oracle walks until nil. Same decision as
-//     js_is_type, for the same reason and with the same cost: a cyclic __super
-//     hangs the oracle and answers "unknown super method" here, and no 65-deep
-//     hierarchy is expressible in a program this tree compiles.
-//
-//  6. NOT MERGED - js. js-rt's js_supercall is the one that must NOT take the 64
-//     cap: a JavaScript `class A extends B` chain of 65 IS constructible, and a
-//     program that builds one is not exotic. It also normalises the method name
-//     through jvStr first, because JS is the only language here whose emitter can
-//     hand js_supercall a computed name. It keeps its own definition.
+// The walk is capped at 64 (rtFindMethod), the same deliberate divergence from the
+// oracle as js_is_type. js keeps its own js_supercall: a JavaScript `class A
+// extends B` chain of 65 IS constructible, and its emitter can hand js_supercall a
+// computed name.
 function js_supercall(sup, self, name, args) {
     var m = rtFindMethod(sup, name)
     if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
@@ -460,29 +274,13 @@ function js_supercall(sup, self, name, args) {
 //
 // The __class / __super walk that resolves a method name to a callable, or to
 // undefined. It is what js_supercall above IS, and it is also the tail of
-// js_mcall in csharp, java, php and swift - SIX copies of the same eleven lines,
-// which is the honest merge that js_mcall's row in the 29-name table conceals.
+// js_mcall in csharp, java, php and swift.
 //
-// js_mcall itself does NOT merge, and the difference list says why:
+// js_mcall itself is per language: the String and container arms differ in method
+// set and container model, dart delegates to dtMember, and lua binds the receiver
+// as `self` rather than prepending it.
 //
-//  - csharp, java and swift each open with a String arm over a DIFFERENT method
-//    set (csharp has contains/ToUpper/ToLower/Trim, java has none of those and
-//    range-checks charAt, swift clamps substring by hand), then a container arm
-//    over a different container model (csListMethod / an inline list dispatcher /
-//    swListMethod + an inline dict dispatcher).
-//  - php has no String or container arm at all and opens on phIsGen.
-//  - dart is `return dtMember(recv, name, args)`, one line into a Dart-specific
-//    member resolver.
-//  - lua is `recv[name].apply(recv, args)` - Lua binds the receiver as `self`
-//    rather than prepending it, which is a different calling convention.
-//
-// Six languages, four calling conventions and five method tables: parameterising
-// that would take more knobs than lines. What they DO share is this walk, and
-// merging the walk is what removes the duplication that is actually there.
-//
-// The 64-step cap and the `typeof m == "function"` test are the ones argued at
-// js_supercall; csIsFn, ktIsFn and rbIsFn were three byte-identical spellings of
-// the test and java, php and swift inlined it.
+// The 64-step cap is the one argued at js_is_type.
 function rtFindMethod(cls, name) {
     var c = cls
     var guard = 0
@@ -499,12 +297,8 @@ function rtFindMethod(cls, name) {
 // ===================================================== the dict shape ======
 //
 // A dict / Map / Dictionary / Hash / Go map is js_dict_new's object: __dict, and
-// two parallel insertion-ordered arrays. dtIsDict, goIsDict and swIsDict were
-// three spellings of the same four tests; csIsDict wrote `__dict !== undefined`
-// where the others wrote `=== true`, and rbIsDict is rbTag(v, "__dict"), which
-// is `=== true` without the array checks. All five answer the same question and
-// the strict spelling is the shared one; a language whose value model puts a
-// __dict on something that is NOT a dict does not exist here.
+// two parallel insertion-ordered arrays. No language here puts a __dict on
+// something that is NOT a dict.
 function rtIsDictObj(v) {
     if (!rtIsObj(v)) { return false }
     if (v["__dict"] !== true) { return false }
@@ -512,43 +306,16 @@ function rtIsDictObj(v) {
     return rtkIsArr(v["vals"])
 }
 
-// THE KEY-EQUALITY QUESTION, SETTLED. dtDictFind, rbDictFind and swDictFind were
-// three byte-identical copies of this scan, and goDictFind is the same function
-// through goKeyEq -> goStrictEq, which is a hand respelling of the floor's own
-// strict_eq for numbers (tag 14 -> jf_num_eq, tag 13 -> si_eq) and therefore
-// equal to `===` at every pair it can be given.
+// Key lookup by `===`. In layer 2 `===` is NOT JavaScript identity: it lowers to
+// the floor's strict_eq (lib/runtime.c), which compares a BOXED DOUBLE (tag 14) and
+// a SIZED INTEGER (tag 13) BY VALUE, in the Go twin's own arm order. rt.strictEq
+// (abnf/jsrt.go) is that same function, and rt.dictFind is what the oracle's
+// js_pyset finds keys with. So this bare scan IS the oracle.
 //
-// docs/runtime-merge-plan.md recorded this row as a DISAGREEMENT - "identity in
-// dart/python/swift, value equality in csharp and go, so two languages find keys
-// three others miss" - and that reading was wrong, for a reason worth writing
-// down. `===` in layer 2 is NOT JavaScript identity: it lowers to the floor's
-// strict_eq (lib/runtime.c:2112), whose first four lines compare a BOXED DOUBLE
-// (tag 14) and a SIZED INTEGER (tag 13) BY VALUE, in the Go twin's own arm order,
-// and the floor says so at the site. rt.strictEq (abnf/jsrt.go:1164) is that
-// same function, and rt.dictFind (jsrt.go:2348) is what the oracle's js_pyset
-// finds keys with. So the bare `===` scan IS the oracle.
-//
-// Measured rather than argued, because a reading is not a run. Under swiftc
-// 6.1.2 (installed), a Swift probe storing at an Int key of 10^12 (a tag 13 box
-// in swift-rt's value model), re-storing at a second Int of the same value, at a
-// built-up String key, and at a Double key of 1.5:
-//
-//     real swiftc -O          1 / big2 / 1 20 / 1 2 / 1 8
-//     swift-interpreter.abnf  1 / big2 / 1 20 / 1 2 / 1 8
-//     swift native -exe       1 / big2 / 1 20 / 1 2 / 1 8
-//
-// all three identical: the box-valued key is FOUND by the identity-looking scan,
-// because the floor compares it by value. The same probe under python3 3.13 and
-// both python halves agrees on the numeric and string rows (see the Python bool
-// finding below for the one row where all three do not).
-//
-// The ONE real difference is csharp's, and it is a knob rather than a defect:
-// csValueEq's FIRST arm unboxes a {__char} through js_jchareq. A Char box IS an
-// ordinary object to strict_eq, so two `'a'` boxes are not `===`, and a C#
-// `Dictionary<char, V>` would miss every key without that arm. The oracle has it
-// too (rt.strictEq's charCode unboxing, jsrt.go:1167). Dart, Go, Python, Ruby and
-// Swift have no Char in their value model, so for them the arm is unreachable and
-// the bare scan is the whole function. That is what rtkDictFind selects.
+// rtkDictFind is the knob: csharp's adds a first arm unboxing a {__char} through
+// js_jchareq, because a Char box is an ordinary object to strict_eq and a C#
+// `Dictionary<char, V>` would otherwise miss every key (the oracle unboxes it too).
+// The languages without a Char use this scan as it is.
 function rtDictFind(keys, k) {
     var i = 0
     while (i < keys.length) {
@@ -560,48 +327,16 @@ function rtDictFind(keys, k) {
 
 // ===================================================== js_pyset =============
 //
-// Go: js_pyset (abnf/jsrt.go:6339). `c[k] = v` for a list (a negative index wraps)
-// or a dict (find, else append to the parallel arrays). FIVE of the six merged -
-// csharp, dart, go, ruby, swift. The full difference list:
+// Go: js_pyset (abnf/jsrt.go). `c[k] = v` for a list (a negative index wraps)
+// or a dict (find, else append to the parallel arrays). Shared by csharp, dart, go,
+// ruby and swift; knobs rtkIsDict and rtkDictFind (see rtDictFind).
 //
-//  1. KNOB - the dict test. csIsDict / dtIsDict / goIsDict / rbIsDict / swIsDict,
-//     now rtkIsDict, and five of the six answer it with the shared rtIsDictObj.
-//  2. NOT A DIFFERENCE - the array test, already rtkIsArr.
-//  3. KNOB, and NOT the disagreement it was recorded as - the key equality. The
-//     whole argument is at rtDictFind above. Four of the five spellings are the
-//     same function; csharp's Char arm is the one real knob.
-//  4. DIVERGENCE FROM THE ORACLE, now FIXED by merging - the index coercion. The
-//     oracle is `int(rt.toNumber(...))` and Go's int() truncates toward zero.
-//     dart, go, python and ruby truncated; csharp and swift did NOT, so a
-//     fractional index reached the bounds test and the store unrounded. The
-//     merged body truncates, which is the oracle.
-//     DISCRIMINATING POWER: ZERO, and that is the finding rather than a caveat.
-//     ECMA-334 12.8.11.3 makes an array-access index convert to int/uint/long/
-//     ulong, and Swift's Array subscript is declared `subscript(index: Int)`
-//     (Swift Standard Library, MutableCollection) - so neither language can
-//     express a fractional index at all, in any program either grammar accepts.
-//     Merging removes the divergence; no test can see it go.
-//  5. KNOB, documented - python's __setitem__ dunder arm, which the oracle has
-//     (jsrt.go:6340) and the other five deleted as unreachable. python-rt.metajs
-//     keeps its own js_pyset, which overrides this one; the dunder arm is the
-//     reason, and it is the same reason js_pyget's __getitem__ arm is python's
-//     alone. Not a defect in the other five: no other grammar here emits a
-//     user-defined subscript operator through js_pyset.
-//  6. NOT A DIFFERENCE - ruby's dict arm delegating to rbDictSet, which is this
-//     body's find-else-append inlined behind a name.
+// The index truncates toward zero, as the oracle's `int(rt.toNumber(...))` does.
 //
-// A PYTHON FINDING SURFACED BY THE PROBE, and SINCE FIXED - it is recorded here
-// because this comment used to say "not fixed" and sent someone back to it:
-// `d[True] = "t"; d[1] = "one"` is ONE entry in CPython (True == 1 and the hashes
-// agree) and used to be TWO in both metacompiler halves, because strict_eq - and
-// rt.strictEq with it - make a bool and a number different types. The fix is NOT
-// in this shared body and not in strict_eq, which nine languages share: it is a
-// KEY ALIAS on python's dict path alone, tried twice (a float box aliases the
-// plain number and the number aliases the bool, so {True:"t"}[1.0] is two hops),
-// in all three engines - pyKeyAlias in languages/lib/python-rt.metajs, in
-// abnf/jsrt.go and in languages/python-interpreter.abnf's core.keyEq. Asserted at
-// tests/python-test-full.py bki3-bki16, and all four probe legs - including
-// python3 - agree.
+// python keeps its own js_pyset for its __setitem__ dunder arm (the oracle has it
+// too). Python's bool/number key aliasing (`d[True]` and `d[1]` are one entry) is
+// also python's alone: pyKeyAlias in languages/lib/python-rt.metajs, in abnf/jsrt.go
+// and in python-interpreter.abnf's core.keyEq - not here and not in strict_eq.
 function js_pyset(c, k, v) {
     if (rtkIsDict(c)) {
         var keys = c["keys"]
@@ -622,41 +357,20 @@ function js_pyset(c, k, v) {
 
 // ============================================ the relational comparison ====
 //
-// Go: rt.jsCompare (abnf/jsrt.go:1530), the body behind `<`, `<=`, `>`, `>=`
-// for every operand pair the language's own number tags do not cover. FOUR
-// layer-2 copies: jpCompare (java), csCompare (csharp), dtJsCompare (dart) and
-// swLoose (swift), plus a fifth in js-rt.metajs (jvCmpPrim) that does not import
-// this file. The shape scan grouped three of the four; the fourth and fifth
-// differ from them by exactly the thing this section is about.
+// Go: rt.jsCompare (abnf/jsrt.go), the body behind `<`, `<=`, `>`, `>=`
+// for every operand pair the language's own number tags do not cover. Used by
+// java, csharp, dart and swift; js-rt.metajs has its own (jvCmpPrim) because it
+// does not import this file.
 //
-// THE DIFFERENCE LIST:
+// A NaN on either side answers the SENTINEL 2, meaning "every relation is false"
+// (JLS 15.20.1, ECMA-334 12.12.1). It is NOT 0: a caller spelling `c <= 0` would
+// then make `<=` and `>=` true for a NaN. The CALLER translates the sentinel -
+// java, csharp and dart's js_dart{lt,le,gt,ge} turn it into false, swift's swRel
+// into its own NaN marker - so swMinMax can still use this body for an ordering.
+// Twin: abnf/jsrtjava.go takes the same three lines.
 //
-//  1. NOT A DIFFERENCE - the string arm. csharp and js write the pair of `typeof`
-//     tests nested, java/dart/swift write them with `&&`. Same predicate.
-//  2. NOT A DIFFERENCE - the numeric coercion, already rtkNum: csNum / jvNum /
-//     dtNum / swNum / jvToNumber, the same knob js_jadd took.
-//  3. **DEFECT, in java, in BOTH ENGINES, with two DIFFERENT wrong answers.**
-//     The oracle answers the SENTINEL 2 when either operand coerces to NaN, and
-//     says at the site that it means "every relation is false". csCompare and
-//     jvCmpPrim carry the sentinel; jpCompare, dtJsCompare and swLoose do not -
-//     they fall through to `return 0`, i.e. EQUAL. Read by a caller that spells
-//     `c <= 0` and `c >= 0`, 0 makes `<=` and `>=` TRUE for a NaN; the sentinel
-//     read as an ordering makes `>` and `>=` TRUE. Java's two halves were on
-//     opposite sides of that, so they disagreed with each other AND with java 24
-//     on six of fourteen probe rows. JLS 15.20.1 is the same rule as ECMA-334
-//     12.12.1: for <, <=, > and >= a NaN operand makes the result false.
-//     Fixed by merging onto the oracle's sentinel and guarding it in js_jvcmp,
-//     with abnf/jsrtjava.go:467 taking the same three lines. See the measured
-//     table at js_jvcmp in java-rt.metajs.
-//  4. KNOB - what the CALLER does with the sentinel, which is why this body
-//     answers 2 rather than swallowing it. java and csharp turn it into false
-//     for all four operators; dart's js_dart{lt,le,gt,ge} do the same; swift's
-//     swRel has its own NaN marker (0 - 2) and translates. A shared body that
-//     returned false itself could not serve swMinMax, which wants an ordering.
-//  5. DOCUMENTED OMISSION - the oracle's `rt.hasBigInt` arm (bigPair, jsrt.go:
-//     1545) compares two big.Ints before coercing. None of these four languages
-//     turns hasBigInt on in this path; python does have a bignum and does not
-//     reach jsCompare. Not carried, and not a difference between the four.
+// The oracle's `rt.hasBigInt` arm is not carried: none of these languages turns
+// hasBigInt on in this path.
 function rtCompare(l, r) {
     if (typeof l == "string" && typeof r == "string") {
         if (l < r) { return 0 - 1 }
@@ -674,13 +388,9 @@ function rtCompare(l, r) {
 
 // ============================================ the clamped substring ========
 //
-// Go: rt.jpSubstring / rt.csSubstring, the same eight lines twice. java's
-// String.substring and C#'s String.Substring both THROW on an out-of-range
-// index; both grammars clamp instead, so the shared body is the clamp and the
-// difference between the two languages is upstream of it. csSubstring and
-// jpSubstring were byte-identical - ZERO knobs, and both files already import
-// this one, so sharing it taxes no other language (see runtime-decimal.metajs's
-// head for what that tax is and how it was measured).
+// Go: rt.jpSubstring / rt.csSubstring. java's String.substring and C#'s
+// String.Substring both THROW on an out-of-range index; both grammars clamp
+// instead, so the shared body is the clamp.
 function rtSubstring(s, b, e) {
     var begin = b
     var end = e
@@ -690,26 +400,11 @@ function rtSubstring(s, b, e) {
     return s.substring(begin, end)
 }
 
-// ============================================ the FIFTH pass (2026-08-04) ===
-//
-// Everything below was merged after the `scope_find` hash index landed
-// (runtime-next-plan.md item 0) and the DECLARATION TAX that governed every
-// earlier merge decision was re-measured at ZERO. Sizing is no longer an
-// argument: a body a language imports and cannot call costs it nothing at
-// either end of the module (docs/runtime-merge-plan.md, "THE THIRD ASKING").
-// Each merge below carries its difference list, which is the only thing that
-// still decides.
+// ============================================ small shared helpers ==========
 
 // A fresh copy of an array - Go's `append([]interface{}{}, xs...)`. There is no
 // Array.prototype.slice in this dialect, so everyone wrote the loop.
 //
-// SEVEN bodies, in six languages, and the difference list is EMPTY: csCopyArr,
-// dtCopyArr, k4bArgArr, k4Copy (kotlin had it twice, 993 lines apart),
-// pyFCopyArr, rbCopyArr and swCopyArr were byte-for-byte identical down to the
-// loop variable. The three names they went under - "copy an array", "the
-// variadic tail of a closure", "the dict keys/values arms' defensive copy" -
-// are three CALLERS of one function, which is exactly how seven copies of nine
-// lines went unnoticed by every name-based view for months.
 function rtCopyArr(a) {
     var out = []
     var i = 0
@@ -722,31 +417,16 @@ function rtCopyArr(a) {
 
 // Membership in an array, by the floor's strict equality.
 //
-// THREE bodies, ZERO knobs: dart's dtSeen (a cycle-breaking seen-list in the
-// renderer), php's phNameIn (a key-list membership test in loose ==) and ruby's
-// rbIsLambda (an identity scan of the lambda side table). rbIsLambda read its
-// array from a FILE GLOBAL rather than a parameter, which is why the shape scan
-// showed three bodies and the extern-name view showed nothing at all.
-//
-// rtDictFind above is the same scan returning the index, and it is called and
-// not re-spelled here: `===` in layer 2 is the floor's strict_eq, so identity
-// membership and dict-key lookup ARE one question. See its head comment for the
-// measurement that settled that.
+// rtDictFind is the same scan returning the index: `===` in layer 2 is the floor's
+// strict_eq, so identity membership and dict-key lookup ARE one question.
 function rtHas(a, v) { return rtDictFind(a, v) >= 0 }
 
 // The identity-keyed SIDE TABLE lookup: two parallel arrays scanned with `===`,
 // answering vals[i] or undefined. MetaJS has no map keyed by a function value,
 // so every language that has to remember something ABOUT a closure builds this.
 //
-// THREE bodies, ZERO knobs: kotlin's k4NameOf (ktFuncNames, jsrtkotlin.go:5764),
-// python's pyBFuncName (the name a def bound a closure under) and js-rt's
-// jvCtorDescOf (the class descriptor of a constructor function). TWO are merged.
-//
-// js-rt's is DECLINED, and not on the body: js-rt.metajs does not import this
-// file, it defines a `js_supercall` of its own (a straight collision), and
-// runtime.metajs requires seven rtk* hooks it would have to grow. Eight lines do
-// not buy js-rt's first import of the shared runtime. Cross-referenced at
-// js-rt.metajs's jvCtorDescOf so a change to one is seen at the other.
+// Twin: js-rt.metajs's jvCtorDescOf, which keeps its own copy because js-rt.metajs
+// does not import this file.
 function rtPairGet(keys, vals, k) {
     var i = rtDictFind(keys, k)
     if (i < 0) { return undefined }
@@ -758,14 +438,6 @@ function rtPairGet(keys, vals, k) {
 // (tag 13) and a boxed double (tag 14) answer `typeof v == "number"` in the C
 // floor, which is why the tag 14 test is explicit.
 //
-// THREE bodies, ZERO knobs, and TWO OF THEM WERE IN ONE FILE: kotlin-rt.metajs
-// carried ktIsInt at line 229 and k4bIsIntegral at line 4384, and
-// runtime-jvm.metajs already exported the same five lines as rtjIsIntegral for
-// csharp and java. The only apparent difference was the char test - ktIsChar
-// against rtIsCharBox - and `function ktIsChar(v) { return rtIsCharBox(v) }` is
-// the whole of ktIsChar. Moved UP here from runtime-jvm.metajs rather than
-// kotlin importing that file, because kotlin has neither of runtime-jvm's two
-// knobs (rtjkCmp, rtjkFloOperand) and does not want its other five bodies.
 function rtIsIntegral(v) {
     if (rtIsCharBox(v)) { return true }
     if (typeof v != "number") { return false }
@@ -773,9 +445,7 @@ function rtIsIntegral(v) {
 }
 
 // The number of CODE POINTS in a string - Go's len([]rune(s)) - so a surrogate
-// pair counts once. TWO bodies, ZERO knobs: dart's dtStrLen and kotlin's
-// k2RuneLen differed in the name of the second local (`d` against `t`) and in
-// nothing else. The value model is UTF-16 code units throughout layer 2 (see
+// pair counts once. The value model is UTF-16 code units throughout layer 2 (see
 // docs/abnf-dialect-gotchas.md), so this walk is the only way to ask.
 function rtRuneLen(s) {
     var n = 0
@@ -792,11 +462,7 @@ function rtRuneLen(s) {
     return n
 }
 
-// A run of n "0"s. TWO bodies, ZERO knobs: php's phZeros and the rtZeros that
-// used to live in runtime-decimal.metajs. It is HERE and not there because php
-// has no decimal bignum and importing runtime-decimal.metajs for nine lines
-// would be the tax argument in its worst form; runtime-decimal's own three
-// importers (python, ruby, swift) all import this file first.
+// A run of n "0"s.
 function rtZeros(n) {
     var out = ""
     var i = 0
@@ -807,43 +473,10 @@ function rtZeros(n) {
     return out
 }
 
-// A run of n copies of s. TWO bodies, ZERO knobs: python's pyBRepeat and ruby's
-// rbRepeat were the same four statements, and the ONLY reason they were not a
-// shape-scan group is that python wrote the loop body on one line with a `;` and
-// ruby over two - the normaliser keeps the `;` (docs/todo.md 5.1 lists this pair
-// at the -min 40 tier on the strength of a THIRD copy, a six-line duplicate
-// pyBRepeat that 8de27d7 deleted; measured at 098aaa5 the pair is in no tier).
+// A run of n copies of s.
 //
-// THE CALL SITES, which are what decide (docs/todo.md section 5's warning):
-// SEVEN in python, ALL of them inside pyBFormatBody / pyBFormat's padding arms,
-// and ONE in ruby, String#* in rbBin. Neither is on an arithmetic path, and the
-// body itself carries a loop over n, so the one frame is amortised even there.
-//
-// MEASURED, and the measurement needed an instrument this file did not have -
-// read this before believing any paired layer-2 number, including the ones below:
-//
-//   tests/bench.sh --draws 9 --paired, against a clean archive of 098aaa5:
-//     control, the SAME tree both sides    python +0.13%   ruby +0.03%
-//     this merge                           python +1.08% SLOWER 8/9   ruby -0.12%
-//     a DEAD rtRepeat, nothing calling it  python +0.95% SLOWER 8/9   ruby -0.08%
-//     this merge vs that dead-code tree    python +0.07%   ruby +0.27%  (neither
-//                                          consistent in sign: no difference)
-//
-// So the +1.08% at 8-of-9 pairs IS NOT THE MERGE. Inserting one name into
-// runtime.metajs renumbers the whole @str.N intern table of every importing
-// module - 13,568 changed lines in python-rt.ll for a body of nine, with the
-// LINE COUNT unchanged - and that is a layout draw of the size manual chapter 4
-// measures at 4.8%. --paired holds the -exe path fixed, so the draw is the SAME
-// draw in every pair, and a pure layout shift therefore reads as a UNANIMOUS
-// sign. Dead code that only renumbers reads +0.95% at the same 8/9. The
-// instrument that answers the question is a matched control - base plus the new
-// body as dead code, so both sides carry the renumbering - and against that one
-// this merge is nothing, which is what seven cold call sites predict.
-//
-// rtZeros above is NOT re-expressed as rtRepeat("0", n): its two callers are
-// php's float formatter, php-rt.metajs is not this change's file, and turning a
-// body php calls directly into a delegation is the one thing section 5's warning
-// is about. Two loops, seven lines, and no frame added to anybody.
+// rtZeros above is deliberately NOT re-expressed as rtRepeat("0", n): it is called
+// directly by php's float formatter, and a delegation would add a call frame.
 function rtRepeat(s, n) {
     var out = ""
     var i = 0
@@ -854,29 +487,8 @@ function rtRepeat(s, n) {
     return out
 }
 
-// null OR undefined. TWO bodies, ZERO knobs: python's pyIsNone and ruby's
-// rbIsNil were byte-identical, both testing null first. THREE MORE languages
-// carry the same predicate with the two tests the other way round - js-rt's
-// jvUndefOrNull, kotlin-rt's ktIsNullish and php-rt's phIsNull, a second
-// shape-scan group of the same four lines - and kotlin and php import this file,
-// so two of those three could delegate here for free. They are NOT touched: they
-// are not this change's files, and the call-site count they would need is theirs
-// to take. See the report at docs/todo.md 5.1.
-//
-// THE CALL SITES: EIGHT in python and THIRTY-SIX in ruby, and one of the eight
-// is genuinely hot - pyDTruthy's first test, and js_pytruthy is on the loop
-// condition of every `while` python emits (two calls per iteration of
-// tests/bench/mod.py). Ruby's hottest are js_rget / js_rset and rbMethod's
-// receiver guard; its `while` does NOT reach rbTruthy, so tests/bench/mod.rb
-// cannot see this pair at all. It is still free, and for the reason section 5's
-// warning gives in reverse: NO FRAME IS ADDED. Every site was already a call in
-// the same pinned scope, and the language-local names are DELETED rather than
-// left as delegations - which is exactly what 120ba0f did wrong at pyIsObj.
-//
-// MEASURED, --draws 9 --paired against the tree that has rtRepeat above and
-// nothing else, so the renumbering it carries is the only one in the comparison:
-// python +0.39% (signs mixed, verdict no difference), ruby -0.00%. Read the
-// rtRepeat note above for why a paired layer-2 number needs a matched base.
+// null OR undefined. Hot: pyDTruthy's first test sits on the loop condition of
+// every `while` python emits.
 function rtIsNil(v) {
     if (v === null) { return true }
     return v === undefined
@@ -884,60 +496,12 @@ function rtIsNil(v) {
 
 // "is this an object carrying tag `name` set to true" - the __dict / __set /
 // __cplx / __sym / __flo / __rat / __rrange / __bint / __pybig / __pysup test
-// every value model here is built out of. TWO bodies, and the difference list is
-// ONE ENTRY that is not a knob: pyTag asked pyIsObj and rbTag asked rbIsObj, and
-// those two are byte-identical (this file's head records them as the pair that
-// must NOT be shared, and they are still spelled out in both files).
+// every value model here is built out of.
 //
-// THE CALL SITES, and they are the reason this body looks the way it does. FIVE
-// direct in python and TWELVE in ruby, but four of python's and seven of ruby's
-// are ONE-LINE PREDICATES - pyIsDict / pyIsCplx / pyIsBig / pyIsSuper, rbIsSym /
-// rbIsBig / rbIsFlo / rbIsRat / rbIsCpx / rbIsDict / rbIsRange - which are
-// themselves asked at 84 sites in python and 113 in ruby, several of them per
-// arithmetic step: js_pybin reaches this body FIVE TIMES for one operator
-// (pyASetBin -> pySetElemsOf, pyIsCplx twice, pyABigPair -> pyIsBig twice), so
-// tests/bench/mod.py's loop pays ten of them per iteration. This is the single
-// hottest predicate in the two files, and section 5's warning is about exactly
-// this shape.
-//
-// SO THE OBJECT TEST IS INLINED, and the merge is what forces the question: a
-// shared body cannot call pyIsObj or rbIsObj by name, and delegating to a
-// shared strict-object helper makes the chain FOUR deep where it was three. Both
-// spellings were built and measured, --draws 9 --paired against the tree that
-// has rtRepeat and rtIsNil and nothing else:
-//
-//   rtTag -> helper -> rtIsObj          python +10.60% SLOWER 9/9   ruby -0.39%
-//   the four tests INLINED (this body)  python -13.90% FASTER 9/9   ruby -0.07%
-//
-// The first is 120ba0f's regression re-run at a hotter site and is DECLINED. The
-// second is a frame REMOVED from a predicate asked ten times per iteration, and
-// the exact counter agrees with the timing: MEC_GC_STATS on mod.py goes from
-// collections=3574 live=252800 to collections=3017 live=252656, heap and pinned
-// unmoved - fewer scope frames allocated, which is what a MetaJS call IS. Ruby's
-// row cannot see either spelling because rbBin's number path reaches rbUserObj
-// and rbNumBin and never a tag; the site is still hot in ruby PROGRAMS (rbIsFlo
-// and rbIsBig are the numeric tower's own guards, and this file records a
-// +38.79% ruby row for one extra call at that very spot), so it gains there too.
-//
-// Ordered null, undefined, typeof, array exactly as pyIsObj and rbIsObj had it.
-//
-// WHAT THE THREE BODIES ABOVE COST THE EIGHT NON-CALLERS, measured rather than
-// assumed, because manual 7.13's "a layer-2 call is a scope lookup by NAME, so a
-// module that never calls the body never resolves the hook" is a claim about the
-// CALL and not about the +274 lines of IR each of the eight now links. All
-// fifteen rows, --draws 9 --paired, this tree against a clean archive of 098aaa5:
-//
-//   python -12.82% FASTER 9/9        kotlin -1.19% faster 8/9 (a non-caller: this
-//   ruby    -0.18% no difference     is the same layout draw, in the other
-//   csharp  -0.02  dart  -0.03       direction, that the rtRepeat note above
-//   go      +0.02  java  +0.09       measures at +0.95% for dead code)
-//   php     -0.08  swift -0.01
-//   metajs  +0.01  js    -0.12  lua  0.00
-//   c +0.01  bash +0.04  batch -0.04   <- the semantic controls, and they read 0
-//
-// So: nothing for the non-callers, and no new hook and no new import either -
-// none of these three bodies calls an rtk*, and python and ruby both imported
-// this file already. The whole -12.82% is rtTag's removed frame.
+// The object test is INLINED on purpose: this is the hottest predicate in python's
+// and ruby's layer 2 (js_pybin reaches it several times per operator), and
+// delegating to rtIsObj adds a scope frame per call, which is measurably slower.
+// Ordered null, undefined, typeof, array, as pyIsObj and rbIsObj are.
 function rtTag(v, name) {
     if (v === null) { return false }
     if (v === undefined) { return false }
@@ -946,125 +510,25 @@ function rtTag(v, name) {
     return v[name] === true
 }
 
-// ====================================== the SIXTH pass (2026-08-09) =========
+// ====================================== the former split modules =========
 //
-// THE THREE SPLIT MODULES, FOLDED BACK. runtime-bignum.metajs (263 lines, python
-// + ruby), runtime-decimal.metajs (188, python + ruby + swift) and
-// runtime-jvm.metajs (212, csharp + java) were separate FILES for exactly one
-// reason, stated in all three of their heads and reproduced verbatim below: a
-// top-level declaration in front of an importer that cannot call it was charged
-// for by `scope_find`'s LINEAR SCAN of the module scope, ~+2.2% on kotlin for the
-// 14 declarations of decimal+bignum together. The hash index in
-// languages/lib/runtime.c (`scope_find`, and the `n >= 32` arm above it) removed
-// that scan for every module scope in the project - a module scope has hundreds
-// of entries, so it takes the indexed arm always - and with it the whole reason
-// for the split. The fifth pass above already recorded the tax as re-measured at
-// ZERO; this pass acts on it. Folding moves DECLARATIONS, which are now free, and
-// adds no call depth, so 5.1's warning (size the CALL SITE, not the body) does
-// not apply: nothing here became a delegation.
+// The sections below were once separate files (runtime-bignum.metajs,
+// runtime-decimal.metajs, runtime-jvm.metajs, runtime-dartswift.metajs). A
+// top-level declaration that an importer never calls costs it nothing at run time
+// (scope_find's hash index in languages/lib/runtime.c), so they live here.
 //
-// MEASURED, not assumed. tests/bench.sh --draws 9, all fifteen rows, built in a
-// tree that is a clean `git archive` of 455ce39 plus this fold and nothing else,
-// against the checked-in baseline - which the same run confirms is current for
-// 455ce39 (base itself reads lua +0.01% at a 0.03% spread, python +0.01%):
-//
-//   csharp +0.48 (spread 0.44)   php    +0.26 (0.59)   dart   -0.16 (0.44)
-//   ruby   +0.39 (0.31)          go     +0.11 (0.25)   js     -0.36 (0.38)
-//   bash   +0.20 (0.10)          java   +0.10 (0.40)   kotlin -0.37 (0.78)
-//   lua    -0.01 (0.01)          metajs -0.02 (0.07)   python -0.43 (1.73)
-//   swift  -0.38 (1.97)          batch  -0.20 (0.22)   c      -0.75 (0.35)
-//
-// NOT ONE ROW IS OUTSIDE THE INSTRUMENT. Read `c`, `bash` and `batch` first, as
-// tests/bench/baseline.txt says to: they are self-contained IR with no js_*
-// extern and cannot see this change at all, and they read -0.75, +0.20 and -0.20.
-// That band IS the instrument, and csharp's +0.48 and ruby's +0.39 sit inside it.
-//
-// THE ONE EXACT COUNTER THAT MOVES, and it is the honest cost: MEC_GC_STATS
-// `heap` steps ~+1.0 MiB (1,048,560 B of big-block traffic) on csharp, dart, go,
-// java, kotlin, php and swift - the seven that gained bodies they cannot call.
-// The COLLECTION COUNT is unmoved in all fifteen rows, and python, ruby, lua, js
-// and metajs do not step at all. baseline.txt's ARENA OCCUPANCY section measured
-// what a step costs: +0.20% over 45 paired builds, slower in 26 of 45, i.e.
-// nothing - which is what the timing rows above independently say.
-//
-// THE EVIDENCE THAT IT IS A PURE REFACTOR, which no gate in this project gives
-// you (the matrix, --full and --cross cannot see layer 2 at all - manual ch. 3):
-//
-//   - NATIVE BEFORE vs AFTER. Every affected language's ratchet AND feature file
-//     built with -exe from a clean archive of 455ce39 and from the folded tree,
-//     run, and compared including the exit code: 24 programs across 12 languages,
-//     ALL BYTE-IDENTICAL. lua and js are the controls - they import neither this
-//     file nor the split ones, and their <lang>-rt.ll is byte-identical too.
-//   - EVERY FUNCTION BODY SURVIVES. Splitting both <lang>-rt.ll files into
-//     `define` blocks and normalising the three things renumbering moves (the
-//     jsf_N/str.N global ids, the funcId literals and the `deadN` block labels),
-//     every body present in the base module is present unchanged in the folded
-//     one, in all twelve languages. Exactly TWO bodies differ per module, and
-//     they are the two that must: `jsrtlib_run`, which is the declaration and
-//     binding sequence, and `jsdispatch_ext`, which is the funcId switch.
-//     Net additions are the 18 folded functions plus each module's newly interned
-//     number constants (+7 python/ruby, +14 csharp/java, +18 swift, +20 kotlin,
-//     +21 dart, +23 go/php/metajs, +0 lua/js).
-//
-// FOLDING RE-GENERATES TEN .ll FILES, not five: go-rt.ll, php-rt.ll,
-// kotlin-rt.ll, dart-rt.ll and metajs-rt.ll change too, because they import this
-// file and now carry its new bodies. tests/gen-all.sh --check is what says so.
-//
-// THE ONE REAL COST, and it is a soft one. runtime.metajs's hook contract now
-// nominally covers rtkFloDigits (rtFloStr's one knob) and rtjkCmp /
-// rtjkFloOperand (rtjStrictEq / rtjRel / rtjArith's two), which only the
-// languages that used to import the split files define. A layer-2 call is a
-// SCOPE LOOKUP BY NAME - the emitted module carries the string "rtkFloDigits",
-// not a relocation - so a module that never calls rtFloStr never resolves it and
-// nothing breaks at link time or at boot. Verified: java-rt.ll and go-rt.ll
-// build, link and run with no rtkFloDigits anywhere. What an importer must not
-// do is CALL one of these bodies without defining its hooks; that is a runtime
-// "variable not defined", not a link error, so it is stated here rather than
-// enforced by the toolchain.
-//
-// runtime-dartswift.metajs was NOT folded in this pass: dart-rt.metajs was owned
-// by another agent in the round this landed. It was the same argument and it got
-// the same answer on 2026-08-10 - see the foot of this file.
-
+// THE HOOK CONTRACT: rtkFloDigits (rtFloStr's knob) and rtjkCmp / rtjkFloOperand
+// (rtjStrictEq / rtjRel / rtjArith's) are defined only by the languages that call
+// those bodies. A layer-2 call is a SCOPE LOOKUP BY NAME - the emitted module
+// carries the string "rtkFloDigits", not a relocation - so a module that never calls
+// rtFloStr never resolves it and nothing breaks at link time or at boot. An importer
+// that CALLS one of these bodies without defining its hooks gets a runtime
+// "variable not defined", not a link error.
 
 // ---------------------------------------------------------------------------
 // the exact decimal bignum -- the EXACT decimal expansion of a double, and
 // strconv.FormatInt, used by python and ruby alone.
-//
-// WAS lib/runtime-bignum.metajs, folded in by the sixth pass above. Its head is
-// kept verbatim below, including the "why its own file" argument, because the
-// MEASUREMENTS in it are the record of what the split cost and are still the
-// numbers to quote; only the conclusion has expired.
 // ---------------------------------------------------------------------------
-//
-// Split out of runtime-decimal.metajs because swift wants the float RENDERING
-// above (rtSplit10 / rtSciText / rtFixText / rtFloStr) and never calls this
-// bignum. Two languages want it, so two languages import it.
-//
-// The cost of NOT splitting was measured as +17-24% wall on a swift loop that
-// never formats a float (400,000 x `s = s + i % 7`, native -exe: 3.16-3.20 s ->
-// 3.70-3.94 s, live 103,536 -> 105,072, heap 9.44 -> 10.49 MB, collections
-// 3,841 -> 4,097) and was ATTRIBUTED to the collector walking a permanently-live
-// body. The attribution is mostly wrong; see runtime-decimal.metajs's head and
-// docs/runtime-merge-plan.md, "the tax is DECLARATIONS, not data and not code",
-// where the same experiment re-run on kotlin in instructions retired shows the
-// collector's share does not move at all and the cost is `scope_find`'s linear
-// scan of the module scope, charged per TOP-LEVEL DECLARATION. The one part of
-// the swift row that is a genuine collector effect is the collection COUNT,
-// 3,841 -> 4,097 (+6.7%): more module-init allocation, more collections. The
-// kotlin control holds its collection count at 1,880 across every variant, so
-// that component is swift's and not a general rule. The split stays either way -
-// it is free, and it is the right shape - but the number to quote for it is the
-// kotlin one, +2.2% for the 14 declarations of decimal+bignum together.
-//
-// python-rt.metajs said at its own copy of this code: "Copied verbatim from
-// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
-// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
-// rbByteCut), renamed to the pyB prefix. The comments are theirs." A shape scan
-// confirmed nine of the ten byte-identical and the tenth different only in the
-// NAME of its digit alphabet (PYB_DIGITS vs RB_DIGITS, same 36 characters), so
-// this merge took ZERO knobs - which is the finding: two rounds of formatter
-// work in two files had not drifted, and nothing was stopping them.
 
 function rtDigitAt(s, i) {
     var c = s.charCodeAt(i)
@@ -1077,8 +541,7 @@ function rtDigitAt(s, i) {
 // strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
 // EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
 // it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
-// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
-// measured on the differential probe.
+// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them).
 //
 // A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
 // is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
@@ -1595,7 +1058,7 @@ function rtFixed(x, prec) {
 
 // ----- strconv.FormatInt(int64(x), base) ------------------------------------
 //
-// Two things the naive loop got wrong, both measured: the digit alphabet is 36
+// Two things a naive loop gets wrong: the digit alphabet is 36
 // long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
 // which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
 // "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
@@ -1639,80 +1102,18 @@ function rtBaseStr(n, base) {
 // ---------------------------------------------------------------------------
 // the shared float rendering -- the SHARED float-to-string rendering, used by
 // python, ruby and swift.
-//
-// WAS lib/runtime-decimal.metajs, folded in by the sixth pass above. Its head is
-// kept verbatim below, including the "why its own file" argument, because the
-// MEASUREMENTS in it are the record of what the split cost and are still the
-// numbers to quote; only the conclusion has expired.
 // ---------------------------------------------------------------------------
 //
-// WHY IT IS A SEPARATE FILE: a body put into runtime.metajs is paid for by all
-// TEN importers, including the seven that cannot call a line of it. Ten files
-// import runtime.metajs; three of them want this. So it is imported, not shared.
-//
-// The ORIGINAL justification here said the cost was the collector walking a
-// permanently-live body, and gave "+7-11% wall, +2,304 live bytes x 18,798
-// collections". THAT EXPLANATION IS WRONG, re-measured 2026-08-04 in instructions
-// retired rather than wall clock (wall clock on this machine varies +-8% between
-// runs of the SAME binary; instruction counts reproduce to 0.02%). The collector's
-// share does not move at all: with MEC_GC=off subtracted it is 5.09 G instructions
-// whether or not the merged bodies are there. The real cost is MUTATOR work in
-// runtime.c's `scope_find` (2755), a LINEAR scan of the module scope's name array,
-// and it is charged PER TOP-LEVEL DECLARATION - not per byte of live data and not
-// per line of code, which is exactly free.
-//
-// The honest number for THIS file plus runtime-bignum.metajs is 14 declarations
-// prepended to a kotlin module: +2.2%, measured (kotlin, 40,000 x `s = s + i % 7`,
-// no float in it, 30.506 G -> 31.193 G instructions). Smaller than was claimed,
-// still real, and still worth the split. The full derivation, the code-vs-data
-// controls and the rule are in docs/runtime-merge-plan.md, "the tax is
-// DECLARATIONS, not data and not code".
-//
-// The MetaJS rules and the rtk* hook convention are runtime.metajs's; this file
-// defines one hook of its own, rtkFloDigits, which renders a strictly positive
-// finite double the language's own way and is the only part of float-to-string
-// that is not shared.
+// One hook of its own, rtkFloDigits, renders a strictly positive finite double the
+// language's own way and is the only part of float-to-string that is not shared.
 
 // ============================================ the decimal bignum ===========
 //
-// THE LARGEST SINGLE DUPLICATION IN LAYER 2, and the extern table could never
-// see it. python-rt.metajs and ruby-rt.metajs each carry a complete exact-decimal
-// float formatter, reached through pyBFloStr and rbFloStr respectively, and
-// swift-rt.metajs carries the splitter as well. No js_* name collides, so the
-// 29-name extern census counted these as nine separate private helpers in three
-// separate files; a shape scan (normalise every identifier to a positional token,
-// then group by the resulting string) puts them in one bucket, 267 lines of it.
-//
-// python-rt.metajs:2214 SAYS SO at the site - "Copied verbatim from
-// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
-// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
-// rbByteCut), renamed to the pyB prefix. The comments are theirs." - which is the
-// honest record of a copy and also the reason no gate could have found it.
-//
-// THE DIFFERENCE LIST, mechanically taken (extract each body, strip the language
-// prefix, diff). Ten functions, and the diff is EMPTY for nine of them:
-//
-//   rtSplit10        py == rb == sw   byte-identical bar swift's three comments
-//   rtZeros          py == rb == sw   byte-identical
-//   rtDigitAt        py == rb         byte-identical
-//   rtBigFromNum     py == rb         byte-identical
-//   rtBigMulSmall    py == rb         byte-identical
-//   rtBigStr         py == rb         byte-identical
-//   rtExactDec       py == rb         byte-identical
-//   rtRoundHalfEven  py == rb         byte-identical (57 lines, twice)
-//   rtFixed          py == rb         byte-identical
-//   rtBaseStr        py == rb         byte-identical bar the name of the digit
-//                                     alphabet constant, PYB_DIGITS vs RB_DIGITS,
-//                                     whose VALUES are the same 36 characters.
-//
-// ZERO KNOBS, and that is itself the finding: the two copies could have drifted
-// at any point in two separate rounds of formatter work and did not, so nothing
-// was hiding here - but nothing was stopping it either, and a fix to one would
-// have missed the other in silence. See js_dict_new for the same outcome at
-// one-tenth the size.
-//
-// The float rendering ABOVE this bignum (FloDigits / FloStr) does NOT merge to a
-// single body and is handled separately at rtSciText below.
+// python's and ruby's exact-decimal float formatters (rbDigitAt / rbBigFromNum /
+// rbBigMulSmall / rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci /
+// rbBaseStr / rbByteCut and the pyB copies) and swift's splitter are these bodies.
+// The float rendering ABOVE this bignum (FloDigits / FloStr) is split at rtSciText
+// below.
 
 // strconv.FormatFloat(a, 'e', -1, 64), recovered from the engine's own shortest
 // rendering: turn a > 0 into {d: the significant digits with no point and no
@@ -1760,8 +1161,6 @@ function rtSplit10(a) {
     return {d: digits, e: e10 + pt - 1}
 }
 
-// rtZeros MOVED to lib/runtime.metajs (fifth pass): php had the same nine lines
-// as phZeros and has no decimal bignum to import this file for.
 
 // The exponential half of a float rendering, shared by python, ruby and swift:
 // one digit, the rest as a fraction, then a SIGNED exponent zero-padded to two
@@ -1799,18 +1198,12 @@ function rtFixText(digits, decpt) {
 }
 
 // The whole of a language's float-to-string, above rtkFloDigits (which renders a
-// strictly positive finite double and is the one part that differs). python and
-// ruby had this body twice and swift a third time; the DIFFERENCE LIST is three
-// string literals and nothing else:
+// strictly positive finite double and is the one part that differs). The three
+// spellings of NaN and the infinities are parameters, because they are what the
+// language prints:
 //
 //   nan / inf / -inf        python (repr(float('nan')) is "nan"), swift
 //   NaN / Infinity / -Inf…  ruby (Float::NAN.to_s is "NaN", INFINITY "Infinity")
-//
-// so they are parameters rather than hooks. KNOB, and a real one: it is what the
-// language prints, not how it computes. Everything else agreed, including the
-// two spellings of the sign test - python's `x < 0` after the zero arm and
-// swift's swSignBit + unary minus reach the same two answers, because the zero
-// arm has already taken every value whose sign a comparison cannot see.
 //
 // -0.0 keeps its sign, which needs 1 / x: `-0.0 < 0` is false, Math.abs of it is
 // +0.0, and `"" + -0.0` is "0" in every engine here.
@@ -1833,61 +1226,10 @@ function rtFloStr(x, nanS, infS, ninfS) {
 // ---------------------------------------------------------------------------
 // the JVM-family bodies -- the bodies csharp-rt.metajs and java-rt.metajs share,
 // and NOBODY ELSE DOES.
-//
-// WAS lib/runtime-jvm.metajs, folded in by the sixth pass above. Its head is
-// kept verbatim below, including the "why its own file" argument, because the
-// MEASUREMENTS in it are the record of what the split cost and are still the
-// numbers to quote; only the conclusion has expired.
 // ---------------------------------------------------------------------------
 //
-// WHY ITS OWN FILE, and not lib/runtime.metajs. A layer-2 body is permanently
-// live: every function in a <lang>-rt.ll is a pinned closure the conservative
-// collector walks on every collection, so a body put in front of ten importers
-// to serve two taxes the other eight. That tax was MEASURED at two scales
-// (2026-08-04, swift, 400,000 x `s = s + i % 7`, native -exe, MEC_GC_STATS,
-// dead code-only bodies added to swift-rt.metajs and never called):
-//
-//     added lines   live objects        wall (min of 3)
-//         0         104,016             3.40 s
-//       182         105,168  (+1,152)   3.52 s   +3.5%
-//       720         109,072  (+5,056)   3.71 s   +9.1%
-//
-// - so it is ~7 pinned objects and ~+1.3% per 100 lines of dead shared CODE,
-// linear, and with heap and collection COUNT unmoved (9,442,688 B and 4,097 in
-// all three runs). The decimal bignum's larger +17-24% came from its DATA as
-// well: it moved heap 9.44 -> 10.49 MB and collections 3,841 -> 4,097. Two
-// components, then: the live walk tracks code, the collection count tracks data.
-//
-// The number that matters here is the SLOPE. The ~50 lines below would cost the
-// eight other importers ~0.6% if they were in runtime.metajs - which is real but
-// under the noise floor of a single timing run, and exactly zero here, because
-// only csharp and java import this file. The tax is an argument about hundreds
-// of lines, not tens; it is not a reason to leave a ten-line body duplicated.
-//
-// WHY MERGE AT ALL, given it is fifty lines. Because of what the duplication has
-// already cost twice at this very site. `js_cscmp` and `js_jvcmp` are one body.
-// The NaN sentinel - rtCompare answers 2 when either operand coerces to NaN, and
-// that means "every relation is false" - was found and fixed in the C# copy in
-// Part A, and the java copy was still wrong MONTHS later, in BOTH engines, in two
-// DIFFERENT directions (see runtime-merge-plan.md, third pass, item 2). The same
-// defect, twice, because the same body was written twice. One body cannot do
-// that again.
-//
-// THE DIFFERENCE LIST, taken before merging, and what it came to:
-//
-//   csNum / jvNum             TWO differences, BOTH IDENTITY. The char test is
-//                             csIsChar / jvIsChar and both are `rtIsCharBox(v)`.
-//                             The string coercion is `parseFloat(v)` / `jpStrNum(v)`
-//                             and jpStrNum's whole body is `var t = parseFloat(s);
-//                             return t`. runtime-merge-plan.md recorded this pair
-//                             as "2 hooks"; the code has ZERO.
-//   csIsIntegral/jvIsIntegral ZERO differences, same reason (rtIsCharBox).
-//   js_arr_new_n              ZERO differences once csNum == jvNum.
-//   csStrictEq / jvStrictEq   ONE: csCmp vs jvCmp.
-//   js_cscmp / js_jvcmp       ONE: the same csCmp vs jvCmp.
-//   csFloArith / jvmArith     ONE: csFloOperand vs jvmOperand.
-//
-// So: two knobs, `rtjkCmp` and `rtjkFloOperand`, and both are REAL.
+// `js_cscmp` and `js_jvcmp` are one body (rtjRel), and so are the strict equality
+// and the float arithmetic, over two knobs that are genuinely different:
 //
 //   rtjkCmp - csCmp promotes with csPromote and compares two csBox cells with
 //     sintCmp; jvCmp switches on jvW (JLS 5.6.2: long when either side is long,
@@ -1896,8 +1238,7 @@ function rtFloStr(x, nanS, infS, ninfS) {
 //   rtjkFloOperand - csFloOperand converts only the {__char} box and lets a tag
 //     13 cell through, because a C# long is an honest SIGNED cell; jvmOperand
 //     sends everything non-float through jvNum, because Java's long box is marked
-//     UNSIGNED and the floor's to_number would read it as a magnitude. Recorded at
-//     both sites already; the merge did not create the difference, it named it.
+//     UNSIGNED and the floor's to_number would read it as a magnitude.
 
 // ----- the two knobs, defined by the importer -------------------------------
 //
@@ -1910,24 +1251,11 @@ function rtFloStr(x, nanS, infS, ninfS) {
 // An operand of INTEGER arithmetic. A char is one - it is an integral type in
 // both languages - and a double is not.
 //
-// lib/runtime.metajs exports this body as rtIsIntegral, for kotlin, which had it
-// TWICE (ktIsInt, k4bIsIntegral) and cannot import this file. **THIS COPY IS
-// DELIBERATELY NOT A DELEGATION TO IT**, and the fifth pass made it one:
-//
-//   tests/bench.sh --draws 5, java, against the recorded 4b594c1 baseline:
-//     4b594c1 (body here)        8.940 G   +3.16%   spread 3.18%
-//     120ba0f (delegating)       9.448 G   +5.63%   spread 3.99%
-//
-// +5.7% for one extra MetaJS call, because csharp and java ask this at fifteen
-// sites inside their arithmetic dispatch. It is the same mistake, at a second
-// site, as pyIsObj in lib/python-rt.metajs - which cost python 41% - and the rule
-// is written up there: A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT
-// SUFFICIENT. Size the CALL SITE, not the body.
-//
-// kotlin's ktIsInt is left delegating on purpose: its own row measured -0.64%
-// against a 3.05% spread, so its call sites are not hot and the sharing is free
-// THERE. That asymmetry is the point - the body is identical, the call sites are
-// not, and only the call sites decide.
+// Same body as rtIsIntegral above, and DELIBERATELY NOT A DELEGATION TO IT: csharp
+// and java ask this at fifteen sites inside their arithmetic dispatch, and one
+// extra MetaJS call there is measurably slower (a few percent on java). The same
+// rule is written up at pyIsObj in lib/python-rt.metajs: size the CALL SITE, not
+// the body.
 function rtjIsIntegral(v) {
     if (rtIsCharBox(v)) { return true }
     if (typeof v != "number") { return false }
@@ -1935,59 +1263,20 @@ function rtjIsIntegral(v) {
 }
 
 // long.MaxValue / long.MinValue as 64 bit cells - the SIGNED extremes both
-// languages saturate a double to. WAS csMaxI64/csMinI64 in csharp-rt.metajs and
-// jlMaxL/jlMinL in java-rt.metajs: two pairs of one-line bodies with the same
-// four literals and the same signedness flag, merged 2026-08-10 (docs/todo.md
-// 5.1). The point is not the two lines. It is that 2147483647/4294967295 is a
-// bit pattern written by hand in two files, and a typo in one of them is exactly
-// the shape of defect this file exists to make impossible.
-//
-// SIZING THE CALL SITES, which is what decides a merge here: EIGHT in total -
-// two in csharp's csConv saturation arm, six in java (jlOfDouble, jlOfFlo and
-// the Long.MAX_VALUE/MIN_VALUE statics, two each). None is in an arithmetic
-// path; the java statics run once at module init. Compare rtjIsIntegral just above, which is
-// asked at fifteen sites inside the arithmetic dispatch and cost +5.7% to share.
-// Both languages already import this file, so the merge adds no import and no
-// hook; the other eight importers gain two lines they never resolve.
+// languages saturate a double to. Shared so the hand-written bit patterns exist
+// once; no call site is on an arithmetic path.
 function rtjMaxL() { return sintRaw(2147483647, 4294967295, 64, false) }
 function rtjMinL() { return sintRaw(2147483648, 0, 64, false) }
 
 // The double reading of anything numeric.
 //
-// THE LAST TWO ARMS ARE rt.toNumber's (abnf/jsrt.go:1473) AND THAT IS THE FIX for
-// todo.md 1.2, which stood as a live run-vs-native divergence in BOTH languages:
-// this body answered 0 for undefined where the Go twin answers NaN, so C#'s
-// `dynamic d = obj; d.Missing + 1` printed NaN under the interpreter and llvm.Run
-// and **1** natively, and java's `new int[2][5] + 1` printed NaN under llvm.Run
-// and 1 in the other two.
-//
-// THE DECISION THE ITEM ASKED FOR - java moves WITH csharp, the body is NOT split:
-//
-//   - The divergence is not csharp's alone. It reproduces in java at `a[5] + 1`,
-//     where the interpreter half agreed with the native binary (1) and llvm.Run
-//     did not (NaN). A split that fixed only csharp would leave java's halves
-//     disagreeing.
-//   - Neither answer is the language's. C# would raise a RuntimeBinderException
-//     for a missing `dynamic` member and Java an ArrayIndexOutOfBoundsException,
-//     and no engine here can raise either; what the engines CAN do is agree, and
-//     NaN is the answer two of the three already gave.
-//   - Nothing in java produces an `undefined` in a WELL-FORMED program, probed
-//     against java 24.0.2: an uninitialized `int` field reads 0, a `double` field
-//     0.0, a reference field and an unassigned `Object[]` element read null, and
-//     null is still 0 here. So the change is a no-op for every java program that
-//     compiles, and it is only the malformed ones that move - to the louder of
-//     two wrong answers.
-//   - There is a PRECEDENT and it went this way: kotlin's ktNum
-//     (lib/kotlin-rt.metajs:264) carries the same two arms with a comment saying
-//     answering 0 for undefined made `size + f()` of a Unit-returning `f` print
-//     the size where the twin printed NaN. And lib/runtime.metajs's js_jadd note
-//     6 already recorded, before this, that "csNum's fallback should be NaN, not
-//     0" - it was left as csharp-rt.metajs's own bug. It was runtime-jvm's.
-//
-// Confidence: HIGH for the CONVERGENCE (the twin is the oracle for what these two
-// engines must agree on, and it is unambiguous), LOW for either value being C#'s
-// or Java's - both languages' real answer is an exception. Spec-derived, and no
-// C# toolchain exists on this machine.
+// The last two arms are rt.toNumber's (abnf/jsrt.go): undefined answers NaN, as
+// in the Go twin, so all three engines agree. Neither language's real answer is a
+// number - C# raises RuntimeBinderException for a missing `dynamic` member and Java
+// ArrayIndexOutOfBoundsException - and no engine here can raise either. No
+// well-formed Java program produces an `undefined` (an uninitialized field reads 0,
+// 0.0 or null), so only malformed programs see the arm. kotlin's ktNum carries the
+// same two arms.
 function rtjNum(v) {
     if (floIs(v)) { return floNum(v) }
     if (rtIsCharBox(v)) { return v["__char"] }
@@ -2015,17 +1304,11 @@ function js_arr_new_n(n, fill) {
 // == / != . A double on either side is compared as a double; two integrals are
 // compared at the promoted type; anything else is identity.
 //
-// THE SIZED INTEGER ARM IS A FIX, and the merge is what found it. floEq is the
-// floor's jf_num_eq / the twin's jvmNumEq, and NEITHER has a tag 13 arm: a
-// `long` against a `double` answered FALSE in both compiler engines, in both
-// languages, while both INTERPRETER halves answered true. `long x = 0; double
-// y = 0.0; x == y` is true - JLS 15.21.1 and ECMA-334 12.12.9 both promote the
-// integral operand to double first - and java 24.0.2 confirms it. --cross could
-// not see it because nothing in the matrix ever compared a long to a double, and
-// the comment that used to stand here called the asymmetry deliberate ("a boxed
-// double against a SIZED INTEGER is false ... reproduced rather than smoothed
-// over"), which is how it survived. rtjNum is the promotion, and it is the same
-// reading rtjArith already gives the very same pair of operands.
+// The SIZED INTEGER arm matters: floEq is the floor's jf_num_eq / the twin's
+// jvmNumEq, and NEITHER has a tag 13 arm, but `long x = 0; double y = 0.0; x == y`
+// is true - JLS 15.21.1 and ECMA-334 12.12.9 both promote the integral operand to
+// double first. rtjNum is that promotion, the same reading rtjArith gives the same
+// pair of operands.
 function rtjStrictEq(l, r) {
     if (floIs(l) || floIs(r)) {
         if (sintIs(l) || sintIs(r)) { return rtjNum(l) == rtjNum(r) }
@@ -2045,10 +1328,9 @@ function rtjStrictEq(l, r) {
 //
 // THE SENTINEL MEANS "EVERY RELATION IS FALSE", and that is the rule in both
 // languages: ECMA-334 12.12.1 for C#, JLS 15.20.1 for Java. Read as an ORDERING
-// it makes `>` and `>=` true (so `double.NaN > 0.0` answered true), and read as 0
-// it makes `<=` and `>=` true - wrong in the other direction. Both wrong answers
-// have been shipped here. abnf/jsrtcsharp.go:477 and abnf/jsrtjava.go:467 carry
-// the same three lines and have to move with this one, or --cross reports it.
+// it makes `>` and `>=` true, and read as 0 it makes `<=` and `>=` true.
+// Twins: abnf/jsrtcsharp.go and abnf/jsrtjava.go carry the same three lines and
+// have to move with this one, or --cross reports it.
 function rtjRel(op, l, r) {
     if (rtjIsIntegral(l) && rtjIsIntegral(r) && !floIs(l) && !floIs(r)) { return rtjkCmp(op, l, r) }
     var c = rtCompare(l, r)
@@ -2070,78 +1352,10 @@ function rtjArith(op, l, r) {
 
 // ===================================================== the dart/swift pair ==
 //
-// WAS lib/runtime-dartswift.metajs, folded in on 2026-08-10 (docs/todo.md 5.5),
-// which retires the LAST of the four split modules. Its head is kept below,
-// because the argument it makes about the tax is still the right argument -
-// only its conclusion has expired, for the reason the sixth pass measured: a
-// layer-2 call is a SCOPE LOOKUP BY NAME, so a module that never calls one of
-// these two bodies never resolves it, and NEITHER BODY ADDS A HOOK. rtIsArr
-// calls rtIsObj, which is in this file already; rtJavaStr calls sintIs /
-// sintStr / floIs / floStr, which are MetaJS HOST GLOBALS the floor seeds, not
-// rtk* knobs. The hook contract is unchanged at seven, and that - not size -
-// is what makes a first import expensive (manual 7.13).
-//
-// Verbatim from the split file's head:
-//
-//   Its own module for the reason lib/runtime-jvm.metajs's head measures: a
-//   layer-2 body is permanently live, so a body put in front of ten importers
-//   to serve two taxes the other eight (~7 pinned objects and ~+1.3% wall per
-//   100 lines of shared code that the importer can never call, measured at two
-//   scales on swift). Fourteen lines would cost the other eight about 0.2%,
-//   which is under the noise floor - the tax is an argument about hundreds of
-//   lines, not tens.
-//
-//   THE DIFFERENCE LIST IS EMPTY FOR BOTH BODIES, which is the whole reason to
-//   merge them. Two byte-identical copies with no knobs between them are two
-//   places a future fix can land in one and not the other; that has now cost
-//   this project twice at one site (the NaN relational, and the sized-integer
-//   equality). swIsArr's own comment already said it was "the same
-//   discrimination php-rt.metajs's phIsList makes", so the duplication was
-//   known and unnamed.
-//
-//     dtIsArr / swIsArr      ONE apparent difference, dtIsObj vs swIsObj, and
-//                            BOTH are `rtIsObj(v)`. ZERO knobs. php's phIsList
-//                            is NOT merged in: it rejects a {__refcell} box as
-//                            well, which is a third specification and not a
-//                            knob.
-//     dtJavaStr / swJavaStr  ZERO differences, byte for byte.
-//
-//   go-rt.metajs's goJavaStr shares the NAME and not the body (it delegates to
-//   gopStr), and js-rt.metajs's jxToStr is that same two-line shape again;
-//   neither belongs here.
-//
-// Only dart and swift call either body; the other eight importers carry them
-// and never resolve them.
-//
-// MEASURED, because dd6671b's number was for different bodies and the rule is
-// that a zero-knob difference list is necessary and NOT sufficient.
-// tests/bench.sh --paired against a clean archive of bd80f09, 9 layout draws
-// per row, the fold alone:
-//
-//   csharp -0.03%   dart 0.00%   go -0.00%   java +0.06% (8/9 pairs)
-//   kotlin -0.12%   metajs -0.00%   php -0.19%   swift +0.01%
-//   python +1.46% (9/9 pairs)
-//
-// Every row but python is inside its own spread. java's +0.06% is
-// sign-consistent and is the tax made visible: it is 50x below java's 3.21%
-// noise floor. python is the collection-heaviest row in the bench (3,574
-// collections against kotlin's 1,880 and java's 1,054), so it is the row a
-// permanently-live body moves most - and the EXACT counters say what it is and
-// is not: heap 11,627,376 and collections 3,574 are UNCHANGED, so there is no
-// arena step; `live` goes 251,632 -> 252,080 (+448 B) and the binary +336 B.
-// It is the live-set walk, charged 3,574 times. Over 21 draws against the same
-// base, the same tree WITH the -min 40 intra-file merges of docs/todo.md 5.1 on
-// top reads python +0.03% and kotlin -0.28%, i.e. nothing: python-rt's own two
-// removed declarations paid the fold back in full (-0.87%, 8/9 pairs, measured
-// separately).
-//
-// CORRECTNESS: dart-rt.ll and swift-rt.ll - the only two modules that CALL
-// these bodies - are BYTE-IDENTICAL across the fold, because the declaration
-// order in the merged scope is the order the two files already saw. js-rt.ll
-// and lua-rt.ll, the controls that import neither, are byte-identical too. The
-// other eight gain exactly two `define`s. 24 native programs (the ratchet and
-// the feature file of twelve languages) built from bd80f09 and from the folded
-// tree produce byte-identical output including the exit code.
+// Shared by dart and swift alone. Neither body adds a hook: rtIsArr calls rtIsObj,
+// and rtJavaStr calls sintIs / sintStr / floIs / floStr, which are MetaJS HOST
+// GLOBALS the floor seeds. php's phIsList is a different predicate (it also rejects
+// a {__refcell} box); go's goJavaStr delegates to gopStr.
 
 // A MetaJS list. A Map / Dictionary / tuple / instance box is an object without
 // a numeric `length`.
