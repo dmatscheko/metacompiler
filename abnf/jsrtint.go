@@ -704,6 +704,11 @@ func init() {
 					return w(rt.jvmArith(op[0], l, r))
 				}
 			}
+			// Only go emits js_giarith, so its integer divide by zero is go's
+			// run-time panic rather than giArith's engine failure.
+			if (op == "/" || op == "%") && giVal(rt, r) == 0 {
+				goRTFail("integer divide by zero")
+			}
 			return w(rt.giArith(op, l, r))
 		}
 		// Ordered comparison: answers -1, 0 or 1 so one extern serves < <= > >=.

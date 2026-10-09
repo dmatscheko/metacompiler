@@ -1527,12 +1527,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // is not one more call of the same kind: emitting it unconditionally cost the go
     // bench row (tests/bench/mod.go, an `i % 7` loop) 844,097,409 -> 1,102,256,641
     // instructions, +30.58% against that row's own 2.65% spread. A program that never
-    // writes `recover` cannot tell the difference: an unrecovered divide by zero dies
-    // either way, with the same text and the same exit code - the floor's die() writes
-    // "js runtime error: integer divide by zero" to stderr, which is exactly what
-    // js_gotop would have printed. So the check is emitted only where a recover()
-    // exists to catch it, and the gate is the same shape usesF32 and usesComplex use:
-    // set while the tags WALK (makeCall), long before any emit thunk runs.
+    // writes `recover` dies on an unrecovered divide by zero either way - but natively
+    // it dies through the floor's die(), which writes "js runtime error: integer
+    // divide by zero" and exits 1 where js_gotop writes "panic: runtime error: ..."
+    // and exits 2. So the check is emitted only where a recover() exists to catch
+    // it, and the gate is the same shape usesF32 and usesComplex use: set while the
+    // tags WALK (makeCall), long before any emit thunk runs.
     //
     // Emitted for '/' '%' '/=' '%=' only, so no other operator pays anything either.
     function emitDivZ(b, base, r) {
@@ -4273,12 +4273,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                          function(eb) { return {b: eb, v: mx} })
                     var b3 = rmx.b
                     // 0 <= lo <= hi <= mx <= cap, which is Go's rule for a slice
-                    // EXPRESSION - and it panics, recoverably. Unchecked, `s[7:]`
-                    // of a five element slice built a header with a negative length
-                    // and carried on here while the interpreter half aborted
-                    // (docs/todo.md 1.9). A four argument extern rather than IR:
-                    // the whole check is one call instead of eight compares.
-                    callExt(b3, "js_gislbounds", [rlo.v, rhi.v, rmx.v, pc.v])
+                    // EXPRESSION - and it panics, recoverably. One extern call
+                    // rather than eight compares; the raw mx (undefined in the
+                    // two-index form) and isSlV choose go's panic wording.
+                    callExt(b3, "js_gislbounds", [rlo.v, rhi.v, mx, pc.v, isSlV])
                     var outH = emitSlHdr(b3, pa.v,
                                          callExt(b3, "js_jadd", [po.v, rlo.v]),
                                          callExt(b3, "js_sub", [rhi.v, rlo.v]),
@@ -6397,18 +6395,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             b = emitMainSnippet(b, entry, "Statement")
             b.NewRet(emitNum(b, 0))
         } else {
-            // AN UNRECOVERED PANIC IS REPORTED BY THE PROGRAM, not by the engine, and
-            // that is what fixed the doubled prefix. A runtime panic's VALUE already
-            // reads "js runtime error: <msg>" - goRTPanic builds it that way so that a
-            // recovered `e` is byte-identical to the Go twin's rt.fail value - and
-            // letting it out of the module handed it to the floor's uncaught-throw
-            // handler, which prefixed it a SECOND time
-            // ("js runtime error: uncaught exception: js runtime error: index 5 out of
-            // range"). The entry call is therefore wrapped in one more js_gotry frame
-            // and js_gotop pops it, applying exactly runEntry's rule in
-            // go-interpreter.abnf: a value that already carries the wording is printed
-            // as it stands, anything else gets "uncaught exception: ". All three
-            // engines now print an unrecovered panic identically. docs/todo.md 1.7.
+            // AN UNRECOVERED PANIC IS REPORTED BY THE PROGRAM, not by the engine:
+            // letting it out of the module would hand it to the floor's
+            // uncaught-throw handler and its own prefix. The entry call is wrapped in
+            // one more js_gotry frame and js_gotop pops it, applying runEntry's rule
+            // in go-interpreter.abnf, so all three engines print an unrecovered
+            // panic identically.
             funcCount++
             var eidx = funcCount
             var ef = m.NewFunc("jsf_" + eidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])

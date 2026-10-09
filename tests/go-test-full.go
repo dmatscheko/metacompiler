@@ -2050,12 +2050,9 @@ func s37() {
 	// The same on a SIZED integer, whose operator is a different floor arm.
 	u37 := []uint8{200, 0, 3}
 	check("dz4", u37[0]/u37[2] == 66 && u37[0]%u37[2] == 2)
-	// The recovered VALUE is a runtime-error MESSAGE and the same text in all three
-	// engines. Only its TAIL is asserted: this project prefixes every runtime error
-	// with "js runtime error: " where go writes "runtime error: ", a divergence
-	// recorded at goRTPanic, and the file has to stay green under real `go run` too.
+	// The recovered VALUE prints as go's runtime.Error text, in all three engines.
 	t37 := divText37(d37, 0, 2)
-	check("dz5", len(t37) >= 22 && t37[len(t37)-22:] == "integer divide by zero")
+	check("dz5", t37 == "runtime error: integer divide by zero")
 
 	// ----- a VALUE receiver gets a COPY that keeps its hidden slots -----
 	// goCopyVal makes the copy Go's value semantics require, and layer 2 built it
@@ -2747,6 +2744,51 @@ func s42() {
 	check("ke5", len(arr) == 5 && arr[4] == 1)
 }
 
+// ===== SECTION 43: the value recover() hands back for a run-time panic =====
+// Every expected string was read off `go run` (go 1.26.5). A runtime.Error prints
+// "runtime error: " and go's bounds wording; a store into a nil map and a failed
+// interface conversion carry no such prefix.
+func rec43(f func()) (out string) {
+	defer func() { out = fmt.Sprint(recover()) }()
+	f()
+	return "no panic"
+}
+
+func s43() {
+	ns := []int{0, 1, 2, 3, 4, 5, -1, 7}
+	xs := []int{10, 20, 30}
+	var arr [3]int
+	var nilsl []int
+	var nilm map[int]int
+	str := "ab"
+	type P43 struct{ X int }
+	var np *P43
+	check("rp1", rec43(func() { _ = ns[3] / ns[0] }) == "runtime error: integer divide by zero")
+	check("rp2", rec43(func() { _ = ns[3] % ns[0] }) == "runtime error: integer divide by zero")
+	check("rp3", rec43(func() { _ = xs[ns[3]] }) == "runtime error: index out of range [3] with length 3")
+	check("rp4", rec43(func() { xs[ns[6]] = 1 }) == "runtime error: index out of range [-1]")
+	check("rp5", rec43(func() { _ = arr[ns[7]] }) == "runtime error: index out of range [7] with length 3")
+	check("rp6", rec43(func() { arr[ns[3]] = 2 }) == "runtime error: index out of range [3] with length 3")
+	check("rp7", rec43(func() { _ = str[ns[2]] }) == "runtime error: index out of range [2] with length 2")
+	sub := xs[0:1]
+	check("rp8", rec43(func() { _ = sub[ns[2]] }) == "runtime error: index out of range [2] with length 1")
+	check("rp9", rec43(func() { nilm[ns[1]] = 1 }) == "assignment to entry in nil map")
+	check("rp10", rec43(func() { _ = np.X }) == "runtime error: invalid memory address or nil pointer dereference")
+	check("rp11", rec43(func() { _ = xs[ns[5]:] }) == "runtime error: slice bounds out of range [5:3]")
+	check("rp12", rec43(func() { _ = xs[:ns[5]] }) == "runtime error: slice bounds out of range [:5] with capacity 3")
+	check("rp13", rec43(func() { _ = xs[ns[6]:] }) == "runtime error: slice bounds out of range [-1:]")
+	check("rp14", rec43(func() { _ = xs[:ns[6]] }) == "runtime error: slice bounds out of range [:-1]")
+	check("rp15", rec43(func() { _ = xs[ns[1]:ns[2]:ns[5]] }) == "runtime error: slice bounds out of range [::5] with capacity 3")
+	check("rp16", rec43(func() { _ = xs[ns[1]:ns[3]:ns[2]] }) == "runtime error: slice bounds out of range [:3:2]")
+	check("rp17", rec43(func() { _ = xs[ns[2]:ns[1]:ns[3]] }) == "runtime error: slice bounds out of range [2:1:]")
+	check("rp18", rec43(func() { _ = arr[:ns[5]] }) == "runtime error: slice bounds out of range [:5] with length 3")
+	check("rp19", rec43(func() { _ = nilsl[ns[1]:ns[2]] }) == "runtime error: slice bounds out of range [:2] with capacity 0")
+	check("rp20", rec43(func() { _ = str[ns[5]:] }) == "runtime error: slice bounds out of range [5:2]")
+	check("rp21", rec43(func() { _ = str[:ns[5]] }) == "runtime error: slice bounds out of range [:5] with length 2")
+	// No panic: recover() is nil, and the deferred call overwrites the result.
+	check("rp22", rec43(func() { _ = xs[ns[1]:ns[2]] }) == "<nil>")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2790,6 +2832,7 @@ func main() {
 	s40() // SECTION-CALL 40
 	s41() // SECTION-CALL 41
 	s42() // SECTION-CALL 42
+	s43() // SECTION-CALL 43
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

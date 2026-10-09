@@ -902,7 +902,7 @@ func init() {
 			// through - and with a non-zero offset the old message named the
 			// OFFSET index. docs/todo.md 1.9.
 			if ui < 0 || ui >= int(rt.toNumber(h.props["n"])) {
-				rt.fail("index %d out of range", ui)
+				goIdxFail(ui, int(rt.toNumber(h.props["n"])))
 			}
 			arr.dropIdx()
 			arr.elems[idx] = v
@@ -910,16 +910,24 @@ func init() {
 		}
 		// The bounds of a slice EXPRESSION s[lo:hi:mx]: Go requires
 		// 0 <= lo <= hi <= mx <= cap, and violating it panics. The emitter calls
-		// this before it builds the new header (see $sslice); the twin is
-		// js_gislbounds in languages/lib/go-rt.metajs.
+		// this before it builds the new header (see $sslice) with (lo, hi, mx or
+		// undefined for the two-index form, cap, whether the operand is a slice
+		// rather than an array); the twin is js_gislbounds in
+		// languages/lib/go-rt.metajs.
 		m["js_gislbounds"] = func(a []uint64) uint64 {
 			lo := int(rt.toNumber(u(a[0])))
 			hi := int(rt.toNumber(u(a[1])))
-			mx := int(rt.toNumber(u(a[2])))
 			cp := int(rt.toNumber(u(a[3])))
-			if lo < 0 || hi < lo || mx < hi || cp < mx {
-				rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+			three := !isUndefOrNull(u(a[2]))
+			mx := cp
+			if three {
+				mx = int(rt.toNumber(u(a[2])))
 			}
+			word := "length"
+			if rt.truthy(u(a[4])) {
+				word = "capacity"
+			}
+			goSliceFail(lo, hi, mx, cp, three, word)
 			return 0
 		}
 		// x[i] THROUGH A SLICE HEADER: the read that mirrors js_gisetsl. It exists
@@ -937,21 +945,16 @@ func init() {
 			}
 			ui := int(rt.toNumber(u(a[1])))
 			if ui < 0 || ui >= int(rt.toNumber(h.props["n"])) {
-				rt.fail("index %d out of range", ui)
+				goIdxFail(ui, int(rt.toNumber(h.props["n"])))
 			}
 			return w(arr.elems[int(rt.toNumber(h.props["o"]))+ui])
 		}
 		// THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function
 		// returns. An unrecovered panic is reported HERE rather than being let out
-		// of the module, and that is what stopped the prefix appearing TWICE in a
-		// native binary: a runtime panic's VALUE already reads
-		// "js runtime error: <msg>" (rt.fail builds it that way, and goRTPanic in
-		// both other engines copies it so a recovered `e` is byte-identical), and
-		// the floor's uncaught-throw handler then prefixed it a second time with
-		// "js runtime error: uncaught exception: ". This is the twin of runEntry in
-		// languages/go-interpreter.abnf and js_gotop in languages/lib/go-rt.metajs -
-		// same test, same two wordings, same stream, same exit code, so the three
-		// engines print an unrecovered panic identically. docs/todo.md 1.7.
+		// of the module, so the floor's uncaught-throw handler never adds its own
+		// prefix. This is the twin of runEntry in languages/go-interpreter.abnf and
+		// js_gotop in languages/lib/go-rt.metajs - same wording, same stream, same
+		// exit code, so the three engines print an unrecovered panic identically.
 		m["js_gotop"] = func(a []uint64) uint64 {
 			n := len(rt.goPanics) - 1
 			if n < 0 {
@@ -969,14 +972,9 @@ func init() {
 			//     panic: runtime error: index out of range [5] with length 0
 			//
 			// plus a blank line and a "goroutine 1 [running]:" trace, which
-			// no engine here can produce. "panic: " prefixes BOTH kinds, so
-			// the string test that used to be here (print a runtime panic's
-			// own "js runtime error: <msg>" bare, wrap anything else in
-			// "uncaught exception: ") is gone - go does not distinguish them
-			// at the top. The residual "js " on a runtime panic's text is
-			// docs/todo.md 1.9's project-wide wording; it is what recover()
-			// hands the program in all three engines and rewriting it only
-			// here would make the printed panic disagree with it.
+			// no engine here can produce. "panic: " prefixes BOTH kinds; a
+			// runtime panic's value already reads "runtime error: <msg>"
+			// (see goRTFail).
 			text := ""
 			if exc, ok := p.(*jsThrown); ok {
 				text = rt.gopStr(exc.value)
@@ -1003,7 +1001,7 @@ func init() {
 				return 0
 			}
 			if rt.toNumber(v) == 0 {
-				rt.fail("integer divide by zero")
+				goRTFail("integer divide by zero")
 			}
 			return 0
 		}
@@ -1012,7 +1010,7 @@ func init() {
 			// A store into a NIL MAP is a panic in Go, and it is the one thing a
 			// nil map does not share with an empty one (see giIsNilMap).
 			if giIsNilMap(u(a[0])) {
-				rt.fail("assignment to entry in nil map")
+				panic("assignment to entry in nil map")
 			}
 			// An out of range ARRAY store panics with the same wording the READ
 			// uses. It used to fall through to js_pyset, whose message is
@@ -1021,7 +1019,7 @@ func init() {
 			if arr, ok := u(a[0]).(*jsArray); ok {
 				i := int(rt.toNumber(u(a[1])))
 				if i < 0 || i >= len(arr.elems) {
-					rt.fail("index %d out of range", i)
+					goIdxFail(i, len(arr.elems))
 				}
 			}
 			cur := rt.giSlotOf(u(a[0]), u(a[1]))
@@ -1055,7 +1053,7 @@ func init() {
 			// nil used to pass straight through in all three engines.
 			// docs/todo.md 1.3.
 			if v == nil || v == jsNull || v == jsUndef {
-				rt.fail("interface conversion: interface is nil, not %s", rt.toString(u(a[1])))
+				panic("interface conversion: interface is nil, not " + rt.toString(u(a[1])))
 			}
 			miss := goMissingMethod(rt, v, rt.toString(u(a[2])))
 			if miss == "" {
@@ -1064,8 +1062,7 @@ func init() {
 			// Go's own text is `interface conversion: main.Dog is not main.Sp:
 			// missing method Fly`; there is no package concept in this value
 			// model, so the names are bare.
-			rt.fail("interface conversion: %s is not %s: missing method %s",
-				goTypeNameOf(rt, v), rt.toString(u(a[1])), miss)
+			panic("interface conversion: " + goTypeNameOf(rt, v) + " is not " + rt.toString(u(a[1])) + ": missing method " + miss)
 			return a[0]
 		}
 
@@ -1235,6 +1232,58 @@ func goTypeNameOf(rt *jsrt, v interface{}) string {
 	return "any"
 }
 
+// goRTFail raises a Go run-time panic. Its value - what recover() hands the
+// program and what an unrecovered panic prints - is the string go's
+// runtime.Error spells, "runtime error: <msg>". A store into a nil map and a
+// failed interface conversion panic with their bare text instead, as go's do.
+// The twins are goRTPanic in languages/go-interpreter.abnf and
+// languages/lib/go-rt.metajs.
+func goRTFail(msg string) { panic("runtime error: " + msg) }
+
+// goIdxFail is go's index-out-of-range panic (runtime/error.go, boundsErrorFmt).
+func goIdxFail(i, n int) {
+	if i < 0 {
+		goRTFail(fmt.Sprintf("index out of range [%d]", i))
+	}
+	goRTFail(fmt.Sprintf("index out of range [%d] with length %d", i, n))
+}
+
+// goSliceFail panics when s[lo:hi] (three false) or s[lo:hi:mx] breaks
+// 0 <= lo <= hi <= mx <= cp, checking in go's own order so the bound named is the
+// one go names. word is "capacity" for a slice, "length" for an array or string.
+// The twins are goSliceCheck in languages/go-interpreter.abnf and
+// languages/lib/go-rt.metajs.
+func goSliceFail(lo, hi, mx, cp int, three bool, word string) {
+	p := "slice bounds out of range ["
+	if three {
+		switch {
+		case mx < 0:
+			goRTFail(fmt.Sprintf("%s::%d]", p, mx))
+		case mx > cp:
+			goRTFail(fmt.Sprintf("%s::%d] with %s %d", p, mx, word, cp))
+		case hi < 0:
+			goRTFail(fmt.Sprintf("%s:%d:]", p, hi))
+		case hi > mx:
+			goRTFail(fmt.Sprintf("%s:%d:%d]", p, hi, mx))
+		case lo < 0:
+			goRTFail(fmt.Sprintf("%s%d::]", p, lo))
+		case lo > hi:
+			goRTFail(fmt.Sprintf("%s%d:%d:]", p, lo, hi))
+		}
+		return
+	}
+	switch {
+	case hi < 0:
+		goRTFail(fmt.Sprintf("%s:%d]", p, hi))
+	case hi > cp:
+		goRTFail(fmt.Sprintf("%s:%d] with %s %d", p, hi, word, cp))
+	case lo < 0:
+		goRTFail(fmt.Sprintf("%s%d:]", p, lo))
+	case lo > hi:
+		goRTFail(fmt.Sprintf("%s%d:%d]", p, lo, hi))
+	}
+}
+
 // goMvArr answers the plain array behind a marked multi-value result, and
 // whether v was one. See the js_gomv registration above.
 func goMvArr(v interface{}) (*jsArray, bool) {
@@ -1246,12 +1295,10 @@ func goMvArr(v interface{}) (*jsArray, bool) {
 	return arr, isArr
 }
 
-// goNilDeref raises Go's nil-pointer-dereference panic when v is nil. rt.fail
-// panics with the string "js runtime error: <msg>", which is exactly what
-// goRTPanic produces in the other two engines, so a recovered value is
-// byte-identical across them. See the wrappers above.
+// goNilDeref raises Go's nil-pointer-dereference panic when v is nil. See the
+// wrappers above.
 func goNilDeref(rt *jsrt, v interface{}) {
 	if isUndefOrNull(v) {
-		rt.fail("invalid memory address or nil pointer dereference")
+		goRTFail("invalid memory address or nil pointer dereference")
 	}
 }

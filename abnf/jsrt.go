@@ -14384,14 +14384,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if arr, ok := u(a[0]).(*jsArray); ok {
 				i := int(rt.toNumber(u(a[1])))
 				if i < 0 || i >= len(arr.elems) {
-					rt.fail("index %d out of range", i)
+					goIdxFail(i, len(arr.elems))
 				}
 				return w(arr.elems[i])
 			}
 			if str, ok := u(a[0]).(string); ok { // s[i] is the i-th BYTE of a Go string
 				i := int(rt.toNumber(u(a[1])))
 				if i < 0 || i >= len(str) {
-					rt.fail("index %d out of range", i)
+					goIdxFail(i, len(str))
 				}
 				return rt.wrapNum(float64(str[i]))
 			}
@@ -14656,9 +14656,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
 				lo := bound(a[1], 0)
 				hi := bound(a[2], len(str))
-				if lo < 0 || hi > len(str) || lo > hi {
-					rt.fail("slice bounds [%d:%d] out of range", lo, hi)
-				}
+				goSliceFail(lo, hi, 0, len(str), false, "length")
 				return w(str[lo:hi])
 			}
 			arr, isArr := u(a[0]).(*jsArray)
@@ -14667,9 +14665,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			lo := bound(a[1], 0)
 			hi := bound(a[2], len(arr.elems))
-			if lo < 0 || hi > len(arr.elems) || lo > hi {
-				rt.fail("slice bounds [%d:%d] out of range", lo, hi)
-			}
+			goSliceFail(lo, hi, 0, len(arr.elems), false, "length")
 			out := &jsArray{}
 			out.elems = append(out.elems, arr.elems[lo:hi]...)
 			return w(out)

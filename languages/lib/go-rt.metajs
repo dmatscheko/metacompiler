@@ -1332,13 +1332,13 @@ function js_goslice(v, lo0, hi0) {
         var nb = byteLen(v)
         var slo = goBound(lo0, 0)
         var shi = goBound(hi0, nb)
-        if (slo < 0 || shi > nb || slo > shi) { goRTPanic("slice bounds [" + slo + ":" + shi + "] out of range") }
+        goSliceCheck(slo, shi, 0, nb, false, "length")
         return goSubBytes(v, slo, shi)
     }
     if (!Array.isArray(v)) { fail("slicing a " + typeof v) }
     var lo = goBound(lo0, 0)
     var hi = goBound(hi0, v.length)
-    if (lo < 0 || hi > v.length || lo > hi) { goRTPanic("slice bounds [" + lo + ":" + hi + "] out of range") }
+    goSliceCheck(lo, hi, 0, v.length, false, "length")
     var out = []
     var i = lo
     while (i < hi) { out.push(v[i]); i = i + 1 }
@@ -1437,33 +1437,46 @@ function js_range_val(v, i) {
 
 // A Go RUNTIME PANIC, and it has to be a THROW rather than a `fail`.
 //
-// `fail` is the C floor's hard abort: js_gotry (which is what makes a compiled Go
-// frame recoverable) cannot catch it, so an out of range index that a deferred
-// recover() catches ABORTED THE NATIVE BINARY while llvm.Run printed the message
-// and carried on. The Go twin raises the same conditions with rt.fail, which
-// panics with the string "js runtime error: <msg>" and which js_try catches - so
-// throwing that same text here makes the native leg agree with llvm.Run, with the
-// interpreter (goRTPanic in go-interpreter.abnf), and with `go`'s own
-// recoverability. Only the message TEXT still differs from go's
-// "runtime error: index out of range [7] with length 3", which is this project's
-// wording for every runtime error. docs/todo.md 1.9.
+// `fail` is the C floor's hard abort, which js_gotry (what makes a compiled Go
+// frame recoverable) cannot catch. The thrown value is the string go's
+// runtime.Error spells, "runtime error: <msg>", which recover() hands the program;
+// a store into a nil map and a failed interface conversion throw their bare text,
+// as go's do. The twins are goRTFail in abnf/jsrtgolang.go and goRTPanic in
+// languages/go-interpreter.abnf.
 //
-// The residue this used to carry - an UNRECOVERED one reaching the floor's
-// uncaught-throw handler, which prefixed "js runtime error: uncaught exception: "
-// and so printed the wording TWICE natively - is closed since docs/todo.md 1.7:
-// jsmain wraps the entry call in one more js_gotry frame and js_gotop reports the
-// panic itself, applying runEntry's rule. No ratchet can assert that (a ratchet has
-// to exit 0); tests/probe.sh over the three legs is what settles it.
-function goRTPanic(msg) { throw "js runtime error: " + msg }
-// THE ONE WORDING FOR A NIL POINTER DEREFERENCE, in all three engines. Go's own
-// text is `runtime error: invalid memory address or nil pointer dereference`; the
-// `js ` prefix is the divergence every runtime error in this project already
-// carries. Reading a member of nil, WRITING one and CALLING a method on one all
-// used to reach `fail` here or the C floor's die() in get_member/set_member - a
-// hard abort, while llvm.Run's twin recovered the same condition. All three now
-// raise this one recoverable panic. The twins are goNilDeref in
+// An UNRECOVERED one is reported by js_gotop, so the floor's uncaught-throw
+// handler never adds its own prefix.
+function goRTPanic(msg) { throw "runtime error: " + msg }
+// Go's index and slice-bounds wordings (runtime/error.go, boundsErrorFmt).
+function goIdxPanic(i, n) {
+    if (i < 0) { goRTPanic("index out of range [" + i + "]") }
+    goRTPanic("index out of range [" + i + "] with length " + n)
+}
+// Panics when s[lo:hi] (three false) or s[lo:hi:mx] breaks 0 <= lo <= hi <= mx
+// <= cp, checking in go's own order so the bound named is the one go names. word
+// is "capacity" for a slice, "length" for an array or string. The twins are
+// goSliceFail in abnf/jsrtgolang.go and goSliceCheck in
+// languages/go-interpreter.abnf.
+function goSliceCheck(lo, hi, mx, cp, three, word) {
+    var p = "slice bounds out of range ["
+    if (three) {
+        if (mx < 0) { goRTPanic(p + "::" + mx + "]") }
+        if (mx > cp) { goRTPanic(p + "::" + mx + "] with " + word + " " + cp) }
+        if (hi < 0) { goRTPanic(p + ":" + hi + ":]") }
+        if (hi > mx) { goRTPanic(p + ":" + hi + ":" + mx + "]") }
+        if (lo < 0) { goRTPanic(p + lo + "::]") }
+        if (lo > hi) { goRTPanic(p + lo + ":" + hi + ":]") }
+        return undefined
+    }
+    if (hi < 0) { goRTPanic(p + ":" + hi + "]") }
+    if (hi > cp) { goRTPanic(p + ":" + hi + "] with " + word + " " + cp) }
+    if (lo < 0) { goRTPanic(p + lo + ":]") }
+    if (lo > hi) { goRTPanic(p + lo + ":" + hi + "]") }
+    return undefined
+}
+// Reading a member of nil, writing one and calling a method on one all raise
+// this recoverable panic. The twins are goNilDeref in
 // languages/go-interpreter.abnf and goNilDeref in abnf/jsrtgolang.go.
-// docs/todo.md 1.5.
 function goNilDeref() { goRTPanic("invalid memory address or nil pointer dereference") }
 
 // Go indexing: maps read their ZERO VALUE for a missing key, slices their
@@ -1477,13 +1490,13 @@ function js_map_get(c, k) {
     }
     if (Array.isArray(c)) {
         var ai = goIdx(k)
-        if (ai < 0 || ai >= c.length) { goRTPanic("index " + ai + " out of range") }
+        if (ai < 0 || ai >= c.length) { goIdxPanic(ai, c.length) }
         return c[ai]
     }
     if (typeof c == "string") {
         var si = goIdx(k)
         var bs = goBytes(c)
-        if (si < 0 || si >= bs.length) { goRTPanic("index " + si + " out of range") }
+        if (si < 0 || si >= bs.length) { goIdxPanic(si, bs.length) }
         return bs[si]
     }
     if (goIsFn(c)) { return c }
@@ -1979,16 +1992,8 @@ function js_gotry(fn) {
 
 // THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function returns.
 // An unrecovered panic is reported HERE rather than being let out of the module,
-// and that is what stopped the prefix appearing TWICE natively: a runtime panic's
-// value already reads "js runtime error: <msg>" (goRTPanic builds it that way so a
-// recovered `e` is byte-identical to the Go twin's rt.fail value), and the floor's
-// uncaught-throw handler then prefixed it a second time with "js runtime error:
-// uncaught exception: ". This is the twin of runEntry in languages/go-interpreter.abnf
-// - same test, same two wordings, same stream and same exit code - so the three
-// engines now print an unrecovered panic identically. docs/todo.md 1.7.
-//
-// THE WORDING IS GO'S OWN SINCE docs/todo.md 1.14. Measured, go 1.26.5, on stderr
-// with exit status 2:
+// so the floor's uncaught-throw handler never adds its own prefix. Measured,
+// go 1.26.5, on stderr with exit status 2:
 //
 //     panic: abort probe
 //     panic: 42
@@ -1996,20 +2001,10 @@ function js_gotry(fn) {
 //     panic: assignment to entry in nil map
 //
 // followed by a blank line and a "goroutine 1 [running]:" stack trace. "panic: "
-// prefixes BOTH kinds - a value the program panicked with and a runtime one - so
-// the two-branch test this used to need is gone: go itself does not distinguish
-// them at the top, and the reason the branch existed (not doubling the engine's
-// own "js runtime error: " wording) does not apply to a prefix go really prints.
+// prefixes BOTH kinds - a value the program panicked with and a runtime one.
 //
-// NOT reproduced, deliberately: the goroutine trace (no engine here has a
-// call-site line table, the same wall as dart's `catch (e, s)`, manual 7.9) and
-// the exact text of a RUNTIME panic - "js runtime error: index 5 out of range"
-// where go says "runtime error: index out of range [5] with length 3". That text
-// is the recovered value a program can read with recover(), it is byte-identical
-// in all three engines on purpose, and the `js ` prefix is the project-wide
-// wording recorded under docs/todo.md 1.9. Rewriting it only at the top line
-// would make the printed panic and the recovered value disagree with each other,
-// which is a worse defect than the one it would hide.
+// NOT reproduced: the goroutine trace (no engine here has a call-site line
+// table, the same wall as dart's `catch (e, s)`, manual 7.9).
 //
 // Twins: runEntry in languages/go-interpreter.abnf and js_gotop in
 // abnf/jsrtgolang.go - same wording, same stream (stderr, where go puts it and
@@ -2112,11 +2107,11 @@ function js_goifas(v, namev, csv) {
     // there is no dynamic type. goMissingMethod answers "" for a non-instance, so nil
     // used to pass straight through in all three engines. docs/todo.md 1.3.
     if (v === undefined || v === null) {
-        goRTPanic("interface conversion: interface is nil, not " + goStrOf(namev))
+        throw "interface conversion: interface is nil, not " + goStrOf(namev)
     }
     var miss = goMissingMethod(v, csv)
     if (miss == "") { return v }
-    goRTPanic("interface conversion: " + goTypeNameOf(v) + " is not " + goStrOf(namev) + ": missing method " + miss)
+    throw "interface conversion: " + goTypeNameOf(v) + " is not " + goStrOf(namev) + ": missing method " + miss
     return v
 }
 
@@ -2474,7 +2469,7 @@ function js_gisetsl(h, iv, v) {
     // reported is the one the program wrote. `base[0:2]` of a five element slice
     // has cap 5, so a check against the storage let sub[4] through - and with a
     // non-zero offset the old message named the OFFSET index. docs/todo.md 1.9.
-    if (ui < 0 || ui >= goIdx(h.n)) { goRTPanic("index " + ui + " out of range") }
+    if (ui < 0 || ui >= goIdx(h.n)) { goIdxPanic(ui, goIdx(h.n)) }
     arr[idx] = nv
     return undefined
 }
@@ -2496,16 +2491,17 @@ function js_gidivz(r) {
 
 // The bounds of a slice EXPRESSION s[lo:hi:mx]: Go requires 0 <= lo <= hi <= mx
 // <= cap, and violating it panics. The emitter calls this before it builds the new
-// header (see $sslice in languages/go-to-llvm-ir.abnf); the twin is js_gislbounds
-// in abnf/jsrtgolang.go and the interpreter's own check is in goSlice.
-function js_gislbounds(lo, hi, mx, cp) {
-    var l = goIdx(lo)
-    var h = goIdx(hi)
-    var m = goIdx(mx)
+// header (see $sslice in languages/go-to-llvm-ir.abnf) with mx undefined in the
+// two-index form and isSl false for an array; the twin is js_gislbounds in
+// abnf/jsrtgolang.go and the interpreter's own check is in goSlice.
+function js_gislbounds(lo, hi, mx, cp, isSl) {
     var c = goIdx(cp)
-    if (l < 0 || h < l || m < h || c < m) {
-        goRTPanic("slice bounds [" + l + ":" + h + "] out of range")
-    }
+    var three = mx !== undefined && mx !== null
+    var m = c
+    if (three) { m = goIdx(mx) }
+    var word = "length"
+    if (isSl === true) { word = "capacity" }
+    goSliceCheck(goIdx(lo), goIdx(hi), m, c, three, word)
     return undefined
 }
 
@@ -2517,7 +2513,7 @@ function js_gislget(h, iv) {
     var arr = h.a
     if (!Array.isArray(arr)) { return js_map_get(h, iv) }
     var ui = goIdx(iv)
-    if (ui < 0 || ui >= goIdx(h.n)) { goRTPanic("index " + ui + " out of range") }
+    if (ui < 0 || ui >= goIdx(h.n)) { goIdxPanic(ui, goIdx(h.n)) }
     return arr[goIdx(h.o) + ui]
 }
 
@@ -2525,14 +2521,14 @@ function js_gislget(h, iv) {
 function js_gisetat(c, k, v) {
     // A store into a NIL MAP is a panic in Go, and it is the one thing a nil map
     // does not share with an empty one (see goIsNilMap).
-    if (goIsNilMap(c)) { goRTPanic("assignment to entry in nil map") }
+    if (goIsNilMap(c)) { throw "assignment to entry in nil map" }
     // An out of range ARRAY store panics with the same wording the READ uses. It
     // used to fall through to js_pyset, whose own bound is the floor's `fail` - a
     // hard abort, so a recover() around `arr[3] = 1` caught it under llvm.Run and
     // the native binary died. docs/todo.md 1.9.
     if (Array.isArray(c)) {
         var ai = goIdx(k)
-        if (ai < 0 || ai >= c.length) { goRTPanic("index " + ai + " out of range") }
+        if (ai < 0 || ai >= c.length) { goIdxPanic(ai, c.length) }
     }
     var cur = goSlotOf(c, k)
     if (cur === undefined) { return js_pyset(c, k, v) }
