@@ -9,8 +9,7 @@
       mec languages/lua-to-llvm-ir.abnf tests/lua-test-recognize.lua -q
 
   It is an ordinary matrix entry, not a SHOULD-FAIL guard like the recognize
-  tests of the other languages. (The trailing "notImplemented" notes below are
-  stale: every construct runs.)
+  tests of the other languages.
 ]]
 
 -- Genuine, fully supported additions ----------------------------------------
@@ -37,27 +36,27 @@ print("TINY = " .. TINY)
 -- Further surface ------------------------------------------------------------
 
 -- Bitwise operators and exponentiation.
-local pow  = 2 ^ 10                -- notImplemented: ^
-local band = MASK & HEXY           -- notImplemented: bitwise &
-local bor  = 1 | 2                 -- notImplemented: bitwise |
-local shl  = 1 << 4                -- notImplemented: <<
-local shr  = 256 >> 2              -- notImplemented: >>
-local bnot = ~0                    -- notImplemented: unary ~
+local pow  = 2 ^ 10
+local band = MASK & HEXY
+local bor  = 1 | 2
+local shl  = 1 << 4
+local shr  = 256 >> 2
+local bnot = ~0
 print("pow", pow, "band", band, "bor", bor, "shl", shl, "shr", shr, "bnot", bnot)
 
 -- Varargs: the parameter list accepts a trailing '...', and '...' in the body
 -- yields the extra arguments.
 local function firstOf(label, ...)
-  local rest = ...                 -- notImplemented: varargs ...
+  local rest = ...
   return rest
 end
 print("firstOf", firstOf("xs", 10, 20, 30))
 
 -- goto and its target label (Lua 5.2+): the jump skips the print for i == 2.
 for i = 1, 3 do
-  if i == 2 then goto continue end -- notImplemented: goto
+  if i == 2 then goto continue end
   print("i", i)
-  ::continue::                     -- notImplemented: label
+  ::continue::
 end
 
 print("recognize: all constructs parsed")

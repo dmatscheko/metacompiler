@@ -4949,11 +4949,6 @@ KwInstanceof = "instanceof" KwEnd ;
                               callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
-    // Declared instance-property defaults, by class, plus the extends edge, recorded
-    // while the tags run. Nothing reads them back: defaults are replayed at run time
-    // by each class's __initprops (emitInitProps).
-    var classProps = {}
-    var classSuper = {}
     // ----- traits ---------------------------------------------------------------
     // A trait is a compile-time member list. `use T;` copies those members into the
     // using class unless the class declares the same name itself, which is exactly
@@ -5159,8 +5154,6 @@ KwInstanceof = "instanceof" KwEnd ;
             for (var d = 0; d < tm.statics.length; d++) { statics.push(tm.statics[d]) }
             for (var e = 0; e < tm.consts.length; e++) { consts.push(tm.consts[e]) }
         }
-        classProps["$" + name] = props
-        classSuper["$" + name] = ext
         for (var mi = 0; mi < methods.length; mi++) {
             if (methods[mi].name == "__construct") { ctorSigs["$" + name] = {params: methods[mi].params, byref: methods[mi].byref, rest: methods[mi].rest} }
         }
