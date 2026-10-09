@@ -11,34 +11,10 @@ tests/typescript-test-full.ts (the full-syntax ratchet, ./test.sh --full) passes
 completely.
 
 
-THE GOAL SYMBOL IS Script, and being explicit about it is what decides the meaning of
-'this' at the top level - node gives three different answers for it and only one of them
-is ours:
-
-  node f.js             CommonJS   typeof this is 'object';    this is module.exports
-  vm.runInThisContext   Script     typeof this is 'object';    this === globalThis
-  node f.mjs            Module     typeof this is 'undefined'
-
-The evidence that it is Script is in this grammar rather than in a preference. The Annex
-B HTML-like comments ('<!--', '-->') are accepted, and B.1.3 admits them in the Script
-goal ONLY - node answers 'HTML comments are not allowed in modules'. The code is SLOPPY
-unless a 'use strict' directive says otherwise: an assignment to an undeclared name is an
-implicit global and '01' is a legacy octal literal, both of which a Module - always
-strict - refuses. And top level 'return' is a syntax error here, which is what rules out
-the CommonJS wrapper, since node legalises it inside one (this is also why 'node --check'
-is the wrong oracle for a file written for this grammar: it wraps the file in that
-function - use 'new vm.Script(src)' or vm.runInThisContext). 'import'/'export' are
-accepted ON TOP of the Script goal as an extension - an import runs the named file into
-the shared global scope - rather than switching it.
-
-So the top level 'this' is the GLOBAL OBJECT and 'globalThis' names the same object. It
-is a plain object, not a live view of the scope chain: 'globalThis.x = 1' does not create
-a global variable, and ''' + this' is '[object Object]' where node says '[object global]'.
-A function's STRICTNESS is a per-function flag (UseStrictMark below): a sloppy function
-called with no receiver, or with 'call(null)', gets the global object as its 'this', a
-strict one keeps the undefined or the null. The one row still NOT converged is
-'f.call(7)' on a sloppy function - ToObject of a PRIMITIVE receiver needs wrapper
-objects, which this value model has none of, so the 7 arrives unwrapped.
+THE GOAL SYMBOL IS Script, as in js-to-llvm-ir.abnf (see the description of
+js-interpreter.abnf): sloppy unless 'use strict', no top level 'return', and the top
+level 'this' is the global object ('globalThis' names it; a plain object). A sloppy
+function called with no receiver gets the global object as its 'this'.
 
 THE JAVASCRIPT LAYER is the practical ECMAScript 2022 syntax: the numeric literal forms
 (hex/binary/octal/separators/leading dot/BigInt - and BigInt is REAL: arbitrary precision,
@@ -114,30 +90,17 @@ super property, and the assign-nowhere heads the spec calls early errors ('0 = 0
 model for them: a regular expression is
 matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
 permissive dialect shared by four languages and so has no lookbehind and no property
-escapes, a
-for-of over a generator materializes it first (the loop iterates by index), and the
+escapes, and the
 string parts of a tagged template are an object with index keys rather than an Array.
 
 ASYNC IS AWAITS-AS-YIELDS: an async function answers a real Promise, `await` suspends,
 and a microtask queue is drained once after the entry point returns, which is the only
 event-loop turn this runtime has. An async BODY is compiled exactly like a generator
-body and js_jsasyncfn drives it from the queue; the ordering is byte-identical to node's
-(the trace asserted in SECTION 19 of tests/typescript-test-full.ts was measured against
-it). `for await` and `async function*` RUN: an async generator carries its yields and its
-awaits on the ONE suspension channel a generator has, told apart by a marker record on
-each awaited operand (docs/todo.md 1.7). `yield*` inside one AWAITS each step of the
-delegate and answers the delegate's return value, and ag.throw(e) RAISES AT THE SUSPENDED
-YIELD - the resume value is the throw-in channel, so a try around the yield catches. A
-throw that arrives while the body is parked at a `yield*` is FORWARDED to the delegate's
-throw(); a delegate with no throw method is closed through its return() and the yield*
-raises node's TypeError. A PLAIN generator has a .throw() of its own now - the C floor's
-tag-15 member table learned a third member (runtime.c's gen_throw) - so a sync generator
-delegated to from an async one is handed the throw rather than taking the
-no-throw-method path. g.return() while the body is
-parked at a `yield*` DOES close the delegate: the close raises at that yield and the
-delegate's return() runs on the way out, innermost first (docs/todo.md 1.10). `await` outside an
-async body stays the identity it was; an unhandled rejection is deliberately not
-reported. See the same paragraph in languages/js-to-llvm-ir.abnf for the full account.
+body and js_jsasyncfn drives it from the queue; the ordering matches node's (SECTION 19
+of tests/typescript-test-full.ts). `for await`, `async function*`, ag.throw(e), a
+PLAIN generator's .throw() and g.return() at a `yield*` all behave as described in
+js-to-llvm-ir.abnf's description. `await` outside an async body is the identity; an
+unhandled rejection is deliberately not reported.
 JSX is out of scope, and so are the Annex B HTML-like comments ('<!--', '-->'), which
 TypeScript rejects and which would shadow the '<' of a type argument list.
 
@@ -204,10 +167,7 @@ BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
 NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
-// NOT lib/ident-dollar.abnf: that lib's Id is the ASCII identifier that Java, MetaJS
-// and the rest share, while a JavaScript IdentifierName is a Unicode one that may also
-// be spelled with \u escapes. Id and the keyword boundary KwEnd are defined at the
-// bottom of the rules instead.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -231,11 +191,7 @@ Statement   <~~ push(stmtPos(pop())) ~~>
             | DecoratedDecl | ClassDecl | ClassDeclWidened | TryStmt | VarDecl | Destructure | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl | Labeled | Empty | ExprStmt ;
 
-// A labeled statement: 'outer: for (...) ...', 'l1: { ... break l1 ... }'. The two
-// forms are separate productions because only a LOOP has a continue target: the loop
-// alternative hands its label down (pendingLabel) so the loop builder can register its
-// own post block as the label's continue block, while a labeled non-loop only ever
-// answers 'break label'. Tried before ExprStmt, so a bare 'foo' still is one.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Labeled     = LabeledLoop | LabeledStmt ;
 LabeledLoop <~~ push(makeLabeledLoop(pop(), pop())) ~~>
             = LabelName ":" LoopStmt ;
@@ -433,25 +389,11 @@ SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipTplChar = "\x00"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
-// JavaScript has TWO statement positions. A StatementList (the program, a block, a
-// switch body) takes Statement OR Declaration; the single-statement BODY of if/else,
-// while, do, for, for-of and with takes only Statement - 'if (1) let x = 10;' and
-// 'with (o) class C {}' are syntax errors, not one-statement bodies. 'var' is not a
-// declaration in this sense and stays legal ('if (x) var a = 1;' is fine), so the
-// split cannot be done by listing alternatives: KwVar covers var/let/const together
-// and VarDecl is shared with the legal 'var' form. Instead the body positions reuse
-// the whole Statement and put a negative lookahead in front of it.
-//
-// The two body positions differ by exactly one form: Annex B B.3.4 makes a plain
-// function declaration a legal if/else body in sloppy mode ('if (x) function f(){}'),
-// while a loop or with body never accepts one.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 NestedStatement = NotDeclHead NotFuncHead Statement ;
 IfBody          = NotDeclHead Statement ;
 
-// The JS switch: === comparison, fallthrough until break, stacked labels, default
-// anywhere. The body is a flat list - the labels must be tried before Statement,
-// because 'case 1:' would otherwise parse as two expression statements (semicolons
-// are optional).
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
 CaseLabel   <~~ push({casev: pop()}) ~~>
@@ -499,16 +441,10 @@ ForPost     <~~ push({k:"post", t:exprToClause(pop())}) ~~> = Expression ;
 
 // [] or [exprThunk].
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            // 'return' is a RESTRICTED PRODUCTION: no line terminator may sit between it
-            // and its expression, so a newline forces the semicolon. Without the guard,
-            // 'if (x) return' + 'log = 1' on the next line parses as 'return (log = 1)',
-            // which performs the assignment AND returns it. node says undefined.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             = KwReturn [ SameLine Expression ] [ ";" ] ;
 
-// 'break'/'continue' take an optional label. Automatic semicolon insertion puts a
-// line terminator between the keyword and the label out of bounds ('break \n foo' is
-// a bare break followed by the expression statement 'foo'), so the label is guarded
-// with SameLine.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Break       <~~ push(makeBreakStmt(takeAll())) ~~>
             = KwBreak [ SameLine LabelName ] [ ";" ] ;
 
@@ -560,10 +496,7 @@ PropModItem = PropMod | Decorator <~~ pop() ~~> ;
 PropMod     = ( "public" | "private" | "protected" | "readonly" | "override" ) KwEnd NotParamEnd ;
 RestParam   <~~ push({pname: pop(), rest: true}) ~~>
             = { Decorator <~~ pop() ~~> } "..." NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] ;
-// A destructuring parameter: the argument at this position is matched against the
-// pattern, binding its leaves in the function scope (bindParams -> bindPattern). It may
-// carry a default of its own ('function f({a} = {})'), which fires when the argument is
-// missing or undefined, exactly like a plain default parameter.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 PatternParam <~~ push({ppat: withDefault(takeAll())}) ~~>
             = DPattern [ "?" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 // A rest parameter whose target is a pattern ('function f(...[a, b])'): the collected
@@ -576,35 +509,18 @@ Empty       <~~ push(function(b) { return b }) ~~>
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
-// MEASURED AND REVERTED TWICE - see the long note at ExprStmt in
-// typescript-interpreter.abnf for both measurements and for the list of the ~25 real
-// forms behind the loss. Short version: automatic semicolon insertion on this production
-// costs 97 corpus files and gains 7, because ~70 of the files that parse today are
-// genuinely invalid inputs the corpus still marks 'parse' and they parse only by
-// degrading into bare identifier expression statements.
+// An optional ';', not automatic semicolon insertion - see the note at ExprStmt in
+// typescript-interpreter.abnf.
 
-// Every expression production pushes exactly one thunk: function(block) -> {b, v}.
-// The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
-// is a transparent pass-through of its single operand - an alternative 'a, b | a' would
-// re-parse the operand on every nesting level and go exponential on '((((a))))'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Expression  <~~ push(makeSequence(takeAll(), up.pos)) ~~>
             = AssignExpr { "," AssignExpr } ;
 
-// A destructuring ASSIGNMENT: '[a, b] = [b, a]', '({x, y} = o)'. It is the same pattern
-// grammar as the 'var' binding, but it writes to existing places instead of declaring.
-// It sits directly in front of CondExpr, so an ordinary expression only pays for the
-// attempt when it actually starts with '[' or '{'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 DestructAssign <~~ push(makeDestructAssign(takeAll())) ~~>
             = APattern "=" AssignExpr ;
 
-// Every assignment form starts by re-parsing the same left-hand text, and that text can be
-// an arbitrarily nested array/object/parenthesized expression - so trying the forms one
-// after the other multiplies the work at EVERY nesting level and goes exponential on
-// '[[[[ ... ]]]]' or '(((( ... ))))'. Two things keep it linear. First AssignAhead: one
-// cheap forward scan that answers whether an assignment operator follows the balanced
-// left-hand side at all, so an expression that is not an assignment never tries any of
-// these. Second, the sixteen operators share ONE production (Assignment below) instead of
-// three, so the target is parsed once rather than three times.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 AssignExpr  = AssignForm | Yield | CondExpr ;
 AssignForm  = AssignAhead ( Assignment | SuperAssign | DestructAssign | AssignNoRef ) ;
 
@@ -628,12 +544,7 @@ AssignNoRef <~~ takeAll(); push(notImplExpr("assignment to a non-reference", up.
 NoRefPrimary = NewTarget | NewExpr | NewWidened | SuperProp | AsyncFuncExpr | GenFuncExpr
              | FunctionExpr | ClassExpr | TemplateLit | RegexLit | ObjectLit | ArrayLit
              | StringLit | NumberLit | True | False | Null | Undefined | VarRef ;
-// Assignment is an expression and associates to the right: a = b = c. ONE production for
-// all sixteen operators, so the target is parsed exactly once; makeAnyAssign splits them
-// again by meaning. The plain and the arithmetic/bitwise compound forms read the old value,
-// apply the operator and store the result; the logical assignments &&= ||= ??= are SHORT
-// CIRCUITING - the right side is evaluated, and the store happens, only when the old value
-// asks for it - and get their own builder.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Assignment  <~~ push(makeAnyAssign(takeAll(), up.in)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
 // Longest first, so a prefix never wins over the operator it starts: '**=' before '*=',
@@ -641,17 +552,7 @@ Assignment  <~~ push(makeAnyAssign(takeAll(), up.in)) ~~>
 AssignOp    = "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
             | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ;
 
-// Assigning THROUGH super - 'super.b = 1', 'super[1] = 2', 'super.c[1] = 2' - inside a
-// method. Target starts at 'NotReserved Id', which refuses the reserved word 'super',
-// so the assignment form cannot come from Target the way every other path does; it is
-// spelled out here from the same SuperKey the value form uses.
-//
-// Two shapes come out of it. With no further suffix the store IS the super store, and
-// js_supset performs it: a setter found on the __super chain is invoked with 'this',
-// and otherwise the own property lands on the receiver (which is what [[Set]] with a
-// receiver does). With suffixes - 'super.c[1] = 2' - only the BASE is a super read, and
-// the rest is an ordinary member path, so the whole thing is handed to the normal
-// assignment builder as a ref whose base thunk is the super read.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
             = KwSuper SuperKey { TargetSuffix } AssignOp <~~ push(up.in) ~~> AssignExpr ;
 
@@ -664,15 +565,7 @@ YieldStar   <~~ push(makeYieldStar(pop())) ~~>
 YieldOne    <~~ push(makeYield(takeAll())) ~~>
             = KwYield [ AssignExpr ] ;
 
-// An assignable place. JavaScript's LeftHandSideExpression is a full expression - the
-// spec parses it with a cover grammar and only decides afterwards, as an EARLY error,
-// whether it was assignable - so a target here is much wider than a name:
-//   a, a.b, a[i], a(x).b     the name form, which is the one that lowers
-//   (a), ((a.b)), (a).c      a parenthesized target IS that target, at any nesting
-//   [1].a, (a ** b).c, f().x a target whose base is an arbitrary primary expression
-// The three alternatives are ordered so that the lowerable name form always wins: the
-// parenthesized one is the only one that can start with '(', and the based one demands at
-// least one member suffix, which a bare name never has left over.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Target      = TargetParen | TargetNamed | TargetBased ;
 TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> { TargetSuffix } ;
@@ -685,7 +578,7 @@ TargetSuffix = CallSuffix | DotSuffix | IndexSuffix | NonNullSfx ;
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = NullishExpr [ "?" AssignExpr ":" AssignExpr ] ;
 
-// Nullish coalescing sits just under the ternary; it is accepted but not lowered.
+// Nullish coalescing sits just under the ternary.
 // With no "??" it is a transparent pass-through of its single operand.
 NullishExpr <~~ push(makeNullish(takeAll(), up.pos)) ~~>
             = OrExpr { "??" OrExpr } ;
@@ -710,11 +603,7 @@ BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = InExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> InExpr } ;
 
-// The two relational word operators. 'k in o' asks whether o has the property k
-// (js_has: own properties of an object, indices and 'length' of an array or string);
-// 'v instanceof C' walks the __class/__super chain of the instance (js_instanceof), which
-// is this runtime's stand-in for the prototype chain. With neither operator present this
-// level is a transparent pass-through of its single operand.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 InExpr      <~~ push(makeInInstanceof(takeAll(), up.pos)) ~~>
             = RelExpr { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
 
@@ -730,7 +619,7 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ExpExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ExpExpr } ;
 
-// Exponentiation binds tighter than the multiplicatives; accepted but not lowered.
+// Exponentiation binds tighter than the multiplicatives.
 // With no "**" it is a transparent pass-through of its single operand.
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
@@ -742,10 +631,7 @@ UnaryExpr   = SuperPreUpdate | PreIncDec | PreUpdateExpr | Neg | Plus | Not | Bi
 // postfix one before the ordinary postfix level; both cost a parse only after a 'super'.
 SuperPreUpdate <~~ push(makeSuperUpdate(takeAll(), up.pos)) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> KwSuper SuperKey { TargetSuffix } ;
-// 'delete o.k' drops the property and answers true; 'delete x' on a plain variable cannot
-// remove a binding and answers false, as in sloppy mode. The operand of the member form is
-// a Target - the same assignable-place production the assignments use - so a path that
-// reaches through calls ('delete a(x).k') works too.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Delete      = DeleteMember | DeleteOther ;
 DeleteMember <~~ push(makeDelete(pop())) ~~>
             = KwDelete Target ;
@@ -758,10 +644,7 @@ Void        <~~ push(makeVoid(pop())) ~~>
 // so an await is a yield of the awaited value and js_jsasyncfn's driver resumes it from
 // the microtask queue once that value has settled. js_jsawaitv unpacks what the resume
 // sent back and re-raises a rejection at the await site, which is what puts it inside an
-// enclosing try/catch. The old note follows, for the record:
-// 'await e' had no event loop behind it: this runtime had no promises and no job queue,
-// so awaiting was the identity on the value. That is exactly right for a non-promise
-// operand and a deliberate simplification for a promise one, which cannot exist here.
+// enclosing try/catch.
 Await       <~~ push(makeAwait(pop())) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
@@ -784,10 +667,8 @@ PreUpdateExpr <~~ takeAll(); push(notImplExpr("update of an expression target", 
 // the expression behind for the next statement.
 // ----- The per-function STRICT-MODE flag -----
 //
-// docs/todo.md 1.1: OrdinaryCallBindThis. A SLOPPY function called with no receiver
-// gets the GLOBAL OBJECT as its `this`, a strict one gets undefined - and until this
-// rule existed no engine here carried a per-function strict flag at all, so every
-// function behaved as a strict one.
+// OrdinaryCallBindThis (ECMA-262 10.2.1.2): a SLOPPY function called with no receiver
+// gets the GLOBAL OBJECT as its `this`, a strict one gets undefined.
 //
 // Strictness is lexical: a body is strict when the enclosing code is strict OR its own
 // directive prologue opens with "use strict". This guard answers the SECOND half only,
@@ -889,12 +770,7 @@ Not         <~~ push(makeUnary(pop(), notExt())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
-// 'typeof' is the one operator that may be applied to an UNDECLARED name without
-// raising: 'typeof nowhere === "undefined"' is the classic existence test. A bare
-// identifier therefore gets its own form, which goes through js_scope_typeof (an unbound
-// name is "undefined" rather than a reference error). NotChain keeps it to a BARE name -
-// with a '.', '[', '(' or a template behind it the general form has to run, because there
-// the property/call, not the name, is what is being typed.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Typeof      = TypeofName | TypeofExpr ;
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
             = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotChain ;
@@ -925,60 +801,15 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = CallHead { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix
                       | AsCast | SatisfiesCast | NonNullSfx } ;
-// The head of a call chain, and the {ptxt} marker every call site's error text is
-// rendered from. A SUPER PROPERTY is singled out because 'super.m' is a Reference whose
-// thisValue is the CURRENT 'this' - so 'super[k]()', '(super.m)()' and 'super.m.call(x)'
-// all run the parent's member on the receiver, exactly as the SuperCall production makes
-// 'super.m()' do. Without the flag every one of those called with an undefined 'this'.
-// (up.in is the text matched in THIS rule, so both arms see the head's own source text
-// and not the whole chain's - which is what siteTexts wants.)
+// See the twin of this comment in js-to-llvm-ir.abnf.
 CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
             | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
-// PARENTHESES DO NOT DROP THE RECEIVER. '(o.m)()' calls m with 'this' === o, because a
-// parenthesized expression evaluates to whatever the inner expression evaluates to -
-// and a MemberExpression evaluates to a Reference, which carries its base. The
-// assignment side has always known this ('(a.b).c = 1' assigns where the unparenthesized
-// form does, through TargetParen/retarget); the call side dropped it, and every such
-// call ran with the global object as 'this'.
-//
-// ParenExpr is the call side's parenref, and it is a RECOGNISER, not a second parse.
-// The shape tried first was a dedicated production for a parenthesized member chain,
-// ordered in front of the ordinary '"(" Expression ")"' - and it is EXPONENTIAL in
-// paren-nesting depth, because every level whose chain shape fails is then parsed again
-// by Expression. Measured on nested '(x + a[0])': depth 8 0.39s -> 1.21s, depth 12
-// 0.40s -> 11.05s. This PEG has no memoisation, so the only safe answer is to parse the
-// parenthesized expression EXACTLY ONCE and decide afterwards.
-//
-// foldCallMember records every chain it folds - its item list and its own matched text.
-// The outermost chain inside a '(...)' is the LAST one to complete, so when its text is
-// the whole of the parenthesized text the parentheses held one member chain and nothing
-// else; parenPrimary then hands the chain's ITEMS out under a marker instead of the
-// opaque value thunk, and flattenParen splices them in front of whatever suffixes
-// followed the ')'. '(o.m)()' folds to precisely the item list of 'o.m()'.
-//
-// That text test is also what keeps the NEGATIVE forms negative, and they matter as much
-// as the positive ones: only a parenthesized MemberExpression is a Reference. In
-// '(0, o.m)()', '(c ? o.m : o.n)()', '(o.m || o.n)()' and '(o.m = f)()' the last chain to
-// complete covers only PART of the parentheses, no marker is built, and node's undefined
-// receiver is what comes out - '(0, o.m)()' is the idiom for exactly that.
-//
-// The NotArrow guard behind the ')' is what keeps '(a) => a' and '(a, b) => a' out:
-// both are Expressions, and only the '=>' behind them says they were an arrow PARAMETER
-// list. Guarding here rather than retrying ArrowFn in FRONT of ParenExpr is worth 12
-// seconds on the -frozen leg of tests/js-test-features.js (46.6s -> 34.3s, same machine
-// and file): an ArrowFn attempt ordered ahead of every call primary is paid by EVERY
-// primary in the program, while the guard is paid only by the arrow functions
-// themselves. On the unchanged base file the fix is inside the measurement noise
-// (clean 23.5/25.6s, this tree 24.6/24.7s).
+// See the twin of this comment in js-to-llvm-ir.abnf.
 CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
             = "(" Expression ")" NotArrow ;
 
-// Fails when the next two characters are '=>'. Returns the impossible token to FAIL,
-// undefined to succeed. ParenExpr needs it: '(a)' and '(a, b)' are Expressions the
-// parenthesized primary would happily match, and only the '=>' behind them says they
-// were an arrow PARAMETER LIST. The interpreter half has had this guard (for Yield)
-// since it was written.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 NotArrow    = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -1034,10 +865,7 @@ SpreadElem  <~~ push({spreadT: pop()}) ~~>
 Primary     = AsyncArrow | ArrowFn | TypeAssertion | DynImport | ImportMeta | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | PrivateNameRef | VarRef ;
-// '#field in obj' - the ergonomic brand check of ES2022. A private name is stored under
-// the mangled key '__#<body>#field' (privKey), so the operand is that key as a string and the
-// ordinary 'in' does the rest - js_jshas has the arm that lets a private name past the
-// __-slot filter. Tried before VarRef, whose Id cannot start at a '#'. docs/todo.md 2.4.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 PrivateNameRef <~~ push(privRefConst(pop())) ~~>
             = "#" Id <~~ push(idName(up.in)) ~~> ;
 
@@ -1061,7 +889,7 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
             = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
-// argument list at all - are ACCEPTED but not lowered (makeNew only knows 'new C(args)').
+// argument list at all - go through makeNewGeneral, which takes the callee as a value.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
             = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // The suffix chain belongs to the CALLEE ('new a.b.C()' constructs a.b.C), and it must
@@ -1071,8 +899,8 @@ NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
             = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef ;
 
-// super.x / super[i] as a VALUE (SuperCall above covers the call forms): accepted,
-// not lowered. Any further suffixes come from the enclosing CallMember.
+// super.x / super[i] as a VALUE (SuperCall above covers the call forms). Any further
+// suffixes come from the enclosing CallMember.
 SuperProp   <~~ push(makeSuperProp(pop())) ~~>
             = KwSuper SuperKey ;
 // The key of a super property, as a value thunk wrapped in a marker so that the
@@ -1083,16 +911,15 @@ SuperKeyDot <~~ push({skey: pop()}) ~~>
 SuperKeyIdx <~~ push({skey: pop()}) ~~>
             = "[" Expression "]" ;
 
-// new.target, async arrows, async/generator function expressions and class expressions
-// are all accepted but not lowered.
 // 'new.target': the constructor the running call was made with, or undefined for an
 // ordinary call. makeNew's function form goes through js_call_new, which is what arms it.
 NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
 AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
             = KwAsync ArrowAhead ArrowParams "=>" ArrowBody ;
-// An async function expression is compiled exactly like a plain one (see Await); an async
-// GENERATOR is compiled as a generator. The optional name is accepted but not bound.
+// An async function expression's body is compiled as a generator body driven by
+// js_jsasyncfn, an async GENERATOR's by js_jsasyncgen. The optional name is bound only
+// inside the body (fnSelf).
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
 AsyncGenExpr <~~ push(makeAsyncGenExpr(takeAll(), up.in)) ~~>
             = KwAsync KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
@@ -1100,18 +927,14 @@ AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
             = KwAsync KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
-// `f.name`, and never takes the one of the binding it is assigned to. docs/todo.md 1.4.
+// `f.name`, and never takes the one of the binding it is assigned to.
 FnExprName  <~~ push({fname: up.in}) ~~>
             = NotBindName Id ;
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
 GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
-// A class EXPRESSION - 'var P = class { ... }' - builds the very same descriptor as a
-// class declaration and evaluates TO it. An anonymous one still needs a name, because
-// super() and the method closures resolve their defining class by name; ClassAnonName
-// invents a 0-prefixed one that no source identifier can collide with, and an explicit
-// name overrides it.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ClassExpr   = DecoratedClassExpr | ClassExprLowered | ClassExprWidened ;
 // A decorated class EXPRESSION. The decorators run on the descriptor the expression
 // evaluates to, exactly as on a declaration - but there is no binding to rewrite, so the
@@ -1126,21 +949,17 @@ ClassAnonName <~~ classSeq = classSeq + 1; curClassName = "0class" + classSeq; p
             = Nothing ;
 ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
             = NotBindName Id ;
-// A class expression with a heritage EXPRESSION ('class extends f() {}'): only the
-// 'extends Name' form can be lowered, so this stays accepted-but-not-implemented.
+// A class expression with a heritage EXPRESSION ('class extends f() {}'): the parent
+// arrives as a value thunk (ClassExt) instead of a name.
 ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
             = [ "abstract" KwEnd ] KwClass ClassAnonName [ ClassExprName ] [ TypeParams ] KwExtends ClassExt
               [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 
-// The optional name of a function expression is accepted but not bound.
+// The optional name of a function expression is bound only inside its own body (fnSelf).
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
             = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 
-// The object literal, with the whole ES2015+ property surface: `key: value`, spread,
-// computed keys, shorthand names, shorthand methods (incl. the async form) and
-// getter/setter accessors. A KEY is a property position, so reserved words need no guard
-// there ('{ class: 1, new: 2 }' is legal); only the SHORTHAND form, which names a
-// variable, is guarded.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
             = "{" [ ObjMember { "," ObjMember } [ "," ] ] "}" ;
 ObjMember   = SpreadProp | ComputedProp | GetSetProp | MethodProp | PropDef | ShorthandProp ;
@@ -1158,12 +977,7 @@ SpreadProp  <~~ push({spreadT: pop()}) ~~>
 // computed shorthand METHOD '{[k](x) {}}'.
 ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ":" AssignExpr | [ TypeParams ] ParamList [ TypeAnnot ] Block ) ;
-// A getter takes no parameter and a setter takes exactly one - that is in the grammar
-// of the accessor productions, not an early error, so it is enforced here. The pair
-// becomes an accessor property (js_defprop): reading the key runs the getter with the
-// object as 'this', writing it runs the setter.
-// MemberKey rather than PropKey: an accessor key may be COMPUTED as well
-// ('({get [a]() {}, set [a](b) {}})').
+// See the twin of this comment in js-to-llvm-ir.abnf.
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
             = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams [ TypeAnnot ]
               | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] Block ;
@@ -1171,7 +985,7 @@ GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
 // exactly one parameter" (1049) are TypeScript GRAMMAR CHECKS, reported on a tree tsc has
 // already built - the conformance suite files 'var v = { set foo() { } }' and
 // 'get Foo(a: number) { }' under parser/, expecting them to parse. So the arity is not
-// enforced here any more: the list is the ordinary one and the extra (or missing) names
+// enforced here: the list is the ordinary one and the extra (or missing) names
 // simply have no effect, since a getter is invoked with no argument and a setter with one.
 GetterParams <~~ takeAll() ~~> = "(" [ ParamSeq ] ")" ;
 SetterParams = "(" [ ParamSeq ] ")" ;
@@ -1184,24 +998,13 @@ GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotReserved Id ;
 
-// An array literal has ELISIONS: '[1,,2]' is three elements whose middle one is a hole,
-// and every hole still occupies its index. ArrHole matches nothing at all, so a position
-// left empty is still a position - the same device the array PATTERN uses. A single
-// trailing hole is the trailing comma and is dropped again by makeArray, which is what
-// keeps '[1,2,3,]' three elements long while '[1,2,3,,]' is four.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" ArrElem { "," ArrElem } "]" ;
 ArrElem     = Arg | ArrHole ;
 ArrHole     <~~ push({hole: true}) ~~> = Nothing ;
 
-// Arrow functions: x => x+1, (a, b) => a+b, () => { ... }. They reuse the same
-// closure machinery (emitFunction/js_closure) as function expressions; an expression
-// body is an implicit 'return <expr>'. Tried before "(" Expression ")" and VarRef.
-// The parenthesized parameter list of an arrow is indistinguishable from a parenthesized
-// EXPRESSION until the '=>' behind it settles the question, so without a lookahead every
-// '( ... )' is parsed twice - once as a parameter list that then fails, once as the
-// expression it really was - and that doubles at every nesting level. ArrowAhead answers
-// that one question cheaply: skip the balanced parentheses and see whether '=>' follows.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
             = ArrowAhead ArrowParams "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
@@ -1227,12 +1030,7 @@ TplExpr     <~~ push({expr: pop()}) ~~>
 TplChars    <~~ push({str: unescapeJs(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
-// A template forbids the legacy OCTAL escapes UNCONDITIONALLY - not merely in
-// strict mode, the way a string literal does - so '\1', '\07' and '${x}\02' are
-// syntax errors even in sloppy code. '\0' on its own is still the NUL escape;
-// it only turns octal once a digit follows it. \x and \u carry the same digit
-// requirements as in a string (JsHexEsc / JsUniEsc), while everything else may
-// still be any character at all, including a line continuation.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 TplEsc      = "\\" ( JsHexEsc | JsUniEsc | TplNulEsc | TplEscChar ) ;
 TplNulEsc   = "0" NotDigit ;
 TplEscChar  = !@"xu0123456789" ;
@@ -1241,17 +1039,7 @@ TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U
 TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
             = "$" ;
 
-// for-of over an array or string iterates its elements/characters (genuine).
-// for-in is not implemented (host key enumeration is an off-limits extern);
-// under -warn-unsupported its iterable is evaluated and the body skipped.
-//
-// The loop target is either a name - optionally preceded by var/let/const, the genuine
-// and lowered form - or, since the loop may also assign into an existing place, a member
-// path: 'for (a.b in c)', 'for (a(x)[1] in d)'. The path form has no name to bind, so it
-// is ACCEPTED and routed to notImplemented.
-// The declared and the bare name are two alternatives rather than one '[ KwVar ] Id'
-// because an optional keeps what it matched: in 'for (let in a)' - a loop over the
-// ordinary variable named 'let' - KwVar would swallow the 'let' and leave no name.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
 ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 // A destructuring loop target: 'for (var [k, v] of pairs)'. The element is matched against
@@ -1270,10 +1058,7 @@ ForOfAPat   <~~ push({apat: pop()}) ~~>
 // ITERATOR by awaiting each next() and an array or a string by awaiting each ELEMENT.
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
-// The head pushes the loop name and then the operator. A target that starts with 'let'
-// is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
-// 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
-// the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
 // The Annex B for-IN initializer: 'for (var a = 1 in X)' is legal sloppy JavaScript. It
 // is parsed and dropped - the loop variable is rebound on every iteration anyway. The
@@ -1303,33 +1088,16 @@ ForOfPath   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
 ForOfPathHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push(makeForOfTarget(takeAll(), up.pos)) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
-// A for-in/of whose loop target is not a reference at all: 'for (0 of 0)',
-// 'for ([0] in 0)', 'for ({a: 0} of 0)'. Like AssignNoRef these PARSE in the spec and are
-// early errors, so they are accepted here and abort at compile time. Also like AssignNoRef
-// the head is a LeftHandSideExpression and nothing wider, so 'for (([a]) of 0)' - where the
-// parentheses make the reinterpretation as a pattern impossible - stays a syntax error, and
-// 'this' and a 'let'-headed target are refused outright. Last alternative, after every
-// shape that can actually bind something.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" [ KwVar ] CondExpr ( KwOf | KwIn ) Expression ")" NestedStatement ;
 
-// A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nesting of
-// the two. The pattern is reified on the stack as a tree of nodes and lowered by
-// bindPattern: the initializer runs once, then every leaf is bound to its array element
-// (js_get by index) or object property (js_get by key). The tree covers the whole
-// ECMAScript pattern surface - defaults ('[a = 1]'), holes ('[, a]'), array and object
-// rest ('[a, ...r]', '{a, ...r}'), computed and literal keys ('{[k]: v}', '{"a": b}') and
-// arbitrary nesting - so the same production serves the binding here, a destructuring
-// ASSIGNMENT, a destructuring parameter and a destructuring for-of head.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = KwVar DPattern "=" AssignExpr [ ";" ] ;
 
 DPattern    = ArrPattern | ObjPattern ;
-// Every array position may be empty, which is what makes the holes ('[, a]') and the
-// trailing comma work: DHole matches nothing at all and still occupies its index, so the
-// positions behind a hole keep their numbers. DRest is one of the element alternatives
-// rather than a trailer, because it has to be recognized BEFORE the empty DHole could
-// swallow its position.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
             = "[" DElemOpt { "," DElemOpt } "]" ;
 DElemOpt    = DRest | DElem | DHole ;
@@ -1369,13 +1137,7 @@ DKeyNum     <~~ push({dkeyT: pop()}) ~~> = NumberLit ;
 DKeyComputed <~~ push({dkeyT: pop()}) ~~> = "[" WExpr "]" ;
 
 // ----- The ASSIGNMENT pattern -----
-// A destructuring ASSIGNMENT writes to places that already exist, so its leaves may be
-// member targets on top of plain names: '[a.b] = c', '[...a[1]] = 2', '({a: b()[c]} = 1)'.
-// A BINDING pattern (var/let/const, a parameter, a catch clause) may not - 'var [a.b] = 0'
-// and 'function f({e: a.b}) {}' are syntax errors - which is exactly why the two patterns
-// are separate productions rather than one wide pattern policed after the fact. Everything
-// else about them is identical, so APattern mirrors DPattern node for node and produces
-// the same node tree, only with the extra "target" leaf.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 APattern    = AArrPattern | AObjPattern ;
 AArrPattern <~~ push({dtype: "arr", elems: takeAll()}) ~~>
             = "[" AElemOpt { "," AElemOpt } "]" ;
@@ -1413,10 +1175,7 @@ AFieldKeyed <~~ push(makeDFieldKeyed(takeAll())) ~~>
 // inside a generator.
 WExpr       = AssignForm | CondExpr ;
 
-// try/catch/finally and throw are implemented: throw calls js_throw, each try/catch/
-// finally body compiles to its own closure handed to js_try, and a return/break/
-// continue leaving a try or catch body becomes a control signal that excDispatch
-// re-issues in the enclosing frame. The catch binding is optional (ES2019 catch {}).
+// See the twin of this comment in js-to-llvm-ir.abnf.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody ( CatchClause [ FinallyClause ] | FinallyClause ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -1431,10 +1190,7 @@ CatchPattern <~~ push({ppat: pop()}) ~~>
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 
-// A class declaration: fields, a constructor and instance/static methods lower to the
-// shared __class machinery (an instance is js_obj_new carrying a __class descriptor that
-// holds the methods; a method call dispatches through js_mcall, super through
-// js_supercall). An instance is a plain object; static members live on the descriptor.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = ClassCore ;
 // The head plus the body, shared with DecoratedDecl (which needs the very same shape
@@ -1448,11 +1204,9 @@ ClassCore   = [ "abstract" KwEnd ] KwClass NotBindName Id <~~ push({cname: idNam
               PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
-// 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. Only the
-// 'extends Name' form above can be lowered (makeClassStmt resolves the parent by name),
-// so a class with any other heritage is ACCEPTED here and routed to notImplemented -
-// which means the class is not defined, not that the file is rejected. Tried after
-// ClassDecl so the lowered form always wins.
+// 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. The plain
+// 'extends Name' form above resolves the parent by NAME; every other shape arrives here
+// as a value thunk (ClassExt). Tried after ClassDecl so the plain form always wins.
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
             = [ "abstract" KwEnd ] KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
               [ TypeParams ] KwExtends ClassExt
@@ -1518,15 +1272,12 @@ AbstractMods = { MemberMod } ( "abstract" | "declare" ) KwEnd NotMemberEnd { Mem
 ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
             = MemberMods ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams [ TypeAnnot ]
                          | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams [ TypeAnnot ] ) Block ;
-// 'async m() {}' and the generator forms. An async method is compiled as an ordinary
-// method (see the Await rule for what 'await' means without an event loop); a generator
-// method goes through the generator lowering.
+// 'async m() {}' and the generator forms. An async method's body is compiled as a
+// generator body driven by js_jsasyncfn (see makeAsyncFn); a generator method goes
+// through the generator lowering.
 ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
             = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey [ TypeParams ] ParamList [ TypeAnnot ] Block ;
-// A private member '#x'. Private names are not properties in the spec, but they behave
-// exactly like non-enumerable ones, so they are stored under the mangled key
-// '__#<body>#x' (privDeclare): the
-// '__' prefix is what keeps them out of js_keys, and so out of for-in and object spread.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
             = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~>
               ( [ TypeParams ] ParamList [ TypeAnnot ] Block | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
@@ -1540,10 +1291,7 @@ ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
 ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
             = MemberMods ( StringLit | NumberLit )
               ( [ TypeParams ] ParamList [ TypeAnnot ] Block | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
-// The key of a widened member: a name, a string/number literal or a computed [expr].
-// PropKey (the object-literal key) has no computed form because ComputedProp spells that
-// case out separately; here the computed form has to be part of the key itself, because
-// 'static *[b]() {}' carries a modifier and a '*' in front of it.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 MemberKey   = "#" Id <~~ push(privDeclare(idName(up.in))) ~~>
             | Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
 
@@ -1561,15 +1309,7 @@ MethodDef   <~~ push(makeMethod(takeAll())) ~~>
 // markers and the ': Type' annotation are type-layer only.
 FieldDef    <~~ push(makeField(takeAll())) ~~>
             = MemberMods Id <~~ push({fname: idName(up.in)}) ~~> [ "?" | "!" ] FieldNameEnd [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ;
-// FieldDef is the LAST member alternative, so whatever the earlier ones reject lands
-// here - and without this guard a malformed member silently becomes a field plus a
-// method: 'class A { get prop(x) {} }' (a getter with a parameter, a syntax error)
-// parsed as a field named 'get' followed by a method 'prop'. A field name can only be
-// followed by '=', ';', '}' or a line break (ASI), so a name-like, string-like or
-// '('-like continuation means the member was malformed and the class must be rejected.
-// Returns the impossible token to FAIL. Only spaces and tabs are stepped over: a line
-// break ENDS the field, and a comment is left alone (which can only make the guard
-// miss, never misfire).
+// See the twin of this comment in js-to-llvm-ir.abnf.
 FieldNameEnd = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -1590,16 +1330,10 @@ FieldNameEnd = :script(~~
 // perfectly ordinary MEMBER NAME as well, so each carries the NotMemberEnd guard: a word
 // that is directly followed by '(', '=', ';', ':', '?', '!', '<' or '}' is the member,
 // not a modifier ('class A { static() {} }', 'class A { readonly = 1 }').
-// MEASURED AND REVERTED (2026-07-28): TypeScript's ordering rule - "error 1029: 'public'
-// modifier must precede 'static' modifier" - is a post-parse GRAMMAR CHECK, not a parse
-// error, and spelling it structurally as { AccessMod } { MemberMod } puts it at the wrong
-// layer. The conformance suite proves it: classes/propertyMemberDeclarations/
-// accessibilityModifiers.ts holds a valid class AND, under the comment "// Errors,
-// accessibility modifiers must precede static", a class D full of 'static private ...' -
-// one file, expected to parse, so tsc plainly builds a tree for both. The same shape sits
-// among ordinary members in override/override5.ts and override7.ts ('override public op'),
-// defineProperty.ts ('declare public a') and autoAccessorDisallowedModifiers.ts. Measured:
-// reject 100 -> 103, parse 5271 -> 5266. A loss, and wrong besides.
+// TypeScript's ordering rule ("error 1029: 'public' modifier must precede 'static'
+// modifier") is a post-parse GRAMMAR CHECK, not a parse error - the conformance suite's
+// accessibilityModifiers.ts expects a class full of 'static private ...' to parse - so
+// the modifiers are a free repetition rather than { AccessMod } { MemberMod }.
 MemberMods  <~~ push({mods: takeAll()}) ~~>
             = { MemberModItem } ;
 // A decorator may also stand BETWEEN the modifiers ('public @dec method() {}'); in that
@@ -1641,15 +1375,9 @@ NotParamEnd = :script(~~
     })()
 ~~) ;
 
-// ----- Widened statement surface (ACCEPTED, routed to notImplemented) -----
+// ----- Widened statement surface: modules, 'with', async/generator declarations -----
 
-// Project-file imports: `import ... from './lib.js'` and the bare `import './lib.js'`
-// load the referenced file (resolveImport -> core.importFile). Its top-level declarations
-// are stashed by buildMain (importDepth > 0) and prepended to jsrun, so they register in
-// the shared program scope before the main program's own statements. A flat module model:
-// the binding clause is parsed and dropped (the names are global once the file is loaded).
-// The path is the last string ModPath pushed (an import clause may push earlier string
-// specs, which jsImport ignores).
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
 // TypeScript adds the type-only forms ('import type { T } from', 'import { type T }')
 // and the older 'import X = require("...")' / 'import X = A.B' aliases; all of them are
@@ -1706,7 +1434,8 @@ ExportAssign <~~ push(makeExportDefault(pop())) ~~>
 ExportDefaultExpr <~~ push(makeExportDefault(pop())) ~~>
             = AssignExpr [ ";" ] ;
 
-// with and the async/generator function declarations: accepted, not lowered.
+// 'with' introduces an object as a scope, which the scope model has no room for:
+// accepted, not lowered.
 With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
             = KwWith "(" Expression ")" NestedStatement ;
 // 'debugger' IS implemented: with no debugger attached the spec makes it a no-op,
@@ -1728,15 +1457,7 @@ Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
 
-// JavaScript's own string literals, deliberately NOT the shared lib's
-// DqString/SqString: that lib also serves C, Java and the rest, which disagree
-// about which escapes exist, so its StrEsc is the catch-all "backslash followed
-// by any printable char". JavaScript's escape grammar is specific, and every
-// shape it does NOT have is a syntax ERROR rather than a stray character -
-// without spelling it out '\x', '\u{110000}' and '\9' all "parse". The
-// plain-char alternatives are still the lib's DqPlain / SqPlain, and ModPath
-// above keeps using the lib's StrEsc: a module path is a file name, not a
-// JavaScript value, and its escapes are not JavaScript's problem.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 StringLit   = JsDqString | JsSqString ;
 JsDqString  = '"' :whitespace() { JsStrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
 JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
@@ -1754,10 +1475,7 @@ JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsLineCont | JsEscChar ) ;
 JsLineCont  = "\r\n" | "\n" | "\r" | "\u2028" | "\u2029" ;
 JsEscChar   = !"x" !"u" !"8" !"9" "\x20"..b"\x7e" ;
 
-// \xHH is exactly two hex digits; \u is either exactly four, or a braced code
-// POINT, whose value must therefore stay <= 0x10FFFF. Leading zeros do not
-// count towards that limit ('\u{00000041}' is 'A'), so it applies to the
-// SIGNIFICANT digits: at most five of them, or six that begin with '10'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 JsHexEsc    = "x" HexDigit HexDigit ;
 JsUniEsc    = "u" ( "{" JsCodePoint "}" | HexDigit HexDigit HexDigit HexDigit ) ;
 JsCodePoint = JsCpZeros | JsCpPlane16 | JsCpUpTo5 ;
@@ -1788,12 +1506,7 @@ OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
             = OctPrefix OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
 OctPrefix   = ( "0o" | "0O" ) :whitespace() ;
 OctDigit    = "0"..."7" ;
-// A BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is not
-// orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). BigInt is a
-// value type of its own (typeof 10n is "bigint"), so it cannot go through makeConst,
-// which only knows the double numbers: js_bigint parses the digits into an arbitrary
-// precision integer at run time. The hex/binary/octal BigInt forms ('0xffn') keep their
-// prefix, which js_bigint reads too.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
               | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() { Digit | "_" } )
@@ -1808,10 +1521,7 @@ SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
 SepExpOnly  = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } "_" { Digit | "_" } ;
 // The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
 SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
-// The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
-// because JavaScript has the exponent form, which that DecLit does not: without it
-// '1e3' is the number 1 followed by the variable 'e3', which parses and then means
-// something else entirely.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
             = Digit :whitespace() { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The leading-dot form '.5'. It needs at least one digit behind the dot, which is what
@@ -1836,20 +1546,7 @@ RegexBodyChar  = "\x00"..."\x09" | "\x0b"..."\x2e" | "\x30"..."\x5a" | "\x5d"...
 RegexClassChar = "\x00"..."\x09" | "\x0b"..."\x5b" | "\x5e"..."\U0010ffff" ;
 RegexFlag   = "a"..."z" ;
 
-// The 'u' flag switches JavaScript's regexp grammar from the sloppy Annex B one to the
-// STRICT one, and the difference is a SyntaxError at parse time, not a different match:
-// under 'u' a lone '{' or '}' is not a literal brace, a backreference must have a group,
-// an assertion may not be quantified, and the only identity escapes left are the syntax
-// characters and '/'. lib/regex.js cannot answer this - it deliberately implements one
-// permissive dialect for four languages, and it is not reachable from the parser VM
-// anyway - so the check is a zero-width guard right after the opening '/', re-derived
-// from the source on every call (guards must be pure functions of source and position,
-// see docs/abnf-dialect-gotchas.md). Verified against node v24 parsing with the Script
-// goal: /\1/u, /{*/u, /}?/u and /(?!.){0,}?/u are all SyntaxErrors while their unflagged
-// spellings are all legal.
-//
-// Only 'u' turns it on, not 'v': the 'v' flag's class-set syntax ([[a][b]], \q{...}) is
-// a THIRD grammar again, and refusing what it adds would be worse than accepting it.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ReStrictU   = :script(~~
     (function () {
         var isHex = function (x) {
@@ -2116,18 +1813,7 @@ KwImplements = "implements" KwEnd ;
 KwSatisfies = "satisfies" KwEnd ;
 
 // ----- The JavaScript identifier -----
-// An IdentifierName is a UNICODE name, not the ASCII one lib/ident-dollar.abnf gives the
-// other languages: it starts with a Unicode ID_Start character, '$' or '_' and continues
-// with ID_Continue, and ANY of its characters may instead be written as a \u escape
-// ('var \u0061' declares 'a'). The escape is part of the identifier GRAMMAR, not of some
-// earlier lexing pass, so it has to be here; idName resolves it back to the real name.
-//
-// The Unicode classes are the REAL ID_Start / ID_Continue tables, carried by the two
-// guards of lib/ident-unicode.abnf. They sit BEHIND the character they judge (see that
-// file for why in front does not work) and they answer for the ASCII code points too,
-// because an escape can spell one: '\u002a' is an asterisk and is not an identifier
-// however it is spelled. IdEscape scopes whitespace to nothing after the '\u', so
-// '\u00 61' stays the syntax error it is.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
 IdStart     = "a"..."z" | "A"..."Z" | "_" | "$" | ( IdEscape IdCpStartOk ) | ( IdUniChar IdCpStartOk ) ;
 IdPart      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | ( IdEscape IdCpPartOk ) | ( IdUniChar IdCpPartOk ) ;
@@ -2146,18 +1832,7 @@ KwEnd = :script(~~
     })()
 ~~) ;
 
-// A reserved word is not an identifier. Without this guard every construct whose
-// keyword form fails to parse quietly falls back to a bare variable reference named
-// after the keyword - 'var new A = 0', 'new.prop', 'a class;', 'try { }' and 'const'
-// all "parse" that way - so the identifier positions that denote a VARIABLE (a
-// reference, an assignment target, a binding) are guarded with a negative lookahead.
-// PROPERTY positions are deliberately NOT guarded: 'o.default', '{ if: 1 }' and
-// 'class A { delete() {} }' are legal JavaScript.
-//
-// Returns the impossible token to FAIL (the upcoming word is reserved), undefined to
-// succeed. NotReserved is the reference/target form and leaves 'this' alone (it is a
-// genuine bound variable here: methods bind it in their scope); NotBindName is the
-// binding form, which additionally refuses 'this'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 NotReserved = :script(~~
     (function() {
         // The guard sits BEFORE the identifier token, so the pending whitespace has
@@ -2207,11 +1882,7 @@ NotThis     = :script(~~
             : abnf.newToken("\x01reserved-word", 0)
     })()
 ~~) ;
-// 'let' is not a reserved word (it is an ordinary identifier in non-strict code), so
-// NotReserved lets it through - which is right for 'for (let.let in 1)'. It is wrong for
-// the for-OF head, where the spec says a target starting with 'let' is ALWAYS the
-// declaration form, making 'for (let of y)' and 'for (let.a of 0)' syntax errors. Same
-// shape as NotThis: the impossible token FAILS the guard when the word ahead is 'let'.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 NotLet      = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -2408,10 +2079,7 @@ ParenAhead  = :script(~~
     })()
 ~~) ;
 
-// ArrowAhead: is the '(' that starts here the parameter list of an arrow function, i.e.
-// does '=>' follow its matching ')'? A bare-name parameter list ('x => x') needs no
-// lookahead and is let through unexamined. Same conventions as AssignAhead: strings and
-// comments are stepped over, and anything undecidable answers "maybe".
+// See the twin of this comment in js-to-llvm-ir.abnf.
 ArrowAhead  = :script(~~
     (function() {
         var i = 0
@@ -2484,11 +2152,7 @@ ArrowAhead  = :script(~~
     })()
 ~~) ;
 
-// The restricted-production guard of ASI: succeeds only when no line terminator sits
-// between here and the next token. 'break'/'continue' use it in front of their optional
-// label, so 'break \n foo' stays a bare break plus the statement 'foo'. Only spaces and
-// tabs are stepped over; anything else (including the '/' of a comment) is left to the
-// production behind the guard.
+// See the twin of this comment in js-to-llvm-ir.abnf.
 SameLine    = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -2500,18 +2164,6 @@ SameLine    = :script(~~
     })()
 ~~) ;
 
-// The lookaheads that turn Statement into NestedStatement / IfBody (see there). Both
-// return the impossible token to FAIL - the upcoming statement is a declaration and
-// so may not stand as a single-statement body - and undefined to succeed.
-//
-// NotDeclHead refuses every form that is a Declaration in a nested position:
-//   const/class/import/export   - always a declaration, the bare word settles it
-//   let <binding>               - only when a binding name, '[' or '{' follows;
-//                                 'let' alone is a plain identifier in sloppy mode
-//                                 and 'if (x) let = 1;' stays legal
-//   async function / function*  - Annex B relaxes plain function declarations only,
-//                                 never the async or generator forms
-// 'var' is deliberately absent: 'if (x) var a = 1;' is legal JavaScript.
 NotDeclHead = :script(~~
     (function() {
         // Like NotReserved, this guard sits BEFORE the token, so the pending
@@ -2587,42 +2239,15 @@ NotFuncHead = :script(~~
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
-    // takeAll empties the local stack of the current tag and returns its items in push
-    // order as a plain JS array.
-    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
-
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
     // for constructs that parse but cannot be lowered).
     function fail(msg) { println("typescript compiler error: " + msg); exit(1) }
 
     // ----- the dynamic `this`, for a NATIVE build only -------------------------
-    // docs/runtime-next-plan.md part 3: js_this reads abnf/jsrt.go's OWN CALL STACK
-    // (rt.thisStack), which the C floor does not keep - runtime.c's js_call drops the
-    // receiver for a tag-7 closure. There is no floor extern that answers it, so
-    // unlike PHP's scope probe and Go's control signal this one cannot be lowered by
-    // finding one; it is kept in LAYER 2 instead (languages/lib/js-rt.metajs), whose
-    // module has globals of its own. The emitter's whole half is this: hand the
-    // receiver over immediately before each js_call. No restore is needed, because a
-    // function reads `this` exactly once, at entry, before any nested call can run.
-    //
-    // Emitted ONLY when -exe is building a binary, so the module llvm.Run sees is
-    // byte-for-byte the one it always was and nothing in the matrix moves.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var nativeBuild = (c.exePath != undefined && c.exePath != "")
-    // ----- calling a non-function, docs/todo.md 1.4 ----------------------------
-    //
-    // `xs[1]()` with undefined in the slot is a catchable TypeError in node and was
-    // an UNCATCHABLE ABORT in all three engines here, worded differently in each:
-    // *call of a non function value (method '1')* in the interpreter, *unknown list
-    // method '1'* under llvm.Run and *unknown method '1' on object* natively. The
-    // floor's js_call (die2) is shared by every language's layer-2 internals and
-    // must keep aborting, so the check is made HERE, at the js/ts call site, where
-    // the callee's source text is known and the whole message is a constant:
-    //
-    //   js_jsfnp   raw 0/1, "is this value callable" - one extern on the taken path
-    //   badB       three instructions, never executed unless the call really fails
-    //
-    // js_jserrmk builds the very TypeError class emitErrorClasses registered, so
-    // `e instanceof TypeError` answers and a plain try/catch recovers.
+    // ----- calling a non-function -----------------------------------------------
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitSiteThrow(bb, msg) {
         callExt(bb, "js_throw", [callExt(bb, "js_jserrmk", [emitStr(bb, "TypeError: " + msg)])])
         bb.NewRet(hUndef) // Never reached: js_throw does not return.
@@ -2634,11 +2259,7 @@ NotFuncHead = :script(~~
         emitSiteThrow(badB, site + " is not a function")
         return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
     }
-    // The MISS SENTINEL js_jsmcall answers when no arm claimed a method call. It is
-    // one pinned object made in the boot block, so the same handle in both engines
-    // (abnf/jsrt.go gives a *jsObject a stable id), which is what lets the call site
-    // compare it with a raw icmp instead of a js_seq call. Held in an array because a
-    // grammar-script global may not change type between the two script hosts.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var mcallMissGH = []
     function mcallMissGlob() {
         if (mcallMissGH.length == 0) { mcallMissGH.push(m.NewGlobalDef("jsmcallmiss", llvm.constant.NewInt(i64, 0))) }
@@ -2650,56 +2271,18 @@ NotFuncHead = :script(~~
         return callExt(b, "js_call", [fnV, thisV, argsV])
     }
 
-    // js_scope_set_or_create - JavaScript's non-strict implicit global: the store
-    // walks the chain and, when the name is nowhere on it, creates the binding in the
-    // ROOT scope. It used to be abnf/jsrt.go's alone, so a native build lowered it to
-    // the floor's js_pyset_var, which is the same walk with the ENCLOSING scope as
-    // its fallback - exact for every declared name and wrong only for an implicit
-    // global created in a function and read outside it (tests/js-test-implicit-global.js
-    // and nothing else). The C floor exports the real function now (runtime.c, next to
-    // js_pyset_var), so BOTH engines call the same name and the lowering is gone.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
 
-    // Member reads and writes under -exe. abnf/jsrt.go's js_get / js_set know the
-    // ACCESSOR box a `get x()` / `set x(v)` member is stored as (jsAccessor, a Go
-    // type); the C floor's get_member / set_member cannot - an accessor is layer 2's
-    // own object there, so a read would answer the box itself and a write would
-    // replace it. Both are therefore routed through layer 2 for a native build, where
-    // js_jsmget / js_jsmset unwrap the accessor and delegate everything else straight
-    // back to the floor. js_jsmget already exists on both sides; js_jsmset is emitted
-    // only under -exe, so it needs no Go twin.
-    // The same hand-over for the three call externs that are LAYER 2'S rather than
-    // the floor's: js_jsxcall (the regex wrapper around js_call), js_jsmcall (the
-    // String/Array/Object method surface) and js_supercall. Doing it in the emitter
-    // rather than inside each of them keeps the receiver rule in ONE place.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function jsThisSet(b, thisV) {
         if (nativeBuild) { callExt(b, "js_jssetthis", [thisV]) }
         return b
     }
 
 
-    // `typeof` under -exe. A BigInt is a Go TYPE in abnf/jsrtjsbig.go, so js_typeof
-    // answers "bigint" there; in layer 2 it is an ordinary object box and the floor's
-    // type_of can only say "object". The user-visible `typeof` is therefore routed
-    // through layer 2 for a native build. The two INTERNAL js_typeof probes below
-    // (makeNewFrom and the method-call arm) are left alone deliberately: both ask
-    // only "is this a function", which the floor answers correctly for every value
-    // including a tag-16 generator function.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
 
-    // The FLOOR externs a BigInt has to be taken away from, under -exe only. In
-    // abnf/jsrt.go a BigInt is a Go TYPE, so `truthy`, `strictEq`, `js_neg`, `js_not`
-    // and `typeof` all carry an arm for it; in layer 2 it is an object box and the C
-    // floor's own versions would answer "truthy", "identity", "NaN" and "object".
-    // Each is therefore routed to a layer-2 twin for a native build - the same move
-    // as memGetExt/memSetExt above, and for the same reason it is safe: the module
-    // llvm.Run executes is untouched.
-    //
-    // js_jstruthy is the one place js/ts need the `__raw` SUFFIX of part 3's item 2
-    // (languages/lib/js-rt.metajs spells it js_jstruthy__raw), because compile-core's
-    // truthy() compares core.truthyExt's result with `icmp ne ..., 0` as a RAW
-    // integer. So the honest answer to "does this language need __raw" is: NOT for
-    // llvm.Run, where the default js_truthy is the floor's own, but YES for the
-    // native build, where BigInt forces the override. No other language in part 3 has
-    // had the answer differ between the two.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function seqExt() {
         if (nativeBuild) { return "js_jsseq" }
         return "js_seq"
@@ -2719,21 +2302,14 @@ NotFuncHead = :script(~~
     if (nativeBuild) { core.truthyExt = "js_jstruthy" }
 
 
-    // js_jstypeof in BOTH halves, not js_typeof under llvm.Run: the floor's and
-    // the Go twin's shared type_of/typeOf serve all sixteen languages and call a
-    // class descriptor an object, where node says `typeof K` is "function" for
-    // every class. The Go twin's arm is in abnf/jsrtjsprint.go. docs/todo.md 1.8.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function typeofExt() { return "js_jstypeof" }
 
     function memGetExt() {
         if (nativeBuild) { return "js_jsmget" }
         return "js_get"
     }
-    // js_jsmset in BOTH halves, not js_set under llvm.Run: a member write on a CLASS
-    // DESCRIPTOR is a write to its static namespace (docs/todo.md 2.13), and js_set is
-    // shared by sixteen languages and must not learn about it. The Go twin is in
-    // abnf/jsrtjsprint.go and delegates every non-descriptor write straight to js_set,
-    // so nothing but a class object changes behaviour.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function memSetExt() { return "js_jsmset" }
 
     if (nativeBuild) { core.indexExt = "js_jsmget" }
@@ -2779,10 +2355,7 @@ NotFuncHead = :script(~~
         return out
     }
 
-    // The real name behind an IdentifierName: any \u escape in it stands for the character
-    // it denotes, so '\u0061bc', 'a\u0062c' and 'abc' are three spellings of ONE name and
-    // have to resolve to the same string before anything looks the name up in a scope.
-    // The fast path is the overwhelmingly common one: a name with no backslash at all.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function idName(src) {
         var hasEsc = false
         for (var i = 0; i < src.length; i++) { if (src.charCodeAt(i) == 92) { hasEsc = true } }
@@ -2810,13 +2383,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- JavaScript string escapes -----
-    // The shared unescapeJs of compile-core.js is the common denominator of every C-like
-    // language (\n \t \r \0 \xNN \uNNNN); JavaScript's own escape grammar is wider, so
-    // this grammar overrides it. On top of the shared set it resolves \b \f \v, the
-    // braced code point \u{...} (encoded as the UTF-16 surrogate pair a JS string holds,
-    // which is what makes '\u{1F600}'.length === 2), the legacy octal escapes (\1, \07,
-    // \377 - still legal in sloppy mode) and the LineContinuation, where a backslash in
-    // front of a line terminator contributes nothing at all.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     unescapeJs = function(s) {
         var out = ""
         var i = 0
@@ -2882,9 +2449,6 @@ NotFuncHead = :script(~~
 
     // ----- Project-file imports (see the ImportStmt rule) -----
 
-    // Build an import statement: resolve the referenced file at compile time - which
-    // parses and walks it, stashing its top-level thunks into importedItems - and leave a
-    // no-op statement in the program. The path is the last item ModPath pushed.
     // The module specifier is the last STRING an import rule pushed (ModPath pushes the
     // raw path text). The TypeScript alias form 'import X = A.B' has no specifier at all,
     // which is why this looks for one instead of taking the last item.
@@ -2945,16 +2509,6 @@ NotFuncHead = :script(~~
 
     var i8 = llvm.types.I8
 
-
-    // The handle constants: 0 undefined, 1 null, 2 false, 3 true.
-
-    // All js_* externals get declared on first use. Every parameter and result is i64,
-    // except the string pool pointer of js_str_mem.
-    // One module global per distinct string literal / name.
-    // The function being built, the current scope chain handle (an SSA value), and the
-    // enclosing loops (for break/continue).
-
-    // An i1 for conditional branches: js_truthy(v) != 0.
     // ----- Expression thunks: function(block) -> {b: endBlock, v: i64 handle} -----
 
     function makeHandleConst(n) {
@@ -2995,12 +2549,7 @@ NotFuncHead = :script(~~
         }
         return b
     }
-    // Append the elements of an iterable to arrV. The subset iterates by index over the
-    // 'length' of the value, which covers arrays and strings ('[..."ab"]' spreads the two
-    // characters) - the same model the for-of lowering uses. A user defined
-    // Symbol.iterator is not consulted; there are no symbols in the subset.
-    // The loop counter lives in a fresh scope so that two spreads in one list, or a spread
-    // inside a spread's expression, cannot overwrite each other's slot.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitSpreadInto(b, arrV, t) {
         var r = t(b)
         b = r.b
@@ -3026,12 +2575,7 @@ NotFuncHead = :script(~~
         curScopeV = saved
         return exitB
     }
-    // '{...src}': copy src's own keys into the literal under construction. js_jskeys
-    // yields them in insertion order (and skips the __-prefixed internal slots), so the
-    // copy walks that key array by index. js_jskeys and not the floor's js_keys: for a
-    // CLASS DESCRIPTOR the floor answers the descriptor's own map, which holds the
-    // INSTANCE methods, so `{...C}` copied the methods where node copies the static
-    // fields. docs/todo.md 2.10.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitObjSpread(b, objV, t) {
         var r = t(b)
         b = r.b
@@ -3054,13 +2598,7 @@ NotFuncHead = :script(~~
         var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osk")])
         var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osrc")])
         var keyB = callExt(bodyB, memGetExt(), [ksB, iB])
-        // js_jsvget and not memGetExt() for the VALUE: memGetExt() is the shared
-        // js_get under llvm.Run, which knows neither a class descriptor's static
-        // namespace nor a FUNCTION's side table - so `{...f}` copied the right keys
-        // with undefined values on that leg alone, where the native leg (js_jsmget)
-        // and both interpreters were right. The keys come from js_jskeys, so every
-        // read here hits an own slot and the value read is exactly the right
-        // semantics. docs/todo.md 2.10.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         callExt(bodyB, memSetExt(), [objV, keyB, callExt(bodyB, "js_jsvget", [srcB, keyB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0osi"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
@@ -3101,10 +2639,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Binary operator levels that are a pass-through with a single operand -----
-    // The one-operand fast path returns the operand's own thunk, so an ordinary expression
-    // emits exactly the IR it would without these levels in the grammar at all.
-    // items = [thunk, "in"|"instanceof", thunk, ...], folded left. 'in' takes its operands
-    // the other way round than the external does ('key in obj' is js_has(obj, key)).
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeInInstanceof(items, pos) {
         if (items.length == 1) return items[0]
         return function(b) {
@@ -3115,14 +2650,13 @@ NotFuncHead = :script(~~
                 var rr = items[i + 1](b)
                 b = rr.b
                 // js_jshas is js_has plus the __class methods: an instance keeps its
-                // methods on its class descriptor, not as own properties, so
-                // `"m" in instance` answered false where node answers true.
-                // docs/todo.md 2.5.
+                // methods on its class descriptor, not as own properties, but
+                // `"m" in instance` is true in node.
                 if (items[i] == "in") { v = callExt(b, "js_jshas", [rr.v, v]) }
                 // js_jsinstanceof also answers a plain constructor FUNCTION on the
-                // right ('function F() {}; new F() instanceof F'), which the shared
-                // extern reported false for because it only knows class descriptors,
-                // and the Object / Array globals. It delegates for everything else.
+                // right ('function F() {}; new F() instanceof F') and the Object / Array
+                // globals; the shared extern only knows class descriptors. It delegates
+                // for everything else.
                 // (The same swap js-to-llvm-ir.abnf makes; the two grammars share
                 // abnf/jsrtjsprint.go.)
                 else { v = callExt(b, "js_jsinstanceof", [v, rr.v]) }
@@ -3136,9 +2670,8 @@ NotFuncHead = :script(~~
         if (ref.path.length == 0) { return makeConst(false) }
         return function(b) {
             var p = emitRefPath(b, ref)
-            // js_jsdel adds the ARRAY case: the shared js_del only knows objects, so
-            // 'delete a[1]' was a silent no-op and a[1] still read 2. The slot is
-            // blanked and the key dropped, so `1 in a` is false afterwards.
+            // js_jsdel adds the ARRAY case: the shared js_del only knows objects. The
+            // slot is blanked and the key dropped, so `1 in a` is false afterwards.
             return {b: p.b, v: callExt(p.b, "js_jsdel", [p.obj, p.key])}
         }
     }
@@ -3146,14 +2679,7 @@ NotFuncHead = :script(~~
     function makeVoid(t) {
         return function(b) { return {b: t(b).b, v: hUndef} }
     }
-    // 'typeof name' for a possibly undeclared name.
-    // `typeof <bare name>` is the one expression that may name an UNDECLARED
-    // variable without a ReferenceError, so it asks js_scope_typeof rather than
-    // reading the name. That answers the SHARED type_of, though, which calls a
-    // class descriptor an object - so when the name is bound the value is read
-    // and typed through js_jstypeof, which knows that `typeof K` is "function".
-    // The read is safe exactly because js_scope_typeof already said the name
-    // resolves: it cannot trip the js_rt_missvar hook. docs/todo.md 1.8.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeTypeofName(name) {
         return function(b) {
             var nmV = emitStr(b, name)
@@ -3173,7 +2699,7 @@ NotFuncHead = :script(~~
     // ----- Exponentiation -----
     // js_jspow IS Math.pow (math.Pow over ToNumber) for two numbers and exact
     // arbitrary precision for two BigInts, which Math.pow cannot be: 2n ** 64n has no
-    // double. It used to lower to a js_mcall on the Math host global.
+    // double.
     function emitPow(b, l, r) {
         return callExt(b, "js_jspow", [l, r])
     }
@@ -3183,10 +2709,7 @@ NotFuncHead = :script(~~
         if (op == "**" || op == "**=") { return emitPow(b, l, r) }
         return callExt(b, binExt[op], [l, r])
     }
-    // '**' is the one RIGHT associative binary operator of JavaScript: 2 ** 3 ** 2 is
-    // 2 ** (3 ** 2) == 512. The operands are still evaluated left to right (that is
-    // observable through side effects), so they are emitted in order first and only the
-    // pow applications are folded from the right.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeExp(items, pos) {
         if (items.length == 1) return items[0]
         return function(b) {
@@ -3203,10 +2726,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Nullish coalescing and the comma operator -----
-    // 'a ?? b' keeps a unless a is null or undefined. The nullish test is the loose
-    // equality with null, which in JavaScript is true for exactly those two values, so it
-    // is one js_eq rather than two comparisons. Like || and && it short circuits, so the
-    // right side gets its own block and a phi merges the two results.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeNullish(items, pos) {
         if (items.length == 1) return items[0]
         return function(b) {
@@ -3243,10 +2763,9 @@ NotFuncHead = :script(~~
 
     // js_jseq / js_jsne / js_jslt / js_jsgt / js_jsle / js_jsge are the shared
     // operators plus the ToPrimitive step the abstract equality and relational
-    // comparisons need (abnf/jsrtjsprint.go). Without it an OBJECT operand never
-    // reached its primitive form, so `[1] == 1` and `[2] > 1` were false in the
-    // compiler and true in node. Each delegates to the shared extern for two
-    // primitive operands, which is every comparison an object-free program makes.
+    // comparisons need (abnf/jsrtjsprint.go), so `[1] == 1` and `[2] > 1` are true as
+    // in node. Each delegates to the shared extern for two primitive operands, which is
+    // every comparison an object-free program makes.
     // Every arithmetic and bitwise operator goes through the js_js* twin rather than
     // the shared external, because a BigInt operand needs arbitrary precision and the
     // spec's mixed-operand TypeError (abnf/jsrtjsbig.go). Each twin delegates to the
@@ -3262,10 +2781,7 @@ NotFuncHead = :script(~~
                   "<<=": "js_jsshl", ">>=": "js_jsshr", ">>>=": "js_jsushr"}
     wraps = {} // MetaJS numbers are not wrapped to 32 bit.
 
-    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    // || and && evaluate lazily and keep the deciding operand, exactly like in JS.
-    // Each step branches: on a decided value the right side is skipped, a phi merges.
-    // items = [thunk] or [condThunk, thenThunk, elseThunk].
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeCond(items) {
         if (items.length == 1) return items[0]
         return function(b) {
@@ -3300,7 +2816,6 @@ NotFuncHead = :script(~~
     // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk.
     function makeProp(valT, key, txt) {
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
-        // docs/todo.md 1.4.
         if (typeof key == "string") { fnAnonName(key, ":", txt) }
         return {kt: (typeof key == "string") ? makeConst(key) : key, t: valT}
     }
@@ -3334,44 +2849,24 @@ NotFuncHead = :script(~~
         }
     }
     // ----- Generators -----
-    // A generator body is an ORDINARY IR function; what makes it a generator is that the
-    // closure is handed to js_genfn, so calling the result creates a generator object over
-    // it instead of running it. The body then runs on its own goroutine on the host side,
-    // and 'yield' is a handshake with the pending next() (see abnf/jsrt.go). The upshot for
-    // the compiler is that a generator needs no code transformation at all: 'yield' is one
-    // more external call, and every statement form works inside a generator unchanged.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeGenFn(params, bodyT, ownStrict, nm, txt) {
         return fnDef(function(b) {
             var idx = emitFunction(params, bodyT, false, false, ownStrict)
             return {b: b, v: callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
         }, nm, params, txt)
     }
-    // makeAwait's lexical test: is the body currently being emitted an async function's?
-    // makeAsyncFn arms pendingAsyncFn immediately before its emitFunction call and
-    // emitFunction consumes it, saving and clearing inAsyncFn for every nested function -
-    // so an ordinary function or an arrow inside an async body does not inherit it.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var inAsyncFn = false
     var pendingAsyncFn = false
-    // The same pair for an async GENERATOR body, which is a THIRD mode and not the
-    // conjunction of the other two: inside one, `yield e` is a plain js_yield and
-    // `await e` is a js_yield of a MARKED operand, and js_jsasyncgen's driver tells
-    // the two apart by that marker. That is the whole of "one suspension channel"
-    // (docs/todo.md 1.7) - the generator model needed nothing added to it.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var inAsyncGen = false
     var pendingAsyncGen = false
-    // ----- Strict mode, per FUNCTION (docs/todo.md 1.1) -----
-    // Strictness is lexical, and emission IS lexical: emitFunction saves emitStrict,
-    // ORs in the function's own "use strict" directive (the UseStrictMark guard's
-    // answer, handed in as ownStrict) and restores it afterwards, so a nested function
-    // inherits exactly what the spec says it inherits. Until this existed no engine
-    // here carried a per-function strict flag at all and every function behaved as a
-    // strict one - which is only visible through `this`.
+    // ----- Strict mode, per FUNCTION -----
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var emitStrict = false
     var fileStrict = false // The Script's own directive prologue; set by buildMain.
-    // The UseStrictMark of a function production, and the same item list without it. The
-    // mark is optional and sits directly in front of the body thunk, which the builders
-    // below index either from the front or from the END - so it has to come out before
-    // any of that indexing happens.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function itemsStrict(items) {
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].ustrict == true) { return true }
@@ -3401,11 +2896,7 @@ NotFuncHead = :script(~~
         }, nm, params, txt)
     }
     // ----- Async generators -----
-    // An async generator body is compiled EXACTLY like a generator body - the awaits
-    // are yields of a marked operand - and js_jsasyncgen wraps the generator FUNCTION
-    // into one that answers an async-generator object: next/return/throw each answer a
-    // promise, and a request queue serialises them. So an async generator needs no
-    // code transformation either, and every statement form works inside one.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeAsyncGenFn(params, bodyT, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingAsyncGen = true // Consumed by the emitFunction call below.
@@ -3414,7 +2905,8 @@ NotFuncHead = :script(~~
                 [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])}
         }, nm, params, txt)
     }
-    // items = [name?, params, bodyThunk]: the optional name of an EXPRESSION is not bound.
+    // items = [name?, params, bodyThunk]: the optional name of an EXPRESSION is bound only
+    // inside its body (fnSelf).
     function makeAsyncGenExpr(itemsIn, txt) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
@@ -3434,12 +2926,7 @@ NotFuncHead = :script(~~
             return b
         }
     }
-    // 'await e': yield the operand out to the driver and unpack what it sends back.
-    // OUTSIDE an async function body there is nothing to suspend - `await` there is not
-    // valid JavaScript at all, and both grammars accept it as a widening - so it stays
-    // the identity it was rather than aborting with "yield outside of a generator".
-    // inAsyncFn is the lexical test: emitFunction clears it for every nested function,
-    // so an ordinary function or an arrow inside an async body does not inherit it.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeAwait(t) {
         return function(b) {
             var r = t(b)
@@ -3457,7 +2944,8 @@ NotFuncHead = :script(~~
         if (!inAsyncFn) { return v }
         return callExt(b, "js_jsawaitv", [callExt(b, "js_yield", [v])])
     }
-    // items = [name?, params, bodyThunk] - the optional name is accepted, not bound.
+    // items = [name?, params, bodyThunk] - the optional name is bound only inside the body
+    // (fnSelf).
     function makeAsyncFuncExpr(itemsIn, txt) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
@@ -3482,7 +2970,7 @@ NotFuncHead = :script(~~
         return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true, false, "", txt)
     }
     // items = [name?, params, bodyThunk] - the optional name of a function EXPRESSION is
-    // accepted but not bound, so the last two items are what matters.
+    // recorded and bound only inside its body, so the last two items are what matters.
     function makeGenFuncExpr(itemsIn, txt) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
@@ -3523,51 +3011,12 @@ NotFuncHead = :script(~~
             return {b: b, v: emitYieldSent(b, callExt(b, "js_yield", [v]))}
         }
     }
-    // The value one `yield` answers - what the driver sent back in. Inside an async
-    // GENERATOR the driver may resume the body with a THROW-IN record ({__athrow, v})
-    // instead of a sent value: that is how ag.throw(e) raises AT the suspended yield,
-    // and it is the same record an `await`'s resumption carries, so js_jsawaitv unpacks
-    // both. It is emitted ONLY inside an async generator: a plain generator's next(v)
-    // hands its argument through untouched, and its g.throw(v) is RAISED by the floor at
-    // the yield itself, so there is no record for a plain yield to unpack.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitYieldSent(b, v) {
         if (!inAsyncGen) { return v }
         return callExt(b, "js_jsawaitv", [v])
     }
-    // 'yield* e': yield every element of e in turn. The value of the expression is the
-    // delegate's RETURN value - the `value` of the record whose `done` ended the loop -
-    // and undefined for an array or a string, which have no return value to give.
-    //
-    // Inside an async generator each step of the delegate is AWAITED (emitAwait below),
-    // which is what makes 'yield* otherAsyncGen()' terminate: an async generator's next()
-    // answers a PROMISE, whose `done` is undefined, so driving it unawaited spins forever.
-    //
-    // THE RESUME DISPOSITION, and why it is not a stack. The loop keeps what the driver
-    // last sent in - RAW, in the scope slot 0ysent - and branches on its SHAPE at the top
-    // of every turn. A normal resume drives the delegate's next() WITH the sent value
-    // (the specification's `received.value`, which is how `g.next(v)` reaches a delegated
-    // generator at all). A {__athrow, v} record - the one ag.throw(e) puts on the resume
-    // channel, and the one emitYieldStarCatch rebuilds from the value a plain g.throw(v)
-    // RAISES at this yield - drives the delegate's THROW() instead, so a delegate that
-    // would catch the throw does, and the yield* carries on with what it yields next. A
-    // delegate with no throw method is CLOSED through its return() and the yield* raises
-    // a TypeError, which is what node does for `yield* [1,2]`.
-    //
-    // Both arms are driven IN FRAME. The await of a delegate step is a SUSPENSION of this
-    // generator, so it cannot move into a helper function - that is the whole shape of
-    // this loop.
-    //
-    // The state is that one slot, and the slot lives in the scope js_scope_new makes when
-    // this expression is evaluated: one per yield* per generator INSTANCE, on that
-    // coroutine's own frame, nothing kept in any program-wide structure across a
-    // suspension. That is the constraint docs/todo.md 2.1's per-loop DEPTH STACK failed -
-    // it was per-program, and `for await` suspends inside its own for-of.
-    // The TRY body of the yield* barrier: hand out slot 0yout, and clear 0yopen once the
-    // driver has resumed us. Reaching the clear is exactly "this yield answered
-    // normally", so the finally below can tell a resume from a close with no second
-    // signal. It is a ctl closure like every other js_try body (emitFunction's isCtl):
-    // that carries inAsyncGen through and leaves `this` lexical, which an implementation
-    // closure must - it is not a JavaScript function.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitYieldStarYield() {
         return emitFunction([], function(bb) {
             var yv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yout")])
@@ -3577,15 +3026,7 @@ NotFuncHead = :script(~~
             return deadBlock()
         }, true)
     }
-    // The CATCH body of the yield* barrier. g.throw(v) RAISES v at the yield the body is
-    // parked at (runtime.c's gen_throw, abnf/jsrt.go's throwInto) - but at a yield*, node
-    // FORWARDS the value to the delegate's throw() instead of raising it in the outer
-    // body, so a delegate that would catch it does. This catch therefore turns the raised
-    // value straight back into the {__athrow, v} record the loop head already dispatches
-    // on for an async generator's ag.throw(), and the two paths then share every block
-    // after it. 0yopen is cleared first so the FINALLY below does not also close the
-    // delegate - a forward is not an abandonment. A close is unaffected: GEN_EXIT is
-    // never offered to a catch clause in either engine (runtime.c's js_try).
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitYieldStarCatch() {
         return emitFunction(["0ythr"], function(bb) {
             callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, "0yopen"), hFalse])
@@ -3597,11 +3038,7 @@ NotFuncHead = :script(~~
             return deadBlock()
         }, true)
     }
-    // The FINALLY body: if the body left the yield abnormally - which for a generator
-    // means gen_close threw GEN_EXIT in - run IteratorClose on the delegate, the same two
-    // steps makeForOf's closeB emits (a callable `return` member, called on the delegate
-    // as receiver). An array or a string delegate has none, and node closes neither.
-    // 0yopen is cleared first so a delegate whose own return() unwinds cannot re-enter.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitYieldStarClose() {
         return emitFunction([], function(bb) {
             var opV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yopen")])
@@ -3625,10 +3062,7 @@ NotFuncHead = :script(~~
             b = r.b
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
-            // The delegate is driven exactly the way for-of drives one (makeForOf): an
-            // ITERATOR one next() at a time, so 'yield* endless()' is a legal generator
-            // rather than a hang inside js_iterable's drain, and anything else - an array,
-            // a string - by index.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var seqV = r.v
             var ynxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
             var yisItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [ynxV]), emitStr(b, "function")])
@@ -3653,12 +3087,7 @@ NotFuncHead = :script(~~
             var joinB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            // The throw-in dispatch used to exist only inside an async generator, which
-            // was the only driver that could send a throw-in at all. g.throw(v) gives a
-            // PLAIN generator one too - emitYieldStarCatch turns the value it raises at
-            // the yield into the same {__athrow, v} record - so both drivers now share
-            // this block and everything after it. splitB is where the iterator/index
-            // decision is made, behind the dispatch.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var splitB = curF.NewBlock("")
             var yisItC = truthy(b, yisItV)
             b.NewCondBr(yisItC, headB, ylenB)
@@ -3674,11 +3103,7 @@ NotFuncHead = :script(~~
             var ythrNoB = curF.NewBlock("")
             var yretB = curF.NewBlock("")
             var ythrowB = curF.NewBlock("")
-            // The same shape test js_jsawaitv makes, in the emitter: a throw-in is
-            // the only object the resume channel ever carries with __athrow set. The
-            // typeof gate in front of it is not decoration - a member read of a
-            // non-object aborts ("member '__athrow' of undefined"), and the very
-            // first turn of this loop reads a sent value of undefined.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
                                 [callExt(headB, "js_typeof", [hsentV]), emitStr(headB, "object")])),
                             hchkB, splitB)
@@ -3704,7 +3129,7 @@ NotFuncHead = :script(~~
             yretB.NewBr(ythrowB)
             // js_jserrmk turns the text into a real TypeError instance (the class
             // object emitErrorClasses registered), so this one is catchable as
-            // `e instanceof TypeError` like every other error. docs/todo.md 1.1.
+            // `e instanceof TypeError` like every other error.
             callExt(ythrowB, "js_throw",
                     [callExt(ythrowB, "js_jserrmk",
                              [emitStr(ythrowB, "TypeError: The iterator does not provide a 'throw' method.")])])
@@ -3716,9 +3141,9 @@ NotFuncHead = :script(~~
             callExt(ystepB, "js_arr_push",
                     [ynxArgsV, callExt(ystepB, "js_scope_get", [curScopeV, emitStr(ystepB, "0ysent")])])
             var ystRawV = callExt(jsThisSet(ystepB, seqV), "js_call", [ynxV, seqV, ynxArgsV])
-            // emitAwait is the identity outside an async body, so this is the same call
-            // it always was for a plain generator - and one suspension per step inside an
-            // async generator, exactly as the specification's async delegation does.
+            // emitAwait is the identity outside an async body, so this is a plain call
+            // for a plain generator - and one suspension per step inside an async
+            // generator, exactly as the specification's async delegation does.
             var ystV = emitAwait(ystepB, ystRawV)
             ystepB.NewBr(joinB)
             // One {value, done} record, from next() or from a forwarded throw().
@@ -3743,21 +3168,7 @@ NotFuncHead = :script(~~
             // instruction of its own into this one.
             var youtV = bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
                                       llvm.ir.NewIncoming(ystepElemV, joinB)])
-            // The resume value is stored RAW - the shape test at headB is what reads it,
-            // so a throw-in is forwarded rather than raised here.
-            //
-            // The yield itself sits inside a js_try, and the two arms answer the two
-            // ways the driver can interrupt a parked yield*. The FINALLY closes the
-            // delegate, which is what makes g.return() at a yield* run the delegate's
-            // finally clauses (docs/todo.md 1.10): g.return() is gen_close, and
-            // gen_close throws the GEN_EXIT sentinel AT this yield, so every js_try
-            // between the yield and the body's entry runs its finally on the way out
-            // and a barrier here is the one place the delegate handle is still
-            // reachable. GEN_EXIT reaches the finally and NOT the catch, in either
-            // engine (runtime.c's js_try, abnf/jsrt.go's genExit) - a close is a return
-            // completion. The CATCH is g.throw(v), which raises an ordinary value at
-            // this yield: emitYieldStarCatch turns it back into a throw-in record so
-            // that headB forwards it to the delegate (docs/todo.md 1.4).
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yout"), youtV])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yopen"), hTrue])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ysent"),
@@ -3782,14 +3193,14 @@ NotFuncHead = :script(~~
         var items = itemsNoStrict(itemsIn)
         // node names an accessor function "get k" / "set k"; nothing in this subset can
         // read one as a value, so the name is recorded for the four engines to agree
-        // rather than for a program to see. docs/todo.md 1.4.
+        // rather than for a program to see.
         return {kt: keyThunk(items[1]), acc: items[0], ustrict: st,
                 accName: (typeof items[1] == "string") ? (items[0] + " " + items[1]) : "",
                 params: items.slice(2, items.length - 1), body: items[items.length - 1]}
     }
     // items = [{amod}?, {gmod}?, key, params, bodyThunk]. A shorthand method is an ordinary
-    // property whose value is a function expression; 'async' only matters for 'await'
-    // inside the body (see the Await rule) and a generator method goes through makeGenFn.
+    // property whose value is a function expression; an async method's body goes through
+    // makeAsyncFn and a generator method through makeGenFn.
     function makeMethodProp(itemsIn) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
@@ -3802,7 +3213,7 @@ NotFuncHead = :script(~~
             else { rest.push(items[i]) }
         }
         // A method's own name is its KEY - node says `n` for `{ n(){} }`. A COMPUTED key
-        // is only known at run time, so those stay anonymous. docs/todo.md 1.4.
+        // is only known at run time, so those stay anonymous.
         var mnm = (typeof rest[0] == "string") ? rest[0] : ""
         var fnT = makeFunctionExpr(rest[2], rest[1], st, mnm)
         if (isGen) { fnT = makeGenFn(rest[1], rest[2], st, mnm) }
@@ -3817,49 +3228,7 @@ NotFuncHead = :script(~~
         return {kt: items[0], t: makeFunctionExpr(items[2], items[1])}
     }
 
-    // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
-    // its object handle, so that a directly following call uses it as 'this'.
-    // A member access immediately followed by a call is a method call: look the property
-    // up (js_get); if it is a function value it is called directly (js_call, this = the
-    // object) - that keeps every native string/array method and object-literal method
-    // working exactly as before; otherwise it is a __class instance method, dispatched
-    // through js_mcall (which prepends the receiver and follows __super). A call not
-    // preceded by a member is a plain function call.
-    // An optional link (?. ?.[ ?.( ) short circuits the WHOLE chain, not just its own
-    // step: 'a?.b.c' is undefined when a is nullish, and c is never looked up. That is
-    // why the guard blocks collect into shortIn and every one of them feeds undefined
-    // into a single phi at the END of the chain, instead of merging step by step.
-    // The nullish test is the loose equality with null, which is true for exactly null
-    // and undefined.
-    // ===== THE CALLEE TEXT OF A CALL SITE - docs/todo.md 1.4 ====================
-    //
-    // node's message for calling a non-function is the callee's SOURCE TEXT:
-    //
-    //   xs[1]()     TypeError: xs[1] is not a function
-    //   o.nope()    TypeError: o.nope is not a function
-    //   new n()     TypeError: n is not a constructor
-    //
-    // V8 recovers it by re-printing the AST of the call site (CallPrinter), so it is
-    // NOT derivable from any runtime value: `xs[1]` and `xs[i]` reach the runtime as
-    // one and the same key. It IS derivable at PARSE time, and that is what these
-    // three functions do. The grammar hands the primary's own matched input over
-    // (`up.in` after Primary / NewSeed) and every member suffix now carries either its
-    // identifier (`name`) or its bracketed source text (`txt`); siteTexts renders one
-    // callee text per suffix position ONCE, while the closure is built. Nothing here
-    // runs at call time - the message is a constant string chosen at parse time - so
-    // the hot path is untouched: every message this emits is a COMPILE-TIME CONSTANT
-    // string, emitted into the cold block that raises it, so nothing is built, looked
-    // up or interned at call time. The interpreter half's siteTexts is the twin and
-    // the two must render identically, or the halves disagree on the message.
-    //
-    // WHAT MATCHES NODE AND WHAT DOES NOT. Matching, verified against node v24: a bare
-    // name, a dot chain, `this.x`, an index by identifier or by number literal, a
-    // string-literal index (node prints o["k"] as o.k, so this does too), a call
-    // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
-    // not a name (node's own "(intermediate value)"). NOT matching, because V8
-    // re-prints its AST rather than the source: a foldable constant index (node says
-    // xs[2] for xs[1+1]) and a compound index expression, which V8 parenthesises and
-    // re-spaces (`xs[(i + 1)]` for `xs[i+1]`). Both keep the class and the shape.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function siteIdentOk(t) {
         // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
         if (t.length == 0) { return false }
@@ -3879,15 +3248,7 @@ NotFuncHead = :script(~~
         return !atStart
     }
     function sitePrimaryText(t) {
-        // V8 prints the callee's own source range for everything that is not a
-        // COMPUTED result, literals included - `[1,2].nope`, `"abc".nope`, `1.nope`,
-        // `true.nope` - and "(intermediate value)" for what a call, a `new` or a
-        // function expression produced. A "(" is exactly the line between the two,
-        // and it also marks a PARENTHESISED primary, whose parentheses V8 does not
-        // print: `(o.g)()` reads `o.g is not a function`. So one layer is stripped
-        // and the test repeated. A grammar's Primary that starts at "(" is the
-        // parenthesized-expression form and is balanced by construction, so there is
-        // no `(a)(b)` to mis-strip - that is a primary plus a call SUFFIX.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         if (t.length == 0) { return "(intermediate value)" }
         if (t.indexOf("(") < 0) { return t }
         if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
@@ -3897,10 +3258,7 @@ NotFuncHead = :script(~~
         return "(intermediate value)"
     }
     function siteIndexText(base, txt) {
-        // txt is the suffix's own matched input, brackets and all, with the tag
-        // engine's whitespace already elided ("[ i + 1 ]" arrives as "[i+1]"). The
-        // optional form's rule also matched its "?." in one grammar and not in the
-        // other, so the opening bracket is SEARCHED for rather than assumed at 0.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var open = txt.indexOf("[")
         if (open < 0) { return base + "[?]" }
         var inner = txt.substring(open + 1, txt.length - 1)
@@ -3934,20 +3292,11 @@ NotFuncHead = :script(~~
     }
     function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: privRefConst(n)} }
     // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
-    //
-    // chainItems is every member chain foldCallMember has folded, in completion order,
-    // and chainLastText is the matched source text of the most recent one. A chain is
-    // handed out by INDEX and never by value: a record pushed onto the tag stack is
-    // DEEP-COPIED, and the copy would not be the array the closures were built from.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var chainItems = []
     var chainLastIx = 0 - 1
     var chainLastText = ""
-    // The tag of '"(" Expression ")"' in a call position. The parenthesized expression has
-    // already been parsed exactly once, and t is its value thunk; the only question left
-    // is whether the parentheses held ONE member chain and nothing else. The last chain to
-    // complete inside them is the outermost one, so comparing its text with the text
-    // between the parentheses answers it - and answers NO for '(0, o.m)', '(a ? b.c : d)',
-    // '(o.m || o.n)' and '(o.m = f)', where the last chain covers only part of the inside.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function parenPrimary(t, txt) {
         // MetaJS is typed and this answers either the value thunk or a marker record, so
         // the result is declared anytype rather than returned from two arms.
@@ -3959,13 +3308,7 @@ NotFuncHead = :script(~~
         r = {parenchainIx: chainLastIx}
         return r
     }
-    // A parenthesized member chain arrives as [{parenchainIx}, {ptxt}, outerSuffixes...];
-    // the parentheses mean nothing at run time, so the inner chain's items REPLACE the
-    // marker and the outer suffixes are appended to them. '(o.m)()' therefore folds to
-    // precisely the item list of 'o.m()' and keeps its receiver. Nesting needs no
-    // recursion here - a chain is recorded already flattened - and the inner {ptxt}
-    // survives at index 1, which is what makes siteTexts name '(o.nope)()' 'o.nope', as
-    // V8 does.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function flattenParen(items) {
         var head = items[0]
         if (head == undefined || head.parenchainIx == undefined) { return items }
@@ -4013,11 +3356,7 @@ NotFuncHead = :script(~~
                         var callS = suffixes[i + 1]
                         var objV = cur
                         var keyV = kr.v
-                        // js_jsmget is js_get with the String/Array method names
-                        // HIDDEN, so the call falls into the js_jsmcall arm below
-                        // rather than into the shared boundMethod path, whose
-                        // semantics differ (indexOf ignores its from-index, map's
-                        // callback gets no index, ...). Everything else delegates.
+                        // See the twin of this comment in js-to-llvm-ir.abnf.
                         var fV = callExt(b, "js_jsmget", [objV, keyV])
                         var argsV = callExt(b, "js_arr_new", [])
                         b = pushArgs(b, argsV, callS.args)
@@ -4026,24 +3365,13 @@ NotFuncHead = :script(~~
                         var elseB = curF.NewBlock("")
                         var mergeB = curF.NewBlock("")
                         b.NewCondBr(isFn, thenB, elseB)
-                        // js_jsxcall / js_jsxmcall are js_call / js_mcall plus the regular
-                        // expression surface (abnf/jsrtregexjs.go). Both delegate to the
-                        // extern they wrap for every receiver that is not a RegExp and
-                        // every string call whose argument is not a pattern, so a program
-                        // that uses no regular expression behaves exactly as before.
+                        // See the twin of this comment in js-to-llvm-ir.abnf.
                         var tv = callExt(jsThisSet(thenB, objV), "js_jsxcall", [fV, objV, argsV])
                         thenB.NewBr(mergeB)
                         // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
                         // Number / Object method surface (abnf/jsrtjsprint.go).
                         var ev = callExt(jsThisSet(elseB, objV), "js_jsmcall", [objV, keyV, argsV])
-                        // ...and when nothing at all claimed the call, js_jsmcall
-                        // ANSWERS THE MISS SENTINEL rather than aborting. `o.nope()`
-                        // used to end the program in both compiled halves, with two
-                        // different messages and neither node's. The sentinel travels
-                        // as an ordinary handle and is compared RAW, so the taken path
-                        // pays one load, one icmp and a never-taken branch, and the
-                        // message in the cold block is a compile-time constant.
-                        // docs/todo.md 1.4.
+                        // See the twin of this comment in js-to-llvm-ir.abnf.
                         var mOkB = curF.NewBlock("")
                         var mBadB = curF.NewBlock("")
                         elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
@@ -4055,12 +3383,7 @@ NotFuncHead = :script(~~
                         curThis = hUndef
                         i = i + 2
                     } else {
-                        // A member read that is NOT followed by a call. js_jsvget is
-                        // memGetExt() plus the two things a plain read has to answer
-                        // and the call site must not: a __class method (so `typeof p.m`
-                        // is "function", not "undefined") and a String/Array builtin
-                        // (so `typeof [].push` stops depending on which engine runs).
-                        // See languages/lib/js-rt.metajs. docs/todo.md 2.5.
+                        // See the twin of this comment in js-to-llvm-ir.abnf.
                         curThis = cur
                         cur = callExt(b, "js_jsvget", [cur, kr.v])
                         i = i + 1
@@ -4093,22 +3416,13 @@ NotFuncHead = :script(~~
         }
     }
 
-    // Target items = [nameString, suffix marker...] -> reference descriptor.
-    // Walks a target path (members and calls) up to the last element, which must
-    // be a member. Returns {b, obj, key} with the object and the last key evaluated.
-    // A target reference is {name, path} for the ordinary 'a.b[i]' form and {base, path}
-    // when the path hangs off an arbitrary expression instead of a name ('[1].a = 2',
-    // '(a ** b).c = 1'). retarget re-roots a parenthesized target and appends whatever
-    // suffixes follow the ')', so '(a).b' is the very same reference as 'a.b'.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeTargetBase(items) { return {base: items[0], ptxt: items[1].ptxt, path: items.slice(2)} }
     function retarget(items) {
         var inner = items[0]
         return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1))}
     }
-    // The primary text of an assignment TARGET's reference. compile-core's shared
-    // makeTargetRef answers {name, path} and is not this grammar's to change, so a
-    // named target falls back to its own name - which is exactly what node prints for
-    // `f().x = 1`. docs/todo.md 1.4.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function refSiteText(ref) {
         if (ref.ptxt != undefined) { return ref.ptxt }
         if (ref.name != undefined) { return ref.name }
@@ -4135,7 +3449,7 @@ NotFuncHead = :script(~~
                 var argsV = callExt(b, "js_arr_new", [])
                 b = pushArgs(b, argsV, s.args)
                 // A call in the MIDDLE of an assignment target ('f().x = 1'): the same
-                // check the ordinary call site makes. docs/todo.md 1.4.
+                // check the ordinary call site makes.
                 var rcr = jsCallChecked(b, cur, curThis, argsV, siteTexts(refSiteText(ref), ref.path)[i])
                 b = rcr.b
                 cur = rcr.v
@@ -4150,7 +3464,7 @@ NotFuncHead = :script(~~
     function makeAnyAssign(items, txt) {
         var op = items[1]
         // NamedEvaluation, the assignment form: `f = function(){}` names it "f", and only
-        // for a plain '=' to a bare NAME. docs/todo.md 1.4.
+        // for a plain '=' to a bare NAME.
         if (op == "=" && items[0].path != undefined && items[0].path.length == 0) {
             fnAnonName(items[0].name, "=", txt)
         }
@@ -4190,12 +3504,7 @@ NotFuncHead = :script(~~
             return {b: b, v: v}
         }
     }
-    // items = [ref, "&&="|"||="|"??=", valueThunk]. A logical assignment SHORT CIRCUITS:
-    // the target is read once, and only if the old value asks for it (falsy for ||=,
-    // truthy for &&=, null/undefined for ??=) is the right side evaluated and stored. The
-    // member path of a target is evaluated exactly once, before the branch, so
-    // 'a[i()] ||= b' calls i() once whichever way the branch goes. The expression value is
-    // the old value or the newly stored one, merged by a phi.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeLogicalAssign(items) {
         var ref = items[0]
         var op = items[1]
@@ -4230,10 +3539,7 @@ NotFuncHead = :script(~~
         }
     }
 
-    // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
-    // ++/-- are ToNumeric-then-step, not ToNumber-then-add: a BigInt stays a BigInt
-    // and steps by 1n (js_jstonumeric / js_jsstep, abnf/jsrtjsbig.go), everything else
-    // becomes a number and steps by 1 exactly as js_tonum / js_add did.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeIncDec(items) {
         var ref = items[0]
         var delta = (items[1] == "++") ? 1 : -1
@@ -4274,13 +3580,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Parameter binding -----
-    // A parameter list entry is either a bare name string (the plain form) or a
-    // descriptor: {pname, def} for a default and {pname, rest: true} for a rest
-    // parameter. The parameters are bound in source order into the freshly opened
-    // function scope, so a later default may refer to an earlier parameter
-    // ('function f(a, b = a + 1)'), exactly as the spec's parameter environment does.
-    // off is the index the parameters start at in the argument array (1 for an instance
-    // method, whose args[0] is the receiver).
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeDefaultParam(items) { return {pname: items[0], def: items[1]} }
     function bindParams(b, params, argsV, off) {
         for (var i = 0; i < params.length; i++) {
@@ -4343,16 +3643,7 @@ NotFuncHead = :script(~~
         return exitB
     }
 
-    // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
-    // the passed environment, binds the parameters and 'arguments', and runs the body.
-    // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
-    // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    // lexThis marks a body with a LEXICAL 'this' - an arrow function and the try/catch/
-    // finally closures, which are an implementation device and not JS functions at all.
-    // Those do not bind 'this' at all, so a reference to it resolves up the scope chain to
-    // the enclosing function's binding, which is exactly what the spec prescribes for an
-    // arrow. Every other function binds the DYNAMIC this of its call (js_this, fed by the
-    // receiver that the call site handed to js_call).
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitFunction(paramNames, bodyT, isCtl, lexThis, ownStrict) {
         funcCount++
         var idx = funcCount
@@ -4363,11 +3654,7 @@ NotFuncHead = :script(~~
         var savedLoops = loopStack
         var savedForOf = forOfIters
         var savedTag = curFTag
-        // A try/catch/finally BODY is an IR closure too (isCtl), but it is not a
-        // function of the program: an `await` inside a try inside an async body is
-        // still that body's await, so the flag is carried in rather than cleared.
-        // Clearing it made `try { await p } catch` answer the throw-in MARKER as a
-        // value instead of raising - measured, three assertions.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var savedAsync = inAsyncFn
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
@@ -4384,11 +3671,7 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         if (!isCtl && lexThis != true) {
-            // OrdinaryCallBindThis (ES2023 10.2.1.2). A STRICT function takes the
-            // receiver exactly as the call site handed it over; a SLOPPY one turns an
-            // undefined or null receiver into the GLOBAL OBJECT. Step 3.b's ToObject of
-            // a PRIMITIVE receiver is NOT implemented - this value model has no wrapper
-            // objects, so `f.call(7)` keeps the 7 in all four engines. docs/todo.md 1.1.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var thisV = callExt(b, "js_this", [])
             if (!emitStrict) {
                 var gV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "globalThis")])
@@ -4413,28 +3696,8 @@ NotFuncHead = :script(~~
         emitStrict = savedStrict
         return idx
     }
-    // ----- The intrinsic `name` and `length` of a FUNCTION (docs/todo.md 1.4) -----
-    // Every function has two own properties nothing in the program writes: `name`, the
-    // identifier it was DEFINED under, and `length`, its declared arity. Both answered
-    // `undefined` in this half - a closure is a floor handle with nowhere to keep them -
-    // where the interpreter half answered ""/0 and node answers `f`/1, so the pair was a
-    // HALVES DIVERGENCE as well as a wrong answer.
-    //
-    // js_jsfnmeta(closure, name, length) -> closure records them beside the closure, in
-    // an identity-keyed side table in both engines. It is python's js_pyfnname exactly -
-    // the extern a `def` wraps its closure in so that f.__name__ can answer - and it is
-    // emitted the same way, at the creation site, so a closure built in a loop keeps
-    // answering after the enclosing scope is gone. Twins: js_jsfnmeta in
-    // abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs; fnMeta* in both
-    // *-interpreter.abnf.
-    //
-    // A function with NO name and NO parameters emits no call at all, which is the whole
-    // of the internal thunks this emitter builds for itself (a try body, a catch arm, a
-    // yield* barrier) - they are never reachable as values.
-    //
-    // What is deliberately NOT modelled: `arguments`, `caller` and `prototype`, the other
-    // three own names node reports on a function declaration. There is no prototype chain
-    // and no call-site frame in this value model.
+    // ----- The intrinsic `name` and `length` of a FUNCTION -----
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function fnArity(params) {
         var n = 0
         for (var i = 0; i < params.length; i++) {
@@ -4464,32 +3727,7 @@ NotFuncHead = :script(~~
         }
     }
     // ----- A named function EXPRESSION sees its own name (ES2023 15.2.5) -----
-    // `const f = function fact(n){ return n < 2 ? 1 : n * fact(n-1) }` recurses through
-    // `fact` in node and answered *ReferenceError: fact is not defined* in every engine
-    // here: the optional name of a function expression was accepted and dropped.
-    // FnExprName records it now (that is what `f.name` reads), so the binding is the
-    // rest of the work, and it is the spec's funcEnv - ONE scope holding ONE binding of
-    // the name to the function object, between the DEFINITION site and the function's
-    // own scope. Every neighbouring case then falls out of the scope order, measured
-    // against node 24: the name does not leak outwards, an outer variable of the same
-    // name is shadowed inside and untouched outside, a PARAMETER of the same name wins,
-    // a `var` of the same name in the body wins too, a nested function still sees it,
-    // and a function DECLARATION never comes through here.
-    //
-    // The ONE case this does not reproduce is an ASSIGNMENT to the name inside the body:
-    // node ignores it silently in sloppy code and raises a TypeError in strict code,
-    // because the binding is IMMUTABLE. Here the write lands on the funcEnv slot in BOTH
-    // halves, so they agree and no assertion pins it; making it immutable needs a const
-    // flag on the C floor's scope (the floor of sixteen languages) or a js-only
-    // scope-WALKING extern in place of js_scope_set at every plain-name assignment, and
-    // js_jsmget's head comment measures what a call on that path costs. See the same
-    // paragraph in js-interpreter.abnf.
-    //
-    // The scope is created at RUN TIME, once per evaluation of the expression, which is
-    // what makes two closures of the same function expression have two funcEnvs. One
-    // helper serves all four function-value forms because every one of them reads
-    // curScopeV when it builds the closure. Twin: fnSelf in js-interpreter.abnf.
-    // docs/todo.md 1.4.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function fnSelf(t, nm) {
         if (nm == undefined || nm === "") { return t }
         return function(b) {
@@ -4502,21 +3740,7 @@ NotFuncHead = :script(~~
         }
     }
 
-    // NamedEvaluation (ES2023 8.4.5): an ANONYMOUS function expression or arrow takes the
-    // name of the binding it is directly assigned to, so `const h = x => x` has
-    // h.name === "h", while a named one keeps its own.
-    //
-    // What decides is the SOURCE TEXT: the binder names the pending function only when
-    // its own text ends in `=` (or `:`) followed by exactly that function's own text,
-    // with any number of wrapping parentheses allowed, since `const q = (function(){})`
-    // is named in node too. It must not reach a function merely NESTED in the
-    // initializer - node names nothing in `const q = f(function(){})`.
-    //
-    // Thunk IDENTITY cannot be the test, and the failure is silent: a value pushed onto
-    // the ABNF tag stack is DEEP-COPIED (manual chapter 4), so the thunk that comes back
-    // out of takeAll() is a fresh bridge wrapper and `items[1] === noted` is false for
-    // every function in every program. Text is what survives the round trip. Both halves
-    // spell this the same way; see the same block in js-interpreter.abnf.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var fnAnonTxt = ""    // the source text of the last anonymous function form built
     var fnAnonSlot = []   // that form's one-element name slot
     function fnAnonNote(slot, nm, txt) {
@@ -4558,8 +3782,6 @@ NotFuncHead = :script(~~
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, nm, paramNames, txt)
     }
-    // items = [params, (UseStrictMark)?, bodyThunk] - the optional function-expression
-    // name pushes nothing.
     // items = [({fname})?, params, (UseStrictMark)?, bodyThunk]. Indexed from the END,
     // because the optional name FnExprName pushes in front of the parameter list (the
     // type parameters and the return-type annotation push nothing at all).
@@ -4573,8 +3795,7 @@ NotFuncHead = :script(~~
 
     // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
     // A block body is a statement thunk; an expression body becomes 'return <expr>'.
-    // The body thunk of an arrow: a block body is a statement thunk, an expression body
-    // becomes 'return <expr>'. Shared with makeAsyncArrow.
+    // arrowBody is shared with makeAsyncArrow.
     function arrowBody(bm) {
         if (bm.body != undefined) { return bm.body }
         var et = bm.ebody
@@ -4589,18 +3810,7 @@ NotFuncHead = :script(~~
         }, "", params, txt)
     }
 
-    // Template literal: items = [{str:"chunk"} | {expr: thunk}...].
-    //
-    // Every interpolated PART goes through js_jsstr - JavaScript's ToString, which is
-    // ToPrimitive with hint STRING, so an object's own `toString` runs and a BigInt
-    // spells its digits. The parts are strings by the time they meet, so the join is
-    // the floor's plain js_add in BOTH engines.
-    //
-    // Seeding with "" and letting js_add coerce (what this used to do) is wrong twice
-    // over, and both were measured against node: the floor's js_add stringifies an
-    // object as "[object Object]" whatever `toString` it carries, and routing the ADD
-    // through js_jsadd instead - the other candidate - renders `${boxedNumber}` as `5`,
-    // because a template does ToString and not ToPrimitive-with-hint-default.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -4618,13 +3828,7 @@ NotFuncHead = :script(~~
         }
     }
 
-    // A tagged template call: tag(strings, ...values). The string parts are the text
-    // BETWEEN the interpolations, so there is always one more of them than there are
-    // values ('x${1}y${2}' has the parts "x", "y" and the trailing ""). The parts object
-    // carries them under the index keys plus 'length' and the raw (unescaped) texts under
-    // 'raw' - a plain object rather than a js_arr_new array, because the runtime's arrays
-    // are pure element sequences and cannot carry the 'raw' property the tag protocol
-    // needs. Index reads (strings[0]) work either way: a member read stringifies its key.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
         var raws = []
@@ -4662,22 +3866,11 @@ NotFuncHead = :script(~~
             callExt(b, "js_arr_push", [argsV, r.v])
         }
         // A tag that is not callable is node's ordinary "is not a function", not the
-        // floor's abort. docs/todo.md 1.4.
+        // floor's abort.
         return jsCallChecked(b, fnV, thisV, argsV, site)
     }
 
-    // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
-    // for-of has TWO arms, chosen at run time by one structural probe:
-    //   * an ITERATOR - a generator, or any object whose `next` member is callable - is
-    //     driven LAZILY, one next() per iteration through the {value, done} record;
-    //   * everything else (an array, a string, an object) iterates BY INDEX: the loop
-    //     opens its own scope holding the iterable, the length and the index (hidden
-    //     0-prefixed names that no JS identifier can collide with) and runs
-    //     name = iter[i] while i < length.
-    // for-in iterates the object's own keys: js_jskeys yields them (insertion order,
-    // deterministic, __-prefixed slots skipped, a class descriptor's static FIELDS - see
-    // docs/todo.md 2.10), and the same index loop walks that key array, binding name to
-    // each key string.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeForOf(items, pos) {
         // 'for await (x of xs)' pushes a {fawait} marker from its header; strip it so
         // every index below is the one the plain form has.
@@ -4706,37 +3899,14 @@ NotFuncHead = :script(~~
             var ir = iterT(b)
             b = ir.b
             var seqV = ir.v
-            // for-in materializes: js_iterable is the identity on arrays, strings and
-            // objects and drains a generator, and js_keys wants the whole sequence.
-            // srcV keeps the ENUMERATED VALUE alive beside the key array, because the
-            // key array is a snapshot and the per-iteration liveness guard below has to
-            // ask the original object whether the key is still there.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var srcV = anytype // A handle: the object being enumerated (for-in only).
             srcV = hUndef
             if (isIn) {
                 srcV = callExt(b, "js_iterable", [seqV])
                 seqV = callExt(b, "js_jskeys", [srcV])
             }
-            // for-of does NOT, because js_iterable's drain is what made
-            // 'for (const x of endless()) { ...; break }' hang and what put every one of
-            // the producer's side effects before the first of the consumer's. The probe
-            // for "drive this lazily" is STRUCTURAL - a callable `next` member. There are
-            // no symbols in this subset, so Symbol.iterator cannot be consulted; and an
-            // array, a string and a plain object answer no `next`, so they keep the index
-            // arm below, unchanged.
-            //
-            // A BREAK out of the lazy arm CLOSES the iterator, as node does: the loop's
-            // brk target is closeB below, which calls the iterator's `return()` when it
-            // has a callable one. The floor's tag-15 cell answers `return` since
-            // runtime.c's gen_close, and both it and abnf/jsrt.go's closeBody run the
-            // body's `finally` clauses, so the two engines agree - which is exactly what
-            // this used to be unable to buy. A LABELED break to THIS loop closes it too
-            // (bindLabelBrk re-points the label at closeB). What is still NOT closed: a
-            // `return` or a `throw` leaving the loop body, and a labeled break to an
-            // OUTER statement - none of the three reaches a block this emitter owns, one
-            // rets the frame, one longjmps and one branches to the outer label's exit.
-            // node closes the iterator in all three; the interpreter half deliberately
-            // does not either, so the two halves agree (js-interpreter.abnf makeForOf).
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var lazy = !isIn
             var isItV = anytype // A handle: the probe's result, or the constant false.
             var nxV = anytype   // A handle: the `next` member, or undefined.
@@ -4759,11 +3929,7 @@ NotFuncHead = :script(~~
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            // The length is read on the INDEX arm only: a generator has no 'length'
-            // member, and the two runtimes need not agree on what asking for one means.
-            // The probe is truthy-tested ONCE, in the entry block that dominates the
-            // whole loop, so the arm test in the head costs a branch and not a call -
-            // an index loop over an array makes exactly the externs it made before.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var isItC = anytype // The i1 the two arm tests branch on.
             isItC = handle(0)
             if (lazy) {
@@ -4803,16 +3969,14 @@ NotFuncHead = :script(~~
             // 'for await (x of [p1, p2])' see the resolved values.
             if (isAwait) { idxElemV = emitAwait(elemB, idxElemV) }
             // for-in's per-iteration LIVENESS GUARD. js_jskeys is a snapshot, so a key
-            // the body deletes before its turn came was still visited:
-            // `for (k in o) { s += k; delete o.c }` printed "abc" where node prints
-            // "ab". js_jshas is total over every value for-in enumerates - an object, a
-            // class descriptor's statics, an array's and a string's index keys - so a
-            // key that is still there always passes, and only a deleted one is skipped.
-            // The skip branches to postB, which is the increment, so it costs one extern
-            // per iteration and no extra block on the taken path. The interpreter half
-            // makes the same test with propIn (typescript-interpreter.abnf makeForOf);
-            // the two are both-or-neither, since one alone is a halves divergence.
-            // docs/todo.md 2.10.
+            // the body deletes before its turn came must be skipped:
+            // `for (k in o) { s += k; delete o.c }` prints "ab" in node. js_jshas is
+            // total over every value for-in enumerates - an object, a class descriptor's
+            // statics, an array's and a string's index keys - so a key that is still
+            // there always passes, and only a deleted one is skipped. The skip branches
+            // to postB, which is the increment, so it costs one extern per iteration and
+            // no extra block on the taken path. The interpreter half makes the same test
+            // with propIn (typescript-interpreter.abnf makeForOf).
             if (isIn) {
                 elemB.NewCondBr(truthy(elemB, callExt(elemB, "js_jshas", [srcV, idxElemV])), bodyB, postB)
             } else { elemB.NewBr(bodyB) }
@@ -4836,10 +4000,7 @@ NotFuncHead = :script(~~
                         [retV, seqV, callExt(doCloseB, "js_arr_new", [])])
                 doCloseB.NewBr(exitB)
             }
-            // docs/todo.md 1.8: while the BODY is emitted, this loop's iterable is one
-            // of the handles a `return` or a labeled break to an outer statement has to
-            // close on its way out. seqV is defined in the entry block, which dominates
-            // the body, so it is a legal operand at every such site.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             if (lazy) { forOfIters.push(seqV) }
             loopStack.push({cont: postB, brk: brkB})
             if (lbl != "") { bindLabelCont(lbl, postB) }
@@ -4857,19 +4018,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Destructuring patterns -----
-    // A pattern is a tree of nodes built by the D* productions:
-    //   {dtype:"id",   name, def?}        a leaf name, with an optional default
-    //   {dtype:"hole"}                    an array position that binds nothing
-    //   {dtype:"arr",  elems[], def?}     positional, elems may hold a "rest" node
-    //   {dtype:"obj",  fields[], def?}    by key, fields may hold an "orest" node
-    //   {dtype:"rest", pat}               '...' inside an array pattern
-    //   {dtype:"orest",name}              '...' inside an object pattern
-    // An object field is {dkey|dkeyT, pat}: a static key name, or a value thunk for a
-    // computed/literal key.
-    // bindPattern walks the tree against a value handle and emits ONE binding external per
-    // leaf. Which external that is decides what the pattern means: js_scope_decl for a
-    // 'var/let/const' binding and a parameter, js_scope_set_or_create for a destructuring
-    // ASSIGNMENT ('[a, b] = [b, a]'), which writes to existing variables.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
 
     // Attach an optional default to a freshly parsed pattern node: items is [node] or
     // [node, defaultThunk].
@@ -5001,10 +4150,7 @@ NotFuncHead = :script(~~
         curScopeV = saved
         return bindPattern(exitB, subPat, arrV, declExt)
     }
-    // '{a, ...rest}': a fresh object with every own key of the source that the pattern did
-    // not name. js_jskeys yields the keys in insertion order; the loop body skips a key
-    // when it equals one of the statically taken ones (a compile-time chain of
-    // comparisons).
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitObjRest(b, name, valueH, taken, declExt) {
         var restV = callExt(b, "js_obj_new", [])
         var saved = curScopeV
@@ -5054,9 +4200,6 @@ NotFuncHead = :script(~~
             return bindPattern(r.b, pat, r.v, "js_scope_decl")
         }
     }
-    // A destructuring ASSIGNMENT ('[a, b] = [b, a]', '({x} = o)'): the very same pattern,
-    // but the leaves are ASSIGNED rather than declared. The expression value is the right
-    // hand side, as for every assignment.
     function makeDestructAssign(items) {
         var pat = items[0]
         var valT = items[1]
@@ -5066,10 +4209,7 @@ NotFuncHead = :script(~~
         }
     }
 
-    // makeCatch is shared - see lib/compile-core.js.
-    // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
-    // try and catch bodies are ctl closures, so a return/break/continue leaving them
-    // becomes a control signal that excDispatch re-issues here.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
@@ -5089,13 +4229,7 @@ NotFuncHead = :script(~~
                 finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
-            // A RETURN out of the try body leaves the for-of loops AROUND the try as
-            // well, and it arrives here as a control signal that the shared
-            // excDispatch re-issues with no idea they exist - so the close is emitted
-            // here, where the loops' iterable handles are still in scope. node closes
-            // them after the finally body, which is where this sits. js_ctl_kind
-            // answers a RAW 0/1/2/3, so the test is == 1
-            // (docs/working-on-this-project.md 7.1): truthy() would take break too.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             if (forOfIters.length > 0) {
                 var kindV = callExt(b, "js_ctl_kind", [ctl])
                 var unwB = curF.NewBlock("")
@@ -5110,10 +4244,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Classes (the __class machinery) -----
-    // An instance is a js_obj_new object carrying a __class descriptor; the descriptor
-    // holds the methods (js_closure over the class-defining scope) and the __ctor. A
-    // method call dispatches through js_mcall (which prepends the instance as the
-    // receiver and follows __super for inheritance); super.m() goes through js_supercall.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
 
     // The class whose body is being built, captured by super() / super.m() at build time,
     // and the counter that names an anonymous class expression.
@@ -5121,19 +4252,7 @@ NotFuncHead = :script(~~
     var classSeq = 0
     var heritageSeq = 0
 
-    // A private name '#x' is stored under the mangled key '__#<body>#x'. The '__' prefix
-    // is the runtime's marker for an internal slot, which js_keys skips - so a private
-    // field stays out of for-in, Object.keys and object spread, as a real private name
-    // does. The '<body>' component is the CLASS BODY the name is declared in, because a
-    // private name is scoped to its class body and not to its spelling: `class A { #v }`
-    // and `class B extends A { #v }` declare TWO names in node, and a per-NAME key made
-    // them one slot, so B's field initializer overwrote A's and `getA()` answered B's
-    // value. docs/todo.md 2.4, 2.10.
-    //
-    // privStack is the chain of class bodies currently open in the WALK (tags run over
-    // the chosen parse tree, in source order - abnf/compiler.go's compileRule - so the
-    // PrivBodyOpen/PrivBodyClose pair is exactly balanced and no backtracking reaches
-    // it); privDecls[id] is the set of private names body id DECLARES.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var privStack = []
     var privDecls = []
     function privEnter() {
@@ -5149,11 +4268,7 @@ NotFuncHead = :script(~~
         privDecls[id]["$" + n] = true
         return privKey(id, n)
     }
-    // A REFERENCE resolves to the innermost ENCLOSING body that declares the name, which
-    // is what makes an inner class reading an outer class's `#v` keep working. It cannot
-    // be answered when the reference is walked - a method body may read a field declared
-    // further down the same body - so the key is computed on FIRST EMIT instead, by which
-    // time the whole walk is over and every declaration is recorded.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function privRefKey(st, n) {
         var i = st.length - 1
         while (i >= 0) {
@@ -5171,15 +4286,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- Class members -----
-    // Every member production pushes ONE descriptor:
-    //   {kind:"ctor",     params, body}
-    //   {kind:"method",   name|nameT, statik, params, body}
-    //   {kind:"field",    name|nameT, statik, init}
-    //   {kind:"accessor", name|nameT, statik, acc:"get"|"set", params, body}
-    //   {kind:"sblock",   body}
-    //   {skip:true}                     a ';' or a member that could not be lowered
-    // A name is either a plain string or, for a computed/literal key, a value thunk
-    // (nameT) that emitClass evaluates once at class definition time.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function isStaticMods(mods) {
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { return true } }
         return false
@@ -5190,14 +4297,14 @@ NotFuncHead = :script(~~
         return {b: b, v: emitStr(b, m.name)}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
-    // so is only known at run time. docs/todo.md 1.4.
+    // so is only known at run time.
     function memberFnName(m) {
         if (m.nameT != undefined) { return "" }
         return m.name
     }
     // js_jsfnmeta on a method or accessor closure, at its definition site. Emitted right
     // where the closure is built, so the wrapping js_genfn / js_jsasyncfn sees the value
-    // this returns - which IS the closure. docs/todo.md 1.4.
+    // this returns - which IS the closure.
     function fnMetaAt(b, clo, nm, params) {
         if (nm === "" && fnArity(params) == 0) { return clo }
         return callExt(b, "js_jsfnmeta", [clo, emitStr(b, nm), emitNum(b, fnArity(params))])
@@ -5238,8 +4345,8 @@ NotFuncHead = :script(~~
                 nameT: (typeof items[2] == "string") ? undefined : items[2],
                 params: items.slice(3, items.length - 1), body: items[items.length - 1]}
     }
-    // items = [mods, {amod}?, {gmod}?, key, params, bodyThunk]. An async method compiles as
-    // an ordinary method; a generator method goes through the generator lowering.
+    // items = [mods, {amod}?, {gmod}?, key, params, bodyThunk]. An async method's body is
+    // driven by js_jsasyncfn; a generator method goes through the generator lowering.
     function makeClassSpecial(items) {
         var mods = items[0].mods
         var isGen = false
@@ -5276,10 +4383,7 @@ NotFuncHead = :script(~~
                 init: items.length > 2 ? items[2] : null}
     }
 
-    // Emits one method/constructor as jsf_N(env, args). For an instance function args[0]
-    // is 'this'. A constructor (initFields != null) sets the field defaults/initializers
-    // at entry; a default constructor of a subclass (implicitSuper set) first runs the
-    // parent constructor with no arguments.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitClassFunc(params, body, isInstance, initFields, implicitSuper, propNames) {
         funcCount++
         var idx = funcCount
@@ -5288,15 +4392,13 @@ NotFuncHead = :script(~~
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedForOf = forOfIters
-        // A CLASS method body is emitted here rather than through emitFunction, and it
-        // used to consume neither pending flag - so `await` inside `async m() {}` was
-        // the identity in this half while the interpreter half awaited, and the method
-        // answered the unresolved promise. Found by probe; the object-literal form
-        // always worked because it goes through makeAsyncFn.
+        // A CLASS method body is emitted here rather than through emitFunction, so it
+        // has to consume the pending async flags itself - otherwise `await` inside
+        // `async m() {}` would be the identity.
         var savedAsync = inAsyncFn
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
-        emitStrict = true // A class body is strict code, always. docs/todo.md 1.1.
+        emitStrict = true // A class body is strict code, always.
         inAsyncFn = pendingAsyncFn
         inAsyncGen = pendingAsyncGen
         pendingAsyncFn = false
@@ -5311,30 +4413,14 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         } else {
-            // A STATIC method. Its receiver is not prepended to the arguments (only an
-            // instance method's is), so `this` has to come from the call's own receiver
-            // channel exactly as an ordinary function's does - js_this, fed by
-            // js_jssetthis at the call site (manual 7.3). It used to be declared here at
-            // all, so `this` inside `static s() {}` walked OUT of the method and found
-            // the top level binding: `typeof this` answered "undefined" where node and
-            // the interpreter half both say "function". A live halves divergence
-            // --cross never reached. docs/todo.md 1.4.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
         }
         b = bindParams(b, params, f.Params[1], off)
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
-            // A default derived constructor is `constructor(...args) { super(...args) }`,
-            // so it FORWARDS its arguments. A fresh array holding only `this` was
-            // passed, so `class A { constructor(x) { this.x = x } } class B extends A {}`
-            // made new B(5).x undefined where node says 5 - in all four engines,
-            // both halves agreeing and both wrong. THIS function's own argument
-            // array already IS [this, ...args] (a default ctor declares no
-            // parameters of its own), which is exactly the shape the parent
-            // constructor is called with, so it is handed over unchanged. Found
-            // while giving Error a hierarchy, because `class E extends Error {}`
-            // has to carry its message through. docs/todo.md 1.1.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             jsCall(b, supCtor, hUndef, f.Params[1])
         }
         if (initFields != null) {
@@ -5368,22 +4454,8 @@ NotFuncHead = :script(~~
         return idx
     }
 
-    // ----- The static namespace (docs/todo.md 2.13) -----
-    // `class C { static m(){} m(){} }` is TWO members in JavaScript, one on the
-    // constructor and one on the prototype. Both used to be written into the
-    // descriptor's own property map, where the second simply won: `C.m()` answered
-    // the instance method, an inherited static lost to a subclass's instance member,
-    // and an INSTANCE could see every static. Every static member - field, method and
-    // accessor box - now goes into a plain object stored on the descriptor under
-    // `__statics`, and the js/ts member externs (js_jsmget / js_jsvget / js_jsmset /
-    // js_jsmcall) plus js_supget / js_supset / js_supercall read it. Instance members
-    // are untouched, so the shared js_get / js_set / js_mcall are untouched too.
-    //
-    // Every write here is a RAW js_set rather than memSetExt(): memSetExt is
-    // js_jsmset, whose whole job is to send a non-internal write on a descriptor to
-    // the static table, which is exactly wrong for the instance half of this loop.
-    // The table itself is created unconditionally, so a RUNTIME `C.zz = 1` has
-    // somewhere to land whether or not the class declared a static.
+    // ----- The static namespace -----
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function clsRawSet(b, obj, key, val) { callExt(b, "js_set", [obj, key, val]) }
     // ----- The class descriptor -----
     // Sort the parsed members and remember the name and the parent. Shared by the
@@ -5396,10 +4468,7 @@ NotFuncHead = :script(~~
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
             if (m.ext != undefined) { info.superName = m.ext; continue }
-            // A heritage EXPRESSION. The value is bound to a synthetic scope name here, at
-            // BUILD time, so that emitClass and emitClassFunc keep resolving the parent by
-            // name exactly as they do for 'extends Name'. The '0' prefix is the same trick
-            // ClassAnonName uses: no source identifier can collide with it.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             if (m.extT != undefined) {
                 heritageSeq = heritageSeq + 1
                 info.extT = m.extT
@@ -5429,13 +4498,7 @@ NotFuncHead = :script(~~
         var clsV = callExt(b, "js_obj_new", [])
         clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)
         clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.name))
-        // js_jsstatics builds the static table, hangs it on the descriptor and answers
-        // it. It is one extern rather than js_obj_new plus a set because layer 2 counts
-        // the classes: while no class exists, every member read in the program skips the
-        // descriptor test with one integer compare, the same fast-out jvAccN gives the
-        // accessor box. js_jsmget's own comment records that ONE unconditional hash
-        // lookup added there cost 21-43% on a member-read loop - and the js bench row is
-        // pure arithmetic, so no gate here would have seen it.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var statsV = callExt(b, "js_jsstatics", [clsV])
         if (info.superName != null) {
             clsRawSet(b, clsV, emitStr(b, "__super"),
@@ -5451,11 +4514,7 @@ NotFuncHead = :script(~~
                 b = rs.b
                 sv = rs.v
             }
-            // js_jssfield rather than clsRawSet: a static FIELD is an ENUMERABLE own
-            // property of the class object and a static method/accessor is not, and
-            // all three live in the same __statics table, so the enumerable ones are
-            // named in a list beside them for Object.keys to read. See jsvSfTrack in
-            // abnf/jsrtjsprint.go. docs/todo.md 2.10.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             callExt(b, "js_jssfield", [statsV, kr.v, sv])
         }
         var ctorIdx = anytype
@@ -5465,11 +4524,6 @@ NotFuncHead = :script(~~
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
         }
         clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
-        // The __stat table - a set of NAMES marking which descriptor slots were static -
-        // used to live here, so that js_supercall could pick the calling convention. It
-        // is GONE: a set of names cannot answer once a class holds a static AND an
-        // instance member of the same name, and the two tables answer it by construction
-        // now. docs/todo.md 2.13.
         for (var mi = 0; mi < info.methods.length; mi++) {
             var mm = info.methods[mi]
             var mk = emitMemberKey(b, mm)
@@ -5482,15 +4536,10 @@ NotFuncHead = :script(~~
                 continue
             }
             if (mm.gen == true && mm.async == true) {
-                // An async generator method (docs/todo.md 1.7).
+                // An async generator method.
                 pendingAsyncGen = true
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                // The meta goes on the OUTERMOST value - the one that lands on the
-                // descriptor and that a read of the method answers - and not on the
-                // closure inside: js_jsasyncfn / js_jsasyncgen / js_genfn each hand back
-                // a NEW function value, and registering on the inner one made
-                // `p.am.length` answer 0 in this half and 1 in the interpreter's.
-                // docs/todo.md 1.4.
+                // See the twin of this comment in js-to-llvm-ir.abnf.
                 clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_jsasyncgen",
                     [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])]), memberFnName(mm), mm.params))
                 continue
@@ -5519,10 +4568,7 @@ NotFuncHead = :script(~~
             var aa = info.accessors[ai]
             var ak = emitMemberKey(b, aa)
             b = ak.b
-            // An accessor is invoked with the object as the RECEIVER (js_get/js_set hand it
-            // to the getter/setter as `this`), not with it prepended to the arguments the
-            // way a method call does, so it is emitted as an ordinary function: `this`
-            // comes from js_this and the setter's value is args[0].
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var aidx = emitFunction(aa.params, aa.body, false, false)
             var aclo = fnMetaAt(b, callExt(b, "js_closure", [handle(aidx), curScopeV]),
                                 (memberFnName(aa) === "") ? "" : (aa.acc + " " + memberFnName(aa)), aa.params)
@@ -5551,11 +4597,7 @@ NotFuncHead = :script(~~
         return function(b) { return {b: b, v: callExt(b, "js_newtarget", [])} }
     }
 
-    // 'new C(args)'. C is either a CLASS descriptor - build the instance, attach __class
-    // and run __ctor(instance, args...) - or an ordinary FUNCTION used as a constructor
-    // ('function Ctor(n) { this.n = n }'), where the fresh object is simply the receiver
-    // of a normal call. Which one it is can only be decided at run time, so both are
-    // emitted and a typeof test picks: a class descriptor is an object, a function is not.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeNew(items) {
         var clsName = items[0].cls
         var argThunks = items.slice(1)
@@ -5573,10 +4615,7 @@ NotFuncHead = :script(~~
             return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])}
         }, argThunks, clsName)
     }
-    // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
-    // argument list may be absent entirely ('new C'), which is the same as an empty one.
-    // items = [calleeThunk, {ptxt}, argThunk...]; the ptxt marker is NewCallee's own
-    // matched input, which is the text node names in "X is not a constructor".
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeNewGeneral(items) {
         return makeNewFrom(items[0], items.slice(2), sitePrimaryText(items[1].ptxt))
     }
@@ -5605,10 +4644,7 @@ NotFuncHead = :script(~~
             fnB.NewBr(mergeB)
             // The class form: the constructor convention prepends the instance. A
             // callee that is neither a function nor a class descriptor is node's
-            // `X is not a constructor` TypeError, and CATCHABLE: reading __ctor off
-            // undefined used to end the program with "Cannot read properties of
-            // undefined (reading '__ctor')" in both compiled halves while the
-            // interpreter said "unknown class: expression". docs/todo.md 1.4.
+            // `X is not a constructor` TypeError, and CATCHABLE.
             var ctorOkB = curF.NewBlock("")
             var ctorBadB = curF.NewBlock("")
             clsB.NewCondBr(clsB.NewICmp(llvm.enum.IPredNE, callExt(clsB, "js_jsctorp", [clsV]), handle(0)),
@@ -5654,10 +4690,7 @@ NotFuncHead = :script(~~
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
             var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])
-            // The same miss-sentinel check the method-call arm makes: nothing on the
-            // __super chain is node's "is not a function", not an abort. It has no
-            // source text for a super receiver either and prints "(intermediate
-            // value).<name>". docs/todo.md 1.4.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             var scOkB = curF.NewBlock("")
             var scBadB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, scV, b.NewLoad(i64, mcallMissGlob())), scBadB, scOkB)
@@ -5667,10 +4700,7 @@ NotFuncHead = :script(~~
     }
 
     // ----- super as a PROPERTY -----
-    // The three property forms (a read, a store, a destructuring target) all need the
-    // same pair: the class the lookup starts AT - the __super of the defining class,
-    // which is resolved by name at run time exactly as super() and super.m() resolve it -
-    // and the receiver, which travels separately so a getter/setter sees the right 'this'.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitSuperBase(b, defName) {
         var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
         return {sup: callExt(b, memGetExt(), [clsV, emitStr(b, "__super")]),
@@ -5689,11 +4719,7 @@ NotFuncHead = :script(~~
         return function(b) {
             var kr = keyT(b)
             var sb = emitSuperBase(kr.b, defName)
-            // js_jssupget and not the shared js_supget: the js/ts value read has to
-            // hand back a method shim whose receiver the eventual `.call(x)` can
-            // OVERRIDE, and the extern map is one map for every language, so the
-            // fixed behaviour needs a name of its own. See abnf/jsrtjsprint.go.
-            // docs/todo.md 2.10.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
             return {b: kr.b, v: callExt(kr.b, "js_jssupget", [sb.sup, sb.self, kr.v])}
         }
     }
@@ -5776,10 +4802,7 @@ NotFuncHead = :script(~~
         }
         return {apat: {dtype: "target", ref: ref}}
     }
-    // The destructuring-target form of a super property (see ATargetSuper). A bare
-    // 'super.d' is its own leaf kind, which bindPattern stores through js_supset; with
-    // further suffixes ('[super.d[0]] = e') only the base is a super read and the rest is
-    // an ordinary member path, so it degrades to the leaf every other member target uses.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeSuperTarget(items) {
         var path = items.slice(1)
         if (path.length > 0) {
@@ -6070,7 +5093,7 @@ NotFuncHead = :script(~~
     function emitDecoratedMethod(b, clsV, keyV, mm) {
         var idx = emitFunction(mm.params, mm.body, false, false)
         // A DECORATED method keeps its declaration's name and arity: what a decorator
-        // replaces is the body. docs/todo.md 1.4.
+        // replaces is the body.
         var cur = fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params)
         for (var i = mm.decos.length - 1; i >= 0; i--) {
             var dr = applyDeco(b, mm.decos[i], cur)
@@ -6082,8 +5105,8 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cur])
         var widx = emitDecoTrampoline(slot, mm.statik)
         // clsV is the STATIC table for a static member and the descriptor for an
-        // instance one - emitClass picks which (docs/todo.md 2.13), and the raw set is
-        // for the same reason it is raw there.
+        // instance one - emitClass picks which, and the raw set is for the same reason
+        // it is raw there.
         clsRawSet(b, clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV]))
         return b
     }
@@ -6130,38 +5153,12 @@ NotFuncHead = :script(~~
     }
 
     // ----- Labeled statements -----
-    // labelStack holds one entry per enclosing label: {name, brk, cont}. 'break L'
-    // branches to brk (the block right after the labeled statement) and 'continue L' to
-    // cont (the post block of the labeled LOOP; a labeled non-loop has none, and
-    // 'continue' on it is the syntax error it is in JavaScript). pendingLabel carries the
-    // name from the LabeledLoop production down into the loop builder: every loop thunk
-    // takes it at entry (takeLabel, which also CLEARS it, so an unlabeled loop nested in a
-    // labeled block cannot steal the label) and registers its own continue target.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var labelStack = []
     var pendingLabel = ""
-    // CLOSING AN ITERATOR ON AN EARLY EXIT (docs/todo.md 1.8). forOfIters holds the
-    // iterable HANDLE of every lazy for-of loop of the CURRENT IR function that
-    // encloses the statement being emitted, innermost last. A for-of's entry block
-    // dominates its whole body, so those SSA values are in scope at any `return` or
-    // labeled break inside it - and closing them BY VALUE rather than by counting a
-    // runtime stack is what makes this correct in the presence of coroutines.
-    //
-    // A RUNTIME STACK WAS TRIED FIRST AND IS WRONG, which is worth recording because
-    // it is the route docs/todo.md 1.8 proposes. `for await` suspends INSIDE its own
-    // for-of, so a suspended body leaves an entry on a global stack while unrelated
-    // frames run, and any depth-based unwind then closes the wrong loop. Measured:
-    // with a stack, SECTION 16's `try { await Promise.reject(r) } catch` closed
-    // SECTION 38's suspended `for await` iterator and its loop answered one element
-    // instead of three. Nothing here keeps runtime state, so that cannot arise.
-    //
-    // The list is saved and cleared with loopStack: a nested function's jumps leave
-    // none of the outer loops, and its SSA values would not dominate them anyway.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var forOfIters = []
-    // Close the iterators of the for-of loops this jump LEAVES, innermost first,
-    // which is the order node closes them in. `to` is the nesting depth at the
-    // destination; a label bound in an ENCLOSING function reads as a deeper
-    // destination than the current function's zero, so the bound is clamped rather
-    // than trusted.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitIterUnwind(b, to) {
         var from = to
         if (from < 0) { from = 0 }
@@ -6178,11 +5175,7 @@ NotFuncHead = :script(~~
             if (labelStack[i].name == name) { labelStack[i].cont = contB; labelStack[i].fon = forOfIters.length; return }
         }
     }
-    // bindLabelBrk re-points 'break L' at a block INSIDE the labeled loop instead of
-    // at the block after it. Only for-of uses it, so that 'L: for (x of g) break L'
-    // closes the iterator on its way out, exactly as an unlabeled break does; the
-    // block it names branches on to the loop's own exit, which the labeled statement
-    // then branches past, so the control flow is otherwise unchanged.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function bindLabelBrk(name, brkB) {
         for (var i = labelStack.length - 1; i >= 0; i--) {
             if (labelStack[i].name == name) { labelStack[i].brk = brkB; labelStack[i].fon = forOfIters.length; return }
@@ -6277,7 +5270,7 @@ NotFuncHead = :script(~~
     function makeDecl(items, txt) {
         var name = items[0]
         pendingNames.push(name) // what an enclosing 'export' would publish
-        // NamedEvaluation: `const h = x => x` names the arrow "h". docs/todo.md 1.4.
+        // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
         return function(b) {
             var v = hUndef
@@ -6290,7 +5283,6 @@ NotFuncHead = :script(~~
             return b
         }
     }
-    // items = [cond, then] or [cond, then, else].
     // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
     function makeDo(condT, bodyT) {
         return function(b) {
@@ -6366,10 +5358,7 @@ NotFuncHead = :script(~~
             return deadBlock()
         }
     }
-    // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
-    // list is grouped at build time. The dispatch chain compares with js_seq (===);
-    // the case bodies fall through into each other, break jumps to the exit, and
-    // continue still targets the enclosing loop.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeSwitch(items) {
         var subj = items[0]
         var cases = []
@@ -6433,50 +5422,7 @@ NotFuncHead = :script(~~
         }
     }
 
-    // The top level statements become jsrun(scope, args): the caller provides the scope
-    // that the top level declarations land in (the frozen tag executor passes the shared
-    // scope of the compile run, so scripts see each others globals). The return value is
-    // the completion value: what the last executed expression statement produced.
-    // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
-    // runs the program, and then calls main() - the self checking test convention.
-    // ----- the Error hierarchy (docs/todo.md 1.1) ---------------------------
-    //
-    // `new TypeError("x")` was *variable not defined* in all six js/ts engines,
-    // so every error this engine raises had to be caught as a STRING: e.message
-    // and `e instanceof TypeError` did not exist, and that was the stated ceiling
-    // on every "make X catchable" item.
-    //
-    // The model is python-to-llvm-ir.abnf's builtin-exception block, and it is
-    // deliberately ORDINARY class machinery rather than a special case: each
-    // class is the same {__isclass, __name, __super, __ctor} descriptor
-    // emitClass builds, so js_jsinstanceof's chain walk already answers
-    // `e instanceof Error` for a TypeError, makeNewFrom's class arm already
-    // constructs one, and `class E extends Error {}` already works.
-    //
-    // ONE constructor serves all seven: the name is not baked into the closure
-    // but recovered inside js_jserrinit by walking the instance's own __class
-    // chain for __errname, which is what makes a user subclass answer its
-    // NEAREST BUILTIN ANCESTOR's name - node's `class E extends TypeError {}`
-    // answers "TypeError" and `class E extends Error {}` answers "Error",
-    // exactly because name lives on the prototype and E.prototype does not
-    // shadow it. That also keeps the emitted cost at two function bodies and
-    // seven small objects rather than one body per class.
-    //
-    // js_jserrcls also REGISTERS each class with the runtime, so the errors the
-    // RUNTIME itself raises (the BigInt family) carry the very same class
-    // object - two class objects of one name would make instanceof false.
-    // Twins: abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-    // WHY FIVE AND NOT SEVEN. EvalError and URIError are standard globals too and
-    // cost nothing to write, and they were measured out: on tests/bench/mod.js -
-    // a GC-dominated loop that collects 131 times - the live set the boot classes
-    // add is +2,720 bytes at one class, +3,584 at three, +3,680 at FIVE and
-    // +6,112 at seven, and only the seven-class form steps the arena (heap
-    // 10,528,880 -> 10,530,160). The collector marks the live set at every one of
-    // those 131 collections, which is the whole mechanism: seven classes read
-    // SLOWER in 19 of 21 paired draws (+3.40%) where five is inside the row's own
-    // spread. So the table is the five the exception hierarchy actually needs and
-    // the two extras are declined, with the numbers kept here rather than
-    // re-derived. docs/todo.md 1.1.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
                            "SyntaxError"]
     function emitErrorClasses(b) {
@@ -6499,16 +5445,7 @@ NotFuncHead = :script(~~
                              [tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])]))
         var ctorV = callExt(b, "js_closure", [handle(ciIdx), curScopeV])
         var tsV = callExt(b, "js_closure", [handle(tsIdx), curScopeV])
-        // The seven descriptors are built by js_jserrcls rather than by six
-        // memSets each, and that is a MEASURED choice, not a style one: the
-        // memSet form put a fixed +10,201 bytes of IR into every js module,
-        // TRIPLING a small one (5,522 -> 15,723); this form costs +3,075. The
-        // heap is identical either way - the same seven objects with the same
-        // slots - so nothing moved except emitted text. js_scope_decl is the one
-        // step that cannot move into the extern: it is a FLOOR primitive and a
-        // layer-2 file cannot call it (that is why it is in the floor at all),
-        // so the binding stays here, in the PROGRAM's own scope like RegExp and
-        // Object above, where no other language's compiler can see the name.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         for (var ei = 0; ei < jsErrClassNames.length; ei++) {
             callExt(b, "js_scope_decl",
                     [curScopeV, emitStr(b, jsErrClassNames[ei]),
@@ -6517,31 +5454,8 @@ NotFuncHead = :script(~~
         return b
     }
 
-    // ----- the three recoverable-error hooks (docs/todo.md 1.8 and 3.2) ------
-    //
-    // `zzz` with no binding, `null.x` and `null.x = 1` were UNCATCHABLE ABORTS in
-    // both compiled halves, where node throws a ReferenceError and a TypeError
-    // that a plain try/catch recovers. All three sites - scope_get, get_member
-    // and set_member - are shared by all sixteen languages, and turning either abort into a throw for
-    // everyone is wrong: a statically typed language means "this program is
-    // broken" by it, and the three SHOULD-ABORT matrix rows are how the floor's
-    // abort path is reached by a test at all. So the floor and abnf/jsrt.go take
-    // a per-language HOOK (js_rt_missvar / js_rt_missmem), the language registers
-    // one here, and a language that registers nothing is bit-for-bit unchanged.
-    //
-    // The hook ANSWERS the value to throw rather than throwing it: the runtime
-    // clears the slot while the hook runs, so a hook that itself trips the same
-    // site falls back to the original abort instead of recursing, and the
-    // clear/restore has to bracket a call that RETURNS. It costs nothing on the
-    // hot path - the test is on the miss path, after the whole chain walk has
-    // already failed.
-    //
-    // The message texts are node's, verified against node v24:
-    //   ReferenceError: zzz is not defined
-    //   TypeError: Cannot read properties of null (reading 'x')
-    //   TypeError: Cannot set properties of null (setting 'x')
-    // js_jserrmk turns either text into the very class object emitErrorClasses
-    // registered above, so `e instanceof ReferenceError` and e.message answer.
+    // ----- the three recoverable-error hooks ------------------------------------
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitMissHooks(b) {
         funcCount++
         var vIdx = funcCount
@@ -6569,8 +5483,8 @@ NotFuncHead = :script(~~
                             emitStr(mb, "')")])
         mb.NewRet(callExt(mb, "js_jserrmk", [mTxt]))
 
-        // The WRITE sibling: `null.x = 1` was the same uncatchable abort, and node
-        // spells it "Cannot set properties of null (setting 'x')".
+        // The WRITE sibling: node spells `null.x = 1` as
+        // "Cannot set properties of null (setting 'x')".
         funcCount++
         var sIdx = funcCount
         var sf = m.NewFunc("jsf_" + sIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -6592,12 +5506,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(mIdx), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(sIdx), curScopeV])])
 
-        // The fourth of the family, and the one the call site needs: js_rt_misscall
-        // hands both engines the MISS SENTINEL, after which a method call nothing
-        // claimed ANSWERS it instead of aborting, and the call site raises node's
-        // TypeError. A language that never calls this extern keeps the abort, which
-        // is what leaves the other fifteen bit-for-bit unchanged. It is pinned
-        // because a module global is invisible to the collector. docs/todo.md 1.4.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var missV = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])
         b.NewStore(missV, mcallMissGlob())
         callExt(b, "js_rt_misscall", [missV])
@@ -6605,13 +5514,7 @@ NotFuncHead = :script(~~
     }
 
     function buildMain(itemsIn) {
-        // The file's own directive prologue decides the strictness every top-level
-        // function inherits. The mark is stripped before the statements are emitted.
-        // An IMPORTED file's own file-level directive is dropped rather than carried:
-        // its statements are stashed here and emitted later, inside the importing
-        // file's buildMain, which sets the flag last. Every FUNCTION in it still
-        // carries its own UseStrictMark, so only a bare file-level "use strict" in an
-        // imported file is affected.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var items = []
         for (var bi = 0; bi < itemsIn.length; bi++) {
             if (itemsIn[bi] != undefined && itemsIn[bi].ustrict == true) { fileStrict = true; continue }
@@ -6629,17 +5532,7 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
-        // THE GLOBAL OBJECT, and with it the top level 'this'. This grammar implements
-        // the SCRIPT goal symbol (see the :description), whose top level 'this' IS the
-        // global object: node's `vm.runInThisContext` answers `object` for
-        // `typeof this` and true for `this === globalThis`. It used to be hUndef here
-        // and bound nowhere at all in the interpreter half, which answered
-        // "ReferenceError: this is not defined" for a bare top level `this` - a live
-        // halves divergence --cross never reached. docs/todo.md 1.4.
-        //
-        // It is a PLAIN object, not a live view of the scope chain: `globalThis.x = 1`
-        // does not create a global variable. Both names are the SAME handle, which is
-        // what makes `this === globalThis` true.
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         var globalObjV = callExt(b, "js_obj_new", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), globalObjV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "globalThis"), globalObjV])
@@ -6648,21 +5541,18 @@ NotFuncHead = :script(~~
         // runtime's root, so no other language's compiler can see the name.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "RegExp"), callExt(b, "js_jsxctor", [])])
         // The Object global. The runtime root binds a bare object carrying only
-        // 'prototype', so Object.keys / values / entries / assign / fromEntries aborted
-        // with "unknown method 'keys'". js_jsobject answers a MARKED object that
-        // js_jsmcall recognizes, declared in the program's own scope like RegExp above.
+        // 'prototype'; js_jsobject answers a MARKED object that js_jsmcall recognizes
+        // (Object.keys / values / entries / assign / fromEntries), declared in the
+        // program's own scope like RegExp above.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Object"), callExt(b, "js_jsobject", [])])
-        // println / print with JAVASCRIPT's ToString. The runtime root binds the SHARED
-        // host functions, which hand the raw value to Go's %v - so println(null) printed
-        // "<nil>", println([1, 2, 3]) printed "[1 2 3]" and println({a: 1}) printed a Go
-        // map dump, while node's String() says "null", "1,2,3" and "[object Object]".
-        // Declaring them as program-scope bindings keeps shadowing honest: a program
-        // with a println of its own overwrites this.
+        // println / print with JAVASCRIPT's ToString (the runtime root binds the SHARED
+        // host functions, which print Go's %v). Declaring them as program-scope bindings
+        // keeps shadowing honest: a program with a println of its own overwrites this.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "println"), callExt(b, "js_jsprintfn", [emitStr(b, "println")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_jsprintfn", [emitStr(b, "print")])])
-        // The String global. The runtime root binds an OBJECT carrying fromCharCode, so
-        // a bare String(v) call aborted with "call of a non function value"; this is a
-        // real function, and String.fromCharCode still resolves through js_jsmcall.
+        // The String global. The runtime root binds an OBJECT carrying fromCharCode;
+        // this is a real function, and String.fromCharCode still resolves through
+        // js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "String"), callExt(b, "js_jsstringfn", [])])
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
@@ -6711,7 +5601,7 @@ NotFuncHead = :script(~~
     // Build the module out of the parsed program.
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -6720,8 +5610,7 @@ NotFuncHead = :script(~~
     // (lib/js-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
     // are offset by a million, so the two chains cannot overlap and one js_call reaches
     // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
-    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is the
-    // reusable part of phase 4 and nothing here is TypeScript's.
+    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged.
     function emitDispatch() {
         var idxs = []
         var fns = []
