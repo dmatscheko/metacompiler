@@ -29,7 +29,7 @@ import (
 // the interpreter. This test reads the three sources instead of running them, so
 // it does not care.
 //
-// The sets are now equal, so tests/metajs-test-full.js CAN assert every name on
+// The sets are equal, so tests/metajs-test-full.js CAN assert every name on
 // both halves and does (SECTION 31); this test is what stops the next addition
 // from landing in one engine only.
 func TestMetaJSHostGlobalsAgree(t *testing.T) {

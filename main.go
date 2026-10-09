@@ -44,7 +44,7 @@ import (
 //                directory first, then under each -i root in order)
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
 //  -rt-prims     MetaJS: emit the derivable runtime primitives from lib/rt-prims.metajs
-//                instead of calling their Go externals (see docs/runtime-rework-plan.md)
+//                instead of calling their Go externals
 //  -rt-lib       MetaJS: compile the source as a linkable layer-2 runtime library
 //  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
 //                lets call graphs / CFGs / traces be built from partially understood languages
@@ -302,10 +302,7 @@ func main() {
 	// mec is a short-lived batch process: it allocates hard (the parser, the
 	// compile walk and both script engines are allocation bound), it never has
 	// to give memory back, and the default GOGC of 100 makes it spend a third of
-	// its time in the collector. Trading heap for time here measures at 8-19 %
-	// of a whole run on both engines. 300 is where the curve flattens: on the
-	// Kotlin run it buys 21 of the 25 ms that GOGC=400 buys, for half its extra
-	// memory (86 MB peak at the default, 102 MB here, 117 MB at 400). An
+	// its time in the collector. 300 is where the time/heap curve flattens. An
 	// explicit GOGC in the environment still wins, so a memory tight setup can
 	// dial it back.
 	if os.Getenv("GOGC") == "" {
@@ -419,8 +416,8 @@ func main() {
 	}
 	// The real stage numbering (runPipeline) goes beyond the file count: every
 	// -pipe segment behind the first adds a "(piped)" input stage, and the last
-	// segment may add a trailing run stage for a startScript-only grammar - a
-	// cap at len(o.files) rejected -vN/-vvN/-slotN for stages the run printed.
+	// segment may add a trailing run stage for a startScript-only grammar, so the
+	// cap is not len(o.files).
 	maxStage := len(o.files) + len(o.pipeBounds) + 1
 	for stage := range o.verboseStage {
 		if stage > maxStage {
@@ -483,16 +480,10 @@ func main() {
 	// and exits 0 exactly as it always does, because llvm.Run executed the module
 	// as usual. That is indistinguishable from a successful native build.
 	//
-	// Only grammars emitting SELF-CONTAINED IR can implement it (c, tinyc, bash,
-	// batch, lisp, calculator, brainfuck). The other twelve languages emit handle
-	// IR calling js_* externs that clang has nothing to link against, so for most
-	// of the tree -exe has always been a silent no-op - and on 2026-07-27 that
-	// cost real work: a run was reported as clang-validated when no binary had
-	// been produced at all.
-	//
-	// Refuse up front rather than after the fact. The check cannot live after
-	// runPipeline: these language tests are self-checking and propagate the
-	// program's own result through os.Exit, so control never comes back here.
+	// So a grammar whose source never mentions exePath is refused, up front: the
+	// check cannot live after runPipeline, because these language tests are
+	// self-checking and propagate the program's own result through os.Exit, so
+	// control never comes back here.
 	if o.exePath != "" && !strings.Contains(srcs[0], "exePath") {
 		fmt.Fprintf(os.Stderr,
 			"error: -exe: %s does not implement c.exePath, so no executable would be produced.\n"+
@@ -508,8 +499,8 @@ func main() {
 }
 
 // runPipeline executes the file pipeline. Without -pipe there is a single
-// segment and it behaves exactly like the original loop (a chain of a-grammars,
-// each stage's compiled grammar feeding the next file). Each -pipe starts a new
+// segment: a chain of a-grammars, each stage's compiled grammar feeding the next
+// file. Each -pipe starts a new
 // segment: an independent a-grammar chain whose PROGRAM input is the captured
 // text output (script print) of the previous segment - so a language (e.g. a
 // preprocessor) can transform the source before another language consumes it.
