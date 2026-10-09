@@ -1,7 +1,7 @@
 :title("Java (subset) interpreter") ;
 :description("Parses Java and executes it directly, without generating code. The
 goal is the whole practical language; tests/java-test-full.java is the ratchet that
-measures how far it is, and all 22 of its sections pass today.
+measures how far it is.
 
 Types: classes with instance and static fields (with initializers), instance,
 static and abstract methods, OVERLOADED constructors with explicit this(...) and
@@ -17,7 +17,8 @@ ordinal / name / compareTo), NESTED, INNER and LOCAL classes (Outer.this and the
 qualified o.new Inner(...) creation), and annotation types (parsed and dropped -
 nothing reads them at run time).
 
-Values: int / long / double arithmetic on one 32 bit-truncating number type,
+Values: int, long, short, byte, float and double with their own widths and Java's
+wrapping and promotion rules,
 boolean, String, arrays, null, and char as a boxed value that renders as its glyph
 but compares and calculates as its code, so c == 65, 'b' - 'a' == 1 and
 (char)(c + 1) == 'c' all hold. Literals cover hex / binary / octal / underscored /
@@ -62,10 +63,7 @@ Main, whose `main` may be an instance method (the launcher constructs it).
 Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
 switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
 are picked by arity), the flow scoping of pattern variables (a binding outlives the
-test that introduced it), threads and reflection. An ANONYMOUS class body cannot
-read a local or parameter of the ENCLOSING METHOD here, where the compiler half
-can - its methods are built into a fresh frame rather than over the defining scope;
-an outer FIELD, an outer static and Outer.this all work. A JPMS module declaration
+test that introduced it), threads and reflection. A JPMS module declaration
 (module-info.java, with requires / exports / opens / uses / provides, and 'import
 module M;') is PARSED and dropped - nothing here has a module system for it to
 describe.

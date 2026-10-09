@@ -97,8 +97,7 @@ destructured for val (a, b) = m.destructured, and next(). String.matches, .repla
 .split and .contains take a Regex too, and only then - a String argument keeps the
 plain behavior. The replacement template is Kotlin's own dollar-one / dollar-brace-name
 spelling, rewritten here to what the engine expands. The engine has no lookbehind, no
-POSIX bracket expressions and no unicode property escapes, and Regex.escape answers
-explicitly backslashed text rather than the JVM's quote-region form.
+POSIX bracket expressions and no unicode property escapes.
 
 Beyond the executable subset the grammar aims at RECOGNITION: backtick-quoted names,
 package and import declarations anywhere (and a package with a body), `private
