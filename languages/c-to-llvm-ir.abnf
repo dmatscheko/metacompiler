@@ -3811,9 +3811,6 @@ KwDefault   = "default" KwEnd ;
             return exitB
         }
     }
-    // Superseded: the same-named function declarations below come later and win.
-    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
-    function makeDefault(items) { return {isDefault: true, body: items} }
     // ----- switch: case labels are BASIC BLOCKS -----
     // A case label may sit anywhere inside the switch body - in a nested block, or
     // halfway down a loop body, which is what makes Duff's device legal C - so the body

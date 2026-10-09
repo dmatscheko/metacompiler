@@ -37,7 +37,7 @@ arithmetic, wrap-around, shifts and unsigned comparisons all run through the
 language-neutral sized-integer layer of lib/interp-core.js, so 5000000000L keeps every
 bit and (unsigned long)-1 is 18446744073709551615. A declared return type converts the
 returned value, so a function declared int truncates a long.
-Not in the subset: aggregate initializers on globals, and variable-length arrays.
+Not in the subset: variable-length arrays.
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
 address, scopes map names to addresses, and pointers are plain indexes; every int,

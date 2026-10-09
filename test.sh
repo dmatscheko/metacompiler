@@ -595,15 +595,14 @@ if [ "$FULL" -eq 1 ]; then
                   printf "  and NOT a kill (that is reported separately). Usual causes: VACUOUS - main() is\n"
                   printf "  not being run; UNMEASURED - the probe hit an error it could not attribute to a\n"
                   printf "  section, or the grammar is missing. tests/gates.sh greps for the NO-COUNT: line\n"
-                  printf "  above BY NAME - it is the designed detector, not the two greps that used to\n"
-                  printf "  catch this class only by overlapping each other.\n"
+                  printf "  above by name.\n"
                   printf "  What the affected languages put into the total above:%s\n", missing
               }
               if (totgaps > 0) {
                   printf "\n  GAPS: %d section-gap(s), summed per half, across %d language(s), deleted before the file would run:%s\n", totgaps, ngappy, gapnames
                   printf "  Each of those languages still CONTRIBUTED its remaining assertions to the total\n"
-                  printf "  above - that is the fix for docs/todo.md 6.1, and it is why the total falls by\n"
-                  printf "  the size of the deleted sections rather than by a whole language. The gap list\n"
+                  printf "  above, so the total falls by the size of the deleted sections rather than by a\n"
+                  printf "  whole language. The gap list\n"
                   printf "  per grammar is in the per-language report above. tests/gates.sh has a recorded\n"
                   printf "  FULL_GAPS ceiling, so a NEW gap is red even though the total barely moves.\n"
               }

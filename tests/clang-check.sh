@@ -165,7 +165,7 @@ else
     printf '                       anyway and the ratchet still reports FULL.\n'
     printf '  - NATIVE RUN DISAGREES  the module is well-formed and clang builds it, but\n'
     printf '                       the executable does not behave as it does under\n'
-    printf '                       llvm.Run. Only the three self-contained-IR languages\n'
-    printf '                       (bash, batch, c) can be checked this far at all.\n\n'
+    printf '                       llvm.Run (the native binary links layer 2, llvm.Run\n'
+    printf '                       uses the Go twin).\n\n'
 fi
 exit "$rc"

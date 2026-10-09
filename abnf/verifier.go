@@ -29,7 +29,7 @@ import (
 
 // VerifyIssue is one problem found by Verify.
 type VerifyIssue struct {
-	Kind   string // "undefined" / "badrange" (errors) or "unreachable" (warning).
+	Kind   string // "undefined" / "badrange" / "dupfunc" (errors) or "unreachable" (warning).
 	Name   string // The offending identifier / production name, or bad range bound.
 	Line   int    // 1-based line in the grammar source (0 if unknown).
 	Detail string // Extra context (the range unit "rune"/"byte" for badrange).
