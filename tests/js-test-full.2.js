@@ -791,7 +791,12 @@ function s40() {
     check("mv3", typeof p.zz === "undefined")
     var bm = p.bm
     var am = p.am
-    check("mv4", bm() === "b" && am() === "a1")     // the shim stays bound to p
+    // NOT bound: a bare call has `this` undefined (class bodies are strict), so `am`
+    // throws a TypeError, and the receiver of a call through the value is the call's.
+    var amThrew = false
+    try { am() } catch (e) { amThrew = e instanceof TypeError }
+    check("mv4", bm() === "b" && amThrew)
+    check("mv7", p.am === p.am && p.am === am && am.call(p) === "a1")
     check("mv5", typeof arr.push === "function")    // was engine-dependent
     check("mv6", typeof "s".slice === "function")
 

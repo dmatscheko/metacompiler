@@ -4406,14 +4406,11 @@ NotFuncHead = :script(~~
         return t
     }
     // getMember is getMemberRaw plus the METHODS. An instance keeps its methods on its
-    // __class descriptor rather than as own properties, so a plain read found nothing
-    // and `typeof p.m` answered "undefined" where node says "function" - in all four
-    // engines. The answer is a receiver-bound shim that re-enters mcall, so a method
-    // read as a value and then called behaves exactly as `p.m(...)` does, __super walk
-    // and all; the call SITE keeps using getMemberRaw (see foldCallMember), which is
-    // what stops an ordinary method call allocating a closure it would throw away.
-    // Twins: js_jsvget in abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
-    // docs/todo.md 2.5.
+    // __class descriptor rather than as own properties, so a plain read finds nothing;
+    // a method read as a VALUE answers methodValueShim, while the call SITE keeps using
+    // getMemberRaw (see foldCallMember), which is what stops an ordinary method call
+    // allocating a closure it would throw away. Twins: js_jsvget in
+    // abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
     function getMember(o, k) {
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
@@ -4422,7 +4419,9 @@ NotFuncHead = :script(~~
         // the __-name skip would hide it from the walk. docs/todo.md 2.4.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
             (isPrivateKey(k) || !isInternalKey(k))) {
-            if (findClassMethod(o, k) != undefined) { return boundMethodShim(o, k) }
+            var cm = anytype // The method closure, or absent.
+            cm = findClassMethod(o, k)
+            if (cm != undefined) { return methodValueShim(cm, "" + k) }
         }
         return v
     }
@@ -4436,38 +4435,34 @@ NotFuncHead = :script(~~
         }
         return undefined
     }
-    function boundMethodShim(o, k) {
-        // The shim IS the method as a value, so it answers the method's own name and
-        // arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The underlying
-        // closure's registered length already excludes the receiver, which arrives as
-        // arguments[0] and is not a declared parameter. docs/todo.md 1.4.
-        return fnMetaPut(boundMethodShimFn(o, k), "" + k, fnLenOf(findClassMethod(o, k)))
+    // A __class method READ AS A VALUE: one function per method closure, so that
+    // `p.m === p.m` holds as in node. Nothing is bound - the receiver is the call
+    // site's (pendingThis, which callWithThis arms and which must be DRAINED here
+    // exactly as makeClosure drains it), so a bare `g()` runs the body with `this`
+    // undefined: the TypeError a class body's strict mode gives in node. The closure
+    // takes that receiver as arguments[0]. Twins: jsvMethodValue in
+    // abnf/jsrtjsprint.go and jvMethodValue in languages/lib/js-rt.metajs.
+    var mvK = []
+    var mvV = []
+    function methodValueShim(m, k) {
+        for (var i = 0; i < mvK.length; i++) {
+            if (mvK[i] === m) { return mvV[i] }
+        }
+        // The value answers the method's own name and arity: node says `meth`/1 for
+        // `new C().meth` of `meth(x){}`. The closure's registered length already
+        // excludes the receiver.
+        var f = fnMetaPut(methodValueFn(m), k, fnLenOf(m))
+        mvK.push(m)
+        mvV.push(f)
+        return f
     }
-    function boundMethodShimFn(o, k) {
+    function methodValueFn(m) {
         return function() {
-            // AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the method on
-            // x in node; this shim used to ignore x entirely and re-dispatch on o, so
-            // every .call/.apply/.bind on a method read as a VALUE silently kept the
-            // read-time receiver - in all four engines. pendingThis is the one-shot
-            // slot callWithThis (and so fnCallShim / fnApplyShim / fnBindShim) arms,
-            // and it must be DRAINED here exactly as makeClosure drains it, or the
-            // receiver leaks into the next closure that runs. An absent receiver keeps
-            // the read-time one, which is what makes `(super.who)()` and a bare `f()`
-            // behave as they did. The resolved method is invoked directly rather than
-            // re-entering mcall, because an explicit receiver need not be an instance
-            // of o's class - or an instance at all. docs/todo.md 2.10.
             var recv = pendingThis
             pendingThis = undefined
-            var a = []
+            var a = [recv]
             for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
-            if (recv != undefined) {
-                var m = findClassMethod(o, k)
-                if (m != undefined) { return m.apply(undefined, concat2impl([recv], a)) }
-            }
-            // A bound shim has lost its call site (`const f = o.m; f()`), so the text
-            // node would print is the NAME the shim was made from, on an anonymous
-            // receiver. docs/todo.md 1.4.
-            return mcall(o, k, a, "(intermediate value)." + k)
+            return m.apply(undefined, a)
         }
     }
     // ----- The intrinsic `name` and `length` of a FUNCTION -----
@@ -7237,9 +7232,12 @@ NotFuncHead = :script(~~
                 scopePut(self, fk, fv)
                 trackKey(self, fk)
             }
-            if (bodyT != null) bodyT()
+            var rb = anytype // The body's return record, or absent.
+            rb = undefined
+            if (bodyT != null) rb = bodyT()
             scopes = saved
-            return undefined
+            // An explicit `return v` reaches makeNewFrom, which keeps it if it is an object.
+            return (rb != undefined && rb.isRet) ? rb.v : undefined
         }
     }
 
@@ -7636,7 +7634,9 @@ NotFuncHead = :script(~~
             obj["__keys"] = []
             var cargv = [obj]
             for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
-            cls.__ctor.apply(undefined, cargv)
+            var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
+            cret = cls.__ctor.apply(undefined, cargv)
+            if (cret != undefined && cret != null && (typeof cret == "object" || typeof cret == "function")) { return cret }
             return obj
         }
     }
@@ -7713,11 +7713,9 @@ NotFuncHead = :script(~~
     // is called with here (see mcall).
     function superMethodShim(m, self) {
         return function() {
-            // An EXPLICIT receiver wins over the read-time one, the same rule
-            // boundMethodShim follows and for the same reason: `super.m.call(x)` runs
-            // the parent's method on x in node, and this shim used to hand it `self`.
-            // pendingThis is drained here, as every other callable in this engine
-            // drains it. docs/todo.md 2.10.
+            // An EXPLICIT receiver wins over the read-time one: `super.m.call(x)` runs
+            // the parent's method on x in node. pendingThis is drained here, as every
+            // other callable in this engine drains it.
             var recv = pendingThis
             pendingThis = undefined
             var a = [(recv != undefined) ? recv : self]

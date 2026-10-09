@@ -1227,23 +1227,60 @@ function jvFindClassMethod(o, name) {
     return undefined
 }
 
-// A __class method, bound to its receiver. The convention a class method is called
-// with here PREPENDS the receiver to the arguments (js_jsmcall's own arm does the
-// same), so the shim rebuilds that argument list.
+// A __class method found through `super.m`, bound to the receiver of the read. The
+// convention a class method is called with here PREPENDS the receiver to the
+// arguments (js_jsmcall's own arm does the same), so the shim rebuilds that list.
 function jvBoundMethod(fn, self) {
     return function () {
-        // AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` (and the same shim
-        // reached through js_supget, so `super.m.call(x)`) runs the method on x in
-        // node; this shim used to ignore x and always re-enter with the receiver the
-        // READ was made with, in all four engines. jvThis is the receiver channel the
-        // emitter arms with js_jssetthis IMMEDIATELY BEFORE EVERY CALL - a plain
-        // `f()` therefore arms undefined, which keeps the read-time receiver and
-        // leaves `(super.who)()` behaving as it did. Every layer-2 callback site goes
-        // through jvCallT, which arms it too. docs/todo.md 2.10.
+        // AN EXPLICIT RECEIVER WINS: `super.m.call(x)` runs the method on x in node.
+        // jvThis is the receiver channel the emitter arms with js_jssetthis
+        // IMMEDIATELY BEFORE EVERY CALL - a plain `f()` therefore arms undefined,
+        // which keeps the read-time receiver, so `(super.who)()` runs on `this`.
+        // Every layer-2 callback site goes through jvCallT, which arms it too.
         var recv = anytype
         recv = jvThis
         if (recv === undefined) { recv = self }
         var a = [recv]
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return jvCallT(fn, undefined, a)
+    }
+}
+
+// A __class method READ AS A VALUE: one function per method closure, so `p.m === p.m`
+// holds as in node. Nothing is bound - the receiver is the call site's (jvThis, armed
+// before every call), so a bare `g()` runs the body with `this` undefined, which is
+// the TypeError a class body's strict mode gives in node. The closure takes that
+// receiver PREPENDED to its arguments. The cache is an identity scan over the methods
+// ever read as values, which is the miss path only. Twins: jsvMethodValue in
+// abnf/jsrtjsprint.go and methodValueShim in both *-interpreter.abnf.
+var jvMvK = []
+var jvMvV = []
+var jvMvN = 0
+
+function jvMethodValue(fn, key) {
+    var i = 0
+    while (i < jvMvN) {
+        if (jvMvK[i] === fn) { return jvMvV[i] }
+        i = i + 1
+    }
+    // The value answers the method's own name and arity: node says `meth`/1 for
+    // `new C().meth` of `meth(x){}`. The closure's registered length already excludes
+    // the prepended receiver.
+    var mv = anytype
+    mv = fnMetaSet(jvMethodValueFn(fn), key, jvFnLenOf(fn))
+    jvMvK.push(fn)
+    jvMvV.push(mv)
+    jvMvN = jvMvN + 1
+    return mv
+}
+
+function jvMethodValueFn(fn) {
+    return function () {
+        var a = [jvThis]
         var i = 0
         while (i < arguments.length) {
             a.push(arguments[i])
@@ -1391,12 +1428,7 @@ function jvValueMiss(o, key) {
         }
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
-            // The shim IS the method as a value, so it answers the method's own name
-            // and arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The
-            // method closure's registered length already excludes the receiver, which
-            // is PREPENDED to the arguments and is not a declared parameter.
-            // docs/todo.md 1.4.
-            if (fn !== undefined) { return fnMetaSet(jvBoundMethod(fn, o), key, jvFnLenOf(fn)) }
+            if (fn !== undefined) { return jvMethodValue(fn, key) }
             return undefined
         }
     }

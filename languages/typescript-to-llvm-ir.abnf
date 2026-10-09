@@ -5621,9 +5621,11 @@ NotFuncHead = :script(~~
             callExt(clsB, "js_arr_push", [cargs, oC])
             var cb = emitSpreadInto(clsB, cargs, function(bb) { return {b: bb, v: argsV} })
             var ctorV = callExt(cb, memGetExt(), [clsV, emitStr(cb, "__ctor")])
-            jsCall(cb, ctorV, hUndef, cargs)
+            // [[Construct]]'s last step, as in the function form: an OBJECT the
+            // constructor returns replaces the instance.
+            var oCr = callExt(cb, "js_jsnewres", [jsCall(cb, ctorV, hUndef, cargs), oC])
             cb.NewBr(mergeB)
-            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(oF, fnB), llvm.ir.NewIncoming(oC, cb)])}
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(oF, fnB), llvm.ir.NewIncoming(oCr, cb)])}
         }
     }
 

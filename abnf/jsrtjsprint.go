@@ -382,6 +382,32 @@ func jsvFnMetaSet(v interface{}, name string, length int) {
 	}
 }
 
+// jsvMethodVals -- a __class method READ AS A VALUE, one per method closure, so that
+// `p.m === p.m` and `p.m === q.m` hold as they do in node. The closure takes its
+// receiver PREPENDED to the arguments (see jsvCallMethod); the value is the plain
+// function that takes `this` from its call site instead. Nothing is bound: a bare
+// `g()` runs the body with `this` undefined, which is the TypeError a class body's
+// strict mode gives in node. The table pins the method closures it has seen, which
+// live as long as their class descriptor anyway. Twins:
+// jvMethodValue in languages/lib/js-rt.metajs and methodValueShim in both
+// *-interpreter.abnf.
+var jsvMethodVals = map[interface{}]*hostFunc{}
+
+func jsvMethodValue(name string, fn interface{}) *hostFunc {
+	if shim, found := jsvMethodVals[fn]; found {
+		return shim
+	}
+	shim := jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.call(fn, jsUndef, append([]interface{}{rt.unwrap(this)}, args...))
+	})
+	// The value answers the method's own name and arity: node says `meth`/1 for
+	// `new C().meth` of `meth(x){}`. The closure's registered length already excludes
+	// the prepended receiver.
+	jsvFnMetaSet(shim, name, jsvFnMeta(fn).length)
+	jsvMethodVals[fn] = shim
+	return shim
+}
+
 // The value of `f.name` / `f.length`, or nil for any other name and any receiver that is
 // not a function. The DEFAULTS are ""/0 and not "absent": every function has both
 // properties, and a function this table never saw - a host builtin like a String method,
@@ -1846,10 +1872,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// and which deliberately HIDES the String/Array method names so the call falls into
 	// js_jsmcall. The difference this extern exists for: an instance's methods live on
 	// its __class descriptor, not as own properties, so `typeof p.m` answered
-	// "undefined" in all four engines where node says "function". The answer is a
-	// receiver-BOUND host function that re-enters the method with the receiver
-	// PREPENDED, which is the calling convention a __class method has here (see
-	// jsvCallMethod). The layer-2 twin is js_jsvget in languages/lib/js-rt.metajs and
+	// "undefined" in all four engines where node says "function". The answer is
+	// jsvMethodValue: one unbound function per method, which takes `this` from its
+	// call site. The layer-2 twin is js_jsvget in languages/lib/js-rt.metajs and
 	// the interpreters' is getMember's class-method arm. docs/todo.md 2.5.
 	m["js_jsvget"] = func(a []uint64) uint64 {
 		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else
@@ -1902,28 +1927,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		if fn, found := jsvFindClassMethod(recv, name); found {
-			bound := fn
-			shim := jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				// AN EXPLICIT RECEIVER WINS. `const f = o.m; f.call(x)` runs the
-				// method on x in node; this shim used to ignore `this` and always
-				// re-enter with the receiver the READ was made with, so every
-				// .call/.apply/.bind on a method read as a value silently kept it -
-				// in all four engines. An absent receiver still keeps the read-time
-				// one, which is what leaves a bare `f()` behaving as it did.
-				// docs/todo.md 2.10.
-				self := interface{}(recv)
-				if !isUndefOrNull(u(this)) {
-					self = u(this)
-				}
-				return rt.call(bound, jsUndef, append([]interface{}{self}, args...))
-			})
-			// The shim IS the method as a value, so it answers the method's own name and
-			// arity: node says `meth`/1 for `new C().meth` of `meth(x){}`. The method
-			// closure's registered length already excludes the receiver, which is
-			// PREPENDED to the arguments and is not a declared parameter.
-			// docs/todo.md 1.4.
-			jsvFnMetaSet(shim, name, jsvFnMeta(bound).length)
-			return w(shim)
+			return w(jsvMethodValue(name, fn))
 		}
 		return r
 	}

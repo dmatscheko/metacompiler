@@ -522,7 +522,17 @@ Promise.resolve().then(qnop).then(qnop).then(qnop).then(qnop).then(function() {
 class FMv { m() { return "m" + this.k } }
 var fmv = new FMv(); fmv.k = 1;
 check("method-as-value-typeof", typeof fmv.m === "function");
-check("method-as-value-call", (function() { var g = fmv.m; return g(); })() === "m1");
+// A method read as a value is NOT bound: called bare, `this` is undefined (a class
+// body is strict), and the receiver comes from the call site. One value per method.
+check("method-as-value-call", (function() { var g = fmv.m; try { g(); return false; } catch (e) { return e instanceof TypeError; } })());
+check("method-as-value-identity", fmv.m === fmv.m && fmv.m === new FMv().m);
+check("method-as-value-receiver", ({k: 5, m: fmv.m}).m() === "m5" && fmv.m.call({k: 8}) === "m8");
+// [[Construct]]: an object a class constructor returns replaces the instance; a
+// primitive one is ignored.
+var ctorRetP = {tag: "P"};
+class CtorRetObj { constructor() { return ctorRetP } }
+class CtorRetPrim { constructor() { this.a = 1; return 5 } }
+check("ctor-returns-object", new CtorRetObj() === ctorRetP && new CtorRetPrim().a === 1);
 check("method-in-operator", ("m" in fmv) && !("__class" in fmv));
 check("builtin-as-value", typeof [].push === "function" && typeof "s".slice === "function");
 check("objproto-tostring", Object.prototype.toString.call([1]) === "[object Array]" &&
