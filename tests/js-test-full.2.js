@@ -957,15 +957,19 @@ function s41() {
     // every pre-existing `("" + e).indexOf(...)` assertion in this file honest.
     check("err18", ("" + new TypeError(xs[0])).indexOf("TypeError: ") === 0)
 
-    // name / message / stack ARE ENUMERABLE HERE and non-enumerable in node,
-    // where Object.keys(new Error("x")) is []. That is a value-model ceiling,
-    // not a slip: the floor's js_keys IS for-in and object spread, a layer-2
-    // object has exactly one key list - the floor's - and no way to mark an
-    // entry hidden, and the only alternative was three more key comparisons on
-    // js_jsmget's hot path, which that function's own measurements (+21% to
-    // +43% for one added test) rule out. All four engines were made to AGREE
-    // and to diverge from node together, so this row asserts OUR answer.
-    check("err19", Object.keys(new Error(xs[0])).join(",") === "name,message,stack")
+    // name / message / stack are NOT enumerable: Object.keys(new Error("x")) is [],
+    // for-in and spread see only the program's own fields, and a write keeps message
+    // hidden. `name` lives on the prototype, so writing it creates an ordinary
+    // enumerable own property at that point of the key order.
+    check("err19", Object.keys(new Error(xs[0])).join(",") === "" && Object.keys(new Error()).length === 0)
+    var ek = []
+    for (var ekk in m2) { ek.push(ekk) }
+    check("err20", ek.join(",") === "code" && Object.keys({...m2}).join(",") === "code")
+    var ew = new RangeError(xs[0])
+    ew.message = "b"
+    ew.q = 1
+    ew.name = "Q"
+    check("err21", Object.keys(ew).join(",") === "q,name" && ("" + ew) === "Q: b" && ("message" in ew))
 }
 function* s41deleg() { yield* [3, 4] }
 

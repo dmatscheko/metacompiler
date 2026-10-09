@@ -293,7 +293,7 @@ func jsvOwnKeys(v interface{}) []string {
 				out = append(out, k)
 			}
 		}
-		return out
+		return jsvErrHide(o, out)
 	case *jsArray:
 		out := make([]string, len(o.elems))
 		for i := range o.elems {
@@ -2121,6 +2121,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return w(out)
 			}
+			if _, marked := v.props["__errh"]; marked {
+				out := &jsArray{}
+				for _, k := range jsvOwnKeys(v) {
+					out.elems = append(out.elems, k)
+				}
+				return w(out)
+			}
 		case *jsArray:
 			return w(jsvIndexKeys(len(v.elems)))
 		case string:
@@ -2211,6 +2218,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if p := jsvFnPropsMake(u(a[0])); p != nil {
 			p.set(rt.toString(u(a[1])), u(a[2]))
 			return 0
+		}
+		if o, isObj := u(a[0]).(*jsObject); isObj {
+			if rt.toString(u(a[1])) == "name" {
+				jsvErrNameWrite(o)
+			}
 		}
 		return baseSet(a)
 	}
@@ -2425,20 +2437,51 @@ func jsErrText(name, msg string) string {
 // line node's stack starts with and no frames, which is what an
 // `e.stack.split("\n")[0]` idiom reads.
 func (rt *jsrt) jsErrInit(self *jsObject, msg string) {
-	// NAME / MESSAGE / STACK ARE ENUMERABLE HERE AND NON-ENUMERABLE IN A REAL
-	// ENGINE, and that is a value-model ceiling rather than a slip:
-	// Object.keys(new Error("x")) is [] in node and ["name","message","stack"] in
-	// all four engines here. The floor's js_keys IS for-in and object spread, a
-	// layer-2 object has exactly one key list - the floor's - and no way to mark
-	// an entry hidden; the only alternative was three more key comparisons on
-	// js_jsmget's hot path, which that function's own measurements (+21% to +43%
-	// for one added test) rule out. So set(), not props[]: all four engines were
-	// made to AGREE and to diverge from node together, which is the one thing
-	// this project's byte-identity gates can still see.
+	// name / message / stack are NOT ENUMERABLE in node: Object.keys(new
+	// Error("x")) is []. The __errh mark makes jsvErrHide drop them from the key
+	// lists, the same shape as layer 2's, where a floor object cannot hold a hidden
+	// key at all. js_jsmset clears the mark's name half when the program writes
+	// `name` itself, which node makes an ordinary enumerable own property because
+	// the original lives on the prototype. Twins: js_jserrinit in
+	// languages/lib/js-rt.metajs and jsErrInit in both *-interpreter.abnf.
 	name := jsErrNameOf(self)
 	self.set("name", name)
 	self.set("message", msg)
 	self.set("stack", jsErrText(name, msg))
+	self.props["__errh"] = true
+}
+
+// jsvErrHide is an Error instance's own key list without the non-enumerable three
+// (see jsErrInit); any other object's list comes back as it is.
+func jsvErrHide(o *jsObject, ks []string) []string {
+	h, marked := o.props["__errh"]
+	if !marked {
+		return ks
+	}
+	out := make([]string, 0, len(ks))
+	for _, k := range ks {
+		if k == "message" || k == "stack" || (k == "name" && h == true) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// jsvErrNameWrite: the program writes `name` on an Error instance, so from now on it
+// is an ordinary own property, created at THIS point of the key order.
+func jsvErrNameWrite(o *jsObject) {
+	if o.props["__errh"] != true {
+		return
+	}
+	o.props["__errh"] = false
+	for i, k := range o.keys {
+		if k == "name" {
+			o.keys = append(o.keys[:i:i], o.keys[i+1:]...)
+			break
+		}
+	}
+	delete(o.props, "name")
 }
 
 func (rt *jsrt) jsErrToString(v interface{}) string {

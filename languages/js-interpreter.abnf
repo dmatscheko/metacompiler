@@ -6362,27 +6362,20 @@ NotFuncHead = :script(~~
     // and `new Error(undefined)` both leave message "" - the spec only assigns
     // it when the argument is not undefined, and null is not undefined.
     //
-    // NAME / MESSAGE / STACK ARE ENUMERABLE HERE AND NON-ENUMERABLE IN A REAL
-    // ENGINE, and that is a value-model ceiling rather than a slip:
-    // `Object.keys(new Error("x"))` is [] in node and ["name","message","stack"]
-    // in all four engines here. The floor's js_keys IS for-in and object spread
-    // (languages/lib/runtime.c), a layer-2 object has exactly ONE key list - the
-    // floor's - and no way to mark an entry hidden; the only alternative was
-    // three more key comparisons on js_jsmget's hot path, which that function's
-    // own measurements (+21% to +43% for one added test) rule out. So all four
-    // engines were made to AGREE and to diverge from node together, which is the
-    // one thing this project's byte-identity gates can still see. The three
-    // values themselves, and everything read off them, are node's exactly.
+    // name / message / stack are NOT ENUMERABLE in node - Object.keys(new
+    // Error("x")) is [] - so none of the three goes on the instance's key list, and
+    // the __errh mark keeps trackKey from adding message or stack on a later write.
+    // A program's own `this.name = "E"` does land on the list, as in node, where the
+    // original name lives on the prototype. Twins: jsErrInit in abnf/jsrtjsprint.go
+    // and js_jserrinit in languages/lib/js-rt.metajs.
     function jsErrInit(self, msg) {
         var n = jsErrNameOf(self)
         var m = ""
         if (msg !== undefined) { m = jsStr(msg) }
         scopePut(self, "name", n)
-        trackKey(self, "name")
         scopePut(self, "message", m)
-        trackKey(self, "message")
         scopePut(self, "stack", jsErrText(n, m))
-        trackKey(self, "stack")
+        scopePut(self, "__errh", true)
         return undefined
     }
     // Error.prototype.toString: "TypeError: x", the name alone when there is no
@@ -6596,6 +6589,8 @@ NotFuncHead = :script(~~
         // A mangled PRIVATE name is deliberately absent from __keys - nothing enumerates
         // one - so the brand check `#x in o` has to ask the slot itself. docs/todo.md 2.4.
         if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
+        // ...and so are an Error instance's name / message / stack (see jsErrInit).
+        if (hasOwn(o, "__errh") && hasOwn(o, "" + k)) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
         // A METHOD is not an own property here - it lives on the __class descriptor -
@@ -6801,6 +6796,8 @@ NotFuncHead = :script(~~
         if (typeof key != "string") { return }
         if (isInternalKey(key)) { return }
         if (!hasOwn(o, "__keys")) { return }
+        // An Error instance's message and stack stay non-enumerable (see jsErrInit).
+        if ((key === "message" || key === "stack") && hasOwn(o, "__errh")) { return }
         var ks = o["__keys"]
         if (ks.indexOf(key) < 0) { ks.push(key) }
     }
