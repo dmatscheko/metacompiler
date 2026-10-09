@@ -55,9 +55,8 @@ Program     <~~ runProgram(takeAll()) ~~>
 // shape most of a spec suite has). Body and Program therefore accept the same items.
 BodyItem    = HdBodyItem | AliasTop | Statement ;
 
-// module M ... end: accepted but not implemented (no namespacing). Its body is a
-// program of the same items; under -warn-unsupported they run in the current scope
-// so any defs/classes/calls stay visible. A nested module recurses.
+// module M ... end: creates (or reopens) the module object and runs its body, a program
+// of the same items. A nested module recurses.
 ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
@@ -71,10 +70,8 @@ ClassPath   = KwNilPath | ScopedName ;
 KwNilPath   = "nil" KwEnd "::" Name ;
 
 // A def: implicit return of the last expression, or an explicit return. A singleton
-// receiver (def self.m / def obj.m) is accepted but not implemented (routed as a
-// plain method of that name). The parameter list accepts default / splat / double-
-// splat / block / keyword parameters; the fancy forms are notImplemented (the method
-// is still built with the parameter names, so its body stays runnable).
+// receiver (def self.m / def obj.m) defines a singleton method. The parameter list
+// accepts default / splat / double-splat / block / keyword parameters.
 Def         <~~ push(makeFun(takeAll())) ~~>
             = KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
 // The name a def may carry. SetterName comes FIRST (PEG): `def name=(v)` declares the
@@ -106,7 +103,7 @@ SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
 // The receiver TEXT is carried up so that anything but `self` becomes a def on that
-// one OBJECT (docs/todo.md 1.3); ScopedName already accepts a plain local name.
+// one OBJECT; ScopedName already accepts a plain local name.
 SelfRecvHead <~~ push(up.in) ~~>
             = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
@@ -154,8 +151,6 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
-// A superclass (class D < Base) is accepted but not implemented (no inheritance);
-// the class body still runs as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ]
               { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
@@ -264,18 +259,13 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
             = StmtRescue [ SameLine ModKw ModCond ] ;
-// STMT rescue STMT: the STATEMENT modifier form of rescue, which is where MRI
-// really puts it. It used to live inside the expression chain alone, and that was
-// wrong in both directions: `raise "a" rescue 7' did not parse at all (the raise
-// is a statement, not an expression), `g 1/0 rescue 9' bound the rescue to g's
-// ARGUMENT and called g, and `x = f rescue "c"' rescued the ASSIGNMENT so x was
-// never written. MRI's own grammar allows the modifier at exactly three places -
-// a statement, an assignment's right-hand side and a parenthesised body - and
-// REJECTS `f(a rescue b)' outright, so the tail moved out of the expression chain
-// to here and to AssignRhs; `(a rescue b)' reaches it through ParenBody.
+// STMT rescue STMT: the STATEMENT modifier form of rescue. MRI allows the modifier at
+// exactly three places - a statement, an assignment's right-hand side (AssignRhs) and a
+// parenthesised body (reached through ParenBody) - and REJECTS `f(a rescue b)', so it is
+// not part of the expression chain.
 // NotAfterSemi is what keeps a one-line `def f; raise "x"; rescue; 1; end' intact:
 // ExprStmt consumes the `;', so without it this rule would steal the def's own
-// rescue CLAUSE. docs/todo.md 1.3.
+// rescue CLAUSE.
 StmtRescue  <~~ push(makeRescueMod(takeAll())) ~~>
             = SimpleStmt [ SameLine NotAfterSemi KwRescue SimpleStmt ] ;
 // `remove_method :m if method_defined? :m` - the condition of a modifier is a full
@@ -349,13 +339,9 @@ MGroup      <~~ push({group: takeAll()}) ~~>
             = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
-// SameLine is what makes the no-argument form a no-argument form. Without it the
-// optional Expression reached ACROSS the newline and a bare `puts' swallowed the
-// start of the next statement: `puts' followed by `p x' parsed as `puts p' (the
-// bare name `p' is a method reference, so it printed "#<Proc>") and left `x' as a
-// dead statement, while `puts' followed by `f x' called `f' with no arguments.
-// CommandForm already spells the same guard for exactly this reason.
-// docs/todo.md 1.3.
+// SameLine is what makes the no-argument form a no-argument form: without it the
+// optional Expression reaches ACROSS the newline, and a bare `puts' followed by `p x'
+// parses as `puts p'. CommandForm spells the same guard for the same reason.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> [ SameLine Expression { "," Expression } ] ;
 
@@ -394,7 +380,6 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // the very first token when the right side is anything else.
 // The right-hand side carries the rescue modifier (`x = f rescue "c"'), because
 // in Ruby `rescue' binds TIGHTER than `=': the fallback is what gets assigned.
-// docs/todo.md 1.3.
 AssignRhs   <~~ push(makeRescueMod(takeAll())) ~~>
             = RhsCore [ SameLine KwRescue RhsCore ] ;
 RhsCore     = SplatRhs | CommandForm | AssignExpr ;
@@ -513,11 +498,8 @@ ParenTargetAhead = :script(~~
 ~~) ;
 
 // A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
-// user-defined `[]=` with three). Only the first is lowered; the rest are parsed so
-// the surrounding file is understood, which is what a multi-key []= costs here.
-// The SECOND subscript is kept: `a[1, 2] = 9' replaces two elements in MRI and
-// used to write one here, because this action dropped everything after n[0].
-// docs/todo.md 1.3.
+// user-defined `[]=` with three). The first two are lowered (`a[1, 2] = 9' replaces two
+// elements); the rest are parsed so the surrounding file is understood.
 TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = "[" Arg { "," Arg } "]" ;
 
@@ -636,9 +618,7 @@ SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}
 // A subscript reaches a user-defined #[] with a full argument list. A ONE-argument
 // subscript is the ordinary index; a TWO-argument one is Ruby's `s[start, len]' /
 // `a[start, len]' subsequence and is routed through the `[]' METHOD instead, which
-// is also what a user class' `def [](a, b)' wants. Before this only the first
-// argument was evaluated, so `"hello world"[0, 6]' answered ONE CHARACTER in every
-// engine. docs/todo.md 1.10.
+// is also what a user class' `def [](a, b)' wants.
 IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = LineCont "[" Arg { "," Arg } "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
@@ -647,10 +627,8 @@ IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.lengt
 // the `foo (1)` spelling working, which Ruby warns about but accepts.)
 MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ] | Block ;
 
-// A call argument: an ordinary expression, or one of the forms accepted for
-// recognition but not implemented - keyword argument (name: v), splat / double-splat
-// (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
-// placeholder argument, so the call still runs.
+// A call argument: an ordinary expression, a keyword argument (name: v), a splat /
+// double-splat (*a, **h) or a block pass (&blk, &:sym).
 // FwdArg comes LAST: a leading "..." is first offered to Expression, which reads it
 // as a beginless exclusive range and only fails when no operand follows - so `f(...)`
 // forwards while `f(...9)` stays a range.
@@ -892,8 +870,7 @@ ForVar      = "(" ForVarList ")" | ForPathAhead Target <~~ push({ftarget: pop()}
 SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
             = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ Block ] ;
 
-// yield / yield(args) / yield args: accepted but not implemented (no block passing);
-// warns and yields a placeholder value.
+// yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
             = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
 
@@ -903,12 +880,9 @@ YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
 // it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
 // 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
 // Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
-// The Integer literals are ruby's OWN productions rather than lib/numbers.abnf's
-// NumHex / NumBin / NumOct / NumInt, because those build the value with parseInt
-// and parseInt ROUNDS past 2^53: 0x20000000000001 arrived as 9007199254740992 and
-// 12345678901234567890 as ...567000. The syntax is unchanged (the digit
-// productions are still the shared ones); only the value builder differs, and it
-// is intLitDec / intLitRadix, which box anything the double cannot count exactly.
+// The Integer literals use ruby's OWN value builders (intLitDec / intLitRadix) rather
+// than lib/numbers.abnf's, whose parseInt ROUNDS past 2^53; the digit productions are
+// still the shared ones, and anything the double cannot count exactly is boxed.
 RbHexLit    <~~ push(makeConst(intLitRadix(up.in, 16, 2))) ~~>
             = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
 RbBinLit    <~~ push(makeConst(intLitRadix(up.in, 2, 2))) ~~>
@@ -1598,16 +1572,16 @@ LcId        = ( "a"..."z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"...
 PatValue    <~~ push(makePatValue(pop())) ~~> = RangeExpr ;
 
 // begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
-// finally). A raise in the body unwinds to the first rescue (exception types are
-// parsed but not discriminated), which binds its `=> Id` name; else runs only when the
+// finally). A raise in the body unwinds to the first rescue whose types match, which
+// binds its `=> Id` name; else runs only when the
 // body raised nothing and produced no return/break/next; ensure always runs. A
 // return/break/next leaving the body propagates as the ordinary control signal.
 BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = KwBegin Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
               [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] End ;
-// rescue [Type[, Type]] [=> Id]: the type list is parsed and discarded (types are not
-// discriminated); the `=> Id` name is pushed so makeExcept can bind it to the value.
+// rescue [Type[, Type]] [=> Id]: makeExcept collects the type list and the `=> Id`
+// target the raised value is bound to.
 // SameLine is what keeps a bare `rescue` whose body OPENS the next line with a
 // constant (`rescue` newline `ScratchPad << :x`) from reading that constant as the
 // rescued exception type - the type list, like every command argument in Ruby, has
@@ -1648,8 +1622,8 @@ RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
 RetryExpr   <~~ push(makeRetry()) ~~>
             = KwRetry ;
 
-// raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
-// approximated as raising nil); a trailing message argument is parsed and ignored.
+// raise [EXPR[, EXPR]]: a bare raise re-raises the current exception; a class is
+// instantiated with the optional message argument.
 RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
@@ -1996,14 +1970,8 @@ CmdArgAhead = :script(~~
         // Characters that can only continue an expression, never open one.
         // `{` IS ONE OF THEM, and that is Ruby's rule rather than a convenience: a
         // brace after a method name is always a BLOCK, never a Hash argument - MRI
-        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}` with
-        // *syntax error, unexpected ':'*. Without 123 here, CommandForm read the
-        // brace as an ArrowArg and `x = proc { }` became `x = proc({})`, so the
-        // interpreter answered *unknown Hash method: lambda?* and both compiled
-        // halves *variable not defined: proc*. The shape is specifically a command
-        // argument list: `p proc { }.lambda?` always worked, because there the
-        // brace is reached through Primary -> Call -> `BareName Block`.
-        // docs/todo.md 1.3.
+        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}`. Without
+        // 123 here, `x = proc { }` would read as `x = proc({})`.
         if (cc === 40 || cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
@@ -2330,13 +2298,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (c0 == "@") { return "instance-variable" }
             if (t == "self") { return "self" }
             // MRI gives each keyword literal its OWN kind - `defined?(nil)` is "nil",
-            // not "expression". This answered "expression" for all three, and
-            // ruby-to-llvm-ir.abnf converged on that wrong answer rather than invent a
-            // fourth one; MRI is the oracle and it is installed, so both halves now
-            // answer the keyword itself. (2.6.10's Float and defined? behaviour is
-            // unchanged in 3.x, so this row is settleable on /usr/bin/ruby.) These are
-            // KEYWORDS - no local, method or constant can carry one of these names - so
-            // returning the text needs no further test.
+            // not "expression". These are KEYWORDS - no local, method or constant can
+            // carry one of these names - so returning the text needs no further test.
             if (t == "nil" || t == "true" || t == "false") { return t }
             if (c0 >= "A" && c0 <= "Z") {
                 for (var i2 = scopes.length - 1; i2 >= 0; i2--) { if (hasOwn(scopes[i2], t)) { return "constant" } }
@@ -2411,9 +2374,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Symbols -----
-    // :name is its OWN type in Ruby (:ok != "ok"), so it cannot stay the string it
-    // used to be here. Symbols are INTERNED in symTable, which makes === identity
-    // decide equality and therefore lets them work as hash keys unchanged.
+    // :name is its OWN type in Ruby (:ok != "ok"), so it cannot be a plain string.
+    // Symbols are INTERNED in symTable, which makes === identity decide equality and
+    // therefore lets them work as hash keys unchanged.
     var symTable = {}
     function mkSym(name) {
         var k = "$" + name
@@ -2861,8 +2824,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of
-    // the same value. parseInt rounds past 2^53 - 0x20000000000001 came back as
-    // 2^53 - and bigFromDec reads decimal only, so the conversion is a schoolbook
+    // the same value. parseInt rounds past 2^53 and bigFromDec reads decimal
+    // only, so the conversion is a schoolbook
     // multiply-add over a little-endian array of decimal digits: d = d * radix + v.
     function radixToDec(digits, radix) {
         var d = [0]
@@ -2908,9 +2871,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     // The EXACT value of an integral double as a big. Ruby never renders an
-    // Integer in exponent form, and `"" + x` does exactly that from 1e21 up, so
-    // `(2.0 ** 70).to_i` printed 1.1805916207174113e+21 where MRI prints all 22
-    // digits. x = m * 2^e with m < 2^53: halving a double is exact (it only
+    // Integer in exponent form, and `"" + x` does exactly that from 1e21 up.
+    // x = m * 2^e with m < 2^53: halving a double is exact (it only
     // decrements the exponent) and an integral x >= 2^53 stays integral all the
     // way down to m, so the mantissa is recovered exactly and shifted back up.
     function bigFromDouble(x) {
@@ -2969,23 +2931,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isRat(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rat === true }
     function isCpx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cpx === true }
     // THE BLOCK MARKER. A call's block is appended to the argument list (makeCall
-    // and mcall below), and until this existed it went in as the BARE closure -
-    // indistinguishable from a Proc handed over as an ordinary positional argument.
-    // bindParams could only guess ("the trailing callable is the block"), so
-    // `def m(f = 3); end; m(some_proc)' took the default where MRI binds the proc.
-    // Wrapping records the fact at the CALL SITE, which is the only place that
-    // knows it. js_rblkwrap of lib/ruby-rt.metajs and rubyBlkWrap of abnf/jsrt.go
-    // are the same pair for the compiler half.
+    // and mcall below) WRAPPED, so it stays distinguishable from a Proc handed over
+    // as an ordinary positional argument: `def m(f = 3); end; m(some_proc)' binds
+    // the proc to f, as MRI does. Wrapping records the fact at the CALL SITE, which
+    // is the only place that knows it. Twins: js_rblkwrap of lib/ruby-rt.metajs and
+    // rubyBlkWrap of abnf/jsrt.go.
     function mkBlkArg(f) { return {__rblk: f} }
     function isBlkArg(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rblk !== undefined }
 
     // ----- Kernel#Integer / #Float / #String / #Array: the CONVERSION functions.
-    // They existed in no engine - the name resolved to the builtin CLASS object, so
-    // `Integer("5")' built an INSTANCE of Integer here and aborted both compiled
-    // halves with *call of a non function value*. Integer and Float are STRICT (MRI
-    // raises ArgumentError on anything the whole string is not), which is what makes
-    // `Integer(s) rescue default' the idiom it is. Mirrors rubyKernelConv of
-    // abnf/jsrt.go and rbKernelConv of lib/ruby-rt.metajs. docs/todo.md 1.3.
+    // Integer and Float are STRICT (MRI raises ArgumentError on anything the whole
+    // string is not), which is what makes `Integer(s) rescue default' the idiom it
+    // is. Twins: rubyKernelConv of abnf/jsrt.go and rbKernelConv of lib/ruby-rt.metajs.
     function convDigit(ch) {
         if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
         if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
@@ -3088,20 +3045,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var v = argv.length > 0 ? argv[0] : null
         if (name == "String") { return rstr(v) }
         // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either
-        // from two parts. They were absent from the list, so `Rational(1, 3)' hit
-        // the class arm below and built an INSTANCE of the class Rational - an
-        // object on which every arithmetic operator then aborted with *unknown
-        // method '+' on Rational* - while both compiled halves aborted with *call
-        // of a non function value*. Three engines, three wrong answers, and no gate
-        // could see it because `2r/3r' (the literal form) was the only shape any
-        // test used. docs/todo.md 1.3.
-        //
+        // from two parts (otherwise the name would reach the class arm below and build
+        // an INSTANCE of the class).
         // Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so both go
         // through asRat and inherit exactly what #to_r already answers - no second
-        // conversion rule, and no new divergence. (What #to_r itself cannot do is
-        // an inexact Float: MRI's (0.1).to_r is 3602879701896397/36028797018963968
-        // and a Rational whose parts are bigs is docs/todo.md 2.5's second value
-        // model. Unchanged by this.)
+        // conversion rule.
         if (name == "Rational") {
             var rp = asRat(v)
             if (argv.length < 2) { return mkRat(rp.n, rp.d) }
@@ -3152,13 +3100,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return name == "Integer" || name == "Float" || name == "String" || name == "Array"
     }
     // ===== String methods shared by all three engines ==========================
-    //
-    // The item named six missing String methods (bytes, tr, center, ljust/rjust,
-    // count, delete). A sweep of MRI's whole String surface found SEVENTY-EIGHT that
-    // aborted every engine with *unknown String method*, so these are the six plus
-    // their families plus the cheap remainder. Everything here is a pure function of
-    // strings and numbers, so the three copies (abnf/jsrt.go, lib/ruby-rt.metajs and
-    // ruby-interpreter.abnf) are line-for-line the same. docs/todo.md 1.3.
+    // Everything here is a pure function of strings and numbers, so the three
+    // copies (abnf/jsrt.go, lib/ruby-rt.metajs and ruby-interpreter.abnf) are
+    // line-for-line the same.
 
     // The UTF-8 bytes of a string whose units are UTF-16, surrogate pairs included.
     // String#bytes / #bytesize / #getbyte / #each_byte / #sum all read this.
@@ -3618,7 +3562,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // in this model, so the in-place effect is unrepresentable (the same limitation
     // sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
     // string, or nil when nothing changed, and that is what these produce.
-    // docs/todo.md 1.3.
     function smBangBase(name) {
         if (name.length < 2 || name.charAt(name.length - 1) != "!") { return "" }
         var b = name.substring(0, name.length - 1)
@@ -3693,21 +3636,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // needs NO bit access - the same argument manual 7.7 makes for ruby's %a, and the
     // same safety property: scaling a double by a power of two is exact provided you
     // never overflow and never enter the subnormals, and the loops below are driven so
-    // they do not. (1.5).to_r was (1.5/1) in all four legs where MRI says (3/2), and
-    // (0.1).to_r has to come out 3602879701896397/36028797018963968.
+    // they do not. (1.5).to_r is (3/2) and (0.1).to_r is
+    // 3602879701896397/36028797018963968.
     //
     // WHAT THIS CANNOT REACH, and it is a property of the value model rather than of
     // the arithmetic: n and d are DOUBLES here, so d = 2^-e is representable only
     // while -e <= 1023. A normal double may need 2^1074 (the second-smallest normal,
     // 2^-1022 * (1 + 2^-52), reduces to an ODD numerator over 2^1074), so every
     // |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
-    // denominator this model cannot hold. Those fall back to the old x/1, which is
-    // visibly not an Integer pair rather than a plausible wrong one. Closing it is
-    // the bignum-Rational second value model docs/todo.md 2.4 already names.
+    // denominator this model cannot hold. Those fall back to x/1, which is visibly
+    // not an Integer pair rather than a plausible wrong one.
     //
     // An infinity or a NaN has no Rational at all: MRI raises FloatDomainError, and
-    // WITHOUT the guard this HUNG - mkRat's gcd2 does `x % y` with y = NaN forever,
-    // so `Float::INFINITY.to_r` never returned in the interpreter OR under llvm.Run.
+    // without the guard mkRat's gcd2 would loop forever on `x % NaN`.
     var RAT_M52 = 4503599627370496          // 2^52
     var RAT_M53 = 9007199254740992          // 2^53
     function ratOfFlo(x) {
@@ -3725,11 +3666,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         while (e < 0 && a / 2 == Math.floor(a / 2)) { a = a / 2 ; e = e + 1 }
         // Every pair built here is ALREADY reduced - the loop above took the twos out
         // of a and d is a power of two, so their gcd is 1 - so the record is built
-        // directly rather than through mkRat. That is not only a saving: mkRat's
-        // Euclid runs `x % y` on a pair spanning 1074 binades, and the floor's
-        // d_mod_go is a shift-and-subtract loop, one iteration per binade. The
-        // fallback pair (5e-324, 1) took the NATIVE binary past 45 seconds through it
-        // at base, and does not any more.
+        // directly rather than through mkRat, whose Euclid would take one iteration per
+        // binade on a pair spanning up to 1074 of them.
         //
         // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
         // integral Float too big for 2^53, whose numerator intStr expands exactly.
@@ -3747,32 +3685,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) -------------
     //
     // The plain sum SQUARES both parts, so it overflows to Infinity above ~1.3e154 and
-    // underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well:
-    // Complex(1e200, 1e200).abs was Infinity and Complex(1e-200, 1e-200).abs was 0.0,
-    // in all four legs, against MRI's 1.414213562373095e+200 and
-    // 1.414213562373095e-200. Complex(3, 4).abs is 5.0 either way, which is why the
-    // claim does not reproduce at small integers.
+    // underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well
+    // (Complex(1e200, 1e200).abs is 1.414213562373095e+200).
     //
     // THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to
-    // the textbook `hi * sqrt(1 + (lo/hi)^2)`. Measured against /usr/bin/ruby over the
-    // pairs where the plain sum is unsafe, 40,000 per band:
-    //
-    //                        hi >= 2^511      hi <= 2^-511
-    //   hi*sqrt(1+t*t)       1,825 differ     1,937 differ
-    //   power-of-two scaled     23 differ        21 differ
-    //
-    // and the ratio form also moves 5,370 of 20,000 pairs in the ORDINARY range, so it
-    // cannot simply replace the plain sum either. Scaling by 2^k is EXACT (manual 7.7's
-    // %a argument), so the scaled operands carry the same significands and the same
-    // roundings as the unscaled ones - which is why the two paths agree bit-for-bit
-    // wherever both are defined, and the safe-band branch below is a SPEED guard and
-    // not a second answer.
-    //
-    // The residue is ~1 in 1,700 pairs at 1 ulp, and it is not closable here: Apple's
-    // libm hypot is not correctly rounded (3,165 of 20,000 differ from the
-    // exactly-rounded answer, computed in Ruby over exact Rationals), so no double
-    // formula matches it everywhere. All three engines run this same arithmetic, so
-    // they agree by construction.
+    // the textbook `hi * sqrt(1 + (lo/hi)^2)`, which disagrees with MRI far more often,
+    // in the ordinary range too. Scaling by 2^k is EXACT, so the scaled operands carry
+    // the same significands and roundings as the unscaled ones - the two paths agree
+    // bit-for-bit wherever both are defined, and the safe-band branch below is a SPEED
+    // guard and not a second answer. A ~1-ulp residue remains because Apple's libm hypot
+    // is not correctly rounded; all three engines run this same arithmetic, so they agree
+    // by construction.
     //
     // 2^511 is the widest safe threshold: hi <= 2^511 keeps hi*hi + hi*hi under 2^1023,
     // and hi >= 2^-511 keeps hi*hi at or above 2^-1022, so it never goes subnormal.
@@ -3817,14 +3740,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isUserObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined }
     // ----- the FUSED `x - q*y` ----------------------------------------------
     //
-    // `a - Math.floor(a/b) * b` is not one expression with one answer. Go
-    // CONTRACTS it into a single arm64 FMSUBD, so abnf/jsrt.go's twin rounds once
-    // and 9007199254740991 % -3 is -2; this grammar's tag engine evaluates the
-    // multiply and the subtract separately, rounds twice, and answered -1. Real
-    // ruby 2.6.10 says -2, so the fused answer is the correct one - and this half
-    // was the last of the three still computing the other one. languages/lib/
-    // ruby-rt.metajs's rbFmaSub is the same body and the same reason; the twin now
-    // says math.FMA out loud rather than relying on the compiler.
+    // `a - Math.floor(a/b) * b` must round ONCE: 9007199254740991 % -3 is -2 in MRI,
+    // and a separate multiply and subtract (two roundings) answer -1. Twins:
+    // abnf/jsrt.go says math.FMA, languages/lib/ruby-rt.metajs's rbFmaSub is the
+    // same body.
     //
     // The emulation is the standard Dekker two-product / two-sum: split each
     // operand at 26 bits so the partial products are exact, recover the product's
@@ -3862,36 +3781,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
     // Raise a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue "d"' and
-    // `begin; 1/0; rescue ZeroDivisionError; end' work. A plain fail() is an ENGINE
-    // abort that no rescue clause in any of the three engines can see, which made
-    // every runtime error uncatchable. Mirrors rubyRaiseErr of abnf/jsrt.go and
-    // rbRaiseErr of lib/ruby-rt.metajs. docs/todo.md 1.3.
+    // `begin; 1/0; rescue ZeroDivisionError; end' work: a plain fail() is an ENGINE
+    // abort that no rescue clause can see. Twins: rubyRaiseErr of abnf/jsrt.go and
+    // rbRaiseErr of lib/ruby-rt.metajs.
     function raiseErr(clsName, msg) {
         throw {__exc: true, v: mkExc(hostGlobals[clsName], msg)}
     }
     // Every route from a Float to an Integer - #to_i, #to_int, #truncate, #round,
     // #floor, #ceil, and the %d / %x / %o / %b directives, whose operand MRI
     // converts with to_i - raises FloatDomainError on an infinity or a NaN, with
-    // the float's own #to_s as the message. All three engines answered the
-    // infinity itself instead, agreed and wrong, so --cross was blind; and it is
-    // what made the ratchet's "%x" % Infinity row pin an ARCHITECTURE-DEPENDENT
-    // int64 saturation (9102c91 preserved that answer rather than invent one -
-    // this replaces it with MRI's, which is not an invention). rbFloDomain in
-    // languages/lib/ruby-rt.metajs and rubyFloDomain in abnf/jsrtruby.go are the
-    // twins. docs/todo.md 1.5.
+    // the float's own #to_s as the message. Twins: rbFloDomain in
+    // languages/lib/ruby-rt.metajs and rubyFloDomain in abnf/jsrtruby.go.
     function floDomainGuard(x) {
         if (x !== x) { raiseErr("FloatDomainError", "NaN") }
         if (x - x !== 0) { raiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
     }
     function idiv(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return Math.floor(a / b) }
     function imod(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
-    // A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG
-    // IN THIS DIALECT: the tag engine keeps an integral value as an integer, so
-    // `-4 * 0` is the integer 0 and the sign is gone - measured, `1 / (x * 0)`
-    // is +Infinity for x = -4, where `1 / (z / (0 - 1))` is -Infinity. Dividing
-    // a zero by -1 is a float division in every engine and keeps the sign.
-    // rbZeroSign in languages/lib/ruby-rt.metajs is the same body; abnf/jsrt.go
-    // spells it math.Copysign(0, x), which Go has and this dialect does not.
+    // A zero carrying x's sign. `x * 0` does NOT work in this dialect: the tag
+    // engine keeps an integral value as an integer, so `-4 * 0` is the integer 0
+    // and the sign is gone. Dividing a zero by -1 is a float division in every
+    // engine and keeps the sign. Twins: rbZeroSign in languages/lib/ruby-rt.metajs;
+    // abnf/jsrt.go spells it math.Copysign(0, x).
     function zeroSigned(x) {
         var z = 0
         if (x < 0) { return z / (0 - 1) }
@@ -3901,12 +3812,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Float#round / #floor / #ceil AND Integer#round / #floor / #ceil with
     // a DIGIT COUNT -------------------------------------------------------------
     //
-    // Every engine here ignored ndigits outright (this half) or applied
-    // `Math.floor(x * 10**n + 0.5) / 10**n` (the other two), which is wrong three
-    // ways: it rounds half away from zero where MRI corrects toward the DECIMAL
-    // the double prints as, it answers a Float where a negative ndigits answers an
-    // INTEGER, and it overflows to Infinity or NaN where MRI answers the receiver.
-    // Measured against /usr/bin/ruby 2.6.10 (Float#round is unchanged in 3.x):
+    // This is MRI's algorithm, not an approximation of it (Float#round is the same
+    // in 2.6 and 3.x):
     //
     //     2.345.round(2)   2.35     (2.345 is really 2.3449999999999997513)
     //     2.675.round(2)   2.68     (2.675 is really 2.6749999999999998224)
@@ -3915,7 +3822,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //     1.7976931348623157e308.round(1) -> itself, where x*10 is Infinity
     //     5e-324.round(374) -> NaN, because MRI's own pow(10, 374) is Infinity
     //
-    // So this is MRI's algorithm and not an approximation of it. numeric.c:
+    // numeric.c:
     //
     //   ndigits > 0   float_round_overflow  -> the receiver unchanged
     //                 float_round_underflow -> +0.0 (round; floor only when x > 0,
@@ -3934,13 +3841,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // double would answer 2.67, which is the true value and not MRI's.
     //
     // A non-finite receiver answers itself for ndigits > 0 and raises
-    // FloatDomainError for ndigits <= 0 - the guard was already there for the
-    // no-argument form and now covers 0 and negatives too.
+    // FloatDomainError for ndigits <= 0.
     //
-    // rbFloBinExp / rbFloDigitRound / rbIntDigitOp (languages/lib/ruby-rt.metajs)
+    // Twins: rbFloBinExp / rbFloDigitRound / rbIntDigitOp (languages/lib/ruby-rt.metajs)
     // and rubyFloDigitRound / rubyIntDigitOp (abnf/jsrt.go, which asks math.Frexp
-    // for the binary exponent the other two compute by scaling) are the twins.
-    // docs/todo.md 1.2.
+    // for the binary exponent the other two compute by scaling).
 
     // frexp's exponent: the e with x == m * 2**e and 0.5 <= |m| < 1. x must be
     // finite and non-zero. The 2**32 steps keep a subnormal off a 1074-iteration
@@ -3972,11 +3877,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return nd < 0 - (be > 0 ? cTruncDiv(be, 3) + 1 : cTruncDiv(be, 4))
     }
     // 10**nd as a DOUBLE. `Math.pow(10, 20)` is not it: this engine keeps an
-    // integral value as a sized integer and the integer power WRAPS - measured,
-    // Math.pow(10, 20) is 7766279631452241920 (10**20 mod 2**64) and 5e-324.ceil(20)
-    // came out 1.2876178137472069e-19 instead of 1.0e-20. Parsing the decimal is
-    // exact, host-independent (goja and the frozen engine agree digit for digit)
-    // and answers Infinity past 1e308, which is what MRI's own pow() does.
+    // integral value as a sized integer and the integer power WRAPS (10**20 mod
+    // 2**64). Parsing the decimal is exact, host-independent and answers Infinity
+    // past 1e308, which is what MRI's own pow() does.
     function pow10(nd) { return parseFloat("1e" + nd) }
     // C's round(): half away from zero, and EXACT - `Math.floor(v + 0.5)` answers
     // 1 for the largest double below 0.5, because the addition itself rounds up.
@@ -4029,7 +3932,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and log_256(1/2) == -0.125, where the size of a Fixnum is sizeof(long) == 8
     // whatever the value is. So `(-1234).floor(-20)` is 0 in MRI where the
     // arithmetic says -10**20, and `(2**100).floor(-32)` is 0 where it says a
-    // 33-digit multiple. Measured, first-zero-at: -20 for every Fixnum and for
+    // 33-digit multiple. MRI's first-zero-at:
     // 2**63, -22 for 2**64 (9 bytes), -32 for 2**100 (13), -63 for 2**200 (26),
     // -304 for 2**1000 (126), -309 for Float::MAX floored (128).
     function intByteSize(v) {
@@ -4084,9 +3987,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var away = false
         // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200 and
-        // -1234.truncate(-2) is -1200. It was absent, so #truncate ignored its
-        // ndigits outright in every engine - docs/todo.md 1.3's second
-        // argument-list rule.
+        // -1234.truncate(-2) is -1200.
         if (!zeroTail && mode != "t") {
             if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
             else if (mode == "f") { away = neg }
@@ -4099,16 +4000,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var z = 0; z < k; z++) { out = out + "0" }
         return bigOut(bigFromDec(neg ? ("-" + out) : out))
     }
-    // The one entry point both numeric method sets call. `t` is the receiver's
-    // double, `isInt` says whether the receiver is an Integer (an Integer is
-    // already rounded at every ndigits >= 0), `big` is the receiver itself when it
-    // is a big and null otherwise, and mode is "r" / "f" / "c".
     // #truncate at a POSITIVE ndigits: toward zero, which is floor above zero and
     // ceil below it. Both of those are exact at every magnitude already.
     function floDigitTrunc(x, nd) {
         if (x < 0) { return floDigitCeil(x, nd) }
         return floDigitFloor(x, nd)
     }
+    // The one entry point both numeric method sets call. `t` is the receiver's
+    // double, `isInt` says whether the receiver is an Integer (an Integer is
+    // already rounded at every ndigits >= 0), `big` is the receiver itself when it
+    // is a big and null otherwise, and mode is "r" / "f" / "c" / "t".
     function numDigitOp(t, big, isInt, mode, nd) {
         if (isInt) {
             if (nd >= 0) { return big !== null ? big : t }
@@ -4139,10 +4040,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- Rational#floor / #ceil / #round / #truncate, EXACTLY ------------------
     //
-    // MRI keeps the Rational: `(2r/3r).round(1)' is (7/10) and not the 0.7 every
-    // engine here answered - numberMethod converted the receiver with toF and ran
-    // the FLOAT rule, so a Rational lost its exactness at the first ndigits.
-    // Measured against /usr/bin/ruby 2.6.10 (Rational#round is unchanged in 3.x).
+    // MRI keeps the Rational: `(2r/3r).round(1)' is (7/10) and not 0.7, so the
+    // FLOAT rule cannot be used (Rational#round is the same in 2.6 and 3.x).
     //
     // MRI's rule, from rational.c, is one line at each sign of ndigits:
     //
@@ -4156,11 +4055,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // carried - rather than on the quotient, so it does not depend on a double
     // holding a/b exactly.
     //
-    // THE CEILING, stated because it is real: n and d here are plain doubles, so
-    // n * 10**nd must stay under 2^53. That is the same limit the Rational value
-    // model already has everywhere else (docs/todo.md 2.5's "a Rational whose parts
-    // are bigs" is the second value model that would lift it), and this widens
-    // nothing.
+    // THE CEILING: n and d here are plain doubles, so n * 10**nd must stay under
+    // 2^53 - the same limit the Rational value model has everywhere else.
     function ratIntOp(n, d, mode) {
         if (mode == "f") { return Math.floor(n / d) }
         if (mode == "c") { return Math.ceil(n / d) }
@@ -4302,8 +4198,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBig(v)) { return bigOut(bigNeg(v)) }
         // `x * (0 - 1)` and NOT `0 - x`: the two agree everywhere except on zero,
         // where `0 - 0.0` is +0.0 and Ruby's -0.0 keeps its sign ((-0.0).to_s is
-        // "-0.0"). Both compiled halves already answered -0.0 here; only this one
-        // did not, and it was invisible until floStr started rendering the sign.
+        // "-0.0").
         if (isFlo(v)) { return mkFlo(v.f * (0 - 1)) }
         if (isRat(v)) { return mkRat(0 - v.n, v.d) }
         if (isCpx(v)) { return mkCpx(0 - v.re, 0 - v.im) }
@@ -4313,7 +4208,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
     // (and nil becomes the empty Array), which is what Ruby's splat on a right side does.
     // What `*x' SPLICES rather than wraps: an Array, and a Range - `[*1..3]' is
-    // [1, 2, 3] and `f(*r)' passes three arguments. docs/todo.md 1.5.
+    // [1, 2, 3] and `f(*r)' passes three arguments.
     function splatSeq(v) {
         if (isRange(v)) { return rangeToA(v) }
         return v
@@ -4323,11 +4218,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var v = anytype
             v = t()
             if (Array.isArray(v)) { return v.slice(0) }
-            // `*r' on a Range SPLICES it: `[*1..3]' is [1, 2, 3] and
-            // `a, b, c = *r' unpacks. This half wrapped the range as ONE element
-            // while the compiled halves happened to be right, because a bounded
-            // range there WAS an array - a live halves divergence.
-            // docs/todo.md 1.5.
+            // `*r' on a Range SPLICES it: `[*1..3]' is [1, 2, 3] and `a, b, c = *r' unpacks.
             if (isRange(v)) { return rangeToA(v) }
             if (v === null || v === undefined) { return [] }
             return [v]
@@ -4337,8 +4228,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Unary plus: the identity. `+"str"` asks Ruby for an unfrozen copy of a frozen
     // string literal, and every string value here is already an ordinary mutable one.
     function makePos(t) { return function() { return t() } }
-    // ~x is -(x+1) at any size. Past 2^53 the double cannot hold the +1, so
-    // ~9007199254740992 came back as -9007199254740992 instead of ...993.
+    // ~x is -(x+1) at any size. Past 2^53 the double cannot hold the +1, so a
+    // big goes through the exact path.
     function bitNotOf(v) {
         if (!isBig(v) && v > 0 - bigMaxNum && v < bigMaxNum) { return 0 - toF(v) - 1 }
         var b = bigOf(v)
@@ -4348,11 +4239,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeBitNot(t) { return function() { return bitNotOf(t()) } }
     // One binary step for every operator that is not '+': a user object dispatches to
     // its own operator method (def +, def <=>, def []), everything else is numeric.
-    // Array#- (set difference, by VALUE) and Array#* (repeat). Both are the
-    // compiler half's rubyBin / rbBin arms, and their absence here was a halves
-    // divergence in two different shapes (docs/todo.md 2.9): `a - b` ABORTED with
-    // "not a number in '-'", and `a * 2` answered the silent NaN that numBin makes
-    // of an array - the worse of the two, since nothing stops the program.
+    // Array#- (set difference, by VALUE) and Array#* (repeat). Twins: the compiled
+    // halves' rubyBin / rbBin arms.
     function arrDiff(l, r) {
         var out = []
         for (var i = 0; i < l.length; i++) {
@@ -4387,8 +4275,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "*") { return arrRepeat(l, r) }
             // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
             // order, both dedupe, and both compare with eql? like Array#- above.
-            // Without these arms they reached numBin and ABORTED with "not a number
-            // in '&'" in all three engines.
             if (op == "&" && Array.isArray(r)) { return arrAnd(l, r) }
             if (op == "|" && Array.isArray(r)) { return arrOr(l, r) }
         }
@@ -4404,15 +4290,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //
     // ARRAY IS COMPARABLE. Array#<=> is element-wise, recursing into nested arrays,
     // and a shorter array that is a PREFIX of the longer one sorts first. Two rules
-    // are easy to get wrong and both were measured against ruby 2.6.10p210:
-    //   - ONE incomparable element pair makes the WHOLE comparison nil. Skipping it
-    //     and carrying on (which is what the compiled halves used to do) makes
-    //     `[1, "a"] <=> [1, 2]` answer 0 where MRI answers nil.
+    // are easy to get wrong (MRI 2.6.10):
+    //   - ONE incomparable element pair makes the WHOLE comparison nil, so
+    //     `[1, "a"] <=> [1, 2]` is nil, not 0.
     //   - the answer is NORMALISED to -1/0/1, so `[1,2,3] <=> [1]` is 1, not 2.
-    // This arm was MISSING here while both compiled halves had it, so
-    // `[[2],[1]].sort` aborted in the interpreter and worked everywhere else - a
-    // halves divergence that ./test.sh --cross could not see, because no test
-    // program sorts an array of arrays.
     function cmpSign(n) {
         if (n < 0) { return -1 }
         if (n > 0) { return 1 }
@@ -4423,11 +4304,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
         if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
         // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
-        // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI and
-        // raised *comparison of Symbol with :a failed* in every engine here. It is
+        // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI. It is
         // the name comparison and nothing else: `:a <=> 1' is nil, which is the
-        // `return null' below. Measured on /usr/bin/ruby 2.6.10; Symbol#<=> is a
-        // Ruby-2 method. docs/todo.md 1.3.
+        // `return null' below.
         if (isSym(l) && isSym(r)) { return l.s < r.s ? -1 : (l.s > r.s ? 1 : 0) }
         if (Array.isArray(l) && Array.isArray(r)) {
             for (var si = 0; si < l.length && si < r.length; si++) {
@@ -4453,8 +4332,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var cl = classOf(l)
         var ln = cl !== null && cl !== undefined && cl.__name != undefined ? cl.__name : "Object"
         // A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and a
-        // program may rescue it. Both compiled halves raise the same class and the
-        // same message.
+        // program may rescue it. Both compiled halves raise the same class and message.
         throw {__exc: true, v: mkExc(hostGlobals["ArgumentError"],
                                      "comparison of " + ln + " with " + cmpName(r) + " failed")}
     }
@@ -4552,7 +4430,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rangeText: #to_s renders its endpoints, #inspect INSPECTS them. That is the
     // only place the two differ - `("a".."e").inspect' is `"a".."e"' and its #to_s
     // is `a..e'. Twins: rbRangeText in languages/lib/ruby-rt.metajs and
-    // rubyRangeText in abnf/jsrt.go. docs/todo.md 1.5.
+    // rubyRangeText in abnf/jsrt.go.
     function rangeText(r, insp) {
         var dots = r.excl === true ? "..." : ".."
         var ls = ""
@@ -4576,8 +4454,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "begin") { return t.lo }
         // #end and #last with NO argument are the range's END, not its last
         // element: `(1...3).last' is 3 where `(1...3).to_a.last' is 2. With an
-        // ARGUMENT they are the Array's - `(1..3).first(2)' is [1, 2] - and this
-        // half answered the bare endpoint for both. docs/todo.md 1.5.
+        // ARGUMENT they are the Array's - `(1..3).first(2)' is [1, 2].
         if (name == "end") { return t.hi }
         if (name == "first" && args.length == 0) { return t.lo }
         if (name == "last" && args.length == 0) { return t.hi }
@@ -4587,10 +4464,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "==" || name == "eql?" || name == "equal?") {
             return isRange(args[0]) && rangeEq(t, args[0])
         }
-        // Range#step(n): every n-th element. It existed in NO engine - `(1..10).step(3)'
-        // aborted with *unknown Array method: step* here too. Without a block MRI
-        // answers an ArithmeticSequence; the nearest thing in this value model is an
-        // Enumerator, which answers #to_a and #each the same way. docs/todo.md 1.5.
+        // Range#step(n): every n-th element. Without a block MRI answers an
+        // ArithmeticSequence; the nearest thing in this value model is an Enumerator,
+        // which answers #to_a and #each the same way.
         if (name == "step") {
             var by = Math.trunc(toF(args[0]))
             if (by <= 0) { raiseErr("ArgumentError", "step can't be 0 or negative") }
@@ -4606,26 +4482,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // An endless (or beginless) range has no sequence, so only the two
         // questions that do not need one can be answered; MRI agrees that (1..).min
-        // is 1 and (1..).max raises. Without this, #min materialized first and
-        // `(1..).min' aborted. docs/todo.md 1.5.
+        // is 1 and (1..).max raises; materializing first would never end.
         if (t.hi === null || t.hi === undefined || t.lo === null || t.lo === undefined) {
             if (name == "min") { return t.lo }
             if (name == "size" || name == "length" || name == "count") {
                 fail("cannot take the length of an endless range")
             }
         }
-        // Range#size / #min / #max on their own. #size used to fall through to
-        // arrayMethod, which has no `size' arm, and answered NIL where both
-        // compiled halves answered the count - a live halves divergence. #min used
-        // to answer the low bound unconditionally, which is wrong for an EMPTY
-        // range: MRI says nil for (1..-1).min. docs/todo.md 1.3.
+        // Range#size / #min / #max on their own: arrayMethod has no `size' arm, and
+        // #min of an EMPTY range is nil in MRI ((1..-1).min), not the low bound.
         if (args.length == 0 && blk == null) {
             var ra = anytype
             ra = rangeToA(t)
             // #size, #length and #count all answer the ELEMENT COUNT, and that is
-            // a DELIBERATE divergence, measured and left - see the twin in
-            // languages/lib/ruby-rt.metajs for why splitting them is not worth it.
-            // docs/todo.md 1.5.
+            // a DELIBERATE divergence - see the twin in languages/lib/ruby-rt.metajs for why
+            // splitting them is not worth it.
             if (name == "size" || name == "length" || name == "count") { return ra.length }
             if (name == "min") { return ra.length == 0 ? null : ra[0] }
             if (name == "max") { return ra.length == 0 ? null : ra[ra.length - 1] }
@@ -4654,8 +4525,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (items[i].splat != undefined) {
                     var sv = anytype
-                    // A Range SPLICES like an Array: `[*1..3]' is [1, 2, 3]. This
-                    // half wrapped it as one element. docs/todo.md 1.5.
+                    // A Range SPLICES like an Array: `[*1..3]' is [1, 2, 3].
                     sv = splatSeq(items[i].splat())
                     if (Array.isArray(sv)) { for (var j = 0; j < sv.length; j++) { out.push(sv[j]) } }
                     else { out.push(sv) }
@@ -4695,9 +4565,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // would have to pad with zeros, so 1234567890123456.0 (decpt 16, 16 digits) is
     // exponential and 3002399751580330.5 (decpt 16, 17 digits) is not,
     // with the mantissa always carrying a fraction digit ("1.0e+15") and the exponent
-    // always signed and at least two digits ("e-05"). The before / after table and the
-    // ground truth (ruby 2.6.10p210) are at rubyFloStr in abnf/jsrt.go, which this
-    // must stay in step with - ./test.sh --cross diffs the two.
+    // always signed and at least two digits ("e-05"). The ground truth table is at
+    // rubyFloStr in abnf/jsrt.go, which this must stay in step with - ./test.sh
+    // --cross diffs the two.
     // floSplit10 turns a > 0 into {d: significant digits, e: scientific exponent}.
     function floSplit10(a) {
         var s = "" + a
@@ -4757,25 +4627,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function floStr(x) {
         if (x != x) { return "NaN" }
         if (x - x != 0) { return x > 0 ? "Infinity" : "-Infinity" }
-        // -0.0 keeps its sign, which the old body dropped.
+        // -0.0 keeps its sign.
         if (x == 0) { return 1 / x < 0 ? "-0.0" : "0.0" }
         if (x < 0) { return "-" + floDigits(0 - x) }
         return floDigits(x)
     }
-    // Rational#to_s and Complex#to_s. The SIGN is the whole content of the second
-    // one: a negative imaginary part joins with "-" and its own magnitude, and every
-    // engine here wrote the "+" unconditionally, so Complex(3, -4) rendered
-    // `3+-4i' where MRI writes `3-4i'. Agreed in all four legs and wrong in all
-    // four. Mirrors rbRatText / rbCpxText of lib/ruby-rt.metajs and rubyRatText /
-    // rubyCpxText of abnf/jsrt.go. docs/todo.md 1.3.
+    // Rational#to_s and Complex#to_s. A negative imaginary part joins with "-" and
+    // its own magnitude: Complex(3, -4) is `3-4i', not `3+-4i'. Twins: rbRatText /
+    // rbCpxText of lib/ruby-rt.metajs and rubyRatText / rubyCpxText of abnf/jsrt.go.
     // Both parts go through intStr and NOT through `"" + n`, because a Rational's
     // parts are INTEGERS and `"" + n` answers the SHORTEST ROUND-TRIPPING form,
     // which past 2^53 is a different integer: `"" + 36028797018963968` (2^55) is
-    // "36028797018963970". That became reachable the moment #to_r started answering
-    // the exact pair - MRI's (0.001).to_r is 1152921504606847/1152921504606846976
-    // and its denominator is 2^60 - and it printed 36028797018963970 for (0.1).to_r
-    // in all four legs. intStr is the exact expansion, and it is the same rule
-    // Integer#to_s already follows.
+    // "36028797018963970" - and (0.1).to_r's denominator is 2^55. intStr is the
+    // exact expansion, the same rule Integer#to_s follows.
     function ratText(v) { return intStr(v.n) + "/" + intStr(v.d) }
     function cpxText(v) {
         var im = v.im
@@ -4805,21 +4669,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A plain instance with no #to_s of its own. MRI writes
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
-        // the same rule the Proc renderer below follows. Without this line this half
-        // aborted with *unknown method 'to_s'* while both compiled halves printed
-        // "[object Object]". docs/todo.md 1.3.
+        // the same rule the Proc renderer below follows.
         if (isUserObj(v)) { return "#<" + v.__class.__name + ">" }
         // A CLASS object stringifies as its name, not as "[object Object]".
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
         // A PROC. MRI prints `#<Proc:0x0000...@f.rb:4 (lambda)>`; the address is its
         // own and cannot be matched, and neither can the source location, so both are
-        // left off rather than invented - the same rule python's <function fn> follows
-        // (docs/todo.md 1.8, closed in da43fee). Without this line THIS half printed
-        // the closure's METAJS SOURCE TEXT - the whole body, comments included -
-        // while both compiled halves printed the C floor's `[function]`: a live halves
-        // divergence no gate could see, because neither half was ever asserted.
-        // Mirrors rbFuncRender of lib/ruby-rt.metajs and rubyFuncRender of
-        // abnf/jsrt.go. docs/todo.md 1.5.
+        // left off rather than invented - the same rule python's <function fn> follows.
+        // Twins: rbFuncRender of lib/ruby-rt.metajs and rubyFuncRender of abnf/jsrt.go.
         if (typeof v == "function") {
             if (isMethodVal(v)) { return methodValRender(v) }
             return isLambda(v) ? "#<Proc (lambda)>" : "#<Proc>"
@@ -4872,15 +4729,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isSym(v)) { return ":" + v.s }
         // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is
         // not - `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one
-        // place the two differ for a numeric. Every engine fell through to #to_s.
-        // docs/todo.md 1.3.
+        // place the two differ for a numeric.
         if (isRat(v)) { return "(" + ratText(v) + ")" }
         if (isCpx(v)) { return "(" + cpxText(v) + ")" }
         // Range#inspect INSPECTS its endpoints where #to_s renders them, which is
         // the only place the two differ: `("a".."e").inspect' is `"a".."e"' and its
-        // #to_s is `a..e'. This half fell through to the generic object arm and
-        // printed the class name; the compiled halves printed the materialized
-        // array. docs/todo.md 1.5.
+        // #to_s is `a..e'.
         if (isRange(v)) { return rangeText(v, true) }
         if (Array.isArray(v)) {
             var out = "["
@@ -4898,11 +4752,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // Exception#inspect / a plain instance's #inspect. MRI answers
         // `#<RuntimeError: boom>' - the CLASS NAME and #to_s - and the bare class
-        // name when #to_s is empty. It was unimplemented in all three engines:
-        // `p exc' aborted here with *unknown method 'inspect'* and printed the
-        // message alone in the compiled halves. A class that defines #inspect of
-        // its own stays in charge. Mirrors rubyExcInspect of abnf/jsrt.go and
-        // rbExcInspect of lib/ruby-rt.metajs. docs/todo.md 1.3.
+        // name when #to_s is empty. A class that defines #inspect of its own stays in
+        // charge. Twins: rubyExcInspect of abnf/jsrt.go and rbExcInspect of
+        // lib/ruby-rt.metajs.
         if (isUserObj(v)) {
             if (typeof lookupMethod(v.__class, "inspect") == "function") {
                 return rstr(mcall(v, "inspect", [], null))
@@ -4939,9 +4791,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // padTo(s, width, padOnLeft, padChar, keep). A ZERO pad has to go AFTER the
-    // sign: "%05d" % -42 is "-0042" in MRI and in the compiled half, and this used
-    // to answer "00-42" - a LIVE HALVES DIVERGENCE, invisible to --cross because no
-    // test formatted a negative to a width. It also has to go after a # base
+    // sign: "%05d" % -42 is "-0042" in MRI. It also has to go after a # base
     // prefix ("%#010x" % 255 is "0x000000ff"), which is what `keep` carries: the
     // number of leading characters the zeros must not get in front of - the sign
     // and the prefix and, for MRI's infinite two's complement, the ".." as well
@@ -4984,15 +4834,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // trailing zeros of the fraction go, and with one the fraction is rounded
     // (half to even) or zero-padded to exactly that many digits.
     //
-    // Chapter 7.7 of docs/working-on-this-project.md points at d_frexp for this,
-    // and it is NOT needed: scaling a double by a POWER OF TWO is exact as long as
-    // the result neither overflows nor falls into the subnormals, and both
-    // directions can be driven so that it never does - divide only while the value
-    // is >= the power (the quotient stays >= 1), multiply only while the product
-    // stays < 2. So hexNorm is pure arithmetic, needs no bit access, no floor
-    // primitive and no new host global, and it is exact for every finite double
-    // including 5.0e-324. rbHexNorm in languages/lib/ruby-rt.metajs and
-    // rubyHexNorm in abnf/jsrtruby.go are the twins.
+    // Exact without bit access (no d_frexp): scaling a double by a POWER OF TWO is
+    // exact as long as the result neither overflows nor falls into the subnormals,
+    // and both directions can be driven so that it never does - divide only while
+    // the value is >= the power (the quotient stays >= 1), multiply only while the
+    // product stays < 2. So hexNorm is pure arithmetic, exact for every finite
+    // double including 5.0e-324. Twins: rbHexNorm in languages/lib/ruby-rt.metajs
+    // and rubyHexNorm in abnf/jsrtruby.go.
     //
     // The powers are built by REPEATED SQUARING (2, 4, 16, 256, ... 2^512), which
     // is the exponent ladder 1, 2, 4, ... 512 the two loops walk downward. The
@@ -5113,18 +4961,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- the EXACT decimal of a double ------------------------------------
     //
-    // fixedStr used to be `Math.floor(v * 10^prec + 0.5)`, which is wrong twice
-    // over: it rounds a tie HALF UP where MRI (and strconv, and therefore both
-    // compiled halves) round half to EVEN - "%.0f" % 2.5 was "3" here and "2"
-    // everywhere else - and past 2^53 it has no digits left to print at all.
-    // A LIVE HALVES DIVERGENCE that no test reached, so --cross was silent.
+    // Rounds a tie half to EVEN as MRI (and strconv, and therefore both compiled
+    // halves) do - "%.0f" % 2.5 is "2" - and keeps every digit past 2^53.
     //
-    // The replacement is the same body languages/lib/runtime-bignum.metajs runs
-    // for the compiled halves (rtExactDec / rtRoundHalfEven / rtFixed), over a
-    // little-endian base-10000 limb array: a finite double is an integer mantissa
-    // times a power of two, so scaling by 2^e - or by 5^(-e) with the point moved
-    // -e digits - is EXACT, and every intermediate stays under 50000, which a
-    // double holds exactly. This grammar has no bignum of its own to borrow.
+    // The same body languages/lib/runtime-bignum.metajs runs for the compiled
+    // halves (rtExactDec / rtRoundHalfEven / rtFixed), over a little-endian
+    // base-10000 limb array: a finite double is an integer mantissa times a power
+    // of two, so scaling by 2^e - or by 5^(-e) with the point moved -e digits - is
+    // EXACT, and every intermediate stays under 50000, which a double holds
+    // exactly.
     function rbLimbsFromNum(n) {
         var limbs = []
         var v = n
@@ -5290,14 +5135,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- the # (alternate) flag -------------------------------------------
     //
-    // UNPARSED in all three halves until now. Here the "#" was swallowed into the
-    // spec string and then IGNORED, so "%#g" printed plain %g; in the two compiled
-    // halves the flag loop stopped at it and "#" itself became the conversion, so
-    // "%#g" was "#g" AND the argument went to the next directive - a live halves
-    // divergence --cross never saw, because no test used the flag. MRI: %g keeps
-    // its trailing zeros, a decimal point is forced wherever there would be none,
-    // and %x/%X/%o/%b get a base prefix unless the value is zero. Settled against
-    // ruby 2.6.10 over the whole flag/width/precision matrix.
+    // MRI: %g keeps its trailing zeros, a decimal point is forced wherever there
+    // would be none, and %x/%X/%o/%b get a base prefix unless the value is zero
+    // (ruby 2.6.10 over the whole flag/width/precision matrix).
     // A point at the END of the mantissa when there is none, before any exponent.
     function altPoint(t) {
         var at = t.indexOf("e")
@@ -5329,18 +5169,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- the three integer directives -------------------------------------
     //
-    // %d/%i/%x/%X/%o/%b went through baseStr and `"" + Math.trunc(v)`, and were
-    // wrong three ways at once. Past 2^53 the digits are simply gone - "%d" % 1e30
-    // printed "1e+30" and "%x" % 1e30 looped over a double, where MRI prints
-    // 1e30.to_i EXACTLY, all 31 decimal digits of 1000000000000000019884624838656.
-    // A NEGATIVE under %x/%o/%b needs MRI's infinite two's complement ("%x" % -5 is
-    // "..fb"), not "-5". And a PRECISION on an integer directive is a minimum digit
-    // count that also cancels the 0 flag, with the special case that "%.0x" % 0 is
-    // the empty string. Settled against ruby 2.6.10 over a 61-format x 38-value
-    // table; Integer formatting is unchanged in 3.x.
+    // Past 2^53 MRI prints the operand's to_i EXACTLY ("%d" % 1e30 is all 31
+    // digits of 1000000000000000019884624838656). A NEGATIVE under %x/%o/%b needs
+    // MRI's infinite two's complement ("%x" % -5 is "..fb"), not "-5". And a
+    // PRECISION on an integer directive is a minimum digit count that also cancels
+    // the 0 flag, with the special case that "%.0x" % 0 is the empty string.
+    // Integer formatting is the same in 2.6 and 3.x.
     //
-    // baseStr STAYS, for Integer#to_s(base), which is a different function with a
-    // different (int64-saturating) contract. This is only the format directives.
+    // baseStr is a different function, for Integer#to_s(base); this is only the
+    // format directives.
     var FMT_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
     function digitVal(c) {
         var v = c.charCodeAt(0)
@@ -5497,23 +5334,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //
     // MRI's numeric directives do not read a number out of the operand, they CONVERT
     // it with Kernel#Integer / Kernel#Float rules - so they raise on a value that has
-    // no number in it, and they PARSE one that has a number in its text. Every engine
-    // here went straight to toF, whose answer is 0 for nil, true, false, a Symbol and
-    // an Array, AND 0 for the perfectly good string "12". Measured against
-    // /usr/bin/ruby, agreed and wrong in all four legs:
+    // no number in it, and they PARSE one that has a number in its text
+    // (MRI 2.6.10, same in 3.x):
     //
-    //   "%d" % [nil]    "0"   MRI: TypeError    can't convert nil into Integer
-    //   "%d" % [true]   "0"   MRI: TypeError    can't convert true into Integer
-    //   "%d" % [:s]     "0"   MRI: TypeError    can't convert Symbol into Integer
-    //   "%d" % ["x"]    "0"   MRI: ArgumentError invalid value for Integer(): "x"
-    //   "%d" % ["12"]   "0"   MRI: "12"
-    //   "%f" % [nil]    "0.000000"  MRI: TypeError can't convert nil into Float
-    //   "%c" % [nil]    ""    MRI: TypeError    no implicit conversion from nil to integer
+    //   "%d" % [nil]    TypeError     can't convert nil into Integer
+    //   "%d" % [true]   TypeError     can't convert true into Integer
+    //   "%d" % [:s]     TypeError     can't convert Symbol into Integer
+    //   "%d" % ["x"]    ArgumentError invalid value for Integer(): "x"
+    //   "%d" % ["12"]   "12"
+    //   "%f" % [nil]    TypeError     can't convert nil into Float
+    //   "%c" % [nil]    TypeError     no implicit conversion from nil to integer
     //
     // nil / true / false name THEMSELVES in the message and everything else names its
     // CLASS, which is MRI's wording and not a simplification. %c has a message of its
     // own. The twins are rbFmtIntOperand / rbFmtFloOperand in lib/ruby-rt.metajs and
-    // rubyFmtIntOperand / rubyFmtFloOperand in abnf/jsrt.go. docs/todo.md 2.4.
+    // rubyFmtIntOperand / rubyFmtFloOperand in abnf/jsrt.go.
     function fmtConvName(v) {
         if (v === null || v === undefined) { return "nil" }
         if (v === true) { return "true" }
@@ -5628,11 +5463,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
     // "%10s" % "café" is six spaces and four characters, and its result has
-    // String#length 10 and #bytesize 11. The two compiled halves counted BYTES -
-    // layer 2 was written to match abnf/jsrt.go's `len(body)` and that file was
-    // never checked against MRI, and docs/working-on-this-project.md chapter 7.7
-    // states the byte rule and cites this very example. Both of them agreeing and
-    // both wrong, so --cross could not see it; only the oracle could.
+    // String#length 10 and #bytesize 11.
     //
     // A surrogate PAIR is one character to MRI, so this counts CODE POINTS and not
     // the UTF-16 units String#length answers. rubyCharCount in abnf/jsrt.go and
@@ -5705,13 +5536,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var keep = -1
         var intPrec = false
         var base = intBase(conv)
-        // TRUNCATE, do not floor. This was Math.floor, and both compiled halves
-        // use Math.trunc: "%d" % -1.5 was "-2" here and "-1" there, and MRI says
-        // "-1" (its %d converts the float with to_i, which truncates). A live
-        // halves divergence --cross never saw, because no test formatted a
-        // negative NON-INTEGER float with %d. Pinned by fmt19. baseStr was
-        // FLOORING for %x/%o/%b too, which was the same divergence one directive
-        // over, and it is gone with baseStr's use here.
+        // TRUNCATE, do not floor: "%d" % -1.5 is "-1" in MRI (its %d converts the
+        // float with to_i, which truncates). Pinned by fmt19.
         if (base != 0) {
             var iv = anytype
             var ivx = fmtIntOperand(v)
@@ -5762,8 +5588,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // on it outright ("%.0c" % 65 is "A"). MRI demands a String of EXACTLY one
         // character and raises ArgumentError otherwise; this takes the first.
         else if (conv == "c") {
-            // A String operand must be EXACTLY one character. This took the first and
-            // said so at the site; MRI raises, and the message is its own.
+            // A String operand must be EXACTLY one character; MRI raises otherwise, and
+            // the message is its own.
             if (typeof v == "string") {
                 if (charCount(v) != 1) { raiseErr("ArgumentError", "%c requires a character") }
                 body = v
@@ -5776,16 +5602,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (prec >= 0 && prec < charCount(body)) { body = charCut(body, prec) }
         }
         else {
-            // %s. The precision was PARSED AND DROPPED here where both compiled
-            // halves cut the string, so "%.2s" % "abcdef" was "abcdef" in this half
-            // and "ab" in the other two - a live halves divergence --cross never
-            // saw, because no test gave %s a precision.
+            // %s, cut to the precision.
             body = rstr(v)
             if (prec >= 0 && prec < charCount(body)) { body = charCut(body, prec) }
         }
-        // The + and SPACE flags were parsed and THROWN AWAY here, and in both
-        // compiled halves: "%+d" % 7 was "7" against MRI's "+7". Both halves
-        // agreeing and both wrong, so --cross could never have seen it.
+        // The + and SPACE flags: "%+d" % 7 is "+7".
         var numeric = fmtNumeric(conv)
         if (numeric && body.charAt(0) != "-") {
             if (plus) { body = "+" + body } else if (space) { body = " " + body }
@@ -5798,11 +5619,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- the ARGUMENT SELECTORS -------------------------------------------
     //
     // A directive does not have to take the next argument. MRI offers four ways of
-    // saying which one it takes, and until now this half implemented NONE of them
-    // and mis-parsed three of the four into a wrong answer rather than an error:
-    // "%1$s-%2$s" % ["a", "b"] read the "1" and the "2" as WIDTHS and answered
-    // "a- b" (the two compiled halves read the "$" as the conversion and answered
-    // "$s- $s" - a live three-way divergence, docs/todo.md 1.5).
+    // saying which one it takes:
     //
     //   %N$s          the Nth argument, 1-based, in any order and reusable
     //   %<name>s      the Hash entry :name, formatted by the directive
@@ -5815,30 +5632,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // "%*.*f" % [5, 2, 3.14159] is " 3.14". "*" also takes an explicit selector
     // ("%1$*2$d" % [7, 6] is "     7").
     //
-    // "TOO FEW ARGUMENTS" IS RAISED, since docs/todo.md 1.3's 2026-08-10 pass, and
-    // the paragraph that used to stand here declined it. The decline's argument was
-    // that "making one of the five raise while the other four stay lenient would be
-    // a divergence of a different shape"; measured against /usr/bin/ruby 2.6.10
-    // (ArgumentError on a short argument list is unchanged in 3.x), every one of the
-    // shapes below raises, and answering nil made "%s %s" % ["a"] read "a " in all
-    // three engines - agreed and wrong, which is the class that pays out here:
+    // TOO FEW ARGUMENTS IS RAISED (ArgumentError, MRI 2.6.10 and 3.x) by every
+    // one of these shapes:
     //
     //     "%d" % []          "%s %s" % ["a"]     "%-5s" % []      "%c" % []
     //     "%*d" % [5]        "%.*f" % [2]        "%1$d" % []      "%2$d" % [1]
     //
-    // What does NOT raise, checked in the same run and asserted in
-    // tests/ruby-test-full.rb SECTION 68: a NAMED directive short of a hash is
-    // *one hash required* and never this ("%<x>d" % [] / "%{x}" % []); a re-USED
-    // selector is not a shortage ("%1$d %1$d" % [1] is "1 1"); a single non-array
-    // operand is a one-element list, so "%s" % nil is "" and "%s" % {:a=>1} is
-    // "{:a=>1}"; and "abc" % [] is "abc".
+    // What does NOT raise, asserted in tests/ruby-test-full.rb SECTION 45: a NAMED
+    // directive short of a hash is *one hash required* and never this
+    // ("%<x>d" % [] / "%{x}" % []); a re-USED selector is not a shortage
+    // ("%1$d %1$d" % [1] is "1 1"); a single non-array operand is a one-element
+    // list, so "%s" % nil is "" and "%s" % {:a=>1} is "{:a=>1}"; and "abc" % [] is
+    // "abc".
     //
     // Ordering falls out of the left-to-right walk and matches MRI: "%s%" % [] is
-    // *too few arguments* there and here, where it used to be *incomplete format
-    // specifier*. The one row a selector still saves in MRI and not here
-    // ("%1$%" % 5 is "%") is untouched by this - it never reaches the argument
-    // list. STILL not implemented: MRI's four ArgumentErrors for MIXING the
-    // numbered, unnumbered and named styles.
+    // *too few arguments*. The one row a selector still saves in MRI and not here
+    // ("%1$%" % 5 is "%") never reaches the argument list. NOT implemented: MRI's
+    // four ArgumentErrors for MIXING the numbered, unnumbered and named styles.
     //
     // rbFmtTooFew in languages/lib/ruby-rt.metajs and rubyFmtTooFew in
     // abnf/jsrtruby.go are the twins.
@@ -5885,18 +5695,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return {n: Math.trunc(toF(v)), j: j}
     }
-    // MRI raises ArgumentError on a malformed format string, and every engine here
-    // accepted one - in three DIFFERENT ways. Measured against /usr/bin/ruby
-    // 2.6.10 (sprintf is unchanged in 3.x); the three columns are this half,
-    // llvm.Run and the native binary:
-    //
-    //     "%z" % 5     5      z     z          MRI: malformed format string - %z
-    //     "%5" % 5     %5     %5    ""         MRI: malformed format string - %*[0-9]
-    //     "100%" % []  100%   100%  100%       MRI: incomplete format specifier…
-    //
-    // The native column is layer 2's `break`, which DISCARDED the rest of the
-    // string; nothing but a native probe could see it. Converging means raising,
-    // and the messages are MRI's own, chosen by what the head consumed last:
+    // MRI raises ArgumentError on a malformed format string (sprintf is the same
+    // in 2.6.10 and 3.x), with its own message chosen by what the head consumed
+    // last:
     //
     //     ran off the end after a number      malformed format string - %*[0-9]
     //     ran off the end after flags only    invalid format character - %
@@ -5906,14 +5707,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //     ...that is not printable ASCII      malformed format string
     //     % reached AS the conversion         invalid format character - %  ("%5%")
     //
-    // MRI's "too few arguments" is raised too, since 2026-08-10 - see fmtTooFew
-    // above, which also records what a short list does NOT raise. The one row a
-    // selector still saves in MRI and not here is "%1$%" % 5, which is "%" there
-    // and *invalid format character - %* here; it never reaches the argument list,
+    // "Too few arguments" is fmtTooFew's, above. "%1$%" % 5 is "%" in MRI and
+    // *invalid format character - %* here; it never reaches the argument list,
     // so it is a malformed-head row and not an argument-count one.
     //
     // rbFmtCheckConv in languages/lib/ruby-rt.metajs and rubyFmtCheckConv in
-    // abnf/jsrtruby.go are the twins. docs/todo.md 1.3.
+    // abnf/jsrtruby.go are the twins.
     function isFmtConv(c) {
         return c == "d" || c == "i" || c == "u" || c == "f" || c == "s" || c == "p"
             || c == "c" || c == "x" || c == "X" || c == "o" || c == "b" || c == "B"
@@ -5936,9 +5735,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         while (i < fmt.length) {
             var ch = fmt.charAt(i)
             if (ch != "%") { out += ch; i = i + 1; continue }
-            // A MALFORMED directive is an ArgumentError in MRI, and it was
-            // accepted by all three engines here in three DIFFERENT ways.
-            // docs/todo.md 1.3, and fmtBadConv below carries the measurements.
+            // A MALFORMED directive is an ArgumentError in MRI; see isFmtConv above
+            // for the messages.
             if (i + 1 >= fmt.length) { raiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead") }
             if (fmt.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
             // A newline or a NUL DIRECTLY after the % is the one shape MRI writes
@@ -6277,26 +6075,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // that shape can only be kept in a registry keyed by function identity - which
     // RETAINS every closure it records, together with its whole scope chain, and a
     // block literal builds one closure per call. So the registry is armed only for a
-    // program that NAMES the method. Measured on a 20,000-iteration loop containing
-    // one block: always-on took the native live set from 181 KB to 5.1 MB and the
-    // heap from 11.6 MB to 22.1 MB. A program that reaches the method some other way
-    // (send(:arity)) answers 0, which is what an unrecorded closure answers anyway.
+    // program that NAMES the method; always-on multiplies the live set of any loop that
+    // builds blocks. A program that reaches the method some other way (send(:arity))
+    // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity") { usesArity = true } return n }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
     // JavaScript's set - it is right about \n \t \r \xNN \uNNNN and copies anything
-    // else through as the bare letter - and Ruby's set is wider in four ways that all
-    // reached a program's OUTPUT silently, because both halves called the same shared
-    // helper and therefore agreed:
+    // else through as the bare letter - and Ruby's set is wider in four ways:
     //   \a \b \f \v \e   the four control spellings JS does not have (\e is ESC);
     //   \s               a space;
-    //   \nnn             an OCTAL byte, one to three digits ("\101" is "A"); the
-    //                    shared helper read "\101" as NUL followed by "01";
+    //   \nnn             an OCTAL byte, one to three digits ("\101" is "A");
     //   \u{...}          the braced form, which may be ASTRAL - encoded here as the
     //                    surrogate PAIR the floor's UTF-16 strings are made of.
     // Everything else keeps the shared helper's rule: the character itself, so \" \\
-    // \# and \/ stay right. \C-x / \M-x are NOT decoded here and were not before
-    // either - ctlCharVal handles them for ?x character literals only.
+    // \# and \/ stay right. \C-x / \M-x are NOT decoded here - ctlCharVal handles them
+    // for ?x character literals only.
     function unescapeRb(s) {
         var out = ""
         var i = 0
@@ -6351,12 +6145,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (bn == 0) { out += "u"; i = i + 2; continue }
                     if (bv > 65535) {
                         var pv = bv - 65536
-                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a
-                        // time. Handing both to String.fromCharCode in one call makes
-                        // the COMPILER half print the character and leaves the other
-                        // two at U+FFFD - a halves divergence - so the two-call form
-                        // is kept, and astral text is U+FFFD everywhere, which is what
-                        // it already is in swift and in Go's byte slicing.
+                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a time:
+                        // handing both to String.fromCharCode in one call makes the COMPILER
+                        // half print the character while the other two print U+FFFD, so the
+                        // two-call form is kept and astral text is U+FFFD everywhere, as it
+                        // already is in swift and in Go's byte slicing.
                         out += String.fromCharCode(55296 + Math.trunc(pv / 1024))
                         out += String.fromCharCode(56320 + (pv - Math.trunc(pv / 1024) * 1024))
                     } else {
@@ -6411,13 +6204,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rlen(v) {
         if (isDict(v)) { return v.keys.length }
         // An Enumerator's length is its element count. A bare `.size' / `.length'
-        // is lowered to this shortcut in BOTH halves rather than to a method call,
-        // so without this arm `e.size' answered nil here and aborted the compiler.
+        // is lowered to this shortcut in BOTH halves rather than to a method call.
         if (isEnum(v)) { return v.items.length }
-        // A Range's size is its element COUNT, and a Range object here has no
-        // .length at all - `r = 1..3; r.size' answered nil while both compiled
-        // halves answered 3, because they index a materialized array.
-        // docs/todo.md 1.3.
+        // A Range's size is its element COUNT; a Range object here has no .length.
         if (isRange(v)) { return rangeToA(v).length }
         if (v === null || v === undefined) { fail("length of nil") }
         return v.length
@@ -6449,10 +6238,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (di < 0) { return hashDefault(o, i) }
             return o.vals[di]
         }
-        // s[a..b] / a[a..b]: a Range subscript is a SUBSEQUENCE, not an index. Both
-        // answered the first character / element before, and the compiled halves
-        // (which materialize a bounded range as an array) answered the element at
-        // the range's own first value - a live halves divergence. docs/todo.md 1.10.
+        // s[a..b] / a[a..b]: a Range subscript is a SUBSEQUENCE, not an index.
         if (isRange(i) && (typeof o == "string" || Array.isArray(o))) { return rsubrange(o, i) }
         if (typeof o == "string") {
             if (i < 0) { i += o.length }
@@ -6647,33 +6433,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Method dispatch (js_mcall equivalent) -----
-    // The class object of any value (Object#class), used by is_a? / instance_of? and
-    // by the `when Integer` form of case.
-    // BasicObject#equal? - OBJECT IDENTITY, and it existed in NO engine:
-    // `1.equal?(1)' aborted here with *unknown Integer method: equal?* and in both
-    // compiled halves with *method call 'equal?' on a number*, so --cross could
-    // never see it. docs/todo.md 2.5, and manual 7.6's `is'/`strictEq' under-read is
-    // the same problem one language over.
-    //
-    // The rule is NOT a bare `===', and that is the whole content of this function.
-    // Three kinds of value need saying, each measured against /usr/bin/ruby 2.6.10
-    // (equal? is unchanged in 3.x):
+    // BasicObject#equal? - OBJECT IDENTITY. The rule is NOT a bare `===' (MRI 2.6.10,
+    // the same in 3.x):
     //
     //   a Float is a BOX here and a flonum in MRI, so identity ON THE BOX would
     //   make 1.0.equal?(1.0) FALSE where MRI says true. The doubles are compared
     //   instead, which also delivers MRI's `false' for NaN by construction. A `==='
     //   would not do: this half compares two boxes by JS identity while layer 2's
-    //   `===' is the floor's strict_eq (manual 7.9), so the two halves would part
-    //   company on exactly this row.
+    //   `===' is the floor's strict_eq (manual 7.9), so the two halves would part.
     //
     //   a String, a Rational and a Complex answer FALSE, always. MRI allocates a
     //   fresh object for each of them ("a".equal?("a") is false, and so is
     //   (1r/3r).equal?(1r/3r)), and this value model has no identity for any of the
-    //   three - a String is a host string and the other two are rebuilt by every
-    //   operation. The row that costs is the ALIASED one, `s = "a"; s.equal?(s)',
-    //   true in MRI and false here; it is the same trade in all four engines, so it
-    //   is a divergence from MRI and never a halves divergence, and the alternative
-    //   (value equality) gets the literal row wrong AND disagrees with the Go twin,
+    //   three. The row that costs is the ALIASED one, `s = "a"; s.equal?(s)', true
+    //   in MRI and false here; it is the same trade in all four engines, and value
+    //   equality would get the literal row wrong AND disagree with the Go twin,
     //   where a jsRat is a comparable Go STRUCT and two equal ones are `=='.
     //
     //   everything else is a reference or an interned value and `===' IS identity:
@@ -6697,6 +6471,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRat(a) || isCpx(a) || isRat(b) || isCpx(b)) { return false }
         return a === b
     }
+    // The class object of any value (Object#class), used by is_a? / instance_of? and
+    // by the `when Integer` form of case.
     function classOf(v) {
         if (v === null || v === undefined) { return hostGlobals["NilClass"] }
         if (v === true) { return hostGlobals["TrueClass"] }
@@ -6716,16 +6492,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(v)) { return hostGlobals["Hash"] }
         if (isEnum(v)) { return hostGlobals["Enumerator"] }
         if (isUserObj(v)) { return v.__class }
-        // A class object's own class is Class, a module object's is Module - this
-        // half answered Object for both. docs/todo.md 1.3.
+        // A class object's own class is Class, a module object's is Module.
         if (isClassObj(v)) {
             return v.__ismodule === true ? hostGlobals["Module"] : hostGlobals["Class"]
         }
         return hostGlobals["Object"]
     }
     // String#start_with? / #end_with?: true when ANY of the given prefixes/suffixes
-    // matches. Mirrors rbStartsWith/rbEndsWith of lib/ruby-rt.metajs and the
-    // start_with?/end_with? arms of abnf/jsrt.go. docs/todo.md 1.10.
+    // matches. Twins: rbStartsWith/rbEndsWith of lib/ruby-rt.metajs and the
+    // start_with?/end_with? arms of abnf/jsrt.go.
     function strAnyPrefix(s, args) {
         for (var i = 0; i < args.length; i++) {
             var p = rstr(args[i])
@@ -6744,7 +6519,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // answers nil for a negative length or a start past the end, "" / [] for a start
     // exactly at the end, and clamps len to what is left. A negative start counts
     // back from the end. Mirrors rbStrSubseq / rbArrSubseq of lib/ruby-rt.metajs and
-    // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go. docs/todo.md 1.10.
+    // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go.
     function rsubseq(o, start, len) {
         var n = o.length
         var s = Math.trunc(toF(start))
@@ -6785,8 +6560,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The Integer method set for a value past 2^53. It is the same list the plain
     // number arm of mcall answers, with every step routed through the exact
-    // arithmetic instead of the double - `(2**64).abs` used to answer
-    // 1.8446744073709552e+19 through toF. What is NOT here (times / upto /
+    // arithmetic instead of the double. What is NOT here (times / upto /
     // downto / succ / pred and the Rational and Complex conversions) either
     // cannot terminate at this size or has no exact form in this value model;
     // they fall through to numberMethod's error, which names the method.
@@ -6796,7 +6570,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "truncate") { return numDigitOp(0, t, true, "t", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
         // An Integer is already floored, ceilinged and rounded at every ndigits
         // >= 0; a NEGATIVE one rounds to a multiple of 10**-ndigits, which past
-        // 2**53 has to be exact. docs/todo.md 1.2.
+        // 2**53 has to be exact.
         if (name == "floor") { return numDigitOp(0, t, true, "f", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
         if (name == "ceil") { return numDigitOp(0, t, true, "c", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
         if (name == "round") { return numDigitOp(0, t, true, "r", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
@@ -6822,23 +6596,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The methods of the boxed numerics (Float, Rational, Complex).
     function numberMethod(t, name, args, blk) {
-        // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes -
-        // and this arm answered rstr for both, so `p 2r/3r' printed the bracketed
-        // form off rinspect while `(2r/3r).inspect' printed the bare one, inside
-        // one engine. docs/todo.md 1.3.
+        // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
         if (name == "inspect") { return rinspect(t) }
         if (name == "to_s") { return rstr(t) }
         if (name == "to_f") { return isFlo(t) ? t : mkFlo(toF(t)) }
-        // #truncate is NOT here any more: it takes an ndigits like #floor and
-        // #round, and this arm ignored it - `1.567.truncate(1)' answered the
-        // Integer 1 where MRI answers the Float 1.5. docs/todo.md 1.3.
+        // #truncate is answered with #floor / #round below, because it takes an
+        // ndigits too (`1.567.truncate(1)' is the Float 1.5).
         if (name == "to_i" || name == "to_int") { var x1 = toF(t); floDomainGuard(x1); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
         if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
-        // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
-        // through toF, so (2r/3r).abs answered the Float 0.6666666666666666 and
-        // (3+4i).abs answered 3.0 - the REAL PART - where MRI says (2/3) and 5.0.
-        // Agreed in all four legs and wrong in all four. docs/todo.md 1.3.
+        // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE:
+        // (2r/3r).abs is (2/3) and (3+4i).abs is 5.0 in MRI.
         if (name == "abs" || name == "magnitude") {
             if (isRat(t)) { return t.n < 0 ? mkRat(0 - t.n, t.d) : t }
             if (isCpx(t)) { return mkFlo(hypotOf(t.re, t.im)) }
@@ -6847,7 +6615,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
         // one answers a Float (and does not raise on an infinity); 0 and negatives
-        // answer an Integer. numDigitOp is the whole rule. docs/todo.md 1.2.
+        // answer an Integer. numDigitOp is the whole rule.
         if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
             var dmode = name == "floor" ? "f" : (name == "ceil" ? "c" : (name == "round" ? "r" : "t"))
             var dnd = args.length > 0 ? Math.trunc(toF(args[0])) : 0
@@ -6858,11 +6626,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
-        // Float#nan? / #infinite? / #finite?, which existed in NO engine: this half
-        // aborted with *unknown Numeric method: nan?* and both compiled halves with
-        // *method call 'nan?' on a object*, agreed and both useless. Found while
-        // asserting Float::NAN, which cannot be checked without one of them.
-        // #infinite? answers 1, -1 or NIL - not a boolean. docs/todo.md 1.5.
+        // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL - not
+        // a boolean.
         if (name == "nan?") { var xn = toF(t); return xn !== xn }
         if (name == "finite?") { var xk = toF(t); return xk === xk && xk - xk === 0 }
         if (name == "infinite?") {
@@ -6879,9 +6644,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function mcall(target, name, args, blk) {
         // Object#send / #__send__ / #public_send: the method NAME is the first
         // argument and the rest of the list is the call, with the block travelling
-        // on unchanged. It was implemented in no engine at all - `"a".send(:upcase)'
-        // aborted with *unknown String method: send* in all four legs, which is why
-        // --cross never saw it. Re-entering mcall rather than reaching into any one
+        // on unchanged. Re-entering mcall rather than reaching into any one
         // type's table is what makes it work for a user object, an Array and a Proc.
         if (name == "send" || name == "__send__" || name == "public_send") {
             if (args.length == 0) { fail("no method name given") }
@@ -6922,29 +6685,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // only through the emitted module, so one of the three would have had to
             // answer a synthetic stand-in. An omission is not a divergence.
             if (name == "name" && isMethodVal(target)) { return mkSym(methodNames[methodValIndex(target)]) }
-            // Proc#to_s / #inspect are the same string in MRI, and neither existed:
-            // `method(:x).inspect' aborted with *unknown Proc method: inspect* while
-            // "#{method(:x)}" answered off rstr - so the interpolation and the
-            // explicit call disagreed inside ONE engine.
+            // Proc#to_s / #inspect are the same string in MRI, and the same one the
+            // interpolation "#{method(:x)}" renders.
             if (name == "to_s" || name == "inspect") { return rstr(target) }
             if (name == "lambda?") { return isLambda(target) }
             if (name == "arity") { return procArity(target) }
             // `def m(&blk); blk.nil?; end' - the ordinary way to ask whether a method
-            // was given a block - ABORTED this half, where the compiled halves
-            // answered off the generic nil? arm.
+            // was given a block.
             if (name == "nil?") { return false }
             // The universal arms below this block are unreachable for a function
             // value, so #equal? is answered here too - a Proc IS a reference, so it
             // is plain identity.
             if (name == "equal?") { return target === args[0] }
             if (name == "class") { return classOf(target) }
-            // NO `fail' here, and that is the point. This block used to end in
-            // *unknown Proc method: NAME*, which made a function value the ONE kind
-            // of value that could not reach Ruby's universal methods below -
-            // `method(:x).is_a?(Method)' and `p.frozen?' aborted where every other
-            // receiver answered. Falling through costs nothing: none of the arms
-            // below matches a function, and the last one names the method just as
-            // this one did.
+            // NO `fail' here, and that is the point: a function value has to reach
+            // Ruby's universal methods below too (`method(:x).is_a?(Method)',
+            // `p.frozen?'). None of the arms below matches a function, and the last
+            // one names the method.
         }
         // The methods every value answers.
         if (name == "class") { return classOf(target) }
@@ -6959,9 +6716,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "tap") { blockCall(blk, [target]); return target }
         // Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
         // Float, Rational and String all answer them off one pair of arms - which
-        // is why they sit here and not in three method tables. They were
-        // compiler-half-only (docs/todo.md 2.9); a user class that defines either
-        // itself still wins, because its own dispatch is below.
+        // is why they sit here and not in three method tables. A user class that
+        // defines either itself still wins, because its own dispatch is below.
         if ((name == "between?" || name == "clamp") && !isUserObj(target)) {
             if (name == "between?") { return rcmp(target, args[0]) >= 0 && rcmp(target, args[1]) <= 0 }
             if (rcmp(target, args[0]) < 0) { return args[0] }
@@ -7019,12 +6775,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : intStr(target) }
             if (name == "to_i" || name == "to_int") { return intFromF(Math.floor(target)) }
             // #truncate takes an ndigits like #floor and #round - `1234.truncate(-2)`
-            // is 1200 - and this arm ignored it. docs/todo.md 1.3.
+            // is 1200.
             if (name == "truncate") { return numDigitOp(target, null, true, "t", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
             // #floor / #ceil / #round on an Integer answer the receiver at every
             // ndigits >= 0 and round to a multiple of 10**-ndigits below that.
-            // #ceil and #round were absent outright - `5.ceil` aborted with
-            // *unknown Integer method: ceil*. docs/todo.md 1.2.
             if (name == "floor") { return numDigitOp(target, null, true, "f", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
             if (name == "ceil") { return numDigitOp(target, null, true, "c", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
             if (name == "round") { return numDigitOp(target, null, true, "r", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
@@ -7079,7 +6833,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return target.split("") }
             if (name == "split") { return args.length > 0 ? target.split(rstr(args[0])) : target.split(" ") }
-            // String#[] / #slice: one index, a Range, or start+len (docs/todo.md 1.10).
+            // String#[] / #slice: one index, a Range, or start+len.
             if (name == "[]" || name == "slice") {
                 if (args.length > 1) { return rsubseq(target, args[0], args[1]) }
                 return rindex(target, args[0])
@@ -7091,8 +6845,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "index") { var ix = target.indexOf(rstr(args[0])); return ix < 0 ? null : ix }
             if (name == "empty?") { return target.length == 0 }
             if (name == "inspect") { return strInspect(target) }
-            // 0 for an empty string, not NaN: MRI raises ArgumentError, and the two
-            // compiled halves answer 0, so this is the half that had to move.
+            // 0 for an empty string where MRI raises ArgumentError; the two compiled
+            // halves answer 0 as well.
             if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
             if (name == "succ" || name == "next") { return strSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
@@ -7109,9 +6863,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (name == "scan") { return reScan(rv, target, blk) }
                 return reSub(rv, target, args, blk, name == "gsub" || name == "gsub!")
             }
-            // The String surface the item's six names belong to (bytes / tr /
-            // center / ljust / rjust / count / delete and their families).
-            // docs/todo.md 1.3.
+            // The rest of the String surface (bytes / tr / center / ljust / rjust /
+            // count / delete and their families) - see smMethod.
             var sx = strExtra(target, name, args, blk)
             if (sx.ok) { return sx.v }
             fail("unknown String method: " + name)
@@ -7128,7 +6881,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return dpairs
             }
             // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
-            // rindex. String and Array answer it too. docs/todo.md 1.10.
+            // rindex. String and Array answer it too.
             if (name == "[]") { return rindex(target, args[0]) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
@@ -7263,7 +7016,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (target.__class != undefined) {
             // The SINGLETON table comes first: `def obj.m', `class << obj' and an
             // extended module all sit in front of the object's own class.
-            // docs/todo.md 1.3.
             // The two slot reads come first and the CALL only when one of them is
             // set: this sits on the method-dispatch path of every user object.
             if (target.__sing != undefined || target.__sext != undefined) {
@@ -7287,8 +7039,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "singleton_methods") { return singNames(target) }
             if (name == "respond_to?") { return singRespond(target, rstr(args[0])) }
             // Object#method with an explicit receiver. Kernel#method (no receiver)
-            // was already here; `o.method(:m)' aborted in every engine, and it is
-            // the one way a singleton method is reachable as a value.
+            // Object#method with an explicit receiver: the one way a singleton method
+            // is reachable as a value.
             if (name == "method" && lookupMethod(target.__class, "method") == undefined) {
                 var bm = anytype
                 bm = singFind(target, rstr(args[0]))
@@ -7324,12 +7076,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 // #to_s / #inspect on an instance whose class defines neither: the
                 // universal Object methods, answered rather than aborted.
-                // docs/todo.md 1.3.
                 if (name == "inspect") { return rinspect(target) }
                 if (name == "to_s") { return rstr(target) }
                 // Object#dup / #clone: a SHALLOW copy of the instance variables, and
                 // the two differ in exactly one thing - #clone carries the singleton
-                // class over and #dup does not. Both aborted in every engine.
+                // class over and #dup does not.
                 // Reached only when the class defines neither, so a user #dup wins.
                 if (name == "dup" || name == "clone") { return singCopy(target, name == "clone") }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
@@ -7347,18 +7098,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mr
         }
         if (target.__isclass === true) {
-            // Proc.new { } is a PROC, not a lambda: `Proc.new { }.lambda?' is false in
-            // MRI and in the compiler half, and marking it here made this half answer
-            // true. Its `return' is non-local, exactly like a block's.
+            // Proc.new { } is a PROC, not a lambda: `Proc.new { }.lambda?' is false.
+            // Its `return' is non-local, exactly like a block's.
             if (name == "new" && target === hostGlobals["Proc"]) { return blk }
-            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this arm
-            // it fell into the generic instance construction below and answered a bare
-            // object - a silent wrong answer, and a different one in each engine.
+            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }, ahead of the
+            // generic instance construction below.
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default is kept in
             // the hidden __hdef / __hdefp slots and honoured by hashDefault at every
-            // read; before that the two argument forms fell through to the generic
-            // instance construction and answered a bare object.
+            // read.
             if (name == "new" && target === hostGlobals["Hash"]) {
                 var nd = {__dict: true, keys: [], vals: []}
                 if (blk != null) { nd.__hdefp = blk }
@@ -7387,10 +7135,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return hostGlobals["Object"]
             }
             if (name == "instance_methods") { return [] }
-            // Module#ancestors / #include? / #< / #<= / #> / #>=: the reflection
-            // surface. ancestors answered a bare [] here and aborted in both
-            // compiled halves; the four operators raised *comparison of Object with
-            // Object failed* in every engine. docs/todo.md 1.3.
+            // Module#ancestors / #include? / #< / #<= / #> / #>=: the reflection surface.
             if (name == "ancestors") { return ancestorsOf(target) }
             if (name == "include?") { return ancestorHas(target, args[0]) }
             if (name == "<" || name == "<=" || name == ">" || name == ">=") {
@@ -7401,7 +7146,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // explicit receiver all install there. The BARE `extend M' directive
             // inside a class body still goes through extendOnto - it is a build-time
             // form in the compiler half, and only the receiver form has to agree
-            // between the engines at run time. docs/todo.md 1.3.
+            // between the engines at run time.
             if (target.__sing != undefined || target.__sext != undefined) {
                 var cgm = anytype
                 cgm = singFind(target, name)
@@ -7431,8 +7176,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
             // are ordinarily called without a receiver, but naming Kernel explicitly is
-            // legal Ruby and aborted here. They are the same host functions the bare
-            // names resolve to.
+            // legal Ruby. They are the same host functions the bare names resolve to.
             if (target === hostGlobals["Kernel"]
                 && (name == "format" || name == "sprintf" || name == "rand" || name == "srand")) {
                 return hostGlobals[name].apply(undefined, args)
@@ -7534,9 +7278,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // Array.new(n) fills with nil, Array.new(n, v) with v, and Array.new(n) { |i| }
-    // calls the block once per index. Both compiled halves answered something else
-    // entirely (`3` under llvm.Run, an object in the interpreter), so this was a
-    // silent wrong answer in every engine rather than an abort.
+    // calls the block once per index.
     function arrNew(args, blk) {
         var out = []
         if (args.length > 0 && Array.isArray(args[0])) { return arrReplace(out, args[0]) }
@@ -7663,22 +7405,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "min_by" || n == "max_by" || n == "take_while" || n == "drop_while"
     }
     // A blockless each / each_slice / each_cons / each_with_index / combination /
-    // permutation answers an Enumerator in MRI; before this they answered the array of
-    // elements the enumerator would have produced, so `.to_a` was right and `.class`
-    // said Array and `.next` did not exist at all.
+    // permutation answers an Enumerator in MRI.
     //
     // This Enumerator is EAGER: it holds the materialized element list. A lazy one
-    // needs a suspendable body, and ruby-to-llvm-ir.abnf lowers every block by hand
-    // (grep js_genfn: zero hits), so the compiler half has no coroutine to park in.
-    // Everything an eager one can answer - to_a, next/peek/rewind, size, with_index
-    // and the whole Enumerable surface by delegation to Array - is answered, and
-    // Enumerator.new / an infinite enumerator is not expressible. Mirrored by
-    // rbMkEnum / rbEnumMethod in lib/ruby-rt.metajs and rubyMkEnum /
-    // rubyEnumMethod in abnf/jsrt.go.
+    // needs a suspendable body, and ruby-to-llvm-ir.abnf lowers every block by hand,
+    // so the compiler half has no coroutine to park in. Everything an eager one can
+    // answer - to_a, next/peek/rewind, size, with_index and the whole Enumerable
+    // surface by delegation to Array - is answered, and Enumerator.new / an infinite
+    // enumerator is not expressible. Mirrored by rbMkEnum / rbEnumMethod in
+    // lib/ruby-rt.metajs and rubyMkEnum / rubyEnumMethod in abnf/jsrt.go.
     // An Enumerator remembers the OPERATION that made it: `h.map` is an Enumerator
-    // whose pending op is map, so `h.map.with_index { }` has to answer the MAPPED
-    // list, not the receiver. An eager Enumerator that forgot the op answered the
-    // Enumerator itself and every `map.with_index` was silently wrong.
+    // whose pending op is map, so `h.map.with_index { }` answers the MAPPED list,
+    // not the receiver.
     function mkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
     function mkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
     // What one pass of the pending operation answers, given the block results.
@@ -7754,8 +7492,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // both go through here. each / each_with_index answer one below on their own.
         if (blk == null && arrWantsBlock(name)) { return mkEnumOp(t.slice(0), name) }
         if (name == "size" || name == "length") { return t.length }
-        // Array#[]: one index, a Range, or start+len. (#slice has its own arm below,
-        // kept as it was.) docs/todo.md 1.10.
+        // Array#[]: one index, a Range, or start+len. (#slice has its own arm below.)
         if (name == "[]") {
             if (args.length > 1) { return rsubseq(t, args[0], args[1]) }
             return rindex(t, args[0])
@@ -7766,8 +7503,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t
         }
         // first / last / pop / shift all take an optional COUNT, and then answer an
-        // ARRAY. Without it they answered the single element whatever was passed, so
-        // `[1,2,3].first(2)` was a silent 1 in every engine.
+        // ARRAY (`[1,2,3].first(2)` is [1, 2]).
         if (name == "pop") {
             if (args.length > 0) {
                 var pn = Math.trunc(toF(args[0]))
@@ -7810,22 +7546,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { pre.push(t[i]) }
             return arrReplace(t, pre)
         }
-        // Array#include? is `===` plus a big-aware FALLBACK SCAN: two Integers
-        // past 2^53 are different objects, so indexOf alone answered false where
-        // both compiled halves (which route this through their dict find, and
-        // therefore through a value comparison) answered true.
         // Array#include? / #index / #find_index are ==, not === and not eql?:
-        // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. This
-        // was `indexOf` plus a big-only fallback scan, which answered false to
-        // both, and rubyEq subsumes the big arm it replaces.
+        // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. rubyEq
+        // also equates two Integers past 2^53, which are different objects here.
         if (name == "include?" || name == "contains") {
             for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { return true } }
             return false
         }
-        // inspect / index / find_index / rindex / uniq. All four were missing from
-        // EVERY engine (docs/todo.md 2.9 recorded them as an interpreter gap; they
-        // were not), and index and uniq compare BY VALUE - `[[1]].index([1])` is 0
-        // in MRI - which is what dictScan/rbDictFind/core.keyEq now say too.
+        // inspect / index / find_index / rindex / uniq. index and uniq compare BY VALUE - `[[1]].index([1])` is 0
+        // in MRI - as dictScan/rbDictFind/core.keyEq do.
         if (name == "inspect") { return rinspect(t) }
         if (name == "index" || name == "find_index") {
             // The block form answers the first index the block accepts.
@@ -7886,16 +7615,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { if (!rtest(blockCall(blk, [t[i]]))) { out.push(t[i]) } }
             return out
         }
-        // sum was `(s + t[i]) | 0`, which truncated every Float and every value past
-        // 2^31 to a 32-bit integer: `[1.5, 2.5].sum` answered 3. Ruby's sum is
-        // ordinary + from an Integer 0 (or from the given initial value), with the
-        // block applied to each element first.
-        // MRI's sum starts from an Integer 0 and REFUSES a non-numeric element:
-        // `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
-        // NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])`
-        // is [1,2], because those start from a String and an Array. A catchable
-        // TypeError, like the AttributeError of 6eec533: MRI's is rescuable and a
-        // hard abort would not be.
+        // Ruby's sum is ordinary + from an Integer 0 (or from the given initial
+        // value), with the block applied to each element first.
+        // MRI's sum REFUSES a non-numeric element against a NUMERIC accumulator:
+        // `["b","a"].sum` is a TypeError, not "0ba", while `["a","b"].sum("")` is
+        // "ab" and `[[1],[2]].sum([])` is [1,2], because those start from a String
+        // and an Array. The TypeError is catchable, as MRI's is.
         if (name == "sum") {
             var s = anytype
             s = args.length > 0 ? args[0] : 0
@@ -7917,9 +7642,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "sort!") { return arrReplace(t, arrSortWith(t, arrCmpFn(blk))) }
         if (name == "sort_by") { return arrUndecorate(arrKeyed(t, blk)) }
         if (name == "sort_by!") { return arrReplace(t, arrUndecorate(arrKeyed(t, blk))) }
-        // #reverse_each yields (or enumerates) from the back. It was missing in ALL
-        // THREE engines - surfaced by Range#reverse_each, which delegates here.
-        // docs/todo.md 1.5.
+        // #reverse_each yields (or enumerates) from the back; Range#reverse_each
+        // delegates here.
         if (name == "reverse_each") {
             var rvz = []
             for (i = t.length - 1; i >= 0; i--) { rvz.push(t[i]) }
@@ -8209,10 +7933,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = ii; i < t.length; i++) { ins.push(t[i]) }
             return arrReplace(t, ins)
         }
-        // delete answers the value it removed (nil when it removed nothing), while
+        // delete answers the LAST element it removed (nil when none) - not always
+        // the argument, since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
         // delete_at answers the element that was at that index.
-        // delete answers the LAST element it removed - which is not always the
-        // argument, since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
         if (name == "delete") {
             var kept = []
             var hit = anytype
@@ -8379,8 +8102,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The function values `method(:x)' / `obj.method(:x)' handed out, with the
     // OWNER and NAME each one was built from. MRI's Method is a class of its own -
     // `method(:x).class' is Method, `#<Method: Object#x>' is its to_s and its arity
-    // counts like a lambda's - and every engine here answered Proc, `#<Proc>' and a
-    // proc's arity. docs/todo.md 2.5.
+    // counts like a lambda's.
     //
     // A REGISTRY and not a property on the function value, for the reason
     // lambdaSet gives one line down: a property is not portable across the two
@@ -8419,9 +8141,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // A Kernel method reachable by name, and the ARITY MRI reports for it. `puts`,
     // `format` and their neighbours are ordinary Methods there - `method(:puts)`
-    // answers `#<Method: Object(Kernel)#puts>` - and every engine here raised
-    // NameError instead, agreed and wrong, so --cross was blind to it.
-    // docs/todo.md 2.5.
+    // answers `#<Method: Object(Kernel)#puts>`.
     //
     // THE LIST IS EXACTLY THE KERNEL FUNCTIONS ALL THREE ENGINES CAN CALL FROM AN
     // ARGUMENT ARRAY, and it is the same list, in the same order, in
@@ -8519,8 +8239,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (i < 0) { return 0 }
         if (arityStar[i] === true) { return 0 - (arityReq[i] + 1) }
         // A METHOD counts optionals the way a lambda does, not the way a proc does:
-        // MRI's `method(:m).arity' for `def m(a, b = 1)' is -2, and every engine
-        // here answered the proc's 1. docs/todo.md 2.5.
+        // MRI's `method(:m).arity' for `def m(a, b = 1)' is -2.
         if ((isLambda(f) || isMethodVal(f)) && arityOpt[i] > 0) { return 0 - (arityReq[i] + 1) }
         return arityReq[i]
     }
@@ -8556,7 +8275,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // REGISTRY could not supply it, being armed only when the program names `arity'
     // (it retains every closure with its whole scope chain). js_rlamchk of
     // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
-    // docs/todo.md 1.6.
     function lamArityWrap(f, params) {
         if (typeof f != "function" || params == undefined || params == null) { return f }
         return function() {
@@ -8669,7 +8387,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // blkParams travels beside the block so that Kernel#lambda can arity-check
         // it (makeCall below). The arity REGISTRY cannot carry it: it is armed only
         // when the program names `arity', and behaviour must not depend on that.
-        // docs/todo.md 1.6.
         return {blkParams: params, blkT: function() {
             var captured = scopes.slice(0)
             var f = function() {
@@ -8786,9 +8503,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // `&nil' is Ruby for "no block", and it is how a method FORWARDS the
             // block it may not have been given: `def a(*r, &b); c(*r, &b); end'
-            // called without one passes &nil. This half aborted on it outright
-            // while both compiled halves answered - a live halves divergence
-            // --cross never reached, found probing docs/todo.md 1.9.
+            // called without one passes &nil.
             if (v === null || v === undefined) { return null }
             fail("& needs a proc or a symbol")
         }
@@ -8842,7 +8557,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // enumerate an object's keys (the same reason a module scope keeps __names), so
     // Object#dup / #clone would have nothing to copy without this list. It is
     // __-prefixed, so it stays out of every other reader. The compiled halves need
-    // no list: keysOf / o.keys answer exactly the same set there. docs/todo.md 1.3.
+    // no list: keysOf / o.keys answer exactly the same set there.
     function ivarPut(s, name, v) {
         if (!hasOwn(s, name)) {
             if (s.__ivn == undefined) { s.__ivn = [] }
@@ -8897,7 +8612,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `s[0] = "H"' has to be written back to the variable - exactly what
     // makeAppendStmt already does for `s << "x"'. The write-back is done only for a
     // one-step path with an assignable head, which is what the emitter's
-    // emitPathSet can do too. docs/todo.md 1.3.
+    // emitPathSet can do too.
     function writePathRuby(ref, p, v) {
         if (!p.isIdx) { rsetIndex(p.obj, p.key, v); return }
         var nv = anytype
@@ -8922,8 +8637,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (op != "=") {
                     var old = anytype
                     // A MISS answers the hash's default, exactly as Hash#[] does -
-                    // `cnt[w] += 1' on a Hash.new(0) is the counter idiom, and this
-                    // read used to answer nil unconditionally.
+                    // `cnt[w] += 1' on a Hash.new(0) is the counter idiom.
                     if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di] }
                     else if (isUserObj(p.obj)) { old = rindex(p.obj, p.key) }
                     else { old = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined }
@@ -8988,7 +8702,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // makeCall. IT CHANGES THE IDENTITY of the result - the value is the
             // checking wrapper, not the block - so the arity record is copied over;
             // nothing in Ruby can observe the difference, a block literal not being
-            // a value there at all. docs/todo.md 1.6.
+            // a value there at all.
             if (name == "lambda" && blkT != null && lamParams != null) {
                 var lb0 = blkT()
                 return markLambda(copyArity(lamArityWrap(lambdaWrap(lb0), lamParams), lb0))
@@ -9007,8 +8721,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (f == undefined) { f = getVar(name) }
             // Kernel#Integer / #Float / #String / #Array before the class arm: the
-            // name resolves to the builtin CLASS object, and calling that built an
-            // INSTANCE of Integer instead of converting. docs/todo.md 1.3.
+            // name resolves to the builtin CLASS object, and calling that would build
+            // an INSTANCE instead of converting.
             if (f != undefined && f != null && f.__isclass === true && isKernelConv(name)
                 && argv.length > 0 && f.__name == name && !hasOwn(rubyMethods, name)) {
                 return kernelConv(name, argv)
@@ -9090,15 +8804,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A raise that escapes the top level is reported the way MRI reports it -
         // "prog.rb:2:in `<main>': boom (RuntimeError)" - rather than as an engine
         // error, so all three engines print the same line. js_rtop of
-        // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins, which
-        // used to print "uncaught exception: [object Object]". docs/todo.md 1.7.
+        // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
         // A top-level `return' ENDS THE PROGRAM in MRI (it is legal at the main
-        // level and behaves like falling off the end), and the compiled halves
-        // already did that. This half ran on to the next statement, so the two
-        // halves disagreed on every file with an early `return' guard at the top
-        // level. isSig also stops on a stray top-level break/next, which MRI turns
-        // into a LocalJumpError - ending quietly is closer than ignoring it.
-        // docs/todo.md 1.3.
+        // level and behaves like falling off the end). isSig also stops on a stray
+        // top-level break/next, which MRI turns into a LocalJumpError - ending
+        // quietly is closer than ignoring it.
         try {
             for (var i = 0; i < items.length; i++) {
                 var sv = anytype
@@ -9113,8 +8823,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             throw e
         }
     }
-    // module M ... end: not implemented (no namespacing). Run the body items in
-    // sequence in the current scope so any defs / classes / calls stay visible.
     // module M ... end: a real module object. It is the same shape as a class object
     // (so include/extend/prepend can copy methods off it and a def inside it lands in
     // the same table), plus __methodNames, which `extend` needs because the frozen
@@ -9204,7 +8912,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // MRI's own wording, and the three shapes it writes the expectation in:
     // `expected 1` for a fixed list, `expected 1..2` when optionals follow, and
     // `expected 1+` when a *splat does. Mirrors rbArgCountErr of lib/ruby-rt.metajs
-    // and rubyArgCountErr of abnf/jsrt.go. docs/todo.md 1.5.
+    // and rubyArgCountErr of abnf/jsrt.go.
     function argCountErr(given, posParams) {
         var req = 0
         var opt = 0
@@ -9227,9 +8935,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (i = 0; i < params.length; i++) { if (params[i].kw === true || params[i].kwrest === true) { wantsKw = true } }
         var pos = args
         // The keyword Hash is the last argument BEFORE the trailing block slot, not
-        // the last argument outright - `def kw(a: 7); end; kw(a: 2) { }' passed the
-        // keywords and still took the default, because the block sat behind the Hash.
-        // js_rkwargs of the compiler half searches the same two positions.
+        // the last argument outright: in `kw(a: 2) { }' the block sits behind the
+        // Hash. js_rkwargs of the compiler half searches the same two positions.
         var kwAt = pos.length - 1
         if (kwAt >= 0 && isBlkArg(pos[kwAt])) { kwAt = kwAt - 1 }
         if (wantsKw && kwAt >= 0 && isDict(pos[kwAt])) {
@@ -9252,26 +8959,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // may take - `def d(x = 5); yield x; end; d { }' binds x to 5 in Ruby, not to
         // the block. npos is the positional count with that trailing block slot
         // removed. A Proc handed over as an ORDINARY argument carries no marker and
-        // binds normally, which is the whole point of the marker: before it,
-        // `def m(f = 3); end; m(some_proc)' took the default. The compiler half draws
-        // the same line, in js_rposbind.
+        // binds normally, which is the whole point of the marker. The compiler half
+        // draws the same line, in js_rposbind.
         var npos = pos.length
         if (npos > 0 && isBlkArg(pos[npos - 1])) { npos = npos - 1 }
         // TOO FEW POSITIONAL ARGUMENTS IS AN ERROR, and this is the only place that
         // can see it: bindParams is reached from invokeRuby (a method call) and from
         // a LAMBDA's body, which are exactly the two forms MRI arity-checks - a block
-        // binds loosely and must not be checked. Before this, `def one(a); end; one'
-        // bound a to nil and ran, where MRI raises ArgumentError; the bare-name form
-        // is the one docs/todo.md 1.5 names, but the same hole swallowed `one()' and
-        // `f = ->(x) { }; f.call' just as quietly. A CATCHABLE ArgumentError, not a
+        // binds loosely and must not be checked. A CATCHABLE ArgumentError, not a
         // host abort - the class and the message are MRI's, and both compiled halves
         // raise the same ones (js_rposbind in lib/ruby-rt.metajs / abnf/jsrt.go).
         if (npos < required) { argCountErr(npos, posParams) }
-        // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises
-        // for `def one(a); end; one(1, 2)' and for `->(x) { }.call(1, 2)' exactly as
-        // it does for too few; both were accepted here, and the extra arguments were
-        // silently dropped. The two compiled halves ask the same question in
-        // js_rposbind / js_rargchk. docs/todo.md 1.6.
+        // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling
+        // (`def one(a); end; one(1, 2)', `->(x) { }.call(1, 2)'). The two compiled
+        // halves ask the same question in js_rposbind / js_rargchk.
         var hasStar = false
         for (i = 0; i < posParams.length; i++) { if (posParams[i].splat === true) { hasStar = true } }
         if (!hasStar && npos > posParams.length) { argCountErr(npos, posParams) }
@@ -9349,12 +9050,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     // A non-local `return' out of a block throws straight past the blockStack.pop()
-    // of the call that pushed the block, so the block STAYED on the stack and the
-    // next method invoked with no block of its own saw it: after section 37 of
-    // tests/ruby-test-full.rb `block_given?' answered true and `&b' bound a stale
-    // block. This half only - the compiler half publishes $blk out of the method's
-    // own argument list, so it cannot leak. invokeRuby restores the depth exactly
-    // the way it restores `scopes'.
+    // of the call that pushed the block, so without the trim the block would STAY on
+    // the stack and the next method invoked with no block of its own would see it.
+    // This half only - the compiler half publishes $blk out of the method's own
+    // argument list, so it cannot leak. invokeRuby restores the depth exactly the
+    // way it restores `scopes'.
     function blkTrim(n) { while (blockStack.length > n) { blockStack.pop() } }
     function invokeRuby(fn, self, args) {
         var saved = scopes
@@ -9390,9 +9090,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A `def` closure enters the arity registry exactly as a block or a lambda does,
     // so `method(:double).arity` answers 1 rather than the 0 an UNRECORDED closure
     // answers. markParamArity is the gate as well as the write: it records nothing
-    // unless the program names `arity` (noteMName), which is what keeps b086d07's
-    // measured 181 KB -> 5.1 MB live-heap cost off every program that does not ask.
-    // docs/todo.md 1.5.
+    // unless the program names `arity` (noteMName), which keeps the registry's
+    // retention cost off every program that does not ask.
     function makeFunClosure(fn) {
         return markParamArity(function() {
             var args = []
@@ -9428,7 +9127,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return undefined
     }
-    // ----- The PER-OBJECT singleton method table (docs/todo.md 1.3) -----
+    // ----- The PER-OBJECT singleton method table -----
     // Ruby gives every object a singleton ("eigen") class that sits IN FRONT of its
     // own class, and three source forms write into it: `def obj.m', `class << obj'
     // and #define_singleton_method. `obj.extend(M)' inserts a module there instead.
@@ -9497,7 +9196,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // singleton slots by accident, which is the trap the Go twin's generic clone
     // falls into: it walks o.keys RAW). The ONE difference is that #clone carries
     // the singleton class over and #dup does not; the tables are COPIED, not
-    // shared, so a def on the clone does not reach the original. Measured on /usr/bin/ruby 2.6.10.
+    // shared, so a def on the clone does not reach the original (MRI 2.6.10).
     // `clone(freeze: false)' is not modelled and does not need to be: nothing here
     // has a frozen bit to clear (Object#frozen? answers true only for the immediate
     // values), so the keyword would be a no-op in every engine.
@@ -9530,7 +9229,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `C.singleton_methods' has to answer them and there is no way to enumerate a
     // "$s$" key (keysOf hides nothing here, and the frozen engine has no for..in).
     // The compiler half emits the same list as __snames from its build-time
-    // classSMethods record. docs/todo.md 1.3.
+    // classSMethods record.
     function snamePut(cls, name) {
         if (cls.__snames == undefined) { cls.__snames = [] }
         for (var i = 0; i < cls.__snames.length; i++) { if (cls.__snames[i] == name) { return null } }
@@ -9557,9 +9256,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Object#singleton_methods: the direct defs first, then every extended module's
     // instance methods NEAREST FIRST (the order singFind searches), each name once.
-    // MRI's own order inside one module is its method-table hash order - measured
-    // `[:twice, :hi]` for a module written hi-then-twice - so only the tier order is
-    // settleable against the oracle and a test must sort.
+    // MRI's own order inside one module is its method-table hash order, so only
+    // the tier order is settleable against the oracle and a test must sort.
     function singNames(o) {
         var out = []
         if (o.__singn != undefined) {
@@ -9567,7 +9265,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // A class object's own `def self.' / `class << self' methods are singleton
         // methods of that object, and MRI lists them: `C.singleton_methods' answers
-        // [:sm] for `class C; def self.sm; end'. docs/todo.md 1.3.
+        // [:sm] for `class C; def self.sm; end'.
         if (o.__snames != undefined) {
             for (var s0 = 0; s0 < o.__snames.length; s0++) {
                 var dup0 = false
@@ -9590,8 +9288,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // Object#respond_to?: the singleton table, then the class chain (an instance) or
-    // the $s$ / $x$ class-method tables (a class object). It was absent from all four
-    // engines, so `o.respond_to?(:m)' aborted everywhere and --cross never saw it.
+    // the $s$ / $x$ class-method tables (a class object).
     function singRespond(o, name) {
         if (typeof singFind(o, name) == "function") { return true }
         if (o.__isclass === true) {
@@ -9659,13 +9356,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rubyMethods records every name introduced by a top-level def, so makeVarRef can
     // tell a method from an ordinary local (a local always wins, as in Ruby).
     //
-    // Every def is auto-called, WHATEVER its parameters. It used to be only the ones
-    // that declare none, on the argument that a bare name for a method taking
-    // arguments is an error in Ruby anyway - which is only true of a REQUIRED
-    // parameter: `def q(a = 1); end; q` is an ordinary call in MRI and printed
-    // nothing here. The feature-matrix file used the old shape to pass a method
-    // around as a value; it now says `method(:double)`, which is how Ruby spells
-    // that (hostGlobals["method"] below), so the guard has no case left to protect.
+    // Every def is auto-called, WHATEVER its parameters: `def q(a = 1); end; q` is
+    // an ordinary call in MRI. A method passed around as a value is spelled
+    // `method(:double)` (hostGlobals["method"] below).
     var rubyMethods = {}
     // The same registration, as an EXPRESSION: its value is the method's name as a Symbol.
     function makeDefExpr(fn) {
@@ -9675,9 +9368,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeDefStmt(fn) {
         // `def obj.m' - a def on ONE object, wherever it is written. The receiver is
-        // read at run time and the closure lands in its singleton table; before this
-        // the receiver was ignored and the def became a plain method of that name, so
-        // `def o.greet' left `o.greet' aborting. docs/todo.md 1.3.
+        // read at run time and the closure lands in its singleton table.
         if (fn.srecv != "") {
             var recvT = srecvThunk(fn.srecv)
             return function() { return singPut(recvT(), fn.name, makeMethodClosure(fn)) }
@@ -9709,11 +9400,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "private" || name == "protected" || name == "public" || name == "module_function") {
                 return hostGlobals[name]()
             }
-            // A BARE `rand` is Kernel#rand called with no arguments, not a reference to
-            // the host function - which is what it used to answer, so `rand.class` said
-            // Proc where MRI says Float (and the compiler half said "variable not
-            // defined: rand"). A program that defines a rand of its own still wins: the
-            // scope walk and selfMethod above run first.
+            // A BARE `rand` is Kernel#rand called with no arguments (`rand.class` is
+            // Float), not a reference to the host function. A program that defines a rand
+            // of its own still wins: the scope walk and selfMethod above run first.
             if (name == "rand" && rubyMethods["$rand"] !== true) { return hostGlobals["rand"](null) }
             var sm2 = anytype
             sm2 = selfMethod(name)
@@ -9854,10 +9543,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (it.method != undefined) {
                     var sm = it.method
                     // `class << obj' on an ORDINARY VALUE writes the object's own
-                    // singleton table. It used to install on the value's CLASS, so
-                    // the method leaked to every other instance of it - the same
-                    // wall that made the emitter refuse a def here.
-                    // docs/todo.md 1.3.
+                    // singleton table, so the method does not reach the other
+                    // instances of its class.
                     if (isCls) { sm.singleton = true; declareMethods(cls, [sm]) }
                     else { sm.owner = cls; singPut(obj, sm.name, makeMethodClosure(sm)) }
                 }
@@ -10331,7 +10018,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var p = resolveRefRuby(ref)
         // A MISS answers the hash's default, exactly as Hash#[] does - so
         // `nest[k] << v' on a Hash.new { |h, k| h[k] = [] } appends to the array the
-        // default block just installed, where this read used to answer nil.
+        // default block just installed.
         if (isDict(p.obj)) {
             var di = dictFind(p.obj, p.key)
             return di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di]
@@ -10403,7 +10090,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // a[i, len] = v / a[range] = v / s[i] = c. Answers the (possibly new) container:
     // a Ruby String is a value here. Mirrors rubySetSlice of abnf/jsrt.go and
-    // rbSetSlice of lib/ruby-rt.metajs. docs/todo.md 1.3.
+    // rbSetSlice of lib/ruby-rt.metajs.
     function rsetSlice(o, k1, k2, v) {
         if (isUserObj(o) && typeof lookupMethod(o.__class, "[]=") == "function") {
             mcall(o, "[]=", (k2 !== undefined && k2 !== null) ? [k1, k2, v] : [k1, v], null)
@@ -10502,9 +10189,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // begin / rescue / else / ensure. items = [{trybody}, {handler,hname}*, {elsebody}?,
-    // {finalbody}?]. makeExcept pairs a rescue's `=> Id` name (if any) with its body.
-    // items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
+    // begin / rescue / else / ensure. makeExcept turns one rescue clause into
+    // {handler, href, etypes}.
     function makeExcept(items) {
         var types = []
         var href = null
@@ -10555,7 +10241,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return cur
     }
-    // A raise in the body unwinds (a host throw) to the first rescue, which binds its
+    // A raise in the body unwinds (a host throw) to the first matching rescue, which binds its
     // `=> Id` name to the value; else runs only when the body raised nothing AND produced
     // no return/break/next signal; ensure always runs and a control signal from it
     // overrides. A return/break/next signal from the body propagates as the begin's value.
@@ -10643,11 +10329,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
     }
-    // raise [EXPR[, EXPR]]: raise the first expression's value as a host exception (a
-    // bare raise re-raise is approximated by raising nil); the message argument is ignored.
-    // raise "msg" wraps in a RuntimeError, raise CLASS[, msg] instantiates the class,
-    // raise EXC re-raises an instance, and a bare raise re-raises the one being
-    // handled - exactly Kernel#raise.
+    // raise [EXPR[, EXPR]]: raise "msg" wraps in a RuntimeError, raise CLASS[, msg]
+    // instantiates the class, raise EXC re-raises an instance, and a bare raise
+    // re-raises the one being handled - exactly Kernel#raise.
     function makeRaise(items, pos) {
         var t = items.length > 0 ? items[0] : null
         var mt = items.length > 1 ? items[1] : null
@@ -10673,7 +10357,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // declared once per method invocation), which is the interpreter's answer to
     // the compiler's emit-time curMethName. Only the raise SITE is modelled; MRI's
     // further backtrace frames are not, and a block is reported as its enclosing
-    // method rather than "block in NAME". docs/todo.md 1.7.
+    // method rather than "block in NAME".
     function raiseSite(pos) {
         var who = "<main>"
         if (hasVar("$mname")) {
@@ -10739,8 +10423,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "FalseClass") { return v === false }
             // Comparable is NOT universal: MRI answers false for a plain object and
             // true only for a Numeric, a String, or a class that included it - which
-            // the userIsA walk below settles. This half answered true for
-            // everything. docs/todo.md 1.3.
+            // the userIsA walk below settles.
             if (n == "Comparable") { return isNumV(v) || typeof v == "string" || userIsA(v, cls) }
             // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in
             // MRI; a Module is not a Class.
@@ -10765,7 +10448,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var e = 0; e < v.__extends.length; e++) { if (v.__extends[e] === cls) { return true } }
             }
             // `C.extend(M)' with an explicit receiver writes the per-object table
-            // rather than the build-time __extends record. docs/todo.md 1.3.
+            // rather than the build-time __extends record.
             if (v.__sext != undefined) {
                 for (var cx = 0; cx < v.__sext.length; cx++) {
                     if (v.__sext[cx] === cls) { return true }
@@ -10780,7 +10463,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // An INSTANCE that was `extend'ed is a member of that module too, and of
         // every module THAT one includes - `o.extend(B)' where `module B; include A'
         // makes o an A as well. The per-object twin of the class case above.
-        // docs/todo.md 1.3.
         if (v.__sext != undefined) {
             for (var x = 0; x < v.__sext.length; x++) {
                 if (v.__sext[x] === cls) { return true }
@@ -10804,9 +10486,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ancestorsOf: Module#ancestors, in MRI's order - the PREPENDED modules, then the
     // class, then the INCLUDED ones (nearest first, i.e. the last include), then the
-    // superclass chain, then Object / Kernel / BasicObject. It answered a bare [] in
-    // this half and aborted in both compiled halves. Twins: rbAncestors in
-    // languages/lib/ruby-rt.metajs, rubyAncestors in abnf/jsrt.go. docs/todo.md 1.3.
+    // superclass chain, then Object / Kernel / BasicObject. Twins: rbAncestors in
+    // languages/lib/ruby-rt.metajs, rubyAncestors in abnf/jsrt.go.
     function ancestorsOf(cls) {
         var out = []
         if (cls == undefined || cls == null || cls.__isclass !== true) { return out }
@@ -10853,28 +10534,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isClassObj(v) { return v != undefined && v != null && typeof v == "object" && v.__isclass === true }
     var builtinClassNames = ["Integer", "Float", "Rational", "Complex", "Numeric", "String",
                              "Symbol", "Array", "Hash", "Range", "Regexp", "MatchData", "Proc",
-                             // Method is what `method(:x)' answers to #class - every
-                             // engine said Proc. docs/todo.md 2.5.
+                             // Method is what `method(:x)' answers to #class.
                              "Method", "NilClass",
                              "TrueClass", "FalseClass", "Object", "BasicObject", "Kernel",
                              "Comparable", "Enumerable", "Enumerator", "Math",
                              // Class and Module are what a class object and a module
-                             // object answer to #class. docs/todo.md 1.3.
+                             // object answer to #class.
                              "Class", "Module"]
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
     }
     // ----- Float's scoped constants -----
     // `Float::INFINITY' - the ordinary way to write an infinity in Ruby, and the
-    // only way to write a NaN - aborted this half with *uninitialized constant
-    // Float::INFINITY* while `1.0/0.0' worked, and printed an EMPTY LINE in both
-    // compiled halves (js_get of a slot no class object carries answers nil, which
-    // puts prints as ""). A silent empty line is the worse of the two, and the
-    // item that named this only saw the interpreter's half of it. docs/todo.md 1.5.
-    //
-    // The compiled halves are fixed in the EMITTER (makeScopedConst in
-    // ruby-to-llvm-ir.abnf), which folds these thirteen names to a literal - no
-    // runtime slot, and therefore nothing to keep in step in two more engines.
+    // only way to write a NaN. The compiled halves fold these thirteen names to a
+    // literal in the EMITTER (makeScopedConst in ruby-to-llvm-ir.abnf) - no runtime
+    // slot, and therefore nothing to keep in step in two more engines.
     //
     // No exponent literal in this dialect (manual chapter 4), so MAX / MIN /
     // EPSILON / INFINITY are all built by arithmetic. 2^-52 and 2^-1022 are exact
@@ -10904,13 +10578,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         flc["$c$ROUNDS"] = 1
     }
     // ----- the Math module -----
-    // Math was in the list above and carried NOTHING, so `Math.sin(1)' aborted this
-    // half with "unknown class method 'sin'" while the compiler half answered (its
-    // own list had no Math at all, so the name fell through to the root scope's
-    // JavaScript Math - which is why Math.sqrt(4) was 2 there instead of 2.0, and
-    // why the members the C floor lacked worked under llvm.Run and killed the
-    // native binary). docs/todo.md 1.1. The other two engines are rubyMathCall in
-    // abnf/jsrt.go and rbMathCall in languages/lib/ruby-rt.metajs.
+    // Twins: rubyMathCall in abnf/jsrt.go and rbMathCall in
+    // languages/lib/ruby-rt.metajs.
     //
     // A class method lives in a "$s$"-prefixed slot and takes the class object as
     // its first argument; a scoped constant lives in a "$c$" one (lookupConst).
@@ -10965,8 +10634,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["FrozenError"] = mkBuiltinClass("FrozenError", hostGlobals["RuntimeError"])
     // FloatDomainError < RangeError is what an infinity or a NaN raises when it is
     // asked for an Integer - Float::INFINITY.to_i and "%d" % Float::INFINITY both.
-    // It existed in no engine, which is why both of those answered "Infinity"
-    // instead. docs/todo.md 1.5.
     hostGlobals["FloatDomainError"] = mkBuiltinClass("FloatDomainError", hostGlobals["RangeError"])
     // Exception#initialize / #message: the message defaults to the class name, which
     // is what `raise S18Sub` (no message) has to produce.
@@ -10983,7 +10650,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // MRI's Exception#message IS #to_s, so a subclass that overrides to_s changes
     // its message too. rstr prefers the instance's own to_s and falls back to
-    // excMessageFn, which is the base to_s. docs/todo.md 1.3.
+    // excMessageFn, which is the base to_s.
     function excMsgFn() {
         var self = arguments[0]
         return rstr(self)
@@ -10996,8 +10663,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // (makeRaise records it), so the answer is that one frame, in MRI's own spelling
     // - "prog.rb:2:in `<main>'". An exception raised by the runtime rather than by a
     // `raise', and one that was never raised at all, has no site and answers nil,
-    // which is what MRI does for an un-raised exception object. This used to answer
-    // an empty Array unconditionally. docs/todo.md 1.7.
+    // which is what MRI does for an un-raised exception object.
     excBase["backtrace"] = function() {
         var self = arguments[0]
         if (typeof self.__rwhere == "string") { return [self.__rwhere] }
@@ -11017,9 +10683,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // include M: M's methods join the class's lookup chain. A module may itself have
     // included another one, and lookupMethod scans __mixins ONE level deep, so the
     // list is kept FLATTENED - M's own mixins go in first (they are farther
-    // ancestors, and the scan runs last-to-first) and then M. Without this
-    // `module P; include N; end; class C; include P; end' left C with none of N's
-    // methods, in all three engines. docs/todo.md 1.3.
+    // ancestors, and the scan runs last-to-first) and then M, so
+    // `module P; include N; end; class C; include P; end' gives C N's methods.
     function mixinListHas(list, m) {
         for (var i = 0; i < list.length; i++) { if (list[i] === m) { return true } }
         return false
@@ -11125,29 +10790,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Kernel#lambda and Kernel#proc: the block itself is the value; only lambda marks
     // it, so Proc#lambda? can tell the two apart. A lambda's `return' is LOCAL, so
     // Kernel#lambda wraps the block in a closure that swallows the block's own
-    // __blkret signal - without it `lambda { |x| return x }.call(1)' escaped every
-    // enclosing method and, at the top level, aborted this half outright.
+    // __blkret signal, so `lambda { |x| return x }.call(1)' leaves only the lambda.
     hostGlobals["lambda"] = function(blk) { return markLambda(copyArity(lambdaWrap(blk), blk)) }
     hostGlobals["proc"] = function(blk) { return blk }
     // Kernel#method(:name): a method AS A VALUE. Ruby has no bare method reference -
-    // `double' on its own CALLS double - so this is the only spelling there is, and
-    // without it the only way to pass a method around here was the bare name that
-    // makeVarRef used to leave uncalled (see rubyMethods). The answer is the closure
-    // itself, so #call, #arity and #to_proc all work on it; its #class is Proc rather
-    // than Method, because this value model has no Method class. It resolves through
-    // the SCOPE CHAIN, which is every def the compiler half can reach too (there it
-    // is js_scope_get of the symbol's own text), and then - since this round - the
-    // INSTANCE METHODS OF THE RUNNING SELF, bound to it.
-    //
-    // THE OLD NOTE HERE ("binding one needs a variadic closure and layer 2's MetaJS
-    // has no `arguments`") WAS WRONG ON ITS SECOND HALF, and it is what kept this
-    // shut. MetaJS does have `arguments`: metajs-to-llvm-ir.abnf binds it in every
-    // compiled function, lib/go-rt.metajs already builds a bound receiver with it,
-    // and a two-line probe compiled and ran the construct in both engines. The
-    // compiler half's twin is js_rmethodval; the wrapper it and this one build is
+    // `double' on its own CALLS double - so this is the only spelling there is. The
+    // answer is a closure marked as a Method value, so #call, #arity and #to_proc all
+    // work on it. It resolves through the SCOPE CHAIN, which is every def the compiler
+    // half can reach too (there it is js_scope_get of the symbol's own text), and then
+    // the INSTANCE METHODS OF THE RUNNING SELF, bound to it.
+    // The compiler half's twin is js_rmethodval; the wrapper it and this one build is
     // the same shape, and it carries the underlying method's arity over so
     // `method(:inst).arity` answers the parameter count rather than 0.
-    // docs/todo.md 1.5.
     hostGlobals["method"] = function(nm) {
         var n = rstr(nm)
         var res = anytype
@@ -11175,8 +10829,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // NOT hostGlobals: a Kernel method is not in the emitted module's scope, so
         // answering one here would abort the compiler half and not this one. A
         // CATCHABLE NameError, which is what MRI raises and what a program may
-        // rescue; a host abort here printed a line on stdout that the compiled
-        // halves printed on stderr, so the miss itself was a halves divergence.
+        // rescue.
         throw {__exc: true, v: mkExc(hostGlobals["NameError"],
                                      "undefined method '" + n + "' for class 'Object'")}
     }
@@ -11201,11 +10854,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var sa = argsArray(arguments)
         return rformat(rstr(sa[0]), sa.slice(1))
     }
-    // Kernel#printf is print(format(...)). It was missing here, and the compiler
-    // half was resolving the bare name to the SHARED host printf instead of Ruby's
-    // - Go's fmt under llvm.Run ("%!f(string=1.)") and something else again
-    // natively (the directives came out verbatim). Three engines, three answers,
-    // none of them Ruby's; docs/todo.md 2.9 recorded only the missing half.
+    // Kernel#printf is print(format(...)) - Ruby's format, not the shared host
+    // printf.
     hostGlobals["printf"] = function() {
         var pa = argsArray(arguments)
         if (pa.length == 0) { return null }
@@ -11277,8 +10927,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["<=>"] = function(l, r) { return spaceship(l, r) }
     // < > <= >= between two MODULES is the ancestry relation, not a value
     // comparison: `A < M' after `include M' is true and `A < String' is nil, where
-    // rcmp's contract is to raise. All three engines raised *comparison of Object
-    // with Object failed* for every one of these. docs/todo.md 1.3.
+    // rcmp's contract is to raise.
     binOps["<"]  = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<") }  return rcmp(l, r) < 0 }
     binOps[">"]  = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, ">") }  return rcmp(l, r) > 0 }
     binOps["<="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<=") } return rcmp(l, r) <= 0 }
@@ -11297,8 +10946,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.add = radd
     core.test = rtest
     // A Hash key that is an Integer past 2^53 is a BOX, and two boxes of the same
-    // value are different objects - so `{2**64 => :big}[2**64]` missed on the
-    // scan's `===`. The key IDENTITY is its exact decimal text, which puts a big
+    // value are different objects, so a `===` scan would miss `{2**64 => :big}[2**64]`.
+    // The key IDENTITY is its exact decimal text, which puts a big
     // straight into dictIndex's map (no scan at all) and, because a plain Integer
     // uses the same rendering, keeps the two shapes of one Integer on one key.
     // The id namespace is "b", which no default id can collide with: a big is
@@ -11310,8 +10959,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
-    // so `{[1] => 5}[[1]]` is 5 where a `===` scan answered nil - docs/todo.md
-    // 2.11. It belongs HERE and not in interp-core's dictKeyEq, which nine
+    // so `{[1] => 5}[[1]]` is 5. It belongs HERE and not in interp-core's dictKeyEq, which nine
     // languages share and in which two arrays are two objects: python's `{(1,):5}`
     // is a tuple, JavaScript's `Map` keys by identity. A Hash keys the same way.
     // dictKeyId leaves an object key unindexed, so this is reached on the FALLBACK
@@ -11325,8 +10973,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
         if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
         // A Range is a VALUE key for the same reason an Array is: two range
-        // literals are two objects, so `h[1..3] = v; h[1..3]` answered nil.
-        // docs/todo.md 1.5.
+        // literals are two objects.
         if (isRange(a) && isRange(b)) { return rangeEq(a, b) }
         if (!isBig(a) || !isBig(b)) { return false }
         return bigCmp(a, b) == 0
