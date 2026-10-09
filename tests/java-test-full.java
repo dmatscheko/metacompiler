@@ -1465,6 +1465,8 @@ class S30 {
         Main.check("hc24", new Fl30(1.4E-45f).hashCode() == 1);
         Main.check("hc25", new Fl30(3.4028235E38f).hashCode() == 2139095039);
         Main.check("hc26", new Di30(1.0).hashCode() != new Fl30(1.0f).hashCode());
+        // doubleToLongBits canonicalises every NaN, Double.NaN included.
+        Main.check("hc46", new Di30(Double.NaN).hashCode() == 2146959360 && new Fl30(0f / 0f).hashCode() == 2143289344);
 
         // String.hashCode over UTF-16 code units.
         Main.check("hc27", new St30(strs[0]).hashCode() == 0 && strs[0].hashCode() == 0);

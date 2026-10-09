@@ -1304,9 +1304,22 @@ func jvpHash(v interface{}) string {
 // The twin is js_jhash in languages/lib/java-rt.metajs, arm for arm; that one
 // cannot call math.Float64bits and takes the bit pattern apart with exact
 // arithmetic instead.
+// doubleToLongBits and floatToIntBits collapse every NaN to one canonical
+// pattern; math.Float64bits keeps the payload (math.NaN() is ...0001).
 func jvHashDouble(f float64) float64 {
 	bits := math.Float64bits(f)
+	if f != f {
+		bits = 0x7ff8000000000000
+	}
 	return float64(int32(uint32(bits>>32) ^ uint32(bits)))
+}
+
+func jvHashFloat(f float64) float64 {
+	bits := math.Float32bits(float32(f))
+	if f != f {
+		bits = 0x7fc00000
+	}
+	return float64(int32(bits))
 }
 
 func (rt *jsrt) jvHashString(s string) float64 {
@@ -1343,7 +1356,7 @@ func (rt *jsrt) jvHash(v interface{}) float64 {
 		return float64(int32(uint32(u>>32) ^ uint32(u)))
 	case jsJFlo:
 		if x.sty == floJavaF {
-			return float64(int32(math.Float32bits(float32(x.f))))
+			return jvHashFloat(x.f)
 		}
 		return jvHashDouble(x.f)
 	}
