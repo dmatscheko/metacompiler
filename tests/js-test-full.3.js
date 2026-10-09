@@ -262,11 +262,8 @@ function s45() {
     // it needs a per-coroutine `this` in the C floor's control block, not a
     // strictness flag. Recorded rather than asserted, since clang-check and
     // native-full run this file natively.
-    // DELIBERATELY NOT CONVERGED: OrdinaryCallBindThis step 3.b is ToObject of a
-    // PRIMITIVE receiver, and this value model has no wrapper objects - node hands
-    // a sloppy body a Number object where all four engines here hand it the 7.
-    // The rest of the rule is implemented; this row is the whole of what is left.
-    check("gthis31", s45plain.call(7) === 7);
+    // Not asserted: a sloppy body boxes a primitive receiver (s45plain.call(7) is a
+    // Number object in node), and this value model has no wrapper objects.
     var detached = lit.m
     check("gthis17", typeof detached === "function")
 }
