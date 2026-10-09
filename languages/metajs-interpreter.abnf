@@ -5,7 +5,8 @@ MetaJS is the restricted JavaScript subset that the annotation scripts of the gr
 this repository are written in. It has: var/let/const (all block scoped), function declarations and
 anonymous function expressions with real closures and an 'arguments' array, if/else, while,
 do-while, for(;;), switch (=== comparison, fallthrough, stacked labels, default),
-break, continue, return, throw (terminates, there is no try/catch),
+break, continue, return, throw and try/catch/finally (the catch binding is optional),
+import './file.js' of a project file (its top level runs into the shared global scope),
 numbers (doubles, hex 0x literals included), strings with the methods length/charAt/
 charCodeAt/indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim,
 booleans, null, undefined,
@@ -26,7 +27,7 @@ A variable that must hold values of changing types declares it: var v = anytype
 (a host global) starts the variable as undefined and exempts it from pinning;
 assigning anytype to an already existing variable is an error.
 
-Deliberately not in the subset: this, new, prototypes, try/catch, regex, for-in,
+Deliberately not in the subset: this, new, prototypes, regex, for-in,
 getters/setters, and hoisting (a binding must be executed before it is used;
 main() is called after the whole top level ran, so mutual recursion works anyway).
 Semicolons are optional at statement ends, but a statement must not begin with '(' or '['
@@ -289,20 +290,7 @@ KwDefault   = "default" KwEnd ;
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
-    // takeAll empties the local stack of the current tag and returns its items in push
-    // order as a plain JS array. It only uses pop(), so it works independently of how
-    // the runtime wraps the Go slice behind up.stack.
-    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
-    // The host unescape() is for the grammar token syntax and rejects \' and \", so the
-    // JS string literals bring their own unescaper.
-    // ----- Scopes -----
-    // 'scopes' is the active scope chain (innermost last). Every closure captures a copy
-    // of the chain array; the scope objects inside stay shared, so later declarations in
-    // an already captured scope are visible to the closure (that is what allows mutual
-    // recursion between top level functions).
 
-    // The host names that a MetaJS program can use. Everything resolves to the goja
-    // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
     // The 'anytype' declaration marker of the interpreted programs: a unique
     // object a program can only obtain through the anytype global below.
     var anytypeMarker = {}
@@ -331,8 +319,7 @@ KwDefault   = "default" KwEnd ;
     // The fifth, TRUTHINESS, is NOT converted: runtime.c's truthy() answers
     // `fa(h) != 0` for tag 13, so `if (sint(0, 0, 8, 0))` is false there and
     // true here, because the condition is the host engine's own and the
-    // statement builders live in lib/interp-core.js. Recorded in
-    // docs/runtime-next-plan.md part 2 and deliberately not asserted.
+    // statement builders live in lib/interp-core.js. Deliberately not asserted.
     //
     // Every function is named after the si_* of runtime.c it transliterates.
     // interp-core.js's szNorm/szCmp are NOT reused directly: szNorm rounds a
@@ -387,8 +374,7 @@ KwDefault   = "default" KwEnd ;
         var u = siUnsOf(l, r)
         // A SHIFT takes its result type from the LEFT operand ALONE - the count is
         // a separate operand with a type of its own. si_apply carries the same two
-        // lines and the measurement that says why they are a guard rather than a
-        // repair; keep the two in step.
+        // lines; keep the two in step.
         if (code == 9 || code == 10) { w = siWidthOf(l, l); u = siUnsOf(l, l) }
         var a = siPair(l)
         var b = siPair(r)
@@ -623,8 +609,7 @@ KwDefault   = "default" KwEnd ;
     // two digit step); it shows among the SUBNORMALS, where the gap between
     // neighbours is comparable to the value: Double.MIN_VALUE is
     // 4.9406564584124654E-324, so java writes "4.9E-324" where appending ".0"
-    // to the shortest form writes "5.0E-324". Measured against real java
-    // 24.0.2 - 254 lines of the java probe, docs/runtime-next-plan.md part 3.
+    // to the shortest form writes "5.0E-324" (checked against java 24.0.2).
     //
     // The host engine's own "" + a is the SHORTEST form, so the second digit
     // has to be computed: scale the value so that its two significant digits
@@ -681,9 +666,7 @@ KwDefault   = "default" KwEnd ;
     }
     // jvmFloStr: java.lang.Double.toString - always a decimal point, plain
     // decimal for 1e-3 <= |d| < 1e7, "1.0E20" outside it. The window is tested
-    // on the VALUE, as Go's `a >= 1e-3 && a < 1e7` does; measured, the decimal
-    // exponent form of the same test (dg.e >= -3 && dg.e < 7) is
-    // indistinguishable - 0 of 51 assertions and 0 of 10,149 probe lines.
+    // on the VALUE, as Go's `a >= 1e-3 && a < 1e7` does.
     function flJava(f) {
         if (f != f) return "NaN"
         if (f == 1 / 0) return "Infinity"
@@ -917,8 +900,6 @@ KwDefault   = "default" KwEnd ;
     // layer-2 function a scope handle (js_pyset_var's `s`, and every `defined?` /
     // `isset` / `global` probe) and layer 2 could do nothing with it, because
     // MetaJS cannot open a cell and an extern is not callable from MetaJS source.
-    // Six languages answered that by lowering the probe into their EMITTER, i.e.
-    // by writing the same IR once per language for one language-neutral question.
     //
     //   scopeNew(parent)      undefined / null / missing means NO parent
     //   scopeParent(s)        undefined at the top of a chain
@@ -994,43 +975,33 @@ KwDefault   = "default" KwEnd ;
     // engines - the predicate's true arm is reachable only from an EMITTER, i.e.
     // only from a layer-2 file of a language that has generators. What the
     // ratchet in tests/metajs-test-full.js can therefore prove is that all three
-    // halves answer false for every value a MetaJS program can build, which is
-    // exactly what languages/lib/php-rt.metajs's hand-rolled phIsGen gets wrong
-    // in principle: it says "generator" for any object with a callable `next`.
+    // halves answer false for every value a MetaJS program can build.
     function isGeneratorHost(v) { return false }
 
     // ----- THE HOST-GLOBAL SET IS THE C FLOOR'S seed_root LIST, EXACTLY -----
     //
-    // docs/todo.md 4.1. This table used to bind eleven names where the other two
-    // engines bound eighteen, and NOTHING IN THE SUITE COULD SEE IT: the --full
-    // runner makes both halves run the same file and report the same assertion
-    // count, so an assertion on a compiler-only global fails on this half by
-    // construction, and it cannot be guarded either (`typeof sprint` is
-    // "function" over there and a hard `variable not defined: sprint` here).
-    //
-    // The set is now pinned by abnf/hostglobals_test.go, which parses all three
+    // The set is pinned by abnf/hostglobals_test.go, which parses all three
     // engines out of their own sources - this literal, seed_root(...) in
     // languages/lib/runtime.c, and programJSBindings() in abnf/jsrtint.go - and
     // fails `go test ./abnf/` if any of them gains or loses a name. Add a global
-    // to one engine and that test tells you the other two.
+    // to one engine and that test tells you the other two. (The --full runner
+    // cannot see such a difference: an assertion on a compiler-only global fails
+    // on this half by construction.)
     //
     // What still differs, deliberately, and is NOT a name:
     //   Math's MEMBERS. The floor seeds eleven (floor abs max min imul ceil trunc
     //   round sign sqrt pow) plus PI and E; the grammar host below and the Go twin
     //   also carry sin/cos/tan/exp/log/log2/log10/cbrt/atan2/hypot, which the
     //   floor cannot have without soft-float transcendentals. No layer-2 file uses
-    //   one (grepped), so nothing here reaches the gap, but a MetaJS program that
-    //   calls Math.sin runs under the interpreter and under llvm.Run and fails in
-    //   a native binary. See the report on docs/todo.md 4.1: ruby's `Math.sin` has
-    //   exactly this defect today, through ruby-to-llvm-ir.abnf's js_scope_get of
-    //   the host Math.
+    //   one, but a MetaJS program that calls Math.sin runs under the interpreter
+    //   and under llvm.Run and fails in a native binary.
     //
     // String and Array are PLAIN OBJECTS with one method each, not the grammar
     // host's own constructors: the floor's boot() seeds them as
     // seed_host(strobj, "fromCharCode", 30) / seed_host(arrobj, "isArray", 31) and
     // abnf/jsrt.go's standardJSBindings builds the same two objects. Binding the
-    // host's String here made `typeof String` answer "function" in this half and
-    // "object" in the other two - the same divergence one level down from a name.
+    // host's String here would make `typeof String` answer "function" in this half
+    // and "object" in the other two.
     var stringHostObj = {
         fromCharCode: function() { return String.fromCharCode.apply(undefined, arguments) }
     }
@@ -1056,7 +1027,7 @@ KwDefault   = "default" KwEnd ;
         // fmt_sprint in languages/lib/runtime.c (host id 35) and standardJSBindings
         // in abnf/jsrt.go are the other two. The grammar hosts bind the name for
         // this line: frozen.go through standardJSBindings, and commonscript.go
-        // explicitly, which it did not until docs/todo.md 4.1.
+        // explicitly.
         "sprint": function() { return sprint.apply(undefined, siPrintArgs(arguments)) },
         // The UTF-8 byte length; .length counts UTF-16 code units. Host id 32.
         "byteLen": byteLen,
@@ -1115,24 +1086,17 @@ KwDefault   = "default" KwEnd ;
         "floMin": function(l, r) { return flMinMax(l, r, flTakeL(flNum(l), flNum(r), false)) },
         // A SIGNED 64 bit box is negated in the box, exactly as jvmMathObject's
         // own abs does in abnf/jsrtjvm.go: the `| 0` below is to_int32, which
-        // TRUNCATES a long, so floAbs(3000000000L) answered -1294967296 and
-        // floAbs(Long.MAX_VALUE) answered 0. Two's-complement negation maps
-        // Long.MIN_VALUE to itself, which is the answer JLS 15.15.4 asks for.
-        // Everything narrower widens to int before the call and keeps the wrap,
-        // and an unsigned box is a magnitude already.
-        //
-        // languages/lib/runtime.c's jf_abs (host id 60) is the THIRD engine of
-        // this primitive and carries the same three lines. All three now agree;
-        // tests/metajs-test-full.js's flo51..flo53 pin them, and those rows are
-        // the ONLY thing that reaches this arm - no layer-2 file does, because
-        // java-rt.metajs and kotlin-rt.metajs both handle their long case before
-        // the call. That is why the defect could sit here unnoticed.
+        // TRUNCATES a long. Two's-complement negation maps Long.MIN_VALUE to
+        // itself, which is the answer JLS 15.15.4 asks for. Everything narrower
+        // widens to int before the call and keeps the wrap, and an unsigned box is
+        // a magnitude already. languages/lib/runtime.c's jf_abs (host id 60) is
+        // the THIRD engine of this primitive and carries the same three lines;
+        // tests/metajs-test-full.js's flo51..flo53 pin them (no layer-2 file
+        // reaches this arm).
         //
         // The fallthrough reads the operand with siNum, not flNum: flNum's `v * 1`
-        // of a {__sz} box is NaN and `NaN | 0` is 0, so THIS half answered 0 for
-        // every sized-integer operand at df9199a while llvm.Run and the native
-        // binary both answered the 32-bit wrap of its value. Measured with a
-        // sintRaw probe; nothing in the suite calls floAbs on a box.
+        // of a {__sz} box is NaN and `NaN | 0` is 0, where the other two engines
+        // answer the 32-bit wrap of its value.
         "floAbs": function(v) {
             if (flIs(v)) return flMake(v.f < 0 || flNegZero(v.f) ? 0 - v.f : v.f, v.sty)
             if (szIs(v) && v.w == 64) {
@@ -1273,8 +1237,8 @@ KwDefault   = "default" KwEnd ;
         // bitwise operators are wrong: goja converts through `int32(int64(f))`,
         // which Go leaves implementation defined and which answers -1 for every
         // positive value above 2^63 and 0 for every negative one. Real JS wraps
-        // MODULO 2^32 (`1e20 | 0` is 1661992960), and so now do the C floor's
-        // to_int32 and abnf/jsrt.go's rt.toInt32 - so without this the goja half
+        // MODULO 2^32 (`1e20 | 0` is 1661992960), and so do the C floor's
+        // to_int32 and abnf/jsrt.go's rt.toInt32 - without this the goja half
         // would be the only engine of the five that is wrong. The guard is four
         // comparisons and is reached only by the six bitwise operators; a
         // non-number operand makes every one of them false.
@@ -1372,15 +1336,11 @@ KwDefault   = "default" KwEnd ;
         var last = ref.path[ref.path.length - 1]
         if (last.kind != "member") fail("assignment target must end in a member")
         // The same diagnostic as the other two engines, and for the same set of
-        // targets. This used to guard only undefined/null, and to name neither the
-        // key: assigning onto a PRIMITIVE (var x = 5; x.foo = 1) fell through to the
-        // host, which answered goja's "TypeError: Value is not an object: 5" with a
-        // stack trace into this grammar file - an uncontrolled failure where
-        // languages/lib/runtime.c's set_member says "member assignment 'foo' on 5"
-        // and abnf/jsrt.go's setMember says the same. set_member accepts exactly two
-        // tags, the object (6) and the array (5), which is `typeof v == "object"`
-        // here; the loose == catches null as well as undefined, both of which the
-        // floor rejects on its first line.
+        // targets: languages/lib/runtime.c's set_member and abnf/jsrt.go's
+        // setMember say "member assignment 'foo' on 5" for a PRIMITIVE receiver
+        // and accept exactly two tags, the object (6) and the array (5), which is
+        // `typeof v == "object"` here; the loose == catches null as well as
+        // undefined, both of which the floor rejects on its first line.
         if (cur == undefined || typeof cur != "object") {
             fail("member assignment '" + last.key() + "' on " + cur)
         }
@@ -1451,14 +1411,12 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
 
-    // An expression in statement position: evaluate and discard the value.
     // items = [name] or [name, initThunk].
     function makeDecl(items) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(undefined)
         return function() { declVar(name, init()) }
     }
-    // items = [cond, then] or [cond, then, else].
     // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
     function makeDo(condT, bodyT) {
         return function() {
@@ -1600,7 +1558,6 @@ KwDefault   = "default" KwEnd ;
         return function() { declVar(name, makeClosure(paramNames, bodyT, scopes)) }
     }
 
-    // Build the program thunk out of the parsed source.
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "js"
 
