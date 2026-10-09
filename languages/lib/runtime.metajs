@@ -901,12 +901,12 @@ function rtIsNil(v) {
 // this shape.
 //
 // SO THE OBJECT TEST IS INLINED, and the merge is what forces the question: a
-// shared body cannot call pyIsObj or rbIsObj by name, and delegating to
-// rtIsObjNotArr below makes the chain FOUR deep where it was three. Both
+// shared body cannot call pyIsObj or rbIsObj by name, and delegating to a
+// shared strict-object helper makes the chain FOUR deep where it was three. Both
 // spellings were built and measured, --draws 9 --paired against the tree that
 // has rtRepeat and rtIsNil and nothing else:
 //
-//   rtTag -> rtIsObjNotArr -> rtIsObj   python +10.60% SLOWER 9/9   ruby -0.39%
+//   rtTag -> helper -> rtIsObj          python +10.60% SLOWER 9/9   ruby -0.39%
 //   the four tests INLINED (this body)  python -13.90% FASTER 9/9   ruby -0.07%
 //
 // The first is 120ba0f's regression re-run at a hotter site and is DECLINED. The
@@ -944,25 +944,6 @@ function rtTag(v, name) {
     if (typeof v != "object") { return false }
     if (Array.isArray(v)) { return false }
     return v[name] === true
-}
-
-// rtIsObj plus the array rejection. TWO bodies, ZERO knobs: pyIsObj and rbIsObj
-// were byte-identical, and both are the four tests rtIsObj's own head comment
-// names - it merged the first three and deliberately left the fourth out,
-// because ITS callers walk __class/__super and an array carries neither. Python
-// and Ruby ask a stricter question in ~60 places each (`is this a user object
-// rather than a list`), so the fourth test is real for them.
-//
-// IT HAS NO CALLER, and the sentence that used to end this comment - "the two
-// files keep their own names as one-line delegations to this body" - was left
-// behind when 120ba0f's delegation was measured at python +41% and taken back
-// out. The two files spell the four tests out; nothing calls this. It is kept,
-// not deleted, because keeping it is a decision recorded twice (see pyIsObj in
-// lib/python-rt.metajs): a COLD caller that wants the strict test should call
-// here rather than write a fifth copy. rtTag above does not, and says why.
-function rtIsObjNotArr(v) {
-    if (!rtIsObj(v)) { return false }
-    return !Array.isArray(v)
 }
 
 // ====================================== the SIXTH pass (2026-08-09) =========
