@@ -92,8 +92,8 @@ block), the bitwise and overflow operators, and ranges as values.
 
 A number carries its own type: an Int is a plain value at its declared width (Int
 is 64 bit, Int8 ... UInt64 wrap at theirs) and a Double is a BOX, so 7.0 / 2.0 is
-3.5 where 7 / 2 is 3 and a whole Double still prints 3.0 rather than 3. Float is
-modelled as Double. A compound assignment is lowered to a = a <op> b, so an
+3.5 where 7 / 2 is 3 and a whole Double still prints 3.0 rather than 3. Float is a
+real IEEE-754 binary32. A compound assignment is lowered to a = a <op> b, so an
 overloaded + is what runs for +=.
 
 Not in the subset (accepted structurally and reported as not implemented under

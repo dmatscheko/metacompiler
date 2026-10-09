@@ -77,8 +77,7 @@ at their width - real Swift traps instead), and a Double is a BOX, so 7.0 / 2.0 
 3.5 where 7 / 2 is 3 and a whole Double still prints 3.0 rather than 3. A mixed
 Int/Double operation evaluates in floating point, which is real Swift's answer
 when a literal is involved and a compile error otherwise - this front end has no
-type checker to tell the two apart. Float is modelled as Double, i.e. at 64 bit
-precision. A user-defined infix operator sits at one level of the expression
+type checker to tell the two apart. Float is a real IEEE-754 binary32. A user-defined infix operator sits at one level of the expression
 grammar, binding tighter than * and /, and the precedence groups order the custom
 operators among THEMSELVES. A compound assignment is lowered to a = a <op> b, so
 an overloaded + is what runs for +=, and a declared `static func +=` is accepted
