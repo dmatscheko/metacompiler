@@ -55,7 +55,6 @@ package abnf
 import (
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -323,11 +322,10 @@ func (rt *jsrt) ktThrowableStr(o *jsObject) string {
 // so the fallback only has to AGREE across the three engines: it is each engine's
 // own toString, which the three already keep in step.
 func (rt *jsrt) ktExcTopLine(v interface{}) string {
-	const head = "Exception in thread \"main\" "
 	if o, ok := v.(*jsObject); ok && ktIsThrowLike(o) {
-		return head + rt.ktThrowableStr(o)
+		return jvmMainHead + rt.ktThrowableStr(o)
 	}
-	return head + rt.ktpRender(v, 0)
+	return jvmMainHead + rt.ktpRender(v, 0)
 }
 
 // ktIsBuiltinExc reports a name the hierarchy above provides.
@@ -1159,11 +1157,7 @@ func init() {
 		// no engine here has a call-site line table. This is java's js_jvtop,
 		// ruby's js_rtop and go's js_gotop, one language further on.
 		// docs/todo.md 1.2.
-		m["js_kttop"] = func(a []uint64) uint64 {
-			fmt.Fprint(warnWriter, wtf8Clean(rt.ktExcTopLine(u(a[0]))+"\n"))
-			os.Exit(1)
-			return 0
-		}
+		m["js_kttop"] = func(a []uint64) uint64 { return jvmUncaught(rt.ktExcTopLine(u(a[0]))) }
 		// js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the
 		// __outer chain for an instance whose class is named `Outer`, and fall back to
 		// the receiver itself when there is none - which is what makeThisAt does in

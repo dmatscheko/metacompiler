@@ -548,6 +548,31 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 	return o
 }
 
+// csharpExcTopLine is the text of js_cstop below; the twins are csExcTopLine in
+// languages/csharp-interpreter.abnf and in languages/lib/csharp-rt.metajs. Note
+// the EMPTY-message rule: C# drops the colon where java keeps it.
+func (rt *jsrt) csharpExcTopLine(v interface{}) string {
+	const head = "Unhandled exception. "
+	o, ok := v.(*jsObject)
+	if !ok {
+		return head + rt.cspStr(v)
+	}
+	name := "System.Object"
+	if t := rt.csTypeOfVal(o); t != nil {
+		if f, isStr := t.props["FullName"].(string); isStr {
+			name = f
+		}
+	}
+	msg := o.props["Message"]
+	if jvmNullish(msg) {
+		return head + name
+	}
+	if s, isStr := msg.(string); isStr && s == "" {
+		return head + name
+	}
+	return head + name + ": " + rt.cspStr(msg)
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -559,6 +584,15 @@ func init() {
 			return jsHFalse
 		}
 		opOf := func(h uint64) string { return rt.toString(u(h)) }
+
+		// THE .NET HOST'S UNHANDLED-EXCEPTION LINE, the C# counterpart of
+		// js_jvtop in abnf/jsrtjvm.go and reached the same way (buildMain in
+		// languages/csharp-to-llvm-ir.abnf wraps the entry call in one
+		// js_try). SPEC-CITED, NOT MEASURED - no C# toolchain on this machine
+		// (manual 7.9). See csExcTopLine in languages/lib/csharp-rt.metajs for
+		// the citation and for what is deliberately not reproduced.
+		// docs/todo.md 1.14.
+		m["js_cstop"] = func(a []uint64) uint64 { return jvmUncaught(rt.csharpExcTopLine(u(a[0]))) }
 
 		// One binary integral operator: (op, left, right). A double operand keeps
 		// the FLOAT path of jsrtjvm.go, which is where the two boxes meet; two

@@ -514,60 +514,31 @@ func init() {
 		// jvExcTopLine in languages/lib/java-rt.metajs - same two message slots
 		// (`message` from the interpreter's jExcCtor, `__msg` from the emitted
 		// builtin constructor), same binary class name, same stream, same code.
-		m["js_jvtop"] = func(a []uint64) uint64 {
-			fmt.Fprint(warnWriter, wtf8Clean(rt.jvmExcTopLine(rt.unwrap(a[0]))+"\n"))
-			os.Exit(1)
-			return 0
-		}
-		// THE .NET HOST'S UNHANDLED-EXCEPTION LINE, the C# half of the same
-		// change and reached the same way (buildMain in
-		// languages/csharp-to-llvm-ir.abnf wraps the entry call in one
-		// js_try). SPEC-CITED, NOT MEASURED - no C# toolchain on this machine
-		// (manual 7.9). See csExcTopLine in languages/lib/csharp-rt.metajs for
-		// the citation and for what is deliberately not reproduced.
-		// docs/todo.md 1.14.
-		m["js_cstop"] = func(a []uint64) uint64 {
-			fmt.Fprint(warnWriter, wtf8Clean(rt.csharpExcTopLine(rt.unwrap(a[0]))+"\n"))
-			os.Exit(1)
-			return 0
-		}
+		m["js_jvtop"] = func(a []uint64) uint64 { return jvmUncaught(rt.jvmExcTopLine(rt.unwrap(a[0]))) }
 	})
 }
 
-// csharpExcTopLine is the text of js_cstop above; the twins are csExcTopLine in
-// languages/csharp-interpreter.abnf and in languages/lib/csharp-rt.metajs. Note
-// the EMPTY-message rule: C# drops the colon where java keeps it.
-func (rt *jsrt) csharpExcTopLine(v interface{}) string {
-	const head = "Unhandled exception. "
-	o, ok := v.(*jsObject)
-	if !ok {
-		return head + rt.cspStr(v)
-	}
-	name := "System.Object"
-	if t := rt.csTypeOfVal(o); t != nil {
-		if f, isStr := t.props["FullName"].(string); isStr {
-			name = f
-		}
-	}
-	msg := o.props["Message"]
-	if jvmNullish(msg) {
-		return head + name
-	}
-	if s, isStr := msg.(string); isStr && s == "" {
-		return head + name
-	}
-	return head + name + ": " + rt.cspStr(msg)
+// jvmMainHead is the JVM launcher's prefix for an exception that escapes main,
+// java's and kotlin's alike (kotlin's throwables are java.lang's).
+const jvmMainHead = "Exception in thread \"main\" "
+
+// jvmUncaught writes an uncaught-exception line to stderr and exits 1, as the
+// java launcher and the .NET host both do. The js_jvtop / js_kttop / js_cstop
+// closures end the program through it.
+func jvmUncaught(line string) uint64 {
+	fmt.Fprint(warnWriter, wtf8Clean(line+"\n"))
+	os.Exit(1)
+	return 0
 }
 
 // jvmExcTopLine is the text of js_jvtop above. Kept out of the closure so that
 // the three engines' bodies read alike side by side.
 func (rt *jsrt) jvmExcTopLine(v interface{}) string {
-	const head = "Exception in thread \"main\" "
 	o, ok := v.(*jsObject)
 	if !ok {
-		return head + rt.jvpStr(v)
+		return jvmMainHead + rt.jvpStr(v)
 	}
-	return head + rt.jvmThrowableStr(o)
+	return jvmMainHead + rt.jvmThrowableStr(o)
 }
 
 // jvmThrowableStr is java.lang.Throwable#toString - the whole of the abort line
