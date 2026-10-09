@@ -113,7 +113,7 @@ class Vec {
 
 class Node {
   int value;
-  Node next;
+  Node? next;
   Node(this.value) {
     next = null;                   // constructor with a body
   }
@@ -261,10 +261,10 @@ String rethrower() {
     try {
       throw "deep";
     } catch (e) {
-      throw e + "er";              // rethrow a derived value
+      throw (e as String) + "er";  // rethrow a derived value
     }
   } catch (e2) {
-    return e2;
+    return e2 as String;
   }
 }
 
@@ -352,7 +352,7 @@ int main() {
   check("str-eq", "abc" == "abc" && "a" != "b");
   check("str-length", "hello".length == 5 && "".length == 0);
   check("str-isempty", "".isEmpty && "x".isNotEmpty);
-  check("str-charat", "abc".charAt(0) == "a" && "abc".charAt(2) == "c");
+  check("str-charat", "abc"[0] == "a" && "abc"[2] == "c");
   check("str-substring", "hello".substring(1, 3) == "el" && "hello".substring(3) == "lo");
   check("str-indexof", "abcabc".indexOf("b") == 1 && "abc".indexOf("z") == -1);
   String name = "Dart";
@@ -501,8 +501,8 @@ int main() {
   check("map-containskey", ages.containsKey("bob") && !ages.containsKey("dave"));
   check("map-keys-values", ages.keys.length == 3 && ages.values.length == 3);
   String keyOrder = "";
-  for (var k in ages) {
-    keyOrder = keyOrder + k + ",";  // for-in over a map walks its keys in order
+  for (var k in ages.keys) {
+    keyOrder = keyOrder + k + ",";  // a map's keys iterate in insertion order
   }
   check("map-for-in-order", keyOrder == "alice,bob,carol,");
   int vSum = 0;
@@ -511,7 +511,7 @@ int main() {
   }
   check("map-values-iterate", vSum == 96);
   String mapCtl = "";
-  for (var k in ages) {
+  for (var k in ages.keys) {
     if (k == "alice") continue;
     if (k == "carol") break;
     mapCtl = mapCtl + k;
@@ -536,8 +536,8 @@ int main() {
   check("class-dispatch", callWho(WhoA()) + callWho(WhoB()) == "AB");
   Node head = Node(1);
   head.next = Node(2);             // an object-typed field forms a chain
-  check("class-object-field", head.next.value == 2);
-  check("class-null-field", head.next.next == null);
+  check("class-object-field", head.next!.value == 2);
+  check("class-null-field", head.next!.next == null);
   Vec v0 = Vec();
   Vec v1 = Vec(x: 1, y: 2);
   check("class-named-ctor-defaults", v0.norm1() == 0 && v1.norm1() == 3);
@@ -571,7 +571,7 @@ int main() {
     risky(5);
     check("throw-unreachable", false);
   } catch (e) {
-    caught = e.code;               // catch binds the thrown object
+    caught = (e as Boom).code;     // catch binds the thrown object
   }
   check("catch-binding", caught == 5);
   check("throw-not-taken", risky(2) == 4);
@@ -586,14 +586,14 @@ int main() {
   try {
     throw Boom(8);
   } catch (e, st) {                // two-binder catch: the stack trace is dropped
-    twoBind = e.code;
+    twoBind = (e as Boom).code;
   }
   check("catch-two-binders", twoBind == 8);
   String strCaught = "";
   try {
     throw "plain";                 // any value can be thrown
   } catch (e) {
-    strCaught = e;
+    strCaught = e as String;
   }
   check("throw-string", strCaught == "plain");
   check("return-from-try", classify(4) == 40);
