@@ -1,8 +1,7 @@
 // regex.js -- the shared regular-expression engine for the language grammars.
 //
-// This tree had no regular-expression matcher at all, and four languages want the
-// same one (Ruby's /re/ literals, JavaScript's RegExp, Python's re, Kotlin's Regex).
-// So this is written ONCE, language-neutral: it takes a pattern STRING plus a flag
+// Several languages want the same matcher (Ruby's /re/ literals, JavaScript's RegExp,
+// Python's re, Kotlin's Regex, bash's [[ =~ ]]), so this is written ONCE, language-neutral: it takes a pattern STRING plus a flag
 // STRING and knows nothing about how any language spells its literals. Mapping a
 // language's own flag letters onto the neutral set below is the grammar's job (Ruby's
 // /m/ is dot-matches-newline, i.e. this file's "s"; Ruby's ^ and $ are always line
@@ -276,13 +275,9 @@ function rxClsMatch(cls, c, icase) {
 // \u000c and \u000b, NOT \f and \v: this file is layer 2, so it is parsed BOTH by
 // goja (real JavaScript, where \f and \v are formfeed and vertical tab) AND by the
 // frozen MetaJS parser, whose string literal has NEITHER and DROPS THE BACKSLASH -
-// turning them into the letters f and v. Measured before the fix, on kotlin:
-// Regex(Regex.escape("f") + Regex.escape("v") + Regex.escape("x")) matching "fvx"
-// was true under goja, FALSE under -frozen and FALSE in the native binary, where
-// real Kotlin says true. The \uXXXX spelling means the same thing in both parsers.
-// abnf/jsrtregex.go is a line-by-line port of this file and is written in Go, where
-// \f and \v are real - so the twin was right and only this side was wrong, which is
-// exactly why no dynamic gate could see it. tools/metajs-lint catches the class.
+// turning them into the letters f and v. The \uXXXX spelling means the same thing in
+// both parsers. (The Go twin abnf/jsrtregex.go can use \f and \v.) tools/metajs-lint
+// catches the class.
 function rxIsMetaCh(ch) {
     return "\\^$.|?*+()[]{}-#/ \t\n\r\u000c\u000b".indexOf(ch) >= 0
 }
@@ -851,7 +846,7 @@ function rxParsePiece(st) {
         // A second quantifier on the same atom - a**, a?*, a{2}{3}, and in an ERE also
         // a*? - is a syntax error in bash, node, python3 and java alike. (Ruby 2.6 is
         // the one dissenter: it warns about the "redundant nested repeat operator" and
-        // folds it. The engine follows the four.) This loop used to fold it silently.
+        // folds it. The engine follows the four.)
         seen = seen + 1
         if (seen > 1) {
             rxErr(st, st.ere ? "Invalid preceding regular expression"
@@ -1372,9 +1367,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             // rxMatchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
             // match that stops short of mustEnd is refused right here, so the VM
             // keeps backtracking for a longer one. Rewriting the pattern to
-            // \A(?:...)\z would work too, but every caller that tried it had to
-            // rediscover that under the x flag a trailing # comment swallows the
-            // wrapper's own closing paren. Constraining the run has no such edge.
+            // \A(?:...)\z instead breaks under the x flag, where a trailing #
+            // comment swallows the wrapper's own closing paren.
             if (st.mustEnd >= 0 && sp != st.mustEnd) { return -1 }
             return sp
         } else {
@@ -1570,17 +1564,9 @@ function rxSplit(re, text) {
 
 // ===== The compiled-pattern cache, and the neutral match value ==============
 //
-// Added 2026-08-04 (docs/runtime-merge-plan.md, Part A fifth pass). Everything
-// below already existed ONCE in abnf/jsrtregex.go - rxCache/rxGet at :1614,
-// rxIsRegexObj at :1635, rxIsMatchObj at :1644, rxObjRe at :1652, rxMatchOf at
-// :1680, all SHARED by js, kotlin, python and ruby there - and FOUR TIMES on
-// this side, once per importing layer-2 file, under four private prefixes
-// (jxGetProg/jxCache, k5Get/k5Cache, pyERxGet/pyERxCache, rbRxGet/rbRxCache).
-// The four were byte-identical; the divergence was between the two engines, not
-// among the four copies, and this is the side that had it wrong. The names here
-// are deliberately the GO TWIN'S names, so the two files line up when they are
-// diffed - which is the only way the three-place edit (regex.js, jsrtregex.go,
-// and each grammar's include) stays honest.
+// Shared by js, kotlin, python and ruby. Twins: rxCache/rxGet, rxIsRegexObj,
+// rxIsMatchObj, rxObjRe and rxMatchOf in abnf/jsrtregex.go. The names are
+// deliberately the Go twin's, so the two files line up when they are diffed.
 //
 // THE KEY IS NOT THE GO KEY, and that is deliberate. Go writes
 // `flags + "\x00" + pattern`; here the key is prefixed "$" and separated by a
@@ -1608,31 +1594,15 @@ function rxGet(pattern, flags) {
 // Each language adds its own marker beside them (__ktsrc, __pymatch), which is
 // why only the bodies that read the SHARED slots live here.
 //
-// The difference list for the four bodies below, taken before merging:
+// The object and nil tests are spelled out rather than calling a language's
+// helpers: js-rt.metajs imports this file and does NOT import runtime.metajs.
+// Python does not use rxIsMatchObj: its pyERxIsMatch asks __pymatch, because a
+// Python match and a compiled pattern both carry __rx* slots.
 //
-//   ktRxIsRegex / rbRxIsRegex   TWO apparent differences, both NIL. The object
-//                               test was ktIsObj against rbIsObj (the latter
-//                               also rejects arrays - and an array has no
-//                               __rxsrc, so both answer false either way), and
-//                               the nil test was ktIsNullish against rbIsNil,
-//                               which are the same two lines. Neither may be
-//                               called here: js-rt.metajs imports this file and
-//                               does NOT import runtime.metajs, so the tests are
-//                               spelled out.
-//   ktRxIsMatch / rbRxIsMatch   the same, and python does NOT join them: its
-//                               pyERxIsMatch asks __pymatch, because a Python
-//                               match and a compiled pattern must be told apart
-//                               and both carry __rx* slots.
-//   k5ObjRe / rbRxObjRe         ONE: k5Get against rbRxGet, which is rxGet.
-//   k5MatchOf / rbRxMatchOf /   ONE: the capture coercion, ktNum / rbToF /
-//   pyERxMatchOf                pyNum. __rxcaps is written in exactly three
-//                               places (k5NewMatch, rbRxNewMatch, pyERxMkMatch)
-//                               and all three copy the engine's own m.caps, so
-//                               every value the coercion can see is already a
-//                               plain integer and all three are the identity on
-//                               it. Math.trunc is kept; the language coercion is
-//                               dropped, which is also what the Go twin does
-//                               (`f, _ := e.(float64)`).
+// rxMatchOf applies no language number coercion to __rxcaps: it is written only
+// by k5NewMatch, rbRxNewMatch and pyERxMkMatch, all of which copy the engine's
+// own m.caps, so every value is already a plain integer (the Go twin likewise
+// does `f, _ := e.(float64)`).
 function rxIsRegexObj(v) {
     if (v === null) { return false }
     if (v === undefined) { return false }

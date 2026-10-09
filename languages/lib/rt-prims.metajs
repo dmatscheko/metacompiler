@@ -1,10 +1,9 @@
 // rt-prims.metajs -- the derived half of the MetaJS runtime, written in MetaJS.
 //
 // The MetaJS compiler (languages/metajs-to-llvm-ir.abnf) emits handle-threaded IR
-// that calls 48 js_* externals. The self-hosted-runtime plan (docs/runtime-rework-plan.md)
-// wants those 48 split into a small FLOOR that has to be written in C - because it
-// needs raw memory, unboxed machine integers or an indirect call - and everything
-// else written here, in MetaJS, on top of the floor.
+// that calls js_* externals. Those split into a small FLOOR that has to be written in
+// C - because it needs raw memory, unboxed machine integers or an indirect call - and
+// everything else, written here in MetaJS on top of the floor.
 //
 // This file is that "everything else". Compile a program with -rt-prims and the
 // grammar emits each function below as an ordinary IR function and routes the
@@ -38,7 +37,7 @@
 // ----- Equality -----
 //
 // Only ONE equality primitive has to unbox: === (js_seq). Loose equality is a
-// coercion cascade on top of it, and the Go twin (looseEq, abnf/jsrt.go:1442)
+// coercion cascade on top of it, and the Go twin (looseEq, abnf/jsrt.go)
 // deliberately answers false for "primitive against object" instead of running
 // ToPrimitive, which is exactly what the tests below reproduce.
 //
@@ -93,8 +92,7 @@ function js_sne(a, b) {
 
 // !v is exactly the branch condition inverted, and the branch condition IS the
 // floor primitive js_truthy (the compiler emits `icmp ne js_truthy(v), 0` for
-// every if/while/?:/&&/||). So js_not adds nothing js_truthy does not already
-// provide, and it goes.
+// every if/while/?:/&&/||), so js_not is derived from it.
 function js_not(v) {
     if (v) { return false }
     return true
@@ -104,7 +102,7 @@ function js_not(v) {
 //
 // The floor keeps exactly one relational primitive, js_lt. The other three are
 // that one comparison read differently, which is also how the spec defines them:
-// jsCompare (abnf/jsrt.go:1490) compares two strings lexicographically and
+// jsCompare (abnf/jsrt.go) compares two strings lexicographically and
 // everything else as ToNumber, and answers "unordered" when either side is NaN,
 // which makes every relation false.
 
@@ -217,10 +215,10 @@ function js_ushr(a, b) {
 
 // ----- typeof -----
 //
-// The Go twin reads the value's dynamic type (typeOf, abnf/jsrt.go:1523). Every
+// The Go twin reads the value's dynamic type (typeOf, abnf/jsrt.go). Every
 // case of that switch MetaJS can produce is reachable from === against the four
 // singleton handles plus the two coercions above, so no tag read is needed after
-// all - typeof leaves the floor.
+// all.
 function js_typeof(v) {
     if (v === undefined) { return "undefined" }
     if (v === null) { return "object" }        // The famous JS wart, kept deliberately.

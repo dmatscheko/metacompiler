@@ -37,14 +37,13 @@ var core = {
     // with ===, so two boxes holding the same number are two different keys. A
     // language that boxes (Dart: {__flo} for a double, {__sz} for a 64-bit int, and
     // 1 == 1.0 so they must key alike) sets these two; every other language leaves
-    // them null and gets exactly the code path it had before.
+    // them null.
     keyId: null,        // (k) -> a string id, or null to fall through to dictKeyId.
     keyEq: null,        // (a, b) -> whether two keys are the same key, when a !== b.
     // A null/undefined CONTAINER met while walking an assignment path (resolveRef).
-    // The default is null and resolveRef then fails exactly as it always did, so the
-    // five languages that do not set it are untouched. Go sets it because a nil
-    // pointer dereference is a RECOVERABLE runtime panic there and an abort here was
-    // a three-way split against llvm.Run and the native binary - docs/todo.md 1.5.
+    // The default is null and resolveRef then aborts. Go sets it because a nil
+    // pointer dereference is a RECOVERABLE runtime panic there, as it is under
+    // llvm.Run and in the native binary.
     nilPath: null       // (name) -> raise the language's own runtime error, or null.
 }
 
@@ -217,9 +216,9 @@ function declVar(name, value) { if (name != core.blank) scopePut(scopes[scopes.l
 // setVar and getVar walk the scope chain on every write and read of the
 // interpreted program, so both keep `scopes` and the hasOwn function in locals
 // (under the frozen engine every mention of a global is a scope-chain lookup of
-// its own) and call the latter directly rather than through hasOwn. The test
-// itself is unchanged: a variable may legitimately hold undefined, so membership
-// is what decides, innermost scope first.
+// its own) and call the latter directly rather than through hasOwn. A variable
+// may legitimately hold undefined, so membership is what decides, innermost
+// scope first.
 function setVar(name, value) {
     if (name == core.blank) { return }
     var sc = scopes
@@ -449,8 +448,8 @@ function makeBreak() { return function() { return BRK } }
 function makeContinue() { return function() { return CONT } }
 
 // The receiver-prepend of every instance method call ([target] + args). concat is
-// one host call for the whole job, where the push loop was one per element - and
-// under -frozen every one of those is an extern into the handle runtime.
+// one host call for the whole job rather than one push per element - and under
+// -frozen every one of those is an extern into the handle runtime.
 function concat2impl(a, b) {
     return a.concat(b)
 }
@@ -656,22 +655,17 @@ function dictSet(d, k, v) {
 }
 
 // ----- Typed catch clauses (shared) -----
-// excTry above always runs the FIRST catch clause: the original interpreters had no
-// runtime type test, so a `catch (e: IOException)` and a `catch (e: Exception)` could
-// not be told apart. excTryTyped is the same protocol with that one difference - a
-// clause may carry the DECLARED type of its catch parameter as `catchtype`, and it
-// only runs when core.excMatches(thrownValue, catchtype) accepts it. Every language
-// here whose grammar spells that type out - Java, Kotlin, C#, Swift, Dart, PHP,
-// Python - can move its try/catch production onto this function by recording the type
-// name in the clause; the rest of the shape is unchanged, so excCatch's existing
-// {catchbody, catchname} entries keep working.
+// excTry above always runs the FIRST catch clause. excTryTyped is the same protocol
+// with one difference - a clause may carry the DECLARED type of its catch parameter as
+// `catchtype`, and it only runs when core.excMatches(thrownValue, catchtype) accepts
+// it. The rest of the clause shape is excTry's, so excCatch's {catchbody, catchname}
+// entries work here too.
 //
 // A clause with no catchtype catches everything (Kotlin's `catch (e)`, Python's bare
 // `except:`), the clauses are tried in source order and the first match wins, an
 // unmatched exception is rethrown so an outer try can still see it, and `finally`
 // always runs and its own control-flow signal overrides - exactly as in excTry. A
-// language that has not set core.excMatches gets first-clause-wins behavior back, so
-// adopting this rule is safe before the predicate exists.
+// language that has not set core.excMatches gets first-clause-wins behavior.
 //
 // items = [{trybody}, {catchbody, catchname, catchtype?}*, {finbody}?].
 function excTryTyped(items) {
@@ -725,10 +719,8 @@ function excTryTyped(items) {
 // sized-integer box a language grammar puts around it, exactly as the {__flo} box
 // carries floatness. The same pair therefore serves int8 through uint64.
 //
-// Validated against `go run` over 156490 random and edge-case vectors (every
-// operator below, all four widths, both signednesses) and run byte-identically
-// under goja, the frozen MetaJS engine and node - so no BigInt, no for..in, no
-// splice, no string.split appears here.
+// This code must run byte-identically under goja, the frozen MetaJS engine and
+// node - so no BigInt, no for..in, no splice, no string.split appears here.
 
 function i64Make(h, l) { return {h: h >>> 0, l: l >>> 0} }
 
@@ -982,7 +974,7 @@ function i64Fits53(p) {
 //
 // Keeping the ordinary case a plain number is what makes this affordable: a
 // program that never writes a sized type and never leaves 2^53 allocates no box
-// and runs the arithmetic it ran before, one magnitude test heavier. The box is
+// and runs plain double arithmetic, one magnitude test heavier. The box is
 // rare, so the places that consume a number raw - an array index, a slice bound,
 // a map key - meet one only in the programs that asked for it.
 var SZ_EXACT = 9007199254740992      // 2^53
@@ -1088,9 +1080,8 @@ function szArithSlow(op, l, r) {
     // operators; JLS 15.19; ECMA-334 12.11; Kotlin's shl/shr/ushr take an Int;
     // Swift's `>> <RHS: BinaryInteger>` answers Self). szWidth/szUns read the type
     // off whichever operand is a box, so a plain `int` shifted by a `uint8` would
-    // come out 8 bits UNSIGNED. This is the same guard si_apply carries; see the
-    // measurement written out there (it fired zero times across the whole corpus,
-    // because every language normalises the count before it gets here).
+    // come out 8 bits UNSIGNED. This is the same guard si_apply carries (every
+    // language normalises the count before it gets here, so it is a backstop).
     if (op == "<<" || op == ">>") { w = szWidth(l, l); u = szUns(l, l) }
     var a = szPair(l)
     var b = szPair(r)
