@@ -13,39 +13,15 @@ Two conventions, and they are the point of the file:
 > **[V]** — a probe or grep was run for this item, on this commit.
 > **[U]** — inherited from an older note and NOT re-checked. A lead, not a fact.
 
-> **TREAT AN ITEM AS A PLACE TO START PROBING, NEVER AS A SPECIFICATION.** Round
-> after round this list has been wrong more often than right, and **always in the
-> direction of understating the defect**. The strongest single measurement: of
-> **eleven claims across eight items, nine were wrong as written**, and every
-> underlying defect was real and larger. Two items were already CLOSED when
-> assigned — one of them 123 commits earlier, its text verbatim the pre-fix
-> wording of the commit that fixed it.
->
-> Failure modes seen more than once: an error message recorded against the WRONG
-> receiver (two probe rows merged in transcription); a named blocker that does not
-> exist; and an item naming three residues of which the third was a different
-> defect entirely.
->
-> So: **probe the FIX as well as the DEFECT**, and **re-probe any [U] item BEFORE
-> it is assigned, not during**. **Item NUMBERS are re-assigned on every rebuild** —
-> a citation of `docs/todo.md 1.4` is provenance, not an address.
->
-> The corollary that keeps paying: **agents that declined an instruction with a
-> measurement have been right every time**, and partial results sent back for the
-> rest turned up further defects the fix itself had created. Write the brief so
-> that declining is expected.
+> **Treat an item as a place to start probing, never as a specification.** Items
+> have repeatedly understated their defect or named the wrong fix. Probe the FIX as
+> well as the DEFECT, re-probe a **[U]** item before assigning it, and expect a
+> brief's instruction to be declined with a measurement. Item numbers change as
+> items close, so never cite them from code.
 
-Baseline every item must preserve (`tests/gates.sh`, `--serial` on a loaded
-machine, `--bench` for anything touching layer 2 or the floor):
-
-```
-matrix 385/385 (17 SHOULD ABORT, 15 of them ALL HALVES) · --full 9,688
-assertions, 0 halves disagree · --cross 121/0 · clang-check 18 modules agreeing,
-none held · go test ok · gen-all 15/15 clean · native-full 20 languages, 0 failures
-shape-scan 15 groups / 481 recoverable · metajs-lint 0 findings, self-test ok
--freeze a fixed point · bench: 15 rows, no row outside its spread
-tests/coro-poc/build.sh byte-identical
-```
+The baseline every change must preserve is whatever `tests/gates.sh` records
+(its constants: FULL_ASSERTIONS, MATRIX_ENTRIES, SHAPE_GROUPS, ...); run it with
+`--gen --freeze`, and with `--bench` for anything touching layer 2 or the floor.
 
 **Before measuring anything, read the manual's chapter 4 and
 `tests/bench/baseline.txt`'s header** — instructions not wall clock, medians over
@@ -61,9 +37,7 @@ floor is raised afterwards, once, from a COMMITTED tree.
 
 Every item here was measured while closing something else, so they are findings
 rather than leads — but the header's warning still applies: **re-probe before
-assigning.** Two of the five items this section carried into the nineteenth round
-were not defects at all, and one of my own non-reproductions was wrong because I
-had probed at the wrong magnitude.
+assigning**, at the magnitude the item names.
 
 ### 1.1 python: `%d`/`{:d}` on a non-integer operand is a THREE-WAY divergence **[V]**
 `"%d" % 1e300` gives `1e+300` natively, `9223372036854775807` in the Go twin, and
@@ -284,10 +258,108 @@ deprecated on darwin, and `runtime.c` has no `#include`, so `ucontext_t` fields
 would be hard-coded byte offsets — a floor that guesses a struct layout is not a
 floor. Nothing is wasted by having done B: the extern surface is identical.
 
+# 4. Open defects with an oracle answer, found in review
+
+Each was probed against the real toolchain (or, where none exists here, the
+language spec, marked so). None is fixed yet.
+
+### 4.1 python: integer division by zero never raises **[V]**
+`1 // 0` prints `Infinity` and `x % 0` prints `NaN` in all three engines; CPython
+raises `ZeroDivisionError`. Only the exception class exists.
+
+### 4.2 python: `str.title()` treats `ß` as uncased **[V]**
+`"straße".title()` is `StraßE` in all engines (CPython `Straße`): the case-fallback
+length guard makes `ß` end a word.
+
+### 4.3 python: smaller gaps **[V]**
+`dict.fromkeys`; set `issuperset`/`isdisjoint`/`intersection`/`difference` (and
+`hasattr` says False for them). `except E as w` does not unbind `w`. An uncaught
+KeyError's repr differs between halves (`[1]` vs `1`). `__mro__` lacks `object`.
+`None.k = v` is not catchable. Natively `float(2**80)` is `nan` and
+`2**80 == float(2**80)` is False (CPython `1.2089258196146292e+24`, True).
+
+### 4.4 java: assignment conversion only at declarations **[V]**
+A declaration and a field initializer convert (`double d = b` widens a float,
+`static float f = 16777217` rounds), but parameters, returns, plain reassignment,
+field/array stores and array initializers do not, in all engines: `q(2)` for
+`void q(double)` prints `2` (java `2.0`), `double r(){return 3;}` prints `3`,
+`long t; t = 2; t*1000000*1000000*1000` wraps at 32 bits. Needs the declared type
+threaded to those sites in both grammars.
+
+### 4.5 java: defaults and constants **[V]**
+Uninitialised `double`/`long`/`float`/`byte` fields read `null` (java `0.0`/`0`).
+`Double.POSITIVE_INFINITY`/`NEGATIVE_INFINITY` are `null` in the interpreter and
+`NaN` compiled (a halves divergence); `Float.NaN` and `Math.sqrt` are unknown in the
+interpreter. `Integer.parseInt`'s NumberFormatException is not catchable in the
+compiled halves.
+
+### 4.6 go: the built-in `error` interface is not modelled **[V]**
+`x.(error)` is false even for a type with `Error()`, `case error:` never matches,
+and a recovered runtime panic is a plain string (so `r.(string)` succeeds where go
+fails). Natively, an UNRECOVERED integer divide by zero still dies through the C
+floor (`js runtime error: ...`, exit 1; go: `panic: runtime error: ...`, exit 2).
+`a.(int)` on a string does not panic. fmt: composites are not walked per element
+in bad-verb notes (`[%!s(int=1) %!s(int=2)]`), int64/uint64 print as int/uint, and
+`%f %g %e %x %o %b` are unimplemented.
+
+### 4.7 ruby **[V]**
+`{}.fetch(:a)`'s KeyError is not catchable by `rescue KeyError`/`IndexError`.
+`NotImplementedError` sits under StandardError (MRI: ScriptError). The compiled
+halves lack `IOError`/`LocalJumpError`. The interpreter lacks `Float#div`,
+`divmod`, `rationalize`. `"\u{48 49}"` gives `H 49}` (MRI `HI`).
+`p (2.0**55).to_r` parses as `(p ...).to_r`. The interpreter answers `"method"` for
+`defined?(x)` of a top-level local (MRI and the compiled halves: `local-variable`).
+
+### 4.8 js/ts **[V]**
+`Math.pow(1, NaN)` and `Math.pow(±1, ±Infinity)` give 1 (node NaN), probably `**`
+too. `JSON.stringify` is missing everywhere. A derived class whose `super()` returns
+an object does not rebind `this`. On an Error, `hasOwnProperty("name")` is true and
+`getOwnPropertyNames` gives `[]` (node: false, `[stack, message]`). A call of a
+non-function names the callee without node's spacing (`o.a+1 is not a function`).
+
+### 4.9 swift **[V]**
+`d[k] ?? "x"` and `if let v = d[k]` on a missing key trap (swiftc: the default).
+`x as? Double ?? -1` does not parse. `Dictionary.first` answers a key, not a tuple.
+`var x: Double? = nil; x = 3` prints `3` (swiftc `3.0`). A typealias to `Any`, an
+observed/computed `Any` property, and `for var`/`if var`/closure-parameter locals
+still adopt the old value's type on a write.
+
+### 4.10 C# (spec only - no dotnet here) **[U]**
+Overload resolution takes the first declared applicable candidate, not the most
+specific (`O(object)` declared before `O(string)` wins for `"s"`). Derived field
+initializers run after the base constructor (C#: before). `flt36`/`flt37` assert
+`Single` exponent forms whose threshold is unverified here.
+
+### 4.11 dart (spec only - no dart here) **[U]**
+The features check `tdef-legacy-form` asserts `int Function(int)` is a
+`dynamic Function(bool)`; parameters are contravariant, so Dart says false.
+Chained `x as T is T` may be a syntax error in real Dart.
+
+### 4.12 bash, lua **[V]**
+bash: unquoted `${a[@]@A}` is 4 words, ours 3. lua: a subnormal float key read back
+through `pairs()` compares unequal in the compiled halves.
+
+### 4.13 MetaJS and the C subset **[V]**
+The MetaJS lexer reads `"\f"`/`"\v"` as the letters (`"\f".charCodeAt(0)` is 102);
+metajs-lint guards the known sites but the lexer is the root. `-frozen`'s
+`indexOf(x, from)` ignores `from` (`"aXaXa".indexOf("a", 2)`: goja 2, frozen 0).
+The C subset's `(float)x` is a no-op.
+
+### 4.14 Replay-based generators repeat side effects in the interpreters **[V]**
+js, ts and python interpreter halves drive generators and async functions by
+replay, so effects before a `yield`/`await` run again (js `take(inf(), 3)` gives
+`t0 t2 t5`). The compiled halves are correct.
+
+### 4.15 Case mapping is no longer pinned goja-vs-frozen **[V]**
+The python/ruby/kotlin ratchet rows that compared goja's and `-frozen`'s case
+mapping asserted single-character answers the real languages contradict
+(`"ß".upper()` is `SS`) and were removed. Pin the agreement again with
+oracle-correct (full-mapping) expectations or a Go test.
+
 # 5. Duplication and dead code
 
-`go run ./tools/shape-scan` is the measure. Gate tier (140 chars): **15 groups / 481
-recoverable**. Permissive tier (`-min 40`): **48 / 761**, re-measured at `cd75454`.
+`go run ./tools/shape-scan` is the measure; `tests/gates.sh` records the gate-tier
+(140 chars) numbers. The permissive tier (`-min 40`) shows what is left below it.
 
 > **⚠ A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT SUFFICIENT — SIZE THE CALL
 > SITE, NOT THE BODY.** The fifth pass merged on an empty difference list alone and
@@ -321,10 +393,6 @@ already import `runtime.metajs`; **js imports only `regex.js`, so it pays a firs
 import plus seven `rtk*` hooks** (manual 7.13), which is the real cost and not the
 line count.
 
-### 5.3 `rtIsObjNotArr` has zero callers **[V]**
-Kept deliberately — recorded twice now — since `120ba0f`'s revert removed its two
-callers. Its stale comment was corrected at `cd75454`.
-
 # 6. Tooling and developer experience
 
 ### 6.1 The `-frozen` host needs 11.9 GB for one js ratchet part **[V]**
@@ -348,15 +416,7 @@ the top-level list is built by `makeSeq`, which — unlike php's own `makeBody` 
 not recognise the `{lblstmt}` / `{body}` records those statements push. The same
 shapes work INSIDE a function.
 
-### 6.4 `gates.sh` runs its seven gates serially at 315% CPU **[V]**
-Measured at **291 s → 150 s** concurrently, with all seven verdicts byte-identical.
-Not shipped, and the blocker is specific: the matrix entries in `.vscode/launch.json`
-write FIXED paths inside the repo (`tests/*.out`), so proving no two concurrent gates
-collide needs an audit of three more scripts, and `--freeze` must stay serial because
-it rewrites `abnf/jsbootstrap.ll`. **One green run is not proof, and a false green in
-`gates.sh` is the worst outcome available here.**
-
-### 6.5 `-callgraph` names a function by the minimum marker in its body **[V]**
+### 6.4 `-callgraph` names a function by the minimum marker in its body **[V]**
 So `def f` on line 8 reads `L9` in every language. Cosmetic, and now visible in three
 more languages because `932b3e2` gave ruby and php line attribution at all.
 
@@ -417,8 +477,8 @@ next. Each line is a verdict plus the shortest reason that stops someone
 re-opening it. The detail is in git; the durable lessons are in the manual
 (ch. 4 and 7).
 
-**DECLINED after measurement — the nineteenth round's, added here because each one
-is a number the next person should not have to re-derive.** php's `isset`/`$this`
+**DECLINED after measurement — each is a number the next person should not have to
+re-derive.** php's `isset`/`$this`
 scope probe into layer 2 (**+0.77%, slower in 9 of 9 paired draws**, ~490 instructions
 per probe call: unlike kotlin's, php's probe has NO miss arm layer 2 answers better,
 so it is all hot arm) · swift's and dart's `sw_kget`/`sw_kset` into layer 2
