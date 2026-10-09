@@ -12,7 +12,7 @@ with the dollar-var and dollar-brace-expr forms inside single and double quotes,
 while, C-style for and for (x in coll), closures with real captured scopes, print(...), the
 arithmetic + - * / ~/ % , comparisons, && || ! and the ternary operator.
 
-It also has, all of them added since the first version of this paragraph: inheritance
+It also has: inheritance
 (extends, super calls and super constructor chains), mixins (with, including the
 linearisation) and implements - `class A implements B` records the nominal supertype, so
 `A() is B` and `on B catch` both see it; named, redirecting, factory and primary
@@ -104,9 +104,8 @@ StatementBody = TopModDecl | Block | ClassAlias | ClassDecl | EnumDecl | MixinDe
 TopModDecl  = TopMod ( ExternDecl | StatementBody ) ;
 TopMod      = ( "external" | "abstract" ) KwEnd ;
 // An `external` declaration has no body at all. The no-body form is confined to this
-// production on purpose: offering it as an alternative of FnBodyKind made the ordinary
-// statement `c1();` parse as a body-less declaration of a function named c1, which
-// parses, runs and quietly returns null.
+// production on purpose: as an alternative of FnBodyKind it would make the ordinary
+// statement `c1();` parse as a body-less declaration of a function named c1.
 ExternDecl  = ExternFnTyped | ExternGetter | ExternSetter | ExternFnPlain ;
 ExternFnTyped <~~ push(makeFuncDecl(takeAll())) ~~>
             = Type FName [ TParams ] ParamList ExternBody ;
@@ -125,8 +124,6 @@ Annotations = Annotation { Annotation } ;
 Annotation  = "@" Id [ SkipAngle ] { "." AnnPart } [ SkipParen ] ;
 AnnPart     = KwNew | Id ;
 
-// Top-level declarations accepted structurally and reported as not implemented; their
-// bodies are matched with SkipBlock so a full file parses.
 // An enum is a class whose values are canonical instances: the value list comes first,
 // then (after a ";") the ordinary members of an enhanced enum. Every value gets .index,
 // and the enum itself a static .values list.
@@ -424,7 +421,7 @@ TypeRecord  = SkipParen [ "?" ] ;
 TypeNamed   = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ "?" ] ;
 // A type-ARGUMENT list is parsed as real types, not as a balanced <...> run. The balanced
 // run would happily span `i < 2; ... =>` to reach the ">" of a "=>" ten lines later and
-// then find the "(" a generic call needs - which is exactly what it did.
+// then find the "(" a generic call needs.
 TypeArgs    = "<" TypeArg { "," TypeArg } ">" ;
 TypeArg     = Type ;
 TypeFn      = KwFunction [ SkipAngle ] SkipParen [ "?" ] ;
@@ -469,8 +466,8 @@ PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
 PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
 // A typed / var / final binder: `var v`, `int a`, `final String s`.
 // The TYPE has to be tagged: a variable pattern with a type annotation TESTS that type
-// (patterns feature spec, "Variable / Runtime semantics"), and without the tag
-// makeVarPat never saw it, so `case B b` matched an A.
+// (patterns feature spec, "Variable / Runtime semantics"); without the tag makeVarPat
+// would not see it and `case B b` would match an A.
 PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
 PatVarLead  = KwVar | KwFinal [ PatVarType ] | PatVarType ;
 PatVarType  <~~ push({ptype: up.in}) ~~> = TypeNamed ;
@@ -507,8 +504,8 @@ PatObjShort <~~ push(makeShortField(pop())) ~~> = ":" Pattern ;
 PatBareId   <~~ push({p: "idref", name: up.in}) ~~> = PatBareName ;
 // The `!"<"` keeps `case C<int>:` and `case List<int>:` out of here: a bare identifier
 // pattern binds or names a constant and is never followed by type arguments, so without
-// it PatBareId matched just the `C`, succeeded, and the case then died on the "<" with
-// no way back (PEG: a committed alternative is never retried).
+// it PatBareId would match just the `C`, succeed, and the case would then die on the "<"
+// with no way back (PEG: a committed alternative is never retried).
 PatBareName = Id !"." !"(" !"<" ;
 PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
 
@@ -576,8 +573,8 @@ ForPostOne  <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
-// break / continue accept an optional target label (the labeled loop is not implemented,
-// so the label warns and the break/continue still targets the innermost loop).
+// break / continue accept an optional target label: the signal carries the label and
+// the labeled statement or loop it names consumes it (makeLabeled / loopRoute).
 Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ LoopLabel ] ";" ;
 Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ LoopLabel ] ";" ;
 LoopLabel   <~~ push({label: up.in}) ~~> = Id ;
@@ -642,11 +639,10 @@ NotSwEnd = :script(~~
 DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
-// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
-// raises the value, catch binds it (the leftmost catch clause wins - exception types are
-// parsed but not discriminated), finally always runs. return/break/continue inside a try
-// still propagate to the enclosing loop or function. Each part is marked so excTry can
-// tell them apart on the stack.
+// try/catch/finally and throw (dartTry, excThrow): throw raises the value, the leftmost
+// catch clause whose `on` type matches (dartIsType) binds it, finally always runs.
+// return/break/continue inside a try still propagate to the enclosing loop or function.
+// Each part is marked so dartTry can tell them apart on the stack.
 TryStmt     <~~ push(dartTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -654,16 +650,15 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 // Dart catch forms: `on Type catch (e)`, `on Type catch (e, st)`, `on Type { }` (no
-// binding), `catch (e)`, `catch (e, st)`. The `on Type` type is parsed and discarded; the
-// first binder is the caught value's name (pushed), the optional second binder (the stack
-// trace) is parsed and dropped. excCatch reads [name?, blockThunk].
+// binding), `catch (e)`, `catch (e, st)`. The `on Type` type is recorded for the match;
+// the first binder is the caught value's name, the optional second binder (the stack
+// trace) is parsed and dropped. makeCatchClause collects the three.
 CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
             = ( KwOn CatchType [ KwCatch "(" CatchName [ "," Id ] ")" ]
               | KwCatch "(" CatchName [ "," Id ] ")" ) Block ;
 CatchType   <~~ push({catchtype: up.in}) ~~> = Type ;
 CatchName   <~~ push({catchname: up.in}) ~~> = Id ;
-// rethrow re-raises inside a catch. There is no current-exception register, so it is
-// approximated as `throw null` (a genuine unwind carrying an undefined value).
+// rethrow re-raises the exception the innermost running catch clause caught (curExc).
 Rethrow     <~~ push(makeRethrow()) ~~>
             = KwRethrow ";" ;
 Assert      <~~ push(makeAssert(takeAll())) ~~>
@@ -676,8 +671,7 @@ TopGetter   <~~ push(makeTopAccessor(true, takeAll())) ~~>
             = KwGet FName FnBody | Type KwGet FName FnBody ;
 TopSetter   <~~ push(makeTopAccessor(false, takeAll())) ~~>
             = KwSet FName ParamList FnBody | Type KwSet FName ParamList FnBody ;
-// A labeled statement (label: stmt). The label targeting is not implemented, but the
-// labeled statement still runs.
+// A labeled statement (label: stmt): a `break label` inside it ends it.
 LabeledStmt <~~ push(makeLabeled(takeAll())) ~~>
             = StmtLabel ":" Statement ;
 StmtLabel   <~~ push({slabel: up.in}) ~~> = Id ;
@@ -734,18 +728,16 @@ CascadeAssignOp = "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|="
 CascadeValue = ThrowExpr | Assignment | CondExpr ;
 // A zero-width fast-fail in front of the two productions that begin with Target.
 // Both `Assignment` and `IncDec` parse a whole Target before they learn whether the
-// operator they need is there, and Target's seeds now include `new C(...)` and a
-// parenthesized expression - so every nested creation was parsed TWICE (once by the
-// speculative Target, once by the CallMember that follows it), which is 2^depth on
-// language/async_nested/*, a corpus of deliberately deep literals. This guard answers
+// operator they need is there, and Target's seeds include `new C(...)` and a
+// parenthesized expression - so without it every nested creation is parsed TWICE (once
+// by the speculative Target, once by the CallMember that follows it), which is 2^depth
+// on deeply nested literals (language/async_nested/*). This guard answers
 // "is there an assignment operator or a ++/-- ahead, at bracket depth 0, before this
-// expression ends" and declines outright when there is not. It turned 9.4s into 0.13s
-// on async_nested20_test.dart.
+// expression ends" and declines outright when there is not.
 // Two caps, and they must be separate: `budget` bounds the CODE scanned (a target longer
 // than that is treated as "no operator", which surfaces as a parse failure, not as a
-// wrong parse), while `spin` bounds the raw iterations. Charging comments to `budget`
-// was a 44-file regression - a statement preceded by nine lines of commentary spent the
-// whole budget before reaching its own `=`.
+// wrong parse), while `spin` bounds the raw iterations. Comments are NOT charged to
+// `budget`: a statement preceded by a long comment must still reach its own `=`.
 TargetOpAhead = :script(~~
     (function() {
         var i = 0
@@ -806,11 +798,10 @@ TargetOpAhead = :script(~~
             if (depth === 0) {
                 // A ';' or a ',' at depth 0 ends this expression: any operator that
                 // belongs to it stands before them. Stopping at the comma is what keeps
-                // the guard cheap inside a 20 000-element literal - without it the two
-                // big_set_literal tests took 25s each and hit the sweep's timeout.
+                // the guard cheap inside a huge collection literal.
                 // The comma of a TYPE ARGUMENT list is not such an end, though, so it
                 // only counts outside an open '<': `Indexable<String, Object?>('')[0]
-                // ??= e` is one target, and stopping at its comma lost eight files.
+                // ??= e` is one target.
                 if (ch === 59) { break }
                 if (ch === 44 && angle === 0) { break }
                 // ++ / -- (a postfix or prefix step)
@@ -869,16 +860,14 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // is / is! / as type tests, at relational precedence. 'as' is an identity cast (operand
 // evaluated, type erased); 'is' / 'is!' are a real runtime test - dartIsType, which knows
 // dart:core's types, the error hierarchy and a user class's extends/with/implements set.
-// A REPETITION, not one optional postfix: Dart's relationalExpression takes a chain, and
-// `o as Shape is Shape` used to fail to parse - the whole program, not just the
-// expression. Measured against the whole dart corpus in both halves: no other output
-// changes, because a second postfix is exactly what did not parse before.
+// A REPETITION, not one optional postfix: Dart's relationalExpression takes a chain
+// (`o as Shape is Shape`).
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr { TypeTestOp TestType } ;
 // The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
 // with the conditional operator, and a PEG's greedy optional never gives it back, so
-// `o is Shape ? a : b` ate the "?" as a nullable marker and then failed at the ":" with
-// no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
+// `o is Shape ? a : b` would eat the "?" as a nullable marker and then fail at the ":"
+// with no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
 // "," or ">"), so only that one is guarded; a record or Function type keeps its own.
 TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
 TestTypeT   = TestTypePrim { TypeFn } ;
@@ -943,8 +932,8 @@ ConstMember <~~ push(constify(pop())) ~~> = KwConst CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = TargetOpAhead Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-// A primary followed by any mix of method calls, field reads, index reads and the (not
-// implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
+// A primary followed by any mix of method calls, field reads, index reads and the
+// postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | GenFieldSfx | AnonMethodSfx | FieldSfx | CallSfx | IndexSfx
                       | NullAnonSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
@@ -1122,8 +1111,7 @@ DartIntLit  <~~ push(makeConst(szNorm(i64FromStr(up.in), 64, false))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
-// argument is erased and the list/map/set is built as usual.
-// The type argument of a collection literal is REMEMBERED (as __etype) so that a reified
+// argument of a collection literal is REMEMBERED (as __etype) so that a reified
 // test like `<Object>[1] is! List<int>` can answer what Dart answers.
 TypedColl   <~~ push(makeTypedColl(takeAll())) ~~>
             = CollTypeArgs ( ListLit | MapLit | SetLit ) ;
@@ -1258,7 +1246,7 @@ DqPlain     = "\x00"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\U0010ffff"
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
-// A balanced { ... } run (switch / try / enum / member bodies) accepted without being
+// A balanced { ... } run accepted without being
 // understood. Dart string literals (single and double quoted, with $name / ${expr}
 // interpolation) are matched first so braces inside them are never miscounted.
 SkipBlock   = "{" { SkipItem } "}" ;
@@ -1348,9 +1336,8 @@ KwDeferred  = "deferred" KwEnd ;
     // ----- string rendering: Dart's Object.toString() and its overrides -----
     // This is the twin of js_dartstr / js_dartprint in abnf/jsrtdart.go (the compiler
     // half's extern), and print, string interpolation and an explicit .toString() all
-    // go through it. Falling through to JavaScript's ToString - which is what this
-    // used to do - rendered a List as "1,2,3", and a Map, a Set and every instance as
-    // "[object Object]".
+    // go through it. (JavaScript's ToString would render a List as "1,2,3", and a Map,
+    // a Set and every instance as "[object Object]".)
     //
     //   null            null                     Instance of 'E'   no user toString()
     //   true / false    true / false             E                 a Type (a class)
@@ -1421,12 +1408,10 @@ KwDeferred  = "deferred" KwEnd ;
         return "" + v
     }
 
-    // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
+    // ----- dart:core's errors and exceptions -----
     //
-    // NOT ONE of dart:core's Error / Exception classes was a bound name, in either
-    // half: `throw FormatException("x")` was `unknown name: FormatException`, and so
-    // were the other fifteen. They are not declared by the program, so the engine has
-    // to provide them.
+    // dart:core's Error / Exception classes are not declared by the program, so the
+    // engine has to provide them.
     //
     // They are provided as PLAIN OBJECTS carrying the hidden slot __dexc (the class
     // name) rather than as class descriptors, because one flat table then answers
@@ -1584,9 +1569,8 @@ KwDeferred  = "deferred" KwEnd ;
     // IndexError's `length` is stored as __dlen, i.e. HIDDEN, and `e.length` is
     // therefore NOT readable on one - deliberately. Layer 2's rtIsArr is
     // `an object with a numeric length that is not a Map` (lib/runtime-dartswift.metajs,
-    // a shared file), so a public numeric `length` property made an IndexError
-    // indistinguishable from a List: the native binary rendered
-    // IndexError.withLength(5, 3) as `[null, null, null]`. Every other documented
+    // a shared file), so a public numeric `length` property would make an IndexError
+    // indistinguishable from a List in the native binary. Every other documented
     // member (message, name, invalidValue, start, end, indexable, source, offset,
     // modifiedObject) IS a public property and reads back.
     // ArgumentError and its two subclasses share one field set (errors.dart:163-547):
@@ -1828,14 +1812,11 @@ KwDeferred  = "deferred" KwEnd ;
     }
 
     // ----- Dart's numbers: int is 64 bit, double is a separate type -----
-    // Dart has TWO numeric types and no implicit conversion between them, and the value
-    // model here is untyped, so 1 and 1.0 used to be the same JS number: print(1.0) said
-    // "1", 1 / 1 said "1" instead of "1.0", `1 is double` was true and `1.0 is int` was
-    // true. Dart's int is also exactly 64-bit two's complement on the VM and WRAPS
-    // (int64max + 1 is int64min), which a JS double cannot represent at all - it said
-    // 9223372036854776000.
+    // Dart has TWO numeric types and no implicit conversion between them (print(1.0) is
+    // "1.0", `1.0 is int` is false), and Dart's int is exactly 64-bit two's complement
+    // on the VM and WRAPS (int64max + 1 is int64min), which a JS double cannot represent.
     //
-    // Both are fixed by putting the type ON the value, the way java-interpreter.abnf's
+    // Both are handled by putting the type ON the value, the way java-interpreter.abnf's
     // {__flo} box and go-interpreter.abnf's sized integers already do. The invariant, in
     // BOTH halves of this language (abnf/jsrtdart.go implements exactly these rules):
     //
@@ -1844,9 +1825,8 @@ KwDeferred  = "deferred" KwEnd ;
     //     an {__flo} box    ==  a double
     //
     // The int side reuses the shared 64-bit pair layer of lib/interp-core.js unchanged
-    // (szArith / szCmp / szEq / szNorm / i64*), which was proved against 1.3M operator
-    // vectors for Go; Dart only ever asks it for the signed 64-bit width, so a program
-    // that stays inside 2^53 allocates no box and runs the arithmetic it ran before.
+    // (szArith / szCmp / szEq / szNorm / i64*); Dart only ever asks it for the signed
+    // 64-bit width, so a program that stays inside 2^53 allocates no box.
     //
     // Corpus citations, from tests/reference/dart/dart-language-tests:
     //   language/double/to_string_test.dart          the double rendering below
@@ -1905,9 +1885,7 @@ KwDeferred  = "deferred" KwEnd ;
     }
 
     // ----- num's own members (dart:core num / int / double) -----
-    // These did not exist at all before: `2.6.round()` failed with "method call 'round'
-    // on 2". They matter far more now that int and double are distinct, because
-    // toInt / toDouble are how a Dart program crosses between them. Every one of them
+    // toInt / toDouble are how a Dart program crosses between int and double. Every one of them
     // answers {v: value} so that a null result means "not a num member" and the caller
     // falls through to its extension lookup. Return TYPES follow dart:core: floor,
     // ceil, round and truncate answer an int even on a double, and abs keeps the type.
@@ -1998,8 +1976,8 @@ KwDeferred  = "deferred" KwEnd ;
         if (out == "") { out = "0" }
         return neg ? "-" + out : out
     }
-    // The old `x - 0` in stepRef coerced a string counter to a number; a boxed one has
-    // to survive it untouched.
+    // stepRef's `x - 0` coerces a string counter to a number; a boxed int has to
+    // survive it untouched.
     function dNumOrSelf(v) {
         if (dIsNum(v)) { return v }
         return v - 0
@@ -2024,11 +2002,9 @@ KwDeferred  = "deferred" KwEnd ;
     function dTruncDiv(l, r) {
         if (dIsFlo(l) || dIsFlo(r)) {
             var q = dNum(l) / dNum(r)
-            // A CATCHABLE UnsupportedError, not an abort: the compiler half has
-            // always thrown here (it threw the rendered STRING) while this half
-            // called fail(), so a `try { 1.5 ~/ 0 }` was a live halves divergence.
+            // A CATCHABLE UnsupportedError, not an abort, as in the compiled halves.
             // UnsupportedError.toString prepends "Unsupported operation: " itself
-            // (errors.dart:584), so the rendered text is unchanged in all three.
+            // (errors.dart:584).
             if (q !== q || q === dInf || q === 0 - dInf) { dxRaise("UnsupportedError", "Result of truncating division is " + dFloStr(q)) }
             return szNorm(i64FromNum(dTrunc(q)), 64, false)
         }
@@ -2060,17 +2036,15 @@ KwDeferred  = "deferred" KwEnd ;
         // `~/` and `%` with an INT divisor of zero raise a CATCHABLE
         // IntegerDivisionByZeroException. sdk/lib/_internal/vm/lib/integers.dart:25-44
         // is explicit - both operators test `(other is int) && (other == 0)` and
-        // `throw const IntegerDivisionByZeroException()` - and all three engines used
-        // to abort instead, uncatchably, through the SHARED sized-integer layer
-        // (lib/interp-core.js:1067, abnf/jsrtint.go:182, runtime.c:2573), which cannot
-        // know which language is asking. A DOUBLE operand never reaches here: `1.5 % 0`
-        // took the dartMod branch above and `1.5 ~/ 0` is dTruncDiv's Infinity path.
+        // `throw const IntegerDivisionByZeroException()` - so the check is made here,
+        // before the SHARED sized-integer layer, which aborts and cannot know which
+        // language is asking. A DOUBLE operand never reaches here: `1.5 % 0` takes the
+        // dartMod branch above and `1.5 ~/ 0` is dTruncDiv's Infinity path.
         //
-        // The test belongs in the two operator branches, not at the head of dArith:
-        // written once at the top, the layer-2 twin of it cost tests/bench/mod.dart
-        // 9.61% - slower in 15 of 15 paired draws - by running on every `+`, `-`, `*`
-        // and `&` in the program. A sized integer is only ever built past 2^53, so a
-        // zero divisor is always the plain number.
+        // The test belongs in the two operator branches, not at the head of dArith,
+        // where it would run on every `+`, `-`, `*` and `&` (measurably slower). A
+        // sized integer is only ever built past 2^53, so a zero divisor is always the
+        // plain number.
         if (op == "%") {
             var rm = dInt(r)
             if (rm === 0) { dxRaise0("IntegerDivisionByZeroException") }
@@ -2089,17 +2063,17 @@ KwDeferred  = "deferred" KwEnd ;
         }
         return szCmp(l, r)
     }
-    // `+` and `+=` reach the shared core.add, whose DEFAULT truncates the sum with |0 -
-    // so 0.1 + 0.2 was 0 and 1.5 + 1.0 was 2 here. Every numeric case now goes to
-    // dArith; only the string concatenation of an interpolation stays.
+    // `+` and `+=` reach the shared core.add, whose DEFAULT truncates the sum with |0,
+    // so every numeric case goes to dArith; only the string concatenation of an
+    // interpolation stays.
     core.add = function(l, r) {
         if (typeof l == "string" || typeof r == "string") { return dstr(l) + dstr(r) }
         if (dIsNum(l) && dIsNum(r)) { return dArith("+", l, r) }
         // dart:core, List.operator +: "Returns the concatenation of this list and
         // other" - a NEW list of this list's elements followed by other's, with
         // neither operand touched. `l + r` is JavaScript's +, which renders both
-        // sides instead, so `[1, 2] + [3]` was the STRING "1,23" with length 4
-        // rather than the list [1, 2, 3] with length 3. No dart toolchain is
+        // sides instead, so `[1, 2] + [3]` would be the STRING "1,23" rather than the
+        // list [1, 2, 3]. No dart toolchain is
         // installed here, so the dart:core signature is the oracle. The other
         // halves are js_dartarith in abnf/jsrtdart.go and lib/dart-rt.metajs.
         if (Array.isArray(l) && Array.isArray(r)) {
@@ -2118,9 +2092,8 @@ KwDeferred  = "deferred" KwEnd ;
         // which is what nearly all arithmetic in a Dart program is, and neither of them
         // can carry a user `operator` or be NaN - so the whole dispatch below (two
         // dIsNum probes, a table lookup, dArith's two dIsFlo probes and szArith's own
-        // boxing tests) collapses to the operation itself. Measured on a 3M-iteration
-        // `s = s + i % 7` loop: 48s without this path, 21s with it, which is what the
-        // grammar cost before any of the boxing existed.
+        // boxing tests) collapses to the operation itself - roughly halving the cost
+        // of ordinary integer arithmetic.
         if (typeof l == "number" && typeof r == "number") {
             if (op == "<") { return l < r }
             if (op == ">") { return l > r }
@@ -2213,8 +2186,8 @@ KwDeferred  = "deferred" KwEnd ;
         }
     }
 
-    // throw / rethrow are wired to excThrow (lib/interp-core.js); try/catch/finally to
-    // excTry/excCatch. No local makeThrow is needed.
+    // throw is wired to excThrow (lib/interp-core.js) and try/catch/finally to dartTry.
+    // No local makeThrow is needed.
     // a ?? b ?? c : the first operand that is not null; the rest are not evaluated.
     // items = [op, marker, op, marker, ...]; a single operand passes through.
     function makeIfNull(items) {
@@ -2484,8 +2457,8 @@ KwDeferred  = "deferred" KwEnd ;
         // carries the `implements` edges the __class walk below cannot express.
         if (dxIsExc(v)) { return dxIsA(v, t) }
         // A USER class's supertype set, which the shared rtIsType's __super walk cannot
-        // express either: it knows `extends` and nothing else, so `class A implements B`
-        // answered false for `A() is B` in all three engines (docs/todo.md 1.5).
+        // express either: it knows `extends` and nothing else, so it would answer false
+        // for `A() is B` with `class A implements B`.
         if (v !== null && v !== undefined && typeof v == "object") {
             var vc = v.__class
             if (vc !== null && vc !== undefined && typeof vc == "object") {
@@ -2526,9 +2499,8 @@ KwDeferred  = "deferred" KwEnd ;
     }
 
     // ----- type aliases and type parameters -----
-    // Both are NAMES that stand for another type, and before this every one of them fell
-    // through dartIsType to the shared __class walk, which knows only real classes and so
-    // answered false. Two different rules, one resolution point (dtResolve, called at the
+    // Both are NAMES that stand for another type, which the shared __class walk (it knows
+    // only real classes) cannot resolve. Two different rules, one resolution point (dtResolve, called at the
     // top of dartIsType so `is`, `is!`, `on T catch` and every typed pattern get the same
     // answer - two spellings of the test would be two behaviours):
     //
@@ -2536,7 +2508,7 @@ KwDeferred  = "deferred" KwEnd ;
     //    expands to the recorded target text. A function-typed alias collapses to
     //    `Function`: the value model has no function SIGNATURE, so `f is IntFn` can be
     //    answered ("is it a function") but `f is StrFn` cannot be refused. Stated in the
-    //    :description block and in docs/todo.md.
+    //    :description block.
     //  * a TYPE PARAMETER is reified in Dart - `case T t` inside `class Box<T>` tests the
     //    INSTANTIATED argument, so `Box<int>().w(3)` is `yes` and `Box<int>().w("s")` is
     //    `no`. The argument written at the creation site is stamped on the instance as
@@ -2736,9 +2708,8 @@ KwDeferred  = "deferred" KwEnd ;
                 scopes.push({})
                 // The for-in pattern is a DECLARATION (patterns spec: the pattern-for
                 // statement desugars to `var <pattern> = element;` per iteration), so it
-                // is irrefutable: an element that does not match raises. Skipping it - as
-                // this loop used to - turns a wrong answer into a silently SHORT LOOP,
-                // and it disagreed with the compiler half, which already raised here.
+                // is irrefutable: an element that does not match raises rather than being
+                // skipped (a silently SHORT LOOP). The compiler half raises too.
                 if (!patMatch(pat, dget(it, i))) { scopes.pop(); fail("for-in pattern did not match an element") }
                 var r = bodyT()
                 scopes.pop()
@@ -3089,19 +3060,15 @@ KwDeferred  = "deferred" KwEnd ;
         if (isDict(o)) {
             // dart:core, Map.operator []: "the value for the given key, or null if
             // key is not in the map". A miss is not an error - it is what makes
-            // `m[k] ?? d` and `if (m[k] != null)` work at all. This used to abort
-            // with "map has no key", and so did the compiled half through the shared
-            // js_pyget (which is Python's indexing, and there the KeyError is right).
-            // The twin fix is emitIndexGet in dart-to-llvm-ir.abnf.
+            // `m[k] ?? d` and `if (m[k] != null)` work at all. Twin: emitIndexGet in
+            // dart-to-llvm-ir.abnf (the shared js_pyget is Python's indexing, whose
+            // KeyError is wrong for Dart).
             var di = dictFind(o, i)
             if (di < 0) { return null }
             return o.vals[di]
         }
         if (o === null || o === undefined) { fail("index of null") }
-        // An out-of-range index is dart's IndexError, and it is CATCHABLE. It used to
-        // be a fail() here, python's IndexError under llvm.Run and a third fail()
-        // natively - one index, three answers, and --cross is blind to it because two
-        // of the three legs are the same half (docs/todo.md 1.6). dart:core's
+        // An out-of-range index is dart's IndexError, and it is CATCHABLE. dart:core's
         // List.operator [] is documented "Throws a RangeError if index is out of
         // bounds" and the object thrown is an IndexError (errors.dart:445). The twins
         // are js_dtidx in abnf/jsrtdart.go and in languages/lib/dart-rt.metajs; the
@@ -3116,9 +3083,9 @@ KwDeferred  = "deferred" KwEnd ;
     function dsetIndex(o, i, v) {
         if (isDict(o)) { dictSet(o, i, v); return }
         if (o === null || o === undefined) { fail("index assign on null") }
-        // The write side raises the same IndexError: `xs[7] = 1` silently GREW the
-        // list here (MetaJS's array write extends), where Dart's List.operator []=
-        // throws a RangeError.
+        // The write side raises the same IndexError: without the check `xs[7] = 1`
+        // would silently GROW the list (MetaJS's array write extends), where Dart's
+        // List.operator []= throws a RangeError.
         if (Array.isArray(o) && (i < 0 || i >= o.length)) { dxRaiseA("IndexError", "", [i, o, "index"]) }
         o[i] = v
     }
@@ -3142,7 +3109,7 @@ KwDeferred  = "deferred" KwEnd ;
     }
     function getFieldD(o, name) {
         if (o === null || o === undefined) { fail("field ." + name + " of null") }
-        // Own-property read: a bare o[name] resolved inherited Object.prototype
+        // Own-property read: a bare o[name] would resolve inherited Object.prototype
         // members (toString, valueOf, ...) under a host JS engine.
         if (hasOwn(o, name)) { return o[name] }
         return undefined
@@ -3267,8 +3234,8 @@ KwDeferred  = "deferred" KwEnd ;
     // ----- method dispatch (agrees with the compiler's js_mcall / memberCall) -----
     function mcall(target, name, args) {
         // x.toString() is Object.toString() unless the class overrides it, and dstr
-        // answers both (an override wins there). Without this the call fell through
-        // to the extension lookup and failed with "method call 'toString' on 3".
+        // answers both (an override wins there). Without this the call would fall
+        // through to the extension lookup and fail.
         if (name == "toString" && args.length == 0) { return dstr(target) }
         // A NAMED constructor of one of dart:core's errors, reached through the
         // postfix chain rather than QualCall: `ArgumentError.value(7)` is a bare
@@ -3914,8 +3881,8 @@ KwDeferred  = "deferred" KwEnd ;
             if (p.thisf != undefined || p.superf != undefined) { cps.push(p); continue }
             flds.push({field: p.pname, init: null})
             // The other flags have to travel with it: the optional-positional binder
-            // keys its default on `opt`, so dropping it made `class C([var int q = 6])`
-            // bind null instead of 6 - in the compiler only.
+            // keys its default on `opt`, so dropping it would make
+            // `class C([var int q = 6])` bind null instead of 6.
             cps.push({thisf: p.pname, pname: p.pname, named: p.named, opt: p.opt, def: p.def})
         }
         return {primary: true, pfields: flds, pparams: cps}
@@ -4017,9 +3984,8 @@ KwDeferred  = "deferred" KwEnd ;
             for (var e2 = 0; e2 < enumVals.length; e2++) {
                 var inst = construct(cls, "", evalArgs(enumVals[e2].eargs))
                 inst.index = e2
-                // `name` is Enum's own getter (Col.red.name == "red"); dart-to-llvm-ir
-                // already wrote it and this half answered null. __enumName is the same
-                // string under a __-prefixed key, which is what dstr reads - so a class
+                // `name` is Enum's own getter (Col.red.name == "red"). __enumName is the
+                // same string under a __-prefixed key, which is what dstr reads - so a class
                 // that merely declares a field called `name` never renders as an enum.
                 inst.name = enumVals[e2].evname
                 inst.__enumName = enumVals[e2].evname
@@ -4565,10 +4531,8 @@ KwDeferred  = "deferred" KwEnd ;
         var cond = items[0]
         var msg = (items.length > 1) ? items[1] : null
         return function() {
-            // A CATCHABLE AssertionError. This half used to fail() - an abort no
-            // `catch` could see - while the compiler half threw the message STRING,
-            // so `try { assert(false, "x") } catch (e)` was a live halves
-            // divergence. Both now raise the dart:core object.
+            // A CATCHABLE AssertionError, the dart:core object, as in the compiled
+            // halves.
             //
             // DELIBERATE, CITED DIVERGENCE from the VM: a failing `assert` there
             // raises the PRIVATE _AssertionError, whose toString carries the script
@@ -4673,19 +4637,18 @@ KwDeferred  = "deferred" KwEnd ;
         if (dxIsName(name)) { return {v: {__dexcType: name}} }
         // An unqualified GETTER of a non-object receiver: `extension SX on String { bool
         // e() => isEmpty; }`. The hasOwn arm at the top of this function already answers
-        // `length`, because a host string's own property set is exactly {length} - and
-        // that is why this half was RIGHT where both compiled halves were wrong
-        // (docs/todo.md 5.3) - but a Dart getter that is not a host own property, like
-        // isEmpty, fell through to "unknown name". mcall is Dart's own curated member
+        // `length`, because a host string's own property set is exactly {length} - but a
+        // Dart getter that is not a host own property, like isEmpty, needs this arm or it
+        // would fall through to "unknown name". mcall is Dart's own curated member
         // dispatch, the same one a qualified `.isEmpty` uses, so this answers exactly
         // what the qualified read would and admits no name Dart lacks.
         //
-        // The guard is the receiver, and it matches the emitter's dt_kgetp arm exactly:
+        // The guard is the receiver, and it matches the emitter's rtKGetB arm exactly:
         // NOT an object carrying a __class, since those instances were served by the two
         // arms above and handing one to mcall would turn a missing name into a zero-
         // argument call of a same-named method. mcall ABORTS on a name it cannot place,
         // so this is terminal and its diagnostic replaces "unknown name: X" for this
-        // receiver shape - which is also what the compiled halves now say.
+        // receiver shape - which is also what the compiled halves say.
         if (self != undefined && self != null) {
             var plainRecv = true
             if (typeof self == "object") { if (self.__class != undefined) { plainRecv = false } }

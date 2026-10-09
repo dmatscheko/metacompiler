@@ -138,18 +138,17 @@ class Boom {
 
 // `implements` and `with` contribute a NOMINAL TYPE in Dart: `class A implements B`
 // makes `A() is B` true and `on B catch` claim an A, and so does `class A with M`
-// for M. Neither is on the __super chain, and all three engines used to record
-// nothing at all, so every one of these answered false (docs/todo.md 1.5).
+// for M. Neither is on the __super chain, so a __super walk alone would answer false.
 abstract class FShape { double area(); }
 mixin FLoud { String shout() => "LOUD"; }
 class FSq implements FShape { double area() => 4.0; }
 class FSubSq extends FSq {}                 // conformance through an extends chain
 class FMix with FLoud implements FShape { double area() => 1.0; }
 
-// ----- typedef names and type PARAMETER names in a type test (docs/todo.md 2.4) -----
-// Both are names that stand for another type, and both fell through to the class-chain
-// walk, which knows only real classes: `f is FIntFn` was false and `case T t` inside
-// `class FBox<T>` never matched, in BOTH halves.
+// ----- typedef names and type PARAMETER names in a type test -----
+// Both are names that stand for another type, which the class-chain walk (it knows
+// only real classes) cannot resolve: `f is FIntFn` and `case T t` inside
+// `class FBox<T>` need dtResolve.
 typedef FIntFn = int Function(int);
 typedef FNames = List<String>;
 typedef FAlias = FNames;
@@ -324,8 +323,8 @@ int main() {
   check("bit-shl", (1 << 4) == 16);
   check("bit-shr-neg", (-8 >> 1) == -4);
   // Dart's int is 64-bit, so `>>>` shifts a 64-bit unsigned value: -1 is
-  // 0xFFFFFFFFFFFFFFFF and >>> 28 leaves 0xFFFFFFFFF. The old expectation (15) was
-  // the JS 32-bit answer, which both halves used to give. Neighbouring 64-bit shift
+  // 0xFFFFFFFFFFFFFFFF and >>> 28 leaves 0xFFFFFFFFF (15 would be the JS 32-bit
+  // answer). Neighbouring 64-bit shift
   // behaviour is pinned by the corpus in
   // language/operator/bit_operations_test.dart:50 (0xF00000000 >> 32 == 15) and :54.
   check("bit-ushr", (-1 >>> 28) == 68719476735);
@@ -606,9 +605,8 @@ int main() {
   check("finally-overrides-throw", finallyOverridesThrow() == "fin");
   check("rethrow-derived", rethrower() == "deeper");
 
-  // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
-  // Sixteen names that were bound in NEITHER half: `throw FormatException("x")`
-  // was `unknown name: FormatException`. The full battery - every constructor,
+  // ----- dart:core's errors and exceptions -----
+  // The sixteen engine-provided names. The full battery - every constructor,
   // every toString, the whole supertype graph - is SECTION 31 of
   // tests/dart-test-full.dart, cited line by line to sdk/lib/core/errors.dart and
   // sdk/lib/core/exceptions.dart. These are the shapes the matrix should see.
@@ -624,9 +622,8 @@ int main() {
   try { throw FormatException("x"); } on Error catch (e) { excKind = "error"; }
   on Exception catch (e) { excKind = "exception"; }
   check("exc-on-exception-claims-format", excKind == "exception");
-  // `on int catch` and friends: the compiler half filtered with the shared
-  // js_is_type, which knows only the JVM spellings, so none of int / double /
-  // bool / Map / Set ever matched there while the interpreter half claimed them.
+  // `on int catch` and friends: Dart's own type names (the shared js_is_type knows
+  // only the JVM spellings).
   var primKind = "";
   try { throw 7; } on int catch (e) { primKind = "int"; } catch (e) { primKind = "other"; }
   check("exc-on-int", primKind == "int");
@@ -634,7 +631,7 @@ int main() {
   try { throw {"a": 1}; } on Map catch (e) { mapKind = "map"; } catch (e) { mapKind = "other"; }
   check("exc-on-map", mapKind == "map");
   // An int divisor of zero is a CATCHABLE IntegerDivisionByZeroException
-  // (sdk/lib/_internal/vm/lib/integers.dart:25-44); both halves used to abort.
+  // (sdk/lib/_internal/vm/lib/integers.dart:25-44).
   var zeros = [0];
   var divKind = "";
   try { divKind = "${5 ~/ zeros[0]}"; }
@@ -645,7 +642,7 @@ int main() {
   try { assert(zeros[0] == 1, "nope"); } on AssertionError catch (e) { assertKind = "$e"; }
   check("exc-assert-catchable", assertKind == "Assertion failed: \"nope\"");
 
-  // ----- implements / with are nominal types (docs/todo.md 1.5) -----
+  // ----- implements / with are nominal types -----
   check("iface-direct", FSq() is FShape);
   check("iface-self", FSq() is FSq);
   check("iface-through-extends", FSubSq() is FSq && FSubSq() is FShape);
@@ -661,11 +658,9 @@ int main() {
   catch (e) { ifaceKind2 = "other"; }
   check("iface-on-catch-negative", ifaceKind2 == "other");
 
-  // ----- a list index out of range is dart's IndexError (docs/todo.md 1.6) -----
-  // Not python's, which is what the shared js_pyget raised: the interpreter aborted,
-  // llvm.Run threw python's IndexError and the native binary aborted with a third
-  // wording - a THREE-WAY split --cross cannot see, since two of the three legs are
-  // the same half. dart:core's List.operator [] throws a RangeError, and the object
+  // ----- a list index out of range is dart's IndexError -----
+  // Not python's (the shared js_pyget's). dart:core's List.operator [] throws a
+  // RangeError, and the object
   // is an IndexError (errors.dart:445); the text is dxArgStr/dxExpl's.
   var idxs = [10, 20, 30];
   var idxMsg = "";
@@ -696,9 +691,9 @@ int main() {
   var idxMap = {"a": 1};
   check("idx-map-miss-still-null", idxMap["zz"] == null && idxMap["a"] == 1);
 
-  // ----- a TYPED pattern TESTS its type (docs/todo.md 2.14) -----
-  // The type annotation on a variable pattern was dropped by the grammar itself, in
-  // BOTH halves, so the FIRST case of any typed switch always won. The position
+  // ----- a TYPED pattern TESTS its type -----
+  // The type annotation on a variable pattern is a type TEST, so a typed switch does
+  // not simply take its FIRST case. The position
   // decides what a failed test means: a switch case / if-case is REFUTABLE and falls
   // to the next case, a declaration or a for-in binder is IRREFUTABLE and raises
   // Dart's TypeError (patterns feature spec, "Variable"; errors.dart:144).
@@ -763,16 +758,16 @@ int main() {
     tpLoopErr = "ran";
   } on TypeError catch (e) { tpLoopErr = "typeerror"; }
   check("tpat-for-in-raises-not-skips", tpLoopErr == "typeerror" && tpShort == 1);
-  // An object pattern's own type now sees the `implements` edge the shared js_is_type
-  // could not: FSq implements FShape and is not on any __super chain.
+  // An object pattern's own type sees the `implements` edge the shared js_is_type
+  // cannot: FSq implements FShape and is not on any __super chain.
   check("tpat-object-pattern-implements",
         switch (tpSq) { FShape() => "iface", _ => "no" } == "iface");
   check("tpat-object-pattern-negative",
         switch (7) { FShape() => "iface", _ => "no" } == "no");
 
-  // ----- `o is T ? a : b` parses (docs/todo.md 2.14) -----
-  // The type's trailing "?" is greedy and a PEG never gives it back, so the whole
-  // program failed to parse at the ":" - in both halves.
+  // ----- `o is T ? a : b` parses -----
+  // The type's trailing "?" is greedy and a PEG never gives it back, so without the
+  // NotCondQ guard the whole program would fail to parse at the ":".
   check("iscond-plain", (tpSq is FShape ? "y" : "n") == "y");
   check("iscond-negated", (tpSq is! FShape ? "y" : "n") == "n");
   check("iscond-nullable-type-still-parses", (tpSq is FShape? ? "y" : "n") == "y");
@@ -780,15 +775,13 @@ int main() {
   check("iscond-nullable-plain", iscondN is int? && !(iscondN is int));
   check("iscond-nested", (tpSq is FShape ? (tpSub is FSq ? "a" : "b") : "c") == "a");
   check("iscond-unary-arms", (tpSq is FShape ? -1 : -2) == -1);
-  // While factoring the type test out for the patterns above: `is List<T>` answered the
-  // NUMBER 1 in the compiler half and true in the interpreter, because the element-type
-  // refinement is a BITWISE js_band. --cross never reached it - every existing test of
-  // it was an `if`, where a raw 1 is truthy. Interpolate it, so the value is compared
-  // and not just tested.
+  // `is List<T>` must be a boolean, not the NUMBER 1 a BITWISE js_band leaves (the
+  // element-type refinement). Interpolate it, so the value is compared and not just
+  // tested - in an `if` a raw 1 is truthy.
   check("is-typed-list-answers-a-bool", "${<int>[1, 2] is List<int>}" == "true");
   check("is-typed-list-negative", "${<int>[1, 2] is List<String>}" == "false");
 
-  // ----- typedef / type-parameter names in a type test (docs/todo.md 2.4) -----
+  // ----- typedef / type-parameter names in a type test -----
   // A typedef DENOTES the aliased type, so the test is the test of that type. A type
   // parameter is REIFIED in Dart: `case T t` inside `class FBox<T>` tests the argument
   // the instance was created with, so FBox<int> claims 3 and refuses "s" - erasing T to
@@ -819,9 +812,8 @@ int main() {
   // A boolean, not the raw 1 a bitwise js_band would leave (see is-typed-list above).
   check("tparam-answers-a-bool", "${FBox<int>().isT(3)}" == "true");
 
-  // ----- a CHAIN of type-test postfixes parses (docs/todo.md 2.4, adjacent) -----
-  // TypeTestExpr took one optional postfix, so `o as FShape is FShape` failed to parse -
-  // the whole program, in both halves.
+  // ----- a CHAIN of type-test postfixes parses -----
+  // TypeTestExpr takes a repetition, so `o as FShape is FShape` parses.
   Object tchO = tpSq;
   check("typetest-chain-as-then-is", (tchO as FShape is FShape));
   check("typetest-chain-as-as-isnot", (tchO as FShape as FShape is! int));

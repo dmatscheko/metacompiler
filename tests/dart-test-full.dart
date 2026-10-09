@@ -111,15 +111,14 @@ void s03() {
   check("co6", sq[3] == 9 && sq.length == 3);
   // Map.operator [] answers NULL for a key the map does not hold (dart:core:
   // "the value for the given key, or null if key is not in the map"), which is
-  // what the whole null-aware idiom below is built on. Both halves used to ABORT
-  // here - the compiled one through the shared js_pyget, which is Python's
-  // indexing and raises a KeyError - so every line of this check was unreachable.
+  // what the whole null-aware idiom below is built on (the shared js_pyget is
+  // Python's indexing and would raise a KeyError).
   check("co7", mp["zz"] == null && sq[99] == null && <int, String>{1: "x"}[9] == null);
   check("co8", (mp["zz"] ?? 7) == 7 && (mp["a"] ?? 7) == 1);
   var miss = mp["zz"];
   check("co9", miss == null && !mp.containsKey("zz") && mp.length == 3);
-  // ...and the guard runs on the MAP arm only: a list and a String index the way
-  // they always did, including the negative-index wrap the sequence path owns.
+  // ...and the guard runs on the MAP arm only: a list and a String still index as
+  // sequences.
   check("co10", xs[0] == 1 && xs[3] == 4 && "abc"[1] == "b");
 }
 
@@ -416,10 +415,9 @@ extension ExInt on int {
 extension ExList<T> on List<T> { T orElse(int i, T fb) => i < length ? this[i] : fb; }
 // Unqualified GETTERS of a NON-OBJECT receiver. A List receiver is an object and the
 // `length` above resolved through the emitter's own `this`-property arm all along; a
-// String is not, so both compiled halves died on `length` with "variable not defined"
-// while dart-interpreter.abnf answered it, and `isEmpty` - a Dart getter that is not a
-// host own property - failed in BOTH halves. Both are answered through Dart's own
-// curated dispatch now (docs/todo.md 5.3), so no name Dart lacks comes with them.
+// String is not, and `isEmpty` is a Dart getter that is not a host own property. Both
+// are answered through Dart's own curated dispatch, so no name Dart lacks comes with
+// them.
 extension ExStr on String {
   int lenPlus() => length + 1;
   bool emptyq() => isEmpty;
@@ -446,8 +444,8 @@ class GnBox<T extends num> { // bounded type parameter
   bool bigger(GnBox<T> o) => v > o.v;
 }
 T gnMax<T extends num>(T a, T b) => a > b ? a : b;
-// A type PARAMETER and a typedef name are both names that stand for another type, and
-// both fell through the class-chain walk in BOTH halves (docs/todo.md 2.4).
+// A type PARAMETER and a typedef name are both names that stand for another type,
+// which the class-chain walk alone cannot resolve.
 typedef GnIntFn = int Function(int);
 typedef GnNames = List<String>;
 class GnT<T> {
@@ -636,8 +634,7 @@ void s24() {
   check("ti8", (lit == List<int>) && (lit != Map<int, int>));
   var inst = tiId<int>;
   check("ti9", inst != null);
-  // Only the LITERAL is asserted here: `0.5 + 0.25` is a known wrong answer in
-  // both halves (integer-truncating addition), which is not this file's subject.
+  // Only the LITERAL is asserted here; arithmetic is SECTION 30's subject.
   check("ti10", .5 == 0.5 && .25 < .5 && .125 > 0);
 }
 
@@ -781,10 +778,8 @@ void s28() {
 // ===== SECTION 29: toString rendering and const canonicalization =====
 // Dart's Object.toString() (which print and string interpolation both go through)
 // and the canonicalization of const values. Two grammars can agree on the whole
-// syntax of a program and still print different things: the compiler half used to
-// hand raw values to the host print, so `print(null)` said "<nil>", a List said
-// "[1 2 3]" and an instance dumped its class descriptor with a Go pointer address
-// in it. The expected answers here come from the vendored corpus:
+// syntax of a program and still print different things (the host print would render
+// `print(null)` as "<nil>"). The expected answers here come from the vendored corpus:
 //   language/regress/regress45642_test.dart:14   "should print: Instance of 'Foo'"
 //   language/records/simple/literals_and_field_access_test.dart:121
 //                                                x.toString() == "[1, 2, 3]"
@@ -848,11 +843,9 @@ void s29() {
 
 // ===== SECTION 30: int and double are different types; int is 64-bit =====
 // Dart has TWO numeric types with no implicit conversion, and its int is exactly
-// 64-bit two's complement on the VM and WRAPS. Both grammars used to model every
-// number as one JS double, so `print(1.0)` said "1", `1 / 1` said "1" although `/`
-// always yields a double, `1 is double` was true, `1.0 is int` was true, and
-// int64max + 1 answered 9.2e+18 in the compiler half and -1 in the interpreter half
-// (a live cross-half divergence). Every expectation below is quoted from the
+// 64-bit two's complement on the VM and WRAPS: `print(1.0)` is "1.0", `1 / 1` is a
+// double, `1 is double` and `1.0 is int` are false, and int64max + 1 wraps. Every
+// expectation below is quoted from the
 // vendored corpus at tests/reference/dart, file:line given per assertion; the ones
 // marked SPEC come from the dart:core documentation instead, because the corpus is
 // silent on them. There is no dart toolchain on this machine, so none of this was
@@ -1014,9 +1007,7 @@ void s30() {
 }
 
 // ===== SECTION 31: dart:core's errors and exceptions =====
-// None of these sixteen names was BOUND before docs/todo.md 1.2 was closed:
-// `throw FormatException("x")` was `unknown name: FormatException` in the
-// interpreter and `variable not defined: FormatException` in the compiler. Every
+// The sixteen engine-provided names. Every
 // expectation below is quoted from sdk/lib/core/errors.dart and
 // sdk/lib/core/exceptions.dart, which ARE the documentation - THERE IS NO dart
 // TOOLCHAIN ON THIS MACHINE, so none of this was run against a real Dart VM.
@@ -1044,10 +1035,8 @@ String xkind(Object v) {
   } catch (e) { return "other"; }
 }
 
-// The same dispatch over DART's own type names. The compiler half used to filter
-// with the shared js_is_type, which knows only the JVM spellings, so `on int`,
-// `on double`, `on num`, `on bool`, `on Map` and `on Set` never matched there
-// while the interpreter half claimed them - five of eight rows of a probe.
+// The same dispatch over DART's own type names (`on int`, `on double`, `on num`,
+// `on bool`, `on Map`, `on Set`), which the shared js_is_type's JVM spellings miss.
 String xprim(Object v) {
   try {
     throw v;
@@ -1185,7 +1174,7 @@ void s31() {
 
   // ----- the constructs that RAISE one -----
   // `~/` and `%` with an int divisor of zero throw a catchable
-  // IntegerDivisionByZeroException (integers.dart:25-44). Both halves aborted.
+  // IntegerDivisionByZeroException (integers.dart:25-44).
   var zs = [0, 3];
   var d0 = "";
   try { d0 = "${7 ~/ zs[0]}"; } catch (e) { d0 = "$e"; }
@@ -1195,12 +1184,11 @@ void s31() {
   check("xe76", m0 == "caught");
   check("xe77", 7 ~/ zs[1] == 2 && 7 % zs[1] == 1); // a non-zero divisor is untouched
   // A DOUBLE operand takes the other branch: `_Double.~/` is (this/other).truncate(),
-  // whose Infinity is an UnsupportedError - now a real one, not the rendered string.
+  // whose Infinity is an UnsupportedError - a real one, not the rendered string.
   var f0 = "";
   try { f0 = "${1.5 ~/ zs[0]}"; } on UnsupportedError catch (e) { f0 = "$e"; }
   check("xe78", f0 == "Unsupported operation: Result of truncating division is Infinity");
-  // A failing `assert` raises a catchable AssertionError in BOTH halves; the
-  // interpreter used to abort and the compiler used to throw the message string.
+  // A failing `assert` raises a catchable AssertionError in BOTH halves.
   var a0 = "";
   try { assert(zs[0] == zs[1], "nope"); } on AssertionError catch (e) { a0 = "$e"; }
   check("xe79", a0 == "Assertion failed: \"nope\"");
@@ -1209,19 +1197,17 @@ void s31() {
   check("xe80", a1 == "Assertion failed");
 
   // ----- an initializing formal / initializer-list entry beats the DECLARED
-  // field initializer. Found while binding the sixteen above, because dart:core's
-  // own RangeError has declared `start`/`end` beside a `super(message)` chain.
-  // The declared initializer ran LAST in the compiler half and overwrote both, so
-  // `class XiA { int x = 7; XiA(this.x); }` answered 7 there and 1 here - four of
-  // four rows of a probe, and `--cross` had never reached the shape.
+  // field initializer (dart:core's own RangeError relies on it: declared
+  // `start`/`end` beside a `super(message)` chain). `class XiA { int x = 7;
+  // XiA(this.x); }` answers 1.
   check("xe83", XiA(1).x == 1);
   check("xe84", XiB().y == 5);
   check("xe85", XiC(2).z == 2);
   check("xe87", XiA.plain().x == 7); // no formal, no init entry: the declared one stands
 
   // A user class is NOT one of the sixteen and does not become an Exception by being
-  // thrown. It is the DECLARATION that decides, and since docs/todo.md 1.5 was closed
-  // an `implements Exception` on a user class IS recorded - so both directions are
+  // thrown. It is the DECLARATION that decides, and an `implements Exception` on a
+  // user class IS recorded - so both directions are
   // asserted here, and SECTION 32 asserts the rest of the shape.
   check("xe81", MyException("z").toString() == "mine:z" && !(MyException("z") is Exception));
   check("xe88", MyRealException("z") is Exception && !(MyRealException("z") is Error));
@@ -1244,19 +1230,16 @@ class MyException { final String m; MyException(this.m); String toString() => "m
 class MyRealException implements Exception { final String m; MyRealException(this.m); }
 
 // ===== SECTION 32: implements / with are nominal types; a bad index is a RangeError =====
-// Two things this file could not assert before, both of them three-engine defects that
-// --cross was blind to because both halves agreed (docs/todo.md 1.5 and 1.6).
+// Two things where all three engines must agree with Dart rather than with each other.
 //
-// 1.5  `class A implements B` recorded NOTHING: `A() is B` was false in the
-//      interpreter, under llvm.Run and in the native binary, and so was `on B catch`.
-//      Neither `implements` nor `with` is on the __super chain, which is all the
-//      shared rtIsType / isTypeName walk knows. Exactly the wall 9cd3272 closed for
-//      swift's protocols; the answer here is a flattened supertype-name set on the
-//      class descriptor (__bases + dxUserAnc in the interpreter, __anc written at emit
-//      time in the compiler).
+// NOMINAL EDGES  `class A implements B` makes `A() is B` true and `on B catch` claim
+//      an A. Neither `implements` nor `with` is on the __super chain, which is all the
+//      shared rtIsType / isTypeName walk knows; the answer is a flattened
+//      supertype-name set on the class descriptor (__bases + dxUserAnc in the
+//      interpreter, __anc written at emit time in the compiler).
 //
-// 1.6  `xs[7]` raised PYTHON's IndexError, because Dart's indexing was lowered to the
-//      shared js_pyget. Three legs, three answers. dart:core's List.operator [] is
+// RANGE ERROR  `xs[7]` raises Dart's IndexError, not python's (the shared js_pyget's).
+//      dart:core's List.operator [] is
 //      documented "Throws a RangeError if index is out of bounds"; the object thrown
 //      is an IndexError (errors.dart:445 `class IndexError extends ArgumentError
 //      implements RangeError`) and its toString is dxArgStr + dxExpl (:227-238,
@@ -1291,7 +1274,7 @@ enum NmCol with NmLoud implements NmNamed {
   String get label => "c";
 }
 void s32() {
-  // ----- 1.5: the nominal edges -----
+  // ----- the nominal edges -----
   check("nm1", NmSq() is NmShape && NmSq() is NmNamed && NmSq() is NmSq);
   check("nm2", NmSub() is NmSq && NmSub() is NmShape && NmSub() is NmNamed);
   check("nm3", NmDeep() is NmSq && NmDeep() is NmShape && NmDeep() is NmLoud);
@@ -1312,10 +1295,8 @@ void s32() {
   var nmOn2 = "";
   try { throw NmSq(); } on NmLoud catch (e) { nmOn2 = "loud"; } catch (e) { nmOn2 = "other"; }
   check("nm14", nmOn2 == "other");
-  // ----- 2.14: a typed pattern TESTS its type, and the position says what a failure
-  // means. The type used to be dropped by the grammar itself (PatVarLead's TypeNamed
-  // carried no tag), so the FIRST case of a typed switch always won, in both halves.
-  // A REFUTABLE position (a switch case, an if-case) falls to the next case; an
+  // ----- a typed pattern TESTS its type, and the position says what a failure
+  // means. A REFUTABLE position (a switch case, an if-case) falls to the next case; an
   // IRREFUTABLE one (a declaration, a for-in binder) raises Dart's TypeError. The
   // nominal edges above are the interesting subject: `case NmShape _` has to claim an
   // NmSq through `implements`, which is exactly what the plain __super walk cannot see.
@@ -1333,8 +1314,8 @@ void s32() {
   var nmPatSw = "";
   switch (NmSq()) { case NmLoud _: nmPatSw = "loud"; case NmNamed _: nmPatSw = "named"; }
   check("nm-pat8", nmPatSw == "named");
-  // An object pattern's type takes the same route (it used to use the shared
-  // js_is_type in the compiler half, which knows no `implements` edge).
+  // An object pattern's type takes the same route (not the shared js_is_type, which
+  // knows no `implements` edge).
   check("nm-pat9", switch (NmSq()) { NmShape() => "os", _ => "no" } == "os");
   // Irrefutable: the declaration and the for-in binder downcast, and a failure is a
   // TypeError. The trip COUNT is asserted, because a loop that silently skips a
@@ -1362,14 +1343,14 @@ void s32() {
     nmLoopErr = "ran";
   } on TypeError catch (e) { nmLoopErr = "typeerror"; }
   check("nm-pat13", nmLoopErr == "typeerror" && nmShort == 1);
-  // 2.14, second half: `o is T ? a : b`. The type's trailing "?" is greedy and a PEG
-  // never gives it back, so the whole FILE used to fail to parse at the ":".
+  // `o is T ? a : b`. The type's trailing "?" is greedy and a PEG never gives it
+  // back, so without the NotCondQ guard the whole FILE would fail to parse at the ":".
   check("nm-pat14", (nmObj is NmShape ? "y" : "n") == "y");
   check("nm-pat15", (nmObj is NmLoud ? "y" : "n") == "n");
   check("nm-pat16", (nmObj is NmShape? ? "y" : "n") == "y");
   check("nm-pat17", (nmObj is! NmLoud ? 1 : 2) == 1);
 
-  // ----- 1.6: the range error -----
+  // ----- the range error -----
   var xs = [10, 20, 30];
   var e1 = "";
   try { e1 = "${xs[7]}"; } on IndexError catch (e) { e1 = "$e"; }

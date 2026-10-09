@@ -24,9 +24,7 @@ dispatches through js_mcall (Go memberCall) exactly like the interpreter.
 The top level becomes dartmain(env, args), which runs the program declarations and then
 calls int main(); its return value is the exit code of the metacompiler run, so the test
 programs are self checking (0 on success). The same subset is interpreted directly by
-dart-interpreter.abnf. Constructs outside the subset (mixins/inheritance, async/await, named
-constructors, the null-assertion !) are accepted structurally and reported as not
-implemented under -warn-unsupported; the nullable type marker ? is erased.") ;
+dart-interpreter.abnf; the nullable type marker ? is erased.") ;
 
 
 // --- main rules
@@ -86,10 +84,8 @@ StatementBody = TopModDecl | Block | ClassAlias | ClassDecl | EnumDecl | MixinDe
 // the item count the enclosing rule sees is unchanged.
 TopModDecl  = TopMod ( ExternDecl | StatementBody ) ;
 TopMod      = ( "external" | "abstract" ) KwEnd ;
-// An `external` declaration has no body at all. The no-body form is confined to this
-// production on purpose: offering it as an alternative of FnBodyKind made the ordinary
-// statement `c1();` parse as a body-less declaration of a function named c1, which
-// parses, runs and quietly returns null.
+// An `external` declaration has no body at all. Twin of ExternDecl in
+// dart-interpreter.abnf, which says why the no-body form is confined to it.
 ExternDecl  = ExternFnTyped | ExternGetter | ExternSetter | ExternFnPlain ;
 ExternFnTyped <~~ push(makeFuncDecl(takeAll())) ~~>
             = Type FName [ TParams ] ParamList ExternBody ;
@@ -108,8 +104,6 @@ Annotations = Annotation { Annotation } ;
 Annotation  = "@" Id [ SkipAngle ] { "." AnnPart } [ SkipParen ] ;
 AnnPart     = KwNew | Id ;
 
-// Top-level declarations accepted structurally and reported as not implemented; their
-// bodies are matched with SkipBlock so a full file parses.
 // An enum is a class whose values are canonical instances: the value list comes first,
 // then (after a ";") the ordinary members of an enhanced enum. Every value gets .index
 // and .name, and the enum itself a static .values list.
@@ -149,11 +143,8 @@ ExtensionType <~~ push(makeExtTypeStmt(takeAll())) ~~>
 ETCtorName  = Id ;
 ExtTypeField <~~ push({etfield: popName()}) ~~>
             = [ ParamMods ] Type Id <~~ push({mname: up.in}) ~~> ;
-// A typedef DECLARES no code - but it NAMES a type, and `f is IntFn` tests the type it
-// names (Dart language spec, "Type Aliases": a type alias denotes the aliased type, and
-// the runtime type test is the test of THAT type). So the name and its target are
-// recorded here and dtResolve expands them at the test site; the declaration itself still
-// compiles to nothing. The two legacy forms declare a FUNCTION type by construction.
+// A typedef DECLARES no code but NAMES a type: the name and its target are recorded for
+// dtResolve. Twin of TypedefDecl in dart-interpreter.abnf; see there.
 TypedefDecl <~~ push(function(b) { return b }) ~~>
             = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
 TypedefNew  = TdName [ TParams ] "=" TdTarget ";" ;
@@ -164,16 +155,8 @@ TdName      <~~ tdCur = up.in; tpPending = [] ~~> = Id ;
 TdTarget    <~~ tdReg(tdCur, up.in) ~~> = Type ;
 TdParen     <~~ tdReg(tdCur, "Function") ~~> = SkipParen ;
 
-// A type-PARAMETER list, as opposed to a type-ARGUMENT list: `<T>` in `class Box<T>` and
-// in `void f<T>()` binds T, while `<int>` in `Box<int>()` supplies it. Only the binding
-// positions use these rules, because only they may erase a name. ClsTParams also records
-// the list POSITIONALLY against the class, which is what makes `Box<int>()` reifiable;
-// TParams (functions, methods, typedefs, extensions) only notes the names, because this
-// front end does no call-site inference and has nowhere to read them from.
-// It is a real parse and not a SkipAngle scan because `up.in` arrives with the whitespace
-// already removed - `<T extends num>` reads as `<Textendsnum>`, and the bound cannot be
-// told from the name in it. TPSkip keeps anything this shape cannot read (a variance
-// modifier, a future syntax) parsing, recording nothing rather than recording garbage.
+// A type-PARAMETER list (`<T>` in `class Box<T>`). Twin of TParams in
+// dart-interpreter.abnf; see there.
 TParams     = TPList | TPSkip ;
 TPList      = TPOpen TParam { "," TParam } ">" ;
 TPOpen      <~~ tpPending = [] ~~> = "<" ;
@@ -397,8 +380,6 @@ OptTypedParam <~~ push(makeOptParam(false, takeAll())) ~~>
 OptPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
-// A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
-// all parsed and erased.
 // A type: a name with optional generics <...> and dotted qualification, a record type
 // ( (int, String) , ({int w, int h}) ) matched as a balanced paren run, and the
 // Function(...) form that may follow either. Everything is parsed and erased.
@@ -408,7 +389,7 @@ TypeRecord  = SkipParen [ "?" ] ;
 TypeNamed   = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ "?" ] ;
 // A type-ARGUMENT list is parsed as real types, not as a balanced <...> run. The balanced
 // run would happily span `i < 2; ... =>` to reach the ">" of a "=>" ten lines later and
-// then find the "(" a generic call needs - which is exactly what it did.
+// then find the "(" a generic call needs.
 TypeArgs    = "<" TypeArg { "," TypeArg } ">" ;
 TypeArg     = Type ;
 TypeFn      = KwFunction [ SkipAngle ] SkipParen [ "?" ] ;
@@ -453,8 +434,8 @@ PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
 PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
 // A typed / var / final binder: `var v`, `int a`, `final String s`.
 // The TYPE has to be tagged: a variable pattern with a type annotation TESTS that type
-// (patterns feature spec, "Variable / Runtime semantics"), and without the tag
-// makeVarPat never saw it, so `case B b` matched an A.
+// (patterns feature spec, "Variable / Runtime semantics"); without the tag makeVarPat
+// would not see it and `case B b` would match an A.
 PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
 PatVarLead  = KwVar | KwFinal [ PatVarType ] | PatVarType ;
 PatVarType  <~~ push({ptype: up.in}) ~~> = TypeNamed ;
@@ -491,8 +472,8 @@ PatObjShort <~~ push(makeShortField(pop())) ~~> = ":" Pattern ;
 PatBareId   <~~ push({p: "idref", name: up.in}) ~~> = PatBareName ;
 // The `!"<"` keeps `case C<int>:` and `case List<int>:` out of here: a bare identifier
 // pattern binds or names a constant and is never followed by type arguments, so without
-// it PatBareId matched just the `C`, succeeded, and the case then died on the "<" with
-// no way back (PEG: a committed alternative is never retried).
+// it PatBareId would match just the `C`, succeed, and the case would then die on the "<"
+// with no way back (PEG: a committed alternative is never retried).
 PatBareName = Id !"." !"(" !"<" ;
 PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
 
@@ -629,12 +610,12 @@ NotSwEnd = :script(~~
 DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
-// try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
-// runtime unwinds), each try/catch/finally body compiles to its own closure handed to
-// js_try (see makeTry). The leftmost catch clause wins (exception types are parsed but
-// not discriminated); a return/break/continue leaving a try or catch body becomes a
-// control signal that excDispatch re-issues in the enclosing frame (compile-core). Each
-// part is marked so makeTry can tell them apart.
+// try/catch/finally and throw: throw calls js_throw (a Go panic the runtime unwinds),
+// each try/catch/finally body compiles to its own closure handed to js_try (see makeTry).
+// The leftmost catch clause whose `on` type matches (js_is_type) wins; a
+// return/break/continue leaving a try or catch body becomes a control signal that
+// excDispatch re-issues in the enclosing frame (compile-core). Each part is marked so
+// makeTry can tell them apart.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -642,9 +623,9 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 // Dart catch forms: `on Type catch (e)`, `on Type catch (e, st)`, `on Type { }` (no
-// binding), `catch (e)`, `catch (e, st)`. The `on Type` type is parsed and discarded; the
-// first binder is the caught value's name (pushed), the optional second binder (the stack
-// trace) is parsed and dropped. makeCatch reads [name?, blockThunk].
+// binding), `catch (e)`, `catch (e, st)`. The `on Type` type is recorded for the match;
+// the first binder is the caught value's name, the optional second binder (the stack
+// trace) is parsed and dropped. makeCatchClause collects the three.
 CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
             = ( KwOn CatchType [ KwCatch "(" CatchName [ "," Id ] ")" ]
               | KwCatch "(" CatchName [ "," Id ] ")" ) Block ;
@@ -653,8 +634,8 @@ CatchName   <~~ push({catchname: up.in}) ~~> = Id ;
 // rethrow re-raises the value the enclosing catch clause bound.
 Rethrow     <~~ push(makeRethrow()) ~~>
             = KwRethrow ";" ;
-// assert(cond[, message]) : the condition is evaluated and, when false, the program
-// aborts with the message (js_throw). Dart only runs asserts in debug mode; running them
+// assert(cond[, message]) : the condition is evaluated and, when false, a catchable
+// AssertionError is thrown (js_throw). Dart only runs asserts in debug mode; running them
 // always is the stricter of the two readings and matches the interpreter.
 Assert      <~~ push(makeAssert(takeAll())) ~~>
             = KwAssert "(" Expression [ "," Expression ] [ "," ] ")" ";" ;
@@ -681,8 +662,8 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // Every expression production pushes exactly one thunk: function(block) -> {b, v}.
 Expression  = AssignExpr ;
 AssignExpr  = ThrowExpr | Assignment | Cascade ;
-// throw is an expression in Dart (=> throw e, cond ? a : throw e). Accepted, not
-// implemented; the operand is still evaluated so its calls stay visible.
+// throw is an expression in Dart (=> throw e, cond ? a : throw e): js_throw raises the
+// evaluated operand.
 ThrowExpr   <~~ push(makeThrow(pop(), up.pos)) ~~>
             = KwThrow AssignExpr ;
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
@@ -719,20 +700,8 @@ CascadeAssign <~~ var cv = pop(); push({cassign: cv, cop: pop()}) ~~>
 CascadeAssignOp = "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|=" | "^="
             | "<<=" | ">>>=" | ">>=" | "=" ;
 CascadeValue = ThrowExpr | Assignment | CondExpr ;
-// A zero-width fast-fail in front of the two productions that begin with Target.
-// Both `Assignment` and `IncDec` parse a whole Target before they learn whether the
-// operator they need is there, and Target's seeds now include `new C(...)` and a
-// parenthesized expression - so every nested creation was parsed TWICE (once by the
-// speculative Target, once by the CallMember that follows it), which is 2^depth on
-// language/async_nested/*, a corpus of deliberately deep literals. This guard answers
-// "is there an assignment operator or a ++/-- ahead, at bracket depth 0, before this
-// expression ends" and declines outright when there is not. It turned 9.4s into 0.13s
-// on async_nested20_test.dart.
-// Two caps, and they must be separate: `budget` bounds the CODE scanned (a target longer
-// than that is treated as "no operator", which surfaces as a parse failure, not as a
-// wrong parse), while `spin` bounds the raw iterations. Charging comments to `budget`
-// was a 44-file regression - a statement preceded by nine lines of commentary spent the
-// whole budget before reaching its own `=`.
+// A zero-width fast-fail in front of the two productions that begin with Target. Twin
+// of TargetOpAhead in dart-interpreter.abnf, which explains the guard and its two caps.
 TargetOpAhead = :script(~~
     (function() {
         var i = 0
@@ -791,13 +760,8 @@ TargetOpAhead = :script(~~
             if (ch === 60) { angle = angle + 1 }
             if (ch === 62 && angle > 0) { angle = angle - 1 }
             if (depth === 0) {
-                // A ';' or a ',' at depth 0 ends this expression: any operator that
-                // belongs to it stands before them. Stopping at the comma is what keeps
-                // the guard cheap inside a 20 000-element literal - without it the two
-                // big_set_literal tests took 25s each and hit the sweep's timeout.
-                // The comma of a TYPE ARGUMENT list is not such an end, though, so it
-                // only counts outside an open '<': `Indexable<String, Object?>('')[0]
-                // ??= e` is one target, and stopping at its comma lost eight files.
+                // A ';' or a ',' at depth 0 ends this expression - except the comma of
+                // a TYPE ARGUMENT list (outside an open '<' only).
                 if (ch === 59) { break }
                 if (ch === 44 && angle === 0) { break }
                 // ++ / -- (a postfix or prefix step)
@@ -841,8 +805,8 @@ NullIndexTarget <~~ push({idx: pop(), nulla: true}) ~~> = "?[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = IfNullExpr [ "?" AssignExpr ":" AssignExpr ] ;
-// a ?? b : if-null. Accepted, not implemented; both operands are evaluated (calls
-// stay visible) and the first is returned. With no "??" it passes the operand through.
+// a ?? b : if-null, and it SHORT-CIRCUITS - makeIfNull branches to the next operand
+// only while the value is null. With no "??" it passes the operand through.
 IfNullExpr  <~~ push(makeIfNull(takeAll())) ~~>
             = OrExpr { "??" <~~ push({ifnull: true, pos: up.pos}) ~~> OrExpr } ;
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
@@ -854,18 +818,13 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeTestExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTestExpr } ;
 // is / is! / as type tests, at relational precedence. 'as' is compiled as an identity
-// cast (operand evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
-// The postfix is a REPETITION, not one optional: Dart's relationalExpression takes a
-// chain, and `o as Shape is Shape` used to fail to parse - the whole program, not just
-// the expression. Measured against the whole dart corpus in both halves: no other output
-// changes, because a second postfix is exactly what did not parse before.
+// cast (operand evaluated, type erased); 'is' / 'is!' are a real runtime test
+// (emitDartIsType). The postfix is a REPETITION, not one optional: Dart's
+// relationalExpression takes a chain (`o as Shape is Shape`).
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr { TypeTestOp TestType } ;
 // The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
-// with the conditional operator, and a PEG's greedy optional never gives it back, so
-// `o is Shape ? a : b` ate the "?" as a nullable marker and then failed at the ":" with
-// no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
-// "," or ">"), so only that one is guarded; a record or Function type keeps its own.
+// with the conditional operator. Twin of TestType in dart-interpreter.abnf; see there.
 TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
 TestTypeT   = TestTypePrim { TypeFn } ;
 TestTypePrim = TypeRecord | TypeFn | TestTypeNamed ;
@@ -927,8 +886,8 @@ ConstMember <~~ push(constify(pop())) ~~> = KwConst CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = TargetOpAhead Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-// A primary followed by any mix of method calls, field reads, index reads and the (not
-// implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
+// A primary followed by any mix of method calls, field reads, index reads and the
+// postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | GenFieldSfx | AnonMethodSfx | FieldSfx | CallSfx | IndexSfx
                       | NullAnonSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
@@ -1103,8 +1062,7 @@ DartIntLit  <~~ push(dIntLit(up.in, 10)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
-// argument is erased and the list/map/set is built as usual.
-// The type argument of a collection literal is REMEMBERED so that a reified test like
+// argument of a collection literal is REMEMBERED so that a reified test like
 // `<Object>[1] is! List<int>` can answer what Dart answers.
 TypedColl   <~~ push(makeTypedColl(takeAll())) ~~>
             = CollTypeArgs ( ListLit | MapLit | SetLit ) ;
@@ -1239,7 +1197,7 @@ DqPlain     = "\x00"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\U0010ffff"
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
-// A balanced { ... } run (switch / try / enum / member bodies) accepted without being
+// A balanced { ... } run accepted without being
 // understood. Dart string literals (single and double quoted, with $name / ${expr}
 // interpolation) are matched first so braces inside them are never miscounted.
 SkipBlock   = "{" { SkipItem } "}" ;
@@ -1396,12 +1354,9 @@ KwSuper     = "super" KwEnd ;
     }
     var factoryClasses = {}  // Classes whose UNNAMED constructor is a factory.
 
-    // ----- dart:core's errors and exceptions (docs/todo.md 1.2) -----
+    // ----- dart:core's errors and exceptions -----
     //
-    // None of these sixteen was a bound name in either half: `throw
-    // FormatException("x")` was `variable not defined: FormatException` here and
-    // `unknown name: FormatException` in the interpreter. They are not declared by
-    // the program, so the engine provides them.
+    // These sixteen are not declared by the program, so the engine provides them.
     //
     // Unlike java's builtin throwables - which the emitter BUILDS, as class
     // descriptors with emitted constructor bodies (java-to-llvm-ir.abnf:4645) - these
@@ -1495,14 +1450,9 @@ KwSuper     = "super" KwEnd ;
     // to the js_dart* externs of abnf/jsrtdart.go, which carry the TYPE on the value:
     // a plain number is an int inside 2^53, a jsGInt (the shared sized-integer box of
     // jsrtint.go, always w=64 signed here) is an int outside it, and a jsDartFlo is a
-    // double. Before this, every number was one JS double and every operator went to
-    // js_sub / js_mul / js_div or to the 32-bit js_band / js_shl, so:
-    //   1 / 1            "1"        Dart 1.0   (`/` ALWAYS yields a double)
-    //   print(1.0)       "1"        Dart 1.0
-    //   1 is double      true       Dart false
-    //   int64max + 1     9.2e+18    Dart -9223372036854775808  (and -1 in the
-    //                                              interpreter half - a live divergence)
-    //   1 << 62          0          Dart 4611686018427387904
+    // double. With one JS double and the generic js_sub / js_div / 32-bit js_shl, 1 / 1
+    // would print "1" (Dart: 1.0), `1 is double` would be true, int64max + 1 would not
+    // wrap and 1 << 62 would be 0.
     // dart-interpreter.abnf implements the identical rules on top of szArith / the
     // {__flo} box; ./test.sh --cross diffs the two, so the two files must stay in step.
     //
@@ -1566,7 +1516,7 @@ KwSuper     = "super" KwEnd ;
     }
 
     // ~v flips all 64 bits: Dart's int is 64-bit two's complement, so ~(1 << 62) is not
-    // a 32-bit value and the old js_bxor -1 (which is ToInt32) could not answer it.
+    // a 32-bit value (js_bxor -1, which is ToInt32, cannot answer it).
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
@@ -1576,9 +1526,8 @@ KwSuper     = "super" KwEnd ;
     }
 
     // ----- type aliases and type parameters -----
-    // Both are NAMES that stand for another type, and before this every one of them fell
-    // through js_dartis to the shared __class walk, which knows only real classes and so
-    // answered false. The interpreter half carries the same two registries and the same
+    // Both are NAMES that stand for another type, which the shared __class walk (it knows
+    // only real classes) cannot resolve. The interpreter half carries the same two registries and the same
     // dtResolve; see its comment for the rules and their spec citations. The split here is
     // that a TYPEDEF resolves statically (the target text is known at emit time) while a
     // TYPE PARAMETER resolves at RUN time, out of the instance's `__ta$T` slot, because
@@ -1761,13 +1710,11 @@ KwSuper     = "super" KwEnd ;
     }
     // One runtime type test, as the interpreter half's dartIsType answers it. Factored out
     // of makeTypeTest because a TYPED PATTERN needs exactly the same answer, down to the
-    // element-type refinement: two spellings of the test are two behaviours, and the
-    // pattern half of them would have been the one nothing measured.
+    // element-type refinement: two spellings of the test would be two behaviours.
     //
     // js_dartis answers for DART's type names (int, double, num, bool, Map, Set,
     // Function, ...) and falls through to the shared class-chain walk for a user type.
-    // The shared js_is_type knows only the JVM spelling and answered false for every one
-    // of them, so `1 is int` was false here while the interpreter half said true.
+    // (The shared js_is_type knows only the JVM spelling.)
     // The trailing '?' has to survive: baseName strips it, and `null is int?` is TRUE
     // while `null is int` is false. A '?' inside the type arguments (List<int?>) is not
     // the type's own, so only a FINAL one counts.
@@ -1782,10 +1729,9 @@ KwSuper     = "super" KwEnd ;
             var tv = callExt(b, "js_dartis", [val, nv])
             // The same element-type refinement the static path does below, over a type
             // argument that is only known at run time: `Coll<List<int>>().t(<String>["a"])`
-            // is FALSE, and without this the compiler half said true while the interpreter
-            // half - which resolves the whole name and re-enters its own List arm - said
-            // false. The creation site stamps the element type beside the type argument
-            // (__taE$T) precisely so this does not need string surgery in IR.
+            // is FALSE, as in the interpreter half (which resolves the whole name and
+            // re-enters its own List arm). The creation site stamps the element type beside
+            // the type argument (__taE$T) precisely so this does not need string surgery in IR.
             if (anyTypedColl) {
                 var eaV = b.NewCall(rtTArg(), [curScopeV, emitStr(b, "__taE$" + tp),
                                                emitStr(b, typeArgOf(fb))])
@@ -1810,11 +1756,9 @@ KwSuper     = "super" KwEnd ;
         if (targ != "" && anyTypedColl && (tn == "List" || tn == "Iterable")) {
             var er = emitETGet(b, val)
             b = er.b
-            // js_band is BITWISE, so it answers the NUMBER 1, not true: `print(<int?>[1]
-            // is List<int?>)` printed "1" here and "true" in the interpreter half - a
-            // live divergence --cross never reached, because the only test of it was an
-            // `if`, where a raw 1 is truthy. The double negation is the cheapest thing
-            // that gives back a bool, and it only costs the typed-collection path.
+            // js_band is BITWISE, so it answers the NUMBER 1, not true (`print(<int?>[1]
+            // is List<int?>)` must print "true"). The double negation is the cheapest
+            // thing that gives back a bool, and it only costs the typed-collection path.
             v = callExt(b, "js_not", [callExt(b, "js_not", [callExt(b, "js_band", [v,
                     callExt(b, "js_bor", [callExt(b, "js_seq", [er.v, emitStr(b, "")]),
                                           callExt(b, "js_seq", [er.v, emitStr(b, targ)])])])])])
@@ -1882,11 +1826,10 @@ KwSuper     = "super" KwEnd ;
         }
         return d
     }
-    // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body becomes its own IR closure over the current scope; js_try
     // (jsrt.go) runs the try under a Go recover, routes a thrown value to the catch closure
     // (a one-parameter function bound to the catch name) and always runs finally. The
-    // leftmost catch clause wins. The try and catch bodies are ctl closures (isCtl), so a
+    // leftmost MATCHING catch clause wins. The try and catch bodies are ctl closures (isCtl), so a
     // return/break/continue leaving them becomes a control signal that excDispatch re-issues.
     function makeTry(items) {
         var tryT = anytype, finallyT = anytype
@@ -1897,7 +1840,7 @@ KwSuper     = "super" KwEnd ;
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         // The single catch closure js_try calls dispatches over the clauses in source
-        // order: `on T catch (e)` runs only when js_is_type(e, "T") holds, an untyped
+        // order: `on T catch (e)` runs only when emitDartIsType(e, "T") holds, an untyped
         // `catch (e)` matches everything, and a value no clause claims is re-thrown so
         // it keeps unwinding to the enclosing try. The whole dispatch body is one thunk
         // so it can be handed to the ordinary emitFunc (as a ctl body).
@@ -1917,12 +1860,7 @@ KwSuper     = "super" KwEnd ;
                         var ev = b.NewCall(rtKGet(), [curScopeV, emitStr(b, bindName)])
                         // js_dartis, not the shared js_is_type: the shared one knows
                         // only the JVM spellings (Int, Double, Boolean, List), so
-                        // `on int catch`, `on double catch`, `on num catch`,
-                        // `on bool catch`, `on Map catch` and `on Set catch` all
-                        // answered FALSE here and fell through to the next clause,
-                        // while the interpreter half - which has always called
-                        // dartIsType - claimed them. Five of eight rows of a
-                        // thrown-value probe were a live halves divergence.
+                        // `on int catch` / `on Map catch` would never match.
                         // js_dartis also carries the supertype sets of dart:core's
                         // errors and exceptions, so `on Exception catch` claims a
                         // FormatException, and falls through to the shared __class
@@ -2308,7 +2246,7 @@ KwSuper     = "super" KwEnd ;
             // dt_kgetc, not dt_kget: the callee is resolved in CALL position, so the helper
             // keeps its abort instead of reading a zero-argument member of a builtin `this`.
             // See the long note at that arm - a getter read is not a method call, and
-            // answering one for the other made `indexOf("b")` in a String extension call -1.
+            // answering one for the other would make `indexOf("b")` in a String extension -1.
             var fV = b.NewCall(rtKGetC(), [curScopeV, emitStr(b, name)])
             var argsV2 = callExt(b, "js_arr_new", [])
             b = emitCallArgsInto(b, argsV2, args)
@@ -2387,8 +2325,7 @@ KwSuper     = "super" KwEnd ;
                 }
                 if (s.kind == "mcall") {
                     // x.toString() is Object.toString() unless the class overrides it,
-                    // and js_mcall knows neither: it aborted with "method call
-                    // 'toString' on a number". js_dartstr answers both (a user override
+                    // and js_mcall knows neither. js_dartstr answers both (a user override
                     // wins there), and it is the same rendering print uses.
                     if (s.name == "toString" && s.args.length == 0) {
                         cur = callExt(b, "js_dartstr", [cur])
@@ -2410,10 +2347,9 @@ KwSuper     = "super" KwEnd ;
                         var margs = callExt(b, "js_arr_new", [])
                         b = emitCallArgsInto(b, margs, s.args)
                         // js_dartnm is js_mcall plus num's own members (toInt, round,
-                        // abs, ...), which the runtime's member dispatch does not know
-                        // and which matter far more now that int and double are
-                        // distinct types: a non-number receiver, and a name that is not
-                        // one of them, falls straight through to js_mcall's memberCall.
+                        // abs, ...), which the runtime's member dispatch does not know:
+                        // a non-number receiver, and a name that is not one of them,
+                        // falls straight through to js_mcall's memberCall.
                         cur = callExt(b, "js_dartnm", [cur, emitStr(b, s.name), margs])
                     }
                 } else if (s.kind == "field") {
@@ -2573,7 +2509,7 @@ KwSuper     = "super" KwEnd ;
 
     // Names any class declares as a getter / setter / operator anywhere in the program.
     // A member access has no static type here, so these drive a RUNTIME probe at the use
-    // site - and a program that declares none emits exactly the IR it did before.
+    // site - and a program that declares none emits no probe.
     var getterNames = {}
     var setterNames = {}
     var operatorNames = {}
@@ -2603,7 +2539,7 @@ KwSuper     = "super" KwEnd ;
     // Which CLASSES declare each accessor / operator. js_get does not walk an instance's
     // __class chain and js_has aborts on a number, so the use site cannot probe the value
     // itself; it emits one js_is_type test per declaring class instead (and a program that
-    // declares none emits exactly the IR it did before).
+    // declares none emits no probe).
     function noteDecl(tbl, nm) {
         // An `extension X on T` body is not a class body (ExtOnType parks curClassName on
         // "0ext"), so its members must not enter the accessor / method tables: they are
@@ -2635,7 +2571,7 @@ KwSuper     = "super" KwEnd ;
     // `a + b`, `-a`, `a[i]` and `a[i] = v` take the class's `operator X` when the LEFT
     // operand is an instance of a class that declares one, and the built-in path
     // otherwise. Which classes declare which operator is collected at walk time into
-    // operatorNames, so a program that declares none emits exactly the IR it did before
+    // operatorNames, so a program that declares none emits no dispatch
     // (operatorNames[key] is undefined and the whole branch is skipped).
     //
     // The fallback is a THUNK of the same {b, v} shape an expression emitter has, not a
@@ -2662,19 +2598,15 @@ KwSuper     = "super" KwEnd ;
     // it returns "the value for the given key, or null if key is not in the map",
     // and that is what makes `m[k] ?? d`, `if (m[k] != null)` and the whole
     // null-aware idiom work at all. The shared js_pyget is PYTHON's indexing and
-    // raises a KeyError instead - it aborted the program in every Dart half. The
-    // fix is here rather than in the runtime because js_pyget is shared with the
-    // Python pair, which needs the KeyError; the guard uses only externs Dart
-    // already emits (js_dartis for the type test - O(1) - and the js_pyin over
-    // js_pyiter pair that `containsKey` is lowered to), so no half owes a new one.
+    // raises a KeyError instead; it is shared with the Python pair, which needs the
+    // KeyError, so the guard is here. It uses only externs Dart already emits
+    // (js_dartis for the type test - O(1) - and the js_pyin over js_pyiter pair that
+    // `containsKey` is lowered to).
     //
-    // A LIST or a String goes to js_dtidx, NOT to js_pyget. The claim that used to
-    // stand here - "a List or a String keeps js_pyget's range error, which is Dart's
-    // too" - was wrong twice over: the error was python's IndexError, and the three
-    // legs did three different things with it (docs/todo.md 1.6). js_dtidx raises
-    // dart's IndexError and drops python's negative-index wrap; the long note is at
-    // its Go twin in abnf/jsrtdart.go, the layer-2 half is in lib/dart-rt.metajs, and
-    // the interpreter's is dget in dart-interpreter.abnf.
+    // A LIST or a String goes to js_dtidx, NOT to js_pyget: js_dtidx raises dart's
+    // IndexError (not python's) and drops python's negative-index wrap. Twins: js_dtidx
+    // in abnf/jsrtdart.go (the long note) and lib/dart-rt.metajs, and dget in
+    // dart-interpreter.abnf.
     function emitIndexGet(b, obj, idx) {
         return emitOpDispatch(b, "[]", obj, [idx], function(bb) {
             var mapB = curF.NewBlock("")
@@ -2800,16 +2732,10 @@ KwSuper     = "super" KwEnd ;
 
     // ----- the scope probe, lowered here rather than left as an extern -----
     //
-    // js_kget / js_kset used to be externs that took a SCOPE HANDLE and walked the
-    // chain with a `this` fallback. A scope is the C floor's PRIVATE storage - which
-    // is exactly why the Lua pilot moved js_scope_decl/js_scope_set/js_scope_typeof
-    // INTO the floor - so languages/lib/dart-rt.metajs (layer 2) cannot open one and
-    // could never have implemented either. See "TWO THINGS EVERY ONE OF THE REMAINING
-    // NINE NEEDS" in docs/runtime-next-plan.md part 3: PHP recorded the
-    // generalisation, Swift confirmed it, and Dart is its third instance.
-    //
-    // Neither call needs a floor addition, because both are PROBES and an EMITTER may
-    // call js_scope_typeof / js_scope_get / js_scope_set. Two IR helpers rather than
+    // The `this`-aware variable read and write (dt_kget / dt_kset) walk the SCOPE chain.
+    // A scope is the C floor's PRIVATE storage, so languages/lib/dart-rt.metajs (layer 2)
+    // cannot open one; an EMITTER may call js_scope_typeof / js_scope_get /
+    // js_scope_set, and both are PROBES, so they are lowered here. Two IR helpers rather than
     // PHP's single-expression helper, because Dart's pair is the same `this`-aware
     // Kotlin shape Swift has: a name that is no local resolves against the properties
     // of the enclosing instance.
@@ -2818,29 +2744,13 @@ KwSuper     = "super" KwEnd ;
     // js_scope_typeof answers "undefined" for it and for an absent name alike, so such
     // a name takes the `this` fallback and then, on a miss, the js_scope_get below.
     // Dart's emitter declares an uninitialised `int? v;` as NULL, not undefined, so no
-    // emitted binding takes that path. AND THAT PATH IS HARMLESS ANYWAY: this comment
-    // used to say js_scope_get "ABORTS in the C floor" for such a slot, and it does
-    // not - runtime.c's scope_get dies only when scope_find misses in EVERY frame, and
-    // a frame holding H_UNDEF returns it, exactly like the Go twin.
+    // emitted binding takes that path. That path is harmless anyway: runtime.c's
+    // scope_get dies only when scope_find misses in EVERY frame, and a frame holding
+    // H_UNDEF returns it, exactly like the Go twin.
     //
-    // ===== docs/todo.md 5.3, MOVING THIS PAIR INTO LAYER 2: BUILT, MEASURED, =====
-    // ===== REVERTED. The full argument is at the same site in                =====
-    // ===== languages/swift-to-llvm-ir.abnf, which is the same body.          =====
-    //
-    // In short: there is no MISS arm layer 2 answers better (the two arms below are
-    // exact, and the third is the same abort in both engines), and the whole probe is
-    // the HOT arm - tests/bench/mod.dart, a bare `while` over two locals, emits 5
-    // dt_kget and 4 dt_kset, because this pair is how every plain name is read and
-    // written. The move was built in full (js_kget/js_kset in lib/dart-rt.metajs over
-    // scopeHas/scopeParent/scopeGet, these two helpers reduced to extern trampolines,
-    // dart-rt.ll regenerated), the ratchet stayed green in both compiled halves at 368
-    // checks, and tests/bench.sh --draws 9 --paired against a clean 61aa3de read:
-    //
-    //     dart    +68.97%   SLOWER in 9 of 9 pairs, 0 ties
-    //     swift   +81.19%   SLOWER in 9 of 9 pairs, 0 ties
-    //
-    // php's declined probe (cc28d07) cost +0.77%. Same shape of mistake, 90x the price,
-    // and the whole of it is the call site.
+    // Keep this pair in the EMITTER, not in layer 2: it is how every plain name is read
+    // and written (the HOT path), and moving it behind an extern call is measurably
+    // much slower. See the same site in languages/swift-to-llvm-ir.abnf.
     var rtFuncs = {}
     function rtFunc(name, nparams, bodyFn) {
         if (rtFuncs["$" + name] != undefined) { return rtFuncs["$" + name] }
@@ -2864,9 +2774,8 @@ KwSuper     = "super" KwEnd ;
     }
     // A guarded property read: undefined for anything that is not a plain object, so
     // it is safe to apply to a value of unknown type (js_get aborts on nil).
-    // docs/todo.md 5.2 (merge dt_safeget/sw_safeget/kt_safeget and the kget/kset pair
-    // into a shared ABNF module) is DECLINED; the argument, the experiment that settles
-    // it and the line counts are at the same helper in languages/kotlin-to-llvm-ir.abnf.
+    // Deliberately not merged with sw_safeget / kt_safeget into a shared module; see
+    // the same helper in languages/kotlin-to-llvm-ir.abnf.
     function rtSafeGet() {
         return rtFunc("dt_safeget", 2, function(b, ps) {
             var v = ps[0]
@@ -2907,41 +2816,22 @@ KwSuper     = "super" KwEnd ;
             var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
             var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
             var hitB = curF.NewBlock("")
-            // In CALL position `this` having no property of that name is the end of it and
-            // this function is byte-for-byte the one that shipped before; in value position
-            // there is one arm more, below.
+            // In CALL position `this` having no property of that name is the end of it; in
+            // value position there is one arm more, below.
             var noPropB = missB
             if (!iscall) { noPropB = curF.NewBlock("") }
             probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, noPropB)
             hitB.NewRet(mV)
-            // ===== AN UNQUALIFIED MEMBER OF A NON-OBJECT RECEIVER (docs/todo.md 5.3) ====
+            // ===== AN UNQUALIFIED MEMBER OF A NON-OBJECT RECEIVER =====
             //
             // `this` is bound and has no PROPERTY of that name. For an ordinary instance
             // that is the end of it, but a Dart EXTENSION ON A BUILTIN has a receiver with
-            // members and no properties at all, so the whole of
+            // members and no properties at all
+            // (`extension StrX on String { int lenPlus() => length + 1; }`).
             //
-            //     extension StrX on String { int lenPlus() => length + 1; }
-            //
-            // died here with "variable not defined: length" while dart-interpreter.abnf
-            // printed 4 - a halves divergence --cross never reached, because no test
-            // program extends a builtin.
-            //
-            // THE FIRST FIX FOR IT WAS WRONG AND THE MEASUREMENT IS WHY IT IS NOT HERE.
-            // Routing this block to the js_kget EXTERN works, and it works by asking
-            // abnf/jsrt.go's getMember - whose surface for a string is `length` plus TEN
-            // JAVASCRIPT METHOD NAMES (charCodeAt, charAt, indexOf, replace, slice,
-            // substring, split, toUpperCase, toLowerCase, trim). Four of those - slice,
-            // charAt, replace, charCodeAt - are names Dart does not have at all, and both
-            // compiled halves then ACCEPTED them with JavaScript semantics:
-            //
-            //     extension SX on String { String jsSlice() => slice(1); }   ->  "bc"
-            //
-            // Real Dart rejects that program, and dart-interpreter.abnf rejects it too
-            // (its varMiss tests hasOwn, and a JS string's own property set is `length`
-            // and nothing else - which is exactly why the interpreter was right here all
-            // along). So the first fix traded one divergence for a worse defect: three
-            // legs agreeing on JavaScript. It was measured, backed out, and this replaced
-            // it. Do not put js_kget back.
+            // Do NOT route this to the js_kget extern: abnf/jsrt.go's getMember answers a
+            // string's JAVASCRIPT methods too (slice, charAt, replace, ...), names Dart
+            // does not have, and would accept them with JavaScript semantics.
             //
             // WHAT IS HERE INSTEAD is DART's own curated member dispatch, js_dartnm - the
             // same extern the qualified `.name` chain uses, so an unqualified read answers
@@ -2957,8 +2847,7 @@ KwSuper     = "super" KwEnd ;
             //     read, which is what a Dart GETTER is - `length`, `isEmpty` - and it is
             //     not what `indexOf("b")` is. makeCall resolves its callee with iscall
             //     TRUE, so a call keeps the abort below rather than calling the member with
-            //     no arguments and then calling its result (which read "call of a non
-            //     function value: -1" while it was being tried). This is kotlin's
+            //     no arguments and then calling its result. This is kotlin's
             //     kt_ktgetp third parameter decided at emit time instead of run time, and
             //     its note is the general form: what the name alone cannot decide, the
             //     SITE can.
@@ -2968,8 +2857,8 @@ KwSuper     = "super" KwEnd ;
                 noPropB.NewCondBr(truthy(noPropB, callExt(noPropB, "js_seq", [clsV, hUndef])), dnB, missB)
                 dnB.NewRet(callExt(dnB, "js_dartnm", [selfV, ps[1], callExt(dnB, "js_arr_new", [])]))
             }
-            // Nothing anywhere: js_scope_get is the abort, and it is the SAME abort the
-            // extern used to raise, so a program that read an unknown name still dies.
+            // Nothing anywhere: js_scope_get is the abort, so a program that reads an
+            // unknown name dies.
             missB.NewRet(callExt(missB, "js_scope_get", [ps[0], ps[1]]))
         })
     }
@@ -3023,8 +2912,8 @@ KwSuper     = "super" KwEnd ;
             if (dxIsName(name)) {
                 return {b: b, v: callExt(b, "js_dartexctype", [emitStr(b, name)])}
             }
-            // NOT core.scopeGetExt: that field names an EXTERN, and js_kget is no
-            // longer one - it is the lowered dt_kget helper (see rtKGet above).
+            // NOT core.scopeGetExt: that field names an EXTERN, and the read here is the
+            // lowered dt_kget helper (see rtKGet above).
             return {b: b, v: b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])}
         }
     }
@@ -3143,13 +3032,9 @@ KwSuper     = "super" KwEnd ;
             }
         }
         b = emitParamBinds(b, params, isNamed ? 0 : 1, thisV, ctorDesc.factory)
-        // A const constructor used to canonicalize HERE, against a per-class 0consts
-        // cache keyed by the constructor name and its arguments. That could only ever
-        // work for a NAMED constructor - the unnamed __ctor is handed a fresh instance
-        // by the creation site and cannot return a different one - and it fired whether
-        // or not `const` was written. Canonicalization now happens at the const
-        // expression itself (see constify / js_dartcanon), which covers both kinds and
-        // matches Dart's class-and-fields rule.
+        // Const canonicalization does NOT happen here (the unnamed __ctor is handed a
+        // fresh instance and cannot return another) but at the const expression itself
+        // (constify / js_dartcanon).
         // Initializer list: asserts, then field initialisers; a `: this(...)` redirect or
         // a `: super(...)` call chains to the other constructor.
         var superArgs = null
@@ -3188,12 +3073,8 @@ KwSuper     = "super" KwEnd ;
         // - dart:core's own classes rely on it (RangeError's `super(message)` over a
         // declared `start`/`end`), and the language rule is that a variable
         // initialized by an initializing formal or in the initializer list is not
-        // initialized again.
-        //
-        // Without this skip the declared initializer, which runs LAST here, silently
-        // overwrote both: `class A { int x = 7; A(this.x); }` made A(1).x SEVEN in
-        // this half while the interpreter half - and Dart - answer 1. Four of four
-        // rows of a probe, and `--cross` had never reached the shape.
+        // initialized again. (The declared initializer runs LAST here, so without the
+        // skip `class A { int x = 7; A(this.x); }` would make A(1).x 7, not 1.)
         var ctorWrote = {}
         for (k = 0; k < params.length; k++) {
             if (params[k].thisf != undefined) { ctorWrote["$" + params[k].thisf] = 1 }
@@ -3281,8 +3162,8 @@ KwSuper     = "super" KwEnd ;
             if (p.thisf != undefined || p.superf != undefined) { cps.push(p); continue }
             flds.push({field: p.pname, init: null})
             // The other flags have to travel with it: the optional-positional binder
-            // keys its default on `opt`, so dropping it made `class C([var int q = 6])`
-            // bind null instead of 6 - in the compiler only.
+            // keys its default on `opt`, so dropping it would make
+            // `class C([var int q = 6])` bind null instead of 6.
             cps.push({thisf: p.pname, pname: p.pname, named: p.named, opt: p.opt, def: p.def})
         }
         return {primary: true, pfields: flds, pparams: cps}
@@ -3322,8 +3203,8 @@ KwSuper     = "super" KwEnd ;
             else if (it.con != undefined) { superName = baseName(it.con) }
             else if (it.cmixin != undefined) { mixins.push(baseName(it.cmixin)) }
             // `implements` contributes no implementation, but it DOES contribute a
-            // nominal type: `class A implements B` makes `A() is B` true, and this half
-            // recorded nothing at all (docs/todo.md 1.5). classBases below is the record.
+            // nominal type: `class A implements B` makes `A() is B` true. classBases
+            // below is the record.
             else if (it.ciface != undefined) { ifaces.push(baseName(it.ciface)) }
             else if (it.field != undefined) { fields.push(it) }
             else if (it.sfield != undefined) { sfields.push(it) }
@@ -3455,7 +3336,7 @@ KwSuper     = "super" KwEnd ;
     // extension X on T { ... }: the members are emitted as ordinary method closures and
     // parked in the enclosing scope under "0ext$<member>", so a use site can call one with
     // the receiver as its `this` argument. Which names exist is known at walk time, so a
-    // program with no extension emits exactly the IR it did before.
+    // program with no extension emits none of this.
     var extNames = {}
     var extensionTypes = {}
     function extCall(b, key, recv, argThunks) {
@@ -3659,12 +3540,6 @@ KwSuper     = "super" KwEnd ;
     // too. It passes every value it cannot make const (a number, a string, a
     // closure) straight through, so `const local = tvTen + 1` costs one call and
     // changes nothing.
-    //
-    // This replaces a per-constructor 0consts cache that lived INSIDE the emitted
-    // constructor: that one could only see NAMED constructors (the unnamed __ctor is
-    // handed a fresh instance by the creation site and cannot return another), so
-    // identical(const E(3), const E(3)) was false, and it fired whether or not
-    // `const` was written, which `new Point(1, 2)` must not do.
     function constify(t) {
         return function(b) {
             var r = t(b)
@@ -3864,7 +3739,7 @@ KwSuper     = "super" KwEnd ;
     //              order-independently, which is exactly Dart's record equality
     //              ((x: 1, y: 2) == (y: 2, x: 1) holds, (1, 2) == (2, 1) does not).
     // anyRecord stays false for a program with no record literal, and then == and !=
-    // emit exactly the single js_seq / js_sne they always did.
+    // emit a single js_seq / js_sne.
     var anyRecord = false
     function popName2() { return pop().rn }
     function makeRecord(items) {
@@ -3948,8 +3823,8 @@ KwSuper     = "super" KwEnd ;
     // class that declares one (the interpreter keys unary minus under "-" too), else the
     // shared numeric negation.
     // -x keeps the operand's TYPE: a double negates as a double (so -0.0 and -1.0/0.0
-    // stay real), an int at 64 bits (so -int64min wraps back to itself). js_neg went
-    // through one JS double and the shared makeNeg then wrapped it to 32 bits.
+    // stay real), an int at 64 bits (so -int64min wraps back to itself) - not the shared
+    // makeNeg, which goes through one JS double and wraps to 32 bits.
     var baseMakeNeg = makeNeg
     makeNeg = function(t) {
         var inner = function(b) {
@@ -4493,8 +4368,8 @@ KwSuper     = "super" KwEnd ;
         }
     }
     // '$x' / '${e}': an interpolated expression is converted with Dart's toString(),
-    // not with JavaScript's - js_jadd used to render a List as "1,2" and every
-    // instance as "[object Object]".
+    // not with JavaScript's (js_jadd alone would render a List as "1,2" and every
+    // instance as "[object Object]").
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -4929,13 +4804,9 @@ KwSuper     = "super" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // Dart print writes x.toString() followed by a newline. It used to be bound to
-        // the shared println host function, which hands the RAW value to Go's %v - so
-        // `print(null)` said "<nil>", a List said "[1 2 3]", a Map said
-        // "map[__dict:true keys:[a] vals:[1]]" and an instance dumped its class
-        // descriptor with a Go POINTER ADDRESS in it (not reproducible between runs),
-        // while dart-interpreter.abnf printed Dart's own rendering. js_dartprint
-        // (abnf/jsrtdart.go) is the Dart twin of js_rputs / js_luaprint.
+        // Dart print writes x.toString() followed by a newline - js_dartprint
+        // (abnf/jsrtdart.go), the Dart twin of js_rputs / js_luaprint, not the shared
+        // println host function, which hands the RAW value to Go's %v.
         funcCount++
         var prIdx = funcCount
         var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4966,13 +4837,13 @@ KwSuper     = "super" KwEnd ;
 
     // ----- Core library config (see lib/compile-core.js) -----
     // The this-aware scope read is the EMITTED dt_kget helper (see rtKGet above), not
-    // an extern, so this field must NOT name js_kget any more - makeVarRef is
+    // an extern, so this field must NOT name js_kget - makeVarRef is
     // overridden above and is the only site that reads a name through it.
     core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -4980,9 +4851,8 @@ KwSuper     = "super" KwEnd ;
     // jsdispatch_ext, the same table emitted by the layer-2 runtime library
     // (lib/dart-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
     // indices are offset by a million, so the two chains cannot overlap and one js_call
-    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
-    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
-    // the reusable part of phase 4 and nothing here is Dart's.
+    // reaches either module. Emitted ONLY for -exe. Twin of lua-to-llvm-ir.abnf's
+    // emitDispatch: nothing here is Dart's.
     function emitDispatch() {
         var idxs = []
         var fns = []
@@ -5020,8 +4890,7 @@ KwSuper     = "super" KwEnd ;
 
     // The C floor's own main() calls jsmain(0, 0); this grammar's entry point is
     // named dartmain, for the same reason every other one is named after its
-    // language, so the -exe build gets a one-call alias. Emitted only for -exe, so
-    // no other run's module changes.
+    // language, so the -exe build gets a one-call alias. Emitted only for -exe.
     function emitJsMainAlias() {
         var i = 0
         var entry = null

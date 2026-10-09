@@ -1,11 +1,6 @@
-// dart-rt.metajs -- DART'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the fifth language after the Lua pilot,
-// PHP, Swift and Java.
-//
-// languages/dart-to-llvm-ir.abnf emits handle IR that calls 67 js_* externs over
-// every dart test in tests/ (64 for the full-syntax ratchet alone). 37 of them
-// are generic primitives languages/lib/runtime.c already provides (the C floor,
-// layer 1). The other 30 are here.
+// dart-rt.metajs -- DART'S OWN SEMANTICS, in MetaJS: layer 2 over the C floor
+// (languages/lib/runtime.c, layer 1). It defines the js_dart* / js_dt* externs
+// languages/dart-to-llvm-ir.abnf emits that the floor does not provide.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/dart-rt.metajs -q -rt-lib
@@ -85,30 +80,16 @@
 //     character String, and the emitter never emits js_char / js_char_code /
 //     js_kindex at all.
 //  4. NO coroutine primitive. `grep -c 'js_genfn\|js_yield'` in the grammar is 0
-//     - Dart's sync*/async* are lowered by the emitter - so WALL 1 of
-//     docs/runtime-next-plan.md part 3 does not touch this language.
+//     - Dart's sync*/async* are lowered by the emitter.
 //
-// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+// ----- the scope chain: lowered in the EMITTER, not here ----------------------
 //
-// js_kget and js_kset used to be externs that took a SCOPE HANDLE and walked the
-// chain with a `this` fallback. A scope is the floor's private storage, so layer
-// 2 cannot open one and neither could ever have been written here. Both are pure
-// PROBES, and an EMITTER may call js_scope_typeof / js_scope_get / js_scope_set,
-// so dart-to-llvm-ir.abnf now emits them as the IR helpers dt_kget / dt_kset.
-// PHP recorded the generalisation, Swift confirmed it, Dart is the third.
-//
-// AND IT STAYS TRUE OF THE WHOLE PAIR, which docs/todo.md 5.3 settled by building the
-// alternative twice. Moving both helpers here cost +68.97% over 9 paired draws (9 of
-// 9 slower) - they are how EVERY plain name is read and written, so the probe is all
-// hot arm and there is no cold half to route. A narrower version, with only
-// dt_kget's final miss routed to a js_kget implemented here, was then built for the
-// one thing the emitter could not reach - an unqualified member of a NON-OBJECT
-// receiver, i.e. a Dart extension on a builtin - and that was backed out too, for a
-// better reason: the arm it borrowed is abnf/jsrt.go's getMember, whose string
-// surface is `length` plus ten JAVASCRIPT method names, four of which Dart does not
-// have. The emitter answers that case through js_dartnm instead - Dart's own curated
-// dispatch, which this file already implements - and the argument is written out at
-// dt_kgetp in the grammar. Nothing scope-taking lives here.
+// A scope is the floor's private storage, so layer 2 cannot open one. The
+// `this`-aware variable read / write are emitted by dart-to-llvm-ir.abnf as the IR
+// helpers dt_kget / dt_kset (they are the hot path for every plain name, so they
+// stay in the emitter), and an unqualified member of a non-object receiver goes
+// through js_dartnm, Dart's own curated dispatch (see rtKGetB in the grammar).
+// Nothing scope-taking lives here.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -120,14 +101,11 @@
 // indexOf ignores its from-index, array.length is not assignable, and there are
 // no exponent literals.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies the
+// The shared layer-2 runtime. It supplies the
 // externs every language implements identically, parameterised by rtk* hooks this
 // file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
+// (rtIsArr and rtJavaStr, used by dart and swift only, live there too.)
 import "./runtime.metajs"
-// (runtime-dartswift.metajs held the two bodies dart and swift share and nobody
-// else does - rtIsArr and rtJavaStr. It was folded INTO runtime.metajs on
-// 2026-08-10, docs/todo.md 5.5: neither body adds a hook, so the other eight
-// importers carry two names they never resolve. One import, not two.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
@@ -221,12 +199,12 @@ function dtSintOfFloat(t) {
 
 // The remainder Go's math.Mod computes: TRUNCATED, keeping the DIVIDEND's sign.
 //
-// Two things this must not be, both found by the differential probe:
+// Two things this must not be:
 //
 //  1. NOT `a - Math.trunc(a / b) * b`. That loses the sign of a zero result -
-//     `-0.0 % 1.0` is -0.0 in Go and came out +0.0, because -0.0 - (-0.0) is
-//     +0.0. It is the same signed-zero trap the plan records for unary minus,
-//     met a third way. The sign is therefore carried OUTSIDE the computation and
+//     `-0.0 % 1.0` is -0.0 in Go and would come out +0.0, because -0.0 - (-0.0)
+//     is +0.0 (the signed-zero trap of unary minus, met another way). The sign is
+//     therefore carried OUTSIDE the computation and
 //     put back with a unary minus.
 //  2. NOT the quotient at all. `1e100 / 5e-324` is not representable, so a
 //     quotient-based remainder is nonsense across a wide exponent range, where
@@ -295,8 +273,8 @@ function dtSignBit(d) {
 function dtIsObj(v) { return rtIsObj(v) }
 
 // rtIsArr - a MetaJS list, i.e. an object with a numeric `length` that is not a
-// Map or an instance box - is SHARED with swift, lib/runtime-dartswift.metajs.
-// The two copies had ZERO differences (dtIsObj and swIsObj are both rtIsObj).
+// Map or an instance box - is SHARED with swift, in lib/runtime.metajs (dtIsObj is
+// rtIsObj).
 
 // pySetElems: the element array of a {__set} object, or undefined.
 function dtSetElems(v) {
@@ -318,17 +296,14 @@ function dtIsClass(v) {
 // SIZED INTEGER by VALUE against any other number - so 1 and 1.0 key alike, which
 // is exactly the reason core.keyId / core.keyEq exist in lib/interp-core.js for
 // the interpreter half of this same language.
-// SHARED as rtDictFind - lib/runtime.metajs. This body was byte-identical in
-// dart, ruby and swift, and equal to go's goDictFind; see the argument there.
+// SHARED as rtDictFind - lib/runtime.metajs.
 function dtDictFind(keys, k) { return rtDictFind(keys, k) }
 
-// dtCopyArr is SHARED as rtCopyArr - lib/runtime.metajs. Seven byte-identical
-// copies in six languages; the difference list is there.
+// dtCopyArr is SHARED as rtCopyArr - lib/runtime.metajs.
 
 // The number of CODE POINTS in a string: pyStrLen in the Go twin, so a surrogate
 // pair counts once.
-// SHARED as rtRuneLen - lib/runtime.metajs: kotlin's k2RuneLen was the same
-// fourteen lines with one local renamed.
+// SHARED as rtRuneLen - lib/runtime.metajs.
 function dtStrLen(s) { return rtRuneLen(s) }
 
 // The code POINT at code-point index i, as a string: rt.strAt.
@@ -371,7 +346,7 @@ function dtStrRange(s, from, to) {
 function dtStr(v) { return dtStrIn(v, [], 0) }
 
 // dtSeen is SHARED as rtHas - lib/runtime.metajs: rtDictFind's `===` scan read
-// as a membership test. php's phNameIn and ruby's rbIsLambda were the same body.
+// as a membership test.
 
 function dtStrIn(v, seen, depth) {
     if (depth > 64) { return "..." }
@@ -493,10 +468,8 @@ function dtObjStr(o, seen, depth) {
 
 // rt.toString: the ENGINE's rendering, which is NOT dtStr - a list joins with
 // bare commas here and an object is "[object Object]". It is what the Go twin
-// applies to a user toString()'s result, to a record's key, and - the case the
-// differential probe caught - to BOTH sides of a `+` whose operands are not
-// numbers and not strings. `[1, 2] + [3]` is therefore "1,23" and not a
-// concatenated list, in both halves.
+// applies to a user toString()'s result, to a record's key, and to BOTH sides of a
+// `+` whose operands are not numbers, strings or two Lists (dtJsAdd).
 function dtToStr(v) {
     if (typeof v == "string") { return v }
     if (v === undefined) { return "undefined" }
@@ -735,8 +708,7 @@ function dtArith(op, l, r) {
             if (q !== q || q === Infinity || q === 0 - Infinity) {
                 // A real UnsupportedError rather than the rendered string, so
                 // `on UnsupportedError catch` claims it. Its toString prepends
-                // "Unsupported operation: " itself (errors.dart:584), so the text
-                // reaching stdout is byte-identical to what this used to raise.
+                // "Unsupported operation: " itself (errors.dart:584).
                 throw dtExcNew("UnsupportedError", "", ["Result of truncating division is " + dtFloStr(q)])
             }
             return dtIntFromFloat(q)
@@ -770,10 +742,9 @@ function dtArith(op, l, r) {
         // the dtModF branch above, and `1.5 ~/ 0` is _Double.~/.
         //
         // The test HAS to live in the two operator branches and not at the head of
-        // this function: written once at the top it cost `tests/bench/mod.dart`
-        // 9.61% (SLOWER in 15 of 15 paired draws) for two string compares and a
-        // dtNumOf on every `+`, `-`, `*` and `&` in the program. A sized integer is
-        // only ever built past 2^53, so a zero divisor is always the plain number.
+        // this function, where it would run on every `+`, `-`, `*` and `&` in the
+        // program (measurably slower). A sized integer is only ever built past 2^53,
+        // so a zero divisor is always the plain number.
         if (ri === 0) { throw dtExcNew("IntegerDivisionByZeroException", "", []) }
         var m = dtIntOp("%", li, ri)
         if (sintCmp(m, 0) < 0) {
@@ -1027,8 +998,8 @@ function dtIsType(v, t) {
         var dx = v["__dexc"]
         if (typeof dx == "string") { return dtExcAnc(dx).indexOf("|" + lt + "|") >= 0 }
         // A USER class's supertype set, for the same reason: dtTypeName walks __super
-        // and knows `extends` alone, so `class A implements B` answered false for
-        // `A() is B` (docs/todo.md 1.5). dart-to-llvm-ir.abnf's makeClassStmt writes
+        // and knows `extends` alone, so it would answer false for `A() is B` with
+        // `class A implements B`. dart-to-llvm-ir.abnf's makeClassStmt writes
         // __anc on the descriptor, flattened over extends/with/implements at emit time,
         // so no walk is needed here. Twins: dartIsType in abnf/jsrtdart.go and
         // dxUserAnc in languages/dart-interpreter.abnf.
@@ -1643,7 +1614,7 @@ function dtListMethod(o, name, args) {
 // them, and they are here only because the C floor does not have them yet.
 
 // An empty Map / Python dict / Go map handle.
-// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
+// js_dict_new is SHARED - lib/runtime.metajs (no knobs).
 
 // Sequence indexing (negative wraps) and Map lookup: core.indexExt.
 // The __getitem__ arm of the Go twin is PYTHON's and is unreachable from Dart -
@@ -1672,15 +1643,11 @@ function js_pyget(c, k) {
 
 // List element (negative wraps) or Map entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
-// rtkDictFind; the index coercion now truncates, which is the oracle).
+// rtkDictFind; the index coercion truncates, which is the oracle).
 
 // js_dtidx / js_dtidxset are DART's list and string indexing, emitted by
-// dart-to-llvm-ir.abnf in place of js_pyget / js_pyset. The shared pair is PYTHON's,
-// and routing Dart through it made ONE out-of-range index answer three different
-// things (docs/todo.md 1.6): this half ABORTED with "list index out of range: 7", the
-// Go twin raised python's IndexError, and the interpreter aborted with a third
-// wording. --cross could never see it - it diffs a language's two HALVES, and two of
-// the three legs are the same half.
+// dart-to-llvm-ir.abnf in place of js_pyget / js_pyset. The shared pair is PYTHON's
+// (python's IndexError, python's negative-index wrap).
 //
 // dart:core's List.operator [] is documented "Throws a RangeError if index is out of
 // bounds"; the object thrown is an IndexError (errors.dart:445, `class IndexError
@@ -1864,8 +1831,7 @@ function js_is_type(v, t) { return dtTypeName(v, t) }
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 // The dart emitter emits it for its own string builders and index arithmetic.
 
-// rtJavaStr is SHARED with swift - lib/runtime-dartswift.metajs. The two copies
-// were byte-identical.
+// rtJavaStr is SHARED with swift - lib/runtime.metajs.
 
 // (target, method name, args array): the neutral dispatcher.
 function js_mcall(recv, name, args) { return dtMember(recv, name, args) }
@@ -1902,7 +1868,7 @@ function js_dartexctype(name) { return {__dexcType: name} }
 function js_dartflo(v) { return flo(dtNum(v), 0) }
 
 // An int literal a double cannot hold exactly: the emitter passes its DIGITS,
-// because emitNum would already have rounded 9223372036854775807 to
+// because emitNum would round 9223372036854775807 to
 // 9223372036854776000 on the way into the module. (text, radix); a literal past
 // the 64-bit range wraps, which is how the VM reads 0x8000000000000000.
 function js_dartlit(text, radix) {
@@ -1938,8 +1904,8 @@ function js_dartarith(op, l, r) {
 // dart:core, List.operator +: "Returns the concatenation of this list and
 // other" - a NEW list holding this list's elements followed by other's, with
 // neither operand touched. dtJsAdd below is JavaScript's + and renders both
-// sides instead, so `[1, 2] + [3]` used to be the STRING "1,23" with length 4
-// rather than the list [1, 2, 3] with length 3. No dart toolchain is installed
+// sides instead, so `[1, 2] + [3]` would be the STRING "1,23" rather than the
+// list [1, 2, 3]. No dart toolchain is installed
 // here, so the dart:core signature is the oracle. The twin is js_dartarith in
 // abnf/jsrtdart.go, the third half core.add in dart-interpreter.abnf.
 function dtListPlus(l, r) {
@@ -2008,7 +1974,7 @@ function js_dartident(l, r) { return dtIdentical(l, r) }
 // -x keeps the operand's TYPE: a double negates as a double (so -0.0 and
 // -1.0/0.0 stay real), an int at 64 bits (so -int64min wraps back to itself).
 // UNARY minus, never 0 - x: 0.0 - 0.0 is +0.0 where the floor's d_neg flips the
-// sign BIT. That trap has now bitten five languages.
+// sign BIT.
 function js_dartneg(v) {
     if (floIs(v)) { return flo(-floNum(v), 0) }
     if (!dtIsNum(v)) { return 0 - dtNum(v) }
