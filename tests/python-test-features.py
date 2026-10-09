@@ -1,11 +1,7 @@
 # Fast feature-matrix test for the Python interpreter (python-interpreter.abnf) and
-# the LLVM-IR compiler (python-to-llvm-ir.abnf). It replaces the four algorithm-
-# themed python-test-big-* stress tests: instead of large loops (five sorting
-# routines, Ackermann, sieves, matrix products) every implemented construct is
+# the LLVM-IR compiler (python-to-llvm-ir.abnf): every implemented construct is
 # exercised with the SMALLEST program that can prove it works - loops run 0, 1, 3
-# or 4 times, recursion stays below depth 6. Classes, tuples-as-values, closures/
-# lambdas/nested def, ** and the bit operators are recognized but not implemented
-# (see python-test-recognize.py) and stay out. A failed check prints its id (so a
+# or 4 times, recursion stays below depth 6. A failed check prints its id (so a
 # diff pinpoints it) and the file ends with exit(fails[0]); exit 0 and
 # byte-identical output on all four legs (interpreter/compiler x goja/-frozen)
 # mean everything passed.
@@ -560,13 +556,8 @@ def transform(items):
 # CPython's SETUP_ANNOTATIONS: a class body that CONTAINS an annotation gets its
 # __annotations__ dict before any of its statements run, so a class whose only
 # annotation sits in a branch the body never takes still has an EMPTY one.
-# Two defects met here, both in the compiled half only:
-#  - the dict was created at the annotation SITE, i.e. inside the branch, so
-#    AnnUnreached.__annotations__ raised AttributeError;
-#  - the class fill's "did the body bind this name" guard was a CHAIN WALK, so
-#    the name was found in the MODULE scope instead and the module's own
-#    annotations dict was copied onto the class - the check below then read
-#    {'mod_ann': 'int'} where python3 and the interpreter read {}.
+# The module has an annotation of its own (mod_ann), and the class fill must not
+# pick it up from the MODULE scope: python3 reads {} for AnnUnreached.
 mod_ann: int = 1
 
 class AnnReached:
@@ -583,23 +574,14 @@ class AnnMixed:
 
 check_true("class-annotations-reached", len(AnnReached.__annotations__) == 1 and "ar" in AnnReached.__annotations__)
 check_true("class-annotations-unreached", len(AnnUnreached.__annotations__) == 0)
-# The THIRD shape, and the one that CRASHED: an unreached annotation FOLLOWED by a
-# reached one. The compiler answered "is there an __annotations__ dict in this
-# scope" with a static flag, and the flag was STICKY - the unreached `am_no` set
-# it, so `am_yes` skipped the js_scope_decl and the dict was never created. On its
-# own that class body DIES with "variable not defined: __annotations__" in both
-# compiled halves; here, where the module above has an annotation of its own, the
-# js_scope_get walks the chain and finds the MODULE's dict instead - so the class
-# gets {} and the module's annotations are silently polluted with am_yes. That
-# quieter shape is the one this check sees. It is js_scope_has at run time now,
-# which is the question abnf/jsrt.go's js_pyannot always asked. python3 says
-# {'am_yes': <class 'int'>}.
+# The THIRD shape: an unreached annotation FOLLOWED by a reached one. The reached
+# one must still create the class's dict (and must not land in the module's).
+# python3 says {'am_yes': <class 'int'>}.
 check_true("class-annotations-mixed", len(AnnMixed.__annotations__) == 1 and "am_yes" in AnnMixed.__annotations__ and "am_no" not in AnnMixed.__annotations__)
 
-# Integer literals past 2**53. The box is chosen on the literal TEXT: the decimal
-# predicate used to go through parseFloat (which rounds 9007199254740993 down to
-# exactly 2**53 and answered "not big"), and the 0x / 0o / 0b forms were never
-# boxed at all. Both halves agreed, so only python3 could see it.
+# Integer literals past 2**53. The box is chosen on the literal TEXT (parseFloat
+# rounds 9007199254740993 down to exactly 2**53), and the 0x / 0o / 0b forms are
+# boxed by the same rule.
 check("lit-dec-2p53p1", str(9007199254740993), "9007199254740993")
 check("lit-hex-2p53p1", str(0x20000000000001), "9007199254740993")
 check("lit-oct-2p53p1", str(0o400000000000000001), "9007199254740993")
@@ -612,7 +594,7 @@ check("lit-2p53-exact", str(9007199254740992) + " " + str(0x20000000000000), "90
 check("lit-small-radix", str(0xff) + " " + str(0o17) + " " + str(0b1011), "255 15 11")
 
 
-# ----- str's method library (docs/todo.md 1.5) -----
+# ----- str's method library -----
 # Every operand is read out of a list so the constant folder cannot answer these
 # at compile time. The semantics, not just the names, are what these pin: the two
 # split algorithms, strip's character SET, find-vs-index, and title's word rule.
@@ -716,11 +698,9 @@ check("str-format-nested", "{0:{1}}".format(SS[2], ">5"), "  abc")
 check("str-format-conv", "{0!r}".format(SS[2]), "'abc'")
 
 
-# ----- for-of drives a generator LAZILY (docs/todo.md 1.7) -----
-# js_pyiter / iterToList MATERIALIZE, so an endless generator used to hang the
-# interpreter and hit -max-steps in the compiler even when the body broke out of
-# it on the first round. A generator is now STEPPED - the same shape C#'s foreach
-# has always had - and everything else still normalizes as before.
+# ----- for-of drives a generator LAZILY -----
+# A generator is STEPPED, so an endless one works when the body breaks out of
+# it; everything else still normalizes to a list.
 def nat_lazy():
     i = 0
     while True:
@@ -767,11 +747,10 @@ for lz in upto_lazy(2):
         lazy_nested.append(lz * 10 + lz2)
 check("gen-for-nested", str(lazy_nested), "[0, 1, 10, 11]")
 
-# ----- integer arithmetic PROMOTES past 2^53 (docs/todo.md 1.1) -----
-# A plain Python int is a double, exact to 2^53 and silently rounding above it.
-# 54 of the 55 differing rows of a 626-literal probe against CPython 3.14.6 were
-# the `*` column. Every operand is read out of a list so the constant folder
-# cannot answer the assertion instead of the runtime.
+# ----- integer arithmetic PROMOTES past 2^53 -----
+# A plain Python int is a double, exact to 2^53, so arithmetic must promote to
+# the big-integer box above it. Every operand is read out of a list so the
+# constant folder cannot answer the assertion instead of the runtime.
 bigv = [9007199254740992, 1, 2, 3037000500, 94906266, 123456789, -9007199254740992,
         4503599627370496, 987654321]
 check("int-add-2p53", str(bigv[0] + bigv[1]), "9007199254740993")
@@ -792,7 +771,7 @@ check("int-mul-str-untouched", "ab" * 3, "ababab")
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 
 
-# ----- repr() of a str: CPython's unicode_repr (docs/todo.md 1.4) -----
+# ----- repr() of a str: CPython's unicode_repr -----
 # repr escapes \ and the quote in force, has short forms for \t \n \r, and
 # renders every non-printable code point as \xNN / \uNNNN / \UNNNNNNNN; the
 # quote is ' unless the string holds a ' and no ". Every operand is read out of
@@ -830,8 +809,7 @@ check("repr-in-list", repr([rs[0]]), "['a\\tb']")
 check("repr-in-dict", repr({rs[4]: rs[0]}), '{"it\'s": \'a\\tb\'}')
 check("repr-f-string-conv", f"{rs[0]!r}", "'a\\tb'")
 
-# ----- ord() and chr() (docs/todo.md 2.9) -----
-# They were missing from ALL THREE engines, not just the interpreter.
+# ----- ord() and chr() -----
 ocs = ["A", "z", "0", " ", "é", "中"]
 ons = [65, 122, 48, 32, 233, 20013, 0, 1114111, 128512]
 check("ord-upper", ord(ocs[0]), 65)
@@ -853,13 +831,12 @@ check("ord-chr-max", ord(chr(ons[7])), 1114111)
 check("chr-round-trip", chr(ord(ocs[4])), "é")
 check("ord-bool-is-int", chr(True), "\x01")
 
-# ----- the four foreign method arms are gone (docs/todo.md 5.2) -----
-# isEmpty / removeLast / sumOf / forEach were reachable on a str and a list in
-# both COMPILED halves and raise AttributeError in CPython. The denial is by
-# NAME and sits after the user-class arms, so a Python class that defines a
-# method with one of those names must still work - which is what this asserts
-# (the failure itself is not catchable in the interpreter half, so it is
-# verified by tests/probe.sh rather than here).
+# ----- foreign method names on a user class -----
+# isEmpty / removeLast / sumOf / forEach raise AttributeError on a str and a list
+# in CPython. The denial is by NAME and sits after the user-class arms, so a
+# Python class that defines a method with one of those names must still work -
+# which is what this asserts (the failure itself is not catchable in the
+# interpreter half, so it is verified by tests/probe.sh rather than here).
 class ForeignNames:
     def __init__(self, xs):
         self.xs = xs
@@ -885,7 +862,7 @@ check("foreign-name-forEach", fn.forEach(lambda v: v), None)
 check("foreign-name-after", str(fn.xs), "[1, 2]")
 check("list-pop-still-there", str([9, 8].pop()), "8")
 
-# ----- docs/todo.md 1.4: the builtins that were missing from all three engines --
+# ----- builtins shared by all three engines --------------------------------------
 # Every operand is read out of an ARRAY so the grammars' constant folder cannot
 # evaluate the call at compile time.
 bs = [3, 1, 2]
@@ -930,8 +907,7 @@ for _v in it2:
 check("iter-break-leaves-rest", str(list(it2)), "[1, 2]")
 check("iter-of-iter-is-same", str(list(iter(iter(bt)))), "['a', 'b']")
 
-# next() on a GENERATOR: the compiler half had no `next` at all, so this is the
-# sharpest of the item's two halves gaps.
+# next() on a GENERATOR.
 def counter():
     yield bn[5]
     yield bn[4]
@@ -1005,11 +981,10 @@ setattr(ab, "y", bn[0])
 check("setattr", ab.y, 10)
 check("hasattr-after-setattr", hasattr(ab, "y"), True)
 
-# A BOUND METHOD knows its own name (docs/todo.md 1.4): getattr([1,2], "count")
-# is a FRESH closure that neither the def-name table nor the builtin-render table
-# is keyed to find, so __name__ was '<lambda>' in the interpreter and None in
-# both compiled halves where CPython says 'count'. Every name is read out of a
-# list so the constant folder cannot answer it.
+# A BOUND METHOD knows its own name: getattr([1,2], "count") is a FRESH closure
+# that neither the def-name table nor the builtin-render table is keyed to find,
+# and CPython says 'count'. Every name is read out of a list so the constant
+# folder cannot answer it.
 mnm = ["count", "upper", "m"]
 blc = getattr([3, 1, 2], mnm[0])
 check("bound-builtin-name", blc.__name__, "count")
@@ -1036,8 +1011,8 @@ check("bound-method-self", bm2.__self__ is bo, True)
 check("bound-method-func", bm2.__func__ is Bnd.m, True)
 check("bound-method-repr", str(bm2), "<bound method Bnd.m of <Bnd object>>")
 
-# A missing attribute RAISES, catchably, with CPython's exact text. Both compiled
-# halves answered None for a builtin value and ABORTED for a class object.
+# A missing attribute RAISES, catchably, with CPython's exact text - for a
+# builtin value and for a class object.
 def attr_miss(o):
     try:
         getattr(o, "nope_xyz")
@@ -1049,17 +1024,16 @@ check("attr-miss-list", attr_miss([1, 2]), "'list' object has no attribute 'nope
 check("attr-miss-inst", attr_miss(bo), "'Bnd' object has no attribute 'nope_xyz'")
 check("attr-miss-class", attr_miss(Bnd), "type object 'Bnd' has no attribute 'nope_xyz'")
 
-# An except HANDLER BODY IS NOT A SCOPE: a name first bound inside one was lost
-# at the closing brace in the interpreter half and kept in both compiled halves.
+# An except HANDLER BODY IS NOT A SCOPE: a name first bound inside one survives
+# the handler.
 try:
     raise ValueError(mnm[0])
 except ValueError as exv:
     hbound = "caught " + str(exv)
 check("except-handler-not-a-scope", hbound, "caught count")
 
-# issubclass(), and the builtin hierarchy under it. issubclass was missing from
-# the compiler half entirely; bool-derives-from-int and object-is-the-base were
-# wrong in EVERY engine (isinstance(1, object) was even a live halves split).
+# issubclass(), and the builtin hierarchy under it: bool derives from int and
+# object is the base of everything (isinstance(1, object)).
 class Base:
     pass
 
@@ -1080,20 +1054,17 @@ check("isinstance-int-object", isinstance(1, object), True)
 check("isinstance-instance-object", isinstance(Derived(), object), True)
 check("isinstance-str-not-int", isinstance(bt[0], int), False)
 
-# ----- docs/todo.md 1.5: list.count(x) -----
-# The interpreter had no arm; both compiled halves read the argument as a KOTLIN
-# predicate and died with "call of a non function value: 2".
+# ----- list.count(x) -----
 cs = [1, 2, 2, 3]
 check("list-count", cs.count(bn[5]), 2)
 check("list-count-absent", cs.count(bn[4]), 0)
 check("list-count-by-equality", [1.0, 2].count(bs[1]), 1)
 check("list-count-bool-is-int", [True, 1, 2].count(bs[1]), 2)
-# str.count was already CPython's non-overlapping substring count - a NULL
-# RESULT, asserted so it stays one.
+# str.count is CPython's non-overlapping substring count.
 check("str-count-substring", "abcab".count("ab"), 2)
 check("str-count-non-overlapping", "aaaa".count("aa"), 2)
 
-# ----- docs/todo.md 1.4: set.add and dict.pop -----
+# ----- set.add and dict.pop -----
 sa = {1, 2}
 sa.add(bs[0])
 sa.add(bn[5])
@@ -1110,11 +1081,10 @@ except KeyError:
     popped[0] = True
 check("dict-pop-keyerror", popped[0], True)
 
-# ----- docs/todo.md 2.4: twelve foreign method names on python receivers -----
+# ----- foreign method names on python receivers -----
 # add / size / get / contains / map / filter / any on a list and length / charAt
-# / equals / substring / indexOf on a str all SUCCEEDED under llvm.Run where
-# CPython raises AttributeError. All three engines now raise a CATCHABLE one, so
-# unlike the four names closed in 555af82 this is assertable in one file.
+# / equals / substring / indexOf on a str: CPython raises AttributeError, and all
+# three engines raise a CATCHABLE one.
 def denied(thunk):
     try:
         thunk()
@@ -1148,9 +1118,9 @@ check("set-add-still-works", len(sa), 3)
 # A name Python HAS and this project does not (list.sort) is deliberately NOT
 # denied - it still aborts, so "unimplemented" cannot be silently swallowed.
 
-# ----- docs/todo.md 1.3: the rest of the dict and set method surface -----
+# ----- the rest of the dict and set method surface -----
 # clear / copy / setdefault / update on a dict and pop / clear / copy / remove /
-# discard / union / update on a set all ABORTED in every engine at f4ff228.
+# discard / union / update on a set.
 ks = ["a", "b", "c"]
 vs = [1, 2, 3]
 dm = {}
@@ -1210,20 +1180,18 @@ check_true("hasattr-cross-type-false",
            not hasattr(sm, "keys") and not hasattr(dm, "discard"))
 check("set-keys-is-attributeerror", denied(lambda: sm.keys()), True)
 check("dict-union-is-attributeerror", denied(lambda: dm.union([1])), True)
-# The set ORDERINGS: <= and >= answered True for ANY pair of sets in the
-# interpreter half at f4ff228, because two objects fell into the host's own
-# relational operator.
+# The set ORDERINGS: <= and >= are subset / superset, not the host's own
+# relational operator on two objects.
 so1 = set()
 so1.add(vs[0])
 so2 = sm
 check_true("set-subset-ordering", so1 <= so2 and so2 >= so1 and so1 < so2)
 check_true("set-not-subset", not (so2 <= so1) and not (so1 > so2) and so1 <= so1)
 
-# ----- docs/todo.md 1.7 / 2.6: a subscript miss is CATCHABLE, and a generator's
-# `finally` runs when CPython runs it. `d[missing]` aborted the process in all
-# three engines; the KeyError carried the key's REPR, so repr(e) was doubly
-# quoted; the compiled halves' exception hierarchy was flat under Exception; and
-# the interpreter's replay ran a generator's `finally` at the FIRST next().
+# ----- a subscript miss is CATCHABLE, and a generator's `finally` runs when
+# CPython runs it. The KeyError carries the key itself (repr(e) is not doubly
+# quoted), the exception hierarchy is CPython's, and the interpreter's replay must
+# not run a generator's `finally` at the first next().
 ky = [3, "b", 9]
 kd = {1: "one"}
 
@@ -1269,11 +1237,9 @@ for k in kg:
         korder.append(k)
 check("generator-finally-order", str(korder), "['d0', 'body', 'd1', 'fin', 'd2']")
 
-# ----- g.throw(exc): raise AT the parked yield (docs/todo.md 1.4) -----
-# Blocked in every language until the floor's tag-15 member table learned a third
-# member: the record travels on the RESUME VALUE, exactly as close()'s exit record
-# does, which is what makes it per-coroutine by construction (docs/todo.md 2.1's
-# per-PROGRAM depth stack is the design that failed). runtime.c's gen_throw and
+# ----- g.throw(exc): raise AT the parked yield -----
+# The record travels on the RESUME VALUE, exactly as close()'s exit record does,
+# which is what makes it per-coroutine by construction. runtime.c's gen_throw and
 # abnf/jsrt.go's throwInto answer the compiled halves; genThrow answers this one.
 # Every append is in the DRIVER or in a `finally`: a write before the parked yield
 # repeats once per replay in the interpreter half, so the two halves would disagree.
@@ -1346,10 +1312,7 @@ check("gen-throw-catch-and-return", why(lambda: tit4.throw(ValueError("Q"))),
       "StopIteration||StopIteration()")
 
 # StopIteration's ARGS: empty when the body returned None and (v,) when it returned
-# a value, which repr() shows. All three engines were wrong AND disagreed with each
-# other - this half said StopIteration(None), the compiled halves StopIteration('')
-# for BOTH shapes (losing the return value outright) - and `--cross` never reached
-# it because both halves answer through their own protocol.
+# a value, which repr() shows.
 
 
 def tgen5():
@@ -1370,10 +1333,9 @@ tit6 = tgen6()
 next(tit6)
 check("stopiter-args-none", why(lambda: next(tit6)), "StopIteration||StopIteration()")
 
-# ----- super(), the MRO, and dict.popitem (docs/todo.md 1.9) -----
+# ----- super(), the MRO, and dict.popitem -----
 # The diamond is the point: depth-first over the bases finds A.who, C3 finds
-# C.who, and CPython says C. The interpreter half used to be depth first while
-# both compiled halves used the C3 __mro - a live halves divergence.
+# C.who, and CPython says C.
 snm = ["A", "B", "C", "D"]
 
 
@@ -1424,10 +1386,8 @@ check("dict-popitem-rest", str(spd), "{'a': 0}")
 check("dict-popitem-empty", why(lambda: {}.popitem()),
       "KeyError|'popitem(): dictionary is empty'|KeyError('popitem(): dictionary is empty')")
 
-# ----- `yield from` DELEGATES LAZILY (docs/todo.md 1.6) -----
-# Both halves used to MATERIALIZE the delegate - iterToList here, js_pyiter in the
-# emitter - and every consequence below was invisible to `--cross` because the two
-# agreed. js/ts forward lazily and match node, which is the precedent this follows
+# ----- `yield from` DELEGATES LAZILY -----
+# js/ts forward lazily and match node, which is the precedent this follows
 # (js-interpreter.abnf's doYield(star) / js-to-llvm-ir.abnf's makeYieldStar).
 yf = [0, 1, 2, 3]
 
@@ -1443,8 +1403,7 @@ def yf_take():
     yield from yf_endless()
 
 
-# LAZY: an endless delegate is only stepped as far as it is asked. A drain hung
-# the interpreter half and hit -max-steps in the compiled ones.
+# LAZY: an endless delegate is only stepped as far as it is asked.
 yt = yf_take()
 check("yieldfrom-lazy", str([next(yt), next(yt), next(yt)]), "[0, 1, 2]")
 
@@ -1459,7 +1418,7 @@ def yf_outer_ret():
     yield v
 
 
-# The value of `yield from` is the delegate's RETURN value; it used to be None.
+# The value of `yield from` is the delegate's RETURN value.
 yr = yf_outer_ret()
 check("yieldfrom-value-is-return", str([next(yr), next(yr)]), "[1, 3]")
 
@@ -1493,7 +1452,7 @@ def yf_outer_catch():
 
 
 # g.throw(e) at a `yield from` is FORWARDED to the delegate's own throw(), so the
-# DELEGATE's except arm takes it. It used to be raised at the `yield from` itself.
+# DELEGATE's except arm takes it.
 yc = yf_outer_catch()
 next(yc)
 check("yieldfrom-throw-reaches-delegate", yc.throw(ValueError("y")), 2)
@@ -1529,14 +1488,13 @@ def yf_fin_outer():
 
 
 # close() at a `yield from` closes the DELEGATE first, so its finally runs before
-# the outer's. Neither compiled half reached the delegate at all before.
+# the outer's.
 yfi = yf_fin_outer()
 yfo.append("d0")
 next(yfi)
 # The marker between the next() and the close() is what makes this discriminate:
-# a MATERIALIZED delegate ran its finally during the first next(), i.e. BEFORE
-# this line, which is exactly the wrong order docs/working-on-this-project.md 7.14
-# records for a generator's own finally.
+# a MATERIALIZED delegate would run its finally during the first next(), i.e.
+# BEFORE this line.
 yfo.append("mid")
 yfi.close()
 yfo.append("d1")
@@ -1554,10 +1512,9 @@ def yf_plain_list():
 
 check("yieldfrom-list", str(list(yf_plain_list())), "[1, 2]")
 
-# ----- `raise SomeClass` raises an INSTANCE (docs/todo.md 1.7) -----
-# A bare class rather than an instance worked in the interpreter half and ABORTED
-# the compiler half - the class object was thrown as it stood and matched no
-# except clause. A live halves divergence, and js_pyraiseval is the one line.
+# ----- `raise SomeClass` raises an INSTANCE -----
+# A bare class must be instantiated (js_pyraiseval), or it matches no except
+# clause.
 
 
 class RErr(Exception):
@@ -1590,7 +1547,7 @@ rtg = rt_gen()
 next(rtg)
 check("gen-throw-bare-class", rtg.throw(RErr), 2)
 
-# ----- dict.fromkeys and vars() (docs/todo.md 1.8) -----
+# ----- dict.fromkeys and vars() -----
 # The receiver of fromkeys is the `dict` TYPE OBJECT, which reaches neither the
 # dict dispatcher nor a class MRO - a different arm in each of the three engines,
 # and both the mcall path and the VALUE path need it.
@@ -1608,7 +1565,7 @@ class VC:
 
 
 vco = VC(yf[2])
-# vars(o) IS o.__dict__ - bound in NO engine while the attribute worked in all three.
+# vars(o) IS o.__dict__.
 check("vars-instance", str(vars(vco)), "{'n': 2}")
 check("vars-is-dunder-dict", str(vars(vco)), str(vco.__dict__))
 
@@ -1617,19 +1574,18 @@ def vfn(a):
     return a
 
 
-# A function PRINTED as its MetaJS SOURCE TEXT in the interpreter half and as the
-# C floor's [function] in both compiled halves. CPython's address cannot be
-# matched, so it is left off - the same rule <map object> already follows.
+# A function prints as <function NAME>: CPython's address cannot be matched, so
+# it is left off - the same rule <map object> already follows.
 check("function-str", str(vfn), "<function vfn>")
 check("function-lambda-str", str(lambda vz: vz), "<function <lambda>>")
 check("function-name", vfn.__name__, "vfn")
 check("lambda-name", (lambda vz: vz).__name__, "<lambda>")
 
 
-# ----- iterator cursors, delegated send, builtin repr (docs/todo.md 1.4) -----
+# ----- iterator cursors, delegated send, builtin repr -----
 # The full assertion set is tests/python-test-full.py SECTION 39: most of what
 # these cover lives in languages/lib/python-rt.metajs, and the matrix's native
-# rows only BUILD (docs/todo.md 4.3), so only the ratchet runs them natively.
+# rows only BUILD, so only the ratchet runs them natively.
 itv = [[1, 2, 3, 4], "ab", {"a": 1}]
 itc = iter(itv[0])
 check("cursor-dunder-next", itc.__next__(), 1)
@@ -1676,13 +1632,12 @@ check("builtin-str-type-name", str(str), "<class 'str'>")
 
 
 
-# ----- SECTION: Python's STATIC binding analysis (docs/todo.md 1.6) -----
+# ----- SECTION: Python's STATIC binding analysis -----
 #
 # Every name a function body binds is a local for the WHOLE body, so a read
 # before the binding is an UnboundLocalError - and, crucially, does NOT fall
-# through to an enclosing binding of the same name. Before this section existed
-# `sb_shadow` below answered the string "global", in all three engines, which is
-# a silently wrong VALUE and not just a wrong error class.
+# through to an enclosing binding of the same name (`sb_shadow` below must not
+# answer "global").
 sb_global = "global"
 UNBOUND = "cannot access local variable"
 
@@ -1865,9 +1820,7 @@ check("sb-class-body-is-nameerror", sb_cls_probe[0], "NameError")
 
 
 # A FREE variable of an enclosing function that never got a value is a NameError,
-# not an UnboundLocalError: the empty slot is not this frame's own. The old
-# interpreter walk answered UnboundLocalError here and both compiled halves
-# answered NameError - a live halves divergence `--cross` never reached.
+# not an UnboundLocalError: the empty slot is not this frame's own.
 def sb_free_var():
     def inner():
         return sb_fv
@@ -1917,7 +1870,7 @@ def sb_bare_expr_stmt():
 check("sb-bare-expression-statement", sb_bare_expr_stmt(), 7)
 
 
-# ----- SECTION: del obj.attr, and the re type names (docs/todo.md 1.6/1.7) ----
+# ----- SECTION: del obj.attr, and the re type names --------------------------
 class DelAttrHolder:
     pass
 
@@ -1940,13 +1893,12 @@ check("re-pattern-attr-error", it_denied(lambda: _pat.nope),
 check("re-match-attr-error", it_denied(lambda: _mat.nope),
       "'re.Match' object has no attribute 'nope'")
 # A BUILTIN type object is interned in every engine, so `type(x) is type(y)`
-# holds. The interpreter half used to build a fresh one per call and answered
-# False - a live halves divergence.
+# holds.
 check_true("type-obj-interned-cursor", type(iter([1])) is type(iter([2])))
 check_true("type-obj-interned-builtin", type(len) is type(sorted))
 
 
-# ----- SECTION: the math module (docs/todo.md 1.7) -----
+# ----- SECTION: the math module -----
 mv = [2.0, -2.7, 0.5, 100.0, 8.0, 3.0, 4.0, 12.0, 18.0]
 check("math-pi", str(math.pi), "3.141592653589793")
 check("math-e", str(math.e), "2.718281828459045")
@@ -2041,13 +1993,11 @@ check_true("math-overflow-is-arithmetic",
            issubclass(OverflowError, ArithmeticError))
 
 
-# ----- SECTION: staticmethod / classmethod (docs/todo.md 1.7) -----
+# ----- SECTION: staticmethod / classmethod -----
 #
-# Both names were UNDEFINED in every engine, so a bare `@staticmethod` aborted
-# the run. They are descriptors: the decorator only wraps, and the unwrapping
-# happens at the class-member lookup - the one place that knows both the
-# receiver and its class. Every row below is a shape CPython 3.14.6 was asked
-# about directly.
+# They are descriptors: the decorator only wraps, and the unwrapping happens at
+# the class-member lookup - the one place that knows both the receiver and its
+# class. Every row below is a shape CPython 3.14.6 was asked about directly.
 class SmShape:
     kind = "shape"
 
@@ -2159,14 +2109,11 @@ check("sm-classmethod-mutates-class-2", SmReg.add(2), 2)
 check("sm-classmethod-state", str(SmReg.items), "[1, 2]")
 
 
-# ----- SECTION: unbound method descriptors (docs/todo.md 1.7) -----
+# ----- SECTION: unbound method descriptors -----
 #
 # `list.count` read off the TYPE OBJECT is not a bound method: CPython answers
 # <method 'count' of 'list' objects>, a descriptor with no __self__ that takes
-# the receiver as its FIRST argument. Every engine raised "type object 'list'
-# has no attribute 'count'". The item named list.count; the whole family falls
-# out of one arm, because the per-type "is this one of my methods" tables are
-# the ones pyBuiltinAttr already had.
+# the receiver as its FIRST argument.
 check("desc-repr-list-count", repr(list.count), "<method 'count' of 'list' objects>")
 check("desc-repr-list-append", repr(list.append), "<method 'append' of 'list' objects>")
 check("desc-repr-list-sort", repr(list.sort), "<method 'sort' of 'list' objects>")
@@ -2211,12 +2158,11 @@ check("desc-no-receiver", desc_err(lambda: list.count()),
 check("desc-no-self-attr", desc_err(lambda: list.count.__self__),
       "AttributeError: 'method_descriptor' object has no attribute '__self__'")
 # The TYPE-OBJECT wording, which CPython uses for a type and not for a value.
-# Every engine said "'type' object has no attribute 'nope'" here.
 check("desc-absent-name", desc_err(lambda: list.nope),
       "AttributeError: type object 'list' has no attribute 'nope'")
 
 
-# ----- SECTION: the builtins module and module values (docs/todo.md 1.7) -----
+# ----- SECTION: the builtins module and module values -----
 #
 # len.__self__ IS the builtins module in CPython, and `builtins.len is len`
 # holds - which is why the module's slots are filled from the very scope
@@ -2236,8 +2182,8 @@ check_true("bi-len-self", len.__self__ is builtins)
 check_true("bi-abs-self", abs.__self__ is builtins)
 check_true("bi-getattr", getattr(builtins, "len") is len)
 
-# A math member is now a FIRST-CLASS VALUE, not only something callable through
-# the module - `f = math.sqrt` used to raise.
+# A math member is a FIRST-CLASS VALUE, not only something callable through
+# the module (`f = math.sqrt`).
 check("mv-type", type(math).__name__, "module")
 check("mv-repr-sqrt", repr(math.sqrt), "<built-in function sqrt>")
 check("mv-repr-isclose", repr(math.isclose), "<built-in function isclose>")
@@ -2256,8 +2202,8 @@ check("mv-hasattr-absent", hasattr(math, "nope"), False)
 check("mv-absent-name", desc_err(lambda: math.nope),
       "AttributeError: module 'math' has no attribute 'nope'")
 # A MODULE is not a generator. The builtins module holds a member called `next`,
-# so layer 2's structural pyIsGen answered True for it and type(builtins) read
-# "generator" in the NATIVE binary alone - a divergence only an -exe run sees.
+# so a structural "has next" test would call it one (layer 2's pyIsGen; only an
+# -exe run sees it).
 check("mv-module-not-generator", type(builtins).__name__, "module")
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")

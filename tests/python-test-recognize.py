@@ -47,10 +47,10 @@ line two"""
 check("triple-quoted length", len(triple), 17)
 
 
-# ----- accepted, not implemented (abort by default; warn + run under -warn) -----
+# ----- classes, call arguments, tuples, sets, operators (all executed) -----
 
 
-# class definitions parse; the body (methods, class vars) is dropped
+# a class definition with a class variable and a method
 class Shape:
     kind = "shape"
 
@@ -71,7 +71,7 @@ def register(cls):
     return cls
 
 
-# a decorated class (the decorator parses and is dropped)
+# a decorated class (an identity decorator)
 @register
 class Plugin:
     version = 1
@@ -104,12 +104,8 @@ table = {"x": 1, "y": 2}
 for key, val in table.items():
     print(key, val)
 
-# The iterable has to yield PAIRS, not scalars: this used to read
-# 'for (first, second) in pair', which CPython rejects with "cannot unpack
-# non-iterable int object" because it iterates 1 and then 2. It only looked
-# fine while the construct was recognized but never executed; once for-loop
-# tuple unpacking was genuinely implemented, the file started failing for a
-# real reason. Iterate a sequence OF pairs instead.
+# The iterable has to yield PAIRS: `for (a, b) in pair` over one pair would
+# iterate 1 and 2, which CPython rejects ("cannot unpack non-iterable int").
 for (first, second) in [pair, (3, 4)]:
     print(first, second)
 

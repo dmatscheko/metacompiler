@@ -1,12 +1,11 @@
 # Python try/except/else/finally and raise, genuinely executed (interpreter and
 # compiler).
 #
-# raise unwinds through calls to the first except (exception types are parsed but not
-# discriminated), which binds the value with `as`; else runs only when the body
-# completed without an exception; finally always runs. A return/break/continue leaving
-# a try or except body works in both engines. An uncaught raise is a clean runtime
-# error. (Exceptions are raised as plain values here since the builtin exception
-# classes are outside the subset.)
+# raise unwinds through calls to the first matching except, which binds the value
+# with `as`; else runs only when the body completed without an exception; finally
+# always runs. A return/break/continue leaving a try or except body works in both
+# engines. An uncaught raise is a clean runtime error. Plain values are raised here
+# (raise 0, raise "boom"); `except Exception` accepts any raised value in this model.
 #
 # The program runs top to bottom and ends with exit(fails[0]), so it exits 0 exactly
 # when every check passes; the interpreter and compiler must agree.

@@ -747,34 +747,31 @@ def s22():
     check("re40", re.search(ten, "xyz1234567 7") == None)
 
 # ===== SECTION 23: interpreter/compiler agreement ratchet =====
-# Every check here was a live divergence between python-interpreter.abnf and
-# python-to-llvm-ir.abnf. The matrix cannot see this class of bug - it compares
-# each engine against itself under goja and -frozen - so the assertions live here.
-# Expected values are CPython 3's.
+# Every check here is a place where python-interpreter.abnf and
+# python-to-llvm-ir.abnf can disagree. The matrix cannot see this class of bug - it
+# compares each engine against itself under goja and -frozen - so the assertions
+# live here. Expected values are CPython 3's.
 def s23():
-    # Sequence repetition. The compiler fell through to numeric arithmetic and
-    # answered NaN for every one of these; the interpreter always repeated.
+    # Sequence repetition, not numeric arithmetic.
     check("agr1", "ab" * 3 == "ababab")
     check("agr2", [0] * 3 == [0, 0, 0])
     check("agr3", 3 * [0] == [0, 0, 0])
     check("agr4", [1, 2] * 0 == [])
     check("agr5", "x" * 0 == "")
-    # Conversions the interpreter had and the compiler did not.
+    # Conversions both halves must have.
     check("agr6", bool(0) == False and bool([]) == False and bool("x") == True)
     check("agr7", float("1.5") == 1.5 and float(2) == 2)
     check("agr8", repr("x") == "'x'")
     check("agr9", len(set([1, 2, 2])) == 2)
     check("agr10", sum([1, 2, 3]) == 6 and sum([]) == 0)
     check("agr11", len(tuple([1, 2])) == 2)
-    # max/min: the COMPILER had them and the interpreter did not.
+    # max/min, in both halves.
     check("agr12", max(1, 2) == 2 and min(1, 2) == 1)
     check("agr13", max([3, 1, 2]) == 3 and min([3, 1, 2]) == 1)
 
 # ===== SECTION 24: the syntax the reference corpus asked for =====
-# Every check below is a construct CPython's OWN test suite writes and one or
-# both grammars could not parse. They took the cpython-tests corpus from
-# 53.3% / 23.3% (interpreter / compiler) to 83.3% / 86.7%, so this section is
-# the ratchet that keeps them. Grouped by the gap each one closes.
+# Every check below is a construct CPython's OWN test suite writes. Grouped by
+# the gap each one closes.
 def s24():
     # An import is a SMALL statement, not only a module-level one: inside a
     # function and inside a try are how CPython's suite writes most of them.
@@ -892,8 +889,7 @@ one {"two"} three
     check("corp24", cont == 'one {"two"} three\n')
 
     # PEP 701: a replacement field may span LINES and carry `#` comments. The short
-    # form of this did not even fail - it ended the field early and rendered the rest
-    # of the expression as literal text.
+    # form must not end the field early and render the rest as literal text.
     spread = f'''
 head
 { # a comment, with an apostrophe: it's fine
@@ -1019,12 +1015,9 @@ head
 
 # ===== SECTION 25: a bool IS an int =====
 # `class bool(int)`, so True == 1 and hash(True) == hash(1), and a dict or a set
-# holds ONE entry for the two of them. Every check here was wrong in ALL THREE
-# engines at 9689f81 - the interpreter, llvm.Run and the native binary agreed with
-# each other and disagreed with CPython - so neither the --full halves comparison
-# nor --cross nor the byte-identity matrix could see it. That is the reason for a
-# section of its own next to 23: 23 is "the halves disagreed", this is "the halves
-# agreed and were both wrong". Expected values are CPython 3.14.6's.
+# holds ONE entry for the two of them. A section of its own next to 23 because
+# the halves agree with each other here and must agree with CPython. Expected
+# values are CPython 3.14.6's.
 def s25():
     # Value equality, and every container equality built on it.
     check("bki1", True == 1 and False == 0 and True == 1.0)
@@ -1069,16 +1062,12 @@ def s25():
 # Python's int and float are two different types: they print differently (1 vs
 # 1.0), answer different type()s, and `/` makes a float out of two ints. One
 # double cannot carry that (2.0 and 2 ARE the same double), so the float is a
-# BOXED value in all three engines - and every check here was wrong in ALL THREE
-# at 913bd95, which is why this sits next to 25 rather than in 23: the halves
-# agreed with each other and disagreed with CPython. Expected values are
-# CPython 3.14.6's, and the renderer window (exponential iff
-# decpt <= -4 or decpt > 16, no forced ".0" in that form) is Python's own -
-# ruby, java and dart each use a different one.
+# BOXED value in all three engines. Expected values are CPython 3.14.6's, and the
+# renderer window (exponential iff decpt <= -4 or decpt > 16, no forced ".0" in
+# that form) is Python's own - ruby, java and dart each use a different one.
 def s26():
     # The type, and the literal forms that produce it. type() is compared
-    # through str() because binding the builtin type OBJECTS is a separate
-    # compiler-half gap (isinstance(x, str) is False there too).
+    # through str().
     check("flo1", str(type(1.0)) == "<class 'float'>" and str(type(1)) == "<class 'int'>")
     check("flo2", str(type(1e3)) == "<class 'float'>" and str(type(5.)) == "<class 'float'>")
     check("flo3", str(type(.5)) == "<class 'float'>" and str(type(0xff)) == "<class 'int'>")
@@ -1093,8 +1082,7 @@ def s26():
     check("flo10", str(0.1 + 0.2) == "0.30000000000000004" and str(1 / 3) == "0.3333333333333333")
     # Non-finite is LOWERCASE, and -nan renders as nan.
     # The infinity by OVERFLOW, not by the 1e400 literal: parseFloat("1e400") is
-    # NaN in the frozen tag engine and Infinity under goja, which is a FROZEN-DIFF
-    # of its own and not this section's subject.
+    # NaN in the frozen tag engine and Infinity under goja.
     inf = 1e308 * 10
     check("flo11", str(inf) == "inf" and str(-inf) == "-inf" and str(inf - inf) == "nan")
     check("flo12", str(-(inf - inf)) == "nan")
@@ -1147,25 +1135,20 @@ def s26():
     check("flo39", str(10000000000000000000000000000 / 1) == "1e+28")
     check("flo40", str(10000000000000000000000000001 - 10000000000000000000000000000) == "1")
 
-# ===== SECTION 27: the six defects the float-box probes found and left =====
-# Every check here was measured wrong at f2f8926, and each names which half was
-# wrong. Expected values are CPython 3.14.6's.
+# ===== SECTION 27: float conversion, builtin types, rendering, big ints =====
+# Expected values are CPython 3.14.6's.
 def s27():
     # float(str) is CPython's float_from_string, not JavaScript's parseFloat: it
     # takes the three non-finite SPELLINGS, case-insensitively and with an
-    # optional sign. float("inf") was nan in ALL THREE engines, and "Infinity"
-    # was inf in the interpreter and nan in the compiler - a halves divergence on
-    # top of the defect. Infinity is BUILT (1e308 * 10) rather than written,
-    # because parseFloat("1e400") used to be a FROZEN-DIFF of its own.
+    # optional sign. Infinity is BUILT (1e308 * 10) rather than written, because
+    # parseFloat("1e400") differs between goja and -frozen.
     inf = 1e308 * 10
     check("nf1", float("inf") == inf and float("-inf") == 0 - inf)
     check("nf2", float("INFINITY") == inf and float("infinity") == inf and float("-Inf") == 0 - inf)
     check("nf3", str(float("nan")) == "nan" and str(float("-nan")) == "nan" and str(float("NaN")) == "nan")
     check("nf4", float("  inf  ") == inf and str(float("1.5")) == "1.5")
     # The builtin TYPE OBJECTS. `int` is the class, not a conversion function, so
-    # type(1) IS int - and it was not, under the compiler only: declBuiltin bound
-    # the name to the conversion closure and the class object was reachable only
-    # through type(). Six for six wrong there, all six right in the interpreter.
+    # type(1) IS int.
     check("ty1", isinstance("a", str) and isinstance(1, int) and isinstance(1.0, float))
     check("ty2", isinstance([1], list) and isinstance({}, dict) and isinstance(True, bool))
     check("ty3", type(1) == int and type(1) is int and type("a") is str)
@@ -1174,9 +1157,8 @@ def s27():
     # on the class object as __conv.
     check("ty5", int("42") == 42 and str(float("1.5")) == "1.5" and list("ab") == ["a", "b"])
     check("ty6", str(int) == "<class 'int'>" and str(str) == "<class 'str'>")
-    # __repr__ / __str__ under the COMPILER, which had no user-object rendering
-    # arm at all and printed [object Object] for every instance. CPython prefers
-    # __str__ for str()/print() and __repr__ for repr() and container elements.
+    # __repr__ / __str__ of a user object. CPython prefers __str__ for
+    # str()/print() and __repr__ for repr() and container elements.
     # rp2 and rp3 pin OUR default, "<Name object>": CPython writes
     # "<__main__.Name object at 0x...>" and no engine here can reproduce the
     # address, so those two right-hand sides are deliberately not CPython's.
@@ -1188,25 +1170,21 @@ def s27():
     check("rp4", str(ValueError("boom")) == "boom" and repr(ValueError("boom")) == "ValueError('boom')")
     check("rp5", str(S27E("m")) == "m" and repr(S27E("m")) == "REPR")
     check("rp6", str(S27F()) == "" and str(S27F("a")) == "a" and str(S27F("a", 1)) == "('a', 1)")
-    # A Python int is ARBITRARY PRECISION, so ** stays exact. The interpreter
-    # answered 5076944270305264000 for 10**30 (the int64 its tag engine wrapped
-    # the double into) and the compiler folded 1e+30 - wrong twice and divergent.
+    # A Python int is ARBITRARY PRECISION, so ** stays exact (10**30, not a
+    # wrapped or rounded double).
     check("bi1", str(10 ** 30) == "1000000000000000000000000000000")
     check("bi2", str(2 ** 70) == "1180591620717411303424" and str(2 ** 63) == "9223372036854775808")
     check("bi3", str(3 ** 40) == "12157665459056928801" and 10 ** 18 == 1000000000000000000)
     check("bi4", str(2 ** -1) == "0.5" and 2 ** 10 == 1024 and str(type(2 ** 10)) == "<class 'int'>")
-    # ...and an int operand meeting a big PROMOTES, which the compiled halves did
-    # not do at all: +, -, *, //, % and every ORDER comparison were NaN or False
-    # there whenever one side was a plain int.
+    # ...and an int operand meeting a big PROMOTES: +, -, *, //, % and every
+    # ORDER comparison.
     check("bi5", str(10 ** 30 + 1) == "1000000000000000000000000000001")
     check("bi6", str(1 + 10 ** 30) == "1000000000000000000000000000001" and str(10 ** 30 * 3) == "3000000000000000000000000000000")
     check("bi7", str(10 ** 30 // 7) == "142857142857142857142857142857" and str(10 ** 30 % 7) == "1")
     check("bi8", str((0 - 10 ** 30) // 7) == "-142857142857142857142857142858" and str((0 - 10 ** 30) % 7) == "6")
     check("bi9", str(10 ** 30 % (0 - 7)) == "-6" and 10 ** 30 > 1 and 1 < 10 ** 30 and not (10 ** 30 <= 1))
-    # An unreached annotation followed by a reached one: the compiler answered
-    # "is there an __annotations__ dict here" with a STICKY static flag, so the
-    # dict was never created and the class body died with
-    # "variable not defined: __annotations__".
+    # An unreached annotation followed by a reached one: the class must still
+    # get its __annotations__ dict.
     check("an1", len(S27Ann.__annotations__) == 1 and "am_yes" in S27Ann.__annotations__)
 
 class S27V:
@@ -1237,8 +1215,6 @@ class S27Ann:
     am_yes: int = 2
 
 # ===== SECTION 28: printf-style % formatting =====
-# "fmt" % args was UNIMPLEMENTED in both halves - binOp("%") on a string fell into
-# fmod, so "%s" % "hi" was NaN. The halves agreed, so --cross was blind to it.
 # Every right-hand side is CPython 3.14.6's own answer.
 #
 # An ARRAY is read as the argument TUPLE exactly when its length equals the
@@ -1267,24 +1243,17 @@ def s28():
     check("pct19", ("%d" % (10 ** 30)) == "1000000000000000000000000000000")
     check("pct20", ("%s" % [1, 2]) == "[1, 2]" and ("%s %d" % ("n", 3.9)) == "n 3")
     # The .Nf verb rounds HALF TO EVEN, which is strconv.FormatFloat's rule and
-    # CPython's. The interpreter used to scale and Math.round, i.e. half UP, so
-    # f"{2.5:.0f}" was "3" here and "2" in both compiled halves - a live halves
-    # divergence no test reached.
+    # CPython's (f"{2.5:.0f}" is "2").
     check("pct21", f"{2.5:.0f}" == "2" and f"{3.5:.0f}" == "4" and f"{0.125:.2f}" == "0.12")
     check("pct22", ("%.0f %.1f" % (2.5, 0.05)) == "2 0.1")
     # ...and the {:x} spec: (255).toString(16) works under goja and ABORTS under
-    # -frozen, so this was a live FROZEN-DIFF in the interpreter that no test
-    # reached. The matrix's goja/-frozen byte-identity check is the gate.
+    # -frozen. The matrix's goja/-frozen byte-identity check is the gate.
     check("pct23", f"{255:x} {255:X} {8:o} {5:b}" == "ff FF 10 101")
 
 # ===== SECTION 29: the bitwise operators are ARBITRARY PRECISION =====
-# |, &, ^, ~, << and >> used to be ECMAScript's, i.e. ToInt32 with the shift
-# count masked to five bits: -1 & 0xffffffff was -1 against CPython's
-# 4294967295, 1 << 40 was 256, and every operand past 2^31 was truncated.
-# BOTH HALVES AGREED on all of it, so --cross and the matrix were structurally
-# blind - the defect class only an external oracle can reach. 439 of 944 rows
-# of a differential probe were wrong. Python's rule is INFINITE two's
-# complement over arbitrary precision ints; every value below is CPython
+# Python's rule is INFINITE two's complement over arbitrary precision ints, not
+# ECMAScript's ToInt32 with the shift count masked to five bits (-1 & 0xffffffff
+# is 4294967295, 1 << 40 is 1099511627776). Every value below is CPython
 # 3.14.6's own answer.
 #
 # The operands come out of a list on purpose, so a constant folder cannot
@@ -1303,10 +1272,8 @@ def s29():
     check("bit09", (v[9] & 255) == 0 and (v[9] >> 40) == -909494701772928238 and (v[8] >> 60) == 867361737988)
     check("bit10", (v[0] & v[8]) == v[8] and (v[0] ^ v[8]) == -1000000000000000000000000000001)
     # 2**53 | 1 is 2**53+1, which no double holds: the narrowers have to REBUILD
-    # and compare before they hand a box back as a plain number. (It is asserted
-    # through str() because a DECIMAL LITERAL of 9007199254740993 used to be a
-    # separate gap; that gap is closed - see SECTION 30 - and the str() form is
-    # kept because it is the sharper assertion.)
+    # and compare before they hand a box back as a plain number. Asserted through
+    # str(), the sharper assertion.
     check("bit11", str((2 ** 53) | 1) == "9007199254740993" and str((2 ** 53) ^ 1) == "9007199254740993")
     # bool & bool is a BOOL; a bool meeting an int is an int, and True << 1 is 2.
     check("bit12", (True & True) is True and (True | False) is True and (True ^ True) is False)
@@ -1317,13 +1284,11 @@ def s29():
 # ===== SECTION 30: integer literals past 2**53 =====
 # Whether an integer literal needs the arbitrary precision box is decided on the
 # literal TEXT, in the lexer of python-interpreter.abnf and the emitter of
-# python-to-llvm-ir.abnf. Two defects lived there, both invisible to --cross
-# because both halves agreed: the decimal predicate went through parseFloat,
-# which rounds "9007199254740993" down to exactly 2**53 and therefore answered
-# "not big" for the very first value that is; and the 0x / 0o / 0b forms were a
-# bare parseInt and were never boxed at all, so 0x7fffffffffffffff arrived as
-# 9223372036854776000. Every value below is representable only as an arbitrary
-# precision int, so a rounded literal shows up directly in str().
+# python-to-llvm-ir.abnf: parseFloat would round "9007199254740993" down to
+# exactly 2**53, and a bare parseInt of a 0x / 0o / 0b form would round
+# 0x7fffffffffffffff to 9223372036854776000. Every value below is representable
+# only as an arbitrary precision int, so a rounded literal shows up directly in
+# str().
 def s30():
     lit = [9007199254740993, 0x20000000000001, 0o400000000000000001,
            0b100000000000000000000000000000000000000000000000000001,
@@ -1352,29 +1317,18 @@ def s30():
 
 
 # ===== SECTION 37: a subscript MISS is catchable, and a generator's finally =====
-# docs/todo.md 1.7 and 2.6, and both items were wrong about who was broken.
 #
-#  * 1.7 said `d[missing]` aborted "in the interpreter" and worked in both
-#    compiled halves. It aborted in ALL THREE - rt.fail in abnf/jsrt.go, fail()
-#    in languages/lib/python-rt.metajs, fail() in the interpreter - so
-#    `try: d[3] / except KeyError`, which CPython supports, killed the process
-#    everywhere. Only `del d[k]` next door raised catchably, which is what made
-#    the item look half-true. List and string indexing were the same abort.
-#  * The KeyError's argument was the key's REPR, which made str(e) right by
-#    accident and repr(e) doubly quoted - KeyError('3') where CPython says
-#    KeyError(3) - and e.args[0] a string where CPython has the key. The argument
-#    is the key now and CPython's KeyError.__str__ (repr of args[0], and only
-#    when there is exactly one) is where the repr happens.
-#  * Making the raise reachable exposed a hierarchy that was FLAT in both
-#    compiled halves: every builtin exception derived straight from Exception, so
-#    `except LookupError` did not catch a KeyError and `except ArithmeticError`
-#    did not catch a ZeroDivisionError, and BaseException was not bound at all.
-#  * 2.6 called the interpreter's replay a repetition-and-complexity limit. It
-#    was also an ORDERING defect: the suspension signal is a host-level throw and
-#    it unwound the program's own try/finally and a with's __exit__ on the way
-#    out, so a generator's `finally` ran at the FIRST next() - before CPython
-#    runs it at all - and again at every step. The order assertions below are
-#    written on FIRST OCCURRENCE, which is the property that survives replay:
+#  * A subscript miss (`try: d[3] / except KeyError`, list and string indexing
+#    too) is a catchable exception in all three engines.
+#  * The KeyError's argument is the KEY, not its repr: CPython's KeyError.__str__
+#    (repr of args[0], and only when there is exactly one) is where the repr
+#    happens, so repr(e) is KeyError(3) and e.args[0] is the key.
+#  * The builtin exception hierarchy is CPython's: `except LookupError` catches a
+#    KeyError, `except ArithmeticError` a ZeroDivisionError, and BaseException is
+#    bound.
+#  * A generator's `finally` runs when CPython runs it, not at the first next().
+#    The interpreter's replay repeats side effects, so the order assertions below
+#    are written on FIRST OCCURRENCE, which is the property that survives replay:
 #    repetition inserts duplicates, and only a reordering can move a first.
 #
 # Every operand is read out of a list so the constant folder cannot fold a row.
@@ -1523,7 +1477,7 @@ def s37():
     li.append("d4")
     check("ky28", firsts(li) == ["d0", "a1", "d1", "b1", "d2", "a2", "d3", "b2", "d4"])
 
-    # --- g.throw(exc) raises AT the parked yield (docs/todo.md 1.4) ---------
+    # --- g.throw(exc) raises AT the parked yield ---------------------------
     # Here and not only in the features file because the features file is NEVER
     # BUILT NATIVELY: layer 2's pyGenValue is only reachable through
     # tests/native-full.sh and tests/clang-check.sh.
@@ -1594,7 +1548,6 @@ def s37():
         vp = str(e)
     check("ky33", vp == "W" and lv == [])
     # StopIteration's ARGS: empty for a body that returned None, (v,) otherwise.
-    # All three engines were wrong here AND disagreed with each other.
 
     def g37f():
         yield K[0]
@@ -1637,14 +1590,11 @@ class Mark:
 
 
 # ===== SECTION 31: str's method library =====
-# `"abc".upper()` failed in BOTH halves with "unknown String method: upper"
-# (docs/todo.md 1.5): Python's str method surface did not exist anywhere - not in
-# the interpreter's mcall, not in abnf/jsrt.go's memberCall, not in layer 2. It
-# is now carried three times (languages/python-interpreter.abnf, the str-methods
-# chapter of languages/lib/python-rt.metajs, and abnf/pystrmethod.go), and what
-# these assertions pin is the SEMANTICS rather than the names. Every value below
-# is CPython 3.14.6's own answer, taken from a 45,064-row differential probe on
-# which the interpreter and python3 agree line for line.
+# Python's str method library is carried three times
+# (languages/python-interpreter.abnf, the str-methods chapter of
+# languages/lib/python-rt.metajs, and abnf/pystrmethod.go), and what these
+# assertions pin is the SEMANTICS rather than the names. Every value below is
+# CPython 3.14.6's own answer.
 #
 # The operands are read out of a list so a constant folder cannot answer them.
 def s31():
@@ -1697,13 +1647,10 @@ def s31():
 
 # ===== SECTION 32: integer arithmetic PROMOTES past 2**53 =====
 # SECTION 30 pinned the LITERALS; this is the arithmetic. A plain Python int is a
-# double, so it is exact to 2**53 and silently rounds above it: 9007199254740992
-# + 1 answered 9007199254740992 in all three engines, and 54 of the 55 differing
-# rows of a 626-literal probe against CPython 3.14.6 were the `*` column. BOTH
-# HALVES AGREED on every one of them, so --cross and the matrix were structurally
-# blind - only python3 could see it. The guard is two comparisons on the fast
-# path (see pyOver53 / pyAOver53 / pyPromoteArith); these assertions are what
-# says it fires when it must and stays out of the way when it must not.
+# double, so it is exact to 2**53 and must promote to the box above it. The guard
+# is two comparisons on the fast path (see pyOver53 / pyAOver53 /
+# pyPromoteArith); these assertions say it fires when it must and stays out of
+# the way when it must not.
 #
 # The operands come out of a list so a constant folder cannot answer them; the
 # paired literal form in ar01 holds the folding path as well.
@@ -1726,14 +1673,10 @@ def s32():
     check("ar11", str(v[0] + True) == "9007199254740993" and str(v[0] * True) == "9007199254740992")
 
 # ===== SECTION 33: for-of drives a generator LAZILY =====
-# js_pyiter (the compiler) and iterToList (the interpreter) MATERIALIZE, so
-# `for x in endless(): break` never reached the body at all: it hung in the
-# interpreter and hit -max-steps in the compiler (docs/todo.md 1.7). A generator
-# is now STEPPED through the js_get(g, "next") / {value, done} protocol the
-# coroutine primitive already answered - the shape csharp-to-llvm-ir.abnf's
-# foreach has always had, which is why layer 2 owes this nothing. Every other
-# source still goes through js_pyiter, which normalizes a dict to its keys and a
-# string to its characters.
+# A generator is STEPPED through the js_get(g, "next") / {value, done} protocol,
+# so `for x in endless(): break` works - the shape csharp-to-llvm-ir.abnf's
+# foreach has. Every other source still goes through js_pyiter, which normalizes
+# a dict to its keys and a string to its characters.
 def s33():
     def nat():
         i = 0
@@ -1774,8 +1717,7 @@ def s33():
         for b in upto(2):
             nested.append(a * 10 + b)
     check("lazy06", nested == [0, 1, 10, 11])
-    # The array path is unchanged: a list, a string, a dict and a range still
-    # iterate exactly as they did.
+    # The array path: a list, a string, a dict and a range iterate as before.
     check("lazy07", [c for c in "hi"] == ["h", "i"] and [k for k in {"a": 1, "b": 2}] == ["a", "b"])
     check("lazy08", [e for e in [1, 2, 3]] == [1, 2, 3] and [i for i in range(3)] == [0, 1, 2])
     # A generator that is never exhausted must not leave the loop broken for the
@@ -1790,23 +1732,17 @@ def s33():
     check("lazy09", seen == 2)
 
 # ===== SECTION 34: generator.close(), and a `finally` around a yield =====
-# Two defects of the lazy-for-of work (docs/todo.md 1.6), both fixed here:
 #
-#   * g.close() answered a {value, done} RECORD where CPython answers None, and
-#     natively it did not close at all - it wrote an entry in a layer-2 side table
-#     that only send()/next() consulted, so `for v in g` after g.close() still
-#     yielded the rest. The floor closes the cell itself now (runtime.c's
-#     gen_close, reached through the tag-15 `return` member).
-#   * a `yield` inside a `try` made both COMPILER halves die with "yield outside
-#     of a generator": emitClosure reset sawYield for the try-body closure, so the
-#     def around it was not compiled as a generator function at all. A generator
-#     with a finally around its yield was unreachable in that half.
+#   * g.close() answers None and closes the cell itself (runtime.c's gen_close,
+#     reached through the tag-15 `return` member), so `for v in g` after
+#     g.close() yields nothing.
+#   * a `yield` inside a `try` still makes the def around it a generator
+#     function.
 #
 # CPython does NOT close a generator when a `for` over it breaks - that is
 # JavaScript's rule, not Python's - so nothing here asserts that it does.
 # The finally COUNT is taken after exactly one step, where the interpreter's
-# replay (one finally per next()) and the compiler's one close-time finally agree;
-# their ORDER differs and is the documented replay limitation, not asserted.
+# replay (one finally per next()) and the compiler's one close-time finally agree.
 def s34():
     state = [0]
     def g34():
@@ -1893,7 +1829,7 @@ def s34():
 
 
 # ===== SECTION 35: list methods, hasattr and getattr =====
-# docs/todo.md 1.3 and 1.2. Every value is read out of a list so the grammar's
+# Every value is read out of a list so the grammar's
 # constant folder cannot pre-compute a row, and every error is CAUGHT - the
 # point of raising a real Python exception rather than aborting is that the
 # behaviour becomes assertable in one file, in all three engines.
@@ -1902,7 +1838,7 @@ def s35():
     xs = [3, 1, 2]
     check("lm01", xs.append(4) is None and xs == [3, 1, 2, 4])
     check("lm02", xs.pop() == 4 and xs == [3, 1, 2])
-    # pop(i) used to IGNORE its index in all three engines and remove the last.
+    # pop(i) removes index i, not the last element.
     ys = [3, 1, 2]
     check("lm03", ys.pop(0) == 3 and ys == [1, 2])
     zs = [3, 1, 2]
@@ -2010,7 +1946,7 @@ def s35():
         except ValueError:
             return -1
     check("lm32", find([1, 2], 2) == 1 and find([1, 2], 9) == -1)
-    # --- hasattr / getattr over BUILT-IN methods (docs/todo.md 1.2) -------
+    # --- hasattr / getattr over BUILT-IN methods ---------------------------
     names = ["append", "pop", "clear", "copy", "count", "sort", "insert",
              "remove", "extend", "index", "reverse"]
     seen = 0
@@ -2053,12 +1989,10 @@ def s35():
 
 
 # ===== SECTION 36: dict and set methods =====
-# docs/todo.md 1.3, the residue of SECTION 35's round. dict.clear/copy/
-# setdefault/update and set.pop/clear/copy/remove/discard/union/update all
-# ABORTED in every engine; hasattr answered False for each, deliberately, and
-# that is what tracked them. Every value is read out of a list so the constant
-# folder cannot pre-compute a row, and every error is CAUGHT, which is the whole
-# point of raising a real Python exception instead of aborting.
+# dict.clear/copy/setdefault/update and set.pop/clear/copy/remove/discard/
+# union/update. Every value is read out of a list so the constant folder cannot
+# pre-compute a row, and every error is CAUGHT, which is the whole point of
+# raising a real Python exception instead of aborting.
 def s36():
     src = [["a", 1], ["b", 2], ["c", 3]]
 
@@ -2208,8 +2142,8 @@ def s36():
     check("dm41", dseen == 10 and sseen == 8)
     # And False for the OTHER type's names, and for what this project lacks.
     check("dm42", not hasattr(mks(), "keys") and not hasattr(mkd(), "discard"))
-    # popitem arrived with docs/todo.md 1.9 and is a DICT name only, so a set
-    # still answers False for it - as CPython does.
+    # popitem is a DICT name only, so a set answers False for it - as CPython
+    # does.
     check("dm43", hasattr(mkd(), "popitem") and not hasattr(mks(), "popitem"))
     # issubset is a SET name: it takes any iterable, as union does.
     check("dm43b", hasattr(mks(), "issubset") and not hasattr(mkd(), "issubset"))
@@ -2253,9 +2187,8 @@ def s36():
         order += k
     check("dm54", order == "bcd" and len(it) == 3 and ("a" in it) == False)
     check("dm55", [kv[1] for kv in it.items()] == [2, 3, 4])
-    # The set OPERATORS are untouched - and <= / >= were WRONG in the
-    # interpreter half at f4ff228 (True for any pair of sets, because the host
-    # relational operator rendered both objects as the same string).
+    # The set OPERATORS: <= / >= are subset / superset, not the host relational
+    # operator on two objects.
     o1 = mks()
     o2 = set()
     o2.add(els[0])
@@ -2264,13 +2197,9 @@ def s36():
     check("dm58", len(o1 | o2) == 3 and len(o1 & o2) == 1 and len(o1 - o2) == 2)
 
 # ===== SECTION 38: super(), the MRO, dict.popitem and bound methods =====
-# docs/todo.md 1.9. Before this round `super()` was `name 'super' is not
-# defined` in all three engines, dict.popitem was `unknown dict method`, and the
-# INTERPRETER half resolved a class member depth-first over __bases where both
-# compiled halves used the C3 __mro - so `class D(B, C)` found the wrong method
-# in a diamond, a live halves divergence --cross had never reached. A method
-# read off an instance was also unbound in both COMPILED halves, so
-# `f = a.m; f()` died there and worked here. Every operand comes out of a list
+# super() (zero- and two-argument), dict.popitem, C3 member resolution - so
+# `class D(B, C)` finds the right method in a diamond - and a method read off an
+# instance comes back bound (`f = a.m; f()`). Every operand comes out of a list
 # so the constant folder cannot pre-compute a row.
 def s38():
     names = ["A", "B", "C", "D"]
@@ -2381,8 +2310,8 @@ def s38():
 
     # --- __slots__ applies over the WHOLE MRO, not the nearest declaration ---
     # `class SB(SA)` where BOTH declare __slots__: writing SA's own slot name
-    # through an SB raised AttributeError in all three engines where CPython
-    # allows it, because the lookup stopped at SB's declaration.
+    # through an SB is allowed in CPython - the lookup must not stop at SB's
+    # declaration.
     class SA:
         __slots__ = ["s"]
 
@@ -2412,15 +2341,13 @@ def s38():
 # ===== SECTION 39: iterator cursors, delegated send, and builtin repr =====
 #
 # A CURSOR (what iter/map/zip/enumerate/filter/reversed answer) is NOT a
-# generator, and this project's layer 2 used to think it was: pyIsGen asks
-# structurally for a callable `next` and pyMkIter sets one, so `it.send(7)`
-# stepped the cursor where CPython raises AttributeError and `it.close()`
-# aborted the native binary outright. docs/todo.md 1.4.
+# generator: `it.send(7)` and `it.close()` raise AttributeError in CPython. A
+# structural "has a callable next" test (layer 2's pyIsGen) would call it one.
 #
 # This section is a RATCHET section and not only a feature-matrix one on
-# purpose: the feature matrix's native rows only BUILD (docs/todo.md 4.3), and
-# most of what is asserted here lives in languages/lib/python-rt.metajs, which
-# only a native RUN can see.
+# purpose: the feature matrix's native rows only BUILD, and most of what is
+# asserted here lives in languages/lib/python-rt.metajs, which only a native RUN
+# can see.
 def s39():
     vals = [[1, 2, 3, 4], "ab", {"a": 1, "b": 2}, {7, 8}]
 
@@ -2474,7 +2401,7 @@ def s39():
         stopped = 1
     check("it19", stopped == 1)
 
-    # ----- the sites a cursor used to reach only through pyIsGen -----
+    # ----- the sites that must not take a cursor for a generator -----
     check("it20", sum(iter(vals[0])) == 10)
     check("it21", max(iter(vals[0])) == 4)
     xs = [9, 9, 9, 9]
@@ -2565,11 +2492,10 @@ def s39():
     lam = lambda q: q
     check("it40", "<lambda>" in str(lam))
 
-    # ----- and what a BUILTIN's __name__ answers (docs/todo.md 1.9) -----
-    # The render table above and the def-name table are now the SAME table read
-    # two ways, so a builtin has a __name__ where it used to answer '<lambda>'
-    # in the interpreter and None in both compiled halves. CPython 3.14.6 is the
-    # oracle for every row here.
+    # ----- and what a BUILTIN's __name__ answers -----
+    # The render table above and the def-name table are the SAME table read two
+    # ways, so a builtin has a __name__. CPython 3.14.6 is the oracle for every
+    # row here.
     nok = 0
     for i in range(len(fns)):
         if fns[i].__name__ == fnames[i]:
@@ -2582,8 +2508,8 @@ def s39():
         if clss[i].__name__ == cnames[i]:
             nok2 += 1
     check("it42", nok2 == 6)
-    # The def-name table is UNDISTURBED, which is the reconciliation's whole
-    # risk: a user def, a lambda, and a def that shadows a builtin name.
+    # The def-name table is UNDISTURBED: a user def, a lambda, and a def that
+    # shadows a builtin name.
     check("it43", sorted_like.__name__ == "sorted_like" and lam.__name__ == "<lambda>")
     check("it44", str.__name__ == "str" and int.__name__ == "int")
     # hasattr has to agree with getattr, because the three-argument getattr asks
@@ -2593,11 +2519,10 @@ def s39():
     check("it47", hasattr(str, "__name__") and getattr(str, "__name__", "NOPE") == "str")
     check("it48", getattr(sorted_like, "__name__", "NOPE") == "sorted_like")
 
-    # ----- a BOUND METHOD's introspection (docs/todo.md 1.4) -----
-    # getattr([1,2], "count").__name__ was '<lambda>' in the interpreter and None
-    # in both compiled halves where CPython 3.14.6 says 'count': a bound method is
-    # a FRESH closure and neither name table is keyed to find it. Every name below
-    # is read out of a LIST so the constant folder cannot answer it.
+    # ----- a BOUND METHOD's introspection -----
+    # getattr([1,2], "count").__name__ is 'count': a bound method is a FRESH
+    # closure and neither name table is keyed to find it. Every name below is read
+    # out of a LIST so the constant folder cannot answer it.
     mnames = ["count", "upper", "keys", "m"]
     bl = getattr([3, 1, 2], mnames[0])
     bs = getattr("ab", mnames[1])
@@ -2610,7 +2535,7 @@ def s39():
     gl2 = [3, 1, 2]
     check("it52", getattr(gl2, mnames[0]).__self__ is gl2 and bs.__self__ == "ab")
     # A BUILT-IN method has no __func__ - CPython raises AttributeError, and so
-    # does every engine here now that the miss is catchable rather than a host abort.
+    # does every engine here, catchably.
     nof = 0
     try:
         bl.__func__
@@ -2619,12 +2544,11 @@ def s39():
     check("it53", nof == 1)
     # hasattr has to agree with getattr on every one of them.
     check("it54", hasattr(bl, "__name__") and hasattr(bl, "__self__") and not hasattr(bl, "__func__"))
-    # type() names the two CPython callable types, which all three engines used to
-    # answer 'function' for.
+    # type() names the two CPython callable types.
     check("it55", type(bl).__name__ == "builtin_function_or_method")
     check("it56", type(len).__name__ == "builtin_function_or_method")
     check("it57", type(sorted_like).__name__ == "function" and type(lam).__name__ == "function")
-    # ... and 'type' for a class object, which the compiled halves said 'object' to.
+    # ... and 'type' for a class object.
     check("it58", type(str).__name__ == "type" and type(map).__name__ == "type")
 
     class Bm:
@@ -2653,10 +2577,8 @@ def s39():
     check("it66", Bm.__qualname__.endswith("Bm") and Bm.mth.__qualname__.endswith("mth"))
 
     # ----- an attribute a value does NOT have raises, catchably -----
-    # Both compiled halves answered None for a missing attribute on a builtin
-    # value and ABORTED THE PROGRAM on a missing attribute of a class object;
-    # the interpreter half raised, but with just "'nope'" as the message. All
-    # three now raise CPython's exact text, and it is catchable.
+    # It raises CPython's exact text, catchably, for a builtin value and for a
+    # class object alike.
     misses = [[3, 1, 2], "ab", {"a": 1}, bi, Bm, 5]
     mwant = ["'list' object has no attribute 'nope_xyz'",
              "'str' object has no attribute 'nope_xyz'",
@@ -2675,11 +2597,8 @@ def s39():
     check("it68", getattr(misses[0], "nope_xyz", "dflt") == "dflt" and not hasattr(misses[4], "nope_xyz"))
 
     # ----- an except HANDLER BODY IS NOT A SCOPE -----
-    # A name FIRST bound inside a handler was lost at the closing brace in the
-    # interpreter half - `except E: r = 1` then print(r) died with "name 'r' is
-    # not defined" - while both compiled halves and CPython kept it. A live
-    # halves divergence no test reached because every test assigned a name that
-    # already existed outside. docs/todo.md 1.4.
+    # A name FIRST bound inside a handler survives it (`except E: r = 1` then
+    # print(r)).
     try:
         raise ValueError(mnames[0])
     except ValueError as ex2:
@@ -2697,7 +2616,7 @@ def s39():
     # The `as` name does NOT escape the handler, in any engine. CPython DELETES
     # it (so an outer binding of the same name is deleted too and a later read is
     # a NameError); the compiled halves scope it to the handler and leave an
-    # outer binding standing, and the interpreter half now restores it the same
+    # outer binding standing, and the interpreter half restores it the same
     # way. A DELIBERATE non-convergence: doing it CPython's way needs the emitter
     # to unbind a name in an enclosing scope on every exit path out of a handler.
     ex2 = "outer"
@@ -2712,13 +2631,10 @@ def s39():
     check("it71", after_as == "outer")
 
     # ----- repr() of the three host-backed shapes -----
-    # A GENERATOR printed a raw host dump in every engine: "[object Object]" in
-    # the interpreter and a Go STRUCT LITERAL under llvm.Run. A compiled PATTERN
-    # and a MATCH printed CPython's form in the interpreter and "[object Object]"
-    # in both compiled halves - js_pyrxstr answered str()/print() and repr() went
-    # straight past it. Two live halves divergences, docs/todo.md 1.4. CPython
-    # appends an address to all three and names the generating function; neither
-    # is recoverable here, so the short form is printed, as <map object> already is.
+    # A GENERATOR, a compiled PATTERN and a MATCH, through str() and repr().
+    # CPython appends an address to all three and names the generating function;
+    # neither is recoverable here, so the short form is printed, as <map object>
+    # already is.
     def gsrc():
         yield 1
 
@@ -2733,18 +2649,15 @@ def s39():
 
 
 # ===== SECTION 40: a name with no binding is a catchable NameError =====
-# docs/todo.md 3.2. Reading a name that is nowhere bound was an UNCATCHABLE
-# abort in both compiled halves - `js runtime error: variable not defined: x` -
-# where the interpreter half and CPython raise a NameError a plain
-# try/except recovers. The site is the FLOOR's scope_get (and abnf/jsrt.go's
-# scopeGet), shared by all sixteen languages, so it is reached through a
-# per-language hook the emitter registers (js_rt_missvar); a language that
-# registers none is unchanged, which is what keeps the three SHOULD-ABORT
-# matrix rows where they are.
+# Reading a name that is nowhere bound raises a NameError a plain try/except
+# recovers. The site is the FLOOR's scope_get (and abnf/jsrt.go's scopeGet),
+# shared by all sixteen languages, so it is reached through a per-language hook
+# the emitter registers (js_rt_missvar); a language that registers none is
+# unchanged, which is what keeps the three SHOULD-ABORT matrix rows where they
+# are.
 #
 # The `del` rows ride along: CPython 3.14 answers UnboundLocalError for a
-# deleted LOCAL and NameError for a deleted GLOBAL, and every engine here used
-# to answer one of the two for both.
+# deleted LOCAL and NameError for a deleted GLOBAL.
 #
 # Every row is CPython 3.14.6's answer, verified against it.
 def s40():
@@ -2755,7 +2668,7 @@ def s40():
         r1 = f"{type(e).__name__}|{e}|{isinstance(e, Exception)}"
     check("nm1", r1 == "NameError|name 'nosuchname_zz' is not defined|True")
 
-    # The program CONTINUES afterwards - the point of the whole item.
+    # The program CONTINUES afterwards.
     n = 0
     for _ in range(3):
         try:
@@ -2792,10 +2705,8 @@ def s40():
     check("nm5", inner2() == "UnboundLocalError")
     check("nm6", issubclass(UnboundLocalError, NameError))
 
-    # None has no attributes and is not subscriptable, and BOTH were uncatchable:
-    # `None.x` aborted with "member 'x' of undefined" in the compiled halves and
-    # `None[0]` CRASHED THE TAG SCRIPT in the interpreter ("Cannot read property
-    # 'length' of undefined"), which no except and no engine diagnostic could see.
+    # None has no attributes and is not subscriptable: `None.x` and `None[0]`
+    # raise catchably.
     nones = [None, 1]
     r4 = "none"
     try:
@@ -2835,11 +2746,10 @@ def s41():
 
 
 # ===== SECTION 42: an unhashable set member or dict key =====
-# docs/todo.md 2.4. `a = [1]; b = [1]; len({a, b})` was 2 in the interpreter and 1
-# in both compiled halves - a live halves divergence - and CPython raises
-# TypeError for it. Two separate things came out of that one row.
+# `a = [1]; b = [1]; len({a, b})` raises TypeError in CPython. Two separate
+# things follow from that row.
 #
-# 1. dict and set ARE refused now, in all three engines, with CPython 3.14's exact
+# 1. dict and set ARE refused, in all three engines, with CPython 3.14's exact
 #    wording - which differs between the two positions:
 #      {[1]}    cannot use 'list' as a set element (unhashable type: 'list')
 #      {{}: 1}  cannot use 'dict' as a dict key (unhashable type: 'dict')
@@ -2848,15 +2758,13 @@ def s41():
 #    is False while `{} in {1}` and `{1} in {1: 2}` both raise.
 #
 # 2. The LIST is deliberately NOT refused, and that is the divergence this section
-#    records rather than fixes. A tuple IS a list in this value model
-#    (docs/todo.md 3.1), and the two directions of the mistake are not symmetric:
-#    treating a tuple as hashable only ACCEPTS a program CPython would reject,
-#    while treating a list as unhashable would abort `{(1, 2), (3, 4)}` and
-#    `d[i, j]` - legal Python, and among the most common things Python programs
-#    do. So the array stays hashable, and the halves were made to agree on it the
-#    other way instead: a tuple key now compares by CONTENTS in all three engines
-#    (core.keyEq, pyKeyEq, dictKeyEq), which is CPython's rule for a tuple and
-#    fixed `d[1, 2] = v; d[1, 2]` - a hard KeyError in every engine before.
+#    records. A tuple IS a list in this value model, and the two directions of
+#    the mistake are not symmetric: treating a tuple as hashable only ACCEPTS a
+#    program CPython would reject, while treating a list as unhashable would
+#    abort `{(1, 2), (3, 4)}` and `d[i, j]` - legal Python, and among the most
+#    common things Python programs do. So the array stays hashable, and a tuple
+#    key compares by CONTENTS in all three engines (core.keyEq, pyKeyEq,
+#    dictKeyEq), which is CPython's rule for a tuple (`d[1, 2] = v; d[1, 2]`).
 #
 # Every value is read out of a list so the constant folder cannot pre-compute a
 # row, and every error is CAUGHT.
@@ -2943,8 +2851,8 @@ def s42():
     nested[a_tup] = 5
     check("uh25", nested[(1, 2)] == 5 and not ((1, 3) in nested))
 
-    # --- RECORDED DIVERGENCE: a list is hashable here, because it is a tuple
-    # (docs/todo.md 3.1). CPython raises for every row below.
+    # --- RECORDED DIVERGENCE: a list is hashable here, because it is a tuple.
+    # CPython raises for every row below.
     # They CATCH rather than assert directly, so this section still runs to the
     # end under CPython instead of aborting on the first of them.
     def lsetlen():
@@ -2957,11 +2865,8 @@ def s42():
     check("uh28", lsetlen() == 2)
 
     # --- a BOXED number on the left of `in` -------------------------------
-    # Found by the same probe. `in` and `not in` are CONTAINER operators, so a
-    # boxed operand must fall through to pyIn - floOp let it, boxOp did not, and
-    # in the interpreter half alone `3j in xs` died with "unsupported operand
-    # type for in: complex" while `10**30 in xs` was answered off bigToNum of the
-    # CONTAINER. Both compiled halves already agreed with CPython.
+    # `in` and `not in` are CONTAINER operators, so a boxed operand (`3j in xs`,
+    # `10**30 in xs`) must fall through to pyIn.
     boxes2 = [10 ** 30, 3j, 1]
     big = boxes2[0]
     cx = boxes2[1]
@@ -2972,13 +2877,11 @@ def s42():
 
 # ===== SECTION 43: global / nonlocal across the emitter's inner scopes =====
 # A comprehension target, an `except ... as e` and a `with ... as w` name are the
-# only names the python emitter declares BELOW a binding boundary, and an
-# assignment to such a name used to go straight to the runtime's own chain walk -
-# "assign where the chain already holds it" - which knows nothing about `global`
-# and `nonlocal`. With an intermediate function binding the same name the walk
-# stopped THERE: `[q for q in range(2)]` plus `global q` made a later `q = 55`
-# write the enclosing function's q and leave the module's alone. Both compiled
-# halves did it and the interpreter half did not. docs/todo.md 5.3.
+# only names the python emitter declares BELOW a binding boundary, and the
+# runtime's own chain walk - "assign where the chain already holds it" - knows
+# nothing about `global` and `nonlocal`. With an intermediate function binding
+# the same name, `[q for q in range(2)]` plus `global q` must still make a later
+# `q = 55` write the module's q.
 def s43():
     def lvl2():
         def deep():
@@ -3015,8 +2918,8 @@ def s43():
     pair2 = outn()
     check("gsc4", pair2[0] == 42 and pair2[1] == [0, 1, 2])
 
-    # A `global` at depth ONE always worked (the chain walk reaches the module
-    # scope, which the `global` statement itself seeds), and stays working.
+    # A `global` at depth ONE (the chain walk reaches the module scope, which the
+    # `global` statement itself seeds).
     def one():
         global s43h
         s43h = 3
@@ -3045,11 +2948,9 @@ def s43():
     check("gsc7", exname() == [["v"], "after"])
 
     # An `except ... as x` target is a BINDING SITE like any other, so a `global x`
-    # in the same function covers it and everything after it. The interpreter half
-    # assigned the handler's own block binding and left the module's alone (`1` where
-    # CPython and both compiled halves say 77), because it took the first scope that
-    # already had the name; the declaration is consulted first now, in all three
-    # engines. The `nonlocal` row is the same question one scope further in.
+    # in the same function covers it and everything after it (CPython: 77) - the
+    # declaration is consulted before the first scope that already has the name.
+    # The `nonlocal` row is the same question one scope further in.
     def exglobal():
         global s43e
         try:

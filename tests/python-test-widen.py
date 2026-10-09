@@ -1,14 +1,7 @@
-# Python widening self test: exercises the newly accepted surface.
-#
-# The GENUINELY implemented constructs (ternary, parallel/tuple assignment,
-# annotated assignment, assert) run and self-check under both the default run and
-# -warn-unsupported.
-#
-# The ACCEPT-AND-NOT-IMPLEMENTED constructs (with, yield,
-# del, decorators, async/await, **kwargs) abort a plain run at the first such
-# construct with a clean file:line message; under -warn-unsupported they warn and the
-# file runs to exit(fails[0]). (try/except/finally, raise, lambda, global/nonlocal
-# and *args/default parameters are now implemented and run genuinely here.)
+# Python widening self test: the ternary, parallel and annotated assignment,
+# assert, with, try/except/finally, raise, generators, del, decorators,
+# async/await and **kwargs. Everything here is executed for real; the file runs
+# to exit(fails[0]).
 
 fails = [0]
 
@@ -117,13 +110,13 @@ check("default used", defaulted("hi"), "> hi")
 check("default overridden", defaulted("hi", "* "), "* hi")
 
 
-# ----- accepted, not implemented (abort by default; warn + run under -warn) -----
+# ----- with, try, raise, generators, del, decorators, async, **kwargs -----
 
-# with EXPR as T:  simple form binds T to EXPR's value and runs the body
+# with EXPR as T: a value without __enter__/__exit__ binds T to itself
 with count as ctx:
     check("with body ran", ctx, 15)
 
-# try/except/finally: the try body and finally body run; handlers are dropped
+# try/except/finally: nothing raises, so the handler must not run
 try:
     check("try body ran", 1 + 1, 2)
 except ValueError as e:
@@ -141,18 +134,18 @@ def guard(v):
 
 check("raise path skipped", guard(9), 9)
 
-# yield / generators (accepted, not driven)
+# yield / generators (defined, not driven)
 def gen():
     yield 1
     yield 2
 
 
-# del (accepted)
+# del of a list element
 scratch = [1, 2, 3]
 del scratch[0]
 
 
-# decorators parse and are ignored; the function is still callable
+# an identity decorator; the decorated function is still callable
 def trace(fn):
     return fn
 
@@ -165,12 +158,12 @@ def greet(who):
 check("decorated call", greet("x"), "hi x")
 
 
-# async def / await (accepted)
+# async def / await (defined, not awaited)
 async def afetch(u):
     return await u
 
 
-# **kwargs (accepted; the dict does not bind)
+# **kwargs (defined, not called)
 def keyworded(**kws):
     return 0
 
