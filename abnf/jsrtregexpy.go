@@ -229,9 +229,8 @@ func (rt *jsrt) rxPySearch(rv *jsObject, s string, from int) interface{} {
 // rxPyAnchoredMatch is re.match / re.fullmatch. These are NOT a search plus a
 // position check: a fullmatch has to BACKTRACK into an alternation, so
 // re.fullmatch("a|ab", "ab") is "ab" and not None. The engine's own anchored entry
-// points express both, including Python's `pos` argument - and unlike the
-// \A(?:...)\z wrapper this used to build, they have no quarrel with the x flag's
-// trailing comments.
+// points express both, including Python's `pos` argument - and unlike a
+// \A(?:...)\z wrapper, they have no quarrel with the x flag's trailing comments.
 func (rt *jsrt) rxPyAnchoredMatch(rv *jsObject, s string, from int, whole bool) interface{} {
 	re := rxPyReOf(rv)
 	src, _ := rv.props["__src"].(string)
@@ -657,7 +656,7 @@ func init() {
 		basePyMcall := m["js_pymcall"]
 		m["js_pyrxmcall"] = func(a []uint64) uint64 {
 			target := u(a[0])
-			// The `math` module (abnf/jsrtpymath.go, docs/todo.md 1.7) rides the
+			// The `math` module (abnf/jsrtpymath.go) rides the
 			// same dispatcher: it is the ONE extern the python emitter routes every
 			// method call through, and a module object is not an instance, a class,
 			// a dict or a list, so nothing further down pyMethodCall would find it.

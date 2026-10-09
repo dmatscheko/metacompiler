@@ -4,12 +4,10 @@ package abnf
 // does not reach: the ARGUMENT SELECTORS, the %a/%A hex-float directive, and
 // FloatDomainError on every Float -> Integer conversion.
 //
-// WHY IT IS A SEPARATE FILE. rubyFormat in abnf/jsrt.go renders one directive
-// correctly and its own header says what it cannot do ("Still absent, and NOT
-// cheap: %a/%A ... and the argument selectors %N$, %<name> and %{name} and the *
-// width/precision"). What was missing is not inside any directive - it is the
-// scanner AROUND them, which decides WHICH argument a directive gets. So this
-// file is that scanner, and it delegates each directive it has resolved back to
+// WHY IT IS A SEPARATE FILE. rubyFormat in abnf/jsrt.go renders one directive.
+// What this file adds is not inside any directive - it is the scanner AROUND
+// them, which decides WHICH argument a directive gets. So this file is that
+// scanner, and it delegates each directive it has resolved back to
 // rubyFormat as a single "%<flags><width>.<prec><conv>" with a single argument.
 // No directive body is duplicated: %a is the only one rendered here, because it
 // is the only one rubyFormat has no arm for.
@@ -19,12 +17,11 @@ package abnf
 // table is filled, and it rebinds only the four RUBY-ONLY externs below
 // (js_rformat, js_rmod, js_rmcall, js_rxmcall), each of which keeps and calls the
 // base binding for everything it does not itself answer. Manual chapter 4's
-// warning is about wrapping a SHARED extern - js_mcall was the case that made a
-// C# Substring raise java's message - and none of these four is shared.
+// warning is about wrapping a SHARED extern, and none of these four is shared.
 //
 // The twins are rformat / fmtOne / hexBody / floDomainGuard in
 // languages/ruby-interpreter.abnf and rbFormat / rbHexBody / rbFloDomain in
-// languages/lib/ruby-rt.metajs. docs/todo.md 1.5.
+// languages/lib/ruby-rt.metajs.
 
 import (
 	"math"
@@ -114,11 +111,9 @@ func (rt *jsrt) rubyRealCall(name string, args interface{}) (string, interface{}
 	return name, args
 }
 
-// Float#nan? / #infinite? / #finite?, which existed in NO engine: both compiled
-// halves aborted with *method call 'nan?' on a object* and the interpreter half
-// with *unknown Numeric method: nan?*. #infinite? answers 1, -1 or NIL and not a
+// Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL and not a
 // boolean. The twins are numberMethod in languages/ruby-interpreter.abnf and
-// rbNumMethod in languages/lib/ruby-rt.metajs. docs/todo.md 1.5.
+// rbNumMethod in languages/lib/ruby-rt.metajs.
 func rubyFloPredicate(target interface{}, name string) (interface{}, bool) {
 	if name != "nan?" && name != "infinite?" && name != "finite?" {
 		return nil, false
@@ -161,9 +156,8 @@ func (rt *jsrt) rubyFloDomainGuard(target interface{}, name string, args interfa
 	switch name {
 	case "to_i", "to_int", "truncate":
 	// #floor and #ceil take an ndigits too, and a POSITIVE one answers the
-	// receiver rather than raising - exactly as #round does. Guarding them
-	// unconditionally made Float::INFINITY.floor(2) raise here where MRI and
-	// ruby-interpreter.abnf both answer Infinity. The ndigits <= 0 case still
+	// receiver rather than raising - exactly as #round does
+	// (Float::INFINITY.floor(2) is Infinity). The ndigits <= 0 case still
 	// raises: rubyNumDigitOp does it, on the value it is about to convert.
 	case "floor", "ceil", "round":
 		if arr, isArr := args.(*jsArray); isArr && len(arr.elems) > 0 {
@@ -191,10 +185,7 @@ func rubyFloDomain(rt *jsrt, x float64) {
 // ===== the argument selectors =====
 //
 // A directive does not have to take the next argument, and MRI offers four ways
-// of saying which one it takes. This engine implemented NONE of them and read the
-// "$" of "%1$s" as the CONVERSION LETTER, so `"%1$s-%2$s" % ["a","b"]' answered
-// "$s- $s" where the interpreter half read the digits as WIDTHS and answered
-// "a- b" and MRI says "a-b": a live three-way divergence.
+// of saying which one it takes (`"%1$s-%2$s" % ["a","b"]' is "a-b"):
 //
 //	%N$s          the Nth argument, 1-based, in any order and reusable
 //	%<name>s      the Hash entry :name, formatted by the directive
@@ -205,30 +196,24 @@ func rubyFloDomain(rt *jsrt, x float64) {
 // The `*` argument is read BEFORE the value and width before precision, and `*`
 // takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
 //
-// "TOO FEW ARGUMENTS" IS RAISED, since docs/todo.md 1.3's 2026-08-10 pass; the
-// paragraph that used to stand here declined it, and answering nil made
-// "%s %s" % ["a"] read "a " in all three engines - agreed and wrong. Measured
-// against /usr/bin/ruby 2.6.10 (unchanged in 3.x); the full row table, and the
+// "TOO FEW ARGUMENTS" IS RAISED ("%s %s" % ["a"]); the full row table, and the
 // shapes that do NOT raise, are at fmtTooFew in languages/ruby-interpreter.abnf.
-// rbFmtTooFew in languages/lib/ruby-rt.metajs is the other twin. STILL not
+// rbFmtTooFew in languages/lib/ruby-rt.metajs is the other twin. Not
 // implemented: MRI's four ArgumentErrors for MIXING the numbered, unnumbered and
 // named styles.
-// rubyFmtCheckConv is MRI's malformed-format-string rule. Measured against
-// /usr/bin/ruby 2.6.10 (sprintf is unchanged in 3.x); the columns are
-// ruby-interpreter.abnf, llvm.Run (this file) and the native binary:
+// rubyFmtCheckConv is MRI's malformed-format-string rule (ruby 2.6.10; sprintf
+// is unchanged in 3.x):
 //
-//	"%z" % 5     5      z     z          MRI: malformed format string - %z
-//	"%5" % 5     %5     %5    ""         MRI: malformed format string - %*[0-9]
-//	"100%" % []  100%   100%  100%       MRI: incomplete format specifier…
+//	"%z" % 5     MRI: malformed format string - %z
+//	"%5" % 5     MRI: malformed format string - %*[0-9]
+//	"100%" % []  MRI: incomplete format specifier…
 //
-// The native column is layer 2's `break`, which discarded the rest of the string.
 // The messages are MRI's own, chosen by what the head consumed last - see the
 // table in languages/ruby-interpreter.abnf.
 //
-// MRI's "too few arguments" is raised too, since 2026-08-10 - see the note above.
 // The one row a selector still saves in MRI and not here is "%1$%" % 5, which is
 // "%" there and *invalid format character - %* here; it never reaches the
-// argument list, so it is a malformed-head row. docs/todo.md 1.3.
+// argument list, so it is a malformed-head row.
 func rubyIsFmtConv(c byte) bool {
 	switch c {
 	case 'd', 'i', 'u', 'f', 's', 'p', 'c', 'x', 'X', 'o', 'b', 'B', 'e', 'E', 'g', 'G', 'a', 'A':
@@ -300,9 +285,8 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			i++
 			continue
 		}
-		// A MALFORMED directive is an ArgumentError in MRI, and it was accepted
-		// by all three engines here in three DIFFERENT ways. rubyFmtCheckConv
-		// carries the measurements. docs/todo.md 1.3.
+		// A MALFORMED directive is an ArgumentError in MRI. rubyFmtCheckConv
+		// carries the rule.
 		if i+1 >= len(spec) {
 			rt.rubyRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead")
 		}
@@ -459,9 +443,8 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			rt.rubyFmtCheckConv(conv)
 		}
 		// An infinity or a NaN reaching an INTEGER directive raises, because MRI's
-		// %d/%x/%o/%b convert the operand with to_i. This used to print Go's int64
-		// saturation, which is ARCHITECTURE-DEPENDENT (manual 7.9's giFromFloat
-		// note) and is why 9102c91's ratchet row could pin only "it terminates".
+		// %d/%x/%o/%b convert the operand with to_i (and Go's int64 saturation would
+		// be ARCHITECTURE-DEPENDENT - manual 7.9's giFromFloat note).
 		switch conv {
 		case 'd', 'i', 'u', 'x', 'X', 'o', 'b', 'B':
 			// The OPERAND CHECK comes first: MRI raises TypeError on nil before it
@@ -556,7 +539,7 @@ func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) inter
 // wrong: at a precision of EXACTLY 13 - the full digit count, where no rounding
 // can be needed - it rounds the last digit to even anyway. "%.13a" % (1.0/3) is
 // 0x1.5555555555554p-2 there against the value's own 0x1.5555555555555p-2. C's
-// printf on this machine, python3's float.hex and MRI's own %a with no precision
+// printf, python3's float.hex and MRI's own %a with no precision
 // all print the exact digits, and MRI is right again at 12 and at 14.
 func rubyHexNorm(x float64) (float64, int) {
 	pv, pk := []float64{}, []int{}

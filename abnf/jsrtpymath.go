@@ -9,12 +9,11 @@ import (
 // languages/python-to-llvm-ir.abnf prog.py` (llvm.Run) executes. The other two
 // halves are js_pymath_module in languages/lib/python-rt.metajs (the native
 // binary) and hostGlobals["math"] in languages/python-interpreter.abnf.
-// docs/todo.md 1.7.
 //
 // WHY A FILE OF ITS OWN. Python has no abnf/jsrtpython.go: its Go-twin arms are
 // spread over abnf/jsrt.go and abnf/jsrtregexpy.go. A new module is additive by
-// nature, so it goes in a new python-only file rather than into the 18,000-line
-// shared one, exactly as abnf/pystrmethod.go did for the str surface.
+// nature, so it goes in a python-only file rather than into the shared one,
+// exactly as abnf/pystrmethod.go does for the str surface.
 //
 // WHAT IS IN SCOPE, AND WHY THAT LINE. Everything here is a pure function of
 // doubles or of integers, which is what this value model can carry exactly and
@@ -134,7 +133,7 @@ func pyMathModule(rt *jsrt) *jsObject {
 // pyMathCall is math.<name>(args...). The dispatcher is by name rather than by
 // twenty-five stored closures because the same shape has to exist in MetaJS
 // layer 2, where a closure per member would be twenty-five floor cells held
-// forever - and tests/bench/mod.py sits on an arena threshold (docs/todo.md 2.9).
+// forever.
 func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	switch name {
 	// ---- float in, float out

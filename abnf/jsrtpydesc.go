@@ -1,14 +1,13 @@
 package abnf
 
-// Python's DESCRIPTOR surface - the GO TWIN half of docs/todo.md 1.7's third,
-// fourth and fifth bullets. The other two halves are in
+// Python's DESCRIPTOR surface - the GO TWIN half. The other two halves are in
 // languages/lib/python-rt.metajs (the native binary) and in
 // languages/python-interpreter.abnf (the interpreter).
 //
 // Four things live here, and they are one mechanism seen from four sides: a
 // callable that is MINTED AT THE ATTRIBUTE READ and remembers what it came from.
-// abnf/jsrt.go's pyBoundInfo was already that record for a bound method; it
-// gains one field, `kind`, and the three new shapes fall out.
+// abnf/jsrt.go's pyBoundInfo is that record; its field `kind` tells the three
+// callable shapes apart.
 //
 //	kind ""   a bound method        <bound method C.m of ...>
 //	                                <built-in method count of list object>
@@ -27,10 +26,8 @@ package abnf
 // WHY MINTED ON DEMAND RATHER THAN STORED. The module object could simply hold
 // twenty-five closures, and then `math.sqrt` would be an ordinary property read
 // with no arm anywhere. It would also be twenty-five cells and their key strings
-// held by the root scope for the whole run, in the NATIVE build too - and
-// tests/bench/mod.py sits on an arena threshold (docs/todo.md 2.9), where one
-// unused kilobyte moved the row 2.40%. Minting at the read costs a program that
-// never reads one exactly nothing.
+// held by the root scope for the whole run, in the NATIVE build too. Minting at
+// the read costs a program that never reads one exactly nothing.
 //
 // staticmethod / classmethod are the fourth thing, and they are descriptors of a
 // different sort: the decorator only WRAPS, and the unwrapping happens at the
