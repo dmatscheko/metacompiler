@@ -18,9 +18,9 @@ package abnf
 // guarantee.
 //
 // This file is append-only with respect to the rest of the runtime: nothing here
-// runs unless a program calls one of the js_rx* externs, which only the Ruby
-// compiler grammar emits. The one hook in jsrt.go is addRegexExterns below, which
-// ADDS names to the extern map and rebinds none.
+// runs unless a program calls one of the js_rx* externs, which only the compiler
+// grammars that have regexps emit. The one hook in jsrt.go is addRegexExterns
+// below, which ADDS names to the extern map and rebinds none.
 //
 // Positions are RUNE indices, matching the JS side's UTF-16 indices for everything
 // in the Basic Multilingual Plane (and therefore for every ASCII pattern).
@@ -1628,7 +1628,7 @@ func rxGet(pattern, flags string) *rxRe {
 // Both are ordinary *jsObject values carrying __rx-prefixed slots, so nothing in
 // the rest of the runtime has to learn a new type. Their METHODS are reached
 // through js_rxmcall below, which is a wrapper around the existing js_rmcall: the
-// Ruby compiler grammar emits the wrapper everywhere it used to emit js_rmcall,
+// Ruby compiler grammar emits the wrapper for every method call,
 // and every receiver that is not a Regexp or a MatchData is handed straight on to
 // the original. Same shape for js_rxcase (case/when) and js_rxget (m[1]).
 
@@ -2125,15 +2125,11 @@ func (rt *jsrt) addRegexExterns(m map[string]func(args []uint64) uint64) {
 		}
 		target := u(a[0])
 		name := rt.toString(u(a[1]))
-		// A STRING PATTERN reaches the regexp half too. The gate used to require a
-		// Regexp RECEIVER or a Regexp first ARGUMENT, so `s.sub("a", "z")` - Ruby
-		// compiles a String pattern to a Regexp - never reached rxRegexMethod and
-		// died in the base dispatch with "unknown String method: sub". Six methods
-		// were unreachable that way in both compiled halves while
-		// ruby-interpreter.abnf answered: sub, gsub, sub!, gsub!, match, match?
-		// (and =~ / scan, whose spellings a program rarely writes with a string).
-		// rxRegexMethod itself already normalized a String argument; nothing but
-		// the gate was missing. split and index are NOT in the list: with a
+		// A STRING PATTERN reaches the regexp half too: Ruby compiles a String
+		// pattern to a Regexp, so `s.sub("a", "z")` is a regexp operation. That
+		// holds for sub, gsub, sub!, gsub!, match, match? (and =~ / scan, whose
+		// spellings a program rarely writes with a string). rxRegexMethod itself
+		// normalizes a String argument. split and index are NOT in the list: with a
 		// plain-string argument they are ordinary string operations.
 		_, targetIsStr := target.(string)
 		if rxIsRegexObj(target) || rxIsMatchObj(target) || rxIsRegexObj(argAt(arr.elems, 0)) ||

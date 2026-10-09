@@ -4,10 +4,9 @@ package abnf
 //
 // Every other caller of jsrtregex.go reaches it through the i64-HANDLE world: a
 // compiler grammar emits js_rx* calls whose arguments are indices into the jsrt
-// value table. The bash compiler cannot. It emits hand-written IR over a raw i8*
+// value table. A raw-IR grammar cannot: it emits hand-written IR over a raw i8*
 // string model - an arena bump-allocator, rt_strcat, rt_glob - and has no handle
-// runtime at all, so `[[ $s =~ re ]]` had no way to reach the engine and the bash
-// grammar (rightly) refused to fake it.
+// runtime at all.
 //
 // This file bridges that, WITHOUT a second matcher: rt_regex_search below runs the
 // same rxCompile/rxSearch as Ruby, Python, Kotlin, JavaScript and TypeScript. Only
@@ -18,17 +17,14 @@ package abnf
 // llvmmap.go's resolveExtern consults the registry before its own switch, so no
 // existing extern is touched and a program that never calls these is unaffected.
 //
-// STATUS 2026-07-28: NOTHING REACHES THIS ANY MORE. bash-to-llvm-ir.abnf now EMITS
-// its ERE engine as IR instead of declaring these two, and resolveExtern is only
-// consulted for a function with no blocks - so a defined rt_regex_search shadows
-// this one completely. The reason is the whole point of the bridge turning out to
-// be its undoing: a Go native has no C symbol, so `-exe` had nothing to link,
-// buildExecutable's stubUndefined gave the DECLARATION a `ret i32 0` body, and 0
-// means NO MATCH. The bash ratchet passed 289/289 under llvm.Run and 282/289 in the
-// clang-built executable, the seven being exactly the =~ assertions that need a
-// match or a compile error. Byte-identity could not see it (both engines called
-// this same Go code and agreed) and `clang -S -x ir` could not either (the module
-// is well-formed; the symbol simply is not there). See tests/clang-check.sh.
+// NOTHING REACHES THIS AT PRESENT. bash-to-llvm-ir.abnf EMITS its ERE engine as
+// IR instead of declaring these two, and resolveExtern is only consulted for a
+// function with no blocks - so a defined rt_regex_search shadows this one
+// completely. The reason: a Go native has no C symbol, so `-exe` has nothing to
+// link, buildExecutable's stubUndefined gives the DECLARATION a `ret i32 0`
+// body, and 0 means NO MATCH - invisible to byte-identity (both engines call
+// this same Go code) and to `clang -S -x ir` (the module is well-formed). See
+// tests/clang-check.sh.
 //
 // The file is kept, unregistered from nothing and costing nothing, because the
 // pointer-based calling convention below - C strings in flat memory, BYTE offsets
