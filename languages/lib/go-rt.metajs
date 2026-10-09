@@ -1,12 +1,7 @@
-// go-rt.metajs -- GO'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the sixth language after the Lua pilot,
-// PHP, Swift, Java, C# and Dart.
-//
-// languages/go-to-llvm-ir.abnf emits handle IR that calls 82 js_* externs over
-// every go test in tests/ (the same 82 for the full-syntax ratchet alone: the
-// smaller files add nothing). 40 of them are generic primitives
-// languages/lib/runtime.c already provides (the C floor, layer 1). The other 42
-// are here.
+// go-rt.metajs -- GO'S OWN SEMANTICS, in MetaJS: the layer-2 runtime that
+// languages/go-to-llvm-ir.abnf links next to the C floor (languages/lib/runtime.c,
+// layer 1). The generic js_* primitives the emitted IR calls are the floor's; the
+// Go-specific ones are here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/go-rt.metajs -q -rt-lib
@@ -58,29 +53,25 @@
 // Go's whole sized-integer surface is already in the C floor: js_giarith,
 // js_gicmp / js_gilt / js_gile / js_gigt / js_gige, js_giadd, js_giconv,
 // js_gilit, js_gineg, js_ginot, js_gival, js_giis, and js_gflo / js_jfdiv for
-// the boxed double. That is 40 of the 82 externs and it is why Go's own layer-2
-// surface is small for a language this size.
+// the boxed double, which is why Go's own layer-2 surface is small for a
+// language this size.
 //
 // ----- si_norm: Go WANTS it, like Dart and unlike Java ------------------------
 //
-// The plan's question is not "has this language a 64 bit signed type" but "is
-// its unboxed representation the one si_norm produces". abnf/jsrtint.go states
-// Go's invariant at the type: "plain number == a signed 64 bit integer whose
-// value is exact in a double; jsGInt == any other integer". That IS giNorm, and
-// giNorm IS what sint() applies. So Go needs neither Java's marked-unsigned
-// trick nor sintRaw, and there is no pair layer and no box layer in this file.
+// abnf/jsrtint.go states Go's invariant at the type: "plain number == a signed 64
+// bit integer whose value is exact in a double; jsGInt == any other integer".
+// That IS giNorm, and giNorm IS what sint() applies, so Go needs neither Java's
+// marked-unsigned trick nor sintRaw, and there is no pair layer and no box layer
+// in this file.
 //
-// The SECOND-ORDER HAZARD the Java port found - a floor extern reading a tag 13
-// cell numerically and seeing a MAGNITUDE - does not exist for Go either, and
-// the reason is worth writing down because the audit named js_gival as Go's
-// suspect. to_number of a tag 13 cell is si_float, whose 64-bit UNSIGNED arm
-// answers d_from_ulong(fa(h)) - the magnitude. That is not a bug for Go: Go
-// really HAS uint64, an unsigned-marked width-64 cell really IS a uint64, and
+// A floor extern reading a tag 13 cell numerically sees a MAGNITUDE: to_number of
+// a tag 13 cell is si_float, whose 64-bit UNSIGNED arm answers d_from_ulong(fa(h)).
+// That is right for Go: an unsigned-marked width-64 cell really IS a uint64, and
 // abnf/jsrtint.go's own js_gival does exactly the same thing
 // (`if b.u && b.w == 64 { return float64(uint64(b.v)) }`). si_float IS Go's
-// js_gival, si_val is NOT, and the two engines agree. Checked, not assumed.
+// js_gival, si_val is NOT.
 //
-// ----- what Go did NOT need, checked rather than assumed ----------------------
+// ----- what Go does NOT need ---------------------------------------------------
 //
 //  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
 //     on core.truthyExt, so that extern must answer a RAW INTEGER - a shim
@@ -97,26 +88,21 @@
 //  3. NO jsChar. Go has no character type; a rune is an int32, which is the
 //     sized-integer tag, and the emitter emits js_char / js_char_code /
 //     js_kindex zero times.
-//  4. NO COROUTINE PRIMITIVE, and this is the finding the plan asked for.
-//     `grep -c 'js_genfn\|js_yield'` in the grammar is 0. Go's goroutines are
-//     COOPERATIVE and DETERMINISTIC in both halves (the model of
-//     go-interpreter.abnf, shared through the runtime): `go f()` only QUEUES a
-//     nullary closure, and a receive that finds its channel empty RUNS THE
-//     QUEUE - each queued goroutine to completion, in spawn order - until one of
-//     them fills it. There is no suspension point, so there is no second stack
-//     to keep and the floor's pthread-backed tag 15/16 coroutine is not needed.
-//     The whole model is goQueue below: one array and one drain loop.
+//  4. NO COROUTINE PRIMITIVE: the grammar emits no js_genfn / js_yield. Go's
+//     goroutines are COOPERATIVE and DETERMINISTIC in both halves (the model of
+//     go-interpreter.abnf): `go f()` only QUEUES a nullary closure, and a receive
+//     that finds its channel empty RUNS THE QUEUE - each queued goroutine to
+//     completion, in spawn order - until one of them fills it. There is no
+//     suspension point, so there is no second stack to keep and the floor's
+//     pthread-backed tag 15/16 coroutine is not needed. The whole model is goQueue
+//     below: one array and one drain loop.
 //
-// ----- WALL, and it was lowered in the EMITTER --------------------------------
+// ----- js_gounctl is lowered in the EMITTER -----------------------------------
 //
-// js_gounctl used to be an extern that read the completion value out of a
-// CONTROL SIGNAL. A signal is the floor's private tag-10 cell and no host
-// builtin opens one, so layer 2 could never have written it - exactly the
-// position PHP's and Swift's scope probes were in. js_ctl_kind and js_ctl_value
-// ARE floor externs and an EMITTER may call them, so go-to-llvm-ir.abnf's
-// emitUnctl now emits the two-arm select in IR. One extern left layer 2 (43 ->
-// 42) and two floor ones joined the declare list, which is the same accounting
-// correction the Dart port recorded.
+// js_gounctl reads the completion value out of a CONTROL SIGNAL, the floor's
+// private tag-10 cell, which no host builtin opens - so layer 2 cannot write it.
+// js_ctl_kind and js_ctl_value ARE floor externs and an EMITTER may call them, so
+// go-to-llvm-ir.abnf's emitUnctl emits the two-arm select in IR.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -128,9 +114,9 @@
 // indexOf ignores its from-index, array.length is not assignable, and there are
 // no exponent literals.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+// The shared layer-2 runtime. It supplies the externs every language implements
+// identically, parameterised by the rtk* hooks below. Same mechanism ruby uses for
+// `import "./regex.js"`.
 import "./runtime.metajs"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
@@ -254,11 +240,10 @@ function goDictFind(keys, k) {
 
 // A Go map key that is a VALUE TYPE - a struct or an array. Go's == on those is
 // element-by-element (goValueEq), so `m[Pair{1,2}]` has to find an entry stored under a
-// DIFFERENT Pair object holding the same fields; rtDictFind's === answered -1 and every
-// lookup, delete and comma-ok missed. A slice is excluded on purpose: it is not a legal
-// Go map key at all and identity is the cheaper answer for it. The twins are the goLang
-// arm of dictKeyEq in abnf/jsrt.go and mapFind in languages/go-interpreter.abnf.
-// docs/todo.md 1.5.
+// DIFFERENT Pair object holding the same fields, which rtDictFind's === would miss. A
+// slice is excluded on purpose: it is not a legal Go map key at all and identity is the
+// cheaper answer for it. The twins are the goLang arm of dictKeyEq in abnf/jsrt.go and
+// mapFind in languages/go-interpreter.abnf.
 function goKeyIsVal(k) {
     if (Array.isArray(k)) { return true }
     var c = goClassOf(k)
@@ -269,11 +254,10 @@ function goKeyIsVal(k) {
 // rt.strictEq over the value model Go uses. The two number tags compare by
 // VALUE, never by identity: int8(1) == 1 holds and float64(1) == 1 holds.
 //
-// THE SIZED ARM IS NOT the double reading, and the differential probe found it
-// the hard way. giEq is `giVal(l) == giVal(r)` - an EXACT int64 comparison - so
-// 9007199254740992 (a plain number, the largest one giNorm keeps unboxed) and
-// 9007199254740993 (a box, one past it) are DIFFERENT, and real go 1.26.5 says
-// so too. Reading both through a double rounds the second one down and answers
+// THE SIZED ARM IS NOT the double reading. giEq is `giVal(l) == giVal(r)` - an
+// EXACT int64 comparison - so 9007199254740992 (a plain number, the largest one
+// giNorm keeps unboxed) and 9007199254740993 (a box, one past it) are DIFFERENT, as
+// in go. Reading both through a double rounds the second one down and answers
 // true. sintCmp is the exact comparison: two cells with the same payload compare
 // equal whatever the signedness, and two with different payloads never do.
 function goStrictEq(a, b) {
@@ -288,7 +272,7 @@ function goStrictEq(a, b) {
 
 // goIsNilMap: "this is the zero value of a map type" - an empty dict carrying the
 // __nil mark. The zero value of a map is a MARKED EMPTY MAP and not nil, because a
-// nil map has to READ like an empty one in Go (docs/todo.md 1.9); emitZeroTy in
+// nil map has to READ like an empty one in Go; emitZeroTy in
 // languages/go-to-llvm-ir.abnf has the argument. The twins are giIsNilMap in
 // abnf/jsrt.go and isNilMap in languages/go-interpreter.abnf.
 function goIsNilMap(v) {
@@ -395,15 +379,13 @@ function goCopyVal(v) {
     var cls = goClassOf(v)
     if (cls === undefined) { return v }
     var o = {}
-    // THE HIDDEN SLOTS HAVE TO BE CARRIED OVER BY HAND, and this is the manual's
-    // keysOf trap (chapter 7.9) live in Go: keysOf answers only the own keys whose
-    // names do NOT start with "__", while the Go twin's goCopyVal walks the object's
-    // raw key list and therefore keeps __class. Without these two lines a VALUE
-    // receiver - which is exactly what goCopyVal exists for - got a copy with no
-    // descriptor, so `func (c C) m()` on a struct holding a slice answered
-    // "len() of a object" natively while llvm.Run printed the length. __nil goes with
-    // it: the zero value of a slice or map type is a MARKED empty container, and a
-    // copy that dropped the mark would stop comparing equal to nil.
+    // THE HIDDEN SLOTS HAVE TO BE CARRIED OVER BY HAND - the manual's keysOf trap
+    // (chapter 7.9): keysOf answers only the own keys whose names do NOT start with
+    // "__", while the Go twin's goCopyVal walks the object's raw key list and
+    // therefore keeps __class. A VALUE receiver's copy without a descriptor breaks
+    // every method and builtin on it. __nil goes with it: the zero value of a slice
+    // or map type is a MARKED empty container, and a copy that dropped the mark
+    // would stop comparing equal to nil.
     o.__class = cls
     if (v.__nil === true) { o.__nil = true }
     var ks = keysOf(v)
@@ -487,9 +469,7 @@ function gopObj(o, depth) {
     var cls = goClassOf(o)
 
     // THE error INTERFACE WINS OVER fmt.Stringer, which wins over every built-in
-    // rendering - exactly the order fmt's handleMethods uses. Error() was not
-    // consulted at all, so a value with `Error() string` printed `{missing b}` where
-    // go prints `missing b`, in all three engines. docs/todo.md 1.3.
+    // rendering - exactly the order fmt's handleMethods uses.
     if (cls !== undefined && depth < 32) {
         if (goHas(cls, "Error")) {
             var emth = cls.Error
@@ -541,29 +521,22 @@ function gopObj(o, depth) {
     }
 
     // A complex: Go spells it (re+imi), with the sign always written out. BOTH
-    // PARTS ARE float64 AND RENDER AS ONE - a complex128 has no other component
-    // type - so the FLOAT rendering is what has to be used and the generic
-    // number text is not: it printed `(1234567.125-0.5i)` where go prints
-    // `(1.234567125e+06-0.5i)`, `Infinity` where go prints `+Inf`, and lost the
-    // sign of a -0.0 part entirely. 27 of 100 rows of a 600-line complex probe,
-    // in all three engines. The twins are cxStr in go-interpreter.abnf and the
-    // $cx arm of gopObj in abnf/jsrtgolang.go.
+    // PARTS ARE float64 AND RENDER AS ONE, through the FLOAT rendering. The twins
+    // are cxStr in go-interpreter.abnf (which has the details) and the $cx arm of
+    // gopObj in abnf/jsrtgolang.go.
     if (name == "$cx") {
         return "(" + floStr(flo(goNum(o.re), 1)) + goCxSign(floStr(flo(goNum(o.im), 1))) + "i)"
     }
 
     // A pointer CELL (&n, new(int), &p): printed as & followed by the pointee.
     //
-    // THE ONE PLACE LAYER 2 CANNOT MATCH THE GO TWIN, and it is stated rather
-    // than hidden. The cell's `o` is the SCOPE that holds the variable, and a
-    // scope is the C floor's private storage: there is no host builtin that
-    // reads one, which is the same reason a scope probe cannot live in layer 2
-    // at all (docs/runtime-next-plan.md part 3, item 1). Unlike a probe this
-    // one CANNOT be lowered into the emitter, because it is reached from
-    // arbitrarily deep inside a value tree at run time, not from a fixed call
-    // site. The object-backed form (new(T) over a one-slot object) IS readable
-    // and is rendered exactly. See the report in the plan; nothing in
-    // tests/go-test-full.go prints a scope-backed pointer.
+    // THE ONE PLACE LAYER 2 CANNOT MATCH THE GO TWIN. The cell's `o` is the SCOPE
+    // that holds the variable, and a scope is the C floor's private storage: there
+    // is no host builtin that reads one. Unlike a scope probe this one CANNOT be
+    // lowered into the emitter, because it is reached from arbitrarily deep inside
+    // a value tree at run time, not from a fixed call site. The object-backed form
+    // (new(T) over a one-slot object) IS readable and is rendered exactly. Nothing
+    // in tests/go-test-full.go prints a scope-backed pointer.
     if (name == "$ptr") {
         var holder = o.o
         if (goIsObj(holder)) {
@@ -585,7 +558,7 @@ function gopObj(o, depth) {
             // AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt never reaches its
             // Error() or String(): reflect's CanInterface is false for anything read
             // through a lower-case field, transitively. Raising the depth to the
-            // method guard's own limit says exactly that. docs/todo.md 1.3.
+            // method guard's own limit says exactly that.
             var fd = depth + 1
             if (fd < 64 && !goNameExported(fn)) { fd = fd + 64 }
             fo = fo + gopRender(goProp(o, fn), fd)
@@ -645,15 +618,7 @@ function gopKeyLess(numeric, num, txt, a, b) {
 // double with style 1 (floGo) and floStr renders a box in ITS OWN language's
 // style: languages/lib/runtime.c's jf_text sends style 1 to go_float_str,
 // abnf/jsrtjvm.go's jvmFloText sends floGo to goFloStr, and the interpreter half
-// reaches the same code. This file used to carry its own goFloStr / goSignBit /
-// goDigits / goLayout / goSci - about 85 lines - under a comment claiming
-// "the floor's floStr cannot be used: jvmFloText routes style 1 to jvm_flo_str,
-// which is Java's layout". THAT COMMENT WAS STALE when it was written: the go
-// arm had landed two commits earlier, in d30629f. Verified before deleting, with
-// a 47-value probe (0, the infinities, -0.0, 1e-5 and 1e-4 either side of the
-// %e/%f switch, 1e6/1e7, 1e20, 5e-324, MaxFloat64, 1.0/3.0) run under real go
-// 1.26.5, the go interpreter and the go compiler: the two halves agree with each
-// other and with real go on every value both before and after.
+// reaches the same code.
 
 // ================================= float32: the 32 BIT WIDTH ================
 //
@@ -788,7 +753,7 @@ function js_gflo32(v) { return flo(rtF32Round(goNum(v)), 4) }
 // js_gf32fix: the WIDTH, applied to a binary operator's result. go-to-llvm-ir.abnf
 // wraps every arithmetic and every comparison in it - but ONLY in a program whose
 // source text mentions `float32` at all (usesF32 there, the gate usesComplex
-// established), so every other Go program emits exactly the IR it emitted before.
+// established), so every other Go program's IR is untouched.
 //
 // IT IS A POST-FIX AND NOT A REPLACEMENT, and that shape is forced rather than
 // chosen: the operators it corrects are FLOOR externs (js_giarith, js_giadd,
@@ -800,9 +765,8 @@ function js_gflo32(v) { return flo(rtF32Round(goNum(v)), 4) }
 // is returned untouched, which is what makes the non-f32 path in an f32 program
 // cost one call and nothing else.
 //
-// BOTH OPERANDS CONVERT FIRST and rounding only the result is not the same
-// answer - the finding 8f43e84 measured for java's float, and the reason the
-// operands are rounded before the operator rather than after it.
+// BOTH OPERANDS CONVERT FIRST: rounding only the result is not the same answer,
+// which is why the operands are rounded before the operator rather than after it.
 //
 // GO PROMOTES THE OTHER WAY FROM JAVA. Java widens a mixed float/double pair
 // (JLS 5.6.2); Go has no implicit conversion between float32 and float64 at all,
@@ -833,7 +797,7 @@ function js_gf32fix(op, rr, l, r) {
 // shows on ORDINARY values and not only on overflow: (0.1+0.2i)/(3+4i) is
 // (0.044000000000000004+0.008i) in go where the textbook formula gives
 // (...+0.008000000000000002i), and (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) where the
-// textbook formula gives (NaN+NaNi). 55 of 100 rows of a 600-line probe.
+// textbook formula gives (NaN+NaNi).
 //
 // It answers a plain {re, im} object rather than a $cx: the class descriptor
 // lives in the emitted module's scope, so the emitter builds the complex. The
@@ -1000,14 +964,11 @@ function gopVerb(verb, a) {
 // in force. A control character Go would spell \x00 is left verbatim. The twin
 // is gQuoteBody in languages/go-interpreter.abnf; keep the two in step.
 //
-// IT WALKS BYTES, NOT CHARACTERS, and the differential probe found the
-// difference: abnf/jsrtgolang.go's loop is `for i := 0; i < len(s); i++` over a
-// Go string, so a multi-byte rune arrives as its individual UTF-8 bytes and each
-// one becomes the CODE POINT of that byte value (`out += string(c)`). %q of
-// "hello" with an e-acute therefore prints the two bytes C3 A9 as U+00C3 U+00A9
-// and not as the letter. Reproduced here rather than corrected: both halves have
-// to say the same thing, and %q's byte spelling is a question about the Go
-// twin's string model, not about layer 2.
+// IT WALKS BYTES, NOT CHARACTERS, as abnf/jsrtgolang.go's loop does
+// (`for i := 0; i < len(s); i++` over a Go string): a multi-byte rune arrives as its
+// individual UTF-8 bytes and each one becomes the CODE POINT of that byte value, so
+// %q of "hello" with an e-acute prints the two bytes C3 A9 as U+00C3 U+00A9. Kept
+// on purpose: both halves have to say the same thing.
 function gopQuoteBody(s, delim) {
     var bs = goBytes(s)
     var dc = delim.charCodeAt(0)
@@ -1139,14 +1100,11 @@ function goRunes(s) {
     return {cps: cps, offs: offs, bytes: off}
 }
 
-// ===================================================== the ten NEUTRAL ======
+// ===================================================== the NEUTRAL externs ==
 //
-// Ten of the 42 are not Go's: they live in abnf/jsrt.go, other grammars emit
-// them, and they are here only because the C floor has not got them. The plan's
-// running list of floor candidates gains none that were not already on it -
-// js_goslice / js_gospread have now been written out by csharp and go, and
-// js_dict_new / js_is_type / js_jadd / js_pyin / js_pyset by five languages
-// each.
+// These are not Go's: they live in abnf/jsrt.go, other grammars emit them, and
+// they are here (or in the shared lib/runtime.metajs) only because the C floor
+// has not got them.
 
 // js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
@@ -1197,7 +1155,7 @@ function js_pyin(x, c) {
 
 // List element (negative wraps) or map entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
-// rtkDictFind; the index coercion now truncates, which is the oracle).
+// rtkDictFind; the index coercion truncates).
 
 // s[lo:hi]. On a Go STRING the bounds are BYTE offsets and the result is the
 // decoded byte range; on a slice the elements are COPIED. An absent bound
@@ -1272,13 +1230,8 @@ function goDecodeUtf8(bs) {
     return out
 }
 
-// js_gospread is the C FLOOR's now (lib/runtime.c, next to js_bytelen). It was
-// HERE and in csharp-rt.metajs, one specification in two copies; having a copy
-// here as well as in the floor is a duplicate-symbol link error, so the floor
-// body and these two deletions are ONE change. Measured on the way in: 2,000,000
-// spread elements cost about 1.0 s here and under 35 ms in the floor - but only
-// 3.7% of the program, because the VARIADIC CALLEE's prologue, which is still
-// MetaJS, dominates. The numbers are at the floor body.
+// js_gospread is the C FLOOR's (lib/runtime.c, next to js_bytelen); a copy here as
+// well would be a duplicate-symbol link error.
 
 // The Go range bound: an int is its own bound, otherwise the element/entry count.
 function js_range_len(v) {
@@ -1306,7 +1259,7 @@ function js_range_val(v, i) {
     return undefined
 }
 
-// ===================================================== Go's own 32 ==========
+// ===================================================== Go's own externs =====
 
 // ----- indexing and the map -------------------------------------------------
 
@@ -1488,10 +1441,8 @@ function js_gotypeis(v, want) {
         // box, so a jsJFlo and a jsGInt both fall through to the default "any" -
         // `case float64:` in a type switch of interface{} does not match a
         // float64 held in a `var f float64` slot, and `case int:` does not match
-        // a uint8. Real go 1.26.5 answers "float64" for the first and "other"
-        // for the second, so the two halves agree with each other and one of
-        // them agrees with go; making layer 2 "right" here would have broken
-        // byte identity, which is the gate. Found by probe C, two lines.
+        // a uint8. Go answers "float64" for the first and "other" for the second;
+        // the two halves have to agree byte for byte, so layer 2 follows the twin.
         if (floIs(v) || sintIs(v)) { got = "any" }
         else if (v === Math.trunc(v)) { got = "int" }
         else { got = "float64" }
@@ -1643,7 +1594,6 @@ function js_gofield(o, kv) {
         // slot rather than through goPkgScope: this is on every field access in the
         // language, and every receiver that is not a package object pays exactly one
         // property read for it. The twin is goPkgSlot in abnf/jsrtgolang.go.
-        // docs/todo.md 1.5.
         var ps = o.__pkgscope
         if (ps !== undefined && scopeHas(ps, key)) { return scopeGet(ps, key) }
         if (goHas(o, key)) { return o[key] }
@@ -1662,17 +1612,14 @@ function js_gofield(o, kv) {
 }
 
 // The field `name` PROMOTED from an embedded struct of o, searched BREADTH FIRST,
-// which is Go's own rule: the shallowest depth wins. Only ONE level was searched, in
-// all three engines, so a two-level promotion (`type B struct{A}; type C struct{B}`)
-// answered <nil> where go answers the field. The depth cap matches the __class walks
-// (manual 7.9): a pointer cycle here would otherwise not terminate. Answers undefined
-// when nothing is found. docs/todo.md 1.3.
+// which is Go's own rule: the shallowest depth wins. The depth cap matches the
+// __class walks (manual 7.9): a pointer cycle here would otherwise not terminate.
+// Answers undefined when nothing is found.
 function goPromField(o, key, maxd) {
-    // LEVEL ONE WITHOUT ALLOCATING, which is what the one-level loop this replaced
-    // did: js_gofield reaches here on every miss of an own property (a method value,
-    // a builtin), so the common answer must cost no array and no frontier. The
-    // breadth-first walk below only starts when there IS an embedded struct and the
-    // first level did not have the name.
+    // LEVEL ONE WITHOUT ALLOCATING: js_gofield reaches here on every miss of an own
+    // property (a method value, a builtin), so the common answer must cost no array
+    // and no frontier. The breadth-first walk below only starts when there IS an
+    // embedded struct and the first level did not have the name.
     var cls1 = goClassOf(o)
     if (cls1 === undefined) { return undefined }
     var fs1 = cls1.__fields
@@ -1809,19 +1756,15 @@ function goMemberCall(recv, name, args) {
 }
 
 // A method call nothing claimed. THE WORDING IS abnf/jsrt.go's rt.memberCall,
-// shape for shape, and that is the whole point of this function: llvm.Run's
-// js_gomcall falls back to that shared member-call when rt.goMethod misses, this
-// half fell back to one flat "unknown method 'X'", and the two compiled halves
-// therefore printed DIFFERENT TEXT for the same program -
+// shape for shape, because llvm.Run's js_gomcall falls back to that shared
+// member-call when rt.goMethod misses, and the two compiled halves must print the
+// same text:
 //
-//   s.Nope()   llvm.Run: unknown String method: Nope     native: unknown method 'Nope'
-//   o.Nope()   llvm.Run: unknown method 'Nope' on an instance
-//                                                        native: unknown method 'Nope'
+//   s.Nope()   unknown String method: Nope
+//   o.Nope()   unknown method 'Nope' on an instance
 //
-// - a live halves divergence in an error path, which no gate could see because
-// nothing asserted on the text. Go's own toolchain rejects both programs at
-// COMPILE time (`o.Nope undefined (type Foo has no field or method Nope)`), so
-// neither wording is Go's; agreeing is what is available. docs/todo.md 3.2.
+// Go's own toolchain rejects both programs at COMPILE time, so neither wording is
+// Go's; agreeing is what is available.
 function goMcallMiss(recv, name) {
     if (typeof recv == "string") { fail("unknown String method: " + name); return }
     if (Array.isArray(recv)) { fail("unknown list method '" + name + "'"); return }
@@ -1867,8 +1810,8 @@ function js_gotry(fn) {
 
 // THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function returns.
 // An unrecovered panic is reported HERE rather than being let out of the module,
-// so the floor's uncaught-throw handler never adds its own prefix. Measured,
-// go 1.26.5, on stderr with exit status 2:
+// so the floor's uncaught-throw handler never adds its own prefix. Go writes, on
+// stderr with exit status 2:
 //
 //     panic: abort probe
 //     panic: 42
@@ -1882,8 +1825,8 @@ function js_gotry(fn) {
 // table, the same wall as dart's `catch (e, s)`, manual 7.9).
 //
 // Twins: runEntry in languages/go-interpreter.abnf and js_gotop in
-// abnf/jsrtgolang.go - same wording, same stream (stderr, where go puts it and
-// where this used to use println), same exit status.
+// abnf/jsrtgolang.go - same wording, same stream (stderr, where go puts it), same
+// exit status.
 function js_gotop() {
     var n = goPanics.length - 1
     if (n < 0) { return undefined }
@@ -1910,15 +1853,12 @@ function js_gorepanic() {
 // ----- interface satisfaction -------------------------------------------------
 //
 // A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it exactly when
-// it has every method. js_gotypeis can only compare type NAMES, so `v.(Sp)` was
-// false for a value that DOES satisfy Sp, `case Sp:` never fired, and the
-// single-result `v.(Sp)` never panicked for one that does not. The method set
+// it has every method (js_gotypeis can only compare type NAMES). The method set
 // arrives as a comma-joined string the emitter built at parse time from the
 // interface declaration (ifaceMethodCsv in languages/go-to-llvm-ir.abnf); an
 // interface whose body is not a plain method list contributes NO names, which
-// reads as "satisfied by anything" - exactly what this engine did before. The
-// twins are typeMatches / goSatisfies in languages/go-interpreter.abnf.
-// docs/todo.md 1.5.
+// reads as "satisfied by anything". The twins are typeMatches / goSatisfies in
+// languages/go-interpreter.abnf.
 
 // A method of v's own descriptor, or one PROMOTED from an embedded struct.
 function goHasMethod(v, name) {
@@ -1979,8 +1919,8 @@ function js_goifis(v, csv) {
 function js_goifas(v, namev, csv) {
     // A NIL INTERFACE ASSERTED TO ANYTHING PANICS, and with a DIFFERENT text: go says
     // `interface conversion: interface is nil, not main.I`, naming no method because
-    // there is no dynamic type. goMissingMethod answers "" for a non-instance, so nil
-    // used to pass straight through in all three engines. docs/todo.md 1.3.
+    // there is no dynamic type. It is tested first because goMissingMethod answers ""
+    // for a non-instance.
     if (v === undefined || v === null) {
         throw "interface conversion: interface is nil, not " + goStrOf(namev)
     }
@@ -2015,10 +1955,9 @@ function goTypeNameOf(v) {
 // prints `3 3 3`, not `[3 3 3]` - and an unmarked array could not be told from a
 // Go ARRAY value ([3]int is a plain array in this value model, by design). A
 // tag-6 object CAN be marked where an array cannot: runtime.c's set_member
-// refuses a named key on tag 5 (docs/todo.md 3.1). The emitter gates every call
-// to these on usesMultiRet, so a program with no 2-result function never reaches
-// them. The twins are goMvArr / goMvArgs in languages/go-interpreter.abnf.
-// docs/todo.md 1.5.
+// refuses a named key on tag 5. The emitter gates every call to these on
+// usesMultiRet, so a program with no 2-result function never reaches them. The
+// twins are goMvArr / goMvArgs in languages/go-interpreter.abnf.
 
 // The plain array behind a marked result; the identity on everything else,
 // including the plain arrays the comma-ok forms hand to an unpacking assignment.
@@ -2093,8 +2032,7 @@ function js_rundefers(list) {
 
 // ----- goroutines and channels ----------------------------------------------
 //
-// THE ONE GENUINELY NEW QUESTION OF THIS MIGRATION, and the answer is that the
-// floor's coroutine primitive (tags 15/16, a real second stack) is NOT needed.
+// The floor's coroutine primitive (tags 15/16, a real second stack) is NOT needed.
 // Concurrency in both halves is COOPERATIVE and DETERMINISTIC: `go f(...)` puts
 // an already-bound nullary closure on goQueue and returns, and a receive that
 // finds its channel empty RUNS THE QUEUE - each queued goroutine to completion,
@@ -2326,11 +2264,10 @@ function goFieldTy(o, name) {
     return ""
 }
 
-// s[i] = v THROUGH A SLICE HEADER: one extern instead of the three the emitted
-// IR used (read .a, add .o, js_pyset), so carrying the width here costs less
-// than the store cost before it. The width is the header's recorded element type
-// first - an empty []uint8 has no element to take one from - and the box already
-// in the slot second.
+// s[i] = v THROUGH A SLICE HEADER: one extern (offset, width and store) rather than
+// three emitted calls. The width is the header's recorded element type first - an
+// empty []uint8 has no element to take one from - and the box already in the slot
+// second.
 function js_gisetsl(h, iv, v) {
     if (!goIsObj(h)) { return js_pyset(h, iv, v) }
     var arr = h.a
@@ -2342,8 +2279,7 @@ function js_gisetsl(h, iv, v) {
     else if (idx >= 0 && idx < arr.length) { nv = goAdoptLike(arr[idx], v) }
     // THE BOUND IS THE HEADER'S LENGTH, NOT THE BACKING ARRAY'S, and the index
     // reported is the one the program wrote. `base[0:2]` of a five element slice
-    // has cap 5, so a check against the storage let sub[4] through - and with a
-    // non-zero offset the old message named the OFFSET index. docs/todo.md 1.9.
+    // has cap 5, and sub[4] still panics.
     if (ui < 0 || ui >= goIdx(h.n)) { goIdxPanic(ui, goIdx(h.n)) }
     arr[idx] = nv
     return undefined
@@ -2351,13 +2287,12 @@ function js_gisetsl(h, iv, v) {
 
 // The DIVISOR of an integer '/' or '%', checked before the operator runs. Go's
 // integer divide by zero is a RECOVERABLE run-time panic, and the floor's si_arith
-// raises it with die() - a hard abort no js_gotry can catch - so a native binary
-// aborted where llvm.Run (whose twin uses rt.fail, which panics) recovered. This file
-// cannot call the floor's js_giarith by name to wrap it, so the emitter emits this as
-// a PRE-CHECK instead (emitDivZ in languages/go-to-llvm-ir.abnf), the mirror image of
-// js_gf32fix's post-fix. A FLOAT divisor is passed over: a float64 divided by zero is
-// an infinity in Go, not a panic. The twin is js_gidivz in abnf/jsrtgolang.go and the
-// interpreter's own check is gIntDivZ in languages/go-interpreter.abnf.
+// raises it with die() - a hard abort no js_gotry can catch. This file cannot call
+// the floor's js_giarith by name to wrap it, so the emitter emits this as a
+// PRE-CHECK instead (emitDivZ in languages/go-to-llvm-ir.abnf), the mirror image of
+// js_gf32fix's post-fix. A FLOAT divisor is passed over: a float64 divided by zero
+// is an infinity in Go, not a panic. The twin is js_gidivz in abnf/jsrtgolang.go
+// and the interpreter's own check is gIntDivZ in languages/go-interpreter.abnf.
 function js_gidivz(r) {
     if (floIs(r)) { return undefined }
     if (goNum(r) === 0) { goRTPanic("integer divide by zero") }
@@ -2382,7 +2317,7 @@ function js_gislbounds(lo, hi, mx, cp, isSl) {
 
 // x[i] THROUGH A SLICE HEADER: the read that mirrors js_gisetsl. It exists for
 // the bound - js_map_get sees only the backing array and cannot know the header's
-// length, so `base[0:2][4]` read the storage in both halves where go panics.
+// length (`base[0:2][4]` must panic).
 function js_gislget(h, iv) {
     if (!goIsObj(h)) { return js_map_get(h, iv) }
     var arr = h.a
@@ -2397,10 +2332,9 @@ function js_gisetat(c, k, v) {
     // A store into a NIL MAP is a panic in Go, and it is the one thing a nil map
     // does not share with an empty one (see goIsNilMap).
     if (goIsNilMap(c)) { throw "assignment to entry in nil map" }
-    // An out of range ARRAY store panics with the same wording the READ uses. It
-    // used to fall through to js_pyset, whose own bound is the floor's `fail` - a
-    // hard abort, so a recover() around `arr[3] = 1` caught it under llvm.Run and
-    // the native binary died. docs/todo.md 1.9.
+    // An out of range ARRAY store panics with the same wording the READ uses,
+    // rather than reaching js_pyset, whose own bound is the floor's `fail` (a hard
+    // abort no recover() can catch).
     if (Array.isArray(c)) {
         var ai = goIdx(k)
         if (ai < 0 || ai >= c.length) { goIdxPanic(ai, c.length) }

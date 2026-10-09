@@ -24,9 +24,8 @@
 //   - anything under a written-out conversion: float64(0.1) + float64(0.2) really
 //     IS 0.30000000000000004 in Go, because each conversion rounds and the
 //     arithmetic is then float64 arithmetic. tyAt already reports that case.
-//   - a complex constant, a rune literal, '&' '|' '^' '&^' with a negative
-//     operand, a shift count over 4096, and any division or remainder by zero
-//     (which is a compile error in Go, not a value).
+//   - '&' '|' '^' '&^' with a negative operand, a shift count over 4096, and any
+//     division or remainder by zero (which is a compile error in Go, not a value).
 // An intermediate wider than CB_LIMIT limbs also abandons the fold, so a
 // pathological constant expression cannot make the front end quadratic.
 var CB_BASE = 10000000
@@ -424,14 +423,14 @@ function cNot(c) {
     // ^x is -x-1 at arbitrary precision.
     return cAddSub(cInt(0 - 1, cbOne()), c, true)
 }
-// ----- a COMPLEX constant, the fourth thing c240f92 left unfolded -----
-// (0.1 + 0.2i) * (0.1 + 0.2i) is exactly -0.03 + 0.04i and Go prints it; the
-// unfolded path multiplied four already-rounded doubles and answered
-// -0.030000000000000006+0.04000000000000001i. A complex constant is a PAIR of the
-// exact rationals above, and it carries s/n/d as a zero so that any reader that
-// does not know about it reads a zero rather than a missing field. Both parts are
-// marked FLOAT: there is no integer division anywhere inside complex arithmetic,
-// and cDiv2 decides which one it does off exactly that flag.
+// ----- a COMPLEX constant -----
+// (0.1 + 0.2i) * (0.1 + 0.2i) is exactly -0.03 + 0.04i and Go prints it; multiplying
+// four already-rounded doubles would answer -0.030000000000000006+0.04000000000000001i.
+// A complex constant is a PAIR of the exact rationals above, and it carries s/n/d as
+// a zero so that any reader that does not know about it reads a zero rather than a
+// missing field. Both parts are marked FLOAT: there is no integer division anywhere
+// inside complex arithmetic, and cDiv2 decides which one it does off exactly that
+// flag.
 function cAsF(c) { return {s: c.s, n: c.n, d: c.d, f: true} }
 function cIsCx(c) { return c != null && c.cx === true }
 function cxMk(re, im) {
@@ -462,7 +461,7 @@ function cxApply(op, x, y) {
 }
 // 2i / 2.5i / 1e3i: the literal is the IMAGINARY part, read exactly the way a float
 // literal is. Only '==' and '!=' are legal on a complex constant, so the ordering
-// comparisons answer null and fall back exactly as before.
+// comparisons answer null and fall back to the unfolded path.
 function goImagLitC(text, pos) {
     var im = cFromFloatText(text.substring(0, text.length - 1))
     regConst(pos, im == null ? null : cxMk(cMk(0, [], cbOne(), true), im))
@@ -609,9 +608,8 @@ function cFromIntText(s, radix, start) {
 // ends there, and cNone is the "ends here, and is not a constant" entry. It is
 // load-bearing: a prefix operator and a non-folding binary run end at the SAME
 // offset as their last operand, so `ci % 2` would otherwise be read back as the
-// constant 2 that the literal registered - which silently made every `ci%2 == 1`
-// in the corpus false. Every node that ends where an operand ends either
-// re-registers its own value or clears.
+// constant 2 that the literal registered, and `ci%2 == 1` would be false. Every
+// node that ends where an operand ends either re-registers its own value or clears.
 var constByPos = {}
 var cNone = {s: 0, n: [], d: [], f: false, none: true}
 function regConst(pos, c) {
@@ -743,23 +741,17 @@ function goNegC(t, pos) {
     if (c == null) { regCFn(pos, cNegFn(inner)); return makeNeg(t) }
     var nc = cNeg(c)
     regConst(pos, nc)
-    // UNARY MINUS IS A FOLD SITE, and the reason is a value rather than a
-    // tidy-up: a Go CONSTANT HAS NO SIGNED ZERO, so `-0.0` is exactly the
-    // constant 0 and `complex(-0.0, 0.0)` is (0+0i) before the program runs.
-    // cNeg already says so (it hands a zero back unchanged); what was missing
-    // is that nothing CONSUMED the folded value - cMaterialize is reached only
-    // from goFoldConst, i.e. only from a BINARY run - so the runtime thunk ran
-    // instead and answered -0.0. `x := -0.0`, `var y float64 = -0.0`,
-    // `const c = -0.0` and the bare literal all printed -0 where go prints 0,
-    // and every one of the eight remaining lines of a 346-value complex probe
-    // was downstream of that single -0.
+    // UNARY MINUS IS A FOLD SITE because a Go CONSTANT HAS NO SIGNED ZERO:
+    // `-0.0` is exactly the constant 0 and `complex(-0.0, 0.0)` is (0+0i)
+    // before the program runs. cNeg hands a zero back unchanged, but
+    // cMaterialize is otherwise reached only from goFoldConst (a BINARY run),
+    // so without this the runtime thunk would answer -0.0 for `x := -0.0`,
+    // `var y float64 = -0.0`, `const c = -0.0` and the bare literal.
     //
-    // Only a ZERO materialises here. Folding every unary minus would be the
-    // principled form, but it would also re-route `-9223372036854775808` and
-    // every other magnitude through cMaterialize's own wrap rules, which is a
-    // change with no defect behind it; the zero is the whole observable
-    // difference and it is the one Go's "constants have no signed zero" rule
-    // actually forces.
+    // Only a ZERO materialises here. Folding every unary minus would also
+    // re-route `-9223372036854775808` and every other magnitude through
+    // cMaterialize's own wrap rules for no observable gain; the zero is the
+    // one difference Go's "constants have no signed zero" rule forces.
     if (nc.s === 0) { return cMaterialize(nc) }
     return makeNeg(t)
 }
@@ -799,8 +791,8 @@ function cFromRadixText(text) {
 // into the enclosing frame (a decline), while a const only ever binds inside the
 // frame of the block that declares it.
 //
-// WHAT IT DECLINES, each falling back to exactly the previous behaviour rather than
-// to a half-fold:
+// WHAT IT DECLINES, each falling back to the unfolded path rather than to a
+// half-fold:
 //   - a spec that carries a TYPE (const x float64 = 0.1). Go converts - and so
 //     rounds - at the declaration, so x + 0.2 really is float64 arithmetic there.
 //   - IOTA, and with it any spec that REPEATS the previous spec's expression list.
@@ -872,9 +864,9 @@ function cSpecVal(fns, n, ok, io) {
 // A bare name registers its constant against its own end position, exactly as a
 // literal does, so every fold above it reads names and literals the same way. The
 // thunk is UNCHANGED - the name still reads its variable - so a fold is the only
-// thing that can consume it, and a context the grammars do not fold behaves as
-// before. The clear on the miss is the constByPos invariant: a node that ends where
-// an operand ends either re-registers or clears.
+// thing that can consume it, and a context the grammars do not fold is unaffected.
+// The clear on the miss is the constByPos invariant: a node that ends where an
+// operand ends either re-registers or clears.
 function goNameC(name, pos) {
     if (name === "iota") {
         // No CONSTANT (see cFnByPos: folding iota would poison the re-emitted
@@ -888,8 +880,8 @@ function goNameC(name, pos) {
     return makeVarRef(name)
 }
 // A const spec binds its names and hands the item list on with the position markers
-// CExprItem pushed taken back out, so the builders below see the shape they always
-// did. items = [name..., {ty}?, thunk, {cat}, thunk, {cat}, ...].
+// CExprItem pushed taken back out, so the builders below see the plain shape.
+// items = [name..., {ty}?, thunk, {cat}, thunk, {cat}, ...].
 function cBindSpec(items) {
     var names = []
     var i = 0
@@ -910,8 +902,7 @@ function cBindSpec(items) {
     // The spec's expression list AS FUNCTIONS OF IOTA. A spec that HAS one records
     // it as the group's current list; a spec with no '=' at all repeats it, which
     // is Go's rule and the whole reason the fn channel exists. Anything else (a
-    // name count that does not match the expression count) binds nothing, exactly
-    // as the old iota watermark did.
+    // name count that does not match the expression count) binds nothing.
     var fns = []
     if (ats.length === names.length && rest.length === names.length) {
         var af = 0
@@ -933,7 +924,7 @@ function cBindSpec(items) {
     // it cannot reach the folder and therefore cannot change any expression's
     // value. Flat rather than scoped, which is the one thing it gives up: a
     // function-local typed const shadowing a package-level one of the same name
-    // would take the inner value for both. docs/todo.md 2.7.
+    // would take the inner value for both.
     if (typed) {
         var tn = 0
         while (tn < names.length) {
@@ -949,10 +940,10 @@ function cBindSpec(items) {
     while (z < rest.length) { out.push(rest[z]); z = z + 1 }
     return out
 }
-// A rune literal is an ordinary INTEGER constant in Go ('A' is 65). It was left out
-// of the first fold only because its value is built inside the rule rather than
-// read back off the matched text; registering it here at the literal's own end
-// position makes 'z' - 'a' and 1 << ('c' - 'a') fold like any other pair.
+// A rune literal is an ordinary INTEGER constant in Go ('A' is 65). Its value is
+// built inside the rule rather than read back off the matched text, so it is
+// registered here at the literal's own end position, which makes 'z' - 'a' and
+// 1 << ('c' - 'a') fold like any other pair.
 function goRuneLitC(v, pos) {
     regConst(pos, cInt(1, cbFromSmall(v)))
     return makeConst(v)
