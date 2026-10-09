@@ -166,8 +166,7 @@ LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 BlockComment = KDocOk "/*" :whitespace() { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
 // A KDoc comment is NOT trivia to Kotlin's parser: `/** ... */` is parsed, and the
 // errors it finds are ordinary PsiErrorElements in the file's tree. This grammar lexes
-// the whole comment away, so every such error was invisible and three corpus files
-// whose ONLY defect is inside a doc comment were wrongly accepted.
+// the whole comment away, so without this guard every such error would be invisible.
 //
 // A full KDoc sub-parser is not what those three files need. Every error element in
 // them is the same one - a qualified name with a DANGLING DOT, `Identifier expected` -
@@ -286,9 +285,9 @@ Program     = { Annotation } [ [ Modifiers ] Package ] { Import } { TopDecl } ;
 // One top-level declaration. Factored out of Program so a `package name { ... }` block
 // (the pre-1.0 package syntax that the PSI corpus still carries) can hold the same set.
 // A `package` directive and the `import` list are NOT in here: Kotlin allows them only
-// at the head of a file, and letting them recur mid-file is what made the 37 `// FILE:`
-// corpus files - several compilation units, sometimes several LANGUAGES, concatenated
-// into one .kt by the test harness - parse as though they were one legal file.
+// at the head of a file, and the `// FILE:` corpus files - several compilation units,
+// sometimes several LANGUAGES, concatenated into one .kt by the test harness - must not
+// parse as though they were one legal file.
 TopDecl     = [ Modifiers ] ( Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias | ClassDecl | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | ExtProp | ExtDelegProp | UnsupFun | PropAccessor | TopVisProp | TopProp | TopBareProp ) ;
 
 // Modifiers/annotations before a declaration are parsed and ignored. Annotations
@@ -397,8 +396,7 @@ ContextClause = "context" KwEnd "(" [ CtxParam { "," CtxParam } [ "," ] ] ")" ;
 // A context parameter is an optional name followed by its type. A LABEL is not a name
 // here: `fun foo(f: context(label@String) () -> Unit)` is refused by Kotlin's own
 // parser, which records `Expecting comma or ')'` at the `@` and then loses the rest of
-// the file (psi/contextParameters/labelInFunctionTypeContext.txt). An earlier `"@"`
-// alternative existed solely to accept that one file and cost the reject row for it.
+// the file (psi/contextParameters/labelInFunctionTypeContext.txt).
 // The modifiers are what `context(noinline a: () -> Int)` needs (psi/contracts/good/
 // holdsIn/withContextParameters.kt); they are parsed and dropped like every other
 // context-clause part.
@@ -531,19 +529,17 @@ AnnNoArgs   = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } ) ;
 // long ago, and Kotlin's own psi/packages/PackageBlockFirst.kt records it as an error
 // ("Expecting a top level declaration"). The compiler half never had it either.
 Package     <~~ takeAll() ~~> = KwPackage PkgPath [ ";" ] ;
-// The package path is an ordinary dotted name. It used to be parsed leniently (a
-// leading, trailing or doubled dot still read as a path) on the grounds that the name
-// is ignored anyway - but every file that leniency won is a psi/packages/* recovery
-// test that Kotlin REJECTS ("package .a.b.c", "package ."), so it only cost reject
-// coverage. The name is still ignored; it just has to be a name.
+// The package path is an ordinary dotted name, not a lenient one: a leading, trailing
+// or doubled dot ("package .a.b.c", "package .") is a psi/packages/* recovery test
+// that Kotlin REJECTS. The name itself is ignored.
 PkgPath     <~~ push(stripWs(up.in)) ~~>
             = KId { "." KId } ;
-// The import policy is unchanged - resolveImport still resolves, warns under
-// -warn-imports, or aborts. What is ADDED is a record of the simple name each import
-// brings in (and its `as` alias), which is what tells a supertype that is genuinely
-// OUTSIDE the program (`class MyApp : Application()` after an Android import this
-// machine cannot resolve) apart from one the resolver merely failed to find. The two
-// are different bugs and only the second is ours: see noteImportName.
+// resolveImport resolves, warns under -warn-imports, or aborts. The simple name each
+// import brings in (and its `as` alias) is also recorded, which is what tells a
+// supertype that is genuinely OUTSIDE the program (`class MyApp : Application()` after
+// an Android import this machine cannot resolve) apart from one the resolver merely
+// failed to find. The two are different bugs and only the second is ours: see
+// noteImportName.
 Import      <~~ ktImport(takeAll(), up.pos) ~~>
             = KwImport QualName [ KwAs KId <~~ push({ialias: up.in}) ~~> ] [ ";" ] ;
 QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
@@ -576,8 +572,7 @@ SkipBracketItem = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" |
 TypeParams  <~~ tpSet(parseTypeParams(up.in)) ~~>
             = SkipAngle ;
 // A trailing `;` after a function body is ordinary Kotlin - psi/FunctionExpressions.kt
-// spells `fun c() = fun name();` out with a clean tree - and it is the SEMICOLON that
-// was missing, not the body: `fun c() = 1;` and `fun c() { };` were both refused.
+// spells `fun c() = fun name();` out with a clean tree.
 FunBody     = Block [ ";" ] | "=" ExprBody [ ";" ] ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
@@ -725,12 +720,11 @@ MemberExtFun <~~ push({memberExt: takeAll()}); retLblPop() ~~>
 // `abstract fun Int.plus2(): Int` in an abstract class. It is AbstractFun's shape with
 // a receiver in front, and like AbstractFun it contributes no implementation: an
 // override in a subclass installs the real `ext$name` entry, and clsFind walks to it
-// from the runtime receiver. Before this the two shapes fell through to UnsupFun and
-// aborted the whole run, even though the override beside them already worked.
+// from the runtime receiver.
 // Ordered AFTER MemberExtFun, so a member extension WITH a body still has its body
 // parsed by MemberExtFun and a syntax gap inside it surfaces at its true position.
 // The parameter list is ParamsSkip, not SkipParen: a balanced-brace skip over a broken
-// parameter list is exactly the widening that cost the reject corpus 88 files before.
+// parameter list would accept files Kotlin rejects.
 MemberExtAbs <~~ takeAll() ~~>
             = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId [ SkipAngle ] ParamsSkip [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
 // An extension property may carry an INITIALIZER as well as its accessors -
@@ -757,16 +751,15 @@ NestedType  <~~ push({nested: takeAll()}) ~~>
 // accessor, ...): consumed so the surrounding declaration still parses.
 MemberSkip  <~~ takeAll(); takeMods(); notImpl("class member", up.pos) ~~>
             = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] KId [ SkipAngle ] [ ":" Type ] [ "=" DiscardExpr ] [ SkipBlock ] [ ";" ] ;
-// A bodiless function declaration: `abstract fun area(): Int` in an abstract class or
-// `fun greet(): String` in an interface. It contributes no implementation, so the tag
-// simply drops whatever its parameter list pushed.
 // A typealias declared inside a class body: registered while walking, no member.
 MemberTypeAlias <~~ takeAll() ~~>
             = TypeAlias ;
-// It contributes no implementation, but it DOES contribute its name: a `fun interface`
-// installs a SAM only when the body declares exactly one abstract member, so the count
-// and the name both have to reach buildInterface. The record key is `absname` rather
-// than `abstract`, which is a future-reserved word the frozen script parser knows.
+// A bodiless function declaration: `abstract fun area(): Int` in an abstract class or
+// `fun greet(): String` in an interface. It contributes no implementation, but it DOES
+// contribute its name: a `fun interface` installs a SAM only when the body declares
+// exactly one abstract member, so the count and the name both have to reach
+// buildInterface. The record key is `absname` rather than `abstract`, which is a
+// future-reserved word the frozen script parser knows.
 AbstractFun <~~ push({absname: takeAll()[0]}) ~~>
             = KwFun [ SkipAngle ] KId <~~ push(up.in) ~~> [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
 // A property member. The initializer is optional: a bodiless property (abstract
@@ -787,14 +780,11 @@ PropDecl    <~~ push(makeProp(takeAll())) ~~>
 PropInit    <~~ push({pinit: pop()}) ~~>
             = Expression ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
-// get() / set(v) with a body. The setter parameter name defaults to `value`; the two
-// halves of it are AccGetB / AccSetB below, which is what the accessor RUN is built
-// from now that a property may carry at most one of each.
-// The accessor RUN. Spelled `{ Accessor | PropVis }` it was an unbounded repetition, so
-// psi/DuplicateAccessor.kt - `val a : Int` with TWO `get() = 0` bodies - parsed clean
-// where Kotlin reports "Expecting a top level declaration" on the second. A property
-// has at most ONE getter and at most ONE setter, in either order, and each of the two
-// may be a body form (Getter/Setter) or a visibility-only one (`private set`).
+// get() / set(v) with a body. The setter parameter name defaults to `value`.
+// The accessor RUN: a property has at most ONE getter and at most ONE setter, in
+// either order, and each may be a body form (Getter/Setter) or a visibility-only one
+// (`private set`) - psi/DuplicateAccessor.kt, with TWO `get() = 0` bodies, is
+// "Expecting a top level declaration" in Kotlin.
 // AccRunB is the same thing where at least one of the two must carry a BODY: it is what
 // separates PropAccessor / ExtProp from the plain declaration forms that follow them in
 // the ordered choice, and dropping that requirement would let PropAccessor swallow
@@ -815,20 +805,14 @@ Getter      <~~ push({getter: pop()}) ~~>
             = KwGet "(" ")" [ ":" Type ] [ ContractClause ] FunBody ;
 Setter      <~~ var b = pop(); push({setter: b, sparam: pop()}) ~~>
             = KwSet [ "(" [ { Annotation } KId <~~ push(up.in) ~~> [ ":" Type ] ] [ "," ] ")" ] [ ":" Type ] [ ContractClause ] FunBody ;
-// A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
-// is GENUINE (see LazyProp): the initializer is run once and its value becomes a
-// plain field, so reads use the ordinary member machinery. Every OTHER delegate -
-// the Koin/DI `by inject()`, a custom getValue/setValue, `by Delegates.observable`,
-// `var by` (Kotlin allows lazy only on val) - needs the delegate protocol, which is
-// outside the subset: parsed and reported as not implemented (no field, like an
-// accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
-// `by lazy { init }` is special-cased (eager, see LazyProp); every other delegate goes
-// through Kotlin's real DELEGATE PROTOCOL - the delegate object is stored in a hidden
-// `name$delegate` field and every read calls its getValue(thisRef, property), every
-// write its setValue(thisRef, property, value). An expression that is not a delegate at
-// all (it has no getValue member) is reported as not implemented when the declaration
-// runs; an EXTENSION delegated property (val Recv.x by ...) has no single owner to pass
-// as thisRef and stays unsupported.
+// A delegated property (val/var x [: T] by <delegate>). `by lazy { init }` is
+// special-cased (eager, see LazyProp); every other delegate goes through Kotlin's real
+// DELEGATE PROTOCOL - the delegate object is stored in a hidden `name$delegate` field
+// and every read calls its getValue(thisRef, property), every write its
+// setValue(thisRef, property, value). An expression that is not a delegate at all (it
+// has no getValue member) is reported as not implemented when the declaration runs;
+// an EXTENSION delegated property (val Recv.x by ...) has no single owner to pass as
+// thisRef and stays unsupported.
 PropDelegate = LazyProp | RealPropDelegate | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
@@ -837,11 +821,9 @@ LazyProp    <~~ push(makeProp(takeAll())) ~~>
 // `val a by A(); get() = 1;` (psi/propertyDelegate/GetterInSameLine.kt). Kotlin parses
 // both with a clean tree and rejects them SEMANTICALLY ("delegated property cannot have
 // accessors"), so they are consumed and DROPPED (DropAcc), exactly as the local form
-// (RealDelegateDecl) already tolerated its `[ AccRun ]`. Without the run neither half
-// parsed the member spelling at all: RealPropDelegate matched up to the delegate,
-// SUCCEEDED, and the class body then died on the `get` - and because it succeeded,
-// ordered choice never offered the shape to UnsupDelegate, whose whole reason for
-// carrying an accessor run was this case.
+// (RealDelegateDecl) tolerates its `[ AccRun ]`. The run has to be HERE: once
+// RealPropDelegate has matched up to the delegate it succeeds, and ordered choice
+// never offers the shape to UnsupDelegate.
 RealPropDelegate <~~ push(makeDelegProp(takeAll(), up.pos)) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
 DropAcc     <~~ pop() ~~> = AccGetB | AccSetB ;
@@ -927,10 +909,6 @@ ModRun      <~~ takeMods() ~~>
 LocalModTarget = LocalExtFun | LocalFun | Destructure | DestructAssign | DelegateDecl | Decl | BareDecl ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = LabelDef PlainStmt ;
-// A local function declaration (fun name(...) { ... } inside a block): genuine. It
-// binds a closure over the enclosing scope under its name in the CURRENT scope, so
-// it sees the enclosing locals and can recurse. Comes before ExprStmt, which would
-// otherwise read the `fun` keyword as an identifier. FunDecl pushes {name,params,body}.
 // A local typealias. The alias is registered while the declaration is WALKED (types
 // are erased, so there is nothing to do at run time), and the statement itself is a
 // no-op thunk - every statement production must leave exactly one on the stack.
@@ -945,11 +923,8 @@ LocalTypeAlias <~~ push(function() {}) ~~>
 // scope a top-level one does. Two local classes of the same name in different functions
 // therefore share one globalScope slot - the last one walked wins for anything that
 // resolves through globalScope, while the statement binding is per-frame and correct.
-// A local ENUM class is built for real too. It used to be offered only to the SKIP
-// forms below, so `fun f() { enum class E { A, B }; return E.B.ordinal }` warned "enum
-// class not implemented" and then died with "unknown name: E", while the compiler half
-// lowered it and answered 1 - a live cross-half divergence. EnumReal/EnumBare push the
-// same {nname, nval, inner} record ClassReal does, so nothing else changes.
+// A local ENUM class is built for real too: EnumReal/EnumBare push the same
+// {nname, nval, inner} record ClassReal does.
 LocalClass  <~~ push(makeLocalTypeStmt(pop())) ~~>
             = [ Modifiers ] ( EnumReal | EnumBare | ClassReal | InterfaceReal | ObjectReal ) ;
 // The shapes the real builders decline (an enum, or a body outside the member set):
@@ -958,6 +933,10 @@ LocalClass  <~~ push(makeLocalTypeStmt(pop())) ~~>
 // pushed, so the statement leaves exactly one.
 LocalTypeDecl <~~ takeAll(); takeMods(); push(notImplStmt("local type declaration", up.pos)) ~~>
             = [ Modifiers ] ( EnumSkip | ClassSkip | InterfaceSkip | ObjectSkip ) ;
+// A local function declaration (fun name(...) { ... } inside a block): genuine. It
+// binds a closure over the enclosing scope under its name in the CURRENT scope, so
+// it sees the enclosing locals and can recurse. Comes before ExprStmt, which would
+// otherwise read the `fun` keyword as an identifier. FunDecl pushes {name,params,body}.
 LocalFun    <~~ push(makeLocalFunStmt(pop())) ~~>
             = FunDecl ;
 // A local EXTENSION function (fun Int.tripled(): Int = this * 3 inside a body): the
@@ -1029,34 +1008,6 @@ NewStmtLine = :script(~~
         return undefined
     })()
 ~~) ;
-// MEASURED, REVERTED, AND NOW LANDED (2026-07-28). The guard above was written twice
-// before it stuck. Both rows, each against the baseline of its day:
-//
-//     backward scan (wrong, kept only as the reason the forward one exists)
-//                              parse 284 (-102)   reject 292 (+3)
-//     forward scan, first try  parse 378 (-8)     reject 292 (+3)     net -5, reverted
-//     forward scan, landed     parse 384 (-0)     reject 297 (+3)
-//
-// The eight files the first try cost were all places where THIS grammar split a
-// construct Kotlin keeps whole, and every one of them was a real gap:
-//
-//     psi/LocalDeclarations.kt                   LabelDef matched `abstract @` ACROSS
-//     psi/newLabels/oldSyntaxExpressions.kt      a space, and a local declaration took
-//                                                no modifier run    -> AtAdjacent on
-//                                                LabelDef, LocalModDecl
-//     psi/annotation/at/blockLevelExpressions*   `x7 infix x9` is an infix CALL; the
-//     psi/annotation/modifiersMigration/         soft-keyword modifiers were excluded
-//       newModifiers.kt                          from infix position -> NotInfixKw
-//     psi/contextParameters/parsing…Incorrect
-//     psi/trailingCommaAllowed.kt                `x[1, 3, ]` is a variadic index with a
-//                                                trailing comma     -> IndexSfx
-//     psi/DoubleColon.kt                         `X()::class`, `super<a>@b::foo`,
-//                                                `++a::b`           -> RefSfx, SuperExpr,
-//                                                PreIncRef
-//
-// With those eight parsing for the RIGHT reason the guard costs nothing and takes the
-// three files it was written for (psi/AssertNotNull.kt, psi/primaryConstructor/local.kt,
-// psi/annotation/lambda.kt), which is what closed the reject row.
 
 // A declared RECEIVER function type - val dot: Int.(Int) -> Int - makes the
 // initializing lambda a lambda-with-receiver: its first argument becomes `this`, so it
@@ -1140,11 +1091,10 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 Expression  = { Annotation } ( SuperAssign | Assignment | CallAssign | OrExpr ) ;
 // `super.p = v` - the superclass's SETTER, which an overriding setter calls to store the
 // value the base keeps. It needs its own form because `Target` is rooted at a KId and
-// `super` matches one, so the write went to a variable named `super` and aborted with
-// "unknown name: super". Tried before Assignment, whose Target would swallow it; the
-// required `.name` and assignment operator make it decline `super.f()` and `super.p + 1`
-// on their own. The twin of SuperAssign in kotlin-to-llvm-ir.abnf. UNVERIFIED against
-// kotlinc (none on this machine): the Kotlin documentation's "Calling the superclass
+// `super` matches one, so Assignment would write a variable named `super`. Tried before
+// Assignment; the required `.name` and assignment operator make it decline `super.f()`
+// and `super.p + 1` on their own. The twin of SuperAssign in kotlin-to-llvm-ir.abnf.
+// Spec-cited (no kotlinc here): the Kotlin documentation's "Calling the superclass
 // implementation" section spells the read, and the write is the same qualified access
 // on the left of an assignment.
 SuperAssign <~~ push(makeSuperAssign(curClassTop(), takeAll())) ~~>
@@ -1247,8 +1197,7 @@ InExpr      <~~ push(makeInExpr(takeAll())) ~~>
 // expression, so
 //     in 0..9   -> "digit"
 //     in 10..99 -> "two"
-// read as `"digit" in 10..99` and the second arm's `->` was stranded: the parse died on
-// the SECOND arm, two lines below a first arm that is perfectly correct, in BOTH halves.
+// would read as `"digit" in 10..99` and strand the second arm's `->`.
 // A `when` entry ends at the newline in Kotlin, and an `in` that OPENS a line is a
 // membership condition, never a continuation - the same rule this tree already applies
 // to a call's argument list (docs/abnf-dialect-gotchas.md) and to a postfix `is T`.
@@ -1422,12 +1371,10 @@ NotInfixKw  = :script(~~
 ~~) ;
 
 // A range expression as a VALUE - a..b, a..<b, a until b, a downTo b, a step b - in
-// general operand position ((0 until n).joinToString(...)). The range value itself is
-// not modelled (no iterable range object), so a range is not implemented; both bounds
-// still run so their calls stay visible. Without a range operator RangeExpr is a pure
-// pass-through (its single AddExpr thunk is returned unchanged), so ordinary
-// expressions are byte-identical. The for-loop and when(x){ in a..b } forms bind their
-// bounds at AddExpr, below this level, so they keep splitting on their own range token.
+// general operand position ((0 until n).joinToString(...)); makeRange builds the
+// progression value. Without a range operator RangeExpr is a pure pass-through (its
+// single AddExpr thunk is returned unchanged), so ordinary expressions are
+// byte-identical.
 RangeExpr   <~~ push(makeRange(takeAll(), up.pos)) ~~>
             = AddExpr { RangeInfix AddExpr } ;
 RangeInfix  = ( "..<" | ".." "<" ) <~~ push({rop: "..<"}) ~~>
@@ -1487,13 +1434,12 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
-// A call's EXPLICIT TYPE ARGUMENTS used to be skipped and dropped here. They are the
-// whole meaning of `xs.filterIsInstance<String>()`, so the run is now captured (as its
-// raw text) and popMCall lifts it off the item list beside the method name; every other
-// method ignores it, so the only cost is one push per type-argument list. tArgName turns
-// "<String>" into "String" and mcallTArg decides - by method NAME - whether to append it
-// as a trailing argument, which keeps `listOf<Int>()`, `emptyMap<K, V>()` and every other
-// type-argument-carrying call emitting exactly what they emitted before.
+// A call's EXPLICIT TYPE ARGUMENTS are the whole meaning of
+// `xs.filterIsInstance<String>()`, so the run is captured (as its raw text) and
+// popMCall lifts it off the item list beside the method name; every other method
+// ignores it. tArgName turns "<String>" into "String" and mcallTArg decides - by method
+// NAME - whether to append it as a trailing argument, so `listOf<Int>()`,
+// `emptyMap<K, V>()` and every other type-argument-carrying call are unaffected.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
 MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll()}); retLblPop() ~~>
@@ -1611,8 +1557,8 @@ IndexSfx    <~~ push({kind: "index", idx: kIndexArg(takeAll(), up.pos)}) ~~>
 // LAMBDA is deliberately not guarded: Kotlin does allow it after a line break.
 // A trailing lambda may carry ANNOTATIONS, which is also Kotlin's OLD label syntax:
 // `x2.filter @f { return 2 }` is a LAMBDA_ARGUMENT whose child is an ANNOTATED_EXPRESSION
-// wrapping the lambda (psi/newLabels/oldSyntaxExpressions.txt). Without them the `@f`
-// ended the call and the `{ ... }` became a second statement on the same line.
+// wrapping the lambda (psi/newLabels/oldSyntaxExpressions.txt); without them the `@f`
+// would end the call and the `{ ... }` become a second statement on the same line.
 MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { AnnLambda } | AnnLambda { AnnLambda } ;
 // Annotation pushes nothing, so this stays item-neutral: the parent still pops one
 // lambda per repetition.
@@ -1643,9 +1589,6 @@ NamedArg    <~~ var v = pop(); push({argname: pop(), av: v}) ~~>
 // ExprStmt); a leading `when` is this expression form.
 Primary     = CollectionLit | ParenApply | "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | DotFloatLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | DeclExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | ReturnAtExpr | BreakAtExpr | ContinueAtExpr | ReturnExpr | BreakExpr | ContinueExpr | ThisExpr | SuperExpr | LabeledPrim | Call | VarRef ;
 
-// `throw e` in EXPRESSION position - a Nothing-typed expression body
-// (fun bail(msg: String): Nothing = throw AppError(msg)) or the body of a when arm.
-// It raises the exception exactly like the statement form and never yields a value.
 // A class or interface DECLARATION in operand position. Kotlin's parser builds one -
 // psi/recovery/InterfaceInExpressionPosition.kt makes `val p = 1 < interface I { fun f()
 // {} }` a binary expression whose right operand is a CLASS, and
@@ -1657,6 +1600,9 @@ Primary     = CollectionLit | ParenApply | "(" Expression ")" | RawStr | Templat
 // operand yields is reported as unsupported.
 DeclExpr    <~~ takeAll(); takeMods(); push(notImplExpr("declaration in expression position", up.pos)) ~~>
             = ClassSkip | InterfaceSkip ;
+// `throw e` in EXPRESSION position - a Nothing-typed expression body
+// (fun bail(msg: String): Nothing = throw AppError(msg)) or the body of a when arm.
+// It raises the exception exactly like the statement form and never yields a value.
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ;
 
@@ -1710,16 +1656,15 @@ NotAtLbl    = :script(~~
 // being walked (curClassTop), so the member lookup starts one level up while `this`
 // stays the same instance.
 // The qualifier is `super<Base>`; an EMPTY `super<>` is "Type expected" in Kotlin
-// (psi/Super.kt), so the angle run must hold at least one item. The qualifier is now
-// KEPT (SuperQual pushes its text): `class T : I1, I2` has TWO parents, and resolving
-// every `super<...>` to parents[0] made super<I1>.w() and super<I2>.w() the same call.
+// (psi/Super.kt), so the angle run must hold at least one item. The qualifier is KEPT
+// (SuperQual pushes its text): `class T : I1, I2` has TWO parents, and super<I1>.w()
+// and super<I2>.w() are different calls.
 // SuperQual is tagged, so SuperExpr must takeAll() it back off the stack - a tagged
 // sub-rule changes how many items its parent pops.
 SuperExpr   <~~ push(makeSuperRef(curClassTop(), takeAll())) ~~>
-// `super<Base>@Outer` names one supertype of one outer receiver. The type argument was
-// already skipped; the label was not, so psi/DoubleColon.kt's `super<a>@b::foo` had no
-// reading. The `@` is glued to the qualifier, like every other label in Kotlin, so
-// AtAdjacent keeps a following ANNOTATION (`super @Ann`) out of it.
+// `super<Base>@Outer` names one supertype of one outer receiver (psi/DoubleColon.kt's
+// `super<a>@b::foo`). The `@` is glued to the qualifier, like every other label in
+// Kotlin, so AtAdjacent keeps a following ANNOTATION (`super @Ann`) out of it.
             = "super" KwEnd [ SuperQual ] [ AtAdjacent "@" KId ] ;
 SuperQual   <~~ push({squal: up.in}) ~~>
             = SkipAngle1 ;
@@ -1766,8 +1711,7 @@ ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
 // The anonymous descriptor is named "<object>", and curClassPush puts that same name on
 // the walk-time class stack for the duration of the body - so a `super.m()` inside an
 // object expression anchors to the object itself (makeSuperRef then starts at its
-// supertype) instead of to the ENCLOSING class, which is what made it fail outright at
-// top level ("no super method") and would have resolved to the wrong parent inside a class.
+// supertype) instead of to the ENCLOSING class.
 ObjectExprReal <~~ push(makeObjectExpr(takeAll())); curClassPop() ~~>
             = KwObject <~~ curClassPush("<object>") ~~> [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] "{" { Member } "}" ;
 ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
@@ -1846,10 +1790,9 @@ DName       <~~ push(dName(takeAll())) ~~>
 // box.second and box.first, so the ORDER does not matter - while the BRACKETED spelling
 // of the same entry stays POSITION based whatever it says (Kotlin's name-based
 // destructuring proposal; psi/destructuring/fullNameBasedDestructuring.kt next to
-// fullPositionBasedDestructuring.kt). The interpreter read both positionally, so a
-// reversed `(val second, val first)` bound the wrong values while the compiled half -
-// which splits the two through DEntryN / DEntryP - bound Kotlin's. Hence the split into
-// a paren pair and a bracket pair; the two differ only in the flag they hand dName.
+// fullPositionBasedDestructuring.kt). The compiled half splits the two through
+// DEntryN / DEntryP; here the paren pair and the bracket pair differ only in the flag
+// they hand dName.
 DNameKw     <~~ push(dName(takeAll(), true)) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
 DNameKwV    <~~ push(dName(takeAll(), true)) ~~>
@@ -1890,12 +1833,12 @@ TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9
 // is not followed by an identifier start or by `{` an ordinary REGULAR_STRING_PART:
 // psi/StringTemplates.txt records `"$"` and `"$.$.asdf$\t"` as LITERAL_STRING_TEMPLATE_
 // ENTRYs with no error element. `$` is deliberately absent from TplPlain / RawPlain (see
-// TplVar above), so before this alternative existed BOTH halves refused every string with
-// a literal dollar in it - which is a price, a shell snippet or a regex end-anchor in real
-// code. The guard is a `:script` on c.peek(0) rather than a `!"..."` lookahead because it
-// has to be anchored to the very next BYTE (docs/abnf-dialect-gotchas.md), and it declines
-// exactly the two cases the template entries own, so a `$` in front of a hard KEYWORD
-// (`"$as"`) still refuses the whole template the way TplVar's NotHardKw intends.
+// TplVar above), so this alternative is what lets a literal dollar (a price, a shell
+// snippet, a regex end-anchor) through. The guard is a `:script` on c.peek(0) rather
+// than a `!"..."` lookahead because it has to be anchored to the very next BYTE
+// (docs/abnf-dialect-gotchas.md), and it declines exactly the two cases the template
+// entries own, so a `$` in front of a hard KEYWORD (`"$as"`) still refuses the whole
+// template the way TplVar's NotHardKw intends.
 TplDollar   <~~ push({s: "$"}) ~~>
             = "$" NotTplStart ;
 NotTplStart = :script(~~
@@ -1941,9 +1884,9 @@ TrailLamSfx <~~ push({kind:"invoke", args: takeAll()}) ~~>
 // An argument slot may not be EMPTY: `f(1, ,)`, `@Ann(,)` and `[1, , 3]` are
 // "Expecting an argument" / "Expecting an index element" in Kotlin
 // (psi/emptyArgumentsInAnnotations.txt, psi/emptyArgumentsInArrayAccesses.txt), and the
-// old spelling `[ Arg ] { "," [ Arg ] }` accepted every one of them. A TRAILING comma is
-// real Kotlin and stays. The compiler half's CallArgs / CollLit were already in this
-// shape, so this also converges the two.
+// (psi/emptyArgumentsInAnnotations.txt, psi/emptyArgumentsInArrayAccesses.txt). A
+// TRAILING comma is real Kotlin and stays. The compiler half's CallArgs / CollLit
+// have the same shape.
 CollectionLit <~~ push(makeListLit(takeAll())) ~~>
             = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
@@ -1990,13 +1933,12 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // A NON-LOCAL labelled return (an outer lambda's label) stays not implemented.
 // The DEFINING half of the same one-token rule: `loop@ while (...)`. The `@` has to be
 // glued to the name here for exactly the reason AtAdjacent exists on the reference
-// side, and without the guard the `"@"` token skipped the whitespace in front of it
-// (docs/abnf-dialect-gotchas.md, `!"literal"` skips leading whitespace - a plain token
-// does too). That made LabelDef match ACROSS a space, so `abstract @a class F {}` was
-// read as the label `abstract@` on the statement `a`, leaving `class F {}` as a second
-// statement on the same line. Kotlin lexes `abstract` as a modifier and `@a` as an
-// annotation there; its tree for psi/LocalDeclarations.kt and for
-// psi/newLabels/oldSyntaxExpressions.kt records both files as ONE declaration per line.
+// side: a plain `"@"` token skips the whitespace in front of it
+// (docs/abnf-dialect-gotchas.md), and LabelDef would match ACROSS a space, reading
+// `abstract @a class F {}` as the label `abstract@` on the statement `a`. Kotlin lexes
+// `abstract` as a modifier and `@a` as an annotation there; its tree for
+// psi/LocalDeclarations.kt and for psi/newLabels/oldSyntaxExpressions.kt records both
+// files as ONE declaration per line.
 LabelDef    = KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl)) ~~>
             = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
@@ -2016,8 +1958,8 @@ AtAdjacent  = :script(~~
 ~~) ;
 // The other half of the same rule, and the one that makes the file REJECT rather than
 // merely mis-parse. AtAdjacent only declines the labelled alternative; the bare
-// `break` / `continue` / `return` then matches and the stranded `@l1` is read as an
-// ANNOTATION on the next declaration, so `break @l1` parsed clean. Kotlin's parser
+// `break` / `continue` / `return` would then match and the stranded `@l1` be read as an
+// ANNOTATION on the next declaration. Kotlin's parser
 // reports "There should be no space or comments before '@' in label reference"
 // (psi/newLabels/spaceBeforeLabelReference.kt) for every one of `break @l1`,
 // `return @l2 1`, `continue @l4 5`, `break/**/@l5` and `return//\n@l7 4` - so a `@`
@@ -2123,8 +2065,7 @@ CallableRef = IsInitRef | BareClassRef | BareRef | QualRef ;
 // type one. The Kotlin documentation ("Checking whether a lateinit var is initialized")
 // makes the check available only for a property that is lexically accessible at the
 // site: declared in the same type, in one of the outer types, or at top level in the
-// same file. `l::a.isInitialized` from OUTSIDE the declaring class is a compile error,
-// where this half used to answer `false` - a wrong answer, not a missing feature.
+// same file. `l::a.isInitialized` from OUTSIDE the declaring class is a compile error.
 // The enclosing class chain is known to the grammar while it walks (curClasses), so the
 // receiver is a pure SYNTAX question, so it is decided here: absent, `this` or
 // `this@Label` is accepted and every other receiver is refused. (`Type::prop` is a
@@ -2146,8 +2087,7 @@ BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // KProperty1 over an unbound receiver, which this interpreter does not implement, and
 // the compiler half routes it to notImplExpr. The two are told apart only at run time,
 // by whether the base name resolves to a value, so makePropRef makes that test itself
-// rather than evaluating the base unconditionally (which aborted with "unknown name:
-// String" before the not-implemented path could warn).
+// rather than evaluating the base unconditionally.
 // A NULLABLE receiver is allowed in front of the `::` - `X?::x`, `X ?:: x`, `X? ?:: x`,
 // `X ??:: x`, `X ?? :: x`. All five are CALLABLE_REFERENCE_EXPRESSIONs in Kotlin's own
 // tree (psi/greatSyntacticShift/nullableTypes.txt), differing only in where the QUEST
@@ -2287,8 +2227,8 @@ EnumBare    <~~ buildEnum(takeAll()) ~~>
               [ PrimaryCtor ] [ ":" SuperList ] NotBrace ;
 // The fallback for an enum whose entries or members are outside the subset. It skips
 // the body's CONTENTS but keeps its SHAPE - a comma separated entry list and then, only
-// after a `;`, the members. A plain SkipBlock here accepted every psi/EnumEntry* corpus
-// file (`enum class My { FIRST, fun foo() {} }`, `FIRST,,`, `FIRST: My(13)`), all of
+// after a `;`, the members. A plain SkipBlock here would accept every psi/EnumEntry*
+// corpus file (`enum class My { FIRST, fun foo() {} }`, `FIRST,,`, `FIRST: My(13)`), all of
 // which Kotlin rejects with "Expecting ';' after the last enum entry".
 EnumSkip    <~~ takeAll(); takeMods(); notImpl("enum class", up.pos); push({nname: "", nval: null, inner: false}) ~~>
             = KwEnum KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ EnumSkipBody ] ;
@@ -2296,7 +2236,7 @@ EnumSkip    <~~ takeAll(); takeMods(); notImpl("enum class", up.pos); push({nnam
 // skip form exists for an ENTRY LIST the strict rules refused (an entry with a body,
 // an exotic argument list); the members after the `;` are ordinary members and the
 // member set already covers everything it can, MemberSkip and UnsupFun included. A
-// balanced-item run there accepted `enum class A { A, B; inner object }`, whose member
+// balanced-item run there would accept `enum class A { A, B; inner object }`, whose member
 // is not a declaration at all - Kotlin's tree records `Name expected`
 // (psi/namelessObjectAsEnumMember.txt) - and that is the shape a skip over a body the
 // member set DECLINED always has (see the `Skip*` entry in docs/abnf-dialect-gotchas.md).
@@ -2388,12 +2328,11 @@ ExtProp     <~~ registerExtProp(takeAll()) ~~>
 // to any instance, so the `by` expression is evaluated ONCE here (this tag runs while
 // the top level executes, exactly like TopProp's), and every read of `recv.name` calls
 // getValue(recv, property) with the EXTENSION RECEIVER as thisRef - every write
-// setValue(recv, property, value). That is what makes the "no single owner to pass as
-// thisRef" objection this rule used to carry wrong: the owner is the receiver of the
-// access, supplied per access rather than per declaration. UNVERIFIED against kotlinc
-// (none on this machine); the arity (getValue/2, setValue/3) and the thisRef identity
-// are read off the Kotlin documentation's "Delegated properties" page, which spells the
-// operator signatures with thisRef typed as the extension receiver's type.
+// setValue(recv, property, value): the owner is the receiver of the access, supplied
+// per access rather than per declaration. Spec-cited (no kotlinc here): the arity
+// (getValue/2, setValue/3) and the thisRef identity are read off the Kotlin
+// documentation's "Delegated properties" page, which spells the operator signatures
+// with thisRef typed as the extension receiver's type.
 // provideDelegate still gets a null thisRef, as it does for any property with no
 // dispatch receiver: it runs at the declaration, where no receiver exists yet.
 ExtDelegProp <~~ registerExtDelegProp(takeAll(), up.pos) ~~>
@@ -2595,9 +2534,7 @@ NotMemberKw = :script(~~
     }
 
     // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
-    // notImplExpr family now live in lib/interp-core.js (shared). This grammar sets
-    // core.stdlibImports (above) and keeps the Kotlin-specific builders below.
-    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
+    // notImplExpr family live in lib/interp-core.js (shared), as do excTry/excThrow.
     // Decodes a character literal's source text ('A', '\n', '￿') to its code.
     function kCharCode(t) {
         if (t.charAt(1) == "\\") {
@@ -2668,12 +2605,9 @@ NotMemberKw = :script(~~
     function kNegZeroF() { return 0 / kNegOne }
     // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
     // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` comes back +0
-    // where IEEE-754, both compiled halves and java 24.0.2 all say -0.0 (the
-    // `x * 0` trap of docs/working-on-this-project.md chapter 4). It is a
-    // PRE-EXISTING interpreter-vs-run divergence for `Double`, reproducible at
-    // 15af058 in six lines of kotlin; the float work only made it show up 96 times
-    // in an 11,343-line probe. The rule is IEEE-754's: the sign of a zero product
-    // or quotient is the XOR of the operand signs. (The same defect and the same
+    // where IEEE-754, both compiled halves and java all say -0.0 (the `x * 0` trap
+    // of docs/working-on-this-project.md chapter 4). The rule is IEEE-754's: the
+    // sign of a zero product or quotient is the XOR of the operand signs. (The same
     // fix as jZeroSign in languages/java-interpreter.abnf.)
     function kZeroSign(p, a, b) {
         if (p !== 0) { return p }
@@ -2720,19 +2654,14 @@ NotMemberKw = :script(~~
     function kFloSci(a, digits, e10) {
         // NEVER FEWER THAN TWO SIGNIFICANT DIGITS, and where the shortest form
         // has ONE the second is not a zero but the closest two digit decimal to
-        // the ACTUAL value. This half was missing the rule while the compiler
-        // half (jvmFloStr in abnf/jsrtjvm.go) and layer 2 (k1FloStr in
-        // languages/lib/kotlin-rt.metajs) both had it, so Double.MIN_VALUE
-        // printed "5.0E-324" here and "4.9E-324" in the other two - a halves
-        // divergence --cross had never reached, found by the float probe for
-        // docs/todo.md 1.8. 4.9E-324 is the right answer: Kotlin/JVM's
-        // Double.toString IS java.lang.Double.toString, whose rule this is (the
-        // identical code is jFloSci in languages/java-interpreter.abnf, checked
-        // against `java` 24.0.2). For every NORMAL double the two agree - the
-        // value is within ~1e-16 of its one digit form, a thousandth of a two
-        // digit step - so only the subnormals, where the gap between neighbours
-        // is comparable to the value, can show it. Float.toString already had
-        // the rule; see coreJvmF32Str.
+        // the ACTUAL value, so Double.MIN_VALUE prints "4.9E-324", not "5.0E-324".
+        // Kotlin/JVM's Double.toString IS java.lang.Double.toString, whose rule
+        // this is; twins: jvmFloStr in abnf/jsrtjvm.go, k1FloStr in
+        // languages/lib/kotlin-rt.metajs, jFloSci in languages/java-interpreter.abnf.
+        // For every NORMAL double the two forms agree - the value is within ~1e-16
+        // of its one digit form, a thousandth of a two digit step - so only the
+        // subnormals, where the gap between neighbours is comparable to the value,
+        // can show it. Float.toString has the same rule; see coreJvmF32Str.
         if (digits.length == 1) {
             // The scaling exponent is the VALUE's, not the shortest form's -
             // 1e-322 is really 9.88e-323, whose two digit form is 9.9E-323 - so
@@ -2968,10 +2897,8 @@ NotMemberKw = :script(~~
     // field write, a parameter (including its default), and a function's return value.
     // Kotlin has no implicit numeric conversions, so the only value a declared type can
     // retype is an integer literal typed by its expectation - but that literal reaches a
-    // property, a parameter and a return position exactly as often as it reaches a local,
-    // and until now only the local carried the width. `class A { var y: Long = 1 }`
-    // followed by `a.y * 1000000 * 1000000` answered -727379968 where java (JDK 24) on
-    // the equivalent program prints 1000000000000.
+    // property, a parameter and a return position exactly as often as it reaches a local:
+    // `class A { var y: Long = 1 }` then `a.y * 1000000 * 1000000` is 1000000000000.
     function kAdoptTy(v, dt) {
         if (dt == undefined || dt == null || dt == "") { return v }
         if (kIsIntegral(v)) {
@@ -3091,8 +3018,7 @@ NotMemberKw = :script(~~
             }
             // `-` on a COLLECTION is kotlin.collections.minus, the twin of the `+`
             // branch in kadd: a list, set or map loses the given element or every
-            // element of the given collection. Before this it fell through to the
-            // numeric tail, so `listOf(1, 2, 3) - 1` answered 0 in BOTH halves.
+            // element of the given collection (`listOf(1, 2, 3) - 1`).
             if (op == "-") {
                 if (Array.isArray(l)) { return kSeqMethod(l, "minus", [r]).v }
                 if (kIsSet(l)) { return kSetMethod(l, "minus", [r]).v }
@@ -3154,7 +3080,7 @@ NotMemberKw = :script(~~
     binOps["!="] = function(l, r) { return !kEq(l, r) }
     // The compound assignments are the same operators (a *= b is a = a * b), so they
     // resolve through binOps rather than through the shared applyOps table, whose
-    // arithmetic is 32 bit integer only - which made `d *= 2` on a Double truncate.
+    // arithmetic is 32 bit integer only and would truncate `d *= 2` on a Double.
     var kCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
     var coreApplyOpK = applyOp
     applyOp = function(op, a, b) {
@@ -3167,8 +3093,6 @@ NotMemberKw = :script(~~
             var v = t()
             var m = lookupMethod(v, "unaryMinus")
             if (m != null) { return m.apply(undefined, [v]) }
-            // -x keeps the operand's type: a Double negates as a Double (so -0.0
-            // and -1.0/0.0 are real), a Char and an Int as an Int32.
             // -x keeps the operand's type: a Double negates as a Double (so -0.0
             // and -1.0/0.0 are real), a Long stays a Long, and a Byte, a Short and
             // a Char promote to Int first - which is what Kotlin's unaryMinus
@@ -3240,8 +3164,8 @@ NotMemberKw = :script(~~
     // same object serves `for (i in r)`, `x in r` (rangeHas) and a range stored in a
     // variable - the for-loop no longer needs its own range syntax.
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
-    // and no iteration for one, and its contains is the BOUNDS test alone; every
-    // engine answered `1.5 in 1.0..2.0` FALSE before, agreeing and all wrong.
+    // and no iteration for one, and its contains is the BOUNDS test alone
+    // (`1.5 in 1.0..2.0` is true).
     // `pg` marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
     // and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
     // and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" while
@@ -3353,10 +3277,9 @@ NotMemberKw = :script(~~
                 r = items[i + 1]()
                 if (rop == "step") {
                     if (!isRange(v)) { fail("step applied to a non-range") }
-                    // kNum, not the raw operand: `1L..5L step 2L` handed a {__sz} box
-                    // straight into `st` here and the range printed "1..NaN step
-                    // [object Object]" while both compiled halves (which run the
-                    // bound through k4RangeNum) answered "1..5 step 2".
+                    // kNum, not the raw operand: `1L..5L step 2L` must not hand a
+                    // {__sz} box straight into `st` (k4RangeNum does the same in the
+                    // compiled halves).
                     var stn = kNum(r)
                     if (stn <= 0) { fail("range step must be positive") }
                     v = {__range: true, from: v.from, to: v.to, st: stn, down: v.down,
@@ -3372,9 +3295,7 @@ NotMemberKw = :script(~~
     // x in range. A plain IntRange declares contains(value) and consults the bounds
     // only; a STEPPED progression declares none, so `in` is Iterable.contains - a
     // LINEAR membership test, and 3 is NOT in (1..10 step 4). Both are the one test
-    // below. The step used to be ignored outright, which made this half answer true
-    // where both compiled halves (searching the materialized elements) answered
-    // false: a live halves divergence, and this half was the wrong one.
+    // below.
     function rangeHas(rg, x) {
         // A ClosedFloatingPointRange consults the bounds and nothing else.
         if (rg.fl === true) {
@@ -3401,8 +3322,7 @@ NotMemberKw = :script(~~
     // IntRange.toString is "$first..$last"; IntProgression.toString is
     // "$first..$last step $step" for a positive step and
     // "$first downTo $last step ${-step}" for a negative one. CharRange overrides
-    // with the IntRange form. Every engine printed the ELEMENT LIST before -
-    // todo.md 1.10's `mr.range.toString()`.
+    // with the IntRange form.
     function rangeStr(rg) {
         // ClosedFloatingPointRange.toString is "$start..$endInclusive".
         if (rg.fl === true) { return kstr(kFlo(rg.from)) + ".." + kstr(kFlo(rg.to)) }
@@ -3413,9 +3333,7 @@ NotMemberKw = :script(~~
         return a + ".." + b
     }
     // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
-    // and two non-empty ones agree when first, LAST ELEMENT and step agree. The old
-    // test read `a.step`, a field no range has (it is `st`), so every pair of
-    // progressions compared their steps as undefined === undefined.
+    // and two non-empty ones agree when first, LAST ELEMENT and step agree.
     function rangeEqK(a, b) {
         if (rangeEmpty(a)) { return rangeEmpty(b) }
         if (rangeEmpty(b)) { return false }
@@ -3445,12 +3363,10 @@ NotMemberKw = :script(~~
         if (rg.from >= rg.to) { return rg.to }
         return rg.to - ((rg.to - rg.from) % rg.st)
     }
-    // The step of a MATERIALIZED progression, recovered from the distance between its
-    // first two elements - the compiler half has nothing else to read it from, and this
-    // half answers the same so the two agree. undefined when there is nothing to
-    // measure (an empty list) or the elements are not a progression's; a one-element
-    // progression assumes 1, which is the residue a materialized range cannot recover.
-    // The twin is ktProgNum / the "step" arm of js_ktfget in abnf/jsrtkotlin.go.
+    // The step of a LIST read as a progression (`.step` on a plain list), recovered
+    // from the distance between its first two elements. undefined when there is
+    // nothing to measure (an empty list) or the elements are not a progression's; a
+    // one-element list assumes 1.
     function kProgNumOr(v) {
         if (typeof v == "number") { return v }
         if (kIsChar(v)) { return v.__char }
@@ -3641,11 +3557,8 @@ NotMemberKw = :script(~~
     hostGlobals["println"] = function() { println(arguments.length == 0 ? "" : kstr(arguments[0])) }
     hostGlobals["print"] = function() { print(arguments.length == 0 ? "" : kstr(arguments[0])) }
     hostGlobals["exitProcess"] = function(code) { exit(code | 0) }
-    // kotlin.math.abs / max / min. All three used to force their answer through `| 0`
-    // or a raw JS comparison, so `abs(-1.5)` was 0 and `abs(-3L)` was 0 - while the
-    // compiled half, which binds these to the shared runtime's Math, answered 1.5 and
-    // 3. They keep the operand's TYPE now: a Double answers a Double, a sized integer
-    // its own width.
+    // kotlin.math.abs / max / min keep the operand's TYPE: a Double answers a Double
+    // (`abs(-1.5)` is 1.5), a sized integer its own width (`abs(-3L)` is 3L).
     hostGlobals["abs"] = function(v) {
         if (kIsFlo(v)) { return kFlo(v.__flo < 0 ? kNegF(v.__flo) : v.__flo) }
         if (szIs(v)) {
@@ -3657,13 +3570,12 @@ NotMemberKw = :script(~~
     }
     hostGlobals["max"] = function(a, b) { return kKeyLess(a, b) ? b : a }
     hostGlobals["min"] = function(a, b) { return kKeyLess(b, a) ? b : a }
-    // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Int.MAX_VALUE
-    // and friends existed in neither half before ("unknown name: Int"), and
-    // Long.MAX_VALUE cannot be written as a plain number at all - which is the whole
-    // reason a sized integer had to exist, since Int.MAX_VALUE + 1 also has to wrap to
-    // Int.MIN_VALUE rather than grow. The pairs are built with szMake / i64Make rather
-    // than through kConv because this runs at SCRIPT BODY time. The twin is js_kttype
-    // in abnf/jsrtkotlin.go.
+    // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Long.MAX_VALUE
+    // cannot be written as a plain number at all - which is the whole reason a sized
+    // integer had to exist, since Int.MAX_VALUE + 1 also has to wrap to Int.MIN_VALUE
+    // rather than grow. The pairs are built with szMake / i64Make rather than through
+    // kConv because this runs at SCRIPT BODY time. The twin is js_kttype in
+    // abnf/jsrtkotlin.go.
     hostGlobals["Int"] = {MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE_BITS: 32, SIZE_BYTES: 4}
     hostGlobals["Long"] = {MAX_VALUE: szMake(i64Make(0x7fffffff, 0xffffffff), 64, false),
                            MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false), SIZE_BITS: 64, SIZE_BYTES: 8}
@@ -3752,12 +3664,10 @@ NotMemberKw = :script(~~
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = function() { return kMakeSet() }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
-    // NOT AVAILABLE IN THE COMPILED HALF YET. A global NAME is declared by each
-    // grammar's own builtin block (js_scope_decl in kotlin-to-llvm-ir.abnf), not by
-    // the runtime, so these six builders have to be ported there by hand. Everything
-    // they BUILD is a shared shape whose whole member surface already lives in
-    // abnf/jsrtkotlin.go (ktMapMethod / ktPairMethod), so the port is the declaration
-    // only - the methods come with it.
+    // A global NAME is declared by each grammar's own builtin block (js_scope_decl in
+    // kotlin-to-llvm-ir.abnf, ktGlobalFn in abnf/jsrtkotlin.go), not by the runtime.
+    // Everything these builders BUILD is a shared shape whose member surface lives in
+    // abnf/jsrtkotlin.go (ktMapMethod / ktPairMethod) for the compiled half.
     hostGlobals["mapOf"] = function() {
         var m = kMakeMap()
         for (var i = 0; i < arguments.length; i++) {
@@ -3847,9 +3757,8 @@ NotMemberKw = :script(~~
     hostGlobals["Regex"] = function() {
         return mkKRegex(arguments[0], arguments.length > 1 ? arguments[1] : null)
     }
-    // ----- The kotlin stdlib top-level functions the subset was missing. Each one
-    // aborted the run with "unknown name" in BOTH halves; the compiled twins are
-    // ktGlobalFn in abnf/jsrtkotlin.go plus the name list in kotlin-to-llvm-ir.abnf.
+    // ----- kotlin stdlib top-level functions. The compiled twins are ktGlobalFn in
+    // abnf/jsrtkotlin.go plus the name list in kotlin-to-llvm-ir.abnf.
     // A COMPARATOR is a plain function of two elements answering an Int, which is what
     // sortedWith / maxWith / minWith drive.
     hostGlobals["compareBy"] = function(sel) {
@@ -3991,9 +3900,8 @@ NotMemberKw = :script(~~
     // delegates to it is read through the same box.
     hostGlobals["lazy"] = function(f) { return {__lazy: true, f: f, done: false, v: null} }
     // kotlin.properties.Delegates: the three standard property delegates. Each answers
-    // a box delegGet / delegSet drive (see delegKind), and the twin is the "Delegates"
-    // arm of ktGlobal in abnf/jsrtkotlin.go, which the compiler half already had - this
-    // half aborted with "unknown name: Delegates".
+    // a box delegGet / delegSet drive (see delegKind); the twin is the "Delegates" arm
+    // of ktGlobalFn in abnf/jsrtkotlin.go.
     hostGlobals["Delegates"] = {
         observable: function(initial, cb) { return kDelegBox("observable", initial, cb) },
         vetoable: function(initial, cb) { return kDelegBox("vetoable", initial, cb) },
@@ -4003,15 +3911,14 @@ NotMemberKw = :script(~~
         return {__ktdeleg: kind, v: initial, cb: cb, set: kind != "notNull"}
     }
     // ----- kotlinx.coroutines, as a SYNCHRONOUS subset -----
-    // `launch`, `async`, `runBlocking`, `delay` and the scope builders were UNDEFINED
-    // in both halves, so any program with a coroutine in it stopped at the import.
-    // They run their block IMMEDIATELY and to completion here, on the calling thread:
-    // runBlocking { } is its body, async { } computes its value at the point it is
-    // written and await() hands it back, launch { } is the block itself, delay() is a
-    // no-op, and withContext / coroutineScope / supervisorScope are their bodies.
+    // `launch`, `async`, `runBlocking`, `delay` and the scope builders run their block
+    // IMMEDIATELY and to completion, on the calling thread: runBlocking { } is its
+    // body, async { } computes its value at the point it is written and await() hands
+    // it back, launch { } is the block itself, delay() is a no-op, and withContext /
+    // coroutineScope / supervisorScope are their bodies.
     //
-    // THE LIMITATION, stated the way the JS async subset states its own (commit
-    // 3ce4862): the RESULTS are right and the ORDERING is not. Nothing suspends, so
+    // THE LIMITATION, stated the way the JS async subset states its own: the RESULTS
+    // are right and the ORDERING is not. Nothing suspends, so
     // no two coroutines interleave - a `launch` block runs before the statement after
     // it rather than concurrently, `delay` does not yield, and a program whose output
     // DEPENDS on interleaving prints a different (but deterministic) order than the
@@ -4067,16 +3974,14 @@ NotMemberKw = :script(~~
                                   Unconfined: "Dispatchers.Unconfined"}
 
     // ----- The QUALIFIED stdlib paths -----
-    // `kotlin.math.abs(-3)` is the same function as the unqualified `abs(-3)`, and it
-    // resolved in NEITHER half before ("unknown name: kotlin") - the builtins are
-    // global names here, so only the bare spelling reached them. `kotlin` is a value
-    // now: a package handle whose field read either descends into a known sub-package
-    // or answers the GLOBAL of that name. Membership is deliberately not modelled per
-    // package - the last segment is looked up wherever it lives - because a wrong
-    // membership table would REJECT correct code, and Kotlin's own resolution has
-    // already decided the path is valid by the time a program runs.
-    // `import kotlin.math.abs` needed nothing: an import of a builtin is already a
-    // no-op in both halves (see the -warn-imports note).
+    // `kotlin.math.abs(-3)` is the same function as the unqualified `abs(-3)`. The
+    // builtins are global names here, so `kotlin` is a value: a package handle whose
+    // field read either descends into a known sub-package or answers the GLOBAL of that
+    // name. Membership is deliberately not modelled per package - the last segment is
+    // looked up wherever it lives - because a wrong membership table would REJECT
+    // correct code, and Kotlin's own resolution has already decided the path is valid
+    // by the time a program runs. `import kotlin.math.abs` needs nothing: an import of
+    // a builtin is a no-op in both halves (see the -warn-imports note).
     // The twin is ktPkgMember in abnf/jsrtkotlin.go.
     var kPkgPaths = {}
     var kPkgList = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.text",
@@ -4141,12 +4046,12 @@ NotMemberKw = :script(~~
     hostGlobals["RegexOption"] = {IGNORE_CASE: "IGNORE_CASE", MULTILINE: "MULTILINE",
                                   DOT_MATCHES_ALL: "DOT_MATCHES_ALL", COMMENTS: "COMMENTS",
                                   LITERAL: "LITERAL", CANON_EQ: "CANON_EQ", UNIX_LINES: "UNIX_LINES"}
-    // opts is absent, one RegexOption, or a collection of them (setOf(...) - which this
-    // subset models as a list). LITERAL is not a match mode: it quotes the pattern.
+    // opts is absent, one RegexOption, or a collection of them (a list or a set).
+    // LITERAL is not a match mode: it quotes the pattern.
     function krxFlags(opts) {
         var list = []
         if (opts != undefined && opts != null) {
-            // setOf(...) is the idiomatic spelling and answers a SET now, not a list.
+            // setOf(...) is the idiomatic spelling and answers a SET, not a list.
             var raw = (Array.isArray(opts) || kIsSet(opts)) ? kElems(opts) : [opts]
             for (var i = 0; i < raw.length; i++) { list.push(kstr2(raw[i])) }
         }
@@ -4169,7 +4074,7 @@ NotMemberKw = :script(~~
         return {flags: flags, literal: literal}
     }
     // Regex.escape / RegexOption.LITERAL is Pattern.quote: a \Q...\E quote region,
-    // which the shared engine now understands, so this returns the SAME TEXT the JVM
+    // which the shared engine understands, so this returns the SAME TEXT the JVM
     // does and not merely an equivalent one. An embedded \E has to close and reopen
     // the region, exactly as java.util.regex.Pattern.quote spells it.
     function krxQuote(s) {
@@ -4216,8 +4121,7 @@ NotMemberKw = :script(~~
         return out
     }
     // MatchResult.range is a real kotlin.ranges.IntRange, so it prints "1..3" and
-    // answers first / last / step / isEmpty / in like any other progression. It was
-    // a bare {first, last} object and printed "[object Object]" - todo.md 1.10.
+    // answers first / last / step / isEmpty / in like any other progression.
     function krxRange(from, to) { return kRange(from, to, false) }
     // A group that took no part reads as null; an index or a name that does not exist
     // at all is an error, as it is on the JVM (IndexOutOfBounds / IllegalArgument).
@@ -4389,10 +4293,9 @@ NotMemberKw = :script(~~
             if (name == "split") { return {v: krxSplit(target.prog, kstr2(args[0]), krxArgInt(args, 1, 0))} }
             if (name == "toString") { return {v: target.src} }
             // let / run / apply / also / takeIf / takeUnless are extensions on ANY
-            // receiver, and mcall tries kScopeMethod only AFTER this dispatcher - so
-            // `re.run { pattern }` and `re.let { it.pattern }` aborted here with
-            // *unknown Regex method: run* while both compiled halves ran them (their
-            // js_ktsmcall reaches ktScopeMethod first). Declining is the whole fix.
+            // receiver, and mcall tries kScopeMethod only AFTER this dispatcher, so
+            // this one must decline them (`re.run { pattern }`, `re.let { it.pattern }`;
+            // the compiled halves' js_ktsmcall reaches ktScopeMethod first).
             if (kIsScopeFnName(name)) { return null }
             fail("unknown Regex method: " + name)
         }
@@ -4449,13 +4352,12 @@ NotMemberKw = :script(~~
         // print [object Object] and szNum rounds above 2^53.
         if (szIs(v)) return szStr(v)
         // A range renders as its BOUNDS - "1..3", "10 downTo 1 step 1" - which is
-        // IntRange.toString / IntProgression.toString. Both halves do this now: the
-        // compiled one grew the first-class range value this half always had.
+        // IntRange.toString / IntProgression.toString.
         if (isRange(v)) { return rangeStr(v) }
         // A list (and an array, which this value model cannot tell apart from a list)
         // renders as java.util.AbstractCollection.toString does: "[1, 2]", elements
-        // separated by a comma and a space, a String element unquoted. Falling through
-        // to JavaScript's Array.prototype.toString spelled it "1,2".
+        // separated by a comma and a space, a String element unquoted (not
+        // JavaScript's Array.prototype.toString "1,2").
         if (Array.isArray(v)) {
             var out = "["
             for (var ai = 0; ai < v.length; ai++) {
@@ -4481,9 +4383,8 @@ NotMemberKw = :script(~~
         // the Pair it also destructures as - so `println(m.entries)` is [a=1, b=2].
         if (kIsEntry(v)) { return kstr(v.key) + "=" + kstr(v.value) }
         // An IndexedValue is a DATA class, so its toString is the generated one:
-        // "IndexedValue(index=0, value=10)", not the Pair "(0, 10)" every engine
-        // printed. The first/second slots stay on the value so destructuring is
-        // unchanged; only the render moved.
+        // "IndexedValue(index=0, value=10)", not the Pair "(0, 10)". The first/second
+        // slots stay on the value so destructuring works.
         if (typeof v == "object" && v.__ktiv === true) {
             return "IndexedValue(index=" + kstr(v.index) + ", value=" + kstr(v.value) + ")"
         }
@@ -4513,8 +4414,7 @@ NotMemberKw = :script(~~
             if (g != null) { return g.v }
         }
         // A Regex renders as its pattern and a MatchResult as the matched text (their
-        // own toString); neither carries a __class, so both used to fall through to
-        // JavaScript's "[object Object]".
+        // own toString); neither carries a __class.
         if (typeof v == "object") {
             var rx = krxMethod(v, "toString", [])
             if (rx != null) { return kstr2(rx.v) }
@@ -4610,11 +4510,9 @@ NotMemberKw = :script(~~
         return 0 - 1
     }
     // A SET is its own shape, {__set: true, keys: []} - the map handle without the
-    // parallel `vals` array, which is exactly what java.util.LinkedHashSet is. Before
-    // this every set constructor was an alias of listOf, so setOf(1, 1, 2) did not
-    // deduplicate, setOf(2, 1) == setOf(1, 2) was FALSE (java: true) and
-    // listOf(1) == setOf(1) was TRUE (java: false). Three properties come with the
-    // shape at once: uniqueness on insertion, order-INDEPENDENT equality, and
+    // parallel `vals` array, which is exactly what java.util.LinkedHashSet is. Three
+    // properties come with the shape: uniqueness on insertion, order-INDEPENDENT
+    // equality (java: setOf(2, 1) == setOf(1, 2), listOf(1) != setOf(1)), and
     // java.util.AbstractSet's hashCode, which is the plain SUM of the element hashes
     // (java: Set.of(1, 2).hashCode() is 3, where the list fold answers 994).
     // The ITERATION order is insertion order for setOf / mutableSetOf / linkedSetOf
@@ -4654,7 +4552,7 @@ NotMemberKw = :script(~~
     // __entry marker is what says so: java.util.AbstractMap.SimpleEntry.toString is
     // `a=1` where kotlin.Pair.toString is `(a, 1)`, and Map.Entry.hashCode is
     // key.hashCode() XOR value.hashCode() where a Pair uses the data-class 31-fold.
-    // Verified against java (JDK 24): for {a=1, b=2}, entrySet() prints [a=1, b=2],
+    // java: for {a=1, b=2}, entrySet() prints [a=1, b=2],
     // one entry prints a=1 and hashes to 96 ("a".hashCode() ^ 1), and the entry SET
     // hashes to 192, which is the map's own hash.
     function kMapEntry(k, v) { return {__entry: true, key: k, value: v, first: k, second: v} }
@@ -4704,9 +4602,6 @@ NotMemberKw = :script(~~
             if (clsFind(target.__class, name) != undefined) { return null }
         }
         var f = args[0]
-        // `x.run { ... }` binds the receiver as `this`; a bare closure value has no
-        // receiver channel in this model, so the receiver arrives as `it` instead -
-        // and the compiled half does exactly the same.
         // `run` and `apply` bind the receiver as `this` (kSetRecv is the channel a
         // lambda-with-receiver already uses), so an UNQUALIFIED member call inside the
         // lambda resolves against it; the receiver also arrives as `it`, which `let`
@@ -4818,8 +4713,7 @@ NotMemberKw = :script(~~
                 return {v: kChar(sv.charCodeAt(ci))}
             }
             // A PREDICATE form of any of the five is the CharSequence overload in
-            // _Strings.kt and belongs to the shared table: firstOrNull/lastOrNull used
-            // to ignore the lambda here exactly as first/last did.
+            // _Strings.kt and belongs to the shared table.
             if (args.length > 0 && typeof args[0] == "function") {
                 return kSeqMethodK(kChars(sv), name, args, "Char sequence")
             }
@@ -4827,13 +4721,10 @@ NotMemberKw = :script(~~
             if (name == "lastOrNull") { return {v: n == 0 ? null : kChar(sv.charCodeAt(n - 1))} }
             // first/last/single with a PREDICATE, and every empty or over-long
             // receiver, are kotlin.text's own CharSequence family in _Strings.kt and
-            // are answered by the shared table under the "Char sequence" kind. Three
-            // defects lived in these four lines, all of them agreed in every engine:
-            // `"abc".first { it == 'z' }` IGNORED the predicate and answered 'a',
-            // `"".first()` was an uncatchable ABORT where CharSequence.first() throws
-            // NoSuchElementException("Char sequence is empty."), and `"abc".single()`
-            // aborted where it throws IllegalArgumentException("Char sequence has more
-            // than one element."). The single-character fast path stays, so the cost of
+            // are answered by the shared table under the "Char sequence" kind
+            // (`"".first()` throws NoSuchElementException("Char sequence is empty."),
+            // `"abc".single()` IllegalArgumentException("Char sequence has more than
+            // one element.")). The single-character fast path stays, so the cost of
             // materializing the chars is paid only where a throw or a lambda is due.
             if (n == 0 || (name == "single" && n != 1)) {
                 return kSeqMethodK(kChars(sv), name, args, "Char sequence")
@@ -4896,10 +4787,9 @@ NotMemberKw = :script(~~
             return {v: kParseNum(sv, name)}
         }
         if (name == "format") { return {v: kFormat(sv, args)} }
-        // ----- More of kotlin.text, added in one batch: every one of these aborted the
-        // run in BOTH halves with "unknown String method". The compiled twin is
-        // ktStrMethod2 in abnf/jsrtkotlin.go. A `replace` whose argument is a Regex
-        // never reaches here - krxMethod runs before this branch in mcall.
+        // ----- More of kotlin.text. The compiled twin is ktStrMethod2 in
+        // abnf/jsrtkotlin.go. A `replace` whose argument is a Regex never reaches
+        // here - krxMethod runs before this branch in mcall.
         if (name == "replace" || name == "replaceFirst") {
             var oldS = kStrArg(args[0])
             var newS = kStrArg(args[1])
@@ -4972,12 +4862,10 @@ NotMemberKw = :script(~~
         // Boolean): String`), not a List<Char>; chunked and windowed answer
         // List<String>; partition answers Pair<String, String>. Everything that
         // TRANSFORMS - map, flatMap, groupBy, zip, sorted, distinct, withIndex -
-        // answers a List in Kotlin too and keeps falling through below. Every one of
-        // these printed "[a, b, d]" in all three engines. todo.md 1.5.
+        // answers a List in Kotlin too and keeps falling through below.
         if (name == "slice") {
             // String.slice(IntRange) is substring(range) - the BOUNDS, not the
             // elements; String.slice(Iterable<Int>) picks the chars at those indices.
-            // Both answered the char LIST.
             if (isRange(args[0])) {
                 if (rangeEmpty(args[0])) { return {v: ""} }
                 return {v: sv.substring(args[0].from, args[0].to + 1)}
@@ -5051,9 +4939,8 @@ NotMemberKw = :script(~~
     // toInt() / toLong() / toDouble() on a String. Kotlin THROWS NumberFormatException
     // for text that is not a number, with java.lang's message - a catchable exception,
     // not a hard abort: `runCatching { s.toInt() }.getOrElse { -1 }` and an ordinary
-    // try/catch are how real code parses input, and both halves used to stop the program
-    // dead instead (identically, so nothing flagged it). The compiled twin is ktParseNum
-    // in abnf/jsrtkotlin.go, which now raises the same class through ktRaise.
+    // try/catch are how real code parses input. The compiled twin is ktParseNum in
+    // abnf/jsrtkotlin.go, which raises the same class through ktRaise.
     function kParseNum(sv, name) {
         var t = kTrimSide(sv, true, true)
         if (name == "toDouble") {
@@ -5088,9 +4975,8 @@ NotMemberKw = :script(~~
     }
     // The subset of java.util.Formatter a test program writes: %s, %d, %f (with a
     // precision), %x, %c, %b, %% and a width. The Go twin is ktFormat.
-    // java.util.Formatter's %f, and BOTH of its rules had to be measured rather than
-    // assumed (java 24.0.2 on this machine; there is no kotlinc here, so the JVM is
-    // the oracle for the semantics Kotlin/JVM inherits).
+    // java.util.Formatter's %f has two rules (java is the oracle: Kotlin/JVM inherits
+    // the semantics, and there is no kotlinc here):
     //
     //   1. THE DIGITS ARE Double.toString's, NOT THE DOUBLE'S EXACT DECIMAL.
     //      java's Formatter renders a double through FormattedFloatingDecimal, which
@@ -5098,25 +4984,19 @@ NotMemberKw = :script(~~
     //      String.format("%.20f", 0.1) is "0.10000000000000000000" and not
     //      0.1000000000000000055511151231257827, "%.30f" of 4.9e-324 is all zeros,
     //      and "%.0f" of 1.3379870716132959e18 is 1337987071613295900 - NOT the exact
-    //      1337987071613295872. docs/todo.md 1.11 had that value the wrong way round:
-    //      the interpreter's zero-padded shortest form was already java's answer and
-    //      the compiler half's exact expansion was the wrong one. Which also means
-    //      rtFixed / rtExactDec in languages/lib/runtime.metajs - the exact machinery
-    //      docs/working-on-this-project.md 7.7 points at - is the WRONG tool here, and
-    //      floPrec is not needed at all (it clamps at 17 significant digits anyway,
-    //      so the "exact %f on floPrec at high n" the item proposed is not available
-    //      without a runtime.c change).
-    //   2. THE TIE RULE IS HALF_UP, AWAY FROM ZERO, applied to those digits. Measured:
+    //      1337987071613295872. So rtFixed / rtExactDec in
+    //      languages/lib/runtime.metajs - the exact machinery
+    //      docs/working-on-this-project.md 7.7 points at - is the WRONG tool here.
+    //   2. THE TIE RULE IS HALF_UP, AWAY FROM ZERO, applied to those digits:
     //      "%.1f" of 0.15 is "0.2" (the exact double is 0.1499999999999999944, which
     //      an exact half-even rounder answers "0.1"), of 0.25 is "0.3", "%.0f" of 2.5
     //      is "3" and of -2.5 is "-3".
     //
-    // The old body was Math.floor(x*10^p + 0.5), which is wrong three further ways it
-    // was never asked about: it overflows to Infinity for prec 17 of 1e300 (printed
-    // "Infinity.00000000000000NaN"), it loses the sign of -0.0 (java prints "-0"), and
-    // past 2^53 the scaled product is no longer the value. The twins are ktFixed in
-    // abnf/jsrtkotlin.go and k2Fixed in languages/lib/kotlin-rt.metajs; all three must
-    // agree or --cross and the native leg diverge.
+    // A naive Math.floor(x*10^p + 0.5) would also overflow to Infinity for prec 17 of
+    // 1e300, lose the sign of -0.0 (java prints "-0"), and stop being the value past
+    // 2^53. The twins are ktFixed in abnf/jsrtkotlin.go and k2Fixed in
+    // languages/lib/kotlin-rt.metajs; all three must agree or --cross and the native
+    // leg diverge.
     function kFixed(f, prec) {
         if (f !== f) { return "NaN" }
         if (f - f !== 0) { return f > 0 ? "Infinity" : "-Infinity" }
@@ -5247,8 +5127,7 @@ NotMemberKw = :script(~~
     // ----- explicit TYPE ARGUMENTS on a method call -----
     // The methods whose type argument is part of the call's MEANING. For these the type
     // name is appended as a trailing string argument; for every other method the
-    // captured list is dropped exactly as it was before this existed, so a program that
-    // calls none of them is unchanged.
+    // captured list is dropped.
     var mcallTArgMethods = {"$filterIsInstance": true}
     // MethodSfx's item list holds the method name, the (optional) type-argument text and
     // the arguments. The shared popName lifts only the name, and a `{mtargs}` item left
@@ -5297,8 +5176,8 @@ NotMemberKw = :script(~~
         fail("not a sequence: " + kstr(v))
     }
     // Kotlin's sumOf/sum take the WIDTH of what they sum: a Long selector sums to a
-    // Long and a Double selector to a Double, where the shared list branch accumulated
-    // in 32 bits for everything.
+    // Long and a Double selector to a Double (the shared list branch accumulates in
+    // 32 bits for everything).
     function kSumOf(es, f) {
         var isFlo = false
         var isLong = false
@@ -5329,9 +5208,8 @@ NotMemberKw = :script(~~
         if (kIsChar(a) && kIsChar(b)) { return a.__char < b.__char }
         if (kIsIntegral(a) && kIsIntegral(b)) { return kCmpI("<", a, b) }
         // A user Comparable: `listOf(V(3), V(1)).sorted()` sorts by the class's own
-        // compareTo, exactly as `V(1) < V(2)` already did through kNumOp2. Without
-        // this every element compared as NaN < NaN, no pair was ever "less", and the
-        // list came back in its ORIGINAL order - silently, in both halves.
+        // compareTo, exactly as `V(1) < V(2)` does through kNumOp2. Without this every
+        // element would compare as NaN < NaN.
         var cf = lookupMethod(a, "compareTo")
         if (cf != null) { return kNum(cf.apply(undefined, [a, b])) < 0 }
         return kNumD(a) < kNumD(b)
@@ -5447,10 +5325,9 @@ NotMemberKw = :script(~~
             }
             return {v: es.length == 0 ? null : es[0]}
         }
-        // lastOrNull(predicate) is the last MATCHING element, and this arm used to
-        // ignore the lambda and answer the last element - `listOf(1,2,3).lastOrNull
-        // { it < 2 }` was 3 in every engine where Kotlin says 1. The findLast arm
-        // further down names lastOrNull too and never saw a call because of it.
+        // lastOrNull(predicate) is the last MATCHING element -
+        // `listOf(1,2,3).lastOrNull { it < 2 }` is 1. This arm must stay ahead of the
+        // findLast arm further down, which also names lastOrNull.
         if (name == "lastOrNull") {
             if (args.length == 1 && typeof f == "function") {
                 for (i = es.length - 1; i >= 0; i--) { if (f(es[i])) { return {v: es[i]} } }
@@ -5498,8 +5375,7 @@ NotMemberKw = :script(~~
         }
         // reduceRight folds from the END with the accumulator as the SECOND parameter,
         // and it is declared on List (and CharSequence), which is the only place the
-        // "Empty list can't be reduced." wording comes from. Both spellings used to
-        // abort with "unknown list method" in all three engines.
+        // "Empty list can't be reduced." wording comes from.
         if (name == "reduceRight" || name == "reduceRightIndexed") {
             if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, true) + " can't be reduced.") }
             var accr2 = anytype
@@ -5564,10 +5440,8 @@ NotMemberKw = :script(~~
             return {v: out}
         }
         // chunked(size[, transform]) and windowed(size, step = 1, partialWindows =
-        // false[, transform]). The TRANSFORM used to be dropped on the floor in every
-        // engine - `listOf(1,2,3,4).chunked(2) { it.sum() }` answered the chunks
-        // themselves - and windowed's partialWindows was ignored, so the tail windows
-        // it asks for were never produced. todo.md 1.5.
+        // false[, transform]): `listOf(1,2,3,4).chunked(2) { it.sum() }` applies the
+        // transform to each chunk, and partialWindows produces the short tail windows.
         if (name == "chunked" || name == "windowed") {
             var sz = kNum(args[0])
             var step = 1
@@ -5593,22 +5467,19 @@ NotMemberKw = :script(~~
             return {v: out}
         }
         // kotlin.collections.random / randomOrNull. See kRndBox: the generator is
-        // deterministic, which is the only thing three engines can agree on.
+        // deterministic so the engines agree.
         if (name == "random" || name == "randomOrNull") {
             if (es.length == 0) {
                 if (name == "randomOrNull") { return {v: null} }
                 // random() is declared on COLLECTION (and on CharSequence), never on
-                // List, so a list receiver takes the Collection wording too - which is
-                // why this site already spelled it that way while first()/last() did
-                // not, and is the "why does that site have it" of docs/todo.md 1.5.
+                // List, so a list receiver takes the Collection wording too.
                 kThrowExc("NoSuchElementException", kPredWord(kind) + " is empty.")
             }
             return {v: es[kRndBelow(kRndOf(args), es.length)]}
         }
         // distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
         // deduplication is the same, the SHAPE is not (kotlin.collections declares
-        // distinct(): List and toSet(): Set). While every set was a list these four
-        // were one branch.
+        // distinct(): List and toSet(): Set).
         if (name == "distinct") {
             out = []
             for (i = 0; i < es.length; i++) {
@@ -5720,9 +5591,7 @@ NotMemberKw = :script(~~
         }
         if (name == "joinToString") {
             // The TRANSFORM is joinToString's last parameter, so `joinToString { ... }`
-            // passes a function - which used to be read as the SEPARATOR, printing the
-            // lambda between the elements (a page of script text in this half and
-            // "[function]" in the compiled one: a wrong answer AND a divergence).
+            // passes a function, which is not the SEPARATOR.
             var jtrans = null
             var jtext = []
             for (i = 0; i < args.length; i++) {
@@ -5739,19 +5608,13 @@ NotMemberKw = :script(~~
             return {v: pre + js + post}
         }
         if (name == "hashCode") { return {v: kHash(es)} }
-        // ----- More of kotlin.collections, added together because a realistic program
-        // reaches for them constantly and every one of them aborted the run in BOTH
-        // halves with "unknown list method". The compiled twin is ktSeqMethod in
+        // ----- More of kotlin.collections. The compiled twin is ktSeqMethod in
         // abnf/jsrtkotlin.go; the two tables are kept in step name for name.
-        // filterIsInstance<T>(): the elements that ARE a T. The type argument is the
-        // whole point of the call, and both grammars used to SKIP a call's explicit type
-        // arguments (`"." KId [ SkipAngle ] MArgs`), so the name reached the runtime
-        // with nothing to filter on and both halves aborted with "unknown list method".
-        // MTypeArgs now captures the list and makeCallMember passes the type NAME as a
+        // filterIsInstance<T>(): the elements that ARE a T. MTypeArgs captures the
+        // call's explicit type arguments and makeCallMember passes the type NAME as a
         // trailing string argument for the handful of methods that need it. A null is
         // never an instance of a non-nullable T, so it is dropped, exactly as Kotlin's
-        // own filterIsInstance does. The compiled twin is ktSeqMethod in
-        // abnf/jsrtkotlin.go.
+        // own filterIsInstance does.
         if (name == "filterIsInstance") {
             var want = (args.length > 0 && typeof args[0] == "string" && args[0] != "") ? args[0] : "Any"
             out = []
@@ -5824,12 +5687,11 @@ NotMemberKw = :script(~~
             name == "getOrNull" || name == "getOrElse") {
             var ix = kNum(f)
             if (ix >= 0 && ix < es.length) { return {v: es[ix]} }
-            // Was fail() - an ABORT where the JVM throws a catchable
-            // IndexOutOfBoundsException. kotlin.collections.elementAt on a List IS
-            // get(index), so the two share the message; on a bare Iterable the
-            // stdlib spells it "Collection doesn't contain element at index N.", a
-            // distinction this value model cannot make because kElems has already
-            // materialized the receiver. docs/todo.md 2.9.
+            // The JVM throws a catchable IndexOutOfBoundsException.
+            // kotlin.collections.elementAt on a List IS get(index), so the two share
+            // the message; on a bare Iterable the stdlib spells it "Collection doesn't
+            // contain element at index N.", a distinction this value model cannot make
+            // because kElems has already materialized the receiver.
             if (name == "elementAt") { kIndexOob("IndexOutOfBoundsException", ix, es.length) }
             if (name == "elementAtOrElse" || name == "getOrElse") { return {v: args[1](ix)} }
             return {v: null}
@@ -5887,8 +5749,7 @@ NotMemberKw = :script(~~
             return {v: out}
         }
         // union / intersect / subtract are declared on Iterable and answer a SET, not
-        // a List - they used to answer a deduplicated list, which was only right while
-        // a set WAS a list.
+        // a List.
         if (name == "intersect" || name == "subtract") {
             var oth = kElems(f)
             var iout = kMakeSet()
@@ -5907,7 +5768,7 @@ NotMemberKw = :script(~~
         }
         // sliceArray is slice under the Array name (Kotlin gives it a separate name
         // because it answers an Array); here the two shapes are one, so it is the
-        // same operator. It aborted with "unknown list method" in all three engines.
+        // same operator.
         if (name == "slice" || name == "sliceArray" || name == "subList") {
             var idxs = anytype
             idxs = (name == "subList") ? null : (isRange(f) ? rangeList(f) : kElems(f))
@@ -5983,10 +5844,7 @@ NotMemberKw = :script(~~
             for (i = 0; i < more.length; i++) { es.push(more[i]) }
             return {v: more.length > 0}
         }
-        // The rest of the MutableList surface, all of it IN PLACE. Every one of these
-        // aborted the run with "unknown list method" in BOTH halves, while their
-        // copying twins (sorted, sortedBy, reversed) were present - so `l.sort()` and
-        // `l.set(0, x)`, which any realistic program reaches for, were unreachable.
+        // The rest of the MutableList surface, all of it IN PLACE.
         if (name == "set") {
             var si2 = kNum(f)
             if (si2 < 0 || si2 >= es.length) { kIndexOob("IndexOutOfBoundsException", si2, es.length) }
@@ -6022,10 +5880,8 @@ NotMemberKw = :script(~~
         }
         if (name == "removeAll" || name == "retainAll") {
             // Kotlin has TWO overloads of each: one takes a collection of elements, the
-            // other a PREDICATE. `l.removeAll { it % 2 == 0 }` is the commoner of the
-            // two in real code and aborted BOTH halves with "not a sequence: <lambda>",
-            // because only the collection overload existed. The twin is the same branch
-            // of ktMutListMethod in abnf/jsrtkotlin.go.
+            // other a PREDICATE (`l.removeAll { it % 2 == 0 }`). The twin is the same
+            // branch of ktMutListMethod in abnf/jsrtkotlin.go.
             var isPred = (typeof f == "function")
             var drop = isPred ? [] : kElems(f)
             var keep = []
@@ -6055,10 +5911,9 @@ NotMemberKw = :script(~~
             return {v: null}
         }
         // getOrPut(key) { default }: the value under key, or - when there is none - the
-        // lambda's value, STORED under the key and then answered. It is the standard
-        // way to build a map of collections (`m.getOrPut(k) { mutableListOf() }.add(v)`)
-        // and existed in neither half ("unknown Map method: getOrPut"). The twin is the
-        // same case of ktMapMethod in abnf/jsrtkotlin.go.
+        // lambda's value, STORED under the key and then answered
+        // (`m.getOrPut(k) { mutableListOf() }.add(v)`). The twin is the same case of
+        // ktMapMethod in abnf/jsrtkotlin.go.
         if (name == "getOrPut") {
             i = kMapFind(m, f)
             if (i >= 0) { return {v: m.vals[i]} }
@@ -6102,9 +5957,8 @@ NotMemberKw = :script(~~
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
         if (name == "keys") { return {v: kSetFrom(m.keys)} }
         if (name == "values") { return {v: kSeqMethod(m.vals, "toList", []).v} }
-        // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS, which is why
-        // they no longer share one branch - `m.toList()` prints [(a, 1)] and
-        // `m.entries` prints [a=1].
+        // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
+        // `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
         if (name == "entries") { return {v: kSetOfDistinct(kElems(m))} }
         if (name == "toList") {
             var pl = []
@@ -6123,8 +5977,7 @@ NotMemberKw = :script(~~
         if (name == "hashCode") { return {v: kHash(m)} }
         if (name == "equals") { return {v: kEq(m, f)} }
         // The kotlin.collections Map filters and mappers. Every one of them answers a
-        // MAP; before this they fell through to the entry-LIST below, so `filter` gave
-        // a list of Pairs where Kotlin gives a Map, and the four named ones aborted.
+        // MAP, not a list of Pairs.
         if (name == "filterKeys" || name == "filterValues" || name == "filter" ||
             name == "filterNot" || name == "mapValues" || name == "mapKeys") {
             var fm = kMakeMap()
@@ -6290,19 +6143,16 @@ NotMemberKw = :script(~~
             if (name == "length") return target.length
             if (name == "equals") return target === args[0]
             // kotlin.text.substring(range: IntRange) is substring(range.start,
-            // range.endInclusive + 1). The range argument used to reach kNum, which
-            // reads an object as NaN, so `"abcdef".substring(1..3)` answered the whole
-            // string in all three engines. todo.md 1.5.
+            // range.endInclusive + 1) (kNum would read the range as NaN).
             if (name == "substring" && args.length == 1 && isRange(args[0])) {
                 if (rangeEmpty(args[0])) { return "" }
                 return target.substring(args[0].from, args[0].to + 1)
             }
             // BOUNDS-CHECKED, like the indexed read. java.lang.String#substring
             // throws when begin < 0, begin > end or end > length, and its message is
-            // a RANGE (measured, java 24.0.2): `"ab".substring(5)` is
-            // StringIndexOutOfBoundsException "Range [5, 2) out of bounds for length
-            // 2". All three engines used to answer "" for it - JS substring CLAMPS
-            // AND SWAPS its bounds - which is agreed and wrong. docs/todo.md 1.2.
+            // a RANGE (java): `"ab".substring(5)` is StringIndexOutOfBoundsException
+            // "Range [5, 2) out of bounds for length 2". JS substring would CLAMP AND
+            // SWAP its bounds instead.
             if (name == "substring") {
                 var sb0 = kNum(args[0])
                 var se0 = args.length > 1 ? kNum(args[1]) : target.length
@@ -6312,9 +6162,7 @@ NotMemberKw = :script(~~
             if (name == "indexOf") return target.indexOf(kstr2(args[0]))
             if (name == "isEmpty") return target.length == 0
             if (name == "isNotEmpty") return target.length > 0
-            // Bounds-checked, like the indexed read s[i] it is the method spelling
-            // of: this used to answer kChar(NaN), a blank character, where the Go
-            // twin answered U+FFFD. docs/todo.md 2.9.
+            // Bounds-checked, like the indexed read s[i] it is the method spelling of.
             if (name == "get") {
                 var sgi = kNum(args[0])
                 if (sgi < 0 || sgi >= target.length) { kIndexOob("StringIndexOutOfBoundsException", sgi, target.length) }
@@ -6345,9 +6193,8 @@ NotMemberKw = :script(~~
         // per-receiver branches below. The twin is ktNumMethod in abnf/jsrtkotlin.go.
         // rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
         // `downTo` are the infix operators makeRange folds, but kotlin.ranges declares
-        // each as an ordinary member/extension too, and `1.rangeTo(5)` aborted with
-        // "unknown Int method: rangeTo" in all three engines. Char is here rather than
-        // in kCharMethod because the three share one body.
+        // each as an ordinary member/extension too (`1.rangeTo(5)`). Char is here
+        // rather than in kCharMethod because the three share one body.
         if ((name == "rangeTo" || name == "until" || name == "downTo") && args.length == 1 &&
             (kIsFlo(target) || szIs(target) || typeof target == "number" || kIsChar(target))) {
             if (name == "downTo") { return kRange(target, args[0], true) }
@@ -6365,8 +6212,7 @@ NotMemberKw = :script(~~
             if (name == "toFloat") { return kFlo32(kNumD(target)) }
             if (name == "toChar") { return kChar(szNum(kConv(target, 16, true)) & 65535) }
         }
-        // coerceIn(min, max) / coerceIn(range): the third member of the coerce family,
-        // missing in both halves while coerceAtLeast and coerceAtMost were present.
+        // coerceIn(min, max) / coerceIn(range): the third member of the coerce family.
         if (name == "coerceIn" && (kIsFlo(target) || szIs(target) || typeof target == "number")) {
             var loB = anytype
             var hiB = anytype
@@ -6432,15 +6278,11 @@ NotMemberKw = :script(~~
         }
         // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so they are
         // the two members a NULL receiver answers rather than throwing: java's
-        // Objects.hashCode(null) is 0 and String.valueOf(null) is "null". Before this
-        // both halves aborted the run.
+        // Objects.hashCode(null) is 0 and String.valueOf(null) is "null".
         if (target === undefined || target === null) {
             if (name == "hashCode") return 0
             // Unit is a VALUE and Unit.toString() is "kotlin.Unit"; only a Kotlin null
-            // renders "null". Both answered "null" here, so `f().toString()` for a
-            // Unit-returning f read "null" in this half and "kotlin.Unit" in the other
-            // (ktpRender's jsUndefT arm, and kstr's own undefined arm right here in
-            // this file). A live halves divergence, found sweeping todo.md 1.8.
+            // renders "null" (ktpRender's jsUndefT arm and kstr's undefined arm agree).
             if (name == "toString") return target === undefined ? "kotlin.Unit" : "null"
             fail("method call ." + name + "() on null")
         }
@@ -6465,8 +6307,8 @@ NotMemberKw = :script(~~
             if (name == "set") { kRefSet(target, args); return undefined }
             if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null) }
             // KCallable.toString() renders the REFERENCE, not the value it reads: this
-            // branch sits above mcall's general toString, so without it `b::v.toString()`
-            // answered "3" here and "reference v" in the compiled half.
+            // branch sits above mcall's general toString, so `b::v.toString()` is
+            // "reference v", as in the compiled half.
             if (name == "toString" && args.length == 0) { return kstr(target) }
             if (target.kbound === false) { fail("method ." + name + "() of an unbound callable reference ::" + target.pname) }
             return mcall(kGetField(target.obj, target.pname), name, args, spec)
@@ -6493,8 +6335,7 @@ NotMemberKw = :script(~~
                     if (ev != null) return ev.v
                     // Kotlin THROWS IllegalArgumentException here, which is why
                     // `runCatching { Level.valueOf(s) }.getOrNull()` is the ordinary way
-                    // to parse an enum from text. This used to abort the whole run with
-                    // a host error in both halves, so that idiom could not be written.
+                    // to parse an enum from text.
                     kRaise("IllegalArgumentException",
                            "No enum constant " + target.__name + "." + args[0])
                 }
@@ -6509,9 +6350,8 @@ NotMemberKw = :script(~~
         // v.toString() is the rendering of the value, which is what println writes -
         // kstr consults a user or generated toString first, so an override still wins.
         // The primitive receivers above answer it themselves (identically); this reaches
-        // a list, a range and a class instance, where the list case used to fail
-        // outright ("unknown list method: toString") and an enum entry answered E@1.
-        // The compiled half emits js_ktstr at the same point (see foldCallMember).
+        // a list, a range and a class instance. The compiled half emits js_ktstr at the
+        // same point (see foldCallMember).
         if (name == "toString" && args.length == 0) { return kstr(target) }
         // Everything from here down is a BUILTIN receiver (a list, a string, a range, a
         // map, a set, ... - a class instance is dispatched further below, through its own
@@ -6602,18 +6442,13 @@ NotMemberKw = :script(~~
         var tgtKind = "List"
         if (isRange(tgt)) {
             if (name == "contains") return rangeHas(tgt, args[0])
-            // The members whose answer IS the range. toString / hashCode / equals
-            // fell through to the materialized list here and answered "[1, 2, 3]",
-            // the list fold and element-wise equality - all three different from
-            // what the compiled halves answer now, and from Kotlin.
+            // The members whose answer IS the range: toString / hashCode / equals
+            // answer from the bounds, not from the materialized list.
             if (name == "toString") return rangeStr(tgt)
             if (name == "hashCode") return rangeHashK(tgt)
             if (name == "isEmpty") return rangeEmpty(tgt)
             if (name == "equals") { return isRange(args[0]) ? rangeEqK(tgt, args[0]) : false }
-            // IntProgression.reversed() is an IntProgression, not a List - every
-            // engine answered the materialized "[5, 4, 3, 2, 1]" here, and the
-            // `.first`/`.last`/`.step` of the answer were then kotlin.Unit in both
-            // compiled halves. todo.md 1.5.
+            // IntProgression.reversed() is an IntProgression, not a List.
             if (name == "reversed" && tgt.fl !== true) { return rangeRev(tgt) }
             // IntProgression.step(k) in its function spelling; the infix `step` is
             // folded by makeRange and never reaches a method call.
@@ -6646,10 +6481,7 @@ NotMemberKw = :script(~~
             // to kSeqMethod below, so the fast path takes the one-argument form only.
             if (name == "add" && args.length == 1) { tgt.push(args[0]); return true }
             if (name == "size") return tgt.length
-            // Bounds-checked, like the indexed read a[i] it is the method spelling
-            // of: this used to answer undefined, which PRINTED "kotlin.Unit", while
-            // the compiled halves aborted with "list index 5 out of range".
-            // docs/todo.md 2.9.
+            // Bounds-checked, like the indexed read a[i] it is the method spelling of.
             if (name == "get") {
                 var lgi = kNum(args[0])
                 if (lgi < 0 || lgi >= tgt.length) { kIndexOob("IndexOutOfBoundsException", lgi, tgt.length) }
@@ -6702,17 +6534,16 @@ NotMemberKw = :script(~~
             if (gen != null) { return gen.v }
             // An interface implemented by delegation forwards everything it does not
             // override to the delegate instance.
-            // MEASURED DIVERGENCE (2026-07-28, found while sweeping the super surface):
-            // this fallback sits AFTER clsFind, so an interface DEFAULT body inherited
-            // through the parent chain wins over the `by` delegate -
+            // KNOWN DIVERGENCE: this fallback sits AFTER clsFind, so an interface
+            // DEFAULT body inherited through the parent chain wins over the `by`
+            // delegate -
             //     interface I { fun h() = 40 } ; class Impl : I { override fun h() = 7 }
             //     class C(d: I) : I by d         C(Impl()).h()
             // answers 40 here and 7 in the compiler half. Kotlin's rule (documentation,
             // "Delegation": the compiler generates forwarders for every member the class
             // does not itself override) makes the COMPILER right. Fixing it needs the
             // OWNER of the found member, so a class's own / a superclass's member still
-            // wins - a dispatch-ordering change across the whole method surface, not a
-            // super fix, and it reproduces with no `super` in the program.
+            // wins - a dispatch-ordering change across the whole method surface.
             var ds = target.__deleg
             if (ds != undefined) {
                 for (var di = 0; di < ds.length; di++) {
@@ -6785,15 +6616,12 @@ NotMemberKw = :script(~~
     }
     // The Object default, Name@1 - EXCEPT for a Throwable, which inherits
     // java.lang.Throwable#toString: the BINARY class name and, only when the message
-    // is non-null, ": " and the message. Measured, java 24.0.2 -
-    // println(RuntimeException("x")) is "java.lang.RuntimeException: x", where all
-    // three engines answered "RuntimeException@1": agreed and wrong, the class only
-    // an oracle can see (manual chapter 5). It goes HERE rather than in kstr because
-    // dataMember answers toString for every non-data class, so kstr never reached
+    // is non-null, ": " and the message (java: println(RuntimeException("x")) is
+    // "java.lang.RuntimeException: x"). It goes HERE rather than in kstr because
+    // dataMember answers toString for every non-data class, so kstr never reaches
     // past it - and because this is also what an explicit `e.toString()` calls
     // (the mcall path). An `override fun toString()` and a data class' GENERATED one
     // both still win, exactly as in Kotlin: neither reaches this function.
-    // docs/todo.md 1.2.
     function defaultToString(target) {
         if (kIsThrowable(target)) { return kThrowableStr(target) }
         return target.__class.__name + "@1"
@@ -6869,16 +6697,13 @@ NotMemberKw = :script(~~
         return h
     }
     // java.lang.Double.hashCode, which is what Kotlin/JVM's Double.hashCode() IS:
-    // doubleToLongBits(d) xor (bits ushr 32), read as an Int. Before this the box's
-    // hash was the TRUNCATED value, so 1.5.hashCode() answered 1 where java answers
-    // 1073217536 and listOf(1.5).hashCode() answered 32 where java answers
-    // 1073217567 - and a hash that disagrees with kEq is a real defect, because the
-    // collection equality this file already implements is paired with it.
+    // doubleToLongBits(d) xor (bits ushr 32), read as an Int (1.5.hashCode() is
+    // 1073217536, listOf(1.5).hashCode() is 1073217567). A hash must agree with kEq.
     // Neither engine has typed arrays, so the bit pattern is derived arithmetically:
     // the magnitude is normalised into [1, 2) by halving/doubling (every step is an
     // exact power of two), and the 52-bit significand is split into its top 20 bits
-    // and its bottom 32. Verified against java (JDK 24) for 1.5, 0.1, -1.5, 3.0,
-    // +-0.0, NaN, +-Infinity, 1e300 and the smallest subnormal 4.9E-324.
+    // and its bottom 32. Checked against java for 1.5, 0.1, -1.5, 3.0, +-0.0, NaN,
+    // +-Infinity, 1e300 and the smallest subnormal 4.9E-324.
     // A FLOAT shares the {__flo} box with a Double in this value model but carries
     // __f32, so it takes the OTHER hash - kFltHash below.
     function kDblHash(d) {
@@ -6917,8 +6742,8 @@ NotMemberKw = :script(~~
     // It differs from kDblHash at all but a handful of coincidences - 1.5f is
     // 1069547520 where the double 1.5 is 1073217536 - and the two ZEROS stay apart
     // (-0.0f is -2147483648, 0.0f is 0), which is the case a value-based hash
-    // cannot see. Verified against java (JDK 24) over 28 values including the
-    // subnormals, both infinities, NaN, Float.MAX_VALUE and Float.MIN_VALUE.
+    // cannot see. Checked against java over the subnormals, both infinities, NaN,
+    // Float.MAX_VALUE and Float.MIN_VALUE.
     function kFltHash(d) {
         // floatToIntBits COLLAPSES every NaN to 0x7fc00000.
         if (d !== d) { return 2143289344 }
@@ -6975,9 +6800,7 @@ NotMemberKw = :script(~~
         if (typeof l == "number" && typeof r == "number") { return (l + r) | 0 }
         if (typeof l == "string" || typeof r == "string") return kstr2(l) + kstr2(r)
         // `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements of
-        // another collection, or the single element. Before this it fell through to the
-        // numeric tail and `listOf(1, 2) + listOf(3)` answered 0 here and the string
-        // "1,23" in the compiled half - a wrong answer and a divergence.
+        // another collection, or the single element (`listOf(1, 2) + listOf(3)`).
         if (Array.isArray(l)) { return kSeqMethod(l, "plus", [r]).v }
         if (kIsMap(l)) { return kMapMethod(l, "plus", [r]).v }
         // A SET gains elements as a Set, not as a List (kotlin.collections.plus is
@@ -7003,10 +6826,9 @@ NotMemberKw = :script(~~
         // TWO {__flo} BOXES ARE COMPARED BEFORE THE UNBOXING BELOW, because a Float
         // and a Double are DIFFERENT KEYS: Kotlin's == on Any is java.lang.Float.equals
         // / Double.equals, and Float#equals answers true only "if the argument is not
-        // null and is a Float object", so setOf(1.5f, 1.5) has TWO elements (java
-        // 24.0.2; Kotlin/JVM's Float IS java.lang.Float, the argument e5e68b5 and
-        // 30cd9f6 used). 30cd9f6 made the two widths HASH apart - this is the half of
-        // the same contract equality owes the hash. `<`, `>` and a well-typed program's
+        // null and is a Float object", so setOf(1.5f, 1.5) has TWO elements (Kotlin/JVM's
+        // Float IS java.lang.Float). The two widths also HASH apart (kFltHash); this is
+        // the half of that contract equality owes. `<`, `>` and a well-typed program's
         // primitive == still promote through kFloOp2 / kCmp, which do not come here,
         // and a box against a plain number or a sized integer is left alone (that pair
         // is a compile error in Kotlin: kotlinc rejects `1.5f == 1.5` and `1.0 == 1`).
@@ -7029,14 +6851,11 @@ NotMemberKw = :script(~~
         // comparison at all if the two types disagreed.
         if (szIs(a) || szIs(b)) {
             // A {__flo} BOX ON THE OTHER SIDE COMPARES AS A DOUBLE. kSz below is
-            // i64Trunc of the value, so a non-integral double was TRUNCATED into the
-            // integer's width and `1L == 1.5` answered true here while the compiler
-            // half (k0GiEq / rt.giEq, which promote to a double) answered false - a
-            // halves divergence --cross never saw because nothing in the matrix put a
-            // sized integer against a fractional double. java 24.0.2 agrees with the
-            // compiler half in both readings: 1L == 1.5 is false as a primitive
-            // comparison (JLS 15.21.1 promotes the long TO double) and
-            // Long.valueOf(1).equals(1.5) is false as a boxed one.
+            // i64Trunc of the value, so a non-integral double would be TRUNCATED into
+            // the integer's width and `1L == 1.5` answer true. java: 1L == 1.5 is false
+            // as a primitive comparison (JLS 15.21.1 promotes the long TO double) and
+            // Long.valueOf(1).equals(1.5) is false as a boxed one; the compiler half
+            // (k0GiEq / rt.giEq) promotes to a double too.
             if (kIsFlo(l)) { return kIsIntegral(b) && l.__flo === kNumD(b) }
             if (kIsFlo(r)) { return kIsIntegral(a) && r.__flo === kNumD(a) }
             if (kIsIntegral(a) && kIsIntegral(b)) { return szEq(szIs(a) ? a : kSz(a, 64, kNoU), szIs(b) ? b : kSz(b, 64, kNoU)) }
@@ -7048,13 +6867,12 @@ NotMemberKw = :script(~~
             // The COLLECTION shapes have structural equality in Kotlin (they are
             // java.util.List / Map / AbstractSet on the JVM, whose equals is
             // element-wise), and none of them is a class instance in this value model,
-            // so nothing below would ever have found an `equals` for them: before this
-            // `listOf(1, 2) == listOf(1, 2)` was FALSE in both halves. Structural
-            // equality also has to agree with kHash, which was already element-wise.
+            // so nothing below would ever find an `equals` for them. Structural
+            // equality also has to agree with kHash, which is element-wise.
             // Two callable references are equal when they name the same member of the
             // same receiver (Kotlin: `b::v == b::v` is true for bound references), and
             // two class literals when they name the same class. Both are plain records
-            // here, so without this they compared by identity and answered false.
+            // here, so without this they would compare by identity.
             if (a.__propref === true || b.__propref === true) {
                 return a.__propref === true && b.__propref === true && a.pname == b.pname &&
                        a.kbound === b.kbound && a.obj === b.obj && a.ktype == b.ktype
@@ -7071,14 +6889,10 @@ NotMemberKw = :script(~~
         return false
     }
     // The structural-equality half of kEq, over the shapes the runtime models without a
-    // class descriptor: a list/array/set (a plain host array), a map (the {__dict, keys,
-    // vals} handle), a range and a Pair/Triple. Answers 1 for equal, -1 for not equal
-    // and 0 for "neither side is one of these shapes", so kEq can tell a decided answer
-    // apart from a fall-through.
-    // NOT a full model of Kotlin's rule: a Set is a list here, so `setOf(2, 1) ==
-    // setOf(1, 2)` is false (Kotlin says true) and `listOf(1) == setOf(1)` is true
-    // (Kotlin says false). Element uniqueness and set identity are the same gap the
-    // setOf-is-listOf collapse already had; making them right needs a real set shape.
+    // class descriptor: a list/array (a plain host array), a set, a map (the {__dict,
+    // keys, vals} handle), a range and a Pair/Triple. Answers 1 for equal, -1 for not
+    // equal and 0 for "neither side is one of these shapes", so kEq can tell a decided
+    // answer apart from a fall-through.
     function kStructEq(a, b) {
         // A SET first, so a Set never reaches the element-WISE array branch: two sets
         // are equal when they hold the same elements in ANY order, and a Set is never
@@ -7158,17 +6972,14 @@ NotMemberKw = :script(~~
         var m = clsFind(cls, name)
         return (typeof m == "function") ? m : null
     }
-    // Walk a class descriptor and its __super chain for an own member `name`.
     // Find a member in the supertype GRAPH. Kotlin's resolution is not one chain: a
     // class may implement several interfaces, each of those may extend more, and a
-    // default method (or an accessor) from ANY of them is inherited. This used to walk
-    // `__super` only - the superclass, or else the FIRST supertype - so a second
+    // default method (or an accessor) from ANY of them is inherited - a second
     // interface's default (`class C : A, B` calling b()), anything reached through an
     // interface's own supertypes (`interface B : A`), and a superclass's interface seen
-    // from an OBJECT declaration were all invisible, while the compiled half answered
-    // every one of them. Breadth first, so the nearest declaration wins, which is the
-    // override; a member declared in two unrelated supertypes is an error Kotlin makes
-    // the class resolve explicitly, so either order is right for it.
+    // from an OBJECT declaration. Breadth first, so the nearest declaration wins, which
+    // is the override; a member declared in two unrelated supertypes is an error Kotlin
+    // makes the class resolve explicitly, so either order is right for it.
     // The parents of a supertype are resolved LAZILY here, at lookup time: an object
     // declaration is BUILT while the rest of the file is still being declared, so its
     // superclass's own parents are typically not in globalScope yet - by the time a
@@ -7269,10 +7080,9 @@ NotMemberKw = :script(~~
                     if (tn != null) { spec.pos = concat2impl(spec.pos, [tn]) }
                     // A REIFIED type parameter of an extension called in method position
                     // - `inline fun <reified T> Any.isA() = this is T`, then
-                    // `"x".isA<String>()`. The plain call form `isA<String>(x)` already
-                    // pushed the call site's type arguments; the method-suffix form
-                    // skipped them, so `is T` inside answered false for every T in BOTH
-                    // halves. Same stack, same rule.
+                    // `"x".isA<String>()`. The plain call form `isA<String>(x)` pushes
+                    // the call site's type arguments; the method-suffix form does the
+                    // same here. Same stack, same rule.
                     if (s.targ != undefined && s.targ != null && s.targ != "") {
                         kTypeArgsPush(parseTypeArgs(s.targ))
                         try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
@@ -7357,8 +7167,8 @@ NotMemberKw = :script(~~
                 // slot as well. Real Kotlin gives a receiver lambda no parameter and no
                 // `it` - only `this` - so a VALID program never reaches this widening;
                 // it exists because the shared feature matrix asserts the older reading
-                // (`scoped { s -> s.v }`, where the receiver arrived as an argument),
-                // and dropping that spelling would take the compiler half red with it.
+                // (`scoped { s -> s.v }`, where the receiver arrives as an argument),
+                // which the compiler half answers the same way.
                 var lav = anytype
                 lav = []
                 for (var ai = 0; ai < args.length; ai++) { lav.push(args[ai]) }
@@ -7826,14 +7636,12 @@ NotMemberKw = :script(~~
             for (var i = 0; i < arr.length; i++) {
                 // A FRESH SCOPE OBJECT per iteration, holding just the loop variable.
                 // A lambda captures scopes.slice(0), an array of REFERENCES, so one
-                // shared cell made every closure read the last value: `for (i in 1..3)
-                // { fs.add({ i }) }` answered "3 3 3" where Kotlin answers "1 2 3".
-                // The Kotlin specification defines the for statement by desugaring to
-                // `val <name> = iterator.next()` INSIDE the body, so the binding is a
-                // new one per iteration. All four legs agreed and were wrong together;
-                // the compiler half's twin is makeForRange/makeForList/makeForDestruct
-                // in kotlin-to-llvm-ir.abnf. (No kotlinc here - manual chapter 5 - so
-                // this is spec-cited.)
+                // shared cell would make every closure read the last value: `for (i in
+                // 1..3) { fs.add({ i }) }` is "1 2 3" in Kotlin. The Kotlin specification
+                // defines the for statement by desugaring to `val <name> =
+                // iterator.next()` INSIDE the body, so the binding is a new one per
+                // iteration. The compiler half's twin is makeForRange/makeForList/
+                // makeForDestruct in kotlin-to-llvm-ir.abnf.
                 scopes.push({})
                 declVar(name, arr[i])
                 var r = kLoopBody(bodyT)
@@ -7850,9 +7658,6 @@ NotMemberKw = :script(~~
             return res
         }
     }
-    // for ((a, b) in coll): iterate coll like a list (0 iterations for a non-list, e.g.
-    // a map), running the body each time so its calls stay visible. The component names
-    // bind to undefined - the per-element destructuring is not modelled.
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         var top = retLblTop()
@@ -7936,11 +7741,8 @@ NotMemberKw = :script(~~
                 for (var k = i + off; k < args.length; k++) { va.push(args[k]) }
                 // A vararg parameter may also be filled by NAME, and Kotlin's rule is
                 // that the single named argument IS the array ("only one named argument
-                // for a vararg parameter is allowed, and it must be an array"). Without
-                // this, `add("b", roles = arrayOf("dev"))` bound `roles` to the EMPTY
-                // list here - there were no positional arguments left - while the
-                // compiler half wrapped the array in another array and answered
-                // [[dev]]. Neither was Kotlin's [dev].
+                // for a vararg parameter is allowed, and it must be an array"), so
+                // `add("b", roles = arrayOf("dev"))` binds roles to [dev].
                 if (va.length == 0 && named != null && hasOwn(named, p.pname)) {
                     var nv = anytype
                     nv = named[p.pname]
@@ -7958,11 +7760,9 @@ NotMemberKw = :script(~~
             }
             if (typeof p != "string" && p.ty != undefined && p.ty != "") { v = kAdoptTy(v, p.ty) }
             // A PARAMETER whose declared type is a lambda-WITH-RECEIVER (`body: T.() ->
-            // Unit`) gets the same kRecvLambda wrapper a local `val` of that type
-            // already got, so `t.body()` and `body(t)` both bind `this` to t inside the
-            // lambda. Without it every DSL builder - the single commonest shape of
-            // receiver lambda in real Kotlin - failed with "unknown name: <member>",
-            // because the receiver arrived as the lambda's `it` instead.
+            // Unit`) gets the same kRecvLambda wrapper a local `val` of that type gets,
+            // so `t.body()` and `body(t)` both bind `this` to t inside the lambda - the
+            // shape of every DSL builder.
             if (typeof p != "string" && isRecvFnTy(p.ty)) { v = kRecvLambda(v) }
             declVar(nm, v)
         }
@@ -8034,13 +7834,6 @@ NotMemberKw = :script(~~
         fnRefNames.push(f.name)
         globalScope[f.name] = cl
     }
-    // A local function statement: bind a closure over the enclosing scope under the
-    // function's name in the CURRENT scope. Unlike a top-level function (invokeBody
-    // resets to the global scope), a local function captures its defining scope like
-    // a lambda, so it sees the enclosing locals; the name is declared before the body
-    // captures it, so it can recurse. `this` stays whatever the enclosing scope holds.
-    // A local class/interface/object statement. The descriptor was built while walking;
-    // running the statement is what puts the name in the current frame.
     // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)`; only the
     // one-argument form is modelled, so a wider one is reported and its thunk fails
     // rather than silently indexing by the first argument.
@@ -8050,9 +7843,8 @@ NotMemberKw = :script(~~
     }
     // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`
     // on its own is out of Int range and would be a Long, but `-2147483648` is
-    // Int.MIN_VALUE and stays 32 bit. The equivalent Java program under `java` (JDK 24)
-    // prints -2147483648 / 2147483647 / 0 for x, x - 1 and x * 2; without the fold this
-    // grammar printed -2147483648 / -2147483649 / -4294967296, i.e. Long arithmetic.
+    // Int.MIN_VALUE and stays 32 bit (java prints -2147483648 / 2147483647 / 0 for x,
+    // x - 1 and x * 2 of the equivalent program).
     // Only the exact boundary TEXT is folded. up.in is the production's matched tokens
     // with the separators removed, so `- 2147483648` normalizes to the same string and
     // `-2147483648L` (a genuine Long) and `-(2147483648)` do not match at all.
@@ -8065,11 +7857,18 @@ NotMemberKw = :script(~~
         if (txt == "-2147483648") { return makeConst(-2147483648) }
         return makeNeg(t)
     }
+    // A local class/interface/object statement. The descriptor was built while walking;
+    // running the statement is what puts the name in the current frame.
     function makeLocalTypeStmt(rec) {
         var nm = (rec == undefined || rec == null) ? "" : rec.nname
         var val = (rec == undefined || rec == null) ? null : rec.nval
         return function() { if (nm != "") { declVar(nm, val) } }
     }
+    // A local function statement: bind a closure over the enclosing scope under the
+    // function's name in the CURRENT scope. Unlike a top-level function (invokeBody
+    // resets to the global scope), a local function captures its defining scope like
+    // a lambda, so it sees the enclosing locals; the name is declared before the body
+    // captures it, so it can recurse. `this` stays whatever the enclosing scope holds.
     function makeLocalFunStmt(f) {
         return function() {
             var captured = scopes.slice(0)
@@ -8229,8 +8028,7 @@ NotMemberKw = :script(~~
     }
     // The SIMPLE name of a (possibly generic, possibly nullable, possibly dotted) type
     // reference: Box<T> -> Box, Outer.In -> In, Base? -> Base. Every descriptor is bound
-    // in globalScope under its simple name and carries it as __name, so a supertype
-    // written as a dotted path used to resolve to nothing at all.
+    // in globalScope under its simple name and carries it as __name.
     function typeBaseName(t) {
         t = stripWs(t)
         var cut = t.length
@@ -8288,8 +8086,7 @@ NotMemberKw = :script(~~
         for (var i = 0; i < cls.__parentSpecs.length; i++) {
             // Through a typealias and through a dotted path: `class C : Alias()` and
             // `class C : Outer.In()` both name a descriptor that IS in globalScope, but
-            // under a different name, so the raw lookup failed and the parent was
-            // silently dropped - which is what left `super.g()` with nothing to walk.
+            // under a different name.
             var nm = resolvedTypeName(cls.__parentSpecs[i].name)
             var d = hasOwn(globalScope, nm) ? globalScope[nm] : undefined
             if (d != undefined && d != null && d.__isclass) {
@@ -8304,8 +8101,7 @@ NotMemberKw = :script(~~
         // The answer is only MEMOIZED once every supertype named actually resolved. A
         // nested object declaration is BUILT while its owner's body is being walked -
         // before the owner itself is in globalScope - so `class Shape { object Empty :
-        // Shape() }` used to memoize an EMPTY parent list and lose every member Shape
-        // and Shape's interfaces gave it, for the whole run. Anything still missing at
+        // Shape() }` must not memoize an EMPTY parent list. Anything still missing at
         // lookup time (a supertype from outside the program) simply resolves again;
         // parentSpecs is one or two entries, so retrying is cheap.
         if (!missing) { cls.__parents = ps }
@@ -8352,15 +8148,12 @@ NotMemberKw = :script(~~
         }
         return r
     }
-    // Install a member list onto a descriptor: the methods under their names, the
-    // property accessors under the mangled get$/set$ names.
     // The declared type of every property this descriptor OWNS, keyed "$name". Together
     // with __cparams (which already carries a primary-constructor property's type) it is
     // what lets a FIELD WRITE adopt the declared width: `class A { var y: Long = 0 }`
-    // followed by `a.y = 1` used to store a plain Int, so `a.y * 1000000 * 1000000` gave
-    // -727379968 where java (JDK 24) prints 1000000000000. Go's __ftypes table
-    // (commit 457791c) is the same idea; the Kotlin version needs no zero-value builder
-    // because a property always has an initializer thunk.
+    // followed by `a.y = 1` stores a Long, so `a.y * 1000000 * 1000000` is
+    // 1000000000000. Go's __ftypes table is the same idea; the Kotlin version needs no
+    // zero-value builder because a property always has an initializer thunk.
     function kInstallPTypes(cls, parts) {
         var t = {}
         var li = {}
@@ -8370,8 +8163,7 @@ NotMemberKw = :script(~~
             // Which properties are `lateinit var`. A lateinit property cannot hold
             // null in Kotlin, so "the field is still null" IS "not initialized yet" -
             // no separate flag per instance is needed, and reading one throws
-            // UninitializedPropertyAccessException instead of answering null (which is
-            // what both halves used to do). The twin is __lateinit in
+            // UninitializedPropertyAccessException. The twin is __lateinit in
             // kotlin-to-llvm-ir.abnf.
             if (it.prop != undefined && it.li === true) { li["$" + it.prop] = true }
         }
@@ -8537,15 +8329,13 @@ NotMemberKw = :script(~~
         return undefined
     }
     // EVERY implicit receiver a member-extension lookup may start from, innermost
-    // first: each frame's `this` and each frame's `__dispatch`. It used to be just
-    // [findThis(), findDispatch()] - the FIRST of each - and that lost the enclosing
-    // member's receiver as soon as anything added an implicit one, so inside a member
-    // of A `with(Other(9)) { 2.tripled() }` saw only the `with` receiver and reported
-    // `unknown Int method: tripled`. Kotlin's `with` takes a `T.() -> R` extension
-    // lambda, which ADDS a receiver rather than replacing the enclosing member's
-    // dispatch receiver (spec-cited: no kotlinc on this machine). The same collection
-    // lives in abnf/jsrtkotlin.go's ktMemberExtFind and lib/kotlin-rt.metajs's
-    // k6MextFind; all three must agree or --cross goes red. todo.md 1.3.
+    // first: each frame's `this` and each frame's `__dispatch`, not just the first of
+    // each. Kotlin's `with` takes a `T.() -> R` extension lambda, which ADDS a receiver
+    // rather than replacing the enclosing member's dispatch receiver, so inside a member
+    // of A `with(Other(9)) { 2.tripled() }` must still see A (spec-cited: no kotlinc
+    // on this machine). The same collection lives in abnf/jsrtkotlin.go's
+    // ktMemberExtFind and lib/kotlin-rt.metajs's k6MextFind; all three must agree or
+    // --cross goes red.
     function findRecvStarts() {
         var out = []
         for (var i = scopes.length - 1; i >= 0; i--) {
@@ -8603,13 +8393,10 @@ NotMemberKw = :script(~~
             // The write-back is CONDITIONAL. Kotlin only materializes a backing field
             // when an accessor actually mentions `field`, so a setter that stores
             // somewhere else - `set(v) { super.p = v }`, the delegating override -
-            // must not have its store undone. An unconditional `self[name] = field`
-            // put the ENTRY value back on top of the write the body had just made, so
-            // `d.p = 7` left the base's property at 1 while the same store from an
-            // ordinary method (`fun poke(v: Int) { super.p = v }`) worked. Comparing
-            // against the entry value keeps `field = x` writing through and makes a
-            // setter that never touches `field` a no-op on the slot, which is what the
-            // compiler half already did.
+            // must not have its store undone by an unconditional `self[name] = field`.
+            // Comparing against the entry value keeps `field = x` writing through and
+            // makes a setter that never touches `field` a no-op on the slot, as in the
+            // compiler half.
             try {
                 nlrRun(body)
                 var f1 = anytype
@@ -8643,9 +8430,8 @@ NotMemberKw = :script(~~
         // object is nested in its owner's scope, so the owner's statics - the entries
         // of an enum above all - resolve UNQUALIFIED inside its members: `enum class L
         // { A, B; companion object { fun of(n: Int) = if (n == 0) A else B } }` is the
-        // ordinary spelling of an enum factory, and it failed with "unknown name: A"
-        // here while the compiled half (which emits the companion inside the entry
-        // scope) answered it. Read by recvLookup.
+        // ordinary spelling of an enum factory (the compiled half emits the companion
+        // inside the entry scope). Read by recvLookup.
         obj.__class.__owner = cls
         cls.__statics[cname] = obj
         cls.__companion = obj
@@ -8680,12 +8466,11 @@ NotMemberKw = :script(~~
         cls.__secondary = parts.secondary
         // An `inner` class remembers WHICH class encloses it, so a BARE `Inner()`
         // written inside the outer's own member can capture the enclosing instance as
-        // __outer, exactly as `outer.Inner()` already did. Without it `this@Outer`
-        // inside such an instance answered the INNER instance - thisAtIn ran out of
-        // chain and makeThisAt fell back to findThis - in both halves.
+        // __outer, exactly as `outer.Inner()` does - otherwise `this@Outer` inside such
+        // an instance would find no chain.
         // Recorded HERE and not in attachNested: a descriptor that has travelled
         // through the tag stack is a fresh copy on every read under goja (see
-        // docs/abnf-dialect-gotchas.md), so mutating nm.nval there did nothing.
+        // docs/abnf-dialect-gotchas.md), so mutating nm.nval there does nothing.
         // curClassPop above removed this class's own name, so curClassTop is the
         // enclosing one.
         if (hasMod(mods, "inner")) {
@@ -8704,20 +8489,15 @@ NotMemberKw = :script(~~
     }
     // The BINARY name of a declared type - "Outer$Inner", "Outer$Inner$Deep" - which
     // is what java.lang.Class#getName answers and therefore what Throwable#toString
-    // and the launcher's uncaught line spell for a NESTED throwable. `class Inner :
-    // Exception(m)` inside `class Outer` rendered "Inner: in" where the JVM says
-    // "Outer$Inner: in" (docs/todo.md 2.9's adjacent note). java has carried the same
-    // bookkeeping all along, as jBinStack in languages/java-interpreter.abnf; kotlin
-    // already had the STACK it needs (curClasses), only nothing wrote the name down.
+    // and the launcher's uncaught line spell for a NESTED throwable (`class Inner :
+    // Exception(m)` inside `class Outer` is "Outer$Inner: in"). java keeps the same
+    // bookkeeping as jBinStack in languages/java-interpreter.abnf.
     //
-    // MEASURED, because the note in the list warned that adding it "changes the
-    // Name@1 rendering of EVERY nested class, not just throwables": it does not. The
-    // `Name@1` fallback reads __name (ktpObj in abnf/jsrtkotlin.go, k4bRender in
-    // languages/lib/kotlin-rt.metajs, kstr here); only ktClassBin / kThrowableStr
-    // read __bname. So this moves the throwable line and nothing else. Making
-    // `Name@1` JVM-exact is a SEPARATE change and a losing one on its own terms: the
-    // JVM prints an identity hash there, this project prints a fixed `@1` in all
-    // three engines, so `Outer$Plain@1` would still not be the JVM's answer.
+    // Only ktClassBin / kThrowableStr read __bname; the `Name@1` fallback reads __name
+    // (ktpObj in abnf/jsrtkotlin.go, k4bRender in languages/lib/kotlin-rt.metajs, kstr
+    // here), so this moves the throwable line and nothing else. The JVM prints an
+    // identity hash there and this project a fixed `@1`, so a JVM-exact `Outer$Plain@1`
+    // would buy nothing.
     //
     // An anonymous object's descriptor and the two synthetic names are excluded: the
     // JVM spells those Outer$1, and no engine here has the counter that would need.
@@ -8870,13 +8650,11 @@ NotMemberKw = :script(~~
             }
             var dspec = kevalArgs(dargs)
             if (dtarget == "super") {
-                // `: super(args)` runs the SUPERCLASS constructor, not this class's own.
-                // Calling cls.__ctor with the delegation arguments (what this used to do
-                // unconditionally) bound them to this class's OWN parameter list - empty,
-                // since Kotlin forbids `: super(...)` in a class that has a primary
-                // constructor - so the superclass's `val` parameters were never stored on
-                // the instance and `n` inside an inherited method died with "unknown
-                // name: n", while the compiler half answered correctly.
+                // `: super(args)` runs the SUPERCLASS constructor, not this class's own:
+                // cls.__ctor would bind the arguments to this class's OWN parameter list -
+                // empty, since Kotlin forbids `: super(...)` in a class that has a primary
+                // constructor - and the superclass's `val` parameters would never be
+                // stored on the instance.
                 var pc = firstClassParent(cls)
                 if (pc != null && pc.__ctor != undefined && pc.__ctor != null) {
                     kSetNamed(dspec.named)
@@ -8936,7 +8714,7 @@ NotMemberKw = :script(~~
         var cls = newDescriptor(name, parentSpecs)
         // A companion's owner is recorded BEFORE the property initializers below run:
         // `companion object { val def = A }` inside an enum reads an owner static in
-        // its INITIALIZER, so setting it after the singleton was built was too late.
+        // its INITIALIZER.
         if (owner != undefined && owner != null) { cls.__owner = owner }
         installMembers(cls, parts)
         attachNested(cls, parts.nested)
@@ -9071,11 +8849,9 @@ NotMemberKw = :script(~~
             var obj = {__class: cls}
             scopes.push({})
             declVar("this", obj)
-            // `object : B(...)` genuinely CONSTRUCTS its superclass: without this the
-            // instance carried none of B's fields, so `(object : B() {}).v` answered
-            // Unit and `super.v` had nothing to read. Interface delegation (`object : I
-            // by d`) is recorded here for the same reason. Both halves agreed on the
-            // old (wrong) answer, so only a probe finds it.
+            // `object : B(...)` genuinely CONSTRUCTS its superclass, so the instance
+            // carries B's fields (`(object : B() {}).v`, `super.v`). Interface
+            // delegation (`object : I by d`) is recorded here for the same reason.
             for (var sp2 = 0; sp2 < parentSpecs.length; sp2++) {
                 var pspec = parentSpecs[sp2]
                 if (pspec.args != null) {
@@ -9141,11 +8917,10 @@ NotMemberKw = :script(~~
     // none. The twin of ktDelegKind in abnf/jsrtkotlin.go, which the compiler half
     // drives: "obj" is a user object with getValue, "map" a Map delegated by the
     // property's NAME, "box" one of the kotlin.properties.Delegates boxes and "lazy"
-    // a lazy handle. Only the "obj" arm was recognized before, because the test was a
-    // bare lookupMethod - which does not see the builtin Map surface at all, and whose
-    // kMapMethod getValue takes a KEY rather than a property. So `val a: Int by map`
-    // warned "delegated property not implemented" in this half while the compiler
-    // answered map["a"]; each non-obj kind therefore needs its own branch.
+    // a lazy handle. A bare lookupMethod is not enough: it does not see the builtin
+    // Map surface at all, and kMapMethod's getValue takes a KEY rather than a
+    // property (`val a: Int by map` reads map["a"]), so each non-obj kind needs its
+    // own branch.
     function delegKind(d) {
         if (d === null || d === undefined || typeof d != "object") { return "" }
         if (typeof d.__ktdeleg == "string" && d.__ktdeleg != "") { return "box" }
@@ -9263,8 +9038,7 @@ NotMemberKw = :script(~~
             return v
         }
     }
-    // Write a plain (path-less) assignment target, delegate-aware. One scope walk does
-    // what the previous getVar+setVar pair did in two.
+    // Write a plain (path-less) assignment target, delegate-aware, in one scope walk.
     function kSetName(name, op, v) {
         // The compound result goes into a fresh anytype local: a PARAMETER keeps the
         // type it was first called with under the frozen engine, and += may turn a
@@ -9338,8 +9112,6 @@ NotMemberKw = :script(~~
     }
 
     // ----- super and this@Label -----
-    // super.m(): a marker naming the instance and the class to start the lookup from -
-    // the FIRST parent of the class whose body this expression sits in.
     // The DECLARING class of the `super` expression, found at runtime. The walk-time
     // name is the anchor, but a globalScope lookup alone is not enough: an OBJECT
     // EXPRESSION has no global name (its descriptor is "<object>", and ObjectExprReal
@@ -9390,7 +9162,7 @@ NotMemberKw = :script(~~
                 var ps = resolveParents(cls)
                 // `super<I2>` names WHICH supertype - reduced through generics, a dotted
                 // path and any typealias first, because clsNamed matches the descriptor's
-                // SIMPLE name (`super<Outer.In>` and `super<Alias>` both used to miss).
+                // SIMPLE name (`super<Outer.In>`, `super<Alias>`).
                 if (qual != "") {
                     want = resolvedTypeName(qual)
                     for (var i = 0; i < ps.length; i++) {
@@ -9398,11 +9170,11 @@ NotMemberKw = :script(~~
                     }
                 }
                 // An unqualified `super` names the SUPERCLASS, which is not necessarily
-                // the first supertype: Kotlin lets the interfaces be listed first, and
-                // `class C : I3, Base2()` gave ps[0] = I3 and lost Base2 entirely.
-                // resolveParents already picks the supertype written with a constructor
-                // call (falling back to the first non-interface, then to position) and
-                // records it as __super - that is the one to start from.
+                // the first supertype: Kotlin lets the interfaces be listed first
+                // (`class C : I3, Base2()`). resolveParents already picks the supertype
+                // written with a constructor call (falling back to the first
+                // non-interface, then to position) and records it as __super - that is
+                // the one to start from.
                 if (start == null) { start = cls.__super }
                 if (start == null && ps.length > 0) { start = ps[0] }
                 if (start == null) { want = superWantName(cls, qual) }
@@ -9491,11 +9263,10 @@ NotMemberKw = :script(~~
 
     // ----- Property references (recv::member) -----
     // A BARE `::name`. Inside a class member it is a reference to THIS receiver's
-    // property, which is what makes `::name.isInitialized` - the lateinit test - work;
-    // it used to be a plain variable READ, so it evaluated the property and then asked
-    // for `.isInitialized` of the (null) value, aborting both halves with
-    // "property .isInitialized of null". Anywhere else - a top-level function, a
-    // builtin, a local - it stays the value itself, which is what ::fn has always been.
+    // property, which is what makes `::name.isInitialized` - the lateinit test - work
+    // (a plain variable read would evaluate the property and ask the null value for
+    // `.isInitialized`). Anywhere else - a top-level function, a builtin, a local - it
+    // stays the value itself, which is what ::fn is.
     // A scope binding wins over a receiver property, so a local `::x` is unchanged.
     function makeBareRef(name) {
         var vr = makeVarRef(name)
@@ -9583,10 +9354,8 @@ NotMemberKw = :script(~~
     }
     // The names Kotlin declares as TYPES rather than values. A `::` in front of one of
     // them is an UNBOUND reference (String::length, Int::class) even where the runtime
-    // happens to carry a same-named builder in scope - which the compiled half does, and
-    // which made `String::length.get("abcd")` answer kotlin.Unit there while this half
-    // answered 4. The twin is ktIsTypeName in abnf/jsrtkotlin.go; the two lists MUST
-    // stay in step.
+    // happens to carry a same-named builder in scope (as the compiled half does). The
+    // twin is ktIsTypeName in abnf/jsrtkotlin.go; the two lists MUST stay in step.
     var kTypeNames = {}
     function kIsTypeName(n) { return hasOwn(kTypeNames, n) }
     function kInstallTypeNames() {
@@ -9623,8 +9392,7 @@ NotMemberKw = :script(~~
             return kGetField(recv, r.pname)
         }
         // An EXTENSION function - `Box::tripled`, `b::tripled`. extResolves is the same
-        // resolution the call `b.tripled()` uses; without it both halves read a property
-        // that does not exist and answered kotlin.Unit.
+        // resolution the call `b.tripled()` uses.
         if (extResolves(r.pname)) {
             return extFuns["$" + r.pname].apply(undefined, concat2impl([recv], kRefRest(r, args)))
         }
@@ -9673,7 +9441,7 @@ NotMemberKw = :script(~~
         if (v === null || v === undefined) { return null }
         if (kIsChar(v)) { return "Char" }
         // The __f32 flag says which of the two the box holds, so `1.5f::class` is
-        // Float where it used to answer Double alongside every real double.
+        // Float.
         if (kIsFlo(v)) { return kIsF32(v) ? "Float" : "Double" }
         if (szIs(v)) { return kBoxTypeName(v) }
         if (typeof v == "number") { return "Int" }
@@ -9738,8 +9506,7 @@ NotMemberKw = :script(~~
         // List<Int> is a compile error there, not a runtime one - so neither half can
         // be faithful and the two must at least agree. The compiler's emitComponent
         // is a three-way select (list -> element, object -> componentN, else ->
-        // undefined); this is its `else` arm. Aborting here instead made the whole
-        // recognition corpus die in the interpreter and run in the compiler.
+        // undefined); this is its `else` arm, so a recognition-only corpus runs in both.
         return undefined
     }
     // items = [name..., initThunk]
@@ -9804,10 +9571,10 @@ NotMemberKw = :script(~~
     function kGetField(o, name) {
         // An extension property declared on a NULLABLE receiver - `val String?.safeLen
         // get() = this?.length ?: -1` - is exactly the case where a null receiver is
-        // legal, and its getter is the only thing that can decide what to answer. The
-        // null test came first and aborted with "property .safeLen of null" while the
-        // compiler half (whose field emitter reaches extp$name before any null check)
-        // answered -1. A name no extension declares still fails, as before.
+        // legal, and its getter is the only thing that can decide what to answer, so it
+        // is consulted before the null test (the compiler half's field emitter reaches
+        // extp$name before any null check too). A name no extension declares still
+        // fails.
         if (o === undefined || o === null) {
             var ep0 = extProps["$" + name]
             if (ep0 != undefined) { return ep0(o) }
@@ -9834,9 +9601,7 @@ NotMemberKw = :script(~~
             if (sx !== undefined) { return sx }
             if (name == "lastIndex") { return o.length - 1 }
             // kotlin.text declares `val CharSequence.indices: IntRange` beside
-            // lastIndex, and it was missing here: `for (i in s.indices)` aborted with
-            // "iteration over kotlin.Unit" in BOTH halves. Found sweeping todo.md 1.8's
-            // neighbourhood, which named only the List case.
+            // lastIndex (`for (i in s.indices)`).
             if (name == "indices") { return kRange(0, o.length - 1, false) }
             return extPropGet(o, name)
         }
@@ -9858,8 +9623,7 @@ NotMemberKw = :script(~~
             return extPropGet(o, name)
         }
         // A StringBuilder IS a CharSequence, so kotlin.text's `indices` and `lastIndex`
-        // apply to it exactly as they do to a String. Only `length` was answered, in
-        // BOTH halves - agreement, and both wrong. Found sweeping todo.md 1.8.
+        // apply to it exactly as they do to a String.
         if (typeof o == "object" && o.__sb === true) {
             if (name == "length") { return o.s.length }
             var bx = anytype
@@ -9889,19 +9653,15 @@ NotMemberKw = :script(~~
             if (ax !== undefined) { return ax }
             if (name == "lastIndex") { return o.length - 1 }
             if (name == "indices") { return kRange(0, o.length - 1, false) }
-            // first / last / step on a LIST are the compiler half's answer, and they
-            // are here so the two halves agree. That half MATERIALIZES a range as a
-            // list of its elements (kotlin-to-llvm-ir.abnf's makeRange), so the only
-            // way `(1..10 step 3).first` can work there is to recover the progression
-            // from the elements - and then a plain list answers the same reads. Kotlin
-            // itself declares first/last/step on IntProgression only; on a List
-            // first/last are member FUNCTIONS and need parentheses, so no valid
-            // program can tell the difference. The twin is the *jsArray arm of
-            // js_ktfget in abnf/jsrtkotlin.go.
+            // first / last / step on a plain LIST read it as a progression (see
+            // kProgStep). Kotlin itself declares first/last/step on IntProgression
+            // only; on a List first/last are member FUNCTIONS and need parentheses, so
+            // no valid program can tell the difference. The twin is the *jsArray arm
+            // of js_ktfget in abnf/jsrtkotlin.go.
             if (name == "first" && o.length > 0) { return o[0] }
             if (name == "last" && o.length > 0) { return o[o.length - 1] }
             // IntRange.start / IntRange.endInclusive, the ClosedRange members, for the
-            // same reason and answered kotlin.Unit in all three engines before.
+            // same reason.
             if (name == "start" && o.length > 0) { return o[0] }
             if (name == "endInclusive" && o.length > 0) { return o[o.length - 1] }
             if (name == "step" && kProgStep(o) !== undefined) { return kProgStep(o) }
@@ -9913,11 +9673,9 @@ NotMemberKw = :script(~~
             if (rx !== undefined) { return rx }
             if (name == "first") { return rangeEl(o, o.from) }
             // IntProgression.last is "the last element in the progression", NOT the
-            // bound it was built from: (1..10 step 4).last is 9, and this answered 10.
-            // IntProgression.step carries the DIRECTION - kotlin.ranges.downTo is
-            // documented as "a progression ... with the step -1" - and this answered
-            // +1 for every downTo. Both were wrong against the stdlib in this half and
-            // unanswerable (kotlin.Unit) in the other; found sweeping todo.md 1.8.
+            // bound it was built from: (1..10 step 4).last is 9. IntProgression.step
+            // carries the DIRECTION - kotlin.ranges.downTo is documented as "a
+            // progression ... with the step -1".
             if (name == "last") { return rangeEl(o, rangeLastEl(o)) }
             // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS the range was
             // built from, not the last ELEMENT - the two coincide for every plain
@@ -9933,8 +9691,8 @@ NotMemberKw = :script(~~
         }
         // super.prop: read the OVERRIDDEN property - the accessor declared by the
         // supertype if it has one, else the backing field the supertype initialized.
-        // Without this branch the marker fell through to extPropGet and answered
-        // undefined, so `override val v get() = super.v + 1` quietly evaluated to 0.
+        // Without this branch the marker would fall through to extPropGet, so
+        // `override val v get() = super.v + 1` would quietly evaluate to 0.
         if (o.__superref === true) {
             if (o.cls != undefined && o.cls != null) {
                 var sg = clsFind(o.cls, "get$" + name)
@@ -9967,8 +9725,7 @@ NotMemberKw = :script(~~
             if (sv != null) { return sv.v }
             // Kotlin 1.9's `Col.entries` is a PROPERTY (an EnumEntries, which is a
             // List) where values() is a function, so it is read here rather than
-            // through mcall; before this it answered undefined, printed as
-            // "kotlin.Unit".
+            // through mcall.
             if (o.__isenum === true && name == "entries") { return o.__entries.slice(0) }
             if (o.__companion != undefined) { return kGetField(o.__companion, name) }
             return undefined
@@ -9999,8 +9756,7 @@ NotMemberKw = :script(~~
     // program may declare an EXTENSION property of the same name - and the compiler
     // half resolves `extp$name` in the EMITTER, before js_ktfget is ever reached, so
     // the extension wins there unconditionally. Consulting it first here is what keeps
-    // the two halves agreeing: without this `val List<Int>.first get() = 99` read 99 in
-    // the compiler and the list's own first element here.
+    // the two halves agreeing on `val List<Int>.first get() = 99`.
     function kIdxProp(name) {
         if (name == "indices") { return true }
         if (name == "lastIndex") { return true }
@@ -10040,7 +9796,7 @@ NotMemberKw = :script(~~
         var ft = kFieldTy(o, name)
         if (ft != "") { fv2 = kAdoptTy(fv2, ft) }
         // super.prop = v: the supertype's setter, else its backing field. The twin of
-        // the __superref read in kGetField; without it the write landed on the MARKER.
+        // the __superref read in kGetField; without it the write would land on the MARKER.
         if (typeof o == "object" && o.__superref === true) {
             if (o.cls != undefined && o.cls != null) {
                 var ss = clsFind(o.cls, "set$" + name)
@@ -10069,22 +9825,20 @@ NotMemberKw = :script(~~
         kRaise(cls, "Index " + idx + " out of bounds for length " + len)
     }
     // MutableList.add(index, element) is the ONE member of the family whose message
-    // is a DIFFERENT format. Both are java.util.ArrayList's own and both are java
-    // 24.0.2's verbatim (measured; ArrayList.add uses rangeCheckForAdd, which spells
-    // outOfBoundsMsg, while get/set/remove go through Objects.checkIndex):
+    // is a DIFFERENT format. Both are java.util.ArrayList's own and both are java's
+    // verbatim (ArrayList.add uses rangeCheckForAdd, which spells outOfBoundsMsg, while
+    // get/set/remove go through Objects.checkIndex):
     //     l.removeAt(9) / l.set(9, x)   Index 9 out of bounds for length 2
     //     l.add(9, x)                   Index: 9, Size: 2
-    // Both raise plain IndexOutOfBoundsException. docs/todo.md 1.2.
+    // Both raise plain IndexOutOfBoundsException.
     function kIndexSizeOob(idx, len) {
         kRaise("IndexOutOfBoundsException", "Index: " + idx + ", Size: " + len)
     }
     // java.lang.String#substring's out-of-range message, which is a RANGE and not an
     // index: `"ab".substring(5)` is StringIndexOutOfBoundsException "Range [5, 2) out
-    // of bounds for length 2" (java 24.0.2, measured - docs/todo.md 1.2 recorded
-    // "length 6" for this row, which is the length of a DIFFERENT row's receiver).
-    // The end of the range is the end argument substring() was called with, which for
-    // the one-argument form is the receiver's own length. All three engines used to
-    // answer "" for it, agreed and wrong.
+    // of bounds for length 2" (java). The end of the range is the end argument
+    // substring() was called with, which for the one-argument form is the receiver's
+    // own length.
     function kStrRangeOob(from, to, len) {
         kRaise("StringIndexOutOfBoundsException",
                "Range [" + from + ", " + to + ") out of bounds for length " + len)
@@ -10103,8 +9857,8 @@ NotMemberKw = :script(~~
     // are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
     // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an
     // Array, a Sequence and a Map's `values` view are all the SAME host array as a
-    // List in this value model - telling them apart is docs/todo.md 2.2's nominal type
-    // on the value. A range's first()/last() are kotlin.ranges' own overloads and say
+    // List in this value model, and telling them apart needs a nominal type on the
+    // value. A range's first()/last() are kotlin.ranges' own overloads and say
     // "Progression 1..0 is empty." instead (_Ranges.kt).
     function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
     // first(predicate) and single(predicate) exist ONLY on Iterable and on
@@ -10138,10 +9892,8 @@ NotMemberKw = :script(~~
             var mi = kMapFind(o, i)
             return mi < 0 ? null : o.vals[mi]
         }
-        // Kotlin's indexed reads are BOUNDS-CHECKED, and both of these used to answer
-        // a value: a string gave kChar(NaN) - a blank character - and a list gave
-        // undefined, which printed "kotlin.Unit". Both are catchable throwables on the
-        // JVM, and the messages are java 24.0.2's verbatim (docs/todo.md 2.9):
+        // Kotlin's indexed reads are BOUNDS-CHECKED: both are catchable throwables on
+        // the JVM, and the messages are java's verbatim:
         //   "ab"[5]         java.lang.StringIndexOutOfBoundsException: Index 5 out of bounds for length 2
         //   listOf(1,2)[5]  java.lang.IndexOutOfBoundsException:       Index 5 out of bounds for length 2
         // The JVM's CLASS for the collection read depends on the implementation
@@ -10151,9 +9903,8 @@ NotMemberKw = :script(~~
         // array type for all of them (hostGlobals["arrayOf"] IS hostGlobals["listOf"]),
         // so the common SUPERTYPE is the only answer that is right for every
         // receiver. `catch (e: IndexOutOfBoundsException)` catches the JVM's too.
-        // sb[i] on a StringBuilder answered undefined - "kotlin.Unit". Kotlin's
-        // StringBuilder is a CharSequence, so it indexes like a String and raises
-        // the same throwable out of range (java 24.0.2). docs/todo.md 2.9.
+        // Kotlin's StringBuilder is a CharSequence, so sb[i] indexes like a String and
+        // raises the same throwable out of range.
         if (typeof o == "object" && o.__sb === true) {
             var bt = o.s
             var bi = kNum(i)
@@ -10205,9 +9956,9 @@ NotMemberKw = :script(~~
             if (t == "Any" || t == "Comparable" || t == "Number") { return true }
             // The box's __f32 flag says WHICH of the two it holds, so Double and
             // Float are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both
-            // false, where both were true while the width was invisible. `is Number`
-            // / `is Comparable` / `is Any` above stay true for either width, exactly
-            // as java.lang.Float and java.lang.Double both extend Number.
+            // false. `is Number` / `is Comparable` / `is Any` above stay true for
+            // either width, exactly as java.lang.Float and java.lang.Double both
+            // extend Number.
             return kIsF32(v) ? t == "Float" : t == "Double"
         }
         if (typeof v == "number") {
@@ -10237,11 +9988,9 @@ NotMemberKw = :script(~~
             // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class is
             // spelled from outside its owner, and the shape a sealed hierarchy is
             // normally written in. A descriptor is registered under its SIMPLE name
-            // here, so the qualified spelling matched nothing and the `is` branch of an
-            // ordinary `when (this)` over a sealed class silently fell through to the
-            // else (both halves; the compiled twin is the js_ktis wrapper in
-            // abnf/jsrtkotlin.go). Dropping the qualifier is the same convention the
-            // rest of this subset already applies to packages and imports.
+            // here, so the qualifier is dropped (the compiled twin is the js_ktis
+            // wrapper in abnf/jsrtkotlin.go) - the same convention the rest of this
+            // subset applies to packages and imports.
             var segs = t.split(".")
             if (segs.length > 1) { return clsNamed(v.__class, segs[segs.length - 1]) }
             return false
@@ -10254,13 +10003,11 @@ NotMemberKw = :script(~~
     // java.lang.Class#getName answers for it, and therefore what Throwable#toString
     // and the launcher's uncaught-exception line spell. Kotlin's Exception /
     // RuntimeException / IllegalStateException / ... are TYPEALIASES to the
-    // java.lang classes on the JVM, so `java` 24.0.2 is the oracle even though
-    // there is no kotlinc on this machine (measured: `new RuntimeException("x")`
-    // renders "java.lang.RuntimeException: x"). Two of the nineteen live in
-    // java.util, and NotImplementedError / UninitializedPropertyAccessException are
-    // Kotlin's OWN classes, declared by kotlin-stdlib in the `kotlin` package. The
-    // twins are ktExcFqcn in abnf/jsrtkotlin.go and in
-    // languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+    // java.lang classes on the JVM, so `java` is the oracle (`new RuntimeException("x")`
+    // renders "java.lang.RuntimeException: x"). Two of the nineteen live in java.util,
+    // and NotImplementedError / UninitializedPropertyAccessException are Kotlin's OWN
+    // classes, declared by kotlin-stdlib in the `kotlin` package. The twins are
+    // ktExcFqcn in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
     function kExcFqcn(name) {
         if (name == "NoSuchElementException") { return "java.util." + name }
         if (name == "ConcurrentModificationException") { return "java.util." + name }
@@ -10271,11 +10018,9 @@ NotMemberKw = :script(~~
     // The builtin throwable hierarchy: a class whose supertype list names one of these
     // gets `message` from it, so `catch (e: Exception) { e.message }` works.
     function installThrowables() {
-        // The REAL java.lang throwable chain, which is Kotlin/JVM's: every builtin used
-        // to be parented directly to Throwable, so `IllegalStateException("z") is
-        // Exception` answered FALSE here while the compiled half - whose ktExcHierarchy
-        // in abnf/jsrtkotlin.go always chained properly - answered true. The shape below
-        // was checked against java (JDK 24) with instanceof, class by class.
+        // The REAL java.lang throwable chain, which is Kotlin/JVM's
+        // (`IllegalStateException("z") is Exception` holds); the compiled twin is
+        // ktExcHierarchy in abnf/jsrtkotlin.go.
         // Order matters: a parent must be installed before its children, because
         // resolveParents looks the name up in globalScope.
         var names = ["Throwable", "Exception", "Error", "RuntimeException",
@@ -10286,9 +10031,9 @@ NotMemberKw = :script(~~
                      "ClassCastException", "NumberFormatException",
                      "IllegalAccessException", "StackOverflowError", "OutOfMemoryError",
                      "NotImplementedError", "UninitializedPropertyAccessException",
-                     // Under IndexOutOfBoundsException, not RuntimeException - checked
-                     // with instanceof under java (JDK 24). `"ab"[5]` throws it; the
-                     // COLLECTION read throws plain IndexOutOfBoundsException, see kIndex.
+                     // Under IndexOutOfBoundsException, not RuntimeException (java
+                     // instanceof). `"ab"[5]` throws it; the COLLECTION read throws plain
+                     // IndexOutOfBoundsException, see kIndex.
                      "StringIndexOutOfBoundsException"]
         var supers = ["", "Throwable", "Throwable", "Exception",
                       "RuntimeException", "RuntimeException",
@@ -10302,7 +10047,7 @@ NotMemberKw = :script(~~
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
             // The PACKAGE-QUALIFIED (binary) name, which is what Throwable#toString
-            // and the launcher's uncaught line spell. See kExcFqcn. docs/todo.md 1.2.
+            // and the launcher's uncaught line spell. See kExcFqcn.
             cls.__bname = kExcFqcn(names[i])
             cls.__ctor = function() {
                 var self = arguments[0]
@@ -10319,18 +10064,15 @@ NotMemberKw = :script(~~
     // Kotlin inherits java.lang.Throwable#toString unchanged: the BINARY class name
     // and, only when getMessage() is non-null, ": " and the message. An EMPTY
     // message still prints the colon and the space; a null one prints neither.
-    // Measured, java 24.0.2 (Kotlin's throwables ARE java.lang's - typealiases):
+    // (java; Kotlin's throwables ARE java.lang's - typealiases):
     //
     //     java.lang.RuntimeException: abort probe
     //     java.lang.RuntimeException                  <- message == null
     //     java.lang.RuntimeException:                 <- message == ""
     //     Top: t                                      <- a class the PROGRAM declares
     //
-    // Before this every engine here fell through to the default Name@1 shape, so
-    // `println(RuntimeException("x"))` read "RuntimeException@1" in all three:
-    // agreed and wrong, the class only an oracle can see. The twins are
-    // ktThrowableStr in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
-    // docs/todo.md 1.2.
+    // The twins are ktThrowableStr in abnf/jsrtkotlin.go and in
+    // languages/lib/kotlin-rt.metajs.
     // A descriptor's __super is filled LAZILY (resolveParents), so a raw __super walk
     // answers false for an instance whose class has not been constructed through yet -
     // which is why this asks kIsType, the same test kExcMatches already uses for a
@@ -10393,15 +10135,14 @@ NotMemberKw = :script(~~
         var args = items.slice(start)
         return function() {
             var spec = kevalArgs(args)
-            // THE SYNTACTIC POSITION, and the whole of todo.md 1.6's first bullet in
-            // this half. `first` is a PROPERTY of IntProgression and a member FUNCTION
-            // of List, so the NAME cannot decide which read an unqualified `first`
-            // wants - but the SITE can, and `name(...)` is the only production that
-            // spells a name and means a call. kCallPos is a ONE-SHOT: core.varMiss
-            // clears it before it does anything that could re-enter (a getter body is
-            // ordinary user code and resolves names of its own), and it is cleared
-            // here too, because a name the SCOPE walk answers never reaches varMiss at
-            // all and the flag would otherwise survive into the next miss.
+            // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
+            // member FUNCTION of List, so the NAME cannot decide which read an
+            // unqualified `first` wants - but the SITE can, and `name(...)` is the only
+            // production that spells a name and means a call. kCallPos is a ONE-SHOT:
+            // core.varMiss clears it before it does anything that could re-enter (a
+            // getter body is ordinary user code and resolves names of its own), and it
+            // is cleared here too, because a name the SCOPE walk answers never reaches
+            // varMiss at all and the flag would otherwise survive into the next miss.
             kCallPos = true
             var f = getVar(name)
             kCallPos = false
@@ -10442,11 +10183,8 @@ NotMemberKw = :script(~~
     }
     function kSetIndex(o, i, v) {
         // THE INDEXED WRITE IS BOUNDS-CHECKED, exactly like kIndex's read. `l[9] = 5`
-        // IS MutableList.set(9, 5) in Kotlin and throws IndexOutOfBoundsException;
-        // this used to EXTEND the array with undefined instead, and the compiled
-        // halves aborted uncatchably on a negative index - a live halves divergence
-        // --cross never reached. Twins: js_ktset in abnf/jsrtkotlin.go and in
-        // languages/lib/kotlin-rt.metajs. docs/todo.md 1.2.
+        // IS MutableList.set(9, 5) in Kotlin and throws IndexOutOfBoundsException.
+        // Twins: js_ktset in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
         if (Array.isArray(o)) {
             var wix = kNum(i)
             if (wix < 0 || wix >= o.length) { kIndexOob("IndexOutOfBoundsException", wix, o.length) }
@@ -10477,7 +10215,7 @@ NotMemberKw = :script(~~
     }
     // ++ / -- keep the type of what they step: a Double stays a Double, a sized
     // integer steps at its OWN width (so `var b: Byte = 127; b++` is -128), and
-    // everything else steps as an Int32 (a Char as its code, like before).
+    // everything else steps as an Int32 (a Char as its code).
     function kStep(v, d) {
         // ++/-- keeps the operand's own type, WIDTH included: a Float steps as a
         // Float, so `var f = 16777216f; f++` stays 1.6777216E7.
@@ -10542,10 +10280,9 @@ NotMemberKw = :script(~~
         var iscall = kCallPos
         kCallPos = false
         // Kotlin's implicit receivers form a STACK and lookup walks OUTWARD: a name the
-        // innermost receiver does not answer falls through to the next one out. Only
-        // findThis() - the innermost - used to be consulted, so `with(P(1)) { tag }`
-        // written inside a member of Q, where P has no `tag`, failed with "unknown
-        // name: tag" in BOTH halves instead of reading this@Q.tag.
+        // innermost receiver does not answer falls through to the next one out, so
+        // `with(P(1)) { tag }` written inside a member of Q, where P has no `tag`,
+        // reads this@Q.tag.
         var chain = findThisChain()
         for (var ci = 0; ci < chain.length; ci++) {
             var hc = recvLookup(chain[ci], name, iscall)
@@ -10557,15 +10294,14 @@ NotMemberKw = :script(~~
         if (h != null) { return h }
         // A property registered as a top-level computed property.
         if (hasOwn(topProps, "$" + name)) { return {v: kGetField(topProps["$" + name], name)} }
-        // A STRING implicit receiver's METHODS, answered LAST. `with("abcd")
-        // { substring(1) }` and `{ uppercase() }` aborted with "unknown name" in this
-        // half while the compiler ran them (ktIsBuiltinRecv covers a string there), and
-        // the LATENESS is the whole point: a member extension on String -
+        // A STRING implicit receiver's METHODS, answered LAST (`with("abcd")
+        // { substring(1) }`, `{ uppercase() }`; ktIsBuiltinRecv covers a string in the
+        // compiled half). The LATENESS is the whole point: a member extension on String -
         // `fun String.emit()` declared inside a class - binds the string as `this`, so
-        // answering here early swallows every name of the DECLARING class and broke
-        // three ratchet assertions when it was tried. The compiler half has exactly
-        // this ordering: kt_ktget probes the dispatch receiver before it ever reaches
-        // ktRecvStack. The hostGlobals guard is recvLookup's, for its reason.
+        // answering here early would swallow every name of the DECLARING class. The
+        // compiler half has exactly this ordering: kt_ktget probes the dispatch receiver
+        // before it ever reaches ktRecvStack. The hostGlobals guard is recvLookup's, for
+        // its reason.
         if (!hasOwn(hostGlobals, name)) {
             for (var cj = 0; cj < chain.length; cj++) {
                 if (typeof chain[cj] == "string") { return {v: kBoundBuiltin(chain[cj], name)} }
@@ -10574,9 +10310,7 @@ NotMemberKw = :script(~~
             // receiver has them whatever its shape - a Pair, a Map.Entry, a number, a
             // range. recvLookup walks the class descriptors first, so a class that
             // OVERRIDES either has already answered; what reaches here is a receiver
-            // with no descriptor at all, and `with(p) { toString() }` aborted with
-            // "unknown name: toString" in this half and "unknown list method
-            // 'toString'" in the compiled ones - todo.md 1.10.
+            // with no descriptor at all (`with(p) { toString() }`).
             if (name == "toString" || name == "hashCode" || name == "equals") {
                 if (chain.length > 0) { return {v: kBoundBuiltin(chain[0], name)} }
             }
@@ -10593,14 +10327,11 @@ NotMemberKw = :script(~~
         var cur = start
         while (cur != undefined && cur != null) {
             if (typeof cur != "object") {
-                // A STRING receiver is a BUILTIN receiver like any other, and only
-                // `length` resolved here: `with("abcd") { substring(1) }`,
-                // `{ uppercase() }`, `{ lastIndex }` and `{ indices }` all aborted with
-                // "unknown name" while the compiler half answered every one of them
-                // (ktIsBuiltinRecv in abnf/jsrtkotlin.go covers a string). A live
-                // halves divergence, found sweeping todo.md 1.8's neighbourhood. The
-                // two guards below are the ones the object arm further down uses, for
-                // the same reasons.
+                // A STRING receiver is a BUILTIN receiver like any other:
+                // `with("abcd") { substring(1) }`, `{ uppercase() }`, `{ lastIndex }`
+                // and `{ indices }` (ktIsBuiltinRecv in abnf/jsrtkotlin.go covers a
+                // string too). The two guards below are the ones the object arm further
+                // down uses, for the same reasons.
                 if (typeof cur == "string") {
                     if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
                     if (!iscall) {
@@ -10628,7 +10359,7 @@ NotMemberKw = :script(~~
                 }
                 // Bare `entries` inside an enum's own member or its companion: Kotlin
                 // 1.9's EnumEntries is a member of the enum, so it needs no qualifier
-                // there. Only `L.entries` resolved before, in BOTH halves.
+                // there.
                 if (name == "entries") {
                     var ecl = cls.__isenum === true ? cls
                               : (cls.__owner != undefined && cls.__owner != null
@@ -10641,21 +10372,15 @@ NotMemberKw = :script(~~
             // receiver as `this` and an unqualified `append("a")` is a member call on
             // it. The few PROPERTIES come from kGetField; everything else is a bound
             // method, so the lookup never turns a property into a callable.
-            // A SET was missing from this list in BOTH halves (ktIsBuiltinRecv in
-            // abnf/jsrtkotlin.go names "a list, a map, a StringBuilder box or a
-            // String" and its code agrees), so `with(setOf(1, 2)) { size }` and
-            // `{ contains(1) }` aborted with "unknown name" everywhere - both halves
-            // agreeing and both wrong, which byte-identity cannot see. Kotlin's `with`
+            // A SET belongs here too (`with(setOf(1, 2)) { size }`): Kotlin's `with`
             // binds any receiver, and Set.size is Collection.size.
             // The RECEIVER SHAPES whose members come from the runtime rather than
-            // from a class descriptor. A RANGE, a REGEX, a MATCHRESULT, a RESULT and a
-            // CHAR were all missing, in this half and in both compiled ones, so
-            // `with(1..7 step 2) { first }`, `with(Regex("a")) { pattern }`, an
-            // unqualified `find()`, `with(runCatching { 7 }) { getOrNull() }` and
-            // `with('q') { isLetter() }` reached nothing anywhere - todo.md 1.6 and its
-            // neighbourhood. Every one of them has a real method surface in mcall and
-            // a real property surface in kGetField, which is what makes them belong
-            // here rather than in the plain-object arm below.
+            // from a class descriptor - a RANGE, a REGEX, a MATCHRESULT, a RESULT and a
+            // CHAR (`with(1..7 step 2) { first }`, `with(Regex("a")) { pattern }`, an
+            // unqualified `find()`, `with(runCatching { 7 }) { getOrNull() }`,
+            // `with('q') { isLetter() }`) - have a real method surface in mcall and a
+            // real property surface in kGetField, which is what makes them belong here
+            // rather than in the plain-object arm below.
             if (cls == undefined && cur.__isclass == undefined &&
                 (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true ||
                  isRange(cur) || isKRegex(cur) || isKMatch(cur) || kIsResult(cur) ||
@@ -10670,26 +10395,23 @@ NotMemberKw = :script(~~
                     if (bv !== undefined) { return {v: bv} }
                 }
                 // A name the RUNTIME provides as a global is not a member of the
-                // receiver: `buildList { addAll(listOf(2, 3)) }` bound `listOf` as a
-                // method of the list under construction and aborted with "unknown list
-                // method: listOf", because core.varMiss runs BEFORE the hostGlobals
-                // lookup in getVar. Declining here lets it fall through, which is what
-                // the compiler half does (js_ktget consults the scope first). A builtin
-                // receiver has no member of any of these names, so nothing that used to
-                // resolve stops resolving.
+                // receiver: `buildList { addAll(listOf(2, 3)) }` must not bind `listOf`
+                // as a method of the list under construction, and core.varMiss runs
+                // BEFORE the hostGlobals lookup in getVar. Declining here lets it fall
+                // through, which is what the compiler half does (js_ktget consults the
+                // scope first). A builtin receiver has no member of any of these names.
                 if (hasOwn(hostGlobals, name)) { return null }
                 return {v: kBoundBuiltin(cur, name)}
             }
             // A PLAIN OBJECT receiver that is neither a class instance nor one of the
             // collection kinds: a lazy, a Result, a MatchResult. Its OWN properties
             // were already answered at the top of the loop, which is what makes
-            // `with(Pair(1, "x")) { first }` work; what was missing is the group the
-            // runtime SYNTHESISES - kotlin.Lazy's value / isInitialized,
-            // kotlin.Result's isSuccess / isFailure, MatchResult.value - all of which
-            // kGetField answers and none of which is an own property. `with(lazy {
-            // 42 }) { value }` aborted with "unknown name: value" here while the
-            // compiler half answered 42. Nothing is bound as a METHOD: a plain object
-            // has no builtin method table to dispatch into.
+            // `with(Pair(1, "x")) { first }` work; this adds the group the runtime
+            // SYNTHESISES - kotlin.Lazy's value / isInitialized, kotlin.Result's
+            // isSuccess / isFailure, MatchResult.value - all of which kGetField answers
+            // and none of which is an own property (`with(lazy { 42 }) { value }`).
+            // Nothing is bound as a METHOD: a plain object has no builtin method table
+            // to dispatch into.
             if (cls == undefined && cur.__isclass == undefined &&
                 (kRecvProps["$" + name] === true || !iscall)) {
                 var pv = anytype
@@ -10750,7 +10472,7 @@ NotMemberKw = :script(~~
 
     // AN EXCEPTION NOBODY CAUGHT IS REPORTED THE WAY THE JVM LAUNCHER REPORTS IT -
     // "Exception in thread \"main\" java.lang.RuntimeException: abort probe", on
-    // STDERR, exit status 1 (measured, java 24.0.2). See kExcTopLine above. The
+    // STDERR, exit status 1 (java). See kExcTopLine above. The
     // compiled halves' twin is js_kttop, reached from buildMain in
     // kotlin-to-llvm-ir.abnf.
     function kReportUncaught(v) {
