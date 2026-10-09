@@ -169,10 +169,11 @@ type jsArray struct {
 // different modules (e.g. a helper library and a tag script) can call each
 // other through one shared runtime.
 type jsClosure struct {
-	id  jsHandleID
-	fn  *ir.Func
-	env uint64 // Scope handle of the creation site.
-	ma  *machine
+	id   jsHandleID
+	fn   *ir.Func
+	env  uint64 // Scope handle of the creation site.
+	ma   *machine
+	meta *jsvFnInfo // js/ts `name` and `length`, set by js_jsfnmeta; nil = ""/0
 }
 
 // jsThrown carries a user-thrown value (any handle) as a Go panic. js_throw raises
@@ -294,6 +295,7 @@ type hostFunc struct {
 	// every other host function in every other language, so this costs one
 	// pointer per host function and nothing else.
 	pybm *pyBoundInfo
+	meta *jsvFnInfo // as on jsClosure
 }
 
 // pyBoundInfo is what a python BOUND METHOD knows about itself. Neither of the

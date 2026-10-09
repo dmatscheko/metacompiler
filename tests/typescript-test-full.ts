@@ -2964,6 +2964,13 @@ function s48() {
     check("fnm32", fnZero.tag === 7 && g2.length === 3 && g2[2] === "tag");
     check("fnm33", fnZero.hasOwnProperty("tag") && fnZero.propertyIsEnumerable("tag"));
     check("fnm34", Object.keys(fnZero).length === 1 && Object.keys(fnZero)[0] === "tag");
+    // Closures built at ONE definition site in a loop each carry their own pair, and
+    // binding one of them names only the bound value.
+    var fnLoop = []
+    for (var fi = 0; fi < 300; fi++) { fnLoop.push(function looped(a, b) { return a + b }) }
+    var fnLoopB = fnLoop[150].bind(null, 1)
+    check("fnm35", fnLoop[0].name === "looped" && fnLoop[299].length === 2 && fnLoop[150] !== fnLoop[151]);
+    check("fnm36", fnLoopB.name === "bound looped" && fnLoopB.length === 1 && fnLoopB(2) === 3 && fnLoop[150].name === "looped");
     // ----- a named function EXPRESSION sees its OWN NAME (ES2023 15.2.5) -----
     // The optional name was accepted and dropped, so this whole group answered
     // *ReferenceError* in all four engines. The spec's funcEnv - one scope, one binding

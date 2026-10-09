@@ -4479,14 +4479,10 @@ NotFuncHead = :script(~~
     // `f`/1 for `function f(a){}`, `named`/2 for `const g = function named(a,b){}` and
     // `h`/1 for `const h = (x)=>x`. docs/todo.md 1.4.
     //
-    // The pair lives in a side table keyed by the closure, the shape fnProps* below
-    // uses and for its reason: under -frozen a function value is a Go *jsClosure and
-    // cannot carry a field. It is a SEPARATE table on purpose. fnProps' cheapness is
-    // entirely the `fnPropsN > 0` guard, and a program that merely DEFINES a function
-    // would fill fnProps and put an identity scan on every member read it makes.
-    //
-    // Registration is a PUSH and never a lookup: fnDef registers a value that was just
-    // created, so it cannot already be there. A function with no name and no parameters
+    // The pair is kept ON the function value by the grammar host's fnMeta(f, key) /
+    // fnMetaSet(f, name, length) (fnMetaBindings in abnf/jsrtint.go for -frozen,
+    // installGojaFnMeta in abnf/commonscript.go for goja), so registering is O(1) and
+    // does not keep the function alive. A function with no name and no parameters
     // registers NOTHING - the defaults are ""/0 - which is the whole of the anonymous
     // zero-arity thunks this engine builds for itself.
     //
@@ -4495,42 +4491,15 @@ NotFuncHead = :script(~~
     // a function declaration. `name` and `length` are non-writable in node, which IS
     // modelled - setMember drops a write to either - but a write in STRICT mode raises
     // a TypeError there and is silently dropped here.
-    // Twins: fnMeta* in js-interpreter.abnf, jsvFnMeta* in
-    // abnf/jsrtjsprint.go, jvFnMeta* in languages/lib/js-rt.metajs.
-    var fnMetaK = []      // the closure
-    var fnMetaNm = []     // the name it was defined under, same index
-    var fnMetaLn = []     // its arity, same index
-    var fnMetaN = 0
+    // Twins: fnMeta* in js-interpreter.abnf, jsvFnMeta in
+    // abnf/jsrtjsprint.go, js_jsfnmeta in languages/lib/runtime.c.
     function fnMetaPut(f, nm, ln) {
         if (typeof f != "function") { return f }
         if (nm === "" && ln === 0) { return f }
-        fnMetaK.push(f)
-        fnMetaNm.push(nm)
-        fnMetaLn.push(ln)
-        fnMetaN = fnMetaN + 1
-        return f
+        return fnMetaSet(f, nm, ln)
     }
-    // The table index of f, or -1. Scanned from the END so that the most recent
-    // registration of one value wins, which is what makes fnBindShim's re-registration
-    // of a bound function the answer.
-    function fnMetaAt(f) {
-        for (var i = fnMetaN - 1; i >= 0; i = i - 1) {
-            if (fnMetaK[i] === f) { return i }
-        }
-        return -1
-    }
-    function fnNameOf(f) {
-        if (fnMetaN == 0) { return "" }
-        var i = fnMetaAt(f)
-        if (i < 0) { return "" }
-        return fnMetaNm[i]
-    }
-    function fnLenOf(f) {
-        if (fnMetaN == 0) { return 0 }
-        var i = fnMetaAt(f)
-        if (i < 0) { return 0 }
-        return fnMetaLn[i]
-    }
+    function fnNameOf(f) { return (typeof f == "function") ? fnMeta(f, "name") : "" }
+    function fnLenOf(f) { return (typeof f == "function") ? fnMeta(f, "length") : 0 }
     // FunctionDeclarationInstantiation's `length`: the parameters BEFORE the first one
     // that has a default and before the rest parameter; a destructuring pattern counts
     // as one. Measured against node: `(a,b=1,c)` is 1, `(...r)` is 0, `({a},[b],c)` is

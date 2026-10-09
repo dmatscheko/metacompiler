@@ -379,64 +379,28 @@ function jvFnPropsOf(o) {
 // ============================================ a function's name and length ==
 //
 // Every function has two own properties nothing in the program writes: `name`, the
-// identifier it was DEFINED under, and `length`, its declared arity. Both answered
-// `undefined` in this half where the interpreters answered ""/0 and node answers
-// `f`/1 for `function f(a){}` - a halves divergence as well as a wrong answer.
+// identifier it was DEFINED under, and `length`, its declared arity.
 //
-// js_jsfnmeta(closure, name, length) -> closure is the extern the EMITTER wraps every
-// named or parameter-taking closure in, at its creation site; it is python's
-// js_pyfnname (the name a `def` bound a closure under, so f.__name__ can answer)
-// exactly. The pair lives in the identity-keyed side table jvFnProps uses above, and
-// for the same reason: there is no slot on a closure handle. It is a SEPARATE table
-// on purpose - jvFnProps' whole cheapness is the jvFnPropsN guard, and filling it at
-// every function DEFINITION would put a scan on every member read in the program.
+// The pair is stored ON the function cell by the floor (js_jsfnmeta in
+// languages/lib/runtime.c), which the EMITTER wraps every named or parameter-taking
+// closure in at its creation site - python's js_pyfnname pattern. Setting it is O(1)
+// and it does not keep the function alive. Layer 2 reaches the same storage through
+// the host builtins fnMeta(f, key) and fnMetaSet(f, name, length).
 //
 // The DEFAULTS are ""/0 and not "absent": every function has both properties, and a
-// function this table never saw - a host builtin, or one of the emitter's own
-// internal thunks - answers what the interpreter halves answer for it, which is what
-// keeps the two halves equal. Twin: jsvFnMeta in abnf/jsrtjsprint.go; the
-// interpreters keep the same table as fnMeta*. docs/todo.md 1.4.
-var jvFnMetaK = []
-var jvFnMetaNm = []
-var jvFnMetaLn = []
-var jvFnMetaN = 0
-// A repeat for the same value OVERWRITES, as the Go twin's map assignment does, so a
-// re-registration (jvBindShim naming the function it just built) is the answer.
-function js_jsfnmeta(f, nm, ln) {
-    var i = 0
-    while (i < jvFnMetaN) {
-        if (jvFnMetaK[i] === f) {
-            jvFnMetaNm[i] = nm
-            jvFnMetaLn[i] = ln
-            return f
-        }
-        i = i + 1
-    }
-    jvFnMetaK.push(f)
-    jvFnMetaNm.push(nm)
-    jvFnMetaLn.push(ln)
-    jvFnMetaN = jvFnMetaN + 1
-    return f
-}
-function jvFnMetaAt(f) {
-    var i = jvFnMetaN - 1
-    while (i >= 0) {
-        if (jvFnMetaK[i] === f) { return i }
-        i = i - 1
-    }
-    return 0 - 1
-}
+// function nobody named - a host builtin, or one of the emitter's own internal
+// thunks - answers what the interpreter halves answer for it, which is what keeps
+// the two halves equal. Twin: jsvFnMeta in abnf/jsrtjsprint.go; the interpreters
+// keep a side table as fnMeta*.
 function jvFnNameOf(f) {
-    if (jvFnMetaN == 0) { return "" }
-    var i = jvFnMetaAt(f)
-    if (i < 0) { return "" }
-    return jvFnMetaNm[i]
+    var r = anytype
+    r = fnMeta(f, "name")
+    return r
 }
 function jvFnLenOf(f) {
-    if (jvFnMetaN == 0) { return 0 }
-    var i = jvFnMetaAt(f)
-    if (i < 0) { return 0 }
-    return jvFnMetaLn[i]
+    var r = anytype
+    r = fnMeta(f, "length")
+    return r
 }
 // HOW THE READ SITES ASK. Not through a helper: both arms are written out inline in
 // js_jsvget and js_jsmget as two comparisons against interned literals, because the
@@ -1159,7 +1123,7 @@ function jvBindShim(f) {
         // A bound function's own name is "bound " + the target's, and its length is
         // the target's less the arguments already supplied, floored at 0 - node says
         // "bound f"/1 for `f.bind(null)` of `function f(a){}`. docs/todo.md 1.4.
-        return js_jsfnmeta(jvBoundFn(f, self, pre), "bound " + jvFnNameOf(f), bl)
+        return fnMetaSet(jvBoundFn(f, self, pre), "bound " + jvFnNameOf(f), bl)
     }
 }
 
@@ -1377,7 +1341,7 @@ function js_jsvget(o, key) {
         }
         if (jvHides(o, key)) { return jvBoundBuiltin(o, key) }
         // `f.name` and `f.length` - two inline comparisons, no call (see the comment
-        // beside jvFnMeta*). Before the own-property side table, because both are
+        // beside jvFnNameOf). Before the own-property side table, because both are
         // non-writable in node and js_jsmset drops a write to either.
         // docs/todo.md 1.4.
         if (key == "name" || key == "length") {
@@ -1432,7 +1396,7 @@ function jvValueMiss(o, key) {
             // method closure's registered length already excludes the receiver, which
             // is PREPENDED to the arguments and is not a declared parameter.
             // docs/todo.md 1.4.
-            if (fn !== undefined) { return js_jsfnmeta(jvBoundMethod(fn, o), key, jvFnLenOf(fn)) }
+            if (fn !== undefined) { return fnMetaSet(jvBoundMethod(fn, o), key, jvFnLenOf(fn)) }
             return undefined
         }
     }
@@ -3108,7 +3072,7 @@ function js_jsmcall(recv, key, args) {
             // "bound f", and the target's length less the arguments already supplied -
             // the same pair jvBindShim records for the value-read form.
             // docs/todo.md 1.4.
-            return js_jsfnmeta(jvBoundFn(recv, bself, bpre), "bound " + jvFnNameOf(recv), bl2)
+            return fnMetaSet(jvBoundFn(recv, bself, bpre), "bound " + jvFnNameOf(recv), bl2)
         }
     }
     // Promise.prototype.then / catch / finally, and the Promise statics on the

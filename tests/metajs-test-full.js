@@ -29,11 +29,11 @@
 // Infinity, NaN, Array, Object, byteLen, sprint and rawSet - and no check on the
 // difference was possible, because it would fail on one half by construction.
 //
-// THAT IS CLOSED (docs/todo.md 4.1). All three engines now bind the SAME 48
+// THAT IS CLOSED (docs/todo.md 4.1). All three engines now bind the SAME 50
 // names - the C floor's seed_root list in languages/lib/runtime.c is the
 // authority, the interpreter gained the six it was missing, and the two that only
 // the grammar's own tag scripts ever wanted (Object, rawSet) left the program set.
-// SECTION 31 asserts every one of the 48 on both halves, which is only possible
+// SECTION 31 asserts every one of the 50 on both halves, which is only possible
 // because they agree; abnf/hostglobals_test.go parses the three sources and fails
 // `go test ./abnf/` if a future name lands in fewer than three of them.
 //
@@ -1663,7 +1663,7 @@ function s30() {
     check("gen08", typeof fake === "object" && isGenerator(fake) === false)
 }
 
-// ===== SECTION 31: the host-global SET, all 48 names on both halves =====
+// ===== SECTION 31: the host-global SET, all 50 names on both halves =====
 // docs/todo.md 4.1. This section exists because it COULD NOT BE WRITTEN before:
 // the --full runner makes both halves run this same file and report the same
 // assertion count, so a check on a name only one half bound failed on the other
@@ -1709,6 +1709,18 @@ function s31() {
     check("hg19", typeof scopeNew === "function" && typeof scopeParent === "function")
     check("hg20", typeof scopeGet === "function" && typeof scopeHas === "function")
     check("hg21", typeof scopeDecl === "function" && typeof isGenerator === "function")
+    // A function's `name` and `length` (host ids 94/95), kept on the function value:
+    // ""/0 until set, a repeat overwrites, undefined for a non-function or another key.
+    check("hg21a", typeof fnMeta === "function" && typeof fnMetaSet === "function")
+    var fm = function(a, b) { return a }
+    check("hg21b", fnMeta(fm, "name") === "" && fnMeta(fm, "length") === 0)
+    check("hg21c", fnMetaSet(fm, "fm", 2) === fm && fnMeta(fm, "name") === "fm" && fnMeta(fm, "length") === 2)
+    fnMetaSet(fm, "g", 1)
+    check("hg21d", fnMeta(fm, "name") === "g" && fnMeta(fm, "length") === 1)
+    check("hg21e", fnMeta(1, "name") === undefined && fnMeta(fm, "other") === undefined)
+    var fms = []
+    for (var fi = 0; fi < 3; fi = fi + 1) { fms.push(fnMetaSet(function() { return 0 }, "f" + fi, fi)) }
+    check("hg21f", fnMeta(fms[0], "name") === "f0" && fnMeta(fms[2], "name") === "f2" && fnMeta(fms[2], "length") === 2)
     // The five non-function names. anytype is the declaration marker and is an
     // object in all three engines (a cell of tag 12 in the floor).
     check("hg22", typeof Infinity === "number" && typeof NaN === "number")

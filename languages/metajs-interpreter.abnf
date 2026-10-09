@@ -1096,6 +1096,12 @@ KwDefault   = "default" KwEnd ;
         "scopeHas": scHas,
         "scopeDecl": scDecl,
         "isGenerator": isGeneratorHost,
+        // fnMeta(f, key) / fnMetaSet(f, name, length): host ids 94/95, a
+        // function's name and length kept on the function value. Both grammar
+        // hosts bind them (fnMetaBindings in abnf/jsrtint.go, installGojaFnMeta
+        // in abnf/commonscript.go), so these names resolve to the host's own.
+        "fnMeta": fnMeta,
+        "fnMetaSet": fnMetaSet,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,

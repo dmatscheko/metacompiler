@@ -475,6 +475,7 @@ func programJSBindings() map[string]interface{} {
 	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
 	})
+	fnMetaBindings(b)
 	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
 	// languages/lib/runtime.c, whose comment already claims "the Go twin's rt.fail
 	// panics with exactly this text". It did, but the name was not BOUND here, so
@@ -579,6 +580,33 @@ func keysBindings(b map[string]interface{}) {
 			}
 		}
 		return true
+	})
+}
+
+// fnMetaBindings adds fnMeta(f, key) and fnMetaSet(f, name, length), host ids 94/95
+// of languages/lib/runtime.c: a function's `name` and `length`, stored on the
+// function value itself (see jsvFnMeta in jsrtjsprint.go). fnMeta answers ""/0 for
+// a function never named and undefined for a non-function or another key. The
+// frozen grammar host binds them too (frozenBaseBindings), and commonscript.go binds
+// the goja twin, because the js/ts interpreter halves keep the same pair.
+func fnMetaBindings(b map[string]interface{}) {
+	b["fnMeta"] = jsHostFunc("fnMeta", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if !jsvIsFnLike(v) {
+			return jsUndef
+		}
+		switch rt.toString(argAt(args, 1)) {
+		case "name":
+			return jsvFnMeta(v).name
+		case "length":
+			return float64(jsvFnMeta(v).length)
+		}
+		return jsUndef
+	})
+	b["fnMetaSet"] = jsHostFunc("fnMetaSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		jsvFnMetaSet(v, rt.toString(argAt(args, 1)), int(rt.toNumber(argAt(args, 2))))
+		return v
 	})
 }
 

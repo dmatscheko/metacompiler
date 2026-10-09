@@ -229,6 +229,8 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// goes red.
 	vm.Set("floPrec", func(v float64, n int) string { return floPrecStr(v, n) })
 
+	installGojaFnMeta(vm)
+
 	// The UTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit
 	// (lib/compile-core.js emitStr). goja exports the string as UTF-8.
@@ -393,6 +395,53 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	installGojaMathSurface(vm)
 
 	return &common
+}
+
+// installGojaFnMeta binds fnMeta(f, key) and fnMetaSet(f, name, length), the goja
+// twin of fnMetaBindings (jsrtint.go), which the frozen grammar host binds. The pair
+// is kept ON the function object under a private symbol, so it is O(1), invisible to
+// every string-keyed enumeration, and does not keep the function alive.
+func installGojaFnMeta(vm *goja.Runtime) {
+	sym := goja.NewSymbol("fnMeta")
+	fnObj := func(v goja.Value) *goja.Object {
+		o, ok := v.(*goja.Object)
+		if !ok {
+			return nil
+		}
+		if _, isFn := goja.AssertFunction(o); !isFn {
+			return nil
+		}
+		return o
+	}
+	vm.Set("fnMeta", func(call goja.FunctionCall) goja.Value {
+		o := fnObj(call.Argument(0))
+		if o == nil {
+			return goja.Undefined()
+		}
+		mi := jsvFnInfo{}
+		if v := o.GetSymbol(sym); v != nil {
+			if p, ok := v.Export().(*jsvFnInfo); ok {
+				mi = *p
+			}
+		}
+		switch call.Argument(1).String() {
+		case "name":
+			return vm.ToValue(mi.name)
+		case "length":
+			return vm.ToValue(mi.length)
+		}
+		return goja.Undefined()
+	})
+	vm.Set("fnMetaSet", func(call goja.FunctionCall) goja.Value {
+		f := call.Argument(0)
+		if o := fnObj(f); o != nil {
+			mi := &jsvFnInfo{name: call.Argument(1).String(), length: int(call.Argument(2).ToFloat())}
+			if err := o.DefineDataPropertySymbol(sym, vm.ToValue(mi), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
+				panic(err)
+			}
+		}
+		return f
+	})
 }
 
 // installGojaCaseMapping replaces goja's String.prototype.toUpperCase and

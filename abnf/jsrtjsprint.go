@@ -346,22 +346,41 @@ func jsvGopnKeys(v interface{}) []string {
 // same table under the same name. docs/todo.md 2.10.
 var jsvFnProps = map[interface{}]*jsObject{}
 
-// jsvFnMeta -- the declared NAME and ARITY of a function, filled by js_jsfnmeta at the
-// closure's creation site. `f.name` and `f.length` answered `undefined` in both compiled
-// halves where the interpreters answered ""/0 and node answers `f`/1 for
-// `function f(a){}`, so the pair was a HALVES DIVERGENCE as well as a wrong answer. A
-// closure here is a *jsClosure or a *hostFunc and neither can carry the two, so they live
-// beside it in this table - the same shape and the same reason as jsvFnProps above, and
-// the same shape as rt.pyFuncNames, which python's js_pyfnname fills for f.__name__.
-// Package level for jsvOwnKeys' reason: the readers have no runtime. Twins: js_jsfnmeta
-// in languages/lib/js-rt.metajs and fnMeta* in both *-interpreter.abnf.
-// docs/todo.md 1.4.
+// jsvFnMeta -- the declared NAME and ARITY of a function, set by js_jsfnmeta at the
+// closure's creation site. The pair is stored ON the function value (the meta field of
+// *jsClosure and *hostFunc), so setting it is O(1) and it does not keep the function
+// alive - the C floor keeps it in the function cell the same way. Twins: js_jsfnmeta
+// in languages/lib/runtime.c, reached from layer 2 as fnMeta/fnMetaSet, and fnMeta*
+// in both *-interpreter.abnf.
 type jsvFnInfo struct {
 	name   string
 	length int
 }
 
-var jsvFnMeta = map[interface{}]jsvFnInfo{}
+// jsvFnMeta answers ""/0 for a function that was never named and for a non-function.
+func jsvFnMeta(v interface{}) jsvFnInfo {
+	switch f := v.(type) {
+	case *jsClosure:
+		if f.meta != nil {
+			return *f.meta
+		}
+	case *hostFunc:
+		if f.meta != nil {
+			return *f.meta
+		}
+	}
+	return jsvFnInfo{}
+}
+
+// jsvFnMetaSet records the pair on a function value; any other value is ignored.
+func jsvFnMetaSet(v interface{}, name string, length int) {
+	switch f := v.(type) {
+	case *jsClosure:
+		f.meta = &jsvFnInfo{name: name, length: length}
+	case *hostFunc:
+		f.meta = &jsvFnInfo{name: name, length: length}
+	}
+}
 
 // The value of `f.name` / `f.length`, or nil for any other name and any receiver that is
 // not a function. The DEFAULTS are ""/0 and not "absent": every function has both
@@ -377,7 +396,7 @@ func jsvFnIntrinsic(v interface{}, name string) interface{} {
 	if !jsvIsFnLike(v) {
 		return nil
 	}
-	mi := jsvFnMeta[v]
+	mi := jsvFnMeta(v)
 	if name == "name" {
 		return mi.name
 	}
@@ -784,11 +803,11 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		// A bound function's own name is "bound " + the target's, and its length is the
 		// target's less the arguments already supplied, floored at 0 - node says
 		// "bound f"/1 for `f.bind(null)` of `function f(a){}`. docs/todo.md 1.4.
-		bl := jsvFnMeta[fn].length - len(pre)
+		bl := jsvFnMeta(fn).length - len(pre)
 		if bl < 0 {
 			bl = 0
 		}
-		jsvFnMeta[bound] = jsvFnInfo{name: "bound " + jsvFnMeta[fn].name, length: bl}
+		jsvFnMetaSet(bound, "bound "+jsvFnMeta(fn).name, bl)
 		return bound, true
 	}
 	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
@@ -1903,7 +1922,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// closure's registered length already excludes the receiver, which is
 			// PREPENDED to the arguments and is not a declared parameter.
 			// docs/todo.md 1.4.
-			jsvFnMeta[shim] = jsvFnInfo{name: name, length: jsvFnMeta[bound].length}
+			jsvFnMetaSet(shim, name, jsvFnMeta(bound).length)
 			return w(shim)
 		}
 		return r
@@ -2194,13 +2213,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 
 	// (closure, name, length) -> closure. The emitter calls it at the creation site of
 	// every function that HAS a name or a parameter, which is python's js_pyfnname
-	// pattern exactly. A repeat for the same value overwrites, as a Go map assignment
-	// does and as the interpreters' end-first scan does, so a closure re-created in a
-	// loop keeps one entry and `f.bind(g)` can re-register the value it just built.
-	// docs/todo.md 1.4.
+	// pattern exactly. A repeat for the same value overwrites.
 	m["js_jsfnmeta"] = func(a []uint64) uint64 {
 		if v := u(a[0]); jsvIsFnLike(v) {
-			jsvFnMeta[v] = jsvFnInfo{name: rt.toString(u(a[1])), length: int(rt.toNumber(u(a[2])))}
+			jsvFnMetaSet(v, rt.toString(u(a[1])), int(rt.toNumber(u(a[2]))))
 		}
 		return a[0]
 	}

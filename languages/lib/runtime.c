@@ -851,16 +851,18 @@ void gc_trace(long b, long c) {
 	if (t == 4)  { gc_try(w[1], 0); gc_try(w[3], 0); return; }  /* bytes, units */
 	if (t == 5)  { gc_try(w[1], 1); return; }                   /* array elements */
 	if (t == 6)  { gc_try(w[1], 1); gc_try(w[2], 1); return; }  /* keys, values */
-	if (t == 7)  { gc_try(w[2], 1); return; }                   /* closure env */
-	if (t == 9)  { gc_try(w[1], 1); return; }                   /* bound receiver */
+	/* 7 8 9 16 are the function kinds: e holds the name js_jsfnmeta set. */
+	if (t == 7)  { gc_try(w[2], 1); gc_try(w[5], 1); return; }  /* closure env, name */
+	if (t == 8)  { gc_try(w[5], 1); return; }                   /* name */
+	if (t == 9)  { gc_try(w[1], 1); gc_try(w[5], 1); return; }  /* bound receiver, name */
 	if (t == 10) { gc_try(w[2], 1); return; }                   /* signal value */
 	if (t == 11) { gc_try(w[1], 1); gc_try(w[6], 1); return; }  /* names+vals, parent */
 	/* 15 GENERATOR: a fn, b args, d lastValue, f sent/return/thrown value are
 	 * handles; c is the RAW control-block pointer and e a raw flag word.  16
 	 * generator FUNCTION: a is the closure it wraps. */
 	if (t == 15) { gc_try(w[1], 1); gc_try(w[2], 1); gc_try(w[4], 1); gc_try(w[6], 1); return; }
-	if (t == 16) { gc_try(w[1], 1); return; }
-	/* 3 number, 8 host function, 12 anytype, 13 sized integer, 14 boxed double:
+	if (t == 16) { gc_try(w[1], 1); gc_try(w[5], 1); return; }
+	/* 3 number, 12 anytype, 13 sized integer, 14 boxed double:
 	 * no children - every field of those is a raw long, not a handle. */
 }
 
@@ -3658,6 +3660,8 @@ long arg_str(long args, long i) { if (i < arr_len(args)) { return to_string(arr_
 
 long host_call(long id, long self, long args);
 long builtin_method(long recv, long mid, long args);
+long js_jsfnmeta(long f, long nm, long ln);
+long fn_meta_get(long f, long key);
 
 long gen_create(long gf, long args);
 
@@ -5809,6 +5813,9 @@ long host_call(long id, long self, long args) {
 	 * whole surface with no exemption at all (docs/todo.md 4.1). */
 	if (id == 92) { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
 	if (id == 93) { return mk_dnum(d_fround(arg_d(args, 0))); }
+	/* fnMeta(f, key) / fnMetaSet(f, name, length): see js_jsfnmeta. */
+	if (id == 94) { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
+	if (id == 95) { return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2))); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -6050,6 +6057,29 @@ long js_get(long o, long k)          { return get_member(o, k); }
 long js_set(long o, long k, long v)  { set_member(o, k, v); return 0; }
 
 long js_closure(long idx, long env) { long h = cell_new(7); sa(h, idx); sb(h, env); return h; }
+
+/* A function's `name` and `length`, kept ON the function cell: e is the name
+ * string handle (0 = never set, read as ""), f the length as a raw long. Fields
+ * e and f are unused by every function kind (7 closure, 8 host function,
+ * 9 bound method, 16 generator function), so setting them is O(1) and the pair
+ * dies with the function. Any other value is passed through untouched.
+ * js_jsfnmeta is what the js/ts emitters wrap a closure in at its creation
+ * site; layer 2 reaches the same storage through fnMeta / fnMetaSet (host ids
+ * 94/95). Twin: jsvFnMetaSet in abnf/jsrtjsprint.go. */
+int fn_kind(long h) {
+	long t = tag_of(h);
+	return t == 7 || t == 8 || t == 9 || t == 16;
+}
+long js_jsfnmeta(long f, long nm, long ln) {
+	if (fn_kind(f)) { se(f, nm); sf(f, d_to_long(d_trunc(to_number(ln)))); }
+	return f;
+}
+long fn_meta_get(long f, long key) {
+	if (!fn_kind(f)) { return H_UNDEF; }
+	if (str_eq_c(key, "name")) { if (fe(f) == 0) { return mk_cstr(""); } return fe(f); }
+	if (str_eq_c(key, "length")) { return mk_num(d_from_long(ff(f))); }
+	return H_UNDEF;
+}
 
 long js_scope_new(long parent) { return mk_scope(scope_of(parent)); }
 long js_scope_get(long s, long name) { return scope_get(scope_of(s), name); }
@@ -6616,6 +6646,8 @@ void boot(void) {
 	seed_root("scopeDecl", mk_host(68));
 	seed_root("isGenerator", mk_host(69));
 	seed_root("floPrec", mk_host(70));
+	seed_root("fnMeta", mk_host(94));
+	seed_root("fnMetaSet", mk_host(95));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

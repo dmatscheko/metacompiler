@@ -372,6 +372,9 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
 	})
+	// fnMeta / fnMetaSet - a function's name and length, kept on the function
+	// value. commonscript.go binds the goja twin.
+	fnMetaBindings(b)
 	return b
 }
 
