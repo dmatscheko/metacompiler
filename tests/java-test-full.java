@@ -728,6 +728,17 @@ class S19 {
         String m = "";
         try { S19.declThrows(); } catch (AErr e) { m = e.getMessage(); } finally { m += "!"; }
         Main.check("exc5", m.equals("d!"));
+        // The built-in hierarchy is the JDK's: UnsupportedOperationException
+        // extends RuntimeException, StackOverflowError VirtualMachineError.
+        String arm = "";
+        try { throw new UnsupportedOperationException("u"); }
+        catch (IllegalArgumentException e) { arm = "IAE"; }
+        catch (RuntimeException e) { arm = "RTE"; }
+        Main.check("exc6", arm.equals("RTE"));
+        arm = "";
+        try { throw new StackOverflowError("s"); }
+        catch (VirtualMachineError e) { arm = "VME"; }
+        Main.check("exc7", arm.equals("VME"));
     }
 }
 

@@ -3894,11 +3894,10 @@ HasStatic   = :script(~~
     // java 24.0.2: `new RuntimeException("x").getClass().getName()` is
     // "java.lang.RuntimeException", and Throwable#toString - which is what the
     // launcher's uncaught-exception line prints - spells the same name. Only
-    // IOException of the nineteen names jExcTree lists lives outside java.lang.
-    // The twin is jvExcFqcn in languages/lib/java-rt.metajs, and the emitter
-    // (emitBuiltinExc in java-to-llvm-ir.abnf) writes the same string as __bname,
-    // which is where the Go twin (javaClassBin in abnf/jsrtjava.go) reads it.
-    // docs/todo.md 1.14.
+    // IOException of the names jExcTree lists lives outside java.lang.
+    // The emitter (emitBuiltinExc in java-to-llvm-ir.abnf) writes the same
+    // string as __bname, which is where the Go twin (jvpClassName in
+    // abnf/jsrtjava.go) and layer 2 (jpClassName) read it.
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
         return "java.lang." + name
@@ -3915,6 +3914,7 @@ HasStatic   = :script(~~
     var jExcTree = ["Throwable", "",
                     "Exception", "Throwable",
                     "Error", "Throwable",
+                    "VirtualMachineError", "Error",
                     "RuntimeException", "Exception",
                     "IOException", "Exception",
                     "InterruptedException", "Exception",
@@ -3929,7 +3929,7 @@ HasStatic   = :script(~~
                     "StringIndexOutOfBoundsException", "IndexOutOfBoundsException",
                     "NegativeArraySizeException", "RuntimeException",
                     "NumberFormatException", "IllegalArgumentException",
-                    "StackOverflowError", "Error",
+                    "StackOverflowError", "VirtualMachineError",
                     "AssertionError", "Error"]
     for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
         jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])

@@ -4658,7 +4658,7 @@ HasStatic   = :script(~~
     // provides them: a descriptor with the usual __super chain, a constructor taking
     // an optional message and getMessage(). Only the ones a program actually names
     // (as a superclass or a `new` target), plus their ancestors, are emitted.
-    var builtinExcOrder = ["Throwable", "Exception", "Error", "RuntimeException",
+    var builtinExcOrder = ["Throwable", "Exception", "Error", "VirtualMachineError", "RuntimeException",
                            "IllegalArgumentException", "IllegalStateException",
                            "NullPointerException", "ArithmeticException",
                            "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
@@ -4668,11 +4668,11 @@ HasStatic   = :script(~~
                            "StackOverflowError", "AssertionError"]
     // The PACKAGE-QUALIFIED (binary) name of each, written on the descriptor as
     // __bname - which is what java.lang.Class#getName answers, what jpClassName in
-    // languages/lib/java-rt.metajs and javaClassBin in abnf/jsrtjava.go read, and
+    // languages/lib/java-rt.metajs and jvpClassName in abnf/jsrtjava.go read, and
     // therefore what the uncaught-exception line prints. Measured, java 24.0.2:
     // `new RuntimeException("x").getClass().getName()` is
-    // "java.lang.RuntimeException". Only IOException of the nineteen lives outside
-    // java.lang. The twin is jExcFqcn in java-interpreter.abnf. docs/todo.md 1.14.
+    // "java.lang.RuntimeException". Only IOException of the twenty lives outside
+    // java.lang. The twin is jExcFqcn in java-interpreter.abnf.
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
         return "java.lang." + name
@@ -4687,9 +4687,10 @@ HasStatic   = :script(~~
                             "$ArrayIndexOutOfBoundsException": "IndexOutOfBoundsException",
                             "$StringIndexOutOfBoundsException": "IndexOutOfBoundsException",
                             "$NegativeArraySizeException": "RuntimeException",
-                            "$StackOverflowError": "Error", "$AssertionError": "Error",
+                            "$VirtualMachineError": "Error",
+                            "$StackOverflowError": "VirtualMachineError", "$AssertionError": "Error",
                             "$ClassCastException": "RuntimeException",
-                            "$UnsupportedOperationException": "IllegalArgumentException",
+                            "$UnsupportedOperationException": "RuntimeException",
                             "$NumberFormatException": "IllegalArgumentException",
                             "$InterruptedException": "Exception", "$IOException": "Exception"}
     // ----- what the RUNTIME can raise, decided at WALK time -----
