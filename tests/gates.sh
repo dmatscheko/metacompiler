@@ -65,7 +65,7 @@ done
 FULL_TIMEOUT=900
 
 # A FLOOR on the total ratchet assertion count (the files legitimately grow).
-FULL_ASSERTIONS=9688
+FULL_ASSERTIONS=9767
 
 # A CEILING on section gaps, summed per half over all languages. A gapped half
 # still reports the assertions it ran, so the total barely moves when a section
@@ -76,8 +76,8 @@ FULL_GAPS=0
 # across files. BOTH numbers, because a body copied into a third language joins
 # an existing group without moving the group count; only the recoverable-lines
 # count sees it.
-SHAPE_GROUPS=15
-SHAPE_LINES=481
+SHAPE_GROUPS=1
+SHAPE_LINES=6
 
 # A CEILING on tools/metajs-lint findings (MetaJS constructs that do not mean what
 # they mean in JavaScript, e.g. "\f" compiling to "f"). Only the native binary can
