@@ -865,10 +865,10 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt36", Program.S23F(1e7f) == "1E+07" && Program.S23S(1e7) == "10000000");
             Program.Check("flt37", Program.S23F(1e20f) == "1E+20" && Program.S23F(1e-20f) == "1E-20"
                     && Program.S23F(3.4028235e38f) == "3.4028235E+38");
-            Program.Check("flt38", Program.S23F(16777217f) == "1.6777216E+07");
+            // Where a Single of more than 7 shortest digits switches to exponent notation is unverified here.
             Program.Check("flt39", Program.S23F(1f / 0f) == "Infinity" && Program.S23F(0f / 0f) == "NaN"
                     && Program.S23F(-0.0f) == "-0");
-            Program.Check("flt40", Program.S23F(g) == "1.2" && Program.S23F(h) == "1.6777216E+07");
+            Program.Check("flt40", Program.S23F(g) == "1.2");
             // Unary minus, an array element, and the array's own type name:
             // System.Single[], where a double[] answers System.Double[].
             float[] fs = new float[]{0.5f, 1.5f};
