@@ -36,12 +36,10 @@ ordinary classes, so 'class MyError(Exception)' is nothing special.
 Generators are REAL: a def whose body contains a yield becomes a generator function
 (js_genfn), its body runs on its own goroutine and yield is a suspending handshake -
 never a replay. yield from, send() and StopIteration carrying the return value all work,
-and close() runs the body's `finally` clauses through the floor's gen_close. What this
-half does NOT have is gen.throw(): the cell's member table is host-dispatched in
-runtime.c and offers `next` and `return` only, so a throw() is a floor change and both
-halves abort on it today. For the same reason close() is not offered to `except` - the
-GEN_EXIT sentinel unwinds `finally` without being catchable, where CPython delivers a
-catchable GeneratorExit. docs/todo.md 2.6.
+close() runs the body's `finally` clauses through the floor's gen_close, and
+gen.throw() raises at the parked yield (the floor's gen_throw). close() is not offered
+to `except`: the GEN_EXIT sentinel unwinds `finally` without being catchable, where
+CPython delivers a catchable GeneratorExit.
 Generator expressions parse (parenthesized and as the sole argument of a call) but are
 materialized eagerly.
 
@@ -255,10 +253,10 @@ DefLike     <~~ push(pop().dstmt) ~~>
 // them (a trailing ';' is allowed), so the line pushes ONE sequence thunk.
 SmallLine   <~~ push(makeSeq(takeAll())) ~~>
             = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
-// An import may sit inside a function, a try or an if - CPython's own test suite is full
-// of them (`try: import _testcapi` opens eight of its files) - so it is a SMALL statement
-// too, not only a module level one. It pushes nothing net, so a line holding only an
-// import makes an empty (no-op) sequence, which is what an import is to a flat module.
+// An import may sit inside a function, a try or an if (`try: import _testcapi` is a
+// common CPython idiom), so it is a SMALL statement too, not only a module level one. It
+// pushes nothing net, so a line holding only an import makes an empty (no-op) sequence,
+// which is what an import is to a flat module.
 SmallStmt   = Import | FromImport
             | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
             | TypeAlias | AugAssign | AnnAssign | Assign | ExprSmall ;
@@ -516,9 +514,7 @@ DiscardType <~~ pop() ~~>
 DiscardExpr <~~ pop() ~~>
             = Expression ;
 
-// `return a, b` returns the bare TUPLE `(a, b)` - no parentheses needed - and it is how
-// most of CPython's suite returns a pair. Taking only one Expression here made the parse
-// die on the comma; six corpus files turned on this one word.
+// `return a, b` returns the bare TUPLE `(a, b)` - no parentheses needed.
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd ;
@@ -540,8 +536,8 @@ AssignHead  <~~ push({tlist: pop()}) ~~>
 // A comma-separated target list unpacks; a single target with no comma stays itself.
 // The trailing comma is RECORDED, not just tolerated: `x, = t` and `for x, in [(1,)]`
 // are ONE-element tuple targets and must unpack, while `x = t` binds the whole value.
-// Without the marker a single-item list degraded to a plain target and the loop bound the
-// tuple itself - a wrong answer with no parse error anywhere.
+// Without the marker a single-item list would degrade to a plain target and the loop
+// would silently bind the tuple itself.
 TargetList  <~~ push(makeTargetList(takeAll())) ~~>
             = TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ;
 TargetItem  = StarTarget | TupleTarget | Target ;
@@ -593,29 +589,28 @@ NotEqSign   = :script(~~
 ~~) ;
 // An assignment target is a SEED followed by a chain of suffixes whose last one is an
 // attribute, an index or a slice; the leading ones may be anything a reading chain may be,
-// calls and method calls included. `Exception().__traceback__ = 5`,
+// calls and method calls included: `Exception().__traceback__ = 5`,
 // `del globals()["__class__"]`, `(1).__class__ = MyInt` and `[list][0]: type` are all
-// ordinary Python and all failed while the seed had to be a bare Id. This is the shape
-// docs/abnf-dialect-gotchas.md calls "object creation must SEED the member chain".
+// ordinary Python. This is the shape docs/abnf-dialect-gotchas.md calls "object creation
+// must SEED the member chain".
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetSeed { CallSfx | MethodSfx | TSubTup | TSlice | TIndex | TAttr } ;
 // A plain name stays a STRING - it is the only seed that can be a bare store into a scope,
 // and it is the overwhelmingly common one. Any other seed contributes a read thunk.
 // TargetExpr comes FIRST: a bytes/str prefix letter is a perfectly good Id, so
-// `b"a".__class__ = M` matched TargetName on the lone `b`, COMMITTED, and then died on the
-// quote - the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md. Trying the
-// literal forms first is safe because each of them needs a quote, a digit or a bracket
-// that a bare name can never supply.
+// `b"a".__class__ = M` would match TargetName on the lone `b`, commit, and then die on
+// the quote - the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md. Trying
+// the literal forms first is safe because each of them needs a quote, a digit or a
+// bracket that a bare name can never supply.
 TargetSeed  = TargetExpr | TargetName ;
 TargetName  <~~ push(up.in) ~~> = NotPyKw Id ;
-// A target NAME may not be one of Python's reserved words. Without this, `for x, in [...]`
-// (a one-element tuple target with a trailing comma) had its `{ "," TargetItem }`
-// repetition happily match the comma and then read `in` as a second target name - PEG
-// repetition is greedy and never gives a match back - and the parse died at the end of the
-// line. A `!"in"` lookahead would be wrong twice over: it skips whitespace, and it would
-// also reject a name that merely STARTS with a keyword (`information`), so the guard reads
-// the whole word and compares it. Soft keywords (`match`, `case`, `type`, `_`) are real
-// names in Python and are deliberately absent from the list.
+// A target NAME may not be one of Python's reserved words. Otherwise `for x, in [...]`
+// (a one-element tuple target with a trailing comma) would have its `{ "," TargetItem }`
+// repetition match the comma and read `in` as a second target name - PEG repetition is
+// greedy and never gives a match back. A `!"in"` lookahead would be wrong twice over: it
+// skips whitespace, and it would also reject a name that merely STARTS with a keyword
+// (`information`), so the guard reads the whole word and compares it. Soft keywords
+// (`match`, `case`, `type`, `_`) are real names in Python and are deliberately absent.
 NotPyKw     = :script(~~
     (function() {
         var kws = ["False", "None", "True", "and", "as", "assert", "async", "await",
@@ -781,8 +776,6 @@ Not         <~~ push(makeNot(pop())) ~~>
 // ONCE and the chain short-circuiting as soon as a link is false. That is a repetition,
 // not an option, and it cannot go through foldBinary (which would compare the BOOLEAN
 // result of the first link with c). makeCompare lowers the chain properly.
-// 'is' / 'is not' are identity comparisons; in this subset (== already compares lists
-// and dicts by identity) they lower to the same == / != externs.
 Comparison  <~~ push(makeCompare(takeAll())) ~~>
             = BitExpr { ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr
                     | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> BitExpr
@@ -969,8 +962,7 @@ ListComp    <~~ push(makeListComp(takeAll())) ~~>
 // A comprehension is a CHAIN of clauses: one or more `for` clauses, each of which may be
 // followed by any number of `if` clauses ([x for a in xs for x in a if x]), and the loop
 // target is a full target LIST, not a bare name - `for _, _, line in co.co_lines()` and
-// `for (kind, string, *_) in ...` are what CPython's own suite writes. Restricting this to
-// one `for` over one name cost seven files of the reference corpus.
+// `for (kind, string, *_) in ...` are what CPython's own suite writes.
 CompClause  = CompFor | CompIf ;
 CompFor     <~~ var it = pop(); push({cfor: pop(), citer: it}) ~~>
             = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression ;
@@ -1013,9 +1005,8 @@ FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) 
 //     f'''{ # the following operation
 //     3
 //     * 2}'''
-// is. With the newline-less Whitespace the comment ran to the end of its line and the
-// parse stopped there - and in the shorter cases it did not fail at all, it silently
-// ended the field early and printed the rest of the expression as literal text.
+// is. With the newline-less Whitespace the comment would run to the end of its line, and
+// in shorter cases the field would silently end early and print the rest as literal text.
 FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
             = "{" :whitespace(WhitespaceNL) ExprList [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
 // The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
@@ -1044,10 +1035,8 @@ FSpecConv   = "!" ( "r" | "s" | "a" ) ;
 // whole sub-spec is discarded, so it must stay item-neutral, and popping the one thunk its
 // Expression pushes is what keeps FSpec's takeAll() seeing exactly the fields it renders.
 // FSpecSubChunk, not FSpecChunk: FSpecChunk carries a `push({chunk})` tag, so reusing it
-// here made the DROPPED sub-spec push its text into the enclosing FSpec's takeAll() - the
-// "tagging a sub-rule changes how many items its PARENT pops" trap. It did not fail: the
-// leaked `0` of `{width:0}` was appended to the width and the field rendered 100 columns
-// wide instead of 10.
+// here would make the DROPPED sub-spec push its text into the enclosing FSpec's takeAll() -
+// the "tagging a sub-rule changes how many items its PARENT pops" trap.
 FSpecSub    = ":" :whitespace() { FSpecSubField | FSpecSubChunk } :whitespace(Whitespace) ;
 FSpecSubChunk = FSpecChar { FSpecChar } ;
 FSpecSubField <~~ pop() ~~>
@@ -1067,23 +1056,22 @@ FChar3S     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3S ;
 FBrace      = "{{" | "}}" ;
 // The named-unicode escape INSIDE an f-string. A `{` normally opens a replacement
 // field, but the one after a backslash-N belongs to the escape: without this rule
-// StrEsc2 matched only the `\N` and left the `{` to open a field, so
-// `f'\N{GREEK CAPITAL LETTER DELTA}'` (test_fstring line 990) did not parse at all.
+// StrEsc2 would match only the `\N` and leave the `{` to open a field, so
+// `f'\N{GREEK CAPITAL LETTER DELTA}'` would not parse.
 // It has to be tried BEFORE StrEsc2, which would otherwise take the `\N` and commit.
 // The name characters are exactly the ones a Unicode character name may hold -
 // upper-case letters, digits, spaces and hyphens - which keeps the rule from running
 // past a missing `}` and eating the closing quote; an unterminated `\N{` therefore
-// falls back to StrEsc2 and behaves as it did before. The NAME TABLE is a small
-// subset (pyUniNames); a name outside it parses and renders as the empty string.
+// falls back to StrEsc2. The NAME TABLE is a small subset (pyUniNames); a name outside
+// it parses and renders as the empty string.
 FNamedEsc   = "\\N{" FNameCh { FNameCh } "}" ;
 // A backslash escape inside an f-string never consumes a BRACE. CPython's f-string
 // lexer treats `{` and `}` as structural first: `f'\{6*7}'` is a (warned about, still
 // legal) invalid escape - a literal backslash - followed by a REPLACEMENT FIELD, and it
-// evaluates to '\\42'; `f'\}'` is the error "single '}' is not allowed". Using the plain
-// StrEsc2 here swallowed the `{`, so the field never opened and test_fstring line 1016
-// (`fr'\{6*7}'`) died on the closing brace instead. FBksl is the lone backslash that is
-// left over, which pyUnescape keeps verbatim - and, because FPlain* already excludes the
-// backslash, nothing else can match it by accident.
+// evaluates to '\\42'; `f'\}'` is the error "single '}' is not allowed". The plain
+// StrEsc2 would swallow the `{`, so the field would never open. FBksl is the lone
+// backslash that is left over, which pyUnescape keeps verbatim - and, because FPlain*
+// already excludes the backslash, nothing else can match it by accident.
 FStrEsc     = "\\" FEscCh ;
 FEscCh      = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 FBksl       = "\\" ;
@@ -1221,12 +1209,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
     // -why. It is NOT core stmtPos (lib/compile-core.js), because up.pos is the
     // position AFTER the tag's node matched and neither python shape ends at its
-    // own last token: a SmallLine ends in NL, so `x = 1` on line 1 was reported
+    // own last token: a SmallLine ends in NL, so `x = 1` on line 1 would be reported
     // as line 2 - the last statement of a file pointing PAST EOF - and a compound
     // statement's node ends after its whole suite, so an `if` would be reported
-    // at the end of its block (docs/todo.md 6.1). The Statement rule therefore
-    // captures the position of the statement's FIRST token with an empty-token
-    // tag ahead of the alternatives and hands over [pos, thunk].
+    // at the end of its block. The Statement rule therefore captures the position
+    // of the statement's FIRST token with an empty-token tag ahead of the
+    // alternatives and hands over [pos, thunk].
     //
     // Everything else is core stmtPos: the marker is emitted only when the host
     // collects positions (c.tracing), so without -trace/-cfgraph/-callgraph/-why
@@ -1243,8 +1231,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ======================================================================
-    // PYTHON SCOPING, LOWERED IN THE EMITTER (docs/runtime-next-plan.md part 3,
-    // "a PRIVATE-REPRESENTATION probe belongs in the EMITTER")
+    // PYTHON SCOPING, LOWERED IN THE EMITTER
     // ======================================================================
     //
     // abnf/jsrt.go carries Python's binding rule on the SCOPE OBJECT ITSELF: a
@@ -1253,16 +1240,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a `global` / `nonlocal` statement sent elsewhere). js_pyfnscope, js_pyglobal,
     // js_pynonlocal and js_pyset_var read and write them.
     //
-    // A scope is the C floor's PRIVATE storage. runtime.c says so itself at
-    // js_pyset_var: "a scope here carries no such mark, so those arms are
-    // unreachable and are NOT modelled. A Python layer 2 will have to add them."
-    // Layer 2 CANNOT: a MetaJS runtime library never receives a scope it can open.
-    // That is the wall php, swift, java, dart, go and ruby each met, and the answer
-    // is the same one for the seventh time - find the floor externs that DO answer
-    // the question and lower the call in the emitter. Everything below is written
-    // over js_scope_new / js_scope_decl / js_scope_get / js_scope_set /
-    // js_scope_typeof / js_pyset_var, which the C floor and abnf/jsrt.go BOTH have,
-    // so the two halves execute the same program.
+    // A scope is the C floor's PRIVATE storage (runtime.c says so at js_pyset_var),
+    // and a MetaJS layer 2 never receives a scope it can open. So the rule is lowered
+    // in the emitter, over js_scope_new / js_scope_decl / js_scope_get /
+    // js_scope_set / js_scope_typeof / js_pyset_var, which the C floor and
+    // abnf/jsrt.go BOTH have, so the two halves execute the same program.
     //
     // The marks are carried as ORDINARY BINDINGS, in a scope of their own:
     //
@@ -1293,9 +1275,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // so there is no false POSITIVE; the false negative lands in the declare arm and
     // is exactly the case above. The three ways to bind strictly below the boundary
     // are all the EMITTER's own declarations, so it knows those names statically -
-    // see pyInnerNames, which routes them to the floor's exact walk instead. The
-    // per-scope containment test docs/todo.md 5.3 costs in layer 2 therefore has
-    // nothing left to decide.
+    // see pyInnerNames, which routes them to the floor's exact walk instead.
     var pySetVarF = undefined
     var pyGetVarF = undefined
     var pyDelVarF = undefined
@@ -1347,9 +1327,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // every other js_scope_decl of a user name in this grammar writes the boundary
     // scope, and every other assignment goes through pySetVar - so the containment
     // question py_setvar's two-typeof probe cannot answer is answered STATICALLY
-    // here, and completely. docs/todo.md 5.3 costs a scopeHas/scopeParent walk in
-    // layer 2 for it; there is nothing left for that walk to decide, and it would put
-    // a layer-2 call (a scope frame) on the language's hottest write path.
+    // here, and completely - without a layer-2 scope walk (a call, and a scope
+    // frame) on the language's hottest write path.
     var pyInnerNames = {}
     function pyDeclInner(nameStr) { pyInnerNames["$" + nameStr] = true }
     // True while the ONE write of a comprehension's own loop target is emitted; see
@@ -1366,21 +1345,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // `global q` / `nonlocal q` does not reach the `q` of `[q for q in ...]` - the
         // enclosing statement `q = 55` is sent away and the target is not. It is the
         // one write site the marks must not see, so it says so rather than being
-        // decided by name (the SAME name is usually both, which is how the defect
-        // py_setvar_in fixes came to be reachable at all). declCompNames has already
-        // declared the slot, so the floor's own walk lands on it.
+        // decided by name. declCompNames has already declared the slot, so the floor's
+        // own walk lands on it.
         if (pyCompTgt) { return callExt(b, "js_pyset_var", [envV, nameV, v]) }
         if (pyInnerNames["$" + nameStr] == true) {
             return pySetVarInner(b, envV, nameV, v)
         }
         return b.NewCall(pySetVarFunc(), [envV, nameV, v])
     }
-    // An INNER name still owes the `global` / `nonlocal` arms, and it used to skip
-    // them: the shortcut above went straight to js_pyset_var, which is the FLOOR's
-    // walk - "assign where the chain already holds it, else declare here" - and the
-    // floor knows nothing about the g*/n* marks, because those are the emitter's own
-    // bindings (runtime.c says so at js_pyset_var). abnf/jsrt.go consults its pyDecl
-    // map FIRST, so a name that is both inner-declared and `global` disagreed:
+    // An INNER name still owes the `global` / `nonlocal` arms. js_pyset_var is the
+    // FLOOR's walk - "assign where the chain already holds it, else declare here" - and
+    // knows nothing about the g*/n* marks, which are the emitter's own bindings;
+    // abnf/jsrt.go consults its pyDecl map FIRST. So:
     //
     //     q = 1
     //     def o():
@@ -1391,19 +1367,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //             q = 55
     //         i()
     //         return q
-    //     print(o(), q)                       # CPython: 100 1 -> 100 55
+    //     print(o(), q)                       # CPython: 100 55
     //
-    // The floor's walk found o's `q` on the way up and assigned THERE, so llvm.Run
-    // and the native binary both answered `55 1` where CPython and
-    // python-interpreter.abnf answer `100 55`. It needs BOTH marks to be reachable
-    // and an intermediate function binding the name - at depth 1 the floor's walk
-    // reaches the module scope anyway (js_pyglobal seeds it) and the answer happens
-    // to be right, which is why nothing caught it.
-    //
-    // The fix keeps py_setvar byte-identical and keeps the shortcut: two typeof
-    // probes ask whether either mark is in scope at all, and when one is, py_setvar
-    // - which has the arms already - decides. Nothing here is duplicated logic, and
-    // the extra pair of probes is on the inner path only.
+    // must not let the floor's walk find o's `q` on the way up. Two typeof probes ask
+    // whether either mark is in scope at all, and when one is, py_setvar - which has
+    // the arms already - decides. The extra pair of probes is on the inner path only.
     var pySetVarInF = undefined
     function pySetVarInner(b, envV, nameV, v) {
         if (pySetVarInF == undefined) {
@@ -1500,9 +1468,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // WHICH exception depends on where the deleted name lived, and CPython
             // 3.14 draws the line at the module: a deleted GLOBAL is a NameError
             // with the very text an unbound name gets, a deleted LOCAL is an
-            // UnboundLocalError. Raising UnboundLocalError for both made a
-            // module-level `del x; x` disagree with the interpreter half AND with
-            // CPython. "Am I at module level" is the boundary test the marks
+            // UnboundLocalError. "Am I at module level" is the boundary test the marks
             // already answer: pyfn* is the nearest enclosing boundary scope and
             // pymod* is the module's, and at the top level they are the same scope.
             // The floor's scope API cannot say which scope a chain walk stopped in,
@@ -1512,7 +1478,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // one only if the nearest boundary scope itself binds the name, and
             // otherwise it came from an outer namespace and is a NameError again.
             // That reproduces abnf/jsrt.go's `s == pyModuleScope(sc)` for every
-            // shape a Python program can write. docs/todo.md 3.2.
+            // shape a Python program can write.
             var fnScV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "pyfn*")])
             var modScV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "pymod*")])
             var ownB = pyGetVarF.NewBlock("deleted_own")
@@ -1553,8 +1519,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tv = callExt(eb, "js_scope_typeof", [envP, nmP])
             eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
             // Deleting a slot that is ALREADY empty raises, and the static binding
-            // analysis (docs/todo.md 1.6) is what makes that reachable: `def f():
-            // del x` now finds x's own empty local slot, where CPython says
+            // analysis is what makes that reachable: `def f(): del x` finds x's own
+            // empty local slot, where CPython says
             // UnboundLocalError - not the NameError a name bound nowhere gets.
             // py_getvar answers exactly that exception for exactly that slot, so
             // the check is one call to it rather than a second copy of the
@@ -1610,19 +1576,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // abnf/jsrt.go's js_pyannot looks the dict up in the scope's OWN names
     // (sc.find, not the chain) and creates one there when it is missing.
     //
-    // This used to answer that question STATICALLY, with the pyAnnotHere flag, and
-    // the flag is STICKY: an annotation the program does not REACH still set it, so
-    // the next REACHED annotation skipped the js_scope_decl and the dict was never
-    // created at all. `class A: (if False: z: int = 1); y: int = 2` then died with
-    // "variable not defined: __annotations__" in the compiled halves, from
-    // llvm.Run and from the native binary, where CPython 3.14 prints
-    // {'y': <class 'int'>}. Not a corner - a crash.
-    //
-    // It is the RUNTIME question now, the same one the Go twin asks: js_scope_has
-    // is the own-names probe an emitter did not have when this was written (it
-    // landed with pyClassFill above). pyAnnotHere survives only for pyEnsureAnnot,
-    // which asks a different question - "did this class BODY contain an annotation
-    // anywhere", which is genuinely static.
+    // This is the RUNTIME question (js_scope_has), not the static pyAnnotHere
+    // flag: that flag is STICKY, so an annotation the program does not REACH would
+    // make the next reached one skip the js_scope_decl and the dict would never be
+    // created (`class A: (if False: z: int = 1); y: int = 2`). pyAnnotHere serves
+    // only pyEnsureAnnot, which asks a genuinely static question - "did this class
+    // BODY contain an annotation anywhere".
     var pyAnnotDeclF = undefined
     function pyAnnotDecl(b, envV) {
         if (pyAnnotDeclF == undefined) {
@@ -1643,12 +1602,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyAnnot(b, envV, nameStr, annStr) {
         // ONLY A CLASS BODY records annotations. pyBindSink is non-null exactly
-        // inside one, and outside one CPython 3.14 (PEP 649) and
-        // python-interpreter.abnf both raise NameError for `__annotations__` while
-        // this half used to build a dict and hand it out - a halves divergence at
-        // module and function scope, and the very dict pyClassFill's old chain walk
-        // fed on. An annotation is kept as its source TEXT, so there is nothing
-        // left to evaluate once it is not recorded.
+        // inside one; outside one CPython 3.14 (PEP 649) and python-interpreter.abnf
+        // both raise NameError for `__annotations__`. An annotation is kept as its
+        // source TEXT, so there is nothing left to evaluate once it is not recorded.
         if (pyBindSink == null) { return b }
         pyBindSink.push("__annotations__")
         pyAnnotDecl(b, envV)
@@ -1666,20 +1622,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // binding the body did not REACH (`if c: x = 1`) off the class, which is what
     // enumerating the scope gave for free.
     //
-    // That guard used to be js_scope_typeof, which WALKS THE CHAIN, so a name the
-    // body did not reach but an ENCLOSING scope binds was copied onto the class
-    // from there:
+    // The guard is js_scope_has, not js_scope_typeof: typeof WALKS THE CHAIN, so a
+    // name the body did not reach but an ENCLOSING scope binds would be copied onto
+    // the class from there:
     //     w = "module"
     //     class K:
     //         if False:
     //             w = "inner"
-    //     K.w                  -> "module", where python3 raises AttributeError
-    // and __annotations__ made it visible without any `if` at all, since pyAnnot
-    // records the name whether or not the annotation runs. The question is "does
-    // THIS scope bind it", which js_scope_has answers - the extern twin of the
-    // scopeHas builtin the floor grew at d9014d7, added to languages/lib/runtime.c
-    // and abnf/jsrt.go in this same change because a builtin is callable from
-    // MetaJS and an extern from emitted IR, and this is the emitter's side.
+    //     K.w                  -> python3 raises AttributeError
+    // js_scope_has is the extern twin of the floor's scopeHas builtin (a builtin is
+    // callable from MetaJS, an extern from emitted IR).
     var pyFill1F = undefined
     function pyClassFill(b, clsV, scopeV, names) {
         if (pyFill1F == undefined) {
@@ -1711,20 +1663,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is given its __annotations__ dict at the TOP of the body, before any of its
     // statements run - so a class whose only annotation sits in a branch the body
     // never takes still has an EMPTY one. An emitter can only reach the annotation
-    // SITE, so the dict was created inside that branch and
-    //
-    //     class A:
-    //         if False:
-    //             z: int = 1
-    //     A.__annotations__
-    //
-    // raised "type object 'A' has no attribute '__annotations__'" in BOTH compiled
-    // halves, where CPython 3.14 and python-interpreter.abnf answer an empty dict.
-    // The body has finished by the time the class is filled, so the guarantee is
-    // restored there instead: pyAnnotHere says the body held an annotation, and
-    // this seeds the dict if the reached statements did not. js_get answers
-    // undefined for a missing key, which is the probe - the emitter has no
-    // own-property test that every language's native runtime also carries.
+    // SITE, so the guarantee is restored when the class is filled instead:
+    // pyAnnotHere says the body held an annotation, and this seeds the dict if the
+    // reached statements did not. js_get answers undefined for a missing key,
+    // which is the probe - the emitter has no own-property test that every
+    // language's native runtime also carries.
     var pyEnsAnnotF = undefined
     function pyEnsureAnnot(b, clsV) {
         if (pyEnsAnnotF == undefined) {
@@ -1753,31 +1696,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var sawYield = false
     var genClosure = false
 
-    // ----- Python's STATIC binding analysis (docs/todo.md 1.6) -----
+    // ----- Python's STATIC binding analysis -----
     //
-    // CPython decides a function's locals STATICALLY: every name the body binds is a
-    // local for the WHOLE body, so `def h(): print(w); w = 1` raises
-    // UnboundLocalError even when a global `w` exists. No engine here performed that
-    // analysis, and the damage was not just a wrong exception class - with an outer
-    // binding in scope the read SUCCEEDED and answered the outer value. All three
-    // engines agreed, so `--cross` was blind to it by construction.
-    //
-    // The set is collected at PARSE time here and seeded in emitClosure as the
-    // `pydel*` sentinel - the marker `del` already leaves in a slot - so py_getvar's
-    // existing "the slot is empty" arm raises the exception, with the
-    // local-vs-free distinction it already draws. languages/python-interpreter.abnf
-    // runs the identical collection (sbPush / sbPop / sbName / sbTarget /
-    // sbPattern) and seeds pyDeleted; the two must stay in step or the halves
-    // diverge.
-    //
-    // WHY THE COLLECTION IS IN THE make* FUNCTIONS AND NOT IN A TAG ON `Target`.
-    // AugAssign, AnnAssign and Assign each try `Target` first and then fail when the
-    // operator, the colon or the `=` does not follow, so the ordinary expression
-    // statement `x == 1` matches Target three times before ExprSmall reads it - and
-    // PEG never un-runs a tag. Every collector below sits in the tag of a production
-    // that has already succeeded in full. Comprehension targets fall out correctly
-    // for free: CompFor consumes its CompTarget itself and reaches no collector,
-    // which is right, because a comprehension is its own scope in CPython.
+    // Twin of the collection in python-interpreter.abnf (sbPush / sbPop / sbName /
+    // sbTarget / sbPattern); see there for the rule and for why the collectors sit
+    // in the make* tags rather than on `Target`. The two must stay in step or the
+    // halves diverge. Here the set is collected at PARSE time and seeded in
+    // emitClosure as the `pydel*` sentinel, so py_getvar's existing "the slot is
+    // empty" arm raises UnboundLocalError, with the local-vs-free distinction it
+    // already draws.
     var sbFrames = []
     function sbPush() { sbFrames.push({names: [], decl: []}) }
     // The names of the frame just closed, de-duplicated, minus anything a `global`
@@ -1845,7 +1772,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // 10000000000000000000000000001 - 10000000000000000000000000000 is 1 here.
     // js_bigint reads DECIMAL text (pyABigFromStr says so at its own site), so a
     // 0x / 0o / 0b literal is converted to exact decimal first rather than being
-    // handed to parseInt, which rounds: 0x20000000000001 used to arrive as 2^53.
+    // handed to parseInt, which rounds (0x20000000000001 would arrive as 2^53).
     function makeIntLit(t, radix) {
         var txt = numText(t)
         if (radix != 10) {
@@ -1861,10 +1788,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return makeConst(parseInt(txt, 10))
     }
-    // Is the decimal digit string txt worth MORE than 2^53? Decided on the TEXT: the
-    // gate used to be parseInt(txt, 10) > 2^53, and that rounds 9007199254740993 down
-    // to exactly 2^53 - so the very first value that needs the box answered "not big"
-    // and the literal became the double below it. 2^53 itself is exact, not boxed.
+    // Is the decimal digit string txt worth MORE than 2^53? Decided on the TEXT:
+    // parseInt(txt, 10) rounds 9007199254740993 down to exactly 2^53, so the very
+    // first value that needs the box would answer "not big". 2^53 itself is exact,
+    // not boxed.
     // A literal never carries a sign here (NegNumLit applies makeNeg to the value).
     function pyDecOver53(txt) {
         var s = txt
@@ -1994,10 +1921,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e == "N" && text.charAt(i + 2) == "{") {
                 // A forward SCAN, not text.indexOf("}", i + 3): the frozen engine
                 // ignores indexOf's from-index (docs/abnf-dialect-gotchas.md), so it
-                // answered with the FIRST `}` in the whole chunk - which may sit before
-                // this escape, sending `i` backwards and spinning to the step cap. It
-                // only surfaced once f-strings started reaching this branch, behind a
-                // green goja run.
+                // would answer with the FIRST `}` in the whole chunk - which may sit before
+                // this escape, sending `i` backwards.
                 var close = -1
                 for (var cj = i + 3; cj < text.length; cj++) {
                     if (text.charAt(cj) == "}") { close = cj; break }
@@ -2265,15 +2190,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = ea.b
                     cur = callExt(b, "js_pycall", [cur, ea.pos, ea.kw])
                 } else if (s.kind == "mcall") {
-                    // .items() USED TO BE LOWERED HERE, to a ~40-instruction loop over
-                    // js_keys building [key, value] pairs, because js_mcall had no dict
-                    // "items" arm. docs/todo.md 1.3 gave both compiled engines one
-                    // (pyDictMethod in abnf/jsrt.go and in lib/python-rt.metajs), so the
-                    // lowering is gone and the name goes through the extern like every
-                    // other method. It was also WRONG on a receiver that is not a dict:
-                    // `set().items()` emitted the loop anyway and answered
-                    // [['elems', <the element list>]] where the interpreter half raised
-                    // AttributeError - a halves divergence removing it also fixes.
                     var ea2 = emitCallArgs(b, s.args)
                     b = ea2.b
                     // js_pyrxmcall is js_pymcall plus the `re` module, a compiled
@@ -2580,10 +2496,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // One step along a target path: an index ([i], js_pyget) or an attribute
-    // (.name, js_get - matching the pyattr read of the interpreter).
-    // One step along a target path. Everything BUT the last step of a target is an
-    // ordinary READ, so the call and method-call forms emit exactly what foldCallMember
-    // emits - that is what makes `hold()["k"] = 1` write into the slot it reads.
+    // (.name, js_get - matching the pyattr read of the interpreter). Everything BUT
+    // the last step of a target is an ordinary READ, so the call and method-call forms
+    // emit exactly what foldCallMember emits - that is what makes `hold()["k"] = 1`
+    // write into the slot it reads.
     function emitPathStep(b, o, step) {
         if (step.tattr == true) { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
         if (step.kind == "call") {
@@ -3089,21 +3005,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vName = "$v" + hidCount
             var r = listT(b)
             b = r.b
-            // LAZY ITERATION over a generator (docs/todo.md 1.7). js_pyiter
-            // MATERIALIZES its argument, so `for x in endless(): ... break` never
-            // reached the body at all - it hung in the interpreter and hit
-            // -max-steps in the compiler. A GENERATOR is therefore kept raw and
-            // STEPPED, one value per round, through the js_get(g, "next") /
-            // {value, done} protocol the coroutine primitive already answers;
-            // everything else still goes through js_pyiter, which normalizes a
-            // dict to its keys and a string to its characters. C# lowers foreach
-            // the same way and owes layer 2 nothing for it - see
-            // csharp-to-llvm-ir.abnf's makeForEach, which is where this shape is from.
+            // LAZY ITERATION over a generator. js_pyiter MATERIALIZES its argument,
+            // which never ends for `for x in endless(): ... break`. A GENERATOR is
+            // therefore kept raw and STEPPED, one value per iteration, through the
+            // js_get(g, "next") / {value, done} protocol the coroutine primitive
+            // already answers; everything else still goes through js_pyiter, which
+            // normalizes a dict to its keys and a string to its characters. C# lowers
+            // foreach the same way - see csharp-to-llvm-ir.abnf's makeForEach.
             //
             // Which of the two the loop is on is decided ONCE, into a hidden slot,
             // and the head tests it with an ICmp against the `true` handle - no
-            // extern call and no re-probe per round, so the array path pays one
-            // machine compare more than it did.
+            // extern call and no re-probe per iteration.
             var isGenV = callExt(b, "js_seq",
                 [callExt(b, "js_typeof", [callExt(b, "js_get", [r.v, emitStr(b, "next")])]),
                  emitStr(b, "function")])
@@ -3267,12 +3179,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!isFrom) { return {b: b, v: callExt(b, "js_yield", [v])} }
             // yield from: the delegate is driven LAZILY, one value at a time,
             // through the {value, done} protocol that a generator cell and a cursor
-            // both answer. It used to be an index loop over js_pyiter, which
-            // MATERIALIZES: `yield from endless()` hit -max-steps, a .throw() was
-            // raised at the `yield from` rather than forwarded to the delegate's own
-            // except arms, a close never reached the delegate, a send() never
-            // reached it either, and the value of the expression was always None.
-            // docs/todo.md 1.6; the shape is js-to-llvm-ir.abnf's makeYieldStar.
+            // both answer, so an endless delegate works, a .throw() is forwarded to
+            // the delegate's own except arms, close() and send() reach it, and the
+            // value of the expression is the delegate's return value. The shape is
+            // js-to-llvm-ir.abnf's makeYieldStar.
             //
             // js_pyiterfn is iter(): a generator and a cursor are their own, and
             // everything else is materialized into a cursor - a list is finite, so
@@ -3340,13 +3250,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // PEP 380's resume is `if _s is None: _y = _i.__next__()` else
             // `_y = _i.send(_s)`, and a CURSOR has no send: `g.send(7)` over
             // `yield from [1,2,3]` raises AttributeError inside the generator,
-            // which ends it. Forwarding a non-None value to a cursor's next()
-            // answered 2 instead, in ALL THREE engines - so the matrix and
-            // --cross were blind to it by construction and only the oracle could
-            // see it. js_pyyfsend is the guard and it raises; it is a call and
-            // not an inline test because "is this a cursor" is a value-model
-            // question, which is layer 2's and the Go twin's to answer.
-            // docs/todo.md 1.4.
+            // which ends it (forwarding it to the cursor's next() would answer 2).
+            // js_pyyfsend is the guard and it raises; it is a call and not an
+            // inline test because "is this a cursor" is a value-model question,
+            // which is layer 2's and the Go twin's to answer.
             callExt(stepB, "js_pyyfsend", [dV, sentV])
             var nxV = callExt(stepB, "js_get", [dV, emitStr(stepB, "next")])
             var nxArgsV = callExt(stepB, "js_arr_new", [])
@@ -3478,7 +3385,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: mergeB, v: phi}
         }
     }
-    // name: Type [= value]: the annotation is ignored; assign when a value is given.
     // NAME: TYPE [= VALUE]. The annotation is recorded in the enclosing body's
     // __annotations__ (js_pyannot; in a class body that dict becomes a class member
     // like every other name the body binds), and the value, when there is one, is
@@ -3555,8 +3461,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // `except E as e` binds e as an ordinary function local (and CPython deletes
         // it again at the end of the handler, so reading it afterwards is an
-        // UnboundLocalError rather than a NameError - a live halves divergence
-        // before this pass existed).
+        // UnboundLocalError rather than a NameError).
         sbName(cl.hname)
         return {excl: cl}
     }
@@ -3713,16 +3618,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // `raise SomeClass` names a CLASS, and CPython raises an INSTANCE of
             // it: js_pyraiseval instantiates one. Throwing the class object itself
-            // matched no except clause and aborted the process, where the
-            // interpreter half - whose makeRaise has the same line - caught it.
-            // docs/todo.md 1.7.
+            // would match no except clause.
             callExt(b, "js_throw", [callExt(b, "js_pyraiseval", [v])])
             b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
         }
     }
-    // with EXPR [as T]: a simple form (no context-manager protocol) - run each
-    // context expression, bind the target to its value, then run the body.
+    // One `with` item, {ctxitem, target}; makeWith lowers the protocol.
     function makeWithItem(items) {
         var target = items.length > 1 ? items[1] : null
         sbTarget(target)
@@ -3893,7 +3795,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else {
             curScopeV = pyOpenBoundary(fb, f.Params[0], false)
         }
-        // CPython's STATIC locals (docs/todo.md 1.6): every name the body binds owns
+        // CPython's STATIC locals: every name the body binds owns
         // a slot from the moment the frame exists, holding NOTHING. The `pydel*`
         // sentinel IS that "slot exists and is empty" marker, so py_getvar's
         // existing arm raises UnboundLocalError for a read of one - with the
@@ -3936,11 +3838,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // A try/except/finally/with BODY closure (isCtl) is not a function of the
         // program: a `yield` inside it belongs to the def around it, so sawYield
-        // has to travel OUT of it. Resetting it here made `def g(): try: yield 1
-        // finally: ...` compile g as an ordinary function, and both compiler
-        // halves died with "yield outside of a generator" while the interpreter
-        // ran it - a generator with a `finally` around its yield was unreachable
-        // in this half at all.
+        // has to travel OUT of it. Resetting it here would compile `def g(): try:
+        // yield 1 finally: ...` as an ordinary function.
         var savedYield = sawYield
         if (!isCtl) { sawYield = false }
         var endB = bodyT(fb)
@@ -4114,10 +4013,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lb = er.b
             var clo = callExt(lb, "js_closure", [handle(idx), er.env])
             // CPython names a lambda <lambda>, and it is what f.__name__ answers.
-            // Only a `def` used to record a name here, so a lambda's __name__ was
-            // None in both compiled halves where the interpreter half - whose
-            // fnName defaults to <lambda> - answered it. Found beside
-            // docs/todo.md 1.8's function rendering, which reads the same table.
             clo = callExt(lb, "js_pyfnname", [clo, emitStr(lb, "<lambda>")])
             return {b: lb, v: emitSig(lb, clo, plist)}
         }
@@ -4125,15 +4020,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // The builtin names that are TYPES rather than plain functions. `int` is not a
     // conversion function in Python, it is the class - so `type(1) == int` and
-    // `isinstance("a", str)` are True, and both were FALSE under this compiler
-    // while the interpreter said True (six for six), because declBuiltin bound the
-    // name to the conversion CLOSURE and the class object was reachable only
-    // through type(). Now the name holds js_pybuiltincls's stable class object -
-    // the very object type() answers with - and the conversion closure rides on it
-    // as __conv, which js_pycall calls when a class object carrying one is called.
-    // That way CALLING the name still runs the same IR function it always did and
-    // nothing about the call path changes shape; only the value the NAME holds
-    // does. rt.pyIsInstance already accepted a builtin class object as its target.
+    // `isinstance("a", str)` are True. The name holds js_pybuiltincls's stable
+    // class object - the very object type() answers with - and the conversion
+    // closure rides on it as __conv, which js_pycall calls when a class object
+    // carrying one is called. So CALLING the name still runs the same IR function;
+    // only the value the NAME holds is the class. rt.pyIsInstance accepts a
+    // builtin class object as its target.
     var pyTypeBuiltin = {}
     pyTypeBuiltin["$str"] = true
     pyTypeBuiltin["$int"] = true
@@ -4143,10 +4035,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$dict"] = true
     pyTypeBuiltin["$set"] = true
     pyTypeBuiltin["$tuple"] = true
-    // `type` is a class too, and the same six-for-six argument applies: with the
-    // name bound to the CONVERSION closure `str(type)` read [function] here and
-    // <class 'type'> in the interpreter and in CPython. Calling it still runs the
-    // same js_pytype forwarder, through __conv.
+    // `type` is a class too: `str(type)` is <class 'type'>. Calling it still runs
+    // the same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
     // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
     // above: they answer a cursor rather than convert, so binding them to a class
@@ -4155,7 +4045,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // This list is the whole two-form split, and it lives HERE - once per half -
     // rather than in the Go twin and layer 2 and the interpreter, which is why
-    // js_pybfn stores the finished text instead of a name. docs/todo.md 1.4.
+    // js_pybfn stores the finished text instead of a name.
     var pyClassBuiltin = {}
     pyClassBuiltin["$range"] = true
     pyClassBuiltin["$enumerate"] = true
@@ -4166,9 +4056,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The CODE the builtin render table stores: the builtin's NAME, with a
     // leading "*" when CPython prints it as a class. Keeping the split HERE means
     // the list of the six class-like builtins is written once per half instead of
-    // three times. What this table costs, and why no shape of it is free on
-    // tests/bench/mod.py, is measured and recorded at the table itself in
-    // languages/lib/python-rt.metajs.
+    // three times.
 
     function pyBFnCode(name) {
         if (pyClassBuiltin["$" + name] == true) { return "*" + name }
@@ -4176,8 +4064,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Every name declBind has bound, in order, so the `builtins` module object
     // can be filled from the very scope bindings the global names resolve to -
-    // which is what makes `builtins.len is len` hold rather than answering a copy
-    // (docs/todo.md 1.7).
+    // which is what makes `builtins.len is len` hold rather than answering a copy.
     var pyBuiltinNameList = []
     function declBind(b, name, cloV) {
         pyBuiltinNameList.push(name)
@@ -4187,9 +4074,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cls])
             return b
         }
-        // print(len) said "<function <lambda>>" in all three engines where CPython
-        // says "<built-in function len>": a builtin has no `def` to record a name
-        // in the js_pyfnname table, so it gets one of its own, filled here.
+        // CPython prints a builtin as "<built-in function len>": a builtin has no
+        // `def` to record a name in the js_pyfnname table, so it gets one of its own,
+        // filled here.
         callExt(b, "js_pybfn", [cloV, emitStr(b, pyBFnCode(name))])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cloV])
         return b
@@ -4263,8 +4150,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rB = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(1)])
         rb.NewRet(rb.NewCall(getExtern("js_pyrange", 2), [rA, rB]))
         b = declBind(b, "range", callExt(b, "js_closure", [handle(rgIdx), curScopeV]))
-        // abs(). Bound straight from JS Math it answered NaN on a boxed float
-        // and lost precision on an arbitrary precision int; js_pyabs keeps both.
+        // abs(): js_pyabs, not JS Math, which would answer NaN on a boxed float and
+        // lose precision on an arbitrary precision int.
         b = declBuiltin(b, "abs", "js_pyabs", 1)
         // type(v), str(v), int(v) and isinstance(v, C).
         b = declBuiltin(b, "type", "js_pytype", 1)
@@ -4273,35 +4160,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
         // dispatches re.search(...) on it (abnf/jsrtregexpy.go).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "re"), callExt(b, "js_pyre_module", [])])
-        // The `math` module, bound the same way and for the same reason
-        // (docs/todo.md 1.7): `import math` binds nothing in this flat import
-        // model, so the module object is simply always there. js_pygetattr reads
-        // math.pi / math.inf straight out of it and js_pyrxmcall dispatches
-        // math.sqrt(2) on it - abnf/jsrtpymath.go for the Go twin,
-        // js_pymath_module in languages/lib/python-rt.metajs for the native build.
-        // ----- `open` and file I/O: DECLINED, and this is the reason ------------
+        // The `math` module, bound the same way and for the same reason: `import
+        // math` binds nothing in this flat import model, so the module object is
+        // simply always there. js_pygetattr reads math.pi / math.inf straight out of
+        // it and js_pyrxmcall dispatches math.sqrt(2) on it - abnf/jsrtpymath.go for
+        // the Go twin, js_pymath_module in languages/lib/python-rt.metajs for the
+        // native build.
+        // ----- `open` and file I/O: not implemented ------------------------------
         //
-        // docs/todo.md 1.7 lists `open` beside `math`. It is not implemented, and the
-        // decision is a measurement rather than a preference: THERE IS NO FILE I/O
-        // PRIMITIVE ANYWHERE IN THIS PROJECT'S RUNTIME. languages/lib/runtime.c
-        // declares exactly putchar, write(2), malloc, exit, getenv, setjmp/longjmp,
-        // pthread and dlopen/dlsym - no open/read/close - and `nm -u` on any native
-        // binary showing libc and nothing else is a property the manual states in
-        // chapter 1. c.readFile IS in the grammar host, but it is the COMPILE-time
-        // import reader, not something an interpreted program can reach.
-        //
-        // So `open` is not a builtin to add; it is a new capability across four
-        // engines: three libc declarations plus a file-handle tag in runtime.c, an
-        // os.File-backed Go type in the twin, a MetaJS layer-2 object, a host global
-        // in metajs-interpreter.abnf (manual 7.2: a host global means THREE engines,
-        // and abnf/hostglobals_test.go pins the set), and then the whole file-object
-        // surface - read/readline/readlines/write/close, iteration, and the context
-        // manager - before one realistic program works. The test suite could not
-        // assert on it either without fixtures the matrix has no mechanism for.
-        //
-        // `open(...)` therefore raises the catchable NameError any unbound name gets
-        // (d0f4db3), which is a truthful answer. Saying so here is worth more than a
-        // fake `open` that pretends to read.
+        // There is no file I/O primitive in this project's runtime:
+        // languages/lib/runtime.c declares putchar, write(2), malloc, exit, getenv,
+        // setjmp/longjmp, pthread and dlopen/dlsym - no open/read/close - and
+        // c.readFile is the COMPILE-time import reader. `open` would be a new
+        // capability across every engine (libc declarations and a file-handle tag in
+        // runtime.c, a Go type in the twin, a layer-2 object, a host global in
+        // metajs-interpreter.abnf) plus the whole file-object surface. `open(...)`
+        // therefore raises the catchable NameError any unbound name gets, which is a
+        // truthful answer, rather than a fake `open` that pretends to read.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "math"), callExt(b, "js_pymath_module", [])])
         b = declBuiltin(b, "str", "js_pyrxstr", 1)
         b = declBuiltin(b, "int", "js_pyint", 1)
@@ -4310,27 +4185,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "max", "js_pymax", 0)
         b = declBuiltin(b, "min", "js_pymin", 0)
         // The remaining conversions pyConvert of python-interpreter.abnf offers.
-        // Without them bool(0) / float(s) / repr(v) / set(it) / sum(it) / tuple(it)
-        // aborted with "variable not defined" under the COMPILER only.
         b = declBuiltin(b, "bool", "js_pybool", 1)
         b = declBuiltin(b, "float", "js_pyfloat", 1)
         b = declBuiltin(b, "repr", "js_pyrepr", 1)
         b = declBuiltin(b, "set", "js_pyset_new", 1)
         b = declBuiltin(b, "sum", "js_pysum", 1)
         b = declBuiltin(b, "tuple", "js_pylist", 1)
-        // ord(c) / chr(n). docs/todo.md 2.9 recorded these as present in both
-        // compiled halves and missing only from the interpreter; a probe at
-        // 114fbd5 answered `variable not defined: ord` HERE too, so all three
-        // engines grew them at once - hostGlobals in python-interpreter.abnf,
-        // js_pyord/js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.
+        // ord(c) / chr(n): hostGlobals in python-interpreter.abnf, js_pyord /
+        // js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.
         b = declBuiltin(b, "ord", "js_pyord", 1)
         b = declBuiltin(b, "chr", "js_pychr", 1)
-        // issubclass(C, B) - docs/todo.md 1.4, one of its two named halves gaps:
-        // the interpreter had hostGlobals["issubclass"] and this half answered
-        // `variable not defined: issubclass`. rt.pyIsSubclass (abnf/jsrt.go) and
-        // pyDIsSubclass (lib/python-rt.metajs) are the two implementations.
+        // issubclass(C, B): rt.pyIsSubclass (abnf/jsrt.go) and pyDIsSubclass
+        // (lib/python-rt.metajs) are the two compiled implementations.
         b = declBuiltin(b, "issubclass", "js_pyissubclass", 2)
-        // docs/todo.md 1.4's "missing from BOTH halves" list. Every one of these
+        // Every one of these
         // is bound here, in hostGlobals (languages/python-interpreter.abnf) and
         // in lib/python-rt.metajs, with a Go twin of the same js_py* name in
         // abnf/jsrt.go. argc 0 hands the extern the whole ARGUMENT ARRAY, which
@@ -4364,25 +4232,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
         b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)
         b = declBuiltin(b, "setattr", "js_pysetattr3", 0)
-        // vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO
-        // engine while the attribute worked in all three. docs/todo.md 1.8.
+        // vars(o) IS o.__dict__ - CPython's own definition.
         b = declBuiltin(b, "vars", "js_pyvars", 1)
-        // staticmethod / classmethod (docs/todo.md 1.7). Both were undefined in
-        // every engine, so a bare `@staticmethod` aborted the run. The builtin
-        // only WRAPS; the unwrapping happens at the class-member lookup, which is
-        // the one place that knows both the receiver and its class - see
-        // abnf/jsrtpydesc.go and pyDDescGet in languages/lib/python-rt.metajs.
+        // staticmethod / classmethod. The builtin only WRAPS; the unwrapping
+        // happens at the class-member lookup, which is the one place that knows
+        // both the receiver and its class - see abnf/jsrtpydesc.go and pyDDescGet
+        // in languages/lib/python-rt.metajs.
         b = declBuiltin(b, "staticmethod", "js_pystaticmethod", 1)
         b = declBuiltin(b, "classmethod", "js_pyclassmethod", 1)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
-        // only reaches the eight that convert, so `class C(object)`, `type(None)
-        // is NoneType` and `str(complex)` were a name that is not defined HERE
-        // and a class object THERE - the same halves divergence docs/todo.md 2.9
-        // reported for ord/chr, found by the sweep that item asked for.
-        // js_pybuiltincls is name-generic in both compiled engines (rt.pyBuiltinClass
-        // in abnf/jsrt.go, pyBuiltinClass in lib/python-rt.metajs), so no extern,
-        // no layer-2 line and no floor line is needed - only the binding.
+        // only reaches the eight that convert; these are the rest, so `class
+        // C(object)`, `type(None) is NoneType` and `str(complex)` see a class
+        // object. js_pybuiltincls is name-generic in both compiled engines
+        // (rt.pyBuiltinClass in abnf/jsrt.go, pyBuiltinClass in
+        // lib/python-rt.metajs), so only the binding is needed.
         var pyPlainTypes = ["object", "complex", "bytes", "NoneType", "function"]
         for (var pt0 = 0; pt0 < pyPlainTypes.length; pt0++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pyPlainTypes[pt0]),
@@ -4402,9 +4266,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var eRest = eb.NewCall(getExtern("js_pyrest", 2), [ef.Params[1], handle(1)])
         eb.NewCall(getExtern("js_set", 3), [eSelf, emitStr(eb, "args"), eRest])
         eb.NewRet(hUndef)
-        // BaseException sits above Exception, as in CPython: `except BaseException`
-        // aborted with `variable not defined: BaseException` in both compiled
-        // halves while the interpreter half had it (docs/todo.md 1.7).
+        // BaseException sits above Exception, as in CPython.
         var excRootBases = callExt(b, "js_arr_new", [])
         var excRoot = callExt(b, "js_pyclass_new", [emitStr(b, "BaseException"), excRootBases])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BaseException"), excRoot])
@@ -4414,13 +4276,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_set", [excBase, emitStr(b, "__init__"),
                               callExt(b, "js_closure", [handle(eiIdx), curScopeV])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Exception"), excBase])
-        // The hierarchy is CPython's, not a flat list under Exception. Every one of
-        // these used to derive straight from Exception, so `except LookupError`
-        // did not catch a KeyError and `except ArithmeticError` did not catch a
-        // ZeroDivisionError in EITHER compiled half, while
-        // languages/python-interpreter.abnf's pyExcParent got both right. It went
-        // unseen because the only way to reach a runtime KeyError was
-        // `d[missing]`, which aborted the process outright (docs/todo.md 1.7).
+        // The hierarchy is CPython's, not a flat list under Exception, so
+        // `except LookupError` catches a KeyError and `except ArithmeticError` a
+        // ZeroDivisionError (python-interpreter.abnf's pyExcParent is the twin).
         // The list is in parent-first order: an entry's base must already exist.
         var excNames = ["ValueError", "TypeError", "RuntimeError", "AttributeError",
                         "NameError", "StopIteration", "ArithmeticError", "LookupError",
@@ -4446,7 +4304,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             excMade[excNames[e0]] = eCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
-        // ----- the `builtins` module (docs/todo.md 1.7) ---------------------
+        // ----- the `builtins` module ------------------------------------------
         //
         // CPython's len.__self__ IS the builtins module, and `builtins.len is
         // len` holds. Both fall out of ONE object filled here, AFTER every
@@ -4454,24 +4312,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // name back out of the scope - so the module's slot holds the identical
         // value the bare name resolves to, not a copy. The read side is the
         // module arm of pyGetAttr (abnf/jsrtpydesc.go's pyModuleAttr and
-        // pyGetAttr in languages/lib/python-rt.metajs).
-        // WHAT THIS SECTION COSTS, MEASURED, so the next person does not re-derive
-        // it (docs/todo.md 2.9 asks for exactly this beside the row):
-        //
-        //                      collections   live      heap        module bytes
-        //   e89fd9e base       3574          243712    11627376    47250
-        //   ungated fill       3574          252752    12675952    65976   <- +1 chunk
-        //   gated (this)       3574          250928    11627376    49400
-        //
-        // `collections` is IDENTICAL in all three, so nothing new is EXECUTED in
-        // the benchmark loop; the ungated version stepped the arena by a whole
-        // 1 MiB chunk on module text alone, which is the tax 2.9 warns about and
-        // is why the fill is gated. What remains is a 3.0% larger LIVE SET, which
-        // the collector marks on each of the 3,574 sweeps: tests/bench.sh
-        // --paired against a clean archive of the base reads python +0.55%,
-        // slower in 8 of 9 pairs, with all thirteen other languages at 0.00% as
-        // controls. That is the honest price of the module and descriptor
-        // surface, and it is a marking cost, not an arena step and not new work.
+        // pyGetAttr in languages/lib/python-rt.metajs). The fill is gated on
+        // pySawBuiltins: ungated, its module text alone steps the arena by a
+        // whole chunk for programs that never mention the module.
         var bmodV = callExt(b, "js_pybuiltins_module", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "builtins"), bmodV])
         if (pySawBuiltins) {
@@ -4487,16 +4330,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_set", [bmodV, emitStr(b, "BaseException"), excRoot])
         }
 
-        // ----- the recoverable-name hook (docs/todo.md 3.2) -----------------
+        // ----- the recoverable-name hook ----------------------------------------
         //
-        // Reading a name that is nowhere bound was an UNCATCHABLE abort in both
-        // compiled halves - `js runtime error: variable not defined: x` - where
-        // this project's own interpreter half and CPython both raise a catchable
-        // NameError. The site is the floor's scope_get / abnf/jsrt.go's scopeGet,
+        // Reading a name that is nowhere bound raises a catchable NameError in
+        // CPython. The site is the floor's scope_get / abnf/jsrt.go's scopeGet,
         // shared by all sixteen languages, so it cannot simply be made to throw:
         // a statically typed language means "this program is broken" by it, and
-        // the three SHOULD-ABORT matrix rows are how the abort path is reached by
-        // a test at all. Both engines therefore take a per-language HOOK
+        // the SHOULD-ABORT matrix rows are how the abort path is reached by a
+        // test at all. Both engines therefore take a per-language HOOK
         // (js_rt_missvar) and this registers python's; a language that registers
         // nothing is bit-for-bit unchanged. Registering it AFTER the class block
         // is required, because the hook raises one of those classes.
@@ -4558,13 +4399,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // scope_get knows nothing about. core.scopeGetExt names an EXTERN and py_getvar
     // is an emitted IR function, so makeVarRef (lib/compile-core.js) is overridden
     // here instead - the same move swift and dart made for js_kget.
+    //
     // Did the program ever NAME `builtins`? The module object itself is cheap and
     // is always built (len.__self__ is it), but FILLING it is one js_set per
-    // builtin and per exception class - about 19 KB of module text, which is
-    // enough to step tests/bench/mod.py's arena by a whole chunk for a program
-    // that never mentions the module (docs/todo.md 2.9). The tags run at parse
-    // time and the boot block is emitted afterwards, so the answer is known
-    // before it is needed. `import builtins` also sets it, in ImportMod.
+    // builtin and per exception class - about 19 KB of module text, enough to
+    // step the arena by a whole chunk for a program that never mentions the
+    // module. The tags run at parse time and the boot block is emitted afterwards,
+    // so the answer is known before it is needed. `import builtins` also sets it,
+    // in ImportMod.
     var pySawBuiltins = false
     makeVarRef = function(name) {
         if (name == "builtins") { pySawBuiltins = true }
@@ -4640,7 +4482,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -4649,8 +4491,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (lib/python-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
     // indices are offset by a million, so the two chains cannot overlap and one js_call
     // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
-    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
-    // the reusable part of phase 4 and nothing here is Python's.
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - nothing here is
+    // Python's.
     function emitDispatch() {
         var idxs = []
         var fns = []

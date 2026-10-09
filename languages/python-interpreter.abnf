@@ -50,40 +50,30 @@ Known deviations, all deliberate:
     state therefore lands more than once - a list a generator appends to before
     its first yield ends up [1, 1, 2] where CPython leaves [1, 2].
 
-    ORDER IS NOT AFFECTED. Measured, not assumed: an interleaving probe that
-    numbers every driver event and every generator event into one log gives, after
-    collapsing repeats, byte-identically CPython's sequence - for two generators
-    driven alternately, for a generator mutating shared state, for try / with /
-    finally nested around a yield, for close() mid-run, and for an exception
-    object built before a yield and raised after it. That was NOT true before
-    docs/todo.md 2.6 was worked: the suspension signal is a host-level throw, and
-    it used to unwind the program's own try/finally and a with's __exit__ on its
-    way out, so a generator's `finally` ran at the FIRST next() - before CPython
-    runs it at all - and again at every step after that. makeTry, runWith and
-    genClose now let that signal pass through untouched (isGenSuspend), and
-    close() replays to the parked yield and raises there, which is how the
-    `finally` runs at the moment CPython runs it.
+    ORDER IS NOT AFFECTED: an interleaving probe that numbers every driver event
+    and every generator event into one log gives, after collapsing repeats,
+    CPython's sequence - for two generators driven alternately, for a generator
+    mutating shared state, for try / with / finally nested around a yield, for
+    close() mid-run, and for an exception object built before a yield and raised
+    after it. The suspension signal is a host-level throw, so makeTry, runWith and
+    genClose let it pass through untouched (isGenSuspend), and close() replays to
+    the parked yield and raises there, which is how the `finally` runs at the
+    moment CPython runs it.
 
     gen.throw(exc) RAISES AT THE PARKED YIELD, so the body's own except and
     finally clauses see it, and the record travels on the resume value exactly as
     close()'s exit record does - which is what makes it per-coroutine by
-    construction. It used to be missing everywhere, because the COMPILED halves
-    could not follow: a generator there is the C floor's tag-15 cell whose member
-    table is host-dispatched and offered next and return only. runtime.c's
-    gen_throw is that table's third member, and abnf/jsrt.go's throwInto the Go
-    twin's. A generator that has not started, or that is done, runs NOTHING - no
-    `finally` - and the exception propagates out of throw() itself; all three
-    shapes were probed against CPython 3.14.6.
+    construction. The compiled halves have it as runtime.c's gen_throw and
+    abnf/jsrt.go's throwInto. A generator that has not started, or that is done,
+    runs NOTHING - no `finally` - and the exception propagates out of throw()
+    itself, as in CPython.
 
     STILL MISSING: a close() is not offered to `except`. The floor's GEN_EXIT
     sentinel unwinds `finally` clauses without being catchable, so neither engine
-    lets a generator catch its own GeneratorExit, where CPython does. That one is
-    NOT the same shape as throw() - GEN_EXIT is a floor object with no Python
-    class, and js_try's guard that routes it past every catch arm is shared with
-    the fifteen other languages, where a close IS a return completion and must not
-    be catchable. Also: `yield from` MATERIALIZES its delegate in both halves, so a
-    throw is raised at the `yield from` and never reaches the delegate's own
-    except arms, where CPython forwards it.
+    lets a generator catch its own GeneratorExit, where CPython does. GEN_EXIT is
+    a floor object with no Python class, and js_try's guard that routes it past
+    every catch arm is shared with the fifteen other languages, where a close IS a
+    return completion and must not be catchable.
   - A tuple is a list, so it is mutable and compares equal to a list.
   - A complex whose imaginary part is zero is an ordinary number, and int / float
     are one numeric type, so type() cannot tell 1 from 1.0 or from 1+0j.
@@ -200,8 +190,6 @@ SmallLine   = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
 SmallStmt   = Import | FromImport | TypeAliasStmt | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
             | AugAssign | AnnAssign | Assign | ExprSmall ;
 
-// A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
-// suite starts at the same level; the first one defined the level via Indent.
 // A suite is either an indented block - ':' NEWLINE INDENT statements DEDENT, every
 // further statement at the same level - or the ONE-LINE form, ':' followed by small
 // statements on the same line (def f(self): return 1, if c: t = 5).
@@ -275,9 +263,6 @@ While       <~~ push(makeWhileElse(takeAll())) ~~>
 LoopElse    <~~ push({loopelse: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 
-// for x in ITER: a single name (genuinely executed). A tuple target
-// (for a, b in ...  /  for (a, b) in ...) is accepted and reported as not
-// implemented (the subset has no tuple unpacking in the loop head).
 // for TARGETS in ITER: the target is a full target list, so `for head, *tail in xs`
 // unpacks each element. An `else` suite runs when the loop was not broken.
 For         <~~ push(makeForStmt(takeAll())) ~~>
@@ -287,10 +272,7 @@ For         <~~ push(makeForStmt(takeAll())) ~~>
 // function (calling it then yields a generator object rather than running the body).
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in); genPush(); sbPush() ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
-// Parameter lists: plain names, default values (evaluated once, when the def
-// statement runs - like real Python) and a *args rest parameter all work;
-// **kwargs, the bare '*' and '/' markers and keyword-only parameters after
-// *args are reported as not implemented. Annotations parse and are ignored.
+// A parameter list may span lines; annotations parse and are ignored.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) [ Param { "," Param } [ "," ] ] ")" :whitespace(Whitespace) ;
 // The full Python parameter grammar: positional-or-keyword names with defaults, the
@@ -308,8 +290,6 @@ NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
 ParamDefault <~~ push({pdefault: pop()}) ~~>
             = "=" Expression ;
 
-// A decorated def / async-def / class: the decorators parse (their call
-// expressions are dropped) and the function/class is defined unwrapped.
 // Decorators are applied bottom-up to the defined name, exactly as in Python; PEP 614
 // allows any expression, so the decorator is a full expression (registry["t"]).
 Decorated   <~~ push(makeDecorated(takeAll())) ~~>
@@ -317,10 +297,6 @@ Decorated   <~~ push(makeDecorated(takeAll())) ~~>
 Decorator   <~~ push({deco: pop()}) ~~>
             = "@" Expression NL ;
 
-// class Name[(bases, metaclass=..., ...)]: SUITE - accepted structurally and
-// reported as not implemented (the subset has no user-defined classes). The base
-// list reuses the call-argument surface (positional bases, keyword and *unpacked
-// arguments); the whole body is parsed and dropped.
 // class Name[[T, ...]][(bases, ...)]: SUITE. The body is a real suite run in a fresh
 // namespace scope, so plain statements (loops, conditionals) inside a class body work
 // and every name it binds - including its defs - becomes a class attribute.
@@ -332,7 +308,6 @@ ClassBases  <~~ push({bases: takeAll()}) ~~>
 SkipBracket = "[" { SkipBracket | SkipBracketItem } "]" ;
 SkipBracketItem = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
 
-// async def / await: accepted structurally, reported as not implemented.
 // async def / async for / async with / await: the SYNTAX is genuine - an async
 // function is an ordinary function value here, so it can be defined, named, decorated
 // and inspected. There is no event loop, so awaiting merely evaluates its operand;
@@ -344,9 +319,8 @@ AsyncFor    <~~ push(pop()) ~~>
 AsyncWith   <~~ push(pop()) ~~>
             = "async" KwEnd With ;
 
-// try/except/else/finally: accepted; under -warn-unsupported the try body (and a
-// finally body) run, so calls inside them stay visible. There is no exception
-// model, so the except/else handlers are parsed and dropped.
+// try/except/else/finally: every except clause is kept and its type decides; an
+// unmatched exception is re-raised after the finally ran.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -366,16 +340,12 @@ TryElse     <~~ push({elsebody: pop()}) ~~>
 TryFinally  <~~ push({finalbody: pop()}) ~~>
             = SameLevel "finally" KwEnd Suite ;
 
-// raise: accepted, reported as not implemented; the raised expression still runs.
 // raise EXPR [from CAUSE] and the bare `raise` that re-raises the active exception.
 Raise       <~~ push(makeRaise(takeAll())) ~~>
             = "raise" KwEnd [ Expression [ KwFrom RaiseCause ] ] ;
 RaiseCause  <~~ push({cause: pop()}) ~~>
             = Expression ;
 
-// with EXPR [as TARGET]: a simple form - the context expression runs, the target
-// is bound to its value and the body runs (no __enter__/__exit__ protocol), so it
-// is reported as not implemented but stays visible under -warn-unsupported.
 // with EXPR [as TARGET], ...: the real context-manager protocol - __enter__ before
 // the body, __exit__ after it (also on the way out of an exception, and a truthy
 // result swallows it). The 3.10 parenthesized item list is accepted too.
@@ -393,9 +363,7 @@ Assert      <~~ push(makeAssert(takeAll())) ~~>
 
 // global / nonlocal: the declaration guarantees a binding in the right scope,
 // then plain assignment (update where the chain resolves the name) lands there.
-// Deviation: a nearer binding of the same name still wins over the declared
-// scope (real Python forces it); nonlocal is checked when the call reaches it,
-// not at compile time. del stays unsupported.
+// nonlocal is checked when the call reaches it, not at compile time.
 Global      <~~ push(makeGlobal(takeAll(), up.pos)) ~~>
             = "global" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
 Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
@@ -409,16 +377,12 @@ Del         <~~ push(makeDel(takeAll())) ~~>
             = "del" KwEnd DelTarget { "," DelTarget } [ "," ] ;
 DelTarget   = "(" :whitespace(WhitespaceNL) [ Target { "," Target } [ "," ] ] ")" :whitespace(Whitespace) | Target ;
 
-// yield: accepted as a statement, reported as not implemented (no generators).
+// yield / yield from as a statement: the expression, value dropped.
 YieldStmt   <~~ push(exprToStmt(pop())) ~~>
             = YieldExpr ;
 
 
 
-// name: Type [= value]: the annotation is parsed and ignored; with a value it is a
-// plain assignment, without one it is a no-op declaration.
-// name: Type [= value]. The annotation is erased, but the NAME is recorded so a class
-// body can answer __annotations__; with a value it is a plain assignment.
 // name: Type [= value]. The annotation is erased, but the target's NAME is recorded
 // so a class body can answer __annotations__; with a value it is a plain assignment.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
@@ -463,8 +427,8 @@ AssignHead  <~~ push({tlist: pop()}) ~~>
             = TargetList "=" NotEqSign ;
 // The trailing comma is RECORDED, not just tolerated: `x, = t` and `for x, in [(1,)]`
 // are ONE-element tuple targets and must unpack, while `x = t` binds the whole value.
-// Without the marker a single-item list degraded to a plain target and the loop bound the
-// tuple itself - a wrong answer with no parse error anywhere.
+// Without the marker a single-item list would degrade to a plain target and the loop
+// would silently bind the tuple itself.
 TargetList  <~~ push(makeTargetList(takeAll())) ~~>
             = TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ;
 TargetItem  = StarTarget | TupleTarget | Target ;
@@ -504,30 +468,28 @@ ExprList    <~~ push(makeExprList(takeAll())) ~~>
             = StarExpr { "," StarExpr } [ "," <~~ push({tcomma: true}) ~~> ] ;
 // An assignment target is a SEED followed by a chain of suffixes whose last one is an
 // attribute, an index or a slice; the leading ones may be anything a reading chain may be,
-// calls and method calls included. `Exception().__traceback__ = 5`,
+// calls and method calls included: `Exception().__traceback__ = 5`,
 // `del globals()["__class__"]`, `with ... as list(xs)[0][1]:`, `(1).__class__ = MyInt` and
-// `[list][0]: type` are all ordinary Python and all failed while the seed had to be a bare
-// Id and the only call form was the argument-less one. This is the shape
+// `[list][0]: type` are all ordinary Python. This is the shape
 // docs/abnf-dialect-gotchas.md calls "object creation must SEED the member chain".
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetSeed { CallSfx | MethodSfx | TSubTup | TSlice | TIndex | TAttr } ;
 // A plain name stays a STRING - it is the only seed that can be a bare store into a scope,
 // and it is the overwhelmingly common one. Any other seed contributes a read thunk.
 // TargetExpr comes FIRST: a bytes/str prefix letter is a perfectly good Id, so
-// `b"a".__class__ = M` matched TargetName on the lone `b`, COMMITTED, and then died on the
-// quote - the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md. Trying the
-// literal forms first is safe because each of them needs a quote, a digit or a bracket
-// that a bare name can never supply.
+// `b"a".__class__ = M` would match TargetName on the lone `b`, commit, and then die on
+// the quote - the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md. Trying
+// the literal forms first is safe because each of them needs a quote, a digit or a
+// bracket that a bare name can never supply.
 TargetSeed  = TargetExpr | TargetName ;
 TargetName  <~~ push(up.in) ~~> = NotPyKw Id ;
-// A target NAME may not be one of Python's reserved words. Without this, `for x, in [...]`
-// (a one-element tuple target with a trailing comma) had its `{ "," TargetItem }`
-// repetition happily match the comma and then read `in` as a second target name - PEG
-// repetition is greedy and never gives a match back - and the parse died at the end of the
-// line. A `!"in"` lookahead would be wrong twice over: it skips whitespace, and it would
-// also reject a name that merely STARTS with a keyword (`information`), so the guard reads
-// the whole word and compares it. Soft keywords (`match`, `case`, `type`, `_`) are real
-// names in Python and are deliberately absent from the list.
+// A target NAME may not be one of Python's reserved words. Otherwise `for x, in [...]`
+// (a one-element tuple target with a trailing comma) would have its `{ "," TargetItem }`
+// repetition match the comma and read `in` as a second target name - PEG repetition is
+// greedy and never gives a match back. A `!"in"` lookahead would be wrong twice over: it
+// skips whitespace, and it would also reject a name that merely STARTS with a keyword
+// (`information`), so the guard reads the whole word and compares it. Soft keywords
+// (`match`, `case`, `type`, `_`) are real names in Python and are deliberately absent.
 NotPyKw     = :script(~~
     (function() {
         var kws = ["False", "None", "True", "and", "as", "assert", "async", "await",
@@ -665,8 +627,8 @@ Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd <~~ sbPush() ~~> [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header); defaults
-// and *args work like in def, **kwargs is reported as not implemented.
+// Lambda parameters take no annotation (the ':' ends the header); defaults,
+// *args and **kwargs work like in def.
 LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
 LamDblStar  <~~ push({pkwrest: up.in}) ~~>
             = "**" Id ;
@@ -696,9 +658,6 @@ CmpOp       = ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push({cop: up.in}) ~
             | ( "is" KwEnd ) <~~ push({cop: "is"}) ~~>
             | ( "in" KwEnd ) <~~ push({cop: "in"}) ~~> ;
 
-// Bitwise / shift operators ( | ^ & << >> ) sit just above comparison; they are
-// accepted and reported as not implemented (no integer-bit support in the subset).
-// With no such operator the layer is transparent (returns the single operand).
 // Bitwise / shift operators. On ints they are the 32-bit bit operations; on sets
 // | ^ & - are union, symmetric difference, intersection and difference; a user class
 // may define __or__ / __and__ / ... . Precedence follows Python: | then ^ then &
@@ -725,22 +684,21 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 // Unary plus. It is the identity on every numeric type this model has, so the
 // operand thunk is simply passed through.
 Pos         = "+" Factor ;
-// ~x bitwise-not: accepted, reported as not implemented.
+// ~x bitwise-not (makeInvert).
 Invert      <~~ push(makeInvert(pop())) ~~>
             = "~" Factor ;
-// await EXPR: accepted, reported as not implemented (no coroutines).
 // await EXPR: there is no event loop, so it yields its operand's value. That is
 // enough for the SYNTAX to be defined, named and inspected, which is what an async
 // function can be here; genuinely resuming a coroutine is out of the subset.
 Await       <~~ push(pop()) ~~>
             = "await" KwEnd Factor ;
 
-// a ** b exponentiation: accepted, reported as not implemented. With no '**' the
-// layer is transparent (returns the single operand).
+// a ** b exponentiation. With no '**' the layer is transparent (returns the single
+// operand).
 Power       <~~ push(makePower(takeAll())) ~~>
             = PostfixExpr [ "**" Factor ] ;
 
-// f(a), s[i], s[a:b], lst.append(x), obj.attr (attribute access is not implemented).
+// f(a), s[i], s[a:b], lst.append(x), obj.attr.
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { CallSfx | MethodSfx | SubTupSfx | SliceSfx | IndexSfx | AttrSfx } ;
@@ -751,8 +709,6 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
 // obj.attr with no call: a genuine attribute read (pyattr).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
             = "." Id <~~ push({aname: up.in}) ~~> ;
-// A call argument: keyword (name=value) and *seq / **map unpacking are accepted
-// as markers (the call becomes not implemented); a plain positional is executed.
 // A call argument: keyword (name=value), *seq / **map unpacking, or positional -
 // all genuine (see kevalArgs). A generator expression may also be the sole argument.
 CallArg     = CallKw | CallDblStar | CallStar | CallPos ;
@@ -792,8 +748,6 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 Primary     = EmptyTuple | GenExpParen | Grouped | StringLit | Ellipsis | PyNumLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
-// ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples are accepted and reported as
-// not implemented; a single parenthesized expression ( a ) is plain grouping.
 // () is the empty tuple; ( a ) is plain grouping; ( a, b ) / ( a, ) is a TUPLE.
 // A tuple is modelled as a plain list - the value model has one sequence type - so
 // indexing, len, iteration, slicing and == all work on it unchanged.
@@ -802,11 +756,9 @@ EmptyTuple  <~~ push(makeConst([])) ~~>
 Grouped     <~~ push(makeParen(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) StarExpr { "," <~~ push({tcomma: true}) ~~> [ StarExpr ] } ")" :whitespace(Whitespace) ;
 
-// { e for x in it [if c] } set comprehension and { a, b, ... } set literal: both
-// accepted and reported as not implemented (the subset has no set type). Tried
-// after the dict forms so { k: v } and { k: v for ... } still parse as dicts.
-// { e for x in it [if c] } and { a, b, ... }: a genuine set - a dict whose keys are
-// the members (so membership, len and insertion order come for free) marked __set.
+// { e for x in it [if c] } / { a, b, ... } (SetComp / SetLit below): a genuine set - a
+// dict whose keys are the members (so membership, len and insertion order come for free)
+// marked __set.
 // ( e for x in it [if c] ): a parenthesized generator expression.
 GenExpParen <~~ push(makeListComp(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
@@ -826,9 +778,9 @@ ListComp    <~~ push(makeListComp(takeAll())) ~~>
 // The loop target of a comprehension is a full assignment TARGET LIST, the same one a
 // `for` statement takes: a name, a tuple of names, a nested or starred tuple
 // (`for (kind, string, *_) in ...`) and even a subscript (`for tgt[0] in source()` - odd,
-// but legal Python, and CPython's own suite tests both). Restricting it to plain names
-// cost three corpus files. compTargetOf keeps the all-plain-names case on its old, faster
-// path, which is what keeps a comprehension variable LOCAL to the comprehension.
+// but legal Python, and CPython's own suite tests both). compTargetOf keeps the
+// all-plain-names case on its faster path, which is what keeps a comprehension
+// variable LOCAL to the comprehension.
 CompTarget  <~~ push(compTargetOf(takeAll())) ~~>
             = TargetItem { "," TargetItem } [ "," ] ;
 CompIf      <~~ push({cif: pop()}) ~~>
@@ -853,7 +805,6 @@ DictSplat   <~~ push({dsplat: pop()}) ~~>
 DictEntry   <~~ var dv = pop(); push({dk: pop(), dv: dv}) ~~>
             = Expression ":" Expression ;
 
-// f-string: literal chunks and {expression} parts; every expression renders like str().
 // An f-string piece. All four quote styles, and the `rf`/`fr` prefix orders; the
 // replacement fields carry the full 3.12 surface - a nested f-string, a conversion
 // (!r / !s / !a), a format spec that may itself contain a {nested} field, and the
@@ -872,9 +823,8 @@ FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) 
 //     f'''{ # the following operation
 //     3
 //     * 2}'''
-// is. With the newline-less Whitespace the comment ran to the end of its line and the
-// parse stopped there - and in the shorter cases it did not fail at all, it silently
-// ended the field early and printed the rest of the expression as literal text.
+// is. With the newline-less Whitespace the comment would run to the end of its line, and
+// in shorter cases the field would silently end early and print the rest as literal text.
 FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
             = "{" :whitespace(WhitespaceNL) ExprList [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
 // The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
@@ -903,10 +853,8 @@ FSpecConv   = "!" ( "r" | "s" | "a" ) ;
 // whole sub-spec is discarded, so it must stay item-neutral, and popping the one thunk its
 // Expression pushes is what keeps FSpec's takeAll() seeing exactly the fields it renders.
 // FSpecSubChunk, not FSpecChunk: FSpecChunk carries a `push({chunk})` tag, so reusing it
-// here made the DROPPED sub-spec push its text into the enclosing FSpec's takeAll() - the
-// "tagging a sub-rule changes how many items its PARENT pops" trap. It did not fail: the
-// leaked `0` of `{width:0}` was appended to the width and the field rendered 100 columns
-// wide instead of 10.
+// here would make the DROPPED sub-spec push its text into the enclosing FSpec's takeAll() -
+// the "tagging a sub-rule changes how many items its PARENT pops" trap.
 FSpecSub    = ":" :whitespace() { FSpecSubField | FSpecSubChunk } :whitespace(Whitespace) ;
 FSpecSubChunk = FSpecChar { FSpecChar } ;
 FSpecSubField <~~ pop() ~~>
@@ -917,8 +865,7 @@ FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 FChunkD     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharD { FCharD } ;
 // StrEsc2, not the shared StrEsc: lib/dq-strings.abnf's StrEsc allows only a printable
 // ASCII byte after the backslash, so an f-string opening `f"""\` + newline (a line
-// continuation, and how CPython's test_tokenize writes its expected-token blocks) did not
-// match. The compiler's copy already used the wide form; this is the interpreter catching up.
+// continuation) would not match.
 FCharD      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainD ;
 FChunkS     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharS { FCharS } ;
 FCharS      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainS ;
@@ -930,23 +877,22 @@ FChar3S     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3S ;
 FBrace      = "{{" | "}}" ;
 // The named-unicode escape INSIDE an f-string. A `{` normally opens a replacement
 // field, but the one after a backslash-N belongs to the escape: without this rule
-// StrEsc2 matched only the `\N` and left the `{` to open a field, so
-// `f'\N{GREEK CAPITAL LETTER DELTA}'` (test_fstring line 990) did not parse at all.
+// StrEsc2 would match only the `\N` and leave the `{` to open a field, so
+// `f'\N{GREEK CAPITAL LETTER DELTA}'` would not parse.
 // It has to be tried BEFORE StrEsc2, which would otherwise take the `\N` and commit.
 // The name characters are exactly the ones a Unicode character name may hold -
 // upper-case letters, digits, spaces and hyphens - which keeps the rule from running
 // past a missing `}` and eating the closing quote; an unterminated `\N{` therefore
-// falls back to StrEsc2 and behaves as it did before. The NAME TABLE is a small
-// subset (pyUniNames); a name outside it parses and renders as the empty string.
+// falls back to StrEsc2. The NAME TABLE is a small subset (pyUniNames); a name outside
+// it parses and renders as the empty string.
 FNamedEsc   = "\\N{" FNameCh { FNameCh } "}" ;
 // A backslash escape inside an f-string never consumes a BRACE. CPython's f-string
 // lexer treats `{` and `}` as structural first: `f'\{6*7}'` is a (warned about, still
 // legal) invalid escape - a literal backslash - followed by a REPLACEMENT FIELD, and it
-// evaluates to '\\42'; `f'\}'` is the error "single '}' is not allowed". Using the plain
-// StrEsc2 here swallowed the `{`, so the field never opened and test_fstring line 1016
-// (`fr'\{6*7}'`) died on the closing brace instead. FBksl is the lone backslash that is
-// left over, which pyUnescape keeps verbatim - and, because FPlain* already excludes the
-// backslash, nothing else can match it by accident.
+// evaluates to '\\42'; `f'\}'` is the error "single '}' is not allowed". The plain
+// StrEsc2 would swallow the `{`, so the field would never open. FBksl is the lone
+// backslash that is left over, which pyUnescape keeps verbatim - and, because FPlain*
+// already excludes the backslash, nothing else can match it by accident.
 FStrEsc     = "\\" FEscCh ;
 FEscCh      = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 FBksl       = "\\" ;
@@ -963,10 +909,6 @@ StarExpr    = StarItem | Expression ;
 StarItem    <~~ push({splat: pop()}) ~~>
             = "*" Expression ;
 
-// Triple-quoted strings (docstrings, multi-line text) are genuinely evaluated as
-// ordinary string constants; they are tried before the single-quoted forms so
-// """...""" is not misread as an empty "" string. The body may span newlines and
-// contain lone or doubled quotes; only three quotes in a row close it.
 // A string literal is a run of ADJACENT pieces - Python concatenates them implicitly
 // ("ab" "cd", f"a{1}" "b") - each with its own prefix and quote style. A piece with an
 // `f` prefix is an f-string (its {expressions} are parsed); every other piece is a
@@ -991,11 +933,9 @@ DqChar2     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SqChar2     = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 // ANY character may follow the backslash, a NEWLINE included: inside a triple-quoted
 // string `\` at end of line is Python's line continuation, and `\` before a non-ASCII
-// character is simply kept. Restricting this to printable ASCII did not fail the string -
-// it made TripleDqStr fail, so the piece was re-read as a run of ADJACENT short strings
-// that happened to pair up, and the parse died at the first quote inside the body that
-// broke the accidental pairing. Four corpus files open with `"""\` (test_exceptions,
-// test_generators, test_syntax, test_tokenize) and all four turned on this one range.
+// character is simply kept. Restricting it to printable ASCII would make TripleDqStr
+// fail on `"""\`, and the piece would be re-read as a run of ADJACENT short strings that
+// happen to pair up.
 TStrEsc     = "\\" "\x00"..."\U0010ffff" ;
 // A non-quote, non-backslash char (newlines and spaces included: the body is raw).
 TdqChar     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
@@ -1213,7 +1153,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // CPython's type(gen).__name__, and the name its AttributeError uses.
         if (isGen(v)) { return pyBuiltinTypeObj("generator") }
         if (typeof v == "function") {
-            // docs/todo.md 1.4: a BOUND method and a BUILTIN are their own
+            // A BOUND method and a BUILTIN are their own
             // CPython types. The three names are not in the fourteen hostGlobals
             // type objects, so they are built the way a cursor's type is below.
             var bml = pyBMFind(v)
@@ -1240,20 +1180,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // AttributeError the cursor arm of mcall raises: CPython says
         // "'list_iterator' object has no attribute 'send'", not "'object' ...".
         // Built rather than looked up in hostGlobals, which holds only the
-        // fourteen NAMED builtin types. docs/todo.md 1.4.
+        // fourteen NAMED builtin types.
         if (isPyIt(v)) { return pyBuiltinTypeObj(v.__pyit) }
         // A compiled regexp and a match object name their own CPython types, and
         // the name is MODULE-QUALIFIED on purpose: it is the string an
         // AttributeError interpolates ("'re.Pattern' object has no attribute
         // 'nope'"), while type(p).__name__ is the SHORT 'Pattern' - which is why
         // the __name__ / __qualname__ arm of pyattr cuts at the last dot
-        // (pyShortName). docs/todo.md 1.6 recorded this as declined on the
-        // reasoning that a one-line arm would trade one wrong answer for another;
-        // both strings are in fact reachable from the same one and differ only by
-        // that cut.
+        // (pyShortName).
         if (v.__pyre === true) { return pyBuiltinTypeObj("re.Pattern") }
         if (v.__pymatch === true) { return pyBuiltinTypeObj("re.Match") }
-        // docs/todo.md 1.7: the two decorator wrappers and a module object are
+        // The two decorator wrappers and a module object are
         // their own CPython types.
         if (hasOwn(v, "__pysm")) { return pyBuiltinTypeObj("staticmethod") }
         if (hasOwn(v, "__pycm")) { return pyBuiltinTypeObj("classmethod") }
@@ -1270,16 +1207,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return n.substring(cut + 1, n.length)
     }
     // A builtin type object that is not one of the fourteen NAMED ones above -
-    // a cursor's type, and the two callable types of docs/todo.md 1.4.
+    // a cursor's type, and the two callable types (bound method, builtin).
     //
     // INTERNED, one object per name, and that is load-bearing rather than a
-    // saving: `type(x) is type(y)` compares the two type objects by identity, and
-    // building a fresh one per call made `type(iter([])) is type(iter([]))` FALSE
-    // here while both compiled halves - where rt.pyBuiltinClass / pyBuiltinClass
-    // have always kept one object per name - and CPython say True. A live halves
-    // divergence `--cross` never reached, found while re-checking docs/todo.md
-    // 1.6's declined `re.Pattern` note. It reached generators and builtin
-    // functions too, not only cursors.
+    // saving: `type(x) is type(y)` compares the two type objects by identity, so
+    // `type(iter([])) is type(iter([]))` must be True - as in CPython and in both
+    // compiled halves (rt.pyBuiltinClass / pyBuiltinClass keep one object per name).
     var pyTypeObjNames = []
     var pyTypeObjVals = []
     function pyBuiltinTypeObj(n) {
@@ -1294,14 +1227,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // float("inf") - CPython's float_from_string accepts the three non-finite
     // SPELLINGS, case-insensitively and with an optional sign, after stripping
     // whitespace: "inf", "infinity" and "nan". JavaScript's parseFloat accepts
-    // "Infinity" and nothing else of the set, so float("inf") was nan in all three
-    // engines where CPython says inf - and, worse, "Infinity" itself was inf in
-    // THIS half and nan in the compiled one, a live halves divergence.
+    // "Infinity" and nothing else of the set.
     //
     // Only the non-finite spellings are handled here; everything else still goes
     // to parseFloat, so float("1.5abc") is still the prefix parse 1.5 where CPython
-    // raises ValueError. That is a separate, pre-existing looseness and is recorded
-    // as such rather than silently half-fixed.
+    // raises ValueError - a known looseness.
     //
     // Infinity has to be BUILT, not written: the ABNF script dialect has no
     // exponent form in a numeric literal (1e308 parses as the identifier e308), so
@@ -1369,9 +1299,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["isinstance"] = function(v, cls) { return pyIsInstance(v, cls) }
     // issubclass(C, B): B may be a TUPLE of classes, exactly as isinstance's
-    // second argument may - which this half did not accept, so
-    // issubclass(bool, (str, int)) was False where CPython says True. (A tuple
-    // is a list in this value model; see docs/working-on-this-project.md 7.9.)
+    // second argument may (issubclass(bool, (str, int)) is True). A tuple is a
+    // list in this value model; see docs/working-on-this-project.md 7.9.
     hostGlobals["issubclass"] = function(c1, c2) {
         if (Array.isArray(c2)) {
             for (var i = 0; i < c2.length; i++) { if (clsIsSub(c1, c2[i])) { return true } }
@@ -1400,15 +1329,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v < 0 ? -v : v
     }
     // max/min over the arguments, or over a single iterable one - the same shape
-    // js_pymax / js_pymin give the COMPILER, which had them while this grammar
-    // did not (so max(1, 2) worked in one half and raised NameError in the other).
+    // js_pymax / js_pymin give the compiler.
     hostGlobals["max"] = function() { return pyMinMax(arguments, 1) }
     hostGlobals["min"] = function() { return pyMinMax(arguments, -1) }
-    // ord(c) / chr(n). They were missing from ALL THREE engines (docs/todo.md
-    // 2.9 said the compiled halves had them; a probe at 114fbd5 showed
-    // `variable not defined: ord` under llvm.Run too), so they land here, in
-    // languages/python-to-llvm-ir.abnf as js_pyord/js_pychr, in
-    // languages/lib/python-rt.metajs and in abnf/jsrt.go together.
+    // ord(c) / chr(n). Twins: js_pyord / js_pychr in python-to-llvm-ir.abnf,
+    // languages/lib/python-rt.metajs and abnf/jsrt.go.
     //
     // A string is UTF-16 in every engine here, so a character ABOVE the BMP is a
     // surrogate PAIR of code units and ONE character to Python: ord decodes the
@@ -1418,7 +1343,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["ord"] = function(s) { return pyOrdOf(s) }
     hostGlobals["chr"] = function(n) { return pyChrOf(n) }
 
-    // ----- docs/todo.md 1.4: the builtins missing from ALL THREE engines ------
+    // ----- builtins shared with the compiled halves -----------------------------
     //
     // Each has a twin of the same behaviour bound by declBuiltin in
     // languages/python-to-llvm-ir.abnf, an extern in abnf/jsrt.go and a
@@ -1428,8 +1353,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // python-to-llvm-ir.abnf: input (reads stdin), format, frozenset, hash, id.
     //
     // THE ITERATOR OBJECT. iter/enumerate/zip/map/filter/reversed answer an
-    // ITERATOR in CPython and next() drives it, and this project had no such
-    // value: the only steppable thing was a generator. So an iterator is built
+    // ITERATOR in CPython and next() drives it. An iterator is built
     // to LOOK like one - a plain object carrying a callable "next" that answers
     // {value, done} - which is exactly the structural test the compiled halves
     // already make (python-to-llvm-ir.abnf's makeForStmt, pyIsGen in
@@ -1441,8 +1365,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The SOURCE is materialized, and that is the line drawn: CPython's
     // map/filter/zip/enumerate are lazy in their input too, so
     // `map(f, endless())` works there and hangs here. iter(gen) answers the
-    // GENERATOR ITSELF - CPython's rule as well - so the lazy case docs/todo.md
-    // 1.7 fixed is untouched.
+    // GENERATOR ITSELF - CPython's rule as well - so a generator stays lazy.
     function pyMkIter(name, arr) {
         var it = {__pyit: name, __a: arr, __i: 0}
         it.next = function() { return pyItStep(it) }
@@ -1470,7 +1393,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // CPython 3.14's and not invented: a str whose code units are all ASCII gets
     // str_ascii_iterator and any other str str_iterator (CPython splits the two
     // implementations), a dict gets dict_keyiterator and a set set_iterator.
-    // Before docs/todo.md 1.4 a dict and a set both answered the bare "iterator".
     // The twins are pyIterKind in abnf/jsrt.go and in lib/python-rt.metajs.
     function pyItKind(v) {
         if (typeof v == "string") {
@@ -1488,9 +1410,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isGen(v) || isPyIt(v)) { return v }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
-    // next(it[, default]). The COMPILER half had no `next` at all (`variable not
-    // defined: next`), which is docs/todo.md 1.4's sharpest gap - next(g) is the
-    // ordinary way to drive a generator.
+    // next(it[, default]) - the ordinary way to drive a generator.
     hostGlobals["next"] = function(g, d) {
         if (isGen(g)) {
             if (arguments.length > 1) {
@@ -1709,14 +1629,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["hasattr"] = function(o, n) { return pyHasAttrOf(o, n) }
     hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
-    // vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO engine
-    // while the attribute worked in all three (docs/todo.md 1.8), so this is that
-    // one line, over the same pyattr the `.` operator uses.
+    // vars(o) IS o.__dict__ - CPython's own definition - over the same pyattr
+    // the `.` operator uses.
     hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
 
-    // ----- staticmethod / classmethod (docs/todo.md 1.7) --------------------
+    // ----- staticmethod / classmethod --------------------------------------
     //
-    // Both were undefined in every engine, so `@staticmethod` aborted the run.
     // They are DESCRIPTORS: the decorator only WRAPS, and the unwrapping happens
     // at the class-member lookup, which is the one place that knows both the
     // receiver and its class. A staticmethod yields the plain function; a
@@ -1738,7 +1656,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return bindMethod(owner, m.__pycm, name)
     }
 
-    // ----- the `builtins` module (docs/todo.md 1.7) -------------------------
+    // ----- the `builtins` module -------------------------------------------
     //
     // CPython's len.__self__ IS the builtins module, and `builtins.len is len`
     // holds. Both fall out of one object whose attribute read goes straight to
@@ -1746,13 +1664,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // name resolves to.
     hostGlobals["builtins"] = {__pymod: "builtins"}
 
-    // ----- the BUILTIN render table (docs/todo.md 1.4) ----------------------
+    // ----- the BUILTIN render table ----------------------------------------
     //
-    // print(len) said "<function <lambda>>" in ALL THREE engines where CPython
-    // says "<built-in function len>", and print(map) the same where CPython says
-    // "<class 'map'>" - the six builtins that really are types. A builtin is a
-    // host function with no `def` to record a name in fnNames, so it gets a
-    // table of its own, filled here in one pass over the bindings above.
+    // CPython prints len as "<built-in function len>" and map as "<class 'map'>"
+    // (the six builtins that really are types). A builtin is a host function
+    // with no `def` to record a name in fnNames, so it gets a table of its own,
+    // filled here in one pass over the bindings above.
     //
     // The names that are BUILTIN TYPE OBJECTS (str, int, list, ...) are not
     // here: they already render <class 'str'> through prender's class arm. The
@@ -1760,13 +1677,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // filled by python-to-llvm-ir.abnf's declBind.
     //
     // WHAT IS STORED IS THE CODE, not the finished text - the builtin's NAME
-    // with a leading "*" when CPython prints it as a class - which is what the
-    // two compiled halves already stored. That reconciliation is what makes
-    // len.__name__ answerable (docs/todo.md 1.9): the render text cannot be cut
-    // back to a name without re-parsing it, and feeding the DEF-name table
-    // instead would have desynchronised the name a user function answers. The
-    // render form is derived by bfnText and the name by bfnName, so both
-    // questions read ONE table in all three engines.
+    // with a leading "*" when CPython prints it as a class - as in the two
+    // compiled halves. That is what makes len.__name__ answerable: the render
+    // text cannot be cut back to a name without re-parsing it, and feeding the
+    // DEF-name table instead would desynchronise the name a user function
+    // answers. The render form is derived by bfnText and the name by bfnName,
+    // so both questions read ONE table in all three engines.
     var bfnFns = []
     var bfnCodes = []
     function bfnCode(f) {
@@ -1816,25 +1732,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return clsFind(o, name) != null
         }
         // A MODULE object, mirroring pyattr's module arm - hasattr(math, "sqrt")
-        // has to agree with what `math.sqrt` answers. docs/todo.md 1.7.
+        // has to agree with what `math.sqrt` answers.
         if (typeof o == "object" && o.__pymod != undefined) {
             if (hasOwn(o, name)) { return true }
             if (o.__pymod == "builtins") { return hasOwn(hostGlobals, name) }
             if (o.__pymod == "math") { return pyMathHas(name) }
             return false
         }
-        // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
+        // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
         if (pyBuiltinAttr(o, name)) { return true }
-        // A SET's internal keys/vals arrays are not attributes. Go's set object
-        // carries them under different names, so hasattr(s, "keys") answered
-        // True here and False under llvm.Run - a live halves divergence the
-        // 1.2 sweep turned up.
+        // A SET's internal keys/vals arrays are not attributes (Go's set object
+        // carries them under different names, so hasattr(s, "keys") must be False
+        // in every engine).
         if (isSet(o)) { return false }
-        // Likewise a LIST: hasattr([3,1,2], "length") was True here (the host
-        // array's own JS property) and False under llvm.Run, where an array is
-        // not the object type pyHasAttr scans. CPython says False.
+        // Likewise a LIST: the host array's own JS property "length" is not a
+        // Python attribute. CPython says False.
         if (Array.isArray(o)) { return false }
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
@@ -1851,9 +1765,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return false
     }
-    // docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
-    // object's own property map, so hasattr([3,1,2], "count") was False and
-    // hasattr("s", "upper") was False where CPython answers True in both. This is
+    // hasattr()/getattr() of a BUILT-IN method (hasattr([3,1,2], "count"),
+    // hasattr("s", "upper")): CPython answers True for both. This is
     // the same question the DISPATCHER answers, asked by name: the str table
     // (pySIsStrMethod), the list table (pyIsListMethod), and the dict/set arms of
     // mcall. Keep in step with pyBuiltinAttr in abnf/jsrt.go and pyDBuiltinAttr
@@ -1884,16 +1797,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pyBMSet(f, name, target, null)
     }
-    // ----- the UNBOUND method descriptor (docs/todo.md 1.7) -----------------
+    // ----- the UNBOUND method descriptor -----------------------------------
     //
     // `list.count` read off the TYPE OBJECT is not a bound method: CPython hands
     // back <method 'count' of 'list' objects>, a descriptor with no __self__
     // that takes the receiver as its first argument, so list.count([1,2,2], 2)
-    // is 2. Every engine here raised "type object 'list' has no attribute
-    // 'count'" instead. The item named list.count as the EXAMPLE; the whole
-    // family falls out of one arm, because the "is this a method of that type"
-    // question is already answered per type by pyBuiltinAttr - it just needs a
-    // VALUE of the type to ask about, which pyTypeSample supplies.
+    // is 2. The whole family falls out of one arm, because the "is this a
+    // method of that type" question is already answered per type by
+    // pyBuiltinAttr - it just needs a VALUE of the type to ask about, which
+    // pyTypeSample supplies.
     function pyTypeSample(tname) {
         if (tname == "list") { return [] }
         if (tname == "str") { return "" }
@@ -1918,9 +1830,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A MODULE-level builtin function read off a module object as a VALUE -
     // `f = math.sqrt` - rather than called through it. Minted ON DEMAND, so a
-    // program that never does it pays nothing: the alternative was twenty-five
-    // closures held in the module object forever, and tests/bench/mod.py sits on
-    // an arena threshold (docs/todo.md 2.9).
+    // program that never does it pays nothing: the alternative is twenty-five
+    // closures held in the module object forever, which steps the arena of a
+    // module-heavy benchmark past a threshold.
     function pyModuleFn(mod, name) {
         var f = function() {
             var args = []
@@ -1929,20 +1841,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pyBMSetK(f, name, mod, null, "m")
     }
-    // ----- what a BOUND METHOD knows about itself (docs/todo.md 1.4) ----------
+    // ----- what a BOUND METHOD knows about itself --------------------------
     //
-    // getattr([1,2], "count").__name__ was '<lambda>' here and None in both
-    // compiled halves where CPython says 'count'. Neither of the two name tables
-    // can answer it: fnNames holds what a `def` bound and bfnFns holds the
-    // builtins, and both are keyed by the function VALUE, while a bound method is
-    // a FRESH closure minted at the attribute read. So it gets a third table, in
-    // the identity-scan shape the other two use because function objects have no
-    // expando slot under the frozen engine.
+    // getattr([1,2], "count").__name__ is 'count' in CPython. Neither of the two
+    // name tables can answer it: fnNames holds what a `def` bound and bfnFns
+    // holds the builtins, and both are keyed by the function VALUE, while a
+    // bound method is a FRESH closure minted at the attribute read. So it gets a
+    // third table, in the identity-scan shape the other two use because function
+    // objects have no expando slot under the frozen engine.
     //
     // ONE flat array with a stride of four - closure, method name, receiver,
     // underlying function (null for a builtin method) - rather than four
     // parallel arrays, because the twin in languages/lib/python-rt.metajs pays
-    // for every module-level global it declares (see the arena note there).
+    // for every module-level global it declares.
     // It GROWS with the number of bound methods a program creates, exactly as
     // fnNames grows with the number of times a `def` runs; the scan is only ever
     // walked by introspection (__name__, repr, type), never by a call.
@@ -1950,8 +1861,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
     // family in languages/lib/python-rt.metajs.
     // The stride is FIVE, not four: the fifth slot is the KIND, because three
-    // different CPython callables now share this record and they print, name and
-    // introspect differently (docs/todo.md 1.7).
+    // different CPython callables share this record and they print, name and
+    // introspect differently.
     //
     //   ""  a bound method            <bound method C.m of ...> / <built-in method
     //                                 count of list object>
@@ -2065,7 +1976,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // this value model cannot build (see below), so one name serves both slots.
     //
     // WHAT IS REFUSED HERE IS dict AND set, AND NOT list. A tuple IS a list in
-    // this value model (docs/todo.md 3.1), and the two directions of the mistake
+    // this value model, and the two directions of the mistake
     // are not symmetric: treating a tuple as hashable only ACCEPTS a program
     // CPython would reject, while treating a list as unhashable would ABORT
     // `{(1, 2), (3, 4)}` and `d[i, j]` - legal, and among the most common things
@@ -2120,7 +2031,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is the type rather than an instance, so it reaches neither the dict
     // dispatcher nor a class MRO, and each of the three engines resolves a class
     // attribute in an arm of its own. Keep in step with pyBuiltinClsMethod in
-    // abnf/jsrt.go and in languages/lib/python-rt.metajs. docs/todo.md 1.8.
+    // abnf/jsrt.go and in languages/lib/python-rt.metajs.
     function pyBuiltinClsMethod(cls, name) {
         if (cls == null || cls == undefined) { return null }
         if (cls.__name == "dict" && name == "fromkeys") {
@@ -2187,22 +2098,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a dict that HOLDS a float box cannot be indexed (dictKeyId answers null for
     // an object), so its lookups fall back to interp-core's scan - and the scan
     // confirms with dictKeyEq, which is this hook. Numbers only: everything else
-    // keeps === and the behaviour it had.
+    // keeps ===.
     core.keyEq = function(a, b) {
         // A tuple key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
-        // is a hit off two different objects - and a tuple IS an array here. This
-        // half used to answer identity while the compiled halves already deduplicated
-        // set members with Python's == (pySetHas -> pyEqual): `{(1,2), (1,2)}` was 2
-        // in the interpreter and 1 in both compiled halves, a live halves divergence,
-        // and the interpreter was the wrong one of the two. See pyHashCheck above for
-        // why the array cannot instead be refused as unhashable.
+        // is a hit off two different objects - and a tuple IS an array here, so
+        // `{(1,2), (1,2)}` has one member, as in both compiled halves (pySetHas ->
+        // pyEqual). See pyHashCheck above for why the array cannot instead be refused
+        // as unhashable.
         if (Array.isArray(a) && Array.isArray(b)) { return pyEq(a, b) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
     }
-    // Structural equality, Python\'s ==: sequences element-wise, dicts and sets by
-    // their contents (a set ignores order), everything else by identity. A user class
-    // may override it with __eq__.
     // The int a bool IS (True is 1, False is 0), against a value that is not a
     // bool. A boxed number (arbitrary precision int, complex) compares by VALUE
     // through boxOp, the same call pyEq makes for it; everything else - a string, a
@@ -2216,6 +2122,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return false
     }
 
+// Structural equality, Python's ==: sequences element-wise, dicts and sets by
+// their contents (a set ignores order), everything else by identity. A user class
+// may override it with __eq__.
     function pyEq(a, b) {
         if (a === b) { return true }
         // A float equals the int of the same value (1.0 == 1) and two boxes
@@ -2226,9 +2135,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Ahead of everything else because a bool is never a container, never a
         // boxed number and never a user object, so nothing below can be skipped.
         // Taken out of line rather than rewriting the operand: MetaJS is TYPED and
-        // a variable that held a boolean cannot hold a number - goja accepts the
-        // assignment and -frozen does not, which is the FROZEN-DIFF this file's
-        // first attempt produced.
+        // a variable that held a boolean cannot hold a number (goja accepts the
+        // assignment, -frozen does not).
         if (typeof a == "boolean" || typeof b == "boolean") {
             if (typeof a == "boolean" && typeof b == "boolean") { return false }
             if (typeof a == "boolean") { return pyBoolEqVal(b, a) }
@@ -2427,8 +2335,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A MODULE object. CPython prints <module 'builtins' (built-in)> for a
         // built-in module and, for an extension module like math, the .so PATH it
         // was loaded from - which is machine-specific and cannot be matched, so
-        // every module here takes the built-in spelling. Without this a module
-        // printed the host's [object Object].
+        // every module here takes the built-in spelling.
         if (v !== null && v !== undefined && typeof v == "object" && v.__pymod != undefined) {
             return "<module '" + v.__pymod + "' (built-in)>"
         }
@@ -2438,22 +2345,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isPyIt(v)) { return "<" + v.__pyit + " object>" }
         // A GENERATOR, on the same rule. CPython says <generator object gen at
         // 0x...>; neither the address nor the generating function's name is
-        // recoverable from the value, so the short form is printed. Both halves
-        // printed a raw host dump before - [object Object] here and a Go STRUCT
-        // LITERAL under llvm.Run. docs/todo.md 1.4.
+        // recoverable from the value, so the short form is printed.
         if (isGen(v)) { return "<generator object>" }
         // A FUNCTION. CPython prints <function fn at 0x...>; the address is its own
         // and cannot be matched, so it is left off rather than invented - the same
         // rule the iterator line above follows, and all three engines print this
-        // same short form. Without it this half printed the function's METAJS
-        // SOURCE TEXT (the host's own Function#toString) and both compiled halves
-        // the C floor's [function] - a live halves divergence. docs/todo.md 1.8.
+        // same short form.
         // A BUILTIN prints its own way, and its table is asked FIRST: a user
         // `def len(...)` records its own name against its own function object,
         // so the two tables cannot collide by identity even when they collide
-        // by name. docs/todo.md 1.4.
+        // by name.
         if (typeof v == "function") {
-            // A BOUND METHOD prints as one - docs/todo.md 1.4.
+            // A BOUND METHOD prints as one.
             var bmi = pyBMFind(v)
             if (bmi >= 0) { return pyBMRender(bmi) }
             var bft = bfnText(v)
@@ -2465,10 +2368,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A user object renders through its dunders, else like Python's default
     // <Name object>. CPython splits the two directions: str() and print() prefer
     // __str__ and fall back to __repr__, while repr() and every CONTAINER element
-    // use __repr__ only. This half had one body for both and consulted __repr__
-    // alone, so a class with a __str__ printed <Name object>; the two compiled
-    // halves had no user arm at all and printed [object Object] - pyUserRender in
-    // languages/lib/python-rt.metajs and abnf/jsrt.go are now this body.
+    // use __repr__ only. Twins: pyUserRender in languages/lib/python-rt.metajs
+    // and abnf/jsrt.go.
     function pyUserRender(v, wantRepr) {
         if (!wantRepr) {
             var g = clsFind(v.__class, "__str__")
@@ -2476,15 +2377,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // BaseException.__str__, which an exception INHERITS and which therefore
             // beats a __repr__ the class also defines: no args is "", one arg is
             // str(that arg), more is the args TUPLE's repr. str(ValueError("boom"))
-            // is "boom" in CPython and was ValueError('boom') here.
+            // is "boom" in CPython.
             if (hasOwn(v, "args")) {
                 if (v.args.length == 0) { return "" }
                 // KeyError OVERRIDES BaseException.__str__ with repr(args[0]),
-                // which is why str(KeyError('x')) is "'x'" and not "x". Every
-                // engine here used to fake that by pre-repr'ing the ARGUMENT,
-                // which made str() right and repr() doubly quoted
-                // (docs/todo.md 1.7). The argument is now the key itself and the
-                // repr happens here, where CPython does it.
+                // which is why str(KeyError('x')) is "'x'" and not "x". The
+                // argument must be the key itself (pre-repr'ing it would make repr()
+                // doubly quoted), and the repr happens here, where CPython does it.
                 if (v.args.length == 1 && isKeyErrCls(v.__class)) { return prepr(v.args[0]) }
                 if (v.args.length == 1) { return pstr(v.args[0]) }
                 var oute = "("
@@ -2534,12 +2433,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // abnf/jsrt.go and pyDLinearize in languages/lib/python-rt.metajs; a hierarchy
     // C3 cannot resolve consistently falls back to first-seen order there, and here,
     // rather than aborting the program.
-    //
-    // WHY IT IS HERE AT ALL: clsFind used to be a left-to-right DEPTH-FIRST walk of
-    // __bases, which is not Python's order and is not what the two compiled halves
-    // do. With `class B(A): pass`, `class C(A): f`, `class D(B, C)`, depth-first
-    // finds A.f where CPython and both compiled halves find C.f - a live halves
-    // divergence --cross never reached, found by the docs/todo.md 1.9 sweep.
     function clsLinearize(bases) {
         if (bases.length == 0) { return [] }
         var seqs = []
@@ -2577,13 +2470,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    // __slots__ over the WHOLE resolution order, which is CPython's rule and not
-    // the nearest-declaration one all three engines used to apply: a name is
-    // writable if ANY class on the MRO declares it in its own __slots__, and any
-    // name at all is writable as soon as one class on the MRO declares no
-    // __slots__ (that class gives its instances a __dict__). With
-    // `class A: __slots__ = ["s"]` and `class B(A): __slots__ = ["t"]`, writing
-    // B().s raised AttributeError in every engine where CPython allows it.
+    // __slots__ over the WHOLE resolution order, which is CPython's rule (not the
+    // nearest declaration): a name is writable if ANY class on the MRO declares it
+    // in its own __slots__, and any name at all is writable as soon as one class
+    // on the MRO declares no __slots__ (that class gives its instances a
+    // __dict__). With `class A: __slots__ = ["s"]` and `class B(A): __slots__ =
+    // ["t"]`, B().s is writable.
     function pySlotsAllow(cls, name) {
         var mro = clsMRO(cls)
         var all = true
@@ -2603,7 +2495,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Walk a class's resolution order for a member. A class with an MRO is a flat
     // scan of it; anything else (a builtin type object, the synthetic {__name} class
-    // descriptor pyTypeOf hands out) keeps the old depth-first __bases walk.
+    // descriptor pyTypeOf hands out) gets a depth-first __bases walk.
     function clsFind(cls, name) {
         if (cls == undefined || cls == null) { return null }
         if (hasOwn(cls, "__mro")) {
@@ -2644,12 +2536,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
             return {__genalias: true, origin: o, targs: Array.isArray(i) ? i : [i]}
         }
-        // A subscript MISS is a catchable exception, not an abort. It used to be a
-        // fail() in all three engines, so `try: d[k] / except KeyError` - which
-        // CPython supports - killed the process instead (docs/todo.md 1.7). The
-        // KeyError carries the KEY ITSELF, never its repr: CPython's
-        // KeyError.__str__ is repr(args[0]), so pre-repr'ing the argument made
-        // str(e) right by accident and repr(e) doubly quoted.
+        // A subscript MISS is a catchable exception (`try: d[k] / except KeyError`),
+        // not an abort. The KeyError carries the KEY ITSELF, never its repr:
+        // CPython's KeyError.__str__ is repr(args[0]).
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) { pyRaise(pyMakeExc("KeyError", [i])) }
@@ -2661,12 +2550,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return o.charAt(i)
         }
         // Subscripting something that is not a sequence, a mapping or a generic
-        // alias is CPython's TypeError, and it was a raw HOST CRASH here -
-        // `None[0]` read `.length` of undefined and took the tag script down with
-        // "Cannot read property 'length' of undefined", which no `except` and no
-        // engine diagnostic could see. docs/todo.md 1.8.
-        // The test is "has no numeric length" rather than "is not an array", so
-        // nothing that used to index successfully can start raising here.
+        // alias is CPython's TypeError, not a host crash reading `.length` of
+        // undefined (`None[0]`). The test is "has no numeric length" rather than
+        // "is not an array", so nothing that indexes successfully can start raising.
         if (o === null || o === undefined || typeof o.length != "number") {
             pyRaise(pyMakeExc("TypeError",
                 ["'" + pyTypeOf(o).__name + "' object is not subscriptable"]))
@@ -2713,10 +2599,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //   - the (?P<name>...) / (?P=name) spellings -> (?<name>...) / a numbered
     //     backreference, which is what the engine accepts.
     //
-    // re.match / re.fullmatch are NOT a search plus a position check: `re.fullmatch(
-    // "a|ab", "ab")` has to backtrack INTO the alternation, and a leftmost search
-    // answers "a" and would then wrongly report no match. They anchor the pattern
-    // instead - \A(?:...) and \A(?:...)\z - which is both correct and cheap.
+    // re.match / re.fullmatch are NOT a search plus a position check; see the
+    // note at their implementation below.
 
     // CPython's re constants (sre_constants). re.A is the engine's only behaviour
     // and re.U is the py3 default, so both are accepted and ignored; re.L has no
@@ -2818,8 +2702,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // re.match / re.fullmatch. These are NOT a search plus a position check: a
     // fullmatch has to BACKTRACK into an alternation, so re.fullmatch("a|ab", "ab")
     // is "ab" and not None. The engine's own anchored entry points express both,
-    // including Python's `pos` argument - and unlike the \A(?:...)\z wrapper this
-    // used to build, they have no quarrel with the x flag's trailing comments.
+    // including Python's `pos` argument - and unlike an \A(?:...)\z wrapper, they
+    // have no quarrel with the x flag's trailing comments.
     function pyReAnchoredMatch(rv, s, from, whole) {
         var m = whole ? rxMatchWhole(rv.prog, s, from) : rxMatchAt(rv.prog, s, from)
         if (m == null) { return undefined }
@@ -3036,34 +2920,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                          S: PY_RE_S, DOTALL: PY_RE_S, U: PY_RE_U, UNICODE: PY_RE_U,
                          X: PY_RE_X, VERBOSE: PY_RE_X}
 
-    // ----- `open` and file I/O: DECLINED, and this is the reason ------------
-    //
-    // docs/todo.md 1.7 lists `open` beside `math`. It is not implemented, and the
-    // decision is a measurement rather than a preference: THERE IS NO FILE I/O
-    // PRIMITIVE ANYWHERE IN THIS PROJECT'S RUNTIME. languages/lib/runtime.c
-    // declares exactly putchar, write(2), malloc, exit, getenv, setjmp/longjmp,
-    // pthread and dlopen/dlsym - no open/read/close - and `nm -u` on any native
-    // binary showing libc and nothing else is a property the manual states in
-    // chapter 1. c.readFile IS in the grammar host, but it is the COMPILE-time
-    // import reader, not something an interpreted program can reach.
-    //
-    // So `open` is not a builtin to add; it is a new capability across four
-    // engines: three libc declarations plus a file-handle tag in runtime.c, an
-    // os.File-backed Go type in the twin, a MetaJS layer-2 object, a host global
-    // in metajs-interpreter.abnf (manual 7.2: a host global means THREE engines,
-    // and abnf/hostglobals_test.go pins the set), and then the whole file-object
-    // surface - read/readline/readlines/write/close, iteration, and the context
-    // manager - before one realistic program works. The test suite could not
-    // assert on it either without fixtures the matrix has no mechanism for.
-    //
-    // `open(...)` therefore raises the catchable NameError any unbound name gets
-    // (d0f4db3), which is a truthful answer. Saying so here is worth more than a
-    // fake `open` that pretends to read.
+    // ----- `open` and file I/O: not implemented. Twin of the note beside the
+    // `math` module binding in python-to-llvm-ir.abnf; see there (no file I/O
+    // primitive exists in this project's runtime). `open(...)` raises the
+    // NameError any unbound name gets.
 
     // ================================================ the `math` module ====
     //
     // Go twin: abnf/jsrtpymath.go. Layer 2: js_pymath_module / pyMathCall in
-    // languages/lib/python-rt.metajs. docs/todo.md 1.7.
+    // languages/lib/python-rt.metajs.
     //
     // `import math` binds no module object in this flat import model, so the
     // module is a host global - exactly what `re` above already is, and the
@@ -3081,23 +2946,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
     // answer a FLOAT (math.pow(2, 10) is 1024.0), floor / ceil / trunc / gcd /
     // factorial answer an INT, and isnan / isinf / isfinite answer a bool.
-    // THE GENERAL RULE, and it will bite whoever adds the next module here: a
-    // top-level STATEMENT in a grammar's tag script may only call a function
-    // declared ABOVE it. goja hoists function declarations to the top of the
-    // script; the frozen engine binds them in textual order, so a call that runs
-    // during the script's own top-level execution sees a declaration that comes
-    // later as UNDEFINED. The two engines therefore pick opposite winners, and
-    // only `-frozen` fails - which no goja-only run, and no amount of reading,
-    // can show you. (Manual chapter 4 has the same rule from the other side, for
-    // an unprefixed helper in a shared core.)
+    // THE GENERAL RULE: a top-level STATEMENT in a grammar's tag script may only
+    // call a function declared ABOVE it. goja hoists function declarations to the
+    // top of the script; the frozen engine binds them in textual order, so a call
+    // that runs during the script's own top-level execution sees a declaration
+    // that comes later as UNDEFINED - and only `-frozen` fails. (Manual chapter 4
+    // has the same rule from the other side, for an unprefixed helper in a shared
+    // core.)
     //
-    // Here that meant writing the float boxes OUT instead of building them with
-    // pyFlo, which is declared ~1,600 lines further down: `pyFlo(3.14...)` ran
-    // green under goja and aborted every python interpreter row under -frozen
-    // with "variable not defined: pyFlo" - seven matrix entries at once.
-    // pyFlo's whole body is {__flo: f}, so the literal below is the same value.
-    // The FUNCTION BODIES in this chapter are safe by construction: they run at
-    // program time, long after the whole script has been evaluated.
+    // That is why the float boxes below are written OUT instead of built with
+    // pyFlo, which is declared further down; pyFlo's whole body is {__flo: f}, so
+    // the literal is the same value. The FUNCTION BODIES in this chapter are safe
+    // by construction: they run at program time, long after the whole script has
+    // been evaluated.
     hostGlobals["math"] = {__pymod: "math",
                            pi: {__flo: 3.141592653589793},
                            e: {__flo: 2.718281828459045},
@@ -3319,7 +3180,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pySFail(msg) { fail(msg) }
     // A CATCHABLE KeyError, for the one place in the str-method chunk where
     // CPython raises rather than aborts: "{a}".format(b=1). pySFail is the
-    // engine's abort and cannot be caught (docs/todo.md 1.7).
+    // engine's abort and cannot be caught.
     function pySRaiseKey(nm) { pyRaise(pyMakeExc("KeyError", [nm])) }
     function pySFormat1(v, spec, conv) { return pyFormat(v, spec, conv) }
     function pySGetAttr(v, nm) { return pyattr(v, nm) }
@@ -3344,7 +3205,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ===================================================== str methods ==========
     //
-    // Python's str method library, per docs/todo.md 1.5. Written ONCE and carried in
+    // Python's str method library. Written ONCE and carried in
     // three engines - languages/python-interpreter.abnf, languages/lib/python-rt.metajs
     // (this text, verbatim) and abnf/pystrmethod.go (a line-by-line Go port) - because
     // a Python method call reaches a different implementation in each
@@ -4142,8 +4003,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var seq = anytype
             seq = args[0]
             if (typeof seq == "string") { return pySJoin(s, pySChars(seq)) }
-            // A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/
-            // filter/zip/enumerate) is materialized rather than refused -
+            // A GENERATOR or an ITERATOR object (iter/map/filter/zip/enumerate)
+            // is materialized rather than refused -
             // `", ".join(map(str, xs))` is ordinary Python. Keep in step with the
             // join arm in abnf/pystrmethod.go and languages/lib/python-rt.metajs.
             var jseq = pySSeqOf(seq)
@@ -4264,14 +4125,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (target.__pyre === true) { return pyReMethod(target, name, args) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
         }
-        // A CURSOR (iter(), map(), zip(), ...) is NOT a generator. This half's
-        // isGen is a __gen tag so it never thought otherwise - layer 2's
-        // structural pyIsGen did, which is docs/todo.md 1.4 - but the arm still
-        // has to exist, because without it `it.__next__()` fell all the way
-        // through to "method call .__next__() on <list_iterator object>" and
-        // ABORTED, where CPython steps the cursor and the native binary already
-        // did. CPython's list_iterator carries __next__ and __iter__ and nothing
-        // else, so send / close / throw - and every other name - are a catchable
+        // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, but it
+        // needs this arm: CPython's list_iterator carries __next__ and
+        // __iter__ and nothing else, so it.__next__() steps the cursor and
+        // send / close / throw - and every other name - are a catchable
         // AttributeError rather than a hard stop.
         if (isPyIt(target)) {
             if (name == "__next__") {
@@ -4296,30 +4153,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fail("unknown generator method: " + name)
         }
         if (Array.isArray(target)) {
-            // THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. Only append, pop
-            // and count were here; sort/insert/remove/extend/index/reverse/clear/
-            // copy aborted with "unknown list method" in every engine, and pop
-            // IGNORED its index argument in all three ([3,1,2].pop(0) answered 2
-            // where CPython answers 3). The twins are pyListMethod in
+            // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
             if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
             if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown list method: " + name)
         }
         if (isDict(target)) {
-            // THE WHOLE DICT AND SET METHOD SURFACE - docs/todo.md 1.3, the
-            // residue of 51436f9 (which did the list surface). A set is a dict
-            // whose keys ARE its members here, so both live in this branch and
-            // the SET is asked first. The twins are pySetMethod/pyDictMethod in
+            // THE WHOLE DICT AND SET METHOD SURFACE. A set is a dict whose keys
+            // ARE its members here, so both live in this branch and the SET is
+            // asked first. The twins are pySetMethod/pyDictMethod in
             // abnf/jsrt.go and in languages/lib/python-rt.metajs.
             //
-            // A name the OTHER type owns raises AttributeError, which is what
-            // CPython does - and the two "only" lists are narrower than the two
-            // method sets, because pop/clear/copy/update are on BOTH types.
-            // Asking one type for the other's name used to answer: `set().keys()`
-            // was the member list in this half and aborted with "unknown method
-            // 'keys'" in both compiled halves - a live halves divergence, found
-            // by the 1.3 sweep and fixed here.
+            // A name the OTHER type owns raises AttributeError (`set().keys()`),
+            // which is what CPython does - and the two "only" lists are narrower
+            // than the two method sets, because pop/clear/copy/update are on BOTH
+            // types.
             if (isSet(target)) {
                 if (pyIsSetMethod(name)) { return pySetMethod(target, name, args) }
                 if (pyIsDictOnly(name)) { pyAttrErr(target, name) }
@@ -4334,7 +4183,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A method on a builtin TYPE OBJECT - dict.fromkeys(ks). The mcall path AND
         // the value path (pyattr) both need it, or it is reachable one way and not
         // the other: `dict.fromkeys(ks)` takes one and `f = dict.fromkeys; f(ks)`
-        // the other. docs/todo.md 1.8.
+        // the other.
         if (target !== null && target !== undefined && typeof target == "object" && target.__isclass == true) {
             var bcm = pyBuiltinClsMethod(target, name)
             if (bcm != null) { return bcm.apply(undefined, args) }
@@ -4343,7 +4192,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("method call ." + name + "() on " + pstr(target))
     }
 
-    // docs/todo.md 1.3 - Python's list methods, the NAME SET first so that
+    // Python's list methods, the NAME SET first so that
     // hasattr()/getattr() can ask exactly what the dispatcher answers. Keep in
     // step with pyIsListMethod in abnf/jsrt.go and in
     // languages/lib/python-rt.metajs.
@@ -4517,17 +4366,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---------------------------------------------------------- dict / set ---
     //
-    // docs/todo.md 1.3, the residue of 51436f9. The NAME SETS first, so that
+    // The NAME SETS first, so that
     // hasattr()/getattr() ask exactly what the dispatcher answers. Keep in step
     // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
     // languages/lib/python-rt.metajs.
     //
-    // NOT the whole of CPython's: dict.fromkeys (a classmethod on the `dict` type
-    // object) and set.intersection/difference/symmetric_difference/isdisjoint/
-    // issuperset and their *_update forms are absent, hasattr() therefore says
-    // False for them, and a written call ABORTS rather than raising: a hard stop
-    // says "this project does not have it" where an AttributeError would say
-    // "Python does not have it". The operators & - ^ <= >= are complete.
+    // NOT the whole of CPython's: set.intersection/difference/
+    // symmetric_difference/isdisjoint/issuperset and their *_update forms are
+    // absent, hasattr() therefore says False for them, and a written call ABORTS
+    // rather than raising: a hard stop says "this project does not have it"
+    // where an AttributeError would say "Python does not have it". The operators
+    // & - ^ <= >= are complete.
     function pyIsDictMethod(name) {
         if (name == "keys" || name == "values" || name == "items") { return true }
         if (name == "get" || name == "pop" || name == "clear") { return true }
@@ -4562,9 +4411,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "keys") { return d.keys.slice(0) }
         if (name == "values") { return d.vals.slice(0) }
         // .items(): a list of [key, value] pairs in insertion order (each pair a
-        // 2 element list, since the subset has no tuples). pair[0]/pair[1] read
-        // them. CPython answers a dict_items VIEW of TUPLES; the list is the
-        // tuple gap of docs/todo.md 3.1, not this item.
+        // 2 element list, since a tuple is a list in this value model).
+        // pair[0]/pair[1] read them. CPython answers a dict_items VIEW of TUPLES.
         if (name == "items") {
             var pairs = []
             for (var ii = 0; ii < d.keys.length; ii++) {
@@ -4591,9 +4439,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("KeyError", [pyArgAt(args, 0)]))
         }
         // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
-        // The pair is a 2-element list, like items()' pairs, because this subset has
-        // no tuple (docs/todo.md 3.1). Empty raises the KeyError whose argument is a
-        // sentence rather than a key, which c2b4071's arg-carrying KeyError renders.
+        // The pair is a 2-element list, like items()' pairs. Empty raises the
+        // KeyError whose argument is a sentence rather than a key.
         if (name == "popitem") {
             if (d.keys.length == 0) {
                 pyRaise(pyMakeExc("KeyError", ["popitem(): dictionary is empty"]))
@@ -4632,7 +4479,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the KEYWORD one works only on a WRITTEN call: a bound builtin from
         // getattr() cannot carry keyword arguments (a signature-less builtin
         // receives its kw dict as a trailing positional and the wrapper cannot
-        // tell that from a real argument - docs/todo.md 2.13), so
+        // tell that from a real argument), so
         // getattr(d, "update")(a=1) is not d.update(a=1); the written call is.
         if (name == "update") {
             if (args.length > 1) {
@@ -4754,13 +4601,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // docs/todo.md 2.4 and 5.2. The member-call names that the COMPILED halves
-    // reach through rt.memberCall - the table nine languages share - and that
-    // Python's receiver type does not have: `xs.size()` answered 2 and
-    // `"ab".charAt(0)` answered "a" under llvm.Run where CPython raises
-    // AttributeError. This grammar never had them, so its half of the fix is
-    // only the ERROR: it used to abort with "unknown list method: size", and now
-    // raises the same catchable AttributeError the other two do.
+    // The member-call names that the COMPILED halves reach through
+    // rt.memberCall - the table nine languages share - and that Python's
+    // receiver type does not have (`xs.size()`, `"ab".charAt(0)`). CPython raises
+    // AttributeError, and so do all three engines; here that is only the ERROR.
     //
     // Keyed by RECEIVER TYPE, not by name alone: `get` is a real dict method and
     // `add` a real set method. Keep in step with pyForeignMethod in abnf/jsrt.go
@@ -4769,8 +4613,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A name Python DOES have and this project does not is deliberately NOT
     // here: it still aborts, because a hard stop says "unimplemented" where a
     // catchable AttributeError would let a program silently take the wrong
-    // branch. list.sort and list.insert used to be the example; they are real
-    // methods now (pyListMethod above), so the rule stands with no member.
+    // branch.
     function pyForeignMethod(target, name) {
         if (Array.isArray(target)) {
             // Kotlin's, Java's, Dart's and Swift's list methods. `count` is not
@@ -4818,28 +4661,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     makeNot = function(t) { return function() { return !pytruthy(t()) } }
     // WHICH of the two `del` exceptions CPython 3.14 raises depends on WHERE the
-    // deleted name lived: a deleted GLOBAL is a NameError with the same text an
-    // unbound name gets, a deleted LOCAL is an UnboundLocalError. Every engine
-    // here used to answer NameError for both, so `def f(): y = 1; del y; y` read
-    // NameError against CPython's UnboundLocalError - and the compiled halves
-    // already answered UnboundLocalError, so it was a live halves divergence.
-    // The holder is the FIRST scope up the chain that binds the name, which is
-    // exactly where makeDel put the sentinel; scopes[0] is the module namespace.
-    // The twins are abnf/jsrt.go's scopeGet (s == pyModuleScope(sc)) and
-    // py_getvar in languages/python-to-llvm-ir.abnf. docs/todo.md 3.2.
-    // WHICH scope holds the empty slot is the whole question, and "any scope but the
-    // module" is the WRONG test: a name that is a local of an ENCLOSING function is a
-    // free variable here, and CPython says NameError for it, not UnboundLocalError
+    // empty slot lives: a local of THIS frame's own function boundary is an
+    // UnboundLocalError; a deleted GLOBAL, or a local of an ENCLOSING function (a
+    // free variable here), is a NameError with the text an unbound name gets:
     //
     //     def o():
     //         def i(): return vv     # NameError: name 'vv' is not defined
     //         return i()
     //         vv = 1
     //
-    // The rule is the one py_getvar already emitted in the compiler half - the slot
-    // must belong to THIS frame's own function boundary - and the old walk disagreed
-    // with it (a live halves divergence on `except E as e` that --cross never
-    // reached: the interpreter said UnboundLocalError, both compiled halves NameError).
+    // The twins are abnf/jsrt.go's scopeGet and py_getvar in
+    // languages/python-to-llvm-ir.abnf.
     function pyDeletedExc(name) {
         var fs = pyFnScope()
         if (fs != null && hasOwn(fs, name)) {
@@ -5216,11 +5048,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = 0
             for (var i = n - 1; i >= 0; i = i - 1) { v = v * bigBase + a.limbs[i] }
             // The reconstruction can ROUND: 2^53+1 accumulates to 2^53, which is
-            // <= bigMaxNum, and the box used to leave with the wrong value - so
-            // (2**53) | 1 was 9007199254740992 here and exact in both compiled
-            // halves, whose narrowers rebuild and compare. bigFromNum is exact, so
-            // a mismatch means the double is not the value. (Go: pyBigNarrow's
-            // IsInt64 test; layer 2: pyABigNarrow's own rebuild.)
+            // <= bigMaxNum, so the box must not leave on the reconstruction alone.
+            // bigFromNum is exact, so a mismatch means the double is not the value.
+            // (Go: pyBigNarrow's IsInt64 test; layer 2: pyABigNarrow's own rebuild.)
             if (v <= bigMaxNum && magCmp(bigFromNum(v).limbs, a.limbs) == 0) { return (a.sign < 0) ? -v : v }
         }
         return a
@@ -5363,12 +5193,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- the BITWISE operators, at arbitrary precision --------------------
     //
     // Python's |, &, ^, ~, << and >> are INFINITE TWO'S COMPLEMENT over
-    // arbitrary precision ints. Every half used to run the tag engine's own
-    // ECMAScript operators, which are ToInt32 with the shift count masked to
-    // five bits: `-1 & 0xffffffff` was -1 against CPython's 4294967295, `1 << 40`
-    // was 256, and every operand past 2^31 was truncated. BOTH HALVES AGREED on
-    // all of it, so --cross and the matrix were structurally blind; python3
-    // 3.14.6 is the oracle, and 439 of a 944-row differential probe were wrong.
+    // arbitrary precision ints - not the tag engine's ECMAScript operators,
+    // which are ToInt32 with the shift count masked to five bits (`-1 &
+    // 0xffffffff` must be 4294967295 and `1 << 40` must not be 256).
     //
     // Working on MAGNITUDES only, a negative operand is ~(|x| - 1), which gives
     // four identities per operator over AND / OR / XOR / ANDNOT of non-negative
@@ -5600,11 +5427,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function boxOp(op, l, r) {
         // `in` and `not in` are CONTAINER operators: the box is the element being
         // looked for, never an operand of an arithmetic rule, so it must fall
-        // through to pyIn exactly as floOp already lets it. Without this,
-        // `3j in xs` died with "unsupported operand type for in: complex" and
-        // `10**30 in xs` answered off bigToNum(xs) - in THIS half only, while both
-        // compiled halves answered CPython's True. Found by the docs/todo.md 2.4
-        // probe; floOp:5097 has had the same line all along.
+        // through to pyIn exactly as floOp lets it (`3j in xs`, `10**30 in xs`).
         if (op == "in" || op == "not in") { return null }
         if (isCplx(l) || isCplx(r)) { return {v: cplxOp(op, l, r)} }
         var a = bigOf(l)
@@ -5624,8 +5447,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
         }
-        // The bit operators at arbitrary precision - a big meeting one used to
-        // fall through to bigToNum and the tag engine's ToInt32.
+        // The bit operators at arbitrary precision, not bigToNum and the tag
+        // engine's ToInt32.
         if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
             var bb = bigBitBin(op, a, b)
             if (bb === null) { fail("negative shift count") }
@@ -5671,10 +5494,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyDecOver53(txt)
     }
     // Is the decimal digit string txt worth MORE than 2^53? This has to be decided on
-    // the TEXT. The predicate used to be parseFloat(txt) > bigMaxNum, and parseFloat
-    // rounds 9007199254740993 down to exactly 2^53 - so the very first value that
-    // needs the box answered "not big" and the literal became the double below it.
-    // 2^53 itself is exact and is deliberately NOT boxed.
+    // the TEXT: parseFloat rounds 9007199254740993 down to exactly 2^53, so the very
+    // first value that needs the box would answer "not big". 2^53 itself is exact and
+    // is deliberately NOT boxed.
     function pyDecOver53(txt) {
         var s = txt
         var z = 0
@@ -5690,7 +5512,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return false
     }
     // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of the
-    // same value. parseInt rounds past 2^53 - 0x20000000000001 came back as 2^53 -
+    // same value. parseInt rounds past 2^53 (0x20000000000001 would come back as 2^53)
     // and bigFromDec reads decimal only, so the conversion is a schoolbook
     // multiply-add over a little-endian array of decimal digits: d = d * radix + v.
     function pyRadixToDec(digits, radix) {
@@ -5718,8 +5540,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var j = d.length - 1; j >= 0; j--) { out = out + String.fromCharCode(48 + d[j]) }
         return out
     }
-    // A 0x / 0o / 0b literal. Boxed by the same rule a decimal one is - it used to be
-    // a bare parseInt, so every non-decimal literal past 2^53 was silently rounded.
+    // A 0x / 0o / 0b literal. Boxed by the same rule a decimal one is, so a
+    // non-decimal literal past 2^53 is not silently rounded.
     function pyRadixLit(txt, radix) {
         var digits = txt.substring(2)
         var dec = pyRadixToDec(digits, radix)
@@ -5731,13 +5553,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // "fmt" % args is printf-style FORMATTING, not a remainder, and it has to be
         // decided BEFORE the boxed-number gate below - a float or an arbitrary
         // precision int on the right is an ordinary argument, and floOp/boxOp would
-        // otherwise take the pair for arithmetic and answer NaN. It fell into fmod
-        // in both halves before this.
+        // otherwise take the pair for arithmetic and answer NaN.
         if (op == "%" && typeof l == "string") { return pyPct(l, r) }
         // Both overload gates - boxed numbers and user classes - sit behind ONE
         // typeof test, because pyBoxed and pyUser can only ever be true for an
         // object. An ordinary number therefore pays two comparisons and no call at
-        // all, where it used to pay two calls.
+        // all.
         if (typeof l == "object" || typeof r == "object") {
             // The float box first: it is not pyBoxed, and a float against a big
             // or a complex has to be settled by the FLOAT rules, not the tower's.
@@ -5756,10 +5577,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (uo != null) return uo.v
             }
         }
-        // PROMOTION PAST 2^53 (docs/todo.md 1.1). A plain Python int is a double, so
-        // it is EXACT up to 2^53 and silently rounds above it: 9007199254740992 + 1
-        // was 9007199254740992 in all three engines. The box already exists (the
-        // literal half landed in 506000a); what is added here is the trigger.
+        // PROMOTION PAST 2^53. A plain Python int is a double, so it is EXACT up to
+        // 2^53 and would silently round above it (9007199254740992 + 1). The box
+        // exists for literals; this is the arithmetic trigger.
         //
         // pyOver53 is the whole guard, and it is sound BOTH WAYS. Every plain
         // operand is an integer of magnitude <= 2^53 (anything larger is already
@@ -5798,12 +5618,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // int ** negative int is a float in Python (2 ** -1 is 0.5); every other
         // pair of ints stays an int - and a Python int is ARBITRARY PRECISION, so
         // 10**30 is 1000000000000000000000000000000. Math.pow answers the nearest
-        // DOUBLE, which was 5076944270305264000 here (the int64 the tag engine
-        // wraps it into) and 1e+30 in the compiled halves - wrong twice over and
-        // divergent. Past 2^53 the double has lost digits, so the exact answer is
-        // the big path's: boxOp's `**` arm, which is bigPow and already exists.
-        // bigOut narrows it back to a plain number when it fits, so nothing below
-        // 2^53 changes shape.
+        // DOUBLE, which past 2^53 has lost digits, so the exact answer is the big
+        // path's: boxOp's `**` arm, which is bigPow. bigOut narrows it back to a
+        // plain number when it fits, so nothing below 2^53 changes shape.
         if (op == "**") {
             if (r < 0) { return pyFlo(Math.pow(l, r)) }
             var pw = Math.pow(l, r)
@@ -5816,12 +5633,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "is not") return l !== r
         // Two sets compare as SUBSET / SUPERSET, not by the host's relational
         // operator - which on two objects renders both as "[object Object]" and
-        // answers True for <= and >= whatever the members are. Found by the
-        // docs/todo.md 1.3 probe as a live halves divergence PRE-EXISTING at
-        // f4ff228: `{1,2} <= {2,3}` was True here and False in both compiled
-        // halves, which is CPython's answer. The compiled twin is the
-        // "<=", "<", ">=", ">" arm of pySetBin in abnf/jsrt.go; the same arm in
-        // layer 2 is pySetBin in languages/lib/python-rt.metajs.
+        // answers True for <= and >= whatever the members are. The compiled twin
+        // is the "<=", "<", ">=", ">" arm of pySetBin in abnf/jsrt.go; the same
+        // arm in layer 2 is pySetBin in languages/lib/python-rt.metajs.
         if (isSet(l) && isSet(r)) {
             if (op == "<" || op == ">" || op == "<=" || op == ">=") {
                 return setOrder(op, l, r)
@@ -5861,10 +5675,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ----- "fmt" % args, CPython's printf-style formatting -----
     //
-    // UNIMPLEMENTED in both halves until now: binOp("%") on a string fell straight
-    // into fmod, so "%s" % "hi" was NaN - the two halves agreed, which is why
-    // --cross was blind to it and only a CPython diff saw it.
-    //
     // Supported: the conversions s r a d i u x X o b c e E g G f F and %%; the
     // flags - + 0 and space; a width; and a .precision, which TRUNCATES for s/r/a.
     // A %(name)s mapping key reads a dict argument. NOT supported, and a LOUD
@@ -5878,14 +5688,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // except a ONE-element list meeting a single conversion, where the two
     // readings are genuinely indistinguishable here: "%s" % (1,) is "1" and
     // "%s" % [1] is "[1]" in CPython, and they are the same value in this model.
-    // The base-N digits of an integral value. `(255).toString(16)` works under goja
-    // and ABORTS under -frozen ("call of a non function value"), which made
-    // f"{255:x}" a LIVE FROZEN-DIFF that no test reached - the whole point of the
-    // matrix's byte-identity check. This is the digit loop instead, and it is exact
-    // for every magnitude a double holds exactly. The same loop is inlined in
-    // rt.pyPctRadix (abnf/jsrt.go) and pyBPctRadix (languages/lib/python-rt.metajs)
-    // - deliberately NOT strconv.FormatInt or pyBBaseStr, whose int64 SATURATION
-    // only the {:x} format spec wants - so %x agrees in all four engines.
+    //
+    // The base-N digits of an integral value: a digit loop, because
+    // `(255).toString(16)` works under goja and ABORTS under -frozen ("call of a
+    // non function value"). It is exact for every magnitude a double holds
+    // exactly. The same loop is inlined in rt.pyPctRadix (abnf/jsrt.go) and
+    // pyBPctRadix (languages/lib/python-rt.metajs) - deliberately NOT
+    // strconv.FormatInt or pyBBaseStr, whose int64 SATURATION only the {:x}
+    // format spec wants - so %x agrees in all four engines.
     function pyBaseStr(n, base) {
         var v = Math.trunc(n)
         if (v !== v) { v = 0 }
@@ -6002,11 +5812,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // The obvious source is floPrec and it is the WRONG one: floPrec's contract is
     // only "at least nd digits" - the floor's implementation answers the SHORTEST
-    // round-tripping form when nd is smaller, so %e of 1234.5678 came out
-    // 1.234567e+03 from the native binary. Every existing floPrec caller asks for
-    // an nd at least as large as the shortest form, where the two contracts
-    // coincide; %e and %g do not. pyBPctSig in languages/lib/python-rt.metajs is
-    // this same body.
+    // round-tripping form when nd is smaller (%e of 1234.5678 would come out
+    // 1.234567e+03 from the native binary). pyBPctSig in
+    // languages/lib/python-rt.metajs is this same body.
     function pyPctSig(a, nd) {
         if (a == 0) {
             var z = ""
@@ -6121,11 +5929,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (f != null) { return pytruthy(f(r, l)) }
         }
         // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
-        // rule. Neither is an array, so the scan below read a `length` of
-        // undefined and answered a SILENT False, where both compiled halves
-        // aborted with "'in' needs a list, a string, a dict or an object with
-        // __contains__". The scan STOPS at the match rather than draining, so
-        // `it = iter(xs); 1 in it; list(it)` leaves the rest. docs/todo.md 1.4.
+        // rule. Neither is an array, so the scan below would read a `length` of
+        // undefined. The scan STOPS at the match rather than draining, so
+        // `it = iter(xs); 1 in it; list(it)` leaves the rest.
         if (isPyIt(r)) {
             while (true) {
                 var s = pyItStep(r)
@@ -6190,10 +5996,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e == "N" && text.charAt(i + 2) == "{") {
                 // A forward SCAN, not text.indexOf("}", i + 3): the frozen engine
                 // ignores indexOf's from-index (docs/abnf-dialect-gotchas.md), so it
-                // answered with the FIRST `}` in the whole chunk - which may sit before
-                // this escape, sending `i` backwards and spinning to the step cap. It
-                // only surfaced once f-strings started reaching this branch, behind a
-                // green goja run.
+                // would answer with the FIRST `}` in the whole chunk - which may sit before
+                // this escape, sending `i` backwards.
                 var close = -1
                 for (var cj = i + 3; cj < text.length; cj++) {
                     if (text.charAt(cj) == "}") { close = cj; break }
@@ -6459,12 +6263,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return res
     }
     // Fixed-point rendering, spelled out because frozen MetaJS has no
-    // Number.toFixed. It used to scale by 10^p and Math.round, which rounds a tie
-    // HALF UP - so f"{2.5:.0f}" was "3" here and "2" in both compiled halves and in
-    // CPython, and f"{0.125:.2f}" was "0.13" against their "0.12". A LIVE HALVES
-    // DIVERGENCE that no test reached, so --cross was silent about it. It is now
-    // the exact decimal rounded half to EVEN, which is what
-    // strconv.FormatFloat(v, 'f', p, 64) - and therefore both compiled halves - do.
+    // Number.toFixed. The exact decimal is rounded half to EVEN (f"{2.5:.0f}" is
+    // "2", f"{0.125:.2f}" is "0.12"), which is what CPython and
+    // strconv.FormatFloat(v, 'f', p, 64) - and therefore both compiled halves -
+    // do; scaling by 10^p and Math.round would round a tie half up.
     function pyFixed(v, p) {
         if (v !== v) { return "NaN" }
         if (v - v !== 0) { if (v > 0) { return "+Inf" } ; return "-Inf" }
@@ -6533,15 +6335,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function genPop() { return genFlags.pop() }
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
 
-    // ----- Python's STATIC binding analysis (docs/todo.md 1.6) -----
+    // ----- Python's STATIC binding analysis -----
     //
     // CPython decides a function's locals STATICALLY: every name the body binds is
     // a local for the WHOLE body, including the part before the binding runs. So
-    // `def h(): print(w); w = 1` raises UnboundLocalError, and it does so even when
-    // a global `w` exists. No engine here performed that analysis, and the visible
-    // consequence was NOT merely a wrong exception class: with an outer `w` in
-    // scope the read SUCCEEDED and answered the outer value - a silently wrong
-    // answer that `--cross` cannot see, because all three engines agreed.
+    // `def h(): print(w); w = 1` raises UnboundLocalError, even when a global `w`
+    // exists - the read must not answer the outer value.
     //
     // The set is collected here, at TAG time, and handed to callScopes, which seeds
     // each name with pyDeleted - the very "the slot exists and holds nothing"
@@ -6550,8 +6349,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // seeds the same sentinel through js_scope_decl; the two must stay in step.
     //
     // WHY THE COLLECTION IS IN THE make* FUNCTIONS AND NOT IN A TAG ON `Target`.
-    // A tag on Target (or on TargetName) looks like one edit instead of a dozen and
-    // is WRONG: AugAssign, AnnAssign and Assign each try `Target` first and then
+    // A tag on Target (or on TargetName) would be WRONG: AugAssign, AnnAssign and
+    // Assign each try `Target` first and then
     // fail when the operator, the colon or the `=` does not follow, so the bare
     // expression statement `x == 1` matches Target three times before ExprSmall
     // finally reads it - and PEG never un-runs a tag. Every collector below sits in
@@ -6663,11 +6462,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // PEP 380's resume is `if _s is None: _y = _i.__next__()` else
         // `_y = _i.send(_s)`, and a CURSOR has no send: `g.send(7)` over
         // `yield from [1,2,3]` raises AttributeError inside the generator, which
-        // ends it. Forwarding the value to the cursor's next() - which ignores
-        // it - answered 2 instead, in ALL THREE engines, so --cross and the
-        // matrix were blind to it by construction and only the oracle could see
-        // it. docs/todo.md 1.4; the twin is js_pyyfsend, emitted by
-        // python-to-llvm-ir.abnf's makeYield at the same point.
+        // ends it (forwarding the value to the cursor's next() would answer 2).
+        // The twin is js_pyyfsend, emitted by python-to-llvm-ir.abnf's makeYield at
+        // the same point.
         if (sent !== undefined && sent !== null) {
             pyRaise(pyMakeExc("AttributeError",
                 ["'" + d.__pyit + "' object has no attribute 'send'"]))
@@ -6690,11 +6487,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyDelegClose(d) { if (isGen(d)) { genClose(d) } }
     // `yield from xs` DELEGATES: every value xs produces is a yield of this
-    // generator, driven ONE AT A TIME. The old body called iterToList first, which
-    // materialized the delegate - so `yield from endless()` hung, the delegate's
-    // return value was lost, a send() never reached it, and a .throw() was raised at
-    // the `yield from` itself instead of inside the delegate, where CPython offers
-    // it to the delegate's own except arms. docs/todo.md 1.6; the shape is
+    // generator, driven ONE AT A TIME, so `yield from endless()` works, the
+    // delegate's return value is kept, a send() reaches it, and a .throw() is
+    // offered to the delegate's own except arms, as in CPython. The shape is
     // js-interpreter.abnf's doYield(star) one for one.
     function doYieldFrom(run, v) {
         var d = pyDelegOf(v)
@@ -6777,12 +6572,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e != undefined && e != null && e.__genYield == true) { yielded = true; out = e.v }
             // A generator whose body RAISES is FINISHED, so the next next() gets
             // StopIteration and not the same exception again. This half is a
-            // REPLAY engine: without the done flag the failing run was replayed
-            // from the top on every subsequent step and re-raised for ever, where
-            // CPython and both compiled halves say StopIteration - a live halves
-            // divergence --cross never reached, found while closing
-            // docs/todo.md 1.4 (the delegated send() raises AttributeError
-            // INSIDE the body, and that is what made the difference visible).
+            // REPLAY engine: without the done flag the failing run would be replayed
+            // from the top on every subsequent step and re-raised for ever.
             // The close/throw signals are excluded: genClose and genThrow set the
             // flag themselves and read st.ret afterwards.
             else { st.done = true; scopes = saved; genRuns.pop(); throw e }
@@ -6801,11 +6592,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The StopIteration a finished generator raises. Its ARGS are EMPTY when the
     // body returned None and (v,) when it returned a value - CPython's rule, which
-    // repr() shows as StopIteration() against StopIteration(7). Both engines used
-    // to pass one argument unconditionally and disagreed on what it was: this half
-    // said StopIteration(None) and the compiled halves StopIteration(''), against
-    // CPython's StopIteration(). `value` is set either way, and it is what
-    // `except StopIteration as e: e.value` reads.
+    // repr() shows as StopIteration() against StopIteration(7). `value` is set
+    // either way, and it is what `except StopIteration as e: e.value` reads.
     function pyStopIter(v) {
         var a = []
         if (v != undefined && v != null) { a.push(v) }
@@ -6815,19 +6603,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
     // g.close(): abandon a suspended generator, RUNNING the `finally` clauses that
-    // wrap its yield. This half used to set the done flag and nothing else, so a
-    // generator's finally never ran at close at all - while the compiled halves,
-    // whose generators are real floor coroutines, run it through runtime.c's
-    // gen_close. It is reachable in the replay model because the close does not
-    // need a frozen stack: replay to the yield the generator is parked at and
-    // raise there instead of resuming.
+    // wrap its yield, as the compiled halves do through runtime.c's gen_close. It
+    // is reachable in the replay model because the close does not need a frozen
+    // stack: replay to the yield the generator is parked at and raise there
+    // instead of resuming.
     //
     // The exit signal is deliberately NOT an ordinary Python exception, which is
     // also what the floor does: gen_close's GEN_EXIT sentinel unwinds `finally`
     // clauses but is not offered to `except`, so `except BaseException` inside a
     // generator does not see a close in EITHER engine, where CPython delivers a
     // catchable GeneratorExit. Making it catchable here alone would be a halves
-    // divergence; making it catchable in both is a floor change. docs/todo.md 2.6.
+    // divergence; making it catchable in both is a floor change.
     function genClose(g) {
         var st = g.st
         if (st.done) { return undefined }
@@ -6852,7 +6638,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // own try/except and finally clauses see it - the difference from close(), whose
     // exit record is deliberately not offered to `except`. The record travels on the
     // resume value exactly as close()'s does, which is what makes it per-coroutine by
-    // construction rather than by care (docs/todo.md 2.1). runtime.c's gen_throw and
+    // construction rather than by care. runtime.c's gen_throw and
     // abnf/jsrt.go's throwInto do the same for the compiled halves.
     //
     // A generator that is DONE, or that has never been resumed, runs NOTHING - a body
@@ -7075,10 +6861,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
         return out
     }
-    // items = [exprT, {cvar}, iterT, {cif}?]. The variable lives in an own scope
-    // (Python 3 comprehension scoping: it does not leak).
-    // Bind a comprehension / for-loop target: one name takes the element, several
-    // names unpack it positionally (for a, b in pairs).
     // Decide ONCE, at build time, which of the two binders a comprehension clause needs.
     // Both fields are always present and always the right type: the frozen engine is
     // unhappy with a record whose property is sometimes undefined.
@@ -7294,7 +7076,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var k = 0; k < heads.length; k++) { writeTarget(heads[k], v) }
         }
     }
-    // A comma-separated expression list is a tuple; a single expression stays itself.
     // A comma-separated expression list is a TUPLE; a single expression with no comma
     // stays itself, but a trailing comma (one = 7,) still makes a one-element tuple.
     function makeExprList(items) {
@@ -7336,10 +7117,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var s2 = scopes.length - 1; s2 >= 0; s2--) {
                 if (hasOwn(scopes[s2], ref.name)) {
                     // Deleting a slot that is ALREADY empty raises, and the static
-                    // binding analysis (docs/todo.md 1.6) is what makes that
-                    // reachable: `def f(): del x` now finds x's own empty local
-                    // slot, where CPython says UnboundLocalError - not the
-                    // NameError a name bound nowhere at all still gets.
+                    // binding analysis is what makes that reachable: `def f(): del x`
+                    // finds x's own empty local slot, where CPython says
+                    // UnboundLocalError - not the NameError a name bound nowhere at
+                    // all still gets.
                     if (scopes[s2][ref.name] === pyDeleted) { pyRaise(pyDeletedExc(ref.name)) }
                     scopePut(scopes[s2], ref.name, pyDeleted)
                     return
@@ -7376,8 +7157,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (idx < 0) { idx += o.length }
         listRemoveAt(o, idx)
     }
-    // Remove one element in place. splice is not available on the frozen engine's
-    // arrays, so the tail is shifted down and the array truncated.
     // Remove one element in place. splice is not available on the frozen engine's
     // arrays and `length` is not assignable there, so the tail shifts down and the
     // last slot is popped off.
@@ -7436,10 +7215,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var src = listT()
             var broke = false
-            // LAZY ITERATION over a generator (docs/todo.md 1.7). iterToList DRAINS,
-            // so `for x in endless(): ... break` never reached the body - it hung
-            // here and hit -max-steps in the compiled half. A generator is STEPPED,
-            // one value per round; everything else is normalized exactly as before.
+            // LAZY ITERATION over a generator. iterToList DRAINS, which never ends
+            // for `for x in endless(): ... break`, so a generator is STEPPED, one
+            // value per iteration; everything else is normalized by iterToList.
             // python-to-llvm-ir.abnf's makeForStmt is the same shape in IR.
             if (isGen(src)) {
                 while (true) {
@@ -7456,8 +7234,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return undefined
             }
             // An ITERATOR object is stepped the same way, so `break` leaves it
-            // PARTIALLY CONSUMED exactly as it does in the compiled halves -
-            // there the emitted loop already takes the generator path, because
+            // PARTIALLY CONSUMED exactly as it does in the compiled halves, where
             // an iterator object carries a callable "next" and the test is
             // structural (python-to-llvm-ir.abnf makeForStmt).
             if (isPyIt(src)) {
@@ -7509,8 +7286,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ----- Widened surface: newly accepted constructs -----
 
-    // a ** b: reported as not implemented; with no '**' the single operand passes
-    // through unchanged (keeping the expression layer transparent).
+    // a ** b; with no '**' the single operand passes through unchanged (keeping
+    // the expression layer transparent).
     function makePower(items) {
         if (items.length == 1) { return items[0] }
         var b = items[0]
@@ -7518,7 +7295,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() { return binOp("**", b(), e()) }
     }
     // ~x is -x-1 in Python's INFINITE two's complement, at arbitrary precision -
-    // not the tag engine's ToInt32 complement, under which ~(2**40) was -257.
+    // not the tag engine's ToInt32 complement (~(2**40) must not be -257).
     // Inside int32 the two agree exactly, so the hot path is still the engine's.
     function pyInvert(v) {
         if (bitIsSmall(v)) { return ~v }
@@ -7587,7 +7364,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
     }
-    // name: Type [= value]: the annotation is ignored; assign when a value is given.
     // items = [ref, {aname}, {atype}, valueThunk?]
     function makeAnnAssign(items) {
         var ref = items[0]
@@ -7651,8 +7427,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["OSError"] = "Exception"
     pyExcParent["ExceptionGroup"] = "Exception"
     // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
-    // integral answer does not exist rather than being out of domain. Added with
-    // the `math` module (docs/todo.md 1.7).
+    // integral answer does not exist rather than being out of domain.
     pyExcParent["OverflowError"] = "ArithmeticError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
@@ -7703,9 +7478,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cls === base) { return true }
         // BUILTIN class objects have no __bases here, so their hierarchy is
         // pyBuiltinSub's: issubclass(bool, int) and issubclass(anything, object)
-        // are True. Both were False before - the first in every engine, and
-        // issubclass itself did not exist in the compiled halves at all
-        // (docs/todo.md 1.4).
+        // are True.
         if (base != undefined && base != null && base.__builtin == true) {
             if (base.__name == "object") { return true }
             if (cls.__builtin == true) { return pyBuiltinSub(cls.__name, base.__name) }
@@ -7760,15 +7533,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var box = {sig: undefined}
             var threw = false
             // A generator SUSPENDS by throwing (see doYield), and the host's own
-            // `finally` below runs for ANY unwinding - so `yield` inside a
-            // try/finally used to run the Python `finally` at every suspension.
-            // That is not a repeated side effect, it is a WRONG ORDER: CPython
-            // runs it once, when the generator finishes or is closed, and this
-            // half printed it before the first next() had even returned, while
-            // both compiled halves (which have real coroutines) got it right.
-            // The suspension signal is engine plumbing, not a Python exception,
-            // so it must reach genStep without touching the handlers, the else
-            // clause or the finally clause. docs/todo.md 2.6.
+            // `finally` below runs for ANY unwinding. CPython runs a Python `finally`
+            // around a `yield` once, when the generator finishes or is closed - not at
+            // every suspension. The suspension signal is engine plumbing, not a Python
+            // exception, so it must reach genStep without touching the handlers, the
+            // else clause or the finally clause.
             var suspended = false
             try {
                 box.sig = tryT()
@@ -7779,9 +7548,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 threw = true
                 // A `yield` inside an EXCEPT ARM suspends from in here, where the
                 // catch clause above can no longer see it - so the finally below
-                // used to run at that suspension too, printing `fin` before the
-                // value the yield produced. Same wrong order, one arm further in,
-                // and both compiled halves had it right.
+                // must skip that suspension too.
                 try { box.sig = runHandlers(clauses, e) }
                 catch (e2) { if (isGenSuspend(e2)) { suspended = true } throw e2 }
             } finally {
@@ -7807,18 +7574,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         throw e
     }
-    // An except HANDLER BODY IS NOT A SCOPE in Python. This used to push a fresh
-    // scope and pop it again, so every name FIRST bound inside a handler was lost
-    // at the closing brace: `except E: r = 1` followed by `print(r)` died with
-    // "name 'r' is not defined" here while both compiled halves - which emit
-    // js_scope_decl into the enclosing scope - printed 1, like CPython. A live
-    // halves divergence `--cross` never reached because no test assigned a NEW
-    // name inside a handler; a name that ALREADY existed outside was written
-    // through by pySet's outward walk, which is why the bug hid. Found by the
-    // docs/todo.md 1.4 sweep. The `as NAME` binding therefore lands in the
-    // enclosing scope too, exactly as js_scope_decl puts it in the other two
-    // engines - see the deliberate non-convergence noted there: CPython DELETES
-    // that name when the handler exits and all three engines keep it.
+    // An except HANDLER BODY IS NOT A SCOPE in Python: `except E: r = 1`
+    // followed by `print(r)` prints 1, so a name FIRST bound inside a handler
+    // must survive the handler (pushing a scope of its own would lose it). The
+    // `as NAME` binding lands in the enclosing scope too, as js_scope_decl puts
+    // it in the other two engines.
     function runHandler(cl, val) {
         pyCurExc.push(val)
         var sc = scopes[scopes.length - 1]
@@ -7915,7 +7675,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             r = runWith(mgrs, i + 1, body)
         } catch (e) {
             // A `yield` inside a `with` inside a generator suspends by throwing;
-            // __exit__ must NOT run then. Same defect as makeTry's, docs/todo.md 2.6.
+            // __exit__ must NOT run then. Same reason as makeTry's.
             if (isGenSuspend(e)) { throw e }
             if (ex != null && excIsUser(e)) {
                 var cls = pyUser(e.v) ? e.v.__class : undefined
@@ -8025,8 +7785,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o === null || o === undefined) {
             if (name == "__class__") { return pyTypeOf(o) } // None.__class__ is NoneType.
             // A CATCHABLE AttributeError with CPython's own text, as the other two
-            // engines raise. fail() ended the program where CPython runs the
-            // except clause. docs/todo.md 1.8.
+            // engines raise.
             pyAttrErr(o, name)
         }
         // Every Python number carries .real / .imag; a complex answers them from its
@@ -8043,11 +7802,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // can write: CPython qualifies only a NESTED class, and a nested
             // `class` here is bound by the same name as a top-level one.
             if (name == "__name__" || name == "__qualname__") { return pyShortName(o.__name) }
-            // The resolution order, as the two compiled halves already answered it
+            // The resolution order, as the two compiled halves answer it
             // (pyGetAttr in abnf/jsrt.go and in languages/lib/python-rt.metajs).
-            // It was missing HERE only - AttributeError in the interpreter half
-            // where both compiled halves answered the list. A tuple prints as a
-            // list in this subset (docs/todo.md 3.1) and `object` is not a member
+            // A tuple prints as a list in this subset and `object` is not a member
             // of the model's hierarchy, so CPython's trailing <class 'object'> is
             // absent in all three engines.
             if (name == "__mro__") { return clsMRO(o).slice(0) }
@@ -8063,16 +7820,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bcm = pyBuiltinClsMethod(o, name)
             if (bcm != null) { return bcm }
             // list.count / str.upper / dict.get read off the BUILTIN type object:
-            // an unbound method descriptor (docs/todo.md 1.7).
+            // an unbound method descriptor.
             if (o.__builtin == true) {
                 var samp = pyTypeSample(o.__name)
                 if (samp !== undefined && pyBuiltinAttr(samp, name)) { return pyUnboundDesc(o, name) }
             }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
-            // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises,
-            // and as the two compiled halves now do - this was fail(), an
-            // uncatchable abort, in all three engines.
+            // A CATCHABLE AttributeError, as CPython raises and as the two
+            // compiled halves do.
             pyRaise(pyMakeExc("AttributeError",
                               ["type object '" + o.__name + "' has no attribute '" + name + "'"]))
         }
@@ -8088,7 +7844,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("AttributeError",
                               ["module '" + o.__pymod + "' has no attribute '" + name + "'"]))
         }
-        // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1)
+        // A BOUND built-in method, so getattr(xs, "count")(1)
         // is the 1 CPython answers. Ahead of the own-property arm because a dict
         // literally has a "keys" property holding its key ARRAY, and CPython's
         // d.keys is the method. x.__class__ is the same class object type(x)
@@ -8117,8 +7873,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return m
             }
         }
-        // A BOUND METHOD knows its own name, receiver and underlying function
-        // (docs/todo.md 1.4). __qualname__ is answered HERE and nowhere else on
+        // A BOUND METHOD knows its own name, receiver and underlying function.
+        // __qualname__ is answered HERE and nowhere else on
         // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
         // fall out of the record, while a plain function's qualname would need
         // the DEFINING scope recorded at every def site in four places.
@@ -8153,11 +7909,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
         }
-        // docs/todo.md 1.9: the BUILTIN table is asked first, exactly as prender
+        // The BUILTIN table is asked first, exactly as prender
         // asks it, so len.__name__ is 'len' rather than the '<lambda>' fnName
         // answers for a function no `def` ever named. The two tables are keyed
         // by identity, so a user `def len(...)` still answers its own name.
-        // DECLINED, and it is worth saying where: __doc__ and __module__ stay
+        // NOT ANSWERED, on purpose: __doc__ and __module__ stay
         // unanswered (an AttributeError, like any other absent attribute).
         // __doc__ needs a def's leading string statement recorded in three
         // engines AND CPython's own text for every builtin, which this project
@@ -8168,20 +7924,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // exactly one shape: a function read off a class body, where CPython
         // says 'C.m' and this says 'm'. Closing that one needs the DEFINING
         // scope recorded at every def site in three engines and the emitter; the
-        // bound-method arm above already answers 'C.m'. docs/todo.md 1.4.
+        // bound-method arm above already answers 'C.m'.
         if (typeof o == "function" && (name == "__name__" || name == "__qualname__")) {
             var bfnm = bfnName(o)
             if (bfnm !== undefined) { return bfnm }
             return fnName(o)
         }
         // len.__self__ is the builtins MODULE in CPython, not a receiver - the
-        // builtin functions are that module's members. docs/todo.md 1.7.
+        // builtin functions are that module's members.
         if (typeof o == "function" && name == "__self__" && bfnCode(o) !== undefined) {
             return hostGlobals["builtins"]
         }
         // CPython names the TYPE as well as the attribute: "'list' object has no
         // attribute 'nope'", not "'nope'". Both compiled halves say the long
-        // form. docs/todo.md 1.4.
+        // form.
         pyRaise(pyMakeExc("AttributeError",
                           ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"]))
     }
@@ -8297,7 +8053,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A staticmethod / classmethod found through super(). The owner a
         // classmethod binds to is the ORIGINAL cls - `super().who()` inside
         // C.who() must still pass C - and s.__sobj is exactly that when the
-        // frame's first argument was a class. docs/todo.md 1.7.
+        // frame's first argument was a class.
         if (pyIsStatic(r.v) || pyIsClsM(r.v)) { return pyDescGet(r.v, pySuperOwner(s), name) }
         if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
@@ -8464,8 +8220,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (alts.length == 1 && asname == null) { return alts[0] }
         return {por: alts, asname: asname}
     }
-    // A parenthesized group with no comma is just the pattern; with commas (or in
-    // brackets) it is a SEQUENCE pattern.
     // A bracketed pattern list is ALWAYS a sequence pattern; a parenthesized or
     // top-level one only when it carries a comma.
     function makeSeqPattern(items, always) {
@@ -8615,10 +8369,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return clsIsSub(v.__class, cls)
     }
 
-    // A parameter list: positional names with optional default thunks, plus an
-
-    // optional *args rest name; **kwargs, bare '*'/'/' markers and keyword-only
-    // names after *args flag the list as unsupported.
     // The parameter list of a def or lambda: an ordered slot list plus the two rest
     // names. `/` marks every slot before it positional-ONLY; a `*args` or a bare `*`
     // marks every slot after it keyword-ONLY.
@@ -8680,7 +8430,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __pyfn marks this frame as a FUNCTION boundary and __pyd carries the
         // global/nonlocal declarations of the body - see pySet.
         var fscope = {__pyfn: true, __pyd: ""}
-        // CPython's STATIC locals (docs/todo.md 1.6): every name the body binds has
+        // CPython's STATIC locals: every name the body binds has
         // a slot from the moment the frame exists, holding NOTHING. pyDeleted is
         // exactly that marker, so pyReadName / makeVarRef already turn a read of one
         // into the UnboundLocalError CPython raises, and pySet's chain walk stops
@@ -8872,10 +8622,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         //         z = 77
         //     i(); print(z)          # CPython 77
         //
-        // wrote the handler's own block binding and left the module's z at 1, while
-        // both compiled halves answer 77 (python-to-llvm-ir.abnf's py_setvar takes
-        // its g*/n* arms before anything else, which is the order abnf/jsrt.go's
-        // js_pyset_var uses too). This is that same order, in the third engine.
+        // must write the module's z. This is the order python-to-llvm-ir.abnf's
+        // py_setvar and abnf/jsrt.go's js_pyset_var use too (g*/n* arms first).
         // GATED ON THE NAME, because pySet runs on every assignment the interpreter
         // makes and this pre-pass would otherwise walk to the function boundary twice.
         // pyDeclNames holds every name any `global` / `nonlocal` statement in the
