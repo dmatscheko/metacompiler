@@ -102,10 +102,7 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
 // case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
 // EVERY WORD HERE IS AN NsWord, and so is every operand of [[ ]] below. bash does NOT
 // field-split the subject of a `case`, its patterns, or either side of a [[ ]] test -
-// they are the same "unquoted but unsplit" context an assignment's right hand side is
-// (docs/todo.md 1.7, found by probing outward from it). With plain `Word` here,
-// x="  a   b  " made `case $x in "  a   b  ")` take the *) arm and
-// `[[ $x == "  a   b  " ]]` false, in BOTH halves and therefore invisibly to --cross.
+// they are the same "unquoted but unsplit" context an assignment's right hand side is.
 // The body of a clause is an ordinary statement list, except that its separator run must not
 // swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
 CaseStmt    <~~ push(makeCase(takeAll())) ~~>
@@ -131,8 +128,8 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 CForStmt    <~~ push(makeCFor(takeAll())) ~~>
             = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
 
-// for NAME in WORD...; do LIST; done  -- each word is one iteration value (no re-splitting).
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
+// Each word is one iteration value (no re-splitting).
 ForStmt     <~~ push(makeFor(takeAll())) ~~>
             = KwFor ForName [ ForIn ] Sep KwDo CompoundList KwDone ;
 ForIn       = KwIn ForWords ;
@@ -216,10 +213,8 @@ LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 // Spelled as its own production (rather than an ordinary command with word arguments)
 // because the declared NAME has to be known statically: the compiler needs it to pick a
 // variable slot, and `local` needs it to record the save entry for the current call frame.
-// The [ RedirList ] is what lets `declare -p missing 2>/dev/null` parse: this
-// production is not a SimpleCommand, so it did not inherit SimpleCommand's
-// redirections, and every redirected declaration was an outright parse failure.
-// It only started to matter when `declare -p` gained a diagnostic to silence.
+// It is not a SimpleCommand, so it needs its own [ RedirList ] for
+// `declare -p missing 2>/dev/null` to parse.
 DeclCommand <~~ push(makeDeclR(takeAll())) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
@@ -246,12 +241,9 @@ AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
 // THE RIGHT HAND SIDE OF AN ASSIGNMENT IS NOT FIELD-SPLIT. `y=$x` with
 // x="  a   b  " assigns the value CHARACTER FOR CHARACTER; only the bare words of an
-// array literal - `A=($x)` - are split, and they go through CWord below. This used to
-// be `Word`, so every scalar assignment lost its leading and trailing blanks and
-// collapsed its internal runs, in both engines and therefore invisibly to --cross
-// (docs/todo.md 1.7). NsWord is the same segment list read in the mode a double-quoted
-// word already used: "$@" and "${a[@]}" still contribute several fields, which is what
-// makes `c=$@` join them with a space rather than concatenate them.
+// array literal - `A=($x)` - are split, and they go through CWord below. NsWord is the
+// same segment list read in the mode a double-quoted word uses: "$@" and "${a[@]}" still
+// contribute several fields, which is what makes `c=$@` join them with a space.
 NsWord      <~~ push(mkNsWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
@@ -368,16 +360,11 @@ DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
             = "\\" AnyCh ;
 
-// The extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). MEASURED SCOPE: only PatSeg - the
-// right hand side of == / != inside [[ ]] - refers to ExtGlob. bash parses the WHOLE file
-// before it runs anything, so a `shopt -s extglob` on line 1 does not make line 5 parse:
-//     $ cat f; shopt -s extglob; echo @(*.cc|*.h)
-//     f: line 2: syntax error near unexpected token `('
-// while `[[ --verbose == --@(help|verbose) ]]` needs no shopt at all. Wiring ExtGlob into
-// WordSeg / CWordSeg as well was measured and REVERTED: +0 must-parse files, -27 on the
-// reject row (all of extglob-files/, extglob-match/003 and /020, toysh/003 and /004,
-// case_/012, globignore/018, redirect-multi/009 and /010).
-// They are ordinary PATTERN text as
+// The extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). Only PatSeg - the right hand
+// side of == / != inside [[ ]] - refers to ExtGlob, on purpose: there bash needs no shopt,
+// while elsewhere a `shopt -s extglob` in the same file does not make a later line parse
+// (bash parses before it runs), so accepting extglobs in ordinary words would accept
+// scripts bash rejects. They are ordinary PATTERN text as
 // far as the word is concerned - the group is rebuilt literally (with $ expansions and
 // quoted arms substituted) and globAt() is what understands it. Nesting is allowed:
 //     [[ --verbose=1 == --@(help|verbose=@(1|2)) ]]   is true in bash.
@@ -399,8 +386,8 @@ EgBare      <~~ push(makeConst(up.in)) ~~> = !@+"|()\"'\\$`@?*+!" ;
 // A bare run: any char that is not whitespace, a separator, or a shell metacharacter.
 // "#" is NOT excluded: it only opens a comment at the START of a word, and a word can never
 // start with one here because the Whitespace rule (which contains Comment) has already run
-// before the first segment. Excluding it made `echo a#b` print "a" and `[[ 64#a -eq 10 ]]`
-// a parse error - real bash prints a#b and accepts the base-N literal.
+// before the first segment. So `echo a#b` prints a#b and `[[ 64#a -eq 10 ]]` reads the
+// base-N literal, as in bash.
 BareSeg     <~~ push(makeConst(up.in)) ~~>
             = !@+" \t\n\r;$'\"\\(){}&|<>`@?*+!" ;
 
@@ -458,7 +445,7 @@ PfxTok      = "*" | "@" ;
 //     @A -> x='a b', with a `declare -FLAGS ` prefix when the name has an attribute
 //     @a -> the attribute letters (i for `declare -i n`, ai for `declare -ai x`)
 // With a @ or * SUBSCRIPT, four of them stop being element-wise and describe the whole
-// variable instead - the half of docs/todo.md 2.12 that neither engine had:
+// variable instead:
 //     ${a[@]@A} -> the three fields  declare  -a  a=([0]="pa" [1]="pb")
 //     ${a[@]@a} -> `a a`, one copy per element      ${a[@]@K} -> 0 "pa" 1 "pb"
 //     ${a[@]@k} -> the four fields  0 pa 1 pb
@@ -592,9 +579,7 @@ ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
 // BASE#DIGITS WHERE EITHER SIDE IS BUILT BY EXPANSION. Real bash expands the whole
 // arithmetic string first and only then lexes it, so `10#$num` is `10#0012` is 12; here the
 // expression is a parse tree, so the two operands are parsed as WORDS (literal characters
-// plus any $ expansion) and joined at run time. Without this `$(( 10#$num ))` did not parse
-// as arithmetic at all and the shell fell back to $( ( ... ) ), i.e. "command not found:
-// 10#0012" (docs/todo.md 1.8).
+// plus any $ expansion) and joined at run time.
 //
 // The BASE side admits only DIGITS as literal text, which is what keeps this rule from
 // swallowing anything else: bash rejects a bare name there too - `b=16; echo $(( b#ff ))` is
@@ -603,12 +588,10 @@ ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
 // ArBase alternative fails on `10#$num` and ArDec then matches just "10", and PEG ordered
 // choice never comes back (manual chapter 4).
 //
-// WHITESPACE, and it cost an hour: a LEADING `:whitespace()` on this production made the
-// rule never match at all (mkArBaseDyn was never called, and `16#ff` quietly fell through
-// to ArNum's own ArBase). It has to sit AFTER the first element, exactly like ArHex's
-// `ArHexPfx :whitespace() ArHexDig`. The two operand productions turn skipping off after
-// their first segment for the same reason `$(( 1 6#3 ))` must stay an error: with skipping
-// on, ArBaseLhs read "1" and "6" across the blank and answered base 16.
+// WHITESPACE: a LEADING `:whitespace()` on this production makes the rule never match, so
+// it sits AFTER the first element, like ArHex's `ArHexPfx :whitespace() ArHexDig`. The two
+// operand productions turn skipping off after their first segment so `$(( 1 6#3 ))` stays
+// an error instead of reading "1" "6" across the blank as base 16.
 ArBaseDyn   <~~ push(mkArBaseDyn(takeAll())) ~~>
             = ArBaseLhs :whitespace() "#" ArBaseRhs :whitespace(Whitespace) ;
 ArBaseLhs   <~~ push(mkWord(takeAll())) ~~> = ArBaseLSeg :whitespace() { ArBaseLSeg } ;
@@ -848,11 +831,6 @@ BraceKwEnd = :script(~~
     })()
 ~~) ;
 
-// "$" as a literal dollar. Bash allows it (`echo $`, `echo $}`, `x=$;`) but NOT before "{":
-// `echo ${`, `echo x${` and `echo "${"` are all "bad substitution"/EOF errors there, so a
-// ${...} that DollarBrace could not parse must not silently degrade to "$" plus a "{" word.
-// That is what made the ksh-only `${ echo hi }` and `${|REPLY=x}` forms parse, and
-// "${foo%d'}" too.
 // Succeeds (consuming nothing) when the arithmetic slot of a ${v:off:len} is EMPTY, i.e.
 // when the next non-blank character is the ":" before the length or the closing "}".
 ArEndHere = :script(~~
@@ -874,6 +852,10 @@ EgLParen = :script(~~
     (function() { if (c.peek(0) !== 40) { return abnf.newToken("\x01eg", 0) } })()
 ~~) ;
 
+// "$" as a literal dollar. Bash allows it (`echo $`, `echo $}`, `x=$;`) but NOT before "{":
+// `echo ${`, `echo x${` and `echo "${"` are all "bad substitution"/EOF errors there, so a
+// ${...} that DollarBrace could not parse (e.g. ksh's `${ echo hi }`) must not silently
+// degrade to "$" plus a "{" word.
 NotDollarBrace = :script(~~
     (function() { if (c.peek(0) === 123) { return abnf.newToken("\x01dollar-brace", 0) } })()
 ~~) ;
@@ -972,12 +954,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         var n = s.length
         var c0 = anytype
-        // THIS SKIP USED TO THROW ITS OWN RESULT AWAY. The loop ended by setting `i = n + 1`
-        // to stand in for a `break`, and the line after it recovered `i - (n + 1)` - which is
-        // 0, not the position it stopped at. So no leading blank was ever skipped and
-        // strToInt("  12") answered 0, while the compiler half's rt_str2int answered 12:
-        // `$(( v + 1 ))` with v="  12" was 1 in one engine and 13 in the other. Found by the
-        // printf conversion sweep, not by any gate.
+        // Leading blanks are skipped, matching the compiler's rt_str2int: with v="  12",
+        // `$(( v + 1 ))` is 13 in both engines.
         var scanning = true
         while (scanning && i < n) {
             c0 = s.charCodeAt(i)
@@ -1021,20 +999,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
     // standard error channel, 2 = discarded.
     //
-    // CHANNEL 1 USED TO BE DROPPED, and the comment here said "there is no stderr primitive
-    // behind a grammar run". There is: `eprintln` is the tag host's diagnostic channel, it
-    // goes straight to standard error, and BOTH script hosts bind it identically (goja in
-    // abnf/commonscript.go, the frozen engine in abnf/jsrt.go's standardJSBindings) - which
-    // is the condition the matrix imposes, since it demands byte-identical stderr too.
-    // Dropping meant `echo x >&2` printed nothing where real bash 5.3 prints it
-    // (docs/todo.md 1.9).
-    //
-    // eprintln APPENDS a newline and there is no eprint, so channel 1 is LINE BUFFERED
-    // here: bytes accumulate in errBuf and each complete line is handed over without its
-    // newline. That reproduces the shell exactly for the only text a shell writes to fd 2
-    // (diagnostics and `echo`, both newline-terminated). A final PARTIAL line - `printf x
-    // >&2` with no newline - is flushed at the end of the run and does gain a newline; that
-    // is the one byte where this half cannot match, and it is recorded rather than hidden.
+    // Channel 1 goes to `eprintln`, the tag host's standard-error channel, which both script
+    // hosts bind identically (goja in abnf/commonscript.go, the frozen engine in abnf/jsrt.go)
+    // so the matrix's byte-identical stderr holds. eprintln APPENDS a newline and there is no
+    // eprint, so channel 1 is LINE BUFFERED: bytes accumulate in errBuf and each complete line
+    // is handed over without its newline. That is exact for everything a shell writes to fd 2
+    // in practice; a final PARTIAL line (`printf x >&2`) is flushed at the end of the run and
+    // gains a newline - the one byte this half cannot match.
     var sinkOut = 0
     var sinkErr = 1
     var errBuf = ""
@@ -1117,8 +1088,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var abortSignal = null   // set by a set -u failure during expansion
 
     // $0 and the prefix on every diagnostic: the program's own path, exactly as this
-    // process was given it. Both are what a real shell answers, and both used to be the
-    // engine naming itself instead (docs/todo.md 1.13, 2.15).
+    // process was given it, which is what a real shell answers.
     var scriptName = c.file
 
     // There is no process environment behind a grammar run, so the few variables a script may
@@ -1152,10 +1122,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Record NAME's current binding in the innermost call frame, so it is restored on return.
     //
     // A BINDING IS NOT JUST A VALUE. `declare -i n` inside a function is a function-local
-    // *attribute* in bash, and so are -a/-A/-u/-l; leaving them behind made `n="3+4"` in the
-    // caller answer 7 (docs/todo.md 1.5). The array store is a second table keyed by name, so
-    // it has to be saved beside the scalar - and COPIED, because a function that writes an
-    // element without redeclaring the array mutates the very object saved here.
+    // *attribute* in bash, and so are -a/-A/-u/-l, so they are saved and restored too. The
+    // array store is a second table keyed by name, so it is saved beside the scalar - and
+    // COPIED, because a function that writes an element without redeclaring the array mutates
+    // the very object saved here.
     function declareLocal(name) {
         if (localFrames.length == 0) { return }
         var fr = localFrames[localFrames.length - 1]
@@ -1189,9 +1159,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "@") { return encFields(posParams) }
         if (allDigits(name)) {
             var idx = strToInt(name)
-            // $0 IS THE SCRIPT, and both halves answered the literal "bash" (docs/todo.md
-            // 1.13, 2.15). c.file is the program's path exactly as the metacompiler was
-            // given it, which is what a real shell's $0 holds.
+            // $0 is the script path (see scriptName).
             if (idx == 0) { return scriptName }
             if (idx <= posParams.length) { return posParams[idx - 1] }
             return ""
@@ -1275,9 +1243,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // pat is the OPTIONAL operand of ${v^pat} / ${v^^pat} / ${v,pat} / ${v,,pat}: a glob
     // matched against ONE character at a time, so only the characters it matches are
-    // converted. It used to be parsed and dropped, so ${s^^[bn]} on banana answered BANANA
-    // where bash 5.3 answers BaNaNa (docs/todo.md 1.8). "" is the absent case and means
-    // every character - globMatch("", "a") is false, so it is tested for, not delegated.
+    // converted: ${s^^[bn]} on banana is BaNaNa. "" is the absent case and means every
+    // character - globMatch("", "a") is false, so it is tested for, not delegated.
     function caseMap(v, mode, pat) {
         var out = ""
         var up = (mode == "^" || mode == "^^")
@@ -1290,9 +1257,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + ch.length
             // ASCII plus the Latin-1 supplement (U+00C0..U+00DE / U+00E0..U+00FE, minus
             // the two multiplication/division signs, which are not letters). bash 5.3.15
-            // maps those: ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute. Only
-            // ASCII used to be mapped, in a runtime whose ${#s} and ${s:i:n} were already
-            // codepoint-aware.
+            // maps those: ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute.
             var touch = (all || first) && (nopat || globMatch(pat, ch))
             if (touch && ch.length == 1) {
                 var cc = ch.charCodeAt(0)
@@ -1340,9 +1305,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v.slice(charIdx(v, off), charIdx(v, e2))
     }
 
-    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
     // ---- ${v@OP} transform operators ------------------------------------------------
-    // Every rule below was measured against GNU bash 5.3.15 before it was written.
+    // Every rule below is checked against GNU bash 5.3.15.
 
     function octal3(k) {
         var o = ""
@@ -1395,9 +1359,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${v@a}: the attribute letters. LIMIT: -r and -x are not modelled anywhere in this
     // grammar, so they are absent here too; -a/-A/-i/-u/-l are answered.
     // bash answers ALL of them, in the order a/A, i, l, u: `declare -ai x` is `ai` and
-    // `declare -iu n` is `iu`. This used to answer the FIRST letter only, which is what
-    // made `declare -p` print `declare -a` for a name bash prints `declare -ai` for -
-    // recorded at the time as a limit and closed with docs/todo.md 2.12.
+    // `declare -iu n` is `iu`.
     function varAttrs(name) {
         var out = ""
         if (isArr(name)) { out = arrs[arrKey(name)].assoc ? "A" : "a" }
@@ -1408,29 +1370,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ---- declare -p ----------------------------------------------------------------
     // `declare -p NAME` reproduces the declaration bash would need to recreate the
-    // variable, and it used to print NOTHING at all: -p was classed with -f/-F as a query
-    // that is "not modelled" (docs/todo.md 1.8). Measured against bash 5.3:
+    // variable. bash 5.3:
     //
     //     declare -- x="hello"      declare -i n="7"       declare -u U="ABC"
     //     declare -a a=([0]="p" [1]="q")                   declare -A m=([k]="v" )
     //     bash: declare: nosuchvar: not found              (fd 2, status 1)
     //
     // The trailing space before ")" on the ASSOCIATIVE form is bash's, not a slip - the
-    // indexed form has none - and it is reproduced here because it is free.
+    // indexed form has none.
     //
-    // ONE LIMIT, inherited rather than introduced: -x/-r are not modelled anywhere in this
-    // grammar (see varAttrs), so `declare -x XX=1` prints `declare --`. The other one -
-    // varAttrs answering a single letter, so `declare -ai x` printed `declare -a` - was
-    // closed with docs/todo.md 2.12. The bare `declare -p` with NO names still prints
-    // nothing: bash lists every variable in the shell, most of which this engine does not
-    // have, so there is no output that could be right.
+    // LIMITS: -x/-r are not modelled (see varAttrs), so `declare -x XX=1` prints
+    // `declare --`. The bare `declare -p` with NO names prints nothing: bash lists every
+    // variable in the shell, most of which this engine does not have.
     // bash quotes a `declare -p` value with "..." unless it holds a CONTROL character, and
     // with the ANSI-C form $'...' when it does - the same switch ${v@Q} makes, and the
-    // same escape table, which is why this calls ansiQuote rather than carrying a second
-    // copy. (An earlier draft of this block carried its own `octal3` too, which SILENTLY
-    // REPLACED the one above and made ${v@a} answer three NUL bytes - the manual's
-    // shared-helper trap, inside one file.) A byte >= 128 is NOT a control character: in a
-    // UTF-8 locale bash prints the accented byte of `declare -- q="aeb"` intact.
+    // same escape table, hence ansiQuote. (Do not add a second helper named like one above:
+    // a later function declaration silently replaces the earlier one.) A byte >= 128 is NOT
+    // a control character: in a UTF-8 locale bash prints `declare -- q="aeb"` intact.
     function declQuote(v) {
         var ctl = false
         var i
@@ -1448,9 +1404,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // "it holds at least one element, or it is known associative". That runtime is a flat
     // triple table with no record of a declared-but-EMPTY indexed array, so `a=();
     // declare -p a` answers `not found` in both engines where bash answers
-    // `declare -a a=()`. Keeping the rule identical here is what keeps the two halves
-    // byte-identical; giving the compiler a fifth table and a subshell snapshot entry for
-    // that one line was judged not worth it, and it is recorded rather than hidden.
+    // `declare -a a=()`. Keeping the rule identical here keeps the two halves
+    // byte-identical; a fifth compiler table for that one case is not worth it.
     function declIsArr(name) {
         if (!isArr(name)) { return false }
         return arrKeyList(name).length > 0 || arrs[arrKey(name)].assoc
@@ -1631,8 +1586,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a pure string function; @a is the only one that looks at the NAME rather than the value.
     //
     // `isset` is not decoration: ${nosuch@Q} is EMPTY in bash 5.3.15 while ${empty@Q} is
-    // `''`, and both halves used to answer `''` for the first (docs/todo.md 2.12). The same
-    // distinction settles ${nosuch@A}, which was `nosuch=''`.
+    // `''`; the same distinction makes ${nosuch@A} empty.
     function xformOne(v, xfOp, nm, isset) {
         if (xfOp == "U") { return v.toUpperCase() }
         if (xfOp == "L") { return v.toLowerCase() }
@@ -1682,6 +1636,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return stripPat(v, pat, (pe == "#" || pe == "##"), (pe == "##" || pe == "%%"))
     }
 
+    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
     function mkParamExp(items) {
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
@@ -1768,8 +1723,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         return xformOne(scGet(idxName, sub), idxXf, idxName, scHas(idxName, sub))
                     }
                     // @A, @K and @k describe the WHOLE VARIABLE when the subscript is @ or *,
-                    // and none of the three is the per-element walk the others are. Measured
-                    // against bash 5.3.15 (docs/todo.md 2.12):
+                    // and none of the three is the per-element walk the others are. bash 5.3.15:
                     //   a=(pa pb)          ${a[@]@A} -> declare -a a=([0]="pa" [1]="pb")
                     //                      ${a[@]@K} -> 0 "pa" 1 "pb"
                     //                      ${a[@]@k} -> the four fields 0 pa 1 pb
@@ -1799,13 +1753,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return joinList(outv, ifsFirst())
                 }
             }
-            // A PATTERN OPERATOR ON A SUBSCRIPTED EXPANSION was parsed and then dropped on
-            // the floor in every engine: ${a[@]/x/Y} and ${a[1]#p} answered the untouched
-            // element or element list (docs/todo.md 2.15). Silently wrong, which is the
-            // worst kind.
-            //
+            // A PATTERN OPERATOR ON A SUBSCRIPTED EXPANSION (${a[@]/x/Y}, ${a[1]#p}).
             // bash applies the operator to EVERY ELEMENT and only then joins, and the
-            // difference is observable rather than academic: `b=(aa ba); echo "${b[*]/a/Q}"`
+            // difference is observable: `b=(aa ba); echo "${b[*]/a/Q}"`
             // is "Qa bQ" in bash 5.3.15, where joining first and replacing once would give
             // "Qa ba". The pattern and the replacement are evaluated ONCE, before the walk,
             // so a command substitution in either runs once and not once per element.
@@ -1928,9 +1878,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
-        // -p/-f/-F are QUERIES, not declarations. They are not modelled (nothing is printed),
-        // but they must not be read as `declare NAME`, which below would make the name a
-        // fresh unset local.
+        // -p/-f/-F are QUERIES, not declarations: -p with names prints (declLine), -f/-F are
+        // not modelled. None of them may be read as `declare NAME`, which below would make
+        // the name a fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         return function() {
@@ -2010,7 +1960,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- glob (pathname-style) pattern matching: * ? [...] and a backslash escape ----
     // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
 
-    // Match p[pi..] against s[si..]. Recursive with backtracking over each "*".
     // --- extended globs: @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b) ---------------------------
     // Index just past the ")" that closes the "(" at p[pi], honouring nesting and escapes.
     function egEnd(p, pi) {
@@ -2089,6 +2038,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return false
     }
 
+    // Match p[pi..] against s[si..]. Recursive with backtracking over each "*".
     function globAt(p, pi, s, si) {
         while (pi < p.length) {
             var pc = p.charCodeAt(pi)
@@ -2157,10 +2107,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // A bracket expression at p[pi] ("["). ok=0 means unterminated (a literal "[").
-    // "[:name:]" inside it is a POSIX class - which this did not implement at all, so
-    // `case 5 in [[:digit:]]*)` read the bracket as the literal set {[,:,d,i,g,t}. bash
-    // 5.3.15 answers "yes". An unknown name is NOT an error in a glob (unlike in an ERE):
-    // bash matches nothing, silently, so it contributes no characters.
+    // "[:name:]" inside it is a POSIX class (`case 5 in [[:digit:]]*)` matches). An unknown
+    // name is NOT an error in a glob (unlike in an ERE): bash matches nothing, silently, so
+    // it contributes no characters.
     function globClass(p, pi, ch) {
         var j = pi + 1
         var neg = false
@@ -2263,12 +2212,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     var arrs = {}
     function arrKey(name) { return "$" + name }
-    // EVERY NAME THAT HAS EVER HELD AN ARRAY OR AN ATTRIBUTE, in creation order. The
-    // scalar table has `varNames` for exactly this reason - snapshotVars walks it - and
-    // the array and attribute tables had no equivalent, which is why a subshell restored
-    // the scalars and left the arrays and the attributes behind (docs/todo.md 1.8).
-    // Appending only, so an index into it stays valid: that is what lets restoreState
-    // below tell "existed before the subshell" from "created inside it".
+    // EVERY NAME THAT HAS EVER HELD AN ARRAY OR AN ATTRIBUTE, in creation order - the
+    // array/attribute counterpart of `varNames`, so a subshell can snapshot and restore
+    // those tables too. Appending only, so an index into it stays valid: that is what lets
+    // restoreState below tell "existed before the subshell" from "created inside it".
     var stNames = []
     var stSeen = {}
     function touchState(name) {
@@ -2314,10 +2261,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // IS THIS NAME ASSOCIATIVE - AND IT IS A WHOLE-PROGRAM FACT, not a property of the
     // current binding. languages/bash-to-llvm-ir.abnf decides a subscript's normalisation
     // from `assocArrays`, which is filled once for the whole program at walk time and
-    // never unwound; without the same rule here, isolating the array store across a
-    // subshell (docs/todo.md 1.8) made `( declare -A m ); m[k]=v; m[j]=w` answer "w" in
-    // the interpreter and "v w" in the compiler - a live halves divergence created by the
-    // fix rather than by the defect. `assoc` is sticky here for exactly that reason.
+    // never unwound. So `assoc` is sticky here too: otherwise `( declare -A m ); m[k]=v;
+    // m[j]=w` would answer "w" here and "v w" in the compiler.
     var assocSeen = {}
     function assocFact(name, assoc) {
         var k = "$" + name
@@ -2416,17 +2361,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < ks.length; i++) { out.push(arrGet(name, ks[i])) }
         return out
     }
-    // A SET SCALAR IS A ONE-ELEMENT ARRAY, and it was not one here: `x=Q` answered
-    // nothing at all for "${x[@]}", "${x[0]}" and "${!x[@]}" and 0 for ${#x[@]}, where
-    // bash 5.3 answers Q, Q, 0 and 1 - the scalar occupies index 0 (docs/todo.md 1.8).
+    // A SET SCALAR IS A ONE-ELEMENT ARRAY at index 0: with `x=Q`, "${x[@]}", "${x[0]}",
+    // "${!x[@]}" and ${#x[@]} answer Q, Q, 0 and 1 in bash 5.3.
     //
     // These four live BESIDE arrGet/arrHas/arrKeyList/arrValList rather than inside
-    // them, and that is deliberate: the fallback belongs to the ${name[...]} EXPANSION
-    // SITES only. Folding it into the store would make isArr, runAssign, `unset` and
-    // every `local` save read a plain scalar as an array, which is a much larger claim
-    // than the one bash makes. languages/bash-to-llvm-ir.abnf reaches the same four
-    // through rt_sc_get / rt_sc_has / rt_sc_count / rt_sc_list in
-    // languages/lib/bash-rt.c, which are expansion-site-only for the same reason.
+    // them, deliberately: the fallback belongs to the ${name[...]} EXPANSION SITES only.
+    // Folding it into the store would make isArr, runAssign, `unset` and every `local`
+    // save read a plain scalar as an array. Twins: rt_sc_get / rt_sc_has / rt_sc_count /
+    // rt_sc_list in languages/lib/bash-rt.c, expansion-site-only for the same reason.
     function scKeyList(name) {
         if (isArr(name)) { return arrKeyList(name) }
         if (isSetVar(name)) { return ["0"] }
@@ -2461,10 +2403,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (blank) { return (wordT != null) ? wordJoin(wordT()) : "" }
         return joined
     }
-    // ${a[k]-default} and its three siblings, which the subscript branch used to drop on
-    // the floor: every ${name[sub]OP word} answered the ELEMENT and ignored OP, so a
-    // missing element expanded to "" instead of to its default (docs/todo.md 1.8). The
-    // arms are the scalar ones with "is it set" asked of the ELEMENT.
+    // ${a[k]-default} and its three siblings: the scalar arms with "is it set" asked of
+    // the ELEMENT.
     function elemOpValue(name, sub, op, wordT) {
         var v = scGet(name, sub)
         if (op == "") { return v }
@@ -2619,10 +2559,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function mkTilde() { return function() { return getVarVal("HOME") } }
 
-    // A word is the concatenation of its segments. When no segment can produce more than one
-    // field the fast path just concatenates strings; otherwise the fields are joined at the
-    // boundaries ( x"$@"y with (a b c) is "xa" "b" "cy" ), and a word that consists only of
-    // expansions which produced nothing disappears entirely.
     // A double-quoted string: no splitting, but "$@" / "${a[@]}" still contribute several
     // fields, joined onto the neighbouring text at the boundaries.
     function mkDqWord(segs) {
@@ -2644,7 +2580,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // The same segment list, read WITHOUT field splitting - the mode an assignment's
-    // right hand side and a double-quoted word share (docs/todo.md 1.7). An unquoted
+    // right hand side and a double-quoted word share. An unquoted
     // expansion is marked by mkSplittable; dropping the mark is the whole difference,
     // so this delegates rather than duplicating mkDqWord's boundary handling.
     function unSplit(segThunks) {
@@ -2659,18 +2595,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function mkNsWord(segThunks) { return mkDqWord(unSplit(segThunks)) }
 
+    // A word is the concatenation of its segments. Fields are joined at the boundaries
+    // ( x"$@"y with (a b c) is "xa" "b" "cy" ), and a word that consists only of
+    // expansions which produced nothing disappears entirely.
     function mkWord(segThunks) {
         var canSplit = false
         var i
         for (i = 0; i < segThunks.length; i++) { if (typeof segThunks[i] != "function") { canSplit = true } }
         // No segment is an UNQUOTED expansion, so nothing here is split - but a QUOTED
-        // "$@" or "${a[@]}" still contributes several fields, and concatenating its encoded
-        // form as if it were text was a live halves divergence `--cross` had never reached:
-        // `arr=(one two); printf '<%s>' x"${arr[@]}"y` printed `<x\x02one\x01two\x01y>` here,
-        // the 0x02 marker and all, where the compiled half and bash 5.3.15 both print
-        // `<xone><twoy>`; and `set -- p q; printf '<%s>' "$@"z` LOST the z entirely, because
-        // decFields discards a tail with no closing 0x01. Same boundary join as mkWord
-        // below, without the delimiter state - a quoted expansion has no boundary.
+        // "$@" or "${a[@]}" still contributes several fields, which must be decoded, not
+        // concatenated as text: `arr=(one two); printf '<%s>' x"${arr[@]}"y` is
+        // `<xone><twoy>`. Same boundary join as below, without the delimiter state - a
+        // quoted expansion has no boundary.
         if (!canSplit) {
             return function() {
                 var res = []
@@ -2695,25 +2631,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         // A DELIMITER AT EITHER END OF AN UNQUOTED EXPANSION SEPARATES IT FROM THE LITERAL
-        // TEXT BESIDE IT, and that was the whole of docs/todo.md 2.15's last case:
-        // `x="  a   b  "; echo w:[$x]` printed `w:[a b]` where bash 5.3.15 prints
-        // `w:[ a b ]` - four words, `w:[`, `a`, `b`, `]`. splitIFS throws leading and
-        // trailing IFS whitespace away, which is right for the fields and loses exactly the
-        // fact that the word had a boundary there.
-        //
-        // So the two boundaries are asked of the RAW value and the assembly becomes a small
-        // state machine: `open` is the field being built and `opened` says whether anything
-        // has been put in it since the last close. A boundary delimiter closes `open` IF one
-        // is open, and does nothing otherwise - which is what makes `echo $x` still two
-        // words, `$x$y` with x="a " and y=" b" still two, and `""$x` three (the empty
-        // literal IS an open field). Measured against bash 5.3.15 over twelve words.
+        // TEXT BESIDE IT: `x="  a   b  "; echo w:[$x]` is four words in bash 5.3.15,
+        // `w:[`, `a`, `b`, `]`. splitIFS drops leading and trailing IFS whitespace, which is
+        // right for the fields but loses the boundary, so the two boundaries are asked of the
+        // RAW value and the assembly is a small state machine: `open` is the field being
+        // built and `opened` says whether anything has been put in it since the last close.
+        // A boundary delimiter closes `open` IF one is open, and does nothing otherwise - so
+        // `$x$y` with x="a " and y=" b" is two words and `""$x` three (the empty literal IS
+        // an open field).
         //
         // Only IFS WHITESPACE counts as a LEADING boundary: a leading non-whitespace
-        // delimiter already produces an empty first field, which does the same job, and
-        // counting it twice made `IFS=:; c=":a:"; echo w:[$c]` four words where bash says
-        // three. A TRAILING delimiter of either kind closes.
+        // delimiter already produces an empty first field (`IFS=:; c=":a:"; echo w:[$c]` is
+        // three words). A TRAILING delimiter of either kind closes.
         //
-        // languages/bash-to-llvm-ir.abnf's mkWord and rt_bnd_acc2 / rt_bnd_open2 /
+        // Twins: mkWord in languages/bash-to-llvm-ir.abnf and rt_bnd_acc2 / rt_bnd_open2 /
         // rt_bnd_opened2 in languages/lib/bash-rt.c are the same state machine.
         return function() {
             var res = []
@@ -2759,7 +2690,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return ifsHas(seps, v.charAt(v.length - 1))
     }
 
-    // Unquoted \x : drop the backslash, keep the char (\  -> space, \$ -> $, \\ -> \).
     // $'...' body -> the decoded string (bash's ANSI-C escapes).
     function ansiC(t) {
         var out = ""
@@ -2782,9 +2712,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (e == "'") { out = out + "'" }
                 else if (e == "\"") { out = out + "\"" }
                 // \NNN: one to THREE octal digits IN TOTAL, so $'\0101' is \b then "1" and
-                // $'\101' is "A". "\0" alone used to be the only octal form understood, which
-                // made $'\001x' a NUL followed by "01x" - and in the compiler, where a NUL
-                // terminates the C string, the empty string.
+                // $'\101' is "A".
                 else if (e >= "0" && e <= "7") {
                     var ov = e.charCodeAt(0) - 48, on = 1
                     while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
@@ -2813,6 +2741,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return -1
     }
 
+    // Unquoted \x : drop the backslash, keep the char (\  -> space, \$ -> $, \\ -> \).
     function escChar(t) { return t.slice(1) }
     // Double quoted \x : the backslash stays literal UNLESS it escapes $ " \ or `.
     function dqEsc(t) {
@@ -2835,10 +2764,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
         return strToInt(t)
     }
-    // bash's digit alphabet is base dependent above 36, and this used to be one map for
-    // every base: 0-9, then a-z AND A-Z both 10..35. Measured against bash 5.3.15,
-    // $(( 64#Az )) is 2339 and $(( 64#@_ )) is 4031, so once the base passes 36 the two
-    // cases SEPARATE - a-z is 10..35, A-Z is 36..61 - and "@" and "_" are digits 62 and 63.
+    // bash's digit alphabet is base dependent above 36: the two cases SEPARATE - a-z is
+    // 10..35, A-Z is 36..61 - and "@" and "_" are digits 62 and 63 ($(( 64#Az )) is 2339,
+    // $(( 64#@_ )) is 4031 in bash 5.3.15).
     // At 36 and below the alphabet is case insensitive, which is what makes 16#FF and 16#ff
     // both 255. languages/lib/bash-rt.c's rt_basenum is the same table for the compiled half.
     function digitsInBase(t, base) {
@@ -3025,10 +2953,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash 5.3.15
         // reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a
-        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="". They
-        // used to go through the indexed path, which asks for the next free INTEGER
-        // index and gets one because every string key reads as 0: a+=(zz) created
-        // a["1"]="zz".
+        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="". (The
+        // indexed path would ask for the next free INTEGER index - every string key reads as
+        // 0 - and create a["1"]="zz".)
         if (plain.length > 0) {
             if (arrs[arrKey(name)].assoc) {
                 for (i = 0; i < plain.length; i = i + 2) {
@@ -3081,13 +3008,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
         }
         return function() {
-            // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER (docs/todo.md 2.12).
-            // `cmd="echo hi"; $cmd` runs echo with the argument hi in bash 5.3.15; this
-            // used to wordJoin the command word and look for a command literally named
-            // "echo hi". The extra fields become the FIRST arguments, ahead of the words
-            // that follow, and a word that expands to no field at all (`e=""; $e echo x`)
-            // contributes nothing - which is why the split has to happen here rather than
-            // inside runCommand, and why the empty case is a success with nothing run.
+            // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER: `cmd="echo hi"; $cmd` runs
+            // echo with the argument hi. The extra fields become the FIRST arguments, and a
+            // word that expands to no field at all (`e=""; $e echo x`) contributes nothing -
+            // which is why the split happens here rather than inside runCommand.
             var cf = wordFields(cmdT())
             var rest = expandWords(argTs)
             var k
@@ -3171,16 +3095,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the "-" / "0" / "#" flags and the usual backslash escapes. The format is reused until
     // the arguments run out, exactly like the shell.
     //
-    // WIDTH OF THE INTEGER MODEL, stated because it is visible here and nowhere else:
-    // this engine is 32-bit throughout (strToInt ends in `| 0`; the compiler half's
-    // rt_str2int/rt_int2str are i32), while bash's printf is 64-bit. So a NEGATIVE operand
-    // under %x/%X/%o/%u renders its 32-BIT two's complement - `printf '%x' -1` is ffffffff
-    // here and ffffffffffffffff in bash 5.3. Both halves agree; nothing asserts it.
+    // WIDTH OF THE INTEGER MODEL: both halves are 32-bit throughout (strToInt ends in
+    // `| 0`; the compiler's rt_str2int/rt_int2str are i32), while bash's printf is 64-bit.
+    // So a NEGATIVE operand under %x/%X/%o/%u renders its 32-BIT two's complement -
+    // `printf '%x' -1` is ffffffff here and ffffffffffffffff in bash 5.3.
     //
-    // NOT IMPLEMENTED, in either half: %e %f %g %a and the ' flag. bash's arithmetic and
-    // this whole runtime are integer-only (bash-rt.c has no double at all), so a float
-    // conversion would need a float parser and an exact formatter in the C runtime before
-    // it could be written here. Reported rather than half-done.
+    // NOT IMPLEMENTED, in either half: %e %f %g %a and the ' flag. The whole runtime is
+    // integer-only (bash-rt.c has no double), so a float conversion would first need a
+    // float parser and an exact formatter in the C runtime.
     function printfBuiltin(args) {
         var dest = null
         var a = args
@@ -3407,11 +3329,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return 0
     }
-    // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined".
-    // This used to join them with a single space, so `IFS=: read -r a b <<< "p::q:r:"`
-    // answered " q r" where bash 5.3.15 answers ":q:r:" and `read -r a b <<< "  x   y   z  "`
-    // answered "y z" where bash answers "y   z" (docs/todo.md 2.15). Measured against bash
-    // 5.3.15 over 26 cases, the rule is:
+    // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined":
+    // `IFS=: read -r a b <<< "p::q:r:"` gives b=":q:r:" and `read -r a b <<< "  x   y   z  "`
+    // gives b="y   z". The rule, checked against bash 5.3.15:
     //
     //   - EXACTLY ONE field left: that field, delimiters and all whitespace gone.
     //     `read -r a <<< "  only  "` is "only"; `IFS=: read -r a b <<< "p:q:"` is "q".
@@ -3421,7 +3341,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //     not contain the space leaves a trailing space alone ("a::: " -> ":: ").
     //   - NONE: the empty string.
     //
-    // languages/lib/bash-rt.c's rt_field is the same three arms.
+    // Twin: rt_field in languages/lib/bash-rt.c.
     function readRest(line, rec, k) {
         if (k >= rec.f.length) { return "" }
         if (rec.f.length - k <= 1) { return rec.f[k] }
@@ -3431,12 +3351,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (t > s && ifsIsWs(seps, line.charAt(t - 1))) { t = t - 1 }
         return line.slice(s, t)
     }
-    // FIELD SPLITTING, with the POSIX delimiter rule. This used to drop every empty field,
-    // which is right only for the IFS WHITESPACE characters: measured against bash 5.3.15,
-    // `IFS=:` on "a:b::c" is FOUR fields (the third empty) and was three here, ":a:" is two
-    // and was one, and `IFS=" :"` on "a : b::c" is four and was three (docs/todo.md 1.8).
+    // FIELD SPLITTING, with the POSIX delimiter rule (POSIX 2.6.5): `IFS=:` on "a:b::c" is
+    // FOUR fields (the third empty), ":a:" is two, and `IFS=" :"` on "a : b::c" is four.
     //
-    // The rule, and it is the whole of the difference: a character of IFS that is space, tab
+    // A character of IFS that is space, tab
     // or newline is IFS WHITESPACE and a RUN of it is one delimiter, ignored entirely at the
     // ends of the value; any other character of IFS delimits exactly ONE field on its own,
     // so two of them in a row leave an empty field between them. A delimiter is therefore
@@ -3444,7 +3362,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // IFS whitespace" - which is also why a TRAILING non-whitespace delimiter adds nothing
     // ("a:" is one field) while a LEADING one adds an empty first field.
     //
-    // languages/lib/bash-rt.c's rt_splitifs is the same walk for the compiled half.
+    // Twin: rt_splitifs in languages/lib/bash-rt.c.
     function ifsIsWs(seps, ch) {
         if (ch != " " && ch != "\t" && ch != "\n") { return false }
         return ifsHas(seps, ch)
@@ -3509,38 +3427,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- the test builtin -------------------------------------------------------------
     // There is no real filesystem behind a grammar run, so the file predicates answer from a
     // small MODEL of the standard paths every shell can rely on. Anything else is "absent".
-    // 0 = absent, 1 = exists and is not a directory, 2 = directory.
-    // THE FILE PREDICATES ANSWER FROM A MODEL, AND stat() WAS DECLINED - here is why, so
-    // that nobody re-derives it. docs/todo.md 1.8 asked for a real stat() in the runtime.
-    // A native -exe binary could do it (bash-rt.c links libc directly), but the OTHER TWO
-    // engines cannot follow: the tag-script host that runs this interpreter half has no
-    // filesystem API at all beyond the import loader's readFile, and llvm.Run cannot call
-    // stat either - abnf/llvmmap.go's libcExterns lists only what the IR interpreter can
-    // implement EXACTLY, and a stat struct is not one of them (a floor that guesses a struct
-    // layout is not a floor; the same argument killed swapcontext, docs/todo.md 3.6). So a
-    // stat() in the runtime alone buys ONE engine of three and ships a designed-in halves
-    // divergence, which the manual's chapter 5 rule makes a loss.
     //
-    // What WAS done instead is to stop the model being wrong about the paths it does know.
-    // It used to answer kind 1, "regular file", for /dev/null and friends, so `[ -f /dev/null ]`
-    // was TRUE here and is false in bash 5.3. They are CHARACTER DEVICES, and that is kind 3
-    // now. Measured with bash 5.3.15 on this machine, `test OP PATH` for every path in the
-    // model:
-    //     /dev/null /dev/zero /dev/tty        -e -r -w -c
+    // Why not a real stat(): a native binary could call it (bash-rt.c links libc), but the
+    // other two engines cannot - the tag-script host running this half has no filesystem
+    // API, and llvm.Run's libcExterns (abnf/llvmmap.go) only lists what the IR interpreter
+    // implements EXACTLY, which a stat struct is not. A stat() in one engine of three would
+    // be a designed-in halves divergence.
+    //
+    // The model, checked with bash 5.3.15 (`test OP PATH`):
+    //     /dev/null /dev/zero /dev/tty        -e -r -w -c      (character devices)
     //     / /dev /usr /bin /usr/bin           -e -d -s -r -x
     //     anything else                       nothing
-    // /tmp, /etc and /var answer -h -L as well on darwin, where they are symlinks, and do
-    // not on Linux - so the model deliberately does NOT claim it. /dev/stdin, /dev/stdout
-    // and /dev/stderr follow whatever the process's fds are attached to (they read as -f -s
-    // through a pipe and as -c on a terminal), so they are modelled as the character devices
-    // they are when a shell is interactive.
+    // /tmp, /etc and /var are -h -L as well on darwin (symlinks) but not on Linux, so the
+    // model does NOT claim it. /dev/stdin, /dev/stdout and /dev/stderr follow the process's
+    // fds in reality, and are modelled as the character devices they are on a terminal.
     //
-    // What is still divergent, and deliberately: -f on a REAL regular file is false here and
-    // true in bash - that is the model, not a bug in it - and -w answers "it exists", so the
-    // five system directories read as writable where bash asks the kernel and (for a
-    // non-root user) says no. Modelling that would mean modelling a uid, and the answer
-    // would then be wrong for a root shell instead. 46 of the 52 predicate/path cells above
-    // match bash 5.3.15 exactly; those five -w cells and -w on nothing else are the rest.
+    // Deliberate divergences: -f on a REAL regular file is false here, and -w answers "it
+    // exists", so the system directories read as writable where bash (non-root) says no -
+    // modelling that would mean modelling a uid.
     // 0 = absent, 1 = regular file, 2 = directory, 3 = character device.
     function fsKind(p) {
         if (p == "/dev/null" || p == "/dev/zero" || p == "/dev/tty") { return 3 }
@@ -3732,14 +3636,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(st2)
             return st2
         }
-        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC. bash prefixes it with $0 and exits
-        // 127; this said `bash interpreter error: ...` and exited 2, while the compiled
-        // halves said `bash-to-llvm-ir: ...` and exited 127 - three engines, three answers,
-        // which is why the abort row is two-leg (docs/todo.md 1.13). All three now print
-        // `<script>: command not found: NAME` and exit 127. The word order still differs
-        // from bash's `<script>: line N: NAME: command not found`, which needs a line
-        // number no engine here carries to run time; and this language STOPS, where bash
-        // would carry on - that is what the abort probe is for.
+        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC: all three engines print
+        // `<script>: command not found: NAME` and exit 127, as bash exits 127. The word order
+        // differs from bash's `<script>: line N: NAME: command not found`, which needs a line
+        // number no engine here carries to run time; and this STOPS, where bash would carry on.
         println(scriptName + ": command not found: " + cmd)
         exit(127)
         return 127
@@ -3933,8 +3833,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // ( LIST ) : variables and positional parameters are restored afterwards, and both a
-    // `return` and an `exit` inside end only the subshell.
     // Everything a subshell must restore: variables, positional parameters, call frames,
     // the shell options and the EXIT trap.
     function saveShellState() {
@@ -3951,6 +3849,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         optPipefail = st.pf
         exitTrap = st.tr
     }
+    // ( LIST ) : variables and positional parameters are restored afterwards, and both a
+    // `return` and an `exit` inside end only the subshell.
     function makeSubshell(bodyT) {
         return function() {
             var saved = saveShellState()
@@ -3968,13 +3868,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // { LIST; } runs in the current shell, so it is just its body.
     function makeGroup(bodyT) { return bodyT }
 
-    // ( LIST ) and { LIST; } CARRY THEIR OWN [ RedirList ], and both tags used to read the
-    // stack with pop() - which takes the LAST value pushed, i.e. the redirection, not the
-    // body. `{ echo A; } >&2` therefore ran with no redirection at all (A went to stdout),
-    // and `( echo B ) >&2` handed a redirection RECORD to makeSubshell and died with
-    // "TypeError: Not a function: [object Object]" in BOTH halves. Measured against bash
-    // 5.3, which sends both to fd 2. takeAll() + mkRedirected is what CompoundRedir on the
-    // line above has always done; these two only ever needed the same treatment.
+    // ( LIST ) and { LIST; } CARRY THEIR OWN [ RedirList ], so their tags take the whole
+    // stack (takeAll, not pop - pop would take the last redirection, not the body) and wrap
+    // the body with mkRedirected, as CompoundRedir does.
     function withRedirs(bodyT, items) {
         var wrapped = [bodyT]
         var i

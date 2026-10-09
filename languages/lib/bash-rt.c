@@ -1,23 +1,14 @@
 /*
  * bash-rt.c - the bash compiler's string runtime, in C.
  *
- * languages/bash-to-llvm-ir.abnf used to hand-emit every one of these helpers as
- * LLVM IR built with the llvm.ir.* builder API - roughly 3,200 lines of MetaJS
- * whose only product was IR text. This file is the same runtime written once, in
- * C, and compiled by languages/c-to-llvm-ir.abnf into the checked-in
- * languages/lib/bash-rt.ll by tests/gen-bash-rt-ll.sh. See
- * docs/runtime-rework-plan.md.
+ * Compiled by languages/c-to-llvm-ir.abnf into the checked-in
+ * languages/lib/bash-rt.ll by tests/gen-bash-rt-ll.sh, and linked with the
+ * module languages/bash-to-llvm-ir.abnf emits.
  *
- * TWO THINGS THE PORT HAS TO RESPECT, both measured rather than assumed:
- *
- * 1. Every POINTER in a module produced by c-to-llvm-ir.abnf is an `i32*`,
- *    whatever it points at, while the bash module's strings are `i8*`. The two
- *    are ABI-identical but not type-identical, so the grammar wraps each helper
- *    in a tiny `rtw_*` shim that bitcasts. Call sites are unchanged.
- * 2. The globals below are the runtime's own state AND the emitted program's:
- *    the program loads last_status, writes gvars[], pushes argv. They are
- *    defined HERE and reached from the grammar by name, so there is exactly one
- *    definition of each.
+ * Every POINTER in a module produced by c-to-llvm-ir.abnf is an `i32*`,
+ * whatever it points at, while the bash module's strings are `i8*`. The two
+ * are ABI-identical but not type-identical, so the grammar wraps each helper
+ * in a tiny `rtw_*` shim that bitcasts.
  */
 
 
@@ -49,14 +40,9 @@ char *script_name;
 char *gvars[1024];
 int nvars;
 
-/* THE FIXED-SIZE TABLES BELOW USED TO REFUSE A WRITE AND SET `int rt_limit`,
- * described as making an overflow "a bounded, observable event". IT WAS NOT
- * OBSERVABLE: rt_limit was written at four sites and READ NOWHERE - not here,
- * not in languages/bash-to-llvm-ir.abnf, not in tests/. A refused write is a
- * silently wrong answer, and one of the four was worse than that: rt_cap_begin
- * refused the 17th nested $( ) without incrementing cap_depth, while the
- * matching rt_cap_end still decremented it, so cap_buf[-1] was then read and
- * written. Every one of them now calls rt_die, so the limit is a diagnosis. */
+/* Every fixed-size table below calls rt_die when it is full: a refused write
+ * would be a silently wrong answer (and an unbalanced rt_cap_begin/rt_cap_end
+ * pair would index cap_buf[-1]). */
 
 /* The {name, slot} table: varnames[i] is the source name of gvars[i]. The
  * emitter fills it in main's entry block, in the same loop that marks every
@@ -70,7 +56,7 @@ char *varnames[1024];
  * (name, key, value) store below, and bash restores it on return too, so each
  * entry also records how many of its rows were copied onto the array save
  * stack. ls_acnt[t] is 0 for the usual scalar case and the pop then does
- * nothing beyond clearing whatever the call created (docs/todo.md 1.5). */
+ * nothing beyond clearing whatever the call created. */
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
@@ -92,27 +78,15 @@ int cap_depth;
 char *ss_save[8192];
 int ss_depth;
 
-/* ...AND THE WHOLE ARRAY STORE, which it did not (docs/todo.md 1.8). The snapshot
- * covered gvars only, so `a=(p q); ( a[0]=Z; a+=(r) )` left the caller looking at
- * "Z q r" where bash 5.3 shows "p q", and `r=$( b[0]=9 )` was just as leaky - a
- * command substitution takes the same snapshot. The store is a flat triple table
- * (arr_nm / arr_k / arr_v, NARR = 4096) whose entries are arena pointers that are
- * never rewritten in place, so saving the three pointer arrays and arr_n is a
- * complete copy: a subshell that mutates an element writes a NEW arena string and
- * stores the pointer, which the restore below discards.
+/* ...and the whole array store, so `a=(p q); ( a[0]=Z )` leaves the caller with
+ * "p q" (a command substitution takes the same snapshot). The store is a flat
+ * triple table (arr_nm / arr_k / arr_v, NARR = 4096) whose entries are arena
+ * pointers never rewritten in place, so saving the three pointer arrays and arr_n
+ * is a complete copy. It is BSS written only as far as arr_n, so only programs
+ * with subshells AND arrays make those pages resident.
  *
- * SSDEPTH * NARR pointers, three of them - 786 KB of BSS. It is BSS and it is
- * written only as far as arr_n, so only the pages a program with subshells AND
- * arrays actually touches become resident; tests/bench/mod.sh has neither and its
- * RSS slope is unchanged.
- *
- * ATTRIBUTES ARE NOT HERE, and that is not an omission: languages/bash-to-llvm-ir.abnf
- * keeps -i/-u/-l/-A in COMPILE-TIME maps (intVars/upVars/loVars/assocArrays) and
- * emits the conversion at each store site, so a subshell isolates them by unwinding
- * the emitter's attribute log around the body, exactly as a function body already
- * did. languages/bash-interpreter.abnf holds the same four at run time and restores
- * them in restoreState. Both engines therefore isolate all four kinds of state, which
- * is what keeps this out of --cross. */
+ * Attributes (-i/-u/-l/-A) are not here: bash-to-llvm-ir.abnf keeps them in
+ * COMPILE-TIME maps and unwinds its attribute log around a subshell body. */
 char *ss_anm[32768];
 char *ss_ak[32768];
 char *ss_av[32768];
@@ -254,22 +228,11 @@ int putchar(int c);
 /* ---- fail-stop -----------------------------------------------------------
  * The two libc names languages/lib/runtime.c already uses for the same job.
  *
- * NEITHER IS AVAILABLE TO `llvm.Run`, DELIBERATELY, and that is fine here.
- * abnf/llvmmap.go's libcExterns lists only what the IR interpreter can
- * implement EXACTLY, and it can implement neither (no unwind path out of
- * ma.call for exit; write's fd is not the interpreter's output). Its comment
- * settles the trade: "Loud-and-absent beats listed-and-wrong". So an arena
- * overflow under llvm.Run stops the run with
- *
- *     IR interpreter: call to undefined external function @write
- *
- * and a nonzero status, and under a clang-built -exe binary it prints the
- * diagnostic below on stderr and exits 70. Both are a diagnosis; neither is
- * the silent SIGSEGV that this replaced. If you are reading that interpreter
- * message, you are out of arena - see rt_die.
- *
- * They are NOT reached on any successful path, so no test program depends on
- * them and no matrix row ever calls one. */
+ * Neither is available to `llvm.Run` (abnf/llvmmap.go's libcExterns lists only
+ * what the IR interpreter implements exactly), so a table overflow under
+ * llvm.Run stops with "call to undefined external function @write" - if you
+ * see that, you are out of arena; see rt_die. Under a -exe binary it prints the
+ * diagnostic on stderr and exits 70. Neither is reached on a successful path. */
 long write(int fd, const char *buf, unsigned long n);
 void exit(int code);
 
@@ -343,18 +306,8 @@ void rt_die(char *what, int want, int used, int cap)
  * One byte arena plus a bump offset; rt_bump hands out slices and nothing is
  * ever freed (manual 7.8 - the arena is a decision, not an omission).
  *
- * THE BOUNDS CHECK IS NEW AND IT IS THE POINT OF THIS FUNCTION. Until now
- * rt_bump added to arena_pos and returned, so a program that outran 4 MiB
- * wrote over gvars, argv, arr_v, re_prog and then off the end of the data
- * segment. Measured, before the check: tests/bench/mod.sh at 40,000 iterations
- * exited 139 HAVING PRINTED NOTHING. That is the manual chapter 4 trap - "a
- * crashing binary looks fast" - with `/usr/bin/time` reporting happily on a
- * process that died. It now prints
- *
- *   bash-rt: string arena exhausted: request 16, used 4194297 of 4194304 ...
- *
- * on stderr and exits 70.
- *
+ * The bounds check is essential: without it a program that outruns 4 MiB
+ * writes over the globals after the arena and dies silently with SIGSEGV.
  * The comparison is written `n > 4194304 - p` and not `p + n > 4194304` so it
  * cannot itself overflow: p is always in [0, 4194304] and n >= 0.
  */
@@ -430,15 +383,11 @@ int rt_strcmp(char *a, char *b) {
     return 0;
 }
 
-/* rt_strcat: fresh arena string = a followed by b.
+/* rt_strcat: a followed by b, as an arena string.
  *
- * CONCATENATING WITH "" IS THE COMMON CASE AND IT USED TO COST A COPY. Every
- * accumulator in this file starts at `empty` and is grown one rt_strcat at a
- * time, and the emitter's word builder concatenates an empty `open` part on
- * every expansion, so a large fraction of all calls had an empty operand. An
- * arena string is never written after it is built - the only mutation in this
- * file is rt_putc into a capture buffer, which comes straight from rt_bump - so
- * handing the other operand back is safe.
+ * Concatenating with "" is the common case (accumulators start at `empty`), so
+ * it hands the other operand back without copying. That is safe because an
+ * arena string is never written after it is built.
  *
  * The `la == 0 && lb == 0` arm returns the shared `empty` and NOT `a`, because
  * `a` may be `unset_marker`: that pointer is compared by IDENTITY in rt_nounset
@@ -460,12 +409,8 @@ char *rt_strcat(char *a, char *b) {
 }
 
 /* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr).
- *
- * It used to bump a flat 16 bytes whatever the value, so "0" cost 16 and the
- * five-digit counters of a loop cost 16 apiece. The digits are formed in a
- * stack buffer first anyway, so the length is known before anything is bumped
- * and the allocation can be exact. INT_MIN still answers "-", exactly as it did
- * before: 0 - INT_MIN is still negative, so no digit is produced. */
+ * The digits are formed in a stack buffer first so the allocation is exact.
+ * INT_MIN answers "-": 0 - INT_MIN is still negative, so no digit is produced. */
 char *rt_int2str(int n) {
     char tmp[16];
     char *dst;
@@ -504,9 +449,7 @@ int rt_str2int(char *s) {
 
 /* The fourteen POSIX class names, WHOLE-matched, shared by the glob bracket
  * parser (rt_class) and the ERE bracket parser (re_clsname). 0 = not a class
- * name. The two used to disagree about what a name even was: the ERE side
- * matched by shortest distinguishing prefix, the glob side did not know classes
- * existed at all. */
+ * name. */
 int rt_clsid(char *nm) {
     int id = 0;
     id = rt_streq(nm, "alpha") != 0 ? 1 : id;
@@ -529,23 +472,15 @@ int rt_clsid(char *nm) {
 /* rt_class: p points at "[". Returns -1 when the bracket expression is
  * unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
  *
- * "[:name:]" inside the brackets is a POSIX class, which this did not implement
- * at all: `case 5 in [[:digit:]]*)` used to read the bracket as the literal set
- * {[,:,d,i,g,t} and answer "no". bash 5.3.15 answers "yes". An UNKNOWN name is
- * not an error in a glob - bash matches nothing, silently - so it simply
- * contributes no characters. */
+ * "[:name:]" inside the brackets is a POSIX class. An UNKNOWN name is not an
+ * error in a glob - bash matches nothing, silently - so it simply contributes
+ * no characters. */
 /* ---- ONE UTF-8 CODEPOINT ---------------------------------------------------
- * The glob matcher used to be pure BYTES, in a runtime whose ${#s} and ${s:i:n}
- * were already codepoint aware, and it diverged from bash 5.3 AND from this
- * language's own interpreter half on every non-ASCII pattern - measured:
- * `[[ ï == [ïn] ]]` is true in bash and in bash-interpreter.abnf and was false
- * in the native binary, and `${y/[ïn]/Z}` replaced ONE BYTE and left a lone
- * continuation byte behind. A bracket expression matches one CHARACTER, so the
- * matcher has to read one.
+ * A bracket expression matches one CHARACTER (`[[ ï == [ïn] ]]` is true in
+ * bash 5.3), so the glob matcher reads codepoints, not bytes.
  *
  * rt_cpw answers 1 for anything that is not a well-formed sequence, so invalid
- * UTF-8 still advances and still compares byte-for-byte - the old behaviour,
- * exactly, on the inputs the old code was right about. */
+ * UTF-8 still advances and compares byte-for-byte. */
 int rt_cpw(char *s) {
     int c0 = (int)(unsigned char)s[0];
     int w = 1;
@@ -660,7 +595,6 @@ int rt_class(char *p, int ch) {
 }
 
 
-/* ================= frag-glob.c ================= */
 
 /* ---- substring helpers for the ${...} family -------------------------------
  * They are placed after rt_glob because every one of them drives the glob
@@ -710,8 +644,7 @@ char *rt_csubstr(char *s, int off, int n)
     int byteN;
 
     bo = rt_charoff(s, off < 0 ? 0 : off);
-    /* n < 0 means "to the end"; otherwise the end is off + n characters in.
-     * BOTH rt_charoff calls happen unconditionally, as in the IR. */
+    /* n < 0 means "to the end"; otherwise the end is off + n characters in. */
     bend = rt_charoff(s, off + (n < 0 ? 0 : n));
     byteN = n < 0 ? -1 : bend - bo;
     byteN = byteN < 0 ? -1 : byteN;
@@ -784,24 +717,12 @@ int rt_egalt(char *eaq, int eaa)
  * The same matcher backs case and [[ == ]], exactly like the shell. Both
  * functions walk raw char* pointers; "*" backtracks by CALLING rt_glob again,
  * so the call stack is the backtracking stack.
- *
- * rt_eg is mutually recursive with rt_glob; the prelude's prototype is the
- * forward declaration the IR expressed by declaring the function early.
  */
 
-/* rt_glob and rt_eg are mutually recursive, so one of them is necessarily
- * CALLED before it is defined; this prototype is the forward declaration, and
- * it carries the POINTER parameters the definition has.
- *
- * Until 2026-08-02 it could not: languages/c-to-llvm-ir.abnf built a
- * not-yet-defined callee with non-pointer parameters (getFuncByArity pushes
- * {ptr: false} for every argument) and a prototype did not correct it, so the
- * later definition tried to store an i32 parameter into an i32** slot and the
- * compile failed with "store operands are not compatible: src=i32; dst=i32**".
- * The workaround here was an rt_eg_fwd(long, long, int) trampoline that the
- * default spec already matched. noteParamCts now records pointer-ness and
- * getFunc reads it, so the prototype does the job and the trampoline is gone.
- * Pinned by SECTION 48 of tests/c-test-full.c.
+/* rt_glob and rt_eg are mutually recursive; this prototype is the forward
+ * declaration, with the POINTER parameters the definition has
+ * (c-to-llvm-ir.abnf's noteParamCts; pinned by SECTION 48 of
+ * tests/c-test-full.c).
  */
 int rt_eg(char *p, char *s, int star);
 
@@ -871,8 +792,7 @@ int rt_glob(char *p, char *s)
         scur2 = sp;
         if ((int)(unsigned char)scur2[0] == 0) return 0;
         /* "?" matches one CHARACTER and a bracket expression holds characters,
-         * so the subject is decoded once here and every arm below steps by scw.
-         * See rt_cpw for what this used to get wrong. */
+         * so the subject is decoded once here and every arm below steps by scw. */
         scw = rt_cpw(scur2);
         sc = rt_cpat(scur2);
 
@@ -892,7 +812,7 @@ int rt_glob(char *p, char *s)
                 continue;
             }
             /* cr < 0: not a bracket expression after all - fall through to
-             * the literal arm, exactly as the IR does. */
+             * the literal arm. */
         } else {
             nc = (int)(unsigned char)pcur[1];
             isEsc = (pc == 92) && (nc != 0);
@@ -983,8 +903,7 @@ int rt_eg(char *egp, char *egs, int egstar)
                 ba = be + 1;
             }
             btail = egs + k;
-            /* the IR evaluates BOTH operands of the And, so rt_glob runs even
-             * when `any` is already set. */
+            /* rt_glob runs even when `any` is already set. */
             g = rt_glob(rest, btail);
             if (any == 0 && g != 0) return 1;
             k = k + 1;
@@ -1011,8 +930,7 @@ int rt_eg(char *egp, char *egs, int egstar)
                     if (rt_glob(rest, tail) != 0) return 1;
                 } else {
                     /* a * / + repeat must consume something, or the recursion
-                     * would not terminate. The IR computes the And's second
-                     * operand - this call - unconditionally. */
+                     * would not terminate. */
                     t3 = egs + k;
                     rr = rt_eg(egp, t3, 1);
                     if (k > 0 && rr != 0) return 1;
@@ -1060,19 +978,15 @@ int rt_matchend(char *p, char *s)
     }
 }
 
-/* ================= frag-strip.c ================= */
-/* ---- chunk: rt_strip .. rt_read_line -------------------------------------- */
+/* ---- ${v#p} / ${v/p/r} / case conversion / quoting / read ----------------- */
 
-/* NEW GLOBAL: the hand-emitted IR defines `read_eof` right in front of
- * rt_read_line (m.NewGlobalDef("read_eof", zero)); the grammar loads it by name
- * for the `read` builtin's status, so it has to live in the C file too. */
+/* The grammar loads `read_eof` by name for the `read` builtin's status. */
 int read_eof;
 
 /* rt_strip: ${v#p} / ${v##p} / ${v%p} / ${v%%p}; mode 0 = #, 1 = ##, 2 = %, 3 = %%.
  * A trial length t walks 0..len; k is t for the ascending modes (# and %%) and
  * len - t for the descending ones (## and %), so the first hit is the shortest
- * or the longest match as required. BOTH substrings are built every round,
- * exactly as the IR's select does, because the arena offsets are observable. */
+ * or the longest match as required. */
 char *rt_strip(char *s, char *p, int mode) {
     int len = rt_strlen(s);
     int isPre = (mode == 0) || (mode == 1);
@@ -1132,11 +1046,8 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
 
 /* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,".
  *
- * It walks CODEPOINTS, not bytes. It used to walk bytes, in a runtime whose
- * rt_charlen / rt_charoff were already UTF-8 aware, and that showed twice:
- * ${v^} touched the first BYTE (so it did nothing at all to a multi-byte first
- * character), and the Latin-1 supplement was not mapped, where bash 5.3.15 maps
- * it - ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute. Latin-1 is
+ * It walks CODEPOINTS, not bytes, and maps the Latin-1 supplement as bash
+ * 5.3.15 does (${v^^} on an e-acute gives an E-acute). Latin-1 is
  * 0xC3 followed by 0x80..0xBE in UTF-8, upper and lower 0x20 apart, with the
  * multiplication and division signs (0x97 / 0xB7) not letters. Codepoints
  * outside ASCII and Latin-1 are copied through. */
@@ -1154,10 +1065,8 @@ char *rt_case(char *s, int mode, char *pat) {
         int touch = all || (first != 0);
         int n;
         /* THE PATTERN OPERAND. ${v^^[bn]} converts only the characters the glob
-         * matches, and it used to be parsed and then thrown away in all three
-         * engines: bash 5.3 answers BaNaNa for banana, we answered BANANA
-         * (docs/todo.md 1.8). The pattern is matched against ONE character at a
-         * time, which is what the shell specifies, so the subject is the current
+         * matches (bash 5.3: banana -> BaNaNa). The pattern is matched against
+         * ONE character at a time, so the subject is the current
          * codepoint's bytes in a stack buffer - never the arena, or a long value
          * would allocate one temporary per character. An ABSENT pattern is ""
          * and means "every character"; rt_glob("", "a") is false, so the empty
@@ -1267,8 +1176,7 @@ char *rt_shquote(char *sq) {
                 dst[o] = (char)114; o = o + 1;
             } else if ((c0 < 32) || (c0 == 127)) {
                 /* bash 5.3.15 writes OCTAL here - ${v@Q} of $'\001' is $'\001',
-                 * not $'\x01'. It used to be \xNN, which rt_ansic could not read
-                 * back, so ${v@E} did not invert ${v@Q}. */
+                 * not $'\x01'. */
                 dst[o] = (char)92; o = o + 1;
                 dst[o] = (char)(48 + (c0 / 64)); o = o + 1;
                 dst[o] = (char)(48 + ((c0 / 8) % 8)); o = o + 1;
@@ -1311,9 +1219,8 @@ int rt_hexval(int hc) {
 /* rt_ansic: the ${v@E} form - the $'...' escapes decoded at RUN time.
  *
  * \NNN (one to THREE octal digits, total, so $'\0101' is \b then "1") and \xHH
- * (one or two hex digits) are decoded here now. They were not, which is the
- * other half of why ${v@E} did not invert ${v@Q}. A \x with no hex digit after
- * it stays literal, as bash leaves it. */
+ * (one or two hex digits) are decoded, so ${v@E} inverts ${v@Q}. A \x with no
+ * hex digit after it stays literal, as bash leaves it. */
 char *rt_ansic(char *ac) {
     int len = rt_strlen(ac);
     char *dst = rt_bump(len + 1);
@@ -1411,7 +1318,6 @@ char *rt_read_line(int u) {
     return line;
 }
 
-/* ================= frag-field.c ================= */
 /* ---- fields, padding, escapes, field lists -------------------------------- */
 
 /* rt_nifs: how many fields `l` splits into under the POSIX delimiter rule (the
@@ -1437,11 +1343,8 @@ int rt_nifs(char *l, char *ifs) {
 /* rt_field: field `idx` of line `l` under the POSIX delimiter rule; with
  * rest != 0 what the LAST name of a `read` gets, which is not the same thing.
  *
- * BOTH HALVES OF THIS WERE WRONG, in different directions (docs/todo.md 2.15).
- * The walk dropped every empty field, so `IFS=: read -r a b <<< ":x:"` put x in
- * a where bash 5.3.15 leaves a empty and gives b "x"; and the remainder was the
- * raw tail, so `read -r v <<< "  hd  "` kept the trailing blanks. Measured
- * against bash 5.3.15 over 26 cases, the remainder has three arms:
+ * Empty fields count (`IFS=: read -r a b <<< ":x:"` leaves a empty and gives b
+ * "x"). Per bash 5.3.15, the remainder has three arms:
  *
  *   no field there      ""
  *   EXACTLY ONE left    that field - no delimiters, no whitespace, so
@@ -1470,8 +1373,6 @@ char *rt_field(char *l, char *ifs, int idx, int rest) {
             if (rest == 0) return rt_substr(l, s, e - s);
             if (left <= 1) return rt_substr(l, s, e - s);
             t = len;
-            /* `t > s && ifsws(l[t-1])` would read l[-1] when both are 0: the IR
-             * evaluates BOTH operands of an And (see rt_eg in this file). */
             while (t > s) {
                 if (rt_ifsws(ifs, (int)(unsigned char)l[t - 1]) == 0) break;
                 t = t - 1;
@@ -1488,8 +1389,7 @@ char *rt_field(char *l, char *ifs, int idx, int rest) {
     return &empty[0];
 }
 
-/* rt_pad: printf's field padding. Both arms of the IR select are evaluated, so
- * BOTH rt_strcat calls run on every iteration and in this order. */
+/* rt_pad: printf's field padding. */
 char *rt_pad(char *s, int w, int left, int zero) {
     char *v = s;
     while (rt_strlen(v) < w) {
@@ -1507,11 +1407,9 @@ char *rt_pad(char *s, int w, int left, int zero) {
 /* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED value in
  * `base`, with the # prefix when `alt` and the value is not zero.
  *
- * THE WIDTH IS 32 BITS, and it is the whole engine's width, not a shortcut
- * here: rt_str2int and rt_int2str are i32 and bash's printf is 64-bit, so
- * `printf '%x' -1` answers ffffffff here where bash 5.3 answers
- * ffffffffffffffff. The interpreter half does exactly the same (radixStr adds
- * 4294967296), so the two halves agree; nothing asserts the negative case.
+ * THE WIDTH IS 32 BITS, the whole engine's width: `printf '%x' -1` answers
+ * ffffffff where bash 5.3 answers ffffffffffffffff. The interpreter's radixStr
+ * does the same, so the two halves agree; nothing asserts the negative case.
  *
  * There is no 64-bit or unsigned type in this C subset, so the unsigned value
  * is carried as two 16-bit halves and divided long-hand: with r < base <= 16,
@@ -1704,9 +1602,7 @@ char *rt_getfield(char *v, int k) {
     return &empty[0];
 }
 
-/* rt_wordjoin: a field list flattened back to one string, fields space-joined.
- * The separator rt_strcat is inside an IR select, so it runs on EVERY iteration
- * (including i == 0) and its allocation is part of the arena order. */
+/* rt_wordjoin: a field list flattened back to one string, fields space-joined. */
 char *rt_wordjoin(char *v) {
     int c0 = (int)(unsigned char)v[0];
     int n = rt_nfields(v);
@@ -1725,14 +1621,6 @@ char *rt_wordjoin(char *v) {
     return op;
 }
 
-/* rt_splitifs: an unquoted expansion split into a field list.
- *
- * ONE PASS TO SIZE IT, ONE TO FILL IT. This used to build the list with
- * rt_strcat(rt_strcat(op, rt_substr(...)), "\x01") per field, which is three
- * allocations per field and quadratic in the total: a one-field value of length
- * L cost 2L+5 bytes of arena where the answer is L+3. Every unquoted expansion
- * in an emitted program calls this, so it is the single largest per-word cost in
- * the runtime - see tests/bench/mod.sh's header for the measurement. */
 /* One IFS WHITESPACE character: space, tab or newline AND a member of IFS. See
  * rt_splitifs. */
 int rt_ifsws(char *ifs, int ch) {
@@ -1750,10 +1638,8 @@ char *rt_splitifs(char *v, char *ifs) {
     int pass;
     char *dst;
     dst = &empty[0];
-    /* THE POSIX DELIMITER RULE. Every empty field used to be dropped, which is
-     * right only for the IFS whitespace characters: bash 5.3.15 splits "a:b::c"
-     * under IFS=: into FOUR fields and this answered three (docs/todo.md 1.8).
-     * A run of IFS whitespace is one delimiter and is ignored at both ends of
+    /* THE POSIX DELIMITER RULE: bash 5.3.15 splits "a:b::c" under IFS=: into
+     * FOUR fields. A run of IFS whitespace is one delimiter and is ignored at both ends of
      * the value; any OTHER member of IFS delimits exactly one field by itself,
      * so two in a row leave an empty field between them. One delimiter is
      * therefore "optional IFS whitespace, at most one non-whitespace IFS
@@ -1762,29 +1648,16 @@ char *rt_splitifs(char *v, char *ifs) {
      *
      * languages/bash-interpreter.abnf's splitIFS is the same walk.
      *
-     * TWO PASSES over one walk: pass 0 sizes the buffer (this is the single
-     * largest per-word cost in the runtime - see tests/bench/mod.sh - and the
-     * shape that made it linear rather than quadratic is kept), pass 1 fills it.
+     * TWO PASSES over one walk (this is the single largest per-word cost in
+     * the runtime): pass 0 sizes the buffer, pass 1 fills it, so it stays
+     * linear rather than quadratic.
      *
-     * AND ONE SCAN BEFORE EITHER OF THEM, WHICH IS WORTH +3.3% OF THE WHOLE bash
-     * ROW (docs/todo.md 7.1). The POSIX rule above replaced a single flat loop
-     * with a nest of four - leading whitespace, the field, trailing whitespace,
-     * one non-whitespace delimiter - and the per-CHARACTER work is the same, so
-     * the cost is not in the walk: it is that the delimiter nest is no longer a
-     * shape clang can keep in registers across the two passes, and mod.sh calls
-     * this four times an iteration on a five-character integer that contains no
-     * separator at all. Measured as instructions per iteration at two loop sizes
-     * (which is immune to the layout lottery of manual chapter 4), 9 draws each:
-     * 3,604.35 with the nest alone, 3,483.90 with this scan, against 3,481.48 at
-     * 0907c7f - i.e. the whole of the regression, and none of the semantics.
-     *
-     * The scan answers exactly the fast path pass 0 already had, one loop
-     * earlier: no IFS character anywhere means one field spanning the whole
-     * value, and a plain string IS a one-field list in this protocol. The two
-     * guards are the same two: an empty value has NO fields (the "\x02" literal
-     * below), and a value already carrying the 0x02 marker must not be returned
-     * as itself or it would be re-read as a list. A value that DOES contain a
-     * separator pays one extra scan as far as that separator and nothing more. */
+     * The scan below is a fast path ahead of both, kept on purpose because it
+     * is measurably faster for the common separator-free value: no IFS
+     * character anywhere means one field spanning the whole value, and a plain
+     * string IS a one-field list in this protocol. An empty value has NO fields
+     * (the "\x02" literal below), and a value already carrying the 0x02 marker
+     * must not be returned as itself or it would be re-read as a list. */
     if (len > 0 && (int)(unsigned char)v[0] != 2) {
         while (q < len && rt_haschar(ifs, (int)(unsigned char)v[q]) == 0) { q = q + 1; }
         if (q == len) return v;
@@ -1811,7 +1684,7 @@ char *rt_splitifs(char *v, char *ifs) {
             }
         }
         if (pass == 0) {
-            /* no fields at all: the empty list is a module literal, as before. */
+            /* no fields at all: the empty list is a module literal. */
             if (nf == 0) return "\x02";
             /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the
              * commonest case, and it needs no allocation, because a plain string
@@ -1859,19 +1732,18 @@ char *rt_bnd_open(char *open, char *f) {
 /* THE SAME APPEND, WITH THE TWO BOUNDARY DELIMITERS OF AN UNQUOTED EXPANSION.
  *
  * `x="  a   b  "; echo w:[$x]` is four words in bash 5.3.15 - `w:[`, `a`, `b`,
- * `]` - and was one, `w:[a b]` (docs/todo.md 2.15). rt_splitifs throws the
- * leading and trailing IFS whitespace away, which is right for the fields and
- * loses exactly the fact that there was a boundary against the literal text.
+ * `]`. rt_splitifs throws the leading and trailing IFS whitespace away, which
+ * is right for the fields but loses the boundary against the literal text.
  *
- * `opened` is the missing state: whether anything has gone into `open` since
+ * `opened` is that state: whether anything has gone into `open` since
  * the last field was closed. A boundary delimiter closes `open` IF one is open
  * and does nothing otherwise, which is what keeps `echo $x` two words and
  * `$x$y` (x="a ", y=" b") two rather than three. rt_ifslead / rt_ifstrail
  * answer the two flags from the RAW value, and only IFS WHITESPACE leads: a
  * leading non-whitespace delimiter already produces an empty first field.
  *
- * Three entry points over one walk, the same shape rt_bnd_acc / rt_bnd_open
- * already had, because C returns one value and the caller needs three.
+ * Three entry points over one walk, because C returns one value and the
+ * caller needs three.
  * bash-interpreter.abnf's mkWord is the same state machine. */
 int rt_ifslead(char *v, char *ifs) {
     if (v[0] == 0) return 0;
@@ -1931,7 +1803,6 @@ int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
     return isopen;
 }
 
-/* ================= frag-arr.c ================= */
 /* ---- arrays ---------------------------------------------------------------
  * One flat store of (arrayName, key, value) triples with a linear scan. Keys
  * are strings for both kinds of array; entries stay in INSERTION order, which
@@ -1963,11 +1834,7 @@ int rt_arr_set(char *nm, char *k, char *v) {
         return 0;
     }
     int n = arr_n;
-    /* ARRMAX = 4096. There was no test here at all, so the 4097th distinct
-     * (array, key) pair wrote past arr_nm / arr_k / arr_v into whatever the
-     * linker had put next. Refusing the write replaced that with a silently
-     * missing array element - `${a[k]}` reads "" and the script carries on -
-     * because the rt_limit it set was read nowhere. */
+    /* ARRMAX = 4096 distinct (array, key) pairs. */
     if (n >= 4096) {
         rt_die("array store", 1, n, 4096);
     }
@@ -2039,7 +1906,6 @@ char *rt_arr_list(char *nm, char *sep, int star, int keys) {
             char *kv = keys != 0 ? arr_k[i] : arr_v[i];
             char *cur = out;
             int needSep = isStar && c > 0;
-            /* both arms of the IR select are evaluated */
             char *withSep = rt_strcat(cur, sep);
             if (needSep) cur = withSep;
             cur = rt_strcat(cur, kv);
@@ -2086,10 +1952,9 @@ int rt_arr_clear(char *nm) {
 
 /* ---- a SET SCALAR IS A ONE-ELEMENT ARRAY ----------------------------------
  * bash 5.3 answers Q for "${x[@]}" with x=Q, Q for "${x[0]}", 1 for ${#x[@]}
- * and 0 for ${!x[@]}: a plain scalar occupies index 0 of an array of one. This
- * runtime answered nothing at all for every one of those (docs/todo.md 1.8).
+ * and 0 for ${!x[@]}: a plain scalar occupies index 0 of an array of one.
  *
- * WHY FOUR NEW NAMES AND NOT A CHANGE TO rt_arr_count. rt_arr_count IS the test
+ * WHY FOUR SEPARATE NAMES AND NOT A CHANGE TO rt_arr_count. rt_arr_count IS the test
  * `is this name an array` everywhere else in the emitted program - varString
  * picks between rt_arr_get(name, "0") and the scalar slot with it, `[[ -v x ]]`
  * asks it, and every assignment path asks it. Making it answer 1 for a scalar
@@ -2141,8 +2006,7 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys) {
 
 /* ---- declare -p ------------------------------------------------------------
  * `declare -p NAME` reproduces the declaration bash would need to recreate the
- * variable, and it used to print NOTHING in either engine (docs/todo.md 1.8).
- * Measured against bash 5.3:
+ * variable. Per bash 5.3:
  *
  *     declare -- x="hello"    declare -i n="7"    declare -a a=([0]="p" [1]="q")
  *     declare -A m=([k]="v" )      <- the trailing space is bash's, indexed has none
@@ -2158,14 +2022,12 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys) {
  * store, so `a=(); declare -p a` says `not found` in BOTH engines where bash
  * says `declare -a a=()`; the interpreter's declIsArr is deliberately written to
  * the same rule, because a fifth table plus a subshell snapshot entry for that
- * one line was judged not worth it. Recorded, not hidden. */
+ * one line was judged not worth it. */
 /* The $'...' form, with bash's escape table - the same one shellQuote uses in
  * languages/bash-interpreter.abnf.
  *
- * These two used to PRINT. ${a[@]@A} needs the same rendering as a VALUE (it is
- * an expansion, not a builtin), so they build a string and rt_declp prints what
- * they return - one renderer, two callers, which is what keeps `declare -p` and
- * ${a[@]@A} from drifting apart the way they had (docs/todo.md 2.12). */
+ * rt_ansiqs and rt_dqs build a string rather than print, so `declare -p` and
+ * ${a[@]@A} share one renderer. */
 char *rt_ansiqs(char *v) {
     int n = rt_strlen(v);
     char *d = rt_bump(n * 4 + 8);
@@ -2235,8 +2097,7 @@ char *rt_dqs(char *v) {
 /* Does this subscript need quoting inside `[...]`? bash quotes an associative
  * key only when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare,
  * `["k one"]` and `["q\$x"]` do not - and the test is sh_contains_shell_metas
- * from bash's own lib/sh. This was recorded as "not modelled" in
- * tests/bash-test-full.sh section 32 and is modelled now. */
+ * from bash's own lib/sh. */
 int rt_keymeta(char *k) {
     int i = 0;
     while (k[i] != 0) {
@@ -2280,7 +2141,7 @@ char *rt_arrassign(char *nm, int assoc) {
  * languages/bash-interpreter.abnf character for character; see xformOne there. */
 
 /* Is this the unset marker? ${nosuch@Q} is EMPTY in bash while ${empty@Q} is
- * '', and both halves used to answer '' for the first. */
+ * ''. */
 int rt_isset(char *v) { return (v == &unset_marker[0]) ? 0 : 1; }
 
 char *rt_shq(char *v, int isset) {
@@ -2380,7 +2241,7 @@ char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
 }
 
 /* ${a[@]@a}: the attribute letters, ONCE PER ELEMENT - `a=(pa pb)` answers
- * `a a`. The compiled half answered one copy (docs/todo.md 2.12). */
+ * `a a`. */
 char *rt_attrf(char *nm, char *at, char *sep, int star) {
     int n = rt_arr_count(nm);
     char *out;
@@ -2400,10 +2261,7 @@ char *rt_attrf(char *nm, char *at, char *sep, int star) {
     return out;
 }
 
-/* ${v@P}: PS1-style prompt expansion. The compiled halves DID NOT MODEL IT AT
- * ALL - they answered the value unchanged, which is right for a value holding
- * no backslash and wrong for every other one, and it was a live halves
- * divergence (docs/todo.md 2.12). This is promptExpand from
+/* ${v@P}: PS1-style prompt expansion. This is promptExpand from
  * languages/bash-interpreter.abnf, escape for escape: the ones that need a
  * process behind them (\u \h \s \j \! \#) answer the same documented fixed
  * values, and the second pass is the double-quoted backslash removal bash runs
@@ -2522,8 +2380,7 @@ int rt_declp(char *nm, char *flag, int assoc) {
         }
         rt_prints("declare -");
         /* `flag` is the SCALAR attribute letters, "" for a name that has none -
-         * where bash writes `declare -- x`. It used to be a single letter, and
-         * `declare -ai x` printed `declare -a`. */
+         * where bash writes `declare -- x`. */
         rt_prints(flag[0] == 0 ? "-" : flag);
         rt_prints(" ");
         rt_prints(nm);
@@ -2604,10 +2461,8 @@ char *rt_globescape(char *s) {
  * pattern operator applied to EVERY FIELD of a field list.
  *
  * op 0 = rt_strip, 1 = rt_replace, 2 = rt_case, 3 = rt_shquote, 4 = rt_ansic,
- * and `mode` is that function's own mode. The last two are the @-transforms,
- * which are element-wise for the same reason and were corrupting the output
- * outright: ${a[@]@Q} handed rt_shquote the whole ENCODED list and printed the
- * 0x02 / 0x01 marker bytes as if they were data.
+ * and `mode` is that function's own mode. The @-transforms must be
+ * element-wise too, or they would see the 0x02 / 0x01 marker bytes as data.
  * With star != 0 the results are joined with `sep` (${a[*]/x/Y});
  * otherwise they come back as a field list (${a[@]/x/Y}).
  *
@@ -2654,9 +2509,8 @@ char *rt_catfields(char *a, char *b) {
     return out;
 }
 
-/* `echo` with the FLAG SCAN AT RUN TIME. The compiler read -n / -e / -E from
- * compile-time constants only, so `opts="-n"; echo $opts x` printed the flag as
- * an argument where bash treats it as a flag (docs/todo.md 2.12). `newline` and
+/* `echo` with the FLAG SCAN AT RUN TIME, so `opts="-n"; echo $opts x` treats
+ * the expanded -n as a flag, as bash does. `newline` and
  * `escapes` carry in whatever the constant prefix already settled, and the scan
  * continues over the fields the expansions produced - which is the same order
  * languages/bash-interpreter.abnf's echoCmd walks. */
@@ -2731,14 +2585,12 @@ char *rt_params(char *sep, int star) {
     return out;
 }
 
-/* ================= frag-io.c ================= */
 /* ---- output, capture stack, subshell snapshots, local save stack --------- */
 
 /* Under set -u, reading an unset variable raises the abort flag. */
-/* `name` is the source name of the variable being read, so that the diagnostic
- * can be written: real bash 5.3 prints "bash: line N: nope: unbound variable" on
- * fd 2 and this printed nothing at all (docs/todo.md 1.9). The line number is
- * not recoverable here - the emitted program keeps no line table - so the text
+/* `name` is the source name of the variable being read, for the diagnostic:
+ * bash 5.3 prints "bash: line N: nope: unbound variable" on fd 2. The line
+ * number is not recoverable here - the emitted program keeps no line table - so the text
  * is the rest of bash's message, and languages/bash-interpreter.abnf writes the
  * same string, character for character, from getVarVal.
  *
@@ -2770,25 +2622,16 @@ char *rt_nounset(char *v, char *name, int isarr)
  * is running, otherwise to stdout. Channel 1 is the standard error channel and
  * channel 2 is the bit bucket.
  *
- * CHANNEL 1 USED TO BE DROPPED TOO, which meant `echo x >&2`, a `set -u`
- * failure, a bad regex and a `[[ ]]` that could not be evaluated all printed
- * NOTHING under -exe where real bash 5.3 prints them on fd 2 (docs/todo.md 1.9).
- * rt_ech is the fd-2 writer rt_die already used; this is the same one byte at a
- * time, so a redirection that reroutes the channel still decides where the text
- * goes and $( ) capture is unaffected (capture is channel 0 only, exactly like
- * the shell).
+ * Channel 1 goes to fd 2 one byte at a time through rt_ech, so a redirection
+ * that reroutes the channel still decides where the text goes; $( ) capture is
+ * channel 0 only, exactly like the shell.
  *
- * WHY IT IS GATED ON err_native, AND WHY THAT IS NOT A HIDDEN DIVERGENCE.
- * rt_ech calls write(2, ...), and `write` is deliberately absent from
- * abnf/llvmmap.go's libcExterns - so under llvm.Run a call to it stops the run
- * with "call to undefined external function @write". llvm.Run has no standard
- * error at all: its RunResult carries one field, Out, filled by putchar, and a
- * grammar prints that. So the honest options for the IR interpreter are DROP or
- * ABORT, and dropping is what it already did. err_native is stored as 1 by
- * main's entry block ONLY when the emitter is building a native executable
- * (bash-to-llvm-ir.abnf, `c.exePath`), so the write is unreachable in the engine
- * that cannot perform it and exact in the engine that can. This is the same
- * ceiling as manual chapter 7.11, not a choice between two implementations.
+ * WHY IT IS GATED ON err_native. `write` is deliberately absent from
+ * abnf/llvmmap.go's libcExterns, and llvm.Run has no standard error at all (its
+ * RunResult carries only Out, filled by putchar), so under llvm.Run channel 1
+ * is dropped. err_native is 1 ONLY in a native executable (bash-to-llvm-ir.abnf,
+ * `c.exePath`), so the write is unreachable in the engine that cannot perform
+ * it. This is the same ceiling as manual chapter 7.11.
  *
  * The INTERPRETER half writes channel 1 through the tag host's eprintln, so the
  * two halves a user actually runs agree; see bash-interpreter.abnf writeChan. */
@@ -2810,13 +2653,8 @@ int rt_putc(int c)
         if (d > 0) {
             buf = cap_buf[d - 1];
             l = cap_len[d - 1];
-            /* The buffer rt_cap_begin bumped is 8192 bytes and there was no
-             * test here at all: a command substitution producing more than that
-             * walked out of its buffer and over the rest of the arena. It got
-             * the right answer whenever nothing else had been bumped since,
-             * which is why no test ever caught it. TRUNCATING would be a
-             * regression on exactly those cases, so the buffer GROWS instead -
-             * a fresh, doubled block out of the arena and a copy. */
+            /* A full buffer GROWS - a fresh, doubled block out of the arena
+             * and a copy - rather than truncating the substitution. */
             if (l + 1 >= cap_sz[d - 1]) {
                 int nsz;
                 char *nb;
@@ -2847,10 +2685,8 @@ int rt_cap_begin(int u)
     int d;
     char *buf;
     d = cap_depth;
-    /* CAPMAX: 17 nested $( ) used to write past cap_buf. Refusing the push was
-     * WORSE than the overflow it prevented - the matching rt_cap_end still
-     * decremented cap_depth, so the 17th substitution read and wrote
-     * cap_buf[-1] / cap_len[-1], i.e. the globals in front of them. */
+    /* CAPMAX = 16. Dying, not refusing the push: the matching rt_cap_end
+     * would still decrement cap_depth and index cap_buf[-1]. */
     if (d >= 16) {
         rt_die("command-substitution nesting", 1, d, 16);
     }
@@ -2902,12 +2738,7 @@ int rt_ss_save(int u)
     int abase;
     int i;
     d = ss_depth;
-    /* SSDEPTH = 8, and this path had NO CHECK OF ANY KIND - the item that
-     * produced this commit named rt_bump only. ss_save is 8 * NVARS pointers,
-     * so the NINTH nested subshell wrote gvars[0..nvars) starting at
-     * ss_save[8192] - straight over stdin_buf, the option flags and whatever
-     * else the linker had put after it, with no symptom until one of them was
-     * next read. */
+    /* SSDEPTH = 8: ss_save is 8 * NVARS pointers. */
     if (d >= 8) {
         rt_die("subshell nesting", 1, d, 8);
     }
@@ -2965,10 +2796,7 @@ int rt_push_local(int id)
 {
     int t;
     t = ls_top;
-    /* LSMAX: deep recursion with `local` used to run off it. Refusing the push
-     * left the caller's value unsaved, so returning from that call restored
-     * nothing and the "local" leaked into the caller - a wrong answer, not a
-     * bounded one. */
+    /* LSMAX. Refusing the push would leak the "local" into the caller. */
     if (t >= 512) {
         rt_die("local save stack", 1, t, 512);
     }
@@ -3024,11 +2852,9 @@ int rt_pop_locals(int d)
     return 0;
 }
 
-/* ---- name -> slot: the three helpers that used to be GENERATED ----------- */
-/* They were a chain over every variable name the program mentions, emitted
- * after the walk. With varnames[] carrying the {name, slot} table they are
- * ordinary loops, and the emitted module no longer grows with the number of
- * distinct variables times three. */
+/* ---- name -> slot ---------------------------------------------------------- */
+/* Ordinary loops over the varnames[] {name, slot} table, so the emitted module
+ * does not grow with the number of distinct variables. */
 
 /* ${!name}: the value of the variable whose NAME is `n`, or the unset marker.
  * Names are distinct, so at most one slot can match. */
@@ -3049,9 +2875,8 @@ char *rt_getvar_byname(char *n)
     int i;
     int c0;
     int allDigits;
-    /* THE SPECIAL PARAMETERS ARE NOT IN varnames[]. `z=0; echo "${!z}"` is the
-     * script path in bash and was EMPTY here, because this walked the named
-     * slots only and $0..$9, $#, $@, $* and $? have none (docs/todo.md 2.12).
+    /* THE SPECIAL PARAMETERS ARE NOT IN varnames[]: $0..$9, $#, $@, $* and $?
+     * have no slot (`z=0; echo "${!z}"` is the script path in bash).
      * languages/bash-interpreter.abnf's getVarVal answers the same set. */
     if (rt_streq(n, "?") != 0) return rt_int2str(last_status);
     if (rt_streq(n, "#") != 0) return rt_int2str(frame_n);
@@ -3087,8 +2912,7 @@ char *rt_getvar_byname(char *n)
 }
 
 /* The same lookup, writing instead of reading. A name the program never
- * mentions has no slot and is silently dropped - which is what the generated
- * chain did too, since it only ever selected among the slots it knew. */
+ * mentions has no slot and is silently dropped. */
 int rt_setvar_byname(char *n, char *v)
 {
     int i;
@@ -3128,9 +2952,9 @@ int rt_fskind(char *p)
 {
     int k;
     k = 0;
-    /* CHARACTER DEVICES, not regular files: `[ -f /dev/null ]` was TRUE here and
-     * is false in bash 5.3 (docs/todo.md 1.8). Why this is still a model and not
-     * a stat() is written out at fsKind in languages/bash-interpreter.abnf. */
+    /* CHARACTER DEVICES, not regular files: `[ -f /dev/null ]` is false in
+     * bash 5.3. Why this is a model and not a stat() is written out at fsKind
+     * in languages/bash-interpreter.abnf. */
     k = rt_streq(p, "/dev/null") != 0 ? 3 : k;
     k = rt_streq(p, "/dev/zero") != 0 ? 3 : k;
     k = rt_streq(p, "/dev/tty") != 0 ? 3 : k;
@@ -3149,13 +2973,9 @@ int rt_fskind(char *p)
 }
 
 
-/* ================= frag-regex.c ================= */
 /* ==== [[ str =~ ere ]] - the POSIX ERE engine =============================
  *
- * Ported byte-for-byte from the hand-emitted IR in languages/bash-to-llvm-ir.abnf
- * (the block that began at "---- [[ str =~ ere ]] ----").
- *
- * Contract, unchanged:
+ * Contract:
  *   rt_regex_search > 0  matched; the number of capture PAIRS (${#BASH_REMATCH[@]})
  *                  == 0  no match
  *                  == -1 the pattern did not compile; rt_regex_error() has the text
@@ -3210,8 +3030,6 @@ int re_steps;                 /* NEW GLOBAL: VM steps used                  */
 int re_cstk[8192];            /* NEW GLOBAL                                 */
 int re_ctop;                  /* NEW GLOBAL                                 */
 int re_fold;                  /* NEW GLOBAL: the "i" flag                   */
-/* re_bad is declared EARLY in the grammar (reForL's guard reads it), but it is
- * one global like any other. */
 int re_bad;                   /* NEW GLOBAL: compile error code, 0 = fine   */
 
 /* The mutually recursive halves, declared before any body needs them. */
@@ -3236,10 +3054,7 @@ int re_set(int spc, int sk, int sv)
 }
 
 /* append one instruction, answer its pc. An overrun raises re_bad rather than
- * writing past re_prog - the arena would have absorbed that write.
- *
- * An instruction is THREE words (opcode, x, y) and the stride used to be four,
- * so a quarter of re_prog - 16 KB - was never addressed by anything. */
+ * writing past re_prog. An instruction is THREE words (opcode, x, y). */
 int re_emit(int eop, int ex, int ey)
 {
     int pc;
@@ -3427,13 +3242,9 @@ int re_ctype(int ctid, int ctch)
 /* the cursor sits just after "[:". Answers the re_ctype id and steps past the
  * closing ":]", or 0 when the name is unknown or the "[:" never closes.
  *
- * The name is matched WHOLE. It used to be matched by the shortest
- * distinguishing PREFIX - one to three characters, whatever told the fourteen
- * names apart - which made every longer string starting with one of those
- * prefixes a silent alias: [[:bogus:]] was [[:blank:]] and [[:lowercase:]] was
- * [[:lower:]]. bash 5.3.15 rejects both with "invalid character class" and a
- * status of 2, and so do we now: an unknown name returns 0, which re_bracket
- * turns into re_bad = 9. */
+ * The name is matched WHOLE: bash 5.3.15 rejects [[:bogus:]] and
+ * [[:lowercase:]] with "invalid character class" and status 2, so an unknown
+ * name returns 0, which re_bracket turns into re_bad = 9. */
 int re_clsname(void)
 {
     int d;
@@ -4222,9 +4033,7 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
     re_alt();
     if (re_bad != 0) {
         bad = re_bad;
-        /* Indexed by re_bad. The text only ever reaches the stderr CHANNEL,
-         * whose bytes this runtime drops, but a wrong code would still be a
-         * wrong status, so they are real. */
+        /* Indexed by re_bad. */
         msg = empty;
         if (bad == 1) { msg = "Unmatched ( or \\("; }
         if (bad == 2) { msg = "Unmatched [, [^, [:, [., or [="; }

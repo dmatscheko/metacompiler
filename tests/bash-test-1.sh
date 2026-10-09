@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Self-checking test for languages/bash-interpreter.abnf.
+# Self-checking basic test for the bash engines (languages/bash-interpreter.abnf and
+# languages/bash-to-llvm-ir.abnf).
 #
-# It exercises every feature of the implemented Bash subset, comparing each computed
-# result against its expected value with the check() helper, which prints PASS/FAIL and
-# counts failures in the global $fails. The script ends with `exit $fails`, so a fully
-# green run exits 0. The output is deterministic and must be byte-identical under goja
-# and under -frozen. It stays inside the subset (no pipes, redirection, $(cmd), arrays,
-# case or external commands), so real bash produces the same output too.
+# check() prints PASS/FAIL and counts failures in $fails; the script ends with
+# `exit $fails`, so a fully green run exits 0. The output is deterministic and must be
+# byte-identical under goja and under -frozen. It stays inside a small core subset (no
+# pipes, redirection, $(cmd), arrays, case or external commands), so real bash produces
+# the same output too.
 
 fails=0
 pass=0
@@ -213,8 +213,7 @@ check "factorial 5" "$fresult" "120"
 factorial 6
 check "factorial 6" "$fresult" "720"
 
-# Iterative Fibonacci (the subset has no `local`, so a two-branch recursive fib cannot
-# hold an intermediate across both calls -- real bash has the same limitation).
+# Iterative Fibonacci.
 fa=0
 fb=1
 fi=0

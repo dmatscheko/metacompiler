@@ -7,15 +7,8 @@
 # program ends with `exit $fails`; exit 0 and byte-identical output on all four legs
 # (interpreter/compiler x goja/-frozen) mean everything passed.
 #
-# WHY THIS FILE EXISTS AND WHAT IT IS AIMED AT (docs/todo.md 4.1)
-#
-# bash was the ONLY native-full language with no feature file, and bash's layer 2 is
-# not MetaJS at all - it is the C runtime languages/lib/bash-rt.c, ~2,950 lines,
-# which only tests/bash-test-full.sh ever exercised. Both gates that can see layer 2
-# (tests/clang-check.sh and tests/native-full.sh) ran that one file, so every
-# bash-rt.c entry point had exactly ONE gate on it and a freshly fixed defect had
-# nowhere cheap to get its assertion. This file is the second one, and it is written
-# to hit the runtime's entry points on purpose: rt_strip / rt_replace / rt_case for
+# bash's layer 2 is the C runtime languages/lib/bash-rt.c, and this file is written
+# to hit its entry points on purpose: rt_strip / rt_replace / rt_case for
 # ${v#p} ${v/p/r} ${v^^}, rt_glob and rt_eg for pattern and extended-glob matching,
 # the re_* regex builder for [[ =~ ]], rt_arr_* for both array kinds, rt_field /
 # rt_splitifs / rt_wordjoin for IFS work, rt_pad for printf widths, rt_unescape for
@@ -133,9 +126,7 @@ mx=mIxEd
 check sub20 "${mx^^}" MIXED
 check sub21 "${mx,,}" mixed
 check sub22 "${mx^}" MIxEd
-# NOT asserted: ${s^^[bn]} (a case op with a PATTERN operand). Real bash 5.3 says
-# BaNaNa; both our engines ignore the pattern and answer BANANA. Recorded in the
-# report for docs/todo.md - it is a bash-rt.c / grammar change, not a test change.
+# A case op with a PATTERN operand (${s^^[bn]}) is asserted in tests/bash-test-full.sh.
 
 # ----- ${v@Q} and friends: rt_shquote -----
 q="a b"
@@ -217,10 +208,9 @@ if [ 1 -eq 1 -a 2 -eq 2 ]; then check tst12 ok ok; else check tst12 no ok; fi
 if [ 1 -eq 2 -o 2 -eq 2 ]; then check tst13 ok ok; else check tst13 no ok; fi
 if [ -e /dev/null ]; then check tst14 ok ok; else check tst14 no ok; fi
 if [ -d /dev ]; then check tst15 ok ok; else check tst15 no ok; fi
-# NOT asserted: -f. languages/lib/bash-rt.c's rt_fskind is a hard-coded path
-# whitelist (there is no stat() in the C floor), so `-f /dev/null` is TRUE here and
-# false in real bash, and `-f` on any real regular file is false here. -e and -d are
-# asserted only on paths the whitelist and the real filesystem agree about.
+# rt_fskind is a hard-coded path model (no stat() in the C floor), so `-f` on a real
+# regular file is false here; -e and -d are asserted only on paths the model and the
+# real filesystem agree about.
 if [ -e /tmp ]; then check tst16 ok ok; else check tst16 no ok; fi
 if [ -e /no/such/path/here ]; then check tst17 no ok; else check tst17 ok ok; fi
 if test 1 -eq 1; then check tst18 ok ok; else check tst18 no ok; fi
@@ -579,7 +569,7 @@ check dcl7 "${dv-gone}" gone
 check dcl8 "$(x=inline; echo $x)" inline
 
 # ----- the SCOPE of a declaration: rt_push_local saves the attributes and the
-# array too, not only the scalar (docs/todo.md 1.5) -----
+# array too, not only the scalar -----
 dsi=1
 dsfn1() { declare -i dsi; dsi=2+3; check dsc1 "$dsi" 5; }
 dsfn1
@@ -622,11 +612,9 @@ rep=""
 for k in 1 2 3; do rep="$rep$name"; done
 check str5 "${#rep}" 15
 check str6 "${rep:5:5}" hello
-# NOT asserted: $(( 10#$num )). Real bash 5.3 answers 123 for 10#00123; both our
-# engines abort with `command not found: 10#00123` - the base#digits form is only
-# recognised for a LITERAL base prefix, not one built by expansion. Reported.
+# $(( 10#$num )) (a base prefix on an expanded operand) is asserted in
+# tests/bash-test-full.sh.
 # ----- printf conversions: rt_radix / rt_intprec / rt_pfq -----
-# %x/%X were absent from the compiler half and %o from both halves.
 check pfc1 "$(printf '%x|%X|%o' 12 255 8)" "c|FF|10"
 check pfc2 "$(printf '%o|%u' 4095 42)" "7777|42"
 check pfc3 "$(printf '%#x|%#o|%#x' 255 8 0)" "0xff|010|0"
@@ -642,8 +630,7 @@ pfsp="  12"
 check pfc10 "$(printf '%d' "$pfsp")" 12
 check pfc11 "$(( pfsp + 1 ))" 13
 
-# IFS is an ordinary SET variable, in both halves (the compiler used to leave the
-# slot unset, so ${#IFS} read 0 there and 3 in the interpreter).
+# IFS is an ordinary SET variable, in both halves.
 check ifsv1 "${#IFS}" 3
 check ifsv2 "${IFS:0:1}" " "
 check ifsv3 "${IFS-unset}" "$IFS"
@@ -652,10 +639,9 @@ check str8 "$(( -0 ))" 0
 
 # ----- an assignment's RHS is NOT field-split; a scalar IS a one-element array;
 # ----- an element takes a default; a subshell isolates arrays and attributes;
-# ----- declare -p prints (docs/todo.md 1.7 and 1.8) -----
-# All five were "both halves agree and both are wrong", so every line here was
-# settled against bash 5.3. tests/bash-test-full.sh SECTION 32 has the wide
-# version and lists what is deliberately not asserted.
+# ----- declare -p prints -----
+# Every line here was settled against bash 5.3. tests/bash-test-full.sh SECTION 32
+# has the wide version and lists what is deliberately not asserted.
 nsp="  a   b  "
 nsy=$nsp
 check nsp1 "[$nsy]" "[  a   b  ]"
@@ -708,9 +694,9 @@ declare -A dpv=(["k one"]=y)
 check dpa8 "$(declare -p dpv)" 'declare -A dpv=(["k one"]="y" )'
 
 # ----- the @-transform family, a computed command name, echo's flags -----
-# docs/todo.md 2.12. tests/bash-test-full.sh SECTION 34 is the full set and
-# carries the reasoning; these are the rows that must stay green in the MATRIX
-# and in the native binary, which the ratchet file does not reach.
+# tests/bash-test-full.sh SECTION 34 is the full set and carries the reasoning;
+# these are the rows that must stay green in the MATRIX and in the native binary,
+# which the ratchet file does not reach.
 xa=(pa "p b")
 declare -A xm=([k]=v)
 xs="hi there"

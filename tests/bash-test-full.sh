@@ -834,11 +834,9 @@ s22() {
 
 # ===== SECTION 23: interpreter/compiler agreement ratchet =====
 # Character-counting parameter expansion. ${#s} and ${s:o:n} count CHARACTERS in
-# bash; this file's grammars used to disagree three ways on non-ASCII text - real
-# bash 5.3 said 3 for "a😀b", bash-interpreter.abnf said 4 (UTF-16 code units)
-# and bash-to-llvm-ir.abnf said 6 (bytes). ${a[i]:o:n} sliced the element LIST in
-# the compiler instead of the element. Every value below is what
-# /opt/homebrew/bin/bash 5.3 prints (in a UTF-8 locale).
+# bash (3 for "a😀b" - not UTF-16 units, not bytes), and ${a[i]:o:n} slices the
+# element, not the element list. Every value below is what bash 5.3 prints (in a
+# UTF-8 locale).
 s23() {
   local s="a😀b"
   check uni1 "${#s}" 3
@@ -861,8 +859,8 @@ s23() {
   check uni15 "${#arr[@]}" 2
 }
 # ===== SECTION 24: background lists, word "#", and word-shaped function names =====
-# Three constructs the grammars used to refuse or mis-read. Every expected value
-# below was produced by running the same code under GNU bash 5.3.15 first.
+# Every expected value below was produced by running the same code under GNU
+# bash 5.3.15 first.
 #
 #   - `LIST &` : "&" both marks a list asynchronous AND separates statements, so
 #     `a & b`, `a &` and `a &<newline>b` are all one list. LIMIT (both halves):
@@ -920,13 +918,10 @@ i=2"
 # ===== END SECTIONS =====
 
 # ===== SECTION 25: ${...} corners and the extended globs =====
-# The five things the COMPILER half used to handle differently from the
-# interpreter, all of them silently: without the "$ may not degrade to a literal
-# in front of {" guard a malformed or unsupported expansion turned into ordinary
-# LITERAL TEXT instead of a parse error, so nothing anywhere went red. --cross
-# read 0 divergent only because no file exercised the gap; this section is what
-# closes it. Every expected value below came from GNU bash 5.3.15 running this
-# same file.
+# A malformed or unsupported expansion must be a parse error, never ordinary
+# LITERAL TEXT ("$ may not degrade to a literal in front of {"), so these corners
+# are pinned in both halves. Every expected value below came from GNU bash 5.3.15
+# running this same file.
 #
 #   - "#" and "!" are prefixes of a WHOLE expansion, not just of a name, which is
 #     what makes ${##} and ${###} two different things
@@ -999,14 +994,11 @@ s25() {
 
 
 # ===== SECTION 26: POSIX classes, ANSI-C escapes, case mapping, assoc literals =====
-# Every assertion here pins a defect that the runtime carried silently. Each was
-# settled against GNU bash 5.3.15(1)-release (aarch64-apple-darwin25.4.0), and
-# each FAILS on the runtime as it stood at ad922a0.
+# Each assertion was settled against GNU bash 5.3.15(1)-release.
 s26() {
-  # -- POSIX class NAMES in an ERE are matched WHOLE, not by prefix. They used to
-  #    be matched by the shortest distinguishing prefix, so [[:bogus:]] was
-  #    [[:blank:]] and [[:lowercase:]] was [[:lower:]]. bash rejects both with
-  #    status 2 ("invalid character class"); the message goes to stderr.
+  # -- POSIX class NAMES in an ERE are matched WHOLE, not by prefix: bash rejects
+  #    [[:bogus:]] and [[:lowercase:]] with status 2 ("invalid character class");
+  #    the message goes to stderr.
   s26bogus() { [[ "a b" =~ [[:bogus:]] ]]; }
   s26bogus 2>/dev/null
   check cls1 $? 2
@@ -1022,8 +1014,7 @@ s26() {
   if [[ "9f" =~ ^[[:xdigit:]]+$ ]]; then check cls6 yes yes; else check cls6 no yes; fi
   if [[ "ab" =~ [[:digit:]] ]]; then check cls7 no yes; else check cls7 ok ok; fi
 
-  # -- POSIX classes inside a GLOB bracket. rt_class did not implement them at
-  #    all: [[:digit:]] used to be read as the literal set { [ : d i g t }.
+  # -- POSIX classes inside a GLOB bracket.
   case 5 in [[:digit:]]) check glc1 yes yes ;; *) check glc1 no yes ;; esac
   case d in [[:alpha:]]) check glc2 yes yes ;; *) check glc2 no yes ;; esac
   case A in [[:upper:]]) check glc3 yes yes ;; *) check glc3 no yes ;; esac
@@ -1039,9 +1030,7 @@ s26() {
   # the same matcher through [[ == ]]
   if [[ 7 == [[:digit:]] ]]; then check glc12 yes yes; else check glc12 no yes; fi
 
-  # -- ANSI-C escapes: \NNN is one to THREE octal digits IN TOTAL. Only "\0" was
-  #    understood, so $'\001x' was a NUL followed by "01x" - and in the compiler,
-  #    where a NUL ends the string, it was the empty string.
+  # -- ANSI-C escapes: \NNN is one to THREE octal digits IN TOTAL.
   o1=$'\101'; check oct1 "$o1" A
   o2=$'\0101'; check oct4 "${#o2}" 2
   o3=$'\001x'; check oct5 "${#o3}" 2
@@ -1049,8 +1038,7 @@ s26() {
   # a \x with no hex digit after it stays literal
   o5=$'\xg'; check oct7 "$o5" '\xg'
 
-  # -- ${v@E} decodes what ${v@Q} writes. @Q used to emit \xNN, which @E could
-  #    not read back, so @E did not invert @Q.
+  # -- ${v@E} decodes what ${v@Q} writes (@Q writes control bytes in octal).
   e1='\101'; check ansi1 "${e1@E}" A
   e2='\x41\102'; check ansi2 "${e2@E}" AB
   e3=$'\001x'; q3=${e3@Q}
@@ -1058,9 +1046,7 @@ s26() {
   check ansi4 "${q3@E}" "\$'${e3}'"
   e4=$'\t9'; check ansi5 "${e4@Q}" "\$'\\t9'"
 
-  # -- ${v^^} / ${v,,} walk CODEPOINTS and map the Latin-1 supplement. They used
-  #    to walk BYTES and map ASCII only, so ${v^} did nothing to a multi-byte
-  #    first character and an e-acute never changed case.
+  # -- ${v^^} / ${v,,} walk CODEPOINTS and map the Latin-1 supplement.
   u1="aéb"
   check case1 "${u1^^}" "AÉB"
   check case2 "${u1,,}" "aéb"
@@ -1078,9 +1064,8 @@ s26() {
   check case9 "${#u4}" 2
 
   # -- bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS, with a
-  #    trailing odd word taking an empty value. They used to go through the
-  #    indexed path, which asks for the next free INTEGER index and gets one
-  #    because every string key reads as 0: a+=(zz) created a["1"]="zz".
+  #    trailing odd word taking an empty value - not the indexed path's next
+  #    free INTEGER index.
   declare -A s26a=(one two three four)
   check aa1 "${s26a[one]}" two
   check aa2 "${s26a[three]}" four
@@ -1105,10 +1090,7 @@ s26() {
   check aa11 "${s26e[*]}" "p q x"
   check aa12 "${#s26e[@]}" 3
 
-  # -- a command substitution larger than the capture buffer. The buffer was a
-  #    fixed 8192-byte arena block with no test on the write, so anything longer
-  #    walked out of it and over the rest of the arena; it only ever gave the
-  #    right answer because nothing else had been bumped since.
+  # -- a command substitution larger than the initial 8192-byte capture buffer.
   s26line=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   s26big=$(i=0; while [ $i -lt 120 ]; do printf '%s' "$s26line"; i=$(( i + 1 )); done)
   check cap1 "${#s26big}" 12000
@@ -1116,14 +1098,10 @@ s26() {
 }
 
 # ===== SECTION 27: arena aliasing, field splitting, and the nesting limits =====
-# These are FIX PROBES, not defect finders, and the distinction is worth stating:
-# every one of them passes on the runtime as it stood before the arena work of
-# 2026-08-08 too. They exist because that work made rt_strcat, rt_substr and
-# rt_splitifs RETURN AN OPERAND instead of a fresh arena copy whenever the copy
-# would have been redundant - which is what took tests/bench/mod.sh from 204.8 to
-# 69.6 bytes of arena per iteration - and every one of those returns is an
-# ALIASING decision that a later change could get wrong in a way no existing
-# assertion sees.
+# These are FENCES, not defect finders: rt_strcat, rt_substr and rt_splitifs
+# RETURN AN OPERAND instead of a fresh arena copy whenever the copy would be
+# redundant, and every one of those returns is an ALIASING decision that a later
+# change could get wrong in a way no other assertion sees.
 #
 # The two properties they fence:
 #   1. An arena string is IMMUTABLE once built. If any future helper writes
@@ -1131,7 +1109,7 @@ s26() {
 #   2. A computed value is never the `unset_marker` pointer. rt_nounset compares
 #      that pointer by IDENTITY to answer ${v-default}, so "" and unset must stay
 #      distinguishable however the "" was arrived at - ali1..ali4.
-# Settled against GNU bash 5.3.15(1)-release (aarch64-apple-darwin25.4.0).
+# Settled against GNU bash 5.3.15(1)-release.
 s27() {
   # -- 1. "" reached by concatenation is still SET, not unset.
   v=
@@ -1158,8 +1136,8 @@ s27() {
   g="${e}q"             # ... and with an empty left operand returns the right
   check ali8 "$f$g" qq
 
-  # -- 3. field splitting, which rt_splitifs now sizes in one pass and skips
-  #    entirely for a single separator-free field.
+  # -- 3. field splitting, which rt_splitifs skips entirely for a single
+  #    separator-free field.
   set -- $(printf '%s' "  p  q  ")
   check spl1 $# 2
   check spl2 "$1$2" pq
@@ -1178,12 +1156,10 @@ s27() {
   check spl6 $# 1
   check spl7 "$1" solo
 
-  # -- 4. the fixed-size tables, driven to just below their caps. bash-rt.c's
+  # -- 4. the fixed-size tables, driven to just below their caps: bash-rt.c's
   #    subshell snapshot stack (SSDEPTH 8), capture stack (CAPMAX 16) and local
-  #    save stack (LSMAX 512) used to have, respectively, no check at all and two
-  #    checks that silently REFUSED the write; all three now call rt_die. These
-  #    assertions pin the caps as real, so lowering one turns them red rather
-  #    than aborting a program that used to work.
+  #    save stack (LSMAX 512), each of which calls rt_die when full. These
+  #    assertions pin the caps as real, so lowering one turns them red.
   n=outer
   ( ( ( ( ( ( ( n=inner ) ) ) ) ) ) )
   check nst1 "$n" outer
@@ -1283,10 +1259,8 @@ s29() {
   check bnm5 "$(( 16#FF ))" 255
   check bnm6 "$(( 16#ff ))" 255
   # ... and either operand may be built by expansion.
-  # `num` was renamed to `bnum` here for a while because SECTION 22's `declare -i num`
-  # LEAKED out of s22 and made `local num=0012` an octal arithmetic assignment
-  # (docs/todo.md 1.5). The attribute is function-local in both engines now, and the
-  # name is back - which is also what keeps this section honest about the fix.
+  # `num` deliberately reuses the name SECTION 22 declares -i: if that attribute
+  # leaked out of s22, `local num=0012` would become an octal arithmetic assignment.
   local num=0012 hx=ff base=2
   check bnm7 "$(( 10#$num ))" 12
   check bnm8 "$(( 10#$num + 1 ))" 13
@@ -1323,9 +1297,9 @@ after"
 }
 
 # ===== SECTION 30: the scope and lifetime of a declaration =====
-# `declare -i n` inside a function used to stay in force after the return, so a
-# later `n="3+4"` in the caller answered 7 (docs/todo.md 1.5). Every attribute
-# and the array store are part of a `local` binding, not just the scalar value.
+# `declare -i n` inside a function must not stay in force after the return (a
+# later `n="3+4"` in the caller is "3+4"). Every attribute and the array store
+# are part of a `local` binding, not just the scalar value.
 # The globals this section restores to are declared here, inside the section, so
 # the SECTION-deletion probe takes them away with it.
 s30x=(g0 g1)
@@ -1434,10 +1408,8 @@ s30() {
 }
 
 # ===== SECTION 31: printf conversions, flags, width and precision =====
-# %x/%X were missing from the COMPILER half only (`printf '%x' 12` answered 12
-# there and c in the interpreter) and %o was absent from both, which is the
-# "both halves agree and both are wrong" class --cross cannot see. Everything
-# here was settled against bash 5.3 with LC_ALL=C.
+# Everything here was settled against bash 5.3 with LC_ALL=C ("both halves agree
+# and both are wrong" is a class --cross cannot see).
 #
 # NOT asserted, on purpose: %e/%f/%g (no float model in either engine - the
 # integer-only runtime is documented at printfBuiltin), a NEGATIVE operand under
@@ -1501,8 +1473,7 @@ s31() {
   local pv
   printf -v pv '%04x' 255
   check pf39 "$pv" 00ff
-  # --- leading blanks in a numeric operand are skipped (the interpreter half
-  # used to throw away the result of its own skip and answer 0)
+  # --- leading blanks in a numeric operand are skipped
   local sp31="  12"
   check pf40 "$(printf '%d' "$sp31")" 12
   check pf41 "$(( sp31 + 1 ))" 13
@@ -1511,9 +1482,8 @@ s31() {
 
 # ===== SECTION 32: an assignment is not field-split; scalars as arrays,
 # ===== element defaults, subshell isolation and declare -p =====
-# docs/todo.md 1.7 and 1.8. All five were "both halves agree and both are
-# wrong" - the class --cross cannot see by construction - so every assertion
-# here was settled against bash 5.3 and nothing else.
+# "Both halves agree" is not evidence here (--cross cannot see that class), so
+# every assertion was settled against bash 5.3 and nothing else.
 #
 # NOT asserted, on purpose:
 #   * `declare -p` of an EMPTY array (`a=(); declare -p a`): bash answers
@@ -1521,18 +1491,15 @@ s31() {
 #     array store keeps no record of a declared-but-empty INDEXED array. The
 #     rule is written identically into both halves; see rt_declp in
 #     languages/lib/bash-rt.c.
-#   * -x / -r, which neither engine models. MORE THAN ONE ATTRIBUTE is modelled
-#     now (docs/todo.md 2.12): `declare -ai x` prints `declare -ai` in both
-#     halves and SECTION 34 pins it. So is the KEY-QUOTING rule that used to be
-#     the next line here - bash quotes an associative subscript only when the
-#     shell would need it (a_b, k and 5x stay bare, "k one" and "q\$x" do not),
-#     which is sh_contains_shell_metas and is now rt_keymeta / keyNeedsQuote.
+#   * -x / -r, which neither engine models. (More than one attribute is
+#     modelled and pinned in SECTION 34, and so is the associative KEY-QUOTING
+#     rule, rt_keymeta / keyNeedsQuote.)
 #   * `declare -p` with NO names, which in bash lists the whole shell.
 #   * an ASSOCIATIVE array with more than one key anywhere its ORDER would
 #     show: bash iterates in hash order, both halves in insertion order.
 s32() {
   local x="  a   b  "
-  # --- 1.7: the right hand side of an assignment keeps its blanks
+  # --- the right hand side of an assignment keeps its blanks
   local y=$x
   check as1 "[$y]" "[  a   b  ]"
   local r=$( echo "  cs  " )
@@ -1569,7 +1536,7 @@ b]"
   check as11 "${#C[@]}" 2
   local D=("$x")
   check as12 "${#D[@]}" 1
-  # --- 1.8a: a set scalar is a one-element array
+  # --- a set scalar is a one-element array
   local q=Q
   check sc1 "${q[@]}" Q
   check sc2 "${q[*]}" Q
@@ -1580,7 +1547,7 @@ b]"
   check sc7 "[${q[@]:0:1}]" "[Q]"
   unset unsetname32
   check sc8 "[${unsetname32[@]}][${#unsetname32[@]}]" "[][0]"
-  # --- 1.8b: a default word on a MISSING element
+  # --- a default word on a MISSING element
   local E=(p q)
   check el1 "${E[9]-dflt}" dflt
   check el2 "${E[0]-dflt}" p
@@ -1597,7 +1564,7 @@ b]"
   check el9 "${G[@]-D}" D
   local H=("")
   check el10 "[${H[@]-D}][${H[@]:-D}]" "[][D]"
-  # --- 1.8c: a subshell isolates arrays and attributes, not just scalars
+  # --- a subshell isolates arrays and attributes, not just scalars
   local I=(p q)
   ( I[0]=Z; I+=(r) )
   check ss1 "[${I[*]}]" "[p q]"
@@ -1619,7 +1586,7 @@ b]"
   ( declare -u u32; u32=xyz )
   u32=def
   check ss7 "$u32" def
-  # --- 1.8d: declare -p
+  # --- declare -p
   local P32=hello
   check dp1 "$(declare -p P32)" 'declare -- P32="hello"'
   local -i Q32=7
@@ -1648,9 +1615,8 @@ declare -i Q32="7"'
 }
 
 # ===== SECTION 33: word-splitting boundaries, read's remainder, $0, and a
-#       pattern operator on a subscripted expansion (docs/todo.md 2.15, 1.13) =====
-# Every assertion here was settled against bash 5.3.15 before it was written,
-# and each one FAILED in at least one engine at ec39aef.
+#       pattern operator on a subscripted expansion =====
+# Every assertion here was settled against bash 5.3.15 before it was written.
 s33() {
   # --- a DELIMITER AT THE EDGE of an unquoted expansion separates it from the
   # literal text beside it: `w:[` `a` `b` `]` is four words, not one.
@@ -1741,17 +1707,16 @@ s33() {
   check pa13 "${B33[*]/a/Q}" 'Qa bQ'
   local -A M33=([k1]=pAx)
   check pa14 "${M33[k1],,}" 'pax'
-  # ...and the same walk for the @-transforms, which leaked the field-list
-  # marker bytes into the output in the compiled half
+  # ...and the same walk for the @-transforms (no field-list marker bytes may
+  # leak into the output)
   local C33=(pa pb)
   check pa15 "$(printf '<%s>' "${C33[@]@Q}")" "<'pa'><'pb'>"
   check pa16 "${C33[*]@U}" 'PA PB'
   check pa17 "${C33[1]@Q}" "'pb'"
 
   # --- $0 is the SCRIPT, not the engine. The --full runner copies this file to a
-  # temporary name, so the assertion is on what $0 must NOT be: every engine used
-  # to answer the literal "bash", and the compiled halves named the GRAMMAR in
-  # their diagnostics (docs/todo.md 1.13).
+  # temporary name, so the assertion is on what $0 must NOT be: the literal
+  # "bash" or the GRAMMAR's path.
   case "$0" in
     ""|bash|*.abnf) check zr1 "$0" "the script's own path" ;;
     *) check zr1 ok ok ;;
@@ -1759,11 +1724,8 @@ s33() {
 }
 
 # ===== SECTION 34: the @-transform family, a command name out of an expansion,
-#       and echo's flags out of an expansion (docs/todo.md 2.12) =====
+#       and echo's flags out of an expansion =====
 # Every assertion here was settled against bash 5.3.15 before it was written.
-# At f1910a9 the interpreter half failed SIXTEEN of them and then died on the
-# first computed command name, and the compiler half refused to compile the
-# section at all ("a computed command name is not supported by this compiler").
 #
 # Two shapes are load-bearing and easy to get wrong when editing this:
 #   * `"${a[@]@A}"` is THREE WORDS in bash, so it cannot be the second argument
