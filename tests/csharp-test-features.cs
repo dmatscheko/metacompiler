@@ -1,13 +1,9 @@
 // Fast feature-matrix test for the C# interpreter (csharp-interpreter.abnf) and the
-// LLVM-IR compiler (csharp-to-llvm-ir.abnf). It replaces the four algorithm-themed
-// csharp-test-big-* stress tests: instead of large loops (sorts, Ackermann, ciphers)
-// every implemented construct is exercised with the SMALLEST program that can prove
-// it works - loops run 0, 1, 3 or 4 times, recursion stays below depth 6. A failed
-// check prints its id (so a diff pinpoints it) and Program.Main returns the failure
-// count; exit 0 and byte-identical output on all four legs (interpreter/compiler x
-// goja/-frozen) mean everything passed.
-// Note: the two-argument Substring(a, b) is slice(a, b) here - b is an exclusive END
-// index, not a length - so the checks below stick to those semantics.
+// LLVM-IR compiler (csharp-to-llvm-ir.abnf). Every implemented construct is exercised
+// with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+// recursion stays below depth 6. A failed check prints its id (so a diff pinpoints
+// it) and Program.Main returns the failure count; exit 0 and byte-identical output
+// on all four legs (interpreter/compiler x goja/-frozen) mean everything passed.
 
 using System;
 using System.Collections.Generic;
@@ -139,9 +135,9 @@ namespace Demo
     }
 
     // The default Message of a parameterless exception constructor, and
-    // Exception.ToString() (docs/todo.md 1.3). MyEx declares both constructors,
-    // BareEx declares NONE - a class with no constructor at all still runs the
-    // implicit ': base()' - and OverEx overrides ToString, which must keep winning.
+    // Exception.ToString(). MyEx declares both constructors, BareEx declares NONE -
+    // a class with no constructor at all still runs the implicit ': base()' - and
+    // OverEx overrides ToString, which must keep winning.
     class MyEx : Exception
     {
         public MyEx() { }
@@ -266,12 +262,11 @@ namespace Demo
             return x => x + n;
         }
 
-        // ----- declared-type adoption (docs/todo.md 1.1) and the run-time type
-        // test behind `is` (docs/todo.md 1.9). ECMA-334 10.2.3 makes an untyped
-        // integer literal at a `double`/`float`/sized-integral site take that
-        // type - the WIDTH IS ON THE VALUE, not on the annotation - and 12.12.12
-        // makes `E is T` a run-time type test with no implicit conversion. Both
-        // halves used to agree on every wrong answer here, so --cross was blind.
+        // ----- declared-type adoption and the run-time type test behind `is`.
+        // ECMA-334 10.2.3 makes an untyped integer literal at a
+        // `double`/`float`/sized-integral site take that type - the WIDTH IS ON THE
+        // VALUE, not on the annotation - and 12.12.12 makes `E is T` a run-time type
+        // test with no implicit conversion.
         static double AdoptG(double x) { return x / 2; }
         static double AdoptR() { return 3; }
         static byte AdoptW(byte b) { return b; }
@@ -279,13 +274,10 @@ namespace Demo
 
         // ----- method groups, method overloads and the integral local write
         // (ECMA-334 10.8 / 20.1 / 20.5 / 20.2 / 12.8.10.2 for the groups, 12.6.4 for
-        // the overloads, 10.2.3 at 12.21.2 for the write; docs/todo.md 1.1/1.2/1.3).
-        // A method group did not exist anywhere: `this.M`, a bare `M` and a bare
-        // static `H` all answered undefined or "unknown name" in BOTH halves, a
-        // delegate FIELD called like a method aborted, and .Invoke() was
-        // unsupported. Overloading was implemented for constructors only, so a class
-        // kept the LAST declaration of each method name. And `long x; x = 3;` stored
-        // the raw int, so `x * 1000000 * 1000000` was a 32-bit multiply.
+        // the overloads, 10.2.3 at 12.21.2 for the write): `this.M`, a bare `M` and
+        // a bare static `H` are method groups, a delegate FIELD can be called like a
+        // method, .Invoke() works, every overload of a method is kept, and
+        // `long x; x = 3;` stores a long, so `x * 1000000 * 1000000` is 64-bit.
         delegate int MgOp(int x);
         class MgK
         {
@@ -310,7 +302,7 @@ namespace Demo
         }
         static int MgFree(int x) { return x + 7; }
         // An OVERLOADED OPERATOR keeps every declaration too (ECMA-334 12.4.5 /
-        // 15.10.1): the second used to overwrite the first in both halves.
+        // 15.10.1).
         class MgV
         {
             public double X;
@@ -321,7 +313,7 @@ namespace Demo
 
 
         // ----- inherited statics, base overloads, operator applicability and
-        // `ref` / `out` (docs/todo.md 1.1) -----
+        // `ref` / `out` -----
         // ECMA-334 15.3.1 (a base member IS a member of the derived class), 15.5.1
         // (one storage location per static field), 15.4 (a const member is
         // implicitly static), 12.6.4 (the candidate set moves to the base when the
@@ -329,7 +321,7 @@ namespace Demo
         // 12.10.5 (a user operator that accepts neither operand is not applicable
         // and the predefined string concatenation stands) and 12.6.2.3.3 / .4 (a
         // `ref` / `out` parameter is an ALIAS for the argument's variable).
-        // There is no C# toolchain here; every value is spec-cited.
+        // No C# toolchain is available; every value is spec-cited.
         delegate int RfOp(int x);
         class RfBas
         {
@@ -360,10 +352,8 @@ namespace Demo
         }
 
         // ----- constructor initializers and constructor overloads (ECMA-334
-        // 15.11.2 / 12.6.4, docs/todo.md 1.1 and 1.10). The ': base(d)' header used
-        // to be parsed and DISCARDED - the base class' parameterless constructor ran
-        // instead - and a class kept only its LAST constructor. Both halves agreed
-        // on both wrong answers, so --cross was blind to them.
+        // 15.11.2 / 12.6.4): the ': base(d)' header selects the base constructor,
+        // and every constructor of a class is kept.
         class CtP { public double D; public double T = 1; public CtP(double d) { D = d; } public CtP() { D = -1; } }
         class CtC : CtP { public CtC(double d) : base(d) { } public CtC() : this(7) { T = T + 100; } }
         class CtOv
@@ -380,7 +370,7 @@ namespace Demo
         class CollFld { public double Coll = 5; }
         // An event whose type is a BUILT-IN delegate (Action), with no `delegate`
         // declaration anywhere in this file: 'E += h' must combine invocation lists
-        // (ECMA-334 15.8.1) and not do arithmetic (docs/todo.md 1.10).
+        // (ECMA-334 15.8.1) and not do arithmetic.
         class EvBox
         {
             public event Action E;
@@ -390,16 +380,16 @@ namespace Demo
         static string EvLog = "";
 
         // ----- an unqualified name resolving to a member of the enclosing type
-        // (ECMA-334 12.8.4 / 12.8.7 / 12.7.3, docs/todo.md 1.2 and 1.1) -----
+        // (ECMA-334 12.8.4 / 12.8.7 / 12.7.3) -----
         class UnqBox
         {
             public double D = 1;
             public double U;
             public static double S = 2;
             // csPropAcc / csEvtAcc are keyed by member name ALONE in the compiler
-            // half, so a property with accessor bodies used to CAPTURE every plain
-            // field of the same name in every other class. `CollFld.Coll` below is
-            // the assertion that it no longer does (docs/todo.md 1.10).
+            // half, so a property with accessor bodies must not CAPTURE a plain
+            // field of the same name in another class. `CollFld.Coll` below is the
+            // assertion.
             public int Acc { get { return 20; } set { this.D = value; } }
             public void WrD(int v) { D = v; }          // instance field, unqualified
             public void WrU(int v) { U = v; }          // ... with no initializer
@@ -429,7 +419,7 @@ namespace Demo
                 return e2.Code;
             }
         }
-        // ----- typed catch, filters and rethrow (docs/todo.md 1.1) -----
+        // ----- typed catch, filters and rethrow -----
         // The FIRST clause is one that must not match, so "first clause wins" scores
         // zero on every row here.
         static string PickClause(int k)
@@ -658,10 +648,8 @@ namespace Demo
             Program.Check("str-unicode-len", "héllo".Length == 5);
             Program.Check("str-substring-tail", "hello".Substring(3) == "lo");
             // Substring's SECOND argument is a LENGTH, not an end index
-            // (System.String.Substring(int startIndex, int length)). This assertion
-            // used to expect "comp" - the JS slice(4, 8) answer - and both halves
-            // agreed with it, which is exactly the class ./test.sh --cross cannot
-            // see. See SECTION 34 of tests/csharp-test-full.cs.
+            // (System.String.Substring(int startIndex, int length)). See SECTION 34
+            // of tests/csharp-test-full.cs.
             Program.Check("str-substring-slice", "metacompiler".Substring(4, 8) == "compiler");
             Program.Check("str-indexof", "hello".IndexOf("ll") == 2 && "hello".IndexOf("z") == -1);
             Program.Check("str-eq", "abc" == "abc" && "abc" != "abd");
@@ -673,9 +661,8 @@ namespace Demo
             // The range indexer on a String is Substring, so its bounds are
             // UTF-16 CODE UNITS (ECMA-334 12.8.12 / String.Substring) - not the
             // BYTES a Go slice would take. The ASCII row cannot tell the two
-            // apart; the CJK one can, and answered a lone replacement character
-            // while the shared js_goslice extern was carrying both languages.
-            // No dotnet on this machine, so the BCL contract is the oracle.
+            // apart; the CJK one can. No C# toolchain is available, so the BCL
+            // contract is the oracle.
             string rngAscii = "abcdef";
             Program.Check("str-range-ascii", rngAscii[1..3] == "bc" && rngAscii[..2] == "ab" && rngAscii[4..] == "ef");
             string rngCjk = "日本語";
@@ -909,9 +896,8 @@ namespace Demo
             Program.Check("continue-in-finally", Program.ContinueInFinally() == 0);
             // Typed catch clauses select on the RUN-TIME type of the thrown value, in
             // source order (ECMA-334 13.11), and a `when` filter that declines falls
-            // through to the next clause. Both used to be parsed and discarded, in BOTH
-            // halves, so the first clause always ran (docs/todo.md 1.1). Bare `throw;`
-            // re-raises what the catch is handling (13.10.6) instead of `undefined`.
+            // through to the next clause. Bare `throw;` re-raises what the catch is
+            // handling (13.10.6).
             Program.Check("catch-typed-order", Program.PickClause(0) == "fmt"
                           && Program.PickClause(1) == "inv" && Program.PickClause(2) == "base");
             Program.Check("catch-when-declines", Program.WhenChain(1) == "hi" && Program.WhenChain(9) == "lo");
@@ -919,16 +905,15 @@ namespace Demo
             Program.Check("catch-bare-rethrow", Program.BareRethrow() == "re:kk");
             Program.Check("catch-is-hierarchy", Program.IsChain() == "abc");
 
-            // ----- the default Message, and Exception.ToString() (docs/todo.md 1.3) --
+            // ----- the default Message, and Exception.ToString() --------------------
             //
-            // SPEC-CITED, NOT MEASURED: no C# toolchain on this machine (manual 7.9).
+            // SPEC-CITED, NOT MEASURED (manual 7.9).
             // System.Exception's parameterless constructor stores NO message, and
             // Exception.Message then generates SR.Format(SR.Exception_WasThrown,
             // GetClassName()) - "Exception of type '{0}' was thrown." over the FULLY
             // QUALIFIED RUNTIME type. Almost every derived BCL type instead passes its
             // own SR string to base(), which is why ArgumentException does NOT say the
-            // generated sentence. All three engines used to answer the bare class name
-            // here, and all three said "[object Object]" for ToString().
+            // generated sentence.
             Program.Check("exc-default-msg-root",
                           new Exception().Message == "Exception of type 'System.Exception' was thrown.");
             Program.Check("exc-explicit-msg-unchanged", new Exception("m").Message == "m");
@@ -964,8 +949,7 @@ namespace Demo
             // String concatenation and Console.Write go through the same conversion.
             Program.Check("exc-tostring-implicit", ("" + new MyEx("c")) == "MyEx: c");
             // A user ToString() override still wins over System.Exception's, exactly
-            // as the virtual dispatch says. This one passes at base too, and is kept
-            // to pin the precedence the new arm was inserted behind.
+            // as the virtual dispatch says.
             Program.Check("exc-tostring-override", new OverEx().ToString() == "over!");
 
             // ----- the one argument of ArgumentNullException is a PARAM NAME --------
@@ -974,10 +958,8 @@ namespace Demo
             // paramName) and ArgumentOutOfRangeException(string? paramName) pass their
             // argument as the paramName and the type's own SR string as the message;
             // ArgumentException.Message then appends " (Parameter '{0}')" - a SPACE,
-            // and nothing at all for a null or empty name. Every engine here read the
-            // argument as the MESSAGE, so `new ArgumentNullException("value").Message`
-            // was "value". The names are read out of an ARRAY so that no constant
-            // folder can answer this at compile time.
+            // and nothing at all for a null or empty name. The names are read out of
+            // an ARRAY so that no constant folder can answer this at compile time.
             string[] pnames = { "value", "" };
             Program.Check("exc-argnull-paramname",
                           new ArgumentNullException(pnames[0]).Message
@@ -1001,7 +983,7 @@ namespace Demo
 
             // ----- a literal adopts its declared type; `is` reads the run-time
             // type. Every operand is read out of an ARRAY so the constant folders
-            // cannot answer at compile time. No C# toolchain on this machine: the
+            // cannot answer at compile time. No C# toolchain is available: the
             // values are ECMA-334 10.2.3 / 12.12.12 cited, not executed.
             int[] adoptN = {3, 250};
             Program.Check("adopt-parameter", Program.AdoptG(adoptN[0]) == 1.5);
@@ -1064,9 +1046,8 @@ namespace Demo
             ev.E -= evA;
             ev.Fire();
             Program.Check("event-combine", Program.EvLog == "abb");
-            // The three declaration sites that still stored the raw int
-            // (docs/todo.md 1.3): a local written after its declaration, an array
-            // element, and a qualified member write.
+            // The declaration sites that adopt on a later write: a local written
+            // after its declaration, an array element, and a qualified member write.
             double adL;
             adL = ctN[0];
             Program.Check("adopt-local-write", adL / 2 == 1.5 && (adL is double));
@@ -1077,8 +1058,7 @@ namespace Demo
             adB.A = ctN[0];
             Program.Check("adopt-qualified-write", adB.A / 2 == 1.5 && (adB.A is double));
 
-            // ----- method groups, method overloads, integral local writes
-            // (docs/todo.md 1.1, 1.2, 1.3) -----
+            // ----- method groups, method overloads, integral local writes -----
             int[] mgN = {1, 2, 3};
             string[] mgW = {"x"};
             double[] mgQ = {1.5};
@@ -1122,7 +1102,7 @@ namespace Demo
 
 
             // ----- inherited statics, base overloads, operator applicability,
-            // `ref` / `out` (docs/todo.md 1.1) -----
+            // `ref` / `out` -----
             int[] rfN = {1, 2, 3};
             string[] rfW = {"s"};
             Program.Check("static-inherited-call", RfDer.SB() == 7);

@@ -3,32 +3,21 @@ package abnf
 // jsrtcsharp.go -- C#'s VALUE RENDERING for the compiler grammar
 // (languages/csharp-to-llvm-ir.abnf).
 //
-// csharp-to-llvm-ir.abnf used to bind Console.WriteLine / Console.Write straight
-// to the shared `println` / `print` host functions, which hand the raw runtime
-// value to Go's `%v`. That printed `<nil>` for a null reference, `[1 2 3]` for an
-// array and a full `map[__class:map[__isclass:true __name:Box ...] x:0]` dump -
-// including a raw Go POINTER address for the constructor - for a class instance,
-// so the compiler's stdout was not even reproducible between two runs of the same
-// program. The interpreter half was wrong in its own way: its `csStr` fell through
-// to JavaScript's ToString, so an array printed `1,2,3` and an instance
-// `[object Object]`.
-//
-// On top of that both halves agreed on ONE wrong answer, which is why
-// `./test.sh --cross` could never flag it: a bool converted to a string printed
-// JavaScript's `true` / `false`. `System.Boolean.ToString()` returns
-// `Boolean.TrueString` / `Boolean.FalseString`, which are the strings "True" and
-// "False" (the LITERALS `true` / `false` are unchanged - only the string
-// CONVERSION is capitalised).
+// The shared `println` / `print` host functions hand the raw runtime value to Go's
+// `%v`, which is wrong for every C# reference (`<nil>`, `[1 2 3]`, a pointer-bearing
+// map dump). And a bool converted to a string is NOT JavaScript's `true` /
+// `false`: `System.Boolean.ToString()` returns `Boolean.TrueString` /
+// `Boolean.FalseString`, the strings "True" and "False" (the LITERALS `true` /
+// `false` are unchanged - only the string CONVERSION is capitalised).
 //
 // This file is the Go twin of `csStr` in csharp-interpreter.abnf and the two MUST
 // stay in step, because ./test.sh --cross diffs them.
 //
 // Registration is additive: an init() appends a registrar to rxExtraExterns, so
 // nothing here runs unless a program calls one of the js_cs* externs registered
-// below, and only the C# compiler grammar emits them. No existing extern is
-// renamed, removed or rebound, and abnf/jsrt.go is untouched.
+// below, and only the C# compiler grammar emits them.
 //
-// Spec basis. There is no dotnet on this machine, so every answer below is CITED
+// Spec basis. No C# toolchain is available, so every answer below is CITED
 // rather than executed:
 //
 //   - bool     "True" / "False"        System.Boolean.ToString(), which is
@@ -50,9 +39,8 @@ package abnf
 //   - instance "Box"                   System.Object.ToString() returns
 //                                      GetType().ToString(), the fully qualified
 //                                      name. See the simplification below.
-//   - double   csFloStr                unchanged from the commit that boxed the
-//                                      float (see jvmFloText / floCS in
-//                                      abnf/jsrtjvm.go); ECMA-335 "G" round-trip.
+//   - double   csFloStr                see jvmFloText / floCS in abnf/jsrtjvm.go;
+//                                      ECMA-335 "G" round-trip.
 //   - char     the glyph               System.Char.ToString().
 //
 // A user-defined ToString() override wins over ALL of the above, in both halves -
@@ -77,8 +65,7 @@ package abnf
 //     simplification abnf/jsrtswift.go records for Swift's module qualification.)
 //   - A RECORD prints its type name like any other instance. Real C# synthesizes
 //     a `Box { X = 1 }` ToString for a record.
-//   - A Dictionary and a tuple are left exactly as they rendered before (the
-//     generic "[object Object]"), because both halves already agreed there and
+//   - A Dictionary and a tuple render as the generic "[object Object]", because
 //     neither shape carries the type information the real answer needs.
 
 import (
@@ -112,7 +99,7 @@ import (
 // a documented gap. Division by zero DOES throw (12.9.3), because it throws in
 // both contexts.
 //
-// There is no dotnet on this machine, so every rule below is CITED rather than
+// No C# toolchain is available, so every rule below is CITED rather than
 // executed; the section header of each function names the clause.
 //
 // languages/csharp-interpreter.abnf implements exactly these rules on top of the
@@ -159,12 +146,6 @@ func csIsTyWidth(t string) (uint8, bool, bool) {
 	return bits, csTypeU[t], true
 }
 
-// csIsNumericV says whether a value can be CONVERTED to a double/float by an
-// implicit numeric conversion: a plain number (an `int` here), a sized integer,
-// or a float box. A char is deliberately NOT one - `double d = 'a'` is legal C#
-// but the interpreter's csImplicitConv declines it too, and the two halves have
-// to agree. Everything else (null, a string, a lambda, an instance) passes
-// through the adoption sites untouched.
 // "double[]" -> "double" when the elements adopt, "" otherwise. One level only, the
 // same rule csElemAdoptTy applies in both grammars.
 func csElemAdoptName(ty string) string {
@@ -181,6 +162,12 @@ func csElemAdoptName(ty string) string {
 	return ""
 }
 
+// csIsNumericV says whether a value can be CONVERTED to a double/float by an
+// implicit numeric conversion: a plain number (an `int` here), a sized integer,
+// or a float box. A char is deliberately NOT one - `double d = 'a'` is legal C#
+// but the interpreter's csImplicitConv declines it too, and the two halves have
+// to agree. Everything else (null, a string, a lambda, an instance) passes
+// through the adoption sites untouched.
 func csIsNumericV(v interface{}) bool {
 	switch v.(type) {
 	case jsGInt, float64, jsJFlo:
@@ -247,18 +234,14 @@ func csPromote(l, r interface{}) (uint8, bool) {
 
 // csExcParent is the .NET base class of one BCL exception type. It is what makes a
 // typed catch clause discriminate: those types are plain {__excname, Message}
-// objects here, with no descriptor and therefore no chain to walk, which is why
-// `catch (FormatException e) {} catch (InvalidOperationException e) {}` used to run
-// the FormatException body on an InvalidOperationException in BOTH halves - a spec
-// divergence rather than a halves one, so --cross was blind to it (docs/todo.md 1.1).
+// objects here, with no descriptor and therefore no chain to walk.
 //
-// SPEC-DERIVED, NOT MEASURED: there is no C# toolchain on this machine (see this
-// file's header and manual 7.9), so every parent here comes from the type's
-// documented base class in the .NET base class library. "" is Exception's parent -
-// the root of what a catch can name - and "?" means "not a BCL exception name at
-// all", which js_csexcmatch has to tell apart from "has no parent".
+// SPEC-DERIVED, NOT MEASURED: every parent here comes from the type's documented
+// base class in the .NET base class library. "" is Exception's parent - the root
+// of what a catch can name - and "?" means "not a BCL exception name at all",
+// which js_csexcmatch has to tell apart from "has no parent".
 //
-// THE SAME BODY EXISTS IN THREE MORE ENGINES: csExcParent in
+// THE SAME BODY EXISTS IN TWO MORE ENGINES: csExcParent in
 // languages/csharp-interpreter.abnf (the tree-walking half) and in
 // languages/lib/csharp-rt.metajs (layer 2, which the NATIVE -exe build links). A
 // chain of ifs rather than a map precisely so it ports into MetaJS unchanged.
@@ -588,10 +571,9 @@ func init() {
 		// THE .NET HOST'S UNHANDLED-EXCEPTION LINE, the C# counterpart of
 		// js_jvtop in abnf/jsrtjvm.go and reached the same way (buildMain in
 		// languages/csharp-to-llvm-ir.abnf wraps the entry call in one
-		// js_try). SPEC-CITED, NOT MEASURED - no C# toolchain on this machine
-		// (manual 7.9). See csExcTopLine in languages/lib/csharp-rt.metajs for
-		// the citation and for what is deliberately not reproduced.
-		// docs/todo.md 1.14.
+		// js_try). SPEC-CITED, NOT MEASURED. See csExcTopLine in
+		// languages/lib/csharp-rt.metajs for the citation and for what is
+		// deliberately not reproduced.
 		m["js_cstop"] = func(a []uint64) uint64 { return jvmUncaught(rt.csharpExcTopLine(u(a[0]))) }
 
 		// One binary integral operator: (op, left, right). A double operand keeps
@@ -619,13 +601,12 @@ func init() {
 			}
 			return w(rt.csArith(op, l, r))
 		}
-		// js_csflo32 is the ONE new extern the float width needs, and it is the
-		// twin of js_csflo (a FLOOR primitive, languages/lib/runtime.c) at 24
-		// significant bits: a `1.0f` literal, a `(float)e` cast and a `float x =
-		// e` declaration all lower to it. It is registered here rather than in
-		// abnf/jsrt.go's table because the floor cannot hold a 32-bit box - see
-		// the header of abnf/jsrtjvm.go. Its layer-2 twin is js_csflo32 in
-		// languages/lib/csharp-rt.metajs.
+		// js_csflo32 is the float-width extern, the twin of js_csflo (a FLOOR
+		// primitive, languages/lib/runtime.c) at 24 significant bits: a `1.0f`
+		// literal, a `(float)e` cast and a `float x = e` declaration all lower to
+		// it. It is registered here rather than in abnf/jsrt.go's table because
+		// the floor cannot hold a 32-bit box - see the header of abnf/jsrtjvm.go.
+		// Its layer-2 twin is js_csflo32 in languages/lib/csharp-rt.metajs.
 		m["js_csflo32"] = func(a []uint64) uint64 {
 			return w(jsJFlo{f: jvmFround(rt.toNumber(u(a[0]))), sty: floCSF})
 		}
@@ -641,18 +622,16 @@ func init() {
 			// comparison (ECMA-334 12.4.7.3 binary numeric promotion, the same
 			// rule as JLS 5.6.2), so `16777216f < 16777217` is FALSE - the int
 			// becomes 1.6777216E7 on the way in. The test sits BEHIND the
-			// integral fast path above, which is where 8f43e84 measured java at
-			// +5.32% for putting it in front.
+			// integral fast path above on purpose: in front it is measurably
+			// slower.
 			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
-			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
-			// there as "every relation is false" - and that is exactly C#'s
-			// rule (ECMA-334 12.12.1: for the floating point relational
-			// operators, "if either operand is NaN, the result is false for
-			// all operators except !="). Read as an ordering the sentinel made
-			// `>` and `>=` TRUE, so `double.NaN > 0.0` answered true here and
-			// in layer 2. It is not 0 either: 0 would make `<=` and `>=` true,
-			// which is wrong in the other direction.
+			// jsCompare answers the SENTINEL 2 for a NaN operand ("every
+			// relation is false"), which is exactly C#'s rule (ECMA-334 12.12.1:
+			// for the floating point relational operators, "if either operand is
+			// NaN, the result is false for all operators except !="). It must not
+			// be read as an ordering, and it is not 0 either: 0 would make `<=`
+			// and `>=` true.
 			if c == 2 {
 				return boolH(false)
 			}
@@ -680,7 +659,7 @@ func init() {
 			bits := uint8(jsToInt(rt.toNumber(u(a[1]))))
 			uns := rt.truthy(u(a[2]))
 			// Adopting a value that ALREADY carries the width and signedness is the
-			// identity (see js_csadoptty for the measurement that made this matter).
+			// identity (see js_csadoptty).
 			if g, isG := v.(jsGInt); isG {
 				if g.w == bits && g.u == uns {
 					return a[0]
@@ -697,22 +676,20 @@ func init() {
 		//
 		//     static double G(double x) { return x / 2; }   G(3)
 		//
-		// answer 1.5 rather than the 1 an int division gave: THE WIDTH IS ON THE
+		// answer 1.5 rather than the 1 an int division gives: THE WIDTH IS ON THE
 		// VALUE, NOT THE ANNOTATION, so nothing but a conversion at the binding
-		// site can put it there (docs/todo.md 1.1). Anything that is not a
-		// number, a sized integer or a float box is handed back UNCHANGED, so a
-		// null, a string or a lambda at such a site is untouched.
+		// site can put it there. Anything that is not a number, a sized integer or
+		// a float box is handed back UNCHANGED, so a null, a string or a lambda at
+		// such a site is untouched.
 		m["js_csadoptty"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			ty := rt.toString(u(a[1]))
 			// ADOPTING A VALUE THAT ALREADY CARRIES THE TYPE IS THE IDENTITY, and
-			// saying so here is not a micro-optimisation: without it every write to
-			// a declared-type slot re-boxed, and `long i; while (...) { i = i + 1; }`
-			// allocated a fresh 64-bit cell per iteration - measured at +15.8% on
-			// tests/bench/mod.cs against a 1.94% spread when the local-write site
-			// started adopting (docs/todo.md 1.3). A sized integer and a float box
-			// are compared BY VALUE by strict_eq, so handing back the same value
-			// rather than a copy is not observable. The twin is js_csadoptty in
+			// not as a micro-optimisation: otherwise every write to a declared-type
+			// slot re-boxes, and `long i; while (...) { i = i + 1; }` allocates a
+			// fresh 64-bit cell per iteration. A sized integer and a float box are
+			// compared BY VALUE by strict_eq, so handing back the same value rather
+			// than a copy is not observable. The twin is js_csadoptty in
 			// languages/lib/csharp-rt.metajs.
 			if ty == "float" {
 				if f, isFlo := v.(jsJFlo); isFlo && f.sty == floCSF {
@@ -752,7 +729,7 @@ func init() {
 		// `public double D;` - has no static receiver type here, so the type has to
 		// come off the object at run time; this is the only site that needs it, and
 		// the emitter calls it only for member NAMES some class declares with an
-		// adopting type (docs/todo.md 1.3). The twin is csAdoptMemW in
+		// adopting type. The twin is csAdoptMemW in
 		// languages/csharp-interpreter.abnf and js_csadoptmem in
 		// languages/lib/csharp-rt.metajs.
 		m["js_csadoptmem"] = func(a []uint64) uint64 {
@@ -843,18 +820,15 @@ func init() {
 		// type test, which is why `object o = 5; o is long` is false in C# - and
 		// the shared js_is_type cannot answer that for a number: it says "is it an
 		// integral number" for all eight integral names at once and "is it a
-		// number" for all three floating ones, so `1.5f is float`, `1.5 is
-		// double`, `5L is long` and `(byte)3 is byte` were all FALSE while
-		// `5 is long` was true (docs/todo.md 1.9).
+		// number" for all three floating ones.
 		//
 		// This value model does carry the answer: a plain number is an `int`, a
 		// jsGInt is every other integral type and carries its width and
 		// signedness, and a jsJFlo's style byte says double (2) or float (5).
 		// `is decimal` is answered by the `double` arm, because a decimal IS a
-		// style-2 double box here - the one residue this cannot fix without a
-		// decimal representation of its own. Every non-numeric name falls through
-		// to the shared probe unchanged, so a user class, a string, a char, an
-		// array and `object` behave exactly as before.
+		// style-2 double box here. Every non-numeric name falls through to the
+		// shared probe unchanged, so a user class, a string, a char, an array and
+		// `object` behave as js_is_type says.
 		baseIs := m["js_is_type"]
 		m["js_csis"] = func(a []uint64) uint64 {
 			t := rt.toString(u(a[1]))
@@ -867,10 +841,8 @@ func init() {
 			isFlo := t == "double" || t == "Double" || t == "decimal" || t == "Decimal"
 			isF32 := t == "float" || t == "Single"
 			// `char` is answered here too: the shared probe's "Char" arm answers
-			// for a PLAIN NUMBER (the Java/Go reading, where a char is one), so
-			// `1 is char` came back TRUE in this half and FALSE in the
-			// interpreter, which has a char box. A pre-existing halves
-			// divergence --cross never reached because no test program asks.
+			// for a PLAIN NUMBER (the Java/Go reading, where a char is one), while
+			// C# has a char box, so `1 is char` is false.
 			isChr := t == "char" || t == "Char"
 			if !isInt && !isFlo && !isF32 && !isChr {
 				if baseIs(a) == jsHTrue {
@@ -878,12 +850,9 @@ func init() {
 				}
 				// The exception hierarchy is the one part of the run-time type this
 				// model keeps OUTSIDE the __class chain js_is_type walks (a BCL
-				// exception is a plain {__excname, Message} object), so
-				// `e is FormatException` inside `catch (Exception e)` answered FALSE
-				// for every BCL type and `myEx is Exception` answered FALSE for a
-				// user class deriving from one - in BOTH halves. ECMA-334 12.12.12's
-				// run-time type test and 13.11's catch-clause selection are the same
-				// question, so they consult the same table (docs/todo.md 1.1).
+				// exception is a plain {__excname, Message} object). ECMA-334
+				// 12.12.12's run-time type test and 13.11's catch-clause selection
+				// are the same question, so they consult the same table.
 				if eb := csExcBase(u(a[0])); eb != "" {
 					// `e is System.IO.IOException`: the table is keyed by simple
 					// name. A catch clause is reduced at emit time (csExcTyName);
@@ -1055,15 +1024,10 @@ func init() {
 		}
 		// `a[lo..hi]`, C#'s range indexer, on a string or an array.
 		//
-		// This used to be emitted as js_goslice, the shared extern, and that is
-		// GO's slice and not C#'s: a Go string is a byte sequence, so js_goslice
-		// takes a BYTE window, while System.Range on a System.String is
-		// Substring - UTF-16 code units (ECMA-334 12.8.12 / String.Substring).
-		// `"日本語"[0..1]` therefore answered a lone replacement character under
-		// llvm.Run and "日" in the interpreter and in the clang-built executable,
-		// which is a disagreement ./test.sh cannot see (each engine matches
-		// itself) and --cross did not reach. One name was carrying two
-		// specifications; C# gets its own, and js_goslice stays Go's.
+		// Not the shared js_goslice: a Go string is a byte sequence, so js_goslice
+		// takes a BYTE window, while System.Range on a System.String is Substring
+		// - UTF-16 code units (ECMA-334 12.8.12 / String.Substring), so
+		// `"日本語"[0..1]` is "日".
 		//
 		// The array arm COPIES, and an absent bound arrives as undefined and
 		// reads as 0 / the length. The twin is js_csslice in
@@ -1099,8 +1063,7 @@ func init() {
 		// C#'s '+'. Identical to the shared js_csadd - string concat with C#'s
 		// null rule, float add when a double is involved - except that two
 		// INTEGRAL operands add at their promoted type and wrap to it, instead of
-		// through a double that rounds above 2^53. js_csadd itself is a shared
-		// extern in jsrt.go and is left exactly as it was.
+		// through a double that rounds above 2^53.
 		m["js_csadd2"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			_, ls := l.(string)
@@ -1140,7 +1103,7 @@ func init() {
 			// the pair promotes to double, jvmFloPromotes answers false, and the
 			// caller's answer stands.
 			// The INTEGRAL fast path stays FIRST and pays nothing for the
-			// width, which is the lesson 8f43e84 bought at +5.32% in java.
+			// width (in front of it the float test is measurably slower).
 			if csIsIntegral(l) && csIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
 				if _, lb := l.(jsGInt); lb {
 					return boolH(rt.csCmp("==", l, r))
@@ -1155,7 +1118,7 @@ func init() {
 			}
 			return a[2] // the js_jchareq / $valeq result the caller computed
 		}
-		// ----- method-group conversion (docs/todo.md 1.1) -----
+		// ----- method-group conversion -----
 		// The Go twin of js_csmg in languages/lib/csharp-rt.metajs and of
 		// csMethodGroup in languages/csharp-interpreter.abnf; the comment in the
 		// interpreter is the specification half (ECMA-334 10.8, 20.1, 20.5).
@@ -1209,7 +1172,7 @@ func init() {
 			o.set(key, u(a[2]))
 			return a[2]
 		}
-		// ----- `ref` / `out` arguments: the REFERENCE BOX (docs/todo.md 1.1) -----
+		// ----- `ref` / `out` arguments: the REFERENCE BOX -----
 		//
 		// ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the
 		// argument's variable. Nothing in this value model can alias a scope slot,
@@ -1247,7 +1210,7 @@ func init() {
 		// undefined. `k.E(5)` on a delegate field parses as a method call and C#
 		// resolves it as the invocation of the field's value (ECMA-334 12.8.10.2).
 		// Answers undefined for every receiver that is not a class instance, so the
-		// call site falls back to js_mcall exactly as it did before.
+		// call site falls back to js_mcall.
 		m["js_csdfld"] = func(a []uint64) uint64 {
 			o, ok := u(a[0]).(*jsObject)
 			if !ok {
@@ -1278,17 +1241,14 @@ func init() {
 			}
 			return w(jsUndef)
 		}
-		// ----- the index bounds (docs/todo.md 1.2's C# half) -----
+		// ----- the index bounds -----
 		//
-		// These used to be python's js_pyget / js_pyset, which WRAP a negative
-		// index - so `a[-1]` answered the LAST element here while the interpreter
-		// aborted, a live halves divergence --cross had never reached - and which
-		// raise python's IndexError rather than the BCL exception the spec names.
-		// The CLASS is spec-grounded (ECMA-335 III.4.4 for ldelem/stelem, ECMA-334
-		// 12.8.11.3 for the string indexer); the MESSAGES are BCL text and there is
-		// no dotnet here to settle them. The layer-2 twins are js_csidx /
-		// js_csidxset / js_csnewlen in languages/lib/csharp-rt.metajs and
-		// csGetIndex / csIdxChk in languages/csharp-interpreter.abnf.
+		// Not python's js_pyget / js_pyset, which WRAP a negative index and raise
+		// python's IndexError. The CLASS is spec-grounded (ECMA-335 III.4.4 for
+		// ldelem/stelem, ECMA-334 12.8.11.3 for the string indexer); the MESSAGES
+		// are BCL text that no C# toolchain here can settle. The layer-2 twins are
+		// js_csidx / js_csidxset / js_csnewlen in languages/lib/csharp-rt.metajs
+		// and csGetIndex / csIdxChk in languages/csharp-interpreter.abnf.
 		//
 		// KNOWN SIMPLIFICATION, shared by all three engines: a List<T> and an array
 		// are the same value here, so a List index out of range also raises
@@ -1346,20 +1306,18 @@ func init() {
 			return basePySet(a)
 		}
 		// ECMA-335 III.4.16: newarr throws OverflowException on a negative count.
-		// Without this `new int[-1]` killed the run with a Go panic
-		// (`runtime error: makeslice: len out of range`).
 		m["js_csnewlen"] = func(a []uint64) uint64 {
 			if jsToInt(rt.toNumber(u(a[0]))) < 0 {
 				rt.csThrow("OverflowException", "Arithmetic operation resulted in an overflow.")
 			}
 			return a[0]
 		}
-		// ----- the three System.Object members no receiver could answer (1.6) -----
+		// ----- the three System.Object members no receiver could answer -----
 		// ECMA-334 8.2.3: every type inherits Equals, GetHashCode, GetType and
-		// ToString from object. Only ToString was routed, so
-		// `v[0].Equals((object) v[1])` aborted with "method call 'equals' on a
-		// number". A user override still wins. The twins are the same three arms in
-		// languages/lib/csharp-rt.metajs and mcall0 in csharp-interpreter.abnf.
+		// ToString from object, so `v[0].Equals((object) v[1])` works on a
+		// number too. A user override still wins. The twins are the same three
+		// arms in languages/lib/csharp-rt.metajs and mcall0 in
+		// csharp-interpreter.abnf.
 		// A SEPARATE EXTERN, not a wrapper on js_mcall: rxExtraExterns fills ONE
 		// map for every language, so overriding js_mcall here would give every
 		// other language C#'s answer for these three names. js_ktsmcall and
@@ -1369,10 +1327,9 @@ func init() {
 			name := rt.toString(u(a[1]))
 			// System.String.Substring(int startIndex, int length) takes a LENGTH,
 			// not an end index; the shared memberCall reads a range and CLAMPS, so
-			// `"abcdef".Substring(1, 3)` answered "bc" where C# answers "bcd" - one
-			// wrong answer BOTH halves agreed on. The twins are csSubstr in
-			// csharp-interpreter.abnf and the substring arm of js_mcall in
-			// languages/lib/csharp-rt.metajs.
+			// `"abcdef".Substring(1, 3)` would be "bc" where C# answers "bcd". The
+			// twins are csSubstr in csharp-interpreter.abnf and the substring arm
+			// of js_mcall in languages/lib/csharp-rt.metajs.
 			if str, isStr := u(a[0]).(string); isStr && name == "substring" {
 				args, _ := u(a[2]).(*jsArray)
 				n := rt.strLen(str)
@@ -1422,7 +1379,7 @@ func init() {
 		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }
 		// The whole Console object, built here rather than in the grammar so that
 		// WriteLine / Write render through cspStr instead of through the shared
-		// println host function (which is what leaked Go's %v).
+		// println host function.
 		m["js_csconsole"] = func(a []uint64) uint64 {
 			o := newJSObject()
 			o.set("WriteLine", jsHostFunc("js_csprint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -1436,13 +1393,6 @@ func init() {
 			return rt.wrap(o)
 		}
 
-		// The rendering step of a string CONVERSION, used by '+', by an
-		// interpolation hole and by .ToString(). It converts only the values whose
-		// C# string form differs from the shared runtime's - a bool, an array and a
-		// class instance - and passes everything else through UNCHANGED, so that
-		// `1 + 2` stays an integer addition and a boxed double stays a double. The
-		// caller wraps the result in js_csadd, which supplies C#'s null rule and
-		// the numeric cases.
 		// ArgumentException.Message's paramName suffix - `new
 		// ArgumentNullException(p)` takes a PARAM NAME, not a message. The
 		// specification and the citations are in the header of csExcParamName1 in
@@ -1462,6 +1412,13 @@ func init() {
 			}
 			return rt.wrapStr(base + " (Parameter '" + ps + "')")
 		}
+		// The rendering step of a string CONVERSION, used by '+', by an
+		// interpolation hole and by .ToString(). It converts only the values whose
+		// C# string form differs from the shared runtime's - a bool, an array and a
+		// class instance - and passes everything else through UNCHANGED, so that
+		// `1 + 2` stays an integer addition and a boxed double stays a double. The
+		// caller wraps the result in js_csadd, which supplies C#'s null rule and
+		// the numeric cases.
 		m["js_csstr"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch t := v.(type) {
@@ -1526,10 +1483,9 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 	}
 	// An exception - a BCL {__excname, Message} object or a user class whose chain
 	// reaches one - renders with System.Exception's OWN ToString override, not
-	// System.Object's bare type name. A BCL one used to fall off the end of this
-	// function and read "[object Object]" in all three engines (docs/todo.md 1.3).
-	// The twins are csExcToStr in languages/csharp-interpreter.abnf and the same arm
-	// of cpObjStr in languages/lib/csharp-rt.metajs, where the citation lives.
+	// System.Object's bare type name. The twins are csExcToStr in
+	// languages/csharp-interpreter.abnf and the same arm of cpObjStr in
+	// languages/lib/csharp-rt.metajs, where the citation lives.
 	if csExcBase(o) != "" {
 		full := "System.Object"
 		if t := rt.csTypeOfVal(o); t != nil {
@@ -1626,11 +1582,9 @@ func cspElemName(e interface{}) string {
 		case t.w == 32 && t.u:
 			return "System.UInt32"
 		case t.w == 32:
-			// UNREACHABLE TODAY and kept only so the three engines agree if it ever
+			// UNREACHABLE TODAY and kept so the three engines agree if it ever
 			// is: csNorm unboxes a signed 32-bit value to a plain number, so no
-			// jsGInt has w 32 and u false. Without this arm the switch fell through
-			// to System.SByte here, while layer 2 said System.Int32 and
-			// csharp-interpreter.abnf said System.UInt32 - three answers.
+			// jsGInt has w 32 and u false.
 			return "System.Int32"
 		case t.w == 16 && t.u:
 			return "System.UInt16"
@@ -1642,9 +1596,8 @@ func cspElemName(e interface{}) string {
 		return "System.SByte"
 	case jsJFlo:
 		// A `float` is System.Single and a `double` System.Double, which the
-		// style byte now tells apart (ECMA-334 8.3.7). `decimal` is still a
-		// double box here, so a decimal[] answers System.Double[] - a
-		// pre-existing approximation, unchanged.
+		// style byte tells apart (ECMA-334 8.3.7). `decimal` is a double box
+		// here, so a decimal[] answers System.Double[] - an approximation.
 		if jvmIs32(t.sty) {
 			return "System.Single"
 		}
@@ -1661,7 +1614,7 @@ func cspElemName(e interface{}) string {
 	return ""
 }
 
-// ============ System.Object.Equals / GetHashCode / GetType (docs/todo.md 1.6) ==
+// ============ System.Object.Equals / GetHashCode / GetType ==================
 //
 // The Go twins of csObjEquals / csHash / csTypeOfVal in
 // languages/lib/csharp-rt.metajs and of the same three in
@@ -1851,9 +1804,9 @@ func (rt *jsrt) csIdHash(v interface{}) int32 {
 
 // csExcFullName is the fully qualified .NET name of a BCL exception type. All but
 // five are in System; the exceptions to that are cited beside them. It is what
-// GetType() has to answer for a value whose only type identity is __excname
-// (docs/todo.md 1.1). The twins are csExcFullName in
-// languages/csharp-interpreter.abnf and languages/lib/csharp-rt.metajs.
+// GetType() has to answer for a value whose only type identity is __excname.
+// The twins are csExcFullName in languages/csharp-interpreter.abnf and
+// languages/lib/csharp-rt.metajs.
 func csExcFullName(n string) string {
 	switch n {
 	case "IOException", "FileNotFoundException", "DirectoryNotFoundException",
@@ -1874,8 +1827,7 @@ func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 			full = cspArrayName(t)
 		case *jsObject:
 			// A BCL exception is a plain {__excname, Message} object, so the
-			// __class walk below cannot see its type and GetType().Name answered
-			// "Object" in both halves. __excname IS the type name (todo.md 1.1).
+			// __class walk below cannot see its type. __excname IS the type name.
 			if n, isStr := t.props["__excname"].(string); isStr {
 				full = csExcFullName(n)
 			}

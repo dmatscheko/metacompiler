@@ -5,16 +5,11 @@
 // char literal, the extended numeric literals (0x.., 0b.., 1_000, 100L, 1.5), a where
 // constraint, an expression bodied constructor, and the checked / lock / using statements.
 //
-// ALSO GENUINELY COMPILED NOW: an interface, an enum, a { get; set; } property, verbatim
+// ALSO GENUINELY COMPILED: an interface, an enum, a { get; set; } property, verbatim
 // strings, ?? and ??=, is / as tests, null-conditional ?. access, and typeof / nameof.
 // The file runs and prints 123 with or without -warn-unsupported, and a run with the flag
-// reports no unsupported construct at all.
-//
-// History: those constructs used to be recognized-but-not-implemented, so a flagless run
-// aborted at the first of them and this file was a by-design SHOULD-FAIL guard. The
-// full-syntax work implemented every one (properties and is/as were the last two), which
-// removed the guard's premise, so the matrix entry became an ordinary one. Do not re-arm
-// it: the C# here is valid and is meant to keep working.
+// reports no unsupported construct at all. This is an ordinary matrix entry, not a
+// SHOULD-FAIL guard; do not re-arm it: the C# here is valid and is meant to keep working.
 global using System;
 using System.Collections.Generic;
 using System.Text;
@@ -44,7 +39,7 @@ public class Program
     private static readonly long Big = 1_000_000L;
     private static double Ratio = 1.5;
 
-    // An attributed { get; set; } property (recognized, not implemented).
+    // An attributed { get; set; } property.
     [Obsolete]
     public int Count { get; set; }
 
@@ -84,7 +79,7 @@ public class Program
             buffer.Add(shifted);
         }
 
-        // Recognized, not implemented: verbatim string, ??, ??=, is / as, ?. and typeof.
+        // Verbatim string, ??, ??=, is / as, ?. and typeof.
         string path = @"C:\logs\widget.txt";
         string name = null;
         string label = name ?? "default";

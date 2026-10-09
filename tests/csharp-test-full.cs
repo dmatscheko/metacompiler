@@ -36,7 +36,7 @@
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the C# 12 language specification with the ANTLR
 // grammars-v4 CSharp grammar as a coverage checklist. Validated against the
-// spec by hand; no local C# compiler was available on this machine.
+// spec by hand; no C# compiler is available, so C# values are SPEC-CITED.
 
 using System;
 using System.Collections.Generic;
@@ -538,11 +538,8 @@ b";                                                   // verbatim keeps the newl
         // runtime whether an iterator method IS a function, rather than just calling
         // it: a compound '+=' / '-=' on a delegate decides combine-vs-arithmetic at
         // run time by testing `typeof v == "function"` on the right operand, and an
-        // iterator method is the C floor's tag 16 - callable, but answering "object"
-        // from type_of until the floor was taught otherwise. Under that behaviour the
-        // native binary took the ARITHMETIC arm and died on the next call with
-        // "call of a non function value: 0", while llvm.Run and the interpreter both
-        // combined. itr8/itr9 are the pin.
+        // iterator method is the C floor's tag 16 - callable, and it must answer
+        // "function" from type_of too. itr8/itr9 are the pin.
         delegate IEnumerable<int> S19Seq(int n);
         static IEnumerable<int> S19Tens(int n)
         {
@@ -672,22 +669,18 @@ b";                                                   // verbatim keeps the newl
         }
 
         // ===== SECTION 23: floating point arithmetic =====
-        // double/float/decimal are a DIFFERENT type from int. No C# compiler is
-        // available on this machine, so every value below is SPEC-CITED, not
-        // executed: ECMA-334 12.4.7 (binary numeric promotion: one double operand
-        // makes the whole operation floating point), 6.4.5.3 (a real literal is a
-        // double unless it carries an f/m suffix), 10.2.3 (implicit numeric
-        // conversion on assignment), and, for the rendering, the .NET Core 3.0+
-        // shortest-round-trip double.ToString() with the invariant
-        // NumberFormatInfo symbols "Infinity" / "-Infinity" / "NaN". The section
-        // exists because both grammars used to evaluate every arithmetic operator
-        // in 32 bit integers: 1.0 / 3.0 was 0 and 2.5 * 1.5 was 3.
+        // double/float/decimal are a DIFFERENT type from int. Every value below is
+        // SPEC-CITED, not executed: ECMA-334 12.4.7 (binary numeric promotion: one
+        // double operand makes the whole operation floating point), 6.4.5.3 (a real
+        // literal is a double unless it carries an f/m suffix), 10.2.3 (implicit
+        // numeric conversion on assignment), and, for the rendering, the .NET Core
+        // 3.0+ shortest-round-trip double.ToString() with the invariant
+        // NumberFormatInfo symbols "Infinity" / "-Infinity" / "NaN".
         static string S23S(double d) { return "" + d; }
 
         // The `float` half of the section. A C# float is System.Single, "an
-        // IEEE-754 binary32 value" (ECMA-334 8.3.7), and used to be an alias of
-        // the double box here - so 1.0f/3.0f answered the double's
-        // 0.3333333333333333.
+        // IEEE-754 binary32 value" (ECMA-334 8.3.7), so 1.0f/3.0f is 0.33333334,
+        // not the double's 0.3333333333333333.
         static string S23F(float v) { return "" + v; }
 
         static float S23Third() { return 1.0f / 3.0f; }
@@ -706,34 +699,24 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt6", Program.S23S(1.0) == "1" && Program.S23S(2.5) == "2.5");
             Program.Check("flt7", Program.S23S(0.1 + 0.2) == "0.30000000000000004");
             Program.Check("flt8", Program.S23S(1.0 / 3.0) == "0.3333333333333333");
-            // docs/todo.md 1.8. The digits are the SHORTEST decimal that reads back
-            // as the same double, and the interpreter half used to take them from
-            // the host's own `"" + a`. goja's is not always the shortest form - it
+            // The digits are the SHORTEST decimal that reads back as the same
+            // double. goja's own `"" + a` is not always the shortest form - it
             // renders 359000550 * 2^-38 with sixteen digits that read back as the
-            // NEXT double up - so the row below answered "0.001306036392634269"
-            // under goja and "0.0013060363926342689" under -frozen: a live
-            // divergence between the two script hosts that no matrix entry reached.
-            // Both engines now ask floPrec for n = 1..17 and stop at the first n
-            // that parses back, which is host-independent by construction. The
-            // operand is read out of an ARRAY so the constant folder cannot answer
-            // it, and the second value is the same double reached by arithmetic.
+            // NEXT double up - so both engines ask floPrec for n = 1..17 and stop at
+            // the first n that parses back, which is host-independent by
+            // construction. The operand is read out of an ARRAY so the constant
+            // folder cannot answer it, and the second value is the same double
+            // reached by arithmetic.
             double[] sd = {0.0013060363926342689, 359000550.0};
             Program.Check("flt8a", Program.S23S(sd[0]) == "0.0013060363926342689");
             Program.Check("flt8b", Program.S23S(sd[1] / 274877906944.0) == "0.0013060363926342689");
-            // The two OTHER shapes goja gets wrong, pinned here as a ratchet. A
-            // 200,000-value random sweep of the whole double space finds ~22 where
-            // goja's `"" + n` does not read back (sd2[0] and the double one ulp
-            // above it BOTH come out "1.738570474083434E+92" there), and a sweep
-            // of the subnormal band finds a further class where it emits a
-            // non-digit character outright - goja renders sd2[1] as
-            // "<.950476795525063e-309", the '<' being '0' + 12.
-            //
-            // MEASURED NULL RESULT, and it is worth saying plainly: this grammar
-            // was already immune. Every csFloStr / csF32Str / interpolation /
-            // concat / Dictionary-key path takes its digits from coreDecDigits, and
-            // the remaining `"" + x` sites in csharp-interpreter.abnf all hold an
-            // int, a small int or a string. These two rows fail in NEITHER engine
-            // at ea28a1a - zero discriminating power today, ratchet value only.
+            // The two OTHER shapes goja's `"" + n` gets wrong, pinned as a ratchet:
+            // a double that does not read back (sd2[0] and the double one ulp above
+            // it BOTH come out "1.738570474083434E+92" there), and a subnormal where
+            // it emits a non-digit character outright (sd2[1] renders as
+            // "<.950476795525063e-309"). Every C# rendering path takes its digits
+            // from coreDecDigits, so these rows have no discriminating power today -
+            // ratchet value only.
             double[] sd2 = {1.7385704740834339e92, 1.2950476795525063e-308, 1.738570474083434e92};
             Program.Check("flt8c", Program.S23S(sd2[0]) == "1.7385704740834339E+92");
             Program.Check("flt8d", Program.S23S(sd2[1]) == "1.2950476795525063E-308");
@@ -746,15 +729,11 @@ b";                                                   // verbatim keeps the newl
             // ECMA-334 12.12.1: for the floating point relational operators "if
             // either operand is NaN, the result is false for all operators except
             // !=, for which the result is true". js_cscmp delegates to rtjRel
-            // (lib/runtime-jvm.metajs, shared with java's js_jvcmp), whose
-            // rtCompare answers the SENTINEL 2 for a NaN operand; read as an
-            // ordering that sentinel made > and >= TRUE, and 0 would have made <=
-            // and >= true instead. Both engines special-case it -
-            // abnf/jsrtcsharp.go's js_cscmp is the same three lines. There is no C#
-            // toolchain on this machine, so this row is the SPEC; java 24.0.2
-            // settles the identical JLS 15.20.1 rule on the java side
-            // (tests/java-test-full.java flt10a-flt10d). Operands come out of an
-            // array so the constant folder cannot answer them.
+            // (lib/runtime.metajs, shared with java's js_jvcmp), whose rtCompare
+            // answers the SENTINEL 2 for a NaN operand, which must not be read as an
+            // ordering. java 24.0.2 settles the identical JLS 15.20.1 rule on the
+            // java side (tests/java-test-full.java flt10a-flt10d). Operands come out
+            // of an array so the constant folder cannot answer them.
             double[] nz = new double[]{0.0 / 0.0, 1.0};
             Program.Check("flt10a", !(nz[0] < nz[1]) && !(nz[0] > nz[1]) && !(nz[0] <= nz[1]) && !(nz[0] >= nz[1]));
             Program.Check("flt10b", !(nz[1] < nz[0]) && !(nz[1] > nz[0]) && !(nz[1] <= nz[0]) && !(nz[1] >= nz[0]));
@@ -763,15 +742,8 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt10d", !(fz[0] >= fz[1]) && !(fz[0] <= fz[1]) && !(fz[0] > fz[1]) && !(fz[0] < fz[1]));
             // ECMA-334 12.12.9 (relational and type-testing operators) applies
             // BINARY NUMERIC PROMOTION first, so == between a long and a double
-            // converts the long to double and compares two doubles. Both COMPILER
-            // halves answered false - floEq (the floor's jf_num_eq, the twin's
-            // jvmNumEq) had no sized-integer arm and a comment at three sites
-            // called that deliberate - while both INTERPRETER halves answered
-            // true, and nothing in the suite had ever compared a long to a double
-            // so --cross could not see it. Found by the shape merge of csharp's
-            // and java's strict equality into lib/runtime-jvm.metajs; java 24.0.2
-            // settles the identical JLS 15.21.1 rule on the java side. There is no
-            // C# toolchain on this machine, so this row is the SPEC. The operands
+            // converts the long to double and compares two doubles; java 24.0.2
+            // settles the identical JLS 15.21.1 rule on the java side. The operands
             // come out of arrays so the constant folder cannot answer them.
             long[] lz = new long[]{0L, 3L};
             double[] dz = new double[]{0.0, 3.0};
@@ -804,28 +776,23 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt22", Program.S23Half() / 2 == 0.25);
             float f = 3;
             Program.Check("flt23", f / 2 == 1.5 && 1.5f + 1.5f == 3.0f && 2.5d * 2 == 5.0);
-            // Two C# rules the compiler half used to get wrong: a null operand of
-            // '+' renders as the EMPTY string (Java writes "null"), and
-            // String.Length counts UTF-16 code units (System.String is UTF-16).
+            // Two C# rules: a null operand of '+' renders as the EMPTY string (Java
+            // writes "null"), and String.Length counts UTF-16 code units
+            // (System.String is UTF-16).
             string nul = null;
             Program.Check("flt24", "x" + nul == "x" && "x" + null == "x");
             Program.Check("flt25", "ab".Length == 2 && "\u00e9".Length == 1 && "😀".Length == 2);
 
-            // ----- the float WIDTH (todo.md 1.1) -----
-            // Everything above treated `float` as a double. It is a binary32,
-            // and the two halves of that fact have DIFFERENT confidence, which
-            // is why they are separated here:
+            // ----- the float WIDTH -----
+            // `float` is a binary32, and the two halves of that fact have DIFFERENT
+            // confidence, which is why they are separated here:
             //
             //   THE ARITHMETIC IS SETTLED. A binary32 add/sub/mul/div/rem and a
             //   binary32 comparison are the same IEEE-754 operation in C# and in
-            //   Java, so `java` 24.0.2 is a real oracle for every VALUE below -
-            //   an 11,424-row probe over 32 float values (every operand read out
-            //   of an array, every result printed as a (double) so the renderer
-            //   is out of the way) is byte-identical to java on all three legs.
+            //   Java, so `java` 24.0.2 is a real oracle for every VALUE below.
             //
-            //   THE RENDERING IS SPEC-CITED ONLY. There is no C# toolchain on
-            //   this machine, and ECMA-334 8.3.7 fixes the TYPE while leaving
-            //   ToString()'s text to the library. The digits are the shortest
+            //   THE RENDERING IS SPEC-CITED ONLY. ECMA-334 8.3.7 fixes the TYPE while
+            //   leaving ToString()'s text to the library. The digits are the shortest
             //   round-tripping decimal at 24 bits (.NET Core 3.0+), the exponent
             //   form is E+nn with a two-digit minimum and there is no forced
             //   ".0" - all as csFloStr32 in abnf/jsrtjvm.go argues line by line.
@@ -879,15 +846,12 @@ b";                                                   // verbatim keeps the newl
 
         // ===== SECTION 24: object.ToString and the string conversion =====
         // Everything a value turns into text through: Console.WriteLine, '+',
-        // an interpolation hole and an explicit .ToString(). No C# compiler is
-        // available on this machine, so every value below is SPEC-CITED, not
-        // executed:
+        // an interpolation hole and an explicit .ToString(). Every value below is
+        // SPEC-CITED, not executed:
         //   - "True" / "False" is System.Boolean.ToString(), documented to return
         //     Boolean.TrueString / Boolean.FalseString. A .NET BCL contract, not
         //     an ECMA-334 rule. The LITERALS stay 'true' / 'false'; only the
-        //     string conversion is capitalised. Both grammars used to write
-        //     JavaScript's "true", consistently, so the cross-half differ could
-        //     never see it.
+        //     string conversion is capitalised.
         //   - a null operand of '+' contributes the EMPTY string (ECMA-334 12.4.7;
         //     String.Concat calls ToString only on a non-null argument).
         //   - an array and an instance render through System.Object.ToString(),
@@ -954,16 +918,12 @@ b";                                                   // verbatim keeps the newl
 
         // ===== SECTION 25: sized integers (int/uint/long/ulong/byte/sbyte/...) =====
         // C#'s integral types have fixed WIDTHS and a SIGNEDNESS, and both have to
-        // survive into the next operation. The area used to be simply absent:
-        // int.MaxValue was an undefined name, `long` was a 32 bit int (1L << 40
-        // answered 256), and ulong.MaxValue could not even be spelled, because a
-        // double rounds 18446744073709551615 - and the two script engines rounded
-        // it DIFFERENTLY, so the goja and -frozen runs of one program disagreed.
+        // survive into the next operation.
         //
-        // THERE IS NO dotnet ON THIS MACHINE, so unlike the Java twin of this
-        // section NONE of these answers was executed. Every one is cited to the
-        // C# standard (ECMA-334, 6th edition) by clause, and the three places
-        // where the standard leaves a choice are called out as choices:
+        // Unlike the Java twin of this section, NONE of these answers was executed.
+        // Every one is cited to the C# standard (ECMA-334, 6th edition) by clause,
+        // and the three places where the standard leaves a choice are called out as
+        // choices:
         //
         //   6.4.5.3   an integer literal's type follows its suffix AND its value
         //   12.4.7.3  binary numeric promotion (the uint/int -> long rule)
@@ -1062,9 +1022,6 @@ b";                                                   // verbatim keeps the newl
             Program.Check("num30", b3 << 8 == 65280);
             // C# 11's '>>>' is the UNSIGNED right shift on a signed type: it fills
             // with zeroes instead of the sign bit, at the left operand's own width.
-            // Every runtime half already had the operator; no GRAMMAR recognised the
-            // token, so these four lines were a syntax error in both engines and the
-            // ">>>" arms of js_csshift were reachable from nothing.
             int n3 = -8;
             Program.Check("urs1", n3 >>> 1 == 2147483644);
             long n4 = -8L;
@@ -1168,8 +1125,8 @@ b";                                                   // verbatim keeps the newl
         // VARIABLE declared in its own argument (12.6.2.1), NAMED arguments in an
         // indexer (12.8.11.3), an anonymous-object PROJECTION (12.8.16.1), and an
         // assignment target that is a member access over ANY primary, optionally
-        // wrapped in parentheses (12.21). No C# compiler was available on this
-        // machine, so every expected value here is spec-derived, not run.
+        // wrapped in parentheses (12.21). Every expected value here is
+        // spec-derived, not run.
         class S27Box
         {
             public int V;
@@ -1215,10 +1172,8 @@ b";                                                   // verbatim keeps the newl
             Program.Check("u3", S27Outer<int>.S27Inner<long>.Get() == 7);
             Program.Check("u4", S27Outer<string>.S27Inner<int>.Field == 11);
 
-            // ----- an out variable declared in the argument itself. The
-            // DECLARATION is what is modelled: `out` does not copy back here (a
-            // call-site `ref`/`out` is parsed and dropped), so the assertion is on
-            // the call, not on the value the callee wrote.
+            // ----- an out variable declared in the argument itself, written by the
+            // callee through a reference box (12.6.2.3.4).
             if (Program.S27Try("abcd", out int got))
             {
                 Program.Check("u5", true);
@@ -1297,34 +1252,23 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 28: a literal adopts its declared type, and `is` reads the
         // run-time type =====
         //
-        // docs/todo.md 1.1 and 1.9. ECMA-334 10.2.3 (implicit numeric conversions)
-        // makes an untyped integer literal written at a `double`, `float` or sized
-        // integral site take that type; the WIDTH IS ON THE VALUE, not on the
-        // annotation, so every one of these used to INTEGER-DIVIDE and answer 1
-        // where the spec says 1.5. ECMA-334 12.12.12 makes `E is T` a RUN-TIME type
-        // test with no implicit conversion, which is why `5L is int` is false.
+        // ECMA-334 10.2.3 (implicit numeric conversions) makes an untyped integer
+        // literal written at a `double`, `float` or sized integral site take that
+        // type; the WIDTH IS ON THE VALUE, not on the annotation, so without it every
+        // one of these would INTEGER-DIVIDE and answer 1 where the spec says 1.5.
+        // ECMA-334 12.12.12 makes `E is T` a RUN-TIME type test with no implicit
+        // conversion, which is why `5L is int` is false.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
-        // spec-cited rather than executed. Each operand is read out of an ARRAY so
-        // the grammars' constant folders cannot answer the question at compile time.
+        // Every value here is spec-cited rather than executed. Each operand is read
+        // out of an ARRAY so the grammars' constant folders cannot answer the
+        // question at compile time.
         //
-        // PART OF THE WRITE SITE IS NOW CLOSED, in SECTION 29: an UNQUALIFIED write
-        // to a member of the enclosing type adopts that member's declared type
-        // (`double D; ... D = 3` holds 3.0), and a numeric field with no
-        // initializer starts at its declared type's zero rather than the int 0.
-        // Both are exact, because the declaring class is known at walk time.
-        //
-        // STILL NOT CLOSED, each still a wrong answer and each deliberately NOT
-        // asserted here: a QUALIFIED write (`bx.A = 3` is still 3, not 3.0 - the
-        // receiver's type is not known at the write site, so it needs either a
-        // static receiver-type table or a run-time lookup of the member's declared
-        // type off the receiver's class), a write to a LOCAL after its declaration
-        // (`double d = 0; d = 3`, which needs a per-method var-type table in both
-        // engines), an array ELEMENT write, a lambda's parameter and return types, a
-        // nested `double[][]`, a `List<double>` element and a
-        // `Dictionary<string, double>` value. And `decimal` is still a style-2
-        // double box, so `1.5m is double` is true and `decimal[]` renders
-        // `System.Double[]`.
+        // The write sites (unqualified, local, array element, qualified member) are
+        // asserted in SECTIONS 29 and 30. NOT covered, and deliberately NOT asserted
+        // here: a lambda's parameter and return types, a nested `double[][]`, a
+        // `List<double>` element and a `Dictionary<string, double>` value. And
+        // `decimal` is a style-2 double box, so `1.5m is double` is true and
+        // `decimal[]` renders `System.Double[]`.
         class S28Box
         {
             public double A = 3;
@@ -1424,7 +1368,7 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 29: an unqualified name resolves to a member of the
         // enclosing type =====
         //
-        // docs/todo.md 1.2 and 1.1. ECMA-334 12.8.4 resolves a simple name that is
+        // ECMA-334 12.8.4 resolves a simple name that is
         // not a local, a parameter or a type against the members of the enclosing
         // type; 12.8.7 inserts the implicit `this` for an instance member; 12.7.3
         // forbids `this` in a static member, so a static member is reached through
@@ -1432,18 +1376,10 @@ b";                                                   // verbatim keeps the newl
         // name shadow it. ECMA-334 10.2.3 at 12.21.2's simple assignment is what
         // makes the WRITTEN VALUE adopt the member's declared type.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
-        // spec-cited rather than executed. Every operand is read out of an ARRAY so
-        // the grammars' constant folders cannot answer the question at compile time.
-        //
-        // FIVE SHAPES WERE BROKEN and only the instance-field READ worked. An
-        // unqualified WRITE to an instance field ABORTED the compiler half where the
-        // interpreter answered; a STATIC field aborted in both directions in both
-        // halves; an auto-property write aborted; a property with ACCESSOR BODIES
-        // read unqualified emitted a js_get of a slot that does not exist and
-        // SILENTLY ANSWERED NOTHING in the compiler while the interpreter aborted;
-        // and an inherited field was missing from the instance entirely in the
-        // interpreter whenever the subclass declared a method (s29in5).
+        // Every value here is spec-cited rather than executed. Every operand is read
+        // out of an ARRAY so the grammars' constant folders cannot answer the
+        // question at compile time. s29in5 pins that a subclass declaring a method
+        // keeps its inherited fields.
         class S29A
         {
             public double D = 1;
@@ -1481,8 +1417,7 @@ b";                                                   // verbatim keeps the newl
         }
         // A STATIC FIELD INITIALIZER naming another static of the same class,
         // unqualified: the initializers run in declaration order (ECMA-334
-        // 15.5.6.1), so S29I.B is 6. The interpreter said "unknown name: A" where
-        // the compiler half answered - a halves divergence of its own.
+        // 15.5.6.1), so S29I.B is 6.
         class S29I { public static double A = 2; public static double B = S29I.A * 3;
                      public static double C = A * 3; public static double Rd() { return C; } }
         class S29Base { public double BD = 1; public static double BS = 2; }
@@ -1552,9 +1487,9 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s29sh2", c.ShadowLocal() == 99);
             Program.Check("s29sh3", c.ShadowWrite(n[0]) == 6 && c.D == 1);
 
-            // ----- docs/todo.md 1.1: the member's DECLARED TYPE adopts an
-            // unqualified write, so an untyped integer written at a `double` member
-            // does not integer-divide afterwards.
+            // ----- the member's DECLARED TYPE adopts an unqualified write, so an
+            // untyped integer written at a `double` member does not integer-divide
+            // afterwards.
             S29A t = new S29A();
             t.WrD(n[0]);
             Program.Check("s29ad1", t.D / 2 == 1.5 && (t.D is double) && !(t.D is int));
@@ -1575,7 +1510,7 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 30: constructor initializers, constructor overloads, and
         // the last three declaration sites that adopt =====
         //
-        // docs/todo.md 1.1, 1.3 and 1.10. ECMA-334 15.11.2 (constructor
+        // ECMA-334 15.11.2 (constructor
         // initializers): ': base(...)' names the base constructor that runs before
         // this one's body, ': this(...)' names a sibling of the same class, and the
         // instance variable initializers run ONLY when the initializer is not a
@@ -1585,21 +1520,9 @@ b";                                                   // verbatim keeps the newl
         // 12.21.2 is what makes a written value adopt the target's declared type.
         // ECMA-334 15.8.1 makes an event's '+=' a Delegate.Combine.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value is spec-cited
-        // rather than executed. Every operand is read out of an ARRAY so the
-        // grammars' constant folders cannot answer at compile time.
-        //
-        // WHAT WAS BROKEN. The ': base(d)' initializer was PARSED AND DISCARDED and
-        // the base class' parameterless constructor ran instead, so `new S30C(3).D`
-        // was empty where C# says 3 - in all three engines, with both halves
-        // agreeing, which is why --cross was blind to it. A class kept only its LAST
-        // constructor, so `new S30Ctr(4)` ran S30Ctr(double). A property with
-        // accessor bodies was recorded by member NAME across the whole file, so a
-        // plain field of the same name in ANY other class emitted an accessor call
-        // and the compiler half died with "unknown method '__get_X'". An `event`
-        // field of a built-in delegate type did not switch multicast combination on,
-        // so 'E += h' did arithmetic. And a write to a local after its declaration,
-        // an array element and a qualified member all stored the raw int.
+        // Every value is spec-cited rather than executed. Every operand is read out
+        // of an ARRAY so the grammars' constant folders cannot answer at compile
+        // time.
         class S30P
         {
             public double D;
@@ -1682,8 +1605,7 @@ b";                                                   // verbatim keeps the newl
             ev.Fire();
             Program.Check("s30ev3", Program.S30Log == "abb");
 
-            // ----- docs/todo.md 1.3: the three declaration sites that still stored
-            // the raw int -----
+            // ----- the three declaration sites that adopt on a later write -----
             double L;
             L = n[0];
             Program.Check("s30ad1", L / 2 == 1.5 && (L is double));
@@ -1707,7 +1629,7 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 31: method-group conversion, method overloads, and the
         // integral local write =====
         //
-        // docs/todo.md 1.1, 1.2 and 1.3. ECMA-334 10.8 (method group conversions):
+        // ECMA-334 10.8 (method group conversions):
         // a method group is implicitly convertible to a compatible delegate type.
         // ECMA-334 20.1 says the delegate so created keeps the receiver the group
         // was formed on as its target, and 20.5 makes two delegates equal when
@@ -1718,20 +1640,12 @@ b";                                                   // verbatim keeps the newl
         // which is why `k.E(5)` on a delegate FIELD is legal. ECMA-334 12.6.4 is
         // overload resolution and 12.12.12 the run-time type test it is decided by
         // here. ECMA-334 10.2.3 at 12.21.2 makes a written value adopt the target's
-        // declared type, and 8.3.6 gives `long` a 64-bit range.
+        // declared type, and 8.3.6 gives `long` a 64-bit range, so
+        // `long x; x = 3; x*1000000*1000000` is 3000000000000.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value is spec-cited
-        // rather than executed. Every operand is read out of an ARRAY so the
-        // grammars' constant folders cannot answer at compile time.
-        //
-        // WHAT WAS BROKEN. Method-group conversion did not exist anywhere: `this.M`,
-        // a bare `M` and a bare static `H` all answered undefined or aborted with
-        // "unknown name", in BOTH halves; `k.E(5)` on a delegate field aborted with
-        // "unknown method 'E'"; and `.Invoke()` was unsupported. Overloading was
-        // implemented for CONSTRUCTORS only, so a class kept the LAST declaration of
-        // each method name and `M(1)`, `M(1.5)`, `M(1,2)` and `M("x")` all ran
-        // `M(string)`. And `long x; x = 3; x*1000000*1000000` was a 32-bit multiply
-        // answering 2112827392 where C# says 3000000000000.
+        // Every value is spec-cited rather than executed. Every operand is read out
+        // of an ARRAY so the grammars' constant folders cannot answer at compile
+        // time.
         delegate int S31Op(int x);
         delegate void S31H(string s);
         class S31K
@@ -1770,9 +1684,7 @@ b";                                                   // verbatim keeps the newl
         }
         // An OVERLOADED OPERATOR: ECMA-334 12.4.5 resolves a user-defined binary
         // operator by the same overload resolution as a method call, and 15.10.1
-        // makes every operator static. The second declaration used to overwrite the
-        // first, so `v + otherV` ran the (S31V, int) body and died reading `.X` of an
-        // int - in BOTH halves, so --cross was blind to it.
+        // makes every operator static, so `v + otherV` runs the (S31V, S31V) body.
         class S31V
         {
             public double X;
@@ -1874,7 +1786,7 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 32: inherited statics, base overloads, operator
         // applicability and `ref` / `out` parameters =====
         //
-        // docs/todo.md 1.1. ECMA-334 15.3.1 makes every accessible member of a base
+        // ECMA-334 15.3.1 makes every accessible member of a base
         // class a member of the derived class, so a STATIC member is reachable
         // through a derived type name; 15.5.1 gives a static field ONE storage
         // location, shared by every name that reaches it. 15.4 makes a `const`
@@ -1888,18 +1800,9 @@ b";                                                   // verbatim keeps the newl
         // for the argument's variable, so a write through it is a write to that
         // variable.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
-        // spec-cited rather than executed. Every operand is read out of an ARRAY so
-        // the grammars' constant folders cannot answer at compile time.
-        //
-        // WHAT WAS BROKEN. `S32Der.SB()` aborted with "unknown static method" in all
-        // three engines while the method-GROUP form `S32Op p = S32Der.SB` already
-        // worked; an inherited static FIELD, PROPERTY and delegate field read as
-        // nothing; a `const` member was not static at all, so even `S32Bas.C` was
-        // empty; a derived class' own overload group HID the base's, so `d.M(1)`
-        // answered 2 where C# says 1; a user `operator +` captured string
-        // concatenation, so `"s" + v` answered a V rather than "sV1"; and `ref` /
-        // `out` were parsed and dropped, so `Ref(ref r)` left r alone.
+        // Every value here is spec-cited rather than executed. Every operand is read
+        // out of an ARRAY so the grammars' constant folders cannot answer at compile
+        // time.
         class S32Bas
         {
             public static int F = 5;
@@ -2048,37 +1951,31 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 33: `(object)` suppresses a user operator, and the reading
         // of a value that is not a number =====
         //
-        // docs/todo.md 1.3 and 1.2.
-        //
-        // 1.3. ECMA-334 12.4.5 builds the candidate set for a user-defined operator
+        // ECMA-334 12.4.5 builds the candidate set for a user-defined operator
         // from the STATIC types of the operands and resolves it like a method call
         // (12.6.4). With `object` on one side, `V.operator ==(V, V)` is not a
         // candidate at all - there is no implicit conversion from object to V - and
         // the PREDEFINED reference-equality operator of 12.12.6 stands. That is
         // exactly why `(object)a == null` is THE idiomatic null guard inside a user
-        // `operator ==`, and here it recursed until the stack died, in both engines
-        // and at `d473319` too. There are no static types in this value model, so
-        // the suppression is read off the SOURCE by the parser (csIsObjCastOperand
-        // in both csharp grammars); it costs nothing at run time, because the
-        // operator probe is simply not emitted for that operand pair.
+        // `operator ==`. There are no static types in this value model, so the
+        // suppression is read off the SOURCE by the parser (csIsObjCastOperand in
+        // both csharp grammars); it costs nothing at run time, because the operator
+        // probe is simply not emitted for that operand pair.
         //
-        // 1.2. `dynamic d = o; d.Missing + 1` printed NaN under the interpreter and
-        // llvm.Run and **1** natively, because rtjNum in
-        // languages/lib/runtime-jvm.metajs answered 0 for undefined where
-        // abnf/jsrt.go's rt.toNumber answers NaN. C#'s own answer is a
-        // RuntimeBinderException, which no engine here can raise, so the value below
-        // is ENGINE BEHAVIOUR asserted for CONVERGENCE - the point is that all four
-        // engines say the same thing, and NaN is what three of them already said.
+        // `dynamic d = o; d.Missing + 1`: C#'s own answer is a RuntimeBinderException,
+        // which no engine here can raise, so the value below is ENGINE BEHAVIOUR
+        // asserted for CONVERGENCE - all four engines read undefined as NaN in `+`
+        // (rtjNum in languages/lib/runtime.metajs, rt.toNumber in abnf/jsrt.go).
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every C#-semantic claim here
-        // is spec-cited rather than executed. Every operand is read out of an ARRAY
-        // so the grammars' constant folders cannot answer at compile time.
+        // Every C#-semantic claim here is spec-cited rather than executed. Every
+        // operand is read out of an ARRAY so the grammars' constant folders cannot
+        // answer at compile time.
         class S33V
         {
             public int N;
             public S33V(int n) { this.N = n; }
-            // THE IDIOMATIC NULL GUARD. Every one of these four `(object)` casts
-            // used to re-enter this very operator.
+            // THE IDIOMATIC NULL GUARD. None of these four `(object)` casts may
+            // re-enter this very operator.
             public static bool operator ==(S33V a, S33V b)
             {
                 if ((object)a == null) { return (object)b == null; }
@@ -2086,8 +1983,7 @@ b";                                                   // verbatim keeps the newl
                 return a.N == b.N;
             }
             public static bool operator !=(S33V a, S33V b) { return !(a == b); }
-            // The two shapes an earlier round of this work REGRESSED, kept as
-            // controls: a null operand must still select operator ==(V, V), and an
+            // Controls: a null operand must still select operator ==(V, V), and an
             // implicit numeric conversion must still select a `double` parameter.
             public static bool operator ==(S33V a, double d) { return a.N == d; }
             public static bool operator !=(S33V a, double d) { return a.N != d; }
@@ -2128,7 +2024,7 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s33oc16", ((object) v[3]) == null);
             Program.Check("s33oc17", !(((object) v[0]) == null));
 
-            // ----- docs/todo.md 1.2: ENGINE BEHAVIOUR, see the note above -----
+            // ----- ENGINE BEHAVIOUR, see the note above -----
             dynamic d = new S33V(n[0]);
             Program.Check("s33un1", ("" + (d.Missing + 1)) == "NaN");
             Program.Check("s33un2", ("" + (1 + d.Missing)) == "NaN");
@@ -2144,17 +2040,9 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 34: System.Object's inherited members, and the index bounds
         // =====
         //
-        // docs/todo.md 1.6 and 1.2's C# half.
-        //
-        // 1.6. ECMA-334 8.2.3: EVERY type inherits Equals, GetHashCode, GetType and
-        // ToString from object. Only ToString was routed, so
-        // `v[0].Equals((object) v[1])` aborted BOTH halves - "unknown method
-        // 'Equals'" in the interpreter and "method call 'equals' on a number" in the
-        // compiler - and so did GetHashCode and GetType on a number, a bool, a char
-        // or a long. Only string.Equals worked, through the string arm of mcall. The
-        // item said the interpreter accepted it; it did not, and the assertion it
-        // says was dropped from this file was never in it - the commit message of
-        // `1260832` recorded the defect instead.
+        // ECMA-334 8.2.3: EVERY type inherits Equals, GetHashCode, GetType and
+        // ToString from object, so all four answer on a number, a bool, a char or a
+        // long too.
         //
         // Equals is NOT `==`. `==` promotes (5 == 5L is true, 16777216f == 16777217
         // is true); Int32.Equals(object) requires an Int32, so `5.Equals(5L)` is
@@ -2166,25 +2054,20 @@ b";                                                   // verbatim keeps the newl
         // processes. What is asserted is the contract - two values Equals() calls
         // equal hash the same.
         //
-        // 1.2's C# half. Index reads went through PYTHON's js_pyget in the compiled
-        // halves, which WRAPS a negative index: `a[-1]` answered the LAST element
-        // there while the interpreter aborted with "index out of range: -1" - a live
-        // halves divergence ./test.sh --cross had never reached. An out-of-range read
-        // raised python's IndexError, a write past the end of an array GREW it in the
-        // interpreter and reported a raw "list assignment index out of range" in the
-        // compiler, and `new int[-1]` answered a zero-length array in one half and
-        // killed the other with a Go panic. The exception CLASS is spec-grounded -
-        // ECMA-335 III.4.4 (ldelem / stelem raise IndexOutOfRangeException), III.4.16
-        // (newarr raises OverflowException on a negative count), ECMA-334 12.8.11.3
-        // for the string indexer - and the MESSAGES are .NET BCL text.
+        // The index bounds: a negative index does not wrap, an out-of-range read or
+        // write throws (and a write does not grow the array), and `new int[-1]`
+        // throws. The exception CLASS is spec-grounded - ECMA-335 III.4.4 (ldelem /
+        // stelem raise IndexOutOfRangeException), III.4.16 (newarr raises
+        // OverflowException on a negative count), ECMA-334 12.8.11.3 for the string
+        // indexer - and the MESSAGES are .NET BCL text.
         //
         // KNOWN SIMPLIFICATION, shared by all three engines: a List<T> and an array
         // are the same value in this model, so a List index out of range also raises
         // IndexOutOfRangeException where real .NET raises ArgumentOutOfRangeException.
         //
-        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every claim here is
-        // spec-cited rather than executed. Every operand is read out of an ARRAY so
-        // the grammars' constant folders cannot answer at compile time.
+        // Every claim here is spec-cited rather than executed. Every operand is read
+        // out of an ARRAY so the grammars' constant folders cannot answer at compile
+        // time.
         class S34R
         {
             public int N;
@@ -2227,7 +2110,7 @@ b";                                                   // verbatim keeps the newl
             int[] a = { 10, 20, 30 };
             string s = "abc";
 
-            // ----- Equals on every value kind. THE LINE THE ITEM NAMES IS FIRST.
+            // ----- Equals on every value kind.
             Program.Check("s34eq1", v[0].Equals((object) v[1]));
             Program.Check("s34eq2", v[2].Equals((object) v[3]));
             Program.Check("s34eq3", iv[0].Equals(iv[1]));
@@ -2273,7 +2156,7 @@ b";                                                   // verbatim keeps the newl
             // ----- the index bounds: a READ, a NEGATIVE index and a WRITE -----
             Program.Check("s34ix1", S34Idx(a, idx[1]) == "30");
             Program.Check("s34ix2", S34Idx(a, idx[2]) == "Index was outside the bounds of the array.");
-            // The one that WRAPPED in the compiled half and aborted in the other.
+            // A NEGATIVE index does not wrap.
             Program.Check("s34ix3", S34Idx(a, idx[3]) == "Index was outside the bounds of the array.");
             Program.Check("s34ix4", S34Wr(a, idx[2]) == "Index was outside the bounds of the array.");
             Program.Check("s34ix5", S34Wr(a, idx[3]) == "Index was outside the bounds of the array.");
@@ -2289,10 +2172,8 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s34ix12", S34New(idx[1]) == "len 2");
 
             // ----- String.Substring takes a LENGTH, not an end index -----
-            // System.String.Substring(int startIndex, int length). Both halves
-            // lowered it to a JS slice(start, END), so this answered "bc" - one
-            // wrong answer BOTH halves agreed on, which --cross cannot see by
-            // construction. And every out-of-range argument CLAMPED silently.
+            // System.String.Substring(int startIndex, int length), and an
+            // out-of-range argument throws rather than clamping.
             string t = "abcdef";
             Program.Check("s34sb1", t.Substring(idx[0] + 1, idx[2]) == "bcd");
             Program.Check("s34sb2", t.Substring(idx[0] + 1) == "bcdef");
@@ -2311,26 +2192,17 @@ b";                                                   // verbatim keeps the newl
 
         // ===== SECTION 35: typed catch clauses, exception filters and rethrow =====
         //
-        // docs/todo.md 1.1.
-        //
         // ECMA-334 13.11: the catch clauses of a try statement are examined IN ORDER
         // and the FIRST one whose exception type is the type of, or a base type of,
         // the thrown exception - and whose `when` filter, if any, evaluates true -
-        // is the one that runs. Before this, both halves kept the first clause only
-        // and ignored its type AND its filter entirely, so
-        // `catch (FormatException e) {} catch (InvalidOperationException e) {}` ran
-        // the FormatException body on an InvalidOperationException. BOTH HALVES
-        // AGREED ON THAT WRONG ANSWER, so ./test.sh --cross was blind to it by
-        // construction; it took a differential probe against the spec to see it.
+        // is the one that runs.
         //
         // ECMA-334 13.10.6: a `throw;` with no operand rethrows the exception the
-        // enclosing catch block is handling. It used to raise `undefined`, so an
-        // outer `catch (Exception e)` reading e.Message ABORTED the run.
+        // enclosing catch block is handling.
         //
         // The BCL parent chain the type test walks is SPEC-DERIVED, not measured:
-        // there is no C# toolchain on this machine, so each parent below is the
-        // type's documented base class in the .NET base class library (see
-        // csExcParent, which exists in four engines).
+        // each parent below is the type's documented base class in the .NET base
+        // class library (see csExcParent, which exists in every engine).
         //
         // Every operand is read out of an ARRAY so the grammars' constant folders
         // cannot answer at compile time.
@@ -2400,7 +2272,7 @@ b";                                                   // verbatim keeps the newl
         }
         static string S35Log = "";
         static bool S35Note(string s) { Program.S35Log += "f"; return true; }
-        // Control flow out of a NON-FIRST clause: the clauses now share one emitted
+        // Control flow out of a NON-FIRST clause: the clauses share one emitted
         // catch closure, so a return/break/continue leaving the second one has to
         // become the same control signal the first one raises.
         static int S35RetSecond(object[] box, int i)
@@ -2439,8 +2311,6 @@ b";                                                   // verbatim keeps the newl
             int[] q = { 0, 1, 0, 1 };
 
             // ----- the clause chosen is the first whose type ACCEPTS the value -----
-            // Each of these used to answer "format", the first clause, whatever was
-            // thrown - that is the whole of docs/todo.md 1.1.
             Program.Check("s35p0", S35Pick(box, n[0]) == "format");
             // ArgumentNullException : ArgumentException, and the more derived clause
             // is written first, so ORDER decides.
@@ -2473,8 +2343,8 @@ b";                                                   // verbatim keeps the newl
             int ucode = 0;
             try { throw new S35Sub(w[n[0]]); }
             catch (S35Ex e) { uname = e.Message; ucode = e.Code; }
-            // ': base(m)' used to set NOTHING - the base was a BCL name, which is not
-            // a class here, so it was dropped with the interfaces and Message read "".
+            // ': base(m)' sets the Message although the base is a BCL name, which is
+            // not a class here.
             Program.Check("s35u1", uname == "boom" && ucode == 7);
             // A class the program declares that is NOT an exception is still caught
             // by `catch (Exception e)`: this subset lets a program throw any object.
@@ -2534,10 +2404,9 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s35i2", isu == "abc");
 
             // ----- GetType() on a BCL exception (8.2.3) -----
-            // A BCL exception is a plain {__excname, Message} object, so the __class
-            // walk GetType() does could not see its type at all and answered "Object"
-            // in both halves. The namespaces are spec-derived: all but five of these
-            // types are in System.
+            // A BCL exception is a plain {__excname, Message} object, so GetType()
+            // cannot take its type off the __class walk. The namespaces are
+            // spec-derived: all but five of these types are in System.
             string gt = "";
             try { throw new FormatException(w[n[0]]); }
             catch (Exception e) { gt = e.GetType().Name + "|" + e.GetType().FullName; }
@@ -2550,7 +2419,7 @@ b";                                                   // verbatim keeps the newl
             try { throw new FileNotFoundException(w[n[0]]); }
             catch (Exception e) { gt3 = e.GetType().FullName; }
             Program.Check("s35t3", gt3 == "System.IO.FileNotFoundException");
-            // A user exception keeps its own declared name, as it always did.
+            // A user exception keeps its own declared name.
             string gt4 = "";
             try { throw new S35Sub(w[n[0]]); }
             catch (Exception e) { gt4 = e.GetType().Name; }

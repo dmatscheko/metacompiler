@@ -103,8 +103,7 @@ is Main's return value, so self checking programs 'return failures;'.") ;
 // wherever a comment would be. That is the one lexical difference from
 // lib/cstyle-comments.abnf, and it is why this grammar carries its own copy of
 // that fragment instead of including it: the shared lib stays untouched and no
-// other language is affected (the precedent is commit 0ed59ab, which did the
-// same for an Id that had to differ).
+// other language is affected.
 Whitespace  = { @+" \t\r\n" | Comment | PPDirective } ;
 Comment     = LineComment | BlockComment ;
 LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
@@ -241,8 +240,8 @@ KwOperator  = "operator" KwEnd ;
 
 // An indexer ('public int this[int i] { get { ... } }'): its accessors become the
 // class' __index / __setindex members, which the index read and the index assignment
-// consult when the receiver is an instance of a class that declares one.
-// An indexer. The name may be qualified with the interface it explicitly implements
+// consult when the receiver is an instance of a class that declares one. The name
+// may be qualified with the interface it explicitly implements
 // ('int IFoo<T>.this[int i] { get { ... } }'); there is one indexer per class here,
 // so the interface name is parsed and dropped. The body may be a block of accessors
 // or an expression, which is a get-only accessor - the same pair Property allows.
@@ -266,14 +265,11 @@ NestedType  <~~ push(makeNested()) ~~>
 // constructor-initializer selects which constructor runs first. The body is a block
 // or an expression bodied '=> e;' form.
 //
-// THE INITIALIZER USED TO BE PARSED AND THROWN AWAY (SkipParen), and the class then
-// always ran the base class' PARAMETERLESS constructor - so `class C : P { public
-// C(double d) : base(d) { } }` left every field P's constructor sets unassigned, and
-// both halves agreed on the wrong answer (docs/todo.md 1.1). ECMA-334 15.11.2: the
-// initializer names the constructor that runs before this one's body, and a
-// `this(...)` initializer means the instance variable initializers do NOT run again.
-// The arguments are ordinary expressions evaluated in the constructor's own parameter
-// scope, which is why they are parsed as an ArgList rather than skipped.
+// ECMA-334 15.11.2: the initializer names the constructor that runs before this
+// one's body, and a `this(...)` initializer means the instance variable
+// initializers do NOT run again. The arguments are ordinary expressions evaluated
+// in the constructor's own parameter scope, which is why they are parsed as an
+// ArgList rather than skipped.
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] CtorBody ;
 CtorInit    <~~ push(csCtorInit(takeAll())) ~~>
@@ -374,13 +370,12 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // dropped: it pushes no name, and the method simply has one parameter fewer.
 Param       = ArglistParam | { AttrSection } { ParamMod } PType [ "..." ] ParamName [ ParamDflt ] ;
 ArglistParam = "__arglist" KwEnd ;
-// The DECLARED TYPE of a parameter, kept so an untyped literal argument adopts it
-// (docs/todo.md 1.1): `void G(double x)` called `G(3)` must bind 3.0, or `x / 2`
-// integer-divides and answers 1 where the implicit numeric conversion of ECMA-334
-// 10.2.3 makes it 1.5. It is the same record DType pushes for a local
-// declaration, at the site that had none; makeParams
-// decides ONCE, at parse time, whether the name is adoptable, so a call pays nothing
-// for the overwhelming majority of parameters that are not.
+// The DECLARED TYPE of a parameter, kept so an untyped literal argument adopts it:
+// `void G(double x)` called `G(3)` must bind 3.0, or `x / 2` integer-divides and
+// answers 1 where the implicit numeric conversion of ECMA-334 10.2.3 makes it 1.5.
+// It is the same record DType pushes for a local declaration; makeParams decides
+// ONCE, at parse time, whether the name is adoptable, so a call pays nothing for
+// the overwhelming majority of parameters that are not.
 PType       <~~ push({ptype: stripWs(up.in)}) ~~>
             = Type ;
 ParamName   <~~ push(up.in) ~~>
@@ -539,12 +534,10 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 
-// An iterator block. A method whose body contains a 'yield' produces a SEQUENCE: the
-// body runs once with a hidden accumulator, every 'yield return e' appends to it and
-// 'yield break' ends it early, and the accumulator is what the call answers. The sequence
-// is therefore materialized eagerly - an endless iterator does not terminate here - which
-// is what makes 'foreach', LINQ-free enumeration and GetEnumerator/MoveNext/Current all
-// work on the ordinary array representation.
+// An iterator block. A method whose body contains a 'yield' is an ITERATOR: calling it
+// answers a generator that REPLAYS the body (see csYieldCount / csGenStep), so the
+// sequence is LAZY and 'foreach' and GetEnumerator/MoveNext/Current drive it one value
+// at a time.
 YieldStmt   = YieldBreak | YieldReturn ;
 YieldReturn <~~ push(makeYieldReturn(pop())) ~~>
             = KwYield KwReturn Expression ";" ;
@@ -555,14 +548,13 @@ KwYield     = "yield" KwEnd ;
 Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 
-// try/catch/finally and throw are implemented (excThrow, languages/lib; csTry here):
-// throw raises the value, and the catch clauses are examined IN SOURCE ORDER - the first
-// one whose declared type accepts the value AND whose 'when (cond)' filter is true runs,
-// which is ECMA-334 13.11. finally always runs. return/break/continue inside a try still
-// propagate. A catch may omit the parens ('catch { }'), the binding ('catch (T) { }') or
-// bind a name ('catch (T e) { }'). The DECLARED TYPE and the FILTER EXPRESSION are both
-// kept now; they used to be parsed and thrown away, so the FIRST clause always won
-// (docs/todo.md 1.1). The compiler half lowers the same rule in csCatchDispatch.
+// try/catch/finally and throw (excThrow, languages/lib; csTry here): throw raises
+// the value, and the catch clauses are examined IN SOURCE ORDER - the first one whose
+// declared type accepts the value AND whose 'when (cond)' filter is true runs, which
+// is ECMA-334 13.11. finally always runs. return/break/continue inside a try still
+// propagate. A catch may omit the parens ('catch { }'), the binding ('catch (T) { }')
+// or bind a name ('catch (T e) { }'). The compiler half lowers the same rule in
+// csCatchDispatch.
 Try         <~~ push(csTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -643,9 +635,9 @@ Expression  = RefExpr | Assignment | ThrowExpr | CondExpr ;
 RefExpr     = "ref" KwEnd [ "readonly" KwEnd ] Expression ;
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow CondExpr ;
-// The compound bitwise/shift forms apply like their arithmetic siblings; '??=' is
-// accepted but reported as not implemented (it needs a null test). Longer operators are
-// listed before their prefixes.
+// The compound bitwise/shift forms apply like their arithmetic siblings, and '??='
+// assigns only when the place is null. Longer operators are listed before their
+// prefixes.
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target ( "<<=" | ">>>=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%="
                      | "&=" | "|=" | "^=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
@@ -767,12 +759,9 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = BitOr { "&&" BitOr } ;
 
 // The bitwise levels sit between && and equality (as in C#). The !"|" / !"&"
-// lookaheads make each level refuse the FIRST character of the doubled operator. This
-// used to be left to the right side failing and the iteration rolling back - which
-// worked only while nothing could start with '&': once AddrOf ('&x') existed,
-// `false && Bump()` parsed as `false & (&Bump())`, evaluated bitwise, and stopped
-// short-circuiting. Silently: it is a wrong ANSWER, not a parse error, and only the
-// logic-and-skipped assertion in csharp-test-features.cs caught it.
+// lookaheads make each level refuse the FIRST character of the doubled operator:
+// leaving it to the right side failing is not enough once AddrOf ('&x') exists -
+// `false && Bump()` would parse as `false & (&Bump())` and stop short-circuiting.
 BitOr       <~~ push(foldBinary(takeAll())) ~~>
             = BitXor { "|" !"|" <~~ push("|") ~~> BitXor } ;
 BitXor      <~~ push(foldBinary(takeAll())) ~~>
@@ -873,11 +862,9 @@ KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
-// C# 11's UNSIGNED right shift. csShift below already had its ">>>" arm and
-// applyOps already had ">>>=", but no rule recognised the token, so all of it was
-// dead code reachable from nothing. It is recognised rather than deleted because
-// it is real C# surface. LONGEST FIRST: ">>" would otherwise swallow the first two
-// characters and leave a stray ">". The twin is csharp-to-llvm-ir.abnf's Shift.
+// C# 11's UNSIGNED right shift `>>>` (csShift / applyOps carry its arms). LONGEST
+// FIRST: ">>" would otherwise swallow the first two characters and leave a stray
+// ">". The twin is csharp-to-llvm-ir.abnf's Shift.
 Shift       <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
@@ -943,9 +930,8 @@ NewAnon     <~~ push(makeAnon(pop())) ~~>
             = KwNew AnonInit ;
 // An anonymous type has its OWN initializer list, because it alone may PROJECT a
 // member instead of naming one: `new { a.B, C }` is `new { B = a.B, C = C }`
-// (C# 7.6.10.6). Putting the projection in the shared ObjInit instead made a
-// collection initializer - `new List<int> { 1, 2 }` - match it, and every entry
-// became a member named after its own text.
+// (C# 7.6.10.6). In the shared ObjInit the projection would make a collection
+// initializer - `new List<int> { 1, 2 }` - read every entry as a member.
 AnonInit    <~~ push({objinit: takeAll()}) ~~>
             = "{" [ AnonMember { "," AnonMember } ] [ "," ] "}" ;
 AnonMember  = NestedInit | IndexedInit | PlainInit | ProjInit ;
@@ -1117,7 +1103,7 @@ ArgName     <~~ push({argname: up.in}) ~~>
 // write through it is a write to that variable). The operand is parsed with the same
 // Target production an assignment uses, which is exactly the set of places C# calls
 // a variable_reference; anything else falls through to PlainArg and is passed by
-// value, as it was before.
+// value.
 RefArg      <~~ push(csRefArg(takeAll())) ~~>
             = RefOutMod Target ;
 RefOutMod   <~~ push({refmod: stripWs(up.in)}) ~~>
@@ -1232,11 +1218,10 @@ VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 
 // C# numeric literals. The value is computed by csNum, which is also where the
 // literal's TYPE is decided (ECMA-334 6.4.5.3). CsDecP - the plain decimal
-// integer - is listed LAST but is no longer left to the shared IntLit, because
-// IntLit reads it with parseInt, i.e. through a double: 18446744073709551615
-// came back as 18446744073709552000, and the two script engines even rounded it
-// differently. CsNum precedes IntLit in the literal choice, so IntLit is now
-// unreachable for this grammar.
+// integer - is listed LAST but is not left to the shared IntLit, because IntLit
+// reads it with parseInt, i.e. through a double: 18446744073709551615 would come
+// back as 18446744073709552000. CsNum precedes IntLit in the literal choice, so
+// IntLit is unreachable for this grammar.
 CsNum       <~~ push(makeConst(csNum(up.in))) ~~>
             = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS | CsDecP ;
 CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
@@ -1285,9 +1270,8 @@ LamBlock    <~~ push({body: pop()}) ~~> = Block ;
 LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
 // A LINQ query expression: accepted, reported as not implemented.
 // The whole query-expression syntax (C# 7.16) is RECOGNIZED - from/let/where/
-// join/orderby/group/select and the `into` continuation - and then reported as
-// not implemented, like it was before: every sub-expression goes through
-// DiscardExpr, so nothing is left on the stack.
+// join/orderby/group/select and the `into` continuation - and every
+// sub-expression goes through DiscardExpr, so nothing is left on the stack.
 //
 // The range variable's explicit TYPE (`from int i in a`) is a separate
 // alternative rather than an optional `[ Type ]`: a PEG optional that matched
@@ -1379,17 +1363,14 @@ ModKw       = EvtMod | ( "public" | "private" | "protected" | "internal" | "stat
               | "file" | "fixed" | "ref" | "scoped" ) KwEnd ;
 // 'event' is a modifier like the others, but an event FIELD is a delegate field:
 // `public event Action E;` then `E += h` must COMBINE invocation lists rather than
-// add numbers. csHasDeleg used to be switched on only by a `delegate` type
-// DECLARATION, so a program whose events all name a built-in delegate type
-// (Action / EventHandler / Func<...>) took the arithmetic path and `E += h`
-// silently produced NaN in the interpreter and aborted in the compiler
-// (docs/todo.md 1.10). ECMA-334 15.8.1: an event's `+=` is Delegate.Combine.
+// add numbers (ECMA-334 15.8.1: an event's `+=` is Delegate.Combine) - also when
+// every event names a built-in delegate type (Action / EventHandler / Func<...>),
+// so the modifier itself switches csHasDeleg on.
 EvtMod      <~~ csNoteDeleg() ~~>
             = "event" KwEnd ;
 LeadMods    = { ModKw | AttrSection } ;
 
-// Type declarations accepted structurally, then reported as not implemented (so a whole
-// C# file parses; -warn-unsupported lets the rest run). Bodies are skipped.
+// The top-level type declaration that carries no runtime meaning: a delegate type.
 UnsupType   = DelegateDecl ;
 // An enum: a descriptor object of int constants. A member without a value continues
 // from the previous one (starting at 0), and a member's initializer may name the members
@@ -1548,8 +1529,8 @@ KwLet       = "let" KwEnd ;
 
     // ----- double / float / decimal: a boxed {__flo: value} -----
     // C#'s double is a DIFFERENT type from int, and this value model is untyped, so
-    // 1.0 and 1 would both be the JS number 1: 1.0 / 3.0 divided as integers (0
-    // instead of 0.3333333333333333) and there was no Infinity, no NaN and no -0.0.
+    // 1.0 and 1 would both be the JS number 1: 1.0 / 3.0 would divide as integers
+    // and there would be no Infinity, no NaN and no -0.0.
     // Boxing every floating-point value keeps them apart, exactly like csChar keeps a
     // char apart from its code and like the compiled half's js_csflo box (see
     // abnf/jsrtjvm.go). Invariant: a PLAIN number is an integral type, a {__flo} box
@@ -1577,11 +1558,10 @@ KwLet       = "let" KwEnd ;
     // 8.3.7): a {__flo, __f32} box; the binary32 rounding and digits are
     // interp-core.js's "binary32 float" section. The compiled world's twin is
     // STYLE 5 of the tag 14 box - abnf/jsrtjvm.go's floCSF and
-    // languages/lib/csharp-rt.metajs. THERE IS NO C# TOOLCHAIN ON THIS MACHINE:
-    // the arithmetic and the rounding were settled against java 24.0.2 (a
-    // binary32 operation is the same operation in both languages), the RENDERING
-    // is spec-cited only and csFloStr32 in abnf/jsrtjvm.go states which decision
-    // rests on what.
+    // languages/lib/csharp-rt.metajs. No C# toolchain is available: the arithmetic
+    // and the rounding were settled against java 24.0.2 (a binary32 operation is
+    // the same operation in both languages), the RENDERING is spec-cited only and
+    // csFloStr32 in abnf/jsrtjvm.go states which decision rests on what.
     function csFlo32(f) { return {__flo: coreF32Round(f), __f32: true} }
     function csIsF32(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f32 === true }
     // The box a binary operation on two float-ish operands answers. ECMA-334
@@ -1595,14 +1575,11 @@ KwLet       = "let" KwEnd ;
     }
     function csFloRes(f, f32) { return f32 ? csFlo32(f) : csFlo(f) }
     // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
-    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` comes back
-    // +0 where IEEE-754, both compiler halves and every real implementation say
-    // -0.0 (the `x * 0` trap of docs/working-on-this-project.md chapter 4). It
-    // is a PRE-EXISTING interpreter-vs-compiled divergence for `double`,
-    // reproducible at 5be2946 in four lines of C#, and the float work only made
-    // it show up in bulk. The same shape as java's jZeroSign (8f43e84) and
-    // kotlin's (e5e68b5) - the ninth appearance. The rule is IEEE-754's: the
-    // sign of a zero product or quotient is the XOR of the operand signs.
+    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` would come
+    // back +0 where IEEE-754 says -0.0 (the `x * 0` trap of
+    // docs/working-on-this-project.md chapter 4). Same shape as java's jZeroSign.
+    // The rule is IEEE-754's: the sign of a zero product or quotient is the XOR of
+    // the operand signs.
     function csZeroSign(p, a, b) {
         if (p !== 0) { return p }
         if (a !== a) { return p }
@@ -1634,10 +1611,10 @@ KwLet       = "let" KwEnd ;
     //     a {__char} box   ==  a char (16 bit UNSIGNED, rendered as a glyph)
     //
     // int is the type of every unsuffixed literal that fits and of every
-    // arithmetic result whose operands are int or narrower, so keeping IT unboxed
-    // is what makes the change affordable. The cost is that a 64 bit value stays
-    // boxed even when it would fit in a double, because a plain number means
-    // `int` here: szNorm unboxes such a result, so csL boxes it straight back.
+    // arithmetic result whose operands are int or narrower, so it stays unboxed.
+    // The cost is that a 64 bit value stays boxed even when it would fit in a
+    // double, because a plain number means `int` here: szNorm unboxes such a
+    // result, so csL boxes it straight back.
     //
     // ARITHMETIC IS UNCHECKED, which is C#'s default (ECMA-334 12.8.20): every
     // operator wraps. A `checked` block is parsed but NOT modelled - it does not
@@ -1856,11 +1833,10 @@ KwLet       = "let" KwEnd ;
         return neg ? "-" + s : s
     }
     // Both forms are built from interp-core.js's coreDecDigits, which asks floPrec
-    // rather than the host's printer (docs/todo.md 1.8): `"" + a` is not the shortest
-    // round-tripping form in goja, so reading the digits off it was a live
-    // goja-vs-`-frozen` divergence. csF32Plain is the shared plain-form writer -
-    // it forces no ".0", which is C#'s rule for a double just as much as for a
-    // float, so the two renderers cannot disagree about the shape.
+    // rather than the host's printer (`"" + a` is not the shortest round-tripping
+    // form in goja). csF32Plain is the shared plain-form writer - it forces no
+    // ".0", which is C#'s rule for a double just as much as for a float, so the
+    // two renderers cannot disagree about the shape.
     function csFloPlain(a) {
         var sig = coreDecDigits(a)
         var ei = sig.indexOf("e")
@@ -1976,7 +1952,7 @@ KwLet       = "let" KwEnd ;
         if (csIsTuple(l) && csIsTuple(r)) { return csTupEq(l, r) }
         return false
     }
-    // ----- System.Object.Equals / GetHashCode / GetType (docs/todo.md 1.6) -----
+    // ----- System.Object.Equals / GetHashCode / GetType -----
     //
     // Equals is NOT ==. `==` promotes (5 == 5L is true, 16777216f == 16777217 is
     // true); Int32.Equals(object) requires an Int32, so `5.Equals(5L)` is FALSE.
@@ -2045,8 +2021,8 @@ KwLet       = "let" KwEnd ;
     }
     // The fully qualified .NET name of a BCL exception type. All but five are in
     // System; the exceptions to that are cited beside them. It is what GetType() has to
-    // answer for a value whose only type identity is __excname (docs/todo.md 1.1) - the
-    // twins are csExcFullName in abnf/jsrtcsharp.go and languages/lib/csharp-rt.metajs.
+    // answer for a value whose only type identity is __excname - the twins are
+    // csExcFullName in abnf/jsrtcsharp.go and languages/lib/csharp-rt.metajs.
     function csExcFullName(n) {
         // System.IO.
         if (n == "IOException" || n == "FileNotFoundException"
@@ -2059,9 +2035,7 @@ KwLet       = "let" KwEnd ;
     }
     // ----- the message a parameterless exception constructor leaves behind ----------
     //
-    // `new Exception().Message` used to be the bare string "Exception" here, in all
-    // three engines - agreed and wrong, the class byte identity cannot see
-    // (docs/todo.md 1.3). .NET has TWO rules and this repo had neither:
+    // .NET has TWO rules for the message a parameterless constructor leaves:
     //
     //   1. System.Exception's parameterless constructor stores NO message at all.
     //      `Exception.Message` then GENERATES one from the RUNTIME type:
@@ -2076,19 +2050,15 @@ KwLet       = "let" KwEnd ;
     //
     //   2. Almost every DERIVED BCL type overrides that by passing its own SR string
     //      to base(...), so `new ArgumentException().Message` is NOT the generated
-    //      sentence but "Value does not fall within the expected range.". The item as
-    //      filed said rule 1 covered the derived types too; it does not, and taking
-    //      it literally would have converged Exception and broken 26 other names.
+    //      sentence but "Value does not fall within the expected range.".
     //
-    // SPEC-CITED, NOT MEASURED - there is no C# toolchain on this machine (manual
-    // 7.9). Each string below is the resource the type's parameterless constructor
-    // passes to base(), from System.Private.CoreLib's Strings.resx (System.IO's and
-    // System.Collections' for the four/one that live there). Corroboration inside
-    // this repo: five of them were already written independently as the text of a
-    // RUNTIME-raised exception in abnf/jsrtcsharp.go's csThrow calls
-    // (DivideByZeroException, IndexOutOfRangeException, NullReferenceException,
-    // OverflowException, KeyNotFoundException) and they agree character for
-    // character.
+    // SPEC-CITED, NOT MEASURED (manual 7.9). Each string below is the resource the
+    // type's parameterless constructor passes to base(), from System.Private.CoreLib's
+    // Strings.resx (System.IO's and System.Collections' for the four/one that live
+    // there). Five of them also appear as the text of a RUNTIME-raised exception in
+    // abnf/jsrtcsharp.go's csThrow calls (DivideByZeroException,
+    // IndexOutOfRangeException, NullReferenceException, OverflowException,
+    // KeyNotFoundException) and agree character for character.
     //
     // ObjectDisposedException is deliberately ABSENT: it has no public parameterless
     // constructor in .NET at all, so `new ObjectDisposedException()` does not compile
@@ -2157,25 +2127,21 @@ KwLet       = "let" KwEnd ;
     //                   return s + " " + SR.Format(SR.Arg_ParamName_Name, _paramName);
     //               return s; } }
     // with SR.Arg_ParamName_Name = "(Parameter '{0}')" - a SPACE separator, not a
-    // newline (that is .NET Framework's older form). Corroborated inside this repo:
-    // csSubstr below and abnf/jsrtcsharp.go both already raise
-    // "StartIndex cannot be less than zero. (Parameter 'startIndex')", written in an
-    // earlier round from the same documentation and agreeing character for character.
-    // Every engine here read the argument as the MESSAGE, so `new
-    // ArgumentNullException("value").Message` was "value".
+    // newline (that is .NET Framework's older form). csSubstr below and
+    // abnf/jsrtcsharp.go raise "StartIndex cannot be less than zero. (Parameter
+    // 'startIndex')" from the same documentation.
     //
     // ArgumentException is NOT in this list - its one-argument overload really is
     // (string? message); the paramName is its SECOND argument, and the two types
     // above put theirs FIRST. ObjectDisposedException is not either: its
     // objectName suffix is joined with Environment.NewLine, which is "\n" here and
-    // "\r\n" on Windows, so there is no single right answer to converge on - the
-    // same reasoning that left .NET's abort()-derived exit status alone in 800ef57.
+    // "\r\n" on Windows, so there is no single right answer to converge on.
     //
     // MULTI-ARGUMENT forms are deliberately untouched: the second argument of
     // ArgumentNullException(string, string) is a message while that of
     // ArgumentNullException(string, Exception) is an inner exception, and this value
-    // model has no inner-exception slot to tell them apart with. Today every engine
-    // ignores arguments past the first, and that is unchanged.
+    // model has no inner-exception slot to tell them apart with. Every engine
+    // ignores arguments past the first.
     //
     // The twins are csExcParamName1 in languages/csharp-to-llvm-ir.abnf, and the
     // message join is js_csargmsg in languages/lib/csharp-rt.metajs and
@@ -2195,8 +2161,7 @@ KwLet       = "let" KwEnd ;
         var full = csElemName(v)
         if (full == "") {
             // A BCL exception is a plain {__excname, Message} object, so the __class
-            // walk below cannot see its type and GetType().Name answered "Object" in
-            // both halves. __excname IS the type name (docs/todo.md 1.1).
+            // walk below cannot see its type. __excname IS the type name.
             if (v !== null && v !== undefined && typeof v == "object"
                 && typeof v.__excname == "string") { full = csExcFullName(v.__excname) }
             else if (Array.isArray(v)) { full = csArrayName(v) }
@@ -2221,13 +2186,13 @@ KwLet       = "let" KwEnd ;
     // yet, .NET's _stackTraceString is null and the two-part form IS the whole answer,
     // so `new Exception("m").ToString()` is "System.Exception: m" on the nose. The
     // "   at Program.Main() in Program.cs:line 8" frames of a thrown one are not
-    // reproducible in any engine here (no call-site line table - manual 7.9 records
-    // the same wall), and INNER exceptions are not reproduced either because this
-    // value model has no inner-exception slot: `new Exception(msg, inner)` keeps only
-    // the message (see makeNew). Both omissions can only ever SHORTEN the answer;
-    // they never make it disagree on the part that is produced.
+    // reproducible in any engine here (no call-site line table - manual 7.9), and
+    // INNER exceptions are not reproduced either because this value model has no
+    // inner-exception slot: `new Exception(msg, inner)` keeps only the message (see
+    // makeNew). Both omissions can only ever SHORTEN the answer; they never make it
+    // disagree on the part that is produced.
     // The twins are cpObjStr in languages/lib/csharp-rt.metajs and cspObjStr in
-    // abnf/jsrtcsharp.go. docs/todo.md 1.3.
+    // abnf/jsrtcsharp.go.
     function csExcToStr(v, d) {
         var full = csTypeOfVal(v).FullName
         var msg = v.Message
@@ -2271,7 +2236,7 @@ KwLet       = "let" KwEnd ;
     // '+', an interpolation hole and .ToString(). It is the twin of cspStr in
     // abnf/jsrtcsharp.go and the two MUST stay in step (./test.sh --cross diffs them).
     //
-    // There is no dotnet on this machine, so each answer here is SPEC-CITED:
+    // No C# toolchain is available, so each answer here is SPEC-CITED:
     //   bool     "True"/"False"   System.Boolean.ToString() returns Boolean.TrueString /
     //                             Boolean.FalseString (a .NET BCL contract, not an
     //                             ECMA-334 rule). The LITERALS stay true/false; only the
@@ -2304,10 +2269,8 @@ KwLet       = "let" KwEnd ;
         // the one array kind whose element type is not a guess.
         if (csIsSz(e)) {
             if (e.w == 64) { return e.u ? "System.UInt64" : "System.Int64" }
-            // UNREACHABLE TODAY and kept only so the three engines agree if it ever
-            // is: a signed 32-bit value is a plain number here, never a box. This
-            // arm used to answer System.UInt32 for BOTH signednesses, where layer 2
-            // says System.Int32 and the Go twin fell through to System.SByte.
+            // UNREACHABLE TODAY and kept so the three engines agree if it ever
+            // is: a signed 32-bit value is a plain number here, never a box.
             if (e.w == 32) { return e.u ? "System.UInt32" : "System.Int32" }
             if (e.w == 16) { return e.u ? "System.UInt16" : "System.Int16" }
             return e.u ? "System.Byte" : "System.SByte"
@@ -2352,8 +2315,8 @@ KwLet       = "let" KwEnd ;
             if (m != undefined) { return csStrD(m(v), d + 1) }
             // An exception - a BCL {__excname, Message} object or a user class whose
             // chain reaches one - renders with System.Exception's OWN ToString
-            // override, not System.Object's bare type name: "System.Exception: m",
-            // and "[object Object]" before this. A user override still wins, above.
+            // override, not System.Object's bare type name: "System.Exception: m".
+            // A user override still wins, above.
             if (csExcBase(v) != "") { return csExcToStr(v, d) }
             if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
             if (v.__class != undefined && typeof v.__class.__name == "string") { return v.__class.__name }
@@ -2421,16 +2384,13 @@ KwLet       = "let" KwEnd ;
         if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
         return o[i]
     }
-    // ----- the index bounds checks (docs/todo.md 1.2's C# half) -----
+    // ----- the index bounds checks -----
     //
-    // Every one of these used to fail() the run, which no program could catch, and
-    // the COMPILED half was worse: it inherited python's js_pyget, so a[-1] answered
-    // the LAST element in the compiled half and aborted here - a live halves
-    // divergence --cross had never reached. They now throw the BCL exception the
-    // spec names, in all three engines (csIdxChk / csThrowExc / js_csidx).
+    // An out-of-range index throws the BCL exception the spec names, in all three
+    // engines (csIdxChk / csThrowExc / js_csidx); a negative index does not wrap.
     //
-    // The MESSAGES are .NET BCL text and there is no dotnet on this machine to
-    // settle them (manual chapter 7.9) - the CLASS is the part that is spec-grounded:
+    // The MESSAGES are .NET BCL text that no C# toolchain here can settle (manual
+    // chapter 7.9) - the CLASS is the part that is spec-grounded:
     // ECMA-335 III.4.4 (ldelem/stelem throw IndexOutOfRangeException), III.4.16
     // (newarr throws OverflowException on a negative count), and ECMA-334 12.8.11.3
     // for the string indexer.
@@ -2446,14 +2406,11 @@ KwLet       = "let" KwEnd ;
     function csIdxChk(o, i) {
         if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
     }
-    // ----- String.Substring, and TWO defects in one line -----
+    // ----- String.Substring -----
     //
     // System.String.Substring(int startIndex, int length) takes a LENGTH, not an end
-    // index. Both halves lowered it to a JS slice(start, end), so
-    // `"abcdef".Substring(1, 3)` answered "bc" where C# answers "bcd" - one wrong
-    // answer BOTH halves agreed on, which is the class --cross cannot see by
-    // construction. And an out-of-range argument CLAMPED silently where C# raises
-    // ArgumentOutOfRangeException; the four messages are the BCL's, uncheckable here.
+    // index, and an out-of-range argument raises ArgumentOutOfRangeException; the
+    // four messages are the BCL's, uncheckable here.
     function csSubstr(s, args) {
         var b = csNumD(args[0])
         if (b < 0) { csThrowExc("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')") }
@@ -2624,12 +2581,11 @@ KwLet       = "let" KwEnd ;
         return f.apply(undefined, argv)
     }
 
-    // ----- method-group conversion (docs/todo.md 1.1) -----
+    // ----- method-group conversion -----
     // ECMA-334 10.8 makes a METHOD GROUP - `this.M`, a bare `M`, `C.M` - convertible to
     // a compatible delegate type, and 20.1 says the delegate so created holds the
     // receiver the group was formed on as its target. Two consequences have to be got
-    // right, and both are settleable from the specification alone (there is no C#
-    // toolchain on this machine):
+    // right, and both are settleable from the specification alone:
     //
     //   - the conversion is a BOUND method: `Op o = s.Got; o(1)` runs Got with `s` as
     //     its `this`, whenever it is called and however far the value has travelled;
@@ -2712,19 +2668,12 @@ KwLet       = "let" KwEnd ;
         if (name == "ToString" && args.length == 0 && !csHasMethod(target, "ToString")) {
             return csStr(target)
         }
-        // ----- the other three members of the System.Object contract (docs/todo.md 1.6)
+        // ----- the other three members of the System.Object contract
         //
         // ECMA-334 8.2.3: EVERY type inherits Equals, GetHashCode, GetType and
-        // ToString from object. Only ToString was answered here, so
-        // `v[0].Equals((object) v[1])` aborted with "unknown method 'Equals'" in this
-        // half and "method call 'equals' on a number" in the compiled one, and so did
-        // GetHashCode and GetType on a number, a bool, a char or a long. Only
-        // string.Equals worked, through the string arm below. A user override always
-        // wins - csHasMethod is the same guard ToString uses.
-        //
-        // JAVA WAS CHECKED FOR THE SAME DEFECT and does not have it: js_jvaleq /
-        // js_jhash / js_jvstr already intercept equals/hashCode/toString for every
-        // receiver in both halves (see the mcall arm in java-to-llvm-ir.abnf).
+        // ToString from object, so these answer on a number, a bool, a char or a
+        // long too. A user override always wins - csHasMethod is the same guard
+        // ToString uses.
         if (name == "Equals" && args.length == 1 && !csHasMethod(target, "Equals")) {
             return csObjEquals(target, args[0])
         }
@@ -2736,8 +2685,7 @@ KwLet       = "let" KwEnd ;
         }
         // `d.Invoke(x)` is `d(x)`: ECMA-334 20.2 gives every delegate type an Invoke
         // method with the delegate's own signature, and 12.8.10.2 invokes it. A user
-        // type declaring its own Invoke wins, which is what csHasMethod tests
-        // (docs/todo.md 1.1).
+        // type declaring its own Invoke wins, which is what csHasMethod tests.
         if (name == "Invoke" && !csHasMethod(target, name) && csIsDelegVal(target)) {
             return csDelegInvoke(target, args)
         }
@@ -2786,8 +2734,7 @@ KwLet       = "let" KwEnd ;
                 // as method calls, and C# resolves the invocation against the field's
                 // delegate value (ECMA-334 12.8.10.2 - a delegate invocation is written
                 // exactly like a method invocation). A real method of the name wins,
-                // which is why this is reached only after the __class walk has missed
-                // (docs/todo.md 1.1).
+                // which is why this is reached only after the __class walk has missed.
                 var dv = anytype
                 dv = hasOwn(target, name) ? target[name] : undefined
                 if (dv === undefined) {
@@ -2801,9 +2748,7 @@ KwLet       = "let" KwEnd ;
         }
         if (target.__isclass === true) {
             // A static member reached through a DERIVED type name is the BASE's, so the
-            // lookup walks __super (ECMA-334 15.3.1) - `Der.SB()` used to abort here
-            // while `Op p = Der.SB` already worked, because csMethodGroup walks and this
-            // did not (docs/todo.md 1.1).
+            // lookup walks __super (ECMA-334 15.3.1), as csMethodGroup does.
             var sh2 = csStaticHolder(target, name)
             var sm = (sh2 == null) ? undefined : sh2[name]
             if (typeof sm == "function") return sm.apply(undefined, args)
@@ -2910,7 +2855,7 @@ KwLet       = "let" KwEnd ;
 
     // A member/index target: obj[key] / obj.field. Dict-aware for Dictionary targets.
     // A target record may carry a `base` thunk instead of a variable name (see
-    // makeChainTarget); everything after the root resolves as it always did.
+    // makeChainTarget); everything after the root resolves as usual.
     function csResolveRef(ref) {
         var o = anytype // The containers along the path may be of mixed types.
         if (ref.base != undefined) { o = ref.base() } else { o = csGetVar(ref.name) }
@@ -2929,10 +2874,9 @@ KwLet       = "let" KwEnd ;
             var wh = csStaticHolder(o, lk)
             if (wh != null) { o = wh }
         }
-        // The WRITE half of the bounds check: `a[3] = 5` on an int[3] used to GROW the
-        // array here and to abort the compiled half with a raw "list assignment index
-        // out of range". A dictionary write INSERTS and must not be checked, and a
-        // user indexer is not an array, so the Array.isArray guard is exactly right.
+        // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws. A
+        // dictionary write INSERTS and must not be checked, and a user indexer is
+        // not an array, so the Array.isArray guard is exactly right.
         if (last.key == undefined && Array.isArray(o)) { csIdxChk(o, lk) }
         return {obj: o, key: lk, isIndex: last.key == undefined}
     }
@@ -2953,16 +2897,14 @@ KwLet       = "let" KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        // THE DECLARATION SITES THAT STILL DID NOT ADOPT (docs/todo.md 1.3). A
-        // declared type adopts what is written to it (ECMA-334 10.2.3), and three
-        // write sites were still storing the raw int: a write to a LOCAL after its
-        // declaration (`double L; L = 3;` then `L / 2` answered 1), an ARRAY ELEMENT
-        // of a declared array type (`double[] a = new double[2]; a[0] = 3;`), and a
-        // QUALIFIED member write (`c.D = 3`). The first two are settled here, at
-        // parse time, off csLocalTypes - the same table the hidden-method rule
-        // already reads - so a name that adopts nothing costs one lookup at PARSE
-        // time and nothing at run time. The third cannot be: the receiver's class is
-        // only known at run time, and csAdoptMemW reads the declared type off it.
+        // A declared type adopts what is written to it (ECMA-334 10.2.3): a write to
+        // a LOCAL after its declaration (`double L; L = 3;` then `L / 2` is 1.5), an
+        // ARRAY ELEMENT of a declared array type (`double[] a = new double[2]; a[0]
+        // = 3;`), and a QUALIFIED member write (`c.D = 3`). The first two are settled
+        // here, at parse time, off csLocalTypes - the same table the hidden-method
+        // rule reads - so a name that adopts nothing costs one lookup at PARSE time
+        // and nothing at run time. The third cannot be: the receiver's class is only
+        // known at run time, and csAdoptMemW reads the declared type off it.
         var lty = ""
         var elty = ""
         if (ref.path.length == 0 && ref.name != undefined && hasOwn(csLocalTypes, ref.name)) {
@@ -3163,8 +3105,7 @@ KwLet       = "let" KwEnd ;
                 var msg = anytype
                 // No argument: the type's OWN parameterless-constructor message, which
                 // is a per-type SR string for all but Exception itself and a sentence
-                // generated from the runtime type for that one. It was the bare class
-                // name in all three engines (docs/todo.md 1.3, csExcDefMsg above).
+                // generated from the runtime type for that one (csExcDefMsg above).
                 msg = csExcDefMsg(clsName)
                 // ...unless the type's one-argument constructor takes a PARAM NAME
                 // rather than a message (csExcParamName1 above): then the default
@@ -3236,7 +3177,7 @@ KwLet       = "let" KwEnd ;
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
-        // The ELEMENT type an index write adopts (docs/todo.md 1.3). It is decided
+        // The ELEMENT type an index write adopts. It is decided
         // here, at parse time, from the head of the chain - a local of a declared
         // array type, or a member of one - so an index write into anything else
         // costs nothing at all at run time.
@@ -3252,10 +3193,7 @@ KwLet       = "let" KwEnd ;
     // member `B`. csSimpleName already drops type arguments and keeps the last
     // dotted segment, which is exactly the rule C# uses.
     function csProjName(text) { return csSimpleName(text) }
-    // `M(out int x)`: bind the name in the enclosing scope before the call, so the
-    // uses after it resolve. There are no out parameters in this model, so the
-    // argument itself is null.
-    // ----- `ref` / `out` arguments: a REFERENCE BOX (docs/todo.md 1.1) -----
+    // ----- `ref` / `out` arguments: a REFERENCE BOX -----
     //
     // ECMA-334 12.6.2.3.3 makes a `ref` argument's parameter an ALIAS for the
     // argument's variable, so `p.Ref(ref r)` must leave r at what the body assigned.
@@ -3372,38 +3310,32 @@ KwLet       = "let" KwEnd ;
         return function() {
             var n = sizeT()
             // ECMA-335 III.4.16: newarr throws OverflowException when the element
-            // count is negative. `new int[-1]` used to answer a zero-length array
-            // here and to kill the compiled half with a Go panic (`runtime error:
-            // makeslice: len out of range`).
+            // count is negative.
             if (csNumD(n) < 0) { csThrowExc("OverflowException", csOvfMsg) }
             var a = []
             for (var i = 0; i < n; i++) a.push(0)
             return a
         }
     }
-    // ----- `(object) x` suppresses a user-defined operator (docs/todo.md 1.3) -----
+    // ----- `(object) x` suppresses a user-defined operator -----
     //
-    // THE DEFECT: `public static bool operator ==(V a, V b) { if ((object)a == null)
-    // ... }` - THE idiomatic C# null guard - recursed until the stack died, in BOTH
-    // engines and at `d473319` too, so it is pre-existing.
+    // `public static bool operator ==(V a, V b) { if ((object)a == null) ... }` -
+    // THE idiomatic C# null guard - must not recurse into itself.
     //
-    // WHY IT CANNOT BE FIXED ON THE VALUE. ECMA-334 12.4.5 selects an operator from
+    // WHY IT CANNOT BE DECIDED ON THE VALUE. ECMA-334 12.4.5 selects an operator from
     // the STATIC types of the operands: with `object` on the left the candidate set
     // holds only the predefined reference-equality operator (12.12.6), because
     // `object` has no implicit conversion to `V`. There is no static type on a value
-    // here and there never will be - but the cast is right there in the SOURCE, so
-    // the one side that can see it is the parser. EqOperand carries each equality
-    // operand's own matched TEXT up to csFoldEq, which is the one place holding the
-    // operands separately at all.
+    // here - but the cast is right there in the SOURCE, so the one side that can see
+    // it is the parser. EqOperand carries each equality operand's own matched TEXT up
+    // to csFoldEq, which is the one place holding the operands separately at all.
     //
-    // WHY NOT MARK THE THUNK. The first version of this fix registered the thunk an
-    // `(object)` cast produced and recognised it later by identity. That is a
-    // GOJA-vs-FROZEN DIVERGENCE and it was measured, not feared: `push` is bound as
-    // func(v interface{}), goja EXPORTS a JS function as a fresh Go closure and
-    // pop() re-wraps it, so the identity test answered true under -frozen and false
-    // under goja - the frozen half printed the right answers while goja still hung.
-    // A plain object's PROPERTIES survive that round trip (it is how {castty} works)
-    // and a string is a string in both, so the marker is text.
+    // WHY NOT MARK THE THUNK. Recognising the thunk an `(object)` cast produced by
+    // identity is a GOJA-vs-FROZEN DIVERGENCE: `push` is bound as
+    // func(v interface{}), goja EXPORTS a JS function as a fresh Go closure and pop()
+    // re-wraps it, so the identity test answers true under -frozen and false under
+    // goja. A plain object's PROPERTIES survive that round trip (it is how {castty}
+    // works) and a string is a string in both, so the marker is text.
     //
     // SCOPE: `==` and `!=` only - the operators the predefined reference-equality
     // form exists for, and the only ones the idiom uses. The compiler twin is the
@@ -3416,9 +3348,9 @@ KwLet       = "let" KwEnd ;
     // is exact rather than approximate.
     //
     // REDUNDANT PARENTHESES ARE SKIPPED: `((object)a) == null` is the same C# as
-    // `(object)a == null`, parentheses do not change a static type, and it hung just
-    // as hard. Only a LEADING run of `(` is walked, so `f((object)x) == y` is not
-    // matched - there the operand is the call's result.
+    // `(object)a == null` - parentheses do not change a static type. Only a LEADING
+    // run of `(` is walked, so `f((object)x) == y` is not matched - there the operand
+    // is the call's result.
     //
     // WHAT THE LEADING-RUN RULE OVER-ACCEPTS, and why it does not matter:
     // `((object)a + 1) == b` reads as an object cast here although the operand's
@@ -3529,15 +3461,8 @@ KwLet       = "let" KwEnd ;
         // (see the invariant at csIsSz): a PLAIN NUMBER is an `int`, an {__sz} box is
         // every other integral type and carries its own width and signedness, an
         // {__flo} box is a double / float / decimal and its __f32 flag says which.
-        //
-        // Before this, every integral name answered "is it an integral number" and
-        // every floating name "is it a number", so `1.5f is float`, `1.5 is double`,
-        // `5L is long` and `(byte)3 is byte` were ALL false while `5 is long` was
-        // true - the width the box already carried was simply not consulted
-        // (docs/todo.md 1.9). `1.5m is decimal` is answered by the `double` arm,
-        // because a decimal IS a style-2 double box here; that is the one residue
-        // this cannot fix without a decimal representation of its own, and it is
-        // recorded at csElemName and in the report.
+        // `1.5m is decimal` is answered by the `double` arm, because a decimal IS a
+        // double box here (see csElemName).
         if (t == "float" || t == "Single") { return csIsF32(v) }
         if (t == "double" || t == "Double" || t == "decimal" || t == "Decimal") {
             return csIsFlo(v) && !csIsF32(v)
@@ -3558,11 +3483,8 @@ KwLet       = "let" KwEnd ;
         }
         // The exception hierarchy is the one part of the run-time type this model keeps
         // OUTSIDE the __class chain (a BCL exception is a plain {__excname, Message}
-        // object), so `e is FormatException` inside `catch (Exception e)` answered FALSE
-        // for every BCL type and `myEx is Exception` answered FALSE for a user class
-        // deriving from one - in BOTH halves. ECMA-334 12.12.12's run-time type test
-        // and 13.11's catch-clause selection are the same question, so they now consult
-        // the same table (docs/todo.md 1.1).
+        // object). ECMA-334 12.12.12's run-time type test and 13.11's catch-clause
+        // selection are the same question, so they consult the same table.
         var eb = csExcBase(v)
         return eb != "" && csExcIsA(eb, t)
     }
@@ -3779,8 +3701,7 @@ KwLet       = "let" KwEnd ;
         // the value fits; U makes it uint or ulong; L makes it long or ulong; UL
         // makes it ulong. The digits are accumulated EXACTLY - parseInt goes
         // through a double, which rounds 9223372036854775807 to
-        // 9223372036854775808 and does it DIFFERENTLY in the two script engines,
-        // so the goja and -frozen runs of one program disagreed.
+        // 9223372036854775808 (and not identically in the two script engines).
         var hasU = false
         var hasL = false
         var body = t
@@ -4150,10 +4071,10 @@ KwLet       = "let" KwEnd ;
     // parameter's default value, and a 'params' tail collects the rest into an array.
     function csBindArgs(sc, pinfo, args) {
         var names = pinfo.params
-        // The parameter's DECLARED TYPE adopts its argument (docs/todo.md 1.1):
-        // `G(3)` on `static double G(double x)` binds 3.0, so `x / 2` is 1.5 and not
-        // the 1 an int division gave. anyAdopt is decided at parse time, so a method
-        // whose parameters name no numeric type reads one boolean and nothing more.
+        // The parameter's DECLARED TYPE adopts its argument: `G(3)` on
+        // `static double G(double x)` binds 3.0, so `x / 2` is 1.5. anyAdopt is
+        // decided at parse time, so a method whose parameters name no numeric type
+        // reads one boolean and nothing more.
         var ad = (pinfo.anyAdopt === true) ? pinfo.adopts : null
         for (var j = 0; j < names.length; j++) {
             if (pinfo.variadic == j) {
@@ -4162,7 +4083,7 @@ KwLet       = "let" KwEnd ;
                 sc[names[j]] = rest
             } else if (j < args.length && args[j] !== undefined) {
                 // A REFERENCE BOX is the alias itself, not a value of the declared
-                // type: converting it would turn `ref int r` into NaN (docs/todo.md 1.1).
+                // type: converting it would turn `ref int r` into NaN.
                 sc[names[j]] = (ad != null && ad[j] != "" && !csIsRefBox(args[j]))
                                ? csImplicitConv(ad[j], args[j]) : args[j]
             } else if (pinfo.dflts != undefined && pinfo.dflts[j] != null) {
@@ -4214,11 +4135,9 @@ KwLet       = "let" KwEnd ;
     // try/catch/finally are handled by csTry above; throw by excThrow (lib/interp-core.js).
     // csThrowVal supplies the thrown-value thunk: the expression for 'throw e;', or - for
     // a bare 'throw;' - a read of __caught, the name csTry binds the exception being
-    // handled to in every catch scope. It used to be an undefined CONSTANT, so a rethrow
-    // raised undefined and the enclosing catch died on e.Message (docs/todo.md 1.1).
-    // ECMA-334 13.10.6 permits a bare throw only inside a catch block; outside one the
-    // name is unbound and both halves abort, which is the closest this has to a
-    // compile-time error.
+    // handled to in every catch scope. ECMA-334 13.10.6 permits a bare throw only
+    // inside a catch block; outside one the name is unbound and both halves abort,
+    // which is the closest this has to a compile-time error.
     function csThrowVal(items) { return items.length > 0 ? items[0] : csRethrowT }
     function csRethrowT() { return getVar("__caught") }
 
@@ -4294,9 +4213,9 @@ KwLet       = "let" KwEnd ;
         // 'S v = w;' with a struct type copies: structs are value types.
         if (hasOwn(csStructs, ty)) { return function() { declVar(name, csStructCopy(csImplicitConv(ty, init()))) } }
         // `double[] a = {3, 4}`: the declared type names the ELEMENT type, so the
-        // untyped literals in the initializer adopt it and a[0] / 2 is 1.5
-        // (docs/todo.md 1.1). csImplicitConv answers an array type with the array
-        // unchanged, so the two are complementary rather than alternatives.
+        // untyped literals in the initializer adopt it and a[0] / 2 is 1.5.
+        // csImplicitConv answers an array type with the array unchanged, so the two
+        // are complementary rather than alternatives.
         var el = csElemAdoptTy(ty)
         if (el != "") { return function() { declVar(name, csAdoptArr(el, init())) } }
         return function() { declVar(name, csImplicitConv(ty, init())) }
@@ -4635,29 +4554,26 @@ KwLet       = "let" KwEnd ;
         "FileNotFoundException", "DirectoryNotFoundException", "UnauthorizedAccessException"]
     for (var iBcl = 0; iBcl < csBclExcNames.length; iBcl++) { csBclExc[csBclExcNames[iBcl]] = true }
 
-    // ----- the BCL exception hierarchy, and typed catch (docs/todo.md 1.1) -----
+    // ----- the BCL exception hierarchy, and typed catch -----
     //
     // A catch clause selects on the RUN-TIME type of the thrown value: the clauses are
     // examined in source order and the first one whose type is the type of, or a BASE
     // type of, the exception is the one that runs (ECMA-334 13.11). That needs a parent
-    // chain, and the BCL exception types here are plain {__excname, Message} objects with
-    // no descriptor at all - which is exactly why, before this,
-    // `catch (FormatException e) {} catch (InvalidOperationException e) {}` ran the
-    // FormatException body on an InvalidOperationException, in BOTH halves, so --cross
-    // was blind to it.
+    // chain, and the BCL exception types here are plain {__excname, Message} objects
+    // with no descriptor at all.
     //
-    // The chain is the .NET class hierarchy of the 28 names csBclExcNames lists. It is
-    // SPEC-DERIVED, not measured: there is no C# toolchain on this machine (manual 7.9's
-    // C# caveat), so every parent here comes from the type's documented base class in the
-    // .NET base class library. "" is Exception's parent - the root of what a catch can
-    // name - and "?" means "not a BCL exception name at all", which csExcMatches has to
-    // tell apart from "has no parent".
+    // The chain is the .NET class hierarchy of the names csBclExcNames lists. It is
+    // SPEC-DERIVED, not measured (manual 7.9's C# caveat): every parent here comes from
+    // the type's documented base class in the .NET base class library. "" is
+    // Exception's parent - the root of what a catch can name - and "?" means "not a
+    // BCL exception name at all", which csExcMatches has to tell apart from "has no
+    // parent".
     //
-    // THESE THREE FUNCTIONS EXIST VERBATIM IN THREE MORE ENGINES: js_csexcmatch in
+    // THESE FUNCTIONS EXIST IN THE OTHER ENGINES TOO: js_csexcmatch in
     // languages/lib/csharp-rt.metajs (the native build) and in abnf/jsrtcsharp.go (the
     // Go twin llvm.Run uses), plus csCatchDispatch in csharp-to-llvm-ir.abnf which emits
     // the calls. A chain of `if`s rather than a table precisely so the body ports into
-    // MetaJS and Go unchanged - manual chapter 4: a fix spanning engines lands whole.
+    // MetaJS and Go unchanged.
     function csExcParent(n) {
         if (n == "Exception") { return "" }
         if (n == "SystemException") { return "Exception" }
@@ -4868,12 +4784,12 @@ KwLet       = "let" KwEnd ;
         var refs = []
         // The declared type each parameter ADOPTS, "" for every parameter that adopts
         // nothing - which is the overwhelming majority, and is what keeps csBindArgs
-        // at one string comparison per parameter per call (docs/todo.md 1.1).
+        // at one string comparison per parameter per call.
         var adopts = []
         // The RAW declared type of each parameter, "" when it names none. Unlike
         // `adopts` (which keeps only the numeric names a binding CONVERTS to) this
         // keeps every name, because constructor overload resolution has to ask
-        // `is` about a string, a bool and a user class too (docs/todo.md 1.10).
+        // `is` about a string, a bool and a user class too.
         var ptypes = []
         var pendingRaw = ""
         var pendingTy = ""
@@ -4946,7 +4862,7 @@ KwLet       = "let" KwEnd ;
         if (hides) { csHiddenNames[name] = true; csHasHidden = true }
         csRegParams(name, items[3])
         var isGen = csGenCheck(items[3])
-        // The RETURN TYPE adopts the returned value (docs/todo.md 1.1): `static
+        // The RETURN TYPE adopts the returned value: `static
         // double R() { return 3; }` answers 3.0, so `R() / 2` is 1.5. An ITERATOR
         // method returns the sequence, not an element, so its declared type
         // (IEnumerable<double>) names nothing adoptable and csAdoptRet declines it.
@@ -4977,7 +4893,7 @@ KwLet       = "let" KwEnd ;
     }
     // items: name, pinfo, [the ': base(...)' / ': this(...)' record], body. The
     // initializer record is optional, so the body is found by scanning rather than by
-    // index (docs/todo.md 1.1).
+    // index.
     function makeCtor(items) {
         csRegParams(items[0], items[1])
         csGenCheck(items[1])
@@ -5041,8 +4957,6 @@ KwLet       = "let" KwEnd ;
         var init = items.length > 3 ? items[3] : null
         var isStatic = false
         // A `const` MEMBER is implicitly static (ECMA-334 15.4), so `Bas.C` names it.
-        // Without this a const field became an INSTANCE field and `Bas.C` read as
-        // nothing at all, in both halves - so --cross was blind to it.
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static" || mods[i] == "const") isStatic = true
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
@@ -5050,9 +4964,8 @@ KwLet       = "let" KwEnd ;
         var dflt = null
         if (ty == "bool") dflt = false
         else if (isNum && ty.indexOf("[") < 0) dflt = 0
-        // The declared type adopts the initializer (docs/todo.md 1.1): a
-        // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
-        // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
+        // The declared type adopts the initializer: a `public double a = 3;` field
+        // holds 3.0, so `t.a / 2` is 1.5. `double[] xs = {3, 4}` adopts elementwise.
         return {kind: "field", name: name, statik: isStatic,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
                 adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
@@ -5104,21 +5017,17 @@ KwLet       = "let" KwEnd ;
     // ECMA-334 12.4.5 builds the candidate set from the user-defined operators of the
     // two operand types and then applies ordinary overload resolution (12.6.4) - so an
     // operator whose parameters no operand fits is simply not applicable, and the
-    // PREDEFINED operator stands. Without this, `"s" + v` on a class declaring
-    // `V operator +(V, V)` ran that body with a string as `a` and answered nonsense,
-    // where C# uses the predefined `string operator +(string, object)` (12.10.5) and
-    // answers "sV1".
+    // PREDEFINED operator stands: `"s" + v` on a class declaring `V operator +(V, V)`
+    // uses the predefined `string operator +(string, object)` (12.10.5) and answers
+    // "sV1".
     //
-    // THE TEST IS A KIND TEST, NOT `is`, AND THAT IS THE WHOLE DESIGN. A first
-    // attempt asked csIsType per parameter and REGRESSED two shapes at once: a null
-    // operand (`a == z` on a user `operator ==(V, V)` stopped calling it, because
-    // ECMA-334 10.2.7 makes null convertible to any reference type and csIsType
-    // answers false) and an implicit numeric conversion (`v + 1` against a `double`
-    // parameter). So the question asked here is only the one this defect needs -
-    // could a value of this KIND ever be that parameter - with null and every
-    // primitive-typed parameter accepted outright. It runs INSIDE the class probe
-    // csFindOp already did, so it can only ever DECLINE an operator that used to
-    // apply; it can never make one apply that did not.
+    // THE TEST IS A KIND TEST, NOT `is`. Asking csIsType per parameter would break a
+    // null operand (ECMA-334 10.2.7 makes null convertible to any reference type and
+    // csIsType answers false) and an implicit numeric conversion (`v + 1` against a
+    // `double` parameter). So the question asked here is only whether a value of this
+    // KIND could ever be that parameter, with null and every primitive-typed
+    // parameter accepted outright. It runs INSIDE the class probe csFindOp already
+    // did, so it can only DECLINE an operator, never make one apply.
     function csOpPrimTy(ty) {
         return ty == "int" || ty == "uint" || ty == "long" || ty == "ulong"
             || ty == "short" || ty == "ushort" || ty == "byte" || ty == "sbyte"
@@ -5211,9 +5120,8 @@ KwLet       = "let" KwEnd ;
         for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
         if (auto) { return csAutoField(name, isStatic, init, ty) }
         // A computed property's GETTER carries a declared type too, so
-        // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5 (docs/todo.md
-        // 1.1). Its SETTER's `value` parameter is not adopted - the value arrives
-        // from the assignment, which is the write-site problem the report names.
+        // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5. Its SETTER's
+        // `value` parameter is not adopted - the value arrives from the assignment.
         return {kind: "prop", name: name, statik: isStatic,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
                 addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
@@ -5228,8 +5136,7 @@ KwLet       = "let" KwEnd ;
         if (ty == "bool") { dflt = false }
         else if (isNum && ty.indexOf("[") < 0) { dflt = 0 }
         // The declared type adopts the initializer, as it does at a local
-        // declaration (docs/todo.md 1.1): `public double A { get; set; } = 3;`
-        // holds 3.0.
+        // declaration: `public double A { get; set; } = 3;` holds 3.0.
         return {kind: "field", name: name, statik: isStatic,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
                 adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
@@ -5317,24 +5224,15 @@ KwLet       = "let" KwEnd ;
         // TWO KINDS OF MEMBER RECORD CARRY AN `ext` SLOT and only one of them is a
         // base class: BaseSpec pushes the base TYPE NAME as a string, while
         // makeMethod pushes a BOOLEAN saying whether the method is an extension
-        // method. `ext != undefined` matched both, so a subclass that declared any
-        // ordinary method re-ran this with ext == false, looked up globalScope[false],
-        // found nothing and left `sup` NULL - and initFields below then skipped the
-        // BASE CONSTRUCTOR entirely, so every inherited field was missing from the
-        // instance. `cls.__super` was already set by the real base record, which is
-        // why `s is Base` and inherited METHODS kept working and only the FIELDS
-        // vanished; the compiler half was accidentally safe (csKnownClasses[false] is
-        // undefined) and answered correctly, so this was a live halves divergence.
+        // method - so the test is on the string.
         for (i = 0; i < members.length; i++) {
             if (typeof members[i].ext == "string") {
                 // Lenient: a base that is not a known class (an interface) is ignored.
                 sup = globalScope[members[i].ext]
                 if (sup != undefined) cls.__super = sup
                 // ...EXCEPT a BCL exception name, which is not a class here at all (see
-                // csBclExc) and used to be silently dropped: `class MyEx : Exception`
-                // then had no base at all, so ': base(m)' set nothing and e.Message read
-                // empty, in both halves. __excbase records the name, which gives
-                // csExcMatches a chain to walk and initBase a Message to write.
+                // csBclExc): __excbase records the name, which gives csExcMatches a
+                // chain to walk and initBase a Message to write.
                 else if (csBclExc[members[i].ext] == true) { cls.__excbase = members[i].ext }
             }
         }
@@ -5347,7 +5245,7 @@ KwLet       = "let" KwEnd ;
         // a static method would then shadow a host global of the same name.
         var sfld = {}
         cls.__sfld = sfld
-        // The declared type a WRITE to each member adopts (docs/todo.md 1.1).
+        // The declared type a WRITE to each member adopts.
         var mty = {}
         cls.__mty = mty
         // A STATIC FIELD INITIALIZER may name another static of the same class
@@ -5355,13 +5253,10 @@ KwLet       = "let" KwEnd ;
         // 15.5.6.1). There is no `this` here and no method frame, so the class is
         // pushed as __cscls for the duration - the same binding a static method
         // body gets - and csSelfWith then resolves the name off the descriptor.
-        // The compiler half already answered these, so this was a halves divergence.
         // The descriptor is registered BEFORE its own static initializers run, so a
         // `static double B = C.A * 3;` that names its own class QUALIFIED resolves
-        // too. The compiler half js_scope_decl's the descriptor at the top of
-        // buildClassStmt and always did; the interpreter used to publish it only at
-        // the end, so the two halves disagreed. Re-published at the end as well,
-        // which is idempotent.
+        // too (the compiler half js_scope_decl's it at the top of buildClassStmt);
+        // re-publishing it at the end is idempotent.
         globalScope[name] = cls
         scopes.push({__cscls: cls})
         for (i = 0; i < members.length; i++) {
@@ -5380,10 +5275,8 @@ KwLet       = "let" KwEnd ;
             }
             if (mm.kind == "prop" && mm.statik) { sfld[mm.name] = true }
             if (mm.adoptTy != undefined && mm.adoptTy != "") { mty[mm.name] = mm.adoptTy }
-            // EVERY constructor is kept, not just the last one. A class used to keep
-            // one `ctorInfo` and the later declaration simply overwrote the earlier,
-            // so `new Ctr(4)` on a class with `Ctr(int)` and `Ctr(double)` ran
-            // whichever was written last in BOTH halves (docs/todo.md 1.10).
+            // EVERY constructor is kept, not just the last one: `new Ctr(4)` on a
+            // class with `Ctr(int)` and `Ctr(double)` picks by overload resolution.
             if (mm.kind == "ctor") { ctorInfo = mm; ctorInfos.push(mm) }
         }
         scopes.pop()
@@ -5393,8 +5286,7 @@ KwLet       = "let" KwEnd ;
         function initBase(self, bargs) {
             // `class MyEx : Exception` - the base is a BCL exception, which is not a
             // class here, so System.Exception's own constructor is inlined: it stores
-            // the message (ECMA-335 / System.Exception(String)). No message means the
-            // class name, which is what `new XException()` already answers in makeNew.
+            // the message (ECMA-335 / System.Exception(String)).
             if (sup == null && cls.__excbase != undefined) {
                 if (bargs.length > 0) { self.Message = bargs[0]; return }
                 // The implicit ': base()' runs the BASE's parameterless constructor, so
@@ -5403,7 +5295,6 @@ KwLet       = "let" KwEnd ;
                 // RUNTIME type of the instance (csExcDefMsg above). `self` is the most
                 // derived instance even when this ctor belongs to a class in the
                 // middle of the chain, which is why csTypeOfVal(self) and not `name`.
-                // This was the declaring class' bare name (docs/todo.md 1.3).
                 var db = csExcDefMsgOf(cls.__excbase)
                 self.Message = (db != "") ? db : csExcGenMsg(csTypeOfVal(self).FullName)
                 return
@@ -5422,7 +5313,7 @@ KwLet       = "let" KwEnd ;
                 if (fk.init != null && fk.init != undefined) { self[fk.name] = fk.init(); continue }
                 // A field with no initializer starts at its declared type's zero,
                 // and THE WIDTH IS ON THE VALUE: `public double U;` holds 0.0, not
-                // the int 0 (docs/todo.md 1.1).
+                // the int 0.
                 self[fk.name] = (fk.adoptTy != undefined && fk.adoptTy != "" && fk.dflt !== null)
                     ? csAdoptVal(fk.adoptTy, fk.dflt) : fk.dflt
             }
@@ -5463,7 +5354,7 @@ KwLet       = "let" KwEnd ;
         // A record deconstructs into its positional parameters, unless it declares a
         // Deconstruct of its own (which csDeconstruct asks for first).
         if (isRecord && primary != null && primary != undefined) { cls.__recfields = primary.params }
-        // EVERY method declaration is kept, not just the last one (docs/todo.md 1.2):
+        // EVERY method declaration is kept, not just the last one:
         // the group is collected first, and the member is built once, from the FIRST
         // record of its group, so the record order is the declaration order the
         // resolution rule reads.
@@ -5500,7 +5391,7 @@ KwLet       = "let" KwEnd ;
                     cls[m2.name] = csOpMember(ogrp, cls)
                     // The operator's DECLARED PARAMETER TYPES, published so that an
                     // operand set no candidate accepts declines the user operator
-                    // instead of capturing the built-in meaning (docs/todo.md 1.1).
+                    // instead of capturing the built-in meaning.
                     if (cls.__opsig == undefined) { cls.__opsig = {} }
                     cls.__opsig[m2.name] = csCtorSigs(ogrp)
                 }
@@ -5543,7 +5434,7 @@ KwLet       = "let" KwEnd ;
     // expressions of the constructor's OWN parameter scope (`: base(d)` names the
     // parameter d), so they cannot be evaluated before csInvoke has bound the
     // parameters - which is why the whole prologue is wrapped INSIDE the body thunk
-    // rather than run ahead of it (docs/todo.md 1.1).
+    // rather than run ahead of it.
     function makeCtorClosure(info, initBase, initOwn, cls) {
         return function() {
             var self = arguments[0]
@@ -5571,7 +5462,7 @@ KwLet       = "let" KwEnd ;
             return info.body()
         }
     }
-    // ----- overload resolution: constructors AND methods (docs/todo.md 1.2/1.10) -----
+    // ----- overload resolution: constructors AND methods -----
     // ECMA-334 12.6.4 picks the applicable member whose parameter types best match the
     // argument types. There is no static type here, so the choice is made from the
     // ARGUMENT VALUES, in two passes and in declaration order:
@@ -5631,13 +5522,11 @@ KwLet       = "let" KwEnd ;
             cls.__ctorFns[csPickCtor(cls.__ctorSigs, args)].apply(undefined, argv)
         }
     }
-    // ----- METHOD overloads (docs/todo.md 1.2) -----
-    // `c4e1942` did constructors and stopped there; an ordinary method kept ONE
-    // closure per name, so the last declaration simply overwrote the earlier ones and
-    // `K.M(1)`, `K.M(1.5)`, `K.M(1,2)` and `K.M("x")` all ran `M(string)`. The
-    // resolution rule is the same one - ECMA-334 12.6.4, applied to the argument
-    // VALUES, in the two passes above - so csCtorSigs and csPickCtor are reused
-    // verbatim and the compiler half reuses its own lowering of them.
+    // ----- METHOD overloads -----
+    // An ordinary method's overload group uses the same resolution rule - ECMA-334
+    // 12.6.4, applied to the argument VALUES, in the two passes above - so
+    // csCtorSigs and csPickCtor are reused verbatim and the compiler half reuses its
+    // own lowering of them.
     //
     // An INSTANCE method's argument array carries `this` first (makeInstanceClosure)
     // and a STATIC one's does not (makeStaticClosure), so the offset is decided once,
@@ -5661,15 +5550,13 @@ KwLet       = "let" KwEnd ;
     }
     // The member a name's overload group becomes. A group that mixes STATIC and
     // INSTANCE declarations has two calling conventions and cannot share one
-    // dispatcher: the last declaration wins there, which is what every group did
-    // before this change. C# allows such a group only across a hiding boundary, and
-    // the compiler half does exactly the same thing.
-    // ----- the candidate set continues into the BASE class (docs/todo.md 1.1) -----
+    // dispatcher: the last declaration wins there. C# allows such a group only
+    // across a hiding boundary, and the compiler half does exactly the same thing.
+    // ----- the candidate set continues into the BASE class -----
     // ECMA-334 12.6.4 builds the candidate set for `d.M(1)` by starting in the type of
     // the receiver and MOVING TO THE BASE when the derived type offers no applicable
     // candidate. A `class D : B` that declares `M(string)` therefore does not hide
-    // `B.M(int)`: `d.M(1)` runs the base's. Here the group kept only D's own
-    // declarations, so `d.M(1)` bound the int to a string parameter and answered 2.
+    // `B.M(int)`: `d.M(1)` runs the base's.
     //
     // The candidate LIST is what is inherited, not the closures: an index past this
     // class' own overloads forwards to the base member, which is itself a dispatcher.
@@ -5727,13 +5614,11 @@ KwLet       = "let" KwEnd ;
         }
         return csMethodDispatch(fns, all, statik, (inh == null) ? null : inh.fn)
     }
-    // An OVERLOADED OPERATOR is the same defect one member kind further along, and
-    // the probe that found it is `V operator +(V, V)` beside `V operator +(V, int)`:
-    // the second declaration overwrote the first, so `v + otherV` ran the (V, int)
-    // body and died reading `.X` of an int. ECMA-334 12.4.5 resolves a user-defined
-    // binary operator by the SAME overload resolution as a method call (12.6.4), so
-    // the same dispatcher serves. An operator is always static (15.10.1), so the
-    // argument array carries no `this`.
+    // An OVERLOADED OPERATOR (`V operator +(V, V)` beside `V operator +(V, int)`)
+    // resolves the same way: ECMA-334 12.4.5 resolves a user-defined binary operator
+    // by the SAME overload resolution as a method call (12.6.4), so the same
+    // dispatcher serves. An operator is always static (15.10.1), so the argument
+    // array carries no `this`.
     function csOpMember(infos, cls) {
         if (infos.length == 1) { return makeStaticClosure(infos[0], cls) }
         var fns = []
@@ -5765,7 +5650,7 @@ KwLet       = "let" KwEnd ;
     }
     // A static member body has no `this` (ECMA-334 12.7.3), so the class it belongs
     // to is carried instead: csInvoke binds it as __cscls, and csSelfWith reads it
-    // there to resolve an unqualified STATIC member (docs/todo.md 1.2).
+    // there to resolve an unqualified STATIC member.
     function makeStaticClosure(m, cls) {
         return function() {
             var args = []
@@ -5850,13 +5735,13 @@ KwLet       = "let" KwEnd ;
         if (g != undefined) { return (o.__isclass === true) ? g() : g(o) }
         // Nothing of that name is stored on the object: it may still be a METHOD, and
         // `o.M` is then a method group (ECMA-334 10.8). csMethodGroup answers undefined
-        // for a name no class in the chain declares, so a genuinely absent member reads
-        // exactly as it always did.
+        // for a name no class in the chain declares, so a genuinely absent member
+        // still reads as absent.
         return csMethodGroup(o, name)
     }
     core.getIndex = csGetIndex
 
-    // ----- unqualified access to a member of the enclosing type (docs/todo.md 1.2) -----
+    // ----- unqualified access to a member of the enclosing type -----
     //
     // C# resolves a simple name that is not a local, a parameter or a type against
     // the members of the enclosing type (ECMA-334 12.8.4, simple names): an
@@ -5865,14 +5750,8 @@ KwLet       = "let" KwEnd ;
     // the DECLARING type. A local or parameter of the same name shadows it, and
     // that falls out free here: interp-core's getVar/setVar walk the whole scope
     // chain first and only then consult these hooks, so every name that does
-    // resolve pays nothing at all.
-    //
-    // WHAT WAS BROKEN. Only the first of five shapes worked. Reading an instance
-    // FIELD unqualified was fine; a STATIC field read or written unqualified, from
-    // either an instance or a static member, said "unknown name"/"assignment to
-    // unknown variable", and so did a property with ACCESSOR BODIES in either
-    // direction. Every class under tests/ wrote `this.x` or `Cls.S`, which is why
-    // 6,873 assertions never reached any of it.
+    // resolve pays nothing at all. This covers fields, statics and properties with
+    // ACCESSOR BODIES, read and written, from instance and static members alike.
     //
     // A STATIC member lives on the class DESCRIPTOR, which an instance reaches
     // through __class and a static member body reaches through __cscls (bound by
@@ -5901,7 +5780,7 @@ KwLet       = "let" KwEnd ;
     }
     // The object an unqualified `name` is read/written through, or null when the
     // name is not a member of the enclosing type at all (getVar then goes on to
-    // hostGlobals and its own error, exactly as before). A class descriptor comes
+    // hostGlobals and its own error). A class descriptor comes
     // back for a static, an instance for an instance member.
     function csSelfWith(name) {
         var sc = scopes
@@ -5954,7 +5833,7 @@ KwLet       = "let" KwEnd ;
         if (o == null) { return false }
         // THE MEMBER'S DECLARED TYPE ADOPTS THE WRITTEN VALUE (ECMA-334 10.2.3 at
         // 12.21.2's simple assignment), so `double D; ... D = 3` holds 3.0 and
-        // `D / 2` is 1.5 (docs/todo.md 1.1).
+        // `D / 2` is 1.5.
         var ty = csMemberTyOf((o.__isclass === true) ? o : o.__class, name)
         var v = (ty == "") ? value : csAdoptVal(ty, value)
         if (!hasOwn(o, name)) {
@@ -5968,14 +5847,12 @@ KwLet       = "let" KwEnd ;
         return true
     }
 
-    // The binary/compound operators, extended with the bitwise and shift forms (32-bit,
-    // matching the compiled js_band/js_bor/... externals). The existing arithmetic and
-    // comparison cases are preserved exactly; only the bitwise cases are new.
+    // The binary/compound operators, extended with the bitwise and shift forms.
     // A char is unboxed for every operator except '+' (which may be a string concat and
     // renders the glyph itself), so 'b' - 'a' == 1 and '\n' == (char)10 both hold.
     binOp = function(op, l0, r0) {
         // csNoUserOp is csFoldEq's one-shot "this step is the PREDEFINED operator"
-        // request (docs/todo.md 1.3). It is cleared HERE rather than by the caller so
+        // request. It is cleared HERE rather than by the caller so
         // that a body which throws cannot leave it set.
         var noUser = csNoUserOp
         csNoUserOp = false
@@ -6111,21 +5988,20 @@ KwLet       = "let" KwEnd ;
     }
 
     // ----- declared-type adoption at the sites that are NOT a local declaration -----
-    // docs/todo.md 1.1. `csImplicitConv` above is ECMA-334 10.2.3's implicit numeric
-    // conversion, and it used to run at exactly ONE site: a local declaration. A
+    // `csImplicitConv` above is ECMA-334 10.2.3's implicit numeric conversion. A
     // PARAMETER, a method's RETURN TYPE, a FIELD / auto-property and the ELEMENT type
-    // of an array declaration all name a type just as definitely, and an untyped
-    // literal written at one of them stayed an int - so it INTEGER-DIVIDED:
+    // of an array declaration all name a type just as definitely as a local does, and
+    // an untyped literal written at one of them must adopt it or it INTEGER-DIVIDES:
     //
-    //     static double G(double x) { return x / 2; }  G(3)   answered 1, not 1.5
-    //     static double R() { return 3; }  R() / 2            answered 1, not 1.5
-    //     class T { public double a = 3; }  new T().a / 2     answered 1, not 1.5
-    //     double[] a = {3, 4};  a[0] / 2                      answered 1, not 1.5
+    //     static double G(double x) { return x / 2; }  G(3)   is 1.5
+    //     static double R() { return 3; }  R() / 2            is 1.5
+    //     class T { public double a = 3; }  new T().a / 2     is 1.5
+    //     double[] a = {3, 4};  a[0] / 2                      is 1.5
     //
-    // The float half of the same rule is what makes `F(1)` exact where only
-    // `F(1.0f)` used to be, and the integral half is what makes `void W(byte b)`
-    // called `W(250)` hold a byte. THE WIDTH IS ON THE VALUE, NOT THE ANNOTATION, so
-    // nothing but a fresh conversion at the binding site can put it there.
+    // The float half of the same rule makes `F(1)` exact, and the integral half
+    // makes `void W(byte b)` called `W(250)` hold a byte. THE WIDTH IS ON THE VALUE,
+    // NOT THE ANNOTATION, so nothing but a fresh conversion at the binding site can
+    // put it there.
     //
     // csAdoptable is asked ONCE, at parse time, so a call to a method whose
     // parameters name no numeric type pays nothing at all.
@@ -6135,36 +6011,20 @@ KwLet       = "let" KwEnd ;
     }
     // The type a WRITE to a member of this declared type adopts, "" for a member
     // whose type names nothing numeric - the overwhelming majority. Asked ONCE, at
-    // parse time (docs/todo.md 1.1). The twin is csWriteTy in
-    // languages/csharp-to-llvm-ir.abnf.
-    // The declared type a write to a LOCAL adopts, which is NOT csWriteTy: only the
-    // FLOATING names are here, and the reason is a measurement rather than a
-    // preference (docs/todo.md 1.3).
+    // parse time. The twin is csWriteTy in languages/csharp-to-llvm-ir.abnf.
+    // The declared type a write to a LOCAL adopts, which is NOT csWriteTy: the
+    // FLOATING names always adopt, the integral ones only a plain number (see
+    // csAdoptLocal).
     //
-    // Every adoption is a layer-2 call, and a layer-2 call in a hot loop is
-    // expensive out of proportion to what it does: adopting every local write cost
-    // tests/bench/mod.cs +5.3% (21.72e9 -> 22.88e9 instructions retired, against a
-    // 1.9% layout spread) for the two writes in `long s, i; while (i < 40000) { s =
-    // s + i % 7; i = i + 1; }` - and it stayed +5.3% after the conversion itself was
-    // made allocation-free and its ~20 string comparisons removed, so the cost is
-    // the CALL, not the work. Restricting the site to double/float/decimal takes
-    // that to zero on this row.
-    //
-    // The line is not arbitrary. A plain number IS the `int` of this value model, so
-    // `long x; x = 3;` stores a value C# would implicitly convert and the loss shows
-    // up only past 32 bits; but a `double` slot holding a plain int INTEGER-DIVIDES
-    // immediately - `double L; L = 3;` then `L / 2` answered 1 instead of 1.5, which
-    // is the defect the item names.
-    //
-    // THE INTEGRAL HALF IS CLOSED NOW (docs/todo.md 1.3). The compiler half found the
-    // "plain-number test the emitter can lower without a call" the item asked for -
-    // js_gival, a C floor primitive, compared for HANDLE IDENTITY - and the
-    // measurement that follows from it is at csLocalWriteTy in
-    // languages/csharp-to-llvm-ir.abnf: unconditional adoption is +7.8% on
-    // tests/bench/mod.cs over 9 draws, gated adoption is -1.7% and inside the spread.
-    // Here the same gate is `typeof v == "number"`, which selects exactly the same
-    // set: a sized integer, a double and a char are all BOXES (objects) in this half.
-    // It is deliberately width-blind for the reason recorded there.
+    // Every adoption is a layer-2 call in the compiled half, and adopting every local
+    // write unconditionally is measurably slower on a hot loop (the cost is the CALL,
+    // not the work). A `double` slot holding a plain int INTEGER-DIVIDES at once, so
+    // the floating names always adopt. For the integral names the compiled half gates
+    // on js_gival (a plain-number test compared for HANDLE IDENTITY, no call) - see
+    // csLocalWriteTy in languages/csharp-to-llvm-ir.abnf. Here the same gate is
+    // `typeof v == "number"`, which selects exactly the same set: a sized integer, a
+    // double and a char are all BOXES (objects) in this half. It is deliberately
+    // width-blind for the reason recorded there.
     function csLocalWriteTy(ty) {
         if (ty == "double" || ty == "float" || ty == "decimal") { return ty }
         if (hasOwn(csTypeW, ty)) { return ty }
@@ -6181,7 +6041,7 @@ KwLet       = "let" KwEnd ;
         return csAdoptable(ty) ? ty : ""
     }
     // The member names some class declares with a type that ADOPTS, filled at parse
-    // time. A qualified write to any other name costs nothing at all (docs/todo.md 1.3).
+    // time. A qualified write to any other name costs nothing at all.
     var csAdoptMems = {}
     function csNoteAdoptMem(name, ty) {
         if (ty != undefined && ty != "") { csAdoptMems[name] = ty }
@@ -6216,8 +6076,7 @@ KwLet       = "let" KwEnd ;
         return csImplicitConv(ty, v)
     }
     // "double[]" -> "double" when the elements are adoptable, "" otherwise. One level
-    // only: `double[][]` and `Dictionary<string, double>` adopt nothing (see the
-    // report at docs/todo.md 1.1).
+    // only: `double[][]` and `Dictionary<string, double>` adopt nothing.
     function csElemAdoptTy(ty) {
         if (ty == undefined || ty == null || ty.length < 3) { return "" }
         if (ty.substring(ty.length - 2, ty.length) != "[]") { return "" }
@@ -6280,16 +6139,11 @@ KwLet       = "let" KwEnd ;
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "Main" }
     // AN EXCEPTION NOBODY CAUGHT IS REPORTED THE WAY THE .NET HOST REPORTS IT.
-    // All three engines used to print "uncaught exception: [object Object]" - the
-    // raw concatenation of an object - so all three agreed and all three were
-    // wrong, the one defect class engine-vs-engine byte identity cannot see
-    // (manual chapter 5). docs/todo.md 1.14.
     //
-    // THIS ONE IS SPEC-CITED, NOT MEASURED: there is no C# toolchain on this
-    // machine (manual 7.9's C# caveat, and the same reason csExcParent above is
-    // spec-derived). ECMA-334 13.11 says only that a `throw` with no enclosing
-    // catch terminates the program in an implementation-defined way, so the text
-    // comes from the .NET runtime's documented unhandled-exception output:
+    // SPEC-CITED, NOT MEASURED (manual 7.9's C# caveat, the same reason csExcParent
+    // above is spec-derived). ECMA-334 13.11 says only that a `throw` with no
+    // enclosing catch terminates the program in an implementation-defined way, so the
+    // text comes from the .NET runtime's documented unhandled-exception output:
     //
     //     Unhandled exception. System.Exception: abort probe
     //        at Program.Main() in Program.cs:line 8
@@ -6302,8 +6156,7 @@ KwLet       = "let" KwEnd ;
     // measured for java, documented for .NET, and the two really do differ.
     //
     // NOT reproduced: the "   at Program.Main()" frames (no call-site line table
-    // in any engine here - manual 7.9 already records that as the reason C#'s
-    // e.ToString() is left alone), the namespace qualification of a user
+    // in any engine here - manual 7.9), the namespace qualification of a user
     // exception type (this subset flattens `namespace N { }` away, so a declared
     // MyExc is "MyExc" where .NET would say "N.MyExc"), and the exit status: .NET
     // on Unix aborts the process, which a shell reports as 134, but that is the
@@ -6311,7 +6164,7 @@ KwLet       = "let" KwEnd ;
     // no abort() - it exits 1, as every other uncaught-exception path here does.
     //
     // The twins are js_cstop in languages/lib/csharp-rt.metajs and in
-    // abnf/jsrtjvm.go, both reached from the one js_try the emitter wraps the
+    // abnf/jsrtcsharp.go, both reached from the one js_try the emitter wraps the
     // entry call in (buildMain in csharp-to-llvm-ir.abnf).
     function csExcTopLine(v) {
         var head = "Unhandled exception. "
