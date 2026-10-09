@@ -375,6 +375,12 @@ def s06
   check("flc6", (begin; Float::INFINITY.to_i; rescue FloatDomainError => e; e.message; end) == "Infinity" &&
                 (begin; Float::NAN.to_i; rescue RangeError => e; e.message; end) == "NaN" &&
                 Float::INFINITY.round(2).to_s == "Infinity")
+  # The builtin exception tree: Class#superclass and rescue-by-ancestor agree.
+  check("flc7", FloatDomainError.superclass == RangeError && RangeError.superclass == StandardError &&
+                KeyError.superclass == IndexError && StopIteration.superclass == IndexError &&
+                FrozenError.superclass == RuntimeError && ZeroDivisionError.superclass == StandardError &&
+                (begin; raise KeyError, "k"; rescue IndexError => e; e.class; end) == KeyError &&
+                (begin; raise FrozenError, "f"; rescue RuntimeError => e; e.class; end) == FrozenError)
 end
 # %c through a rescue, for the rows where MRI raises. Section 06 needs it too.
 def s06c(v)

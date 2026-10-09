@@ -10981,12 +10981,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var stdErr = mkBuiltinClass("StandardError", excBase)
     hostGlobals["StandardError"] = stdErr
     var excNames = ["RuntimeError", "ArgumentError", "TypeError", "NameError", "IndexError",
-                    "KeyError", "RangeError", "ZeroDivisionError", "IOError", "NotImplementedError",
-                    "FrozenError", "StopIteration", "LocalJumpError"]
+                    "RangeError", "ZeroDivisionError", "IOError", "NotImplementedError",
+                    "LocalJumpError"]
     for (var eci = 0; eci < excNames.length; eci++) {
         hostGlobals[excNames[eci]] = mkBuiltinClass(excNames[eci], stdErr)
     }
     hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
+    hostGlobals["KeyError"] = mkBuiltinClass("KeyError", hostGlobals["IndexError"])
+    hostGlobals["StopIteration"] = mkBuiltinClass("StopIteration", hostGlobals["IndexError"])
+    hostGlobals["FrozenError"] = mkBuiltinClass("FrozenError", hostGlobals["RuntimeError"])
     // FloatDomainError < RangeError is what an infinity or a NaN raises when it is
     // asked for an Integer - Float::INFINITY.to_i and "%d" % Float::INFINITY both.
     // It existed in no engine, which is why both of those answered "Infinity"

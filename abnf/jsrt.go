@@ -9936,8 +9936,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				return bn == "Class"
 			case "superclass":
-				// Class#superclass skips the synthetic levels the lowering inserts,
-				// and a root class answers Object the way MRI does.
+				// Class#superclass skips the synthetic levels the lowering inserts.
+				// A builtin exception class has no __super: its parent is named in
+				// rubyExcParent. Any other root class answers Object.
 				if isMod {
 					return jsNull
 				}
@@ -9952,7 +9953,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					}
 					sup = so.props["__super"]
 				}
-				switch nm, _ := o.props["__name"].(string); nm {
+				nm, _ := o.props["__name"].(string)
+				if _, isBuiltin := o.props["__rbuiltin"].(string); isBuiltin {
+					if p := rubyExcParent[nm]; p != "" {
+						return rt.rubyBuiltinClass(p)
+					}
+				}
+				switch nm {
 				case "BasicObject":
 					return jsNull
 				case "Object":

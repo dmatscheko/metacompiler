@@ -6771,8 +6771,9 @@ function rbMethod(target, name, args) {
                 if (target["__ismodule"] === true) { return rbBuiltinClass("Module") }
                 return rbBuiltinClass("Class")
             }
-            // Class#superclass skips the synthetic levels the lowering inserts, and
-            // a root class answers Object the way MRI does.
+            // Class#superclass skips the synthetic levels the lowering inserts.
+            // A builtin exception class has no __super: its parent is named in
+            // rbExcParent. Any other root class answers Object.
             if (name == "superclass") {
                 if (target["__ismodule"] === true) { return null }
                 var sup = target["__super"]
@@ -6782,6 +6783,10 @@ function rbMethod(target, name, args) {
                     sg = sg + 1
                 }
                 if (rbIsObj(sup)) { return sup }
+                if (typeof target["__rbuiltin"] == "string" && typeof target["__name"] == "string") {
+                    var ep = rbExcParentOf(target["__name"])
+                    if (ep != "") { return rbBuiltinClass(ep) }
+                }
                 if (target["__rbuiltin"] === "BasicObject") { return null }
                 if (target["__name"] === "Object") { return rbBuiltinClass("BasicObject") }
                 return rbBuiltinClass("Object")
