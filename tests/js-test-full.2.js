@@ -1041,6 +1041,15 @@ function s42() {
     // negative operand rounding to zero gives -0. max/min order the two zeros.
     check("math39", Math.round(b[6]) === 0 && 1 / Math.round(b[7]) === -Infinity && Math.round(b[8]) === 3 && Math.round(b[9]) === -2)
     check("math40", 1 / Math.max(nz, b[10]) === Infinity && 1 / Math.min(b[10], nz) === -Infinity && 1 / Math.round(nz) === -Infinity)
+
+    // Math.random: a number in [0, 1) on every call. The values differ per run, so
+    // only that property is asserted.
+    var rok = 0
+    for (var ri = 0; ri < 50; ri++) {
+        var rv = Math.random()
+        if (typeof rv === "number" && rv >= 0 && rv < 1) { rok = rok + 1 }
+    }
+    check("math41", typeof Math.random === "function" && rok === 50)
 }
 
 // ===== SECTION 43: three uncatchable aborts become catchable throws =====

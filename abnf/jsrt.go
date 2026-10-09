@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"math/rand/v2"
 	"os"
 	"reflect"
 	"sort"
@@ -16801,6 +16802,12 @@ func standardJSBindings() map[string]interface{} {
 	}))
 	mathObj.set("fround", jsHostFunc("fround", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return float64(float32(rt.toNumber(argAt(args, 0))))
+	}))
+	// Math.random: a uniform double in [0, 1), from a generator seeded per process,
+	// as in node. Host id 96 of languages/lib/runtime.c is the native engine; under
+	// goja installGojaMathSurface hands out this same function.
+	mathObj.set("random", jsHostFunc("random", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rand.Float64()
 	}))
 	mathObj.set("PI", math.Pi)
 	mathObj.set("E", math.E)

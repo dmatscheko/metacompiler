@@ -37,6 +37,7 @@
 @RT_MISS_VAR = global i64 zeroinitializer
 @RT_MISS_MEM = global i64 zeroinitializer
 @RT_MISS_SET = global i64 zeroinitializer
+@RNG_STATE = global i64 zeroinitializer
 @AR_IX = global i64 zeroinitializer
 @AR_IX_N = global i64 zeroinitializer
 @AR_IX_CAP = global i64 zeroinitializer
@@ -320,26 +321,27 @@
 @.str.237 = global [6 x i8] zeroinitializer
 @.str.238 = global [6 x i8] zeroinitializer
 @.str.239 = global [7 x i8] zeroinitializer
-@.str.240 = global [3 x i8] zeroinitializer
-@.str.241 = global [2 x i8] zeroinitializer
-@.str.242 = global [4 x i8] zeroinitializer
-@.str.243 = global [5 x i8] zeroinitializer
-@.str.244 = global [6 x i8] zeroinitializer
-@.str.245 = global [7 x i8] zeroinitializer
-@.str.246 = global [6 x i8] zeroinitializer
-@.str.247 = global [8 x i8] zeroinitializer
-@.str.248 = global [5 x i8] zeroinitializer
-@.str.249 = global [13 x i8] zeroinitializer
-@.str.250 = global [7 x i8] zeroinitializer
-@.str.251 = global [8 x i8] zeroinitializer
-@.str.252 = global [6 x i8] zeroinitializer
-@.str.253 = global [7 x i8] zeroinitializer
-@.str.254 = global [39 x i8] zeroinitializer
-@.str.255 = global [13 x i8] zeroinitializer
-@.str.256 = global [17 x i8] zeroinitializer
-@.str.257 = global [7 x i8] zeroinitializer
+@.str.240 = global [7 x i8] zeroinitializer
+@.str.241 = global [3 x i8] zeroinitializer
+@.str.242 = global [2 x i8] zeroinitializer
+@.str.243 = global [4 x i8] zeroinitializer
+@.str.244 = global [5 x i8] zeroinitializer
+@.str.245 = global [6 x i8] zeroinitializer
+@.str.246 = global [7 x i8] zeroinitializer
+@.str.247 = global [6 x i8] zeroinitializer
+@.str.248 = global [8 x i8] zeroinitializer
+@.str.249 = global [5 x i8] zeroinitializer
+@.str.250 = global [13 x i8] zeroinitializer
+@.str.251 = global [7 x i8] zeroinitializer
+@.str.252 = global [8 x i8] zeroinitializer
+@.str.253 = global [6 x i8] zeroinitializer
+@.str.254 = global [7 x i8] zeroinitializer
+@.str.255 = global [39 x i8] zeroinitializer
+@.str.256 = global [13 x i8] zeroinitializer
+@.str.257 = global [17 x i8] zeroinitializer
 @.str.258 = global [7 x i8] zeroinitializer
-@.str.259 = global [9 x i8] zeroinitializer
+@.str.259 = global [7 x i8] zeroinitializer
+@.str.260 = global [9 x i8] zeroinitializer
 
 define i64 @d_from_long(i64 %0) {
 entry:
@@ -25261,7 +25263,7 @@ entry:
 	%73 = load i64, i64* @H_UNDEF
 	ret i64 %73
 
-dead809:
+dead810:
 	ret i64 0
 }
 
@@ -32393,60 +32395,163 @@ dead800:
 	ret i64 %2030
 
 2031:
-	%2032 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 0
-	store i8 117, i8* %2032
-	%2033 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 1
-	store i8 110, i8* %2033
-	%2034 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 2
-	store i8 107, i8* %2034
-	%2035 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 3
-	store i8 110, i8* %2035
-	%2036 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 4
-	store i8 111, i8* %2036
-	%2037 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 5
-	store i8 119, i8* %2037
-	%2038 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 6
-	store i8 110, i8* %2038
-	%2039 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 7
-	store i8 32, i8* %2039
-	%2040 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 8
-	store i8 104, i8* %2040
-	%2041 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 9
-	store i8 111, i8* %2041
-	%2042 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 10
-	store i8 115, i8* %2042
-	%2043 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 11
-	store i8 116, i8* %2043
-	%2044 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 12
-	store i8 32, i8* %2044
-	%2045 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 13
-	store i8 102, i8* %2045
-	%2046 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 14
-	store i8 117, i8* %2046
-	%2047 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 15
-	store i8 110, i8* %2047
-	%2048 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 16
-	store i8 99, i8* %2048
-	%2049 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 17
-	store i8 116, i8* %2049
-	%2050 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 18
-	store i8 105, i8* %2050
-	%2051 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 19
-	store i8 111, i8* %2051
-	%2052 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 20
-	store i8 110, i8* %2052
-	%2053 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 21
-	store i8 0, i8* %2053
-	%2054 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 0
-	%2055 = bitcast i8* %2054 to i32*
-	%2056 = call i32 @die(i32* %2055)
-	%2057 = load i64, i64* @H_UNDEF
-	ret i64 %2057
+	%2032 = load i64, i64* %3
+	%2033 = sext i32 96 to i64
+	%2034 = icmp eq i64 %2032, %2033
+	%2035 = zext i1 %2034 to i32
+	%2036 = icmp ne i32 %2035, 0
+	br i1 %2036, label %2037, label %2047
 
 dead801:
 	br label %2031
 
+2037:
+	%2038 = alloca i64
+	%2039 = load i64, i64* @RNG_STATE
+	store i64 %2039, i64* %2038
+	%2040 = alloca { i64 }
+	%2041 = getelementptr { i64 }, { i64 }* %2040, i32 0, i32 0
+	store i64 0, i64* %2041
+	%2042 = load i64, i64* %2038
+	%2043 = sext i32 0 to i64
+	%2044 = icmp eq i64 %2042, %2043
+	%2045 = zext i1 %2044 to i32
+	%2046 = icmp ne i32 %2045, 0
+	br i1 %2046, label %2074, label %2083
+
+2047:
+	%2048 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 0
+	store i8 117, i8* %2048
+	%2049 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 1
+	store i8 110, i8* %2049
+	%2050 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 2
+	store i8 107, i8* %2050
+	%2051 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 3
+	store i8 110, i8* %2051
+	%2052 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 4
+	store i8 111, i8* %2052
+	%2053 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 5
+	store i8 119, i8* %2053
+	%2054 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 6
+	store i8 110, i8* %2054
+	%2055 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 7
+	store i8 32, i8* %2055
+	%2056 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 8
+	store i8 104, i8* %2056
+	%2057 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 9
+	store i8 111, i8* %2057
+	%2058 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 10
+	store i8 115, i8* %2058
+	%2059 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 11
+	store i8 116, i8* %2059
+	%2060 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 12
+	store i8 32, i8* %2060
+	%2061 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 13
+	store i8 102, i8* %2061
+	%2062 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 14
+	store i8 117, i8* %2062
+	%2063 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 15
+	store i8 110, i8* %2063
+	%2064 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 16
+	store i8 99, i8* %2064
+	%2065 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 17
+	store i8 116, i8* %2065
+	%2066 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 18
+	store i8 105, i8* %2066
+	%2067 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 19
+	store i8 111, i8* %2067
+	%2068 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 20
+	store i8 110, i8* %2068
+	%2069 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 21
+	store i8 0, i8* %2069
+	%2070 = getelementptr [22 x i8], [22 x i8]* @.str.135, i32 0, i32 0
+	%2071 = bitcast i8* %2070 to i32*
+	%2072 = call i32 @die(i32* %2071)
+	%2073 = load i64, i64* @H_UNDEF
+	ret i64 %2073
+
+2074:
+	%2075 = bitcast i64* %2038 to i32*
+	%2076 = sext i32 8 to i64
+	%2077 = call i32 @getentropy(i32* %2075, i64 %2076)
+	%2078 = icmp ne i32 %2077, 0
+	%2079 = zext i1 %2078 to i32
+	%2080 = icmp ne i32 %2079, 0
+	%2081 = zext i1 %2080 to i32
+	%2082 = icmp ne i32 %2081, 0
+	br i1 %2082, label %2124, label %2117
+
+2083:
+	%2084 = load i64, i64* %2038
+	%2085 = load i64, i64* %2038
+	%2086 = sext i32 13 to i64
+	%2087 = shl i64 %2085, %2086
+	%2088 = xor i64 %2084, %2087
+	store i64 %2088, i64* %2038
+	%2089 = load i64, i64* %2038
+	%2090 = load i64, i64* %2038
+	%2091 = sext i32 7 to i64
+	%2092 = ashr i64 %2090, %2091
+	%2093 = and i64 %2092, u0x1FFFFFFFFFFFFFF
+	%2094 = xor i64 %2089, %2093
+	store i64 %2094, i64* %2038
+	%2095 = load i64, i64* %2038
+	%2096 = load i64, i64* %2038
+	%2097 = sext i32 17 to i64
+	%2098 = shl i64 %2096, %2097
+	%2099 = xor i64 %2095, %2098
+	store i64 %2099, i64* %2038
+	%2100 = load i64, i64* %2038
+	store i64 %2100, i64* @RNG_STATE
+	%2101 = getelementptr { i64 }, { i64 }* %2040, i32 0, i32 0
+	%2102 = zext i32 u0x3FF00000 to i64
+	%2103 = shl i64 %2102, 32
+	%2104 = zext i32 0 to i64
+	%2105 = or i64 %2103, %2104
+	store i64 %2105, i64* %2101
+	%2106 = load i64, i64* %2038
+	%2107 = sext i32 12 to i64
+	%2108 = ashr i64 %2106, %2107
+	%2109 = and i64 %2108, u0xFFFFFFFFFFFFF
+	%2110 = getelementptr { i64 }, { i64 }* %2040, i32 0, i32 0
+	%2111 = load i64, i64* %2110
+	%2112 = or i64 %2109, %2111
+	%2113 = getelementptr { i64 }, { i64 }* %2040, i32 0, i32 0
+	%2114 = load i64, i64* %2113
+	%2115 = call i64 @d_sub(i64 %2112, i64 %2114)
+	%2116 = call i64 @mk_num(i64 %2115)
+	ret i64 %2116
+
+2117:
+	%2118 = load i64, i64* %2038
+	%2119 = sext i32 0 to i64
+	%2120 = icmp eq i64 %2118, %2119
+	%2121 = zext i1 %2120 to i32
+	%2122 = icmp ne i32 %2121, 0
+	%2123 = zext i1 %2122 to i32
+	br label %2124
+
+2124:
+	%2125 = phi i32 [ %2081, %2074 ], [ %2123, %2117 ]
+	%2126 = icmp ne i32 %2125, 0
+	br i1 %2126, label %2127, label %2133
+
+2127:
+	%2128 = sext i32 0 to i64
+	%2129 = inttoptr i64 %2128 to i32*
+	%2130 = call i64 @time(i32* %2129)
+	%2131 = sext i32 1 to i64
+	%2132 = or i64 %2130, %2131
+	store i64 %2132, i64* %2038
+	br label %2133
+
+2133:
+	br label %2083
+
 dead802:
+	br label %2047
+
+dead803:
 	ret i64 0
 }
 
@@ -48429,7 +48534,7 @@ entry:
 	%96 = load i64, i64* %2
 	ret i64 %96
 
-dead850:
+dead851:
 	br label %74
 
 97:
@@ -48514,10 +48619,10 @@ dead850:
 156:
 	br label %139
 
-dead851:
+dead852:
 	br label %156
 
-dead852:
+dead853:
 	ret i64 0
 }
 
@@ -48559,7 +48664,7 @@ entry:
 	%27 = icmp ne i32 %26, 0
 	br i1 %27, label %28, label %30
 
-dead847:
+dead848:
 	br label %17
 
 28:
@@ -48582,7 +48687,7 @@ dead847:
 	store i64 %40, i64* %6
 	br label %41
 
-dead848:
+dead849:
 	br label %30
 
 41:
@@ -48645,7 +48750,7 @@ dead848:
 	%89 = load i64, i64* @H_TRUE
 	ret i64 %89
 
-dead849:
+dead850:
 	ret i64 0
 }
 
@@ -48684,7 +48789,7 @@ entry:
 	%21 = icmp ne i32 %20, 0
 	br i1 %21, label %22, label %29
 
-dead830:
+dead831:
 	br label %11
 
 22:
@@ -48731,10 +48836,10 @@ dead830:
 	%49 = call i64 @fe(i64 %48)
 	ret i64 %49
 
-dead831:
+dead832:
 	br label %47
 
-dead832:
+dead833:
 	br label %29
 
 50:
@@ -48748,10 +48853,10 @@ dead832:
 	%56 = load i64, i64* @H_UNDEF
 	ret i64 %56
 
-dead833:
+dead834:
 	br label %55
 
-dead834:
+dead835:
 	ret i64 0
 }
 
@@ -48784,9 +48889,13 @@ entry:
 	%20 = load i64, i64* %3
 	ret i64 %20
 
-dead829:
+dead830:
 	ret i64 0
 }
+
+declare i32 @getentropy(i32* %0, i64 %1)
+
+declare i64 @time(i32* %0)
 
 define i64 @exc_text(i64 %0) {
 entry:
@@ -48855,7 +48964,7 @@ entry:
 	%43 = icmp ne i32 %42, 0
 	br i1 %43, label %44, label %53
 
-dead803:
+dead804:
 	br label %14
 
 44:
@@ -48944,13 +49053,13 @@ dead803:
 	%104 = call i64 @str_cat(i64 %102, i64 %103)
 	ret i64 %104
 
-dead804:
+dead805:
 	br label %94
 
-dead805:
+dead806:
 	br label %90
 
-dead806:
+dead807:
 	br label %53
 
 105:
@@ -48980,10 +49089,10 @@ dead806:
 	%123 = call i64 @to_string(i64 %122)
 	ret i64 %123
 
-dead807:
+dead808:
 	br label %121
 
-dead808:
+dead809:
 	ret i64 0
 }
 
@@ -49219,7 +49328,7 @@ entry:
 	%147 = load i64, i64* %6
 	ret i64 %147
 
-dead810:
+dead811:
 	ret i64 0
 }
 
@@ -49300,7 +49409,7 @@ entry:
 	%42 = load i64, i64* %1
 	ret i64 %42
 
-dead811:
+dead812:
 	ret i64 0
 }
 
@@ -49313,7 +49422,7 @@ entry:
 	%3 = sext i32 0 to i64
 	ret i64 %3
 
-dead812:
+dead813:
 	ret i64 0
 }
 
@@ -49326,7 +49435,7 @@ entry:
 	%3 = sext i32 0 to i64
 	ret i64 %3
 
-dead813:
+dead814:
 	ret i64 0
 }
 
@@ -49339,7 +49448,7 @@ entry:
 	%3 = sext i32 0 to i64
 	ret i64 %3
 
-dead814:
+dead815:
 	ret i64 0
 }
 
@@ -49355,7 +49464,7 @@ entry:
 	%7 = call i64 @str_intern(i32* %5, i64 %6)
 	ret i64 %7
 
-dead815:
+dead816:
 	ret i64 0
 }
 
@@ -49425,13 +49534,13 @@ entry:
 	%46 = load i64, i64* %2
 	ret i64 %46
 
-dead816:
+dead817:
 	br label %37
 
-dead817:
+dead818:
 	br label %31
 
-dead818:
+dead819:
 	ret i64 0
 }
 
@@ -49444,7 +49553,7 @@ entry:
 	%4 = call i64 @mk_num(i64 %3)
 	ret i64 %4
 
-dead819:
+dead820:
 	ret i64 0
 }
 
@@ -49453,7 +49562,7 @@ entry:
 	%0 = call i64 @mk_obj()
 	ret i64 %0
 
-dead820:
+dead821:
 	ret i64 0
 }
 
@@ -49462,7 +49571,7 @@ entry:
 	%0 = call i64 @mk_arr()
 	ret i64 %0
 
-dead821:
+dead822:
 	ret i64 0
 }
 
@@ -49478,7 +49587,7 @@ entry:
 	%7 = sext i32 0 to i64
 	ret i64 %7
 
-dead822:
+dead823:
 	ret i64 0
 }
 
@@ -49506,10 +49615,10 @@ entry:
 	%15 = load i64, i64* @H_UNDEF
 	ret i64 %15
 
-dead823:
+dead824:
 	br label %14
 
-dead824:
+dead825:
 	ret i64 0
 }
 
@@ -49524,7 +49633,7 @@ entry:
 	%6 = call i64 @get_member(i64 %4, i64 %5)
 	ret i64 %6
 
-dead825:
+dead826:
 	ret i64 0
 }
 
@@ -49543,7 +49652,7 @@ entry:
 	%10 = sext i32 0 to i64
 	ret i64 %10
 
-dead826:
+dead827:
 	ret i64 0
 }
 
@@ -49566,7 +49675,7 @@ entry:
 	%13 = load i64, i64* %4
 	ret i64 %13
 
-dead827:
+dead828:
 	ret i64 0
 }
 
@@ -49628,7 +49737,7 @@ entry:
 	%40 = phi i32 [ %30, %29 ], [ %38, %32 ]
 	ret i32 %40
 
-dead828:
+dead829:
 	ret i32 0
 }
 
@@ -49641,7 +49750,7 @@ entry:
 	%4 = call i64 @mk_scope(i64 %3)
 	ret i64 %4
 
-dead835:
+dead836:
 	ret i64 0
 }
 
@@ -49657,7 +49766,7 @@ entry:
 	%7 = call i64 @scope_get(i64 %5, i64 %6)
 	ret i64 %7
 
-dead836:
+dead837:
 	ret i64 0
 }
 
@@ -49677,7 +49786,7 @@ entry:
 	%11 = sext i32 0 to i64
 	ret i64 %11
 
-dead837:
+dead838:
 	ret i64 0
 }
 
@@ -49817,10 +49926,10 @@ entry:
 	store i64 %80, i64* %6
 	br label %9
 
-dead838:
+dead839:
 	br label %78
 
-dead839:
+dead840:
 	ret i64 0
 }
 
@@ -49888,10 +49997,10 @@ entry:
 	store i64 %44, i64* %6
 	br label %9
 
-dead840:
+dead841:
 	br label %42
 
-dead841:
+dead842:
 	ret i64 0
 }
 
@@ -49911,7 +50020,7 @@ entry:
 	%11 = call i64 @mk_bool(i32 %10)
 	ret i64 %11
 
-dead842:
+dead843:
 	ret i64 0
 }
 
@@ -49994,10 +50103,10 @@ entry:
 	store i64 %50, i64* %4
 	br label %7
 
-dead843:
+dead844:
 	br label %48
 
-dead844:
+dead845:
 	ret i64 0
 }
 
@@ -50066,10 +50175,10 @@ entry:
 	store i64 %45, i64* %6
 	br label %9
 
-dead845:
+dead846:
 	br label %43
 
-dead846:
+dead847:
 	ret i64 0
 }
 
@@ -50127,10 +50236,10 @@ entry:
 	%42 = sext i32 0 to i64
 	ret i64 %42
 
-dead853:
+dead854:
 	br label %29
 
-dead854:
+dead855:
 	ret i64 0
 }
 
@@ -50607,10 +50716,10 @@ entry:
 	%273 = call i32 @scope_pin(i64 %270, i64 %271, i64 %272)
 	br label %268
 
-dead855:
+dead856:
 	br label %137
 
-dead856:
+dead857:
 	ret i64 0
 }
 
@@ -50634,7 +50743,7 @@ entry:
 	%9 = sext i32 %8 to i64
 	ret i64 %9
 
-dead857:
+dead858:
 	ret i64 0
 }
 
@@ -50649,7 +50758,7 @@ entry:
 	%6 = call i64 @mk_bool(i32 %5)
 	ret i64 %6
 
-dead858:
+dead859:
 	ret i64 0
 }
 
@@ -50661,7 +50770,7 @@ entry:
 	%3 = call i64 @type_of(i64 %2)
 	ret i64 %3
 
-dead859:
+dead860:
 	ret i64 0
 }
 
@@ -50674,7 +50783,7 @@ entry:
 	%4 = call i64 @mk_num(i64 %3)
 	ret i64 %4
 
-dead860:
+dead861:
 	ret i64 0
 }
 
@@ -50688,7 +50797,7 @@ entry:
 	%5 = call i64 @mk_num(i64 %4)
 	ret i64 %5
 
-dead861:
+dead862:
 	ret i64 0
 }
 
@@ -50703,7 +50812,7 @@ entry:
 	%6 = call i64 @js_add_v(i64 %4, i64 %5)
 	ret i64 %6
 
-dead862:
+dead863:
 	ret i64 0
 }
 
@@ -50721,7 +50830,7 @@ entry:
 	%9 = call i64 @mk_num(i64 %8)
 	ret i64 %9
 
-dead863:
+dead864:
 	ret i64 0
 }
 
@@ -50739,7 +50848,7 @@ entry:
 	%9 = call i64 @mk_num(i64 %8)
 	ret i64 %9
 
-dead864:
+dead865:
 	ret i64 0
 }
 
@@ -50757,7 +50866,7 @@ entry:
 	%9 = call i64 @mk_num(i64 %8)
 	ret i64 %9
 
-dead865:
+dead866:
 	ret i64 0
 }
 
@@ -50775,7 +50884,7 @@ entry:
 	%9 = call i64 @mk_num(i64 %8)
 	ret i64 %9
 
-dead866:
+dead867:
 	ret i64 0
 }
 
@@ -50791,7 +50900,7 @@ entry:
 	%7 = call i64 @mk_bool(i32 %6)
 	ret i64 %7
 
-dead867:
+dead868:
 	ret i64 0
 }
 
@@ -50809,7 +50918,7 @@ entry:
 	%9 = call i64 @mk_bool(i32 %8)
 	ret i64 %9
 
-dead868:
+dead869:
 	ret i64 0
 }
 
@@ -50825,7 +50934,7 @@ entry:
 	%7 = call i64 @mk_bool(i32 %6)
 	ret i64 %7
 
-dead869:
+dead870:
 	ret i64 0
 }
 
@@ -50843,7 +50952,7 @@ entry:
 	%9 = call i64 @mk_bool(i32 %8)
 	ret i64 %9
 
-dead870:
+dead871:
 	ret i64 0
 }
 
@@ -50861,7 +50970,7 @@ entry:
 	%9 = call i64 @mk_bool(i32 %8)
 	ret i64 %9
 
-dead871:
+dead872:
 	ret i64 0
 }
 
@@ -50879,7 +50988,7 @@ entry:
 	%9 = call i64 @mk_bool(i32 %8)
 	ret i64 %9
 
-dead872:
+dead873:
 	ret i64 0
 }
 
@@ -50918,7 +51027,7 @@ entry:
 	%25 = call i64 @mk_bool(i32 %24)
 	ret i64 %25
 
-dead873:
+dead874:
 	ret i64 0
 }
 
@@ -50957,7 +51066,7 @@ entry:
 	%25 = call i64 @mk_bool(i32 %24)
 	ret i64 %25
 
-dead874:
+dead875:
 	ret i64 0
 }
 
@@ -50991,7 +51100,7 @@ entry:
 	%20 = phi i32 [ %10, %entry ], [ %18, %12 ]
 	ret i32 %20
 
-dead875:
+dead876:
 	ret i32 0
 }
 
@@ -51066,7 +51175,7 @@ entry:
 	%50 = icmp ne i32 %49, 0
 	br i1 %50, label %51, label %56
 
-dead876:
+dead877:
 	br label %43
 
 51:
@@ -51088,7 +51197,7 @@ dead876:
 	%63 = icmp ne i32 %62, 0
 	br i1 %63, label %64, label %69
 
-dead877:
+dead878:
 	br label %56
 
 64:
@@ -51110,7 +51219,7 @@ dead877:
 	%76 = icmp ne i32 %75, 0
 	br i1 %76, label %77, label %82
 
-dead878:
+dead879:
 	br label %69
 
 77:
@@ -51123,10 +51232,10 @@ dead878:
 82:
 	br label %33
 
-dead879:
+dead880:
 	br label %82
 
-dead880:
+dead881:
 	ret i64 0
 }
 
@@ -51150,7 +51259,7 @@ entry:
 	%15 = call i64 @si_norm(i64 %7, i64 %11, i64 %14)
 	ret i64 %15
 
-dead881:
+dead882:
 	ret i64 0
 }
 
@@ -51189,10 +51298,10 @@ entry:
 	%26 = call i64 @si_norm(i64 %19, i64 %22, i64 %25)
 	ret i64 %26
 
-dead882:
+dead883:
 	br label %15
 
-dead883:
+dead884:
 	ret i64 0
 }
 
@@ -51218,10 +51327,10 @@ entry:
 	%13 = load i64, i64* %1
 	ret i64 %13
 
-dead884:
+dead885:
 	br label %12
 
-dead885:
+dead886:
 	ret i64 0
 }
 
@@ -51293,10 +51402,10 @@ entry:
 47:
 	br label %29
 
-dead886:
+dead887:
 	br label %47
 
-dead887:
+dead888:
 	ret i64 0
 }
 
@@ -51315,7 +51424,7 @@ entry:
 	%10 = call i64 @mk_bool(i32 %9)
 	ret i64 %10
 
-dead888:
+dead889:
 	ret i64 0
 }
 
@@ -51353,7 +51462,7 @@ entry:
 	%24 = call i64 @mk_bool(i32 %23)
 	ret i64 %24
 
-dead889:
+dead890:
 	ret i64 0
 }
 
@@ -51375,7 +51484,7 @@ entry:
 	%12 = call i64 @mk_bool(i32 %11)
 	ret i64 %12
 
-dead890:
+dead891:
 	ret i64 0
 }
 
@@ -51413,7 +51522,7 @@ entry:
 	%24 = call i64 @mk_bool(i32 %23)
 	ret i64 %24
 
-dead891:
+dead892:
 	ret i64 0
 }
 
@@ -51465,7 +51574,7 @@ entry:
 	%35 = icmp ne i32 %34, 0
 	br i1 %35, label %44, label %36
 
-dead892:
+dead893:
 	br label %27
 
 36:
@@ -51500,7 +51609,7 @@ dead892:
 	%59 = icmp ne i32 %58, 0
 	br i1 %59, label %67, label %60
 
-dead893:
+dead894:
 	br label %52
 
 60:
@@ -51530,10 +51639,10 @@ dead893:
 	%78 = call i64 @si_apply(i64 %75, i64 %76, i64 %77)
 	ret i64 %78
 
-dead894:
+dead895:
 	br label %74
 
-dead895:
+dead896:
 	ret i64 0
 }
 
@@ -51547,7 +51656,7 @@ entry:
 	%5 = call i64 @jf_make(i64 %3, i64 %4)
 	ret i64 %5
 
-dead896:
+dead897:
 	ret i64 0
 }
 
@@ -51561,7 +51670,7 @@ entry:
 	%5 = call i64 @jf_make(i64 %3, i64 %4)
 	ret i64 %5
 
-dead897:
+dead898:
 	ret i64 0
 }
 
@@ -51575,7 +51684,7 @@ entry:
 	%5 = call i64 @jf_make(i64 %3, i64 %4)
 	ret i64 %5
 
-dead898:
+dead899:
 	ret i64 0
 }
 
@@ -51591,7 +51700,7 @@ entry:
 	%7 = call i64 @jf_arith(i64 %4, i64 %5, i64 %6)
 	ret i64 %7
 
-dead899:
+dead900:
 	ret i64 0
 }
 
@@ -51858,7 +51967,7 @@ entry:
 	%186 = call i64 @si_norm(i64 %178, i64 %182, i64 %185)
 	ret i64 %186
 
-dead900:
+dead901:
 	ret i64 0
 }
 
@@ -51879,7 +51988,7 @@ entry:
 	%12 = call i64 @mk_num(i64 %11)
 	ret i64 %12
 
-dead901:
+dead902:
 	ret i64 0
 }
 
@@ -51900,7 +52009,7 @@ entry:
 	%12 = call i64 @mk_num(i64 %11)
 	ret i64 %12
 
-dead902:
+dead903:
 	ret i64 0
 }
 
@@ -51921,7 +52030,7 @@ entry:
 	%12 = call i64 @mk_num(i64 %11)
 	ret i64 %12
 
-dead903:
+dead904:
 	ret i64 0
 }
 
@@ -51967,7 +52076,7 @@ entry:
 	%29 = call i64 @mk_num(i64 %28)
 	ret i64 %29
 
-dead904:
+dead905:
 	ret i64 0
 }
 
@@ -51996,7 +52105,7 @@ entry:
 	%18 = call i64 @mk_num(i64 %17)
 	ret i64 %18
 
-dead905:
+dead906:
 	ret i64 0
 }
 
@@ -52025,7 +52134,7 @@ entry:
 	%18 = call i64 @mk_num(i64 %17)
 	ret i64 %18
 
-dead906:
+dead907:
 	ret i64 0
 }
 
@@ -52040,7 +52149,7 @@ entry:
 	%6 = call i64 @mk_num(i64 %5)
 	ret i64 %6
 
-dead907:
+dead908:
 	ret i64 0
 }
 
@@ -52075,7 +52184,7 @@ entry:
 	%21 = icmp ne i32 %20, 0
 	br i1 %21, label %22, label %24
 
-dead908:
+dead909:
 	br label %14
 
 22:
@@ -52102,7 +52211,7 @@ dead908:
 	%40 = icmp ne i32 %39, 0
 	br i1 %40, label %41, label %45
 
-dead909:
+dead910:
 	br label %24
 
 41:
@@ -52143,7 +52252,7 @@ dead909:
 	%65 = sext i32 0 to i64
 	ret i64 %65
 
-dead910:
+dead911:
 	br label %45
 
 66:
@@ -52157,10 +52266,10 @@ dead910:
 	%72 = sext i32 0 to i64
 	ret i64 %72
 
-dead911:
+dead912:
 	br label %68
 
-dead912:
+dead913:
 	ret i64 0
 }
 
@@ -52173,7 +52282,7 @@ entry:
 	%3 = sext i32 0 to i64
 	ret i64 %3
 
-dead913:
+dead914:
 	ret i64 0
 }
 
@@ -52182,7 +52291,7 @@ entry:
 	%0 = load i64, i64* @RETSLOT
 	ret i64 %0
 
-dead914:
+dead915:
 	ret i64 0
 }
 
@@ -52195,7 +52304,7 @@ entry:
 	%4 = call i64 @mk_ctl(i64 %2, i64 %3)
 	ret i64 %4
 
-dead915:
+dead916:
 	ret i64 0
 }
 
@@ -52206,7 +52315,7 @@ entry:
 	%2 = call i64 @mk_ctl(i64 %0, i64 %1)
 	ret i64 %2
 
-dead916:
+dead917:
 	ret i64 0
 }
 
@@ -52217,7 +52326,7 @@ entry:
 	%2 = call i64 @mk_ctl(i64 %0, i64 %1)
 	ret i64 %2
 
-dead917:
+dead918:
 	ret i64 0
 }
 
@@ -52242,10 +52351,10 @@ entry:
 	%12 = sext i32 0 to i64
 	ret i64 %12
 
-dead918:
+dead919:
 	br label %11
 
-dead919:
+dead920:
 	ret i64 0
 }
 
@@ -52270,10 +52379,10 @@ entry:
 	%12 = load i64, i64* @H_UNDEF
 	ret i64 %12
 
-dead920:
+dead921:
 	br label %11
 
-dead921:
+dead922:
 	ret i64 0
 }
 
@@ -53889,387 +53998,406 @@ entry:
 	%1006 = bitcast i8* %1005 to i32*
 	%1007 = sext i32 93 to i64
 	%1008 = call i32 @seed_host(i64 %997, i32* %1006, i64 %1007)
-	%1009 = alloca { i64 }
-	%1010 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	store i64 0, i64* %1010
-	%1011 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1012 = zext i32 1074340347 to i64
-	%1013 = shl i64 %1012, 32
-	%1014 = zext i32 1413754136 to i64
-	%1015 = or i64 %1013, %1014
-	store i64 %1015, i64* %1011
-	%1016 = load i64, i64* %2
-	%1017 = getelementptr [3 x i8], [3 x i8]* @.str.240, i32 0, i32 0
-	store i8 80, i8* %1017
-	%1018 = getelementptr [3 x i8], [3 x i8]* @.str.240, i32 0, i32 1
-	store i8 73, i8* %1018
-	%1019 = getelementptr [3 x i8], [3 x i8]* @.str.240, i32 0, i32 2
-	store i8 0, i8* %1019
-	%1020 = getelementptr [3 x i8], [3 x i8]* @.str.240, i32 0, i32 0
-	%1021 = bitcast i8* %1020 to i32*
-	%1022 = call i64 @mk_cstr(i32* %1021)
-	%1023 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1024 = load i64, i64* %1023
-	%1025 = call i64 @mk_num(i64 %1024)
-	%1026 = call i32 @obj_put(i64 %1016, i64 %1022, i64 %1025)
-	%1027 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1028 = zext i32 1074118410 to i64
-	%1029 = shl i64 %1028, 32
-	%1030 = zext i32 -1961601175 to i64
-	%1031 = or i64 %1029, %1030
-	store i64 %1031, i64* %1027
-	%1032 = load i64, i64* %2
-	%1033 = getelementptr [2 x i8], [2 x i8]* @.str.241, i32 0, i32 0
-	store i8 69, i8* %1033
-	%1034 = getelementptr [2 x i8], [2 x i8]* @.str.241, i32 0, i32 1
-	store i8 0, i8* %1034
-	%1035 = getelementptr [2 x i8], [2 x i8]* @.str.241, i32 0, i32 0
-	%1036 = bitcast i8* %1035 to i32*
-	%1037 = call i64 @mk_cstr(i32* %1036)
-	%1038 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1039 = load i64, i64* %1038
-	%1040 = call i64 @mk_num(i64 %1039)
-	%1041 = call i32 @obj_put(i64 %1032, i64 %1037, i64 %1040)
-	%1042 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1043 = zext i32 1072049730 to i64
-	%1044 = shl i64 %1043, 32
-	%1045 = zext i32 -17155601 to i64
-	%1046 = or i64 %1044, %1045
-	store i64 %1046, i64* %1042
-	%1047 = load i64, i64* %2
-	%1048 = getelementptr [4 x i8], [4 x i8]* @.str.242, i32 0, i32 0
-	store i8 76, i8* %1048
-	%1049 = getelementptr [4 x i8], [4 x i8]* @.str.242, i32 0, i32 1
-	store i8 78, i8* %1049
-	%1050 = getelementptr [4 x i8], [4 x i8]* @.str.242, i32 0, i32 2
-	store i8 50, i8* %1050
-	%1051 = getelementptr [4 x i8], [4 x i8]* @.str.242, i32 0, i32 3
-	store i8 0, i8* %1051
-	%1052 = getelementptr [4 x i8], [4 x i8]* @.str.242, i32 0, i32 0
-	%1053 = bitcast i8* %1052 to i32*
-	%1054 = call i64 @mk_cstr(i32* %1053)
-	%1055 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1056 = load i64, i64* %1055
-	%1057 = call i64 @mk_num(i64 %1056)
-	%1058 = call i32 @obj_put(i64 %1047, i64 %1054, i64 %1057)
-	%1059 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1060 = zext i32 1073900465 to i64
-	%1061 = shl i64 %1060, 32
-	%1062 = zext i32 -1145744106 to i64
-	%1063 = or i64 %1061, %1062
-	store i64 %1063, i64* %1059
-	%1064 = load i64, i64* %2
-	%1065 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 0
-	store i8 76, i8* %1065
-	%1066 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 1
-	store i8 78, i8* %1066
-	%1067 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 2
-	store i8 49, i8* %1067
-	%1068 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 3
-	store i8 48, i8* %1068
-	%1069 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 4
-	store i8 0, i8* %1069
-	%1070 = getelementptr [5 x i8], [5 x i8]* @.str.243, i32 0, i32 0
-	%1071 = bitcast i8* %1070 to i32*
-	%1072 = call i64 @mk_cstr(i32* %1071)
-	%1073 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1074 = load i64, i64* %1073
-	%1075 = call i64 @mk_num(i64 %1074)
-	%1076 = call i32 @obj_put(i64 %1064, i64 %1072, i64 %1075)
-	%1077 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1078 = zext i32 1073157447 to i64
-	%1079 = shl i64 %1078, 32
-	%1080 = zext i32 1697350398 to i64
-	%1081 = or i64 %1079, %1080
-	store i64 %1081, i64* %1077
-	%1082 = load i64, i64* %2
-	%1083 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 0
-	store i8 76, i8* %1083
-	%1084 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 1
-	store i8 79, i8* %1084
-	%1085 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 2
-	store i8 71, i8* %1085
-	%1086 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 3
-	store i8 50, i8* %1086
-	%1087 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 4
-	store i8 69, i8* %1087
-	%1088 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 5
-	store i8 0, i8* %1088
-	%1089 = getelementptr [6 x i8], [6 x i8]* @.str.244, i32 0, i32 0
-	%1090 = bitcast i8* %1089 to i32*
-	%1091 = call i64 @mk_cstr(i32* %1090)
-	%1092 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1093 = load i64, i64* %1092
-	%1094 = call i64 @mk_num(i64 %1093)
-	%1095 = call i32 @obj_put(i64 %1082, i64 %1091, i64 %1094)
-	%1096 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1097 = zext i32 1071369083 to i64
-	%1098 = shl i64 %1097, 32
-	%1099 = zext i32 354870542 to i64
-	%1100 = or i64 %1098, %1099
-	store i64 %1100, i64* %1096
-	%1101 = load i64, i64* %2
-	%1102 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 0
-	store i8 76, i8* %1102
-	%1103 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 1
-	store i8 79, i8* %1103
-	%1104 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 2
-	store i8 71, i8* %1104
-	%1105 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 3
-	store i8 49, i8* %1105
-	%1106 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 4
-	store i8 48, i8* %1106
-	%1107 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 5
-	store i8 69, i8* %1107
-	%1108 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 6
-	store i8 0, i8* %1108
-	%1109 = getelementptr [7 x i8], [7 x i8]* @.str.245, i32 0, i32 0
-	%1110 = bitcast i8* %1109 to i32*
-	%1111 = call i64 @mk_cstr(i32* %1110)
-	%1112 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1113 = load i64, i64* %1112
-	%1114 = call i64 @mk_num(i64 %1113)
-	%1115 = call i32 @obj_put(i64 %1101, i64 %1111, i64 %1114)
-	%1116 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1117 = zext i32 1073127582 to i64
-	%1118 = shl i64 %1117, 32
-	%1119 = zext i32 1719614413 to i64
-	%1120 = or i64 %1118, %1119
-	store i64 %1120, i64* %1116
-	%1121 = load i64, i64* %2
-	%1122 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 0
-	store i8 83, i8* %1122
-	%1123 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 1
-	store i8 81, i8* %1123
-	%1124 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 2
-	store i8 82, i8* %1124
-	%1125 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 3
-	store i8 84, i8* %1125
-	%1126 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 4
-	store i8 50, i8* %1126
-	%1127 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 5
-	store i8 0, i8* %1127
-	%1128 = getelementptr [6 x i8], [6 x i8]* @.str.246, i32 0, i32 0
-	%1129 = bitcast i8* %1128 to i32*
-	%1130 = call i64 @mk_cstr(i32* %1129)
-	%1131 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1132 = load i64, i64* %1131
-	%1133 = call i64 @mk_num(i64 %1132)
-	%1134 = call i32 @obj_put(i64 %1121, i64 %1130, i64 %1133)
-	%1135 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1136 = zext i32 1072079006 to i64
-	%1137 = shl i64 %1136, 32
-	%1138 = zext i32 1719614413 to i64
-	%1139 = or i64 %1137, %1138
-	store i64 %1139, i64* %1135
-	%1140 = load i64, i64* %2
-	%1141 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 0
-	store i8 83, i8* %1141
-	%1142 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 1
-	store i8 81, i8* %1142
-	%1143 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 2
-	store i8 82, i8* %1143
-	%1144 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 3
-	store i8 84, i8* %1144
-	%1145 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 4
-	store i8 49, i8* %1145
-	%1146 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 5
-	store i8 95, i8* %1146
-	%1147 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 6
-	store i8 50, i8* %1147
-	%1148 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 7
-	store i8 0, i8* %1148
-	%1149 = getelementptr [8 x i8], [8 x i8]* @.str.247, i32 0, i32 0
-	%1150 = bitcast i8* %1149 to i32*
-	%1151 = call i64 @mk_cstr(i32* %1150)
-	%1152 = getelementptr { i64 }, { i64 }* %1009, i32 0, i32 0
-	%1153 = load i64, i64* %1152
-	%1154 = call i64 @mk_num(i64 %1153)
-	%1155 = call i32 @obj_put(i64 %1140, i64 %1151, i64 %1154)
-	%1156 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 0
-	store i8 77, i8* %1156
-	%1157 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 1
-	store i8 97, i8* %1157
-	%1158 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 2
-	store i8 116, i8* %1158
-	%1159 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 3
-	store i8 104, i8* %1159
-	%1160 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 4
+	%1009 = load i64, i64* %2
+	%1010 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 0
+	store i8 114, i8* %1010
+	%1011 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 1
+	store i8 97, i8* %1011
+	%1012 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 2
+	store i8 110, i8* %1012
+	%1013 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 3
+	store i8 100, i8* %1013
+	%1014 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 4
+	store i8 111, i8* %1014
+	%1015 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 5
+	store i8 109, i8* %1015
+	%1016 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 6
+	store i8 0, i8* %1016
+	%1017 = getelementptr [7 x i8], [7 x i8]* @.str.240, i32 0, i32 0
+	%1018 = bitcast i8* %1017 to i32*
+	%1019 = sext i32 96 to i64
+	%1020 = call i32 @seed_host(i64 %1009, i32* %1018, i64 %1019)
+	%1021 = alloca { i64 }
+	%1022 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	store i64 0, i64* %1022
+	%1023 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1024 = zext i32 1074340347 to i64
+	%1025 = shl i64 %1024, 32
+	%1026 = zext i32 1413754136 to i64
+	%1027 = or i64 %1025, %1026
+	store i64 %1027, i64* %1023
+	%1028 = load i64, i64* %2
+	%1029 = getelementptr [3 x i8], [3 x i8]* @.str.241, i32 0, i32 0
+	store i8 80, i8* %1029
+	%1030 = getelementptr [3 x i8], [3 x i8]* @.str.241, i32 0, i32 1
+	store i8 73, i8* %1030
+	%1031 = getelementptr [3 x i8], [3 x i8]* @.str.241, i32 0, i32 2
+	store i8 0, i8* %1031
+	%1032 = getelementptr [3 x i8], [3 x i8]* @.str.241, i32 0, i32 0
+	%1033 = bitcast i8* %1032 to i32*
+	%1034 = call i64 @mk_cstr(i32* %1033)
+	%1035 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1036 = load i64, i64* %1035
+	%1037 = call i64 @mk_num(i64 %1036)
+	%1038 = call i32 @obj_put(i64 %1028, i64 %1034, i64 %1037)
+	%1039 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1040 = zext i32 1074118410 to i64
+	%1041 = shl i64 %1040, 32
+	%1042 = zext i32 -1961601175 to i64
+	%1043 = or i64 %1041, %1042
+	store i64 %1043, i64* %1039
+	%1044 = load i64, i64* %2
+	%1045 = getelementptr [2 x i8], [2 x i8]* @.str.242, i32 0, i32 0
+	store i8 69, i8* %1045
+	%1046 = getelementptr [2 x i8], [2 x i8]* @.str.242, i32 0, i32 1
+	store i8 0, i8* %1046
+	%1047 = getelementptr [2 x i8], [2 x i8]* @.str.242, i32 0, i32 0
+	%1048 = bitcast i8* %1047 to i32*
+	%1049 = call i64 @mk_cstr(i32* %1048)
+	%1050 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1051 = load i64, i64* %1050
+	%1052 = call i64 @mk_num(i64 %1051)
+	%1053 = call i32 @obj_put(i64 %1044, i64 %1049, i64 %1052)
+	%1054 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1055 = zext i32 1072049730 to i64
+	%1056 = shl i64 %1055, 32
+	%1057 = zext i32 -17155601 to i64
+	%1058 = or i64 %1056, %1057
+	store i64 %1058, i64* %1054
+	%1059 = load i64, i64* %2
+	%1060 = getelementptr [4 x i8], [4 x i8]* @.str.243, i32 0, i32 0
+	store i8 76, i8* %1060
+	%1061 = getelementptr [4 x i8], [4 x i8]* @.str.243, i32 0, i32 1
+	store i8 78, i8* %1061
+	%1062 = getelementptr [4 x i8], [4 x i8]* @.str.243, i32 0, i32 2
+	store i8 50, i8* %1062
+	%1063 = getelementptr [4 x i8], [4 x i8]* @.str.243, i32 0, i32 3
+	store i8 0, i8* %1063
+	%1064 = getelementptr [4 x i8], [4 x i8]* @.str.243, i32 0, i32 0
+	%1065 = bitcast i8* %1064 to i32*
+	%1066 = call i64 @mk_cstr(i32* %1065)
+	%1067 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1068 = load i64, i64* %1067
+	%1069 = call i64 @mk_num(i64 %1068)
+	%1070 = call i32 @obj_put(i64 %1059, i64 %1066, i64 %1069)
+	%1071 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1072 = zext i32 1073900465 to i64
+	%1073 = shl i64 %1072, 32
+	%1074 = zext i32 -1145744106 to i64
+	%1075 = or i64 %1073, %1074
+	store i64 %1075, i64* %1071
+	%1076 = load i64, i64* %2
+	%1077 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 0
+	store i8 76, i8* %1077
+	%1078 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 1
+	store i8 78, i8* %1078
+	%1079 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 2
+	store i8 49, i8* %1079
+	%1080 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 3
+	store i8 48, i8* %1080
+	%1081 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 4
+	store i8 0, i8* %1081
+	%1082 = getelementptr [5 x i8], [5 x i8]* @.str.244, i32 0, i32 0
+	%1083 = bitcast i8* %1082 to i32*
+	%1084 = call i64 @mk_cstr(i32* %1083)
+	%1085 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1086 = load i64, i64* %1085
+	%1087 = call i64 @mk_num(i64 %1086)
+	%1088 = call i32 @obj_put(i64 %1076, i64 %1084, i64 %1087)
+	%1089 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1090 = zext i32 1073157447 to i64
+	%1091 = shl i64 %1090, 32
+	%1092 = zext i32 1697350398 to i64
+	%1093 = or i64 %1091, %1092
+	store i64 %1093, i64* %1089
+	%1094 = load i64, i64* %2
+	%1095 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 0
+	store i8 76, i8* %1095
+	%1096 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 1
+	store i8 79, i8* %1096
+	%1097 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 2
+	store i8 71, i8* %1097
+	%1098 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 3
+	store i8 50, i8* %1098
+	%1099 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 4
+	store i8 69, i8* %1099
+	%1100 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 5
+	store i8 0, i8* %1100
+	%1101 = getelementptr [6 x i8], [6 x i8]* @.str.245, i32 0, i32 0
+	%1102 = bitcast i8* %1101 to i32*
+	%1103 = call i64 @mk_cstr(i32* %1102)
+	%1104 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1105 = load i64, i64* %1104
+	%1106 = call i64 @mk_num(i64 %1105)
+	%1107 = call i32 @obj_put(i64 %1094, i64 %1103, i64 %1106)
+	%1108 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1109 = zext i32 1071369083 to i64
+	%1110 = shl i64 %1109, 32
+	%1111 = zext i32 354870542 to i64
+	%1112 = or i64 %1110, %1111
+	store i64 %1112, i64* %1108
+	%1113 = load i64, i64* %2
+	%1114 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 0
+	store i8 76, i8* %1114
+	%1115 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 1
+	store i8 79, i8* %1115
+	%1116 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 2
+	store i8 71, i8* %1116
+	%1117 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 3
+	store i8 49, i8* %1117
+	%1118 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 4
+	store i8 48, i8* %1118
+	%1119 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 5
+	store i8 69, i8* %1119
+	%1120 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 6
+	store i8 0, i8* %1120
+	%1121 = getelementptr [7 x i8], [7 x i8]* @.str.246, i32 0, i32 0
+	%1122 = bitcast i8* %1121 to i32*
+	%1123 = call i64 @mk_cstr(i32* %1122)
+	%1124 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1125 = load i64, i64* %1124
+	%1126 = call i64 @mk_num(i64 %1125)
+	%1127 = call i32 @obj_put(i64 %1113, i64 %1123, i64 %1126)
+	%1128 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1129 = zext i32 1073127582 to i64
+	%1130 = shl i64 %1129, 32
+	%1131 = zext i32 1719614413 to i64
+	%1132 = or i64 %1130, %1131
+	store i64 %1132, i64* %1128
+	%1133 = load i64, i64* %2
+	%1134 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 0
+	store i8 83, i8* %1134
+	%1135 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 1
+	store i8 81, i8* %1135
+	%1136 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 2
+	store i8 82, i8* %1136
+	%1137 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 3
+	store i8 84, i8* %1137
+	%1138 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 4
+	store i8 50, i8* %1138
+	%1139 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 5
+	store i8 0, i8* %1139
+	%1140 = getelementptr [6 x i8], [6 x i8]* @.str.247, i32 0, i32 0
+	%1141 = bitcast i8* %1140 to i32*
+	%1142 = call i64 @mk_cstr(i32* %1141)
+	%1143 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1144 = load i64, i64* %1143
+	%1145 = call i64 @mk_num(i64 %1144)
+	%1146 = call i32 @obj_put(i64 %1133, i64 %1142, i64 %1145)
+	%1147 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1148 = zext i32 1072079006 to i64
+	%1149 = shl i64 %1148, 32
+	%1150 = zext i32 1719614413 to i64
+	%1151 = or i64 %1149, %1150
+	store i64 %1151, i64* %1147
+	%1152 = load i64, i64* %2
+	%1153 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 0
+	store i8 83, i8* %1153
+	%1154 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 1
+	store i8 81, i8* %1154
+	%1155 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 2
+	store i8 82, i8* %1155
+	%1156 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 3
+	store i8 84, i8* %1156
+	%1157 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 4
+	store i8 49, i8* %1157
+	%1158 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 5
+	store i8 95, i8* %1158
+	%1159 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 6
+	store i8 50, i8* %1159
+	%1160 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 7
 	store i8 0, i8* %1160
-	%1161 = getelementptr [5 x i8], [5 x i8]* @.str.248, i32 0, i32 0
+	%1161 = getelementptr [8 x i8], [8 x i8]* @.str.248, i32 0, i32 0
 	%1162 = bitcast i8* %1161 to i32*
-	%1163 = load i64, i64* %2
-	%1164 = call i32 @seed_root(i32* %1162, i64 %1163)
-	%1165 = call i64 @mk_obj()
-	store i64 %1165, i64* %3
-	%1166 = load i64, i64* %3
-	%1167 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 0
-	store i8 102, i8* %1167
-	%1168 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 1
-	store i8 114, i8* %1168
-	%1169 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 2
-	store i8 111, i8* %1169
-	%1170 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 3
-	store i8 109, i8* %1170
-	%1171 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 4
-	store i8 67, i8* %1171
-	%1172 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 5
-	store i8 104, i8* %1172
-	%1173 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 6
-	store i8 97, i8* %1173
-	%1174 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 7
-	store i8 114, i8* %1174
-	%1175 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 8
-	store i8 67, i8* %1175
-	%1176 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 9
-	store i8 111, i8* %1176
-	%1177 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 10
-	store i8 100, i8* %1177
-	%1178 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 11
-	store i8 101, i8* %1178
-	%1179 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 12
-	store i8 0, i8* %1179
-	%1180 = getelementptr [13 x i8], [13 x i8]* @.str.249, i32 0, i32 0
-	%1181 = bitcast i8* %1180 to i32*
-	%1182 = sext i32 30 to i64
-	%1183 = call i32 @seed_host(i64 %1166, i32* %1181, i64 %1182)
-	%1184 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 0
-	store i8 83, i8* %1184
-	%1185 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 1
-	store i8 116, i8* %1185
-	%1186 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 2
+	%1163 = call i64 @mk_cstr(i32* %1162)
+	%1164 = getelementptr { i64 }, { i64 }* %1021, i32 0, i32 0
+	%1165 = load i64, i64* %1164
+	%1166 = call i64 @mk_num(i64 %1165)
+	%1167 = call i32 @obj_put(i64 %1152, i64 %1163, i64 %1166)
+	%1168 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 0
+	store i8 77, i8* %1168
+	%1169 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 1
+	store i8 97, i8* %1169
+	%1170 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 2
+	store i8 116, i8* %1170
+	%1171 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 3
+	store i8 104, i8* %1171
+	%1172 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 4
+	store i8 0, i8* %1172
+	%1173 = getelementptr [5 x i8], [5 x i8]* @.str.249, i32 0, i32 0
+	%1174 = bitcast i8* %1173 to i32*
+	%1175 = load i64, i64* %2
+	%1176 = call i32 @seed_root(i32* %1174, i64 %1175)
+	%1177 = call i64 @mk_obj()
+	store i64 %1177, i64* %3
+	%1178 = load i64, i64* %3
+	%1179 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 0
+	store i8 102, i8* %1179
+	%1180 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 1
+	store i8 114, i8* %1180
+	%1181 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 2
+	store i8 111, i8* %1181
+	%1182 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 3
+	store i8 109, i8* %1182
+	%1183 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 4
+	store i8 67, i8* %1183
+	%1184 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 5
+	store i8 104, i8* %1184
+	%1185 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 6
+	store i8 97, i8* %1185
+	%1186 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 7
 	store i8 114, i8* %1186
-	%1187 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 3
-	store i8 105, i8* %1187
-	%1188 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 4
-	store i8 110, i8* %1188
-	%1189 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 5
-	store i8 103, i8* %1189
-	%1190 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 6
-	store i8 0, i8* %1190
-	%1191 = getelementptr [7 x i8], [7 x i8]* @.str.250, i32 0, i32 0
-	%1192 = bitcast i8* %1191 to i32*
-	%1193 = load i64, i64* %3
-	%1194 = call i32 @seed_root(i32* %1192, i64 %1193)
-	%1195 = call i64 @mk_obj()
-	store i64 %1195, i64* %4
-	%1196 = load i64, i64* %4
-	%1197 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 0
-	store i8 105, i8* %1197
-	%1198 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 1
-	store i8 115, i8* %1198
-	%1199 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 2
-	store i8 65, i8* %1199
-	%1200 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 3
-	store i8 114, i8* %1200
-	%1201 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 4
-	store i8 114, i8* %1201
-	%1202 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 5
-	store i8 97, i8* %1202
-	%1203 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 6
-	store i8 121, i8* %1203
-	%1204 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 7
-	store i8 0, i8* %1204
-	%1205 = getelementptr [8 x i8], [8 x i8]* @.str.251, i32 0, i32 0
-	%1206 = bitcast i8* %1205 to i32*
-	%1207 = sext i32 31 to i64
-	%1208 = call i32 @seed_host(i64 %1196, i32* %1206, i64 %1207)
-	%1209 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 0
-	store i8 65, i8* %1209
-	%1210 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 1
-	store i8 114, i8* %1210
-	%1211 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 2
-	store i8 114, i8* %1211
-	%1212 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 3
-	store i8 97, i8* %1212
-	%1213 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 4
-	store i8 121, i8* %1213
-	%1214 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 5
-	store i8 0, i8* %1214
-	%1215 = getelementptr [6 x i8], [6 x i8]* @.str.252, i32 0, i32 0
-	%1216 = bitcast i8* %1215 to i32*
-	%1217 = load i64, i64* %4
-	%1218 = call i32 @seed_root(i32* %1216, i64 %1217)
-	%1219 = alloca i32*
-	%1220 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 0
-	store i8 77, i8* %1220
-	%1221 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 1
-	store i8 69, i8* %1221
-	%1222 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 2
-	store i8 67, i8* %1222
-	%1223 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 3
-	store i8 95, i8* %1223
-	%1224 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 4
-	store i8 71, i8* %1224
-	%1225 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 5
-	store i8 67, i8* %1225
-	%1226 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 6
+	%1187 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 8
+	store i8 67, i8* %1187
+	%1188 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 9
+	store i8 111, i8* %1188
+	%1189 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 10
+	store i8 100, i8* %1189
+	%1190 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 11
+	store i8 101, i8* %1190
+	%1191 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 12
+	store i8 0, i8* %1191
+	%1192 = getelementptr [13 x i8], [13 x i8]* @.str.250, i32 0, i32 0
+	%1193 = bitcast i8* %1192 to i32*
+	%1194 = sext i32 30 to i64
+	%1195 = call i32 @seed_host(i64 %1178, i32* %1193, i64 %1194)
+	%1196 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 0
+	store i8 83, i8* %1196
+	%1197 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 1
+	store i8 116, i8* %1197
+	%1198 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 2
+	store i8 114, i8* %1198
+	%1199 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 3
+	store i8 105, i8* %1199
+	%1200 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 4
+	store i8 110, i8* %1200
+	%1201 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 5
+	store i8 103, i8* %1201
+	%1202 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 6
+	store i8 0, i8* %1202
+	%1203 = getelementptr [7 x i8], [7 x i8]* @.str.251, i32 0, i32 0
+	%1204 = bitcast i8* %1203 to i32*
+	%1205 = load i64, i64* %3
+	%1206 = call i32 @seed_root(i32* %1204, i64 %1205)
+	%1207 = call i64 @mk_obj()
+	store i64 %1207, i64* %4
+	%1208 = load i64, i64* %4
+	%1209 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 0
+	store i8 105, i8* %1209
+	%1210 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 1
+	store i8 115, i8* %1210
+	%1211 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 2
+	store i8 65, i8* %1211
+	%1212 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 3
+	store i8 114, i8* %1212
+	%1213 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 4
+	store i8 114, i8* %1213
+	%1214 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 5
+	store i8 97, i8* %1214
+	%1215 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 6
+	store i8 121, i8* %1215
+	%1216 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 7
+	store i8 0, i8* %1216
+	%1217 = getelementptr [8 x i8], [8 x i8]* @.str.252, i32 0, i32 0
+	%1218 = bitcast i8* %1217 to i32*
+	%1219 = sext i32 31 to i64
+	%1220 = call i32 @seed_host(i64 %1208, i32* %1218, i64 %1219)
+	%1221 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 0
+	store i8 65, i8* %1221
+	%1222 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 1
+	store i8 114, i8* %1222
+	%1223 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 2
+	store i8 114, i8* %1223
+	%1224 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 3
+	store i8 97, i8* %1224
+	%1225 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 4
+	store i8 121, i8* %1225
+	%1226 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 5
 	store i8 0, i8* %1226
-	%1227 = getelementptr [7 x i8], [7 x i8]* @.str.253, i32 0, i32 0
+	%1227 = getelementptr [6 x i8], [6 x i8]* @.str.253, i32 0, i32 0
 	%1228 = bitcast i8* %1227 to i32*
-	%1229 = call i32* @getenv(i32* %1228)
-	%1230 = bitcast i32* %1229 to i32*
-	store i32* %1230, i32** %1219
-	%1231 = load i32*, i32** %1219
-	%1232 = bitcast i32* %1231 to i32*
-	%1233 = inttoptr i32 0 to i32*
-	%1234 = icmp ne i32* %1232, %1233
-	%1235 = zext i1 %1234 to i32
-	%1236 = icmp ne i32 %1235, 0
-	br i1 %1236, label %1237, label %1245
-
-1237:
-	%1238 = load i32*, i32** %1219
-	%1239 = getelementptr i8, i32* %1238, i32 0
-	%1240 = load i8, i8* %1239
-	%1241 = sext i8 %1240 to i32
-	%1242 = icmp eq i32 %1241, 111
-	%1243 = zext i1 %1242 to i32
-	%1244 = icmp ne i32 %1243, 0
-	br i1 %1244, label %1247, label %1249
-
-1245:
-	%1246 = sext i32 1 to i64
-	store i64 %1246, i64* @GC_ON
-	ret i32 0
-
-1247:
-	%1248 = sext i32 1 to i64
-	store i64 %1248, i64* @GC_MODE
-	br label %1249
+	%1229 = load i64, i64* %4
+	%1230 = call i32 @seed_root(i32* %1228, i64 %1229)
+	%1231 = alloca i32*
+	%1232 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 0
+	store i8 77, i8* %1232
+	%1233 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 1
+	store i8 69, i8* %1233
+	%1234 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 2
+	store i8 67, i8* %1234
+	%1235 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 3
+	store i8 95, i8* %1235
+	%1236 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 4
+	store i8 71, i8* %1236
+	%1237 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 5
+	store i8 67, i8* %1237
+	%1238 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 6
+	store i8 0, i8* %1238
+	%1239 = getelementptr [7 x i8], [7 x i8]* @.str.254, i32 0, i32 0
+	%1240 = bitcast i8* %1239 to i32*
+	%1241 = call i32* @getenv(i32* %1240)
+	%1242 = bitcast i32* %1241 to i32*
+	store i32* %1242, i32** %1231
+	%1243 = load i32*, i32** %1231
+	%1244 = bitcast i32* %1243 to i32*
+	%1245 = inttoptr i32 0 to i32*
+	%1246 = icmp ne i32* %1244, %1245
+	%1247 = zext i1 %1246 to i32
+	%1248 = icmp ne i32 %1247, 0
+	br i1 %1248, label %1249, label %1257
 
 1249:
-	%1250 = load i32*, i32** %1219
+	%1250 = load i32*, i32** %1231
 	%1251 = getelementptr i8, i32* %1250, i32 0
 	%1252 = load i8, i8* %1251
 	%1253 = sext i8 %1252 to i32
-	%1254 = icmp eq i32 %1253, 115
+	%1254 = icmp eq i32 %1253, 111
 	%1255 = zext i1 %1254 to i32
 	%1256 = icmp ne i32 %1255, 0
-	br i1 %1256, label %1257, label %1259
+	br i1 %1256, label %1259, label %1261
 
 1257:
-	%1258 = sext i32 2 to i64
-	store i64 %1258, i64* @GC_MODE
-	br label %1259
+	%1258 = sext i32 1 to i64
+	store i64 %1258, i64* @GC_ON
+	ret i32 0
 
 1259:
-	%1260 = load i32*, i32** %1219
-	%1261 = getelementptr i8, i32* %1260, i32 0
-	%1262 = load i8, i8* %1261
-	%1263 = sext i8 %1262 to i32
-	%1264 = icmp eq i32 %1263, 112
-	%1265 = zext i1 %1264 to i32
-	%1266 = icmp ne i32 %1265, 0
-	br i1 %1266, label %1267, label %1269
+	%1260 = sext i32 1 to i64
+	store i64 %1260, i64* @GC_MODE
+	br label %1261
 
-1267:
-	%1268 = sext i32 3 to i64
-	store i64 %1268, i64* @GC_MODE
-	br label %1269
+1261:
+	%1262 = load i32*, i32** %1231
+	%1263 = getelementptr i8, i32* %1262, i32 0
+	%1264 = load i8, i8* %1263
+	%1265 = sext i8 %1264 to i32
+	%1266 = icmp eq i32 %1265, 115
+	%1267 = zext i1 %1266 to i32
+	%1268 = icmp ne i32 %1267, 0
+	br i1 %1268, label %1269, label %1271
 
 1269:
-	br label %1245
+	%1270 = sext i32 2 to i64
+	store i64 %1270, i64* @GC_MODE
+	br label %1271
+
+1271:
+	%1272 = load i32*, i32** %1231
+	%1273 = getelementptr i8, i32* %1272, i32 0
+	%1274 = load i8, i8* %1273
+	%1275 = sext i8 %1274 to i32
+	%1276 = icmp eq i32 %1275, 112
+	%1277 = zext i1 %1276 to i32
+	%1278 = icmp ne i32 %1277, 0
+	br i1 %1278, label %1279, label %1281
+
+1279:
+	%1280 = sext i32 3 to i64
+	store i64 %1280, i64* @GC_MODE
+	br label %1281
+
+1281:
+	br label %1257
 }
 
 declare i32* @getenv(i32* %0)
@@ -54308,85 +54436,85 @@ entry:
 	store i64 %22, i64* %20
 	%23 = sext i32 2 to i64
 	store i64 %23, i64* @OUTFD
-	%24 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 0
+	%24 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 0
 	store i8 106, i8* %24
-	%25 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 1
+	%25 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 1
 	store i8 115, i8* %25
-	%26 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 2
+	%26 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 2
 	store i8 32, i8* %26
-	%27 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 3
+	%27 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 3
 	store i8 114, i8* %27
-	%28 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 4
+	%28 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 4
 	store i8 117, i8* %28
-	%29 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 5
+	%29 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 5
 	store i8 110, i8* %29
-	%30 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 6
+	%30 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 6
 	store i8 116, i8* %30
-	%31 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 7
+	%31 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 7
 	store i8 105, i8* %31
-	%32 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 8
+	%32 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 8
 	store i8 109, i8* %32
-	%33 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 9
+	%33 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 9
 	store i8 101, i8* %33
-	%34 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 10
+	%34 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 10
 	store i8 32, i8* %34
-	%35 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 11
+	%35 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 11
 	store i8 101, i8* %35
-	%36 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 12
+	%36 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 12
 	store i8 114, i8* %36
-	%37 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 13
+	%37 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 13
 	store i8 114, i8* %37
-	%38 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 14
+	%38 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 14
 	store i8 111, i8* %38
-	%39 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 15
+	%39 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 15
 	store i8 114, i8* %39
-	%40 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 16
+	%40 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 16
 	store i8 58, i8* %40
-	%41 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 17
+	%41 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 17
 	store i8 32, i8* %41
-	%42 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 18
+	%42 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 18
 	store i8 117, i8* %42
-	%43 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 19
+	%43 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 19
 	store i8 110, i8* %43
-	%44 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 20
+	%44 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 20
 	store i8 99, i8* %44
-	%45 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 21
+	%45 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 21
 	store i8 97, i8* %45
-	%46 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 22
+	%46 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 22
 	store i8 117, i8* %46
-	%47 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 23
+	%47 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 23
 	store i8 103, i8* %47
-	%48 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 24
+	%48 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 24
 	store i8 104, i8* %48
-	%49 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 25
+	%49 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 25
 	store i8 116, i8* %49
-	%50 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 26
+	%50 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 26
 	store i8 32, i8* %50
-	%51 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 27
+	%51 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 27
 	store i8 101, i8* %51
-	%52 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 28
+	%52 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 28
 	store i8 120, i8* %52
-	%53 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 29
+	%53 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 29
 	store i8 99, i8* %53
-	%54 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 30
+	%54 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 30
 	store i8 101, i8* %54
-	%55 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 31
+	%55 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 31
 	store i8 112, i8* %55
-	%56 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 32
+	%56 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 32
 	store i8 116, i8* %56
-	%57 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 33
+	%57 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 33
 	store i8 105, i8* %57
-	%58 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 34
+	%58 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 34
 	store i8 111, i8* %58
-	%59 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 35
+	%59 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 35
 	store i8 110, i8* %59
-	%60 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 36
+	%60 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 36
 	store i8 58, i8* %60
-	%61 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 37
+	%61 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 37
 	store i8 32, i8* %61
-	%62 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 38
+	%62 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 38
 	store i8 0, i8* %62
-	%63 = getelementptr [39 x i8], [39 x i8]* @.str.254, i32 0, i32 0
+	%63 = getelementptr [39 x i8], [39 x i8]* @.str.255, i32 0, i32 0
 	%64 = bitcast i8* %63 to i32*
 	%65 = call i32 @o_cstr(i32* %64)
 	%66 = load i64, i64* %20
@@ -54404,33 +54532,33 @@ entry:
 	store i64 %74, i64* %0
 	%75 = sext i32 0 to i64
 	store i64 %75, i64* @JB_DEPTH
-	%76 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 0
+	%76 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 0
 	store i8 77, i8* %76
-	%77 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 1
+	%77 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 1
 	store i8 69, i8* %77
-	%78 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 2
+	%78 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 2
 	store i8 67, i8* %78
-	%79 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 3
+	%79 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 3
 	store i8 95, i8* %79
-	%80 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 4
+	%80 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 4
 	store i8 71, i8* %80
-	%81 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 5
+	%81 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 5
 	store i8 67, i8* %81
-	%82 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 6
+	%82 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 6
 	store i8 95, i8* %82
-	%83 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 7
+	%83 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 7
 	store i8 83, i8* %83
-	%84 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 8
+	%84 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 8
 	store i8 84, i8* %84
-	%85 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 9
+	%85 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 9
 	store i8 65, i8* %85
-	%86 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 10
+	%86 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 10
 	store i8 84, i8* %86
-	%87 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 11
+	%87 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 11
 	store i8 83, i8* %87
-	%88 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 12
+	%88 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 12
 	store i8 0, i8* %88
-	%89 = getelementptr [13 x i8], [13 x i8]* @.str.255, i32 0, i32 0
+	%89 = getelementptr [13 x i8], [13 x i8]* @.str.256, i32 0, i32 0
 	%90 = bitcast i8* %89 to i32*
 	%91 = call i32* @getenv(i32* %90)
 	%92 = bitcast i32* %91 to i32*
@@ -54443,41 +54571,41 @@ entry:
 97:
 	%98 = sext i32 2 to i64
 	store i64 %98, i64* @OUTFD
-	%99 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 0
+	%99 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 0
 	store i8 103, i8* %99
-	%100 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 1
+	%100 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 1
 	store i8 99, i8* %100
-	%101 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 2
+	%101 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 2
 	store i8 58, i8* %101
-	%102 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 3
+	%102 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 3
 	store i8 32, i8* %102
-	%103 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 4
+	%103 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 4
 	store i8 99, i8* %103
-	%104 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 5
+	%104 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 5
 	store i8 111, i8* %104
-	%105 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 6
+	%105 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 6
 	store i8 108, i8* %105
-	%106 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 7
+	%106 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 7
 	store i8 108, i8* %106
-	%107 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 8
+	%107 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 8
 	store i8 101, i8* %107
-	%108 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 9
+	%108 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 9
 	store i8 99, i8* %108
-	%109 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 10
+	%109 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 10
 	store i8 116, i8* %109
-	%110 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 11
+	%110 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 11
 	store i8 105, i8* %110
-	%111 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 12
+	%111 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 12
 	store i8 111, i8* %111
-	%112 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 13
+	%112 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 13
 	store i8 110, i8* %112
-	%113 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 14
+	%113 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 14
 	store i8 115, i8* %113
-	%114 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 15
+	%114 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 15
 	store i8 61, i8* %114
-	%115 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 16
+	%115 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 16
 	store i8 0, i8* %115
-	%116 = getelementptr [17 x i8], [17 x i8]* @.str.256, i32 0, i32 0
+	%116 = getelementptr [17 x i8], [17 x i8]* @.str.257, i32 0, i32 0
 	%117 = bitcast i8* %116 to i32*
 	%118 = call i32 @o_cstr(i32* %117)
 	%119 = load i64, i64* @GC_COUNT
@@ -54485,21 +54613,21 @@ entry:
 	%121 = call i64 @mk_num(i64 %120)
 	%122 = call i64 @to_string(i64 %121)
 	%123 = call i32 @o_str(i64 %122)
-	%124 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 0
+	%124 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 0
 	store i8 32, i8* %124
-	%125 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 1
+	%125 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 1
 	store i8 108, i8* %125
-	%126 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 2
+	%126 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 2
 	store i8 105, i8* %126
-	%127 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 3
+	%127 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 3
 	store i8 118, i8* %127
-	%128 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 4
+	%128 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 4
 	store i8 101, i8* %128
-	%129 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 5
+	%129 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 5
 	store i8 61, i8* %129
-	%130 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 6
+	%130 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 6
 	store i8 0, i8* %130
-	%131 = getelementptr [7 x i8], [7 x i8]* @.str.257, i32 0, i32 0
+	%131 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 0
 	%132 = bitcast i8* %131 to i32*
 	%133 = call i32 @o_cstr(i32* %132)
 	%134 = load i64, i64* @GC_LIVE
@@ -54507,21 +54635,21 @@ entry:
 	%136 = call i64 @mk_num(i64 %135)
 	%137 = call i64 @to_string(i64 %136)
 	%138 = call i32 @o_str(i64 %137)
-	%139 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 0
+	%139 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 0
 	store i8 32, i8* %139
-	%140 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 1
+	%140 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 1
 	store i8 104, i8* %140
-	%141 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 2
+	%141 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 2
 	store i8 101, i8* %141
-	%142 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 3
+	%142 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 3
 	store i8 97, i8* %142
-	%143 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 4
+	%143 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 4
 	store i8 112, i8* %143
-	%144 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 5
+	%144 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 5
 	store i8 61, i8* %144
-	%145 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 6
+	%145 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 6
 	store i8 0, i8* %145
-	%146 = getelementptr [7 x i8], [7 x i8]* @.str.258, i32 0, i32 0
+	%146 = getelementptr [7 x i8], [7 x i8]* @.str.259, i32 0, i32 0
 	%147 = bitcast i8* %146 to i32*
 	%148 = call i32 @o_cstr(i32* %147)
 	%149 = load i64, i64* @GC_HEAP
@@ -54529,25 +54657,25 @@ entry:
 	%151 = call i64 @mk_num(i64 %150)
 	%152 = call i64 @to_string(i64 %151)
 	%153 = call i32 @o_str(i64 %152)
-	%154 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 0
+	%154 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 0
 	store i8 32, i8* %154
-	%155 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 1
+	%155 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 1
 	store i8 112, i8* %155
-	%156 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 2
+	%156 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 2
 	store i8 105, i8* %156
-	%157 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 3
+	%157 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 3
 	store i8 110, i8* %157
-	%158 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 4
+	%158 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 4
 	store i8 110, i8* %158
-	%159 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 5
+	%159 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 5
 	store i8 101, i8* %159
-	%160 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 6
+	%160 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 6
 	store i8 100, i8* %160
-	%161 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 7
+	%161 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 7
 	store i8 61, i8* %161
-	%162 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 8
+	%162 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 8
 	store i8 0, i8* %162
-	%163 = getelementptr [9 x i8], [9 x i8]* @.str.259, i32 0, i32 0
+	%163 = getelementptr [9 x i8], [9 x i8]* @.str.260, i32 0, i32 0
 	%164 = bitcast i8* %163 to i32*
 	%165 = call i32 @o_cstr(i32* %164)
 	%166 = load i64, i64* @PIN_N
@@ -54579,10 +54707,10 @@ entry:
 	%184 = trunc i64 %183 to i32
 	ret i32 %184
 
-dead922:
+dead923:
 	br label %181
 
-dead923:
+dead924:
 	ret i32 0
 }
 

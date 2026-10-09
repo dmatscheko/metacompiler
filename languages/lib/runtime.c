@@ -57,6 +57,8 @@ int puts(const char *s);
 long write(int fd, const char *buf, unsigned long n);
 void *malloc(unsigned long n);
 char *getenv(const char *name);
+int getentropy(void *buf, unsigned long n);
+long time(long *t);
 int setjmp(void *env);
 void longjmp(void *env, int v);
 void exit(int code);
@@ -463,6 +465,7 @@ long PIN_N;
 long RT_MISS_VAR;    /* closure(name)      -> the value to throw, or 0 = abort */
 long RT_MISS_MEM;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
 long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
+long RNG_STATE;      /* Math.random's xorshift64 state, 0 until the first call */
 
 void gc_collect(void);
 
@@ -5815,21 +5818,29 @@ long host_call(long id, long self, long args) {
 		while (i < n) { t = arg_d(args, i) / mx; sum = sum + t * t; i = i + 1; }
 		return mk_dnum(mx * d_sqrt_d(sum));
 	}
-	/* clz32 and fround exist in goja's Math and did not exist in the other two
-	 * engines, so `Math.clz32(1)` answered 31 in the js interpreter half under
-	 * goja and aborted with `call of a non function value` under -frozen: a live
-	 * FROZEN-DIFF that no test reached. Math.random was the third goja-only
-	 * member and it is converged the OTHER WAY, in goja: it needs a random
-	 * number generator here and a nondeterministic one would fail the matrix by
-	 * construction, so abnf/commonscript.go's installGojaMathSurface deletes the
-	 * name from the grammar host instead, and the floor gains no line. There is
-	 * no goja-only Math member left; abnf/hostglobals_test.go now compares the
-	 * whole surface with no exemption at all (docs/todo.md 4.1). */
+	/* clz32 and fround: the Go twin's (abnf/jsrt.go standardJSBindings), which
+	 * the goja grammar host also uses (installGojaMathSurface). */
 	if (id == 92) { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
 	if (id == 93) { return mk_dnum(d_fround(arg_d(args, 0))); }
 	/* fnMeta(f, key) / fnMetaSet(f, name, length): see js_jsfnmeta. */
 	if (id == 94) { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
 	if (id == 95) { return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2))); }
+	/* Math.random: xorshift64, seeded once from getentropy (time() if that
+	 * fails). The top 52 bits of the state become the mantissa of a double in
+	 * [1, 2), and subtracting 1 gives [0, 1). The Go twin uses math/rand. */
+	if (id == 96) {
+		long x = RNG_STATE;
+		union DB one;
+		if (x == 0) {
+			if (getentropy(&x, 8) != 0 || x == 0) { x = time(0) | 1; }
+		}
+		x = x ^ (x << 13);
+		x = x ^ ((x >> 7) & 144115188075855871);
+		x = x ^ (x << 17);
+		RNG_STATE = x;
+		one.d = 1.0;
+		return mk_num(d_sub(((x >> 12) & 4503599627370495) | one.l, one.l));
+	}
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -6709,6 +6720,7 @@ void boot(void) {
 	seed_host(math, "hypot", 91);
 	seed_host(math, "clz32", 92);
 	seed_host(math, "fround", 93);
+	seed_host(math, "random", 96);
 	{
 		union DB p;
 		p.d = 3.141592653589793;
