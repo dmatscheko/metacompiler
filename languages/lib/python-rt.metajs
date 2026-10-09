@@ -439,10 +439,10 @@ function pyNum(v) {
 }
 
 // rt.toString. The one arm `"" + v` does not give is the bignum, whose Go twin
-// answers big.Int.String(); pyABigStr (chunk A) is that, and top-level function
+// answers big.Int.String(); rtABigStr (chunk A) is that, and top-level function
 // declarations hoist, so it is reachable from here.
 function pyToStr(v) {
-    if (pyIsBig(v)) { return pyABigStr(v) }
+    if (pyIsBig(v)) { return rtABigStr(v) }
     return "" + v
 }
 
@@ -821,7 +821,7 @@ function pyShortName(n) {
 
 // ===================================================== equality and order ===
 //
-// abnf/jsrt.go's pyEqual (8580). The bigint arms are chunk A's pyABigCmp /
+// abnf/jsrt.go's pyEqual (8580). The bigint arms are chunk A's rtABigCmp /
 // pyABigEqFloat; they are called from here so every caller of pyEqual gets them.
 
 // The int a bool IS (True is 1, False is 0), against a value that is not a bool.
@@ -885,7 +885,7 @@ function pyEqual(x, y) {
         return pyEqBoolVal(x, y)
     }
     if (pyIsBig(x)) {
-        if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
+        if (pyIsBig(y)) { return rtABigCmp(x, y) == 0 }
         if (typeof y == "number") { return pyABigEqFloat(x, y) }
     }
     if (pyIsBig(y)) {
@@ -1539,10 +1539,10 @@ function pySliceIndices(n, loV, hiV, stepV) {
 // The representation is {__pybig: true, neg: <bool>, limbs: [...]}: the
 // MAGNITUDE as a LITTLE-ENDIAN array of base-10000 limbs and a separate sign, so
 // every intermediate of the schoolbook algorithms below stays under 10^8 and a
-// double holds it EXACTLY. The shape of the limb arithmetic is lifted from
-// languages/lib/ruby-rt.metajs (rbBigFromNum / rbBigMulSmall / rbBigStr).
+// double holds it EXACTLY. The limb arithmetic is runtime.metajs's rtABig* layer,
+// shared with ruby; this file supplies the {__pybig} constructor rtkABigNew.
 //
-// Zero is canonical: limbs == [0] and neg == false, so pyABigCmp needs no
+// Zero is canonical: limbs == [0] and neg == false, so rtABigCmp needs no
 // negative-zero case.
 //
 // WHAT IS DELIBERATELY NOT IMPLEMENTED, and why:
@@ -1557,7 +1557,7 @@ function pySliceIndices(n, loV, hiV, stepV) {
 //     *jsBigInt case, so `bigval // 2`, `bigval % 2`, `bigval ** 2`, float(big)
 //     and int(float) of a big all see NaN in Go. Reproducing that only needs the
 //     PRELUDE's pyNum to answer NaN for a plain object, which it does; nothing
-//     is needed here. pyABigFromNum below is the one direction that IS needed
+//     is needed here. rtABigFromNum below is the one direction that IS needed
 //     (bigEqFloat), and it is exact.
 //
 //   * Base-0 literal parsing. Go's js_bigint calls big.Int.SetString(s, 0),
@@ -1572,226 +1572,22 @@ function pySliceIndices(n, loV, hiV, stepV) {
 //     limb). The reachable operands are Python integer literals, so this is
 //     small and exact rather than fast.
 
-function pyABigNorm(limbs) {
-    var out = limbs
-    while (out.length > 1 && out[out.length - 1] == 0) { out.pop() }
-    if (out.length == 0) { out.push(0) }
-    return out
-}
-
-function pyABigNew(neg, limbs) {
-    var ls = pyABigNorm(limbs)
+// The rtkABigNew hook of runtime.metajs's rtABig* layer: a normalised {__pybig}.
+function rtkABigNew(neg, limbs) {
+    var ls = rtABigNorm(limbs)
     var n = neg
     if (ls.length == 1 && ls[0] == 0) { n = false }
     return {__pybig: true, neg: n, limbs: ls}
 }
 
-function pyABigIsZero(v) {
-    var ls = v["limbs"]
-    return ls.length == 1 && ls[0] == 0
-}
-
-// |a| <=> |b| over two NORMALIZED limb arrays.
-function pyABigCmpMag(a, b) {
-    if (a.length != b.length) { return a.length < b.length ? -1 : 1 }
-    var i = a.length - 1
-    while (i >= 0) {
-        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1 }
-        i = i - 1
-    }
-    return 0
-}
-
-// The signed comparison - Go's big.Int.Cmp, which jsCompare and pyEqual use.
-function pyABigCmp(x, y) {
-    if (x["neg"] != y["neg"]) { return x["neg"] ? -1 : 1 }
-    var c = pyABigCmpMag(x["limbs"], y["limbs"])
-    if (x["neg"]) { return -c }
-    return c
-}
-
-function pyABigAddMag(a, b) {
-    var out = []
-    var carry = 0
-    var n = a.length
-    if (b.length > n) { n = b.length }
-    var i = 0
-    while (i < n) {
-        var av = i < a.length ? a[i] : 0
-        var bv = i < b.length ? b[i] : 0
-        var s = av + bv + carry
-        if (s >= 10000) {
-            carry = 1
-            s = s - 10000
-        } else {
-            carry = 0
-        }
-        out.push(s)
-        i = i + 1
-    }
-    if (carry > 0) { out.push(carry) }
-    return out
-}
-
-// |a| - |b|, and the caller guarantees |a| >= |b|.
-function pyABigSubMag(a, b) {
-    var out = []
-    var borrow = 0
-    var i = 0
-    while (i < a.length) {
-        var bv = i < b.length ? b[i] : 0
-        var s = a[i] - bv - borrow
-        if (s < 0) {
-            s = s + 10000
-            borrow = 1
-        } else {
-            borrow = 0
-        }
-        out.push(s)
-        i = i + 1
-    }
-    return pyABigNorm(out)
-}
-
-// A magnitude times a single limb (0..9999), as a FRESH array: the division
-// below needs the multiplicand left alone, unlike ruby-rt's in-place rbBigMulSmall.
-function pyABigMulSmall(limbs, k) {
-    var out = []
-    var carry = 0
-    var i = 0
-    while (i < limbs.length) {
-        var v = limbs[i] * k + carry
-        carry = Math.floor(v / 10000)
-        out.push(v - carry * 10000)
-        i = i + 1
-    }
-    while (carry > 0) {
-        var c2 = Math.floor(carry / 10000)
-        out.push(carry - c2 * 10000)
-        carry = c2
-    }
-    return pyABigNorm(out)
-}
-
-function pyABigNeg(x) {
-    var ls = []
-    var i = 0
-    while (i < x["limbs"].length) {
-        ls.push(x["limbs"][i])
-        i = i + 1
-    }
-    return pyABigNew(!x["neg"], ls)
-}
-
-function pyABigAdd(x, y) {
-    if (x["neg"] == y["neg"]) { return pyABigNew(x["neg"], pyABigAddMag(x["limbs"], y["limbs"])) }
-    var c = pyABigCmpMag(x["limbs"], y["limbs"])
-    if (c == 0) { return pyABigNew(false, [0]) }
-    if (c > 0) { return pyABigNew(x["neg"], pyABigSubMag(x["limbs"], y["limbs"])) }
-    return pyABigNew(y["neg"], pyABigSubMag(y["limbs"], x["limbs"]))
-}
-
-function pyABigSub(x, y) { return pyABigAdd(x, pyABigNeg(y)) }
-
-function pyABigMul(x, y) {
-    var a = x["limbs"]
-    var b = y["limbs"]
-    var out = []
-    var z = 0
-    while (z < a.length + b.length) {
-        out.push(0)
-        z = z + 1
-    }
-    var i = 0
-    while (i < a.length) {
-        var carry = 0
-        var j = 0
-        while (j < b.length) {
-            var cur = out[i + j] + a[i] * b[j] + carry
-            carry = Math.floor(cur / 10000)
-            out[i + j] = cur - carry * 10000
-            j = j + 1
-        }
-        var k = i + b.length
-        while (carry > 0) {
-            var cur2 = out[k] + carry
-            carry = Math.floor(cur2 / 10000)
-            out[k] = cur2 - carry * 10000
-            k = k + 1
-        }
-        i = i + 1
-    }
-    return pyABigNew(x["neg"] != y["neg"], pyABigNorm(out))
-}
-
-// |a| divided by |b| -> {q, r}, both NORMALIZED limb arrays. Schoolbook long
-// division a limb at a time; the quotient limb is found by binary search over
-// 0..9999 because there is no wide-multiply primitive to estimate it with.
-// The caller has already rejected a zero divisor.
-function pyABigDivMag(a, b) {
-    var qms = []
-    var rem = [0]
-    var i = a.length - 1
-    while (i >= 0) {
-        // rem = rem * 10000 + a[i], which in little-endian is a PREPENDED limb.
-        var shifted = [a[i]]
-        if (!(rem.length == 1 && rem[0] == 0)) {
-            var t = 0
-            while (t < rem.length) {
-                shifted.push(rem[t])
-                t = t + 1
-            }
-        }
-        rem = pyABigNorm(shifted)
-        var lo = 0
-        var hi = 9999
-        var d = 0
-        while (lo <= hi) {
-            var mid = Math.floor((lo + hi) / 2)
-            if (pyABigCmpMag(pyABigMulSmall(b, mid), rem) <= 0) {
-                d = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-        qms.push(d)
-        rem = pyABigSubMag(rem, pyABigMulSmall(b, d))
-        i = i - 1
-    }
-    // qms came out most-significant first; the representation is little-endian.
-    var q = []
-    var m = qms.length - 1
-    while (m >= 0) {
-        q.push(qms[m])
-        m = m - 1
-    }
-    return {q: pyABigNorm(q), r: pyABigNorm(rem)}
-}
-
 // Go's big.Int.Quo: TRUNCATED toward zero, so the sign is the sign of the product.
 function pyABigQuo(x, y) {
-    return pyABigNew(x["neg"] != y["neg"], pyABigDivMag(x["limbs"], y["limbs"])["q"])
+    return rtkABigNew(x["neg"] != y["neg"], rtABigDivMag(x["limbs"], y["limbs"])["q"])
 }
 
 // Go's big.Int.Rem: the remainder takes the sign of the DIVIDEND.
 function pyABigRem(x, y) {
-    return pyABigNew(x["neg"], pyABigDivMag(x["limbs"], y["limbs"])["r"])
-}
-
-// Go: big.Int.String().
-function pyABigStr(v) {
-    var limbs = v["limbs"]
-    var out = "" + limbs[limbs.length - 1]
-    var i = limbs.length - 2
-    while (i >= 0) {
-        var s = "" + limbs[i]
-        while (s.length < 4) { s = "0" + s }
-        out = out + s
-        i = i - 1
-    }
-    if (v["neg"]) { return "-" + out }
-    return out
+    return rtkABigNew(x["neg"], rtABigDivMag(x["limbs"], y["limbs"])["r"])
 }
 
 // Go: big.Int.SetString(text, 0) - see the note above on why only base 10 with
@@ -1825,36 +1621,7 @@ function pyABigFromStr(text) {
         limbs.push(parseInt(digits.substring(from, end), 10))
         end = from
     }
-    return pyABigNew(neg, limbs)
-}
-
-// An INTEGRAL, FINITE double as an exact bignum - Go's big.NewFloat(f).Int(nil),
-// which bigEqFloat uses. An integral double above 2^53 is a multiple of 2, so
-// halving it down to a 53 bit mantissa and doubling the bignum back up loses
-// nothing (the same argument ruby-rt.metajs's rbExactDec makes).
-function pyABigFromNum(n) {
-    var neg = n < 0
-    var m = Math.abs(n)
-    var e = 0
-    while (m > 9007199254740992) {
-        m = m / 2
-        e = e + 1
-    }
-    var limbs = []
-    var x = m
-    while (x > 0) {
-        var q = Math.floor(x / 10000)
-        limbs.push(x - q * 10000)
-        x = q
-    }
-    if (limbs.length == 0) { limbs.push(0) }
-    var ls = limbs
-    var k = 0
-    while (k < e) {
-        ls = pyABigMulSmall(ls, 2)
-        k = k + 1
-    }
-    return pyABigNew(neg, ls)
+    return rtkABigNew(neg, limbs)
 }
 
 // Go: bigEqFloat (jsrt.go:8650). Only an integral, finite double can equal an
@@ -1864,7 +1631,7 @@ function pyABigFromNum(n) {
 function pyABigEqFloat(x, f) {
     if (f - f != 0) { return false }
     if (f != Math.trunc(f)) { return false }
-    return pyABigCmp(x, pyABigFromNum(f)) == 0
+    return rtABigCmp(x, rtABigFromNum(f)) == 0
 }
 
 // Go: bigArith (jsrt.go:2724), including bigPair's rule that BOTH operands must
@@ -1879,47 +1646,13 @@ function pyABigEqFloat(x, f) {
 function pyABigOperand(v) {
     if (pyIsBig(v)) { return v }
     if (typeof v == "boolean") {
-        if (v) { return pyABigFromNum(1) }
-        return pyABigFromNum(0)
+        if (v) { return rtABigFromNum(1) }
+        return rtABigFromNum(0)
     }
     if (typeof v == "number") {
-        if (v == Math.trunc(v) && Math.abs(v) <= 9007199254740992) { return pyABigFromNum(v) }
+        if (v == Math.trunc(v) && Math.abs(v) <= 9007199254740992) { return rtABigFromNum(v) }
     }
     return null
-}
-
-// Go: rt.pyBigNarrow, and the interpreter grammar's bigOut. A big that still fits
-// in the exactly representable range comes back as a plain number, so only the
-// values that GENUINELY need arbitrary precision carry the {__pybig} shape.
-// The reconstruction can ROUND when the true value is past 2^53, so the answer is
-// checked by rebuilding the limbs from it - pyABigFromNum is exact, so a mismatch
-// means the double is not the value.
-function pyABigNarrow(x) {
-    var limbs = x["limbs"]
-    if (limbs.length > 4) { return x }
-    var v = 0
-    var i = limbs.length - 1
-    while (i >= 0) {
-        v = v * 10000 + limbs[i]
-        i = i - 1
-    }
-    if (v > 9007199254740992) { return x }
-    if (pyABigCmpMag(pyABigFromNum(v)["limbs"], limbs) != 0) { return x }
-    if (x["neg"]) { return 0 - v }
-    return v
-}
-
-// Go: big.Int.Exp with a nil modulus, and the interpreter grammar's bigPow. The
-// exponent is capped by the caller at 4096, so the linear loop is what both other
-// engines use too.
-function pyABigPow(x, n) {
-    var acc = pyABigFromNum(1)
-    var i = 0
-    while (i < n) {
-        acc = pyABigMul(acc, x)
-        i = i + 1
-    }
-    return acc
 }
 
 // Go: pyBigBin (jsrt.go). Python's integer arithmetic in arbitrary precision.
@@ -1928,26 +1661,26 @@ function pyABigPow(x, n) {
 // null for an operator with no exact integer form, so the caller falls through to
 // the double path it always had.
 function pyABigBin(op, x, y) {
-    if (op == "+") { return pyABigAdd(x, y) }
-    if (op == "-") { return pyABigSub(x, y) }
-    if (op == "*") { return pyABigMul(x, y) }
+    if (op == "+") { return rtABigAdd(x, y) }
+    if (op == "-") { return rtABigSub(x, y) }
+    if (op == "*") { return rtABigMul(x, y) }
     if (op == "//" || op == "%") {
-        if (pyABigIsZero(y)) { return null } // Let the double path raise the usual error.
+        if (rtABigIsZero(y)) { return null } // Let the double path raise the usual error.
         var q = pyABigQuo(x, y)
         var rm = pyABigRem(x, y)
-        if (!pyABigIsZero(rm) && rm["neg"] != y["neg"]) {
-            if (op == "//") { return pyABigSub(q, pyABigFromNum(1)) }
-            return pyABigAdd(rm, y)
+        if (!rtABigIsZero(rm) && rm["neg"] != y["neg"]) {
+            if (op == "//") { return rtABigSub(q, rtABigFromNum(1)) }
+            return rtABigAdd(rm, y)
         }
         if (op == "//") { return q }
         return rm
     }
     if (op == "**") {
         if (y["neg"]) { return null }
-        var e = pyABigNarrow(y)
+        var e = rtABigNarrow(y)
         if (typeof e != "number") { return null }
         if (e > 4096) { return null }
-        return pyABigPow(x, e)
+        return rtABigPow(x, e)
     }
     return null
 }
@@ -1981,11 +1714,6 @@ function pyABigBin(op, x, y) {
 // runs in a loop - two operands inside int32 - where ECMAScript's own operators
 // ARE the infinite two's complement answer.
 
-var PY_BIT_AND = 0
-var PY_BIT_OR = 1
-var PY_BIT_XOR = 2
-var PY_BIT_ANDNOT = 3
-
 // The largest shift count honoured. CPython answers a MemoryError somewhere above
 // this; the cap keeps `1 << 10**9` from asking for a gigabyte of limbs.
 var PY_BIT_SHIFT_MAX = 1048576
@@ -2016,11 +1744,6 @@ function pyABitsFromLimbs(limbs) {
     return bits
 }
 
-function pyABitsTrim(bits) {
-    while (bits.length > 0 && bits[bits.length - 1] == 0) { bits.pop() }
-    return bits
-}
-
 // bits - 1, IN PLACE; the caller only ever hands this a magnitude of at least 1.
 function pyABitsDec(bits) {
     var i = 0
@@ -2029,7 +1752,7 @@ function pyABitsDec(bits) {
         i = i + 1
     }
     if (i < bits.length) { bits[i] = 0 }
-    return pyABitsTrim(bits)
+    return rtABitsTrim(bits)
 }
 
 // bits + 1, IN PLACE.
@@ -2043,66 +1766,16 @@ function pyABitsInc(bits) {
     return bits
 }
 
-function pyABitsOp(kind, a, b) {
-    var n = a.length
-    if (b.length > n) { n = b.length }
-    var out = []
-    var i = 0
-    while (i < n) {
-        var x = i < a.length ? a[i] : 0
-        var y = i < b.length ? b[i] : 0
-        var r = 0
-        if (kind == PY_BIT_AND) {
-            if (x == 1 && y == 1) { r = 1 }
-        } else if (kind == PY_BIT_OR) {
-            if (x == 1 || y == 1) { r = 1 }
-        } else if (kind == PY_BIT_XOR) {
-            if (x != y) { r = 1 }
-        } else {
-            if (x == 1 && y == 0) { r = 1 }
-        }
-        out.push(r)
-        i = i + 1
-    }
-    return pyABitsTrim(out)
-}
-
-function pyABitsShl(bits, k) {
-    if (bits.length == 0) { return [] }
-    var out = []
-    var i = 0
-    while (i < k) {
-        out.push(0)
-        i = i + 1
-    }
-    var j = 0
-    while (j < bits.length) {
-        out.push(bits[j])
-        j = j + 1
-    }
-    return out
-}
-
-function pyABitsShr(bits, k) {
-    var out = []
-    var i = k
-    while (i < bits.length) {
-        out.push(bits[i])
-        i = i + 1
-    }
-    return pyABitsTrim(out)
-}
-
 // A bit array back to a bignum, by the schoolbook doubling the limbs already have.
 function pyABitsToBig(neg, bits) {
     var limbs = [0]
     var j = bits.length - 1
     while (j >= 0) {
-        limbs = pyABigMulSmall(limbs, 2)
-        if (bits[j] == 1) { limbs = pyABigAddMag(limbs, [1]) }
+        limbs = rtABigMulSmall(limbs, 2)
+        if (bits[j] == 1) { limbs = rtABigAddMag(limbs, [1]) }
         j = j - 1
     }
-    return pyABigNew(neg, limbs)
+    return rtkABigNew(neg, limbs)
 }
 
 // A SHIFT COUNT as a plain number. Anything past the cap answers a value the
@@ -2131,28 +1804,28 @@ function pyABitBin(op, x, y) {
         if (bn) { return null }
         var k = pyABitsToNum(b)
         if (k > PY_BIT_SHIFT_MAX) { return null }
-        if (op == "<<") { return pyABitsToBig(an, pyABitsShl(a, k)) }
-        if (!an) { return pyABitsToBig(false, pyABitsShr(a, k)) }
+        if (op == "<<") { return pyABitsToBig(an, rtABitsShl(a, k)) }
+        if (!an) { return pyABitsToBig(false, rtABitsShr(a, k)) }
         // floor(-a / 2^k) is -(((a-1) >> k) + 1), which is Python's -5 >> 1 == -3.
-        return pyABitsToBig(true, pyABitsInc(pyABitsShr(pyABitsDec(a), k)))
+        return pyABitsToBig(true, pyABitsInc(rtABitsShr(pyABitsDec(a), k)))
     }
     if (op == "&") {
-        if (!an && !bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_AND, a, b)) }
-        if (an && !bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_ANDNOT, b, pyABitsDec(a))) }
-        if (!an && bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_ANDNOT, a, pyABitsDec(b))) }
-        return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_OR, pyABitsDec(a), pyABitsDec(b))))
+        if (!an && !bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_AND, a, b)) }
+        if (an && !bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_ANDNOT, b, pyABitsDec(a))) }
+        if (!an && bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_ANDNOT, a, pyABitsDec(b))) }
+        return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_OR, pyABitsDec(a), pyABitsDec(b))))
     }
     if (op == "|") {
-        if (!an && !bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_OR, a, b)) }
-        if (an && !bn) { return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_ANDNOT, pyABitsDec(a), b))) }
-        if (!an && bn) { return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_ANDNOT, pyABitsDec(b), a))) }
-        return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_AND, pyABitsDec(a), pyABitsDec(b))))
+        if (!an && !bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_OR, a, b)) }
+        if (an && !bn) { return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_ANDNOT, pyABitsDec(a), b))) }
+        if (!an && bn) { return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_ANDNOT, pyABitsDec(b), a))) }
+        return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_AND, pyABitsDec(a), pyABitsDec(b))))
     }
     if (op == "^") {
-        if (!an && !bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_XOR, a, b)) }
-        if (an && bn) { return pyABitsToBig(false, pyABitsOp(PY_BIT_XOR, pyABitsDec(a), pyABitsDec(b))) }
-        if (an) { return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_XOR, pyABitsDec(a), b))) }
-        return pyABitsToBig(true, pyABitsInc(pyABitsOp(PY_BIT_XOR, a, pyABitsDec(b))))
+        if (!an && !bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_XOR, a, b)) }
+        if (an && bn) { return pyABitsToBig(false, rtABitsOp(RT_BIT_XOR, pyABitsDec(a), pyABitsDec(b))) }
+        if (an) { return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_XOR, pyABitsDec(a), b))) }
+        return pyABitsToBig(true, pyABitsInc(rtABitsOp(RT_BIT_XOR, a, pyABitsDec(b))))
     }
     return null
 }
@@ -2171,7 +1844,7 @@ function pyABitPow2(k) {
 
 // ~x is -x - 1 in Python's infinite two's complement, at arbitrary precision.
 function pyABitNot(x) {
-    return pyABigSub(pyABigNeg(x), pyABigFromNum(1))
+    return rtABigSub(rtABigNeg(x), rtABigFromNum(1))
 }
 
 // An operand of a bit operator that ECMAScript's int32 operators already answer
@@ -2209,17 +1882,17 @@ function pyABigPair(l, r) {
 function pyABigArith(op, l, r) {
     if (!pyIsBig(l)) { return null }
     if (!pyIsBig(r)) { return null }
-    if (op == "+") { return pyABigAdd(l, r) }
-    if (op == "-") { return pyABigSub(l, r) }
-    if (op == "*") { return pyABigMul(l, r) }
+    if (op == "+") { return rtABigAdd(l, r) }
+    if (op == "-") { return rtABigSub(l, r) }
+    if (op == "*") { return rtABigMul(l, r) }
     if (op == "/") {
-        if (pyABigIsZero(r)) { return null } // Let the double path produce Inf/NaN.
+        if (rtABigIsZero(r)) { return null } // Let the double path produce Inf/NaN.
         return pyABigQuo(l, r)
     }
     if (op == "%") {
         // Unreachable from Python (js_pybin's "%" is pyFloorMod on doubles), but
         // bigArith has the arm and the division already answers both halves.
-        if (pyABigIsZero(r)) { return null }
+        if (rtABigIsZero(r)) { return null }
         return pyABigRem(l, r)
     }
     return null
@@ -2237,7 +1910,7 @@ function pyATruthy(v) {
     if (typeof v == "boolean") { return v }
     if (typeof v == "number") { return v != 0 && v == v }
     if (typeof v == "string") { return v.length > 0 }
-    if (pyIsBig(v)) { return !pyABigIsZero(v) }
+    if (pyIsBig(v)) { return !rtABigIsZero(v) }
     // 0.0 is falsy and NaN is TRUTHY (Go's truthy has no `t.f == t.f` on the
     // Python box); every other object is truthy.
     if (pyIsFlo(v)) { return v["__flo"] != 0 }
@@ -2264,7 +1937,7 @@ function pyAJsTypeOf(v) {
 // `x is y` on two big literals of the same value is true in both engines.
 function pyAStrictEq(a, b) {
     if (pyIsBig(a) || pyIsBig(b)) {
-        if (pyIsBig(a) && pyIsBig(b)) { return pyABigCmp(a, b) == 0 }
+        if (pyIsBig(a) && pyIsBig(b)) { return rtABigCmp(a, b) == 0 }
         return false
     }
     // A float box compares by VALUE against ANOTHER FLOAT only - this is what
@@ -2291,7 +1964,7 @@ function pyACompare(a, b) {
         if (a > b) { return 1 }
         return 0
     }
-    if (pyIsBig(a) && pyIsBig(b)) { return pyABigCmp(a, b) }
+    if (pyIsBig(a) && pyIsBig(b)) { return rtABigCmp(a, b) }
     var an = pyNum(a)
     var bn = pyNum(b)
     if (an !== an || bn !== bn) { return 2 }
@@ -2312,7 +1985,7 @@ function pyAEqual(x, y) {
     // that arm, bigint case included, so a bool operand goes straight there.
     if (typeof x == "boolean" || typeof y == "boolean") { return pyEqual(x, y) }
     if (pyIsBig(x)) {
-        if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
+        if (pyIsBig(y)) { return rtABigCmp(x, y) == 0 }
         if (pyIsFlo(y)) { return pyABigEqFloat(x, pyNum(y)) }
         if (pyIsNum(y)) { return pyABigEqFloat(x, y) }
         return false
@@ -2333,7 +2006,7 @@ function pyAEqual(x, y) {
 // arbitrary precision INT, so 10**28 / 1 has to be the float 1e+28 where pyNum
 // (rt.toNumber) answers NaN for one.
 function pyAToF(v) {
-    if (pyIsBig(v)) { return parseFloat(pyABigStr(v)) }
+    if (pyIsBig(v)) { return parseFloat(rtABigStr(v)) }
     return pyNum(v)
 }
 
@@ -2406,7 +2079,7 @@ function pyAPromote(op, l, r) {
     if (y === null) { return out }
     var v = pyABigBin(op, x, y)
     if (v === null) { return out }
-    out = pyABigNarrow(v)
+    out = rtABigNarrow(v)
     return out
 }
 
@@ -2758,7 +2431,7 @@ function js_pybin(opv, l, r) {
             if (br !== null) {
                 var bb = pyABitBin(op, bl, br)
                 if (bb === null) { pyFail("negative shift count") }
-                return pyABigNarrow(bb)
+                return rtABigNarrow(bb)
             }
         }
         // Not two ints: a user class gets its __and__ / __lshift__ chance (which
@@ -2785,12 +2458,12 @@ function js_pybin(opv, l, r) {
     var bp = pyABigPair(l, r)
     if (bp !== null) {
         var bv = pyABigBin(op, bp["x"], bp["y"])
-        if (bv !== null) { return pyABigNarrow(bv) }
+        if (bv !== null) { return rtABigNarrow(bv) }
         // The ORDER comparisons need the same promotion: pyACompare's big arm is
         // pyABigArith's, so a big meeting a plain int reached pyNum, answered NaN
         // and made every relation false.
         if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=") {
-            var bc = pyABigCmp(bp["x"], bp["y"])
+            var bc = rtABigCmp(bp["x"], bp["y"])
             if (op == "<") { return bc < 0 }
             if (op == ">") { return bc > 0 }
             if (op == "<=") { return bc <= 0 }
@@ -2856,14 +2529,14 @@ function js_pybin(opv, l, r) {
     // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int.
     // ...and a Python int is ARBITRARY PRECISION, so 10**30 is
     // 1000000000000000000000000000000, not the double 1e+30 this used to fold.
-    // pyABigNarrow hands back a plain number whenever it still fits, so nothing
+    // rtABigNarrow hands back a plain number whenever it still fits, so nothing
     // below 2^53 changes shape.
     if (op == "**") {
         var ex = pyNum(r)
         if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
         if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
             var bl = pyABigOperand(l)
-            if (bl !== null) { return pyABigNarrow(pyABigPow(bl, ex)) }
+            if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
         }
         return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
     }
@@ -2902,11 +2575,11 @@ function js_pyunary(opv, v) {
         // hot path is still the floor's own operator.
         if (pyABitIsSmall(v)) { return ~pyNum(v) }
         var bv = pyABigOperand(v)
-        if (bv !== null) { return pyABigNarrow(pyABitNot(bv)) }
+        if (bv !== null) { return rtABigNarrow(pyABitNot(bv)) }
         return ~pyNum(v)
     }
     if (pyIsCplx(v)) { return pyNewCplx(-pyCplxRe(v), -pyCplxIm(v)) }
-    if (pyIsBig(v)) { return pyABigNeg(v) }
+    if (pyIsBig(v)) { return rtABigNeg(v) }
     if (pyIsFlo(v)) { return pyMkFlo(pyFloNegate(v["__flo"])) }
     return -pyNum(v)
 }
@@ -2963,7 +2636,7 @@ function js_pyabs(v) {
         return pyMkFlo(f)
     }
     if (pyIsBig(v)) {
-        if (pyABigCmp(v, pyABigFromNum(0)) < 0) { return pyABigNeg(v) }
+        if (rtABigCmp(v, rtABigFromNum(0)) < 0) { return rtABigNeg(v) }
         return v
     }
     var n = pyNum(v)
@@ -3428,16 +3101,16 @@ function pyRadixOf(n, base, prefix) {
     var sign = ""
     var v = anytype
     v = pyABigOperand(n)                        // Promotes a plain int too.
-    if (pyABigCmp(v, pyABigFromNum(0)) < 0) {
+    if (rtABigCmp(v, rtABigFromNum(0)) < 0) {
         sign = "-"
-        v = pyABigNeg(v)
+        v = rtABigNeg(v)
     }
     var digits = "0123456789abcdef"
     var out = ""
-    var bb = pyABigFromNum(base)
-    if (pyABigIsZero(v)) { out = "0" }
-    while (!pyABigIsZero(v)) {
-        out = digits.charAt(Math.trunc(pyNum(pyABigNarrow(pyABigRem(v, bb))))) + out
+    var bb = rtABigFromNum(base)
+    if (rtABigIsZero(v)) { out = "0" }
+    while (!rtABigIsZero(v)) {
+        out = digits.charAt(Math.trunc(pyNum(rtABigNarrow(pyABigRem(v, bb))))) + out
         v = pyABigQuo(v, bb)
     }
     return sign + prefix + out
@@ -3454,16 +3127,16 @@ function pyAIntOp(op, l, r) {
     if (pyIsBig(l) || pyIsBig(r)) {
         var bl = pyABigOperand(l)
         var br = pyABigOperand(r)
-        if (bl !== null && br !== null && !pyABigIsZero(br)) {
-            if (op == "*") { return pyABigNarrow(pyABigMul(bl, br)) }
+        if (bl !== null && br !== null && !rtABigIsZero(br)) {
+            if (op == "*") { return rtABigNarrow(rtABigMul(bl, br)) }
             var q = pyABigQuo(bl, br)
             var m = pyABigRem(bl, br)
-            if (pyABigCmp(m, pyABigFromNum(0)) < 0) {
-                m = pyABigAdd(m, br)          // The divisor is positive here.
-                q = pyABigSub(q, pyABigFromNum(1))
+            if (rtABigCmp(m, rtABigFromNum(0)) < 0) {
+                m = rtABigAdd(m, br)          // The divisor is positive here.
+                q = rtABigSub(q, rtABigFromNum(1))
             }
-            if (op == "//") { return pyABigNarrow(q) }
-            return pyABigNarrow(m)
+            if (op == "//") { return rtABigNarrow(q) }
+            return rtABigNarrow(m)
         }
     }
     if (op == "*") { return pyNum(l) * pyNum(r) }
@@ -3523,7 +3196,7 @@ function js_pypow(args) {
     if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
     if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
         var bl = pyABigOperand(l)
-        if (bl !== null) { return pyABigNarrow(pyABigPow(bl, ex)) }
+        if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
     }
     return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
 }
@@ -3903,13 +3576,13 @@ function pyBPctCount(f) {
 // A conversion operand as a double, unwrapping the float box and a big.
 function pyBPctNum(v) {
     if (pyIsFlo(v)) { return v["__flo"] }
-    if (pyIsBig(v)) { return parseFloat(pyABigStr(v)) }
+    if (pyIsBig(v)) { return parseFloat(rtABigStr(v)) }
     return pyNum(v)
 }
 
 // %d: the integer part, and an arbitrary precision int stays exact.
 function pyBPctDigits(v) {
-    if (pyIsBig(v)) { return pyABigStr(v) }
+    if (pyIsBig(v)) { return rtABigStr(v) }
     return "" + Math.trunc(pyBPctNum(v))
 }
 
@@ -7795,10 +7468,10 @@ function pyMFactorial(n) {
         while (i <= n) { r = r * i; i = i + 1 }
         return r
     }
-    var acc = pyABigFromNum(1)
+    var acc = rtABigFromNum(1)
     var k = 2
-    while (k <= n) { acc = pyABigMul(acc, pyABigFromNum(k)); k = k + 1 }
-    return pyABigNarrow(acc)
+    while (k <= n) { acc = rtABigMul(acc, rtABigFromNum(k)); k = k + 1 }
+    return rtABigNarrow(acc)
 }
 
 function pyMathCall(name, args) {

@@ -5050,7 +5050,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The reconstruction can ROUND: 2^53+1 accumulates to 2^53, which is
             // <= bigMaxNum, so the box must not leave on the reconstruction alone.
             // bigFromNum is exact, so a mismatch means the double is not the value.
-            // (Go: pyBigNarrow's IsInt64 test; layer 2: pyABigNarrow's own rebuild.)
+            // (Go: pyBigNarrow's IsInt64 test; layer 2: rtABigNarrow's own rebuild.)
             if (v <= bigMaxNum && magCmp(bigFromNum(v).limbs, a.limbs) == 0) { return (a.sign < 0) ? -v : v }
         }
         return a

@@ -3982,7 +3982,7 @@ func rubyToF(v interface{}) float64 {
 var rubyBigMax = big.NewInt(9007199254740992)
 
 // rubyBigNarrow is the only exit from the boxed world, and the twin of bigOut in
-// ruby-interpreter.abnf and rbABigNarrow in languages/lib/ruby-rt.metajs: a value
+// ruby-interpreter.abnf and rtABigNarrow in languages/lib/runtime.metajs: a value
 // that still fits the exactly representable range comes back as a plain number,
 // so only what GENUINELY needs arbitrary precision carries the shape.
 func (rt *jsrt) rubyBigNarrow(x *big.Int) interface{} {
@@ -4870,7 +4870,7 @@ func bigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
 // itself. A float box, a non-integral double and anything past 2^53 (where the
 // double is already an approximation) answer false, so `**` falls back to the
 // double path rather than inventing precision the operand never had.
-// pyABigFromNum in languages/lib/python-rt.metajs is the same test.
+// pyABigOperand in languages/lib/python-rt.metajs is the same test.
 func pyBigOperand(v interface{}) (*big.Int, bool) {
 	switch t := v.(type) {
 	case *jsBigInt:

@@ -2402,7 +2402,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the largest integer a double still counts exactly. This is the same shape
     // python-interpreter.abnf uses, and deliberately so: the three other Ruby
     // engines (abnf/jsrt.go's *jsBigInt, ruby-to-llvm-ir.abnf's js_bigint literal
-    // and languages/lib/ruby-rt.metajs's rbABig* family) must agree with it
+    // and languages/lib/ruby-rt.metajs's rbABig* family over runtime.metajs's rtABig*)
+    // must agree with it
     // digit for digit, and ./test.sh --cross diffs two of them every run.
     var bigBase = 10000000
     var bigMaxNum = 9007199254740992

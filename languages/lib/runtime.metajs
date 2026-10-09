@@ -1128,6 +1128,345 @@ function rtBigStr(limbs) {
     return out
 }
 
+// ================================ Integer at ARBITRARY PRECISION (python, ruby) ===
+//
+// A big is {neg: <bool>, limbs: [...]}: the magnitude a LITTLE-ENDIAN array of
+// base-10000 limbs (the representation of rtBigFromNum above) plus the sign.
+// Zero is canonical, limbs == [0] and neg == false. Every limb product stays
+// below 1e8, which a double holds exactly. A language tags its own box, so the
+// one hook is the constructor:
+//
+//     rtkABigNew(neg, limbs)   normalise limbs and build the language's box
+//
+// Schoolbook multiplication, and division by a per-limb binary search for the
+// quotient digit; the operands are integer literals and their results, so this
+// is small and exact rather than fast.
+
+var RT_BIT_AND = 0
+var RT_BIT_OR = 1
+var RT_BIT_XOR = 2
+var RT_BIT_ANDNOT = 3
+
+function rtABigNorm(limbs) {
+    var out = limbs
+    while (out.length > 1 && out[out.length - 1] == 0) { out.pop() }
+    if (out.length == 0) { out.push(0) }
+    return out
+}
+
+function rtABigIsZero(v) {
+    var ls = v["limbs"]
+    return ls.length == 1 && ls[0] == 0
+}
+
+// |a| <=> |b| over two NORMALIZED limb arrays.
+function rtABigCmpMag(a, b) {
+    if (a.length != b.length) { return a.length < b.length ? -1 : 1 }
+    var i = a.length - 1
+    while (i >= 0) {
+        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1 }
+        i = i - 1
+    }
+    return 0
+}
+
+// The signed comparison - Go's big.Int.Cmp.
+function rtABigCmp(x, y) {
+    if (x["neg"] != y["neg"]) { return x["neg"] ? -1 : 1 }
+    var c = rtABigCmpMag(x["limbs"], y["limbs"])
+    if (x["neg"]) { return -c }
+    return c
+}
+
+function rtABigAddMag(a, b) {
+    var out = []
+    var carry = 0
+    var n = a.length
+    if (b.length > n) { n = b.length }
+    var i = 0
+    while (i < n) {
+        var av = i < a.length ? a[i] : 0
+        var bv = i < b.length ? b[i] : 0
+        var s = av + bv + carry
+        if (s >= 10000) {
+            carry = 1
+            s = s - 10000
+        } else {
+            carry = 0
+        }
+        out.push(s)
+        i = i + 1
+    }
+    if (carry > 0) { out.push(carry) }
+    return out
+}
+
+// |a| - |b|, and the caller guarantees |a| >= |b|.
+function rtABigSubMag(a, b) {
+    var out = []
+    var borrow = 0
+    var i = 0
+    while (i < a.length) {
+        var bv = i < b.length ? b[i] : 0
+        var s = a[i] - bv - borrow
+        if (s < 0) {
+            s = s + 10000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        out.push(s)
+        i = i + 1
+    }
+    return rtABigNorm(out)
+}
+
+// A magnitude times a single limb (0..9999), as a FRESH array: the division
+// below needs the multiplicand left alone, unlike the in-place rtBigMulSmall.
+function rtABigMulSmall(limbs, k) {
+    var out = []
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        out.push(v - carry * 10000)
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        out.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return rtABigNorm(out)
+}
+
+function rtABigNeg(x) {
+    var ls = []
+    var i = 0
+    while (i < x["limbs"].length) {
+        ls.push(x["limbs"][i])
+        i = i + 1
+    }
+    return rtkABigNew(!x["neg"], ls)
+}
+
+function rtABigAdd(x, y) {
+    if (x["neg"] == y["neg"]) { return rtkABigNew(x["neg"], rtABigAddMag(x["limbs"], y["limbs"])) }
+    var c = rtABigCmpMag(x["limbs"], y["limbs"])
+    if (c == 0) { return rtkABigNew(false, [0]) }
+    if (c > 0) { return rtkABigNew(x["neg"], rtABigSubMag(x["limbs"], y["limbs"])) }
+    return rtkABigNew(y["neg"], rtABigSubMag(y["limbs"], x["limbs"]))
+}
+
+function rtABigSub(x, y) { return rtABigAdd(x, rtABigNeg(y)) }
+
+function rtABigMul(x, y) {
+    var a = x["limbs"]
+    var b = y["limbs"]
+    var out = []
+    var z = 0
+    while (z < a.length + b.length) {
+        out.push(0)
+        z = z + 1
+    }
+    var i = 0
+    while (i < a.length) {
+        var carry = 0
+        var j = 0
+        while (j < b.length) {
+            var cur = out[i + j] + a[i] * b[j] + carry
+            carry = Math.floor(cur / 10000)
+            out[i + j] = cur - carry * 10000
+            j = j + 1
+        }
+        var k = i + b.length
+        while (carry > 0) {
+            var cur2 = out[k] + carry
+            carry = Math.floor(cur2 / 10000)
+            out[k] = cur2 - carry * 10000
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return rtkABigNew(x["neg"] != y["neg"], rtABigNorm(out))
+}
+
+// |a| divided by |b| -> {q, r}, both NORMALIZED limb arrays. Schoolbook long
+// division a limb at a time; the quotient limb is found by binary search over
+// 0..9999 because there is no wide-multiply primitive to estimate it with.
+// The caller has already rejected a zero divisor.
+function rtABigDivMag(a, b) {
+    var qms = []
+    var rem = [0]
+    var i = a.length - 1
+    while (i >= 0) {
+        // rem = rem * 10000 + a[i], which in little-endian is a PREPENDED limb.
+        var shifted = [a[i]]
+        if (!(rem.length == 1 && rem[0] == 0)) {
+            var t = 0
+            while (t < rem.length) {
+                shifted.push(rem[t])
+                t = t + 1
+            }
+        }
+        rem = rtABigNorm(shifted)
+        var lo = 0
+        var hi = 9999
+        var d = 0
+        while (lo <= hi) {
+            var mid = Math.floor((lo + hi) / 2)
+            if (rtABigCmpMag(rtABigMulSmall(b, mid), rem) <= 0) {
+                d = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        qms.push(d)
+        rem = rtABigSubMag(rem, rtABigMulSmall(b, d))
+        i = i - 1
+    }
+    // qms came out most-significant first; the representation is little-endian.
+    var q = []
+    var m = qms.length - 1
+    while (m >= 0) {
+        q.push(qms[m])
+        m = m - 1
+    }
+    return {q: rtABigNorm(q), r: rtABigNorm(rem)}
+}
+
+// An INTEGRAL, FINITE double as an exact bignum - Go's big.NewFloat(f).Int(nil).
+// An integral double above 2^53 is a multiple of 2, so halving it down to a 53
+// bit mantissa and doubling the bignum back up loses nothing (the same argument
+// rtExactDec makes).
+function rtABigFromNum(n) {
+    var neg = n < 0
+    var m = Math.abs(n)
+    var e = 0
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = []
+    var x = m
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    var ls = limbs
+    var k = 0
+    while (k < e) {
+        ls = rtABigMulSmall(ls, 2)
+        k = k + 1
+    }
+    return rtkABigNew(neg, ls)
+}
+
+// Go: rt.pyBigNarrow / rt.rubyBigNarrow, and the interpreter grammars' bigOut. A
+// big that still fits in the exactly representable range comes back as a plain
+// number, so only the values that GENUINELY need arbitrary precision stay boxed.
+// The reconstruction can ROUND when the true value is past 2^53, so the answer is
+// checked by rebuilding the limbs from it - rtABigFromNum is exact, so a mismatch
+// means the double is not the value.
+function rtABigNarrow(x) {
+    var limbs = x["limbs"]
+    if (limbs.length > 4) { return x }
+    var v = 0
+    var i = limbs.length - 1
+    while (i >= 0) {
+        v = v * 10000 + limbs[i]
+        i = i - 1
+    }
+    if (v > 9007199254740992) { return x }
+    if (rtABigCmpMag(rtABigFromNum(v)["limbs"], limbs) != 0) { return x }
+    if (x["neg"]) { return 0 - v }
+    return v
+}
+
+// Go: big.Int.Exp with a nil modulus, and the interpreter grammars' bigPow. The
+// exponent is capped by the caller, so the linear loop is what the other engines
+// use too.
+function rtABigPow(x, n) {
+    var acc = rtABigFromNum(1)
+    var i = 0
+    while (i < n) {
+        acc = rtABigMul(acc, x)
+        i = i + 1
+    }
+    return acc
+}
+
+// Go: big.Int.String().
+function rtABigStr(v) {
+    var out = rtBigStr(v["limbs"])
+    if (v["neg"]) { return "-" + out }
+    return out
+}
+
+// ----- the bit view the bitwise operators work on --------------------------
+//
+// A non-negative magnitude as a LITTLE-ENDIAN array of single bits; each
+// language maps a negative operand onto these through its own infinite
+// two's complement identities. rtABitsTrim drops high zero bits IN PLACE.
+function rtABitsTrim(bits) {
+    while (bits.length > 0 && bits[bits.length - 1] == 0) { bits.pop() }
+    return bits
+}
+
+function rtABitsOp(kind, a, b) {
+    var n = a.length
+    if (b.length > n) { n = b.length }
+    var out = []
+    var i = 0
+    while (i < n) {
+        var x = i < a.length ? a[i] : 0
+        var y = i < b.length ? b[i] : 0
+        var r = 0
+        if (kind == RT_BIT_AND) {
+            if (x == 1 && y == 1) { r = 1 }
+        } else if (kind == RT_BIT_OR) {
+            if (x == 1 || y == 1) { r = 1 }
+        } else if (kind == RT_BIT_XOR) {
+            if (x != y) { r = 1 }
+        } else {
+            if (x == 1 && y == 0) { r = 1 }
+        }
+        out.push(r)
+        i = i + 1
+    }
+    return rtABitsTrim(out)
+}
+
+function rtABitsShl(bits, k) {
+    if (bits.length == 0) { return [] }
+    var out = []
+    var i = 0
+    while (i < k) {
+        out.push(0)
+        i = i + 1
+    }
+    var j = 0
+    while (j < bits.length) {
+        out.push(bits[j])
+        j = j + 1
+    }
+    return out
+}
+
+function rtABitsShr(bits, k) {
+    var out = []
+    var i = k
+    while (i < bits.length) {
+        out.push(bits[i])
+        i = i + 1
+    }
+    return rtABitsTrim(out)
+}
+
 // The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
 function rtExactDec(a) {
     if (a == 0) { return {i: "0", f: ""} }

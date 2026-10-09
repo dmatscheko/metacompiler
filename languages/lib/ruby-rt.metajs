@@ -258,132 +258,21 @@ function rbSym(name) {
 // Sign and magnitude, the magnitude a little endian array of base 10000 limbs -
 // the same representation runtime.metajs's bignum section already uses for the exact
 // decimal expansion of a double, so rtBigStr renders one unchanged. A limb
-// product stays below 1e8, well inside a double's exact range.
+// product stays below 1e8, well inside a double's exact range. The limb
+// arithmetic is runtime.metajs's rtABig* layer, shared with python; this file
+// supplies the {__bint} constructor rtkABigNew.
 //
 // What is deliberately NOT here, and is stated rather than hidden: a big meeting
 // a Rational, a Float or a Complex PROMOTES THROUGH THE DOUBLE (rbToF), so
 // `(2**70) + Rational(1,2)` is approximate where MRI keeps it exact. Modelling
 // that needs a Rational whose parts are bigs, which is a second value model.
 
-function rbABigNorm(limbs) {
-    var out = limbs
-    while (out.length > 1 && out[out.length - 1] == 0) { out.pop() }
-    if (out.length == 0) { out.push(0) }
-    return out
-}
-
-function rbABigNew(neg, limbs) {
-    var ls = rbABigNorm(limbs)
+// The rtkABigNew hook of runtime.metajs's rtABig* layer: a normalised {__bint}.
+function rtkABigNew(neg, limbs) {
+    var ls = rtABigNorm(limbs)
     var n = neg
     if (ls.length == 1 && ls[0] == 0) { n = false }
     return {__bint: true, neg: n, limbs: ls}
-}
-
-function rbABigIsZero(v) {
-    var ls = v["limbs"]
-    return ls.length == 1 && ls[0] == 0
-}
-
-// |a| <=> |b| over two NORMALIZED limb arrays.
-function rbABigCmpMag(a, b) {
-    if (a.length != b.length) {
-        if (a.length < b.length) { return 0 - 1 }
-        return 1
-    }
-    var i = a.length - 1
-    while (i >= 0) {
-        if (a[i] != b[i]) {
-            if (a[i] < b[i]) { return 0 - 1 }
-            return 1
-        }
-        i = i - 1
-    }
-    return 0
-}
-
-// The signed comparison - Go's big.Int.Cmp.
-function rbABigCmp(x, y) {
-    if (x["neg"] != y["neg"]) {
-        if (x["neg"]) { return 0 - 1 }
-        return 1
-    }
-    var c = rbABigCmpMag(x["limbs"], y["limbs"])
-    if (x["neg"]) { return -c }
-    return c
-}
-
-function rbABigAddMag(a, b) {
-    var out = []
-    var carry = 0
-    var n = a.length
-    if (b.length > n) { n = b.length }
-    var i = 0
-    while (i < n) {
-        var av = i < a.length ? a[i] : 0
-        var bv = i < b.length ? b[i] : 0
-        var s = av + bv + carry
-        if (s >= 10000) {
-            carry = 1
-            s = s - 10000
-        } else {
-            carry = 0
-        }
-        out.push(s)
-        i = i + 1
-    }
-    if (carry > 0) { out.push(carry) }
-    return out
-}
-
-// |a| - |b|, and the caller guarantees |a| >= |b|.
-function rbABigSubMag(a, b) {
-    var out = []
-    var borrow = 0
-    var i = 0
-    while (i < a.length) {
-        var bv = i < b.length ? b[i] : 0
-        var s = a[i] - bv - borrow
-        if (s < 0) {
-            s = s + 10000
-            borrow = 1
-        } else {
-            borrow = 0
-        }
-        out.push(s)
-        i = i + 1
-    }
-    return rbABigNorm(out)
-}
-
-// A magnitude times a single limb (0..9999), as a FRESH array: the division
-// below needs the multiplicand left alone, unlike rtBigMulSmall, which is
-// in-place and is what the float formatter wants.
-function rbABigMulSmall(limbs, k) {
-    var out = []
-    var carry = 0
-    var i = 0
-    while (i < limbs.length) {
-        var v = limbs[i] * k + carry
-        carry = Math.floor(v / 10000)
-        out.push(v - carry * 10000)
-        i = i + 1
-    }
-    while (carry > 0) {
-        var c2 = Math.floor(carry / 10000)
-        out.push(carry - c2 * 10000)
-        carry = c2
-    }
-    return rbABigNorm(out)
-}
-
-function rbABigNeg(x) {
-    var ls = []
-    var i = 0
-    while (i < x["limbs"].length) {
-        ls.push(x["limbs"][i])
-        i = i + 1
-    }
-    return rbABigNew(!x["neg"], ls)
 }
 
 function rbABigAbs(x) {
@@ -393,93 +282,7 @@ function rbABigAbs(x) {
         ls.push(x["limbs"][i])
         i = i + 1
     }
-    return rbABigNew(false, ls)
-}
-
-function rbABigAdd(x, y) {
-    if (x["neg"] == y["neg"]) { return rbABigNew(x["neg"], rbABigAddMag(x["limbs"], y["limbs"])) }
-    var c = rbABigCmpMag(x["limbs"], y["limbs"])
-    if (c == 0) { return rbABigNew(false, [0]) }
-    if (c > 0) { return rbABigNew(x["neg"], rbABigSubMag(x["limbs"], y["limbs"])) }
-    return rbABigNew(y["neg"], rbABigSubMag(y["limbs"], x["limbs"]))
-}
-
-function rbABigSub(x, y) { return rbABigAdd(x, rbABigNeg(y)) }
-
-function rbABigMul(x, y) {
-    var a = x["limbs"]
-    var b = y["limbs"]
-    var out = []
-    var z = 0
-    while (z < a.length + b.length) {
-        out.push(0)
-        z = z + 1
-    }
-    var i = 0
-    while (i < a.length) {
-        var carry = 0
-        var j = 0
-        while (j < b.length) {
-            var cur = out[i + j] + a[i] * b[j] + carry
-            carry = Math.floor(cur / 10000)
-            out[i + j] = cur - carry * 10000
-            j = j + 1
-        }
-        var k = i + b.length
-        while (carry > 0) {
-            var cur2 = out[k] + carry
-            carry = Math.floor(cur2 / 10000)
-            out[k] = cur2 - carry * 10000
-            k = k + 1
-        }
-        i = i + 1
-    }
-    return rbABigNew(x["neg"] != y["neg"], rbABigNorm(out))
-}
-
-// |a| divided by |b| -> {q, r}, both NORMALIZED limb arrays. Schoolbook long
-// division a limb at a time; the quotient limb is found by binary search over
-// 0..9999 because there is no wide-multiply primitive to estimate it with. The
-// caller has already rejected a zero divisor.
-function rbABigDivMag(a, b) {
-    var qms = []
-    var rem = [0]
-    var i = a.length - 1
-    while (i >= 0) {
-        // rem = rem * 10000 + a[i], which in little-endian is a PREPENDED limb.
-        var shifted = [a[i]]
-        if (!(rem.length == 1 && rem[0] == 0)) {
-            var t = 0
-            while (t < rem.length) {
-                shifted.push(rem[t])
-                t = t + 1
-            }
-        }
-        rem = rbABigNorm(shifted)
-        var lo = 0
-        var hi = 9999
-        var d = 0
-        while (lo <= hi) {
-            var mid = Math.floor((lo + hi) / 2)
-            if (rbABigCmpMag(rbABigMulSmall(b, mid), rem) <= 0) {
-                d = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-        qms.push(d)
-        rem = rbABigSubMag(rem, rbABigMulSmall(b, d))
-        i = i - 1
-    }
-    // qms came out most-significant first; the representation is little-endian.
-    var q = []
-    var m = qms.length - 1
-    while (m >= 0) {
-        q.push(qms[m])
-        m = m - 1
-    }
-    return {q: rbABigNorm(q), r: rbABigNorm(rem)}
+    return rtkABigNew(false, ls)
 }
 
 // Ruby FLOORS: -7 / 2 is -4 and -7 % 3 is 2. The magnitudes give the TRUNCATED
@@ -487,20 +290,13 @@ function rbABigDivMag(a, b) {
 // not already carry the DIVISOR's sign - the same correction rbIDiv/rbIMod make
 // on doubles, and the same one bigDivMod makes in ruby-interpreter.abnf.
 function rbABigDivMod(x, y) {
-    var dm = rbABigDivMag(x["limbs"], y["limbs"])
-    var q = rbABigNew(x["neg"] != y["neg"], dm["q"])
-    var r = rbABigNew(x["neg"], dm["r"])
-    if (!rbABigIsZero(r) && r["neg"] != y["neg"]) {
-        return {q: rbABigSub(q, rbABigFromNum(1)), r: rbABigAdd(r, y)}
+    var dm = rtABigDivMag(x["limbs"], y["limbs"])
+    var q = rtkABigNew(x["neg"] != y["neg"], dm["q"])
+    var r = rtkABigNew(x["neg"], dm["r"])
+    if (!rtABigIsZero(r) && r["neg"] != y["neg"]) {
+        return {q: rtABigSub(q, rtABigFromNum(1)), r: rtABigAdd(r, y)}
     }
     return {q: q, r: r}
-}
-
-// Go: big.Int.String().
-function rbABigStr(v) {
-    var out = rtBigStr(v["limbs"])
-    if (v["neg"]) { return "-" + out }
-    return out
 }
 
 // Go: big.Int.SetString(text, 0). The one caller is the js_bigint literal the
@@ -535,48 +331,7 @@ function rbABigFromStr(text) {
         limbs.push(parseInt(digits.substring(from, end), 10))
         end = from
     }
-    return rbABigNew(neg, limbs)
-}
-
-// An INTEGRAL, FINITE double as an exact big - Go's big.NewFloat(f).Int(nil). An
-// integral double above 2^53 is a multiple of two, so halving it down to a 53 bit
-// mantissa and doubling the big back up loses nothing (the argument rtExactDec
-// makes for the same operation).
-function rbABigFromNum(n) {
-    var neg = n < 0
-    var m = Math.abs(n)
-    var e = 0
-    while (m > 9007199254740992) {
-        m = m / 2
-        e = e + 1
-    }
-    var ls = rtBigFromNum(m)
-    var k = 0
-    while (k < e) {
-        ls = rbABigMulSmall(ls, 2)
-        k = k + 1
-    }
-    return rbABigNew(neg, ls)
-}
-
-// The only exit from the boxed world, and the twin of bigOut in
-// ruby-interpreter.abnf and rubyBigNarrow in abnf/jsrt.go. The reconstruction can
-// ROUND when the true value is past 2^53, so the candidate is checked by
-// rebuilding the limbs from it - rbABigFromNum is exact, so a mismatch means the
-// double is not the value.
-function rbABigNarrow(x) {
-    var limbs = x["limbs"]
-    if (limbs.length > 4) { return x }
-    var v = 0
-    var i = limbs.length - 1
-    while (i >= 0) {
-        v = v * 10000 + limbs[i]
-        i = i - 1
-    }
-    if (v > 9007199254740992) { return x }
-    if (rbABigCmpMag(rbABigFromNum(v)["limbs"], limbs) != 0) { return x }
-    if (x["neg"]) { return -v }
-    return v
+    return rtkABigNew(neg, limbs)
 }
 
 // An EXACT big for an Integer operand: a big as itself, an integral double
@@ -587,8 +342,8 @@ function rbABigNarrow(x) {
 function rbABigOperand(v) {
     if (rbIsBig(v)) { return v }
     if (typeof v == "boolean") {
-        if (v) { return rbABigFromNum(1) }
-        return rbABigFromNum(0)
+        if (v) { return rtABigFromNum(1) }
+        return rtABigFromNum(0)
     }
     if (typeof v == "number") {
         // A plain double past 2^53 lifts EXACTLY, which is where this differs
@@ -597,9 +352,9 @@ function rbABigOperand(v) {
         // Integer and a large one can only have come from Float#to_i or float
         // arithmetic, where MRI's answer is the exact integer value OF THAT
         // DOUBLE. So `(1e30).to_i + 1` is 1000000000000000019884624838657, as in
-        // MRI. The finiteness test is not optional: rbABigFromNum halves until it
+        // MRI. The finiteness test is not optional: rtABigFromNum halves until it
         // reaches the mantissa and an infinity never gets there.
-        if (v == Math.trunc(v) && v - v == 0) { return rbABigFromNum(v) }
+        if (v == Math.trunc(v) && v - v == 0) { return rtABigFromNum(v) }
     }
     return null
 }
@@ -614,7 +369,7 @@ function rbABigCmpOf(v) {
         var f = v["f"]
         if (f - f != 0) { return null }
         if (Math.trunc(f) != f) { return null }
-        return rbABigFromNum(f)
+        return rtABigFromNum(f)
     }
     return rbABigOperand(v)
 }
@@ -627,7 +382,7 @@ function rbABigCmpOf(v) {
 function rbIntFromF(x) {
     if (x - x != 0) { return x }
     if (x <= 9007199254740992 && x >= 0 - 9007199254740992) { return x }
-    return rbABigNarrow(rbABigFromNum(x))
+    return rtABigNarrow(rtABigFromNum(x))
 }
 
 // Both Integer operands exactly when AT LEAST ONE of them is a big. Ruby has ONE
@@ -640,16 +395,6 @@ function rbABigPair(l, r) {
     var y = rbABigOperand(r)
     if (y == null) { return null }
     return {x: x, y: y}
-}
-
-function rbABigPow(x, n) {
-    var acc = rbABigFromNum(1)
-    var i = 0
-    while (i < n) {
-        acc = rbABigMul(acc, x)
-        i = i + 1
-    }
-    return acc
 }
 
 // ----- the BITWISE operators, at arbitrary precision -------------------------
@@ -674,10 +419,6 @@ function rbABigPow(x, n) {
 // arithmetic step and `0 - 9007199254740992` is a subtraction at every one.
 var RB_MIN53 = 0 - 9007199254740992
 
-var RB_BIT_AND = 0
-var RB_BIT_OR = 1
-var RB_BIT_XOR = 2
-var RB_BIT_ANDNOT = 3
 var RB_SHIFT_MAX = 1048576
 
 function rbABitsTrim(bits) {
@@ -750,66 +491,16 @@ function rbABitsInc(bits) {
     return out
 }
 
-function rbABitsOp(kind, a, b) {
-    var n = a.length
-    if (b.length > n) { n = b.length }
-    var out = []
-    var i = 0
-    while (i < n) {
-        var x = i < a.length ? a[i] : 0
-        var y = i < b.length ? b[i] : 0
-        var r = 0
-        if (kind == RB_BIT_AND) {
-            if (x == 1 && y == 1) { r = 1 }
-        } else if (kind == RB_BIT_OR) {
-            if (x == 1 || y == 1) { r = 1 }
-        } else if (kind == RB_BIT_XOR) {
-            if (x != y) { r = 1 }
-        } else {
-            if (x == 1 && y == 0) { r = 1 }
-        }
-        out.push(r)
-        i = i + 1
-    }
-    return rbABitsTrim(out)
-}
-
-function rbABitsShl(bits, k) {
-    if (bits.length == 0) { return [] }
-    var out = []
-    var i = 0
-    while (i < k) {
-        out.push(0)
-        i = i + 1
-    }
-    var j = 0
-    while (j < bits.length) {
-        out.push(bits[j])
-        j = j + 1
-    }
-    return out
-}
-
-function rbABitsShr(bits, k) {
-    var out = []
-    var i = k
-    while (i < bits.length) {
-        out.push(bits[i])
-        i = i + 1
-    }
-    return rbABitsTrim(out)
-}
-
-// A bit array back to a big, by the schoolbook doubling rbABigMulSmall already is.
+// A bit array back to a big, by the schoolbook doubling rtABigMulSmall already is.
 function rbABigFromBits(neg, bits) {
     var limbs = [0]
     var j = bits.length - 1
     while (j >= 0) {
-        limbs = rbABigMulSmall(limbs, 2)
-        if (bits[j] == 1) { limbs = rbABigAddMag(limbs, [1]) }
+        limbs = rtABigMulSmall(limbs, 2)
+        if (bits[j] == 1) { limbs = rtABigAddMag(limbs, [1]) }
         j = j - 1
     }
-    return rbABigNew(neg, limbs)
+    return rtkABigNew(neg, limbs)
 }
 
 // A shift count as a plain number; anything absurd answers past the cap.
@@ -830,8 +521,8 @@ function rbABitsToNum(bits) {
 // opposite shift in Ruby (`1 << -2` is 0, `4 >> -2` is 16); null is "no exact
 // form here", which only an absurd shift count reaches.
 function rbABigBits(op, x, y) {
-    var an = x["neg"] && !rbABigIsZero(x)
-    var bn = y["neg"] && !rbABigIsZero(y)
+    var an = x["neg"] && !rtABigIsZero(x)
+    var bn = y["neg"] && !rtABigIsZero(y)
     var a = rbABitsOfMag(x["limbs"])
     var b = rbABitsOfMag(y["limbs"])
     if (op == "<<" || op == ">>") {
@@ -839,28 +530,28 @@ function rbABigBits(op, x, y) {
         if (bn) { left = !left }
         var k = rbABitsToNum(b)
         if (k > RB_SHIFT_MAX) { return null }
-        if (left) { return rbABigFromBits(an, rbABitsShl(a, k)) }
-        if (!an) { return rbABigFromBits(false, rbABitsShr(a, k)) }
+        if (left) { return rbABigFromBits(an, rtABitsShl(a, k)) }
+        if (!an) { return rbABigFromBits(false, rtABitsShr(a, k)) }
         // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
-        return rbABigFromBits(true, rbABitsInc(rbABitsShr(rbABitsDec(a), k)))
+        return rbABigFromBits(true, rbABitsInc(rtABitsShr(rbABitsDec(a), k)))
     }
     if (op == "&") {
-        if (!an && !bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_AND, a, b)) }
-        if (an && !bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_ANDNOT, b, rbABitsDec(a))) }
-        if (!an && bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_ANDNOT, a, rbABitsDec(b))) }
-        return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_OR, rbABitsDec(a), rbABitsDec(b))))
+        if (!an && !bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_AND, a, b)) }
+        if (an && !bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_ANDNOT, b, rbABitsDec(a))) }
+        if (!an && bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_ANDNOT, a, rbABitsDec(b))) }
+        return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_OR, rbABitsDec(a), rbABitsDec(b))))
     }
     if (op == "|") {
-        if (!an && !bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_OR, a, b)) }
-        if (an && !bn) { return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_ANDNOT, rbABitsDec(a), b))) }
-        if (!an && bn) { return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_ANDNOT, rbABitsDec(b), a))) }
-        return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_AND, rbABitsDec(a), rbABitsDec(b))))
+        if (!an && !bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_OR, a, b)) }
+        if (an && !bn) { return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_ANDNOT, rbABitsDec(a), b))) }
+        if (!an && bn) { return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_ANDNOT, rbABitsDec(b), a))) }
+        return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_AND, rbABitsDec(a), rbABitsDec(b))))
     }
     if (op == "^") {
-        if (!an && !bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_XOR, a, b)) }
-        if (an && bn) { return rbABigFromBits(false, rbABitsOp(RB_BIT_XOR, rbABitsDec(a), rbABitsDec(b))) }
-        if (an) { return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_XOR, rbABitsDec(a), b))) }
-        return rbABigFromBits(true, rbABitsInc(rbABitsOp(RB_BIT_XOR, a, rbABitsDec(b))))
+        if (!an && !bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_XOR, a, b)) }
+        if (an && bn) { return rbABigFromBits(false, rtABitsOp(RT_BIT_XOR, rbABitsDec(a), rbABitsDec(b))) }
+        if (an) { return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_XOR, rbABitsDec(a), b))) }
+        return rbABigFromBits(true, rbABitsInc(rtABitsOp(RT_BIT_XOR, a, rbABitsDec(b))))
     }
     return null
 }
@@ -868,26 +559,26 @@ function rbABigBits(op, x, y) {
 // One arithmetic step at arbitrary precision, over two ALREADY LIFTED bigs.
 // null is "no exact form", and the caller then keeps the double path it had.
 function rbABigStep(op, x, y) {
-    if (op == "+") { return rbABigNarrow(rbABigAdd(x, y)) }
-    if (op == "-") { return rbABigNarrow(rbABigSub(x, y)) }
-    if (op == "*") { return rbABigNarrow(rbABigMul(x, y)) }
+    if (op == "+") { return rtABigNarrow(rtABigAdd(x, y)) }
+    if (op == "-") { return rtABigNarrow(rtABigSub(x, y)) }
+    if (op == "*") { return rtABigNarrow(rtABigMul(x, y)) }
     if (op == "/" || op == "%") {
-        if (rbABigIsZero(y)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        if (rtABigIsZero(y)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
         var dm = rbABigDivMod(x, y)
-        if (op == "/") { return rbABigNarrow(dm["q"]) }
-        return rbABigNarrow(dm["r"])
+        if (op == "/") { return rtABigNarrow(dm["q"]) }
+        return rtABigNarrow(dm["r"])
     }
     if (op == "**") {
         if (y["neg"]) { return rbMkFlo(Math.pow(rbABigToF(x), rbABigToF(y))) }
-        var e = rbABigNarrow(y)
+        var e = rtABigNarrow(y)
         if (typeof e != "number") { return Math.pow(rbABigToF(x), rbABigToF(y)) }
         if (e > 4096) { return Math.pow(rbABigToF(x), e) }
-        return rbABigNarrow(rbABigPow(x, e))
+        return rtABigNarrow(rtABigPow(x, e))
     }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
         var bb = rbABigBits(op, x, y)
         if (bb == null) { return null }
-        return rbABigNarrow(bb)
+        return rtABigNarrow(bb)
     }
     return null
 }
@@ -914,7 +605,7 @@ function rbABigPromote(op, x, y) {
 // A big as a double, which is where this value model stops being exact. Written
 // through the decimal text on purpose: there is no other exact-to-nearest route
 // from an arbitrary precision integer to a double in this dialect.
-function rbABigToF(v) { return parseFloat(rbABigStr(v)) }
+function rbABigToF(v) { return parseFloat(rtABigStr(v)) }
 
 // An Integer that is still a plain double, as text. Ruby NEVER writes one in
 // exponent form, which is what `"" + x` does from 1e21 up - `(2.0 ** 70).to_i`
@@ -923,17 +614,17 @@ function rbIntStr(x) {
     if (x <= 9007199254740992 && x >= 0 - 9007199254740992) { return "" + x }
     if (x - x != 0) { return "" + x }
     if (Math.trunc(x) != x) { return "" + x }
-    return rbABigStr(rbABigFromNum(x))
+    return rtABigStr(rtABigFromNum(x))
 }
 
 // Integer#to_s(base) for a big: one magnitude division per digit, which
-// rbABigDivMag already is. Go asks big.Int.Text(base) for the same answer.
+// rtABigDivMag already is. Go asks big.Int.Text(base) for the same answer.
 function rbABigBaseStr(v, base) {
-    if (rbABigIsZero(v)) { return "0" }
+    if (rtABigIsZero(v)) { return "0" }
     var mag = v["limbs"]
     var out = ""
     while (!(mag.length == 1 && mag[0] == 0)) {
-        var dm = rbABigDivMag(mag, [base])
+        var dm = rtABigDivMag(mag, [base])
         out = RT_DIGITS.charAt(dm["r"][0]) + out
         mag = dm["q"]
     }
@@ -950,7 +641,7 @@ function rbABigBaseStr(v, base) {
 function rbABigMethod(t, name, args) {
     if (name == "to_s" || name == "inspect") {
         if (args.length > 0) { return rbABigBaseStr(t, Math.trunc(rbToF(args[0]))) }
-        return rbABigStr(t)
+        return rtABigStr(t)
     }
     // An Integer is already floored, ceilinged, truncated and rounded, at any
     // digit argument a Ruby program can write here.
@@ -966,24 +657,24 @@ function rbABigMethod(t, name, args) {
         return rbNumDigitOp(0, t, true, bmd, bnd)
     }
     if (name == "to_f") { return rbMkFlo(rbABigToF(t)) }
-    if (name == "abs" || name == "magnitude") { return rbABigNarrow(rbABigAbs(t)) }
-    if (name == "zero?") { return rbABigIsZero(t) }
+    if (name == "abs" || name == "magnitude") { return rtABigNarrow(rbABigAbs(t)) }
+    if (name == "zero?") { return rtABigIsZero(t) }
     if (name == "positive?") {
-        if (rbABigIsZero(t)) { return false }
+        if (rtABigIsZero(t)) { return false }
         return !t["neg"]
     }
     if (name == "negative?") { return t["neg"] }
-    if (name == "even?") { return rbABigDivMod(t, rbABigFromNum(2))["r"]["limbs"][0] == 0 }
-    if (name == "odd?") { return rbABigDivMod(t, rbABigFromNum(2))["r"]["limbs"][0] != 0 }
-    if (name == "succ" || name == "next") { return rbABigNarrow(rbABigAdd(t, rbABigFromNum(1))) }
-    if (name == "pred") { return rbABigNarrow(rbABigSub(t, rbABigFromNum(1))) }
+    if (name == "even?") { return rbABigDivMod(t, rtABigFromNum(2))["r"]["limbs"][0] == 0 }
+    if (name == "odd?") { return rbABigDivMod(t, rtABigFromNum(2))["r"]["limbs"][0] != 0 }
+    if (name == "succ" || name == "next") { return rtABigNarrow(rtABigAdd(t, rtABigFromNum(1))) }
+    if (name == "pred") { return rtABigNarrow(rtABigSub(t, rtABigFromNum(1))) }
     if (name == "integer?") { return true }
     if (name == "divmod") {
         var d = rbABigOperand(rbArgAt(args, 0))
         if (d != null) {
-            if (rbABigIsZero(d)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+            if (rtABigIsZero(d)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
             var dm = rbABigDivMod(t, d)
-            return [rbABigNarrow(dm["q"]), rbABigNarrow(dm["r"])]
+            return [rtABigNarrow(dm["q"]), rtABigNarrow(dm["r"])]
         }
     }
     return undefined
@@ -1244,7 +935,7 @@ function rbDecIncr(s) {
 function rbIntDigitOp(v, k, mode) {
     if (rbIntRoundZero(v, k)) { return 0 }
     var s = ""
-    if (rbIsBig(v)) { s = rbABigStr(v) } else { s = rbIntStr(v) }
+    if (rbIsBig(v)) { s = rtABigStr(v) } else { s = rbIntStr(v) }
     var neg = s.charAt(0) == "-"
     if (neg) { s = s.substring(1, s.length) }
     var head = ""
@@ -1284,7 +975,7 @@ function rbIntDigitOp(v, k, mode) {
         z = z + 1
     }
     if (neg) { out = "-" + out }
-    return rbABigNarrow(rbABigFromStr(out))
+    return rtABigNarrow(rbABigFromStr(out))
 }
 
 // The one entry point the numeric method set calls. `t` is the receiver's double,
@@ -1748,7 +1439,7 @@ function rbNumCmp(l, r) {
         if (rbIsBig(l) || rbIsBig(r)) {
             var cl = rbABigCmpOf(l)
             var cr = rbABigCmpOf(r)
-            if (cl != null && cr != null) { return rbABigCmp(cl, cr) }
+            if (cl != null && cr != null) { return rtABigCmp(cl, cr) }
         }
     }
     var a = rbToF(l)
@@ -1764,7 +1455,7 @@ function rbNumCmp(l, r) {
 // the floor's sign flip.
 function rbNeg(v) {
     if (typeof v == "number") { return -v }
-    if (rtTag(v, "__bint")) { return rbABigNarrow(rbABigNeg(v)) }
+    if (rtTag(v, "__bint")) { return rtABigNarrow(rtABigNeg(v)) }
     if (rbIsFlo(v)) { return rbMkFlo(-v["f"]) }
     if (rbIsRat(v)) { return {__rat: true, n: -v["n"], d: v["d"]} }
     if (rbIsCpx(v)) { return rbMkCpx(-v["re"], -v["im"]) }
@@ -1812,7 +1503,7 @@ function rbStr(v) {
         if (v <= 9007199254740992 && v >= 0 - 9007199254740992) { return "" + v }
         return rbIntStr(v)
     }
-    if (rtTag(v, "__bint")) { return rbABigStr(v) }
+    if (rtTag(v, "__bint")) { return rtABigStr(v) }
     if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
     if (rbIsRat(v)) { return rbRatText(v) }
     if (rbIsCpx(v)) { return rbCpxText(v) }
@@ -2182,7 +1873,7 @@ function rbGenAlt(x, prec) {
 // is "00377" and MRI leaves it off the ".." two's-complement form entirely.
 function rbBasePrefix(conv, v) {
     if (rbIsBig(v)) {
-        if (rbABigIsZero(v)) { return "" }
+        if (rtABigIsZero(v)) { return "" }
     } else if (v == 0) { return "" }
     if (conv == "x") { return "0x" }
     if (conv == "X") { return "0X" }
@@ -2293,7 +1984,7 @@ function rbABigBinDigits(a) {
 // The exact base-`base` digits of a non-negative integral double, or of a big.
 function rbMagDigits(a, base) {
     if (rbIsBig(a)) {
-        if (base == 10) { return rbABigStr(rbABigAbs(a)) }
+        if (base == 10) { return rtABigStr(rbABigAbs(a)) }
         var bgb = rbABigBinDigits(a)
         if (base == 8) { return rbGroupBits(bgb, 3) }
         if (base == 16) { return rbGroupBits(bgb, 4) }
@@ -2364,7 +2055,7 @@ function rbTwosDigits(a, base) {
 // `sign` is the + or SPACE flag, which switches MRI back to sign-and-magnitude:
 // "%+x" % -5 is "-5", not "..fb".
 function rbIntBody(f, base, upper, alt, sign, prec) {
-    var neg = rbIsBig(f) ? (f["neg"] && !rbABigIsZero(f)) : f < 0
+    var neg = rbIsBig(f) ? (f["neg"] && !rtABigIsZero(f)) : f < 0
     var mag = anytype
     mag = rbIsBig(f) ? rbABigAbs(f) : (neg ? -f : f)
     var fill = "0"
@@ -3234,7 +2925,7 @@ function rbDictFind(keys, k) {
     var i = 0
     while (i < keys.length) {
         if (rbIsBig(keys[i])) {
-            if (rbABigCmp(keys[i], k) == 0) { return i }
+            if (rtABigCmp(keys[i], k) == 0) { return i }
         }
         i = i + 1
     }
@@ -3287,7 +2978,7 @@ function rbPyEqual(x, y) {
     // strictEq, and the interpreter reaches numEq through core.keyEq.
     if (rtTag(x, "__bint")) {
         if (!rtTag(y, "__bint")) { return false }
-        return rbABigCmp(x, y) == 0
+        return rtABigCmp(x, y) == 0
     }
     // A Float / Rational / Complex is a BOX for the same reason, and two boxes of
     // one value are two objects - so `[1.0] == [1.0]` was FALSE in the NATIVE
@@ -4718,7 +4409,7 @@ function rbNumMethod(t, name, args) {
         // expansion does the base conversion instead.
         if (isInt && args.length > 0) {
             if (rbAIsExact(x)) { return rtBaseStr(x, Math.trunc(rbToF(args[0]))) }
-            return rbABigBaseStr(rbABigFromNum(x), Math.trunc(rbToF(args[0])))
+            return rbABigBaseStr(rtABigFromNum(x), Math.trunc(rbToF(args[0])))
         }
         // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes -
         // and this arm answered rbStr for both, so `p 2r/3r' printed the bracketed
@@ -6982,7 +6673,7 @@ function js_rbnot(v) {
     }
     var b = rbABigOperand(v)
     if (b == null) { return -rbToF(v) - 1 }
-    return rbABigNarrow(rbABigSub(rbABigNeg(b), rbABigFromNum(1)))
+    return rtABigNarrow(rtABigSub(rtABigNeg(b), rtABigFromNum(1)))
 }
 
 function js_req(l, r) { return rbEq(l, r) }
