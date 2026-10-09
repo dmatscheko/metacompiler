@@ -1518,11 +1518,18 @@ func init() {
 								"Cannot get random in empty range: "+rt.ktRangeStr(rg))
 						}
 						return w(ktRangeAt(rg, ktRndBelow(rt.ktRndOf(arr.elems), cnt)))
+					// first()/last() resolve to kotlin.ranges' IntProgression /
+					// CharProgression / LongProgression overloads, whose empty
+					// message names the progression.
+					case "first", "last":
+						if len(arr.elems) == 0 && ktRangeEmpty(rg) {
+							rt.ktNoElem("Progression " + rt.ktRangeStr(rg) + " is empty.")
+						}
 					}
 				}
 				// A range materialized into its elements is still not a List:
 				// IntRange is an Iterable, so its empty-receiver messages are the
-				// Collection ones. docs/todo.md 1.5.
+				// Collection ones.
 				recv = &jsArray{elems: ktRangeList(rg)}
 				recvKind = ktKindColl
 			}
@@ -4254,7 +4261,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 					return e, true
 				}
 			}
-			rt.ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
+			rt.ktNoMatch(ktPredWord(kind))
 		}
 		if len(es) == 0 {
 			rt.ktNoElemKind(kind)
@@ -4271,7 +4278,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 					return es[i], true
 				}
 			}
-			rt.ktNoElem(kind + " contains no element matching the predicate.")
+			rt.ktNoMatch(kind)
 		}
 		if len(es) == 0 {
 			rt.ktNoElemKind(kind)
@@ -4287,7 +4294,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 				}
 			}
 			if n == 0 {
-				rt.ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
+				rt.ktNoMatch(ktPredWord(kind))
 			}
 			if n > 1 {
 				rt.ktRaise("IllegalArgumentException", ktPredWord(kind)+" contains more than one matching element.")
@@ -7109,10 +7116,7 @@ func (rt *jsrt) ktStrRangeOob(from, to, n int) {
 // ktNoElem is kotlin.collections' empty-receiver throw. first()/last()/single() on
 // an empty List raise NoSuchElementException("List is empty.") and max()/min()/
 // maxBy()/maxOf() raise one with NO message (kotlin-stdlib's `?: throw
-// NoSuchElementException()`); every one of them used to ABORT the run in all three
-// engines, which is not catchable at all. There is no kotlinc on this machine, so
-// the message strings are kotlin-stdlib's _Collections.kt and not a measurement;
-// the throwable CLASS is java.util's and that part is settled. docs/todo.md 1.2.
+// NoSuchElementException()`).
 func (rt *jsrt) ktNoElem(text interface{}) {
 	if text == nil {
 		rt.ktRaiseV("NoSuchElementException", jsNull)
@@ -7133,7 +7137,8 @@ func (rt *jsrt) ktNoElem(text interface{}) {
 // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
 // a Sequence and a Map's `values` view are all the SAME host array as a List in this
 // value model - telling them apart is docs/todo.md 2.2's nominal type on the value.
-// Spec-derived, not measured, exactly as above. docs/todo.md 1.5.
+// A range's first()/last() are kotlin.ranges' own overloads and say "Progression
+// 1..0 is empty." instead (_Ranges.kt).
 const (
 	ktKindList = "List"
 	ktKindColl = "Collection"
@@ -7148,6 +7153,15 @@ func (rt *jsrt) ktNoElemKind(kind string) {
 // so a List receiver resolves to the Iterable overload and says "Collection contains
 // no element matching the predicate." - the predicate word is NOT the receiver word.
 // last(predicate) does have a List overload, so that one takes the receiver word.
+// CharSequence's miss says "character", not "element".
+func (rt *jsrt) ktNoMatch(word string) {
+	if word == ktKindChar {
+		rt.ktNoElem(word + " contains no character matching the predicate.")
+		return
+	}
+	rt.ktNoElem(word + " contains no element matching the predicate.")
+}
+
 func ktPredWord(kind string) string {
 	if kind == ktKindChar {
 		return ktKindChar

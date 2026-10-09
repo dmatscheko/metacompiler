@@ -4485,9 +4485,8 @@ fun sec83() {
 // rangeCheckForAdd, the third through String's checkBoundsBeginEnd. All three raise
 // IndexOutOfBoundsException or its StringIndexOutOfBoundsException subclass.
 //
-// The EMPTY-RECEIVER rows are kotlin-stdlib's _Collections.kt and NOT a measurement:
-// java cannot answer them and there is no kotlinc on this machine. What java does
-// settle is the throwable CLASS, java.util.NoSuchElementException.
+// The EMPTY-RECEIVER rows are kotlin-stdlib's own messages, measured by calling the
+// kotlin-stdlib 2.2.21 jar's CollectionsKt / StringsKt / RangesKt from java.
 //
 // Every index is read out of an array (manual chapter 3).
 fun s84text(f: () -> Any?): String {
@@ -4562,8 +4561,7 @@ fun sec84() {
     // A Set, a Map's keys/entries and a range are Iterable and none of them is a
     // List, so all three take the Collection wording; a String takes its own. Every
     // one of these answered "List is empty." before, and the string rows ABORTED the
-    // run uncatchably. All of it is stdlib SOURCE and not a measurement: java cannot
-    // answer a kotlin-stdlib message and there is no kotlinc here. docs/todo.md 1.5.
+    // run uncatchably.
     val eset = setOf<Int>()
     val emap = mapOf<Int, Int>()
     val erange = 1..0
@@ -4605,12 +4603,24 @@ fun sec84() {
         s84text { emap.keys.last() } == nse + ": Collection is empty.")
     check("ax84J", s84text { mapOf(1 to 2, 3 to 4).keys.single() } ==
         "java.lang.IllegalArgumentException: Collection has more than one element.")
-    // An IntRange is an Iterable and not a List. Materializing it into its elements
-    // is what used to lose that, and `random()` on one has its own message from
-    // kotlin.ranges (Random.nextInt's text, rethrown as NoSuchElementException).
-    check("ax84K", s84text { erange.first() } == nse + ": Collection is empty." &&
-        s84text { erange.last() } == nse + ": Collection is empty." &&
+    // An IntRange is an Iterable and not a List, but first()/last() resolve to
+    // kotlin.ranges' IntProgression overloads, which name the progression; single()
+    // has no progression overload and takes the Iterable wording. `random()` has its
+    // own message from kotlin.ranges (Random.nextInt's text, rethrown).
+    check("ax84K", s84text { erange.first() } == nse + ": Progression 1..0 is empty." &&
+        s84text { erange.last() } == nse + ": Progression 1..0 is empty." &&
         s84text { erange.single() } == nse + ": Collection is empty.")
+    // The progression's own toString is in the message: a stepped, a downTo, an
+    // until and a CharRange receiver. The predicate forms are Iterable's.
+    val rb = arrayOf(5, 1, 0, 3)
+    check("ax84Ka", s84text { (rb[0]..rb[1] step 2).first() } ==
+        nse + ": Progression 5..1 step 2 is empty." &&
+        s84text { (rb[2] downTo rb[1]).last() } ==
+        nse + ": Progression 0 downTo 1 step 1 is empty." &&
+        s84text { (rb[3] until rb[3]).first() } == nse + ": Progression 3..2 is empty.")
+    check("ax84Kb", s84text { ('b'..'a').first() } == nse + ": Progression b..a is empty." &&
+        s84text { erange.first { it > 9 } } ==
+        nse + ": Collection contains no element matching the predicate.")
     check("ax84L", s84text { erange.random() } ==
         nse + ": Cannot get random in empty range: 1..0")
     // A CharSequence's own family, from _Strings.kt. All five of these ABORTED the
@@ -4629,11 +4639,11 @@ fun sec84() {
     // engine and answered the first or last character - agreed and wrong, the class
     // only an oracle can see. So did firstOrNull/lastOrNull with one.
     check("ax84Q", s84text { estr[1].first { it == 'z' } } ==
-        nse + ": Char sequence contains no element matching the predicate." &&
+        nse + ": Char sequence contains no character matching the predicate." &&
         s84text { estr[1].last { it == 'z' } } ==
-        nse + ": Char sequence contains no element matching the predicate.")
+        nse + ": Char sequence contains no character matching the predicate.")
     check("ax84R", s84text { estr[1].single { it == 'z' } } ==
-        nse + ": Char sequence contains no element matching the predicate.")
+        nse + ": Char sequence contains no character matching the predicate.")
     check("ax84S", s84text { estr[1].single { it != 'q' } } ==
         "java.lang.IllegalArgumentException: Char sequence contains more than one matching element.")
     check("ax84T", estr[1].first { it == 'b' } == 'b' && estr[1].last { it != 'c' } == 'b' &&

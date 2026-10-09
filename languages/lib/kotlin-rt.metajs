@@ -869,11 +869,7 @@ function ktStrRangeOob(from, to, len) {
 // ktNoElem / ktNoElemNull (jsrtkotlin.go's ktNoElem) are kotlin.collections'
 // empty-receiver throw. first()/last()/single() on an empty List raise
 // NoSuchElementException("List is empty.") and max()/min()/maxBy()/maxOf() raise one
-// with NO message (kotlin-stdlib's `?: throw NoSuchElementException()`); every one
-// of them used to ABORT the run in all three engines, which is not catchable at all.
-// There is no kotlinc on this machine, so the message strings are kotlin-stdlib's
-// _Collections.kt and not a measurement; the throwable CLASS is java.util's and that
-// part is settled. docs/todo.md 1.2.
+// with NO message (kotlin-stdlib's `?: throw NoSuchElementException()`).
 function ktNoElem(text) { ktRaise("NoSuchElementException", text) }
 function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 
@@ -889,12 +885,18 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
 // a Sequence and a Map's `values` view are all the SAME host array as a List in this
 // value model - telling them apart is docs/todo.md 2.2's nominal type on the value.
-// Spec-derived, not measured, exactly as above. docs/todo.md 1.5.
+// A range's first()/last() are kotlin.ranges' own overloads and say "Progression
+// 1..0 is empty." instead (_Ranges.kt).
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
 // first(predicate) and single(predicate) exist ONLY on Iterable and on CharSequence,
 // so a List receiver resolves to the Iterable overload and says "Collection contains
 // no element matching the predicate." - the predicate word is NOT the receiver word.
 // last(predicate) does have a List overload, so that one takes the receiver word.
+// CharSequence's miss says "character", not "element".
+function ktNoMatch(word) {
+    if (word == "Char sequence") { ktNoElem(word + " contains no character matching the predicate.") }
+    ktNoElem(word + " contains no element matching the predicate.")
+}
 function ktPredWord(kind) {
     if (kind == "Char sequence") { return "Char sequence" }
     return "Collection"
@@ -4174,7 +4176,7 @@ function ktSeqMethodK(arr, name, args, kind) {
                 for (i = 0; i < es.length; i = i + 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
-                ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.")
+                ktNoMatch(ktPredWord(kind))
             }
         }
         if (es.length == 0) { ktNoElemKind(kind) }
@@ -4190,7 +4192,7 @@ function ktSeqMethodK(arr, name, args, kind) {
                 for (i = es.length - 1; i >= 0; i = i - 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
-                ktNoElem(kind + " contains no element matching the predicate.")
+                ktNoMatch(kind)
             }
         }
         if (es.length == 0) { ktNoElemKind(kind) }
@@ -4207,7 +4209,7 @@ function ktSeqMethodK(arr, name, args, kind) {
                         n = n + 1
                     }
                 }
-                if (n == 0) { ktNoElem(ktPredWord(kind) + " contains no element matching the predicate.") }
+                if (n == 0) { ktNoMatch(ktPredWord(kind)) }
                 if (n > 1) { ktRaise("IllegalArgumentException", ktPredWord(kind) + " contains more than one matching element.") }
                 return best
             }
@@ -7853,6 +7855,14 @@ function ktSmcall(recv, name, args) {
                             "Cannot get random in empty range: " + ktRangeStr(rv))
                 }
                 return ktRangeAt(rv, k4RndBelow(k4RndOf(as), rcnt))
+            }
+            // first()/last() resolve to kotlin.ranges' IntProgression /
+            // CharProgression / LongProgression overloads, whose empty message names
+            // the progression.
+            if (name == "first" || name == "last") {
+                if (as.length == 0 && ktRangeEmpty(rv)) {
+                    ktNoElem("Progression " + ktRangeStr(rv) + " is empty.")
+                }
             }
         }
         rv = ktRangeList(rv)
