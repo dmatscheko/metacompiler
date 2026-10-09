@@ -142,28 +142,8 @@ Comment     = LineComment | BlockComment ;
 LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 // Kotlin block comments NEST (psi/NestedComments.kt): /*/**/*/ is one comment.
 BlockComment = KDocOk "/*" :whitespace() { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-// A KDoc comment is NOT trivia to Kotlin's parser: `/** ... */` is parsed, and the
-// errors it finds are ordinary PsiErrorElements in the file's tree. This grammar lexes
-// the whole comment away, so every such error was invisible and three corpus files
-// whose ONLY defect is inside a doc comment were wrongly accepted.
-//
-// A full KDoc sub-parser is not what those three files need. Every error element in
-// them is the same one - a qualified name with a DANGLING DOT, `Identifier expected` -
-// in the two places KDoc parses a name:
-//
-//     [A.]   [O.]   [A.B.C...]      a markdown link
-//     @see A.        @see O.        the subject of a name-taking tag
-//
-// so the guard recognizes exactly that and lets the comment fail to match, which makes
-// the `/**` reach the code rules and the file be refused. It is deliberately narrow in
-// the two directions that would cost the parse row:
-//   - a bracket run whose content holds a SPACE, or does not START with an identifier
-//     character, is markdown TEXT and not a link at all. Kotlin's own tree records
-//     `[top level]`, `[O.with space]` and `[....]` as KDOC_TEXT, with no error.
-//   - a bare `@see` with no subject is legal (psi/kdoc/SeeEmpty.txt gives it a KDOC_TAG
-//     with no link), so an empty name run is not an error.
-// Measured over the whole vendored corpus, the two patterns occur in exactly the three
-// files Kotlin rejects and nowhere else.
+// A KDoc comment is NOT trivia to Kotlin's parser. Twin of KDocOk in
+// kotlin-interpreter.abnf; see there.
 KDocOk      = :script(~~
     (function() {
         if (c.peek(0) !== 47 || c.peek(1) !== 42 || c.peek(2) !== 42) { return undefined }
@@ -264,15 +244,8 @@ ClassMark   <~~ push(markTopType(pop())) ~~>
 // (enum/annotation/companion) are NOT consumed here - those declaration forms
 // route to notImplemented instead.
 Modifiers   = { Modifier | Annotation | AnnEnumMod | VarianceMod } ;
-// `annotation` and `enum` are the two soft keywords that also START a declaration
-// (annotation class / enum class), so they cannot sit in the plain Modifier list - a
-// greedy run would eat the keyword the declaration form needs (see docs/abnf-dialect-
-// gotchas.md, "A greedy modifier list eats the declaration keyword"). They ARE ordinary
-// modifiers everywhere else, and Kotlin's own testData leans on it: psi/SimpleModifiers.kt,
-// psi/SoftKeywords.kt, psi/annotation/Annotations.kt and psi/annotation/options/java.kt
-// all spell a multi-line modifier run with `annotation` or `enum` in the middle of it and
-// carry a clean parse tree. The NotClassW guard is what keeps `annotation class Foo` and
-// `enum class Kind` routed to their own productions. (Ported from the interpreter half.)
+// `annotation` and `enum` as ordinary modifiers, kept off `annotation class` /
+// `enum class` by NotClassW. Twin of AnnEnumMod in kotlin-interpreter.abnf; see there.
 AnnEnumMod  = ( "annotation" | "enum" ) KwEnd NotColon NotClassW ;
 // `in` and `out` are variance modifiers, and Kotlin lets them stand in an ordinary
 // declaration modifier run as well. They are the two modifier words that are also HARD
@@ -383,8 +356,8 @@ Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
 // "fieldOf" rather than the target "field".
 // ORDER MATTERS: the alternation is ordered choice and KwEnd sits AFTER it, so a
 // shorter alternative that is a PREFIX of a longer one must come second - with "set"
-// first, @setparam:x matched "set", then KwEnd failed on the `p` and the sequence died
-// without ever retrying "setparam".
+// first, @setparam:x would match "set", KwEnd would fail on the `p`, and "setparam"
+// would never be retried.
 AnnTarget   = ( "field" | "property" | "setparam" | "set" | "get" | "receiver" | "param"
               | "delegate" | "file" | "all" ) KwEnd ;
 AnnSet      = "[" { AnnEntry } "]" ;
@@ -397,13 +370,9 @@ StmtAnn     = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ SkipParen NotAs
 // in psi/annotation/Annotations.kt is one annotation set with a clean parse tree - so the
 // angle run is skipped after every name, not only after the last.
 AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ AnnArgsOk SkipParen ] ;
-// SkipParen consumes any balanced run, so every shape of psi/emptyArgumentsInAnnotations.kt
-// - `@Ann(1, ,)`, `@Ann(,)`, `@Ann(x =)`, `@Ann(*, 2)` - was swallowed whole where Kotlin
-// reports "Expecting an argument". This zero-width guard walks the run the skip is about
-// to eat and refuses it when a depth-1 argument is EMPTY (nothing between two commas, or
-// between the `(` and the first comma), or ends in a dangling `=` (a named argument with
-// no value) or a lone `*` (a spread with no operand). `@Ann()` and a trailing comma stay
-// legal, since both are ordinary Kotlin. The twin is AnnArgsOk in kotlin-interpreter.abnf.
+// A zero-width guard that refuses an annotation argument list with an EMPTY argument,
+// a dangling `=` or a lone `*` (psi/emptyArgumentsInAnnotations.kt). Twin of AnnArgsOk
+// in kotlin-interpreter.abnf; see there.
 AnnArgsOk   = :script(~~
     (function() {
         var i = 0
@@ -476,12 +445,10 @@ AnnArgsOk   = :script(~~
 // warning (see resolveImport in the startScript). QualName also accepts a
 // trailing .* wildcard. Neither pushes a statement, so buildMain never sees them.
 Package     <~~ pop() ~~> = KwPackage QualName [ ";" ] ;
-// The import policy is unchanged - resolveImport still resolves, warns under
-// -warn-imports, or aborts. What is ADDED is a record of the simple name each import
-// brings in (and its `as` alias), which is what tells a supertype that is genuinely
-// OUTSIDE the program (`class MyApp : Application()` after an Android import this
-// machine cannot resolve) apart from one the resolver merely failed to find. The two
-// are different bugs and only the second is ours: see noteImportName.
+// resolveImport resolves, warns under -warn-imports, or aborts. The simple name each
+// import brings in (and its `as` alias) is also recorded, which tells a supertype that
+// is genuinely OUTSIDE the program apart from one the resolver merely failed to find:
+// see noteImportName, and Import in kotlin-interpreter.abnf.
 Import      <~~ ktImport(takeAll(), up.pos) ~~>
             = KwImport QualName [ KwAs KId <~~ push({ialias: up.in}) ~~> ] [ ";" ] ;
 QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
@@ -493,8 +460,8 @@ TopProp     = DelegateDecl | TopDecl | TopBareProp ;
 // A top-level property with neither an initializer nor an accessor (an abstract or
 // expect declaration, or a header split across files). It still binds its name, to
 // undefined, so later references resolve; an extension receiver is dropped as
-// everywhere else. Ported from the interpreter half's TopBareProp; the LOCAL twin
-// (BareDecl) was already here, only the top level was missing it.
+// everywhere else. The twin of TopBareProp in kotlin-interpreter.abnf; BareDecl is the
+// LOCAL form.
 TopBareProp <~~ push(makeBareDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { Annotation } [ RecvSeg { RecvSeg } ]
               NotHardKw KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] [ ";" ] ;
@@ -526,8 +493,7 @@ TypeParams  <~~ pendingReified = reifiedNamesOf(stripWs(up.in)) ~~>
 WhereClause = KwWhere TypeConstraint { "," TypeConstraint } ;
 TypeConstraint = { Annotation } KId ":" Type ;
 // A trailing `;` after a function body is ordinary Kotlin - psi/FunctionExpressions.kt
-// spells `fun c() = fun name();` out with a clean tree - and it is the SEMICOLON that
-// was missing, not the body: `fun c() = 1;` and `fun c() { };` were both refused.
+// spells `fun c() = fun name();` out with a clean tree.
 FunBody     = Block [ ";" ] | "=" ExprBody [ ";" ] ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
@@ -586,7 +552,7 @@ UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
                                   | KId [ SkipAngle ] SigParamsSkip [ ":" Type ] [ WhereClause ] ) [ ";" ] ;
 // The parameter list of a BODILESS `fun name(...)` - the one UnsupFun alternative that
 // is reached from a shape the strict rules refused for no structural reason. A plain
-// SkipParen there accepted `fun foo(@Deprecated)`, whose whole point is that the
+// SkipParen there would accept `fun foo(@Deprecated)`, whose whole point is that the
 // parameter has no name (psi/annotation/noParameterYet.txt records
 // "Expecting a parameter declaration"). This keeps the run balanced-and-skipped in
 // every OTHER alternative and only demands a name here.
@@ -616,21 +582,17 @@ ParamDefault <~~ push({pdef: pop()}) ~~>
             = CollLit | Expression ;
 // A DECLARED type in a binding position - a parameter, a constructor parameter, a
 // property - captured for its WIDTH. Types are erased here, but `val x: Long = 1`
-// says the literal is a Long, and until this rule existed only a LOCAL carried that:
-// a property, a parameter, a parameter default, a field write and a return position
-// all dropped it, so a Long that never passed through a local silently stayed 32 bit
-// (`w.x * 1000000 * 1000000` answered -727379968 where java 24 prints 1000000000000).
-// It is a WRAPPER production rather than a tag on Type itself because ~40 parents
-// reference Type and a tag there would change how every one of them pops (see
-// docs/abnf-dialect-gotchas.md). The twin is PType in kotlin-interpreter.abnf.
+// says the literal is a Long, and a property, a parameter, a parameter default, a
+// field write and a return position all have to keep that (`w.x * 1000000 * 1000000`
+// is 1000000000000). It is a WRAPPER production rather than a tag on Type itself
+// because ~40 parents reference Type and a tag there would change how every one of
+// them pops (see docs/abnf-dialect-gotchas.md). The twin is PType in
+// kotlin-interpreter.abnf.
 PType       <~~ push({pty: stripWs(up.in)}) ~~>
             = Type ;
 // The same capture in RETURN position: `fun ret(): Long = 1` answers a Long.
 RetType     <~~ push({rty: stripWs(up.in)}) ~~>
             = Type ;
-// [1, 2, 3] - Kotlin's collection literal. It is legal ONLY as an annotation argument
-// or as the default of an annotation-class parameter, so it lives here rather than in
-// Primary, where it would make `[a]` a valid expression anywhere. It builds a list.
 // [1, 2] - Kotlin's collection literal. Legal only as an annotation argument or
 // default; anywhere else it is a semantic error that the PARSER still accepts, which is
 // what psi/CollectionLiterals.kt records. It is also an EXPRESSION here, and that does
@@ -652,8 +614,7 @@ PrimaryCtorKw = [ Modifiers ] KwConstructor ;
 // WITHOUT the `constructor` keyword. Kotlin's own parser accepts that shape (the psi
 // corpus keeps it under declarations/ConstructorModifiers) but ONLY when a parameter
 // list really follows: `open class AB private { ... }` is the error "Expecting
-// 'constructor' keyword". So every use pairs CtorModsOnly with a MANDATORY parameter
-// list - dropping that pairing costs two corpus files we correctly reject today.
+// list - dropping that pairing would accept files Kotlin rejects.
 // Spelled as one-or-more so it can never match the empty string.
 CtorModsOnly = ( Modifier | Annotation ) { Modifier | Annotation } ;
 
@@ -697,19 +658,13 @@ DelegMSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." KId <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } [ "," ] ] ")" ;
-// A default value (= expr) is parsed and dropped, exactly like a function Param's:
-// the default is not supplied at call sites, but the header parses (common in data
+// A default value (= expr) is genuine, exactly like a function Param's (common in data
 // classes - data class Spec(val action: String = "", val flags: Int = 0)).
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
 Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | MemberExtProp | MemberExtDelegProp | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) ;
-// A member function WITHOUT a body: an abstract method of an abstract class, or an
-// interface method with no default. Nothing is emitted for it (the overriding class
-// provides the implementation), but its NAME and arity are recorded, which is what
-// interface delegation (`: I by impl`) needs to synthesize its forwarders. Tried
-// after FunDecl, so a function that HAS a body never lands here.
 // A MEMBER extension function - fun B.ext() declared INSIDE a class - is the only
 // construct with TWO receivers: the extension receiver, bound to `this` in the body,
 // and the DISPATCH receiver, the enclosing class instance. The lowering keeps both:
@@ -728,25 +683,24 @@ MemberExtFun <~~ push({memberExt: makeFun(takeAll(), retLblTop())}); retLblPop()
 // MemberExtFun so a member extension WITH a body keeps its own error positions.
 MemberExtAbs <~~ takeAll() ~~>
             = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId [ SkipAngle ] SigParamsSkip [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
-// The trailing `;` is the ordinary statement separator, and every OTHER member form
-// here already accepted it - so `interface I { fun f(): Int; fun g(): Int = 1 }`, a
-// bodiless member followed by a semicolon, fell out of Member, out of InterfaceReal and
-// into InterfaceSkip's "interface not implemented (ignored)", while the interpreter
-// half (whose AbstractFun has carried `[ ";" ]` all along) ran it. Written on one line
-// the shape is common; the same interface written with newlines worked, which is what
-// hid it.
+// A member function WITHOUT a body: an abstract method of an abstract class, or an
+// interface method with no default. Nothing is emitted for it (the overriding class
+// provides the implementation), but its NAME and arity are recorded, which is what
+// interface delegation (`: I by impl`) needs to synthesize its forwarders. Tried
+// after FunDecl, so a function that HAS a body never lands here. The trailing `;` is
+// the ordinary statement separator (`interface I { fun f(): Int; fun g(): Int = 1 }`).
 AbstractFun <~~ push({absmethod: makeAbstract(takeAll())}) ~~>
             = KwFun [ SkipAngle ] KId <~~ push(up.in) ~~> ParamList [ ":" Type ] [ WhereClause ] [ ";" ] ;
-// A nested CLASS - class Nested { } / inner class Inner { } inside another class or
-// object - is genuine. Its descriptor is built exactly like a top-level one, and the
-// enclosing descriptor gets a factory under the nested name, so `Outer.Nested()` and
-// `outerInstance.Inner()` construct it. For an `inner` class the factory stores the
-// enclosing instance as __outer, which is what `this@Outer` reads (see makeThisAt).
 // `companion { ... }` - the CompanionBlocks proposal's anonymous companion. Its
 // members become statics of the enclosing class, which the single-descriptor model does
 // not express, so the block is parsed and reported as not implemented.
 CompanionBlk <~~ notImpl("companion block", up.pos) ~~>
             = KwCompanion SkipBlock ;
+// A nested CLASS - class Nested { } / inner class Inner { } inside another class or
+// object - is genuine. Its descriptor is built exactly like a top-level one, and the
+// enclosing descriptor gets a factory under the nested name, so `Outer.Nested()` and
+// `outerInstance.Inner()` construct it. For an `inner` class the factory stores the
+// enclosing instance as __outer, which is what `this@Outer` reads (see makeThisAt).
 NestedClass <~~ push({nested: makeNested(takeAll())}) ~~>
             = [ "inner" KwEnd <~~ push({isinner: true}) ~~> ] ClassDecl ;
 // A nested TYPE that is not a plain class - an enum class, an interface, an object
@@ -788,13 +742,6 @@ NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in); push({pmods: takeLateinit()}) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
-// A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
-// is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
-// plain field, so reads use the ordinary member machinery. Every OTHER delegate -
-// the Koin/DI `by inject()`, a custom getValue/setValue, `by Delegates.observable`,
-// `var by` (Kotlin allows lazy only on val) - needs the delegate protocol, which is
-// outside the subset: parsed and reported as not implemented (no field, like an
-// accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
 // `by lazy { init }` is special-cased (eager, see LazyProp); every other delegate goes
 // through Kotlin's real DELEGATE PROTOCOL - the delegate object is stored in a hidden
 // `name$delegate` field on the instance and the descriptor gets a js_defprop accessor
@@ -812,9 +759,8 @@ LazyProp    <~~ push(makeProp(takeAll())) ~~>
 // line and `get() = 1` on the next (psi/propertyDelegate/PropertyWithGetter.kt), or
 // `val a by A(); get() = 1;` (psi/propertyDelegate/GetterInSameLine.kt). Kotlin parses
 // both with a clean tree and rejects them SEMANTICALLY, so they are consumed and DROPPED
-// here. The run used to live on UnsupDelegate below, which ordered choice never reached:
-// RealPropDelegate matched up to the delegate and SUCCEEDED, so the class body died on
-// the `get` and the member spelling did not parse in either half.
+// here. The run has to be HERE: once RealPropDelegate has matched up to the delegate it
+// succeeds, and ordered choice never offers the shape to UnsupDelegate.
 RealPropDelegate <~~ push({accprop: makeDelegProp(takeAll(), up.pos)}) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
 DelegSrc    <~~ push({dsrc: pop()}) ~~>
@@ -900,10 +846,9 @@ Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
 // A LOCAL type declaration - `class Local`, `interface I`, `object O`, `enum class E`,
 // `typealias x = t` inside a function body. These reuse the top level productions
 // verbatim (they already push a statement thunk), so a local class is lowered exactly
-// like a top level one and the widened forms still route to notImplemented. Before this
-// existed the words `class` / `interface` / `object` were read as plain variable
-// REFERENCES and the declaration fell apart into two junk expression statements, which
-// is what made psi/localClass.kt and psiUtil/isLocalClass.kt "parse".
+// like a top level one and the widened forms still route to notImplemented. Without
+// it the words `class` / `interface` / `object` would be read as plain variable
+// REFERENCES and the declaration fall apart into two junk expression statements.
 LocalType   = [ Modifiers ] ( UnsupType | ClassDecl | UnsupFun ) ;
 // A local function declaration (fun name(...) { ... } inside a block): genuine. It
 // reuses makeFunStmt, which declares an own IR function's closure (over the current
@@ -934,8 +879,8 @@ CatchClause <~~ push(makeCatch(takeAll())) ~~>
 // psi/trailingCommaAllowed.kt, clean tree - as in the interpreter half.
             = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" CatchTy ] [ "," ] ")" Block ;
 // The DECLARED type of the catch parameter, kept so emitCatchClosure can pick the
-// matching clause. Tagging it means CatchClause now pushes three items instead of
-// two, which is why this grammar overrides the shared makeCatch by assignment.
+// matching clause. Tagging it means CatchClause pushes three items instead of two,
+// which is why this grammar overrides the shared makeCatch by assignment.
 CatchTy     <~~ push({ctype: up.in}) ~~>
             = Type ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
@@ -945,15 +890,8 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" [ Statement ] { NewStmtLine Statement } "}" ;
-// Kotlin refuses two statements on ONE line without a `;` between them: "Unexpected
-// tokens (use ';' to separate expressions on the same line)". The guard sits at the
-// block-item boundary and scans FORWARD - the whitespace after the previous statement's
-// last token is still ahead at a :script, so a backward scan sees nothing and silently
-// does nothing (docs/abnf-dialect-gotchas.md). It accepts a newline, a `;` (either just
-// consumed by the previous statement or still ahead), a `}` (the block is over) and end
-// of input, and refuses everything else. Comments are skipped like whitespace, and a
-// comment containing a newline separates - Kotlin's parser sees the same line breaks the
-// lexer does, whether or not a comment is wrapped around them.
+// Kotlin refuses two statements on ONE line without a `;` between them. Twin of
+// NewStmtLine in kotlin-interpreter.abnf; see there.
 NewStmtLine = :script(~~
     (function() {
         if (c.peek(-1) === 59) { return undefined }
@@ -1005,9 +943,10 @@ BareDecl    <~~ push(makeBareDecl(takeAll())) ~~>
 DeclType    <~~ var dt = stripWs(up.in); pendingRecvLambda = isRecvFnType(dt); push({dtype: dt}) ~~>
             = Type ;
 // A local or top-level delegated property (val x by <delegate>). Same split as
-// PropDelegate: `val x by lazy { init }` is GENUINE (LazyDecl - the initializer is
-// lowered once and x becomes an ordinary binding); every other delegate is not
-// implemented, with a placeholder so the rest still lowers under -warn-unsupported.
+// PropDelegate: `val x by lazy { init }` is special-cased (LazyDecl - the initializer
+// is lowered once and x becomes an ordinary binding); every other delegate goes
+// through the delegate protocol (RealDelegateDecl), and UnsupDelegateDecl keeps a
+// placeholder so the rest still lowers under -warn-unsupported.
 DelegateDecl = LazyDecl | RealDelegateDecl | UnsupDelegateDecl ;
 LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
@@ -1106,17 +1045,12 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // An ANNOTATED assignment - `when (1) { 1 -> @ann46 x46 += foo46() }` (psi/annotation/at/
 // blockLevelExpressions.kt, clean tree). A statement carries its annotations through
 // Statement's own { StmtAnn } run; a when arm / if branch holds an EXPRESSION, and the
-// AnnExpr level below only reaches a UnaryExpr, so `@ann x` parsed and the `+=` was
+// AnnExpr level below only reaches a UnaryExpr, so the `+=` of `@ann x += ...` would be
 // stranded. The annotations push nothing, so this is item-neutral.
 Expression  = AnnAssign | SuperAssign | Assignment | CallAssign | OrExpr ;
 AnnAssign   = Annotation { Annotation } ( SuperAssign | Assignment | CallAssign ) ;
-// `super.p = v` - the superclass's SETTER, which an overriding setter calls to store
-// the value the base keeps. It needs its own form because `Target` is rooted at a KId
-// and `super` matches one, so the write went to a variable named `super` and aborted
-// with "unknown name: super" in BOTH halves. Tried before Assignment, whose Target
-// would swallow it. UNVERIFIED against kotlinc (none on this machine): the Kotlin
-// documentation's "Calling the superclass implementation" section spells the read,
-// and the write is the same qualified access on the left of an assignment.
+// `super.p = v` - the superclass's SETTER. Twin of SuperAssign in
+// kotlin-interpreter.abnf; see there.
 SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
             = KwSuper [ SuperQual ] "." KId <~~ push({sfname: up.in}) ~~>
               ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
@@ -1208,18 +1142,9 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // both engines agree; !in negates. The receiver is a list here.
 InExpr      <~~ push(makeInExpr(takeAll())) ~~>
             = TypeOp { InOp TypeOp } ;
-// The `in` operator must sit on its LEFT OPERAND's line - the guard IsSfx already
-// carries, for the same reason and at the same boundary. A `when` arm's value is an
-// expression, so
-//     in 0..9   -> "digit"
-//     in 10..99 -> "two"
-// read as `"digit" in 10..99` and the second arm's `->` was stranded: the parse died on
-// the SECOND arm, two lines below a first arm that is perfectly correct, in BOTH halves.
-// A `when` entry ends at the newline in Kotlin, and an `in` that OPENS a line is a
-// membership condition, never a continuation - the same rule this tree already applies
-// to a call's argument list (docs/abnf-dialect-gotchas.md) and to a postfix `is T`.
-// Multi-line expressions are unaffected: Kotlin puts a continued operator at the END of
-// the line, where it still sits on its left operand's line.
+// The `in` operator must sit on its LEFT OPERAND's line, so a `when` arm's value never
+// swallows the next arm's `in 10..99 ->`. Twin of InOp in kotlin-interpreter.abnf; see
+// there.
 InOp        = SameLine InOpKw ;
 InOpKw      = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
 
@@ -1287,17 +1212,11 @@ NotParen    = :script(~~
 NotKeyword  = :script(~~
     (function() {
         // The DECLARATION MODIFIERS that are soft keywords are deliberately NOT here:
-        // they are ordinary names, so Kotlin reads `x7 infix x9` and
-        // `@Ann() class C annotation y` as infix calls and says so in as many words -
-        // psi/annotation/modifiersMigration/newModifiers.kt carries the comment
-        // `// infix call` on that line, psi/annotation/at/blockLevelExpressions.txt
-        // makes `x6 ?: x7 infix x9 + 10` one BINARY_EXPRESSION whose OPERATION_REFERENCE
-        // is `infix`, and psi/recovery/binaryExpression/SoftModifierAsInfixFunction.txt
-        // spells the rule out in its file name. Excluding them split those lines into
-        // two statements, which NewStmtLine then refused. The VISIBILITY modifiers and
-        // get/set/init/constructor/companion stay in: `var x = 0` followed on the SAME
-        // line by `private set` is an accessor run, and an infix reading swallows it.
-        // Same list as the interpreter half's NotInfixKw.
+        // Kotlin reads `x7 infix x9` and `@Ann() class C annotation y` as infix calls
+        // (psi/recovery/binaryExpression/SoftModifierAsInfixFunction.txt). The
+        // VISIBILITY modifiers and get/set/init/constructor/companion stay in: `var x =
+        // 0` followed on the SAME line by `private set` is an accessor run, and an
+        // infix reading would swallow it. Same list as the interpreter half's NotInfixKw.
         var reserved = "|as|break|class|continue|do|else|false|for|fun|if|in|interface|is|null"
             + "|object|package|return|super|this|throw|true|try|typealias|val|var|when|while"
             + "|by|where|get|set|init|constructor|companion|catch|finally|import"
@@ -1412,27 +1331,13 @@ InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push(
 UserInfix   = SameLine NotKeyword KId <~~ push({iop: up.in, user: true}) ~~> ;
 
 // A range expression as a VALUE - a..b, a..<b, a until b, a downTo b, a step b - in
-// general operand position (`3 in 1..5`, `for (i in r)`, `(0..n).map { ... }`). It is
-// MATERIALIZED as a list of its elements, which is what makes membership (a contains
-// call), iteration and the list higher-order methods all work with the machinery that is
-// already there. Deviation: Kotlin's progression is lazy, so an enormous range that
-// Kotlin would iterate cheaply is built element by element here. Without a range
-// operator RangeExpr is a pure pass-through (its single AddExpr thunk is returned
-// unchanged), so ordinary expressions stay byte-identical.
-//
-// The progression's OWN properties are recovered from the elements: `first` is the
-// first, `last` the last (which is what IntProgression.last means - the last ELEMENT,
-// so (1..10 step 4).last is 9) and `step` the distance between the first two. That is
-// the *jsArray arm of js_ktfget in abnf/jsrtkotlin.go and its layer-2 twin, and it is
-// exact for every non-empty range. THE RESIDUE, measured and left: an EMPTY range
-// materializes to an empty list, which carries no bounds at all, so `(3..2).first`
-// answers kotlin.Unit here where the interpreter half - which keeps a real {__range}
-// object - answers 3. A one-element range assumes step 1. Both are unreachable by any
-// program that does something with the range rather than reading a bound off an empty
-// one, and closing them needs a range VALUE in this half, which is the thing this
-// materialization deliberately does not build. The for-loop and the
-// when(x){ in a..b } forms bind their bounds at AddExpr, below this level, so they keep
-// splitting on their own range token and never materialize anything.
+// general operand position (`3 in 1..5`, `for (i in r)`, `(0..n).map { ... }`). It
+// lowers to js_ktrange / js_ktrestep, which build the same first-class progression
+// value the interpreter half has (see the PROGRESSIONS block of abnf/jsrtkotlin.go).
+// Without a range operator RangeExpr is a pure pass-through (its single AddExpr thunk
+// is returned unchanged), so ordinary expressions stay byte-identical. The for-loop and
+// the when(x){ in a..b } forms bind their bounds at AddExpr, below this level, so they
+// keep splitting on their own range token and never build a range value.
 RangeExpr   <~~ push(makeRange(takeAll(), up.pos)) ~~>
             = AddExpr { RangeInfix AddExpr } ;
 RangeInfix  = ( "..<" | ".." ) <~~ push({rop: up.in}) ~~>
@@ -1477,8 +1382,8 @@ Neg         <~~ push(kNegFold(pop(), up.in)) ~~>
 // at the newline, so `true!!!` followed by `true!!!!` on the next line is a POSTFIX_
 // EXPRESSION plus a stray `!` that its parser records as
 // "Unexpected tokens (use ';' to separate expressions on the same line)" -
-// psi/AssertNotNull.txt. Without the guard the stray `!` negated the NEXT statement and
-// the file parsed clean.
+// psi/AssertNotNull.txt. Without the guard the stray `!` would negate the NEXT statement
+// and the file parse clean.
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" SameLine UnaryExpr ;
 
@@ -1496,20 +1401,15 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | "!!" } ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
-// dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt had no
-// reading at all and the parse died on the `::`. The value is not modelled - a class
-// literal has no runtime representation in this subset - so it is reported.
+// dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt need
+// this. The value is not modelled - a class literal has no runtime representation in
+// this subset - so it is reported.
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
-// A call's EXPLICIT TYPE ARGUMENTS used to be skipped and dropped here. They are the
-// whole meaning of `xs.filterIsInstance<String>()`, so the run is now captured (as its
-// raw text) and popMCall lifts it off the item list beside the method name; every other
-// method ignores it, so the only cost is one push per type-argument list. tArgName turns
-// "<String>" into "String" and mcallTArg decides - by method NAME - whether to append it
-// as a trailing argument, which keeps `listOf<Int>()`, `emptyMap<K, V>()` and every other
-// type-argument-carrying call emitting exactly what they emitted before.
+// A call's EXPLICIT TYPE ARGUMENTS, captured for `xs.filterIsInstance<String>()`.
+// Twin of MTypeArgs in kotlin-interpreter.abnf; see there.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
 MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll()}); retLblPop() ~~>
@@ -1680,10 +1580,9 @@ SuperCall   <~~ push(makeSuperCall(takeAll(), up.pos)) ~~>
 // psi/Super.txt), and an EMPTY angle pair would otherwise be accepted here.
             = KwSuper [ SuperQual ] "." KId <~~ push({smname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
 // `super<I>` NAMES which supertype the call means, and a class with two supertypes
-// needs it - `class C : I1, I2 { override fun f() = super<I1>.f() }`. The qualifier
-// used to be skipped, so both spellings reached the FIRST supertype and
-// `super<I2>.f()` silently ran I1's default. The name is recorded here and
-// makeSuperCall / makeSuperField start the __super walk at that descriptor instead.
+// needs it - `class C : I1, I2 { override fun f() = super<I1>.f() }`. The name is
+// recorded here and makeSuperCall / makeSuperField start the __super walk at that
+// descriptor.
 SuperQual   <~~ push({squal: superQualName(up.in)}) ~~>
             = SkipAngle1 ;
 // `super.x` as a VALUE - `override val v: Int get() = super.v + 1`. Kotlin's rule is
@@ -1843,9 +1742,8 @@ LamExpr     <~~ push({expr: pop()}) ~~>
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = [ LParam ] { "," [ LParam ] } "->" ;
 // A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
-// over a Pair/data-class/Triple argument. Destructuring is recognised but not lowered
-// (like a val destructuring declaration): the names bind to undefined and makeLambda
-// warns once, so the lambda still parses and lowers under -warn-unsupported.
+// over a Pair/data-class/Triple argument, whose names makeLambda binds through the
+// componentN convention.
 LParam      = DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry pushes {dn, dprop}.
             = DPat [ ":" Type ] ;
@@ -1875,16 +1773,8 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // is refused - which is the reject this guard is for. Same spelling as the interpreter.
 TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
-// A lone `$` - `"$"`, `"cost: 100$"`, `"$.$.asdf"`. Kotlin's own lexer makes a `$` that
-// is not followed by an identifier start or by `{` an ordinary REGULAR_STRING_PART:
-// psi/StringTemplates.txt records `"$"` and `"$.$.asdf$\t"` as LITERAL_STRING_TEMPLATE_
-// ENTRYs with no error element. `$` is deliberately absent from TplPlain / RawPlain (see
-// TplVar above), so before this alternative existed BOTH halves refused every string with
-// a literal dollar in it - which is a price, a shell snippet or a regex end-anchor in real
-// code. The guard is a `:script` on c.peek(0) rather than a `!"..."` lookahead because it
-// has to be anchored to the very next BYTE (docs/abnf-dialect-gotchas.md), and it declines
-// exactly the two cases the template entries own, so a `$` in front of a hard KEYWORD
-// (`"$as"`) still refuses the whole template the way TplVar's NotHardKw intends.
+// A lone `$` - `"$"`, `"cost: 100$"`, `"$.$.asdf"` - is ordinary string text in Kotlin.
+// Twin of TplDollar in kotlin-interpreter.abnf; see there.
 TplDollar   <~~ push({s: "$"}) ~~>
             = "$" NotTplStart ;
 NotTplStart = :script(~~
@@ -1912,9 +1802,9 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 
 // A zero-width guard that fails when the next word is one of Kotlin's HARD keywords -
 // the ones that can never be a name. Without it a bare `if`, `for`, `while`, `when` or
-// `val` parsed as a variable REFERENCE and a `for ()` / `if ()` as a CALL, which is why
-// the whole psi/recovery corpus (deliberately truncated control structures, each one a
-// syntax error) was accepted. It guards the two expression rules that read a bare name,
+// `val` would parse as a variable REFERENCE and a `for ()` / `if ()` as a CALL, and the
+// psi/recovery corpus (deliberately truncated control structures, each one a syntax
+// error) would be accepted. It guards the two expression rules that read a bare name,
 // VarRef and Call; the soft keywords (get/set/data/value/by/where/companion/field/...)
 // are deliberately NOT listed, because Kotlin really does allow them as names and the
 // psi corpus tests exactly that. A backtick-quoted name scans as the empty word and is
@@ -1923,9 +1813,8 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 NotHardKw   = :script(~~
     (function() {
         // catch / finally are here for the same reason the interpreter half has them:
-        // without them `catch` with no parameter list (psi/recovery/CatchKeywordRBrace.kt,
-        // which Kotlin records as an error) parsed as an ordinary identifier expression
-        // and the file was accepted.
+        // `catch` with no parameter list (psi/recovery/CatchKeywordRBrace.kt) must not
+        // parse as an ordinary identifier expression.
         var hard = "|as|break|catch|class|continue|do|else|false|finally|for|fun|if|in"
             + "|interface|is|null"
             + "|object|package|return|super|throw|true|try|typealias|typeof|val|var"
@@ -1983,15 +1872,11 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // walk-time retLabels stack decides (see makeReturnAt); a NON-LOCAL labelled
 // return (an outer lambda's label) stays not implemented, as does a labelled
 // break/continue out of a try body closure.
-// The label NAME may not be a hard keyword. Without the guard `fun @[a] T.() {}` in a
-// block read as the label `fun@` followed by the collection literal `[a]` - the statement
-// SUCCEEDED, consuming `fun @[a]`, and the parse then died on the `.` of `T.()` two
-// tokens later, so the position pointed nowhere near the cause. (psi/FunctionExpressions.kt)
-// The `@` must be GLUED to the name, for the reason AtAdjacent already carries on
-// break/continue/return: `abstract @a class F {}` was read as the label `abstract@` on
-// a statement `a`, leaving `class F {}` as a second statement on the same line - and
-// Kotlin's tree records both as ONE declaration (psi/LocalDeclarations.kt,
-// psi/newLabels/oldSyntaxExpressions.kt). Ported from the interpreter half.
+// The label NAME may not be a hard keyword: `fun @[a] T.() {}` in a block would read as
+// the label `fun@` followed by the collection literal `[a]`, and the parse would die on
+// the `.` of `T.()` two tokens later (psi/FunctionExpressions.kt).
+// The `@` must be GLUED to the name; twin of LabelDef in kotlin-interpreter.abnf, see
+// there.
 LabelDef    = NotHardKw KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
             = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
@@ -2009,17 +1894,9 @@ AtAdjacent  = :script(~~
         return (c.peek(0) === 64) ? undefined : abnf.newToken("\x01need-adjacent-at", 0)
     })()
 ~~) ;
-// The other half of the same rule, and the one that makes the file REJECT rather than
-// merely mis-parse. AtAdjacent only declines the labelled alternative; the bare
-// `break` / `continue` / `return` then matches and the stranded `@l1` is read as an
-// ANNOTATION on the next declaration, so `break @l1` parsed clean. Kotlin's parser
-// reports "There should be no space or comments before '@' in label reference"
-// (psi/newLabels/spaceBeforeLabelReference.kt) for every one of `break @l1`,
-// `return @l2 1`, `continue @l4 5`, `break/**/@l5` and `return//\n@l7 4` - so a `@`
-// reachable from a control keyword across whitespace OR comments is an error, not an
-// annotation. This guard therefore does the full skip (spaces, tabs, CR, LF, form
-// feed, `//` to end of line and `/* */`) the way a refusing guard must, and fails the
-// unlabelled alternative outright.
+// The other half of the same rule: a `@` reachable from a control keyword across
+// whitespace OR comments is an error, not an annotation. Twin of NoSpacedAt in
+// kotlin-interpreter.abnf; see there.
 NoSpacedAt  = :script(~~
     (function() {
         var i = 0
@@ -2129,18 +2006,16 @@ BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
 // initializer, and a bodiless property defaults to null here, so "initialized" is
 // exactly "the field is not null".
 // The `this` is OPTIONAL: a bare `::prop.isInitialized` inside a member means the
-// same thing, and it used to fall through to BareRef, which READ the property and
-// then asked for `.isInitialized` of the (null) value - aborting both halves with
-// "member 'isInitialized' of null".
+// same thing (BareRef would READ the property and ask the null value for
+// `.isInitialized`).
 // The receiver is refused when it is anything OTHER than `this` / `this@Label` /
 // absent: the Kotlin documentation ("Checking whether a lateinit var is initialized")
 // makes the check available only for a property lexically accessible at the site, and a
 // type-qualified `Type::prop` is a KProperty1 - an unbound reference - where
 // isInitialized is declared on KProperty0 alone. `l::a.isInitialized` from OUTSIDE the
-// declaring class is therefore a compile error, not `false`. Widened from a literal
-// `[ "this" ]` to a full base so that the refusal happens HERE rather than falling
-// through to QualRef, which (since references were implemented) would build a perfectly
-// good bound reference and read a member off it.
+// declaring class is therefore a compile error, not `false`. The base is a full one so
+// that the refusal happens HERE rather than falling through to QualRef, which would
+// build a perfectly good bound reference and read a member off it.
 IsInitRef   <~~ push(makeIsInit(takeAll(), up.pos)) ~~>
             = [ QualRefBase [ "?" ] [ "?" ] ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
 BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
@@ -2230,18 +2105,14 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 ObjectDecl  = ObjectCtor | ObjectReal | ObjectNoBody | ObjectSkip ;
 ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
-// object Foo(a: Int) / object Foo private (): an object declaration may not HAVE a
-// primary constructor, but that is a semantic rule - Kotlin parses the parameter list
-// and then reports the error, and the psi corpus expects it parsed. The list is
-// skipped, and the declaration falls to the notImplemented object path below.
-// An object header carrying type parameters and/or a constructor - shapes Kotlin's
-// PARSER builds (and its recovery corpus records without an error element) even though
-// the language forbids them on an object: psi/recovery/objects/declarations/
-// TypeParameterss.kt spells `object Foo<T, R> {}` with a clean tree. At least one of
-// the two must be present, so an ordinary `object Foo` still reaches ObjectReal - which
-// is why the angle run cannot simply be made optional here (ObjectNoBody would then
-// have swallowed `object Foo` and stranded the `<T, R>`). Same shape as the
-// interpreter half's ObjectExotic.
+// object Foo(a: Int) / object Foo private () / object Foo<T, R>: an object declaration
+// may not HAVE a primary constructor or type parameters, but that is a semantic rule -
+// Kotlin's PARSER builds the shape and its recovery corpus records it without an error
+// element (psi/recovery/objects/declarations/TypeParameterss.kt). At least one of the
+// two must be present, so an ordinary `object Foo` still reaches ObjectReal - which is
+// why the angle run cannot simply be made optional here (ObjectNoBody would then
+// swallow `object Foo` and strand the `<T, R>`). Same shape as the interpreter half's
+// ObjectExotic.
 ObjectCtor  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
             = KwObject KId ( SkipAngle [ [ PrimaryCtorKw | CtorModsOnly ] CtorParamsSkip ]
                            | [ PrimaryCtorKw | CtorModsOnly ] CtorParamsSkip )
@@ -2271,25 +2142,23 @@ EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
               "{" [ EnumEntry { "," EnumEntry } [ "," ] ] [ ";" { Member } ] "}" ;
 // An entry may carry its OWN CLASS BODY - `LOW(1) { override fun label() = "low" }` -
 // which is how an enum with an abstract member is written, and the shape any
-// per-constant behaviour takes. The interpreter half has always had it; this half had
-// no reading, so the whole declaration fell to EnumSkip's "enum class not implemented
-// (ignored)" and the enum's NAME was then undefined for the rest of the program. Each
-// such entry gets its own descriptor whose __super is the enum's, so the override wins
-// and everything the enum itself declares is still inherited.
+// per-constant behaviour takes. Each such entry gets its own descriptor whose __super
+// is the enum's, so the override wins and everything the enum itself declares is still
+// inherited.
 EnumEntry   <~~ push(makeEnumEntry(takeAll())) ~~>
             = { Annotation } KId <~~ push({ename: up.in}) ~~> [ "(" [ CallArgs ] ")" ] [ EnumEntryBody ] ;
 EnumEntryBody <~~ push({emembers: takeAll()}) ~~>
             = "{" { Member } "}" ;
 // The fallback for an enum whose ENTRIES or MEMBERS are outside the subset. It skips
 // the body's contents, but it keeps the body's SHAPE: a comma-separated entry list and
-// then, only after a `;`, the members. A plain SkipBlock here accepted every one of the
-// psi/EnumEntry* corpus files - `enum class My { FIRST, fun foo() {} }`, `FIRST,,`,
+// then, only after a `;`, the members. A plain SkipBlock here would accept every one of
+// the psi/EnumEntry* corpus files - `enum class My { FIRST, fun foo() {} }`, `FIRST,,`,
 // `FIRST: My(13)` - which Kotlin rejects with "Expecting ';' after the last enum entry".
 EnumSkip    <~~ push(notImplStmt("enum class", up.pos)) ~~>
             = KwEnum KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] EnumSkipBody ;
 // The member run after the `;` is tried as real members FIRST: an enum reaches EnumSkip
 // because its ENTRIES are outside the subset, and its members are usually ordinary. A
-// bare `{ SkipItem }` run swallowed `inner object` (psi/namelessObjectAsEnumMember.txt
+// bare `{ SkipItem }` run would swallow `inner object` (psi/namelessObjectAsEnumMember.txt
 // records "Name expected"). Two full alternatives, not a group - a group that matched
 // the empty repetition would commit and never offer the second (gotchas.md, "A GROUP of
 // alternatives is committed exactly like an ordered choice").
@@ -2320,14 +2189,11 @@ AnnotationClass <~~ push(makeErased()) ~~>
             = KwAnnotation KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ SkipBlock ] ;
 // The declaration itself is still erased, but the alias -> target mapping is RECORDED:
 // `typealias Alias = Real ; class C : Alias()` names its superclass through the alias,
-// and resolvedTypeName has to be able to follow it or `super.g()` inside C reports
-// "super call outside a subclass" - the exact error four rounds of super fixes kept
-// leaving behind. The interpreter half has kept this table (typeAliases) all along.
+// and resolvedTypeName has to be able to follow it for `super.g()` inside C. The
+// interpreter half keeps the same table (typeAliases).
 TypeAlias   <~~ push(registerTypeAlias(takeAll())) ~~>
             = KwTypealias KId <~~ push(up.in) ~~> [ SkipAngle ] "=" TypeName [ ";" ] ;
 
-// Member forms accepted structurally, then reported as not implemented. Each fires
-// notImpl at compile time and pushes nothing, so makeClassStmt simply skips it.
 // An init block: genuine. Its statements run in the constructor, interleaved with the
 // property initializers in DECLARATION order (Kotlin's rule), with `this` bound - so
 // an init block can read the constructor parameters and write the properties declared
@@ -2346,12 +2212,11 @@ CompanionBlock <~~ push({companion: takeAll()}) ~~>
 CompanionReal <~~ push({companion: takeAll()}) ~~>
 // The optional NAME must open on the `object` keyword's own line. `object` is a soft
 // keyword and therefore a perfectly good KId, so a nameless `companion object` followed
-// by a blank line and a nested `object C` (psi/NamedClassObject.kt) had the NEXT
-// declaration's `object` eaten as the companion's name, stranding its `C`.
+// by a blank line and a nested `object C` (psi/NamedClassObject.kt) would have the NEXT
+// declaration's `object` eaten as the companion's name.
 // The supertype list is `Supers`, not the discarding `SuperList`: a companion object
 // may IMPLEMENT an interface (`companion object : Named`), and its default methods have
-// to be copied onto the companion's method holder or `Cls.show()` aborts with "unknown
-// method" while the interpreter half answers it.
+// to be copied onto the companion's method holder for `Cls.show()`.
             = KwCompanion KwObject [ SameLine KId <~~ push({cname: up.in}) ~~> ] [ ":" Supers ] ( "{" { Member } "}" | !"{" ) ;
 CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ KId ] [ ":" SuperList ] SkipBlock ;
@@ -2380,10 +2245,9 @@ AccessorProp <~~ push({accprop: makeAccessorProp(takeAll())}) ~~>
 PropInit    <~~ push({apinit: pop()}) ~~>
             = Expression ;
 Accessor    = GetAcc | SetAcc ;
-// Kotlin allows at MOST one getter and one setter, in either order. Spelling the run
-// as `AccRun` accepted `get() = 0 get() = 0` (psi/DuplicateAccessor.kt,
-// which Kotlin's own parser records as an error), so the run is spelled the way the
-// interpreter half spells it: one of each kind, either order.
+// Kotlin allows at MOST one getter and one setter, in either order
+// (psi/DuplicateAccessor.kt, `get() = 0 get() = 0`, is an error) - the way the
+// interpreter half spells it.
 AccRun      = GetAcc [ SetAcc ] | SetAcc [ GetAcc ] ;
 GetAcc      <~~ push({getter: pop()}) ~~>
             = [ Modifiers ] KwGet "(" ")" [ ":" Type ] [ ContractClause ] AccBody [ ";" ] ;
@@ -2413,8 +2277,8 @@ ExtProp     <~~ push(makeExtProp(takeAll())) ~~>
 // every write setValue(recv, property, value). The accessors are ordinary extension
 // accessors (extp$name / extps$name), so the field-read and field-assign emitters route
 // to them by NAME exactly as they do for a computed extension property.
-// UNVERIFIED against kotlinc (none on this machine); the operator arity and the thisRef
-// identity are read off the Kotlin documentation's "Delegated properties" page.
+// Spec-cited (no kotlinc here): the operator arity and the thisRef identity are read off
+// the Kotlin documentation's "Delegated properties" page.
 ExtDelegProp <~~ push(makeExtDelegProp(takeAll(), up.pos)) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] KwBy DelegSrc { PropVis } [ ";" ] ;
 // A MEMBER extension PROPERTY - `val Int.scaled: Int get() = this * factor` declared
@@ -2422,11 +2286,8 @@ ExtDelegProp <~~ push(makeExtDelegProp(takeAll(), up.pos)) ~~>
 // counterpart of MemberExtFun above: the accessor pair is installed on the descriptor as
 // extget$name / extset$name and takes (dispatchReceiver, extensionReceiver[, value]), so
 // `this` is the extension receiver and the enclosing instance rides along as __dispatch.
-// It used to fall to UnsupAccessor ("property accessor not implemented (ignored)") and
-// then read back as Unit - and a WRITE through one aborted the compiled program with
-// "cannot set member 'tagged' on float64" - while the interpreter half ran both. Ordered
-// before AccessorProp for the same reason the interpreter orders it before PropDecl: the
-// receiver segment would otherwise be half-consumed as the property name.
+// Ordered before AccessorProp for the same reason the interpreter orders it before
+// PropDecl: the receiver segment would otherwise be half-consumed as the property name.
 MemberExtProp <~~ push({memberExtProp: makeAccessorProp(takeAll())}) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
 // The member-level EXTENSION DELEGATED property - `val Ctx.mem: Int by D()` inside a
@@ -2441,13 +2302,11 @@ MemberExtDelegProp <~~ push({memberExtDeleg: makeDelegProp(takeAll(), up.pos)}) 
 // from Kotlin, which re-evaluates the getter on every read.
 TopAccProp  <~~ push(makeTopAccProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] AccRun ;
-// The forms left over: a MEMBER extension property (two receivers, which the single
-// `this` model cannot express) and a delegated accessor property.
+// The forms left over: a delegated accessor property and anything else AccessorProp,
+// ExtProp and the member-extension forms above did not take.
 UnsupAccessor <~~ push(notImplStmt("property accessor", up.pos)) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] [ { TypeAnno } RecvSeg { RecvSeg } ] KId [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
 
-// A destructuring declaration: accepted, reported as not implemented; the
-// initializer still runs so its calls stay visible under -warn-unsupported.
 // val (a, b) = e: genuine. Kotlin defines it through the componentN operator
 // convention - component1() for the first name, component2() for the second - which is
 // what a data class synthesizes and what any class can declare by hand. A name of `_`
@@ -2526,21 +2385,14 @@ KwContract  = "contract" KwEnd ;
 
     // ===== THE SCOPE PROBES, LOWERED HERE RATHER THAN LEFT AS EXTERNS =====
     //
-    // js_ktget / js_kset / js_ktvarset and their relatives used to be externs that
-    // took a SCOPE HANDLE and walked the chain. A scope is the C floor's PRIVATE
-    // storage - which is exactly why the Lua pilot moved js_scope_decl /
-    // js_scope_set / js_scope_typeof INTO the floor - so languages/lib/kotlin-rt.metajs
-    // (layer 2) cannot open one and could never implement any of them. See "TWO
-    // THINGS EVERY ONE OF THE REMAINING NINE NEEDS" in docs/runtime-next-plan.md
-    // part 3: php lowered 2, swift 2, java 1 helper, csharp 0, dart 2, go 1, and
-    // KOTLIN HAS THE LARGEST SET OF THE EIGHT - ten externs read a scope here.
-    //
-    // No floor addition is needed for the probes, because an EMITTER may call
-    // js_scope_typeof / js_scope_get / js_scope_set. What the emitter CANNOT do is
-    // walk PAST the innermost binding: the floor seeds no scope-parent accessor, so
-    // a helper sees the innermost `name`, the innermost `this` and the innermost
-    // `__dispatch` and no more. Every place that costs exactness is written out at
-    // the helper concerned.
+    // A scope is the C floor's PRIVATE storage, so languages/lib/kotlin-rt.metajs
+    // (layer 2) cannot open one with a handle; Kotlin has ten externs that read a scope.
+    // An EMITTER may call js_scope_typeof / js_scope_get / js_scope_set, but it cannot
+    // walk PAST the innermost binding: the floor seeds no scope-parent extern, so a
+    // helper sees the innermost `name`, the innermost `this` and the innermost
+    // `__dispatch` and no more. So the hot innermost arms are lowered here and the chain
+    // walks are layer 2's (kotlin-rt.metajs SECTION 6, which uses the MetaJS scope host
+    // builtins). Every place that costs exactness is written out at the helper concerned.
     var rtFuncs = {}
     function rtFunc(name, nparams, bodyFn) {
         if (rtFuncs["$" + name] != undefined) { return rtFuncs["$" + name] }
@@ -2567,48 +2419,14 @@ KwContract  = "contract" KwEnd ;
     // sw_safeget and dart's dt_safeget, transferred verbatim - the third and fourth
     // language to use exactly this guard.
     //
-    // ===== docs/todo.md 5.2 (merge these three into a shared ABNF module): =====
-    // ===== DECLINED. The mechanism the item prescribes does not exist.     =====
-    //
-    // THE LOAD-BEARING FACT, and it settles the item on its own: a grammar-level
-    // `:include("lib/x.abnf")` merges PRODUCTIONS. abnf/parser.go's applyCommand
-    // parses the file, compiles it and APPENDS its rules to the a-grammar; the
-    // included file's own `:startScript()` is then never run, because
-    // abnf/r/rules.go's GetStartScript returns the FIRST startScript command and the
-    // host grammar's own comes before anything an include appended. Verified by
-    // experiment, not by reading: a two-line fragment whose startScript prints is
-    // included by a host grammar whose startScript prints, and only the HOST's line
-    // appears - SILENTLY, with no error and no warning. These helpers are startScript
-    // closures over m / curF / callExt / emitStr, so no shared .abnf module can hold
-    // them. (That silent drop is itself worth knowing and is in this round's report.)
-    //
-    // THE MECHANISM THAT COULD HOLD THEM is the script-level `include("lib/*.js")`
-    // three lines above, and using it here is exactly the architecture decision
-    // docs/working-on-this-project.md 7.12 records AGAINST: there are precisely two
-    // such files, lib/compile-core.js (every compiler grammar) and lib/interp-core.js
-    // (every interpreter), plus lib/regex.js, and a three-language file would be the
-    // first family-only one in the repo. Both chapter-4 traps that kill it are live at
-    // THIS site: an unprefixed helper in a shared core SILENTLY REPLACES a grammar's
-    // own (python's `numText`, 13,087 lines of goja-vs-frozen divergence from a commit
-    // about nothing, no gate caught it) and rtFunc/rtSafeGet/rtKGet/rtKSet are exactly
-    // those unprefixed names; and the hoist-vs-textual-position rule is already load
-    // bearing here, since swift's rtFunc calls a `hasOwn` its own grammar defines
-    // 1,400 lines FURTHER DOWN.
-    //
-    // AND THE THREE BODIES ARE NOT THE THREE BODIES THE ITEM DESCRIBES. Measured over
-    // the committed grammars, normalised for the emitted name:
-    //
-    //   rtSafeGet        14 lines, identical in ALL THREE
-    //   rtKGet + rtKSet  44 lines, identical in swift and dart ONLY - kotlin's kt_kset
-    //                    lost its `this` walk to layer 2 at a6df3a8 and kotlin has no
-    //                    kt_kget at all (kt_ktgetp is a different, larger probe)
-    //   rtFunc           already THREE spellings, not one (swift hasOwn, dart/kotlin
-    //                    `!= undefined`)
-    //
-    // 72 recoverable lines, every one of them carrying the EMITTED FUNCTION NAME, so
-    // even a shared file has to thread a `sw_`/`dt_`/`kt_` prefix through or three
-    // languages' modules change byte for byte. tools/shape-scan keeps reporting them,
-    // which is the right outcome for harmless duplication.
+    // Duplicated on purpose with swift and dart: a grammar-level `:include` merges
+    // PRODUCTIONS only (an included file's own :startScript is never run, silently), and
+    // these helpers are startScript closures over m / curF / callExt / emitStr, so no
+    // shared .abnf module can hold them. A shared script-level lib/*.js would be the
+    // first family-only one, and unprefixed helper names in a shared core silently
+    // replace a grammar's own (docs/working-on-this-project.md 7.12). The bodies also
+    // differ per language (rtKGet/rtKSet, rtFunc) and every one carries the emitted
+    // `sw_`/`dt_`/`kt_` prefix.
     function rtSafeGet() {
         return rtFunc("kt_safeget", 2, function(b, ps) {
             var v = ps[0]
@@ -2629,8 +2447,7 @@ KwContract  = "contract" KwEnd ;
     // METHOD of it. The distinction is the whole of it - `with(list) { size }` is a
     // field read and `with(list) { first() }` is a call, and the SAME table decides
     // both in all three engines, so this lowering has to consult it too or the two
-    // arms swap: a bare js_ktfget answers `first` off a materialized range and
-    // `first()` then calls a number. Keep the four lists in step.
+    // arms swap. Keep the four lists in step.
     function rtRecvProp() {
         return rtFunc("kt_recvprop", 1, function(b, ps) {
             var names = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
@@ -2665,8 +2482,7 @@ KwContract  = "contract" KwEnd ;
     //
     // An UNBOUND callable reference is the fourth and is deliberately NOT guarded:
     // it is a host FUNCTION, no property distinguishes it from an ordinary closure
-    // from inside emitted IR, and it already reached the bare js_ktfget on the
-    // non-object arm before this helper existed.
+    // from inside emitted IR, and it reaches the bare js_ktfget on the non-object arm.
     function rtKtFProbe() {
         return rtFunc("kt_fprobe", 2, function(b, ps) {
             var v = ps[0]
@@ -2705,43 +2521,29 @@ KwContract  = "contract" KwEnd ;
     // (the DISPATCH receiver a member extension carries), then the same abort
     // js_scope_get raises.
     //
-    // TWO INEXACTNESSES, both from the missing scope-parent accessor and both
-    // measured rather than assumed (see the KOTLIN section of the plan):
+    // TWO INEXACTNESSES, both from the missing scope-parent extern:
     //   * the Go twin walks the WHOLE chain looking for a `this` and for a
     //     `__dispatch`; this sees the innermost of each.
     //   * js_scope_typeof answers "undefined" for a slot that HOLDS undefined and
-    //     for an absent name alike, so such a name took the `this` fallback and then
-    //     the final js_scope_get - swift's recorded inexactness, met again. HALF
-    //     CLOSED: js_scope_has is the OWN-SCOPE twin of the scopeHas builtin and it
-    //     does distinguish the two, so a name bound in the INNERMOST scope holding
-    //     undefined is now read as the local it is. `val x: Unit = f(); println(x)`
-    //     aborted the native binary with *js_ktget(x) needs to WALK a scope chain*
-    //     while llvm.Run printed kotlin.Unit, because a Unit-valued local IS a slot
-    //     holding undefined. What stays open is the same name bound in an ENCLOSING
-    //     scope: js_scope_has does not walk and there is no js_scope_parent EXTERN
-    //     (host 65 is a MetaJS BUILTIN, reachable from layer 2 and not from emitted
-    //     IR), so that case still falls out to js_ktget. This is the first emitter
-    //     use of the scope API todo.md 6.1 records as unused.
+    //     for an absent name alike. js_scope_has is the OWN-SCOPE twin of the scopeHas
+    //     builtin and does distinguish the two, so a name bound in the INNERMOST scope
+    //     holding undefined (`val x: Unit = f(); println(x)`) is read as the local it
+    //     is. The same name bound in an ENCLOSING scope falls out to js_ktget, whose
+    //     layer-2 walk finds it.
     // js_ktfget is the probe rather than js_get because it is Kotlin's field read -
     // a StringBuilder's properties, a Map miss as null, the Regex/MatchResult
     // properties - and because it is the one an accessor pair (js_defprop on the
     // DESCRIPTOR, i.e. every `val c get() = ...` and every delegated property)
     // resolves through.
     //
-    // THE THIRD PARAMETER IS THE SYNTACTIC POSITION, and it is what todo.md 1.6
-    // needed. `first` is a PROPERTY of IntProgression and a member FUNCTION of List
-    // (kotlin.ranges.IntProgression.first / kotlin.collections.first()), a range is
-    // MATERIALIZED as a plain list here, and the item concluded that the receiver's
-    // ORIGIN therefore had to be carried on the value. It does not: what the name
-    // alone cannot decide, the SITE can. `first` and `first()` are different
+    // THE THIRD PARAMETER IS THE SYNTACTIC POSITION. `first` is a PROPERTY of
+    // IntProgression and a member FUNCTION of List, so the name alone cannot decide
+    // which read is meant; the SITE can. `first` and `first()` are different
     // productions in all three engines, and Kotlin has no form in which an
     // unqualified name in VALUE position means a bound method - a method used as a
     // value needs `::`. So a builtin receiver's field read is tried FIRST in value
     // position and not at all in call position, `with(1..7 step 2) { first }`
     // answers 1, and `with(listOf(4, 5)) { first() }` still binds the method (kr9).
-    // Carrying the origin was also not AVAILABLE: a floor array holds no properties
-    // (jsrt.go's setMember rejects every non-numeric key but `length`), and
-    // languages/lib/runtime.c is the one file that could change that.
     // kt_ktget(env, name) stays the two-parameter spelling every other call site
     // uses; it is a wrapper on kt_ktgetp(env, name, iscall) with iscall false.
     function rtKtGet() {
@@ -2767,41 +2569,23 @@ KwContract  = "contract" KwEnd ;
             thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), dispB, probeB)
             var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
             // AN OBJECT-SHAPED BUILTIN RECEIVER IS NOT AN INSTANCE, AND js_get IS THE
-            // WRONG READ FOR IT. The test used to be js_typeof == "object", which is
-            // true of a Map, a List, a Set, a StringBuilder, a Result and a lazy just
-            // as much as of a class instance, so every one of them took the instance
-            // arm and was read with the shared js_get:
-            //   * `with(m) { entries }` answered js_get's dict arm - the raw Pair
-            //     list, printing `[(a, 1), (b, 2)]` - where `m.entries` written out,
-            //     the interpreter and the native binary all say `[a=1, b=2]`. A live
-            //     llvm.Run-vs-everything-else divergence (todo.md 1.10).
-            //   * `val List<Int>.mid get() = this[size / 2]` said *unknown name:
-            //     size*: js_get misses `size` on an array and the accessor probe
-            //     below finds no {__acc} on a receiver with no descriptor at all, so
-            //     the read fell out to the extern. The interpreter answered 2.
-            // The test is now `__class`, which is what actually distinguishes the two
-            // - a class instance is read with js_get, because on an instance a bare
-            // js_ktfget would ALSO answer a method off the descriptor where the Go
-            // twin's obj.props[name] does not (`add` inside `apply { add(3) }`
-            // answered the enclosing class's member instead of the list's, the
-            // measurement that first shaped this helper).
+            // WRONG READ FOR IT. js_typeof == "object" is true of a Map, a List, a Set,
+            // a StringBuilder, a Result and a lazy just as much as of a class instance,
+            // and js_get would answer `with(m) { entries }` with the raw Pair list and
+            // miss `size` inside `val List<Int>.mid get() = this[size / 2]`. The test is
+            // `__class`, which is what actually distinguishes the two - a class instance
+            // is read with js_get, because on an instance a bare js_ktfget would ALSO
+            // answer a method off the descriptor where the Go twin's obj.props[name]
+            // does not (`add` inside `apply { add(3) }` must be the list's).
             //
             // A builtin receiver then splits AGAIN, on kt_recvprop, and that gate is
             // not optional: ktRecvMember in every engine reads a recv PROPERTY with
-            // js_ktfget and binds anything else as a zero-argument METHOD, and
-            // js_ktfget answers `first`/`last`/`step` off a materialized range, so an
-            // ungated route made `with(listOf(4, 5)) { first() }` call the number 4.
-            // Measured: it aborts under llvm.Run without the gate.
+            // js_ktfget and binds anything else as a zero-argument METHOD, so an ungated
+            // route would make `with(listOf(4, 5)) { first() }` call the number 4.
             //
-            // COST, measured rather than assumed, because this helper is the compiler
-            // half's hottest name resolution: the `__class` read is one kt_safeget
-            // more on the HIT path, and it buys back the two the accessor and
-            // lateinit probes used to make for themselves. A 300,000-iteration loop
-            // of unqualified instance-field reads (`s = s + a + b` inside a method),
-            // 9 layout draws each, native: base median 196,769,166,268 instructions
-            // (spread 1.68%), this shape 195,806,263,424 (spread 2.93%) - -0.49%,
-            // inside both spreads. tests/bench/mod.kt reads only LOCALS and never
-            // reaches this block, so --bench cannot see either direction here.
+            // The `__class` read is one kt_safeget more on the HIT path, and it saves
+            // the two the accessor and lateinit probes would otherwise make; this helper
+            // is the compiler half's hottest name resolution.
             var clsV = probeB.NewCall(rtSafeGet(), [thV, emitStr(probeB, "__class")])
             var instB = curF.NewBlock("")
             var bltB = curF.NewBlock("")
@@ -2818,8 +2602,7 @@ KwContract  = "contract" KwEnd ;
             // kt_recvprop decides for a CALL - `first()` must stay a bound method.
             // In VALUE position there is nothing to decide: Kotlin has no unqualified
             // name that means a method, so the field read is simply tried, and a MISS
-            // falls to exactly the block instB would have fallen to (dispB). That one
-            // extra arm is the whole of todo.md 1.6's first bullet.
+            // falls to exactly the block instB would have fallen to (dispB).
             var rp2B = curF.NewBlock("")
             rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, rp2B)
             rp2B.NewCondBr(truthy(rp2B, ps[2]), instB, fgB)
@@ -2830,8 +2613,8 @@ KwContract  = "contract" KwEnd ;
             // approximation but the exact reading of the Go twin: js_ktget runs
             // ktLateinitCheck on the value it found, and an uninitialised `lateinit
             // var` is exactly the null/undefined case, so it must reach the extern
-            // to raise UninitializedPropertyAccessException. Measured: assertion
-            // lat3 of tests/kotlin-test-full.kt fails without this arm.
+            // to raise UninitializedPropertyAccessException (assertion lat3 of
+            // tests/kotlin-test-full.kt).
             var accB = curF.NewBlock("")
             instB.NewCondBr(truthy(instB, callExt(instB, "js_sne", [mV, hUndef])), p2B, accB)
             // A NULL is not a miss: js_get answers undefined for an ABSENT property
@@ -2839,7 +2622,7 @@ KwContract  = "contract" KwEnd ;
             // and the difference is exactly ktLateinitCheck's case. jsrtkotlin.go
             // raises UninitializedPropertyAccessException for a null-valued property
             // the class chain declares `lateinit`, and answers the null otherwise.
-            // Measured: assertion lat3 of tests/kotlin-test-full.kt.
+            // (assertion lat3 of tests/kotlin-test-full.kt).
             var latB = curF.NewBlock("")
             p2B.NewCondBr(truthy(p2B, callExt(p2B, "js_sne", [mV, hNull])), hitB, latB)
             var liV = latB.NewCall(rtClsFind(), [clsV, emitStr(latB, "__lateinit")])
@@ -2890,16 +2673,11 @@ KwContract  = "contract" KwEnd ;
             var dhitB = curF.NewBlock("")
             dprobeB.NewCondBr(truthy(dprobeB, callExt(dprobeB, "js_sne", [dmV, hUndef])), dhitB, missB)
             dhitB.NewRet(dmV)
-            // THE RESIDUE, and the one thing this lowering does NOT close. Kotlin's
-            // implicit receivers form a STACK that ktWithRecv (with / run / apply /
-            // buildString / buildList / buildMap, and every T.() -> R lambda) pushes
-            // INSIDE the runtime, and js_ktget walks it after the two probes above.
-            // An emitter cannot see that stack, and it cannot walk PAST the innermost
-            // `this` either, because the floor seeds no scope-parent accessor. So the
-            // last arm stays the extern: under llvm.Run it is jsrtkotlin.go's own
-            // js_ktget and nothing changes; natively it is the one call layer 2 cannot
-            // answer. See the KOTLIN section of docs/runtime-next-plan.md for the
-            // measurement and for the two floor primitives that would close it.
+            // The last arm stays the extern. Kotlin's implicit receivers form a STACK
+            // that ktWithRecv (with / run / apply / buildString / buildList / buildMap,
+            // and every T.() -> R lambda) pushes INSIDE the runtime, and js_ktget walks
+            // it after the two probes above. An emitter cannot see that stack, and it
+            // cannot walk PAST the innermost `this` either.
             //
             // What CAN be reached is layer 2 itself, through an extern that takes no
             // scope. js_ktglobal(name) is that extern - it is already emitted for a
@@ -2907,8 +2685,7 @@ KwContract  = "contract" KwEnd ;
             // ktRecvStack FIRST, so `with(list) { size }` and `apply { add(3) }`
             // resolve natively. In the Go twin js_ktglobal is ktGlobalFn, which
             // answers undefined for a name it does not know, so this arm is a no-op
-            // under llvm.Run and the extern below still decides - measured: the
-            // ratchet stays at 979 with the probe in place.
+            // under llvm.Run and the extern below still decides.
             var gB = curF.NewBlock("")
             var lastB = curF.NewBlock("")
             // BOTH externs carry the syntactic position too. Natively `with` binds no
@@ -2928,22 +2705,19 @@ KwContract  = "contract" KwEnd ;
     //
     // classMethodNames (the test at the makeCall site that emits this) is a whole-FILE
     // set: every method name every class and interface declares. So `val f = { x: Int
-    // -> x * 2 }; f(3)` written inside any member aborted with *unknown method 'f' on
-    // an instance* as soon as an unrelated `interface Shape { fun f(): Int }` appeared
-    // anywhere in the file - in llvm.Run and in the native binary both, while the
-    // interpreter half (whose makeCall resolves through getVar) was always right.
+    // -> x * 2 }; f(3)` written inside any member must still call the local when an
+    // unrelated `interface Shape { fun f(): Int }` appears anywhere in the file.
     // Kotlin resolves a call name against the innermost scope that declares it and a
     // local declaration sits INSIDE the class body's scope, so the local wins.
     //
     // The probe is rtKtGetP's own miss-path pair, for the reason given in its header:
     // js_scope_typeof answers "undefined" both for a slot holding undefined and for an
     // absent one, and js_scope_has (own scope only) separates them. A site with no
-    // local pays one js_scope_typeof and takes the member arm exactly as before.
+    // local pays one js_scope_typeof and takes the member arm.
     //
     // The local arm is js_call, not the makeCall tail's js_call-or-invoke-convention
-    // pair: reaching that would mean an `operator fun invoke` class AND a local
-    // shadowing a member-method name in the same file, and the arm it replaces was an
-    // outright abort. todo.md 1.4.
+    // pair: reaching that would need an `operator fun invoke` class AND a local
+    // shadowing a member-method name in the same file.
     function rtBareCall() {
         return rtFunc("kt_barecall", 3, function(b, ps) {
             var localB = curF.NewBlock("")
@@ -2992,14 +2766,13 @@ KwContract  = "contract" KwEnd ;
     // that some class declares the name - so resolving it means walking the frame's
     // `this` and `__dispatch` bindings and their __class / __outer graphs.
     //
-    // THAT WALK IS NOW THE EXTERN'S. It used to be ~100 lines of IR here
-    // (kt_mextwalk / kt_mextfind) which could reach only the INNERMOST `this` and
-    // the INNERMOST `__dispatch`, because emitted IR has no scope-parent accessor.
+    // THAT WALK IS THE EXTERN'S: emitted IR could reach only the INNERMOST `this`
+    // and the INNERMOST `__dispatch`, because it has no scope-parent extern.
     // languages/lib/kotlin-rt.metajs's k6MextFind walks EVERY frame with
     // scopeHas/scopeParent and then the implicit-receiver stack, so
     // `with(Other(9)) { 2.tripled() }` inside a member of A resolves natively; under
-    // llvm.Run the Go twin's ktMemberExtFind decides, exactly as it did when the
-    // lowering missed. See that function's header for the one engine still short.
+    // llvm.Run the Go twin's ktMemberExtFind decides. See k6MextFind's header for the
+    // one engine still short.
     function rtMextCall() {
         return rtFunc("kt_mextcall", 4, function(b, ps) {
             b.NewRet(callExt(b, "js_ktmextcall", [ps[0], ps[1], ps[2], ps[3]]))
@@ -3015,12 +2788,11 @@ KwContract  = "contract" KwEnd ;
             b.NewRet(callExt(b, "js_ktmextset", [ps[0], ps[1], ps[2], ps[3]]))
         })
     }
-    // ktTypeNames, copied from abnf/jsrtkotlin.go:5926 (whose own comment says the
-    // list is shared with kTypeNames in kotlin-interpreter.abnf and that the copies
-    // must stay in step - this is the THIRD copy and it is here because the emitter
-    // has to make the same decision the extern used to make). A `::` in front of one
-    // of these is an UNBOUND reference, and that arm runs BEFORE the scope walk, so
-    // a same-named builder in scope must not win.
+    // ktTypeNames, copied from abnf/jsrtkotlin.go (whose list is shared with kTypeNames
+    // in kotlin-interpreter.abnf; the copies must stay in step - this one is here
+    // because the emitter makes the decision statically). A `::` in front of one of
+    // these is an UNBOUND reference, and that arm runs BEFORE the scope walk, so a
+    // same-named builder in scope must not win.
     var ktTypeNameSet = {}
     var ktTypeNameList = ["String", "CharSequence", "Int", "Long", "Short", "Byte",
         "UInt", "ULong", "UShort", "UByte", "Double", "Float", "Boolean", "Char",
@@ -3028,21 +2800,14 @@ KwContract  = "contract" KwEnd ;
         "MutableSet", "Map", "MutableMap", "Array", "Collection", "Iterable",
         "Comparable", "IntRange", "CharRange", "LongRange", "Regex", "StringBuilder"]
     for (var ktTNI = 0; ktTNI < ktTypeNameList.length; ktTNI++) { ktTypeNameSet["$" + ktTypeNameList[ktTNI]] = true }
-    // ----- the four scope-taking helpers that are now PURE EXTERN CALLS -----
+    // ----- the four scope-taking helpers that are PURE EXTERN CALLS -----
     //
-    // kt_refbase, kt_outer, kt_bareref and kt_dthis each used to lower a scope probe
-    // into IR, because a scope is the C floor's private storage and layer 2 could not
-    // open one. Every one of those lowerings could see only the INNERMOST binding and
-    // the INNERMOST `this`, and each carried a documented inexactness for the frames
-    // further out. languages/lib/kotlin-rt.metajs SECTION 6 now walks the whole chain
-    // with the scopeHas / scopeParent / scopeGet host builtins, so the exact answer
-    // is one extern call away in the native build and the Go twin - which was always
-    // the reference for these - decides under llvm.Run. docs/todo.md 6.1.
-    //
-    // NOTE why this could not be done "in the emitter" the way the item said: the
-    // scope builtins are host ids 64..68 reachable from a MetaJS SOURCE FILE, and the
-    // extern set an emitter may call is js_scope_{new,get,set,set_or_create,decl,has,
-    // typeof} - there is no js_scope_parent. The chain walk has to live in layer 2.
+    // kt_refbase, kt_outer, kt_bareref and kt_dthis need the whole scope chain, which
+    // only languages/lib/kotlin-rt.metajs SECTION 6 can walk (the scopeHas /
+    // scopeParent / scopeGet host builtins are reachable from a MetaJS SOURCE FILE, and
+    // the extern set an emitter may call - js_scope_{new,get,set,set_or_create,decl,has,
+    // typeof} - has no js_scope_parent). So the exact answer is one extern call away in
+    // the native build, and the Go twin decides under llvm.Run.
     //
     // kt_refbase(env, name) is js_ktrefbase MINUS its ktTypeNames arm, which the
     // emitter still decides statically at the call site (the base name is a literal
@@ -3053,11 +2818,10 @@ KwContract  = "contract" KwEnd ;
             b.NewRet(callExt(b, "js_ktrefbase", [ps[0], ps[1], hFalse]))
         })
     }
-    // kt_outer(env, name) is js_ktouter: `this@Outer`. The old lowering walked the
-    // INNERMOST instance's __outer chain, which is the same answer only when the
-    // qualified receiver is an enclosing INSTANCE; the extern walks the scope chain
+    // kt_outer(env, name) is js_ktouter: `this@Outer`. The extern walks the scope chain
     // for a `this` whose own __class / __super chain declares the name, which is the
-    // test Kotlin actually asks.
+    // test Kotlin actually asks (the innermost instance's __outer chain gives the same
+    // answer only when the qualified receiver is an enclosing INSTANCE).
     function rtOuter() {
         return rtFunc("kt_outer", 2, function(b, ps) {
             b.NewRet(callExt(b, "js_ktouter", [ps[0], ps[1]]))
@@ -3084,9 +2848,8 @@ KwContract  = "contract" KwEnd ;
     // MetaJS a call is a scope frame (docs/working-on-this-project.md 5.1), so the
     // arm that runs every iteration of a loop is the one worth keeping here.
     //
-    // A slot HOLDING undefined now resolves correctly rather than falling out: it
-    // reads "undefined" to js_scope_typeof, takes the miss arm, and js_kset's
-    // scopeHas walk finds the binding it really is.
+    // A slot HOLDING undefined reads "undefined" to js_scope_typeof, takes the miss
+    // arm, and js_kset's scopeHas walk finds the binding it really is.
     function rtKSet() {
         return rtFunc("kt_kset", 3, function(b, ps) {
             var localB = curF.NewBlock("")
@@ -3183,8 +2946,7 @@ KwContract  = "contract" KwEnd ;
     // ----- explicit TYPE ARGUMENTS on a method call -----
     // The methods whose type argument is part of the call's MEANING. For these the type
     // name is appended as a trailing string argument; for every other method the
-    // captured list is dropped exactly as it was before this existed, so a program that
-    // calls none of them is unchanged.
+    // captured list is dropped.
     var mcallTArgMethods = {"$filterIsInstance": true}
     // MethodSfx's item list holds the method name, the (optional) type-argument text and
     // the arguments. The shared popName lifts only the name, and a `{mtargs}` item left
@@ -3274,7 +3036,7 @@ KwContract  = "contract" KwEnd ;
     // maps the convention method to those classes, and the emitted code probes with
     // js_is_type (which walks the __super chain, so subclasses are covered) and falls
     // back to the primitive operator. A program declaring no convention method emits
-    // exactly the IR it emitted before, byte for byte.
+    // no probe.
     var opClasses = {}
     var opConventions = {"$plus": true, "$minus": true, "$times": true, "$div": true,
                          "$rem": true, "$mod": true, "$unaryMinus": true, "$unaryPlus": true,
@@ -3307,9 +3069,9 @@ KwContract  = "contract" KwEnd ;
     // The PRIMITIVE binary operator. Everything but `+` is emitted straight; `+` is
     // string concatenation as soon as one operand is a String (Kotlin's rule, and
     // exactly what kotlin-interpreter.abnf's kadd tests), and then both operands are
-    // rendered by js_ktstr first. Without that, the concat falls back on the runtime's
-    // own ToString, which spells a list "1,2" and an instance "[object Object]" where
-    // Kotlin spells them "[1, 2]" and through toString(). The test has to be a RUNTIME
+    // rendered by js_ktstr first (the runtime's own ToString would spell a list "1,2" and
+    // an instance "[object Object]" where Kotlin spells them "[1, 2]" and through
+    // toString()). The test has to be a RUNTIME
     // probe because this front end does not type its expressions; it costs two
     // js_is_type calls and a branch, and only on a `+` written in the source (a loop
     // increment emits js_jadd directly).
@@ -3365,13 +3127,11 @@ KwContract  = "contract" KwEnd ;
     }
     // ----- Double / Float: a boxed js_jflo value (see abnf/jsrtjvm.go) -----
     // Kotlin's Double is a DIFFERENT type from Int, and the handle runtime models
-    // every number as one JS double, so 1.0 / 3.0 and 1 / 3 arrived here as the same
-    // two operands. Every arithmetic operator used to be followed by the shared
-    // intWrap, which made the float half of the language silently integer
-    // arithmetic: 2.5 * 1.5 was 3, 1.0 / 3.0 was 0, println(1.0) printed "1" and
-    // Infinity / NaN / -0.0 did not exist. A floating-point literal now emits the
-    // js_jflo box and the js_jf* operators answer a Double whenever one operand is
-    // one, which is what kotlin-interpreter.abnf's {__flo} box does.
+    // every number as one JS double, so 1.0 / 3.0 and 1 / 3 would arrive here as the
+    // same two operands. A floating-point literal emits the js_jflo box and the js_jf*
+    // operators answer a Double whenever one operand is one (so 2.5 * 1.5 is 3.75,
+    // println(1.0) prints "1.0", and Infinity / NaN / -0.0 exist), which is what
+    // kotlin-interpreter.abnf's {__flo} box does.
     //
     // AN f/F SUFFIX IS A `Float`, i.e. a BINARY32, and not a Double spelled
     // differently: 1.0f/3.0f is 0.33333334 where the double is
@@ -3422,12 +3182,11 @@ KwContract  = "contract" KwEnd ;
         return {t: body, r: radix, s: sfx}
     }
     // The literal's constant thunk. An unsuffixed literal that fits in an Int stays a
-    // PLAIN NUMBER emitted as before - which is the overwhelming majority of literals
-    // in any program, so the IR does not grow and nothing gets slower. Only a literal
-    // that carries a type (a suffix, or a value past Int) pays for js_ktlit, whose
-    // DIGITS travel as text because emitNum would already have rounded
-    // 9223372036854775807 to 9223372036854776000 on the way into the module - and
-    // rounded it DIFFERENTLY under goja and -frozen, which the matrix demands agree.
+    // PLAIN NUMBER - which is the overwhelming majority of literals in any program, so
+    // the IR does not grow. Only a literal that carries a type (a suffix, or a value
+    // past Int) pays for js_ktlit, whose DIGITS travel as text because emitNum would
+    // round 9223372036854775807 to 9223372036854776000 on the way into the module - and
+    // round it DIFFERENTLY under goja and -frozen, which the matrix demands agree.
     function makeIntConst(raw) {
         var p = ktLitParts(raw)
         if (p.s == 0) {
@@ -3548,8 +3307,7 @@ KwContract  = "contract" KwEnd ;
         // exactly as a local `val f: T.() -> R` does, so `t.body()` inside the callee
         // must reach the closure with the receiver in front rather than look for a
         // METHOD named body. Registering the name here is what the call-site branch on
-        // recvLambdaNames already needs; without it every DSL builder aborted with
-        // "unknown method 'body' on an instance".
+        // recvLambdaNames needs.
         if (rec.name != null && rec.ty != "" && isRecvFnType(rec.ty)) {
             recvLambdaNames["$" + rec.name] = true
         }
@@ -3574,14 +3332,11 @@ KwContract  = "contract" KwEnd ;
     // Which parameter of a parameter LIST is the vararg. A vararg slot filled by NAME is
     // Kotlin's "only one named argument for a vararg parameter is allowed, and it must be
     // an array": the value IS the argument list, so orderArgs SPREADS it rather than
-    // placing it. Without this, `add("b", roles = arrayOf("dev"))` wrapped the array in
-    // another array here and answered [[dev]], while the interpreter half answered the
-    // EMPTY list (its vararg only collected the positional tail). Kotlin's answer is
-    // [dev], which both halves now give.
+    // placing it, so `add("b", roles = arrayOf("dev"))` binds roles to [dev].
     //
     // The table is keyed by the parameter-name LIST rather than by the parameter name
-    // alone: keying by name made a data class's synthesized `copy(tags = ...)` spread
-    // its argument, because an unrelated function elsewhere in the file declared a
+    // alone: keyed by name, a data class's synthesized `copy(tags = ...)` would spread
+    // its argument whenever an unrelated function elsewhere in the file declared a
     // `vararg tags`. orderArgs holds the callee's name list and nothing else, which is
     // exactly what this key is.
     var varargOfList = {}
@@ -3601,14 +3356,10 @@ KwContract  = "contract" KwEnd ;
     // the list is returned unchanged, so ordinary calls emit byte-identically.
     // Named arguments are ordered against the parameter names of the method being
     // called, and methodParams is keyed by the method NAME alone - so a second class
-    // declaring a method of the same name overwrote the first one's slots. That is not
-    // hypothetical for a data class: `copy`'s slots are the component names, so
-    // `data class Pt(val x: Int, val y: Int)` followed by ANY other data class made
-    // `p.copy(y = 9)` write into slot 0 and answer Pt(x=9, y=2). The interpreter half,
-    // which binds named arguments by name at call time, was right.
-    // Every declared vector is kept here; the one that carries every named argument of
-    // this call site wins, latest declaration first (which is the tie-break the single
-    // slot used to give unconditionally).
+    // declaring a method of the same name would overwrite the first one's slots (a data
+    // class's `copy` slots are its component names, so `p.copy(y = 9)` must not take
+    // another data class's order). Every declared vector is kept here; the one that
+    // carries every named argument of this call site wins, latest declaration first.
     var methodParamAlts = {}
     function noteParams(name, params) {
         methodParams["$" + name] = params
@@ -3720,8 +3471,8 @@ KwContract  = "contract" KwEnd ;
         }
         // A DECLARED parameter type carries its width, exactly as a declared local type
         // does: `fun f(v: Long = 1)` binds a 64 bit 1 whether the caller passed it or the
-        // default supplied it, so this runs AFTER the defaults above. Verified against
-        // java 24: `dflt41() * 1000000 * 1000000` is 1000000000000, not -727379968.
+        // default supplied it, so this runs AFTER the defaults above
+        // (`dflt41() * 1000000 * 1000000` is 1000000000000).
         if (sig.tys != undefined) {
             for (var t = 0; t < sig.tys.length; t++) {
                 b = emitAdoptSlot(b, sig.params[t], sig.tys[t])
@@ -3843,15 +3594,11 @@ KwContract  = "contract" KwEnd ;
     }
     // An abstract (bodiless) member function: only its name and arity matter.
     function makeAbstract(items) { noteParams(items[0], items[1].params); return {name: items[0], params: items[1].params} }
-    // The base types the runtime does not model as user classes but whose constructor
-    // argument programs DO observe (`class E(m: String) : Exception(m)` must make
-    // e.message readable) used to be a SECOND, SHORTER list here, `excBases`, holding
-    // eight of the seventeen names below - so `class E : IndexOutOfBoundsException(m)`
-    // silently dropped its message. emitSuperCtor now reads excBuiltins, which is the
-    // set the throwable hierarchy actually provides. docs/todo.md 1.2.
     // The builtin throwables that can also be CONSTRUCTED directly - `throw
-    // IllegalStateException("x")`. The set matches ktExcHierarchy in abnf/jsrtkotlin.go
-    // and installThrowables in kotlin-interpreter.abnf.
+    // IllegalStateException("x")` - and whose constructor argument a subclass observes
+    // (`class E(m: String) : Exception(m)` makes e.message readable; emitSuperCtor reads
+    // this set). It matches ktExcHierarchy in abnf/jsrtkotlin.go and installThrowables in
+    // kotlin-interpreter.abnf.
     var excBuiltins = {"$Throwable": true, "$Exception": true, "$Error": true,
                        "$RuntimeException": true, "$IllegalStateException": true,
                        "$IllegalArgumentException": true, "$IndexOutOfBoundsException": true,
@@ -3861,11 +3608,8 @@ KwContract  = "contract" KwEnd ;
                        "$ClassCastException": true, "$IllegalAccessException": true,
                        "$StackOverflowError": true, "$OutOfMemoryError": true,
                        "$StringIndexOutOfBoundsException": true,
-                       // Both of these are constructible in the interpreter half (its
-                       // installThrowables registers all twenty) and were missing here,
-                       // so `throw NotImplementedError("m")` aborted the compiler half
-                       // with "unknown name: NotImplementedError" while the interpreter
-                       // ran it. docs/todo.md 2.9.
+                       // Both of these are constructible in the interpreter half too
+                       // (`throw NotImplementedError("m")`).
                        "$NotImplementedError": true,
                        "$UninitializedPropertyAccessException": true}
 
@@ -3907,15 +3651,11 @@ KwContract  = "contract" KwEnd ;
     }
 
     // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
-    // notImplExpr family now live in lib/compile-core.js (shared by all compiler
-    // grammars). This grammar sets core.stdlibImports (above) and keeps the
-    // Kotlin-specific builders below (they call notImpl from the lib).
+    // notImplExpr family live in lib/compile-core.js (shared by all compiler grammars).
 
     // try/catch/finally: each body becomes its own IR closure over the current scope;
     // js_try (jsrt.go) runs the try under a Go recover, routes a thrown value to the
-    // catch closure (a one-parameter function bound to the catch name) and always runs
-    // finally. The first catch clause wins. See the TryStmt LIMITATION note above.
-    // makeCatch is shared - see lib/compile-core.js.
+    // catch closure and always runs finally; emitCatchClosure picks the clause.
     // Wrap a VALUE block (function(b) -> {b, v}) as a body closure that RETURNS its
     // value, which is how the try-EXPRESSION gets its value out of js_try.
     function valueBody(vb) {
@@ -3925,9 +3665,9 @@ KwContract  = "contract" KwEnd ;
             return deadBlock()
         }
     }
-    // A catch clause, with the DECLARED type CatchTy now records. Overridden by
-    // assignment (never re-declared): makeCatch lives in lib/compile-core.js and is
-    // shared, and this grammar's CatchClause pushes one item more than it expects.
+    // A catch clause, with the DECLARED type CatchTy records. Overridden by assignment
+    // (never re-declared): makeCatch lives in lib/compile-core.js and is shared, and
+    // this grammar's CatchClause pushes one item more than it expects.
     makeCatch = function (items) {
         var body = anytype
         var nm = anytype
@@ -3961,7 +3701,6 @@ KwContract  = "contract" KwEnd ;
     // (abnf/jsrtkotlin.go, the twin of kExcMatches in the interpreter half), an
     // untyped clause takes everything from there on, and a value no clause matches is
     // rethrown - which is Kotlin's rule and what makes an outer try see it.
-    // Before this the compiler ran the FIRST clause whatever its type.
     function emitCatchClosure(cls) {
         return emitFunc(["__caught"], function(bb) {
             var b2 = anytype
@@ -4119,12 +3858,9 @@ KwContract  = "contract" KwEnd ;
                 if (items[i].user == true) {
                     // A user infix function. An `infix fun Int.pctOf(m: Money)` is an
                     // EXTENSION, so it lives under ext$name and takes the receiver in
-                    // its first slot - going through js_ktsmcall aborted with "method
-                    // call 'pctOf' on a number" while the interpreter half answered,
-                    // and `25.pctOf(m)` in dotted form already worked here, which is
-                    // what hid it. The test is the same extResolves the method-suffix
-                    // emitter uses, and it runs at EMIT time, so an extension declared
-                    // further down the file counts.
+                    // its first slot, not through js_ktsmcall. The test is the same
+                    // extResolves the method-suffix emitter uses, and it runs at EMIT
+                    // time, so an extension declared further down the file counts.
                     if (extResolves(op)) {
                         var ifV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + op)])
                         var iaV = callExt(b, "js_arr_new", [])
@@ -4143,8 +3879,7 @@ KwContract  = "contract" KwEnd ;
                 else if (op == "xor") { v = callExt(b, "js_ktarith", [emitStr(b, "^"), v, r2.v]) }
                 // The shift COUNT is MASKED - & 31 for an Int, & 63 for a Long - and
                 // the result type is the LEFT operand's alone, which is why
-                // `1 shl 32` is 1 here and `1L shl 40` is 1099511627776 rather than
-                // the 256 the 32 bit js_shl used to answer.
+                // `1 shl 32` is 1 here and `1L shl 40` is 1099511627776.
                 else { v = callExt(b, "js_ktshift", [emitStr(b, op), v, r2.v]) }
             }
             return {b: b, v: v}
@@ -4176,20 +3911,15 @@ KwContract  = "contract" KwEnd ;
     // A range value in operand position. items alternates operands and {rop}
     // markers: from, {rop}, to [, {rop:"step"}, step].
     //
-    // This used to emit a LOOP here and hand back a materialized list, and
-    // first/last/step/start/endInclusive were then recovered from the elements
-    // downstream. That is unrecoverable for an EMPTY progression - `(5..1).first`
-    // is 5 in Kotlin, where both compiled halves read kotlin.Unit - and for
-    // toString, which is "5..1" and read "[]" (todo.md 1.8 / 1.10). A progression
-    // is now the first-class {__range, from, to, st, down, ch, fl} value the
-    // interpreter half has always had; js_ktrange builds it and js_ktiter
-    // materializes the elements at the one place a `for` needs them. The `for`
-    // loop's OWN range form is lowered separately below and is untouched, so no
-    // counting loop pays for this.
+    // A progression is the first-class {__range, from, to, st, down, ch, fl} value the
+    // interpreter half has: Kotlin answers `(5..1).first` (5) and toString ("5..1")
+    // from the DECLARED bounds, which a materialized element list cannot recover.
+    // js_ktrange builds it and js_ktiter materializes the elements at the one place a
+    // `for` needs them. The `for` loop's OWN range form is lowered separately below, so
+    // no counting loop pays for this.
     // The fold is LEFT TO RIGHT, exactly as makeRange is in the interpreter half,
     // so `0..6 step 2` builds the 0..6 range and then re-steps it - and so does a
-    // range that arrives in a variable, `r step 2`, which the old shape read as
-    // `r..2` and got wrong in this half alone.
+    // range that arrives in a variable, `r step 2`.
     function makeRange(items, pos) {
         if (items.length == 1) { return items[0] }
         // `1..2..3` is not a Kotlin program, and it is rejected HERE rather than
@@ -4214,8 +3944,7 @@ KwContract  = "contract" KwEnd ;
                 } else {
                     var boundV = rr.v
                     // `..<` and until are the half-open forms: the INCLUSIVE bound
-                    // the range value carries is one less, computed here exactly
-                    // as it was when this emitted the element loop itself.
+                    // the range value carries is one less, computed here.
                     if (rop == "until" || rop == "..<") {
                         boundV = callExt(b, "js_sub",
                             [callExt(b, "js_char_code", [boundV]), emitNum(b, 1)])
@@ -4427,11 +4156,9 @@ KwContract  = "contract" KwEnd ;
                     }
                     // A REIFIED type parameter of an extension called in method position
                     // - `inline fun <reified T> Any.isA() = this is T`, then
-                    // `"x".isA<String>()`. makeCall already appends the type names for
-                    // the plain call form; the method-suffix form skipped its type
-                    // arguments entirely, so `is T` inside answered false for every T in
-                    // BOTH halves. Same convention: one trailing string per reified
-                    // parameter, in declaration order.
+                    // `"x".isA<String>()`. makeCall appends the type names for the plain
+                    // call form; this is the same convention for the method-suffix form:
+                    // one trailing string per reified parameter, in declaration order.
                     var exr = reifiedExtra(s.name, s.targ)
                     for (var xi = 0; xi < exr.length; xi++) {
                         callExt(b, "js_arr_push", [eargsV, emitStr(b, exr[xi])])
@@ -4441,8 +4168,8 @@ KwContract  = "contract" KwEnd ;
                 // v.toString(): Kotlin's rendering of the value, which is what
                 // println writes. js_ktstr looks a user or synthesized toString up on
                 // the __class chain and calls it first, so an override still wins;
-                // going through js_mcall instead would abort on a list ("unknown list
-                // method 'toString'") and on an instance without one.
+                // going through js_mcall instead would abort on a list and on an
+                // instance without one.
                 if (s.name == "toString" && s.args.length == 0) {
                     return {b: b, v: callExt(b, "js_ktstr", [cur])}
                 }
@@ -4473,14 +4200,12 @@ KwContract  = "contract" KwEnd ;
                     b.NewCondBr(emitClassProbe(b, lamRecv, mcls), objB2, lamB)
                     var mv = callExt(objB2, "js_ktsmcall", [lamRecv, emitStr(objB2, s.name), margsV])
                     objB2.NewBr(mrg)
-                    // The scope read for the lambda belongs INSIDE the lambda arm. It used
-                    // to be emitted unconditionally, before the branch, so a program that
-                    // merely DECLARED a receiver-function-typed parameter named `f`
-                    // anywhere made every `x.f()` in the file - including an ordinary
-                    // method call on a user class - abort with "unknown name: f", because
-                    // js_ktget ran (and threw) before the probe could pick the method. The
-                    // interpreter half always answered correctly; found while pinning the
-                    // super surface, where a class method happened to be called `f`.
+                    // The scope read for the lambda belongs INSIDE the lambda arm: emitted
+                    // before the branch, a program that merely DECLARED a
+                    // receiver-function-typed parameter named `f` anywhere would make every
+                    // `x.f()` in the file - including an ordinary method call on a user
+                    // class - abort with "unknown name: f", because js_ktget would run (and
+                    // throw) before the probe could pick the method.
                     var lamV = lamB.NewCall(rtKtGet(), [curScopeV, emitStr(lamB, s.name)])
                     var lv2 = callExt(lamB, "js_call", [lamV, hUndef, callArgsV])
                     lamB.NewBr(mrg)
@@ -4548,12 +4273,9 @@ KwContract  = "contract" KwEnd ;
                     callExt(b, "js_arr_push", [gargsV, cur])
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
                 }
-                // `.size` is NOT rewritten to `.length` here any more. The rewrite was
-                // unconditional, so a user class declaring its own `size` property read
-                // undefined and printed "kotlin.Unit" while the interpreter half
-                // answered the property - and a `var size` was written under one name
-                // and read under the other. js_ktfget now falls back to `length` only
-                // when the receiver has no `size` of its own.
+                // `.size` is NOT rewritten to `.length` here: a user class may declare
+                // its own `size` property. js_ktfget falls back to `length` only when
+                // the receiver has no `size` of its own.
                 var fname = s.name
                 // js_ktfget is the StringBuilder box's properties, plus a Map MISS as
                 // null (kotlin.Map.get answers null where the shared js_get answers
@@ -4740,7 +4462,7 @@ KwContract  = "contract" KwEnd ;
         return {b: mergeB, v: phi}
     }
     // The entries of one destructuring pattern. `props[k]` is "" for a POSITION based
-    // entry - that one reads componentN, exactly as before - and the property name for a
+    // entry - that one reads componentN - and the property name for a
     // NAME based entry, which reads that property off the value instead. A name of `_`
     // discards its entry and its componentN() is not called, as in Kotlin.
     function emitComponents(b, srcV, names, props) {
@@ -4888,8 +4610,8 @@ KwContract  = "contract" KwEnd ;
         return {i: i, cparams: cparams, supers: supers, sup: (supers.length > 0 ? supers[0] : null)}
     }
     // The name a type REFERENCE ends up bound under at run time, or null when this
-    // compile emits no descriptor for it. Three reductions, all reachable from ordinary
-    // Kotlin and all of which used to make knownType answer false:
+    // compile emits no descriptor for it. Two reductions, both reachable from ordinary
+    // Kotlin:
     //   * generics and a dotted path      Box<T> -> Box, Outer.In -> In  (baseTypeName;
     //     every descriptor is bound under its SIMPLE name, nested ones included)
     //   * a typealias                     typealias Alias = Real -> Real, followed
@@ -4912,9 +4634,9 @@ KwContract  = "contract" KwEnd ;
     // descriptor value can be read out of the scope at run time.
     function knownType(name) { return resolvedTypeName(name) != null }
     // WHICH supertype is the superclass. Kotlin does not require the superclass to come
-    // first: `class C : I3, Base2()` lists the interface first and is ordinary code, and
-    // taking supers[0] handed the __super slot to I3, dropped Base2's constructor call
-    // and left `super.g()` walking an interface. The superclass is the supertype written
+    // first: `class C : I3, Base2()` lists the interface first and is ordinary code, so
+    // taking supers[0] would hand the __super slot to I3 and drop Base2's constructor
+    // call. The superclass is the supertype written
     // with a CONSTRUCTOR CALL (`Base2()` has parentheses, `I3` does not); a class that
     // declares only secondary constructors writes no parentheses anywhere, so the
     // fallback is the first supertype that resolves to a class rather than an interface,
@@ -4957,24 +4679,14 @@ KwContract  = "contract" KwEnd ;
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, pn)])])
         } else if (pk >= 0 && excBuiltins["$" + baseTypeName(stripWs(supers[pk].name))] == true) {
             // A BUILTIN THROWABLE superclass. This half emits no descriptor for
-            // Exception / RuntimeException / ..., so pn is null and the __super slot
-            // used to stay absent - and `class Top(m: String) : Exception(m)` then
-            // answered `Top("x") is Exception` FALSE under llvm.Run and natively, where
-            // the interpreter half (installThrowables builds real descriptors) and
-            // java 24.0.2 both answer true. js_ktexccls hands over the descriptor out
-            // of the same ktExcHierarchy js_ktnewexc constructs from, so the chain a
-            // user class gets here is the chain a directly-constructed builtin already
-            // had, and js_ktis' ordinary __super walk answers every row.
-            //
-            // THIS ARM CAN ONLY FIRE WHEN pn IS NULL, so no class whose superclass
-            // this compile DOES emit is touched, and the worry that it "would change
-            // every Name@1" is measurable rather than arguable: the emitted module of
-            // tests/kotlin-test-features.kt against a clean `git archive 22e7b44`
-            // differs by 60 lines once the string-table indices are normalised, and
-            // every one of them is a js_ktexccls call and its class-name string on
-            // the SEVEN classes that extend a builtin throwable (plus the __kthrow
-            // js_set this retires, and emitNestedList's __ncls_ slots). Four other
-            // kotlin test programs emit a byte-identical module. docs/todo.md 2.9.
+            // Exception / RuntimeException / ..., so pn is null; without a link
+            // `class Top(m: String) : Exception(m)` would answer `Top("x") is Exception`
+            // false (java and the interpreter half's installThrowables say true).
+            // js_ktexccls hands over the descriptor out of the same ktExcHierarchy
+            // js_ktnewexc constructs from, so the chain a user class gets here is the
+            // chain a directly-constructed builtin has, and js_ktis' ordinary __super
+            // walk answers every row. This arm can only fire when pn is null, so no
+            // class whose superclass this compile DOES emit is touched.
             callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                   callExt(b, "js_ktexccls",
                                           [emitStr(b, baseTypeName(stripWs(supers[pk].name)))])])
@@ -4992,8 +4704,7 @@ KwContract  = "contract" KwEnd ;
                 if (ownMethods["$" + sig[j].name] == true) { continue }
                 // The member is read off the interface that DECLARES it: an interface
                 // that merely EXTENDS another (`interface D : X`) does not own X's
-                // methods as properties, so reading them from D answered undefined and
-                // the class was left without them.
+                // methods as properties.
                 var declV = ifV
                 if (sig[j].from != undefined && sig[j].from != kn && knownType(sig[j].from)) {
                     declV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, resolvedTypeName(sig[j].from))])
@@ -5008,16 +4719,15 @@ KwContract  = "contract" KwEnd ;
     // C does not define by forwarding to the stored delegate. One forwarder IR function
     // per such method - it reads this.__delegN and re-dispatches through js_mcall, so
     // the delegate's own overrides win, exactly like Kotlin's generated bridges.
-    // MEASURED GAP (2026-07-28, found while sweeping the super surface): only METHODS
-    // are forwarded. An interface that declares an abstract PROPERTY -
+    // KNOWN GAP: only METHODS are forwarded. An interface that declares an abstract
+    // PROPERTY -
     //     interface I { val h: Int } ; class Impl : I { override val h = 7 }
     //     class C(d: I) : I by d          C(Impl()).h
     // - answers kotlin.Unit here where the interpreter half answers 7. The cause is not
     // this loop: an interface's abstract property is dropped by splitMembers (no
     // initializer, no accessor), so there is no interface-PROPERTY signature table to
     // forward from at all - interfaceMethods holds methods only. Closing it means adding
-    // that table, which is a feature rather than a fix, so it is left measured rather
-    // than half-done. Unrelated to `super`: it reproduces with no `super` in the program.
+    // that table.
     function emitDelegates(b, clsV, supers, ownMethods) {
         for (var k = 0; k < supers.length; k++) {
             if (supers[k].deleg == null) { continue }
@@ -5086,9 +4796,9 @@ KwContract  = "contract" KwEnd ;
         curScopeV = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
         // `object : B(...)` genuinely CONSTRUCTS its superclass, exactly as a class
-        // declaration does - without this the base's property initializers never ran,
-        // so `(object : B() {}).v` answered undefined and a `super.v` inside an
-        // override had nothing to read. The twin fix landed in the interpreter half.
+        // declaration does, so the base's property initializers run
+        // (`(object : B() {}).v`, and a `super.v` inside an override). Twin: the same
+        // step in the interpreter half's makeObjectExpr.
         b = emitSuperCtor(b, objV, pickSuper(supers))
         for (var p = 0; p < props.length; p++) {
             var r = props[p].init(b)
@@ -5118,7 +4828,6 @@ KwContract  = "contract" KwEnd ;
         }
     }
 
-    // f(args): a class constructor (known at compile time) or a function value.
     // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)`; only the
     // one-argument form is modelled, so a wider one is reported and its thunk fails
     // rather than silently indexing by the first argument.
@@ -5146,23 +4855,17 @@ KwContract  = "contract" KwEnd ;
             // (and reported on) by js_rxktnew - see abnf/jsrtregexkt.go. A program
             // that declares its own Regex class or function keeps it.
             // `println()` / `print()` WITH NO ARGUMENTS, natively only. MetaJS has no
-            // `arguments` object, so layer 2's k2Line is written with the one
-            // parameter Kotlin's println ever takes and cannot tell `println()` from
-            // `println(f())` for a Unit-returning f - both arrive as `undefined`.
-            // It answered "" for both, so `println(f())` printed a BLANK LINE
-            // natively where llvm.Run and the interpreter print "kotlin.Unit"
-            // (todo.md 1.10, measured at k2Line 2026-08-07). The count is knowable
-            // exactly HERE, and it is the only place it is knowable, so the emitter
-            // supplies it: a no-argument call passes the empty string, which Kotlin's
-            // println renders identically to no argument at all (`println()` writes
-            // just the line terminator, `print()` writes nothing), and k2Line is then
-            // free to read `undefined` as kotlin.Unit. No new extern, no Go twin
-            // change, and the non-native module is untouched.
+            // `arguments` object, so layer 2's k2Line cannot tell `println()` from
+            // `println(f())` for a Unit-returning f - both arrive as `undefined`. The
+            // count is knowable only HERE, so the emitter supplies it: a no-argument call
+            // passes the empty string, which Kotlin's println renders identically to no
+            // argument at all (`println()` writes just the line terminator, `print()`
+            // writes nothing), and k2Line is then free to read `undefined` as
+            // kotlin.Unit. The non-native module is untouched.
             //
-            // RESIDUE, deliberately not chased: `::println` bound to a value and
-            // called with no arguments still arrives as `undefined` and now prints
-            // "kotlin.Unit" natively. That is a reference, not a call of the name, so
-            // no emitter can count its arguments either.
+            // Known divergence: `::println` bound to a value and called with no
+            // arguments arrives as `undefined` and prints "kotlin.Unit" natively. That is
+            // a reference, not a call of the name, so no emitter can count its arguments.
             if (ktNativeBuild && args.length == 0 && (name == "println" || name == "print")
                 && classNames[name] == undefined && funNames["$" + name] != true) {
                 var pfV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
@@ -5197,11 +4900,10 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: samObj}
             }
             // One of the BUILTIN THROWABLES - `Exception("m")`, `IllegalStateException(m)`.
-            // The subset has no user class for them, so the call used to abort with
-            // "unknown name: Exception" while the interpreter half ran the same program
-            // (its installThrowables registers all twelve as real descriptors). The
-            // hierarchy lives in abnf/jsrtkotlin.go; a program that declares its own
-            // class or function of the name keeps it, exactly like the Regex branch.
+            // The subset has no user class for them (the interpreter half's
+            // installThrowables registers them as real descriptors); the hierarchy lives
+            // in abnf/jsrtkotlin.go. A program that declares its own class or function of
+            // the name keeps it, exactly like the Regex branch.
             if (excBuiltins["$" + name] == true && classNames[name] == undefined
                 && funNames["$" + name] != true && interfaceNames["$" + name] != true) {
                 var emV = hNull
@@ -5223,17 +4925,14 @@ KwContract  = "contract" KwEnd ;
             //
             // A LOCAL BINDING OF THE NAME WINS, AND ONLY THE RUN TIME KNOWS ABOUT ONE.
             // classMethodNames is a WHOLE-FILE set - every method of every class and
-            // interface - so `val f = { x: Int -> x * 2 }; f(3)` inside any member
-            // aborted with *unknown method 'f' on an instance* the moment some
-            // unrelated `interface Shape { fun f(): Int }` existed, in llvm.Run and
-            // natively both (the interpreter half resolves through getVar and was
-            // always right). Kotlin resolves a call against the INNERMOST scope that
-            // declares the name, and a local declaration is inside the class body's
-            // scope, so the local shadows the member. Locals are not tracked at
-            // emission time (see classOwnProps' header), so the choice is deferred to
-            // kt_barecall, which is the same two-step scope probe rtKtGetP already
-            // makes on its miss path and costs nothing at a site with no local.
-            // todo.md 1.4.
+            // interface - so `val f = { x: Int -> x * 2 }; f(3)` inside any member must
+            // still call the local when some unrelated `interface Shape { fun f(): Int }`
+            // exists. Kotlin resolves a call against the INNERMOST scope that declares the
+            // name, and a local declaration is inside the class body's scope, so the
+            // local shadows the member. Locals are not tracked at emission time (see
+            // classOwnProps' header), so the choice is deferred to kt_barecall, which is
+            // the same two-step scope probe rtKtGetP makes on its miss path and costs
+            // nothing at a site with no local.
             if (emitClassTop() != null && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
@@ -5270,7 +4969,7 @@ KwContract  = "contract" KwEnd ;
             // true - every other rtKtGet in this grammar is a value read (or a
             // synthetic ext$/extp$/this name that never reaches a receiver at all).
             // See rtKtGetP's header for why the position, and not the receiver's
-            // origin, is what todo.md 1.6 needed.
+            // origin, is what decides.
             var fV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
@@ -5427,9 +5126,8 @@ KwContract  = "contract" KwEnd ;
                 }
                 // A top-level extension property's SETTER - a computed `set(v) { ... }`
                 // or a delegated extension property's setValue forwarder. Without this
-                // arm the write fell to js_ktset and landed as an own field on the
-                // receiver, so the setter never ran (the interpreter half always ran
-                // it, through extPropSetters).
+                // arm the write would fall to js_ktset and land as an own field on the
+                // receiver (the interpreter half runs it through extPropSetters).
                 if (isField && extPropSetResolves(fname)) {
                     if (op != "=") {
                         var gV0 = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extp$" + fname)])
@@ -5536,9 +5234,8 @@ KwContract  = "contract" KwEnd ;
     // NULL rather than undefined, and that is not cosmetic: js_scope_typeof answers
     // "undefined" for a slot that HOLDS undefined and for an absent name alike, so
     // the emitted kt_varset helper would take such a name for a non-local and hunt
-    // it up the `this` chain. Swift's port records exactly this trap and declares an
-    // uninitialised `let v: Int` as NULL for the same reason; Kotlin now does too.
-    // Measured: assertion blk1 of tests/kotlin-test-full.kt.
+    // it up the `this` chain. Swift's port declares an uninitialised `let v: Int` as
+    // NULL for the same reason (assertion blk1 of tests/kotlin-test-full.kt).
     function makeBareDecl(items) {
         var name = items[0]
         return function(b) {
@@ -5621,21 +5318,18 @@ KwContract  = "contract" KwEnd ;
     // inside a try/catch closure cannot see the outer loop (the closure resets
     // loopStack) - that stays reported as not implemented.
     //
-    // MEASURED cross-half divergence, 2026-07-28, left open deliberately. The UNLABELLED
-    // forms already cross a try boundary (emitBreak / emitContinue raise a js_ctl_break
-    // or js_ctl_continue signal and excDispatch re-issues it); the labelled forms do not,
-    // because the signal carries no label and excDispatch would re-issue the jump against
-    // the INNERMOST loop rather than the named one. On
+    // KNOWN GAP, deliberately left as a notImpl. The UNLABELLED forms cross a try
+    // boundary (emitBreak / emitContinue raise a js_ctl_break or js_ctl_continue signal
+    // and excDispatch re-issues it); the labelled forms do not, because the signal
+    // carries no label and excDispatch would re-issue the jump against the INNERMOST
+    // loop rather than the named one. On
     //     a@ for (i in 1..3) { try { if (i == 2) continue@a; n += i } finally { n += 10 } }
-    // the interpreter half answers 34 and this half 36 (and 21 vs 36 for break@a);
-    // Kotlin's answers are 34 and 21, so the interpreter half is right.
-    // Closing it means giving the control signal a LABEL and teaching excDispatch to
-    // compare it - and excDispatch, emitBreak and emitContinue live in
-    // languages/lib/compile-core.js, which backs all fifteen compiler grammars. A
-    // Kotlin-local shortcut that re-issues the generic signal is right only when the
-    // label names the IMMEDIATELY enclosing loop and silently wrong one nesting level
-    // out, which is the wrong-answer-no-error shape this tree documents at length. So it
-    // stays an honest notImpl until the shared protocol carries the label.
+    // Kotlin answers 34 (21 for break@a), as the interpreter half does. Closing it means
+    // giving the control signal a LABEL and teaching excDispatch to compare it - and
+    // excDispatch, emitBreak and emitContinue live in languages/lib/compile-core.js,
+    // which backs every compiler grammar. A Kotlin-local shortcut that re-issues the
+    // generic signal is right only when the label names the IMMEDIATELY enclosing loop
+    // and silently wrong one nesting level out.
     function findLabeled(lbl) {
         for (var i = loopStack.length - 1; i >= 0; i--) {
             if (loopStack[i].label == lbl) { return loopStack[i] }
@@ -5760,24 +5454,14 @@ KwContract  = "contract" KwEnd ;
     // same emitted loop (js_char_like is the identity when the bound is not a Char).
     // ----- THE LOOP VARIABLE IS A FRESH BINDING EACH ITERATION -----
     //
-    // All three `for` emitters used to declare the loop variable ONCE in the loop's
-    // own scope and js_scope_set it per iteration, so every closure made inside the
-    // body captured THE SAME CELL: `for (i in 1..3) { fs.add({ i }) }` answered
-    // "3 3 3" where Kotlin answers "1 2 3", and `for (w in listOf("a","b","c"))`
-    // answered "c c c". All four legs agreed and were wrong together - the class
-    // docs/working-on-this-project.md chapter 5 calls the one that keeps paying out -
-    // and nothing in the ratchet asserted loop capture at all.
-    //
-    // The Kotlin specification defines the for statement by desugaring to a while
-    // over an iterator with `val <name> = iterator.next()` INSIDE the loop body, so
-    // the binding is a new immutable one per iteration and a lambda closes over that
-    // iteration's value. (There is no kotlinc on this machine, manual chapter 5, so
-    // this is spec-cited.) js_scope_new per iteration is that `val`.
-    //
-    // COST, measured rather than assumed, because it is one allocation and one
-    // js_scope_decl per iteration of every for loop in the language: see
-    // tests/bench/modfor.kt, which exists for this - tests/bench/mod.kt uses a
-    // WHILE loop and --bench could not see this either way.
+    // A closure made inside the body must capture THAT iteration's value:
+    // `for (i in 1..3) { fs.add({ i }) }` is "1 2 3" in Kotlin, and `for (w in
+    // listOf("a","b","c"))` likewise. The Kotlin specification defines the for statement
+    // by desugaring to a while over an iterator with `val <name> = iterator.next()`
+    // INSIDE the loop body, so the binding is a new immutable one per iteration
+    // (spec-cited: no kotlinc on this machine). js_scope_new per iteration is that `val`.
+    // It costs one allocation and one js_scope_decl per iteration of every for loop;
+    // tests/bench/modfor.kt measures it (tests/bench/mod.kt uses a WHILE loop).
     function makeForRange(items) {
         var name = items[0]
         var fromT = items[1]
@@ -5845,11 +5529,9 @@ KwContract  = "contract" KwEnd ;
     // a SET ({__set, keys}) have no `length`, so the index loop below would run zero
     // times over either; Kotlin iterates a map's ENTRIES and a set's elements, and so
     // does the interpreter half (kIterable). One runtime call decides, so a value that
-    // is neither a list, a string, a map nor a set keeps behaving exactly as it did.
+    // is neither a list, a string, a map nor a set keeps behaving as a list.
     // Each map entry carries key/value AND first/second, which is what makes both
     // `for (e in m)` and `for ((k, v) in m)` work (js_ktiter in abnf/jsrtkotlin.go).
-    // This used to be an inline __dict probe with its own three basic blocks, which
-    // did not know about a set.
     function emitIterSrc(b, v) {
         return {b: b, v: callExt(b, "js_ktiter", [v])}
     }
@@ -6219,10 +5901,9 @@ KwContract  = "contract" KwEnd ;
     function takeLateinit() { var v = pendLateinit; pendLateinit = false; return v }
     // The declared type of each SIZED property, stored on the class descriptor so that
     // a field WRITE can adopt it: `var y: Long = 1` followed by `w.y = 1` has to store
-    // a Long, and without this it stored a plain Int, so `w.y * 1000000 * 1000000`
-    // answered -727379968 where java 24 prints 1000000000000. Only widths are recorded,
-    // so a class with no sized property emits exactly the IR it did before. The twin is
-    // kInstallPTypes / kFieldTy in kotlin-interpreter.abnf; js_ktset consults it.
+    // a Long (`w.y * 1000000 * 1000000` is 1000000000000). Only widths are recorded, so
+    // a class with no sized property emits no table. The twin is kInstallPTypes /
+    // kFieldTy in kotlin-interpreter.abnf; js_ktset consults it.
     function emitPTypes(b, clsV, cparams, inits) {
         var names = []
         var tys = []
@@ -6258,10 +5939,9 @@ KwContract  = "contract" KwEnd ;
     // Which properties are `lateinit var`, stored on the descriptor as __lateinit. A
     // lateinit property cannot hold null in Kotlin, so "the field is still null" IS
     // "not initialized yet" - no per-instance flag is needed, and reading one throws
-    // UninitializedPropertyAccessException instead of answering null (which is what
-    // both halves used to do). A class that declares no lateinit property emits
-    // exactly the IR it did before. The twin is kInstallPTypes in
-    // kotlin-interpreter.abnf; js_ktfget and js_ktget consult it.
+    // UninitializedPropertyAccessException. A class that declares no lateinit property
+    // emits no table. The twin is kInstallPTypes in kotlin-interpreter.abnf;
+    // js_ktfget and js_ktget consult it.
     function emitLateinit(b, clsV, inits) {
         if (inits == undefined || inits == null) { return b }
         var li = []
@@ -6293,7 +5973,7 @@ KwContract  = "contract" KwEnd ;
     }
     // Wrap a property initializer so its value adopts the declared type, the way a
     // local's does. Returns the thunk unchanged when the type carries no width, so a
-    // program that declares no sized property emits exactly the IR it did before.
+    // program that declares no sized property emits no adoption.
     function ktAdoptThunk(t, ty) {
         if (ty == undefined || ty == "" || t == undefined || t == null) { return t }
         var dw = ktWidthOfType(ty)
@@ -6331,26 +6011,14 @@ KwContract  = "contract" KwEnd ;
             // so the super call is synthesized: the first argument becomes the
             // instance's `message`, which is what `e.message` reads.
             //
-            // TWO FIXES HERE, both docs/todo.md 1.2:
+            // The message is stored EVEN WITH NO ARGUMENT, as null: `NoMsg().message`
+            // for `class NoMsg : RuntimeException()` is null in Kotlin. The guard is
+            // excBuiltins, the full set of constructible throwables.
             //
-            //  - the message is stored EVEN WITH NO ARGUMENT, as null. `class NoMsg :
-            //    RuntimeException()` left the slot absent, so `NoMsg().message` was
-            //    kotlin.Unit in both compiled halves where the interpreter half
-            //    answered null (real Kotlin: null) - a live halves divergence --cross
-            //    never reached, found probing the abort text.
-            //  - the guard is excBuiltins, not excBases. excBases listed eight of the
-            //    seventeen constructible throwables, so `class E :
-            //    IndexOutOfBoundsException("x")` dropped its message entirely.
-            //
-            // THE DESCRIPTOR'S __super IS WHAT MAKES THIS A THROWABLE, and that is new.
-            // A `js_set(this, "__kthrow", true)` used to sit here, because this half
-            // linked no __super to the builtin chain and a chain walk could not see
-            // one - which also cost `Top("x") is Exception` a FALSE answer under
-            // llvm.Run and natively while the interpreter half said true. emitSuperLinks
-            // links the chain through js_ktexccls now and the marker is RETIRED:
-            // every call site of emitCtor is immediately preceded by an emitSuperLinks
-            // over the same supertype list (and emitObjectInstance does both), so the
-            // link strictly covers every instance the marker covered. docs/todo.md 2.9.
+            // THE DESCRIPTOR'S __super IS WHAT MAKES THIS A THROWABLE: emitSuperLinks
+            // links the chain through js_ktexccls, and every call site of emitCtor is
+            // immediately preceded by an emitSuperLinks over the same supertype list (and
+            // emitObjectInstance does both).
             callExt(b, "js_set", [thisV, emitStr(b, "message"),
                                   argVs.length > 0 ? argVs[0] : hNull])
         }
@@ -6389,9 +6057,8 @@ KwContract  = "contract" KwEnd ;
         b = emitParamSig(b, ctorSig(cparams), f.Params[1], 1)
         // The `val`/`var` constructor parameters become fields AFTER emitParamSig, not
         // before: a parameter the caller left out holds undefined until the default
-        // runs, so storing it first put undefined on the instance (`Widths41(1L).b`
-        // read 0 where its declared default is 127), and the declared WIDTH is applied
-        // by the same pass.
+        // runs (`Widths41(1L).b` is its declared default 127), and the declared WIDTH is
+        // applied by the same pass.
         for (var k2 = 0; k2 < cparams.length; k2++) {
             if (!cparams[k2].prop) { continue }
             var nv = emitStr(b, cparams[k2].name)
@@ -6503,12 +6170,10 @@ KwContract  = "contract" KwEnd ;
             // The `by` expression is lowered into its own function and the descriptor
             // gets a memo BOX, not the delegate itself: buildMain emits class items in
             // TOPOLOGICAL order, so a delegate naming a top-level val is not bound yet
-            // while this class is being built, and resolving it here aborted with
-            // "unknown name: <val>" in a large file while the same two declarations ran
-            // in isolation. js_ktdmemo resolves it on first access and caches it, so it
-            // is still ONE delegate per declaration site; installMemberExtDeleg in
-            // kotlin-interpreter.abnf memoizes the same way, so both halves evaluate the
-            // expression at the same moment.
+            // while this class is being built. js_ktdmemo resolves it on first access
+            // and caches it, so it is still ONE delegate per declaration site;
+            // installMemberExtDeleg in kotlin-interpreter.abnf memoizes the same way, so
+            // both halves evaluate the expression at the same moment.
             var initIdx = emitFunc([], function(bb) {
                 var ri = rec.dsrc(bb)
                 bb = ri.b
@@ -6670,10 +6335,8 @@ KwContract  = "contract" KwEnd ;
             }
             // A property of the ENCLOSING class, read unqualified inside an inner class.
             // The INNER class wins when it declares the same name - Kotlin's shadowing
-            // rule, and what recvLookup does in the other half: `inner class In(val tag:
-            // String)` inside `class Outer(val tag: String)` read the OUTER `tag` here,
-            // which aborted with "member 'tag' of undefined" whenever the inner instance
-            // had no __outer (constructed bare inside the outer's own method).
+            // rule, and what recvLookup does in the other half (`inner class In(val tag:
+            // String)` inside `class Outer(val tag: String)` reads the inner `tag`).
             if (emitOuterProps != null && emitOuterProps["$" + name] == true
                 && !(emitClassTop() != null && classOwnProps["$" + emitClassTop()] != undefined
                      && classOwnProps["$" + emitClassTop()]["$" + name] == true)) {
@@ -6688,9 +6351,6 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])}
         }
     }
-    // An EXTENSION property: the getter becomes an IR function with the receiver in the
-    // instance slot, bound as "extp$name". Only the getter is modelled (an extension
-    // property with a setter would need an lvalue path the subset does not have).
     // Variables holding a lambda WITH RECEIVER (declared type Recv.(A) -> R). Their
     // lambda binds its first argument as `this`, so `40.dot(2)` and `dot(40, 2)` are the
     // same call - Kotlin's rule for a receiver function type.
@@ -6747,11 +6407,10 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + rec.name),
                                              callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
-            // The SETTER was never emitted before, and nothing consulted it: a write
-            // through a top-level `var Box.doubled` fell to the plain js_ktset and put
-            // an own field on the receiver, so the setter body never ran while the
-            // interpreter half ran it. See extPropSetResolves and the field-assign
-            // emitter. (dispatchless: args[0] is the receiver, args[1] the value.)
+            // The SETTER: a write through a top-level `var Box.doubled` must run it
+            // rather than put an own field on the receiver. See extPropSetResolves and
+            // the field-assign emitter. (dispatchless: args[0] is the receiver, args[1]
+            // the value.)
             if (rec.setter != null) {
                 var si = emitFunc([rec.setParam], rec.setter, true)
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extps$" + rec.name),
@@ -6845,8 +6504,8 @@ KwContract  = "contract" KwEnd ;
     // property structurally equal (js_kteq, folded with the boolean js_jband).
     // js_kteq and not js_seq: a property holding a LIST or a MAP compares
     // element-wise, and a property holding another data instance goes through that
-    // class's own equals - `data class D(val a: Int, val b: List<Int>)` compared
-    // FALSE against an equal copy while the interpreter half said true.
+    // class's own equals (`data class D(val a: Int, val b: List<Int>)` equals an equal
+    // copy).
     function emitEqualsFunc(name, props) {
         return emitFunc(["other"], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -6989,10 +6648,9 @@ KwContract  = "contract" KwEnd ;
 
     // The BINARY name of a declared type - "Outer$Inner", "Outer$Inner$Deep" - which
     // is what java.lang.Class#getName answers and therefore what Throwable#toString
-    // and the launcher's uncaught line spell for a NESTED throwable. `class Inner :
-    // Exception(m)` inside `class Outer` emitted "Inner: in" where the JVM says
-    // "Outer$Inner: in" (docs/todo.md 2.9's adjacent note). java carries the same
-    // bookkeeping in languages/java-to-llvm-ir.abnf, as jBinStack / jBinOf.
+    // and the launcher's uncaught line spell for a NESTED throwable. Twin of kBinName in
+    // kotlin-interpreter.abnf (see there); java carries the same bookkeeping in
+    // languages/java-to-llvm-ir.abnf, as jBinStack / jBinOf.
     //
     // This half has no walk-time class stack, so the prefix is threaded at EMIT time
     // by emitNestedList, the same way emitOuterProps already is: emission is one
@@ -7000,11 +6658,6 @@ KwContract  = "contract" KwEnd ;
     // Only a NESTED type gets a __bname; a top-level one falls back to __name in
     // ktClassBin and the string would be identical, so emitting it would grow every
     // module for nothing.
-    //
-    // MEASURED, because the note in the list warned that adding this "changes the
-    // Name@1 rendering of EVERY nested class, not just throwables": it does not. The
-    // `Name@1` fallback reads __name (ktpObj in abnf/jsrtkotlin.go, k4bRender in
-    // languages/lib/kotlin-rt.metajs); only ktClassBin reads __bname.
     var curBinPrefix = ""
     function emitBinName(b, clsV, name) {
         if (curBinPrefix == "") { return }
@@ -7020,18 +6673,15 @@ KwContract  = "contract" KwEnd ;
     // Kotlin does not require a class to be declared before the one that extends it:
     //     class Inh : Base() { fun q() = v }
     //     open class Base { val v = 5 }
-    // is legal, and forward-referenced FUNCTIONS already worked in both halves. This
-    // half emitted the top level in SOURCE order, and a class statement resolves its
-    // supertype with a scope read at the moment it runs - so the program aborted with
-    // "js runtime error: variable not defined: Base" while the interpreter half, whose
-    // class declarations all register during the walk and whose parents resolve lazily,
-    // answered 5. The same read is what an INTERFACE supertype does, so
+    // is legal, and a class statement resolves its supertype with a scope read at the
+    // moment it runs - so in SOURCE order `Inh` would read `Base` before it is
+    // declared (the interpreter half's class declarations all register during the walk
+    // and resolve their parents lazily). An INTERFACE supertype is the same read:
     //     class Impl : Iface { override fun f() = 1 }
     //     interface Iface { fun f(): Int; fun g(): Int = f() + 10 }
-    // failed identically; one fix covers both. (interfaceMethods itself is NOT the
-    // problem it was thought to be: makeClassStmt's tag body runs during the walk but
-    // the thunk it returns runs in buildMain, after the whole file has been walked, so
-    // the signature table is complete by then - only the scope READ was early.)
+    // (interfaceMethods is complete in time: makeClassStmt's tag body runs during the
+    // walk but the thunk it returns runs in buildMain, after the whole file has been
+    // walked - only the scope READ is early.)
     //
     // Only the class items among the top-level items are permuted; every other
     // statement keeps its slot, so a top-level property initializer still runs where it
@@ -7072,7 +6722,7 @@ KwContract  = "contract" KwEnd ;
     }
     // Permute the class items so every class follows its supertypes. The common case -
     // a file already in dependency order - is one linear scan and no permutation at all,
-    // which keeps the emitted module byte-identical for every program that had one.
+    // which keeps the emitted module unchanged for such a program.
     function topoClassItems(items) {
         var n = topClassItems.length
         if (n < 2) { return items }
@@ -7147,16 +6797,12 @@ KwContract  = "contract" KwEnd ;
     // looks a method CALL up the __class chain (so a construction factory must sit on
     // the descriptor) while js_get on an instance does NOT walk that chain (so a plain
     // read of Outer.Kind must find it on the singleton itself).
-    // PER-OWNER SCOPING. The nested declaration used to run straight into the program
-    // scope, which binds it under its SIMPLE name - so `class A { class Inner }` and
-    // `class B { class Inner }` shared one slot, the second declaration won, and
-    // `A.Inner(1).who()` answered "B" while the interpreter answered "A". Each nested
-    // declaration now runs in its OWN child scope, so the descriptor a factory (and any
-    // method of the nested class) resolves is the one declared right beside it, whatever
-    // some other owner declares under the same simple name. The simple name is still
-    // MIRRORED into the enclosing scope afterwards, because a bare `Inner(1)` written
-    // inside the owner's own body resolves through the ordinary scope chain and must
-    // keep working exactly as it did.
+    // PER-OWNER SCOPING. Each nested declaration runs in its OWN child scope, so
+    // `class A { class Inner }` and `class B { class Inner }` do not share one slot: the
+    // descriptor a factory (and any method of the nested class) resolves is the one
+    // declared right beside it. The simple name is still MIRRORED into the enclosing
+    // scope afterwards, because a bare `Inner(1)` written inside the owner's own body
+    // resolves through the ordinary scope chain.
     function emitNestedList(b, holderV, alsoV, nested, ownerName) {
         for (var nc = 0; nc < nested.length; nc++) {
             var savedOuter = emitOuterProps
@@ -7186,16 +6832,15 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [holderV, emitStr(b, nested[nc].name), slotV])
             if (alsoV != null) { callExt(b, "js_set", [alsoV, emitStr(b, nested[nc].name), slotV]) }
             // THREE LEVELS OF NESTING. The slot above holds a CONSTRUCTION FACTORY for a
-            // nested class, which is what makes `Outer.Mid()` a call - but it also made
-            // the plain READ `Outer.Mid` answer that function, so `Outer.Mid.Deep(7)`
-            // aborted both compiled halves with *method call 'Deep' on a function* while
-            // the interpreter half (whose attachNested stores the DESCRIPTOR) ran it.
-            // A second, `__`-prefixed slot carries the descriptor: js_ktfget prefers it
-            // for a member READ, the plain slot still answers a member CALL, and the two
-            // spellings stop fighting over one name. keysOf hides `__` slots, so no
-            // data-class rendering or `for (k in o)` picks it up. An `asvalue` nested
-            // type (enum, interface, object) already stores its descriptor in the plain
-            // slot and needs none of this. docs/todo.md 2.9.
+            // nested class, which is what makes `Outer.Mid()` a call - but then the plain
+            // READ `Outer.Mid` would answer that function and `Outer.Mid.Deep(7)` would
+            // call 'Deep' on a function (the interpreter half's attachNested stores the
+            // DESCRIPTOR). A second, `__`-prefixed slot carries the descriptor: js_ktfget
+            // prefers it for a member READ, the plain slot still answers a member CALL,
+            // and the two spellings stop fighting over one name. keysOf hides `__` slots,
+            // so no data-class rendering or `for (k in o)` picks it up. An `asvalue`
+            // nested type (enum, interface, object) already stores its descriptor in the
+            // plain slot and needs none of this.
             if (!nested[nc].asvalue) {
                 // __hasncls is the ONE FIXED KEY js_ktfget tests before it builds the
                 // "__ncls_" + name string. js_ktfget is the hot path of this half's
@@ -7292,12 +6937,11 @@ KwContract  = "contract" KwEnd ;
     // One secondary constructor: run the delegation on the same instance, then the body.
     // clsName is this class's own name, which the `: this(...)` arm needs: an explicit
     // `this` delegation goes through the class's __ctor DISPATCHER so that it reaches
-    // the secondary constructor of matching arity. Calling primaryIdx there (what this
-    // did) always ran the PRIMARY, so `class A { val v: Int; constructor(n: Int) { v =
-    // n * 2 }; constructor() : this(5) {} }` left v unset and A().v printed null while
-    // the interpreter half answered 10. An IMPLICIT delegation (kind == null) still goes
-    // straight to the primary - dispatching that by arity would send a bodiless
-    // `constructor(n: Int)` to the zero-argument secondary that delegates back to it.
+    // the secondary constructor of matching arity (`class A { val v: Int;
+    // constructor(n: Int) { v = n * 2 }; constructor() : this(5) {} }` gives A().v ==
+    // 10). An IMPLICIT delegation (kind == null) goes straight to the primary -
+    // dispatching that by arity would send a bodiless `constructor(n: Int)` to the
+    // zero-argument secondary that delegates back to it.
     function emitSecondaryCtor(sec, primaryIdx, supName, clsName) {
         var bodyT = function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -7317,10 +6961,8 @@ KwContract  = "contract" KwEnd ;
                 // constructor executes. The primary is emitted for such a class anyway
                 // (empty parameter list, no supertype arguments - those live in the
                 // `: super(...)` just run), so calling it with the instance alone
-                // contributes exactly the initializer pass. Without this a `val` or an
-                // `init` block beside a `: super(...)` constructor was never assigned
-                // and the compiled program aborted with "unknown name: <prop>", while
-                // the interpreter half ran it.
+                // contributes exactly the initializer pass, so a `val` or an `init`
+                // block beside a `: super(...)` constructor is assigned.
                 var ownV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [ownV, thisV])
                 callExt(b, "js_call", [callExt(b, "js_closure", [handle(primaryIdx), curScopeV]), hUndef, ownV])
@@ -7376,8 +7018,8 @@ KwContract  = "contract" KwEnd ;
             var top = emitClassTop()
             // A label naming an ENCLOSING class is the inner instance's outer receiver.
             // js_ktthisat walks the __outer chain BY NAME and falls back to the receiver
-            // when nothing matches; a bare `js_get(this, "__outer")` aborted for an inner
-            // class constructed inside its outer's own method, where nothing sets it.
+                // when nothing matches; `__outer` is not set for an inner class
+                // constructed inside its outer's own method, so it is not read blindly.
             // Inside a MEMBER extension, `this` is the EXTENSION receiver, so
             // `this@DeclaringClass` is the dispatch receiver rather than `this`.
             if (emitMemberExtOf != null && emitMemberExtOf == lbl) {
@@ -7438,9 +7080,8 @@ KwContract  = "contract" KwEnd ;
     // js_ktref(base, name, ext). An EXTENSION function is resolved at COMPILE time here
     // exactly as a call to it is (extResolves), because the runtime has no extension
     // table: the closure is handed to the reference so that `Box::tripled` and
-    // `b::tripled` call it with the receiver in front. Without it both halves read a
-    // property that does not exist and answered kotlin.Unit. undefined otherwise, so a
-    // program that declares no extension emits the same call it did before.
+    // `b::tripled` call it with the receiver in front. undefined otherwise, so a program
+    // that declares no extension emits no closure.
     function emitRefValue(b, baseV, name) {
         var extV = hUndef
         if (extResolves(name)) { extV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + name)]) }
@@ -7473,10 +7114,9 @@ KwContract  = "contract" KwEnd ;
         }
         classOwnProps["$" + name] = ownProps
         // Which class encloses each `inner` class, recorded at WALK time so the bare
-        // `Inner()` call site below can capture the enclosing instance as __outer. The
-        // qualified `outer.Inner()` always did (emitNestedFactory); a bare one did not,
-        // so `this@Outer` inside such an instance answered the INNER instance in both
-        // halves. The twin is cls.__isinner / __outerName in kotlin-interpreter.abnf.
+    // `Inner()` call site below can capture the enclosing instance as __outer, as the
+    // qualified `outer.Inner()` does (emitNestedFactory). The twin is cls.__isinner /
+    // __outerName in kotlin-interpreter.abnf.
         for (var nn = 0; nn < parts.nested.length; nn++) {
             if (parts.nested[nn].inner == true && parts.nested[nn].name != null) {
                 innerOwner["$" + parts.nested[nn].name] = name
@@ -7627,12 +7267,11 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             // An enum class's own ACCESSOR properties (`open val p: Int get() = 5`),
-            // member extensions and member extension properties were never installed:
-            // only the class and object emitters did that, so `E.A.p` answered
-            // kotlin.Unit here while the interpreter half answered 5 - and a `super.p`
-            // from an entry body had nothing to find. A delegated member property
-            // (isDeleg) goes through the same emitAccessorPair as everywhere else; its
-            // hidden field initializer is already in parts.inits, which emitCtor uses.
+            // member extensions and member extension properties are installed here too,
+            // as the class and object emitters do (`E.A.p`, and a `super.p` from an entry
+            // body). A delegated member property (isDeleg) goes through the same
+            // emitAccessorPair as everywhere else; its hidden field initializer is
+            // already in parts.inits, which emitCtor uses.
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             b = emitMemberExts(b, clsV, parts.memberExts)
             b = emitMemberExtProps(b, clsV, parts.memberExtProps)
@@ -7642,23 +7281,20 @@ KwContract  = "contract" KwEnd ;
             emitSuperRaw = savedSuperRaw
             // __entries is the entry list in DECLARATION order, which is what
             // values() / valueOf() / entries read (ktEnumMethod in
-            // abnf/jsrtkotlin.go). The interpreter half keeps the same field; without
-            // it `Col.values()` aborted the compiled half with "unknown method
-            // 'values'" while the interpreter answered the list - a live cross-half
-            // divergence no test happened to exercise.
+            // abnf/jsrtkotlin.go). The interpreter half keeps the same field.
             var entriesV = callExt(b, "js_arr_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__entries"), entriesV])
             // Bare `entries` inside an enum's own member or its companion: Kotlin 1.9's
-            // EnumEntries is a member of the enum, so it needs no qualifier there. Only
-            // `L.entries` resolved before, in BOTH halves. Declared into the ENTRY
-            // scope, which the members and the companion close over.
+            // EnumEntries is a member of the enum, so it needs no qualifier there.
+            // Declared into the ENTRY scope, which the members and the companion close
+            // over.
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "entries"), entriesV])
             for (var e = 0; e < entries.length; e++) {
                 var objV = callExt(b, "js_obj_new", [])
                 // An entry with its own class body gets its own descriptor, parented to
                 // the enum's, so its overrides win and the enum's own members are still
                 // found up the __super chain. Without a body the entry is an ordinary
-                // instance of the enum descriptor, exactly as before.
+                // instance of the enum descriptor.
                 var entClsV = clsV
                 if (entries[e].body != null) {
                     entClsV = callExt(b, "js_obj_new", [])
@@ -7671,14 +7307,11 @@ KwContract  = "contract" KwEnd ;
                     // An enum entry with a body IS a subclass - of its own enum class,
                     // which is exactly what entClsV.__super was just set to - so
                     // `super.g()` and `super.p` inside the body resolve against the enum
-                    // descriptor, declared in this scope under `name`. Without this the
-                    // entry body emitted with whatever emitSuperName the ENCLOSING scope
-                    // had (null at top level), and superTargetName answered null:
-                    // "super call outside a subclass not implemented" for a method and
-                    // "super reference not implemented" for a property, while the
-                    // interpreter half ran both. The entry's own descriptor is never the
-                    // target: the lookup must START at the enum class, or an override in
-                    // the body would call itself.
+                    // descriptor, declared in this scope under `name`, not against
+                    // whatever emitSuperName the ENCLOSING scope had (null at top level).
+                    // The entry's own descriptor is never the target: the lookup must
+                    // START at the enum class, or an override in the body would call
+                    // itself.
                     var savedESuper = emitSuperName
                     var savedESuperRaw = emitSuperRaw
                     emitSuperName = name
@@ -7711,11 +7344,9 @@ KwContract  = "contract" KwEnd ;
             }
             // The COMPANION of an enum class - `enum class L { A, B; companion object
             // { fun of(n: Int) = ... } }`, the ordinary spelling of an enum factory.
-            // Only the class emitter used to attach one, so `L.of(1)` aborted the
-            // compiled half with "unknown method 'of'" while the interpreter answered
-            // it: a live cross-half divergence. It is emitted while curScopeV is still
-            // the ENTRY scope, so a bare entry name (and the enum's own methods) resolve
-            // inside the companion's members, which is what Kotlin's scoping says.
+            // It is emitted while curScopeV is still the ENTRY scope, so a bare entry
+            // name (and the enum's own methods) resolve inside the companion's members,
+            // which is what Kotlin's scoping says.
             if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
             curScopeV = saved
             b = emitNestedList(b, clsV, null, parts.nested, name)
@@ -7790,12 +7421,10 @@ KwContract  = "contract" KwEnd ;
         classNames[name] = 2   // A singleton: named like a class, but never constructed.
         lastDeclaredType = name
         noteDecl(name, hdr.supers)
-        // noteParams as well as the name: an object's methods used to register only
-        // their NAMES, so orderArgs had no parameter list for them and every NAMED
-        // argument to an object's method landed in the wrong slot - `R.f(c = 9)`
-        // answered 9/2/3 here where the interpreter half (and the identical method on
-        // a CLASS) answered 1/2/9. The declOpIfConvention call is the class emitter's,
-        // for the same reason: an operator convention declared on an object counts.
+            // noteParams as well as the name, so orderArgs has the parameter list for
+            // a NAMED argument to an object's method (`R.f(c = 9)`). The
+            // declOpIfConvention call is the class emitter's, for the same reason: an
+            // operator convention declared on an object counts.
         for (var om = 0; om < methods.length; om++) {
             classMethodNames["$" + methods[om].name] = true
             noteParams(methods[om].name, methods[om].params)
@@ -7840,12 +7469,11 @@ KwContract  = "contract" KwEnd ;
         }
         // An interface INHERITS its own supertypes' members, and emitSuperLinks copies
         // a signature list into the implementing class - so `interface D : X` with an
-        // empty body left `class C : A, D` without any of X's defaults ("unknown method
-        // 'x'"), while the interpreter half, which walks the supertype graph at lookup
-        // time, answered them. Only the FIRST supertype gets the __super link a lookup
-        // can follow, which is why the second one has to carry the full list. The walk
-        // is a static pass in file order, so a supertype declared LATER in the file
-        // contributes nothing here - the same limitation knownType() already has.
+        // empty body must still give `class C : A, D` X's defaults. Only the FIRST
+        // supertype gets the __super link a lookup can follow, which is why the second
+        // one has to carry the full list. The walk is a static pass in file order, so a
+        // supertype declared LATER in the file contributes nothing here - the same
+        // limitation knownType() has.
         for (var si = 0; si < hdr.supers.length; si++) {
             var psig = interfaceMethods["$" + hdr.supers[si].name]
             if (psig == undefined) { continue }
@@ -7912,10 +7540,8 @@ KwContract  = "contract" KwEnd ;
         }
         return emitSuperName
     }
-    // What a failed `super` reference could not resolve. Saying "outside a subclass"
-    // was wrong in every case that actually reached it - the class HAD a superclass and
-    // the compiler could not find its descriptor - so the message names the supertype
-    // instead and the next report diagnoses itself.
+    // What a failed `super` reference could not resolve: the class HAS a superclass
+    // that the compiler could not find, so the message names the supertype.
     // True when the supertype a `super` names came from an import this run could not
     // resolve. See the imports section: that is a different class of failure from a
     // supertype this compiler simply failed to resolve, and only this one degrades.
@@ -8038,8 +7664,8 @@ KwContract  = "contract" KwEnd ;
         // Array from a List (both are a plain host array), which is a deliberate and
         // documented simplification. emptyList() with no arguments yields the empty
         // list, since jsf just returns its arg array. The SET constructors do NOT
-        // collapse any more - a Set is its own shape (ktMakeSet in
-        // abnf/jsrtkotlin.go), so they are js_ktglobal builders like mapOf.
+        // collapse - a Set is its own shape (ktMakeSet in abnf/jsrtkotlin.go), so
+        // they are js_ktglobal builders like mapOf.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableListOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayListOf"), loV])
@@ -8072,11 +7698,9 @@ KwContract  = "contract" KwEnd ;
         var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
                           "emptyMap", "buildMap", "buildList", "buildString", "Pair", "Triple",
                           "with", "run", "repeat", "StringBuilder", "generateSequence",
-                          // The stdlib top-level functions added with the missing-builtin
-                          // sweep; their twins are the hostGlobals block in
-                          // kotlin-interpreter.abnf. listOfNotNull is here rather than on
-                          // the listOf alias above because it must DROP the nulls, which
-                          // the "return the argument array" function did not.
+                          // stdlib top-level functions; their twins are the hostGlobals
+                          // block in kotlin-interpreter.abnf. listOfNotNull is here rather
+                          // than on the listOf alias above because it must DROP the nulls.
                           "compareBy", "compareByDescending", "Comparator", "compareValues",
                           // kotlin.properties.Delegates - observable / vetoable / notNull.
                           "Delegates",
@@ -8090,8 +7714,8 @@ KwContract  = "contract" KwEnd ;
                           "FloatArray", "BooleanArray", "CharArray", "UByteArray",
                           "UShortArray", "UIntArray", "ULongArray",
                           "listOfNotNull", "setOfNotNull",
-                          // The SET constructors: their own shape since sets stopped
-                          // being lists (ktMakeSet / ktSetMethod in jsrtkotlin.go).
+                          // The SET constructors: their own shape (ktMakeSet /
+                          // ktSetMethod in jsrtkotlin.go).
                           "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf",
                           "sortedSetOf", "emptySet",
                           // kotlinx.coroutines, as a SYNCHRONOUS subset: the block
@@ -8106,8 +7730,8 @@ KwContract  = "contract" KwEnd ;
                                          callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb]), hFalse])])
         }
         // kotlin.math's abs/max/min, and exitProcess from exit. NOT JavaScript's Math:
-        // that one answers a plain number, so `max(1.5, 2.0)` printed `2` here and
-        // `2.0` in the interpreter half, which is Kotlin's answer for a Double.
+        // that one answers a plain number, so `max(1.5, 2.0)` would print `2` instead of
+        // `2.0`.
         var ktMath = ["abs", "max", "min"]
         for (var km = 0; km < ktMath.length; km++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktMath[km]),
@@ -8116,17 +7740,14 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         // println / print: Kotlin's OWN rendering, not the shared println host
-        // function (which hands the raw runtime value to Go's %v and printed <nil>
-        // for null, [1 2] for a list and a map of pointer addresses - or a stack
-        // overflow - for an instance). js_ktprint / js_ktwrite each RETURN the host
-        // function, so ::println and list.forEach(::println) keep working and no
-        // other language's println changes. See abnf/jsrtkotlin.go.
+        // function (which hands the raw runtime value to Go's %v). js_ktprint /
+        // js_ktwrite each RETURN the host function, so ::println and
+        // list.forEach(::println) keep working and no other language's println
+        // changes. See abnf/jsrtkotlin.go.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "println"), callExt(b, "js_ktprint", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_ktwrite", [])])
-        // Kotlin's number types as VALUES, for their companion constants. Int.MAX_VALUE
-        // and friends existed in neither half before ("unknown name: Int"), and
-        // Long.MAX_VALUE cannot be written as a plain number at all - which is the
-        // whole reason a sized integer had to exist. The twin is hostGlobals["Int"] etc
+        // Kotlin's number types as VALUES, for their companion constants: Long.MAX_VALUE
+        // cannot be written as a plain number at all. The twin is hostGlobals["Int"] etc
         // in kotlin-interpreter.abnf; the objects come from js_kttype
         // (abnf/jsrtkotlin.go).
         var ktNumTypes = ["Int", "Long", "Byte", "Short", "UInt", "ULong", "UByte", "UShort",
@@ -8145,18 +7766,13 @@ KwContract  = "contract" KwEnd ;
         var mainName = c.mainName
         if (mainName == undefined || mainName == "") { mainName = "main" }
         // THE WHOLE ENTRY CALL RUNS INSIDE ONE js_try, so an exception nobody caught is
-        // reported BY THE PROGRAM (js_kttop) instead of escaping the module. What
-        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
-        // whose exc_text answers the bare message - so `throw RuntimeException("abort
-        // probe")` read "js runtime error: uncaught exception: abort probe" in both
-        // compiled halves, with no class name and no launcher prefix, and the
-        // interpreter half said the same thing with its own engine wording. All three
-        // agreed and all three were wrong. js_kttop prints the JVM LAUNCHER's own line
-        // - `Exception in thread "main" java.lang.RuntimeException: abort probe`, on
-        // stderr, exit 1 - which is what real java does (measured, 24.0.2; Kotlin's
-        // throwables ARE java.lang's). This is exactly the shape
+        // reported BY THE PROGRAM (js_kttop) instead of escaping the module to the
+        // floor's / the Go twin's uncaught-throw handler, which knows only the bare
+        // message. js_kttop prints the JVM LAUNCHER's own line - `Exception in thread
+        // "main" java.lang.RuntimeException: abort probe`, on stderr, exit 1 - which is
+        // what real java does (Kotlin's throwables ARE java.lang's). This is the shape
         // java-to-llvm-ir.abnf (js_try + js_jvtop) and ruby-to-llvm-ir.abnf (js_try +
-        // js_rtop) use. docs/todo.md 1.2.
+        // js_rtop) use.
         //
         // Both closures are emitted with isCtl FALSE: nothing inside them is a
         // return/break/continue crossing the boundary, so js_try's answer is the entry
@@ -8187,13 +7803,12 @@ KwContract  = "contract" KwEnd ;
     // ----- Core library config (see lib/compile-core.js) -----
     // core.scopeGetExt stays the FLOOR's own js_scope_get: the this-aware read is the
     // emitted kt_ktget helper above (makeVarRef is overridden to call it), because
-    // js_ktget took a SCOPE HANDLE and layer 2 cannot open one. This field names an
-    // EXTERN, and js_ktget is no longer one.
+    // layer 2 cannot open a scope handle.
     core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -8201,9 +7816,8 @@ KwContract  = "contract" KwEnd ;
     // jsdispatch_ext, the same table emitted by the layer-2 runtime library
     // (lib/kotlin-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
     // indices are offset by a million, so the two chains cannot overlap and one js_call
-    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
-    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
-    // the reusable part of phase 4 and nothing here is Kotlin's.
+    // reaches either module. Emitted ONLY for -exe. This is lua-to-llvm-ir.abnf's
+    // emitDispatch, unchanged.
     function emitDispatch() {
         var idxs = []
         var fns = []
@@ -8242,8 +7856,8 @@ KwContract  = "contract" KwEnd ;
     // The two runtime inputs live next to THIS grammar, so the build does not depend on
     // the working directory: lib/runtime.ll is the C floor and lib/kotlin-rt.ll is
     // Kotlin's own layer 2. An explicit -rt REPLACES both. This grammar's entry point is
-    // ALREADY named jsmain, which is what the C floor's main() calls, so - like go and
-    // unlike most of part 3 - no one-call alias has to be emitted.
+    // ALREADY named jsmain, which is what the C floor's main() calls, so no one-call
+    // alias has to be emitted.
     function libPath(name) {
         var mn = moduleName()
         var cut = -1
