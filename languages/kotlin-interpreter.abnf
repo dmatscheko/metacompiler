@@ -10564,9 +10564,7 @@ NotMemberKw = :script(~~
         return name + ": " + kstr(msg)
     }
     // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE, on STDERR with exit status 1 - which
-    // is what real java does and what both compiled halves now do through
-    // js_kttop. This half used to print
-    // "kotlin interpreter error: uncaught exception: abort probe" on STDOUT.
+    // is what real java does and what both compiled halves do through js_kttop.
     //
     // The "\tat MainKt.main(Main.kt:4)" frames real java prints after it are
     // deliberately NOT reproduced: no engine here has a call-site line table (the
@@ -10577,9 +10575,7 @@ NotMemberKw = :script(~~
     // (a throw operand must be a Throwable), so the fallback only has to AGREE
     // across the three engines: it is each engine's own toString - kstr here,
     // k2Render in layer 2, ktpRender in the Go twin - which ./test.sh --cross
-    // already keeps in step. That is strictly better than the raw-slot reading
-    // kExcText did for docs/todo.md 1.13, whose "" + v answered "[object Object]"
-    // natively and "P(x=1)" under llvm.Run.
+    // keeps in step.
     function kExcTopLine(v) {
         var head = "Exception in thread \"main\" "
         if (kIsThrowable(v)) { return head + kThrowableStr(v) }
@@ -10963,16 +10959,9 @@ NotMemberKw = :script(~~
 
     // AN EXCEPTION NOBODY CAUGHT IS REPORTED THE WAY THE JVM LAUNCHER REPORTS IT -
     // "Exception in thread \"main\" java.lang.RuntimeException: abort probe", on
-    // STDERR, exit status 1 (measured, java 24.0.2). See kExcTopLine above.
-    //
-    // This replaces docs/todo.md 1.13's kExcText, which was written to the FLOOR's
-    // exc_text - a raw two-slot reading whose whole output was the bare message,
-    // "abort probe", with no class name and no launcher prefix anywhere. That was
-    // the right fix for the halves divergence it closed and the wrong text for the
-    // JVM, and both compiled halves agreed with it, which is precisely why only an
-    // oracle could see it (manual chapter 5). exc_text is no longer reached at all
-    // in either compiled half: buildMain in kotlin-to-llvm-ir.abnf catches the
-    // value inside the module and hands it to js_kttop.
+    // STDERR, exit status 1 (measured, java 24.0.2). See kExcTopLine above. The
+    // compiled halves' twin is js_kttop, reached from buildMain in
+    // kotlin-to-llvm-ir.abnf.
     function kReportUncaught(v) {
         eprintln(kExcTopLine(v))
         exit(1)
