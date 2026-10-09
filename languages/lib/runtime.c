@@ -5414,6 +5414,11 @@ long host_call(long id, long self, long args) {
 		while (i < n) {
 			long v = to_number(arr_get(args, i));
 			if (d_is_nan(v) || d_is_nan(acc)) { acc = DNAN; }
+			/* Two zeros compare equal; max prefers +0 and min -0 (the sign bit
+			 * is the sign of the raw long). */
+			else if (d_is_zero(v) && d_is_zero(acc)) {
+				if (id == 12 ? acc < 0 : v < 0) { acc = v; }
+			}
 			else if (id == 12) { if (d_lt(acc, v)) { acc = v; } }
 			else { if (d_lt(v, acc)) { acc = v; } }
 			i = i + 1;
@@ -5430,12 +5435,21 @@ long host_call(long id, long self, long args) {
 	}
 	if (id == 15) { return mk_num(d_ceil(arg_num(args, 0))); }
 	if (id == 16) { return mk_num(d_trunc(arg_num(args, 0))); }
+	/* Math.round: jsMathRound in abnf/jsrt.go, step for step. floor(x + 0.5)
+	 * is wrong twice: the addition rounds 0.49999999999999994 up to 1, and a
+	 * negative operand that rounds to zero must give -0. */
 	if (id == 17) {
 		long v = arg_num(args, 0);
+		long r;
 		union DB h;
-		if (d_is_nan(v) || d_is_inf(v)) { return mk_num(v); }
+		union DB one;
+		if (d_is_nan(v) || d_is_inf(v) || d_is_zero(v)) { return mk_num(v); }
 		h.d = 0.5;
-		return mk_num(d_floor(d_add(v, h.l)));
+		one.d = 1.0;
+		r = d_floor(v);
+		if (!d_lt(d_sub(v, r), h.l)) { r = d_add(r, one.l); }
+		if (d_is_zero(r) && v < 0) { r = 1; r = r << 63; }
+		return mk_num(r);
 	}
 	if (id == 18) {
 		long v = arg_num(args, 0);

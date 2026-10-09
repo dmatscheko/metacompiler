@@ -16643,6 +16643,25 @@ func (rt *jsrt) printArgs(args []interface{}) []interface{} {
 // from this map and says which and why. The header used to claim this was "the
 // same set that metajs-interpreter.abnf exposes"; it was not, and nothing could
 // see the difference (docs/todo.md 4.1). abnf/hostglobals_test.go now can.
+// jsMathRound is Math.round: the nearest integer, a tie going toward +Infinity, and
+// a result of zero keeping the operand's sign. floor(x+0.5) is not it: the addition
+// rounds 0.49999999999999994 up to 1, and floor(-0.4+0.5) is +0 where node says -0.
+// x - floor(x) is exact, so comparing it with 0.5 is. Host id 17 of
+// languages/lib/runtime.c is the same steps.
+func jsMathRound(x float64) float64 {
+	if math.IsNaN(x) || math.IsInf(x, 0) || x == 0 {
+		return x
+	}
+	r := math.Floor(x)
+	if x-r >= 0.5 {
+		r++
+	}
+	if r == 0 && x < 0 {
+		return math.Copysign(0, -1)
+	}
+	return r
+}
+
 func standardJSBindings() map[string]interface{} {
 	mathObj := newJSObject()
 	// ToInt32 is a MODULO, not a range test, and `int32(int64(f))` outside the
@@ -16708,8 +16727,7 @@ func standardJSBindings() map[string]interface{} {
 	addMath1("log1p", math.Log1p)
 	addMath1("ceil", math.Ceil)
 	addMath1("trunc", math.Trunc)
-	// JS rounds half toward +Infinity (floor(x+0.5)), not Go's round-half-away.
-	addMath1("round", func(x float64) float64 { return math.Floor(x + 0.5) })
+	addMath1("round", jsMathRound)
 	addMath1("sign", func(x float64) float64 {
 		if math.IsNaN(x) || x == 0 {
 			return x // NaN stays NaN; +0 and -0 keep their sign.

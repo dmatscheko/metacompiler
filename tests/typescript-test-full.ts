@@ -2072,6 +2072,20 @@ function s39(): void {
     check("math32", Math.log2(a[10]) === 996.5784284662087);
     check("math33", Math.exp(a[12]) === 0.36787944117144233 && Math.sinh(a[12]) === -1.1752011936438014);
     check("math34", Math.atanh(a[12]) === -Infinity);
+
+    // Operands outside the int32 range. ToInt32 is a modulo 2^32, so 4294967297 is 1
+    // and 1e300 is 0. goja's own Math.imul(1e300, 4294967297) was -1 and
+    // Math.clz32(1e300) 0, in the interpreter half only. Values read off node 24.
+    var b = [4294967296, 4294967297, 1e300, -1e300, 1e20, 16777217, 0.49999999999999994, -0.4, 2.5, -2.5, 0, 3.4028236e38];
+    var nz = -b[10];
+    check("math35", Math.imul(b[2], b[1]) === 0 && Math.imul(b[1], b[1]) === 1 && Math.imul(b[0], b[5]) === 0);
+    check("math36", Math.imul(b[5], b[4]) === 1661992960 && Math.imul(b[3], b[5]) === 0);
+    check("math37", Math.clz32(b[2]) === 32 && Math.clz32(b[4]) === 1 && Math.clz32(b[1]) === 31 && Math.clz32(b[0]) === 32);
+    check("math38", Math.fround(b[11]) === Infinity && Math.fround(b[5]) === 16777216 && Math.hypot(b[2], b[3]) === 1.4142135623730952e+300);
+    // round is not floor(x + 0.5): that addition rounds 0.49999999999999994 up, and a
+    // negative operand rounding to zero gives -0. max/min order the two zeros.
+    check("math39", Math.round(b[6]) === 0 && 1 / Math.round(b[7]) === -Infinity && Math.round(b[8]) === 3 && Math.round(b[9]) === -2);
+    check("math40", 1 / Math.max(nz, b[10]) === Infinity && 1 / Math.min(b[10], nz) === -Infinity && 1 / Math.round(nz) === -Infinity);
 }
 
 // ===== SECTION 40: three uncatchable aborts become catchable throws =====

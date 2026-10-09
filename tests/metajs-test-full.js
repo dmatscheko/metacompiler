@@ -1765,6 +1765,14 @@ function s31() {
     check("hg25r", Math.hypot(mv[4], mv[5]) === 5 && Math.atan2(mv[0], mv[3]) === 1.1071487177940904)
     check("hg25s", Math.clz32(mv[0]) === 31 && Math.fround(mv[3]) === 0.5)
     check("hg25t", Math.LN2 === 0.6931471805599453 && Math.SQRT2 === 1.4142135623730951)
+    // Operands outside the int32 range (ToInt32 is a modulo 2^32), and round / max /
+    // min on the zeros - goja's own Math disagreed with the other engines here.
+    var mb = [4294967296, 4294967297, 100000000000000000000, 16777217, 0.49999999999999994, 0.4, 0]
+    var mnz = -mb[6]
+    check("hg25u", Math.imul(mb[1], mb[1]) === 1 && Math.imul(mb[3], mb[2]) === 1661992960 && Math.imul(mb[0], mb[3]) === 0)
+    check("hg25v", Math.clz32(mb[2]) === 1 && Math.clz32(mb[0]) === 32 && Math.clz32(mb[1]) === 31)
+    check("hg25w", Math.round(mb[4]) === 0 && 1 / Math.round(-mb[5]) === -Infinity && 1 / Math.round(mnz) === -Infinity)
+    check("hg25x", 1 / Math.max(mnz, mb[6]) === Infinity && 1 / Math.min(mb[6], mnz) === -Infinity)
 
     // The six names the interpreter half gained, exercised rather than named.
     check("hg26", Infinity - 1 === Infinity && 0 - Infinity < 0)
