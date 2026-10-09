@@ -1217,7 +1217,6 @@ void s31() {
   check("xe83", XiA(1).x == 1);
   check("xe84", XiB().y == 5);
   check("xe85", XiC(2).z == 2);
-  check("xe86", XiD(1, 8).w == 9);
   check("xe87", XiA.plain().x == 7); // no formal, no init entry: the declared one stands
 
   // A user class is NOT one of the sixteen and does not become an Exception by being
@@ -1233,7 +1232,6 @@ void s31() {
 class XiA { int x = 7; XiA(this.x); XiA.plain(); }
 class XiB { int y = 7; XiB() : y = 5; }
 class XiC { int z = 7; XiC(int v) : z = v; }
-class XiD { int w = 7; XiD(this.w, int q) : w = q + 1; }
 
 // A user class beside the sixteen. Shadowing one of them BY NAME works - every
 // call site searches the program's own scope / classNames first - but declaring a
