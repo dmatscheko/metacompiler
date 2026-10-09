@@ -1,5 +1,5 @@
 /* C subset widening self test (genuinely lowered features only).
- * Exercises the newly supported surface that runs on the integer machine:
+ * Exercises:
  * extra integer type keywords (unsigned/long/short/char/signed/const), void
  * functions and void* parameters, enum constants and enum-typed variables, the
  * comma operator, sizeof of scalar and pointer types, preprocessor directives
@@ -35,7 +35,7 @@ void noop(void) { }                          /* void return type */
 
 int nonnull(void *p) { return p != 0; }      /* void* parameter */
 
-/* extra integer type keywords, all collapsing to the 32-bit int model */
+/* extra integer type keywords */
 int widths(void) {
     unsigned int a = 5;
     long b = 10;

@@ -1,14 +1,6 @@
-/* C subset widening: constructs that used to be accepted but not implemented.
- * Every construct here is genuinely implemented now, in both grammars: the
- * typedef has a real symbol table, floating point has a real numeric tower
- * rather than an integer machine, and goto, union and sizeof-over-an-expression
- * all lower. A flagless run reaches exit 0, and a -warn-unsupported run reports
- * no unsupported construct at all.
- *
- * History: this was a by-design SHOULD-FAIL guard, because a flagless run
- * aborted at the first not-implemented construct (the typedef). The full-syntax
- * work implemented all of them, which removed the guard's premise, so the matrix
- * entry became an ordinary one. Do not re-arm it. **/
+/* C subset widening: typedef, floating point, goto, union and
+ * sizeof-over-an-expression, lowered in both grammars. A flagless run exits 0,
+ * and a -warn-unsupported run reports no unsupported construct at all. **/
 
 #ifndef C_TEST_NOTIMPL
 #define C_TEST_NOTIMPL

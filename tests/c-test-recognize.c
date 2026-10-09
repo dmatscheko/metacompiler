@@ -1,25 +1,14 @@
-/* C recognition self test: a realistic file mixing constructs the widened C grammar
- * now ACCEPTS. The genuinely lowered ones compute real values:
+/* C recognition self test: a realistic file mixing
  *   - storage-class / function specifiers (static, extern, inline),
  *   - hexadecimal and u/U/l/L-suffixed integer literals,
  *   - compound bitwise and shift assignment (&= |= ^= <<= >>=),
  *   - variadic prototypes ( ..., int printf(const char *, ...) ),
- *   - __attribute__((...)) specifiers.
- * The constructs that used to be merely RECOGNISED are all genuinely lowered now:
- *   - string literals ("..."),
- *   - cast expressions ((int)x, (void)x),
- *   - aggregate / brace / multi-dimensional array initializers ( = { ... } ),
- *   - multi-level pointers (char **argv).
- * There is no flat integer machine any more: C has a real type model and a real
- * numeric tower, so a flagless run reaches a clean exit 0 and a -warn-unsupported
- * run reports no unsupported construct at all. Runs identically on goja and
- * -frozen, and on the interpreter and the compiler. main() returns the number of
- * failed genuine checks (0 = success).
- *
- * History: this was a by-design SHOULD-FAIL guard, because a flagless run aborted
- * at the first not-implemented construct. The full-syntax work implemented all of
- * them, which removed the guard's premise, so the matrix entry became an ordinary
- * one. Do not re-arm it. */
+ *   - __attribute__((...)) specifiers,
+ *   - string literals, casts ((int)x, (void)x), aggregate initializers and
+ *     multi-level pointers (char **argv).
+ * A flagless run exits 0 and a -warn-unsupported run reports no unsupported
+ * construct, identically on goja and -frozen, interpreter and compiler. main()
+ * returns the number of failed checks (0 = success). */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +17,7 @@
 int printf(const char *fmt, ...);
 static void die(const char *msg) __attribute__((noreturn));
 
-/* a global lookup table with an aggregate initializer: recognised, not implemented */
+/* a global lookup table with an aggregate initializer */
 static const int masks[] = {0x1, 0x2, 0x4, 0x8, 0x10};
 
 static int nfail = 0;
@@ -61,7 +50,7 @@ int main(int argc, char **argv) {                /* char **argv: multi-level poi
 
     ck(scramble(0xABCD), 0x5D99);
 
-    /* --- recognised-but-not-implemented constructs (harmless under -warn) --- */
+    /* --- constructs that must lower without a -warn-unsupported report --- */
     const char *greeting = "hello, recognizer";   /* string literal        */
     int table[4] = {1, 2, 3, 4};                   /* aggregate initializer */
     long big = (long)0x7FFFFFFFL;                  /* cast expression       */

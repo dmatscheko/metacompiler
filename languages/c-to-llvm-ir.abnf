@@ -16,7 +16,7 @@ everything. cc and this agree BIT FOR BIT over a 90,000-case differential probe
 covering all five of those. A float is computed at double precision, like in the
 interpreter. A constant expression still folds at compile time and never reaches a
 helper.
-Pointers compile to real addresses (alloca values), arrays to alloca [N x i32] plus
+Pointers compile to real addresses (alloca values), arrays to alloca [N x T] plus
 getelementptr, globals to module globals. Structs become real LLVM struct types:
 member access is a getelementptr with a constant field index, nested structs and
 arrays of structs nest the types, and the built-in IR interpreter lays the fields
@@ -46,6 +46,8 @@ The same language with the same semantics is interpreted directly by c-interpret
 
 
 // --- main rules
+// The grammar mirrors c-interpreter.abnf rule for rule, and the syntax notes live
+// there; the notes here are short labels plus what only the compiler does.
 
 // Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
@@ -60,18 +62,13 @@ TopItem     = Include | PPCond | PPLine | StaticAssert | EnumDef | UnionDef | Un
               | StructDef | GStructDefDecl | GUnionDefDecl | TagFwd | StructGDecl
               | FnPtrFuncDef | TdProto | TdFuncDef | TdGlobalDecl | SProto | SFuncDef | EFuncDef | EProto | FuncDef | Proto | GlobalDecl ;
 
-// Preprocessor directives other than #include are accepted and skipped (object-like
-// #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
-// #line). The line (with backslash continuations) is consumed as text and ignored;
-// macro bodies are NOT expanded, so a name #define'd to a value stays unresolved if
-// used later. Include is tried first, so #include keeps its header resolution.
+// Any other directive line (with backslash continuations) is skipped; macro bodies
+// are expanded by c-preprocessor.abnf, not here. Include is tried first.
 PPLine      = "#" :whitespace() { PPCont | PPChar } :whitespace(Whitespace) ;
 PPCont      = "\\" [ "\r" ] "\n" ;
 PPChar      = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
-// enum Color { RED, GREEN = 5, BLUE }; -- genuinely lowered to named int constants
-// (sequential from 0, or from an explicit value). The optional tag is ignored; the
-// constants live in a global table and resolve wherever a bare name is read.
+// enum: named int constants in one global table (the tag is ignored).
 EnumDef     <~~ defineEnum(takeAll()) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
@@ -79,12 +76,7 @@ EnumDef     <~~ defineEnum(takeAll()) ~~>
 EnumOpen    <~~ enumStart() ~~> = "{" ;
 Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
-// An enum initializer is a constant EXPRESSION, and it may NAME another enum constant:
-// 'enum c_tree_code { C_DUMMY = LAST_AND_UNUSED_TREE_CODE, ... }' continues a previous
-// enum's numbering, which is how the GCC tree-code enums are chained. The value is
-// folded here, at parse time, exactly like an array dimension - by the time an
-// enumerator reduces, every constant before it (this enum's included, see
-// makeEnumerator) is already in the table, so the fold never needs a frame.
+// A constant expression folded at parse time; it may name an earlier enum constant.
 EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
 ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
 ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
@@ -96,31 +88,17 @@ ECPos       = "+" ECUn ;
 ECNot       <~~ push(0 - pop() - 1) ~~> = "~" ECUn ;
 ECName      <~~ push(enumConstOf(up.in)) ~~> = Id ;
 
-// union U { int i; unsigned u; }; -- a union is emitted as an LLVM struct holding its
-// LARGEST member, and every member selects index 0 of it, so all members share one
-// address and the storage is as big as the widest one. Tags live in the same table as
-// the struct tags but under a 'u:' prefixed key, so 'struct X' and 'union X' stay
-// distinct C tag namespaces.
+// union: an LLVM struct holding its LARGEST member, which every member selects;
+// its tag is keyed 'u:'+name in the struct table (see uKey).
 UnionDef    <~~ defineUnion(takeAll()) ~~>
             = KwUnion { Attr } Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" { Attr } ";" ;
-// Global union variables, pointers and arrays, with the same declarator syntax as
-// everything else - the tag only supplies the base type.
+// Global union variables, pointers and arrays.
 UnionGDecl  <~~ defineGlobals(takeAll()) ~~>
             = [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
-// An ANONYMOUS struct or union at file scope introduces no tag and no object, so
-// it declares nothing at all - cc says "declaration does not declare anything" and
-// compiles it. It is accepted and ignored. A tagged definition and a definition that
-// also declares objects both keep their own productions: SkipBlock has to start at
-// the '{' and the ';' has to follow the '}', so neither shape can reach here.
+// An anonymous struct/union at file scope declares nothing: accepted and ignored.
 TagSkip     = ( KwUnion | KwStruct ) SkipBlock ";" ;
 
-// typedef: the introduced name becomes a real type name, usable wherever a
-// declaration base type may stand. Because a PEG guard cannot consult a symbol
-// table, the USE site is recognized by SHAPE - an identifier that is not a C
-// keyword, directly followed by a declarator - and the tag resolves the name in
-// the typedef table it filled here. That covers the ordinary forms:
-//   typedef int Int;  typedef Int Num;  typedef int Tri[3];
-//   typedef struct { int v; } Box;  typedef int (*Fn)(int);
+// typedef. A USE is recognized by shape: a non-keyword Id followed by a declarator.
 TypedefDecl <~~ defineTypedef(takeAll()) ~~>
             = KwTypedef TdBase TdDeclr { "," TdDeclr } ";" ;
 // The tag-DEFINING forms come first: only what follows the tag tells
@@ -201,12 +179,7 @@ NotCKw = :script(~~
 
 
 // ----- Conditional compilation -----
-// #if / #ifdef / #ifndef ... #elif ... #else ... #endif. Only the LIVE branch is
-// parsed as source; every dead branch is consumed as raw lines, so no tag of a dead
-// branch ever runs - which is the whole difficulty, because this grammar's top level
-// EXECUTES as it walks (see docs/abnf-dialect-gotchas.md). The macros a condition
-// reads are the object-like #define / #undef lines before it; the full expansion of
-// macro BODIES is a separate pass (languages/c-preprocessor.abnf, -pipe).
+// Only the live branch is parsed; dead branches are consumed as raw lines.
 PPCond      = PPCondFalse PPIfLine PPDeadBody PPDeadChain
             | PPIfLine { PPBodyItem } PPAfterLive ;
 // Nothing has been taken yet, so an #else here is live.
@@ -218,9 +191,7 @@ PPDeadChain = PPEndifLine
 PPAfterLive = PPEndifLine
             | PPMidLine PPDeadBody PPAfterLive ;
 PPMidLine   = PPElifLine | PPElseLine ;
-// An item of a LIVE branch. It may open a nested conditional, but it must not run
-// into the #elif / #else / #endif that ends the branch it is in - PPLine would
-// happily skip that as just another directive line.
+// A live-branch item; it must not run into the #elif/#else/#endif that ends it.
 PPBodyItem  = NotPPEnd TopItem ;
 PPBodyStmt  = NotPPEnd Statement ;
 PPDeadBody  = { PPNestCond | PPDeadLine } ;
@@ -237,12 +208,8 @@ PPEndifLine = "#" :whitespace() { PPSp } "endif" { PPCont | PPChar } :whitespace
 PPIfKw      = "ifdef" | "ifndef" | "if" ;
 PPSp        = " " | "\t" ;
 
-// The guard that decides a conditional: it SUCCEEDS when the directive's condition
-// is FALSE. That is what makes the dead reading the FIRST alternative of PPCond and
-// the live one what is left, so a live body that does not parse stays a parse error
-// instead of being silently swallowed as dead text. Being a guard it consumes
-// nothing, and being pure it re-derives the macro table from the text before it on
-// every call (a :script cannot see the tag scripts' state, and must not keep any).
+// Succeeds when the directive's condition is FALSE, so the dead reading is PPCond's
+// first alternative. Pure: it re-derives the macro table from the text before it.
 PPCondFalse = :script(~~
     (function () {
         var CAP = 500000
@@ -550,9 +517,7 @@ NotPPEnd = :script(~~
     })()
 ~~) ;
 
-// A balanced { ... } body consumed without interpreting it (string and char literals
-// are matched first so braces inside them are never miscounted). Copied from the
-// shared widening pattern (see the Kotlin/Java grammars).
+// A balanced { ... } body consumed uninterpreted (string/char literals first).
 SkipBlock   = "{" { SkipItem } "}" ;
 SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
 SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
@@ -563,9 +528,7 @@ SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
 SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
-// A balanced ( ... ) run, parsed and ignored (used to skip __attribute__ argument
-// lists). Same shape as SkipBlock but for parentheses; strings and char literals are
-// matched first so parens inside them are never miscounted.
+// A balanced ( ... ) run, parsed and ignored (__attribute__ arguments).
 SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
 SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 
@@ -573,12 +536,8 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // type specifier or a prototype tail may appear; the balanced (( )) body is skipped.
 Attr        = ( "__attribute__" | "__attribute" ) SkipParen ;
 
-// #include <stdio.h> or #include "local.h": the header is routed through the
-// shared resolveImport (lib/compile-core.js). System <...> headers listed in
-// core.stdlibImports resolve; a quoted "local.h" or an unknown header aborts,
-// or warns under -warn-imports. The production-level tag's up.in is the whole
-// <...>/"..." token including its delimiters, so slice them off to get the bare
-// header name. Nothing is pushed, so an include yields no top-level statement.
+// #include: resolved by the shared resolveImport (lib/compile-core.js). up.in is the
+// whole <...> / "..." token, so the delimiters are sliced off. Pushes nothing.
 Include     = "#" "include" ( SysHeader | LocHeader ) ;
 SysHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
             = "<" :whitespace() { HdrChar } ">" :whitespace(Whitespace) ;
@@ -586,9 +545,7 @@ LocHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
             = '"' :whitespace() { HdrChar } '"' :whitespace(Whitespace) ;
 HdrChar     = "\x20"..."\x21" | "\x23"..."\x3b" | "\x3d" | "\x3f"..."\x7e" ;
 
-// struct Point { int x; int y; }; -- the fields: int, int* and, of already defined
-// structs, nested struct values and struct pointers (also of the struct itself:
-// that is how linked lists work).
+// struct definition; pointer fields may point at any struct, itself included.
 StructDef   <~~ defineStruct(takeAll()) ~~>
             = KwStruct { Attr } Id <~~ push(up.in) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 // A member line is either an ANONYMOUS struct/union member (C11 6.7.2.1p13: its
@@ -597,9 +554,7 @@ StructDef   <~~ defineStruct(takeAll()) ~~>
 FieldLine   = AnonMember | TagFieldDef | PlainField ;
 PlainField  <~~ push(makeFieldLine(takeAll())) ~~>
             = FieldType ( AnonBits | FieldDecl { "," FieldDecl } ) ";" ;
-// 'struct { int y; int z; } nest;' / 'struct S1 { ... } a, *b;' as a MEMBER: the tag
-// is defined here (with a synthetic name if it has none) and the declarators that
-// follow are ordinary members of that type.
+// A tag definition as a MEMBER ('struct { ... } nest;'): its declarators are members.
 TagFieldDef <~~ push(makeTagField(takeAll())) ~~>
             = AnonKind [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
               FieldDecl { "," FieldDecl } ";" ;
@@ -607,8 +562,7 @@ AnonMember  <~~ push(makeAnonMember(takeAll())) ~~>
             = AnonKind "{" { FieldLine } "}" ";" ;
 AnonKind    = KwUnion <~~ push({anon: true, u: true}) ~~>
             | KwStruct <~~ push({anon: true, u: false}) ~~> ;
-// The base type text is kept so that an UNSIGNED bit field can wrap where a signed
-// one sign-extends; everything else about the width still collapses to the int model.
+// The raw text is kept so an UNSIGNED bit field can wrap where a signed one sign-extends.
 FieldType   = TypeInt <~~ push({bty: baseCtOf(up.in), raw: up.in}) ~~>
             | FieldEnumDef
             | EnumRef <~~ push({bty: ctInt}) ~~>
@@ -631,23 +585,17 @@ BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
 // reserves a slot of its own so the named members around it keep their order.
 AnonBits    <~~ push({padBits: pop()}) ~~> = ":" Number ;
 
-// A function prototype (int putchar(int c);) is accepted and ignored: the callees
-// are resolved by name anyway. It keeps the test programs valid for a real C compiler.
+// A prototype records the return and parameter types (registerProto).
 Proto       <~~ registerProto() ~~>
             = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 
-// The merged pushes: [{ret}, "*"?, name, [params...], bodyThunk]. A parameter is
-// {name, ptr, sname?}. The RETURN type is carried so that a function declared to
-// return a long returns an i64 (see funcRetCt); a pointer return keeps the model's
-// single i32 return, so its '*' only marks the base type as not applying.
+// The merged pushes: [{ret}, "*"?, name, [params...], bodyThunk]. The return type is
+// carried so a long or double return is i64 and a pointer return i32* (getFunc).
 FuncDef     <~~ buildFunction() ~~>
             = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
-// A function whose RETURN type is a struct or union (by value, or a pointer to one).
-// A by-value struct return is lowered the way a C ABI does it: the caller allocates
-// the destination and passes it as a hidden FIRST pointer parameter, and 'return v'
-// copies into it. A prototype registers the same shape, so a call that precedes the
-// definition still emits the hidden argument.
+// A function returning a struct/union (by value or pointer). A by-value return uses
+// the C ABI's sret shape: a hidden first pointer parameter the callee copies into.
 SFuncDef    <~~ buildSFunction(takeAll()) ~~>
             = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 SProto      <~~ registerSProto(takeAll()) ~~>
@@ -663,24 +611,15 @@ EProto      <~~ registerProto() ~~>
 SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
             = ( KwStruct Id <~~ push(up.in) ~~> | KwUnion Id <~~ push(uKey(up.in)) ~~> ) [ Stars ] ;
 
-// 'int (*pick(int w))(int) { ... }' - a function RETURNING a function pointer. The
-// returned value is the callee's identifier, so the return type is an ordinary i32;
-// only the declarator syntax is unusual.
+// 'int (*pick(int w))(int) { ... }': a function RETURNING a function pointer (a funcId).
 FnPtrFuncDef <~~ buildFnPtrFunc(takeAll()) ~~>
             = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } Block ;
 // The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): only
 // the arity of the call matters here, so the balanced run is parsed and ignored.
 FnParams    = SkipParen ;
 
-// Param is tried before the empty (void): 'void' as a base type only makes a
-// parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
-// on the missing name and the '(void)' fallback matches. A trailing '...' (a
-// variadic function) is accepted and ignored: only its named parameters are tracked.
-// VoidOnly comes FIRST and declines a following '*', so a bare '(void)' is the empty
-// parameter list while '(void *p)' falls through to a real parameter. (A PEG never
-// retries a committed alternative, so the two forms cannot be told apart by order
-// alone - the negative lookahead is what decides.) A parameter may be UNNAMED, which
-// is the normal shape of a prototype: int printf(const char *, ...);
+// VoidOnly comes first and declines a following '*', so '(void)' is the empty list
+// while '(void *p)' is a parameter. A trailing '...' is accepted and ignored.
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
@@ -699,17 +638,11 @@ FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
 // so 'int x[100]' and 'int *x' declare the same thing.
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
-// An abstract (unnamed) parameter: only its type matters, and nothing can read it.
-// An abstract parameter: only its type matters. 'int ()' is a function type, which
-// as a parameter is adjusted to a pointer to that function. A function type may carry
-// further parameter lists ('int (*[4])(int)' - an unnamed array of four pointers to
-// functions), which are balanced runs whose contents nothing here reads.
+// An abstract (unnamed) parameter; 'int ()' is adjusted to a function pointer.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] [ ArrDims | AbsFnTy { FnParams } ] ;
 AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
-// An UNNAMED parameter whose type is a typedef name ('int f5(int (int()), fptr1);').
-// It is the last alternative of ParamItem, so a bare identifier here is only read as a
-// type after every other parameter shape has failed.
+// An unnamed parameter of typedef type; tried last.
 TdParamAbs  <~~ push(makeTdParam(takeAll())) ~~>
             = TdName [ Stars ] [ ArrDims ] ;
 ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
@@ -718,20 +651,15 @@ ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
 // Globals are registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
             = BaseTy GDeclItem { "," GDeclItem } ";" ;
-// One declaration may mix prototypes and objects over a shared base type:
-// 'int f(int a), g(int a), a;' declares two functions and one int. Only the objects
-// reach defineGlobals; a prototype merely notes its parameter types. Tried first, and it
-// needs an Id followed by a parameter list, so a plain 'a' or an initialised 'x = 1'
-// falls straight through to DeclItem.
+// 'int f(int a), g(int a), a;': prototypes and objects may share one base type;
+// only the objects reach defineGlobals.
 GDeclItem   = ProtoItem | DeclItem ;
 ProtoItem   <~~ noteProtoItem(takeAll()) ~~>
             = [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } ;
 // The declaration BASE type, kept as a real C type so that a char is one byte wide
 // and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
 BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] | TypeInt ;
-// 'struct T;' / 'union U;' / 'enum E;' - a declaration of the TAG alone. It makes
-// the type name available; the layout comes from the definition, wherever that is.
-// GCC accepts the enum form too, which the corpus relies on.
+// 'struct T;' / 'union U;' / 'enum E;' - a tag declaration alone.
 TagFwd      = ( KwStruct | KwUnion | KwEnum ) Id ";" ;
 
 // Global struct variables, pointers and arrays.
@@ -755,14 +683,11 @@ Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Bre
             | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
-// A typedef inside a function body. C scopes it to the block; this model has one
-// typedef table, which is wider than C but never narrower, so every use still
-// resolves. The declaration itself lowers to nothing, exactly like LStructDef.
+// A local typedef. One typedef table serves every scope (wider than C, never narrower).
 LTypedef    <~~ defineTypedef(takeAll()); push(function(b) { return b }) ~~>
             = KwTypedef TdBase TdDeclr { "," TdDeclr } ";" ;
 
-// A struct definition inside a function body. The layout is registered exactly like a
-// top-level one (the tag runs at build time), and the statement itself does nothing.
+// A local struct definition: registered at build time; the statement does nothing.
 LStructDef  <~~ defineStruct(takeAll()); push(function(b) { return b }) ~~>
             = KwStruct { Attr } Id <~~ push(up.in) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 // A tag definition that also declares locals, and its union twin.
@@ -772,17 +697,11 @@ UnionDefDecl  <~~ push(makeDeclSeq(tagDefDecl(takeAll(), true), false)) ~~>  = U
 LUnionDef   <~~ defineUnion(takeAll()); push(function(b) { return b }) ~~>
             = KwUnion { Attr } Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 
-// A static local: the storage is allocated ONCE and survives across calls, unlike an
-// ordinary local. At the top level 'static' is just a linkage word on a global and is
-// parsed by TypeInt, so this form only ever claims a statement.
+// A static local: storage allocated once, surviving across calls (makeStaticOf).
 StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
-// 'static struct S q;' / 'static union U u;'. BaseTy does not read a tag, so StaticDecl
-// cannot claim these and they used to fall through to StructDecl/UnionDecl, which build
-// an ORDINARY local - a wrong answer in both halves: the object was reset on every call
-// (`static struct P q; q.a++;` counted 1, 1 where cc counts 1, 2), and in the compiler
-// half returning its address returned a dead stack frame, which clang -O2 then made
-// visible as check 3510 of tests/c-test-full.c. Pinned by SECTION 49.
+// 'static struct S q;' / 'static union U u;': BaseTy does not read a tag, and
+// StructDecl/UnionDecl would build an ordinary per-call local.
 SStructDecl <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 SUnionDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
@@ -790,14 +709,10 @@ SUnionDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
 SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
 
-// goto jumps to a label of an enclosing statement SEQUENCE: the goto yields a signal
-// (interpreter) resp. branches to the label's basic block (compiler), which covers
-// forward jumps, backward jumps and jumps out of nested loops.
+// goto: a branch to the label's basic block (see makeSeq).
 Goto        <~~ push(makeGoto(pop())) ~~>
             = KwGoto Id <~~ push(up.in) ~~> ";" ;
-// A label must not be 'case' or 'default': those are switch labels and must be left
-// for the enclosing switch (a case body is a { Statement } run, so without this guard
-// a label would swallow the following 'default:' clause).
+// A label must not be 'case'/'default': those belong to the enclosing switch.
 Label       <~~ push(makeLabel(takeAll())) ~~>
             = NotSwitchKw Id <~~ push(up.in) ~~> ":" Statement ;
 NotSwitchKw = :script(~~
@@ -856,10 +771,7 @@ LTagFwd     <~~ push(function(b) { return b }) ~~> = TagFwd ;
 PPStmt      <~~ push(function(b) { return b }) ~~>
             = PPLine ;
 
-// Local struct and union variables, pointers and arrays. The tag supplies the base
-// type and the ordinary declarator syntax does the rest, so every shape a scalar
-// declarator has - stars, any number of dimensions, brace and expression
-// initializers, a parenthesized pointer-to-array - is available here too.
+// Local struct and union variables, pointers and arrays.
 StructDecl  <~~ push(makeDeclSeq(takeAll(), false)) ~~>
             = [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 UnionDecl   <~~ push(makeDeclSeq(takeAll(), false)) ~~>
@@ -895,11 +807,8 @@ Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 // and runs until a break or the end of the switch. Labels may stack (case 1: case 2:).
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" Statement ;
-// A case label is a LABELED STATEMENT, not a clause of the switch, and it may stand
-// wherever a statement may - directly under the switch ('switch (x) case 0: ;'), inside
-// a nested block, or in the middle of a loop body, which is what makes Duff's device
-// legal C. Fallthrough is then just ordinary sequencing: the statements after a case
-// label are its siblings, and the next case label is another one.
+// A case label is a labeled STATEMENT that may stand anywhere in the switch body
+// (Duff's device); fallthrough is ordinary sequencing.
 SwitchCase  = Case | Default ;
 Case        <~~ push(makeCase(takeAll())) ~~>
             = KwCase CondExpr ":" Statement ;
@@ -909,22 +818,15 @@ Default     <~~ push(makeDefault(pop())) ~~>
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
             = BaseTy DeclItem { "," DeclItem } ;
-// A parenthesized declarator: 'int (*pa)[3]' is a POINTER TO an array of 3 ints,
-// which is a different type from the 'int *pa[3]' array of pointers that InitDecl
-// reads. It has to be tried first - InitDecl cannot start with a '('.
-// FnPtrDecl comes first: both start '( * name', and only what follows the ')' tells
-// a function pointer ('(int)') from a pointer to an array ('[3]') apart.
+// FnPtrRetDecl, FnPtrDecl and PtrArrDecl ('int (*pa)[3]', a pointer TO an array) all
+// start '( *' and come before InitDecl; only what follows tells them apart.
 DeclItem    = FnPtrRetDecl | FnPtrDecl | PtrArrDecl | InitDecl ;
 // 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
 // of them. A function pointer is one i32 holding the callee's identifier.
 FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
             = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
-// 'int (* (*p)(int, int))(int, int)' - a pointer to a function RETURNING a function
-// pointer, the declarator FnPtrFuncDef defines ('int (*f1(int, int))(int, int)') read
-// as a variable. It has to come before FnPtrDecl: both open '( *', and only the second
-// '(' tells them apart. A function pointer is one cell holding a callee identifier
-// whatever its signature, so the two levels need no separate type - the calls
-// '(*(*p)(0, 2))(2, 2)' resolve one at a time.
+// 'int (* (*p)(int, int))(int, int)': a pointer to a function returning a function
+// pointer. Before FnPtrDecl: only the second '(' tells them apart.
 FnPtrRetDecl <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
             = [ PStars ] "(" Stars "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ")" FnParams [ "=" DInit ] ;
 PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
@@ -932,26 +834,15 @@ PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
 InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
               [ ArrDims ] [ "=" DInit ] ;
-// A declarator's array dimensions, outermost first: 'int m[2][3]' is an array of 2
-// arrays of 3 ints, and every dimension is one level of the {k:"arr"} C type. Only
-// the OUTERMOST may be left empty ('int a[] = { ... }', 'int m[][3][5] = ...'), where
-// -1 asks for the size to come from the initializer. A dimension may carry the
-// qualifiers a parameter is allowed to write there (int x[const 5]).
+// Array dimensions, outermost first; only the outermost may be empty (-1: sized by
+// the initializer). Parameter qualifiers are allowed (int x[const 5]).
 ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | StarDim | InferDim ) { ArrDim | StarDim } ;
 // 'int x[const *]' - a VLA of UNSPECIFIED size, which C11 6.7.6.2 allows only in a
 // prototype, where nothing may read the bound anyway. Treated exactly like '[]'.
 StarDim     <~~ push(-1) ~~> = "[" { ArrQual } "*" "]" ;
 ArrDim      = "[" { ArrQual } ConstDim "]" ;
-// An array dimension is a constant EXPRESSION, not just a literal: 'char buf[5*32]' is
-// ordinary C, and so is 'int a[N]' once the preprocessor has turned N into '0x1E+1'. The
-// arithmetic is folded here, at parse time, because a dimension must already be a number
-// when the declarator is built - the interpreter has no frame yet and the compiler emits
-// no code for it.
-//
-// NoDimId is what keeps this honest: it refuses any identifier inside the brackets, so a
-// real variable-length array ('char test[argc]') is still REJECTED outright rather than
-// accepted and then failing at walk time. Accepting a VLA here would score a corpus win
-// while being strictly worse than the rejection it replaced.
+// A dimension is a constant EXPRESSION folded at parse time (no code is emitted for
+// it). NoDimId rejects any identifier, so a real VLA ('char t[argc]') stays an error.
 ConstDim    = NoDimId DimShift ;
 DimShift    <~~ push(foldDimBin(takeAll())) ~~> = DimAdd { DimShOp DimAdd } ;
 DimShOp     <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
@@ -1025,27 +916,17 @@ AssignExpr  = Assignment | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Lvalue ( "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "^=" | "|=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
-// An lvalue thunk evaluates to an address value. A place is a variable followed by
-// any mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
-// A parenthesized lvalue may itself carry a suffix chain, so '(*pa)[1]' and '(*p).f'
-// are places like 'pa[1]' and 'p->f'.
-// DerefP ('*' of a PLACE) comes before the general Deref ('*' of any expression):
-// only the place form knows the C type of what it dereferences, which is what makes
-// '(*pa)[1]' step by whole rows of 'int (*pa)[3]'.
+// An lvalue thunk yields an address: a variable plus any [i] / .f / ->f steps.
+// DerefP ('*' of a PLACE) precedes Deref: only it knows the pointee's C type.
 Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | VarPlace ;
-// A STRING LITERAL is an array object of static storage duration, so it is a place:
-// "abc"[1] indexes it, sizeof "abc" is its byte size, and reading it decays to a
-// pointer to its first character. Adjacent literals concatenate (C11 6.4.5p5); an
-// L / u / U / u8 prefix makes the elements wide.
+// A string literal is a static array object, hence a place (C11 6.4.5).
 StrPlaceP   <~~ push(makeSfxChain(takeAll())) ~~>
             = StrPlace { PlaceSfx } ;
 StrPlace    <~~ push(makeStrPlace(up.in)) ~~>
             = StrTok { StrTok } ;
 StrTok      = [ StrPfx ] SkipStr ;
 StrPfx      = "u8" | "L" | "u" | "U" ;
-// A COMPOUND LITERAL '(Type){ ... }' (C11 6.5.2.5) is an unnamed object with
-// automatic storage - an lvalue - so it takes a suffix chain like any other place,
-// and '&' may be applied to it.
+// A compound literal '(Type){ ... }' (C11 6.5.2.5) is an automatic lvalue.
 CompLitP    <~~ push(makeSfxChain(takeAll())) ~~>
             = CompLit { PlaceSfx } ;
 CompLit     <~~ push(makeCompLit(takeAll())) ~~>
@@ -1143,18 +1024,11 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // function named _Alignof, and the general call seed would claim it first.
 UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | GenericCall | Generic | Cast | PostfixExpr ;
 
-// A cast '(Type)expr' converts the value to the named type: an integer wraps to that
-// type's width and signedness, a float truncates towards zero on the way to an
-// integer, and a pointer cast only re-labels the address. TypeName requires a real
-// type keyword, so '(expr)' still parses as a parenthesized expression.
+// A cast '(Type)expr'. TypeName needs a type keyword, so '(expr)' stays a parenthesis.
 Cast        <~~ push(makeCast(takeAll())) ~~>
             = "(" TypeName ")" UnaryExpr ;
 
-// sizeof: the byte size the type model pins - char 1, short 2, int 4, any long and
-// any double 8, any pointer 8, a struct the packed sum, a union the maximum over its
-// members, an array its element count times the element size. Over an EXPRESSION the
-// answer is the size of that expression's type, which is what makes 'sizeof a' on a
-// char array answer its length.
+// sizeof: the byte size of a type (ctBytes), or of an expression's type.
 Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
 SizeofType  <~~ push(makeSizeof(pop())) ~~>
             = "(" TypeName ")" ;
@@ -1166,12 +1040,8 @@ SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
 // size, and a pointer aligns to 8 like it is sized.
 AlignOf     <~~ push(makeSizeof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
-// A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
-// An ABSTRACT function-pointer declarator may follow, so a cast can name a function
-// pointer type: '(void (*)(void))0' and '(int (*)(int, int))f'. All this model needs
-// from it is that the result IS a function pointer, so the parameter list is skipped
-// whole and every one of them is the same ctFn. GCC attributes are allowed where a
-// declarator may carry them ('int (__attribute__((noinline)) *)(void)').
+// A type name: base plus '*'s, optionally an abstract function-pointer declarator
+// (every function pointer type is the same ctFn) or an array declarator.
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
             = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } [ AbsFnPtr | ArrDims ] ;
 AbsFnPtr    <~~ push({fnabs: true}) ~~> = "(" { Attr } Stars { Attr } ")" FnParams ;
@@ -1184,23 +1054,13 @@ SizeBase    = ScalarName
 ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
             = ScalarTok { ScalarTok } ;
 
-// _Generic(controlling, type: value, ..., default: value) - C11 6.5.1.1. The
-// association whose type name is the controlling expression's own type is the one
-// the whole construct yields; the type is known while the code is emitted, so only
-// the winning arm is ever emitted.
+// _Generic (C11 6.5.1.1): only the association matching the controlling type is emitted.
 Generic     <~~ push(makeGeneric(takeAll())) ~~>
             = KwGeneric "(" AssignExpr "," GenAssoc { "," GenAssoc } ")" ;
-// '_Generic(a, int: a_f, const int: b_f)()' - the selection yields a function pointer
-// and the call follows. It needs its OWN production because UnaryExpr reaches Generic
-// before PostfixExpr, so the bare form would win and leave the '(' behind; requiring at
-// least one suffix here keeps the bare form falling through to Generic unchanged.
+// '_Generic(...)()': its own production, because UnaryExpr tries Generic first.
 GenericCall <~~ push(makeCallExpr(takeAll())) ~~>
             = Generic ( ArgList | PlaceSfx ) { ArgList | PlaceSfx } ;
-// A TYPEDEF NAME may name the association's type ('_Generic(foo, fptr: 3, int: 4)').
-// This is the one place a bare identifier can be read as a type without the ambiguity
-// that makes it impossible in a CAST: the ':' has to follow, and no expression may
-// stand there, so nothing else could have been meant. KwDefault comes first - 'default'
-// is a keyword, not a typedef name.
+// A typedef name may name an association's type; the ':' makes it unambiguous.
 GenAssoc    <~~ push(makeGenAssoc(takeAll())) ~~>
             = ( TypeName | KwDefault <~~ push("default") ~~> | TdGenTy ) ":" AssignExpr ;
 TdGenTy     <~~ push(typedefOf(up.in)) ~~> = NotCKw Id ;
@@ -1230,29 +1090,12 @@ PostfixExpr = PostIncDec | CallExpr | Primary ;
 PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
             = Lvalue ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-// A call whose callee is an EXPRESSION: a bare name (the ordinary direct call, and
-// also a variable holding a function pointer), a parenthesized place ('(*fp)(4)'),
-// or a place path ('tab[0](3)'). Several argument lists chain, so 'pick(1)(5)' calls
-// what pick returned.
-//
-// A call result is a VALUE, not a place, but C still lets a suffix step off it:
-// 'mk().a' selects a field of a returned struct, 'getp()[1]' indexes a returned
-// pointer, and 'go()()->zerofunc()' does both and then calls what it found. So the
-// chain after the first argument list mixes the two - each PlaceSfx steps the value
-// (emitValStep) and each ArgList calls it. Only the FIRST step of such a chain is
-// value-based; everything after it is an ordinary address walk again.
+// A call: the callee is a name, a parenthesized place or a place path; argument lists
+// chain ('pick(1)(5)'), and suffixes may step off a call result ('mk().a', emitValStep).
 CallExpr    <~~ push(makeCallExpr(takeAll())) ~~>
             = CallSeed ArgList { ArgList | PlaceSfx } ;
-// ParenCastRef is what lets a CAST be the callee: '((void (*)(void))0)()' calls the
-// address the cast names. It is deliberately a Cast and not a general parenthesized
-// expression - Cast fails on its first token unless a type keyword is there, so an
-// ordinary '(a + b)' pays nothing for it, whereas re-parsing every parenthesized
-// expression would double the work on the deeply nested casts the corpus is full of.
-// ParenDerefCall is '(*(*p)(0, 2))(2, 2)': the callee is what a call returned, with a
-// '*' in front of it. Dereferencing a FUNCTION POINTER yields the function designator,
-// which decays straight back to the same pointer (C11 6.5.3.2p4), so the '*' is the
-// identity here - unlike '(*fp)(4)', where fp is a VARIABLE and the cell must be read,
-// which is why this alternative sits before the place form but insists on a CALL inside.
+// ParenCastRef: a cast as callee ('((void (*)(void))0)()'). ParenDerefCall:
+// '(*(*p)(0, 2))(2, 2)' - '*' on a function pointer is the identity (C11 6.5.3.2p4).
 CallSeed    = ParenSfxRef | ParenDerefCall | ParenPlaceRef | PlaceRef | NameSeed | ParenCastRef ;
 ParenDerefCall = "(" "*" CallExpr ")" ;
 ParenCastRef = "(" Cast ")" ;
@@ -1261,23 +1104,11 @@ NameSeed    <~~ push({fname: up.in}) ~~> = Id ;
 ArgList     <~~ push({args: takeAll()}) ~~>
             = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
-// A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
-// A string literal (with adjacent-literal concatenation) has no char* backing on the
-// integer machine, so it is accepted and reported as not implemented.
-// ParenSfxRef comes first: '(*pa)[1]' starts like a parenthesized expression, and the
-// general form would consume '(*pa)' and leave the '[1]' behind.
-// FloatLit comes before NumberLit: the integer form matches the '1' of '1e3' and a
-// PEG never goes back for the longer read.
-// StmtExpr comes first: '({ ... })' starts like a parenthesized expression, and the
-// general form would consume the '(' and then choke on the '{'.
+// StmtExpr, CompLitRef and ParenSfxRef before the plain parenthesis, and FloatLit
+// before NumberLit: a PEG never goes back for the longer read.
 Primary     = StmtExpr | CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
-// A GCC STATEMENT EXPRESSION '({ stmt; stmt; expr; })': an ordinary block, in its own
-// scope, whose value is the value of its LAST expression statement (and 0 when it has
-// none). Rather than single that statement out in the syntax - which needs a lookahead
-// for 'is the next token after this ";" the closing "}"' - every expression statement
-// records its value, so the last one to record simply wins. That is the same order in
-// both halves: the interpreter records while it RUNS the block, the compiler while it
-// EMITS it, and in either case the block's own statements are the last to act.
+// GCC statement expression '({ ...; expr; })': the value of its last expression
+// statement (0 when none) - the last one EMITTED wins (see lastExprV).
 StmtExpr    <~~ push(makeStmtExpr(takeAll())) ~~>
             = "(" "{" { Statement } "}" ")" ;
 ParenSfxRef <~~ push(makeLoadOf(pop())) ~~> = ParenSfx ;
@@ -1310,9 +1141,7 @@ CChar       = "\\" "x" HexDig { HexDig } | "\\" OctDig [ OctDig [ OctDig ] ]
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
-// A hexadecimal (0x...) or decimal integer literal with optional C integer suffixes
-// (u/U/l/L in any combination). parseInt reads the 0x prefix and stops at the suffix
-// letters, so hex and suffixed literals both yield the right 32-bit value.
+// An integer literal: hex, binary, octal or decimal, with u/U/l/L suffixes (parseCInt).
 Number      <~~ push(parseCInt(up.in)) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } { IntSfx } :whitespace(Whitespace)
             | ( "0b" | "0B" ) :whitespace() BinDig { BinDig } { IntSfx } :whitespace(Whitespace)
@@ -1323,13 +1152,8 @@ OctDig      = "0"..."7" ;
 BinDig      = "0" | "1" ;
 IntSfx      = "u" | "U" | "l" | "L" ;
 
-// The scalar integer type: any run of int-family keywords and qualifiers, all of
-// which collapse to the one 32-bit int model (unsigned/signed/short/long widths and
-// const/volatile qualifiers are parsed and ignored; char is a full int-sized word;
-// void is accepted here so that void and void* parse). Storage-class and function
-// specifiers (static/extern/register/auto/inline/_Noreturn/_Thread_local) and the
-// _Atomic/restrict qualifiers are likewise parsed and ignored; _Bool and _Complex
-// collapse to int; __attribute__((...)) specifiers are skipped. Pushes nothing.
+// A run of type keywords, qualifiers, storage-class/function specifiers, attributes
+// and _Alignas. Pushes nothing; tags read the type off the matched text (baseCtOf).
 TypeInt     = TypeElem { TypeElem } ;
 TypeElem    = TypeTok | Attr | AlignAs ;
 // _Alignas(8) / _Alignas(int): parsed and ignored (the layout is fixed).
@@ -1344,11 +1168,8 @@ TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
 EnumRef     = KwEnum Id ;
 
 
-// 'struct S { int x; } s, *p;' / 'union { int i; } u;' - a tag DEFINITION that also
-// declares objects. The tag may be omitted, in which case the layout gets a synthetic
-// name that no other declaration can spell. The shared *Body productions carry the
-// syntax; the four wrappers differ only in whether the objects become locals or
-// globals, and whether the tag is a struct or a union.
+// A tag DEFINITION that also declares objects ('struct S { ... } s, *p;'); an omitted
+// tag gets a synthetic name. The wrappers pick locals vs globals, struct vs union.
 StructDefBody = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
                 DeclItem { "," DeclItem } ";" ;
 UnionDefBody  = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
@@ -1362,14 +1183,11 @@ KwEnum      = "enum" KwEnd ;
 KwUnion     = "union" KwEnd ;
 KwTypedef   = "typedef" KwEnd ;
 KwGoto      = "goto" KwEnd ;
-// _Static_assert(constant-expression, "message"); - accepted and skipped at both the
-// top level and inside a function body. The condition is not evaluated: it is a
-// compile-time diagnostic, and this front end reports no diagnostics of its own.
+// _Static_assert(...); - accepted and skipped (not evaluated), top level and in bodies.
 StaticAssert = KwStaticAs SkipParen ";" ;
 AssertStmt  <~~ push(function(b) { return b }) ~~> = StaticAssert ;
 
-// _Bool declarations get their own form so an initializer is normalized to 0 or 1,
-// which is what makes '_Bool two = 2;' hold 1 (TypeInt alone collapses _Bool to int).
+// _Bool declarations: the initializer is normalized to 0 or 1 ('_Bool two = 2;' holds 1).
 BoolDecl    <~~ push(makeSeq(takeAll())) ~~>
             = KwBool BInitDecl { "," BInitDecl } ";" ;
 BInitDecl   <~~ push(makeBoolDecl(takeAll())) ~~>
@@ -1417,11 +1235,8 @@ KwDefault   = "default" KwEnd ;
         if (cc >= 65 && cc <= 70) return cc - 55
         return -1
     }
-    // A C integer constant: 0x/0X hex, 0b/0B binary, a leading 0 octal, or decimal,
-    // with any run of u/U/l/L suffix letters. Read as a 32-bit two's complement value.
     // items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of a constant array
-    // dimension, folded left to right at parse time. See the ArrDim rule for why a
-    // dimension is a number here rather than an expression tree.
+    // dimension or enum initializer, folded left to right at parse time (see ConstDim).
     function foldDimBin(items) {
         var v = anytype
         v = items[0]
@@ -1446,6 +1261,8 @@ KwDefault   = "default" KwEnd ;
         var q = a / b
         return q < 0 ? Math.ceil(q) : Math.floor(q)
     }
+    // A C integer constant: 0x hex, 0b binary, leading-0 octal, or decimal; the u/U/l/L
+    // suffix run ends the digits.
     function parseCInt(s) {
         var base = 10
         var i = 0
@@ -1482,16 +1299,13 @@ KwDefault   = "default" KwEnd ;
         }
         return p
     }
-    // The value of one character-constant body, including the C escape sequences:
-    // backslash x with hex digits, backslash with up to three octal digits, and the
-    // simple escapes n t r v f a b 0, backslash, quote and double quote.
-    // A C floating constant: hexadecimal (mantissa times a power of two) or decimal.
     function pow2(n) {
         var r = 1
         var k = n < 0 ? 0 - n : n
         for (var i = 0; i < k; i++) r = r * 2
         return n < 0 ? 1 / r : r
     }
+    // A C floating constant: hexadecimal (mantissa times a power of two) or decimal.
     function parseCFloat(t) {
         if (t.length > 1 && t.charCodeAt(0) == 48 && (t.charCodeAt(1) == 120 || t.charCodeAt(1) == 88)) {
             var i = 2
@@ -1557,6 +1371,9 @@ KwDefault   = "default" KwEnd ;
         bytes.push(0)
         return {str: bytes, wide: wide}
     }
+    // The value of one character-constant body, including the C escape sequences:
+    // backslash x with hex digits, backslash with up to three octal digits, and the
+    // simple escapes.
     function cCharCode(s) {
         if (s.charCodeAt(0) != 92) return s.charCodeAt(0)
         var e = s.charCodeAt(1)
@@ -1592,35 +1409,23 @@ KwDefault   = "default" KwEnd ;
 
 
     var funcs = {}
-    // The declared RETURN type of a function, and the declared types of its
-    // parameters, by name - filled by a prototype and by a definition, whichever the
-    // walk meets first. They exist for exactly one reason: a 64-bit C type is a real
-    // i64 in the module, so a function taking or returning one has to say so in its
-    // signature or the call would truncate. Everything else stays the model's i32.
+    // Declared return / parameter types by name (prototype or definition, whichever comes
+    // first). Only 64-bit types (long, double) are recorded: they change the signature.
     var funcRetCt = {}
     var funcParamCts = {}
     function noteRetCt(name, ct) {
-        // A DOUBLE return is 64 bits too - it travels as its IEEE bit pattern in an
-        // i64, exactly like a long. Leaving it out left every such function declared
-        // 'i32' while makeReturn handed it an i64, and the caller then read a
-        // truncated pattern: 'double gd(long x) { return 1.5; }' answered a value the
-        // caller saw as neither 1.5 nor anything else in particular.
+        // A double return is 64 bits too: its IEEE bit pattern travels in an i64.
         if (ct != undefined && (ct.k == "flt" || (ct.k == "int" && ct.w >= 8)) &&
             !hasOwn(funcs, name)) { funcRetCt[name] = ct }
     }
-    // The FULL declared return type, pointers included. funcRetCt above may not hold it:
-    // it drives the module SIGNATURE, and a pointer return keeps the model's single i32,
-    // so recording it there would change every such function's LLVM type. This map is
-    // read in exactly one place - a suffix stepping off a call RESULT ('getp()[1]'),
-    // which is the only construct that needs the pointee type of a returned pointer.
+    // The FULL declared return type, pointers and narrow types included; funcRetCt holds
+    // only the 64-bit ones that change the i32/i64 signature.
     var funcRetAll = {}
     function noteRetAll(name, ct) {
         if (ct != undefined && !hasOwn(funcs, name)) { funcRetAll[name] = ct }
     }
-    // Does this function return a POINTER? Its LLVM return type is then the uniform i32*
-    // rather than i32. That has to be said in the signature: 'ret i32* %p' against an i32
-    // result is IR the built-in llvm.Run accepts and clang REFUSES outright, so every
-    // pointer-returning function used to build an unusable module (found by -exe).
+    // A pointer-returning function's LLVM return type is i32*: clang refuses
+    // 'ret i32* %p' in an i32 function (llvm.Run accepts it).
     function retIsPtr(name) {
         return hasOwn(funcRetAll, name) && funcRetAll[name].k == "ptr"
     }
@@ -1630,23 +1435,9 @@ KwDefault   = "default" KwEnd ;
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "*") { n = n + 1 } }
         return n
     }
-    // Which parameters are POINTERS, by name, from whichever of the prototype and the
-    // definition the walk met first. Recorded SEPARATELY from funcParamCts because it
-    // is needed even when no parameter is wider than the model's i32, and because it is
-    // recorded unconditionally: a pointer parameter changes the LLVM signature (i32*,
-    // 64 bits) where a plain int does not.
-    //
-    // Until 2026-08-02 pointer-ness was dropped here, and that produced two defects
-    // that shared this one line. A declared-only function came out as
-    // `declare i32* @ext1(i32 %0)` - the return type right, every parameter flattened to
-    // i32, which TRUNCATES a 64-bit pointer in a native binary and is invisible to
-    // llvm.Run (untyped) and to any test that does not call an external taking a
-    // pointer. And a call emitted BEFORE the definition materialized the callee through
-    // getFuncByArity with {ptr: false} for every argument, so the definition then reused
-    // that object and failed outright with "store operands are not compatible:
-    // src=i32; dst=i32**" - fatal for mutually recursive helpers, which is what forced
-    // languages/lib/bash-rt.c's rt_eg_fwd(long, long, int) trampoline. A prototype now
-    // fixes both, which is what C requires for mutual recursion anyway.
+    // Which parameters are POINTERS, by name (prototype or definition, whichever comes
+    // first). Separate from funcParamCts because any pointer changes the signature
+    // (i32*); a prototype is what lets a call that precedes the definition get it right.
     var funcParamPtrs = {}
     function noteParamCts(name, params) {
         var cts = []
@@ -1726,19 +1517,12 @@ KwDefault   = "default" KwEnd ;
     function trampolineFor(arity) {
         var key = "a" + arity
         if (hasOwn(trampolines, key)) return trampolines[key]
-        // Every ARGUMENT travels as the uniform i32* for the same reason the result
-        // does: an i32 parameter would truncate a pointer argument to 32 bits, which
-        // clang builds happily and which then segfaults the moment the callee reads
-        // through it. i32* is 64 bits, so a pointer survives exactly and an integer
-        // survives sign-extended (icallBox / icallUnbox are the two halves).
+        // Every argument travels as the uniform 64-bit i32* (an i32 would truncate a
+        // pointer argument natively); icallBox / icallUnbox are the two halves.
         var ps = [llvm.ir.NewParam("", i32)]
         for (var i = 0; i < arity; i++) { ps.push(llvm.ir.NewParam("", i32p)) }
-        // The trampoline's RESULT is the uniform i32*, not i32: a callee may return a
-        // pointer, and 'ret i32* %p' against an i32 result is IR the built-in llvm.Run
-        // accepts and clang refuses (found by -exe). A pointer is 64 bits here and an
-        // int 32, so carrying every result as a pointer is LOSSLESS in both directions -
-        // an integer travels sign-extended through inttoptr and comes back by ptrtoint
-        // plus trunc, bit for bit.
+        // The result is i32* too: a callee may return a pointer (clang refuses 'ret i32*'
+        // against i32), and an int round-trips through it exactly, sign-extended.
         var f = m.NewFunc("__mec_icall" + arity, i32p, ps)
         trampolines[key] = f
         trampolineArities.push(arity)
@@ -1820,10 +1604,8 @@ KwDefault   = "default" KwEnd ;
     function starsOf(item) {
         return (item != undefined && item.ptr != undefined) ? item.ptr : 0
     }
-    // enum: sequential values from 0, or continuing after an explicit '= n'.
-    // The counter lives here rather than in defineEnum because a constant has to be
-    // READABLE by the enumerators after it ('A = 4, B = A + 1'), which means it must be
-    // in the table when the NEXT enumerator's initializer folds, not one rule later.
+    // enum: sequential from 0 or after an explicit '= n'. The counter lives here so a
+    // constant is readable by the next enumerator's initializer ('A = 4, B = A + 1').
     var enumNext = 0
     function enumStart() { enumNext = 0 }
     function enumConstOf(name) {
@@ -1859,10 +1641,8 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: v}
         }
     }
-    // A scalar type name, keyword by keyword -> the C type it names. LP64: long AND
-    // long long are 8 bytes, matching the 8-byte pointers this model already pins and
-    // cc on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4). A long double is modelled as
-    // a double, and a plain char is signed like it is on this reference platform.
+    // A scalar type name -> its C type. LP64: long and long long are 8 bytes; a long
+    // double is modelled as a double; a plain char is signed.
     function makeScalarName(items) {
         var nlong = 0
         var uns = false
@@ -1892,11 +1672,8 @@ KwDefault   = "default" KwEnd ;
         if (nlong > 0) return ctI(8, uns)
         return ctI(4, uns)
     }
-    // The base type a declaration's specifier RUN names, read off its source text.
-    // up.in hands over the matched TOKENS with their separators removed - 'long
-    // double' arrives as 'longdouble' - so the run is scanned for the type keywords
-    // themselves instead of being split on whitespace. Everything else (an enum tag,
-    // a storage class, an __attribute__ body) contributes nothing and leaves int.
+    // The base type of a declaration's specifier run, read off up.in, which has the
+    // separators removed ('long double' -> 'longdouble'), so keywords are scanned for.
     var baseKws = ["unsigned", "signed", "double", "float", "short", "_Bool",
                    "char", "void", "long", "int"]
     function baseCtOf(text) {
@@ -1931,10 +1708,7 @@ KwDefault   = "default" KwEnd ;
         var name = items[0]
         var opt = items[1]
         return function(b) {
-            // A _Bool is an unsigned one-byte cell, like every other w==1 integer, so
-            // its slot has to be the same i8 the load and store paths assume. The
-            // descriptor carries the bool flag, so the normalization is now storeTo's
-            // (through emitConv) and no longer only this declarator's.
+            // A _Bool cell is an i8; storeTo normalizes the value (emitConv on ctBool).
             var bct = ctBool
             var ptr = b.NewAlloca(ctLTy(bct))
             if (opt != undefined) {
@@ -1946,10 +1720,8 @@ KwDefault   = "default" KwEnd ;
             return b
         }
     }
-    // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
-    // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    // sizeof yields size_t, which is unsigned long here. A struct tag's size is read
-    // lazily, so a sizeof may name a tag defined further down the file.
+    // sizeof(type): a constant of type size_t (unsigned long). The thunk reads a struct
+    // tag's size at emit time, so a sizeof may name a tag defined further down.
     function makeSizeof(ct) {
         return function(b) { return {b: b, v: kint(ctBytes(ct)), ct: ctSizeT, cv: ctBytes(ct)} }
     }
@@ -1989,17 +1761,10 @@ KwDefault   = "default" KwEnd ;
                 var cv = convertNum(ct, r.cv)
                 return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
             }
-            // Pointer <-> integer is ptrtoint / inttoptr; LLVM has no sext from a
-            // pointer, and emitConv would emit exactly that. The opcode is chosen from
-            // the C TYPE DESCRIPTORS and never from the emitted LLVM type, because this
-            // compiler models every pointer as i32* - so the LLVM type cannot tell a
-            // 'long' apart from an 'int' the way ct.w can, and a value that is already
-            // an integer register (the folded 0 of '(char *)0') must not be ptrtoint'd.
-            // The ct descriptor is authoritative, but it can UNDERSTATE a pointer: a
-            // call reports its result as ctInt unless the callee returns a wide
-            // integer (emitDirectCall / funcRetCt), so 'void *malloc()' hands back an
-            // i32* value carrying ct "int". Hence each direction also accepts a value
-            // that already sits in a pointer register.
+            // Pointer <-> integer is ptrtoint / inttoptr (LLVM has no sext from a pointer).
+            // The opcode is chosen from the C type descriptors, not the LLVM type, since
+            // every pointer is i32*; and since a ct can understate a pointer, a value
+            // already in a pointer register is accepted too.
             var vIsPtr = llvm.types.IsPointer(r.v.Type())
             if (ct.k == "int" && (isPtrLike(fct) || vIsPtr)) {
                 var pi = r.b.NewPtrToInt(ptrOperand(r.b, r.v), llvm.types.I64)
@@ -2032,10 +1797,8 @@ KwDefault   = "default" KwEnd ;
     // register. fct is the type the value HAD, and only its signedness is read.
     function emitConv(b, ct, v, fct) {
         if (ct.k != "int") return v
-        // _Bool first: its conversion is not a truncation but a TEST against zero
-        // (C11 6.3.1.2), so 5, 256 and -3 all become 1. This is the one place an
-        // assignment, a cast and a store all pass through, which is what makes the
-        // single arm enough.
+        // _Bool converts by a TEST against zero (C11 6.3.1.2). Assignment, cast and
+        // store all pass through here, so this one arm suffices.
         if (ct.bool == true) { return toInt(b, truthy(b, v)) }
         var fromU = (fct != undefined && fct.k == "int") ? (fct.u == true) : false
         var v2 = emitWiden(b, v, fromU, ct.w >= 8)
@@ -2066,30 +1829,18 @@ KwDefault   = "default" KwEnd ;
     }
 
     // ----- C types and struct layouts -----
-    // A ct descriptor is {k:"int"} | {k:"ptr", p:ct} | {k:"struct", s:name}; the
-    // pointee of a pointer is a ct in turn, so int** is ptr(ptr(int)) and nests freely.
-    // structs[name] = {lty: LLVM struct type, fields: {fname: {idx, ct}}}. Every
-    // pointer is emitted as i32* (the interpreter only cares about its 8 byte size);
-    // which struct a pointer points at lives in the ct and drives the getelementptrs.
+    // A ct descriptor; pointees nest, so int** is ptr(ptr(int)):
     // {k:"int", w: bytes, u: unsigned}  char / short / int / long, signed or not
     // {k:"flt", w: bytes}                float / double / long double
     // {k:"void"}                         only ever reached through a pointer
     // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp"}
-    // Every integer VALUE lives in an i32 register and every integer CELL is an i32,
-    // whatever its declared width: the width and the signedness drive sizeof, the
-    // conversions, and the choice between the signed and the unsigned instruction.
+    // structs[name] = {lty, fields: {fname: {idx, ct, bf}}, order, isUnion, bytes, wideCt}.
+    // Every pointer is emitted as i32*; the ct says what it points at and drives the
+    // getelementptrs. A cell has its C width (ctLTy), a value lives in i32/i64 (ctRTy).
     function ctI(w, u) { return {k: "int", w: w, u: u} }
     function ctF(w) { return {k: "flt", w: w} }
-    // _Bool is an unsigned one-byte integer in EVERY respect except its conversion
-    // rule: C11 6.3.1.2 says a scalar converted to _Bool is 0 if it compares equal
-    // to 0 and 1 otherwise, so `_Bool b; b = 5;` holds 1 and not 5. It used to be
-    // plain ctI(1, true), indistinguishable from an unsigned char, so only the
-    // declarator form (makeBoolDecl, which normalizes its own initializer)
-    // normalized at all - an assignment, an array element, a cast and a compound
-    // assignment all kept the raw value. Measured against cc: `_Bool g = 1; g = g+1`
-    // was 2 here and 1 there. The flag rides on the descriptor and is read by
-    // emitConv, convertNum and ctEq; nothing else has to know about it, because a
-    // _Bool's WIDTH and SIGNEDNESS are still those of ctI(1, true).
+    // _Bool is ctI(1, true) plus a bool flag for its conversion rule (C11 6.3.1.2: 0 if
+    // equal to 0, else 1), read by emitConv, convertNum and ctEq.
     var ctBool = {k: "int", w: 1, u: true, bool: true}
     var ctInt  = ctI(4, false)
     var ctUInt = ctI(4, true)
@@ -2203,8 +1954,7 @@ KwDefault   = "default" KwEnd ;
         if (f == undefined) fail(tagName(sname) + " has no field " + fname)
         return f
     }
-    // The BYTE size behind sizeof, matching the packed layout of the IR interpreter:
-    // an int is 4, any pointer 8, an aggregate its own size.
+    // The BYTE size behind sizeof (packed layout, no padding).
     function ctBytes(ct) {
         if (ct.k == "ptr" || ct.k == "fnp") return 8
         if (ct.k == "struct") return structOf(ct.s).bytes
@@ -2212,18 +1962,10 @@ KwDefault   = "default" KwEnd ;
         if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
         return ct.w
     }
-    // The size the IR INTERPRETER's packed layout gives a value, which is what
-    // pointer arithmetic steps by. It is exactly the byte size of ctLTy(ct) below,
-    // and the two MUST stay in step: a getelementptr strides by the LLVM element
-    // type while a pointer DIFFERENCE divides by this number, so any disagreement
-    // between them makes 'p + 1 - p' answer something other than 1.
-    // Until 2026-08-02 this returned 4 for every integer narrower than a long, so a
-    // char cell was four bytes wide and "hello" was emitted as [6 x i32]. That made
-    // the whole byte-oriented half of libc (str*/mem*, atoi) unimplementable - see
-    // the measurement at libcExterns in abnf/llvmmap.go. char is now a real byte and
-    // short a real half-word; the only cells that still overstate their C width are a
-    // float (carried as a double's i64 bit pattern) and a function pointer (a funcId
-    // in an i32), both of which are representation choices rather than widths.
+    // The size pointer arithmetic steps by: exactly the byte size of ctLTy(ct). The two
+    // MUST agree - a gep strides by the LLVM type while a pointer difference divides
+    // by this - or 'p + 1 - p' is not 1. A float (carried in an i64) and a function
+    // pointer (a funcId in an i32) are the cells whose size differs from sizeof.
     function machBytes(ct) {
         if (ct.k == "ptr") return 8
         if (ct.k == "flt") return 8      // every float is carried at double precision
@@ -2250,10 +1992,7 @@ KwDefault   = "default" KwEnd ;
     function ctLTy(ct) {
         // A floating-point value is its IEEE-754 bit pattern in an i64.
         if (ct.k == "flt") return llvm.types.I64
-        // long / long long / unsigned long are REAL i64 in the module: the whole
-        // width model rides on the LLVM type, so a load, a store, an alloca, a
-        // struct field and an array element are all 8 bytes wide without any further
-        // arrangement, and the arithmetic below is emitted at i64.
+        // long / long long are real i64 cells (and registers).
         if (ct.k == "int") {
             if (ct.w >= 8) return llvm.types.I64
             if (ct.w == 1) return i8
@@ -2298,11 +2037,8 @@ KwDefault   = "default" KwEnd ;
         if (llvm.types.Equal(t, i8) || llvm.types.Equal(t, i16)) return promoteCell(b, ct, v)
         return v
     }
-    // An address typed to hold a cell of type t. Most addresses arrive from a
-    // getelementptr and are already right, but a pointer VALUE is the uniform i32*
-    // ('*p = x' through a short*), and llir rejects a store whose operand types do
-    // not match. The bitcast is emitted only when it is actually needed, which keeps
-    // it off the i32 path the model started with.
+    // An address typed to hold a cell of type t: a pointer VALUE is the uniform i32*,
+    // and llir rejects a store whose operand types differ. Bitcasts only if needed.
     function cellAddr(b, t, addr) {
         var want = llvm.types.NewPointer(t)
         if (llvm.types.Equal(addr.Type(), want)) return addr
@@ -2372,12 +2108,6 @@ KwDefault   = "default" KwEnd ;
     // An anonymous struct/union member: its own member groups, spliced into the
     // enclosing tag at the slot the member itself occupies.
     function makeAnonMember(items) { return {anonFields: items.slice(1), isUnion: items[0].u} }
-    // StructDef items = [name, {fields}...]. Nested struct/union values need a complete
-    // (already defined) tag; pointer fields may point at any (even later) struct.
-    // A UNION becomes an LLVM struct with exactly ONE member - the widest one - and
-    // every field selects index 0 of it, so all members share the same address and the
-    // storage is as large as the widest member. `order` keeps the declaration order,
-    // which is what a positional brace initializer walks.
     // The C type of one declared member. A POINTER field may point at any (even a
     // later) struct; a member of struct/union VALUE type needs a complete tag.
     function fieldCt(f) {
@@ -2458,6 +2188,8 @@ KwDefault   = "default" KwEnd ;
         }
         return bytes
     }
+    // A UNION is an LLVM struct with ONE member typed as the widest; every field selects
+    // index 0. `order` keeps declaration order for positional brace initializers.
     function defineTag(items, isUnion) {
         var name = items[0]
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
@@ -2635,15 +2367,8 @@ KwDefault   = "default" KwEnd ;
     // for a target without an FPU, written straight into the module. Every helper is
     // branchless (select instead of branches), so it needs no basic blocks of its own
     // and can be emitted while another function is being built.
-    // The arithmetic ROUNDS TO NEAREST, TIES TO EVEN - the IEEE-754 default. Each
-    // helper computes in an EXTENDED mantissa field (the 53 bits shifted left by
-    // three, so bits 2..0 are guard/round/sticky) with a separate flag for whatever
-    // fell below even those, and rounds exactly once, at the end. It used to truncate,
-    // which put every inexact result one ulp low - 0.1 + 0.2 landed below 0.3.
-    // Infinities, NaNs, subnormals and the sign of zero are carried too: overflow
-    // saturates instead of wrapping the exponent, underflow is gradual, a subnormal
-    // operand is normalized on the way in, and a NaN is unordered against everything.
-    // A `float` is computed at double precision, exactly as the interpreter does.
+    // Rounding is to nearest, ties to even (see roundPack); infinities, NaNs, subnormals
+    // and signed zeros are carried. A float is computed at double precision.
     var i64 = llvm.types.I64
     function k64(n) { return llvm.constant.NewInt(i64, n) }
 
@@ -2714,11 +2439,9 @@ KwDefault   = "default" KwEnd ;
         var s = 0
         var v = x
         if (v < 0) { s = 1; v = 0 - v }
-        // Infinity and NaN have no exponent to search for, and the loops below would
-        // spin on them forever: a constant expression as ordinary as `1.0 / 0.0` -
-        // which is how C spells an infinity without a header - HUNG THE COMPILER.
-        // (v * 0.5 == v is the portable test for an infinity once zero is excluded;
-        // an exponent literal cannot be written in a tag script.)
+        // Infinity and NaN have no exponent for the loops below to search (1.0 / 0.0 is
+        // an ordinary constant expression). v * 0.5 == v tests for an infinity once
+        // zero is excluded.
         if (v != v) return {hi: 2146959360, lo: 0}                 // the default NaN
         if (v == 0) return {hi: s * 2147483648, lo: 0}
         if (v * 0.5 == v) return {hi: s * 2147483648 + 2146435072, lo: 0}
@@ -2759,16 +2482,10 @@ KwDefault   = "default" KwEnd ;
         var ex = b.NewAnd(b.NewLShr(a, k64(52)), kExpMask)
         var mn = b.NewAnd(a, kM52)
         var norm = b.NewICmp(llvm.enum.IPredNE, ex, zero64)
-        // A SUBNORMAL has no implicit bit and its true exponent is 1, not the 0 its
-        // field holds - the one place in the format where the field is not the
-        // exponent. It is NORMALIZED here: shifted up until its leading bit sits
-        // where a normal one's does, with the exponent going below 1 to match, so
-        // every helper below sees one uniform shape and roundPack's gradual underflow
-        // puts it back. Reported raw, a subnormal divisor overflowed the quotient
-        // accumulator and a subnormal factor left the product's exponent wrong.
-        // A true zero is left at exponent 1: normalizing it would drive the exponent
-        // 63 places down for a mantissa that stays zero, and every comparison below
-        // would then rank it above a real number.
+        // A SUBNORMAL (field 0, true exponent 1, no implicit bit) is NORMALIZED here, its
+        // exponent going below 1, so every helper sees one shape and roundPack's gradual
+        // underflow puts it back. A true zero stays at exponent 1: normalizing it would
+        // rank it above real numbers in the comparisons below.
         var n = normLeft(b, mn, one64, normLim52)
         var sub = b.NewAnd(b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, ex, zero64), i64),
                            b.NewZExt(b.NewICmp(llvm.enum.IPredNE, mn, zero64), i64))
@@ -2778,10 +2495,7 @@ KwDefault   = "default" KwEnd ;
                 m: b.NewSelect(norm, b.NewOr(mn, kB52), b.NewSelect(subc, n.m, mn))}
     }
     // ----- the values outside the ordinary range -----
-    // An exponent field of all ones is an infinity when the fraction is zero and a
-    // NaN when it is not. Both were left to fall through the ordinary arithmetic,
-    // which produced a finite number for Inf * 0.5 and let a NaN compare equal to
-    // itself; the reference toolchain says otherwise, so the rules are spelled out.
+    // An all-ones exponent field is an infinity (zero fraction) or a NaN.
     var kQuiet = k64(2251799813685248)               // 2^51, the quiet bit
     var kInfBits = k64(9218868437227405312)          // +Inf
     var kNanBits = k64(9221120237041090560)          // the default quiet NaN
@@ -2832,9 +2546,7 @@ KwDefault   = "default" KwEnd ;
     // what lets one flag serve both a sum and a difference.
     function roundPack(b, sg, e, ext, st) {
         // GRADUAL UNDERFLOW: an exponent at or below zero is not representable, so the
-        // mantissa is shifted down into the subnormal range - the bits that fall off
-        // joining the sticky - and rounded there instead. Without this the exponent
-        // simply wrapped and a product that should underflow came back enormous.
+        // mantissa is first shifted into the subnormal range (lost bits join the sticky).
         var sub = b.NewICmp(llvm.enum.IPredSLT, e, one64)
         var dn = shrSticky(b, ext, b.NewSub(one64, e))
         st = b.NewSelect(sub, b.NewOr(st, dn.s), st)
@@ -3028,10 +2740,8 @@ KwDefault   = "default" KwEnd ;
         res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewAnd(az2, bz), zero64), kNanBits, res)
         return nanThrough(b, xb, yb, res)
     }
-    // A signed 64-bit integer to a double, rounded to nearest even. The magnitude
-    // needs up to 63 bits, so it is first shifted DOWN under 2^53 - keeping what
-    // that loses as the sticky - and only then normalized up. Shifting down is what
-    // the old version did not do: every integer above 2^53 came out halved.
+    // A signed 64-bit integer to a double, rounded to nearest even. The magnitude (up to
+    // 63 bits) is first shifted DOWN, keeping the lost bits as the sticky, then normalized.
     function buildI2D(b, f) {
         var x = f.Params[0]
         var neg = b.NewICmp(llvm.enum.IPredSLT, x, zero64)
@@ -3095,13 +2805,12 @@ KwDefault   = "default" KwEnd ;
                      ">": llvm.enum.IPredUGT, "<=": llvm.enum.IPredULE, ">=": llvm.enum.IPredUGE }[op]
         var c = b.NewICmp(pred, dblKey(b, x), dblKey(b, y))
         // A NaN is UNORDERED against everything, itself included: every comparison but
-        // '!=' is false, and '!=' is true. The bit-pattern ordering below cannot say
-        // that on its own - it made NaN == NaN come out true.
+        // '!=' is false. The bit-pattern ordering cannot express that on its own.
         var un = b.NewOr(b.NewZExt(isNanOf(b, x), i64), b.NewZExt(isNanOf(b, y), i64))
         var unc = b.NewICmp(llvm.enum.IPredNE, un, zero64)
         return toInt(b, b.NewSelect(unc, (op == "!=") ? trueBit(b) : falseBit(b), c))
     }
-    // int -> double and double -> int, at the i32 boundary the rest of the model uses.
+    // int -> double and double -> int through the soft-float helpers.
     function emitI2D(b, ct, v) {
         // A 64-bit operand is ALREADY an i64 register and must not be extended again.
         var w = llIs64(v) ? v : ((ct.k == "int" && ct.u == true) ? b.NewZExt(v, i64) : b.NewSExt(v, i64))
@@ -3255,15 +2964,9 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: loadCt(b, ect, e.val, e.load), ct: ect}
         }
     }
-    // A place path: the variable, then indexing and member steps. The walk keeps the
-    // address of the current place and its C type: a[i] getelementptrs by whole
-    // elements (the array in place, a pointer through its loaded base), .f selects
-    // the field, ->f loads the pointer first. The extra ct in the result lets
-    // makeLoadOf pick the loaded type.
     // Step a place path from a starting {b, v, ct}: '[i]' peels one array or pointer
-    // level (and getelementptrs by whole elements), '.f' selects the field, '->f'
-    // loads the pointer first. The C type travels with the address, so nothing needs
-    // a separate 'is this an array' flag.
+    // level (getelementptr by whole elements), '.f' selects the field, '->f' loads the
+    // pointer first. The C type travels with the address.
     function emitPath(start, path, name) {
         var b = start.b
         var addr = start.v
@@ -3411,14 +3114,10 @@ KwDefault   = "default" KwEnd ;
     function makeLoadOf(placeT) {
         return function(b) { return placeValOf(placeT(b)) }
     }
-    // One suffix step off a VALUE rather than a place. A struct value is already the
-    // ADDRESS of its storage (a call returning a struct hands back the alloca it filled),
-    // so '.f' is one getelementptr; a pointer value is the address itself, so '[i]' and
-    // '->f' must NOT load first the way emitPath does for a pointer VARIABLE - there is
-    // no cell holding this pointer. The answer is a place, so any further steps carry on
-    // through emitPath unchanged. The pointer is bitcast to the element/struct type
-    // first: a call result arrives as the uniform i32*, which would index by the wrong
-    // stride (and which clang, unlike llvm.Run, refuses outright).
+    // One suffix step off a VALUE rather than a place: a struct value is already its
+    // address and a pointer value is the address itself, so '[i]' and '->f' must not
+    // load first the way emitPath does. The pointer is bitcast to the element/struct
+    // type: a call result arrives as the uniform i32*, which would stride wrongly.
     function emitValStep(b, v, ct, s) {
         if (s.idx != undefined) {
             if (ct.k != "arr" && ct.k != "ptr") fail("indexing needs an array or a pointer: call result")
@@ -3563,10 +3262,7 @@ KwDefault   = "default" KwEnd ;
         // A shift keeps the LEFT operand's promoted type (C11 6.5.7p3).
         if (op == "<<" || op == ">>") { ct = promote(lct) }
         var out = isCmpOp(op) ? ctInt : ct
-        // Constant folding runs on JS doubles, which stop being exact integers at
-        // 2^53, so it is switched OFF whenever the common type is 64 bits wide: the
-        // module then carries real i64 instructions on exact i64 constants, which is
-        // both correct and what the interpreter half computes.
+        // Folding runs on JS doubles (exact only to 2^53), so it is off for 64-bit types.
         var wide64 = (ct.k == "int" && ct.w >= 8)
         if (lr.cv != undefined && rr.cv != undefined && !wide64) {
             var cv = constBin(op, ct, convertNum(ct, lr.cv), convertNum(op == "<<" || op == ">>" ? rct : ct, rr.cv))
@@ -3672,11 +3368,8 @@ KwDefault   = "default" KwEnd ;
             var ct = arithCt(tct, ect)
             var vt = coerce(rt.b, ct, rt)
             var ve = coerce(re.b, ct, re)
-            // A POINTER arm against a null-constant arm (C11 6.5.15p6, 'p ? p : 0'):
-            // arithCt already answers the pointer type, but coerce leaves the 0 as an
-            // i32, and `phi i32* [ %p, ... ], [ 0, ... ]` is IR llvm.Run accepts and
-            // clang rejects ("integer constant must have integer type"). Both
-            // incomings have to be the uniform i32*.
+            // A POINTER arm against a null-constant arm ('p ? p : 0', C11 6.5.15p6): both
+            // phi incomings must be i32* - clang rejects an integer 0 in a pointer phi.
             if (isPtrLike(ct) || llvm.types.IsPointer(vt.Type()) || llvm.types.IsPointer(ve.Type())) {
                 vt = ptrOperand(rt.b, vt)
                 ve = ptrOperand(re.b, ve)
@@ -3691,15 +3384,6 @@ KwDefault   = "default" KwEnd ;
     // A compound assignment is the plain operator on the current value, converted
     // back to the target's type (C11 6.5.16.2p3).
     function applyOp(b, op, a, v) { return emitBinC(b, op.slice(0, op.length - 1), a, v) }
-    // storeTo writes v to the given address. Every stored pointer is normalized to
-    // i32* first (struct pointers are typed by their getelementptrs, but the cells
-    // are uniform i32* slots - llir checks store operand types); into a pointer
-    // place a plain integer (the 0 of 'p = 0') goes through inttoptr, so the store
-    // covers all 8 bytes.
-    // The RESULT is the value in its register width (an assignment is an expression,
-    // and its value has the promoted type), while what reaches memory is truncated to
-    // the cell. The two differ for char and short, which is why the truncation is a
-    // separate local rather than the returned value.
     // The byte width of an LLVM integer type / of a value's type. Which way a value
     // has to move to fit its cell is a question about WIDTHS, not about whether it
     // happens to be 64 bits: an i32 into an i8 cell truncates, an i32 into an i64 cell
@@ -3711,12 +3395,12 @@ KwDefault   = "default" KwEnd ;
         return 4
     }
     function llWidth(v) { return llWidth2(v.Type()) }
+    // storeTo writes v to addr. A stored pointer is normalized to i32*; an integer into a
+    // pointer place goes through inttoptr (all 8 bytes). The RESULT is the value in its
+    // register width; what reaches memory is truncated to the cell (char, short).
     function storeTo(b, ct, addr, v) {
-        // The ADDRESS is made to match the cell as well as the value is. A place
-        // reached through '*p' arrives as the model's uniform i32*, so a long or a
-        // double stored through one was an i64 into an i32* - which llir refuses
-        // outright, and which is why '*p = v' did not compile while 'p[0] = v'
-        // (whose getelementptr already types the address) did.
+        // The ADDRESS is typed to the cell too: a place reached through '*p' is the
+        // uniform i32*, and llir refuses an i64 store into it.
         if (ct != undefined && isFlt(ct)) { b.NewStore(v, cellAddr(b, llvm.types.I64, addr)); return v }
         if (llvm.types.IsPointer(v.Type())) {
             v = b.NewBitCast(v, i32p)
@@ -3727,10 +3411,7 @@ KwDefault   = "default" KwEnd ;
         }
         var cell = v
         if (ct != undefined && ct.k == "int" && !llvm.types.IsPointer(v.Type())) {
-            // The value is made to match the cell as well: a value that is already of
-            // this C type can still be sitting in a NARROWER register than the cell
-            // (an i32 on its way into a long array element), and now that the address
-            // is typed, llir compares the two.
+            // The value is matched to the cell width as well (an i32 into a long element).
             var lt = ctLTy(ct)
             if (!llvm.types.Equal(v.Type(), lt)) {
                 cell = (llWidth(v) > llWidth2(lt)) ? b.NewTrunc(v, lt)
@@ -3887,12 +3568,8 @@ KwDefault   = "default" KwEnd ;
         b = emitCallArgs(b, args, argValues, paramCtsOf(name), paramPtrsOf(name))
         var cv = b.NewCall(getFuncByArity(name, args.length), argValues)
         if (sct != undefined) return {b: b, v: dest, ct: sct}
-        // A POINTER-returning function reports its declared pointer type, not ctInt.
-        // Its LLVM result is already the uniform i32* (retIsPtr drives the signature),
-        // so ctInt was a LIE about a value that is an address, and it made
-        // 'strchr(s, c) - s' take the pointer+integer branch of emitBinC with the two
-        // operands the wrong way round: the emitted `sext i32* %p to i64` is IR that
-        // llvm.Run accepts and clang refuses outright ("invalid cast opcode").
+        // A pointer-returning function reports its declared pointer type (its LLVM result
+        // is already i32*); ctInt would send 'strchr(s, c) - s' down the ptr+int path.
         var rct = hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt
         if (retIsPtr(name)) { rct = funcRetAll[name] }
         return {b: b, v: cv, ct: rct}
@@ -3917,10 +3594,7 @@ KwDefault   = "default" KwEnd ;
         return {v: items[0]}
     }
     // ----- Declarators -----
-    // One declarator, whatever its shape, collapses into a DESCRIPTOR; the enclosing
-    // declaration owns the base type and combines the two. That is what lets 'char',
-    // 'unsigned' and a typedef name all reach a declarator that only knows about its
-    // own stars, dimensions and initializer.
+    // A declarator collapses into a descriptor; the enclosing declaration owns the base type.
     function makeDeclr(items, kind) {
         var d = {name: "", ptr: 0, dims: undefined, init: undefined, gv: undefined, kind: kind}
         for (var i = 0; i < items.length; i++) {
@@ -4018,15 +3692,8 @@ KwDefault   = "default" KwEnd ;
         var gname = name + ".static." + staticSeq
         var slty = ctLTy(ct)
         var g = m.NewGlobalDef(gname, isPtr ? llvm.constant.NewNull(i32p) : llvm.constant.NewZeroInitializer(slty))
-        // An AGGREGATE static used to fall back to makeDeclOf, i.e. to an ordinary
-        // alloca, and that is not a missing feature but a WRONG ANSWER: `static struct S
-        // q; return &q;` then returns the address of a dead stack frame. It survived
-        // because -O0 leaves the frame's bytes lying where they were; clang -O2 does not,
-        // and check 3510 of tests/c-test-full.c failed natively the moment
-        // buildExecutable started passing -O2. The storage is the global like every
-        // other static; only the scope entry differs (an array is a place, and an
-        // aggregate is pre-zeroed by the global's own zeroinitializer, so the
-        // zeroAggregate makeDeclOf emits is not needed here).
+        // An AGGREGATE static lives in the global too (an alloca would make '&q' dangle);
+        // the global's zeroinitializer replaces makeDeclOf's zeroAggregate.
         if (isAggCt(ct)) {
             var aentry = {val: g, arr: ct.k == "arr", ty: slty, load: slty, ct: ct}
             var aflag = (opt != undefined) ? m.NewGlobalDef(gname + ".done", zero) : undefined
@@ -4144,12 +3811,9 @@ KwDefault   = "default" KwEnd ;
             return exitB
         }
     }
-    // items = [valueThunk, stmtThunk...] resp. [stmtThunk...] -> one case descriptor.
+    // Superseded: the same-named function declarations below come later and win.
     function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
     function makeDefault(items) { return {isDefault: true, body: items} }
-    // items = [scrutineeThunk, caseDescriptor...]: C switch with fallthrough. The
-    // dispatch compares the value against every case in source order; the bodies form
-    // one block chain (fallthrough), and break jumps behind the switch (loop stack).
     // ----- switch: case labels are BASIC BLOCKS -----
     // A case label may sit anywhere inside the switch body - in a nested block, or
     // halfway down a loop body, which is what makes Duff's device legal C - so the body
@@ -4252,7 +3916,6 @@ KwDefault   = "default" KwEnd ;
     // ----- Top level -----
 
     var unnamedSeq = 0
-    // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
     // One parameter descriptor. An ARRAY parameter is adjusted to a pointer to its
     // element type (C11 6.7.6.3p7), and a struct or union VALUE parameter travels as
     // the address of the caller's object, which the callee copies.
@@ -4378,13 +4041,9 @@ KwDefault   = "default" KwEnd ;
     var curFnRetCt = ctInt
     // Whether the function currently being emitted returns a POINTER (LLVM i32*).
     var curFnRetPtr = false
-    // The DECLARED return type when it is narrower than an int - a char, a short or a
-    // _Bool. It cannot be curFnRetCt: that one drives the module SIGNATURE (and the
-    // fall-off-the-end constant), which stays i32 for every narrow type because that
-    // is what the call sites build. But C11 6.8.6.4p3 converts the returned value to
-    // the declared type exactly as an assignment does, so `unsigned char f(int n)
-    // { return n; }` called with 300 answers 44 - which cc and c-interpreter.abnf both
-    // said and the compiled half did not, since coerce was handed ctInt.
+    // The DECLARED return type when narrower than int (char, short, _Bool). Not
+    // curFnRetCt, which drives the i32 signature; C11 6.8.6.4p3 still converts the
+    // returned value to it like an assignment.
     var curFnRetNarrow = undefined
     function emitFunctionBody(name, params, bodyT, sretCt) {
         if (sretCt != undefined) { structRet[name] = sretCt }
@@ -4415,15 +4074,9 @@ KwDefault   = "default" KwEnd ;
                 declVar(params[i].name, {val: a, arr: false, ct: pct})
                 continue
             }
-            // The SIGNATURE passes a narrow integer promoted (i32), because that is
-            // how every call site builds it, but the parameter's own SLOT is a cell of
-            // the declared width - an i8 for a char. Anything else is inconsistent:
-            // a store through the place path truncates to the cell, so an i32 slot
-            // would keep three stale bytes that the next plain read would see.
-            // A double parameter is an i64 - its bit pattern - which is what getFunc
-            // puts in the SIGNATURE. Saying i32 here instead left the prologue storing
-            // an i64 into an i32 slot, and no function with a double parameter would
-            // build at all.
+            // The signature passes a narrow integer promoted (i32), but the SLOT is a cell
+            // of the declared width (an i8 for a char), like every other store/load of it.
+            // A double parameter is an i64 bit pattern, as in getFunc's signature.
             var pty = params[i].ptr ? i32p
                       : ((pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)))
                          ? llvm.types.I64 : i32)
@@ -4455,10 +4108,8 @@ KwDefault   = "default" KwEnd ;
     // name -> the C type it abbreviates. Filled by defineTypedef as the file is
     // walked, read by makeTdDecl when a later declaration uses the name.
     var typedefs = {}
-    // The names the standard headers of core.stdlibImports introduce. Those headers
-    // are no-ops here (the runtime provides what they declare), so the typedefs they
-    // would define are predefined - a file that includes stdint.h and writes uint16_t
-    // means the same thing whether or not the header text was read.
+    // Typedefs of the stdlib headers (no-ops here), predefined so 'uint16_t' works
+    // whether or not the header was included.
     function stdTypedefs() {
         typedefs["size_t"] = ctI(8, true)
         typedefs["ssize_t"] = ctI(8, false)

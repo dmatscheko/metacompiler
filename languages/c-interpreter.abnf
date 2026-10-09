@@ -557,8 +557,8 @@ NotPPEnd = :script(~~
 ~~) ;
 
 // A balanced { ... } body consumed without interpreting it (string and char literals
-// are matched first so braces inside them are never miscounted). Copied from the
-// shared widening pattern (see the Kotlin/Java grammars).
+// are matched first so braces inside them are never miscounted). Same pattern as the
+// Kotlin/Java grammars.
 SkipBlock   = "{" { SkipItem } "}" ;
 SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
 SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
@@ -701,8 +701,7 @@ FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
 // so 'int x[100]' and 'int *x' declare the same thing.
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
-// An abstract (unnamed) parameter: only its type matters, and nothing can read it.
-// An abstract parameter: only its type matters. 'int ()' is a function type, which
+// An abstract (unnamed) parameter: only its type matters. 'int ()' is a function type, which
 // as a parameter is adjusted to a pointer to that function. A function type may carry
 // further parameter lists ('int (*[4])(int)' - an unnamed array of four pointers to
 // functions), which are balanced runs whose contents nothing here reads.
@@ -780,11 +779,8 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
 StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
 // 'static struct S q;' / 'static union U u;'. BaseTy does not read a tag, so StaticDecl
-// cannot claim these and they used to fall through to StructDecl/UnionDecl, which build
-// an ORDINARY local - a wrong answer in both halves: the object was reset on every call
-// (`static struct P q; q.a++;` counted 1, 1 where cc counts 1, 2), and in the compiler
-// half returning its address returned a dead stack frame, which clang -O2 then made
-// visible as check 3510 of tests/c-test-full.c. Pinned by SECTION 49.
+// cannot claim these; without this form they would fall through to StructDecl/UnionDecl
+// and build an ORDINARY local, reset on every call. Pinned by SECTION 49.
 SStructDecl <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 SUnionDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
@@ -952,8 +948,7 @@ ArrDim      = "[" { ArrQual } ConstDim "]" ;
 //
 // NoDimId is what keeps this honest: it refuses any identifier inside the brackets, so a
 // real variable-length array ('char test[argc]') is still REJECTED outright rather than
-// accepted and then failing at walk time. Accepting a VLA here would score a corpus win
-// while being strictly worse than the rejection it replaced.
+// accepted and then failing at walk time.
 ConstDim    = NoDimId DimShift ;
 DimShift    <~~ push(foldDimBin(takeAll())) ~~> = DimAdd { DimShOp DimAdd } ;
 DimShOp     <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
@@ -1018,7 +1013,7 @@ Empty       <~~ push(function() {}) ~~>
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
-// Every expression production pushes exactly one thunk: function() -> 32 bit value.
+// Every expression production pushes exactly one thunk: function() -> typed value.
 // The comma operator evaluates each side in order and yields the last (real C).
 Expression  <~~ push(makeComma(takeAll())) ~~>
             = AssignExpr { "," AssignExpr } ;
@@ -1267,9 +1262,8 @@ ArgList     <~~ push({args: takeAll()}) ~~>
             = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A plain variable reference loads the value; an array name yields its address.
-// A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
-// A string literal (with adjacent-literal concatenation) has no char* backing on the
-// flat integer memory, so it is accepted and reported as not implemented.
+// A place path as an expression (a[i], p.x, head->next) loads the resolved cell, and
+// a string literal (StrRef) decays to the address of its first character.
 // ParenSfxRef comes first: '(*pa)[1]' starts like a parenthesized expression, and the
 // general form would consume '(*pa)' and leave the '[1]' behind.
 // FloatLit comes before NumberLit: the integer form matches the '1' of '1e3' and a
@@ -1317,8 +1311,8 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
 // A hexadecimal (0x...) or decimal integer literal with optional C integer suffixes
-// (u/U/l/L in any combination). parseInt reads the 0x prefix and stops at the suffix
-// letters, so hex and suffixed literals both yield the right 32-bit value.
+// (u/U/l/L in any combination), also binary 0b and octal 0. parseCInt reads it exactly
+// at 64 bits; the constant's C type is picked from the value and the suffix.
 Number      <~~ push(parseCInt(up.in)) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } { IntSfx } :whitespace(Whitespace)
             | ( "0b" | "0B" ) :whitespace() BinDig { BinDig } { IntSfx } :whitespace(Whitespace)
@@ -1329,13 +1323,10 @@ OctDig      = "0"..."7" ;
 BinDig      = "0" | "1" ;
 IntSfx      = "u" | "U" | "l" | "L" ;
 
-// The scalar integer type: any run of int-family keywords and qualifiers, all of
-// which collapse to the one 32-bit int model (unsigned/signed/short/long widths and
-// const/volatile qualifiers are parsed and ignored; char is a full int-sized word;
-// void is accepted here so that void and void* parse). Storage-class and function
-// specifiers (static/extern/register/auto/inline/_Noreturn/_Thread_local) and the
-// _Atomic/restrict qualifiers are likewise parsed and ignored; _Bool and _Complex
-// collapse to int; __attribute__((...)) specifiers are skipped. Pushes nothing.
+// The scalar base type: any run of type keywords, qualifiers, storage-class and
+// function specifiers and __attribute__((...)) specifiers. It pushes nothing; the tags
+// read the run's text (baseCtOf), so the width and signedness survive while the
+// qualifiers and specifiers are ignored. void is accepted so that void and void* parse.
 TypeInt     = TypeElem { TypeElem } ;
 TypeElem    = TypeTok | Attr | AlignAs ;
 // _Alignas(8) / _Alignas(int): parsed and ignored (the layout is fixed).
@@ -1726,9 +1717,8 @@ KwDefault   = "default" KwEnd ;
             declVar(name, a, false, ctBool)
         }
     }
-    // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
-    // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    // sizeof yields size_t, which is unsigned long here. A struct tag's size is read
+    // sizeof(type): a thunk yielding ctBytes of the type, as a size_t, which is
+    // unsigned long here. A struct tag's size is read
     // lazily, so a sizeof may name a tag defined further down the file.
     var ctSizeT = {k: "int", w: 8, u: true}
     function makeSizeof(ct) { return function() { return val(ctBytes(ct), ctSizeT) } }
@@ -1779,8 +1769,7 @@ KwDefault   = "default" KwEnd ;
     }
 
     // ----- C types and struct layouts -----
-    // A ct descriptor is {k:"int"} | {k:"ptr", p:ct} | {k:"struct", s:name}; the
-    // pointee of a pointer is a ct in turn, so int** is ptr(ptr(int)) and nests freely.
+    // A ct descriptor (the pointee of a pointer is a ct in turn, so int** nests freely):
     // structs[name] = {size: words, fields: {fname: {off, ct}}}; fields lie back to
     // back, ints and pointers take one word each (matching the compiled layout).
     // {k:"int", w: bytes, u: unsigned}  char / short / int / long, signed or not
@@ -1791,15 +1780,10 @@ KwDefault   = "default" KwEnd ;
     function ctF(w) { return {k: "flt", w: w} }
     // _Bool is an unsigned one-byte integer in EVERY respect except its conversion
     // rule: C11 6.3.1.2 says a scalar converted to _Bool is 0 if it compares equal
-    // to 0 and 1 otherwise, so `_Bool b; b = 5;` holds 1 and not 5. It used to be
-    // plain ctI(1, true), indistinguishable from an unsigned char, so only the
-    // declarator form (makeBoolDecl, which normalizes its own initializer)
-    // normalized at all - an assignment, an array element, a cast and a compound
-    // assignment all kept the raw value. Measured against cc: `_Bool g = 1; g = g+1`
-    // was 2 here and 1 there. The flag rides on the descriptor and is read by
+    // to 0 and 1 otherwise, so `_Bool b; b = 5;` holds 1 and not 5 - on every store,
+    // not only in a declarator. The flag rides on the descriptor and is read by
     // convert and ctEq; nothing else has to know about it, because a _Bool's WIDTH
-    // and SIGNEDNESS are still those of ctI(1, true). The twin is
-    // c-to-llvm-ir.abnf's ctBool; keep the two in step.
+    // and SIGNEDNESS are still those of ctI(1, true). Twin: c-to-llvm-ir.abnf's ctBool.
     var ctBool = {k: "int", w: 1, u: true, bool: true}
     var ctInt  = ctI(4, false)
     var ctUInt = ctI(4, true)
@@ -2162,7 +2146,7 @@ KwDefault   = "default" KwEnd ;
         }
     }
 
-    // All user defined functions by name: {params: [{name, ptr}...], body: thunk}.
+    // All user defined functions by name: {params: [{name, ptr, ct}...], body: thunk}.
     var funcs = {}
 
     // A function POINTER is the function's identifier: a small positive integer that
@@ -2183,20 +2167,14 @@ KwDefault   = "default" KwEnd ;
     }
 
     // ----- The C standard library: the byte/address family -----
-    // The eighteen names below are exactly abnf/llvmmap.go's libcExterns byte/address
-    // set, which the compiler half resolves through clang (and through libcNative under
-    // llvm.Run). They are implemented HERE so that both halves of the language can
-    // answer the same question; before this, callFunction knew putchar and getchar and
-    // nothing else, and every one of these was 'function not defined'.
+    // The names below are exactly abnf/llvmmap.go's libcExterns byte/address set, which
+    // the compiler half resolves through clang (and through libcNative under llvm.Run).
     //
-    // WHAT MAKES IT SOUND. The interpreter's memory is one cell per SCALAR (see 'The
-    // machine' above) rather than the compiler's packed bytes, and that difference is
-    // deliberate - it is the model, not a defect. It happens to be irrelevant for this
-    // family: sizeof(char) is 1 in both models, so for CHARACTER data a cell IS a byte
-    // and a length in bytes is a length in cells. That equivalence is the whole reason
-    // these can be shared. It does NOT extend to wider elements: memcpy over an int
-    // array would be n/4 cells here and n bytes there, so the mem* group is honest only
-    // over char storage, which is what the ratchet exercises (SECTION 50).
+    // Why it is sound: the interpreter's memory is one cell per SCALAR rather than the
+    // compiler's packed bytes, but sizeof(char) is 1 in both models, so for CHARACTER
+    // data a cell IS a byte and a length in bytes is a length in cells. That does NOT
+    // extend to wider elements (memcpy over an int array would be n/4 cells here and n
+    // bytes there), so the mem* group is honest only over char storage (SECTION 50).
     //
     // A cell of char type holds the SIGNED value ('\xff' is -1, as strLitAddr's
     // convert() pins), so every read masks to an unsigned byte and every write goes back
@@ -2208,12 +2186,9 @@ KwDefault   = "default" KwEnd ;
         if (addr <= 0 || addr >= mem.length) return 0
         return szNum(mem[addr]) & 255
     }
-    // NOTE the shape: a BARE 'return' followed on the next line by an expression is a
-    // goja-vs-frozen trap. Real JS inserts a semicolon after it (ASI); the frozen
-    // MetaJS parser does not, so 'return \n mem[addr] = ...' parsed as
-    // 'return (mem[addr] = ...)' and the store happened only in the branch that was
-    // supposed to skip it - every write silently lost under -frozen, reads unaffected.
-    // Guard positively instead.
+    // Guarded positively on purpose: a BARE 'return' followed on the next line by an
+    // expression is a goja-vs-frozen trap - JS inserts a semicolon (ASI), the frozen
+    // MetaJS parser does not and reads 'return (mem[addr] = ...)'.
     function cPut(addr, b) {
         if (addr > 0 && addr < mem.length) { mem[addr] = convert(ctChar, b & 255) }
     }
@@ -2493,7 +2468,7 @@ KwDefault   = "default" KwEnd ;
         }
     }
 
-    // ----- Expression thunks: function() -> 32 bit int. Lvalue thunks -> address. -----
+    // ----- Expression thunks: function() -> typed value. Lvalue thunks -> place. -----
 
     function makeNum(n, ct) { var v = convert(ct, n); return function() { return val(v, ct) } }
     function makeInt(n) { return makeNum(n, ctInt) }
@@ -2998,9 +2973,8 @@ KwDefault   = "default" KwEnd ;
         mem[a] = convert(ct, strLitAddr(opt.str, opt.wide == true ? ctInt : ctChar))
     }
     // The literal OBJECT's cells hold values of its element type, so each byte goes
-    // through convert() exactly as the array-initializer branch above does. Without
-    // that, '"\xff"[0]' answered 255 here while the compiler half (and cc) answered
-    // the -1 a signed char holds - the two halves disagreeing about one byte.
+    // through convert() exactly as the array-initializer branch above does:
+    // '"\xff"[0]' is the -1 a signed char holds, as in the compiler half and cc.
     function strLitAddr(bytes, ect) {
         var base = alloc(bytes.length)
         for (var i = 0; i < bytes.length; i++) mem[base + i] = convert(ect, bytes[i])
@@ -3204,7 +3178,6 @@ KwDefault   = "default" KwEnd ;
     // ----- Top level -----
 
     var unnamedSeq = 0
-    // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
     // One parameter descriptor. An ARRAY parameter is adjusted to a pointer to its
     // element type (C11 6.7.6.3p7), and a struct or union VALUE parameter travels as
     // the address of the caller's object, which the callee copies.
@@ -3226,7 +3199,6 @@ KwDefault   = "default" KwEnd ;
         var d = makeDeclr(items.slice(i), "plain")
         return paramOf(d.name, declCt(base, d))
     }
-    // Global declarator: ["*"?] name [{size}|{init: n}] -> registered immediately.
     // items = [{bty}, {dcl}...]. A global is registered - and its initializer run -
     // at build time, which is exactly what C asks for: the initializer of an object
     // with static storage duration must be a constant expression (C11 6.7.9p4), so

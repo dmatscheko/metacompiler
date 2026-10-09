@@ -1,6 +1,6 @@
 :title("C preprocessor (macro expansion)") ;
-:description("A source-to-source C preprocessor: it reads C source, expands object-like
-#define macros and honors #undef, and prints the resulting source. It is meant to be
+:description("A source-to-source C preprocessor: it reads C source, expands #define
+macros (object-like and function-like) and honors #undef, and prints the resulting source. It is meant to be
 piped into a C front end with the -pipe pipeline mode of the metacompiler, e.g.
 
     ./mec languages/c-preprocessor.abnf prog.c -pipe languages/c-to-llvm-ir.abnf
@@ -123,7 +123,7 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
     // of body tokens, `params` the parameter names of a function-like macro (empty for an
     // object-like one). expandList/tryExpandAt splice a macro's expansion in, recursively,
     // guarding against runaway recursion with the `active` set (a macro is not re-expanded
-    // inside its own expansion). See the title for scope.
+    // inside its own expansion). See :description for the scope.
 
     // Own-property test for the user-keyed macro tables: a bare [name] read resolved
     // inherited Object.prototype members (toString, valueOf, ...) under a host JS
@@ -218,8 +218,7 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         while (i < src.length) { dst.push(src[i]); i = i + 1 }
     }
     function isOther(t, text) { return t.kind == "other" && t.text == text }
-    // Skip horizontal whitespace in any token list (skipHws above is the same walk; this
-    // one is kept separate so the two uses can diverge without disturbing directives).
+    // Skip horizontal whitespace in any token list (skipHws above is the same walk).
     function skipHwsL(list, p) {
         while (p < list.length && list[p].kind == "hws") { p = p + 1 }
         return p

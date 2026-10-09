@@ -1,9 +1,7 @@
 /* Fast feature-matrix test for the C interpreter (c-interpreter.abnf) and the
- * LLVM-IR compiler (c-to-llvm-ir.abnf). It replaces the four algorithm-themed
- * c-test-big-* stress tests: instead of large loops (sorts, heaps, sieves) every
- * implemented construct is exercised with the SMALLEST program that can prove it
- * works - loops run 0, 1, 3 or 4 times, recursion stays below depth 6, arrays
- * hold 3-5 cells. The subset has no strings, so checks are numbered in source
+ * LLVM-IR compiler (c-to-llvm-ir.abnf). Every implemented construct is exercised
+ * with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+ * recursion stays below depth 6, arrays hold 3-5 cells. Checks are numbered in source
  * order: a failed check prints "FAIL <n>" where n is the ordinal of the check()
  * call (count calls to find it). main() returns the failure count; exit 0 and
  * byte-identical output on all four legs (interpreter/compiler x goja/-frozen)

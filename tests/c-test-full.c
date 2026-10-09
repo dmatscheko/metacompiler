@@ -16,8 +16,8 @@
 //   - main() calls each section via a line tagged 'SECTION-CALL <nn>'
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
-// The C subset has no strings, so check ids are numeric like in the
-// feature-matrix file: id = section * 100 + ordinal, printed as 'FAIL <id>'.
+// Check ids are numeric like in the feature-matrix file: id = section * 100 +
+// ordinal, printed as 'FAIL <id>'.
 //
 // Deliberately out of scope (not core syntax, or unrunnable in this harness):
 // macro EXPANSION (a name standing for its body in ordinary code - a separate
@@ -37,33 +37,15 @@
 // ONE PART OF THE STANDARD LIBRARY IS SECTIONED HERE: the eighteen byte/address
 // names (strlen strcmp strncmp strcpy strncpy strcat strncat strchr strrchr
 // strstr memcpy memmove memset memcmp memchr atoi atol strdup), in SECTION 50.
-// It is worth knowing what it took, because the rest of the library still cannot
-// follow. On 2026-08-02 those eighteen became real linked externs in
-// abnf/llvmmap.go and a section was written; the compiler half answered all of it
-// (cc, llvm.Run and the clang-built -exe binary byte-identical) but
-// languages/c-interpreter.abnf had NO standard library at all - its callFunction
-// knew putchar and getchar and nothing else - so that half stopped at the first
-// call. test.sh --full records a half's assertion COUNT only when that half has
-// ZERO gaps, so the one red section cost the whole count and it was reverted:
+// The compiler half links them (abnf/llvmmap.go's libcExterns, libcNative under
+// llvm.Run); the interpreter half implements them in libcCall
+// (languages/c-interpreter.abnf). SECTION 50 says why it stays on char storage.
 //
-//   c-interpreter:  error without a usable position: function not defined: strcpy
-//   c-to-llvm-ir:   FULL - 495 assertions, goja and -frozen byte-identical
-//   c            MISMATCH: - 495
-//
-// What unblocked it was a libc in the INTERPRETER, not a change in this file:
-// libcCall in languages/c-interpreter.abnf now implements the same eighteen over
-// the interpreter's own memory. The two memory models stay different on purpose
-// (one cell per scalar there, packed bytes here); this family is shareable only
-// because sizeof(char) is 1 in both, so over CHARACTER data a cell is a byte.
-// SECTION 50 stays on char storage for exactly that reason.
-//
-// The REST of the library is still out of scope, and for a reason no amount of
-// work on this file changes: the varargs printf family (no varargs ABI in either
-// interpreter), exit/abort (no unwind path out of a call), and qsort/bsearch (a
-// function pointer is a funcId, not a callable address). Those are listed as
-// deliberately absent at abnf/llvmmap.go's libcNative, where they are loud rather
-// than wrong. The natives remain pinned by abnf/libcnative_test.go (condition 2)
-// and the clang agreement is recorded at libcExterns (condition 1).
+// The REST of the library stays out of scope, for reasons outside this file: the
+// varargs printf family (no varargs ABI in either interpreter), exit/abort (no
+// unwind path out of a call), and qsort/bsearch (a function pointer is a funcId,
+// not a callable address). abnf/llvmmap.go's libcNative lists them as deliberately
+// absent, where they are loud rather than wrong.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the ISO C11/C17 standard with the ANTLR grammars-v4
@@ -524,9 +506,7 @@ int s20(void) {
     check(2007, al == 6);
     /* 6.3.1.2: a scalar converted to _Bool is 0 when it compares equal to 0 and 1
        otherwise - and that is a CONVERSION, so it applies wherever one happens and
-       not only in a declarator with an initializer. _Bool used to be the same
-       descriptor as unsigned char, so both halves agreed on the wrong answer and
-       --cross could not see it; cc is the oracle for every line here. */
+       not only in a declarator with an initializer. cc is the oracle for every line. */
     _Bool as;
     as = 5;
     check(2008, as == 1);
@@ -557,8 +537,7 @@ int s20(void) {
     check(2018, _Generic((_Bool)0, _Bool: 1, unsigned char: 2, default: 3) == 1);
     check(2019, _Generic((unsigned char)0, _Bool: 1, unsigned char: 2, default: 3) == 2);
     /* 6.8.6.4p3: the returned value is converted to the DECLARED return type, the
-       same way an assignment converts. The compiled half only knew the return type
-       when it was 64 bits wide, so a narrow one came back unconverted. */
+       same way an assignment converts, also when that type is narrow. */
     check(2020, s20_retuc(300) == 44 && s20_retsc(200) == -56 && s20_retsh(70000) == 4464);
     return 0;
 }
@@ -1463,11 +1442,9 @@ int s43(void) {
 }
 
 // ===== SECTION 44: a char is ONE BYTE =====
-/* The width model, pinned. Until 2026-08-02 the compiler gave every integer narrower
-   than a long a FOUR-byte cell, so "hello" was emitted as [6 x i32] and a char* strode
-   four bytes at a time - which made the whole byte-oriented half of libc (str*, mem*,
-   atoi) impossible to link, and which nothing in this file could see. Verified against
-   cc, which answers every check below identically.
+/* The width model, pinned: a char is one byte, so "hello" is a byte array and a
+   char* strides one byte at a time - what the byte-oriented half of libc (str*, mem*,
+   atoi) needs. Verified against cc, which answers every check below identically.
 
    One deliberate omission: the raw byte distance between two SHORT array elements is
    not asserted. The compiler packs its cells (that distance is 2, like cc), while the
@@ -1536,8 +1513,7 @@ int s44(void) {
       sa[0] = 1000; sa[1] = -1000; q = q + 1;
       check(4436, *q == -1000 && sizeof sa == 8); }
     /* A string literal's OBJECT holds values of its element type, not raw bytes: a
-       high byte in a signed char array is negative. The interpreter half stored the
-       raw byte and answered 255 here until 2026-08-02. */
+       high byte in a signed char array is negative. */
     { const char *w = "\xff\x7f\x80";
       char lit[4] = "\xff\x7f\x80";
       check(4437, w[0] == -1 && w[1] == 127 && w[2] == -128);
@@ -1547,15 +1523,11 @@ int s44(void) {
 }
 
 // ===== SECTION 45: a function that RETURNS A POINTER =====
-/* The result of such a call is an address, and it has to be typed as one. Until
-   2026-08-02 the compiler half reported it as a plain int (only a 64-bit integer
-   return was recorded), which made 's45_at(a, 2) - a' take the pointer+integer branch
-   of the binary operator with the operands the wrong way round: it answered garbage
-   where cc answers 2, and it emitted 'sext i32* %p to i64', which clang refuses
-   outright. A null-constant arm against a pointer arm ('f ? s : 0') likewise emitted
-   'phi i32* [ %s, ... ], [ 0, ... ]' - clang: "integer constant must have integer
-   type" - so a nine-line C program built a module clang would not accept. Verified
-   against cc. */
+/* The result of such a call is an address, and it has to be typed as one: typed as an
+   int, 's45_at(a, 2) - a' would take the pointer+integer branch of the binary operator
+   with the operands the wrong way round, and the compiler would emit IR clang rejects
+   ('sext' of a pointer, or a 'phi' mixing a pointer with an integer 0 for the
+   null-constant arm 'f ? s : 0'). Verified against cc. */
 char *s45_at(char *s, int i) { return s + i; }
 char *s45_or0(char *s, int f) { return f ? s : 0; }
 int *s45_ip(int *p, int i) { return p + i; }
@@ -1577,18 +1549,12 @@ int s45(void) {
 }
 
 // ===== SECTION 46: double PARAMETERS, double RETURNS, and stores through a pointer =====
-/* Three defects that predate all of the floating-point work and were invisible here
-   because no section used the constructs (they were found while writing
-   languages/lib/runtime.c, which had to work around all three). A double travels as
-   its IEEE-754 bit pattern in an i64, so:
-     - a double PARAMETER did not compile at all: the signature said i64 and the
-       prologue allocated an i32 slot, "store operands are not compatible";
-     - a double RETURN was silently wrong: only a 64-bit INTEGER return was recorded
-       as such, so the function was declared to return i32 while makeReturn handed it
-       an i64 - the same class as the pointer-return defect of section 45;
-     - '*p = v' through a 'long *' or a 'double *' did not compile, while 'p[0] = v'
-       did, because a place reached through '*' arrives as the model's uniform i32*
-       and only the subscript path typed the address.
+/* A double travels as its IEEE-754 bit pattern in an i64, so these are the places
+   where the compiler's declared types have to say so:
+     - a double PARAMETER (signature and prologue slot must agree);
+     - a double RETURN (the function must be declared to return the 64-bit value);
+     - '*p = v' through a 'long *' or a 'double *', not only 'p[0] = v' - a place
+       reached through '*' has to carry its pointee type too.
    Verified against cc. */
 double s46_c(void) { return 1.5; }
 double s46_add(double a, double b) { return a + b; }
@@ -1624,18 +1590,15 @@ int s46(void) {
 }
 
 // ===== SECTION 47: floating point rounds to NEAREST, ties to EVEN =====
-/* The emitted soft float used to TRUNCATE the mantissa where IEEE-754 rounds, so an
-   inexact result came out one ulp low - 0.1 + 0.2 was below 0.3 rather than above it -
-   and the integer-to-double conversion did not shift down at all, so every magnitude
-   above 2^53 came out halved. Every assertion here fails under either of those, and
-   every one was verified against cc.
+/* IEEE-754 rounds an inexact result to nearest, ties to even (0.1 + 0.2 lands ABOVE
+   0.3), and an integer-to-double conversion above 2^53 rounds its low bits. A
+   truncating soft float fails every assertion here. Verified against cc.
 
    THE OPERANDS COME OUT OF ARRAYS ON PURPOSE. Written as literals, all of this is
    folded at compile time by the grammar's own constant folder - which uses the host's
    exact doubles and is therefore right whatever the emitted soft float does. Only a
    value the folder cannot see through reaches the emitted code, which is the code
-   under test. A section of literals passed at HEAD with the truncating soft float
-   still in place; these fail.
+   under test.
 
    Nothing here depends on subnormals, infinities or NaN, which the model still does
    not carry. */
@@ -1692,25 +1655,13 @@ int s47(void) {
 }
 
 // ===== SECTION 48: a call that PRECEDES the definition, with pointer parameters =====
-/* Two defects shared one line - noteParamCts dropped a parameter's POINTER-ness, so
-   only its width survived into funcParamCts.
-
-   1. A call emitted before the definition materialized the callee through
-      getFuncByArity, which pushes {ptr: false} for every argument, and a prototype
-      did not correct it. The definition then reused that object and the compile
-      failed outright: "store operands are not compatible: src=i32; dst=i32**".
-      Fatal for MUTUALLY RECURSIVE helpers, where no ordering avoids it - which is
-      what forced languages/lib/bash-rt.c to route rt_glob -> rt_eg through an
-      rt_eg_fwd(long, long, int) trampoline. That trampoline is gone.
-   2. A function only ever DECLARED came out as `declare i32* @ext1(i32 %0)` - the
-      return type right, every parameter flattened to i32, which truncates a 64-bit
-      pointer in a native binary. That half cannot be asserted from here: this file
-      has no standard library and an external that is never defined cannot be called,
-      so it is measured in docs/runtime-rework-plan.md against a linked helper module.
-      It is the same line, and this section is what pins the line.
-
-   Every check below is a HARD COMPILE FAILURE before the fix, not a wrong answer, so
-   the whole section is the assertion. cc answers all of it. */
+/* A call that precedes the callee's definition (unavoidable for MUTUALLY RECURSIVE
+   helpers) must still see the parameters' POINTER-ness, not only their width - in
+   the compiler a lost pointer type is a hard compile failure ("store operands are
+   not compatible"), so the whole section is the assertion. A function only ever
+   DECLARED must likewise keep its pointer parameters 64 bits wide; that half cannot
+   be asserted from here, since an external that is never defined cannot be called.
+   cc answers all of it. */
 int s48_g(char *a);                       /* forward: pointer parameter */
 int s48_len(char *s, int acc);
 char *s48_pick(char *a, char *b, int k);  /* forward: pointer arms and a pointer return */
@@ -1748,18 +1699,12 @@ int s48(void) {
 }
 
 // ===== SECTION 49: a static local of AGGREGATE type =====
-/* A `static` local has static storage duration whatever its type. An aggregate one
-   used to be built as an ordinary alloca in the compiler half and as ordinary local
-   storage in the interpreter half - `static struct P q; q.a++;` counted 1, 1 where cc
-   counts 1, 2 - because BaseTy does not read a struct/union TAG, so `static struct S q;`
-   fell past StaticDecl into StructDecl and lost the `static`. Both halves agreed with
-   each other and disagreed with cc, which is exactly the class --cross and the matrix
-   cannot see.
-
-   The compiler half had a second, worse symptom: returning the address of such an
-   object returned a dead stack frame. It passed at -O0 because the bytes were still
-   lying there, and check 3510 of SECTION 35 started FAILING natively the moment
-   buildExecutable began passing clang -O2. Validated against cc. */
+/* A `static` local has static storage duration whatever its type, an aggregate
+   included: `static struct P q; q.a++;` counts 1, 2 across two calls, and the address
+   of such an object stays valid after the call returns (returning a dead stack frame
+   instead only shows natively at clang -O2, as check 3510 of SECTION 35). BaseTy does
+   not read a struct/union TAG, so this needs its own production in both halves.
+   Validated against cc. */
 struct S49P { int a; int b; };
 union S49U { int i; char c[4]; };
 int s49_bump(void) { static struct S49P q; q.a = q.a + 1; q.b = q.b + 2; return q.a * 10 + q.b; }
@@ -1791,29 +1736,22 @@ int s49(void) {
 }
 
 // ===== SECTION 50: the libc byte/address family =====
-/* The eighteen byte/address names of <string.h> and <stdlib.h>. They are the one
-   part of the standard library BOTH halves can answer, which is why this section
-   exists and the rest of the library still does not (see the header).
+/* The eighteen byte/address names of <string.h> and <stdlib.h>, the one part of the
+   standard library BOTH halves can answer (see the header).
 
-   The compiler half resolves them for real: abnf/llvmmap.go lists them in
-   libcExterns, so clang links the actual libc symbols, and libcNative implements
-   the same eighteen for `llvm.Run`. The interpreter half implements them over its
-   own memory (libcCall in languages/c-interpreter.abnf). The two memory models are
-   NOT the same - the interpreter is one cell per scalar, the compiler is packed
-   bytes - and this family is shareable precisely because sizeof(char) is 1 in
-   both, so for CHARACTER data a cell is a byte and a length in bytes is a length
-   in cells. Everything below therefore stays on char storage; memcpy over an int
-   array would be n/4 cells in one model and n bytes in the other, and is left out
-   deliberately rather than asserted wrongly.
+   The two memory models are NOT the same - the interpreter is one cell per scalar,
+   the compiler is packed bytes - and this family is shareable precisely because
+   sizeof(char) is 1 in both, so for CHARACTER data a cell is a byte and a length in
+   bytes is a length in cells. Everything below therefore stays on char storage;
+   memcpy over an int array would be n/4 cells in one model and n bytes in the other,
+   and is left out deliberately rather than asserted wrongly.
 
    Only the SIGN of strcmp/strncmp/memcmp is asserted. C leaves the magnitude
    unspecified, Apple's libc returns the unsigned byte difference (strcmp("xy",
    "xc") == 22), and cc CONSTANT-FOLDS a call with literal operands to a normalized
    -1/0/1 - so the magnitude is not a property any of the three engines share.
-   Both runtimes here return the unsigned difference; only the sign is checked.
 
-   Validated against cc (Apple clang 21.0.0, arm64-darwin) at -O0 and -O2 before
-   being written down here. */
+   Validated against cc (Apple clang, arm64-darwin) at -O0 and -O2. */
 unsigned long strlen(const char *s);
 int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, unsigned long n);
