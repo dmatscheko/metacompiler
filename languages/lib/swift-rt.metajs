@@ -1,11 +1,6 @@
-// swift-rt.metajs -- SWIFT'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the third language after the Lua pilot
-// and PHP.
-//
-// languages/swift-to-llvm-ir.abnf emits handle IR that calls 66 js_* externs for
-// its own full-syntax ratchet (66 over every swift test in tests/ as well - the
-// union adds nothing). 35 of them are generic primitives languages/lib/runtime.c
-// already provides (the C floor, layer 1). The other 31 are here.
+// swift-rt.metajs -- SWIFT'S OWN SEMANTICS, in MetaJS: the layer-2 runtime that
+// swift-to-llvm-ir.abnf links next to the C floor (languages/lib/runtime.c,
+// layer 1). Externs the floor already provides generically are not repeated here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/swift-rt.metajs -q -rt-lib
@@ -33,14 +28,14 @@
 //                              jsGInt (abnf/jsrtint.go); the C floor has the same
 //                              thing as a REAL PRIMITIVE TYPE (tag 13) reached
 //                              through the sint/sintOp/sintCmp/... host builtins.
-//     a BOXED DOUBLE       ==  Double (and Float, which this subset aliases to
-//                              Double at 64 bit precision - see jsrtswift.go).
+//     a BOXED DOUBLE       ==  Double (style 0) and Float (style 3, the 32 bit
+//                              width - see "the float WIDTH" below).
 //                              The Go twin uses jsJFlo (abnf/jsrtjvm.go); the C
 //                              floor has it as tag 14, reached through
-//                              flo/floIs/floNum/... Swift builds it with STYLE 0
-//                              and never renders through floStr: every Swift
-//                              print path goes through swRender, whose float arm
-//                              is swFloStr, Swift's own SwiftDtoa rules.
+//                              flo/floIs/floNum/... Swift never renders through
+//                              floStr: every Swift print path goes through
+//                              swRender, whose float arm is Swift's own SwiftDtoa
+//                              rules.
 //     a string             ==  String
 //     an array             ==  Array
 //     a {__dict} object    ==  Dictionary: keys/vals parallel arrays, INSERTION
@@ -55,52 +50,33 @@
 //                              __fields.
 //     any other object     ==  an instance; its descriptor is __class.
 //
-// ----- BOTH tags were already in the floor, and that is the whole story -------
+// ----- floor facts this file relies on ---------------------------------------
 //
-// PHP was picked second because it is the one language whose Go twin uses zero
-// jsJFlo. Swift is the FIRST language to need both floor primitives at once -
-// tag 13 for Int8...UInt64 and tag 14 for Double - and it needed no new code for
-// either: sint*/flo* ARE Swift's two numeric types. There is no i64 pair layer in
-// this file, where lua-rt.metajs needed ~200 lines of one, and no {__flo} object
-// box, where php-rt.metajs needed a {__pf} one. That is the sized-integer and
-// boxed-double tags paying for themselves the second and first time respectively.
+// Swift's two numeric types ARE the floor's tag 13 (sint*: Int8 ... UInt64) and
+// tag 14 (flo*: Double/Float), so there is no i64 pair layer and no object box
+// for a float in this file.
 //
-// ----- what Swift did NOT need, which is a finding of its own -----------------
-//
-//  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
-//     on core.truthyExt, so that extern must answer a RAW INTEGER - and a shim
-//     handing back a boolean HANDLE gives 2 for false, which is != 0, so every
-//     condition in the program would be taken, silently. Swift is the first of
-//     the remaining languages that is IMMUNE: it leaves core.truthyExt at its
-//     default "js_truthy", which is the C FLOOR'S OWN function and already
-//     answers the raw 1/0. Nothing here needs the suffix. Checked, not assumed:
-//     `js_truthy` is in the module's declare list and in runtime.c.
-//  2. NO `_raw` PARAMETERS. Every operator selector the swift emitter passes -
+//  1. core.truthyExt stays at its default "js_truthy", the C FLOOR'S OWN function,
+//     which answers the RAW 1/0 that compile-core's truthy() (`icmp ne <call>, 0`)
+//     needs. A shim answering a boolean HANDLE would give 2 for false and make
+//     every condition true, silently.
+//  2. No `_raw` parameters: every operator selector the swift emitter passes -
 //     js_swarith's and js_swshift's op, js_swintconv's width and signedness - is
 //     emitted with emitStr/emitNum or as a real boolean handle, never with a bare
-//     handle(k). Like PHP and unlike Lua, Swift has zero of them.
-//  3. NO jsChar. js_char / js_char_code / js_kindex are Kotlin's Char externs and
-//     the floor has no jsChar, which is why js_jadd and js_jfstep were left out
-//     of it. Swift reaches all three, but ONLY inside the emitter's own
-//     grapheme-cluster walk (sw_gcount / sw_nfd), where the value produced by
-//     js_char is immediately handed to js_jadd for CONCATENATION and the value
-//     produced by js_kindex is immediately handed to js_char_code. In Go that
-//     round trip is jsChar -> rt.toString -> the character, and jsChar ->
-//     rt.toNumber -> the code point. A one-character STRING makes exactly the
-//     same two round trips, so Swift needs no new floor tag. Written out because
-//     the next language may reach js_char somewhere this equivalence does not
-//     hold, and then it is a real floor gap.
+//     handle(k).
+//  3. No jsChar. js_char / js_char_code / js_kindex are Kotlin's Char externs and
+//     the floor has no jsChar. Swift reaches all three ONLY inside the emitter's
+//     grapheme-cluster walk (sw_gcount / sw_nfd), where js_char's value is handed
+//     straight to js_jadd for CONCATENATION and js_kindex's straight to
+//     js_char_code. A one-character STRING makes exactly the same two round trips
+//     a jsChar does in Go (rt.toString / rt.toNumber). A language that reaches
+//     js_char where this equivalence does not hold has a real floor gap.
 //
-// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+// ----- the scope chain is lowered in the EMITTER, not here -------------------
 //
-// js_kget and js_kset used to be externs that took a SCOPE HANDLE and walked the
-// chain with a `this` fallback. A scope is the floor's private storage - which is
-// why the Lua pilot put js_scope_decl/set/typeof INTO the floor - so layer 2
-// cannot open one, and neither could ever have been written here. Both are pure
-// PROBES, and an EMITTER may call js_scope_typeof / js_scope_get / js_scope_set,
-// so swift-to-llvm-ir.abnf now emits them as the IR helpers sw_kget / sw_kset.
-// The extern count went 68 -> 66 and llvm.Run stayed at 209/209. This is the
-// generalisation PHP recorded, and Swift is its second confirmation.
+// A scope is the floor's private storage, so layer 2 cannot walk one. Name
+// lookup with a `this` fallback is emitted by swift-to-llvm-ir.abnf as the IR
+// helpers sw_kget / sw_kset over the floor's js_scope_typeof / get / set probes.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -112,17 +88,9 @@
 // ignores its from-index, array.length is not assignable, and there are no
 // exponent literals.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+// The shared layer-2 runtime (lib/runtime.metajs). It supplies the externs every
+// language implements identically, parameterised by the rtk* hooks below.
 import "./runtime.metajs"
-// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
-// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
-// only to keep scope_find's linear module-scope scan off non-callers and the
-// hash index in runtime.c removed that scan. One import, not three.
-// runtime-dartswift.metajs, which held the two bodies dart and swift share and
-// nobody else does - rtIsArr and rtJavaStr - followed them on 2026-08-10,
-// docs/todo.md 5.5: neither body adds a hook. One import, not two.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
@@ -177,13 +145,10 @@ function swMkFlo(x) { return flo(x, 0) }
 
 // Double.rounded(), i.e. .toNearestOrAwayFromZero, which is Go's math.Round and
 // NOT JS's Math.round: (-2.5).rounded() is -3 and Math.round(-2.5) is -2.
-// Three guards, all of them measured rather than assumed (see the probe in
-// docs/runtime-next-plan.md part 3):
+// Three guards:
 //   - a ZERO returns itself, so (-0.0).rounded() keeps its sign. `x < 0` is FALSE
 //     for -0.0, so without this the value would come back through
-//     Math.floor(0.5) as +0.0 and print "0.0" where swift prints "-0.0". This was
-//     the ONE line of a 1,910 line probe on which the native binary and llvm.Run
-//     disagreed.
+//     Math.floor(0.5) as +0.0 and print "0.0" where swift prints "-0.0".
 //   - |x| >= 2^52: every double that large is already an integer, and x + 0.5
 //     would round UP to the next one.
 //   - NaN and the infinities return themselves.
@@ -209,10 +174,7 @@ function swRound(x) {
 // "inf"/"-inf" and the NaN is "nan". This is the twin of swFloStr in
 // abnf/jsrtswift.go and of the same name in swift-interpreter.abnf.
 // rtFloStr (languages/lib/runtime.metajs) is the shared body; the three strings
-// are the knob, and Swift's are Python's. swSignBit + unary minus were the old
-// spelling of the sign test and reach the same two answers as the shared body's
-// zero arm plus `x < 0`, because the zero arm takes every value whose sign a
-// comparison cannot see. swSignBit went with it: swFloStr was its only caller.
+// are the knob, and Swift's are Python's.
 function swFloStr(d) { return rtFloStr(d, "nan", "inf", "-inf") }
 
 // rtkFloDigits renders a > 0, and is the hook rtFloStr calls. The Go twin
@@ -221,8 +183,8 @@ function swFloStr(d) { return rtFloStr(d, "nan", "inf", "-inf") }
 // so the same pair is recovered from the engine's own shortest-round-trip
 // rendering ("" + a) - which is jsNumString in the Go half and d_num_str in the
 // floor, and both are the SAME shortest form strconv produces. That recovery is
-// rtSplit10 in languages/lib/runtime.metajs, and python and ruby had two more
-// byte-identical copies of it; rtSciText and rtFixText are the two renderings.
+// rtSplit10 in languages/lib/runtime.metajs; rtSciText and rtFixText are the two
+// renderings.
 //
 // SWIFT'S OWN PART is the boundary, and it is the one of the three that is on the
 // VALUE rather than the exponent: SwiftDtoa goes scientific above 2^53, and the
@@ -490,10 +452,9 @@ function swIntCanon(s, neg) {
 function swIsObj(v) { return rtIsObj(v) }
 
 // rtIsArr - a MetaJS list, i.e. an object with a numeric `length` that is not a
-// Dictionary, a tuple or an instance box - is SHARED with dart,
-// lib/runtime-dartswift.metajs. The two copies had ZERO differences (swIsObj and
-// dtIsObj are both rtIsObj). php's phIsList is the same discrimination plus a
-// {__refcell} rejection, which is a third specification and stays where it is.
+// Dictionary, a tuple or an instance box - is SHARED (lib/runtime.metajs). php's
+// phIsList is the same discrimination plus a {__refcell} rejection, a third
+// specification that stays where it is.
 
 // swNumProp is the Go twin's swNumProp: the value of a numeric internal slot, or
 // -1 for a shape that does not have one. (-1 rather than a second return value,
@@ -580,11 +541,9 @@ function swCopyStruct(v, cls) {
 function js_swcopy(v) {
     // THE SCALAR EARLY-OUT IS THE WHOLE PERFORMANCE STORY, and it is written with
     // the `typeof` OPERATOR rather than swIsObj/rtIsObj on purpose: this extern is
-    // now emitted at every assignment, every binding and every argument, so a
-    // scalar-only loop calls it twice per iteration and reaches nothing else. A
-    // helper call here is a layer-2 scope lookup BY NAME, and spending one on a
-    // number cost tests/bench/mod.swift +10.2% in 9/9 paired draws; the operator
-    // compiles inline and takes it back.
+    // emitted at every assignment, every binding and every argument, and a helper
+    // call here is a layer-2 scope lookup BY NAME (measurably slower); the operator
+    // compiles inline.
     if (typeof v != "object") { return v }
     if (v === null) { return v }
     if (v["__dict"] === true) { return swCopyDict(v) }
@@ -601,8 +560,7 @@ function js_swcopy(v) {
 
 // dictFind: the index of a key, or -1. The Go twin hashes; a linear scan with the
 // same strictEq is observationally identical and is what layer 2 can write.
-// SHARED as rtDictFind - lib/runtime.metajs. This body was byte-identical in
-// dart, ruby and swift, and equal to go's goDictFind; see the argument there.
+// SHARED as rtDictFind - lib/runtime.metajs.
 function swDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // swFindMember walks the __class / __super chain for a CALLABLE member, the same
@@ -685,8 +643,7 @@ function swObjDesc(o, depth) {
     var dd = o["description"]
     if (dd !== undefined && typeof dd != "function") { return swDesc(dd) }
 
-    // A Range printed as itself. Both halves used to answer "[object Object]" -
-    // agree-and-wrong, which byte-identity cannot see. swiftc 6.1.2 prints `0..<3`
+    // A Range printed as itself: swiftc 6.1.2 prints `0..<3`
     // and `1...3`. A ONE-SIDED range prints Swift's PartialRangeFrom/Through/UpTo,
     // whose real form names the static element type
     // (`PartialRangeFrom<Int>(lowerBound: 1)`) and so cannot be reproduced without a
@@ -809,8 +766,8 @@ function swObjDesc(o, depth) {
 // ===================================================== equality =============
 //
 // swEqual is Swift's ==. Array, Dictionary and tuple are VALUE types in Swift, so
-// they compare element by element; js_seq compares them by IDENTITY and answered
-// false for every one. An enum case compares by name plus associated values.
+// they compare element by element (js_seq compares them by IDENTITY). An enum
+// case compares by name plus associated values.
 function swEqual(l, r, depth) {
     if (depth > 32) { return false }
     if (l === undefined || l === null || r === undefined || r === null) {
@@ -845,9 +802,7 @@ function swEqual(l, r, depth) {
         return true
     }
     // Two RANGES compare by their bounds - a Range is Equatable in Swift and
-    // `0..<3 == 0..<3` is true there, where these engines fell through to object
-    // IDENTITY and answered false. Adjacent to docs/todo.md 2.10: nothing could
-    // build a comparable Range value until `indices` did.
+    // `0..<3 == 0..<3` is true there, not an object IDENTITY test.
     if (swIsRange(l) || swIsRange(r)) {
         if (!swIsRange(l)) { return false }
         if (!swIsRange(r)) { return false }
@@ -917,8 +872,7 @@ function swEqual(l, r, depth) {
 
 // ----- the language-NEUTRAL ten ---------------------------------------------
 // None of these is Swift's. They live in abnf/jsrt.go, several languages emit
-// them, and they are here only because the C floor does not have them yet - see
-// the extern split in docs/runtime-next-plan.md part 3.
+// them, and they are here only because the C floor does not have them.
 
 // Kotlin's Char from its code. THE FLOOR HAS NO jsChar (which is why js_jadd and
 // js_jfstep were left out of it), and Swift does not need one: see point 3 of the
@@ -927,12 +881,8 @@ function swEqual(l, r, depth) {
 // rt.toString - and that is the character. So a one-character string is the same
 // value at every point Swift can observe.
 //
-// BYTE-IDENTICAL to lua-rt.metajs's luChar, and DECLINED as a merge twice - see
-// the reason recorded at that site, re-judged in the fifth pass and unchanged:
-// swift could take a shared body from lib/runtime.metajs (which now holds
-// rtRuneLen, the decode half of the same UTF-16 question) but lua imports nothing
-// at all, so the merge would cost a new two-language module and lua's first
-// import to save five lines. Note that this js_char and lib/runtime.metajs's
+// The same body as lua-rt.metajs's luChar; not merged, because lua imports no
+// shared module (see that site). Note that this js_char and lib/runtime.metajs's
 // js_char are two DIFFERENT contracts under one name: swift answers the
 // one-character STRING, the shared one answers a {__char} box. swift-rt.ll
 // carries exactly one `define @js_char` and it is this one.
@@ -958,27 +908,17 @@ function js_char_code(v) {
 // recognises a pair. That mapping is reproduced here rather than left to the
 // engine, which would hand back the surrogate itself.
 //
-// TWO DIVERGENCES FROM THE GO TWIN USED TO LIVE IN THIS BODY (docs/todo.md 2.11):
-// the failure TEXT and the returned TYPE.
-//
-//  - TEXT. abnf/jsrt.go says `string index %d out of range for %q`; this said
-//    `string index out of range`. It is settled ON THE TWIN, not on swiftc, and
-//    deliberately: no Swift program can reach this fail. Swift's own subscript is
-//    js_swidx (whose four messages ARE swiftc's, read off the toolchain);
-//    js_kindex is reached only from the emitter's own sw_gcount / sw_nfd walks,
-//    whose loop bound is now the same code-unit length the index counts in, and
+//  - The failure TEXT follows the Go twin (`string index %d out of range for %q`),
+//    not swiftc: no Swift program can reach this fail. Swift's own subscript is
+//    js_swidx; js_kindex is reached only from the emitter's own sw_gcount / sw_nfd
+//    walks, whose loop bound is the same code-unit length the index counts in, and
 //    from the variadic-parameter prologue, where the receiver is the args ARRAY.
-//    So the twin's wording is the only fixed point available - it is in a file
-//    shared with kotlin, which this round may not touch. swQuote is Swift's
-//    debugDescription rather than Go's %q; the two agree on every printable
-//    string and differ only in how they escape a control character, which is as
-//    close as a body that must not import a Go quoter can get.
-//  - TYPE. The twin answers a jsChar and this answers a one-character String, and
-//    THAT ONE STAYS, because it cannot be closed from here: the floor has no
-//    jsChar tag at all (see WALL note 3 at the top of this file). It is also
-//    unobservable - every value this returns is consumed by js_char_code, whose
-//    two halves read a jsChar's code and a one-character string's charCodeAt to
-//    the same number. Recording it rather than pretending it is gone.
+//    swQuote stands in for Go's %q; the two differ only in how they escape a
+//    control character.
+//  - The returned TYPE differs from the twin: a one-character String, not a jsChar
+//    (the floor has no jsChar tag - see point 3 at the top of this file). It is
+//    unobservable: every value this returns is consumed by js_char_code, which
+//    reads both to the same number.
 function js_kindex(s, i) {
     if (typeof s != "string") { return s[i] }
     if (i < 0 || i >= s.length) {
@@ -990,19 +930,16 @@ function js_kindex(s, i) {
 }
 
 // An empty Python dict / Go map / Swift Dictionary handle.
-// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
+// js_dict_new is SHARED - lib/runtime.metajs.
 
 // Sequence indexing (negative wraps) and dict lookup. Swift's emitter routes
 // every subscript through this (core.indexExt).
 //
-// THE NAME IS js_swidx, NOT js_pyget, and that is the point rather than tidiness:
-// the Go twin of js_pyget is CPython's, shared by every language, so llvm.Run used
-// to answer a Swift subscript in PYTHON - "'NoneType' object is not subscriptable"
-// for nil[0], a catchable KeyError for a missing dictionary key - while this file
-// answered "list index out of range" / "KeyError: 9" and the interpreter half a
-// third thing again. The four messages below are swiftc 6.1.2's OWN, read off the
+// THE NAME IS js_swidx, NOT js_pyget: the Go twin of js_pyget is CPython's, shared
+// by every language, and would answer a Swift subscript in PYTHON. The messages
+// below are swiftc 6.1.2's OWN, read off the
 // toolchain, and abnf/jsrtswift.go's js_swidx and swIndexFail in
-// swift-interpreter.abnf print exactly these. docs/todo.md 1.12.
+// swift-interpreter.abnf print exactly these.
 //
 //     xs[7]  Swift/ContiguousArrayBuffer.swift:692: Fatal error: Index out of range
 //     s[i]   Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
@@ -1026,7 +963,7 @@ function swRangeLen(r) {
 // a[1...] / a[0..<2] / s[1...3]: a RANGE subscript answers the slice. Swift's
 // ArraySlice/Substring keep the ORIGINAL indices (`a[1...][1]` is a[1]), which a
 // plain array cannot; the printed form, the count and every walk agree, and the
-// re-indexing is the one measured divergence - recorded rather than modelled,
+// re-indexing is the one known divergence - recorded rather than modelled,
 // because a slice type is a second collection representation in three engines.
 // A ONE-SIDED range carries a null bound, filled in from the receiver's length.
 function swSliceBounds(r, n) {
@@ -1082,29 +1019,21 @@ function js_swidx(c, k) {
 
 // THE TOP OF THE PROGRAM: an error nobody caught. swift-to-llvm-ir.abnf wraps the
 // whole program in one js_try whose catch calls this, so the value never reaches
-// the floor's uncaught-throw handler in languages/lib/runtime.c - which renders it
-// with the generic object toString and printed "js runtime error: uncaught
-// exception: [object Object]" for every uncaught Swift `throw'. exc_text cannot be
-// taught Swift's rendering: it is the FLOOR, shared by all sixteen languages.
-//
-// fail() gives the floor's own "js runtime error: " prefix and exit 1, so the line
-// is byte for byte the one abnf/jsrtswift.go's js_swtop prints, and swRunTop in
-// swift-interpreter.abnf prints the same text behind its own engine prefix. The
+// the floor's uncaught-throw handler in languages/lib/runtime.c, whose generic
+// rendering is shared by every language. The
 // wording is swiftc 6.1.2's, minus the standard-library frame it names and with the
 // value rendered by swDesc, so swiftc's `m.E.boom' reads `boom' - the module
 // qualification this runtime has no concept of (manual chapter 7.9).
-// docs/todo.md 1.12.
-// HOW A SWIFT PROGRAM DIES (docs/todo.md 1.1). fail() gives the floor's own
-// "js runtime error: " prefix, which sat in front of an otherwise byte-correct
-// `Fatal error: Error raised at top level: boom`. A message ALREADY in swiftc's own
+//
+// HOW A SWIFT PROGRAM DIES. A message ALREADY in swiftc's own
 // wording is printed bare on stderr and exits 1 - the pattern is java's js_jvtop,
-// which has done exactly this since docs/todo.md 1.14, and the twins are the fail
+// and the twins are the fail
 // override in languages/swift-interpreter.abnf and rt.swAbort in abnf/jsrtswift.go.
 // An engine-level complaint that no toolchain would say ("unknown Array method: x")
 // still goes through fail() and keeps its prefix, because it is the engine talking.
 //
-// THE EXIT CODE STAYS 1: swiftc traps at 133 and that is declined with the
-// measurement - see the long note in languages/swift-interpreter.abnf.
+// THE EXIT CODE STAYS 1, not swiftc's 133 - see "How a Swift program DIES" in
+// languages/swift-interpreter.abnf.
 function swAbort(msg) {
     eprintln(msg)
     exit(1)
@@ -1118,7 +1047,7 @@ function js_swtop(exc) {
 
 // List element (negative wraps) or dict entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
-// rtkDictFind; the index coercion now truncates, which is the oracle).
+// rtkDictFind; the index coercion truncates, which is the oracle).
 
 // len() for strings, lists, sets and dicts. Python counts CODE POINTS in a
 // string, not UTF-16 code units - but Swift's own .count goes through the
@@ -1132,12 +1061,9 @@ function js_pylen(v) {
         if (rtIsArr(el)) { return el.length }
     }
     if (rtIsArr(v)) { return v.length }
-    // A Range's .count, LAST so the array path pays nothing for it. `let r = 0..<3;
-    // print(r.count)` aborted here with "len() of a object" while the interpreter
-    // half answered 3 - a live halves divergence adjacent to docs/todo.md 2.10,
-    // found while giving a Range a printed form. The emitter reaches the range
-    // through sw_lenr before it ever gets here, so this arm is the belt to that
-    // brace: any other js_pylen site that meets a Range answers the same 3.
+    // A Range's .count, LAST so the array path pays nothing for it. The emitter
+    // reaches the range through sw_lenr before it ever gets here, so this arm is the
+    // belt to that brace: any other js_pylen site that meets a Range answers too.
     if (swIsRange(v)) { return swRangeLen(v) }
     fail("len() of a " + typeof v)
     return 0
@@ -1150,12 +1076,10 @@ function js_pylen(v) {
 // through the descriptor walk at the bottom, which is where `x is MyType` lands.
 // js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 //
-// js_swis is what the emitter actually calls for `is` / `as?` / `as!`
-// (docs/todo.md 1.2): the two facts above are not a Swift specification, they are
-// the shared probe predating the float box. swiftc 6.1.2 says `3.0 is Double` and
-// `3 is Int`, and this half answered the reverse of both; `true is Bool` was false
-// as well, because the shared probe's boolean arm spells the Java/Kotlin name
-// `Boolean`. The value model carries the answer already - a float box is a Double,
+// js_swis is what the emitter actually calls for `is` / `as?` / `as!`: the two
+// facts above are not a Swift specification (swiftc 6.1.2 says `3.0 is Double` and
+// `3 is Int`), and the shared probe's boolean arm spells the Java/Kotlin name
+// `Boolean`, not `Bool`. The value model carries the answer already - a float box is a Double,
 // the same box at style 3 is a Float, a plain integral number or a sized box is an
 // integer of the width the box names - so it is answered here and every other name
 // falls through to js_is_type unchanged.
@@ -1196,9 +1120,7 @@ function js_swis(v, tname) {
     if (isB) { return typeof v == "boolean" }
     // BOTH BOXES ANSWER `typeof v == "number"` in this half - they are floor tags
     // 13 and 14, not objects the way the interpreter's are - so the box tests have
-    // to come FIRST. Written the other way round, a sized box past 2^53 answered
-    // `is Double` true here and false under llvm.Run: a halves divergence that
-    // only the native leg of a probe can see.
+    // to come FIRST (otherwise a sized box past 2^53 would answer `is Double`).
     if (floIs(v)) { return swIsF32(v) ? isF : isD }
     if (sintIs(v)) { return sintWidth(v) == bits && sintUns(v) === swAdoptUns(t) }
     if (typeof v != "number") { return false }
@@ -1214,8 +1136,7 @@ function js_swis(v, tname) {
 // protocol - so every adoption site writes a __conf_<P> marker on the very table a
 // value reaches through __class, inherited protocols included, and this is the same
 // __class/__super walk swFindMember does (which is what makes a SUBCLASS of a
-// conforming class conform too). docs/todo.md 1.1: `x is P` was false for every
-// conforming type in all three engines, so --cross could not see it.
+// conforming class conform too).
 //
 // The third argument is the statically known list of BUILTIN type names an
 // `extension Int: P` conformed. A builtin value has no descriptor to hold a marker
@@ -1243,11 +1164,9 @@ function js_swconf(v, pname, bnames) {
 }
 
 // A method an `extension Int { ... }` / `extension String { ... }` added. The
-// emitter decides by NAME which call sites can mean one, and that decision used to
-// be FINAL: `extension Int { func pid() }` beside a `struct S { func pid() }` made
-// `S().pid()` answer the Int one in this half, where the interpreter (whose mcall
-// consults builtinTableFor(target), null for an instance) and swiftc both answer
-// S's. So the receiver decides here, at run time, by exactly the interpreter's
+// emitter decides by NAME which call sites can mean one, but that cannot be final:
+// with `extension Int { func pid() }` beside a `struct S { func pid() }`,
+// `S().pid()` must answer S's. So the receiver decides here, at run time, by exactly the interpreter's
 // rule: a value that HAS a builtin member table takes the $ext$ table, and
 // everything else takes the ordinary member call. Twin: js_swextcall in
 // abnf/jsrtswift.go.
@@ -1273,18 +1192,15 @@ function js_swextcall(recv, name, args, tbl) {
 // the floor HAS - so unlike php-rt.metajs's, this one is complete.
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-// rtJavaStr is SHARED with dart - lib/runtime-dartswift.metajs. The two copies
-// were byte-identical.
+// rtJavaStr is SHARED (lib/runtime.metajs).
 
 
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
 // instances. Every arm swift-to-llvm-ir.abnf can reach is here; the GENERATOR arm
-// is the one that is not, and it cannot be - a generator needs a coroutine
-// primitive the floor does not have (WALL 1 of docs/runtime-next-plan.md). Swift
-// emits no js_genfn/js_yield at all (`grep -c` is 0 in the grammar), so nothing
-// in this language can reach it.
+// is the one that is not - a generator needs a coroutine primitive the floor does
+// not have, and Swift emits no js_genfn/js_yield at all.
 function js_mcall(recv, name, args) {
     if (typeof recv == "string") {
         if (name === "length") { return recv.length }
@@ -1323,13 +1239,12 @@ function js_mcall(recv, name, args) {
     if (swIsObj(recv)) {
         var cls = recv["__class"]
         if (cls !== undefined) {
-            // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs,
-            // and so is the receiver prepend this used to spell inline.
+            // The __class/__super walk and the receiver prepend are SHARED -
+            // rtFindMethod, lib/runtime.metajs.
             var mm = rtFindMethod(cls, name)
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             // A STORED PROPERTY holding a closure is callable as `q.fn(3)`, and no
-            // such name is in the member table - so this used to abort in all three
-            // engines. It is consulted only after the table has declined, so a real
+            // such name is in the member table. It is consulted only after the table has declined, so a real
             // method of the same name still wins, and it is called WITHOUT a
             // receiver: a function-typed field is a plain value, not a method.
             // Twins: js_swmcall in abnf/jsrtswift.go, swMethodCall in
@@ -1345,8 +1260,7 @@ function js_mcall(recv, name, args) {
     fail("method call '" + name + "' on a " + typeof recv)
     return undefined
 }
-// swCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
-// languages, ZERO differences).
+// swCopyArr is SHARED as rtCopyArr - lib/runtime.metajs.
 
 // The Kotlin/Python list methods of rt.memberCall, in its order.
 function swListMethod(o, name, args) {
@@ -1369,9 +1283,8 @@ function swListMethod(o, name, args) {
         return o[gi]
     }
     // contains(_:) is a value test and contains(where:) a PREDICATE; the label does
-    // not reach here, so the closure argument is what tells them apart.
-    // `[1, 3].contains(where: { $0 > 2 })` answered FALSE in all three engines
-    // against swiftc 6.1.2's true (docs/todo.md 2.10).
+    // not reach here, so the closure argument is what tells them apart
+    // (`[1, 3].contains(where: { $0 > 2 })` is true).
     if (name === "contains") {
         var ci = 0
         if (args.length > 0 && typeof args[0] == "function") {
@@ -1434,23 +1347,20 @@ function swListMethod(o, name, args) {
     return swSeqMethod(o, name, args)
 }
 
-// ----- The Sequence/Collection members, docs/todo.md 2.10 --------------------
-// Every one of these was measured against swiftc 6.1.2; the members that cannot be
+// ----- The Sequence/Collection members ----------------------------------------
+// Every one of these is checked against swiftc 6.1.2; the members that cannot be
 // matched exactly are recorded at their arms. The twins are arraySeqMethod in
 // languages/swift-interpreter.abnf and swSeqMethod in abnf/jsrtswift.go.
 //
-// THE REFUSAL WORDING IS "unknown Array method: X" IN ALL THREE ENGINES NOW. It
-// used to be "unknown list method 'X'" here and in the shared table of
-// abnf/jsrt.go, against the interpreter's "unknown Array method: X" - the same
-// two-wordings symptom the sixteenth round fixed for popLast, and half of the item.
-// The Go twin reaches its own copy before abnf/jsrt.go's shared list table, so no
-// swift value can land on the shared wording any more.
+// THE REFUSAL WORDING IS "unknown Array method: X" IN ALL THREE ENGINES. The Go
+// twin reaches its own copy before abnf/jsrt.go's shared list table (whose wording
+// is "unknown list method 'X'"), so no swift value can land on the shared wording.
 
 // A total order over the values a Swift Array can hold. js_swlt is Swift's own <
 // (a UInt64 above 2^63 is NOT negative there, and a Double is a box, so a plain <
 // would be wrong twice); a String pair compares as text.
-// A user type's own `static func <` WINS. `[P(n: 3), P(n: 1)].sorted()` answered
-// [3, 1] in all three engines against swiftc 6.1.2's [1, 3]: Comparable is how
+// A user type's own `static func <` WINS (`[P(n: 3), P(n: 1)].sorted()` is
+// [1, 3]): Comparable is how
 // Swift sorts anything that is not a built-in, and the built-in comparison sees
 // two opaque objects. The operand's type is asked first, then the other's -
 // exactly what sw_opfn does for a written `a < b`.
@@ -1582,7 +1492,7 @@ function swSeqMethod(o, name, args) {
     // STATIC element type - `ReversedCollection<Array<Int>>(_base: [3, 1, 2])`. That
     // needs a type checker (manual 7.9's Optional argument exactly), so a plain
     // reversed ARRAY is answered: every use except printing the collection itself
-    // agrees, and `print(a.reversed())` is one measured line of divergence.
+    // agrees, and `print(a.reversed())` is the one known divergence.
     if (name === "reversed") {
         i = n - 1
         while (i >= 0) { out.push(o[i]); i = i - 1 }
@@ -1711,7 +1621,7 @@ function swSeqMethod(o, name, args) {
         return out
     }
     // indices answers a Range; swiftc prints `0..<3` for [3, 1, 2].indices, which
-    // swObjDesc's __range arm now matches exactly.
+    // swObjDesc's __range arm matches exactly.
     if (name === "indices") { return swMkRange(0, n, false) }
     // enumerated() answers an EnumeratedSequence whose printed form names the static
     // type, like reversed(); `Array(a.enumerated())` is what programs use, and THAT
@@ -1896,7 +1806,7 @@ function swOpCode(op) {
 function swGiArith(op, l, r) {
     var c = swOpCode(op)
     if (c < 0) { fail("js_swarith: unknown operator " + op) }
-    // AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S (docs/todo.md 1.1).
+    // AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S.
     // `integer divide by zero` is the text of GO'S OWN runtime panic - it is the
     // shared sized-integer layer's (languages/lib/runtime.c's si_arith and
     // abnf/jsrtint.go), correct for go and for nobody else. swiftc 6.1.2 says
@@ -1912,8 +1822,8 @@ function js_swarith(op, l, r) {
     if (swWhole(l) && swWhole(r)) { return swGiArith(op, l, r) }
     if (op === "+") {
         if (typeof l == "string" || typeof r == "string") { return swDesc(l) + swDesc(r) }
-        // Array + Array is CONCATENATION in Swift, where the shared jsAdd coerced
-        // both to text and answered "1,23".
+        // Array + Array is CONCATENATION in Swift, where the shared jsAdd coerces
+        // both to text ("1,23").
         if (rtIsArr(l) && rtIsArr(r)) {
             var out = rtCopyArr(l)
             var i = 0
@@ -1956,8 +1866,8 @@ function js_swflo(v) {
     return swMkFlo(swNum(v))
 }
 
-// Float(x): the same conversion at the 32 bit width, and the one new extern the
-// width needs. Every Float in a program comes from here or from js_swadoptf32 (a
+// Float(x): the same conversion at the 32 bit width. Every Float in a program
+// comes from here or from js_swadoptf32 (a
 // `let x: Float` annotation); a Float that is already one keeps its width
 // through every operator above. The Go twin is js_swflo32 in abnf/jsrtswift.go.
 //
@@ -1985,17 +1895,16 @@ function js_swadoptf32(v) {
     return js_swflo32(v)
 }
 
-// ----- Declared-type adoption (docs/todo.md 1.1) -----
+// ----- Declared-type adoption -----
 //
 // An untyped literal takes the FLOATNESS and the WIDTH of the type it is written
-// at. `let d: Double = 3` has always done this (js_swflo / js_swadoptf32 /
-// js_swintconv, which is what makeDecl emits); js_swadopt is what the OTHER
+// at. `let d: Double = 3` does this through js_swflo / js_swadoptf32 /
+// js_swintconv, which is what makeDecl emits; js_swadopt is what the OTHER
 // declared-type sites emit - a parameter, a return type, a stored property, and
 // the element type of an array annotation.
 //
-// It is not a Float story: an Int literal that does not adopt stays an Int and
-// INTEGER-DIVIDES, so `func g(_ x: Double) -> Double { x / 2 }` called g(3)
-// answered 1 where swiftc 6.1.2 says 1.5.
+// An Int literal that does not adopt stays an Int and INTEGER-DIVIDES, so
+// `func g(_ x: Double) -> Double { x / 2 }` called g(3) must adopt to answer 1.5.
 //
 // A value that is neither a bare number nor a sized integer nor a float box is
 // returned UNCHANGED: at these sites the only value a type-correct Swift program
@@ -2032,9 +1941,9 @@ function js_swadopt(v, ty) {
     return swAdoptNum(v) ? sintConv(v, bits, swAdoptUns(ty)) : v
 }
 
-// The WRITE half of the same rule (docs/todo.md 1.1). `var d: Double = 0; d = 3`
-// answered 1, because only the INITIAL value ever adopted: the declaration knows
-// the annotation and the assignment three lines later does not.
+// The WRITE half of the same rule: `var d: Double = 0; d = 3` must hold 3.0, yet
+// the declaration knows the annotation and the assignment three lines later does
+// not.
 //
 // No var-type table is needed, because this value model already carries the two
 // things an annotation decides - FLOATNESS (the float box, at its own width) and
@@ -2059,11 +1968,10 @@ function js_swadoptlike(old, v, ty) {
     return v
 }
 
-// The STRUCTURAL declared type (docs/todo.md 1.3). `let a: [Double] = [3, 4]`
+// The STRUCTURAL declared type. `let a: [Double] = [3, 4]`
 // types the array's ELEMENTS, so a[0] / 2 is 1.5; so does a dictionary's VALUE
 // type (`[String: Double]`), a tuple's element types (`(Double, Int)`) and an
-// Optional annotation (`Double?`), each of which answered 1 before because only
-// the array form was walked. The walk is over the annotation TEXT, brackets and
+// Optional annotation (`Double?`). The walk is over the annotation TEXT, brackets and
 // all, and recurses on the three containers, so `[String: [Double]]` falls out of
 // the same arms. A leaf this does not recognise adopts nothing, so a user type, a
 // generic and a function type all pass through untouched.
@@ -2104,27 +2012,13 @@ function swTyTrim(s) {
     while (b > a && (s.charAt(b - 1) == " " || s.charAt(b - 1) == "\t")) { b = b - 1 }
     return s.substring(a, b)
 }
-// Whether an argument can be passed to a parameter of declared type t, for
-// OVERLOAD SELECTION only. It is NOT the dynamic type test: selection sees the
-// argument BEFORE the declared type adopts it, so an untyped integer literal is
-// still a plain number at a `Double` parameter and Swift converts it. The shared
-// js_is_type gets that wrong in both directions since Swift's Double became a box
-// - it answered "an integral number" for `Double`, so `f(3.0)` chose the `Int`
-// overload, and it has no arm for the name `Bool` at all, so a `Bool` overload was
-// never selectable and the dispatcher fell back to its first entry. The
-// interpreter's swArgFits has said this since 8ff0999; this half had not, which is
-// a live halves divergence --cross never reached. Twin: swArgFits in
-// languages/swift-interpreter.abnf.
 // A property/element read that cannot abort, for the write-site ADOPTION only:
 // the value a write is about to overwrite, or undefined when there is none.
 //
-// The emitter used to lower this as sw_safeget, `js_get` behind a nil/typeof
-// guard, and that had a run-vs-native divergence NO GATE CAN SEE: abnf/jsrt.go's
-// getMember has an ADDITIVE arm that answers a {__dict, keys, vals} handle's own
-// entries by key, and the C floor's js_get does not - it reads the object's
-// properties, where a dictionary keeps nothing. So `var d: [String: Double];
-// d["a"] = 3` adopted under llvm.Run and NOT in the native binary, and the same
-// program printed 1.5 one way and 1 the other. Answering the dict arm here, in
+// Not `js_get` behind a nil/typeof guard: abnf/jsrt.go's getMember has an ADDITIVE
+// arm that answers a {__dict, keys, vals} handle's own entries by key, and the C
+// floor's js_get does not, so `var d: [String: Double]; d["a"] = 3` would adopt
+// under llvm.Run and not natively. Answering the dict arm here, in
 // layer 2 and in the Go twin, makes the two agree by construction.
 //
 // An ARRAY still falls to the ordinary indexed read, which is what the array
@@ -2140,16 +2034,22 @@ function js_swsafeget(o, k) {
 }
 
 // An `inout` argument arrives as the one-slot `{__ref, v}` write-back box the call
-// site built, so overload selection was asking whether a BOX is an Int and every
-// answer was no - `func ov(_ x: inout Int)` / `ov(_ x: inout String)` both ran the
-// first entry, in all three engines (docs/todo.md 1.2). The declared type belongs to
-// what the box HOLDS, so the box is opened here rather than at every caller.
+// site built (`func ov(_ x: inout Int)` / `ov(_ x: inout String)`). The declared
+// type belongs to what the box HOLDS, so the box is opened here rather than at
+// every caller.
 function swUnref(v) {
     if (v === undefined || v === null) { return v }
     if (typeof v != "object") { return v }
     if (v["__ref"] === undefined || v["__ref"] === null) { return v }
     return v["v"]
 }
+// Whether an argument can be passed to a parameter of declared type t, for
+// OVERLOAD SELECTION only. It is NOT the dynamic type test: selection sees the
+// argument BEFORE the declared type adopts it, so an untyped integer literal is
+// still a plain number at a `Double` parameter and Swift converts it. The shared
+// js_is_type answers "an integral number" for `Double` (so `f(3.0)` would choose
+// the `Int` overload) and has no arm for the name `Bool`. Twin: swArgFits in
+// languages/swift-interpreter.abnf.
 function js_swfits(v0, ty) {
     var v = swUnref(v0)
     var t = swStripTyOpt(swStripAngleTy(ty))
@@ -2164,8 +2064,8 @@ function js_swfits(v0, ty) {
 
 // fmap is the emitter's map from a function-type LEAF's canonical text to a maker
 // closure answering the adopting wrapper for a value of that type. This walk builds
-// no closures - MetaJS has no `arguments`, so it cannot - which is why a nested
-// `[(Double) -> Double]` annotation had no way to adopt at all (docs/todo.md 1.2).
+// no closures - MetaJS has no `arguments`, so it cannot adopt a nested
+// `[(Double) -> Double]` annotation itself.
 // The emitter knows every such leaf at compile time and hands the makers down; fmap
 // is undefined for every annotation with no function-type leaf, which is nearly all.
 function swFnMakerOf(fmap, ty) {
@@ -2250,10 +2150,8 @@ function floAbsRaw(x) { return Math.abs(x) }
 
 // Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a TIE keeps
 // the LEFT operand for min and takes the right for max, and a NaN operand keeps
-// the left one because every comparison against it is false. Reducing the two
-// doubles to a -1/0/1 comparison threw both away: min(-0.0, 0.0) answered 0.0
-// where swift 6.1.2 answers -0.0, min(0.0, -0.0) answered -0.0 where swift
-// answers 0.0, and min(nan, 1.0) answered 1.0 where swift answers nan. So the
+// the left one because every comparison against it is false (min(-0.0, 0.0) is
+// -0.0, min(nan, 1.0) is nan). A -1/0/1 comparison would lose both, so the
 // float branch tests the operands directly. The two branches below cannot reach
 // either case - a NaN and a signed zero are always a Double here, hence a box.
 function swPick(l, r, wantGt) {
@@ -2298,8 +2196,7 @@ function js_swmin(l, r) { return swPick(l, r, false) }
 // 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
 function js_swmcall(recv, name, args) {
     if (!floIs(recv)) {
-        // insert(_:at:) existed in no engine and aborted with *unknown Array
-        // method*, found while closing docs/todo.md 1.2's append bullet. There is
+        // insert(_:at:). There is
         // no splice in this dialect, so the tail is shifted up by one. It sits
         // INSIDE the non-float arm so a Double method call pays nothing for it.
         // Twins: arrayMethod in languages/swift-interpreter.abnf and js_swmcall in
@@ -2397,10 +2294,9 @@ function swRel(l, r) {
         if (swIntegral(l) && swIntegral(r)) { return sintCmp(l, r) }
     }
     // rtCompare answers the SENTINEL 2 for a NaN operand; swRel's own marker for
-    // "every ordering is false" is -2, which js_swlt/le/gt/ge already test. The
-    // old swLoose - the fourth copy of rtCompare's body - dropped the sentinel
-    // and answered 0, i.e. EQUAL, so a RAW (unboxed) NaN pair reaching this arm
-    // made `<=` and `>=` TRUE. Swift makes all four false, like C# and Java.
+    // "every ordering is false" is -2, which js_swlt/le/gt/ge already test. Mapping
+    // it to 0 (EQUAL) would make `<=` and `>=` TRUE for a raw NaN pair; Swift makes
+    // all four false, like C# and Java.
     var c = rtCompare(l, r)
     if (c == 2) { return 0 - 2 }
     return c
@@ -2451,8 +2347,7 @@ function js_swget(v, k) {
             return v
         }
     }
-    // indices is a PROPERTY on every Collection and answered nil in all three
-    // engines. Only an Array is answered: a String's indices are String.Index values
+    // indices is a PROPERTY on every Collection. Only an Array is answered: a String's indices are String.Index values
     // with no printable form here. swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
     if (k === "indices" && rtIsArr(v)) { return swMkRange(0, v.length, false) }
     // The same three on a value that stayed a plain number, which is where every
