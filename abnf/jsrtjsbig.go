@@ -3,30 +3,22 @@ package abnf
 // jsrtjsbig.go -- ECMAScript BigInt for the JavaScript compiler grammar.
 //
 // abnf/jsrt.go already carries the jsBigInt VALUE (a math/big Int, typeof "bigint",
-// exact strictEq, exact + - * / % between two of them). What it does not carry is the
-// rest of the type's behaviour, and the rest is most of it:
-//
-//	2n ** 64n     was NaN         (** lowers to Math.pow, which has only doubles)
-//	1n & 3n       was 1 as a NUMBER (the bitwise externs go through ToInt32)
-//	1n << 10n     was 1024 as a NUMBER, and it silently truncated past 32 bits
-//	10n == 10     was false       (loose equality never crossed the type line)
-//	10n < 11      was false       (the relational path needs BOTH to be BigInts)
-//	1n + 1        was 2           (the spec says TypeError)
-//	BigInt(42)    was "variable not defined"
-//	~1n           was -2 as a NUMBER
+// exact strictEq, exact + - * / % between two of them). This file adds the rest of
+// the type's behaviour: an exact `**`, the bitwise and shift operators on the two's
+// complement value (no ToInt32 truncation), `==` and `<` across the BigInt/Number
+// line, the mixed-operand TypeError of the spec, the BigInt() global and `~`.
 //
 // Everything here is ADDITIVE in the sense abnf/jsrtjsprint.go established: only new
 // js_js* externs are registered, each delegating to the extern it extends for every
 // operand pair it does not claim.
 //
-// It is also SCOPED. The BigInt value type is shared with two other grammars:
-// python-to-llvm-ir.abnf creates one for any integer literal past 2^53 and then mixes
-// it with plain doubles on every line (`10**30 + 1`), and typescript-to-llvm-ir.abnf
-// has the older lenient behaviour. Raising the spec's mixed-operand TypeError
-// unconditionally would break Python outright. So the strict rules below are armed by
-// `js_jsbigint`, the literal external that ONLY languages/js-to-llvm-ir.abnf emits;
-// until a program evaluates a BigInt literal through it, every wrapper here is a
-// straight pass-through to the extern it wraps.
+// It is also SCOPED. The BigInt value type is shared with python-to-llvm-ir.abnf,
+// which creates one for any integer literal past 2^53 and then mixes it with plain
+// doubles on every line (`10**30 + 1`), so raising the spec's mixed-operand TypeError
+// unconditionally would break Python outright. The strict rules below are therefore
+// armed by `js_jsbigint`, the literal external only the js and typescript compilers
+// emit; until a program evaluates a BigInt literal through it, every wrapper here is
+// a straight pass-through to the extern it wraps.
 //
 // languages/js-interpreter.abnf implements the identical semantics in its tag script
 // (the "BigInt" section, base 2^24 limb arithmetic); ./test.sh --full runs
@@ -127,15 +119,12 @@ func bigFromLiteral(s string) (*big.Int, bool) {
 // an engine abort, which is what node does with every one of them: `1n + 1` inside a
 // try/catch runs the catch clause. rt.fail panics a plain string that js_try
 // deliberately re-panics (it is a runtime error, not a throw), so the raise has to be
-// the same *jsThrown panic js_throw builds - and the thrown VALUE is the message
-// string, the spelling both interpreter halves and the emitters already use for the
-// iterator-throw TypeError. Every rt.fail in this file goes through here except the
-// "invalid BigInt literal" one, which is a malformed-input abort and not reachable
-// from a program that parsed. docs/todo.md 2.6.
-// Since docs/todo.md 1.1 the value is a real Error INSTANCE whenever the emitter
-// registered the hierarchy (jsErrFromText finds the class the message text
-// already names), so e.message and `e instanceof TypeError` answer; `"" + e` is
-// unchanged, because Error.prototype.toString rebuilds exactly this text.
+// the same *jsThrown panic js_throw builds. Every rt.fail in this file goes through
+// here except the "invalid BigInt literal" one, which is a malformed-input abort and
+// not reachable from a program that parsed. The value is a real Error INSTANCE
+// whenever the emitter registered the hierarchy (jsErrFromText finds the class the
+// message text already names), so e.message and `e instanceof TypeError` answer;
+// `"" + e` is the message text either way.
 func (rt *jsrt) bigRaise(format string, args ...interface{}) {
 	panic(&jsThrown{value: rt.jsErrFromText(fmt.Sprintf(format, args...))})
 }
@@ -144,7 +133,7 @@ func (rt *jsrt) bigRaise(format string, args ...interface{}) {
 // value of another type. It is raised only in strict mode (see the file comment).
 func (rt *jsrt) bigMixFail(op string) {
 	// node's message has NO operator suffix - it is the same text for every
-	// operator. docs/todo.md 1.8.
+	// operator.
 	_ = op
 	rt.bigRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions")
 }
@@ -325,7 +314,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// One bool per runtime, armed by the js_jsbigint literal external below. While it
 	// is false every wrapper here is a straight pass-through, which is what keeps the
-	// Python and TypeScript compilers byte-for-byte unchanged.
+	// Python compiler (and any program without a BigInt literal) on the plain operators.
 	strict := false
 
 	// The BigInt literal of languages/js-to-llvm-ir.abnf. It differs from the shared
@@ -387,8 +376,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// '**' has no shared external: it lowers to Math.pow, which only has doubles. The
-	// double arm below IS Math.pow (math.Pow over ToNumber), so a program without a
-	// BigInt gets bit-for-bit the answer it got before.
+	// double arm below IS Math.pow (math.Pow over ToNumber).
 	m["js_jspow"] = func(a []uint64) uint64 {
 		if strict {
 			if r, ok := rt.bigBinary("**", u(a[0]), u(a[1])); ok {
@@ -398,9 +386,8 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 		return rt.wrapNum(math.Pow(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
 	}
 
-	// ~x on a BigInt is exactly -x - 1 in arbitrary precision. The grammar used to
-	// lower it to `x ^ -1` on the shared xor, which the mixed-operand rule would now
-	// (correctly) refuse, so it gets an external of its own.
+	// ~x on a BigInt is exactly -x - 1 in arbitrary precision, so it gets an external
+	// of its own: `x ^ -1` on the shared xor would be refused by the mixed-operand rule.
 	baseBxor := m["js_bxor"]
 	m["js_jsbnot"] = func(a []uint64) uint64 {
 		if strict {

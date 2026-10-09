@@ -3,20 +3,13 @@ package abnf
 // jsrtjsprint.go -- the JavaScript/TypeScript half of the shared runtime.
 //
 // The compiler grammars (languages/js-to-llvm-ir.abnf, languages/typescript-to-llvm-ir.abnf)
-// used to reach the LANGUAGE-NEUTRAL externs of abnf/jsrt.go for printing, for the
-// equality and relational operators, for `instanceof`, for `delete` and for the
-// String/Array/Object method surface. Every one of those is a compromise between a
-// dozen languages, and JavaScript is the one language whose answer they are NOT:
-//
-//   println(null)        printed Go's %v ("<nil>") instead of "null"
-//   println([1, 2, 3])   printed "[1 2 3]" instead of "1,2,3"
-//   println({a: 1})      printed a Go map dump instead of "[object Object]"
-//   [1] == 1             was false (no ToPrimitive on the object operand)
-//   [2] > 1              was false (same)
-//   new F() instanceof F was false for a plain constructor FUNCTION
-//   delete a[1]          was a no-op
-//   Object.keys(o)       aborted with "unknown method 'keys'"
-//   a.map(f) / "s".padStart(...) and ~30 more were missing outright
+// reach JavaScript's own answers here instead of the LANGUAGE-NEUTRAL externs of
+// abnf/jsrt.go for printing (null, arrays and objects spelled the way String()
+// spells them), for the equality and relational operators (ToPrimitive on an object
+// operand), for `instanceof` on a plain constructor FUNCTION, for `delete` on an
+// array and for the String/Array/Object method surface. Every neutral extern is a
+// compromise between a dozen languages, and JavaScript is the one language whose
+// answer they are NOT.
 //
 // Everything here is ADDITIVE, exactly like abnf/jsrtregexkt.go and
 // abnf/jsrtregexjs.go: the init() below appends to rxExtraExterns and the registrar
@@ -106,8 +99,8 @@ func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
 // The engine's own slots (__ctor, __name, __super, ...) are excluded - they are read
 // off the descriptor itself by makeNewFrom, instanceof and the error machinery.
 // A mangled PRIVATE name is a __ name too, and it is NOT one of those: `static #s = 5`
-// files '__#s' in the static table, so skipping it made `C.#s` answer undefined in
-// both compiled halves. jsvPrivateKey is the exception. docs/todo.md 2.4.
+// files '__#s' in the static table, so skipping it would make `C.#s` answer undefined.
+// jsvPrivateKey is the exception.
 func jsvIsStaticSide(v interface{}, name string) (*jsObject, bool) {
 	o, ok := v.(*jsObject)
 	if !ok || !isClassDesc(o) || (jsvInternalKey(name) && !jsvPrivateKey(name)) {
@@ -126,8 +119,8 @@ func jsvPrivateKey(k string) bool {
 // The value of a member read on a class descriptor: the static chain, an accessor
 // unwrapped against the receiver the read started from (node runs `static get g()`
 // with `this` bound to the SUBCLASS), and `name` last - every class object has one,
-// and it is the descriptor's __name unless a `static name` member shadows it
-// (docs/todo.md 2.13 item 3). Anything else is undefined, as node says.
+// and it is the descriptor's __name unless a `static name` member shadows it.
+// Anything else is undefined, as node says.
 func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 	if v, _, found := jsStaticsFind(o, name); found {
 		if acc, isAcc := v.(*jsAccessor); isAcc {
@@ -209,8 +202,7 @@ func jsvIsObjLike(v interface{}) bool {
 }
 
 // jsvToPrimitive is ToPrimitive(v, default): valueOf first, then toString. It is the
-// step the shared js_eq / js_lt were missing, which is why `[1] == 1` and `[2] > 1`
-// were false in the compiler and true in node.
+// step the shared js_eq / js_lt lack: `[1] == 1` and `[2] > 1` are true in node.
 func (rt *jsrt) jsvToPrimitive(v interface{}) interface{} {
 	if o, ok := v.(*jsObject); ok {
 		if r, ok := rt.jsvCallMethod(o, "valueOf"); ok && !jsvIsObjLike(r) {
@@ -253,10 +245,9 @@ func (rt *jsrt) jsvCompare(a, b interface{}) int {
 // ============================================================================
 // The Object global
 //
-// The root scope's `Object` is a bare host object carrying only `prototype`, so
-// Object.keys / values / entries / assign aborted with "unknown method 'keys'". The
+// The root scope's `Object` is a bare host object carrying only `prototype`, so the
 // grammar declares the marked object below in the PROGRAM's own scope (the way it
-// already declares RegExp), so nothing outside the JS/TS pair sees it.
+// already declares RegExp), and nothing outside the JS/TS pair sees it.
 
 func jsvIsObjectGlobal(v interface{}) bool {
 	o, ok := v.(*jsObject)
@@ -274,16 +265,15 @@ func jsvIsArrayGlobal(v interface{}) bool {
 }
 
 // jsvOwnKeys are an object's own enumerable keys in insertion order, WITHOUT the
-// __-prefixed internal slots (__class, __keys, __super, ...). The interpreter half
-// leaked exactly those through Object.keys / Object.entries.
+// __-prefixed internal slots (__class, __keys, __super, ...).
 func jsvOwnKeys(v interface{}) []string {
 	switch o := v.(type) {
 	case *jsObject:
 		// A CLASS DESCRIPTOR answers with the enumerable half of its STATIC
 		// namespace, and with nothing off its own property map: that map holds the
 		// class's INSTANCE methods, which node reports on the prototype and never on
-		// the constructor, so `Object.keys(class C { static sf = 1; m(){} })`
-		// answered ["m"] where node says ["sf"]. docs/todo.md 2.10.
+		// the constructor (node says ["sf"] for
+		// `Object.keys(class C { static sf = 1; m(){} })`).
 		if isClassDesc(o) {
 			return jsvStaticEnumKeys(o)
 		}
@@ -309,7 +299,7 @@ func jsvOwnKeys(v interface{}) []string {
 		return out
 	}
 	// A FUNCTION enumerates the own properties written onto it, which node reports
-	// and this engine keeps in a side table. docs/todo.md 2.10.
+	// and this engine keeps in a side table.
 	if p := jsvFnPropsOf(v); p != nil {
 		return jsvOwnKeys(p)
 	}
@@ -324,7 +314,6 @@ func jsvOwnKeys(v interface{}) []string {
 // frame. Object.keys, values, entries and assign keep reading jsvOwnKeys, and so does
 // for-in, which is what preserves node's empty `for (k in f)`. Twins: jvGopnKeys in
 // languages/lib/js-rt.metajs and jsGopnKeys in both *-interpreter.abnf.
-// docs/todo.md 1.4.
 func jsvGopnKeys(v interface{}) []string {
 	if !jsvIsFnLike(v) {
 		return jsvOwnKeys(v)
@@ -333,8 +322,7 @@ func jsvGopnKeys(v interface{}) []string {
 }
 
 // jsvFnProps -- `f.p = 1` on a FUNCTION. A function value here is a *jsClosure or
-// a *hostFunc and neither carries a property map, so a member write on one aborted
-// with "cannot set field 'p' on *abnf.jsClosure" - while node gives every function
+// a *hostFunc and neither carries a property map, while node gives every function
 // an ordinary own property map, and `f.cache = {}` is a common idiom. The map lives
 // BESIDE the function in this side table, keyed by the pointer, which is the
 // identity JavaScript uses. Only the two POINTER kinds are admitted, so nothing
@@ -343,7 +331,7 @@ func jsvGopnKeys(v interface{}) []string {
 // than per-jsrt so that jsvOwnKeys, which has no runtime, can read it; the keys are
 // pointers, so two runtimes in one process cannot collide.
 // Twin: jvFnProps* in languages/lib/js-rt.metajs. The interpreter halves keep the
-// same table under the same name. docs/todo.md 2.10.
+// same table under the same name.
 var jsvFnProps = map[interface{}]*jsObject{}
 
 // jsvFnMeta -- the declared NAME and ARITY of a function, set by js_jsfnmeta at the
@@ -456,16 +444,12 @@ func jsvFnPropsMake(v interface{}) *jsObject {
 	return p
 }
 
-// jsvFnMethod -- the Object.prototype SURFACE of a FUNCTION, as methods.
+// jsvFnMethod -- the Object.prototype SURFACE of a FUNCTION, as methods:
 // `f.toString()`, `f.valueOf()`, `f.hasOwnProperty(k)` and
-// `f.propertyIsEnumerable(k)` all died with "f.toString is not a function" in both
-// compiled halves and in the -frozen interpreter, while the goja interpreter answered
-// them off the host's own prototype chain - a live goja-vs--frozen divergence that
-// predates the function side table and that nothing reached, because a function was
-// not a property carrier and nobody asked. Twins: jvFnMethod in
-// languages/lib/js-rt.metajs and fnHasOwnShim / fnToStringShim / fnValueOfShim in both
-// *-interpreter.abnf. Answers nil for any receiver or name it does not claim, so the
-// caller tests one value instead of four names. docs/todo.md 2.10.
+// `f.propertyIsEnumerable(k)`. Twins: jvFnMethod in languages/lib/js-rt.metajs and
+// fnHasOwnShim / fnToStringShim / fnValueOfShim in both *-interpreter.abnf. Answers
+// nil for any receiver or name it does not claim, so the caller tests one value
+// instead of four names.
 //
 // Every own property a program can write onto a function here is an ordinary
 // enumerable data property, so hasOwnProperty and propertyIsEnumerable share a body,
@@ -489,8 +473,7 @@ func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			// `name` and `length` are own properties of every function, so
 			// hasOwnProperty says true - and they are the one pair here for which
-			// propertyIsEnumerable says FALSE, which is why the two questions no
-			// longer share one answer. docs/todo.md 1.4.
+			// propertyIsEnumerable says FALSE, which is what `enumerable` is for.
 			if k := rt.toString(argAt(args, 0)); k == "name" || k == "length" {
 				return !enumerable
 			}
@@ -517,7 +500,7 @@ func jsvInternalKey(k string) bool {
 	return len(k) >= 2 && k[0] == '_' && k[1] == '_'
 }
 
-// ----- which static members of a class are ENUMERABLE (docs/todo.md 2.10) -----
+// ----- which static members of a class are ENUMERABLE --------------------------
 //
 // A class object's own enumerable properties are its static FIELDS plus anything a
 // runtime `C.zz = 1` put there. A static METHOD and a static ACCESSOR are not
@@ -551,7 +534,7 @@ func jsvSfTrack(statics *jsObject, name string) {
 
 // jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
 // string - which node answers as the index STRINGS "0".."n-1". Twin: jvIndexKeys in
-// languages/lib/js-rt.metajs. docs/todo.md 2.4.
+// languages/lib/js-rt.metajs.
 func jsvIndexKeys(n int) *jsArray {
 	out := &jsArray{}
 	for i := 0; i < n; i++ {
@@ -585,7 +568,7 @@ func jsvStaticEnumKeys(cls *jsObject) []string {
 // for a value with no __class at all (a plain object literal; node answers Object
 // there, which needs a prototype chain this value model does not have). Twins:
 // jvConstructorOf in languages/lib/js-rt.metajs and classCtorOf in the two
-// *-interpreter.abnf start scripts. docs/todo.md 2.10.
+// *-interpreter.abnf start scripts.
 func jsvConstructorOf(o *jsObject) (interface{}, bool) {
 	cls, ok := o.props["__class"].(*jsObject)
 	if !ok {
@@ -601,17 +584,16 @@ func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
 	// A CLASS DESCRIPTOR reads from its static namespace, exactly as js_jsvget does:
 	// rt.getMember would answer the descriptor's own slot, which is where the
 	// INSTANCE methods live, so Object.values(C) / Object.entries(C) / Object.assign
-	// came back undefined for every static field once jsvOwnKeys started naming them.
-	// The native leg goes through js_jsmget and never had this. docs/todo.md 2.10.
+	// would see undefined for every static field. (The native leg goes through
+	// js_jsmget.)
 	if cls, isStatic := jsvIsStaticSide(v, k); isStatic {
 		return rt.unwrap(rt.jsvStaticSideRead(cls, k))
 	}
 	// A FUNCTION's own properties live in the side table, and rt.getMember knows
 	// nothing about it - the SAME shape as the class-descriptor arm above, one layer
-	// out: once jsvOwnKeys started naming a function's properties, Object.values(f)
-	// and Object.entries(f) answered the right KEYS with undefined VALUES, and
-	// Object.assign({}, f) copied undefined. On the llvm.Run leg only, because the
-	// native leg goes through layer 2's js_jsmget. docs/todo.md 2.10.
+	// out: without it Object.values(f), Object.entries(f) and Object.assign({}, f)
+	// would read undefined values on the llvm.Run leg (the native leg goes through
+	// layer 2's js_jsmget).
 	if p := jsvFnPropsOf(v); p != nil {
 		if val, found := p.props[k]; found {
 			return val
@@ -808,14 +790,13 @@ func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 // jsvMethod is the Go twin of `jsBuiltin` in languages/js-interpreter.abnf.
 func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
 	// Function.prototype.bind. jsrt.go's getMember/builtinMethod already answer
-	// `call` and `apply` for every language, but `bind` is not in that pair and
-	// `f.bind(o)` aborted both compiled halves with "unknown method 'bind' on
-	// function" while a decorator written with call() worked. It is answered HERE,
-	// js/ts-locally, rather than beside call/apply in the shared runtime: the other
-	// fifteen languages have no Function.prototype and must not grow one. The bound
-	// arguments are PREPENDED to the eventual call's, which is the one way bind
-	// differs from call beyond remembering the receiver. The twins are fnBindShim in
-	// both *-interpreter.abnf start scripts and jvBindShim in lib/js-rt.metajs.
+	// `call` and `apply` for every language, but `bind` is not in that pair. It is
+	// answered HERE, js/ts-locally, rather than beside call/apply in the shared
+	// runtime: the other fifteen languages have no Function.prototype and must not
+	// grow one. The bound arguments are PREPENDED to the eventual call's, which is
+	// the one way bind differs from call beyond remembering the receiver. The twins
+	// are fnBindShim in both *-interpreter.abnf start scripts and jvBindShim in
+	// lib/js-rt.metajs.
 	if name == "bind" && isCallable(target) {
 		self := argAt(args, 0)
 		var pre []interface{}
@@ -828,7 +809,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		})
 		// A bound function's own name is "bound " + the target's, and its length is the
 		// target's less the arguments already supplied, floored at 0 - node says
-		// "bound f"/1 for `f.bind(null)` of `function f(a){}`. docs/todo.md 1.4.
+		// "bound f"/1 for `f.bind(null)` of `function f(a){}`.
 		bl := jsvFnMeta(fn).length - len(pre)
 		if bl < 0 {
 			bl = 0
@@ -1500,10 +1481,8 @@ func (rt *jsrt) jsvNumberMethod(x float64, name string, args []interface{}) (int
 			return jsNumString(x), true
 		}
 		if radix < 2 || radix > 36 {
-			// node makes an out-of-range radix a CATCHABLE RangeError, and this is
-			// the number path - the BigInt path beside it (jsrtjsbig.go) has raised
-			// one all along, so the same engine answered the same mistake two
-			// different ways. Reachable now that the hierarchy exists.
+			// node makes an out-of-range radix a CATCHABLE RangeError, as on the
+			// BigInt path beside it (jsrtjsbig.go).
 			rt.bigRaise("RangeError: toString() radix must be between 2 and 36")
 		}
 		return jsvRadixString(x, radix), true
@@ -1527,8 +1506,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// println with JAVASCRIPT's ToString. The shared println host function hands the
-	// raw value to Go's %v, which is where "<nil>", "[1 2 3]" and "map[a:1]" came
-	// from. Multiple arguments stay space-joined, each stringified on its own.
+	// raw value to Go's %v. Multiple arguments stay space-joined, each stringified on
+	// its own.
 	m["js_jsputs"] = func(a []uint64) uint64 {
 		args, ok := u(a[0]).(*jsArray)
 		if !ok {
@@ -1561,16 +1540,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// String(v) / the ToString an interpolation needs.
 	m["js_jsstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jsvString(u(a[0]))) }
 
-	// js_jstypeof is `typeof` for js/ts, and the twin of the layer-2 function of
-	// the same name. It used to be reached under -exe only, because the one thing
-	// it added there - "bigint" for layer 2's object box - the Go twin already
-	// answered from the Go type. It is now the extern in BOTH compiled halves,
-	// because a CLASS DESCRIPTOR IS A FUNCTION to `typeof`: every class here is
-	// an ordinary object carrying __isclass, so `typeof K` answered "object"
-	// where node says "function" for every class there has ever been. The test
-	// stays out of typeOf itself, which is shared by all sixteen languages, and
-	// out of the engine's own `is this callable` guards, which decide whether a
-	// value can be CALLED - a class descriptor still cannot. docs/todo.md 1.8.
+	// js_jstypeof is `typeof` for js/ts in BOTH compiled halves, and the twin of the
+	// layer-2 function of the same name. A CLASS DESCRIPTOR IS A FUNCTION to
+	// `typeof`: every class here is an ordinary object carrying __isclass, while node
+	// says "function" for every class. The test stays out of typeOf itself, which is
+	// shared by all sixteen languages, and out of the engine's own `is this callable`
+	// guards, which decide whether a value can be CALLED - a class descriptor still
+	// cannot.
 	m["js_jstypeof"] = func(a []uint64) uint64 {
 		v := u(a[0])
 		if o, ok := v.(*jsObject); ok {
@@ -1607,10 +1583,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// '+' WITH ToPrimitive. The shared js_add renders an object with the neutral
-	// rendering, so `"" + d` was "[object Object]" for a class that has a toString of
-	// its own while the interpreter half answered the method. Two primitive operands
-	// go straight to the shared extern, which is every addition a program that adds
-	// no objects performs.
+	// rendering, which ignores a class's own toString. Two primitive operands go
+	// straight to the shared extern, which is every addition a program that adds no
+	// objects performs.
 	baseAdd := m["js_add"]
 	m["js_jsadd"] = func(a []uint64) uint64 {
 		l, r := u(a[0]), u(a[1])
@@ -1633,10 +1608,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// The `String` global. The runtime root binds an OBJECT (it carries
-	// fromCharCode), so a bare String(v) call aborted with "call of a non function
-	// value" in the compiler and worked only under goja in the interpreter. This is a
-	// real host function, and String.fromCharCode is answered by js_jsmcall below -
-	// which is reached because js_get has no member of that name on a function value.
+	// fromCharCode); this is a real host function, and String.fromCharCode is answered
+	// by js_jsmcall below - which is reached because js_get has no member of that name
+	// on a function value.
 	m["js_jsstringfn"] = func(a []uint64) uint64 {
 		return w(jsHostFunc("String", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
@@ -1721,8 +1695,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 
 	// 'delete a[i]' on an ARRAY: the length is unchanged and the slot reads as
 	// undefined. (A real JS hole cannot be modelled here: the interpreter half's
-	// arrays are host arrays that carry no side data, so both halves agree on
-	// blanking the slot - which is what the interpreter has always done.)
+	// arrays are host arrays that carry no side data, so both halves blank the slot.)
 	baseDel := m["js_del"]
 	m["js_jsdel"] = func(a []uint64) uint64 {
 		if arr, ok := u(a[0]).(*jsArray); ok {
@@ -1734,7 +1707,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
-		// A function's own properties live in the side table. docs/todo.md 2.10.
+		// A function's own properties live in the side table.
 		if p := jsvFnPropsOf(u(a[0])); p != nil {
 			name := rt.toString(u(a[1]))
 			if _, found := p.props[name]; found {
@@ -1757,15 +1730,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsobject"] = func(a []uint64) uint64 {
 		o := newJSObject()
 		o.set("__jsobject", true)
-		// Object.prototype.toString.call(v) is the classic type probe, and it used to
-		// abort BOTH compiled halves: the root binding's `prototype` carries no
-		// methods, so llvm.Run said "member 'call' of undefined" and the native build,
-		// whose layer-2 js_jsobject had no prototype slot at all, said "member
-		// 'toString' of undefined". The three members are the ones a program in this
-		// subset can reach; each reads its receiver from the call's `this`, which is
-		// what Function.prototype.call passes. Twins: js_jsobject in
-		// languages/lib/js-rt.metajs and jsObjectProto in both *-interpreter.abnf
-		// start scripts. docs/todo.md 2.5.
+		// Object.prototype.toString.call(v) is the classic type probe. The root
+		// binding's `prototype` carries no methods, so this one does. The three members
+		// are the ones a program in this subset can reach; each reads its receiver from
+		// the call's `this`, which is what Function.prototype.call passes. Twins:
+		// js_jsobject in languages/lib/js-rt.metajs and jsObjectProto in both
+		// *-interpreter.abnf start scripts.
 		proto := newJSObject()
 		proto.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsvProtoTag(u(this))
@@ -1774,7 +1744,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return u(this)
 		}))
 		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			// A FUNCTION's own properties live in the side table. docs/todo.md 2.10.
+			// A FUNCTION's own properties live in the side table.
 			if p := jsvFnPropsOf(u(this)); p != nil {
 				_, has := p.props[rt.toString(argAt(args, 0))]
 				return has
@@ -1793,7 +1763,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// js_jsmget hides the String/Array method names from js_get, so that the CALL
 	// site falls into js_jsmcall below instead of the shared boundMethod path, whose
 	// semantics differ for several of them.
-	// ----- CLOSING AN ITERATOR ON AN EARLY EXIT (docs/todo.md 1.8) -----
+	// ----- CLOSING AN ITERATOR ON AN EARLY EXIT -----
 	//
 	// node closes a for-of's iterator on every abrupt exit from the loop body, not
 	// just on `break`: a `return` out of the body and a labeled break to an OUTER
@@ -1803,12 +1773,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// dominates its body, so the loop's iterable handle is a legal operand at every
 	// jump inside it, and one of these is emitted per loop being left.
 	//
-	// There is deliberately NO runtime open-iterator stack here, and that is a
-	// finding rather than an omission - see the forOfIters note in
-	// languages/js-to-llvm-ir.abnf. A stack unwound by DEPTH is what a `throw`
-	// would need, and `for await` suspends INSIDE its own for-of, so a suspended
-	// body leaves an entry on such a stack while unrelated frames run; measured, it
-	// closed the wrong loop.
+	// There is deliberately NO runtime open-iterator stack here - see the forOfIters
+	// note in languages/js-to-llvm-ir.abnf: `for await` suspends INSIDE its own
+	// for-of, so a stack unwound by DEPTH (what a `throw` would need) would close the
+	// wrong loop.
 	//
 	// The twins are js_jsiterclose in languages/lib/js-rt.metajs and closeIterator
 	// in the two *-interpreter.abnf start scripts.
@@ -1822,7 +1790,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return w(jsUndef)
 	}
 
-	// ----- Async generators (docs/todo.md 1.7) -----
+	// ----- Async generators -----
 	// js_jsawaitmark marks an awaited operand so that the one suspension channel an
 	// async generator body has can carry both its yields and its awaits; js_jsasyncgen
 	// wraps the generator FUNCTION the body compiled to into one that answers an
@@ -1844,7 +1812,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}))
 	}
 	// The two RAW PREDICATES the call site uses to keep node's TypeErrors off the
-	// hot path (docs/todo.md 1.4). They answer 0 or 1 as a plain integer, never a
+	// hot path. They answer 0 or 1 as a plain integer, never a
 	// handle, so the emitter can branch on the result with an icmp instead of
 	// paying js_typeof + js_seq - the two-extern shape the method-call arm above
 	// still uses. The layer-2 twins are js_jsfnp__raw / js_jsctorp__raw in
@@ -1871,23 +1839,22 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
 	// and which deliberately HIDES the String/Array method names so the call falls into
 	// js_jsmcall. The difference this extern exists for: an instance's methods live on
-	// its __class descriptor, not as own properties, so `typeof p.m` answered
-	// "undefined" in all four engines where node says "function". The answer is
-	// jsvMethodValue: one unbound function per method, which takes `this` from its
-	// call site. The layer-2 twin is js_jsvget in languages/lib/js-rt.metajs and
-	// the interpreters' is getMember's class-method arm. docs/todo.md 2.5.
+	// its __class descriptor, not as own properties, yet node says `typeof p.m` is
+	// "function". The answer is jsvMethodValue: one unbound function per method, which
+	// takes `this` from its call site. The layer-2 twin is js_jsvget in
+	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
 	m["js_jsvget"] = func(a []uint64) uint64 {
-		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else
-		// (docs/todo.md 2.13). Ordered in front of baseGet because the descriptor's
-		// own property map is where its INSTANCE methods live, and answering one of
-		// those for `C.m` is the defect.
+		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else.
+		// Ordered in front of baseGet because the descriptor's own property map is
+		// where its INSTANCE methods live, and answering one of those for `C.m` would
+		// be wrong.
 		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
 			return rt.jsvStaticSideRead(cls, rt.toString(u(a[1])))
 		}
 		// The FAST PATH must not re-wrap: the handle baseGet answered is returned
 		// as it stands, and the fallback below runs only when the read found
-		// nothing. The layer-2 twin pays the same attention and for a measured
-		// reason - see js_jsvget in languages/lib/js-rt.metajs.
+		// nothing. The layer-2 twin pays the same attention - see js_jsvget in
+		// languages/lib/js-rt.metajs.
 		r := baseGet(a)
 		if !isUndefOrNull(u(r)) {
 			return r
@@ -1896,19 +1863,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if !isObj {
 			// `f.name` and `f.length`, before the own-property side table because both
 			// are non-writable in node: an `f.name = "q"` that reached the table must
-			// not win, and js_jsmset drops it for the same reason. docs/todo.md 1.4.
+			// not win, and js_jsmset drops it for the same reason.
 			if v := jsvFnIntrinsic(u(a[0]), rt.toString(u(a[1]))); v != nil {
 				return w(v)
 			}
 			// An own property written onto a FUNCTION lives in the side table, not
-			// on the closure. docs/todo.md 2.10.
+			// on the closure.
 			if p := jsvFnPropsOf(u(a[0])); p != nil {
 				if v, found := p.props[rt.toString(u(a[1]))]; found {
 					return w(v)
 				}
 			}
 			// ...and a function's Object.prototype surface, AFTER the side table so
-			// an own `f.toString = ...` still wins. docs/todo.md 2.10.
+			// an own `f.toString = ...` still wins.
 			if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
 				return w(m)
 			}
@@ -1918,9 +1885,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvInternalKey(name) {
 			return r
 		}
-		// `e.constructor` is the CLASS an instance was built from. It answered
-		// undefined in all four engines where node hands back the class object (and,
-		// for `new F()`, the function F itself). docs/todo.md 2.10.
+		// `e.constructor` is the CLASS an instance was built from (and, for
+		// `new F()`, the function F itself).
 		if name == "constructor" {
 			if c, found := jsvConstructorOf(recv); found {
 				return w(c)
@@ -1932,34 +1898,30 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return r
 	}
 	// js_has plus the __class methods: an instance keeps its methods on its class
-	// descriptor rather than as own properties, so `"m" in instance` answered false
-	// where node answers true. The layer-2 twin is js_jshas in
-	// languages/lib/js-rt.metajs; the interpreters' is propIn. docs/todo.md 2.5.
+	// descriptor rather than as own properties, but `"m" in instance` is true in node.
+	// The layer-2 twin is js_jshas in languages/lib/js-rt.metajs; the interpreters' is
+	// propIn.
 	baseHas := m["js_has"]
 	m["js_jshas"] = func(a []uint64) uint64 {
 		recv, isObj := u(a[0]).(*jsObject)
 		name := rt.toString(u(a[1]))
-		// The __-prefixed engine slots are not properties of the program's object:
-		// `"__class" in p` answered TRUE in both compiled halves and false in the
-		// interpreters and in node. Measured on the way past, not part of the item.
+		// The __-prefixed engine slots are not properties of the program's object.
 		// ...but a mangled PRIVATE name IS one of the program's own, and `#x in o` -
 		// the ergonomic brand check - asks for exactly that slot, so it falls through
-		// to the own-slot and class-method arms below. docs/todo.md 2.4.
+		// to the own-slot and class-method arms below.
 		if isObj && jsvInternalKey(name) && !jsvPrivateKey(name) {
 			return w(false)
 		}
 		// `"m" in C` asks the STATIC namespace and nothing else, and it is asked
 		// BEFORE js_has: the descriptor's own property map holds C's INSTANCE
 		// methods, which node does not report as properties of the constructor.
-		// docs/todo.md 2.13.
 		if isObj && isClassDesc(recv) {
 			if _, _, found := jsStaticsFind(recv, name); found {
 				return w(true)
 			}
 			return w(name == "name")
 		}
-		// `"constructor" in e` is true in node for every instance, and the read
-		// answers it now. docs/todo.md 2.10.
+		// `"constructor" in e` is true in node for every instance.
 		if isObj && name == "constructor" {
 			if _, found := jsvConstructorOf(recv); found {
 				return w(true)
@@ -1969,7 +1931,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// a property holding undefined is still reported. A function that is not IN
 		// the table answers false rather than falling through, because the shared
 		// js_has aborts with "'in' needs an object on the right side" for any
-		// receiver that is not an object. docs/todo.md 2.10.
+		// receiver that is not an object.
 		if jsvIsFnLike(u(a[0])) {
 			if p := jsvFnPropsOf(u(a[0])); p != nil {
 				if _, found := p.props[name]; found {
@@ -1992,14 +1954,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvHidesMember(u(a[0]), rt.toString(u(a[1]))) {
 			return jsHUndefined
 		}
-		// The static namespace, exactly as in js_jsvget above (docs/todo.md 2.13).
+		// The static namespace, exactly as in js_jsvget above.
 		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
 			return rt.jsvStaticSideRead(cls, rt.toString(u(a[1])))
 		}
 		// then/catch/finally READ AS A VALUE. Promise method dispatch is
 		// table-based (jsvMethod -> promMethod), so a promise has no own slot of
-		// that name and `const t = p.then` answered undefined where node answers a
-		// function. Answer a receiver-BOUND host function, which is what makes
+		// that name. Answer a receiver-BOUND host function, which is what makes
 		// `t.call(p, f)` and `p.then.bind(p)` work; the same arm exists in
 		// languages/lib/js-rt.metajs's js_jsmget and in the interpreters' getMember.
 		if recv := u(a[0]); promIs(recv) {
@@ -2011,13 +1972,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}))
 			}
 		}
-		// `f.name` and `f.length` - see js_jsvget above. docs/todo.md 1.4.
+		// `f.name` and `f.length` - see js_jsvget above.
 		if v := jsvFnIntrinsic(u(a[0]), rt.toString(u(a[1]))); v != nil {
 			return w(v)
 		}
 		// An own property written onto a FUNCTION lives in the side table, at the end
 		// so a program that never writes one pays one map-length test.
-		// docs/todo.md 2.10.
 		if p := jsvFnPropsOf(u(a[0])); p != nil {
 			if v, found := p.props[rt.toString(u(a[1]))]; found {
 				return w(v)
@@ -2026,14 +1986,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// ...and a function's Object.prototype surface. This is the arm the CALL site
 		// reaches: the emitter reads the member with js_jsmget and calls the result
 		// when it is a function, so one body serves `f.hasOwnProperty("p")` and
-		// `typeof f.toString`. docs/todo.md 2.10.
+		// `typeof f.toString`.
 		if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
 			return w(m)
 		}
 		return baseGet(a)
 	}
 
-	// The static table of one class, built at its definition (docs/todo.md 2.13).
+	// The static table of one class, built at its definition.
 	// The layer-2 twin also counts the classes, so that a program with none pays a
 	// single integer compare per member read instead of a hash lookup; the Go twin
 	// has no such loop to protect and only has to answer the same object.
@@ -2041,7 +2001,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// because of the shim in its callable arm. The shared js_supget (abnf/jsrt.go)
 	// hands back a host function that IGNORES the receiver of the eventual call and
 	// always re-enters with the receiver the READ was made with, so
-	// `super.m.call(x)` ran the parent's method on `this` instead of on x. Fixing
+	// `super.m.call(x)` would run the parent's method on `this` instead of on x.
 	// that in js_supget would change it for the eight other languages that emit it,
 	// and the extern map is ONE map for every language (manual chapter 4:
 	// overriding a shared name in a language's own twin file leaks across
@@ -2050,7 +2010,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// deliberately: the static side first when the receiver is a class descriptor,
 	// then the __super walk, and a miss is undefined rather than a read of the
 	// receiver. The layer-2 twin is js_jssupget in languages/lib/js-rt.metajs.
-	// docs/todo.md 2.10.
 	m["js_jssupget"] = func(a []uint64) uint64 { // (super class, this, key) -> value
 		name := rt.toString(u(a[2]))
 		self := u(a[1])
@@ -2099,17 +2058,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 
 	// js_jskeys is js_keys plus the class-descriptor arm. The floor's js_keys is
 	// shared by sixteen languages and answers an object's own key map, which for a
-	// class descriptor is its INSTANCE methods - so `{...C}` copied the methods and
-	// `for (k in C)` enumerated them, where node gives the static FIELDS and this
-	// engine's own Object.keys now does too. A name of its own rather than an
-	// override, for manual chapter 4's reason. The layer-2 twin is js_jskeys in
-	// languages/lib/js-rt.metajs. docs/todo.md 2.10.
-	// It also has to be TOTAL, which the floor's js_keys is not. `for (i in [7,8])`
-	// and `{...[7,8]}` both reach here with an ARRAY, and js_keys aborts the whole
-	// program with "js_keys: not an object (got object)" - a plain abort on ordinary
-	// code, where node answers the INDICES as strings ("0","1"). A string enumerates
-	// the same way, and null/undefined/a number/a boolean enumerate NOTHING rather
-	// than raising. docs/todo.md 2.4.
+	// class descriptor is its INSTANCE methods, where node gives the static FIELDS
+	// (`{...C}`, `for (k in C)`). A name of its own rather than an override, for
+	// manual chapter 4's reason. The layer-2 twin is js_jskeys in
+	// languages/lib/js-rt.metajs.
+	// It also has to be TOTAL, which the floor's js_keys is not: `for (i in [7,8])`
+	// and `{...[7,8]}` both reach here with an ARRAY, where node answers the INDICES
+	// as strings ("0","1"). A string enumerates the same way, and
+	// null/undefined/a number/a boolean enumerate NOTHING rather than raising.
 	baseKeys := m["js_keys"]
 	m["js_jskeys"] = func(a []uint64) uint64 {
 		switch v := u(a[0]).(type) {
@@ -2135,7 +2091,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return w(jsvIndexKeys(rt.strLen(v)))
 		default:
 			// A FUNCTION enumerates the own properties written onto it.
-			// docs/todo.md 2.10.
 			if p := jsvFnPropsOf(v); p != nil {
 				out := &jsArray{}
 				for _, k := range jsvOwnKeys(p) {
@@ -2163,7 +2118,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// accessor go into the same table with a plain js_set / js_defprop and are
 	// therefore invisible to Object.keys, which is what node says. The emitter calls
 	// this instead of js_set in emitClass's static-field loop; the layer-2 twin is
-	// js_jssfield in languages/lib/js-rt.metajs. docs/todo.md 2.10.
+	// js_jssfield in languages/lib/js-rt.metajs.
 	m["js_jssfield"] = func(a []uint64) uint64 {
 		t, ok := u(a[0]).(*jsObject)
 		if !ok {
@@ -2175,13 +2130,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return 0
 	}
 
-	// js_jsmset used to be emitted only under -exe, where layer 2 has to unwrap the
-	// accessor box the C floor knows nothing about, and so it needed no Go twin. It
-	// is emitted in BOTH halves since docs/todo.md 2.13: a member WRITE on a class
-	// descriptor is a write to the STATIC namespace (`C.zz = 1` then `C.zz`), and
-	// putting it in the descriptor's own property map would put it where the instance
-	// methods live. Everything that is not a class descriptor - which is every write
-	// in a program with no classes in it - goes straight to js_set.
+	// js_jsmset is emitted in BOTH halves. Under -exe layer 2 unwraps the accessor box
+	// the C floor knows nothing about; here a member WRITE on a class descriptor is a
+	// write to the STATIC namespace (`C.zz = 1` then `C.zz`) - putting it in the
+	// descriptor's own property map would put it where the instance methods live.
+	// Everything that is not a class descriptor - which is every write in a program
+	// with no classes in it - goes straight to js_set.
 	baseSet := m["js_set"]
 	m["js_jsmset"] = func(a []uint64) uint64 {
 		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
@@ -2199,22 +2153,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			t := jsStaticsOf(cls, true)
 			t.set(name, u(a[2]))
 			// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
-			// object, exactly as it does on any other object. docs/todo.md 2.10.
+			// object, exactly as it does on any other object.
 			jsvSfTrack(t, name)
 			return 0
 		}
 		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
 		// sloppy code (and raises a TypeError in strict code, which no engine here
 		// does). Dropping it keeps one answer for the read, for hasOwnProperty and for
-		// getOwnPropertyNames. docs/todo.md 1.4.
+		// getOwnPropertyNames.
 		if jsvIsFnLike(u(a[0])) {
 			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
 				return 0
 			}
 		}
 		// A write onto a FUNCTION goes to the side table: neither *jsClosure nor
-		// *hostFunc has a property map, and rt.setMember's reflect fallback aborted
-		// with "cannot set field 'p' on *abnf.jsClosure". docs/todo.md 2.10.
+		// *hostFunc has a property map.
 		if p := jsvFnPropsMake(u(a[0])); p != nil {
 			p.set(rt.toString(u(a[1])), u(a[2]))
 			return 0
@@ -2282,9 +2235,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// delegates to the shared js_mcall, so a receiver none of the three claims
 	// behaves exactly as it did before.
 	// The delegate is looked up LAZILY: rxExtraExterns runs its registrars in file
-	// order, so js_jsxmcall (abnf/jsrtregexjs.go) does not exist yet at this point.
-	// Capturing it here bound nil and lost the whole RegExp method surface -
-	// `re.test(s)` failed with "unknown method 'test'".
+	// order, so js_jsxmcall (abnf/jsrtregexjs.go) does not exist yet at this point
+	// and capturing it here would bind nil.
 	baseMcall := m["js_mcall"]
 	m["js_jsmcall"] = func(a []uint64) uint64 {
 		arr, ok := u(a[2]).(*jsArray)
@@ -2294,7 +2246,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if v, handled := rt.jsvMethod(u(a[0]), rt.toString(u(a[1])), arr.elems); handled {
 			return w(v)
 		}
-		// A CLASS DESCRIPTOR stops here (docs/todo.md 2.13). js_jsmget already
+		// A CLASS DESCRIPTOR stops here. js_jsmget already
 		// answered every static, so reaching this line means the name is not one -
 		// and the shared js_mcall below would find the descriptor's own property of
 		// that name, which is its INSTANCE method. Answer the miss sentinel so the
@@ -2310,7 +2262,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return baseMcall(a)
 	}
 
-	// ----- the Error hierarchy (docs/todo.md 1.1) --------------------------
+	// ----- the Error hierarchy ---------------------------------------------
 	//
 	// The classes are ordinary {__isclass, __name, __errname, __super, __ctor}
 	// descriptors - the same shape emitClass builds - so js_jsinstanceof's chain
@@ -2323,9 +2275,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	//                 (bigRaise) carry the VERY SAME class object the program's
 	//                 own `new TypeError(...)` constructs from - two class
 	//                 objects of one name would make instanceof false. Building
-	//                 them here rather than with six memSets each in the emitter
-	//                 is what keeps the fixed cost of the hierarchy at +3,075
-	//                 bytes of IR per module instead of +10,201;
+	//                 them here rather than with memSets in the emitter keeps
+	//                 the hierarchy's fixed IR cost per module small;
 	//   js_jserrinit  the shared constructor body: it walks the instance's own
 	//                 __class chain for __errname, which is what makes a user
 	//                 subclass answer its nearest builtin ancestor's name;
@@ -2350,11 +2301,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		cls.set("__ctor", u(a[1]))
 		// Every class descriptor gets a static table, the builtin Error hierarchy
 		// included - the layer-2 twin needs it to keep `TypeError.name` independent
-		// of whether the program declares a class of its own. docs/todo.md 2.13.
+		// of whether the program declares a class of its own.
 		jsStaticsOf(cls, true)
 		if name == jsErrNames[0] {
 			// toString lives on the ROOT only, exactly as Error.prototype does:
-			// the __class/__super walk finds it from any of the seven and from
+			// the __class/__super walk finds it from any of the builtin classes and from
 			// any user subclass.
 			cls.set("toString", u(a[2]))
 		} else if root, has := rt.jsErrClasses[jsErrNames[0]]; has {
@@ -2517,9 +2468,8 @@ func (rt *jsrt) jsMakeErr(name, msg string) *jsObject {
 
 // jsErrFromText turns "TypeError: ..." into a real TypeError carrying just the
 // message. Every error the js runtime raises already spells its own class in its
-// message text, so the whole routing is this one split rather than a rewrite of
-// thirty call sites - and a text naming no class of ours is returned exactly as
-// it was, a thrown string.
+// message text, so the whole routing is this one split - and a text naming no
+// class of ours is returned exactly as it was, a thrown string.
 func (rt *jsrt) jsErrFromText(t string) interface{} {
 	for _, n := range jsErrNames {
 		pre := n + ": "
@@ -2534,7 +2484,7 @@ func (rt *jsrt) jsErrFromText(t string) interface{} {
 }
 
 // ============================================================================
-// Async generators (docs/todo.md 1.7)
+// Async generators
 //
 // An async generator body yields TWO kinds of thing on ONE suspension channel:
 // its awaits and its yields. They are told apart by a MARKER RECORD on the
@@ -2559,10 +2509,9 @@ func (rt *jsrt) jsErrFromText(t string) interface{} {
 // through js_jsawaitv, which raises when it sees one - the same record and the
 // same unpacker an await's rejected operand already used. Nothing is kept across
 // a suspension: the record travels ON the resume, so it is per-coroutine by
-// construction (the constraint docs/todo.md 2.1 was reverted for).
-// A throw before the body has ever run does NOT start it (st.started), which is
-// node's suspendedStart rule, and one that reaches a `yield*` raises at the
-// yield* rather than being forwarded to the delegate's throw().
+// construction. A throw before the body has ever run does NOT start it
+// (st.started), which is node's suspendedStart rule; one that reaches a `yield*`
+// is forwarded to the delegate's throw() by the emitted yield* loop.
 
 type agRequest struct {
 	kind int // 0 next, 1 return, 2 throw
