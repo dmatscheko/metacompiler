@@ -1,12 +1,8 @@
-// kotlin-rt.metajs -- KOTLIN'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the EIGHTH language after the Lua pilot,
-// PHP, Swift, Java, C#, Dart and Go - and the largest of the set.
+// kotlin-rt.metajs -- KOTLIN'S OWN SEMANTICS, in MetaJS (layer 2).
 //
-// languages/kotlin-to-llvm-ir.abnf emits handle IR that calls 96 js_* externs
-// over every tests/kotlin-test-*.kt (95 before the scope probes below were
-// lowered, which added js_scope_typeof). 35 of them are generic primitives
-// languages/lib/runtime.c already provides (the C floor, layer 1). The other 61
-// are here.
+// languages/kotlin-to-llvm-ir.abnf emits handle IR that calls js_* externs; the
+// generic ones come from languages/lib/runtime.c (the C floor, layer 1), the
+// Kotlin-specific ones are here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/kotlin-rt.metajs -q -rt-lib
@@ -14,119 +10,67 @@
 // languages/lib/kotlin-rt.ll that kotlin-to-llvm-ir.abnf links next to
 // runtime.ll. -rt-lib exports every TOP-LEVEL `function js_*` below under its own
 // C symbol, so nothing else in this file is visible to the linker - the helpers
-// are deliberately named kt* / k0* / k1* / k2* / k3* / k4* / k4b* / k5* / k6*,
-// and the shared regular-expression engine keeps its own rx* / RX_* names.
+// are deliberately named kt* (file-wide) and k0* .. k6* (per section), and the
+// shared regular-expression engine keeps its own rx* / RX_* names.
 //
-// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtkotlin.go (5,934 lines - seven
-// times Java's, and the reason Kotlin was scheduled last), abnf/jsrtregexkt.go
-// (623) over abnf/jsrtregex.go, and the shared externs of abnf/jsrt.go
-// (js_mcall, js_is_type, js_jadd, js_jband, js_char, js_char_code, js_kindex,
-// js_supercall, js_this, js_pyrest, js_defprop). This file matches them function
-// for function; where it CANNOT, the site says so in full.
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtkotlin.go, abnf/jsrtregexkt.go over
+// abnf/jsrtregex.go, the shared externs of abnf/jsrt.go, and the gi* layer of
+// abnf/jsrtint.go. This file matches them function for function and names the Go
+// function each one ports; where it CANNOT, the site says so.
 //
-// THERE IS NO kotlinc AND NO kotlin ON THIS MACHINE - `command -v kotlinc
-// kotlin` is empty, /opt/homebrew/bin/kotlin* and /usr/local/bin/kotlin* do not
-// exist. So, exactly as C# and Dart recorded of themselves, every rule here is
-// CITED from the Go twin rather than executed against a real toolchain, and the
-// only ground truth is byte-identity between llvm.Run (which uses the Go twin)
-// and the native binary (which uses this file).
+// There is no kotlinc on this machine, so every rule here is CITED from the Go
+// twin, and the ground truth is byte-identity between llvm.Run (which uses the Go
+// twin) and the native binary (which uses this file).
 //
 // ----- the value model (abnf/jsrtkotlin.go) ---------------------------------
 //
 //     null / undefined      Kotlin null. kotlin.Unit renders "kotlin.Unit".
 //     boolean               Boolean
-//     a PLAIN NUMBER        an Int whose value is exact in a double
-//     a tag 13 box          a sized integer: Byte/Short/Int/Long, w = 8/16/32/64
-//     a tag 14 box          Double / Float
-//     a {__char} object     Char. The Go twin has a real jsChar TYPE; layer 2
-//                           cannot make a primitive, so this is the object box
-//                           languages/kotlin-interpreter.abnf already uses.
-//     a string              String
-//     an array              List / MutableList / Array
-//     a {__dict} object     Map: parallel keys/vals arrays, insertion ordered
-//     a {__set} object      Set
-//     an {__isclass} object a class descriptor (__name, __super, the methods)
-//     any other object      an instance; its descriptor is __class
-//
-// ----- the si_norm question: KOTLIN IS DART'S ANSWER, NOT JAVA'S -------------
-//
-// Java's `long` must NOT unbox, so java-rt.metajs carries a 64 bit box marked
-// UNSIGNED and reimplements six operators (~90 lines), and C# showed that
-// sintRaw removes both the lines and the second-order hazard. Kotlin needs
-// NEITHER, because abnf/jsrtkotlin.go's ktNorm IS giNorm: a Long whose value is
-// exact in a double is a plain number and anything else is a w=64 SIGNED cell.
-// So every integer operation below is a plain sintOp / sintCmp / sintStr /
-// sintNum / sintConv call, there is no jl* layer and no sintRaw.
-//
-// That also settles the hazard the Java audit named specifically for Kotlin -
-// "kotlin calls js_jflo directly with no js_jvnum equivalent and re-inherits the
-// already-diagnosed bug". Go corrected the reading of that table: the hazard
-// needs a language that carries a SIGNED value in an UNSIGNED-MARKED cell.
-// Kotlin never marks a cell unsigned, so `to_number` of a tag 13 cell IS the
-// signed reading and js_jflo needs no wrapper. Checked, not assumed.
-//
-// ----- what Kotlin did NOT need, checked rather than assumed ------------------
-//
-//  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
-//     on core.truthyExt, so that extern must answer a RAW INTEGER - and a shim
-//     handing back a boolean HANDLE gives 2 for false, which is != 0, so every
-//     condition in the program would be taken, silently. `grep -n truthyExt
-//     languages/kotlin-to-llvm-ir.abnf` is EMPTY, so Kotlin keeps compile-core's
-//     default "js_truthy", which is the C FLOOR'S OWN function and already
-//     answers the raw 1/0. The tally over seven ported languages is now: lua and
-//     php need it; swift, java, csharp, dart, go and kotlin do not.
-//  2. NO coroutine primitive. `grep -c 'js_genfn\|js_yield'
-//     languages/kotlin-to-llvm-ir.abnf` is 0 - Kotlin's suspend functions are
-//     lowered by the emitter into ordinary calls (see ktCoroRun) - so WALL 1 of
-//     part 3 does not touch this language, and the tag-16 typeof divergence
-//     cannot bite it either.
-//  3. `_raw` PARAMETERS: one, js_char's code point, which the emitter writes
-//     with a bare handle(k). Same as java, csharp and go.
-// kotlin-rt.metajs -- SECTION 0, THE FOUNDATION.
-//
-// The shapes, the readings, equality, hashing, the map/set/pair/entry handles,
-// the closure-call helpers, the exception hierarchy and the descriptor walks.
-// Everything every other section stands on. Section 0 defines NO `function js_*`
-// at all: it is helpers only.
-//
-// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtkotlin.go (plus the dictParts /
-// strictEq / isCallable block of abnf/jsrt.go and the gi* layer of
-// abnf/jsrtint.go). Every function below names the Go function it ports.
-//
-// ----- what this section deliberately does NOT port -------------------------
-//
-// * ktWithRecv's SCOPE half. The Go twin rebinds the closure's `this` in a fresh
-//   jsScope; a scope is the floor's private storage and layer 2 cannot open one
-//   (see "What layer 2 does NOT write" in the contract). The ktRecvStack half -
-//   which is what makes an unqualified member resolve inside with/run/apply - is
-//   here in full; the `this` binding is the EMITTER's job.
-// * ktWithRecv's `defer` pop. MetaJS has no try/finally, so a throw out of the
-//   lambda leaves the receiver on the stack. The Go twin pops it.
-// * ktRefEq's side table, in ktEqVals only. js_kteq / js_ktne DO consult ktRefEq
-//   before ktStructEq, as the Go twin does; ktEqVals - the element-wise helper -
-//   still does not, which is the Go twin's shape too (ktEqVals has no ref arm).
-// * ktMemberCall in ktKeyLess. The Go twin routes `compareTo` through the whole
-//   js_ktsmcall hub; here the declared member is found on the descriptor chain
-//   and called directly, which is what the hub does for a class instance.
-//
-// ----- the value model (the contract's, matching abnf/jsrtkotlin.go) --------
-//
-//     null / undefined      Kotlin null
-//     boolean               Boolean
 //     PLAIN NUMBER          an Int exact in a double
-//     tag 13 box            a sized integer, w = 8/16/32/64, SIGNED for Long -
-//                           so the floor's si_norm unboxes a small Long, which
-//                           is the Dart answer the contract chose. sintOp /
-//                           sintCmp / sintStr / sintNum apply directly.
+//     tag 13 box            a sized integer: Byte/Short/Int/Long, w = 8/16/32/64.
+//                           Only a signed 32 bit value is a plain number; every
+//                           other width, a Long included, stays a box (ktNorm).
 //     tag 14 box            Double / Float (floIs / floNum / floStyle / floOp)
-//     {__char: code}        Char - the box languages/kotlin-interpreter.abnf and
-//                           languages/kotlin-to-llvm-ir.abnf already agree on
+//     {__char: code}        Char. The Go twin has a real jsChar TYPE; layer 2
+//                           cannot make a primitive, so this is the object box
+//                           both Kotlin grammars use.
 //     string                String
 //     array                 List / MutableList / Array
 //     {__dict, keys, vals}  Map (the shared handle of dictParts, abnf/jsrt.go)
 //     {__set, keys}         Set (ktMakeSet: the map handle WITHOUT vals)
 //     {__isclass, __name, __super, ...}   a class descriptor
 //     any other object      an instance; its descriptor is __class
+//
+// Kotlin never marks a 64 bit cell unsigned-for-signed (Java's trick), so
+// `to_number` of a tag 13 cell IS the signed reading and js_jflo needs no wrapper.
+//
+// What Kotlin does NOT need:
+//  1. NO `__raw` truthy shim: kotlin-to-llvm-ir.abnf sets no core.truthyExt, so it
+//     keeps compile-core's default "js_truthy", the C floor's function, which
+//     answers the raw 1/0 that `icmp ne <call>, 0` requires.
+//  2. NO coroutine primitive: suspend functions are lowered by the emitter into
+//     ordinary calls (see ktCoroRun).
+//  3. `_raw` PARAMETERS: one, js_char's code point, which the emitter writes
+//     with a bare handle(k).
+//
+// ----- SECTION 0, THE FOUNDATION -------------------------------------------
+//
+// The shapes, the readings, equality, hashing, the map/set/pair/entry handles,
+// the closure-call helpers, the exception hierarchy and the descriptor walks.
+// Section 0 defines NO `function js_*` at all: it is helpers only.
+//
+// What this section deliberately does NOT port:
+// * ktWithRecv's SCOPE half. The Go twin rebinds the closure's `this` in a fresh
+//   jsScope; a scope is the floor's private storage and layer 2 cannot open one.
+//   The ktRecvStack half - which is what makes an unqualified member resolve
+//   inside with/run/apply - is here in full; the `this` binding is the EMITTER's job.
+// * ktWithRecv's `defer` pop. MetaJS has no try/finally, so a throw out of the
+//   lambda leaves the receiver on the stack. The Go twin pops it.
+// * ktRefEq's side table in ktEqVals (the Go twin's ktEqVals has no ref arm
+//   either); js_kteq / js_ktne do consult it.
+// * ktMemberCall in ktKeyLess. The Go twin routes `compareTo` through the whole
+//   js_ktsmcall hub; here the declared member is found on the descriptor chain
+//   and called directly, which is what the hub does for a class instance.
 //
 // MetaJS rules that shape the code (docs/abnf-dialect-gotchas.md): no ASI, so
 // every `return` carries its value on the same line and a value-less early
@@ -135,9 +79,8 @@
 // split/join/lastIndexOf, array.length is not assignable, indexOf ignores its
 // from-index, no exponent literals; unary minus is `-x`, never `0 - x`.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below. Same mechanism SECTION 5 uses for `import "./regex.js"`.
+// The shared layer-2 runtime: the externs every language implements identically,
+// parameterised by the rtk* hooks below.
 import "./runtime.metajs"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
@@ -188,30 +131,14 @@ function ktIsStr(v) { return typeof v == "string" }
 // isCallable (abnf/jsrt.go 1695).
 function ktIsFn(v) { return typeof v == "function" }
 
-// isUndefOrNull (abnf/jsrt.go 1156). SECTION 4's k4Nullish was a byte-identical
-// second copy and was deleted on 2026-08-10 (docs/todo.md 5.1): 15 call sites
-// here, 25 there, all of them already calls, so the merge removes a top-level
-// declaration and changes no call site's cost. kt* is this file's FILE-WIDE
-// helper prefix (see the head); k0*..k6* are the per-section ones, and a body
-// two sections share belongs under kt*.
+// isUndefOrNull (abnf/jsrt.go). kt* is this file's FILE-WIDE helper prefix;
+// k0*..k6* are the per-section ones, and a body two sections share belongs under kt*.
 function ktIsNullish(v) {
     if (v === undefined) { return true }
     return v === null
 }
 
-// argAt(args, i): the i'th argument, or undefined past the end. WAS k1Arg,
-// k2Arg and k3Arg - three byte-identical copies, 6 + 26 + 22 call sites, merged
-// 2026-08-10 (docs/todo.md 5.1) for the same reason and with the same
-// non-effect on the call sites.
-//
-// MEASURED, since 54 argAt + 40 nullish + 18 integral sites is exactly the
-// count that made docs/todo.md 5.1 write its warning. tests/bench.sh --paired,
-// 9 layout draws, these three merges alone: kotlin -0.53%, "no difference".
-// Against the pre-fold base over 21 draws: -0.28%, also no difference. An
-// INTRA-FILE merge cannot move a call site's cost - the name resolves in the
-// same pinned scope either way, and the site was already a call. What the
-// warning is about is turning an inline test, or a local call, into a call
-// reached across an import.
+// argAt(args, i): the i'th argument, or undefined past the end.
 function ktArg(args, i) {
     if (i < args.length) { return args[i] }
     return undefined
@@ -219,9 +146,7 @@ function ktArg(args, i) {
 
 // ===================================================== the Char box =========
 //
-// rtCharBox / rtIsCharBox are lib/runtime.metajs's. ktChar was byte-identical to
-// csharp's and java's; ktIsChar was the STRICT spelling of the same predicate and
-// is the one the merged body took.
+// rtCharBox / rtIsCharBox are lib/runtime.metajs's.
 
 function ktChar(code) { return rtCharBox(code) }
 
@@ -249,19 +174,13 @@ function k0Chars(s) {
 // one - Kotlin's Char has code arithmetic - and a Double is NOT. Both a sized
 // integer (tag 13) and a boxed double (tag 14) answer `typeof v == "number"` in
 // the C floor, which is why the tag 14 test is explicit.
-// SHARED as rtIsIntegral - lib/runtime.metajs. This file had the body TWICE
-// (k4bIsIntegral was the second copy) and runtime-jvm.metajs already exported it
-// as rtjIsIntegral for csharp and java: THREE bodies, and the only apparent
-// difference was ktIsChar against rtIsCharBox, which is what ktIsChar IS.
+// The body is shared as rtIsIntegral (lib/runtime.metajs).
 function ktIsInt(v) { return rtIsIntegral(v) }
 
 // ktIsIntegral (jsrtkotlin.go 135) at the OPERAND level: a box, a plain number
 // or a Char - and NOT a boxed double, which must never be truncated into an
-// integer operation. WAS k1Integral and k3Integral, two byte-identical copies
-// (16 and 2 call sites), merged 2026-08-10. Not to be confused with
-// k0IsNumeric just below or k1Numeric in SECTION 1: those admit a Double and
-// are a different predicate, which is why the -min 40 shape group they all fall
-// into is only PARTLY mergeable.
+// integer operation. Not to be confused with k0IsNumeric just below or k1Numeric
+// in SECTION 1: those admit a Double and are a different predicate.
 function ktIntegral(v) {
     if (ktIsChar(v)) { return true }
     return ktIsInt(v)
@@ -298,8 +217,7 @@ function ktNum(v) {
     if (typeof v == "string") { return parseFloat(v) }
     // rt.toNumber's last two arms (abnf/jsrt.go): a NULL is 0, and everything else -
     // undefined (which is how kotlin.Unit arrives), an object, an array, a function -
-    // is NaN. Answering 0 for undefined made `size + f()` of a Unit-returning `f`
-    // print the size where the Go twin prints NaN.
+    // is NaN, so `size + f()` of a Unit-returning `f` is NaN as in the Go twin.
     if (v === null) { return 0 }
     return NaN
 }
@@ -326,29 +244,16 @@ function ktWU(l, r) {
 }
 
 // ktNorm (jsrtkotlin.go 103): truncate to w bits at u's signedness, then apply
-// the invariant - a signed 32 bit result is a PLAIN NUMBER, every other width or
-// signedness is a box.
-//
-// sintConv is giNorm(giVal(x), w, u), so the truncation is the floor's own. The
-// ONE place it differs from the Go twin is the signed 64 bit arm: si_norm unboxes
-// a Long a double holds exactly, where ktNorm keeps the box. That is the Dart
-// answer the contract chose over Java's sintRaw trick, and it is recorded here
-// because it is the reason a small Long and an Int are the same value.
-// THE si_norm QUESTION, AND KOTLIN IS A THIRD ANSWER - not Dart's and not
-// Java's. jsrtkotlin.go:103 says it in code and in its own comment: "It is
-// deliberately not giNorm, which unboxes at 64 bits because a plain number means
-// int64 for Go." A signed 32 bit result is a PLAIN NUMBER and EVERY OTHER width
-// or signedness - INCLUDING a signed Long, at every magnitude - is a box.
+// the invariant - a signed 32 bit result is a PLAIN NUMBER and EVERY OTHER width
+// or signedness, INCLUDING a signed Long at every magnitude, is a box. It is
+// deliberately not giNorm, which unboxes at 64 bits.
 //
 // That matters because ktWU reads the width off the operand BOXES: an unboxed
 // small Long would make `1000000L * 1000000L` a 32 bit multiply and answer
-// -727379968, which is Java's wall met from the other side. So sintConv, which
-// ends in si_norm and unboxes a signed 64 bit value a double holds exactly,
-// cannot be the last step here - sintRaw is. This is C#'s csNorm recipe
-// unchanged (sintHi/sintLo read a plain number exactly, so the re-box is
-// lossless), and it is the FIRST time sintRaw has been needed for a language
-// whose Long is honestly SIGNED: Java needed it for the unsigned-marked trick,
-// Kotlin needs it because its normalisation boundary is 32 bits, not 64.
+// -727379968. So sintConv (which ends in si_norm and unboxes a signed 64 bit
+// value a double holds exactly) cannot be the last step here - sintRaw re-boxes
+// it, losslessly, since sintHi/sintLo read a plain number exactly. C#'s csNorm
+// uses the same recipe.
 function ktNorm(x, w, u) {
     var t = anytype
     t = sintConv(k0IntVal(x), w, u == 1)
@@ -400,8 +305,7 @@ function k0IntLess(l, r) {
 
 // ktDblHash (jsrtkotlin.go 583) is java.lang.Double.hashCode: the 64 bit pattern
 // XOR its own high half, read as an Int. MetaJS has no math.Float64bits, so the
-// bits are derived arithmetically - which is exactly what the twin kDblHash in
-// languages/kotlin-interpreter.abnf does, and this is that code.
+// bits are derived arithmetically; twin of kDblHash in kotlin-interpreter.abnf.
 // doubleToLongBits COLLAPSES every NaN to 0x7ff8000000000000, which is the first
 // constant below.
 function ktDblHash(d) {
@@ -732,11 +636,10 @@ var ktExcHier = undefined
 // builtin throwable - what java.lang.Class#getName answers for it, and therefore
 // what Throwable#toString and the launcher's uncaught-exception line spell.
 // Kotlin's Exception / RuntimeException / IllegalStateException / ... are
-// TYPEALIASES to the java.lang classes on the JVM, so `java` 24.0.2 is the oracle
-// even though there is no kotlinc on this machine. Two of the nineteen live in
-// java.util, and NotImplementedError / UninitializedPropertyAccessException are
-// Kotlin's OWN classes, declared by kotlin-stdlib in the `kotlin` package.
-// The twin is kExcFqcn in languages/kotlin-interpreter.abnf. docs/todo.md 1.2.
+// TYPEALIASES to the java.lang classes on the JVM, so `java` is the oracle. Two of
+// the nineteen live in java.util, and NotImplementedError /
+// UninitializedPropertyAccessException are Kotlin's OWN classes, declared by
+// kotlin-stdlib in the `kotlin` package. Twin: kExcFqcn in kotlin-interpreter.abnf.
 function ktExcFqcn(name) {
     if (name === "NoSuchElementException") { return "java.util." + name }
     if (name === "ConcurrentModificationException") { return "java.util." + name }
@@ -784,12 +687,8 @@ function ktExcHierarchy() {
     h["StackOverflowError"] = k0MkExc("StackOverflowError", h["Error"])
     h["OutOfMemoryError"] = k0MkExc("OutOfMemoryError", h["Error"])
     // NotImplementedError is kotlin-stdlib's own `class NotImplementedError(message:
-    // String = "An operation is not implemented.") : Error(message)`, and it was
-    // MISSING here while ktRaise("NotImplementedError", ...) already raised it, so
-    // `TODO("soon")` built a throwable with an UNDEFINED __class and printed
-    // "[object Object]" where the interpreter half printed
-    // "kotlin.NotImplementedError: An operation is not implemented: soon".
-    // docs/todo.md 2.9.
+    // String = "An operation is not implemented.") : Error(message)`; `TODO("soon")`
+    // raises it through ktRaise.
     h["NotImplementedError"] = k0MkExc("NotImplementedError", h["Error"])
     ktExcHier = h
     return h
@@ -825,33 +724,11 @@ function ktIndexOob(clsName, idx, len) {
     ktRaise(clsName, "Index " + idx + " out of bounds for length " + len)
 }
 
-// PERFORMANCE, MEASURED AND RECORDED RATHER THAN EXPLAINED. docs/todo.md 1.2's
-// three engines' worth of raises cost kotlin's bench row +2.28% median against a
-// 1.85% spread over 9 draws - the one flagged row, and inside the 2.5% tolerance
-// tests/bench.sh sets because the instrument cannot resolve below it. A paired sign
-// test over matched builds says 14 of 16 draws slower, ~+1.6%, which by this
-// project's own standard is evidence. What it is NOT, measured:
-//   * not layer-2 GROWTH: base plus ~800 dead .ll lines is 6/6 appended and 8/4
-//     inserted mid-file - a coin flip either way;
-//   * not the two hot-path arms: removing js_ktfget's __hasncls probe and
-//     js_ktset's bounds check leaves it at 12/12 slower;
-//   * not the four helpers below: base plus these bodies alone is 7/3;
-//   * not a scope-hash collision on the new names: renaming all four is 12/12;
-//   * not executed code that anyone can point at - tests/bench/mod.kt is
-//     `s = s + i % 7` with no member read, no indexed write and no collection call,
-//     its EMITTED MODULE is md5-identical to the base commit's, and MEC_GC_STATS
-//     reports the same 1880 collections and the same heap on both binaries.
-// So it is a layout draw that pairing cannot see through (manual chapter 4), or a
-// mechanism none of the five controls above isolates. Recorded here so nobody
-// re-derives it; the change is kept because it retires four UNCATCHABLE aborts and
-// a live halves divergence.
-//
 // ktIndexSizeOob (jsrtkotlin.go's ktIndexSizeOob) is MutableList.add(index,
 // element)'s message, which is a DIFFERENT format from every other member of the
-// family. Both are java.util.ArrayList's own and both are java 24.0.2's verbatim
-// (measured): get/set/remove go through Objects.checkIndex ("Index 9 out of bounds
-// for length 2") while add goes through rangeCheckForAdd ("Index: 9, Size: 2").
-// Twins: kIndexSizeOob in languages/kotlin-interpreter.abnf. docs/todo.md 1.2.
+// family. Both are java.util.ArrayList's own: get/set/remove go through
+// Objects.checkIndex ("Index 9 out of bounds for length 2") while add goes through
+// rangeCheckForAdd ("Index: 9, Size: 2"). Twins: kIndexSizeOob in kotlin-interpreter.abnf.
 function ktIndexSizeOob(idx, len) {
     ktRaise("IndexOutOfBoundsException", "Index: " + idx + ", Size: " + len)
 }
@@ -859,8 +736,7 @@ function ktIndexSizeOob(idx, len) {
 // ktStrRangeOob (jsrtkotlin.go's ktStrRangeOob) is java.lang.String#substring's
 // out-of-range message, which names a RANGE and not an index: `"ab".substring(5)`
 // is StringIndexOutOfBoundsException "Range [5, 2) out of bounds for length 2"
-// (measured, java 24.0.2). All three engines answered "" for it, because JS
-// substring clamps and swaps its bounds. docs/todo.md 1.2.
+// (java). JS substring would clamp and swap its bounds instead.
 function ktStrRangeOob(from, to, len) {
     ktRaise("StringIndexOutOfBoundsException",
             "Range [" + from + ", " + to + ") out of bounds for length " + len)
@@ -884,7 +760,7 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 // are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
 // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
 // a Sequence and a Map's `values` view are all the SAME host array as a List in this
-// value model - telling them apart is docs/todo.md 2.2's nominal type on the value.
+// value model, and telling them apart needs a nominal type on the value.
 // A range's first()/last() are kotlin.ranges' own overloads and say "Progression
 // 1..0 is empty." instead (_Ranges.kt).
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
@@ -913,23 +789,18 @@ function ktRedWord(kind, fromRight) {
 
 // ktArrMiss (jsrtkotlin.go's ktArrMiss) is js_ktindex's COLD arm: the indexed
 // read of an array answered undefined, which is either an out-of-range index -
-// Kotlin throws, where this used to answer undefined and print "kotlin.Unit" -
-// or an element that really holds undefined, which is handed straight back. The
-// JVM's class depends on the List implementation behind the interface -
-// Arrays$ArrayList (what `listOf` and `arrayOf` both produce here) raises
-// ArrayIndexOutOfBoundsException, a plain ArrayList raises
+// Kotlin throws - or an element that really holds undefined, which is handed
+// straight back. The JVM's class depends on the List implementation behind the
+// interface - Arrays$ArrayList (what `listOf` and `arrayOf` both produce here)
+// raises ArrayIndexOutOfBoundsException, a plain ArrayList raises
 // IndexOutOfBoundsException - and this value model has ONE array type for all of
 // them, so the common SUPERTYPE is the only answer right for every receiver.
-// `catch (e: IndexOutOfBoundsException)` catches the JVM's too. docs/todo.md 2.9.
 function ktArrMiss(o, k) {
     // THE EXACT ARRAY TEST LIVES HERE, not on the fast path, and this is what makes
     // the fast path's cheap `typeof o["length"] == "number"` probe safe: a CLASS
-    // INSTANCE can carry a numeric `length` field of its own, and with the test only
-    // on the fast path `class Len(val length: Int)` indexed at 9 threw in the NATIVE
-    // leg while both other legs answered kotlin.Unit - a divergence this change
-    // would have introduced, caught by a native -exe probe and by nothing else
-    // (manual chapter 3). Array.isArray is the same predicate the interpreter half's
-    // kIndex uses and the same one the Go twin's *jsArray assertion is.
+    // INSTANCE can carry a numeric `length` field of its own (`class Len(val
+    // length: Int)`), and is not an array. Array.isArray is the same predicate the
+    // interpreter half's kIndex uses and the Go twin's *jsArray assertion is.
     if (!Array.isArray(o)) { return undefined }
     var ai = k4Int(k)
     var n = o["length"]
@@ -968,23 +839,20 @@ function ktIsF32(v) { return floStyle(v) === 3 }
 // java.lang.Float.equals / java.lang.Double.equals, and Float.equals(Double) is
 // FALSE by specification - java.lang.Float#equals answers true only "if the
 // argument is not null and is a Float object" - so `setOf(1.5f, 1.5)` has TWO
-// elements on the JVM (java 24.0.2 confirms it; Kotlin/JVM's Float IS
-// java.lang.Float, which is the same argument e5e68b5 and 30cd9f6 settled the
-// rounding and the hash with). 30cd9f6 already made the two widths HASH apart, so
-// this is the half of the same contract that equality owes the hash.
+// elements on the JVM (Kotlin/JVM's Float IS java.lang.Float). The two widths
+// also HASH apart (ktFloHash); this is the half of that contract equality owes.
 //
 // It is deliberately NOT in the floor's strict_eq / rt.strictEq. That primitive
 // is shared with java, csharp, go and dart, its tag 13/14 arms are the numeric
 // promotion `==` needs (docs/working-on-this-project.md 7.9), and `<`, `>` and a
 // well-typed program's primitive `==` still reach k1JvmArith / ktCmp, which never
-// come through here. The fix is Kotlin's LANGUAGE layer, exactly as java's
-// rtjStrictEq promotes in lib/runtime-jvm.metajs and leaves floEq alone.
+// come through here. java's rtjStrictEq (lib/runtime-jvm.metajs) is the same
+// pattern: the language layer promotes and floEq stays alone.
 //
 // KT_MISS when either side is not a box: the caller keeps its own fallback, so a
 // box against a plain number or a sized integer is untouched. That pairing is a
 // compile error in Kotlin (`1.5f == 1.5` and `1.0 == 1` are both rejected by
-// kotlinc), so narrowing it would move only unreachable answers while risking the
-// reachable ones.
+// kotlinc), so narrowing it would move only unreachable answers.
 function ktFloEq(a, b) {
     if (!floIs(a)) { return KT_MISS }
     if (!floIs(b)) { return KT_MISS }
@@ -1017,7 +885,7 @@ function ktEqVals(a, b) {
         if (ktIsChar(b)) { return a["__char"] === b["__char"] }
     }
     // Two tag 14 boxes: ktFloEq, which is width-aware - a Float is not a Double
-    // key. KT_MISS keeps the old fallback for a box against anything else.
+    // key. KT_MISS keeps the fallback for a box against anything else.
     var fe = anytype
     fe = ktFloEq(a, b)
     if (!ktMiss(fe)) { return fe }
@@ -1121,9 +989,8 @@ function ktStructEq(a, b) {
 // ===================================================== ordering =============
 
 // ktKeyLess (jsrtkotlin.go 4567): the "<" the sort and the comparators use.
-// A user Comparable answers through its own compareTo - without that arm every
-// element compared as NaN, no pair was ever "less", and the list came back in its
-// original order, silently.
+// A user Comparable answers through its own compareTo; without that arm every
+// element would compare as NaN and sorting would silently be a no-op.
 function ktKeyLess(a, b) {
     if (typeof a == "string") {
         if (typeof b == "string") { return a < b }
@@ -1273,60 +1140,20 @@ function ktElemHash(v) {
 //
 // The authoritative specification is abnf/jsrtkotlin.go (the function each one
 // ports is named at its head) plus the two neutral externs Kotlin's emitter
-// reaches from abnf/jsrt.go (js_jadd 5151, js_jband 5170). Every helper here is
-// prefixed k1; the SHARED CONTRACT names (ktNorm, ktWU, ktNum, ktIsInt,
-// ktIsChar, ktChar, ktCharCode, ktRaise, ktThrowArith, ktStructEq, ktIdent,
-// ktCmpVals, ktClsFind, ktClassChainHas, ktClassOf, ktCall2, ktIsObj/Arr/Fn,
-// ktIsSet, rtIsDictObj, ktMiss/KT_MISS) are defined by section 0 and only CALLED.
-// ktRender is section 2's; ktSeqMethod / ktSetMethod / ktMapMethod are
-// section 3's. This section OWNS ktNumMethod.
+// reaches from abnf/jsrt.go (js_jadd, js_jband). Every helper here is prefixed
+// k1; the shared names (ktNorm, ktWU, ktNum, ktIsInt, ktRaise, ktStructEq, ...)
+// are section 0's and only CALLED here. ktRender is section 2's; ktSeqMethod /
+// ktSetMethod / ktMapMethod are section 3's. This section OWNS ktNumMethod.
 //
-// It USED to own ktAdoptTy, ktFieldTy, ktFormat, ktParseNum and ktFixed as well,
-// and those five bodies were DELETED (docs/runtime-merge-plan.md part A, the
-// reachability sweep): each had a second, LIVE implementation elsewhere in this
-// file - k4bAdoptTy, k4bFieldTy, k2Format, k2ParseNum, k2Fixed - and no js_*
-// extern of this file could reach the copies here. The Go originals they name
-// are still in abnf/jsrtkotlin.go; only the dead second reading is gone.
+// Kotlin's Long is SIGNED, so no jl*-style workaround layer is owed: plain sintOp /
+// sintCmp / sintStr / sintNum / sintConv give the right answers on a signed 64 bit
+// box, and this section calls them directly. Every result goes through section
+// 0's ktNorm, which is where the boxed-Long decision lives (see there). The two
+// places that need an exact 64 bit CONSTANT (Long.MIN_VALUE / MAX_VALUE, for the
+// saturating float narrowing) build it with the tag's own shift.
 //
-// ----- THE REPRESENTATION QUESTION, checked against ktNorm ------------------
-//
-// The brief said "Kotlin is Dart's answer to si_norm: giNorm IS its
-// normalisation". THAT IS ONLY HALF TRUE, and jsrtkotlin.go:103 says so at the
-// function itself: ktNorm is DELIBERATELY NOT giNorm -
-//
-//     x = giTrunc(x, w, u)
-//     if w == 32 && !u { return float64(int32(x)) }     // a plain number
-//     return jsGInt{v: x, w: w, u: u}                   // EVERYTHING else
-//
-// so an INT unboxes and a LONG never does, where giNorm (= the floor's si_norm,
-// which every sint* builtin applies) unboxes at w == 64 && !u instead. The two
-// invariants are not the same one, and the difference is observable: ktWU reads
-// the WIDTH off the operand boxes, so an unboxed Long would make
-// `1000000L * 1000000L` a 32 bit multiply - Java's wall, not Dart's floor.
-//
-// What IS true, and is the useful half of the claim: Kotlin's Long is SIGNED,
-// so no jl*-style workaround layer is owed. Plain sintOp / sintCmp / sintStr /
-// sintNum / sintConv give the right answers on a signed 64 bit box, and this
-// section calls them directly. The one thing that needs care is the
-// CONSTRUCTOR, and this section never constructs a Kotlin value itself: every
-// result goes through ktNorm, which is section 0's, so section 0 is where the
-// boxed-Long decision lives (`sintRaw(hi, lo, 64, 0)` is the constructor it
-// needs; sintConv would unbox and break the widths).
-//
-// Nothing below depends on which way section 0 spells it. The two places that
-// need an exact 64 bit CONSTANT (Long.MIN_VALUE / MAX_VALUE, for the saturating
-// float narrowing) build it with the tag's own shift instead of sintRaw, so
-// this file is independent of that choice as well.
-//
-// ----- NOT PORTED, and why -------------------------------------------------
-//
-// * (WAS: ktRefEq, the first arm of js_kteq / js_ktne, whose ktRefOf /
-//   ktIsClassLit boxes belong to the `::` section. It is PORTED now - js_kteq /
-//   js_ktne call the ktRefEq the reference section owns, in front of the
-//   ktStructEq arm, which is what makes `b::v == b::v` true.)
-// * ktTypeObj (437's neighbour, 373-437) is the companion-constant table, a
-//   GLOBALS concern rather than an operator, and ktSumOf (4448) is listed as
-//   section 3's. Neither is here.
+// Not here: ktTypeObj (the companion-constant table, a GLOBALS concern) and
+// ktSumOf (section 3's).
 // ===========================================================================
 
 // ----- operand readers ------------------------------------------------------
@@ -1635,14 +1462,6 @@ function k1NumLess(l, r) {
     return ktNum(l) < ktNum(r)
 }
 
-// THE DOUBLE HASH LIVED HERE TWICE. k1DblHash was a second, byte-for-byte
-// reading of section 0's ktDblHash whose only caller was ktNumMethod's hashCode
-// arm below, and the float WIDTH would have made it a second reading of the
-// binary32 extraction as well - two ~40-line bit derivations kept in step by
-// hand, for no reachable gain. It is DELETED and the one call site now asks
-// section 0's ktFloHash, which is a ktXxx shared-contract name exactly as
-// ktElemHash (called from sections 3 and 4) already is. Same sweep, same reason,
-// as the five bodies this section's header records losing.
 // ----- ktNumMethod, OWNED by this section ----------------------------------
 
 // jsrtkotlin.go ktNumMethod (485): the member-function surface of Kotlin's
@@ -1787,9 +1606,8 @@ function js_ktcmp(op, l, r) {
     if (ktIntegral(l) && ktIntegral(r) && !floIs(l) && !floIs(r)) { return k1Cmp(op, l, r) }
     // A Float operand promotes the other side to Float too, so
     // `16777217 < 16777216f` is false - Int.compareTo(Float) compiles to a JVM
-    // float comparison. THE INTEGRAL FAST PATH ABOVE STAYS FIRST: `i < 40000` is
-    // the whole of tests/bench/mod.kt's loop condition, and asking the float
-    // question ahead of it cost java +5.32% when 8f43e84 tried that shape.
+    // float comparison. The integral fast path above stays FIRST on purpose: a
+    // float test ahead of it is measurably slower on hot loop conditions.
     if (k1FloPromotes(l, r)) { return k1F32Rel(op, rtF32Round(ktNum(l)), rtF32Round(ktNum(r))) }
     if (ktIsObj(l)) {
         if (ktClassChainHas(l, "compareTo")) {
@@ -1945,8 +1763,7 @@ function js_ktadopt(v, bits, uns) {
 }
 
 // jsrtkotlin.go js_ktadoptf (841). The float half of the same rule: `val d:
-// Double = 1` takes the expected type, and without this the value stayed an Int
-// and printed "1" where Kotlin prints "1.0".
+// Double = 1` takes the expected type and prints "1.0".
 function js_ktadoptf(v) {
     if (!ktIntegral(v)) { return v }
     return flo(ktNum(v), 0)
@@ -2009,35 +1826,21 @@ function js_ktstep(v, delta) {
 
 // ----- the two neutral ones Kotlin's emitter reaches ------------------------
 
-// abnf/jsrt.go js_jadd (5151). Java/C# +: string concat, 32 bit add for two int
-// values, float add otherwise. The STRING rendering is jsrt.go's javaString, not
-// Kotlin's own printer - the completed shape java-rt.metajs, swift-rt.metajs and
-// dart-rt.metajs all carry.
-// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
+// abnf/jsrt.go js_jadd: shared in lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
 // abnf/jsrt.go js_jband (5170). Java & | ^: the non-short-circuit boolean
 // operator when both sides are booleans, the int32 bit operation otherwise.
 //
-// DUPLICATED, DELIBERATELY, with java-rt.metajs's js_jband, and the difference
-// list is ONE item that NOTHING CAN REACH. The bodies differ only in the int32
-// coercion (jvI here, k1I32 there - two integer models, one per value model),
-// and NEITHER EMITTER EVER PRODUCES A CALL THAT REACHES IT: `&` lowers to
-// js_jvarith / js_ktarith (java-to-llvm-ir.abnf:2606, kotlin-to-llvm-ir.abnf:4098)
-// and the ONLY js_jband either grammar emits is the boolean fold of a structural
-// equality (java:3934, kotlin:6682), which returns from the arm above.
+// DUPLICATED, DELIBERATELY, with java-rt.metajs's js_jband. The bodies differ only
+// in the int32 coercion (k1I32 here, jvI there), and no emitter produces a call
+// that reaches that arm: `&` lowers to js_jvarith / js_ktarith, and the only
+// js_jband either grammar emits is the boolean fold of a structural equality,
+// which returns from the boolean arm. A shared home would need another rtk* hook
+// in every importer for a coercion that is dead in both callers.
 //
-// So the four lines are shared in every sense but the text, and merging them
-// still costs more than they are worth: kotlin does not import
-// lib/runtime-jvm.metajs (it has neither rtjkCmp nor rtjkFloOperand and wants
-// none of that file's six bodies), and a home in lib/runtime.metajs would need an
-// ELEVENTH rtk* hook declared in all ten importers to carry a coercion that is
-// dead in both callers. Re-judged in the fifth pass, after the declaration tax
-// was measured at zero, and declined on the plumbing rather than on the tax.
-//
-// NOTE FOR WHEN THE ARM WAKES UP: the Go twin (abnf/jsrt.go:5781) has ONE
-// js_jband for both languages and coerces with rt.toInt32 for both. If an
-// emitter ever routes a non-boolean here, THAT is where java and kotlin will
-// disagree with their own twin - and they will disagree in two directions.
+// If an emitter ever routes a non-boolean here: the Go twin (abnf/jsrt.go) has
+// ONE js_jband for both languages and coerces with rt.toInt32, so that is where
+// java and kotlin would disagree with their own twin.
 function js_jband(l, r) {
     if (typeof l == "boolean") {
         if (typeof r == "boolean") { return l && r }
@@ -2069,18 +1872,15 @@ function js_jband(l, r) {
 // NOT PORTED HERE, deliberately:
 //
 //   * js_str_mem. It is a POINTER-and-length read of the module's own constant
-//     memory, which layer 2 has no access to; languages/lib/runtime.c already
-//     carries it (str_intern, runtime.c:4482) and the Go half registers it in
-//     abnf/jsrt.go:4863. Nothing to do.
+//     memory, which layer 2 has no access to; languages/lib/runtime.c carries it
+//     (str_intern) and the Go half registers it in abnf/jsrt.go.
 //
-//   * The String members that take a REGEX. jsrtkotlin.go:1290 shows the rule:
-//     js_ktsmcall calls ktStrMethod even when args[0] is a Regex and then
-//     DISCARDS the answer (`if v, handled := ...; handled && !pat`), so the
-//     Regex dispatcher gets the call. The arms are therefore ported faithfully
-//     below (replace / replaceFirst / split / contains / matches all answer for
-//     a STRING argument), and the HUB in section 4a must carry the `!pat` guard
-//     - `ktRxIsRegex(args[0])` - in front of the ktStrMethod result exactly as
-//     the Go twin does. Section 5 owns ktRxMethod.
+//   * The String members that take a REGEX. js_ktsmcall (jsrtkotlin.go) calls
+//     ktStrMethod even when args[0] is a Regex and then DISCARDS the answer
+//     (`if v, handled := ...; handled && !pat`), so the Regex dispatcher gets the
+//     call. The arms below answer for a STRING argument, and the HUB in section
+//     4a carries the `!pat` guard - `ktRxIsRegex(args[0])` - exactly as the Go
+//     twin does. Section 5 owns ktRxMethod.
 //
 // Private helpers are prefixed k2 and are invisible to the linker: only a
 // top-level `function js_*` is exported by -rt-lib.
@@ -2156,15 +1956,14 @@ function k2Render(v, depth) {
 // this file's spelling of the Go twin's (·, false).
 function k2Obj(o, depth) {
     // A PROGRESSION prints its BOUNDS - "1..5", "10 downTo 1 step 1",
-    // "1..9 step 4" - which is IntRange.toString / IntProgression.toString. It
-    // printed the materialized element list before, in every engine.
+    // "1..9 step 4" - which is IntRange.toString / IntProgression.toString.
     if (o["__range"] === true) { return ktRangeStr(o) }
     // A KClass. java.lang.Class.toString() is "class Box" too, which is why
     // .java answers the same handle. The twin is the __kclass arm of kstr.
     if (o["__kclass"] === true) { return "class " + k2Render(o["kname"], depth + 1) }
     // A Regex renders as its pattern and a MatchResult as the matched text,
     // which is what their toString answers (abnf/jsrtregexkt.go); neither
-    // carries a __class, so without this they fell through to "[object Object]".
+    // carries a __class.
     if (ktRxIsRegex(o) || ktRxIsMatch(o)) {
         var rv = ktRxMethod(o, "toString", [])
         if (!ktMiss(rv)) { return k2Render(rv, depth + 1) }
@@ -2194,9 +1993,8 @@ function k2Obj(o, depth) {
         return k2Render(o["key"], depth + 1) + "=" + k2Render(o["value"], depth + 1)
     }
     // An IndexedValue is a DATA class, so its toString is the generated one:
-    // "IndexedValue(index=0, value=10)", not the Pair "(0, 10)" every engine
-    // printed. The first/second slots stay on the value so destructuring is
-    // unchanged; only the render moved.
+    // "IndexedValue(index=0, value=10)", not the Pair "(0, 10)". The first/second
+    // slots stay on the value so destructuring works.
     if (o["__ktiv"] === true) {
         return "IndexedValue(index=" + k2Render(o["index"], depth + 1) +
                ", value=" + k2Render(o["value"], depth + 1) + ")"
@@ -2230,14 +2028,12 @@ function k2Obj(o, depth) {
         if (typeof en == "string") { return en }
     }
     // java.lang.Throwable#toString, which Kotlin inherits: the BINARY class name
-    // and, only when `message` is non-null, ": " and the message. Measured,
-    // java 24.0.2 - println(RuntimeException("x")) is
-    // "java.lang.RuntimeException: x", not the Object default below, which all
-    // three engines answered ("RuntimeException@1") and all three had wrong. This
-    // is also what an explicit `e.toString()` reaches (the no-argument toString arm
+    // and, only when `message` is non-null, ": " and the message -
+    // println(RuntimeException("x")) is "java.lang.RuntimeException: x". This is
+    // also what an explicit `e.toString()` reaches (the no-argument toString arm
     // of js_ktsmcall routes to ktRender). It sits AFTER the descriptor walk, so an
     // `override fun toString()` and a data class' generated one still win, exactly
-    // as in Kotlin. docs/todo.md 1.2.
+    // as in Kotlin.
     if (k4bIsThrowLike(o)) { return ktThrowableStr(o) }
     var name = cls["__name"]
     if (typeof name != "string") { return undefined }
@@ -2261,8 +2057,7 @@ function ktClassBin(cls) {
 // ktThrowableStr (jsrtkotlin.go's ktThrowableStr) is java.lang.Throwable#toString:
 // the binary class name and, only when `message` is non-null, ": " and the
 // message. An EMPTY message still prints the colon and the space; a null one
-// prints neither (measured, java 24.0.2). The twin in the other half is
-// kThrowableStr in languages/kotlin-interpreter.abnf.
+// prints neither (java). Twin: kThrowableStr in kotlin-interpreter.abnf.
 function ktThrowableStr(o) {
     var cls = o["__class"]
     var name = "java.lang.Throwable"
@@ -2274,12 +2069,10 @@ function ktThrowableStr(o) {
 }
 
 // k4bIsThrowLike (jsrtkotlin.go's ktIsThrowLike) is "does Throwable#toString apply
-// to this value" - the RENDERING question. It used to be a __kthrow MARKER or the
-// chain walk, because this half emitted no descriptor for a builtin throwable and
-// so could not link `class Top : Exception("t")` to one. emitSuperLinks links it
-// through js_ktexccls now (docs/todo.md 2.9) and the marker was RETIRED: every
-// emitCtor call site is immediately preceded by an emitSuperLinks over the same
-// supertype list, so the link strictly covers everything the marker covered.
+// to this value" - the RENDERING question, a walk of the descriptor chain.
+// emitSuperLinks links a class like `class Top : Exception("t")` to the builtin
+// descriptor through js_ktexccls, and every emitCtor call site is preceded by an
+// emitSuperLinks over the same supertype list.
 function k4bIsThrowLike(v) {
     if (!ktIsObj(v)) { return false }
     return k4bIsThrowable(v)
@@ -2287,14 +2080,8 @@ function k4bIsThrowLike(v) {
 
 // THE JVM LAUNCHER'S UNCAUGHT-EXCEPTION LINE, and the top of the program.
 //
-// Without it the exception left the module and the floor's uncaught-throw handler
-// printed "js runtime error: uncaught exception: abort probe" - the bare message,
-// no class name - while the interpreter half printed its own engine-error wording
-// ON STDOUT. All three engines AGREED and all three were wrong, the one defect
-// class byte identity cannot see (manual chapter 5).
-//
-// Kotlin compiles to the JVM and its throwables ARE java.lang's, so java 24.0.2
-// settles the format (measured, stderr, exit status 1):
+// Kotlin compiles to the JVM and its throwables ARE java.lang's, so java settles
+// the format (stderr, exit status 1):
 //
 //     Exception in thread "main" java.lang.RuntimeException: abort probe
 //     Exception in thread "main" java.lang.Exception            <- message == null
@@ -2368,28 +2155,17 @@ function k2FindMember(o, name) {
 // no-argument one (which writes just the line terminator), so this is either ""
 // or the one rendered argument.
 //
-// MetaJS HAS NO `arguments` object (the finding recorded at js_rsymproc in
-// languages/lib/ruby-rt.metajs), so the returned host function is written with
+// MetaJS HAS NO `arguments` object, so the returned host function is written with
 // the ONE parameter Kotlin's println ever takes and an absent argument is
-// `undefined`. That made `println()` and `println(f())` for a Unit-returning f
-// indistinguishable here, and answering "" for both was a LIVE run-vs-native
-// divergence: llvm.Run and the interpreter print "kotlin.Unit" and the native
-// binary printed a blank line (measured 2026-08-07 sweeping todo.md 1.8, closed
-// as part of todo.md 1.10).
+// `undefined`. The argument COUNT is knowable only at the CALL SITE: under -exe the
+// emitter passes the EMPTY STRING for a no-argument `println()` / `print()`
+// (makeCall in kotlin-to-llvm-ir.abnf), which Kotlin renders identically to no
+// argument at all. So `undefined` reaching here is unambiguously kotlin.Unit, and
+// k2Render renders it as its name.
 //
-// CLOSED FROM THE OTHER SIDE, because the argument COUNT is knowable at the CALL
-// SITE and nowhere else: under -exe the emitter passes the EMPTY STRING for a
-// no-argument `println()` / `print()` (makeCall in kotlin-to-llvm-ir.abnf), which
-// Kotlin renders identically to no argument at all - `println()` writes just the
-// line terminator, `print()` writes nothing. So `undefined` reaching here is now
-// unambiguously kotlin.Unit, and k2Render already renders it as its name. No new
-// extern, no Go twin change, and the non-native module is untouched.
-//
-// RESIDUE: `::println` bound to a value and called with no arguments is a
-// reference rather than a call of the name, so no emitter can count ITS arguments
-// either; it now prints "kotlin.Unit" natively where llvm.Run prints "".
-// Everything else about Unit agrees: "$v" interpolation, string concatenation and
-// Unit.toString() all render "kotlin.Unit" in all three engines.
+// Known divergence: `::println` bound to a value and called with no arguments is a
+// reference rather than a call of the name, so no emitter can count ITS arguments;
+// it prints "kotlin.Unit" natively where llvm.Run prints "".
 function k2Line(a) {
     return k2Render(a, 0)
 }
@@ -2400,9 +2176,8 @@ function k2Line(a) {
 // string(rune(code)), so:
 //   * a LONE SURROGATE is not a scalar value and Go writes U+FFFD for it. An
 //     astral character held as a surrogate PAIR therefore renders as two U+FFFD
-//     - the wtf8Clean difference Swift and Go both measured (js_kindex in
-//     languages/lib/swift-rt.metajs carries the same rule). Reproduced, not
-//     fixed.
+//     (js_kindex in languages/lib/swift-rt.metajs carries the same rule).
+//     Reproduced, not fixed.
 //   * an astral CODE POINT in one Char box (a `js_char` literal above 0xFFFF)
 //     is a scalar value and renders as itself, which in a UTF-16 string is the
 //     surrogate pair.
@@ -2454,8 +2229,7 @@ function k2IsLetter(code) {
 
 // The number of CODE POINTS in s (Go's len([]rune(s))), and the code point at a
 // code-point index. Both walk the UTF-16 units and rejoin a surrogate pair.
-// SHARED as rtRuneLen - lib/runtime.metajs: dart's dtStrLen was the same
-// fourteen lines with one local renamed.
+// Shared as rtRuneLen (lib/runtime.metajs).
 function k2RuneLen(s) { return rtRuneLen(s) }
 
 function k2CodePointAt(s, i) {
@@ -2631,9 +2405,6 @@ function ktStrMethod(s, name, args) {
     if (name == "isNotEmpty") { return s.length > 0 }
     if (name == "get") {
         // Bounds-checked, like the indexed read s[i] it is the method spelling of.
-        // This arm used to answer ktChar(-1) - a blank character - where the Go
-        // twin's strCodeAt-based build answered U+FFFD, so the two halves also
-        // DISAGREED. docs/todo.md 2.9.
         var gi = k2Int(ktArg(args, 0))
         if (gi < 0 || gi >= s.length) { ktIndexOob("StringIndexOutOfBoundsException", gi, s.length) }
         return ktChar(s.charCodeAt(gi))
@@ -2671,8 +2442,8 @@ function ktStrMethod(s, name, args) {
 // operations that make a String behave like a collection.
 //
 // charAt is Java's spelling and does not exist in Kotlin at all - it is get /
-// the indexing operator - but both halves have carried it as a builtin for a
-// long time, so it stays, now answering a Char like its two Kotlin spellings.
+// the indexing operator - but both halves carry it as a builtin, answering a Char
+// like its two Kotlin spellings.
 function k2StrMethod2(s, name, args) {
     var n = s.length
 
@@ -2683,13 +2454,10 @@ function k2StrMethod2(s, name, args) {
     }
     // first/last/single/firstOrNull/lastOrNull with a PREDICATE, and every empty or
     // over-long receiver, are kotlin.text's own CharSequence family in _Strings.kt
-    // and are answered by the shared table under the "Char sequence" kind. Three
-    // defects lived in these arms, all of them agreed in every engine:
-    // `"abc".first { it == 'z' }` IGNORED the predicate and answered 'a',
-    // `"".first()` was an uncatchable ABORT where CharSequence.first() throws
-    // NoSuchElementException("Char sequence is empty."), and `"abc".single()`
-    // aborted where it throws IllegalArgumentException("Char sequence has more than
-    // one element."). The single-character fast paths stay, so the cost of
+    // and are answered by the shared table under the "Char sequence" kind
+    // (`"".first()` throws NoSuchElementException("Char sequence is empty."),
+    // `"abc".single()` IllegalArgumentException("Char sequence has more than one
+    // element.")). The single-character fast paths stay, so the cost of
     // materializing the chars is paid only where a throw or a lambda is due.
     if (name == "first" || name == "last" || name == "single" ||
         name == "firstOrNull" || name == "lastOrNull") {
@@ -2780,11 +2548,10 @@ function k2StrMethod2(s, name, args) {
         return k2Format(s, args)
     }
 
-    // ----- More of kotlin.text: every one of these aborted the run in BOTH
-    // halves with "unknown String method". The twin is the `typeof target ==
-    // "string"` branch of mcall in kotlin-interpreter.abnf. `replace` with a
-    // Regex receiver never reaches here - the hub routes a pattern argument to
-    // the Regex dispatcher first (jsrtkotlin.go:1290).
+    // ----- More of kotlin.text. The twin is the `typeof target == "string"`
+    // branch of mcall in kotlin-interpreter.abnf. `replace` with a Regex argument
+    // never reaches here - the hub routes a pattern argument to the Regex
+    // dispatcher first (js_ktsmcall in jsrtkotlin.go).
     if (name == "replace" || name == "replaceFirst") {
         var old = ktStrArg(ktArg(args, 0))
         var nw = ktStrArg(ktArg(args, 1))
@@ -2882,12 +2649,10 @@ function k2StrMethod2(s, name, args) {
     // Boolean): String`), not a List<Char>; chunked and windowed answer
     // List<String>; partition answers Pair<String, String>. Everything that
     // TRANSFORMS - map, flatMap, groupBy, zip, sorted, distinct, withIndex -
-    // answers a List in Kotlin too and keeps falling through below. Every one of
-    // these printed "[a, b, d]" in all three engines. todo.md 1.5.
+    // answers a List in Kotlin too and keeps falling through below.
     //
     // substring(IntRange) and slice(IntRange) are substring(range.start,
-    // range.endInclusive + 1); the range argument used to reach k4Int, which reads
-    // an object as NaN, so `"abcdef".substring(1..3)` answered the whole string.
+    // range.endInclusive + 1).
     if (name == "substring" || name == "slice") {
         if (args.length == 1) {
             if (ktIsRange(args[0])) {
@@ -2897,12 +2662,10 @@ function k2StrMethod2(s, name, args) {
             if (name == "slice") { return k4CharsStr(ktSeqMethodK(ktChars(s), name, args, "Char sequence")) }
         }
         // BOUNDS-CHECKED, like the indexed read. java.lang.String#substring throws
-        // when begin < 0, begin > end or end > length; the shared mcall's substring
-        // is JS substring, which CLAMPS AND SWAPS instead, so `"ab".substring(5)`
-        // answered "" in all three engines - agreed and wrong (java 24.0.2:
-        // StringIndexOutOfBoundsException "Range [5, 2) out of bounds for length 2").
-        // The twin is the same arm of ktStrMethod in abnf/jsrtkotlin.go.
-        // docs/todo.md 1.2.
+        // when begin < 0, begin > end or end > length, where JS substring CLAMPS AND
+        // SWAPS (java: `"ab".substring(5)` is StringIndexOutOfBoundsException "Range
+        // [5, 2) out of bounds for length 2"). Twin: the same arm of ktStrMethod in
+        // abnf/jsrtkotlin.go.
         if (name == "substring") {
             var sb0 = 0
             var se0 = s.length
@@ -3010,12 +2773,9 @@ function k2TrimIndent(s) {
 
 // ------------------------------------------------------ String -> number, %s
 //
-// ktParseNum (jsrtkotlin.go:2459) and ktFormat (2502) sit BETWEEN the two
-// functions this section was given (ktTrimIndent at 2423 and ktStr2 at 2579)
-// and belong to the numeric section by subject. They are reached only from
-// k2StrMethod2's toInt / toDouble / format arms, so they are carried here under
-// the k2 prefix rather than left as a hole: a name collision is impossible and
-// a duplicated body is the safe failure.
+// ktParseNum and ktFormat belong to the numeric section by subject, but are
+// reached only from k2StrMethod2's toInt / toDouble / format arms, so they are
+// carried here under the k2 prefix.
 
 // k2ParseNum is ktParseNum: toInt() / toLong() / toDouble() / toIntOrNull() on
 // a String. Kotlin throws a NumberFormatException for text that is not a
@@ -3069,8 +2829,7 @@ function k2ParseNum(s, name) {
 // (runtime.c:3080) supports NO width and NO precision, so the padding is done
 // by hand here. The two verbs that are not reproduced are %e and %g: Go's
 // scientific formatting has no counterpart the floor can reach, so they fall
-// back on the double's own rendering. Nothing in tests/kotlin-test*.kt writes
-// either, and the site says so rather than pretending.
+// back on the double's own rendering.
 function k2Format(f, args) {
     var out = ""
     var ai = 0
@@ -3218,23 +2977,17 @@ function k2Truthy(v) {
     return true
 }
 
-// k2Fixed is ktFixed (abnf/jsrtkotlin.go), and its twin in the interpreter half is
-// kFixed in languages/kotlin-interpreter.abnf, whose header carries the derivation
-// and the java 24.0.2 measurements. The two rules, both measured rather than
-// assumed:
+// k2Fixed is ktFixed (abnf/jsrtkotlin.go); twin: kFixed in
+// languages/kotlin-interpreter.abnf. The two rules (java.util.Formatter):
 //
-//   - java.util.Formatter renders %f from Double.toString's SHORTEST round-tripping
-//     digits, zero-padded - NOT from the double's exact decimal. "%.20f" of 0.1 is
+//   - %f renders from Double.toString's SHORTEST round-tripping digits,
+//     zero-padded - NOT from the double's exact decimal. "%.20f" of 0.1 is
 //     "0.10000000000000000000"; "%.0f" of 1.3379870716132959e18 is
 //     1337987071613295900 and not the exact ...872. So rtFixed / rtExactDec in
 //     ./runtime.metajs, which are exact, are the wrong tool for this one - they are
 //     right for python / ruby / swift, whose formatters really are exact.
 //   - the tie rule is HALF_UP, away from zero, on those digits: "%.1f" of 0.15 is
 //     "0.2" where an exact half-even rounder answers "0.1".
-//
-// The old body was Math.floor(x*10^p + 0.5) over `"" + whole`, which could not
-// reach past 2^53, printed "1e+22" INSIDE a %f (the host's exponent form leaking
-// into the integer part), and dropped the sign of -0.0. docs/todo.md 1.11.
 //
 // rtDecDigits is the shortest-digits source; see its own header for why `"" + a`
 // is exact in this file and is not in a tag script.
@@ -3432,36 +3185,28 @@ function ktSbMethod(o, name, args) {
 
 // ============================================================ THE EXTERNS ===
 
-// js_char: Kotlin's Char from its CODE (abnf/jsrt.go:6077). The code arrives as
-// a RAW parameter - kotlin-to-llvm-ir.abnf writes it with handle(k), so without
-// the _raw suffix the callee would see the handle 0..3, i.e.
-// undefined/null/false/true. The Lua pilot's finding.
-//
-// Unlike Swift, Kotlin HAS a Char type, so this answers the {__char: code} box
-// and never a one-character string: languages/kotlin-to-llvm-ir.abnf:3443 feeds
-// the result straight into the value model, and js_char_code / js_char_like /
-// js_kindex all read that box back.
-// js_char itself is SHARED - lib/runtime.metajs; the three copies were the same
-// one-line delegation, and the _raw suffix travels with it.
+// js_char: Kotlin's Char from its CODE (abnf/jsrt.go). The code arrives as a RAW
+// parameter - kotlin-to-llvm-ir.abnf writes it with handle(k), so without the
+// _raw suffix the callee would see the handle 0..3, i.e. undefined/null/false/true.
+// Kotlin HAS a Char type, so this answers the {__char: code} box and never a
+// one-character string. js_char itself is shared in lib/runtime.metajs.
 
-// js_char_code (abnf/jsrt.go:6080): the code of a Char, and rt.toNumber for
+// js_char_code (abnf/jsrt.go): the code of a Char, and rt.toNumber for
 // everything else - so a caller can drive a counter with it without knowing
-// whether it holds a Char. kotlin-to-llvm-ir.abnf:3553 and :5058 use it exactly
-// that way, as a range's numeric bound.
-// js_char_code is SHARED - lib/runtime.metajs, as rtkNum, which is exactly this
-// body: kotlin's copy was the oracle spelled directly.
+// whether it holds a Char (kotlin-to-llvm-ir.abnf uses it as a range's numeric
+// bound). Shared in lib/runtime.metajs, as rtkNum.
 
-// js_char_like (abnf/jsrt.go:6085): box `v` back into a Char when `model` is
+// js_char_like (abnf/jsrt.go): box `v` back into a Char when `model` is
 // one, else hand `v` back unchanged. This is how a range keeps its element
 // type: 'a'..'c' counts numerically and re-boxes each element, so
 // `for (ch in 'a'..'c')` yields Chars while `for (i in 1..3)` yields Ints, from
-// one emitted loop (kotlin-to-llvm-ir.abnf:3576, :5084).
+// one emitted loop.
 function js_char_like(model, v) {
     if (ktIsChar(model)) { return ktChar(k2Int(v)) }
     return v
 }
 
-// js_kindex (abnf/jsrt.go:6095): Kotlin's indexed read s[i]. A String yields the
+// js_kindex (abnf/jsrt.go): Kotlin's indexed read s[i]. A String yields the
 // Char at that CODE UNIT index (Kotlin's CharSequence.get), everything else
 // reads the member like js_get - a separate extern because plain js_get must
 // keep yielding a one-character STRING for JS, Python and the other languages
@@ -3482,13 +3227,12 @@ function js_kindex(s, i) {
     return ktChar(c)
 }
 
-// js_ktprint / js_ktwrite (jsrtkotlin.go:1087 / :1093): Kotlin's println / print
-// as a VALUE. The extern takes no arguments and returns the host function, which
-// buildMain declares into the program scope under the names `println` and
-// `print` (kotlin-to-llvm-ir.abnf:7276). Binding a value rather than
-// intercepting the call site keeps `::println` and `list.forEach(::println)`
-// working, and keeps the shared println host function untouched for the twelve
-// other languages that use it.
+// js_ktprint / js_ktwrite (jsrtkotlin.go): Kotlin's println / print as a VALUE.
+// The extern takes no arguments and returns the host function, which buildMain
+// declares into the program scope under the names `println` and `print`. Binding
+// a value rather than intercepting the call site keeps `::println` and
+// `list.forEach(::println)` working, and keeps the shared println host function
+// untouched for the other languages that use it.
 //
 // The Go twin wraps the text in wtf8Clean. That pass only rewrites a WTF-8 lone
 // surrogate, and k2ChStr already refuses to put one into a string, so it is a
@@ -3507,9 +3251,8 @@ function js_ktstr(v) { return ktRender(v) }
 // ============================================================================
 // SECTION 3 of languages/lib/kotlin-rt.metajs -- THE COLLECTION LIBRARY
 //
-// Ported from abnf/jsrtkotlin.go, the authoritative spec (there is no kotlinc on
-// this machine, so the Go twin is the only oracle). The Go originals are named
-// at each function. Ported CODE, not comments and not what Kotlin "should" do.
+// Ported from abnf/jsrtkotlin.go, the authoritative spec. The Go originals are
+// named at each function.
 //
 // Owned and defined here:
 //     ktSeqMethod(arr, name, args)    ktSetMethod(s, name, args)
@@ -3689,8 +3432,7 @@ function k3KeyLess(a, b) {
         if (ktIntegral(b)) { return k3CmpLt(a, b) }
     }
     // A user `Comparable`: listOf(V(3), V(1)).sorted() sorts by the class's own
-    // compareTo. Without this every element compares as NaN and the list comes
-    // back in its original order, silently.
+    // compareTo. Without this every element would compare as NaN.
     if (ktIsObj(a)) {
         if (ktClassChainHas(a, "compareTo")) {
             return ktNum(ktSmcall(a, "compareTo", [b])) < 0
@@ -3747,8 +3489,7 @@ function ktSortBy(es, sel, desc) {
 }
 
 // ktSumOf is jsrtkotlin.go:4448 -- Kotlin's sumOf/sum at the WIDTH of what it is
-// summing: a Long selector sums to a Long and a Double selector to a Double,
-// where the shared js_mcall accumulated in int32 for everything.
+// summing: a Long selector sums to a Long and a Double selector to a Double.
 function ktSumOf(es, f) {
     var isFlo = false
     var isLong = false
@@ -3913,10 +3654,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         return es[0]
     }
     if (name == "last") {
-        // last(predicate) used to fall straight through to the LAST ELEMENT,
-        // ignoring the lambda: `listOf(1,2,3,4).last { it < 3 }` answered 4 in every
-        // engine (agreed and wrong; Kotlin answers 2). first(predicate) had its arm
-        // from the start, which is why nothing noticed.
+        // last(predicate) is the last MATCHING element:
+        // `listOf(1,2,3,4).last { it < 3 }` is 2.
         if (args.length == 1) {
             if (ktIsFn(f)) {
                 for (i = es.length - 1; i >= 0; i = i - 1) {
@@ -3960,10 +3699,9 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (es.length == 0) { return null }
         return es[0]
     }
-    // lastOrNull(predicate) is the last MATCHING element, and this arm used to
-    // ignore the lambda and answer the last element - `listOf(1,2,3).lastOrNull
-    // { it < 2 }` was 3 in every engine where Kotlin says 1. The findLast arm
-    // further down names lastOrNull too and never saw a call because of it.
+    // lastOrNull(predicate) is the last MATCHING element -
+    // `listOf(1,2,3).lastOrNull { it < 2 }` is 1. This arm must stay ahead of the
+    // findLast arm further down, which also names lastOrNull.
     if (name == "lastOrNull") {
         if (args.length == 1) {
             if (ktIsFn(f)) {
@@ -4022,8 +3760,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     // reduceRight folds from the END with the accumulator as the SECOND parameter,
     // and it is declared on List (and CharSequence), which is the only place the
-    // "Empty list can't be reduced." wording comes from. Both spellings used to
-    // abort with "unknown list method" in all three engines.
+    // "Empty list can't be reduced." wording comes from.
     if (name == "reduceRight" || name == "reduceRightIndexed") {
         if (es.length == 0) { ktRaise("UnsupportedOperationException", "Empty " + ktRedWord(kind, true) + " can't be reduced.") }
         acc = es[es.length - 1]
@@ -4094,10 +3831,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         return out
     }
     // chunked(size[, transform]) and windowed(size, step = 1, partialWindows =
-    // false[, transform]). The TRANSFORM used to be dropped on the floor in all
-    // three engines - `listOf(1,2,3,4).chunked(2) { it.sum() }` answered the
-    // chunks themselves - and windowed's partialWindows was ignored, so the tail
-    // windows it asks for were never produced. todo.md 1.5.
+    // false[, transform]): `listOf(1,2,3,4).chunked(2) { it.sum() }` applies the
+    // transform to each chunk, and partialWindows produces the short tail windows.
     if (name == "chunked" || name == "windowed") {
         k = k3Int(ktArg(args, 0))
         n = k
@@ -4123,14 +3858,12 @@ function ktSeqMethodK(arr, name, args, kind) {
         return out
     }
     // kotlin.collections.random / randomOrNull. See k4RndBox: the generator is
-    // deterministic, which is the only thing three engines can agree on.
+    // deterministic so the engines agree.
     if (name == "random" || name == "randomOrNull") {
         if (es.length == 0) {
             if (name == "randomOrNull") { return null }
             // random() is declared on COLLECTION (and on CharSequence), never on
-            // List, so a list receiver takes the Collection wording too - which is
-            // why this site already spelled it that way while first()/last() did
-            // not, and is the "why does that site have it" of docs/todo.md 1.5.
+            // List, so a list receiver takes the Collection wording too.
             ktRaise("NoSuchElementException", ktPredWord(kind) + " is empty.")
         }
         return es[k4RndBelow(k4RndOf(args), es.length)]
@@ -4249,7 +3982,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "joinToString") {
         // The TRANSFORM is joinToString's last parameter, so `joinToString { }`
-        // passes a function - which used to be read as the SEPARATOR.
+        // passes a function, which is not the SEPARATOR.
         best = undefined
         b = false
         for (i = 0; i < args.length; i = i + 1) {
@@ -4278,7 +4011,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         return n
     }
 
-    // ----- more of kotlin.collections, added in one batch -------------------
+    // ----- more of kotlin.collections -----------------------------------------
     if (name == "filterIsInstance") {
         // The type NAME arrives as a trailing string argument (MTypeArgs in both
         // grammars). A null is never an instance of a non-nullable T, so it is
@@ -4351,13 +4084,11 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (k >= 0) {
             if (k < es.length) { return es[k] }
         }
-        // Was fail("index N is out of bounds") for elementAt - an ABORT where the
-        // JVM throws a catchable IndexOutOfBoundsException, agreed by both halves
-        // and wrong in both. kotlin.collections.elementAt on a List IS get(index),
-        // so the two share the message; on a bare Iterable the stdlib spells it
-        // "Collection doesn't contain element at index N.", a distinction this
-        // value model cannot make because ktElems has already materialized the
-        // receiver. docs/todo.md 2.9.
+        // The JVM throws a catchable IndexOutOfBoundsException.
+        // kotlin.collections.elementAt on a List IS get(index), so the two share the
+        // message; on a bare Iterable the stdlib spells it "Collection doesn't
+        // contain element at index N.", a distinction this value model cannot make
+        // because ktElems has already materialized the receiver.
         if (name == "elementAt") { ktIndexOob("IndexOutOfBoundsException", k, es.length) }
         if (name == "get") { ktIndexOob("IndexOutOfBoundsException", k, es.length) }
         if (name == "elementAtOrElse") { return ktCall1(ktArg(args, 1), k) }
@@ -4450,7 +4181,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     // sliceArray is slice under the Array name (Kotlin gives it its own name
     // because it answers an Array); here the two shapes are one, so it is the
-    // same operator. It aborted with "unknown list method" in all three engines.
+    // same operator.
     if (name == "slice" || name == "sliceArray") {
         oth = ktElems(f)
         for (i = 0; i < oth.length; i = i + 1) { out.push(es[k3Int(oth[i])]) }
@@ -4627,9 +4358,7 @@ function k3IsCopyName(name) {
 
 function k3IsElementAt(name) {
     // `get` joins this group so the LIST read a[i] and its method spelling a.get(i)
-    // answer alike: the shared js_mcall's `get` aborted with "list index 5 out of
-    // range" where the interpreter half answered kotlin.Unit - a live halves
-    // divergence, and neither is Kotlin's. docs/todo.md 2.9.
+    // answer alike (bounds-checked).
     if (name == "get") { return true }
     if (name == "elementAt") { return true }
     if (name == "elementAtOrNull") { return true }
@@ -5059,10 +4788,9 @@ function js_ktiter(v) {
 //                    delegated properties and exceptions
 // ===========================================================================
 //
-// Ported from abnf/jsrtkotlin.go (the AUTHORITATIVE spec - the CODE, not the
-// comments and not what anyone knows about Kotlin; there is no kotlinc here, so
-// the Go twin is the only oracle) plus the neutral externs of abnf/jsrt.go that
-// Kotlin's emitter reaches and no other section covers.
+// Ported from abnf/jsrtkotlin.go (the AUTHORITATIVE spec) plus the neutral
+// externs of abnf/jsrt.go that Kotlin's emitter reaches and no other section
+// covers.
 //
 // Private helper prefix: k4b.
 //
@@ -5074,8 +4802,8 @@ function js_ktiter(v) {
 //    floor's private storage and layer 2 cannot open one, so only the part of it
 //    that walks a RECEIVER is written here (k4bMextWalk); the scope half - the
 //    `this` / `__dispatch` collection that produces the walk's start values - is
-//    lowered in the EMITTER by the lead, together with js_ktmextget /
-//    js_ktmextset / js_ktmextcall.
+//    lowered in the EMITTER, together with js_ktmextget / js_ktmextset /
+//    js_ktmextcall.
 //  * Every other scope-taking extern of this file's Go range is likewise absent
 //    by design: js_ktget, js_kset, js_ktvarset, js_ktouter, js_ktrefbase,
 //    js_ktdthis, js_ktbareref.
@@ -5114,10 +4842,7 @@ function js_ktiter(v) {
 
 // ============================================================ small values ==
 
-// ktIsIntegral (jsrtkotlin.go:135): an operand of INTEGER arithmetic - a Char is
-// one, a Double is not. SHARED as rtIsIntegral - lib/runtime.metajs. This was the
-// SECOND copy in this one file (ktIsInt, line ~229, is the first) of a body
-// runtime-jvm.metajs also exported.
+// ktIsIntegral (jsrtkotlin.go:135) is shared as rtIsIntegral (lib/runtime.metajs).
 
 // A double that is an exact integer in [-2^63, 2^63) as the sized-integer
 // representation: below 2^53 that IS the plain number, above it the two unsigned
@@ -5232,23 +4957,18 @@ function k4bLastDot(s) {
 
 // ---------------------------------------------------------------- arrays ---
 
-// append([]interface{}{v}, rest...) - the receiver in front of the arguments.
-// SHARED as rtPrepend - lib/runtime.metajs. This copy was the only one of the
-// five that guarded a null/undefined `args`, and the merged body kept the guard.
+// append([]interface{}{v}, rest...) is shared as rtPrepend (lib/runtime.metajs).
 
-// The variadic tail of a closure, as a plain array - k4bArgArr, and a second
-// copy 993 lines below it as k4Copy. BOTH are SHARED as rtCopyArr,
-// lib/runtime.metajs, with five more in csharp, dart, python, ruby and swift.
+// The variadic tail of a closure, as a plain array, is shared as rtCopyArr
+// (lib/runtime.metajs).
 
 // ================================================== the number type objects ==
 
 // ================================================ the neutral jsrt.go externs ==
 
-// The shared dynamic type test - abnf/jsrt.go's isTypeName (8432). REUSED
-// VERBATIM from languages/lib/java-rt.metajs (js_is_type, line 795), which is
-// the same Go function: the Int/Long/Short/Byte arm tests for a PLAIN number, so
-// a sized box is NOT `is Long` here either - that is what js_ktis is for.
-// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
+// abnf/jsrt.go's isTypeName is js_is_type, shared in lib/runtime.metajs via the
+// rtkIsChar/rtkIsArr hooks. Its Int/Long/Short/Byte arm tests for a PLAIN number,
+// so a sized box is NOT `is Long` there - that is what js_ktis is for.
 
 // ----------------------------------------------------- accessor properties --
 
@@ -5393,8 +5113,7 @@ function k4bSetMember(o, key, val) {
 
 // ------------------------------------------------------------ supercall ----
 
-// js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall,
-// which Kotlin is the language that forced).
+// js_supercall is shared in lib/runtime.metajs; its rtkCall knob exists for Kotlin.
 
 // ------------------------------------------------------------- js_pyrest ---
 
@@ -5422,8 +5141,7 @@ function js_pyrest(args, from_raw) {
 function ktIsType(v, tname) {
     if (typeof v != "number") {
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
-        // List - the shared js_is_type has no arm for it and answered false for
-        // all three while the materialized list answered `is List` true.
+        // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
         if (js_is_type(v, tname) === true) { return true }
         // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class
@@ -5454,9 +5172,9 @@ function ktIsType(v, tname) {
         // model makes a plain number an Int, so `10 is Long` is FALSE and
         // `1.5 is Double` is TRUE - neither of which the shared probe can answer.
         // The style byte says WHICH of the two the box holds, so Double and Float
-        // are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both false, where
-        // both were true while the width was invisible. `is Number` - and the
-        // `is Any` / `is Comparable` above - stay true for either width.
+        // are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both false. `is
+        // Number` - and the `is Any` / `is Comparable` above - stay true for either
+        // width.
         if (t == "Number") { return true }
         if (floStyle(v) == 3) { return t == "Float" }
         return t == "Double"
@@ -5483,11 +5201,9 @@ function js_ktnewexc(name, message) {
 
 // js_ktexccls(name) hands the emitter the DESCRIPTOR of a builtin throwable, so
 // that emitSuperLinks can put it on the __super chain of a class the program
-// declares: `class Top(m: String) : Exception(m)` used to leave __super absent
-// (this half emits no descriptor for Exception), so `Top("x") is Exception`
-// answered FALSE natively and under llvm.Run where the interpreter half answered
-// true - and java 24.0.2 says true. The twin is js_ktexccls in
-// abnf/jsrtkotlin.go. docs/todo.md 2.9.
+// declares: this half emits no descriptor for Exception, and without the link
+// `class Top(m: String) : Exception(m)` would answer `Top("x") is Exception`
+// false (java says true). Twin: js_ktexccls in abnf/jsrtkotlin.go.
 function js_ktexccls(name) {
     if (!ktIsBuiltinExc(name)) { fail("unknown builtin exception " + name) }
     return ktExcHierarchy()[name]
@@ -5512,13 +5228,10 @@ function k4bIsThrowable(v) {
 // three intermediate roots accept a NON-throwable too, and everything else is
 // the ordinary dynamic type test.
 //
-// THE NON-THROWABLE ARM SELF-RETIRED, and was left in place rather than deleted. It
-// existed because a class the program declared could not be linked to the builtin
-// chain in this half, so `catch (e: Exception)` had to accept one by NOT being a
-// throwable; emitSuperLinks links it through js_ktexccls now (docs/todo.md 2.9), so
-// a user throwable takes the ordinary type test and `catch (e: RuntimeException)`
-// correctly declines a `: Exception` class. What still reaches the arm is a value
-// that is genuinely not a throwable at all.
+// The non-throwable arm accepts a value that is genuinely not a throwable at all.
+// A user throwable is linked to the builtin chain (js_ktexccls), so it takes the
+// ordinary type test and `catch (e: RuntimeException)` declines a `: Exception`
+// class.
 function js_ktexcmatch(thrown, tname) {
     var t = k4bStripQ(k4bStripAngle(tname))
     if (t == "Throwable" || t == "Any") { return true }
@@ -5530,9 +5243,8 @@ function js_ktexcmatch(thrown, tname) {
 
 // js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the __outer
 // chain for an instance whose class is named `Outer`, and fall back to the
-// receiver itself when there is none. Reading `__outer` blindly aborted with
-// "member 'tag' of undefined" whenever an inner class was constructed from
-// inside its outer's own method, where nothing sets it.
+// receiver itself when there is none. `__outer` is not set when an inner class
+// is constructed from inside its outer's own method, so it is not read blindly.
 function js_ktthisat(self, want) {
     var cur = anytype
     cur = self
@@ -5682,7 +5394,7 @@ function k4bSimpleName(v) {
     if (ktIsChar(v)) { return "Char" }
     if (typeof v == "number") {
         // The style byte says which of the two a tag-14 box holds, so `1.5f::class`
-        // is Float where it used to answer Double alongside every real double.
+        // is Float.
         if (floIs(v)) {
             if (floStyle(v) == 3) { return "Float" }
             return "Double"
@@ -5897,10 +5609,10 @@ function js_ktsupset(sup, self, name, val) {
 // frame's `this` and `__dispatch` as the walk's start values - is lowered in the
 // EMITTER, together with js_ktmextget / js_ktmextset / js_ktmextcall.
 //
-// The receiver's OWN properties come first. A COMPANION object's members hang on
-// the class descriptor itself, so a member extension declared in a companion was
-// installed on the descriptor and the __class walk below never saw it. No Kotlin
-// identifier can contain `$`, so a mangled name is never an ordinary field.
+// The receiver's OWN properties come first: a COMPANION object's members hang on
+// the class descriptor itself, so a member extension declared in a companion is
+// installed on the descriptor where the __class walk below would not see it. No
+// Kotlin identifier can contain `$`, so a mangled name is never an ordinary field.
 function k4bMextWalk(start, mangled) {
     var cur = anytype
     cur = start
@@ -6145,14 +5857,12 @@ function k4bAdoptTy(v, ty) {
 }
 
 // js_ktset is js_set plus the map handle: `mm[2] = "b"` is Map.put, which the
-// shared setMember cannot answer (it stored a plain PROPERTY named "2", so the
-// map kept its old size and the write was invisible to every map operation).
+// shared setMember cannot answer (it would store a plain PROPERTY named "2").
 function js_ktset(o, key, val) {
     // THE INDEXED WRITE IS BOUNDS-CHECKED, exactly like the indexed read. `l[9] = 5`
     // IS MutableList.set(9, 5) in Kotlin and throws IndexOutOfBoundsException;
     // k4bSetMember instead EXTENDS the array for a non-negative index and aborts for
-    // a negative one. The twin is the same arm of m["js_ktset"] in
-    // abnf/jsrtkotlin.go. docs/todo.md 1.2.
+    // a negative one. Twin: the same arm of m["js_ktset"] in abnf/jsrtkotlin.go.
     if (Array.isArray(o)) {
         if (typeof key == "number") {
             var wix = k4Int(key)
@@ -6263,10 +5973,7 @@ function k4IsRef(info) {
     return !ktMiss(info)
 }
 
-// k4Copy (a fresh array copy) is SHARED as rtCopyArr and k4Prepend
-// (append([]interface{}{recv}, args...)) as rtPrepend - both lib/runtime.metajs.
-// rtPrepend additionally guards a null/undefined `args`, which is a superset of
-// what this copy did.
+// k4Copy and k4Prepend are shared as rtCopyArr and rtPrepend (lib/runtime.metajs).
 
 // args[1:]
 function k4Rest(args, from) {
@@ -6410,19 +6117,17 @@ function k4IsBuiltinRecv(v) {
     if (ktIsArr(v)) { return true }
     // A PROGRESSION: first / last / step / start / endInclusive are its members.
     if (ktIsRange(v)) { return true }
-    // A REGEX, a MATCHRESULT, a RESULT and a CHAR were missing in all three engines -
-    // todo.md 1.6's second bullet and the sweep around it. Each has a real method
-    // surface in ktSmcall and a real property surface in js_ktfget, which is what
-    // this predicate asks about; the plain-object arm of ktRecvMember reads own
-    // properties only and binds no method, so they could not stay there. A Char is a
-    // box object, so it is tested before the ktIsObj gate says nothing about it.
+    // A REGEX, a MATCHRESULT, a RESULT and a CHAR each have a real method surface
+    // in ktSmcall and a real property surface in js_ktfget, which is what this
+    // predicate asks about; the plain-object arm of ktRecvMember reads own
+    // properties only and binds no method. A Char is a box object, so it is
+    // tested before the ktIsObj gate says nothing about it.
     if (ktIsChar(v)) { return true }
     if (!ktIsObj(v)) { return false }
     if (v["__class"] !== undefined) { return false }
     if (v["__isclass"] !== undefined) { return false }
     if (rtIsDictObj(v)) { return true }
-    // A SET was missing here and in the Go twin, so `with(setOf(1, 2)) { size }`
-    // aborted with "unknown name" in both halves alike.
+    // A SET: `with(setOf(1, 2)) { size }`.
     if (ktIsSet(v)) { return true }
     if (ktRxIsRegex(v)) { return true }
     if (ktRxIsMatch(v)) { return true }
@@ -6449,13 +6154,12 @@ function k4Bound(recv, name) {
 // ktRecvMember (jsrtkotlin.go:4845) answers an unqualified name against an
 // implicit receiver, and KT_MISS when it owns none.
 // `iscall` is the SYNTACTIC POSITION of the name: true for `first()`, false for a
-// bare `first`. todo.md 1.6 asked for the receiver's ORIGIN to be carried on the
-// value, because `first` is a PROPERTY of IntProgression and a member FUNCTION of
-// List and a range materializes here as a plain list. The SITE decides it instead -
-// Kotlin has no unqualified name in value position that means a bound method, that
-// spelling is `::name` - and the origin was not carryable anyway: a floor array
-// holds no properties. Keep in step with jsrtkotlin.go's ktRecvMember and
-// recvLookup in languages/kotlin-interpreter.abnf.
+// bare `first`. `first` is a PROPERTY of IntProgression and a member FUNCTION of
+// List, and a range materializes here as a plain list, so the SITE decides it:
+// Kotlin has no unqualified name in value position that means a bound method
+// (that spelling is `::name`), and a floor array holds no properties to carry the
+// origin. Keep in step with jsrtkotlin.go's ktRecvMember and recvLookup in
+// languages/kotlin-interpreter.abnf.
 function ktRecvMember(recv, name, iscall) {
     // A USER-CLASS instance reached through with / run / apply. Its FIELDS are its
     // own properties; its METHODS live on the descriptor chain and come back as a
@@ -6486,11 +6190,10 @@ function ktRecvMember(recv, name, iscall) {
         // MatchResult. Kotlin's `with` binds any receiver at all, and every one of
         // those carries real PROPERTIES - first / second / third, key / value,
         // value / isInitialized, isSuccess / isFailure. Reaching none of them is
-        // what made `with(Pair(1, "x")) { first }` abort in the NATIVE binary while
-        // the interpreter and llvm.Run both answered 1: under llvm.Run the receiver
-        // is also bound as a scope `this`, so the emitter's own probe answers it and
-        // this walk is never reached. Own properties answer the first group and
-        // js_ktfget the second, which is exactly kt_ktget's order in
+        // what `with(Pair(1, "x")) { first }` needs. (Under llvm.Run the receiver is
+        // also bound as a scope `this`, so the emitter's own probe answers it and
+        // this walk is reached natively only.) Own properties answer the first
+        // group and js_ktfget the second, which is exactly kt_ktget's order in
         // kotlin-to-llvm-ir.abnf. Nothing is bound as a METHOD here: a plain object
         // has no runtime method table to dispatch into, and binding one would
         // swallow every global name.
@@ -6505,9 +6208,8 @@ function ktRecvMember(recv, name, iscall) {
         }
         // toString(), hashCode() and equals() are members of kotlin.Any, so an
         // unqualified CALL of one resolves against the implicit receiver whatever
-        // its shape - a Pair, a Map.Entry, a number. `with(p) { toString() }`
-        // aborted with "unknown name: toString" here (todo.md 1.10);
-        // ktSmcall's own Any arm answers it once the name resolves at all.
+        // its shape - a Pair, a Map.Entry, a number (`with(p) { toString() }`);
+        // ktSmcall's own Any arm answers it.
         if (iscall) {
             if (name == "toString" || name == "hashCode" || name == "equals") {
                 return k4Bound(recv, name)
@@ -6515,11 +6217,10 @@ function ktRecvMember(recv, name, iscall) {
         }
         return KT_MISS
     }
-    // A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call.
-    // This used to route through ktSmcall, and the two are not the same set:
-    // `with(list) { size }` worked because the list method table happens to carry a
-    // `size` method, while `with(list) { lastIndex }` died with "unknown list method
-    // 'lastIndex'". kRecvProps in kotlin-interpreter.abnf has always read kGetField.
+    // A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call:
+    // the list method table has a `size` method but no `lastIndex` one, and
+    // `with(list) { lastIndex }` must work. kRecvProps in kotlin-interpreter.abnf
+    // reads kGetField the same way.
     if (k4RecvProp(name)) { return js_ktfget(recv, name) }
     // VALUE POSITION on a builtin receiver: the field read is TRIED, and only a miss
     // falls through to the bound method - so nothing that resolved stops resolving.
@@ -7194,9 +6895,8 @@ function ktGlobalFn(name) {
             return k4ArrayOfN(aname, as)
         }
     }
-    // listOf's "return the argument array" function is WRONG for listOfNotNull: it
-    // kept the nulls, so the compiler answered [1, null, 2] where Kotlin answers
-    // [1, 2].
+    // listOfNotNull drops the nulls, so it cannot share listOf's "return the
+    // argument array" function.
     if (name == "listOfNotNull") {
         return function () {
             var out = []
@@ -7392,8 +7092,7 @@ function k4MinMax(wantMax) {
 var k4NameFns = []
 var k4NameStrs = []
 
-// The two-parallel-array lookup is SHARED as rtPairGet - lib/runtime.metajs.
-// python's pyBFuncName was the same eight lines over pyBFnObjs/pyBFnNames.
+// The two-parallel-array lookup is shared as rtPairGet (lib/runtime.metajs).
 
 // ============================================================================
 // THE NEUTRAL TAIL: rt.memberCall (abnf/jsrt.go:2761)
@@ -7441,11 +7140,9 @@ function k4BaseMcall(recv, name, args) {
     }
     if (ktIsArr(recv)) {
         // abnf/jsrt.go's arrayMethod answers the PROPERTY names as members
-        // (`size` at jsrt.go:2853), and ktRecvProp lists exactly this set, so an
-        // implicit receiver reached through with / run / apply asks for them here
-        // after ktSeqMethod has declined. Without them `with(list) { size }`
-        // aborted natively with "unknown list method 'size'" while llvm.Run
-        // answered - the first divergence the native run of the ratchet found.
+        // (`size`), and ktRecvProp lists exactly this set, so an implicit receiver
+        // reached through with / run / apply asks for them here after ktSeqMethod
+        // has declined (`with(list) { size }`).
         if (name == "size") { return recv.length }
         if (name == "length") { return recv.length }
         if (name == "get") {
@@ -7504,7 +7201,7 @@ function ktSmcall(recv, name, args) {
     if (as === undefined) { as = [] }
     // A range materialized into its elements is still not a List: IntRange is an
     // Iterable, so its empty-receiver messages are the Collection ones. The kind is
-    // remembered here because ktRangeList below is what loses it. docs/todo.md 1.5.
+    // remembered here because ktRangeList below is what loses it.
     var rvKind = "List"
 
     // A callable reference receiver: get / set / invoke, with the receiver as the
@@ -7554,8 +7251,7 @@ function ktSmcall(recv, name, args) {
     // A PROGRESSION. The members whose answer IS the range are answered from
     // the bounds; everything else is a Collection/Iterable extension and runs on
     // the materialized elements. `contains` is answered arithmetically so that
-    // `x in 1..1000000` costs nothing - it used to materialize a million cells at
-    // the construction site alone.
+    // `x in 1..1000000` does not materialize a million cells.
     if (ktIsRange(rv)) {
         if (name == "toString") { return ktRangeStr(rv) }
         if (name == "contains") { return ktRangeHas(rv, k4At(as, 0)) }
@@ -7567,8 +7263,7 @@ function ktSmcall(recv, name, args) {
             return ktRangeEq(rv, ro)
         }
         if (rv["fl"] !== true) {
-            // IntProgression.reversed() is an IntProgression, not a List, and the
-            // `.first`/`.last`/`.step` of the materialized answer were kotlin.Unit.
+            // IntProgression.reversed() is an IntProgression, not a List.
             if (name == "reversed") { return ktRangeRev(rv) }
             // IntProgression.step(k) in its function spelling; the infix `step` is
             // lowered by the emitter and never arrives here.
@@ -7720,8 +7415,7 @@ function ktSmcall(recv, name, args) {
                 }
             }
             // Every Kotlin class inherits equals() from Any. A class that overrides
-            // it has it on the chain and is dispatched below; one that does not used
-            // to ABORT with "unknown method 'equals' on an instance".
+            // it has it on the chain and is dispatched below.
             if (name == "equals") {
                 if (!ktClassChainHas(rv, "equals")) { return ktIdent(rv, k4At(as, 0)) }
             }
@@ -7734,13 +7428,10 @@ function ktSmcall(recv, name, args) {
     if (!ktMiss(xv)) { return xv }
 
     // toString() / hashCode() are members of kotlin.Any, so EVERY receiver has
-    // them - and after every branch above has declined, nothing else can. An
-    // unqualified `with(p) { toString() }` reached "unknown list method
-    // 'toString'" / "unknown name: toString" in all three engines (todo.md 1.10),
-    // and so did `5.toString()`-shaped calls on the shapes with no method table.
-    // A class that OVERRIDES either has it on its descriptor chain and is
-    // dispatched by k4BaseMcall below, which is why the chain is asked first -
-    // the same guard the `equals` arm above uses.
+    // them - and after every branch above has declined, nothing else can (e.g. an
+    // unqualified `with(p) { toString() }`). A class that OVERRIDES either has it
+    // on its descriptor chain and is dispatched by k4BaseMcall below, which is why
+    // the chain is asked first - the same guard the `equals` arm above uses.
     if (as.length == 0) {
         if (name == "toString" || name == "hashCode") {
             if (!k4ChainDeclares(rv, name)) {
@@ -7750,9 +7441,7 @@ function ktSmcall(recv, name, args) {
         }
     }
     // equals(other) is the third Any member, and it is the SAME comparison `==`
-    // makes - js_kteq. `listOf(1, 2).equals(listOf(1, 2))` aborted with "unknown
-    // list method 'equals'" in both compiled halves while the interpreter answered
-    // true: a live divergence, found sweeping todo.md 1.10.
+    // makes - js_kteq: `listOf(1, 2).equals(listOf(1, 2))` is true.
     if (as.length == 1) {
         if (name == "equals") {
             if (!k4ChainDeclares(rv, name)) { return js_kteq(rv, as[0]) }
@@ -7837,20 +7526,14 @@ function k4LateinitCheck(o, name, v) {
 // PROGRESSIONS - a range is a VALUE, not a materialized list
 // ============================================================================
 //
-// `a..b`, `a..<b`, `a until b`, `a downTo b` and `... step k` used to be
-// MATERIALIZED into a plain list by the emitter's own loop, and first / last /
-// step / start / endInclusive were recovered from the elements. That recovery
-// cannot answer an EMPTY progression at all - `(5..1).first` is 5 in Kotlin (an
-// IntRange keeps the bounds it was DECLARED with; only isEmpty() reports the
-// emptiness, and `first()`, the function, is the one that throws) and it read
-// kotlin.Unit in both compiled halves - and it cannot answer toString either,
-// which is "5..1" in Kotlin and was "[]". todo.md 1.8 / 1.10.
-//
-// So a progression is now the same first-class value the interpreter half has
-// always had, field for field: {__range, from, to, st, down, ch, fl}. `from` and
-// `to` are the INCLUSIVE numeric bounds (..< / until subtract one when the range
-// is BUILT), `st` is the POSITIVE step, `down` the direction and `ch` remembers
-// that the bounds were Chars (and `fl` that they were Doubles) so the elements are boxed back into Chars.
+// A progression is a first-class value, the same one the interpreter half has,
+// field for field: {__range, from, to, st, down, ch, fl}. It is not materialized,
+// because Kotlin answers from the DECLARED bounds: `(5..1).first` is 5 (only
+// isEmpty() reports the emptiness, and `first()`, the function, is the one that
+// throws) and toString is "5..1", not "[]". `from` and `to` are the INCLUSIVE
+// numeric bounds (..< / until subtract one when the range is BUILT), `st` is the
+// POSITIVE step, `down` the direction and `ch` remembers that the bounds were
+// Chars (and `fl` that they were Doubles) so the elements are boxed back into Chars.
 //
 // Every Kotlin entry point that can receive one materializes it with
 // ktRangeList: js_ktiter, ktSmcall (after the scope functions, so `(1..5).let`
@@ -7871,16 +7554,14 @@ function k4RangeNum(v) {
     return ktNum(v)
 }
 
-// js_ktrange is the extern the emitter's makeRange now calls in place of the
-// materializing loop. `down` is 1 for downTo and 0 otherwise; the `..<` / until
-// subtraction is the emitter's, exactly as it was.
+// js_ktrange is the extern the emitter's makeRange calls. `down` is 1 for downTo
+// and 0 otherwise; the `..<` / until subtraction is the emitter's.
 function js_ktrange(from, to, st, down) {
     var stn = k4RangeNum(st)
     if (stn <= 0) { fail("range step must be positive") }
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
-    // and no iteration for one, and its contains is the BOUNDS test alone; the old
-    // representation materialized it by stepping 1 and answered `1.5 in 1.0..2.0`
-    // FALSE in every engine, agreeing and all wrong.
+    // and no iteration for one, and its contains is the BOUNDS test alone
+    // (`1.5 in 1.0..2.0` is true).
     return {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
             st: stn, down: down !== 0, ch: ktIsChar(from), fl: floIs(from), pg: false}
 }
@@ -7938,8 +7619,7 @@ function ktRangeEmpty(rg) {
 // IntProgression.reversed(): "a progression that goes over the same range in the
 // opposite direction with the same step" - IntProgression.fromClosedRange(last,
 // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
-// to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed. Every engine
-// answered the materialized list "[5, 4, 3, 2, 1]" here. todo.md 1.5.
+// to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 function ktRangeRev(rg) {
     return {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
             down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true}
@@ -7963,8 +7643,7 @@ function ktRangeAt(rg, i) {
 // The function spelling of rangeTo / until / downTo, shared by the number and the
 // Char receiver. `..`, `until` and `downTo` are the infix operators the emitter
 // lowers to js_ktrange, but kotlin.ranges declares each as an ordinary
-// member/extension too, and `1.rangeTo(5)` aborted with "unknown Int method:
-// rangeTo" in all three engines.
+// member/extension too (`1.rangeTo(5)`).
 function k4RangeMake(from, to, name) {
     var tn = k4RangeNum(to)
     if (name == "until") { tn = tn - 1 }
@@ -8094,8 +7773,7 @@ function k4RndMethod(o, name, args) {
 
 // `x in r`. A plain IntRange declares contains(value) and consults the bounds
 // only; a STEPPED progression is an Iterable and `in` is its linear membership,
-// so 3 is NOT in (1..10 step 4). Both are the one test below, which is why the
-// interpreter half's bounds-only rangeHas was wrong for a progression.
+// so 3 is NOT in (1..10 step 4). Both are the one test below.
 function ktRangeHas(rg, x) {
     // A ClosedFloatingPointRange consults the bounds and nothing else.
     if (rg["fl"] === true) {
@@ -8182,7 +7860,7 @@ function k4RangeIsType(rg, tname) {
     if (t == "IntRange") { return plain }
     // A LongRange is not distinguishable here: k4RangeNum reduces a Long bound to
     // its numeric value, so `1L..5L` and `1..5` are the same value. Both halves
-    // answer the Int names, which is what the interpreter half has always done.
+    // answer the Int names.
     return false
 }
 
@@ -8191,9 +7869,6 @@ function k4Indices(n) {
     return {__range: true, from: 0, to: n - 1, st: 1, down: false, ch: false, pg: false}
 }
 
-// k4ProgNum / k4ProgStep, which recovered a materialized progression's step from
-// the distance between its first two elements, are GONE with the materialization
-// they compensated for: the step is now on the value.
 
 // js_ktfget (jsrtkotlin.go:1980) is Kotlin's dotted READ.
 function js_ktfget(o, name) {
@@ -8249,13 +7924,11 @@ function js_ktfget(o, name) {
     if (ktIsObj(o)) {
         // A NESTED CLASS read as a member of its owner's descriptor - the
         // `Outer.Mid` of `Outer.Mid.Deep(7)`. The ordinary slot holds a construction
-        // factory (a function), so the read answered that and the following member
-        // call aborted with "method call 'Deep' on a function"; emitNestedList in
-        // languages/kotlin-to-llvm-ir.abnf also writes the DESCRIPTOR under
-        // __ncls_<name>, which is what the interpreter half's attachNested puts in
-        // the only slot it has. The twin is the same arm of js_ktfget in
-        // abnf/jsrtkotlin.go. __hasncls is the one fixed key the hot path pays for.
-        // docs/todo.md 2.9.
+        // factory (a function); emitNestedList in languages/kotlin-to-llvm-ir.abnf
+        // also writes the DESCRIPTOR under __ncls_<name>, which is what the
+        // interpreter half's attachNested puts in the only slot it has. Twin: the
+        // same arm of js_ktfget in abnf/jsrtkotlin.go. __hasncls is the one fixed
+        // key the hot path pays for.
         if (o["__hasncls"] === true) {
             var ncv = o["__ncls_" + name]
             if (ncv !== undefined) { return ncv }
@@ -8279,14 +7952,14 @@ function js_ktfget(o, name) {
             if (!ktMiss(jv)) { return jv }
         }
         // A SET has no `length`, so `s.size` - which the emitter spells as
-        // `.length` - read undefined and printed "kotlin.Unit".
+        // `.length` - is answered here.
         if (ktIsSet(o)) {
             if (name == "length") { return ktSetElems(o).length }
             if (name == "size") { return ktSetElems(o).length }
         }
         // Map.keys is a SET (java.util.Map.keySet) and Map.entries a set of
-        // entries. Read as PROPERTIES they used to fall through to js_get, which
-        // handed back the raw `keys` array behind the handle.
+        // entries, read as PROPERTIES - js_get would hand back the raw `keys`
+        // array behind the handle.
         if (rtIsDictObj(o)) {
             var mname = anytype
             mname = ""
@@ -8320,10 +7993,10 @@ function js_ktfget(o, name) {
     if (ktMiss(r)) {
         if (ktIsObj(o)) { r = k4bGetMember(o, name) } else { r = o[name] }
     }
-    // `.size` is Kotlin's collection length, and the emitter used to rewrite it to
-    // `.length` for EVERY receiver - so a user class declaring its own `size`
-    // property read undefined. The rewrite happens HERE, only when the receiver has
-    // no `size` of its own.
+    // `.size` is Kotlin's collection length. The emitter does not rewrite it to
+    // `.length` for every receiver, since a user class may declare its own `size`
+    // property; the rewrite happens HERE, only when the receiver has no `size` of
+    // its own.
     if (name == "size") {
         if (ktIsNullish(r)) {
             var lr = o["length"]
@@ -8333,18 +8006,15 @@ function js_ktfget(o, name) {
     // KOTLIN'S INDEX PROPERTIES - the *jsArray and string arms of js_ktfget
     // (jsrtkotlin.go). `val Collection<*>.indices: IntRange`,
     // `val CharSequence.indices: IntRange`, `val List<T>.lastIndex: Int` and
-    // `val CharSequence.lastIndex: Int` all read UNDEFINED, so
-    // `for (i in vs.indices)` handed js_ktiter an undefined and the loop died with
-    // "member 'length' of undefined" - todo.md 1.8. They are read ONLY WHEN THE
-    // ORDINARY MEMBER READ MISSED, the same fast-path-versus-dispatcher shape as the
-    // `.size` rewrite above: a receiver that declares its own `first` keeps it, and a
-    // field read that HITS pays nothing for these arms.
+    // `val CharSequence.lastIndex: Int`. They are read ONLY WHEN THE ORDINARY
+    // MEMBER READ MISSED, the same fast-path-versus-dispatcher shape as the
+    // `.size` rewrite above: a receiver that declares its own `first` keeps it, and
+    // a field read that HITS pays nothing for these arms.
     //
-    // A range is a VALUE here now, so first / last / start / endInclusive / step
-    // are read off the BOUNDS and an empty progression answers all five - which is
-    // what closed todo.md 1.8. `.size` on a progression is not Kotlin (IntRange is
-    // an Iterable, not a Collection) but the interpreter half answers the element
-    // count, so this one does too rather than diverge.
+    // A range's first / last / start / endInclusive / step are read off the
+    // BOUNDS, so an empty progression answers all five. `.size` on a progression
+    // is not Kotlin (IntRange is an Iterable, not a Collection) but the
+    // interpreter half answers the element count, so this one does too.
     if (ktIsRange(o) && ktIsNullish(r)) {
         if (name == "first") { return k4RangeEl(o, o["from"]) }
         // IntProgression.last is the last ELEMENT, not the bound it was built
@@ -8372,7 +8042,6 @@ function js_ktfget(o, name) {
         if (name == "lastIndex") { return o.length - 1 }
     }
     // A StringBuilder IS a CharSequence, so the same two properties apply to it.
-    // Only `length` was answered, in both halves alike.
     if (ktIsSb(o) && ktIsNullish(r)) {
         if (name == "indices") { return k4Indices(ktSbText(o).length) }
         if (name == "lastIndex") { return ktSbText(o).length - 1 }
@@ -8384,8 +8053,7 @@ function js_ktfget(o, name) {
 
 // js_ktindex (jsrtkotlin.go:2117) is the same rule for the INDEXED read: `m[9]` on
 // a map that has no key 9 is null in Kotlin (Map.get answers null), where the
-// shared js_kindex answers undefined - which printed "kotlin.Unit" and made
-// `m[9] == null` false in the compiler while the interpreter said true.
+// shared js_kindex answers undefined.
 function js_ktindex(o, k) {
     // A progression has no `get`, but `.elementAt(i)` and every list builtin
     // reaches it through the materialized elements, so the indexed read answers
@@ -8406,49 +8074,29 @@ function js_ktindex(o, k) {
     // is the ordinary member read.
     if (typeof o == "string") {
         var i = k4Int(k)
-        // Was fail() - an ABORT, where the JVM throws a CATCHABLE
-        // StringIndexOutOfBoundsException and the interpreter half answered a blank
-        // character. docs/todo.md 2.9; the message is java 24.0.2's verbatim.
+        // The JVM throws a CATCHABLE StringIndexOutOfBoundsException; the message is
+        // java's verbatim.
         if (i < 0 || i >= o.length) { ktIndexOob("StringIndexOutOfBoundsException", i, o.length) }
         return ktChar(o.charCodeAt(i))
     }
     // The array arm's bounds test is FOLDED INTO THE READ, because this is the hot
-    // path of every Kotlin program and docs/todo.md 2.9 is on this list precisely
-    // because a naive guard here is the shape that measured +9.5% elsewhere. An
-    // out-of-range read already answers undefined, so the fast path pays ONE
-    // comparison against a value it has in hand and nothing else - no second
-    // `length` read, no extra call. Only a miss goes to ktArrMiss, which is where
-    // the real bounds test lives and which correctly hands an IN-RANGE undefined
-    // element straight back. The type test is also SPELLED OUT rather than written
-    // `ktIsArr(o)`: that helper's `__dict` probe is dead here, because a dict
-    // handle both returned from the rtIsDictObj arm above AND has no numeric
-    // `length`, and dropping the probe pays for the fold and more.
-    //
-    // Measured with MEC_GC_STATS on a loop that does nothing but index (200,000
-    // reads), against a `git archive db6bf43` tree - an EXACT counter, so one run
-    // settles it, and two runs of this spelling agree to the collection:
-    //   base tree                                        collections = 7197
-    //   this spelling                                                  7178  -0.26%
-    //   ktIsArr + read `length` for the guard                          7209  +0.17%
-    //   ktIsArr + read `length` twice                                  7227  +0.42%
-    // Instructions retired cannot resolve any of these, which is the point of
-    // tests/bench.sh's header: 13 paired layout draws of tests/bench/idxhot.kt read
-    // a median of 52.165G against the base tree's 52.576G - -0.78%, well inside the
-    // base row's own 4.39% spread, so the median says NOTHING - and the sign test
-    // over the matched pairs is 10 of 13 in this tree's favour. Both instruments
-    // agree with the counter on the DIRECTION and neither can put a number on it.
-    // tests/bench.sh's shared kotlin row (mod.kt indexes nothing) reads +0.46%
-    // against a 1.02% spread with heap and collections BYTE-IDENTICAL to baseline.
+    // path of every Kotlin program. An out-of-range read already answers undefined,
+    // so the fast path pays ONE comparison against a value it has in hand and
+    // nothing else - no second `length` read, no extra call. Only a miss goes to
+    // ktArrMiss, which is where the real bounds test lives and which hands an
+    // IN-RANGE undefined element straight back. The type test is also SPELLED OUT
+    // rather than written `ktIsArr(o)`: that helper's `__dict` probe is dead here,
+    // because a dict handle both returned from the rtIsDictObj arm above AND has no
+    // numeric `length`. Inlined on purpose: the helper call is measurably slower.
     if (ktIsObj(o) && o["__set"] !== true && typeof o["length"] == "number") {
         var av = o[k4Int(k)]
         if (av === undefined) { return ktArrMiss(o, k) }
         return av
     }
-    // sb[i] on a StringBuilder answered undefined - "kotlin.Unit" - in BOTH halves.
-    // Kotlin's StringBuilder is a CharSequence, so it indexes like a String and
-    // raises the same throwable out of range (java 24.0.2: "Index 5 out of bounds
-    // for length 2"). The arm is AFTER the array arm on purpose: an sb box carries
-    // no numeric `length`, so it costs the hot path nothing. docs/todo.md 2.9.
+    // Kotlin's StringBuilder is a CharSequence, so sb[i] indexes like a String and
+    // raises the same throwable out of range (java: "Index 5 out of bounds for
+    // length 2"). The arm is AFTER the array arm on purpose: an sb box carries no
+    // numeric `length`, so it costs the hot path nothing.
     if (ktIsSb(o)) {
         var st = ktSbText(o)
         var si = k4Int(k)
@@ -8616,54 +8264,17 @@ function k4NameVal(v, name) {
 //       re-pointed, right after the import, so a step-limit blowup reports the
 //       Go twin's text rather than the engine's default.
 //
-//       THIS USED TO BE 1,489 LINES OF regex.js PASTED IN VERBATIM, kept in step
-//       BY HAND, and the import was measured and REVERTED TWICE (+18-23% on wall
-//       clock, then +10.7% on instructions retired). BOTH VERDICTS DIED WITH THE
-//       DECLARATION TAX. `import` PREPENDS an imported file's top-level
-//       declarations to jsrun (metajs-to-llvm-ir.abnf ~590/~1011), so importing
-//       regex.js relocates 86 declarations to index 0; while runtime.c's
-//       scope_find was a LINEAR SCAN of the module scope's name array that cost
-//       +9.5%, and the six bodies kotlin does not call cost a further +1.1%.
-//       scope_find has had a HASH INDEX since 2026-08-04 (e1307f3), lookups are
-//       O(1), and the only work the import adds is SIX extra js_tdecl calls at
-//       module init. Re-measured at e1307f3, native -exe, /usr/bin/time -l
-//       INSTRUCTIONS RETIRED, as a MEAN OVER MANY BUILDS (see the warning below):
+//       The import costs nothing measurable at run time, and it keeps kotlin on the
+//       same regex.js text the other languages import (abnf/jsrtregex.go ports it
+//       line by line), so a change to lib/regex.js cannot fail to arrive here.
+//       Kotlin carries six engine bodies its grammar never reaches (rxMatchAt,
+//       rxTest, rxGroupCount, rxNameAt, rxReplace, rxSplit); a separate
+//       runtime-regex split would drop them at the price of a second regex text
+//       to hand-synchronise, so there is none.
 //
-//                                  old (verbatim)   new (import)    delta
-//           40,000 x s = s + i%7   mean 17.989 G    mean 17.976 G   -0.07%  n=20
-//                                    95% CI on the delta [-0.60%, +0.38%]
-//           1,000 x regexp ops     mean 15.052 G    mean 15.093 G   +0.28%  n=14
-//                                    95% CI on the delta [-0.60%, +1.17%]
-//           println("hi")          med  27.076 M    med  27.048 M   -0.10%  n=10
-//
-//       BOTH INTERVALS STRADDLE ZERO. The change is not measurable on this
-//       machine in either direction, and it shipped on the CORRECTNESS argument:
-//       1,489 lines that had to be kept in step BY HAND against a regex.js that
-//       three other languages already import and abnf/jsrtregex.go line-by-line
-//       ports. The third row is where a module-init cost would show, and it does
-//       not; MEC_GC_STATS is byte-identical (pinned=13) either way.
-//
-//       *** DO NOT A/B THIS FILE WITH A SINGLE BUILD PER VARIANT. *** Take ONE
-//       byte-identical kotlin-rt.ll, one source, one tree, and vary nothing but
-//       the LENGTH OF THE -exe OUTPUT FILENAME: 17.756 .. 18.600 G, a 4.8%
-//       bimodal spread. It is not the run and not codegen - six rebuilds to one
-//       path give md5-identical binaries and 0.05% spread. The path string lands
-//       in the binary and moves the code layout, and so does this file's own
-//       content, identically - so holding the -exe path fixed across variants
-//       CANCELS NOTHING. Two careful people measured these same two sources at
-//       +0.04% and +0.65% before working this out; both were single draws.
-//       Average over >=15 draws and quote an interval, or it is not a
-//       measurement.
-//
-//       WHAT THIS COSTS: kotlin now carries the six bodies its grammar never
-//       reaches - rxMatchAt, rxTest, rxGroupCount, rxNameAt, rxReplace, rxSplit.
-//       A runtime-regex.metajs split would drop exactly those six; since six
-//       declarations are worth nothing measurable it would buy nothing while
-//       re-introducing a second regex text to hand-synchronise, so it was NOT
-//       created. What the import BUYS is that a change to lib/regex.js can no
-//       longer fail to arrive here.
-//
-//       See docs/runtime-merge-plan.md, "THE THIRD ASKING".
+//       Benchmarking this file: the code layout (and so instructions retired)
+//       moves by several percent with anything that lands in the binary, the -exe
+//       output path included. Compare means over many builds, never single draws.
 //   (b) the Kotlin layer, under the private prefix k5.
 //   (c) the two externs js_rxktnew and js_rxktglobal.
 //
@@ -8691,9 +8302,8 @@ import "./regex.js"
 // reports the pattern the way ktRxCheck does.
 rxFail = function (msg) { fail("regexp: " + msg) }
 
-// The compile cache is SHARED as rxCache / rxGet - lib/regex.js, where
-// abnf/jsrtregex.go has always had it: ONE cache for js, kotlin, python and
-// ruby. Four byte-identical private copies retired.
+// The compile cache is shared as rxCache / rxGet (lib/regex.js): ONE cache for
+// js, kotlin, python and ruby, as in abnf/jsrtregex.go.
 
 function k5Check(re) {
     if (!re["ok"]) { fail("invalid regex '" + re["src"] + "': " + re["err"]) }
@@ -8713,9 +8323,8 @@ function k5Whole(re, text) {
     return rxMatchWhole(re, text, 0)
 }
 
-// The two value tests are SHARED as rxIsRegexObj / rxIsMatchObj - lib/regex.js,
-// the Go twin's own names for them. ruby's rbRxIsRegex / rbRxIsMatch were the
-// same bodies; the difference list is at the shared site.
+// The two value tests are shared as rxIsRegexObj / rxIsMatchObj (lib/regex.js),
+// the Go twin's own names for them.
 function ktRxIsRegex(v) { return rxIsRegexObj(v) }
 
 function ktRxIsMatch(v) { return rxIsMatchObj(v) }
@@ -8731,7 +8340,7 @@ function k5IsCompanion(v) {
     return !ktIsNullish(v["__ktrxco"])
 }
 
-// SHARED as rxObjRe - lib/regex.js. ruby's rbRxObjRe was the same seven lines.
+// Shared as rxObjRe (lib/regex.js).
 function k5ObjRe(v) { return rxObjRe(v) }
 
 // k5NewMatch builds a MatchResult over `prog` (the program the match ran on)
@@ -8760,9 +8369,7 @@ function k5Orig(md) {
 // The Go twin's rxMatchOf answers three values; MetaJS has one return, so the
 // three travel in a record. text stays a STRING: regex.js indexes UTF-16 code
 // units where the Go engine indexes runes, which agree throughout the BMP.
-// SHARED as rxMatchOf - lib/regex.js, with ruby's rbRxMatchOf and python's
-// pyERxMatchOf. The one difference was the capture coercion (ktNum here) and it
-// is the identity on every value __rxcaps can hold; see the shared site.
+// Shared as rxMatchOf (lib/regex.js); see the shared site for the capture coercion.
 function k5MatchOf(v) { return rxMatchOf(v) }
 
 // ----- Flags -----
@@ -9193,50 +8800,35 @@ function js_rxktglobal(name) { return ktRxGlobal(name) }
 // SECTION 6 - THE SCOPE-TAKING EXTERNS
 // ============================================================================
 //
-// Ten of Kotlin's externs take a SCOPE HANDLE, and until the floor grew the
-// scope builtins layer 2 could do NOTHING with one: a scope is the C floor's
-// private storage and MetaJS has no way to open a cell. Kotlin's answer was to
-// lower each probe into the EMITTER (languages/kotlin-to-llvm-ir.abnf), which
-// from emitted IR can reach the INNERMOST binding and the INNERMOST `this` and
-// nothing further out. This section is docs/todo.md 6.1's conversion.
-//
-// WHAT THE SCOPE API ACTUALLY IS, because the item said otherwise and it matters
-// to anyone reading it next. scopeNew / scopeParent / scopeGet / scopeHas /
-// scopeDecl (host ids 64..68; languages/lib/runtime.c, abnf/jsrtint.go's
-// scopeBindings and metajs-interpreter.abnf's scNew/scParent/scGet/scHas/scDecl)
-// are MetaJS HOST BUILTINS. They are reachable from a layer-2 file and NOT from
-// emitted IR - the extern set is js_scope_{new,get,set,set_or_create,decl,has,
-// typeof} and there is no js_scope_parent among them. So these helpers could
-// never "come out of the emitter" into the emitter: the chain walk belongs HERE.
-// languages/lib/ruby-rt.metajs's js_rmethodval is the same shape and shipped
-// first; this is the second.
+// Ten of Kotlin's externs take a SCOPE HANDLE. A scope is the C floor's private
+// storage: from emitted IR (languages/kotlin-to-llvm-ir.abnf) only the INNERMOST
+// binding and the INNERMOST `this` are reachable, through the js_scope_{new,get,
+// set,set_or_create,decl,has,typeof} externs, and there is no js_scope_parent.
+// scopeNew / scopeParent / scopeGet / scopeHas / scopeDecl (languages/lib/runtime.c,
+// abnf/jsrtint.go's scopeBindings and metajs-interpreter.abnf's scNew/scParent/
+// scGet/scHas/scDecl) are MetaJS HOST BUILTINS, reachable from a layer-2 file and
+// NOT from emitted IR. So the chain walk belongs HERE; languages/lib/ruby-rt.metajs's
+// js_rmethodval is the same shape.
 //
 // THE SPLIT WITH THE EMITTER, and why it is deliberately not all-or-nothing. In
-// MetaJS a call is a scope frame (docs/working-on-this-project.md 5.1, where one
-// merge of this shape cost python 41%), and kt_ktgetp is the compiler half's
-// hottest name resolution. So the emitter KEEPS the arms it could already reach
-// - the innermost binding, the innermost `this`, the innermost `__dispatch` -
-// and calls in here only when all of them miss. Everything below therefore runs
-// on a COLD path and is a strict SUPERSET of what the emitter tried: the walks
-// start at the same scope in the same order, so the first hit is the same
-// binding, and what is new is only the frames FURTHER OUT.
+// MetaJS a call is a scope frame (docs/working-on-this-project.md 5.1), and
+// kt_ktgetp is the compiler half's hottest name resolution. So the emitter KEEPS
+// the arms it can reach - the innermost binding, the innermost `this`, the
+// innermost `__dispatch` - and calls in here only when all of them miss.
+// Everything below therefore runs on a COLD path and is a strict SUPERSET of what
+// the emitter tried: the walks start at the same scope in the same order, so the
+// first hit is the same binding, and what is new is only the frames FURTHER OUT.
 //
-// THIS IS NOT A REFACTOR. Three defects, none of which any gate in this project
-// could see, and all three asserted in tests/kotlin-test-full.kt:
+// What only the walk can answer (all asserted in tests/kotlin-test-full.kt):
 //
-//   * A Unit-valued local read from an ENCLOSING scope ABORTED THE NATIVE BINARY
-//     ("js_ktget(u) needs to WALK a scope chain") while the interpreter and
-//     llvm.Run printed kotlin.Unit. js_scope_typeof cannot tell "holds
-//     undefined" from "absent" and js_scope_has does not walk, so from emitted
-//     IR the question was unaskable. scopeHas + scopeParent IS that question,
-//     and it is exactly the shape that bit python's comprehension targets
-//     (docs/working-on-this-project.md 7.3).
+//   * A Unit-valued local read from an ENCLOSING scope. js_scope_typeof cannot
+//     tell "holds undefined" from "absent" and js_scope_has does not walk;
+//     scopeHas + scopeParent IS that question (docs/working-on-this-project.md 7.3).
 //   * An outer-class member read from inside `apply { }` - `Other(5).apply { r =
-//     an + on }` inside a member of A - aborted natively for the same reason.
+//     an + on }` inside a member of A.
 //   * A member extension of the ENCLOSING class called through `with`:
 //     `with(Other(9)) { 2.tripled() }`. The receiver-stack walk below answers it
-//     natively. It is still WRONG in the other two engines, and the fix for
-//     those is not in this file - see js_ktmextcall's header.
+//     natively; see k6MextFind's header for the other two engines.
 
 // ----- the two walks everything below is written on -----
 
@@ -9392,9 +8984,8 @@ function js_kset(env, name, v) {
                 }
                 // The write twin of js_ktget's accessor arm: a property with a
                 // SETTER is a js_defprop pair on the DESCRIPTOR, so the own-property
-                // test missed it. Unreachable under llvm.Run, where rt.setMember
-                // honours the pair itself; natively the floor's member write cannot
-                // see it. js_ktset is the write that does.
+                // test missed it. (Under llvm.Run rt.setMember honours the pair
+                // itself; natively the floor's member write cannot see it.)
                 var acc = k4bFindAcc(t, name)
                 if (acc !== undefined) {
                     js_ktset(t, name, v)
@@ -9407,7 +8998,7 @@ function js_kset(env, name, v) {
         }
     }
     // The IMPLICIT RECEIVER: `with(node) { tag = "x" }`. ktRecvStack is layer 2's
-    // own, so this arm has always been reachable and it stays.
+    // own.
     return k6RecvWrite(name, v, "js_kset")
 }
 
@@ -9465,8 +9056,7 @@ function js_ktvarset(env, name, v) {
 }
 
 // The write that reaches an IMPLICIT RECEIVER - `with(node) { tag = "x" }`.
-// ktRecvStack is layer 2's own, so the walk is an ordinary loop over it. This is
-// the one arm of the write path that was reachable before the scope API.
+// ktRecvStack is layer 2's own, so the walk is an ordinary loop over it.
 function k6RecvWrite(name, v, who) {
     var i = ktRecvStack.length - 1
     while (i >= 0) {
@@ -9487,9 +9077,9 @@ function k6RecvWrite(name, v, who) {
 
 // jsrtkotlin.go:1126's js_ktouter: `this@Outer`. Walk the scope chain for a
 // `this` whose own __class / __super chain declares that name. The emitter's
-// lowering walked the innermost instance's __outer chain instead, which is the
-// same answer only when the qualified receiver is an enclosing INSTANCE; this is
-// the exact test.
+// `this` whose own __class / __super chain declares that name. Walking the
+// innermost instance's __outer chain would give the same answer only when the
+// qualified receiver is an enclosing INSTANCE; this is the exact test.
 function js_ktouter(env, name) {
     var s = anytype
     s = env
@@ -9529,10 +9119,10 @@ function js_ktrefbase(env, name, istype) {
     // builder is in scope. The emitter already makes that decision statically -
     // makeQualRef in kotlin-to-llvm-ir.abnf, over ktTypeNameSet, because the base
     // name is a literal at the call site - so it hands the answer over instead of
-    // this file keeping a fourth copy of a list that abnf/jsrtkotlin.go:5926,
-    // kotlin-interpreter.abnf and the emitter must already keep in step. The Go
-    // twin ignores the extra argument and re-decides from its own table, which is
-    // the same table, so the two engines agree by construction.
+// this file keeping another copy of a list that abnf/jsrtkotlin.go,
+// kotlin-interpreter.abnf and the emitter must already keep in step. The Go
+// twin ignores the extra argument and re-decides from its own table, which is
+// the same table, so the two engines agree by construction.
     if (istype === true) { return name }
     var v = anytype
     v = k6Find(env, name)
@@ -9591,26 +9181,22 @@ function js_ktdthis(env) {
 
 // ----- the three MEMBER-EXTENSION externs -----
 
-// jsrtkotlin.go:3328's ktMemberExtFind, with one deliberate difference that is a
-// FIX and not a port error, and it is the third defect in this section's header.
+// jsrtkotlin.go's ktMemberExtFind, with one deliberate difference that is a FIX
+// and not a port error.
 //
 // The Go twin collects ONE start per key: the first scope carrying a `this` and
 // the first carrying a `__dispatch`, and then walks each start's own
 // __class/__outer graph. So inside a member of A, `with(Other(9)) { 2.tripled() }`
 // - where `fun Int.tripled()` is a member extension declared in A - finds only
 // the `with` receiver and reports the name unresolved. Both the Go twin and
-// languages/kotlin-interpreter.abnf's memberExtLookup do this, which is why that
-// program fails in llvm.Run ("method call 'tripled' on a number") and in the
-// interpreter ("unknown Int method: tripled") while the native binary answers 24.
+// languages/kotlin-interpreter.abnf's memberExtLookup do this, so that program
+// fails in llvm.Run and in the interpreter while the native binary answers 24.
 // Per the Kotlin specification `with` takes a `T.() -> R` extension lambda, which
 // ADDS an implicit receiver rather than replacing the enclosing member's dispatch
-// receiver, so the call resolves and 24 is right. (There is no kotlinc on this
-// machine - docs/working-on-this-project.md chapter 5 - so this is spec-cited.)
-// Closing it in the other two engines is a change to abnf/jsrtkotlin.go's
-// ktMemberExtFind and to memberExtLookup: collect EVERY frame's this/__dispatch
-// instead of breaking at the first. Not done here, because those files were not
-// this round's to change; the assertion is therefore written at the shape all
-// three engines DO agree on.
+// receiver, so the call resolves and 24 is right. Closing it in the other two
+// engines means collecting EVERY frame's this/__dispatch in jsrtkotlin.go's
+// ktMemberExtFind and in memberExtLookup instead of breaking at the first; the
+// test assertion is written at the shape all three engines agree on.
 //
 // EVERY frame's `this` and `__dispatch`, innermost first, then the implicit
 // receiver stack that ktWithRecv pushes for with / run / apply / buildString /
@@ -9651,14 +9237,12 @@ function js_ktmextset(env, recv, name, v) {
         return v
     }
     // NOTHING FOUND MEANS AN ORDINARY MEMBER WRITE, AND AN ORDINARY MEMBER WRITE IS
-    // NOT A RAW SLOT STORE. This used to be `recv[name] = v`, which writes an own
-    // field straight past any {__acc} accessor pair - so a program that declares
-    // `var Int.doubled` inside ANY class makes the emitter route every `x.doubled =`
-    // through here, and an unrelated `class Counted { var doubled get()/set(v) }`
-    // then had its setter skipped: `c.doubled = 10` left `c.raw` at 0 in the NATIVE
-    // binary where the interpreter and llvm.Run both said 5. The Go twin
-    // (jsrtkotlin.go's js_ktmextset) has always used rt.setMember here, whose
-    // accessor arm k4bSetMember is the port of. todo.md 1.4.
+    // NOT A RAW SLOT STORE: `recv[name] = v` would write an own field straight past
+    // any {__acc} accessor pair, and a program that declares `var Int.doubled`
+    // inside ANY class makes the emitter route every `x.doubled =` through here,
+    // including an unrelated class's `var doubled get()/set(v)`. The Go twin
+    // (jsrtkotlin.go's js_ktmextset) uses rt.setMember, whose accessor arm
+    // k4bSetMember is the port of.
     k4bSetMember(recv, name, v)
     return v
 }
