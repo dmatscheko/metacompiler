@@ -779,7 +779,7 @@ func init() {
 				return w(jsChar{code: int32((int64(t.code) + d) & 65535)})
 			case jsJFlo:
 				// ++/-- keeps the operand's own type, WIDTH included: a float
-				// steps as a float (jvF32Round in lib/java-rt.metajs).
+				// steps as a float (rtF32Round in lib/runtime.metajs).
 				if t.sty == floJavaF {
 					return w(jsJFlo{f: jvmFround(t.f + float64(d)), sty: floJavaF})
 				}

@@ -730,7 +730,7 @@ b";                                                   // verbatim keeps the newl
             //
             // MEASURED NULL RESULT, and it is worth saying plainly: this grammar
             // was already immune. Every csFloStr / csF32Str / interpolation /
-            // concat / Dictionary-key path takes its digits from csDecDigits, and
+            // concat / Dictionary-key path takes its digits from coreDecDigits, and
             // the remaining `"" + x` sites in csharp-interpreter.abnf all hold an
             // int, a small int or a string. These two rows fail in NEITHER engine
             // at ea28a1a - zero discriminating power today, ratchet value only.

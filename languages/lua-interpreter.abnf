@@ -1086,7 +1086,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
     // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
     // round-trip a binary64, so the loop terminates with an exact answer. The
-    // reference is jDecDigits in languages/java-interpreter.abnf; floPrec's
+    // reference is coreDecDigits in languages/lib/interp-core.js; floPrec's
     // contract is "exactly n significant digits", so asking for a small n and
     // parsing the answer back IS the shortest-form search.
     function luaDecDigits(a) {

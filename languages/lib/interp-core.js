@@ -1147,3 +1147,190 @@ function szEq(l, r) {
 // operand's own width.
 function szNeg(v) { return szArithSlow("-", szNorm(i64Make(0, 0), szWidth(v, v), szUns(v, v)), v) }
 function szNot(v) { return szNorm(i64Not(szPair(v)), szWidth(v, v), szUns(v, v)) }
+
+// ----- the binary32 float ----------------------------------------------------
+//
+// java/kotlin/C# `float`, Go `float32` and Swift `Float` are binary32: the value
+// travels as a double (every binary32 is exactly one) and coreF32Round rounds
+// every arithmetic result back to 24 significant bits. The dialect has no access
+// to a double's bits, so the rounding is exact power-of-two scalings around one
+// round-half-to-even. Layer 2's copy is rtF32Round in lib/runtime.metajs; the Go
+// twin spells it float64(float32(x)).
+//
+// The digits come from floPrec, never from `"" + a`: goja's printer is not
+// always the shortest round-tripping form, while floPrec answers exactly n
+// digits in every host, so a round-trip search over n is the same everywhere.
+var coreNegOne = 0 - 1
+var coreZeroF = 0
+var coreInfF = 1 / coreZeroF
+// x * 2^k, exactly: every factor is a power of two. The chunking by 2^30 keeps
+// the loop short for the ~280 halvings a subnormal float needs.
+function coreScale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+// Math.fround: the double nearest x that a binary32 holds, half to even, with
+// the subnormals and both overflows. `0 / -1` is -0.0; `0 - 0.0` would be +0.
+function coreF32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var neg = x < 0
+    var a = neg ? x * coreNegOne : x
+    if (a === coreInfF) { return x }
+    var maxf = coreScale2(16777215, 104)
+    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+    // below the smallest subnormal (which ties to even, i.e. to zero); both
+    // early exits also bound the exponent loop below to ~280 turns.
+    if (a >= coreScale2(1, 128)) { return neg ? coreInfF * coreNegOne : coreInfF }
+    if (a <= coreScale2(1, 0 - 150)) { return neg ? 0 / coreNegOne : 0 }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var sc = coreScale2(a, 0 - q)
+    var f = Math.floor(sc)
+    var d = sc - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = coreScale2(f, q)
+    if (r > maxf) { return neg ? coreInfF * coreNegOne : coreInfF }
+    if (r === 0) { return neg ? 0 / coreNegOne : 0 }
+    return neg ? r * coreNegOne : r
+}
+// The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the
+// decimal exponent of the FIRST digit, so the text to parse carries the point
+// after that digit.
+function coreSigVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var frac = ds.substring(1)
+    if (frac == "") { frac = "0" }
+    return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+}
+// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP.
+// Seventeen digits always round-trip a binary64, so the loop always ends.
+function coreDecDigits(a) {
+    var n = 1
+    while (n < 17) {
+        var c = floPrec(a, n)
+        if (coreSigVal(c) === a) { return c }
+        n = n + 1
+    }
+    return floPrec(a, 17)
+}
+// A DIGITS "e" EXP form rounded to n significant digits, half to even.
+function coreRoundDig(s, n) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    if (ds.length <= n) { return s }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
+        if (rest) { up = true } else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        for (var k = n - 1; k >= 0; k--) {
+            var dg = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (dg == 10) { dg = 0; carry = 1 }
+            out = "" + dg + out
+        }
+        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+        keep = out
+    }
+    var ez = keep.length
+    while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
+    return keep.substring(0, ez) + "e" + ex
+}
+// The value of a DIGITS "e" EXP form of at most nine digits, so the integer is
+// exact; the power of ten goes on in chunks of 10^15, the largest a double holds
+// exactly. The error stays far below a float's half-ulp, and the only consumer
+// is coreF32Sig's round-trip test.
+function coreDecVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+    var m = 0
+    for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+// The shortest decimal that round-trips as a binary32. Nine digits always do.
+function coreF32Sig(a) {
+    var full = coreDecDigits(a)
+    var n = 1
+    while (n < 9) {
+        var c = coreRoundDig(full, n)
+        if (coreF32Round(coreDecVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return coreRoundDig(full, 9)
+}
+// java.lang.Float.toString, which Kotlin's Float.toString delegates to:
+// Double.toString's rule at 24 bits - plain for 1e-3 <= |v| < 1e7 and d.dddEnn
+// outside it, always a decimal point, never fewer than two significant digits
+// in the scientific form.
+function coreJvmF32Str(d) {
+    if (d !== d) return "NaN"
+    if (d === coreInfF) return "Infinity"
+    if (d === coreInfF * coreNegOne) return "-Infinity"
+    if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
+    var neg = d < 0
+    var a = neg ? d * coreNegOne : d
+    var sig = coreF32Sig(a)
+    var ei = sig.indexOf("e")
+    var ds = sig.substring(0, ei)
+    var e10 = parseInt(sig.substring(ei + 1), 10)
+    var body = ""
+    if (a >= 0.001 && a < 10000000) {
+        body = coreJvmPlainDec(ds, e10)
+    } else {
+        // Where the shortest form has one digit the second is the closest two
+        // digit decimal to the ACTUAL value rather than a zero: Float.MIN_VALUE
+        // prints "1.4E-45", as Double.MIN_VALUE prints "4.9E-324".
+        if (ds.length == 1) {
+            var s2 = coreRoundDig(coreDecDigits(a), 2)
+            var e2 = s2.indexOf("e")
+            ds = s2.substring(0, e2)
+            e10 = parseInt(s2.substring(e2 + 1), 10)
+        }
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        body = ds.charAt(0) + "." + frac + "E" + e10
+    }
+    return neg ? "-" + body : body
+}
+// The JVM's plain form of a DIGITS / first-digit-exponent pair, with the forced
+// ".0". Float.toString and Double.toString share it: the plain form is the same
+// rule at both widths, only the digit run differs.
+function coreJvmPlainDec(ds, e10) {
+    if (e10 >= 0) {
+        var ip = ""
+        for (var i = 0; i <= e10; i++) { ip = ip + (i < ds.length ? ds.charAt(i) : "0") }
+        var fp = ds.length > e10 + 1 ? ds.substring(e10 + 1) : "0"
+        return ip + "." + fp
+    }
+    var lead = "0."
+    for (var k = 0 - e10 - 1; k > 0; k--) { lead = lead + "0" }
+    return lead + ds
+}

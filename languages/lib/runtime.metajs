@@ -2163,3 +2163,232 @@ function rtJavaStr(v) {
     if (floIs(v)) { return floStr(v) }
     return "" + v
 }
+
+// ===================================================== the binary32 float ===
+//
+// java/kotlin `float`, C# `float`, Go `float32` and Swift `Float` are binary32.
+// The value travels as a double (every binary32 is exactly one) and every
+// arithmetic result is rounded back to 24 significant bits by rtF32Round; only
+// the box's style byte records the width. The rounding lives in layer 2, not the
+// floor, because c-to-llvm-ir.abnf computes every C `float` at double precision
+// and so cannot spell `(float)x`. MetaJS has no access to a double's bits either
+// (manual 7.7), so the rounding is done with exact power-of-two scalings around
+// a single round-half-to-even. The Go twin spells it `float64(float32(x))`.
+
+// x * 2^k, exactly: every factor is a power of two. The chunking by 2^30 keeps
+// the loop short for the ~280 halvings a subnormal float needs.
+function rtScale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+
+// Math.fround: the double nearest x that a binary32 holds, half to even, with
+// the subnormals and both overflows. The significand is scaled until its unit in
+// the last place is 1, rounded there, and scaled back. `0 / (0 - 1)` is -0.0
+// (manual 7.10).
+function rtF32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var zero = 0
+    var inf = 1 / zero
+    var neg = x < 0
+    var a = neg ? 0 - x : x
+    if (a === inf) { return x }
+    var maxf = rtScale2(16777215, 104)
+    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+    // below the smallest subnormal (which ties to even, i.e. to zero); both
+    // early exits also bound the exponent loop below to ~280 turns.
+    if (a >= rtScale2(1, 128)) { return neg ? 0 - inf : inf }
+    if (a <= rtScale2(1, 0 - 150)) { return neg ? 0 / (0 - 1) : 0 }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var s = rtScale2(a, 0 - q)
+    var f = Math.floor(s)
+    var d = s - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = rtScale2(f, q)
+    if (r > maxf) { return neg ? 0 - inf : inf }
+    if (r === 0) { return neg ? 0 / (0 - 1) : 0 }
+    return neg ? 0 - r : r
+}
+
+// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP
+// with EXP the decimal exponent of the FIRST digit - floPrec's shape. It reads
+// the digits off `"" + a`, which is exact in layer 2 in both places it runs (the
+// floor's shortest_digits natively, strconv.FormatFloat(-1) under llvm.Run). The
+// tag-script halves cannot do this - goja's printer is not always shortest - and
+// go through floPrec instead.
+function rtDecDigits(a) {
+    var s = "" + a
+    var mant = s
+    var exp = 0
+    var ei = 0 - 1
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "e") { ei = i }
+        if (c == "E") { ei = i }
+        i = i + 1
+    }
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var et = s.substring(ei + 1)
+        if (et.charAt(0) == "+") { et = et.substring(1) }
+        exp = parseInt(et, 10)
+    }
+    var digits = ""
+    var pt = 0 - 1
+    var j = 0
+    while (j < mant.length) {
+        var ch = mant.charAt(j)
+        if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        j = j + 1
+    }
+    if (pt < 0) { pt = digits.length }
+    var lead = 0
+    while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead)
+    pt = pt - lead
+    var endz = digits.length
+    while (endz > 1 && digits.charAt(endz - 1) == "0") { endz = endz - 1 }
+    digits = digits.substring(0, endz)
+    return digits + "e" + (pt + exp - 1)
+}
+
+// A DIGITS "e" EXP form rounded to n significant digits, half to even. The
+// source is already the shortest form of the value, so a genuine tie can only
+// be a decimal the double holds exactly.
+function rtRoundDig(s, n) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    if (ds.length <= n) { return s }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        var i = n + 1
+        while (i < ds.length) { if (ds.charCodeAt(i) != 48) { rest = true } i = i + 1 }
+        if (rest) { up = true } else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        var k = n - 1
+        while (k >= 0) {
+            var d = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (d == 10) { d = 0; carry = 1 }
+            out = "" + d + out
+            k = k - 1
+        }
+        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+        keep = out
+    }
+    var endz = keep.length
+    while (endz > 1 && keep.charAt(endz - 1) == "0") { endz = endz - 1 }
+    return keep.substring(0, endz) + "e" + ex
+}
+
+// The value of a DIGITS "e" EXP form of at most nine digits, so the integer
+// part is exact; the power of ten goes on in chunks of 10^15, the largest a
+// double holds exactly. The error stays far below a float's half-ulp, and the
+// only consumer is rtF32Sig's round-trip test.
+function rtDecVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+    var m = 0
+    var i = 0
+    while (i < ds.length) { m = m * 10 + (ds.charCodeAt(i) - 48); i = i + 1 }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+
+// The shortest decimal that round-trips as a binary32. Nine digits always do.
+function rtF32Sig(a) {
+    var full = rtDecDigits(a)
+    var n = 1
+    while (n < 9) {
+        var c = rtRoundDig(full, n)
+        if (rtF32Round(rtDecVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return rtRoundDig(full, 9)
+}
+
+// java.lang.Float.toString, which Kotlin's Float.toString delegates to:
+// Double.toString's rule at 24 bits - plain for 1e-3 <= |v| < 1e7 and d.dddEnn
+// outside it, always with a decimal point, never fewer than two significant
+// digits in the scientific form.
+function rtJvmF32Str(d) {
+    if (d !== d) { return "NaN" }
+    var zero = 0
+    var inf = 1 / zero
+    if (d === inf) { return "Infinity" }
+    if (d === 0 - inf) { return "-Infinity" }
+    if (d === 0) { if (1 / d < 0) { return "-0.0" } return "0.0" }
+    var neg = d < 0
+    var a = neg ? 0 - d : d
+    var sig = rtF32Sig(a)
+    var ei = sig.indexOf("e")
+    var ds = sig.substring(0, ei)
+    var e10 = parseInt(sig.substring(ei + 1), 10)
+    var body = ""
+    if (a >= 0.001 && a < 10000000) {
+        body = rtJvmF32Plain(ds, e10)
+    } else {
+        // Where the shortest form has one digit the second is the closest two
+        // digit decimal to the ACTUAL value rather than a zero: Float.MIN_VALUE
+        // prints "1.4E-45", as Double.MIN_VALUE prints "4.9E-324".
+        if (ds.length == 1) {
+            var s2 = rtRoundDig(rtDecDigits(a), 2)
+            var e2 = s2.indexOf("e")
+            ds = s2.substring(0, e2)
+            e10 = parseInt(s2.substring(e2 + 1), 10)
+        }
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        body = ds.charAt(0) + "." + frac + "E" + e10
+    }
+    if (neg) { return "-" + body }
+    return body
+}
+
+// The plain form, from the digits and the exponent of the first one, with the
+// forced ".0" (100.0f is "100.0").
+function rtJvmF32Plain(ds, e10) {
+    if (e10 >= 0) {
+        var ip = ""
+        var i = 0
+        while (i <= e10) {
+            if (i < ds.length) { ip = ip + ds.charAt(i) } else { ip = ip + "0" }
+            i = i + 1
+        }
+        var fp = "0"
+        if (ds.length > e10 + 1) { fp = ds.substring(e10 + 1) }
+        return ip + "." + fp
+    }
+    var lead = "0."
+    var k = 0 - e10 - 1
+    while (k > 0) { lead = lead + "0"; k = k - 1 }
+    return lead + ds
+}

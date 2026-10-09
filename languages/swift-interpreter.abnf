@@ -2160,57 +2160,10 @@ KwContinue  = "continue" KwEnd ;
     // the other side's type. So "if either operand is a Float, both are" is
     // correct for every program swiftc accepts, and none of java's and kotlin's
     // JLS-5.6.2 wider-type machinery is needed.
-    function swF32(f) { return {__flo: swF32Round(f), __f32: true} }
+    function swF32(f) { return {__flo: coreF32Round(f), __f32: true} }
     function isF32(v) { return isFlo(v) && v.__f32 === true }
     // One result, rebuilt at the width its operands had.
     function swReFlo(f, f32) { return f32 ? swF32(f) : swFlo(f) }
-    // x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost.
-    // The chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal
-    // float needs.
-    function swScale2(x, k) {
-        var v = x
-        var n = k
-        while (n >= 30) { v = v * 1073741824; n = n - 30 }
-        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
-        while (n > 0) { v = v * 2; n = n - 1 }
-        while (n < 0) { v = v / 2; n = n + 1 }
-        return v
-    }
-    // Math.fround: the double nearest x that a binary32 can hold, round-half-to-
-    // EVEN, with the subnormals and both overflows. The compiled halves spell it
-    // `float64(float32(x))` and swF32Round in languages/lib/swift-rt.metajs; it is
-    // written on `*` and `/` by powers of two here because this dialect has no
-    // access to a double's bits. The significand is scaled until its unit in the
-    // last place is 1, rounded there, and scaled back; both scalings are exact,
-    // so the single rounding is the only one that happens.
-    function swF32Round(x) {
-        if (x !== x) { return x }
-        if (x === 0) { return x }
-        var neg = x < 0
-        var a = neg ? 0 - x : x
-        if (a === swInfF) { return x }
-        var maxf = swScale2(16777215, 104)
-        // 2^128 is above every rounding boundary and 2^-150 is the half-way point
-        // below the smallest subnormal (which ties to even, i.e. to zero); both
-        // early exits also bound the exponent loop below to ~280 turns.
-        if (a >= swScale2(1, 128)) { return neg ? swInfF * swNegOne : swInfF }
-        if (a <= swScale2(1, 0 - 150)) { return neg ? 0 / swNegOne : 0 }
-        var e = 0
-        var t = a
-        while (t >= 2) { t = t / 2; e = e + 1 }
-        while (t < 1) { t = t * 2; e = e - 1 }
-        var q = e - 23
-        if (q < 0 - 149) { q = 0 - 149 }
-        var sc = swScale2(a, 0 - q)
-        var f = Math.floor(sc)
-        var d = sc - f
-        if (d > 0.5) { f = f + 1 }
-        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
-        var r = swScale2(f, q)
-        if (r > maxf) { return neg ? swInfF * swNegOne : swInfF }
-        if (r === 0) { return neg ? 0 / swNegOne : 0 }
-        return neg ? 0 - r : r
-    }
     // The infinities and the NaN, spelled without a literal (the frozen bootstrap
     // has no Infinity binding, and a division is the portable way to reach them).
     var swZeroF = 0
@@ -2385,7 +2338,7 @@ KwContinue  = "continue" KwEnd ;
         var full = swSplitDE(a)
         for (var n = 1; n < 9; n++) {
             var c = swRoundSig(full, n)
-            if (swF32Round(swSigVal(c)) === a) { return c }
+            if (coreF32Round(swSigVal(c)) === a) { return c }
         }
         return swRoundSig(full, 9)
     }
@@ -2437,7 +2390,7 @@ KwContinue  = "continue" KwEnd ;
         var f32 = isF32(l) || isF32(r)
         var x = swD(l)
         var y = swD(r)
-        if (f32) { x = swF32Round(x); y = swF32Round(y) }
+        if (f32) { x = coreF32Round(x); y = coreF32Round(y) }
         if (op == "+") { return swReFlo(x + y, f32) }
         if (op == "-") { return swReFlo(x - y, f32) }
         if (op == "*") { return swReFlo(swZeroSign(x * y, x, y), f32) }
@@ -6892,7 +6845,7 @@ KwContinue  = "continue" KwEnd ;
         // A Float operand makes the other side a Float too, so `16777217 < f`
         // compares two binary32 values - swift will only ever have put an untyped
         // literal on the other side.
-        if (isF32(l) || isF32(r)) { return want(swF32Round(swD(l)), swF32Round(swD(r))) }
+        if (isF32(l) || isF32(r)) { return want(coreF32Round(swD(l)), coreF32Round(swD(r))) }
         if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
         if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
         return want(l, r)

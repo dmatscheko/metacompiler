@@ -1538,92 +1538,15 @@ function k1FloOperand(v) {
 
 // ===================================================== the float WIDTH ======
 //
-// A Kotlin `Float` is a binary32, not a print style: 1.0f/3.0f is 0.33333334
-// where the Double is 0.3333333333333333, and every arithmetic result has to be
-// rounded back to 24 significant bits. The VALUE still travels as a double
-// (every float is exactly one), so the only thing that has to go on the box is
-// the WIDTH - and the tag 14 box already has a byte for a per-language print
-// tag. STYLE 3 IS THE FLOAT, the same style byte java uses (abnf/jsrtjvm.go's
-// floJavaF), because Kotlin/JVM's Float IS java's: the Kotlin specification
-// declares Float an IEEE-754 binary32 (kotlin.Float, "single-precision 32-bit"),
-// its arithmetic is the JVM's fadd/fmul/fdiv, and Float.toString() delegates to
-// java.lang.Float.toString. There is no kotlinc on this machine, so java 24.0.2
-// is the oracle for every one of those rows.
-//
-// WHY THE WIDTH DOES NOT MOVE INTO THE FLOOR, measured rather than preferred.
-// languages/lib/runtime.c is compiled by our own c-to-llvm-ir.abnf, and THAT
-// DIALECT COMPUTES EVERY `float` AT DOUBLE PRECISION - "a float is computed at
-// double precision" in its header, ctF(4) carried in an i64 double, and floating
-// arithmetic emitted as soft-float integer code. So the floor cannot spell
-// `(float)x` at all: a floor-side rounder would be the SAME `*`/`/`-by-powers-of-
-// two loop written a second time in C, plus a shortest-round-trip-at-24-bits
-// renderer in C, in a file every one of the sixteen languages links and every
-// bench row measures. Layer 2 is therefore where the width stays, and the cost of
-// that is stated at both sites: runtime.c's jf_text has NO ARM for style 3 and
-// would render a Float with the DOUBLE renderer, so every rendering and every
-// arithmetic result of a style 3 box is intercepted HERE before the floor sees it.
-//
-// Three engines implement this one specification for kotlin: the {__flo,__f32}
-// box of languages/kotlin-interpreter.abnf, jsJFlo{sty: floJavaF} in
-// abnf/jsrtkotlin.go + abnf/jsrtjvm.go, and this file.
-
-// x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost. The
-// chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal float
-// needs.
-function k1Scale2(x, k) {
-    var v = x
-    var n = k
-    while (n >= 30) { v = v * 1073741824; n = n - 30 }
-    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
-    while (n > 0) { v = v * 2; n = n - 1 }
-    while (n < 0) { v = v / 2; n = n + 1 }
-    return v
-}
-
-// k1F32Round is Math.fround: the double nearest x that a binary32 can hold,
-// round-half-to-EVEN, with the subnormals and both overflows. It is what the Go
-// twin spells `float64(float32(x))` (jvmFround).
-//
-// It is written on `*` and `/` by powers of two and a floor, because MetaJS has
-// no access to a double's BITS - chapter 7.7 of
-// docs/working-on-this-project.md, the same argument that keeps d_pow and
-// d_frexp in the C floor. The significand is scaled until its unit in the last
-// place is 1, rounded there, and scaled back; both scalings are exact, so the
-// single rounding is the only one that happens.
-function k1F32Round(x) {
-    if (x !== x) { return x }
-    if (x === 0) { return x }
-    var zero = 0
-    var inf = 1 / zero
-    var neg = x < 0
-    var a = neg ? 0 - x : x
-    if (a === inf) { return x }
-    var maxf = k1Scale2(16777215, 104)
-    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
-    // below the smallest subnormal (which ties to even, i.e. to zero); both early
-    // exits also bound the exponent loop below to ~280 turns.
-    if (a >= k1Scale2(1, 128)) { return neg ? 0 - inf : inf }
-    if (a <= k1Scale2(1, 0 - 150)) { return neg ? k1NegZero() : 0 }
-    var e = 0
-    var t = a
-    while (t >= 2) { t = t / 2; e = e + 1 }
-    while (t < 1) { t = t * 2; e = e - 1 }
-    var q = e - 23
-    if (q < 0 - 149) { q = 0 - 149 }
-    var sc = k1Scale2(a, 0 - q)
-    var f = Math.floor(sc)
-    var d = sc - f
-    if (d > 0.5) { f = f + 1 }
-    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
-    var r = k1Scale2(f, q)
-    if (r > maxf) { return neg ? 0 - inf : inf }
-    if (r === 0) { return neg ? k1NegZero() : 0 }
-    return neg ? 0 - r : r
-}
-
-// -0.0. `0 - 0.0` is +0.0 and `x * 0` keeps an integral zero, so the working
-// spelling is a division - docs/working-on-this-project.md chapter 7.10.
-function k1NegZero() { return 0 / (0 - 1) }
+// A Kotlin `Float` is a tag 14 box of STYLE 3, the style byte java uses
+// (abnf/jsrtjvm.go's floJavaF), because Kotlin/JVM's Float IS java's: an
+// IEEE-754 binary32 with the JVM's arithmetic. There is no kotlinc on this
+// machine, so java is the oracle. The binary32 rounding and digits are
+// runtime.metajs's "binary32 float" section; runtime.c's jf_text has no arm
+// for style 3, so every rendering and arithmetic result of one is intercepted
+// HERE. The other engines: the {__flo,__f32} box of
+// languages/kotlin-interpreter.abnf and jsJFlo{sty: floJavaF} in
+// abnf/jsrtkotlin.go + abnf/jsrtjvm.go.
 
 // The result style of a binary operation on two float-ish operands. Kotlin
 // promotes to the WIDER type exactly as JLS 5.6.2 does - Float.plus(Double)
@@ -1656,9 +1579,9 @@ function k1FloStyle2(l, r) {
 //   converted operands.
 function k1FloFix(op, rr, l, r) {
     if (floIs(r)) { if (floStyle(r) != 3) { return flo(floNum(rr), floStyle(r)) } }
-    var a = flo(k1F32Round(ktNum(l)), 3)
-    var b = flo(k1F32Round(ktNum(r)), 3)
-    return flo(k1F32Round(floNum(k1JvmArithRaw(op, a, b))), 3)
+    var a = flo(rtF32Round(ktNum(l)), 3)
+    var b = flo(rtF32Round(ktNum(r)), 3)
+    return flo(rtF32Round(floNum(k1JvmArithRaw(op, a, b))), 3)
 }
 
 // The same promotion for the RELATIONS: a Float operand converts the other side
@@ -1673,216 +1596,23 @@ function k1FloPromotes(l, r) {
     return true
 }
 
-// ----- Float.toString -------------------------------------------------------
-//
-// Double.toString's rule read at 24 significant bits: the SHORTEST decimal that
-// reads back as the same float, plain for 1e-3 <= |v| < 1e7 and d.dddEnn outside
-// it, always a decimal point, never fewer than two significant digits in the
-// scientific form.
-//
-// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and the reason this file may
-// do that while languages/kotlin-interpreter.abnf may NOT is WHOSE printer runs.
-//
-// This file is layer 2: it is only ever linked into a native binary, so `"" + a`
-// is the C floor's shortest_digits, which is exact. A tag script runs on goja too,
-// and GOJA'S Number-to-String IS NOT ALWAYS THE SHORTEST ROUND-TRIPPING FORM (22
-// of 199,904 random doubles; at some subnormal boundaries a non-digit character
-// outright). That is why kDecDigits over in the interpreter had to move to a
-// floPrec round-trip search and this k1DecDigits did not - docs/todo.md 1.8,
-// where a 133-value probe went from 134 goja-vs--frozen rows to 0 with this file
-// untouched. The Go twin (jvmFloStr32 in abnf/jsrtjvm.go) is exact for the same
-// reason: it is strconv.
-//
-// The note that used to sit here - that floPrec's two implementations DISAGREE,
-// abnf/commonscript.go answering exactly n digits and languages/lib/runtime.c's
-// max(n, shortest) - IS NO LONGER TRUE. docs/todo.md 2.8 taught host id 70 the
-// exactly-n contract, so both answer exactly n and floPrec is a legal source
-// here too; `"" + a` simply costs no round-trip search and is already exact on
-// this path.
-
-// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
-// EXP being the decimal exponent of the FIRST digit.
-function k1DecDigits(a) {
-    var s = "" + a
-    var mant = s
-    var exp = 0
-    var ei = 0 - 1
-    var i = 0
-    while (i < s.length) {
-        var c = s.charAt(i)
-        if (c == "e") { ei = i }
-        if (c == "E") { ei = i }
-        i = i + 1
-    }
-    if (ei >= 0) {
-        mant = s.substring(0, ei)
-        var et = s.substring(ei + 1)
-        if (et.charAt(0) == "+") { et = et.substring(1) }
-        exp = parseInt(et, 10)
-    }
-    var digits = ""
-    var pt = 0 - 1
-    var j = 0
-    while (j < mant.length) {
-        var ch = mant.charAt(j)
-        if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
-        j = j + 1
-    }
-    if (pt < 0) { pt = digits.length }
-    var lead = 0
-    while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead = lead + 1 }
-    digits = digits.substring(lead)
-    pt = pt - lead
-    var endz = digits.length
-    while (endz > 1 && digits.charAt(endz - 1) == "0") { endz = endz - 1 }
-    digits = digits.substring(0, endz)
-    return digits + "e" + (pt + exp - 1)
-}
-
-// A DIGITS "e" EXP form rounded to n significant digits, half to even. The source
-// is already the shortest form of the value, so a genuine tie can only be a
-// decimal the double holds exactly.
-function k1RoundDig(s, n) {
-    var ei = s.indexOf("e")
-    var ds = s.substring(0, ei)
-    var ex = parseInt(s.substring(ei + 1), 10)
-    if (ds.length <= n) { return s }
-    var keep = ds.substring(0, n)
-    var nxt = ds.charCodeAt(n) - 48
-    var up = false
-    if (nxt > 5) { up = true }
-    if (nxt == 5) {
-        var rest = false
-        var i = n + 1
-        while (i < ds.length) { if (ds.charCodeAt(i) != 48) { rest = true } i = i + 1 }
-        if (rest) { up = true } else {
-            var last = ds.charCodeAt(n - 1) - 48
-            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
-        }
-    }
-    if (up) {
-        var out = ""
-        var carry = 1
-        var k = n - 1
-        while (k >= 0) {
-            var dg = ds.charCodeAt(k) - 48 + carry
-            carry = 0
-            if (dg == 10) { dg = 0; carry = 1 }
-            out = "" + dg + out
-            k = k - 1
-        }
-        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
-        keep = out
-    }
-    var ez = keep.length
-    while (ez > 1 && keep.charAt(ez - 1) == "0") { ez = ez - 1 }
-    return keep.substring(0, ez) + "e" + ex
-}
-
-// The value of a DIGITS "e" EXP form. At most nine digits, so the integer part is
-// exact; the power of ten is applied in chunks of 10^15, the largest one a double
-// holds exactly. The relative error stays under ~1e-15, five million times finer
-// than a float's half-ulp - and the only consumer is the round-trip TEST below,
-// so an error that small cannot pick a wrong length.
-function k1DecVal(s) {
-    var ei = s.indexOf("e")
-    var ds = s.substring(0, ei)
-    var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
-    var m = 0
-    var i = 0
-    while (i < ds.length) { m = m * 10 + (ds.charCodeAt(i) - 48); i = i + 1 }
-    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
-    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
-    while (k > 0) { m = m * 10; k = k - 1 }
-    while (k < 0) { m = m / 10; k = k + 1 }
-    return m
-}
-
-// The shortest decimal that round-trips as a binary32. Nine digits always do.
-function k1F32Sig(a) {
-    var full = k1DecDigits(a)
-    var n = 1
-    while (n < 9) {
-        var c = k1RoundDig(full, n)
-        if (k1F32Round(k1DecVal(c)) === a) { return c }
-        n = n + 1
-    }
-    return k1RoundDig(full, 9)
-}
-
-function k1F32Str(d) {
-    if (d !== d) { return "NaN" }
-    var zero = 0
-    var inf = 1 / zero
-    if (d === inf) { return "Infinity" }
-    if (d === 0 - inf) { return "-Infinity" }
-    if (d === 0) { if (1 / d < 0) { return "-0.0" } return "0.0" }
-    var neg = d < 0
-    var a = neg ? 0 - d : d
-    var sig = k1F32Sig(a)
-    var ei = sig.indexOf("e")
-    var ds = sig.substring(0, ei)
-    var e10 = parseInt(sig.substring(ei + 1), 10)
-    var body = ""
-    if (a >= 0.001 && a < 10000000) {
-        body = k1F32Plain(ds, e10)
-    } else {
-        // Never fewer than TWO significant digits, and where the shortest form has
-        // one the second is the closest two digit decimal to the ACTUAL value
-        // rather than a zero: Float.MIN_VALUE is 1.401298464324817E-45, which
-        // prints "1.4E-45" and not "1.0E-45". The same rule, at the same site, as
-        // Double.toString's "4.9E-324".
-        if (ds.length == 1) {
-            var s2 = k1RoundDig(k1DecDigits(a), 2)
-            var e2 = s2.indexOf("e")
-            ds = s2.substring(0, e2)
-            e10 = parseInt(s2.substring(e2 + 1), 10)
-        }
-        var frac = ds.substring(1)
-        if (frac == "") { frac = "0" }
-        body = ds.charAt(0) + "." + frac + "E" + e10
-    }
-    if (neg) { return "-" + body }
-    return body
-}
-
-// The plain form, from the digits and the exponent of the first one. The forced
-// ".0" is here (100.0f is "100.0"); the two-digit minimum is NOT, because it is
-// about the significand and only the scientific form shows one.
-function k1F32Plain(ds, e10) {
-    if (e10 >= 0) {
-        var ip = ""
-        var i = 0
-        while (i <= e10) {
-            if (i < ds.length) { ip = ip + ds.charAt(i) } else { ip = ip + "0" }
-            i = i + 1
-        }
-        var fp = "0"
-        if (ds.length > e10 + 1) { fp = ds.substring(e10 + 1) }
-        return ip + "." + fp
-    }
-    var lead = "0."
-    var k = 0 - e10 - 1
-    while (k > 0) { lead = lead + "0"; k = k - 1 }
-    return lead + ds
-}
-
 // Every rendering of a tag 14 box goes through here, because the floor cannot
-// render style 3 (see the section header).
+// render style 3 (see the section header). Float.toString is runtime.metajs's
+// rtJvmF32Str, as Kotlin/JVM's Float.toString is java.lang.Float.toString.
 function k1FloText(v) {
-    if (floStyle(v) == 3) { return k1F32Str(floNum(v)) }
+    if (floStyle(v) == 3) { return rtJvmF32Str(floNum(v)) }
     return floStr(v)
 }
 
 // js_ktflo32 is the one new extern the width needs: a `1.0f` literal and a
 // `.toFloat()` both lower to it. Its Go twin is registered in abnf/jsrtkotlin.go.
-function js_ktflo32(v) { return flo(k1F32Round(ktNum(v)), 3) }
+function js_ktflo32(v) { return flo(rtF32Round(ktNum(v)), 3) }
 
 // jsrtkotlin.go js_ktadoptf32. The FLOAT half of js_ktadoptf: `val f: Float = 1`
 // and every other declared-Float binding site.
 function js_ktadoptf32(v) {
     if (!ktIntegral(v)) { return v }
-    return flo(k1F32Round(ktNum(v)), 3)
+    return flo(rtF32Round(ktNum(v)), 3)
 }
 
 
@@ -1935,7 +1665,7 @@ function ktNumMethod(recv, name, args) {
     if (name == "toDouble") { return flo(ktNum(recv), 0) }
     // toFloat() NARROWS to a binary32: 0.1.toFloat() prints "0.1" and is a
     // different value from the Double 0.1.
-    if (name == "toFloat") { return flo(k1F32Round(ktNum(recv)), 3) }
+    if (name == "toFloat") { return flo(rtF32Round(ktNum(recv)), 3) }
     // A Char from the low 16 bits, which is Kotlin's Int.toChar().
     if (name == "toChar") { return ktChar(sintNum(sintConv(k1Val(recv), 16, 1))) }
     if (name == "inv") {
@@ -2060,7 +1790,7 @@ function js_ktcmp(op, l, r) {
     // float comparison. THE INTEGRAL FAST PATH ABOVE STAYS FIRST: `i < 40000` is
     // the whole of tests/bench/mod.kt's loop condition, and asking the float
     // question ahead of it cost java +5.32% when 8f43e84 tried that shape.
-    if (k1FloPromotes(l, r)) { return k1F32Rel(op, k1F32Round(ktNum(l)), k1F32Round(ktNum(r))) }
+    if (k1FloPromotes(l, r)) { return k1F32Rel(op, rtF32Round(ktNum(l)), rtF32Round(ktNum(r))) }
     if (ktIsObj(l)) {
         if (ktClassChainHas(l, "compareTo")) {
             var m = k1FindMember(l, "compareTo")
@@ -2267,7 +1997,7 @@ function js_ktstep(v, delta) {
     if (ktIsChar(v)) { return ktChar((ktCharCode(v) + d) & 65535) }
     // ++/-- keeps the operand's own type, WIDTH included: a Float steps as a
     // Float, so `var f = 16777216f; f++` stays 1.6777216E7.
-    if (floIs(v)) { var st = floStyle(v); if (st == 3) { return flo(k1F32Round(floNum(v) + d), 3) } return flo(floNum(v) + d, st) }
+    if (floIs(v)) { var st = floStyle(v); if (st == 3) { return flo(rtF32Round(floNum(v) + d), 3) } return flo(floNum(v) + d, st) }
     if (sintIs(v)) {
         var w = sintWidth(v)
         var u = 0
@@ -3506,7 +3236,7 @@ function k2Truthy(v) {
 // reach past 2^53, printed "1e+22" INSIDE a %f (the host's exponent form leaking
 // into the integer part), and dropped the sign of -0.0. docs/todo.md 1.11.
 //
-// k1DecDigits is the shortest-digits source; see its own header for why `"" + a`
+// rtDecDigits is the shortest-digits source; see its own header for why `"" + a`
 // is exact in this file and is not in a tag script.
 function k2Fixed(f, prec) {
     if (f !== f) { return "NaN" }
@@ -3521,7 +3251,7 @@ function k2Fixed(f, prec) {
     var digits = "0"
     var e10 = 0
     if (x !== 0) {
-        var sig = k1DecDigits(x)
+        var sig = rtDecDigits(x)
         var ei = sig.indexOf("e")
         digits = sig.substring(0, ei)
         e10 = parseInt(sig.substring(ei + 1), 10)
@@ -6402,7 +6132,7 @@ function k4bAdoptTy(v, ty) {
     var t = k4bStripQ(ty)
     if (!rtIsIntegral(v)) { return undefined }
     if (t == "Double") { return flo(ktNum(v), 0) }
-    if (t == "Float") { return flo(k1F32Round(ktNum(v)), 3) }
+    if (t == "Float") { return flo(rtF32Round(ktNum(v)), 3) }
     if (t == "Int") { return k4bConv(v, 32, false) }
     if (t == "Long") { return k4bConv(v, 64, false) }
     if (t == "Byte") { return k4bConv(v, 8, false) }

@@ -270,7 +270,7 @@ takes a double's digits from `"" + n` has a live goja-vs-`-frozen` divergence**
 waiting for the first value that reaches it. Choose the digit count by
 round-trip (`floPrec(a, n)` for n = 1..17, stop when `parseFloat` agrees), never
 by counting the host's own printed digits. java is fixed, and **csharp is fixed
-too** - `csDecDigits` (`csharp-interpreter.abnf`) already chooses by `floPrec`
+too** - `coreDecDigits` (`lib/interp-core.js`) already chooses by `floPrec`
 round-trip, and this sentence listed it wrongly until 2026-08-10. **lua, kotlin
 and go's interpreter halves still do this** (todo.md).
 

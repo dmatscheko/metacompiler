@@ -1722,7 +1722,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function gIsIntTy(ty) { return ty.indexOf("int") == 0 || ty.indexOf("uint") == 0 }
     // The note renders the value through gstr, which takes a float's digits from
-    // gDigOf and never from the host printer (goja's is not always shortest).
+    // coreDecDigits and never from the host printer (goja's is not always shortest).
     function gBadVerb(verb, ty, a) {
         if (ty == "nil") { return "%!" + verb + "(<nil>)" }
         if (ty == "") { return "%!" + verb + "(" + gstr(a) + ")" }
@@ -2589,16 +2589,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gNumF(v) { return isFlo(v) ? v.__flo : v }
     function gNegF(f) { return f * gNegOne }
     // ----- float32: the same box at a 32 BIT WIDTH -----
-    // Go's float32 is an IEEE-754 binary32, not a float64 spelled differently:
-    // float32(1)/float32(3) is 0.33333334 where the float64 is 0.3333333333333333,
-    // float32(0.1)+float32(0.2) is 0.3 and not 0.30000000000000004, and
-    // float32(1e20)*float32(1e20) is +Inf where the float64 is 1e+40. So every
-    // arithmetic result rounds back to 24 significant bits and the printer takes
-    // the shortest decimal that round-trips AS A FLOAT. The value still travels as
-    // a double (every float32 is exactly one) and only the WIDTH goes on the box.
-    // The compiled twin is style floGoF of abnf/jsrtjvm.go's tag-14 box, with
-    // js_gflo32 / js_gf32fix in languages/lib/go-rt.metajs; the oracle for every
-    // row is the installed `go`. Kotlin's kFlo32 block is the worked model.
+    // A float32 is a {__flo, __f32} box; the binary32 rounding is interp-core.js's
+    // "binary32 float" section. The compiled twin is style floGoF of
+    // abnf/jsrtjvm.go's tag-14 box, with js_gflo32 / js_gf32fix in
+    // languages/lib/go-rt.metajs; the oracle for every row is the installed `go`.
     // ----- THE SIGN OF A ZERO, put back by hand -----
     // The ABNF tag dialect keeps an INTEGRAL value as an integer, so `-0.0 * 3`
     // comes back +0 where IEEE-754, go and both compiled halves say -0.0. That is
@@ -2624,7 +2618,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gDivF(a, b) { return gZeroSign(a / b, gSignBitF(a) !== gSignBitF(b)) }
     function gAddF(a, b) { return gZeroSign(a + b, gSignBitF(a) && gSignBitF(b)) }
     function gSubF(a, b) { return gZeroSign(a - b, gSignBitF(a) && !gSignBitF(b)) }
-    function gFlo32(f) { return {__flo: gF32Round(f), __f32: true} }
+    function gFlo32(f) { return {__flo: coreF32Round(f), __f32: true} }
     function isF32(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f32 === true }
     // WHICH BOX A BINARY OPERATION ANSWERS. Go has no implicit conversion between
     // float32 and float64 at all - "the operand types must be identical" - so a
@@ -2637,8 +2631,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gFloOp2(op, a0, b0, f32) {
         // BOTH OPERANDS CONVERT FIRST and rounding only the result is not the same
         // answer - the same finding 8f43e84 measured for java's float.
-        var a = f32 ? gF32Round(a0) : a0
-        var b = f32 ? gF32Round(b0) : b0
+        var a = f32 ? coreF32Round(a0) : a0
+        var b = f32 ? coreF32Round(b0) : b0
         if (op == "+") { return gFloRes(gAddF(a, b), f32) }
         if (op == "-") { return gFloRes(gSubF(a, b), f32) }
         if (op == "*") { return gFloRes(gMulF(a, b), f32) }
@@ -2648,111 +2642,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A comparison rounds the same way, so `var f float32 = 0.1; f == 0.1` holds:
     // Go converts the untyped constant to float32 at compile time and the two are
     // then the same value.
-    function gCmpNum(v, f32) { return f32 ? gF32Round(gNumF(v)) : gNumF(v) }
-    // x * 2^k, EXACTLY - every factor is a power of two. The chunking by 2^30 keeps
-    // the loop short for the ~280 halvings a subnormal float needs.
-    function gScale2(x, k) {
-        var v = x
-        var n = k
-        while (n >= 30) { v = v * 1073741824; n = n - 30 }
-        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
-        while (n > 0) { v = v * 2; n = n - 1 }
-        while (n < 0) { v = v / 2; n = n + 1 }
-        return v
-    }
+    function gCmpNum(v, f32) { return f32 ? coreF32Round(gNumF(v)) : gNumF(v) }
     function gNegZeroF() { return 0 / gNegOne }
-    // Math.fround: the double nearest x that a binary32 holds, round half to EVEN,
-    // subnormals and both overflows included. Written on `*` and `/` by powers of
-    // two because the dialect has no access to a double's bits (the argument that
-    // keeps d_frexp in the C floor). The twins are g1F32Round in
-    // languages/lib/go-rt.metajs and float64(float32(x)) in the Go twin.
-    function gF32Round(x) {
-        if (x !== x) { return x }
-        if (x === 0) { return x }
-        var neg = x < 0
-        var a = neg ? gNegF(x) : x
-        if (a === gInf) { return x }
-        var maxf = gScale2(16777215, 104)
-        if (a >= gScale2(1, 128)) { return neg ? gNegF(gInf) : gInf }
-        if (a <= gScale2(1, 0 - 150)) { return neg ? gNegZeroF() : 0 }
-        var e = 0
-        var t = a
-        while (t >= 2) { t = t / 2; e = e + 1 }
-        while (t < 1) { t = t * 2; e = e - 1 }
-        var q = e - 23
-        if (q < 0 - 149) { q = 0 - 149 }
-        var sc = gScale2(a, 0 - q)
-        var f = Math.floor(sc)
-        var d = sc - f
-        if (d > 0.5) { f = f + 1 }
-        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
-        var r = gScale2(f, q)
-        if (r > maxf) { return neg ? gNegF(gInf) : gInf }
-        if (r === 0) { return neg ? gNegZeroF() : 0 }
-        return neg ? gNegF(r) : r
-    }
-    // A DIGITS "e" EXP form rounded to n significant digits, half to even. Lifted
-    // from kotlin-interpreter.abnf's kRoundDig, which java's float renderer built.
-    function gRoundDig(s, n) {
-        var ei = s.indexOf("e")
-        var ds = s.substring(0, ei)
-        var ex = parseInt(s.substring(ei + 1), 10)
-        if (ds.length <= n) { return s }
-        var keep = ds.substring(0, n)
-        var nxt = ds.charCodeAt(n) - 48
-        var up = false
-        if (nxt > 5) { up = true }
-        if (nxt == 5) {
-            var rest = false
-            for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
-            if (rest) { up = true } else {
-                var last = ds.charCodeAt(n - 1) - 48
-                if (last - Math.floor(last / 2) * 2 == 1) { up = true }
-            }
-        }
-        if (up) {
-            var out = ""
-            var carry = 1
-            for (var k = n - 1; k >= 0; k--) {
-                var dg = ds.charCodeAt(k) - 48 + carry
-                carry = 0
-                if (dg == 10) { dg = 0; carry = 1 }
-                out = "" + dg + out
-            }
-            if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
-            keep = out
-        }
-        var ez = keep.length
-        while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
-        return keep.substring(0, ez) + "e" + ex
-    }
-    // The value of a DIGITS "e" EXP form. At most nine digits, so the integer is
-    // exact; the power of ten goes in chunks of 10^15, the largest a double holds
-    // exactly. The relative error stays under ~1e-15, five million times finer than
-    // a float's half-ulp, and the only consumer is the round-trip TEST below.
-    function gDecVal(s) {
-        var ei = s.indexOf("e")
-        var ds = s.substring(0, ei)
-        var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
-        var m = 0
-        for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
-        while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
-        while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
-        while (k > 0) { m = m * 10; k = k - 1 }
-        while (k < 0) { m = m / 10; k = k + 1 }
-        return m
-    }
-    // The shortest decimal that round-trips as a binary32. Nine always do.
-    function gF32Sig(a) {
-        var full = gDigOf(a)
-        var n = 1
-        while (n < 9) {
-            var c = gRoundDig(full, n)
-            if (gF32Round(gDecVal(c)) === a) { return c }
-            n = n + 1
-        }
-        return gRoundDig(full, 9)
-    }
     // fmt's %v for a float32: the SAME 'g' rule as a float64, read at 24 bits.
     function gF32Str(x) {
         if (x !== x) return "NaN"
@@ -2760,7 +2651,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (x === gNegF(gInf)) return "-Inf"
         var neg = x < 0 || (x === 0 && 1 / x < 0)
         var a = neg ? gNegF(x) : x
-        var s = a === 0 ? "0" : gGForm(gF32Sig(a))
+        var s = a === 0 ? "0" : gGForm(coreF32Sig(a))
         return neg ? "-" + s : s
     }
     // fmt's %v for a float64: strconv.FormatFloat(f, 'g', -1, 64), which uses
@@ -2779,49 +2670,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // decimal point position, then renders Go's 'g' form.
     function gFloDigits(a) {
         if (a === 0) { return "0" }
-        return gGForm(gDigOf(a))
-    }
-    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the decimal
-    // exponent of the FIRST digit, so the text to parse carries the point after it.
-    function gSigVal(s) {
-        var ei = s.indexOf("e")
-        var ds = s.substring(0, ei)
-        var frac = ds.substring(1)
-        if (frac == "") { frac = "0" }
-        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
-    }
-    // The shortest round-tripping decimal of the DOUBLE a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the first digit.
-    //
-    // THE DIGITS COME FROM floPrec AND NOT FROM `"" + a`, and that is the opposite
-    // of what this comment used to say (docs/todo.md 1.8).
-    //
-    // `"" + a` IS NOT THE SHORTEST ROUND-TRIPPING FORM IN EVERY ENGINE: goja gets
-    // it wrong for 22 of 199,904 random doubles, and at some subnormal boundaries
-    // it emits a non-digit character outright (`-;.627494252092118e-309`). The
-    // frozen host is exact, so reading a double's digits out of the host printer
-    // was a live goja-vs-`-frozen` divergence waiting for the first value to reach
-    // it - and unfixable from inside the dialect, since a script cannot ask the
-    // host for more digits than its printer chose to give.
-    //
-    // The old note here said floPrec could not be used because its two
-    // implementations disagreed. `08e8fcb` UNIFIED THEM: abnf/commonscript.go (goja
-    // and the frozen host, over strconv) and languages/lib/runtime.c host id 70
-    // (over shortest_digits with g_fixdig) both answer EXACTLY n significant
-    // digits. The shortest form is then a search rather than a host question - ask
-    // for n digits, parse the result back, stop at the first n that reproduces the
-    // value - and the answer is the same in every engine by construction, because
-    // parseFloat is strconv.ParseFloat in both hosts. Seventeen digits always
-    // round-trip a binary64, so the loop always terminates. The reference is
-    // jDecDigits in java-interpreter.abnf.
-    function gDigOf(a) {
-        var n = 1
-        while (n < 17) {
-            var c = floPrec(a, n)
-            if (gSigVal(c) === a) { return c }
-            n = n + 1
-        }
-        return floPrec(a, 17)
+        return gGForm(coreDecDigits(a))
     }
     // Go's 'g' form of a DIGITS "e" EXP pair: scientific when the decimal exponent
     // is below -4 or at least 6, plain otherwise. strconv.FormatFloat fixes that
