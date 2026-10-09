@@ -822,6 +822,8 @@ class S23 {
     static String f(float v) { return "" + v; }
     static float third() { return 1.0f / 3.0f; }
     static double half() { return 0.5; }
+    static float fWide = 16777217;
+    static double dWide = 7f / 3;
     static void run() {
         // Division is REAL division as soon as one side is a double, and integer
         // division (truncating towards zero) when both sides are integral.
@@ -939,6 +941,12 @@ class S23 {
         Main.check("flt43", S23.f(Math.abs(-2.5f)).equals("2.5") && S23.f(Math.max(1.5f, 2)).equals("2.0")
                 && S23.s(Math.max(1.5f, 2.0)).equals("2.0"));
         Main.check("flt44", ("" + fs).indexOf("[F@") == 0 && (int) 2.9f == 2 && (long) -2.9f == -2L);
+        // A declaration converts its initializer (JLS 5.2): a float widened to
+        // double renders at double precision, an int stored in a float rounds.
+        float f73 = 7f / 3;
+        double d73 = f73;
+        Main.check("flt45", ("" + d73).equals("2.3333332538604736") && ("" + f73).equals("2.3333333"));
+        Main.check("flt46", ("" + S23.fWide).equals("1.6777216E7") && ("" + S23.dWide).equals("2.3333332538604736"));
     }
 }
 

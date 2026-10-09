@@ -3743,20 +3743,10 @@ HasStatic   = :script(~~
         // assignment conversion): `double d = 1;` holds 1.0, not 1. The RAW type
         // decides, not the base name: `double[] xs = {...}` declares an ARRAY and
         // must not box the array itself.
-        var isDbl = (rawTy == "double" || rawTy == "float")
-        var floExt = rawTy == "float" ? "js_jflo32" : "js_jflo"
-        // An INTEGRAL declared type puts its WIDTH on the value the same way, which
-        // is what makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit and
-        // `byte b = 100; b += 100` wrap to -56. js_jvadopt narrows only an integral
-        // value, so `Object o = "s"` and a lambda pass through untouched.
-        var declW = jDeclWidth["$" + rawTy]
-        if (declW == undefined) { declW = 0 }
         return function(b) {
             var r = init(b)
             b = r.b
-            var v = r.v
-            if (isDbl) { v = callExt(b, floExt, [callExt(b, "js_jvnum", [v])]) }  // js_jvnum first: see makePrimCast
-            if (declW > 0) { v = callExt(b, "js_jvadopt", [v, emitNum(b, declW)]) }
+            var v = declConvert(b, r.v, rawTy)
             if (sam != null) {
                 var sr = emitSam(b, v, tyName, sam)
                 b = sr.b
@@ -3765,6 +3755,19 @@ HasStatic   = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
+    }
+    // An INTEGRAL declared type puts its WIDTH on the value the same way, which
+    // is what makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit and
+    // `byte b = 100; b += 100` wrap to -56. js_jvadopt narrows only an integral
+    // value, so `Object o = "s"` and a lambda pass through untouched.
+    function declConvert(b, v, rawTy) {
+        if (rawTy == "double" || rawTy == "float") {
+            var floExt = rawTy == "float" ? "js_jflo32" : "js_jflo"
+            return callExt(b, floExt, [callExt(b, "js_jvnum", [v])])  // js_jvnum first: see makePrimCast
+        }
+        var declW = jDeclWidth["$" + rawTy]
+        if (declW != undefined) { return callExt(b, "js_jvadopt", [v, emitNum(b, declW)]) }
+        return v
     }
     function makeDeclSeq(items) {
         var ty = ""
@@ -4120,8 +4123,17 @@ HasStatic   = :script(~~
         if (ty != "int" && ty != "boolean") dflt = 1
         if (ty.indexOf("[") >= 0) dflt = 1
         for (i = 2; i < items.length; i++) {
-            push({kind: "field", name: items[i].fname, statik: isStatic, init: items[i].finit,
+            push({kind: "field", name: items[i].fname, statik: isStatic, init: fieldInitOf(items[i].finit, ty),
                   dfltH: dflt, isInt: ty == "int"})
+        }
+    }
+    // A field initializer gets the same assignment conversion as a local
+    // declaration's: `static float f = 16777217;` holds 1.6777216E7.
+    function fieldInitOf(initT, ty) {
+        if (initT == null || initT == undefined) { return initT }
+        return function(b) {
+            var r = initT(b)
+            return {b: r.b, v: declConvert(r.b, r.v, ty)}
         }
     }
     function fieldDefault(b, f) {

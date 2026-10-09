@@ -4099,6 +4099,9 @@ HasStatic   = :script(~~
                 return v
             }
             if (typeof v == "number" || jIsChar(v) || jIsSz(v)) { return jFlo(jNumD(v)) }
+            // A float widens to double (JLS 5.1.2): the value is already float-
+            // rounded, only the __f32 flag (and so the short rendering) goes.
+            if (jIsF32(v)) { return jFlo(v.__flo) }
             return v
         }
         // An INTEGRAL declared type puts its width on the value, which is what
@@ -4412,8 +4415,15 @@ HasStatic   = :script(~~
         if (ty != "int" && ty != "boolean") dflt = null
         if (ty.indexOf("[") >= 0) dflt = null
         for (i = 2; i < items.length; i++) {
-            push({kind: "field", name: items[i].fname, statik: isStatic, init: items[i].finit, dflt: dflt})
+            push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, ty), dflt: dflt})
         }
+    }
+    // A primitive field's initializer gets the same assignment conversion as a
+    // local declaration's: `static float f = 16777217;` holds 1.6777216E7.
+    function jFieldInit(initT, ty) {
+        if (initT == null || initT == undefined) { return initT }
+        if (ty != "double" && ty != "float" && !hasOwn(jDeclWidth, ty)) { return initT }
+        return function() { return jTypeAdopt(initT(), ty) }
     }
 
     // Runs a method body with a fresh scope: params bound, this bound for instance methods.
