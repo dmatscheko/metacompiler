@@ -65,7 +65,7 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // so they register in the shared program scope before the main program's statements.
 //
 // APPENDING INSTEAD WAS MEASURED AND IS A LOSS - do not "fix" this ordering.
-// docs/runtime-merge-plan.md predicted a large win from it, on the model that a
+// The expected win rested on the model that a
 // declaration at index 0 delays every later lookup in runtime.c's linear scope_find.
 // The model is incomplete: what the index costs is not the number of declarations that
 // precede a body, it is where the HOT declarations sit. kotlin-rt.metajs imports
@@ -526,8 +526,7 @@ KwDefault   = "default" KwEnd ;
     }
 
     // ----- Primitives implemented in MetaJS (-rt-prims) -----
-    // Phase 1 of docs/runtime-rework-plan.md asks how small the C floor of the runtime
-    // really is. With -rt-prims this compiler compiles lib/rt-prims.metajs into the
+    // How small can the C floor of the runtime be? With -rt-prims this compiler compiles lib/rt-prims.metajs into the
     // module it is building and routes every primitive DEFINED there to the compiled
     // MetaJS body instead of declaring the Go external - so whatever the emitted module
     // still `declare`s afterwards is the measured floor. Without the flag none of this
@@ -575,7 +574,7 @@ KwDefault   = "default" KwEnd ;
         // these, so `-rt-prims -exe` failed with "13 symbol(s) are defined MORE THAN
         // ONCE" (js_eq, js_ge, js_gt, js_le, js_ne, js_neg, js_not, js_num_str,
         // js_sne, js_sub, js_tonum, js_typeof, js_ushr) and the two flags could not be
-        // combined at all - open item 12 of docs/runtime-next-plan.md. It also
+        // combined at all. It also
         // collided with the module's OWN declare in the self-use case the warning
         // above reports. The measurement is untouched: it counts what the module still
         // `declare`s, and a shimmed name never reaches getExtern.
@@ -897,7 +896,7 @@ KwDefault   = "default" KwEnd ;
         // appended whenever the path did not already END in ".js", which meant
         // `import "./runtime.metajs"` searched for `runtime.metajs.js` and failed with
         // `unresolved import` - the reason the shared layer-2 runtime could not be given
-        // the name docs/runtime-merge-plan.md gives it. `import "./mod"` is unchanged, and
+        // its name. `import "./mod"` is unchanged, and
         // so is every path that already carries one. The scan is by hand and backwards to
         // the first '.' or '/': the frozen subset has no lastIndexOf, its indexOf ignores a
         // from-index, and the tag script uses no `break` - so the loop ends by driving the
@@ -975,7 +974,7 @@ KwDefault   = "default" KwEnd ;
     // goes into the bootstrap snapshot; in frozen mode the Go core replaces the driver.
 
     // ----- layer 2: compile this file as a linkable runtime LIBRARY (-rt-lib) -----
-    // docs/runtime-rework-plan.md phase 4. A target language's compiler emits calls to
+    // A target language's compiler emits calls to
     // js_* externs that are NOT the 48 generic MetaJS ones - js_luarith, js_lueq,
     // js_lustr and so on. Those are the language's own semantics, they are written in
     // MetaJS (languages/lib/<lang>-rt.metajs), and -rt-lib compiles such a file into a
@@ -1011,8 +1010,7 @@ KwDefault   = "default" KwEnd ;
         // top-level declaration in a file the frozen subset already forbids ASI in.
         //
         // EVERY IMPORTED FILE IS SCANNED TOO, and that is not a convenience. Layer 2
-        // shares its common externs through lib/runtime.metajs
-        // (docs/runtime-merge-plan.md part A), and while only c.file was scanned a
+        // shares its common externs through lib/runtime.metajs, and while only c.file was scanned a
         // `function js_jadd` written THERE compiled, ran CORRECTLY under llvm.Run, and
         // was UNDEFINED AT LINK TIME:
         //     error: 1 unresolved symbol(s), and this build links a runtime ... js_jadd
@@ -1276,8 +1274,8 @@ KwDefault   = "default" KwEnd ;
     // With -exe PATH, link the module into a native executable (clang) instead of running
     // it here. This module is HANDLE IR: every value is an i64 handle and the js_* externs
     // it declares are the runtime, so the build only produces a working binary when a
-    // runtime that defines them is linked in. That runtime is lib/runtime.ll - the C floor
-    // of docs/runtime-rework-plan.md phase 3, compiled out of lib/runtime.c by
+    // runtime that defines them is linked in. That runtime is lib/runtime.ll - the C floor,
+    // compiled out of lib/runtime.c by
     // c-to-llvm-ir.abnf (regenerate with tests/gen-runtime-ll.sh). An explicit -rt
     // REPLACES it rather than adding to it, which is what lets tests/metajs-link-stubrt.c
     // still stand in for the whole runtime in the link tests. Because a runtime is
@@ -1289,8 +1287,7 @@ KwDefault   = "default" KwEnd ;
     // layer 2, built from lib/metajs-rt.metajs by tests/gen-metajs-rt-ll.sh - by this
     // very grammar, with -rt-lib). Without the second one a floor body that moved into
     // lib/runtime.metajs reached every language's native build except MetaJS's, which is
-    // what left Part B with an empty movable set (docs/runtime-next-plan.md, "Part B,
-    // move 1"). An explicit -rt still replaces BOTH, and only the default list gets the
+    // what left no floor body movable into layer 2. An explicit -rt still replaces BOTH, and only the default list gets the
     // chained function table - see emitDispatch's chainExt.
     if (c.exePath != undefined && c.exePath != "") {
         var rts = c.runtime

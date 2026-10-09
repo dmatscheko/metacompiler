@@ -34,8 +34,8 @@ import (
 // compiler.go) or when the entry format itself changes. Bump it in that case.
 const scriptCacheFormat = "2"
 
-var scriptCacheDir string  // "" = disabled; set by scriptCacheInit.
-var scriptCacheKey string  // Hash over format+snapshot, mixed into every entry name.
+var scriptCacheDir string // "" = disabled; set by scriptCacheInit.
+var scriptCacheKey string // Hash over format+snapshot, mixed into every entry name.
 var scriptCacheReady bool
 
 func scriptCacheInit() {

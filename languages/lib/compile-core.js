@@ -227,8 +227,8 @@ function emitStr(b, s) {
 //
 // -256..1024 stays a direct js_num_i: the floor already answers those from its cache
 // without allocating, so a call and a load would be pure loss.
-// THE TEXT A NON-INTEGRAL CONSTANT TRAVELS AS, and why it is not just `"" + n`
-// (docs/todo.md 2.8). A fractional literal is emitted as a STRING for js_num_str to
+// THE TEXT A NON-INTEGRAL CONSTANT TRAVELS AS, and why it is not just `"" + n`.
+// A fractional literal is emitted as a STRING for js_num_str to
 // parse back, so that text has to round-trip - and the host printer does not always
 // give a form that does. goja renders the double 359000550 * 2^-38 as
 // "0.001306036392634269", sixteen digits that read back as the NEXT double up, where

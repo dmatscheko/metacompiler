@@ -1,13 +1,7 @@
 // A second project package, imported by tests/go-test-multifile.go beside mathbox.
 //
-// IT DECLARES `type Vec struct` ON PURPOSE, because mathbox declares one too. The
-// struct field tables (structFields / structFTypes in languages/go-to-llvm-ir.abnf)
-// used to be keyed by the BARE type name across every package, so the second import
-// overwrote the first: mathbox.NewVec(3, 4) built a vecbox Vec, its y field did not
-// exist, and v.Len2() answered NaN. The tables are keyed by package now. The
-// interpreter half was never wrong here - each package's descriptor is its own scope
-// binding - so this is a compiler-half row and --cross was blind to it.
-// docs/todo.md 1.5.
+// It declares `type Vec struct` on purpose, because mathbox declares one too: the
+// compiler's struct field tables must be keyed by package, not by bare type name.
 
 package vecbox
 

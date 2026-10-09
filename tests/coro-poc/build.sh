@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
 # build.sh - the COROUTINE proof of concept
-# (docs/runtime-next-plan.md, "Coroutines - the fifth-language wall").
 #
 # It runs tests/coro-poc/gen.ll in BOTH engines and diffs the two outputs:
 #

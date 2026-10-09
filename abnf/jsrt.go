@@ -539,8 +539,8 @@ type jsrt struct {
 	// bound the name to and filled by js_pybfn. Separate from pyFuncNames on
 	// purpose: that one answers f.__name__ and holds only what a def recorded.
 	pyBuiltinRender map[interface{}]string
-	pySigs      map[interface{}]*pySig
-	pyEllipsis  *jsObject
+	pySigs          map[interface{}]*pySig
+	pyEllipsis      *jsObject
 	// pyAliases memoizes the list[int]-style generic aliases, so the same written
 	// alias is the same value every time (see pyGenericAlias).
 	pyAliases map[string]*jsObject
@@ -881,7 +881,7 @@ func (rt *jsrt) promResolve(p *jsObject, x interface{}) {
 							rt.promSettle(p, 2, argAt(args, 0))
 							return jsUndef
 						}), nil)
-						return
+					return
 				}
 				rt.call(then, xo, []interface{}{
 					jsHostFunc("resolve", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -12874,9 +12874,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// << appends to an Array (in place, so `a << b << c` chains), concatenates a
 		// String and shifts an Integer - one operator, three receivers, like Ruby.
-		"js_rshl":  func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },
-		"js_rshr":  func(a []uint64) uint64 { return w(rt.rubyBin(">>", u(a[0]), u(a[1]))) },
-		"js_rneg":  func(a []uint64) uint64 { return w(rt.rubyNeg(u(a[0]))) },
+		"js_rshl": func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },
+		"js_rshr": func(a []uint64) uint64 { return w(rt.rubyBin(">>", u(a[0]), u(a[1]))) },
+		"js_rneg": func(a []uint64) uint64 { return w(rt.rubyNeg(u(a[0]))) },
 		// ~x is -(x+1) at any size, which math/big's Not is exactly.
 		"js_rbnot": func(a []uint64) uint64 {
 			// Past 2^53 the double cannot hold the +1, so ~9007199254740992 must
@@ -12886,8 +12886,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(-rubyToF(u(a[0])) - 1)
 		},
-		"js_req":   func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
-		"js_rne":   func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
+		"js_req": func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
+		"js_rne": func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
 		// < > <= >= between two MODULES is the ancestry relation, not a value
 		// comparison: `A < M' after `include M' is true and `A < String' is NIL,
 		// where rubyCmp's contract is to raise.
@@ -13508,7 +13508,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// model php-interpreter.abnf already has: a BOXED float (so 3.0 !== 3),
 		// PHP truthiness ("0" is falsy), PHP's == / === / <=> and the one ordered
 		// array type whose === compares the keys and their order.
-		"js_phflo":   func(a []uint64) uint64 { return w(phpMkFlo(rt.toNumber(u(a[0])))) },
+		"js_phflo": func(a []uint64) uint64 { return w(phpMkFlo(rt.toNumber(u(a[0])))) },
 		"js_phtruthy": func(a []uint64) uint64 {
 			if rt.phpTest(u(a[0])) {
 				return 1
@@ -14581,8 +14581,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_godrain": func(a []uint64) uint64 { rt.goDrain(); return 0 },
-		"js_goeq": func(a []uint64) uint64 { return boolH(rt.goValueEq(u(a[0]), u(a[1]))) },
-		"js_gone": func(a []uint64) uint64 { return boolH(!rt.goValueEq(u(a[0]), u(a[1]))) },
+		"js_goeq":    func(a []uint64) uint64 { return boolH(rt.goValueEq(u(a[0]), u(a[1]))) },
+		"js_gone":    func(a []uint64) uint64 { return boolH(!rt.goValueEq(u(a[0]), u(a[1]))) },
 		// A Go field read: the struct's own fields, then the PROMOTED fields of an
 		// embedded struct, then the ordinary member lookup (methods, len, builtins).
 		"js_gofield": func(a []uint64) uint64 {
@@ -16590,9 +16590,9 @@ func standardJSBindings() map[string]interface{} {
 		// The Java subset's Math (abs/max/min only, and double-aware); the Java and
 		// Kotlin compiler grammars bind their `Math` to it. See jsrtjvm.go.
 		"__jmath": jvmMathObject(),
-		"String":   stringObj,
-		"Object":   objectObj,
-		"Array":    arrayObj,
+		"String":  stringObj,
+		"Object":  objectObj,
+		"Array":   arrayObj,
 		// The declaration marker: var v = anytype declares v as never pinning.
 		// frozenBaseBindings inherits it, so tag scripts get it under -frozen too.
 		"anytype": jsAnytype,
@@ -16885,6 +16885,7 @@ func (rt *jsrt) excText(v interface{}) string {
 	}
 	return rt.jsvString(v)
 }
+
 // runJSModule is llvm.RunJS(): it executes the entry function of a MetaJS
 // module with the standard host bindings and returns its int32 result.
 // module with the standard host bindings and returns its int32 result.
@@ -19728,11 +19729,12 @@ func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
 //
 // Two prologue layouts exist, and which one a function uses is fixed at compile
 // time by its own parameter list:
-//   A  [p0 .. pn-1, extra positionals ...]   - the plain layout; a *args rest
-//      parameter reads the extras with js_pyrest(args, n).
-//   B  [p0 .. pn-1, *args list, **kwargs dict]  - used as soon as the def has
-//      keyword-only parameters or a **kwargs one, because those cannot be
-//      recovered from a flat positional array.
+//
+//	A  [p0 .. pn-1, extra positionals ...]   - the plain layout; a *args rest
+//	   parameter reads the extras with js_pyrest(args, n).
+//	B  [p0 .. pn-1, *args list, **kwargs dict]  - used as soon as the def has
+//	   keyword-only parameters or a **kwargs one, because those cannot be
+//	   recovered from a flat positional array.
 type pySig struct {
 	names   []string
 	nkwonly int // The LAST nkwonly names are keyword-only.

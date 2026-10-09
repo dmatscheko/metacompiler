@@ -682,7 +682,7 @@ func report(bodies []fnBody, results []langResult, verbose, byLang bool, max int
 	fmt.Println("\nUNREACHED IS NOT DEAD. It means no checked-in native program called it: the Go")
 	fmt.Println("twin, llvm.Run and any program outside tests/ are all invisible here. What it")
 	fmt.Println("does mean is that moving one of these into layer 2 CANNOT BE VALIDATED by this")
-	fmt.Println("suite - the move would be green whether it was right or wrong (docs/todo.md 3.2).")
+	fmt.Println("suite - the move would be green whether it was right or wrong.")
 
 	if max >= 0 && len(un) > max {
 		fmt.Printf("\nfloor-coverage: %d unreached, above the -max %d\n", len(un), max)

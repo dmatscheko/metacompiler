@@ -696,7 +696,7 @@ anywhere among the files.
                 directory first, then under each -i root in order)
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
   -rt-prims     MetaJS: emit the derivable runtime primitives from lib/rt-prims.metajs
-                instead of calling their Go externals (see docs/runtime-rework-plan.md)
+                instead of calling their Go externals
   -rt-lib       MetaJS: compile the source as a linkable layer-2 runtime library
   -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
                 lets call graphs / CFGs / traces be built from partially understood languages

@@ -56,7 +56,7 @@ func (v Vec) Len2() int {
 	return v.x*v.x + v.y*v.y
 }
 
-// ----- docs/todo.md 2.7: the package has its OWN GLOBAL NAMESPACE -----
+// ----- the package has its OWN GLOBAL NAMESPACE -----
 // Every file used to declare into one shared runtime namespace, so the importing
 // file's `var Scale = 1` and `func helper()` OVERWROTE this package's own - and
 // since Total() resolves its unqualified names through that same namespace at CALL
@@ -80,7 +80,7 @@ func Total() int {
 	return Scale + Base + helper()
 }
 
-// ----- docs/todo.md 1.5: A PACKAGE VAR IS LIVE THROUGH THE QUALIFIER -----
+// ----- A PACKAGE VAR IS LIVE THROUGH THE QUALIFIER -----
 // The compiler half assembled the package object by COPYING each exported name out of
 // the package's scope, so the object was a snapshot: AddBase's write was invisible as
 // mathbox.Base, and a write TO mathbox.Base never reached the variable Total() reads.
@@ -92,7 +92,7 @@ func AddBase(n int) { Base = Base + n }
 
 func BaseNow() int { return Base }
 
-// ----- docs/todo.md 1.5: A QUALIFIED TYPE NAME -----
+// ----- A QUALIFIED TYPE NAME -----
 // mathbox.Point{X: 1, Y: 2} and `var p mathbox.Point` are ordinary Go and parsed in
 // neither half: the compiler reported `composite literal not implemented` (CompLitNI's
 // CompName matched `Id { "." Id }` and its SkipBlock ate the body) and the interpreter

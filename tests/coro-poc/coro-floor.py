@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 # Every one of these must be present in the floor, or the PoC below is testing
-# nothing.  They are the pieces docs/runtime-next-plan.md lists.
+# nothing.
 REQUIRED = [
     ("libc prototypes", "long pthread_cond_broadcast(void *c);"),
     ("registry globals", "long CORO;           /* long *: the live coroutines' control blocks */"),

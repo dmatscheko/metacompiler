@@ -128,6 +128,7 @@ func rxPtrGetErr(ma *machine) string {
 //	i32 rt_regex_search(i8* pattern, i8* subject, i8* flags, i32* caps, i32 ncaps)
 //
 // Answers
+//
 //	> 0  matched: the number of capture PAIRS, i.e. ngroups + 1, exactly the
 //	     ${#BASH_REMATCH[@]} bash reports
 //	  0  no match  (bash: [[ ]] status 1)

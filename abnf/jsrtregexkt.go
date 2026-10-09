@@ -355,9 +355,7 @@ func ktRxGroupValues(re *rxRe, text []rune, m *rxMatch) *jsArray {
 }
 
 // MatchResult.range is a real kotlin.ranges.IntRange, so it prints "1..3" and
-// answers first / last / step / isEmpty / in like any other progression. It used
-// to be a bare {first, last} object, which printed "[object Object]" in all three
-// engines - todo.md 1.10.
+// answers first / last / step / isEmpty / in like any other progression.
 func ktRxRange(first, last int) *jsObject {
 	return ktMakeRange(ktRange{from: float64(first), to: float64(last), st: 1})
 }
