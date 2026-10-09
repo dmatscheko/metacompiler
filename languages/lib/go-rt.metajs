@@ -1037,8 +1037,9 @@ function goCxSign(s) {
 
 // gopFormat is fmt.Sprintf over the verb subset abnf/jsrtgolang.go documents:
 // %v %d %s %t %q %c and %%. Width, precision, flags and the remaining verbs are
-// not implemented; an unhandled verb renders as %!<verb>(<value>) and a missing
-// operand as %!<verb>(MISSING).
+// not implemented; a verb that does not apply to its operand, and every
+// unimplemented verb, renders as go's %!<verb>(<type>=<value>) note, and a
+// missing operand as %!<verb>(MISSING).
 function gopFormat(format, args) {
     var out = ""
     var next = 0
@@ -1058,30 +1059,65 @@ function gopFormat(format, args) {
     return out
 }
 
-function gopVerb(verb, a) {
-    if (verb == "v" || verb == "s") { return gopStr(a) }
-    if (verb == "d") { return gopDec(a) }
-    if (verb == "t") {
-        if (a === true) { return "true" }
-        return "false"
+// The type name fmt writes in a bad-verb note for a SCALAR operand, "nil" for nil
+// and "" for anything else (a slice, map, struct or complex value). A 64 bit box
+// answers "int" or "uint": the value model does not keep int64/uint64 apart from
+// int/uint. The twin is gopFmtTy in abnf/jsrtgolang.go.
+function gopFmtTy(a) {
+    if (a === undefined || a === null) { return "nil" }
+    if (a === true || a === false) { return "bool" }
+    if (typeof a == "string") { return "string" }
+    if (typeof a == "number") {
+        if (floIs(a)) {
+            if (goIsF32(a)) { return "float32" }
+            return "float64"
+        }
+        if (sintIs(a)) {
+            var base = "int"
+            if (sintUns(a)) { base = "uint" }
+            var w = sintWidth(a)
+            if (w == 8) { return base + "8" }
+            if (w == 16) { return base + "16" }
+            if (w == 32) { return base + "32" }
+            return base
+        }
+        if (a === Math.trunc(a)) { return "int" }
+        return "float64"
     }
-    if (verb == "c") { return goRuneStr(goIdx(a)) }
-    if (verb == "q") {
-        if (typeof a == "string") { return "\"" + gopQuoteBody(a, "\"") + "\"" }
-        return "'" + gopQuoteBody(goRuneStr(goIdx(a)), "'") + "'"
-    }
-    return "%!" + verb + "(" + gopStr(a) + ")"
+    return ""
 }
 
-// strconv.FormatInt(int64(toNumber(a)), 10). A sized integer keeps its own text
-// - int64(uint64max) truncates to -1 in the Go twin, and sintStr of an unsigned
-// cell would print the magnitude, so the box is read as a signed 64 bit value
-// first.
-function gopDec(a) {
-    if (sintIs(a)) { return sintStr(sintConv(a, 64, 0)) }
-    var n = goNum(a)
-    if (n !== n) { return "0" }
-    return "" + Math.trunc(n)
+function gopIsIntTy(ty) { return ty.indexOf("int") == 0 || ty.indexOf("uint") == 0 }
+
+function gopBadVerb(verb, ty, a) {
+    if (ty == "nil") { return "%!" + verb + "(<nil>)" }
+    if (ty == "") { return "%!" + verb + "(" + gopStr(a) + ")" }
+    return "%!" + verb + "(" + ty + "=" + gopStr(a) + ")"
+}
+
+function gopVerb(verb, a) {
+    if (verb == "v") { return gopStr(a) }
+    var ty = gopFmtTy(a)
+    if (verb == "s") {
+        if (ty == "string" || ty == "") { return gopStr(a) }
+    }
+    if (verb == "d") {
+        if (sintIs(a)) { return sintStr(a) }
+        if (ty == "int") { return "" + Math.trunc(goNum(a)) }
+        if (ty == "") { return gopStr(a) }
+    }
+    if (verb == "t") {
+        if (a === true) { return "true" }
+        if (a === false) { return "false" }
+    }
+    if (verb == "c") {
+        if (gopIsIntTy(ty)) { return goRuneStr(goIdx(a)) }
+    }
+    if (verb == "q") {
+        if (typeof a == "string") { return "\"" + gopQuoteBody(a, "\"") + "\"" }
+        if (gopIsIntTy(ty)) { return "'" + gopQuoteBody(goRuneStr(goIdx(a)), "'") + "'" }
+    }
+    return gopBadVerb(verb, ty, a)
 }
 
 // gopQuoteBody is the escaping strconv.Quote / strconv.QuoteRune do, minus the

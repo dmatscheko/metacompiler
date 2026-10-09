@@ -60,10 +60,12 @@ package abnf
 //     form too (go prints `{2}` there).
 //   - fmt's format verbs are limited to %v %d %s %t %q %c and %%. Width, precision,
 //     flags (%-5d, %.2f) and the remaining verbs (%f %g %e %x %o %b %p %T %U) are
-//     not implemented; an unhandled verb renders as %!<verb>(<value>) and a missing
-//     operand as %!<verb>(MISSING), which is close to but not identical with go's
-//     own error text (go writes %!z(int=3) where this writes %!z(3)). Surplus
-//     operands are ignored where go appends %!(EXTRA ...). %q escapes the
+//     not implemented. A verb that does not apply to a scalar operand, and every
+//     unimplemented verb, renders as go's bad-verb note %!<verb>(<type>=<value>)
+//     (%!<verb>(<nil>) for nil); a composite operand is not walked element by
+//     element, and int64/uint64 are named int/uint. A missing operand is
+//     %!<verb>(MISSING). Surplus operands are ignored where go appends
+//     %!(EXTRA ...). %q escapes the
 //     backslash, the delimiter and the seven letter escapes; a control character
 //     go would spell with a hex or unicode escape is left verbatim.
 
@@ -419,26 +421,94 @@ func (rt *jsrt) gopFormat(format string, args []interface{}) string {
 	return out
 }
 
-func (rt *jsrt) gopVerb(verb byte, a interface{}) string {
-	switch verb {
-	case 'v', 's':
-		return rt.gopStr(a)
-	case 'd':
-		return strconv.FormatInt(int64(rt.toNumber(a)), 10)
-	case 't':
-		if b, ok := a.(bool); ok && b {
-			return "true"
+// gopFmtTy is the type name fmt writes in a bad-verb note for a SCALAR operand,
+// "nil" for nil and "" for anything else (a slice, map, struct or complex value).
+// A 64 bit box answers "int" or "uint": the value model does not keep
+// int64/uint64 apart from int/uint. The twins are gFmtTy in
+// languages/go-interpreter.abnf and gopFmtTy in languages/lib/go-rt.metajs.
+func gopFmtTy(a interface{}) string {
+	switch t := a.(type) {
+	case jsNullT, jsUndefT:
+		return "nil"
+	case bool:
+		return "bool"
+	case string:
+		return "string"
+	case jsJFlo:
+		if t.sty == floGoF {
+			return "float32"
 		}
-		return "false"
+		return "float64"
+	case jsGInt:
+		base := "int"
+		if t.u {
+			base = "uint"
+		}
+		if t.w == 64 {
+			return base
+		}
+		return base + strconv.Itoa(int(t.w))
+	case float64:
+		if t == math.Trunc(t) {
+			return "int"
+		}
+		return "float64"
+	}
+	return ""
+}
+
+func gopIsIntTy(ty string) bool { return strings.HasPrefix(ty, "int") || strings.HasPrefix(ty, "uint") }
+
+func (rt *jsrt) gopBadVerb(verb byte, ty string, a interface{}) string {
+	switch ty {
+	case "nil":
+		return "%!" + string(verb) + "(<nil>)"
+	case "":
+		return "%!" + string(verb) + "(" + rt.gopStr(a) + ")"
+	}
+	return "%!" + string(verb) + "(" + ty + "=" + rt.gopStr(a) + ")"
+}
+
+func (rt *jsrt) gopVerb(verb byte, a interface{}) string {
+	if verb == 'v' {
+		return rt.gopStr(a)
+	}
+	ty := gopFmtTy(a)
+	switch verb {
+	case 's':
+		if ty == "string" || ty == "" {
+			return rt.gopStr(a)
+		}
+	case 'd':
+		if b, ok := a.(jsGInt); ok {
+			return giStr(b)
+		}
+		if ty == "int" {
+			return strconv.FormatInt(int64(rt.toNumber(a)), 10)
+		}
+		if ty == "" {
+			return rt.gopStr(a)
+		}
+	case 't':
+		if ty == "bool" {
+			if a.(bool) {
+				return "true"
+			}
+			return "false"
+		}
 	case 'c':
-		return string(rune(int64(rt.toNumber(a))))
+		if gopIsIntTy(ty) {
+			return string(rune(giVal(rt, a)))
+		}
 	case 'q':
 		if s, ok := a.(string); ok {
 			return `"` + gopQuoteBody(s, '"') + `"`
 		}
-		return "'" + gopQuoteBody(string(rune(int64(rt.toNumber(a)))), '\'') + "'"
+		if gopIsIntTy(ty) {
+			return "'" + gopQuoteBody(string(rune(giVal(rt, a))), '\'') + "'"
+		}
 	}
-	return "%!" + string(verb) + "(" + rt.gopStr(a) + ")"
+	return rt.gopBadVerb(verb, ty, a)
 }
 
 // gopQuoteBody is the escaping strconv.Quote / strconv.QuoteRune do, minus the \x

@@ -990,6 +990,24 @@ func s24() {
 	half := 1.0 / 2.0
 	check("fmt25", fmt.Sprint(half) == "0.5" && fmt.Sprint([]float64{1.5, 2}) == "[1.5 2]")
 	check("fmt26", fmt.Sprintf("%v %v", half, pt24{}) == "0.5 {0 0}")
+	// A verb that does not apply to its operand is go's bad-verb note,
+	// %!<verb>(<type>=<value>), naming the operand's dynamic type.
+	bf := []float64{1.7, 1.7e92, -2}
+	bstr := []string{"hi", ""}
+	bb := []bool{true, false}
+	bi := []int{42, -3}
+	check("fmt27", fmt.Sprintf("%d|%d|%d", bf[0], bf[1], bf[2]) == "%!d(float64=1.7)|%!d(float64=1.7e+92)|%!d(float64=-2)")
+	check("fmt28", fmt.Sprintf("%d|%d|%d", bstr[0], bstr[1], bb[0]) == "%!d(string=hi)|%!d(string=)|%!d(bool=true)")
+	check("fmt29", fmt.Sprintf("%s|%s|%s", bi[0], bf[0], bb[1]) == "%!s(int=42)|%!s(float64=1.7)|%!s(bool=false)")
+	check("fmt30", fmt.Sprintf("%f|%f|%z", bi[1], bstr[0], bi[0]) == "%!f(int=-3)|%!f(string=hi)|%!z(int=42)")
+	check("fmt31", fmt.Sprintf("%t|%t|%c|%q|%q", bi[0], bstr[0], bf[0], bf[0], bb[0]) == "%!t(int=42)|%!t(string=hi)|%!c(float64=1.7)|%!q(float64=1.7)|%!q(bool=true)")
+	var i8b int8 = -5
+	var u8b byte = 65
+	var f32b float32 = 0.1
+	var nile error
+	check("fmt32", fmt.Sprintf("%s|%s|%d|%t", i8b, u8b, f32b, f32b) == "%!s(int8=-5)|%!s(uint8=65)|%!d(float32=0.1)|%!t(float32=0.1)")
+	check("fmt33", fmt.Sprintf("%d|%s|%d %s", nile, nile, bi[0], bf[0]) == "%!d(<nil>)|%!s(<nil>)|42 %!s(float64=1.7)")
+	check("fmt34", fmt.Sprintf("%c|%q|%d|%d", u8b, u8b, u8b, bi) == "A|'A'|65|[42 -3]")
 	// The two BUILTINS. Real Go writes both to stderr and formats a pointer or a
 	// slice as an address; here they write to stdout and render the value, which
 	// is what makes them reproducible. Only their EXISTENCE can be asserted - the
