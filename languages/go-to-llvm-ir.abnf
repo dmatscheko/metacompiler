@@ -19,18 +19,11 @@ with subject
 (case 2, 3: compares ==) and without (the first true case wins; no fallthrough, an
 implicit break ends every case), Go style if/else without parentheses (else if works), break,
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
-and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
+and fmt.Print, os.Exit, and string concatenation. int is 64 bit, / truncates.
 
-Widened surface (parsed so a real Go file gets through; -warn-unsupported downgrades
-the abort to a warning and keeps the rest compiling, enough for call graphs/CFGs/traces):
-a single-result type assertion x.(T) is GENUINELY handled as the identity on the value
-(the target type is parsed and ignored), the TYPE SWITCH (switch v := x.(type)) is
-genuinely implemented (each arm is a runtime type test), and channel/interface/chan
-types are parsed in type positions. Accepted but reported not implemented (no
-concurrency, channel, or interface model): interface type declarations, goroutines
-(go f()), channel make (make(chan T)), channel send (ch <- v) and receive (<-ch), and
-select. Where operands exist (the goroutine callee, the send/receive channel
-and value) they still emit under -warn-unsupported so their calls stay visible.
+The type switch (switch v := x.(type)) and type assertions are runtime type tests.
+Goroutines, channels (make, send, receive, close, the comma-ok receive) and select run
+on a cooperative scheduler: a goroutine runs when a receive finds its channel empty.
 
 Also implemented (added while widening toward the full language, and measured by
 tests/go-test-full.go): grouped declarations - several names sharing a type in
@@ -55,8 +48,7 @@ header, fallthrough, and the min/max/clear builtins.
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
 appear in if/for/switch headers, map iteration and printing follow the insertion order
-(real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
-a literal or make), and there are no method values, or the comma-ok type assertion.
+(real Go randomizes resp. sorts), and a nil map reads as empty.
 There is one numeric type at runtime, except where a written-out
 conversion makes the type known while the code is emitted: float64(i)/2 is 2.5 and a
 sized unsigned type wraps to its width, so uint8(0xF0) complements to 0x0F. A pointer

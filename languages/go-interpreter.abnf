@@ -18,7 +18,7 @@ with subject
 (case 2, 3: compares ==) and without (the first true case wins; no fallthrough, an
 implicit break ends every case), Go style if/else without parentheses (else if works), break,
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
-and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
+and fmt.Print, os.Exit, and string concatenation. int is 64 bit, / truncates.
 
 Also genuinely implemented (added while widening toward the full language, and
 measured by tests/go-test-full.go): grouped declarations - several names sharing a
@@ -37,13 +37,8 @@ dynamic, so satisfaction is structural by construction), type switches, the two-
 type assertion, value versus pointer method receivers, method values, embedded structs
 with field promotion, and panic/recover with the defers of every unwound frame.
 
-Widened surface (parsed so a real Go file gets through; -warn-unsupported downgrades
-the abort to a warning and keeps the rest running, enough for call graphs/CFGs/traces):
-channel and chan types are parsed in type positions. Accepted but reported not
-implemented (no concurrency or channel model): goroutines (go f()), channel send
-(ch <- v) and receive (<-ch), and select. Where operands exist (the goroutine callee,
-the send/receive channel and value) they still evaluate under -warn-unsupported so
-their calls stay visible.
+Goroutines, channels (make, send, receive, close, the comma-ok receive) and select run
+on a cooperative scheduler: a goroutine runs when a receive finds its channel empty.
 
 Go strings are BYTE strings here too: len and s[i] count UTF-8 bytes, a string slice
 s[lo:hi] is a byte range, ranging a string yields byte offsets and runes, and the
@@ -54,7 +49,7 @@ Deviations and limits: structs behave like references (as if every value were a 
 append mutates in place (write s = append(s, v) as usual), a bare-name composite
 literal must not appear in an if/for/switch header (the bracketed forms may), map
 iteration and printing follow the insertion order (real Go randomizes resp. sorts),
-'var m map[K]V' is not a usable map (create maps with a literal or make). There is one
+a nil map reads as empty. There is one
 numeric type at RUNTIME, so a float and an int with the same value are
 indistinguishable and integer division decides - except where a written-out conversion
 makes the type known while the program is built: float64(i)/2 is 2.5 and a sized
@@ -4432,15 +4427,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function makeSelSend(items) { return {kind: "send", chT: items[0], valT: items[1], body: items[2]} }
     function makeSelDefault(items) { return {kind: "default", body: items[0]} }
-    // s[lo:hi] / s[lo:hi:max]: accepted, reported not implemented. The base and every
-    // bound still evaluate (nested calls stay visible); the value is undefined.
-    function makeSliceNI(items, pos) {
-        notImpl("slice expression", pos)
-        return function() {
-            for (var i = 0; i < items.length; i++) items[i]()
-            return undefined
-        }
-    }
     // var ( ... ) / one var spec per name: run each spec's var-decl thunk in order.
     function makeVarGroup(items) {
         return function() {
