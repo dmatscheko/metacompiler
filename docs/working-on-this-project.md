@@ -1,57 +1,12 @@
 # Working on this project: what I wish I had known on day one
 
-Written 2026-08-04 at `ee51718`, after taking all sixteen languages from
-"emits IR nothing can link" to "self-contained native binary", building the C floor
-and the MetaJS layer 2, adding a garbage collector, and merging the layer-2
-duplication twice (the second time correctly).
-
-**Revised the same day, through `1e1330e`.** Since then: a hash index for
-`scope_find` (20-42% fewer instructions in thirteen languages), a fifth merge pass
-that took the shape residue to two documented declines, kotlin's 1,489-line copy
-of `regex.js` retired, three real defects fixed and **two "open defects" in this
-very chapter found to have been already fixed** — and, running through all of it,
-the discovery that a native binary's instruction count moves 4.8% with nothing but
-the LENGTH OF ITS OUTPUT FILENAME, which invalidated every sub-2% single-build
-measurement in these documents, including several I had quoted back to people as
-facts. That is chapter 4's newest trap and it is the most expensive thing in here.
-
-**Revised 2026-08-10** after the sixteenth round closed eleven todo items with
-eight agents. **Three of the eleven were wrong as written and two of the FIXES I
-prescribed were wrong** - dart's "erase type parameters to `dynamic`" (Dart
-reifies; erasing fixes one row and breaks another), and C#'s "the generated
-message applies to every derived type" (almost every derived BCL type passes its
-own string to `base(...)`, so it would have fixed one name and broken twenty-six).
-A third item asserted real TypeScript accepts a form that real TypeScript rejects.
-**Every agent that declined an instruction did so with a measurement**, which is
-the whole argument for writing briefs that invite it. This round also retired two
-sentences in THIS file as no longer true, added a `tsc` oracle nobody knew was
-installed, and found that item 4.2 understated its own defect fourfold.
-
-**Revised 2026-08-07** after ten more todo items closed. Two of them were WRONG
-AS WRITTEN (`floExt` is live, not dead code - deleting it as the item implied
-would have introduced a defect; and the C# `is` residue was every integral and
-floating name, not one), and **seven of the ten turned up a further defect the
-item did not name** - five of those live halves divergences `--cross` had never
-reached. Chapter 4 gained five traps from that round, including one that no gate
-in this project can see.
-
-**Consolidated 2026-08-05.** There used to be four more documents beside this one -
-three plan/record files totalling ~14,000 lines plus three concept notes. They were
-read in full, their still-actionable content became [todo.md](todo.md) and the
-mechanics chapter here, and they were deleted; see chapter 8 for how to read them
-in git history. **This
-document is now the only manual.** The one other file that is current and NOT
-superseded is [abnf-dialect-gotchas.md](abnf-dialect-gotchas.md), the reference for
-the ABNF tag dialect, which chapter 4 assumes you have.
+This is the only manual. The one other current reference is
+[abnf-dialect-gotchas.md](abnf-dialect-gotchas.md), for the ABNF tag dialect, which
+chapter 4 assumes you have. What is still to do is in [todo.md](todo.md), not here.
 
 How to read this: **chapters 1-3** are what you need to build and test anything.
 **Chapter 4** is the traps, and it is the highest value-per-line in the file.
 **Chapter 7** is the engine mechanics you would otherwise re-derive at some cost.
-
-**What is still to do is NOT in this file.** It is in
-[todo.md](todo.md) next to it, ordered by importance, with every item marked
-either verified-this-pass or inherited-and-unchecked. This file explains how the
-project works; that one says what is left.
 
 ---
 
@@ -482,8 +437,8 @@ worked:
 - **Agents never commit.** The coordinator verifies and commits by explicit path.
   Durable state lives in git, never in an agent's context — so an agent can die,
   be compressed, or run dry at no cost.
-- **Every agent writes findings into the plan documents**, which get committed with
-  the code. Knowledge outlives the context that produced it.
+- **Findings go into [todo.md](todo.md) or this manual**, committed with the code -
+  not into code comments. Knowledge outlives the context that produced it.
 - **Verify in isolation.** `git archive <base> | tar x -C /tmp/x`, copy in only that
   agent's files, build inside, run the suite. That is how you tell one agent's
   regression from another's in-flight edit.
@@ -491,9 +446,12 @@ worked:
   (`runtime.c`, `abnf/jsrt.go`, `metajs-to-llvm-ir.abnf`, `.vscode/launch.json`).
 - **Wait on the subagent, never poll a file's mtime.** One agent burned hours in
   `ls -l` loops waiting for a child that had already finished and reported elsewhere.
-- **The plan list goes stale within two commits.** It happened three times. An item's
-  verdict is only as good as the commit it names — **re-grep the implementation
-  before acting on any line of it.**
+- **The to-do list goes stale within two commits.** An item's verdict is only as
+  good as the commit it names — **re-grep the implementation before acting on any
+  line of it.**
+- **Code comments explain the code, not its history.** No round numbers, commit
+  hashes, todo item numbers or "used to" narratives in code: todo.md is renumbered
+  as items close, so a `todo.md N.M` citation in code soon points at the wrong item.
 
 ---
 
