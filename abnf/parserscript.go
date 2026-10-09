@@ -120,9 +120,8 @@ func NewParserScript(pa *parser, preventDefaultOutput bool) *parserscript {
 }
 
 // init builds the JS VM on first use: most grammars have no :script() rules at
-// all, and a parse of an imported file used to pay for a goja runtime plus its
-// whole host API that nothing ever called. The frozen parser engine has always
-// worked this way (frozen.go, frozenParserScript.init).
+// all, so a parse (e.g. of an imported file) should not pay for a goja runtime
+// plus its whole host API. Same as frozenParserScript.init in frozen.go.
 func (ps *parserscript) init() {
 	if ps.vm != nil {
 		return

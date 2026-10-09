@@ -1,15 +1,12 @@
 package abnf
 
-// PYTHON INTEGER PROMOTION PAST 2^53 for the Go twin (docs/todo.md 1.1).
+// PYTHON INTEGER PROMOTION PAST 2^53 for the Go twin.
 //
 // A plain Python int is a double in this value model, so it is EXACT up to 2^53
-// and silently rounds above it: `9007199254740992 + 1` answered
-// 9007199254740992 in all three engines, and 54 of the 55 differing rows of a
-// 626-literal probe against CPython were the `*` column. The arbitrary precision
-// box already existed - the literal half landed in 506000a - so what is added
-// here is the TRIGGER, in the last of the three engines.
+// and would silently round above it (`9007199254740992 + 1`). This is the
+// TRIGGER that moves such a result into the arbitrary precision box.
 //
-// The other two are binOp's + / - / * arms in languages/python-interpreter.abnf
+// Twins: the other two are binOp's + / - / * arms in languages/python-interpreter.abnf
 // (pyOver53) and the same arms of js_pybin in languages/lib/python-rt.metajs
 // (pyAOver53 / pyAPromote). Keep the three in step.
 //

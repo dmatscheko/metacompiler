@@ -100,9 +100,8 @@ func floPrecStr(v float64, n int) string {
 // is only ever needed when a script is COMPILED for the first time (it is baked
 // into the program for stack traces and for the relative path resolution of
 // load()/store()/include()) or when an error is reported - but the compile walk
-// runs a tag script ten thousand times per grammar, so formatting the name per
-// execution was pure waste. The walk therefore passes the parts and the engines
-// format on demand.
+// runs a tag script many thousand times per grammar, so the walk passes the parts
+// and the engines format on demand.
 type scriptName struct {
 	name string // The module/file name; the whole name when pos < 0.
 	kind string // What the position names, e.g. ":tag:pos:".
@@ -237,11 +236,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("byteLen", func(s string) int { return len(s) })
 
 	// sprint: fmt.Sprint's text, the rendering println gives returned rather than
-	// printed. The frozen grammar host has had it all along (standardJSBindings,
-	// jsrt.go) and this side did not, so a tag script that used the name would
-	// have been a silent goja-vs--frozen divergence. metajs-interpreter.abnf's
-	// hostGlobals now needs it, because the C floor seeds sprint as host id 35 and
-	// the MetaJS host-global set is the floor's list (docs/todo.md 4.1).
+	// printed. Twin of the frozen host's binding (standardJSBindings, jsrt.go);
+	// metajs-interpreter.abnf's hostGlobals needs it because the C floor seeds
+	// sprint as host id 35.
 	vm.Set("sprint", fmt.Sprint)
 
 	// rawSet writes an OWN property, bypassing any Object.prototype accessor: a
@@ -447,9 +444,8 @@ func installGojaFnMeta(vm *goja.Runtime) {
 // installGojaCaseMapping replaces goja's String.prototype.toUpperCase and
 // toLowerCase with Go's strings.ToUpper / strings.ToLower.
 //
-// WHY. Those two methods were a LIVE goja-vs--frozen divergence in every
-// interpreter half and no gate could reach it (docs/todo.md 4.1). Measured on
-// this tree before the change, through metajs-interpreter.abnf:
+// WHY. Otherwise those two methods are a goja-vs--frozen divergence in every
+// interpreter half that no gate can reach:
 //
 //	                 goja      -frozen / llvm.Run / native binary
 //	"ss".toUpperCase()   SS        ss          (U+00DF)
@@ -462,16 +458,11 @@ func installGojaFnMeta(vm *goja.Runtime) {
 // strings.ToUpper is (abnf/jsrt.go's frozen string methods and the Go twin) and
 // what languages/lib/runtime.c's floor implements.
 //
-// THE DECISION IS TO CONVERGE ON THE SIMPLE MAPPING, i.e. to move goja, and it
-// is not a preference: full case mapping in the floor is `case_map`, which was
-// built, measured at 135x on a real workload and reverted
-// (docs/working-on-this-project.md chapter 5). Three engines of four already
-// implement the simple mapping and the fourth cannot afford the other one.
-//
-// The change cannot introduce a divergence, only remove one: goja's answer
-// becomes literally the function the frozen engine already calls, for every
-// input. Any assertion that passes today passes after, because it has to pass
-// under -frozen today.
+// The engines converge on the SIMPLE mapping, i.e. goja moves: full case mapping
+// in the C floor is far too slow on real workloads (docs/working-on-this-project.md
+// chapter 5), so three engines of four implement the simple mapping and the fourth
+// cannot afford the other one. goja's answer is literally the function the frozen
+// engine calls, for every input.
 func installGojaCaseMapping(vm *goja.Runtime) {
 	vm.Set("__goStrUpper", strings.ToUpper)
 	vm.Set("__goStrLower", strings.ToLower)
@@ -524,11 +515,9 @@ func installGojaMathSurface(vm *goja.Runtime) {
 }
 
 // hostAPIObject exposes one of the host API maps (c, abnf, llvm) to goja.
-// Binding the Go map itself made goja wrap the accessed member again on EVERY
-// read: a tag script that calls abnf.newRule() a thousand times had goja build a
-// thousand native function objects for that one Go function, and
-// llvm.ir.NewModule() rebuilt the wrapper of the nested 'ir' map on top of it.
-// Here each member is wrapped once and the same goja Value is handed out
+// Binding the Go map itself would make goja wrap the accessed member again on
+// EVERY read (a new native function object per abnf.newRule() call, plus the
+// wrapper of a nested map like llvm.ir). Here each member is wrapped once and the same goja Value is handed out
 // afterwards; a nested map (abnf.oid, llvm.ir, ...) becomes a caching object of
 // its own. Members whose Go value is rebound while the run goes on are named as
 // live and never cached. Everything else behaves like goja's Go-map wrapper:

@@ -9,31 +9,17 @@ import (
 	"github.com/llir/llvm/ir"
 )
 
-// TestLibcNative is the differential test for the eighteen byte/address libc names that
-// entered libcExterns/libcNative on 2026-08-02, once 93c814f had made a C `char` a real
-// one-byte cell. The SAME operation is computed by libcNative over the machine's arena
-// and by Go's own strings/bytes/strconv over ordinary Go values, for every edge case the
-// hand-written implementations have a chance of getting wrong.
+// TestLibcNative is the differential test for the byte/address libc names of
+// libcExterns/libcNative. The SAME operation is computed by libcNative over the machine's
+// arena and by Go's own strings/bytes/strconv over ordinary Go values, for every edge case
+// the hand-written implementations have a chance of getting wrong.
 //
-// WHY THIS LIVES HERE rather than in tests/c-test-full.c, which is where every other
-// C-level claim in this tree is pinned. That file is run by BOTH halves of the language,
-// and languages/c-interpreter.abnf has no standard library at all - its callFunction
-// knows putchar and getchar and nothing else - so a section calling any of these names
-// makes that half stop dead. test.sh --full records a half's assertion COUNT only when
-// that half has ZERO gaps (see the `gaps -eq 0` guard in full_probe), so one red section
-// costs the whole count and the two halves are reported as disagreeing. Measured, with
-// the section present:
-//
-//	c-interpreter:  error without a usable position: function not defined: strcpy
-//	                - 46 the libc byte/address family: function not defined: strcpy
-//	c-to-llvm-ir:   FULL - 495 assertions, goja and -frozen byte-identical
-//	c            MISMATCH: - 495          <- 0 languages disagreeing is an invariant
-//
-// So the ratchet file cannot host these until the interpreter grammar grows a libc, and
-// the file's own header already puts the standard library out of scope. That leaves
-// condition 1 of the bar at libcExterns (clang's real symbol answers what cc answers)
-// measured by hand and recorded there, and condition 2 (llvm.Run implements the same
-// thing) pinned here, where it can regress under `go test ./abnf/`.
+// WHY THIS LIVES HERE rather than in tests/c-test-full.c: that file is run by BOTH halves
+// of the language, and languages/c-interpreter.abnf has no standard library at all, so a
+// section calling any of these names makes that half stop dead and the two halves are
+// reported as disagreeing (test.sh --full records a half's assertion COUNT only when it
+// has zero gaps). This pins condition 2 of the bar at libcExterns (llvm.Run implements
+// the same thing as clang's symbol).
 //
 // Go is a fair oracle for exactly the properties that matter: it compares bytes
 // unsigned, like C, and it has no opinion about the arena.
@@ -131,7 +117,7 @@ func TestLibcNative(t *testing.T) {
 	}
 	{
 		ma := newMa()
-		// The magnitudes measured from the real symbol, arm64-darwin, Apple clang 21.0.0.
+		// The magnitudes of the real symbol, arm64-darwin (Apple clang).
 		type mag struct {
 			a, b string
 			n    uint64

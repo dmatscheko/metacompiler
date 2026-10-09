@@ -13,7 +13,7 @@ import (
 
 // TestMetaJSHostGlobalsAgree pins the MetaJS HOST-GLOBAL SET across the three
 // engines that implement it, and it exists because nothing else in this project
-// can see them disagree (docs/todo.md 4.1).
+// can see them disagree.
 //
 // The three engines, and the manual's chapter 7.2 rule they are the whole of:
 //
@@ -26,8 +26,8 @@ import (
 // an assertion on a global that only one half binds fails on the other half by
 // construction - and it cannot be guarded either, because `typeof sprint` is
 // "function" under the compiler and a hard `variable not defined: sprint` under
-// the interpreter. That is exactly why eight names diverged unnoticed. This test
-// reads the three sources instead of running them, so it does not care.
+// the interpreter. This test reads the three sources instead of running them, so
+// it does not care.
 //
 // The sets are now equal, so tests/metajs-test-full.js CAN assert every name on
 // both halves and does (SECTION 31); this test is what stops the next addition
@@ -170,23 +170,13 @@ func diffNames(t *testing.T, aName string, a []string, bName string, b []string)
 		aName, len(a), bName, len(b), aName, missing, bName, extra)
 }
 
-// TestMathMembersAgree pins the MEMBERS of Math across the same three engines,
-// and it exists because TestMetaJSHostGlobalsAgree above could not see them: the
-// three engines all bound the NAME `Math` and then offered wildly different
-// objects behind it. At 1367c23 the C floor seeded eleven methods and two
-// properties, standardJSBindings offered thirty-two and eight, and goja - the
-// grammar host the interpreter halves run on - offered thirty-five and eight. So
-//
-//	Math.sin(1)     0.8414709848078965 under llvm.Run, and
-//	                `js runtime error: unknown method 'sin'` in the native binary
-//	Math.hypot(...) Infinity for (1e300, 1e300) under -frozen, and
-//	                1.4142135623730952e+300 under goja
-//	Math.clz32(1)   31 under goja, and "call of a non function value" under -frozen
-//
-// were all live, and no gate in this project could see any of them (docs/todo.md
-// 1.1). The sets are equal now, with no exception at all: goja's Math methods are
-// the Go twin's (abnf/commonscript.go, installGojaMathSurface), and `random` is in
-// all three (host id 96 in the floor).
+// TestMathMembersAgree pins the MEMBERS of Math across the same three engines
+// (plus goja, the grammar host the interpreter halves run on), which
+// TestMetaJSHostGlobalsAgree above cannot see: all engines bind the NAME `Math`,
+// so a member missing or different in one is a divergence no other gate reaches.
+// The sets must be equal with no exception: goja's Math methods are the Go
+// twin's (abnf/commonscript.go, installGojaMathSurface), and `random` is in all
+// three (host id 96 in the floor).
 func TestMathMembersAgree(t *testing.T) {
 	floor := floorMathMemberNames(t)
 	twin := twinMathMemberNames()

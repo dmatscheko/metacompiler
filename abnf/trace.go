@@ -129,8 +129,8 @@ var (
 
 // OpenTrace creates (and truncates) the -trace file up front. Without the
 // eager create, a run that emits no events (interpreter-engine grammars trace
-// nothing) silently left a STALE file from an earlier run in place, and a
-// later -render rendered the wrong program.
+// nothing) would leave a STALE file from an earlier run in place for a later
+// -render.
 func OpenTrace() {
 	traceMu.Lock()
 	defer traceMu.Unlock()

@@ -1,8 +1,7 @@
 package abnf
 
 // Grammar verification: static name-consistency checks on an a-grammar, without
-// running it. The modern successor of the 2021 _unused/ebnf/verifyer.go (whose
-// code was tied to the old parser); the two checks it performed carry over:
+// running it:
 //
 //   - undefined: an Identifier names a production that no production defines
 //     (a typo, or a fragment that was never :include()d). This is an error -
@@ -10,13 +9,10 @@ package abnf
 //   - unreachable: a production is defined but can never be reached from the
 //     start rule (following identifiers, including the ones in command
 //     parameters like :whitespace(Whitespace)). A warning - dead grammar.
-//   - dupfunc: two top-level functions in the grammar's script share a name.
-//     This one is not a name-consistency nicety, it is a trap that has cost
-//     hours: the second declaration wins as a VALUE, but a tag that was bound
-//     to the first keeps pointing at it, so a production silently executes the
-//     WRONG tag. The observed symptom is a correct parse tree whose nodes run
-//     each other's actions - nothing points at the duplicated name, and the
-//     other checks here all pass. An error, because no grammar wants it.
+//   - badrange: a range bound that is not exactly one rune/byte. An error.
+//   - dupfunc: two top-level functions in the grammar's script share a name, so
+//     a production can silently execute the WRONG tag (see dupScriptFuncs). An
+//     error, because no grammar wants it.
 //
 // The check walks the a-grammar purely by NAME, so it needs no reference
 // resolution pass and never mutates a rule. Run it on a FULLY ASSEMBLED grammar
@@ -114,21 +110,19 @@ func ProductionNames(aGrammar *r.Rules) map[string]bool {
 // dupScriptFuncs finds top-level functions declared twice in the grammar's
 // script blocks.
 //
-// Why this is worth a static check rather than a comment: redeclaring a name in
-// the script does NOT produce a JS error, and it does not corrupt the parse
-// tree. What it corrupts is which tag a production runs - a rule bound to the
-// first declaration keeps calling it while the name now resolves to the second,
-// so (real example) a Method node executed the Ctor tag and every class reported
-// "constructor name does not match class". Every symptom pointed at the grammar
-// rules; the actual cause was a duplicated function name several hundred lines
-// away, and finding it took a bisect of the whole script.
+// Why this is worth a static check: redeclaring a name in the script does NOT
+// produce a JS error, and it does not corrupt the parse tree. What it corrupts is
+// which tag a production runs - a rule bound to the first declaration keeps
+// calling it while the name now resolves to the second (e.g. a Method node running
+// the Ctor tag). Every symptom then points at the grammar rules, not at the
+// duplicated name possibly hundreds of lines away.
 //
 // Scope: only TOP-LEVEL declarations, which in every grammar here sit at four
 // spaces of indent inside the script block (a nested helper is at eight or more,
 // and shadowing one inside a function body is ordinary JS). Matching by
 // indentation keeps this to the scope where the hazard actually lives, at the
 // cost of missing a top-level function written at an unusual indent - an
-// acceptable trade for zero false positives on the existing 26 grammars.
+// acceptable trade for zero false positives on the existing grammars.
 func dupScriptFuncs(source string) []VerifyIssue {
 	if source == "" {
 		return nil

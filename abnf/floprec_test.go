@@ -8,7 +8,7 @@ import (
 )
 
 // floPrec's CONTRACT is "exactly n significant digits, trailing zeros stripped",
-// and it has three implementations that have to agree (docs/todo.md 2.8):
+// and it has three implementations that have to agree:
 //
 //	floPrecStr here            - the binding both script hosts get (goja through
 //	                             commonscript.go, the frozen VM through frozen.go),
@@ -16,12 +16,9 @@ import (
 //	languages/lib/runtime.c    - host id 70, over shortest_digits with g_fixdig
 //	languages/metajs-interpreter.abnf - its hostGlobals entry, which IS this function
 //
-// The floor's used to answer max(n, shortest) instead, because g_mindig only
-// started the round-trip SEARCH at n: floPrec(1/3, 1) was "3e-1" here and
-// "3333333333333333e-1" natively. Nothing caught it because the one live caller
-// (lua's %g) always asks for an n at least as large as the shortest form, where
-// the two answers coincide - so the tests below deliberately live where they do
-// NOT coincide, at n strictly below the shortest round-tripping length.
+// An implementation answering max(n, shortest) would pass every case where n is
+// at least the shortest round-tripping length (lua's %g only asks those), so the
+// tests below deliberately live at n strictly below it, where the answers differ.
 //
 // This pins the Go side only. The floor's side is a native binary and is pinned
 // by a differential probe (tests/probe.sh) rather than by a Go test.
@@ -37,7 +34,7 @@ func TestFloPrecExactlyNDigits(t *testing.T) {
 		{1.0 / 3.0, 6, "333333e-1"},
 		{2.0 / 3.0, 1, "7e-1"},   // rounds up
 		{2.0 / 3.0, 3, "667e-1"}, // rounds up
-		// The %e case the C floor got wrong: seven digits of 1234.5678 must be
+		// Seven digits of 1234.5678 must be
 		// the correctly rounded 1234568, not the first seven of the shortest
 		// eight digit form (which would truncate to 1234567).
 		{1234.5678, 7, "1234568e3"},
@@ -69,8 +66,7 @@ func TestFloPrecExactlyNDigits(t *testing.T) {
 
 // The property behind the table: for every n, floPrec answers the digit string of
 // C's "%.*e" - at most n digits, and exactly n before the trailing zeros come off.
-// A sweep is what would have caught the floor's disagreement without knowing which
-// value to look at.
+// A sweep catches a disagreement without knowing which value to look at.
 func TestFloPrecMatchesPrintfE(t *testing.T) {
 	vals := []float64{
 		1.0 / 3.0, 2.0 / 3.0, 1234.5678, 0.1, 1e15 + 1, 9.87654321e-5,

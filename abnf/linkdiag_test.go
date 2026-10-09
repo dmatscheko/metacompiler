@@ -8,18 +8,13 @@ import (
 // TestDuplicateSymbolIsNotReportedAsUnresolved pins the classification the -exe
 // link failure report depends on.
 //
-// The undefined-symbol report in buildExecutable is built by filtering the
-// module's declared-but-undefined names by whether the linker text MENTIONS them,
-// and a duplicate-symbol error mentions exactly those same names - a name the
-// module declares as an extern is a name some input defines. So a build whose real
-// problem was two runtime inputs defining the same function was announced as
-// "N unresolved symbol(s) ... defined by neither the module nor any linked input",
-// the precise opposite of the truth. duplicateSymbols is what separates the two,
-// and it is asked FIRST.
+// A duplicate-symbol error mentions the same names the undefined-symbol report
+// filters on, so without duplicateSymbols (asked FIRST) a duplicate would be
+// announced as an unresolved symbol. See duplicateSymbols in llvmmap.go.
 //
 // The two linker spellings below are the real ones: the ld64 text was captured
-// from clang 17 on this machine (a duplicate `mec_helper` across two -rt inputs),
-// the GNU ld text is that linker's documented wording.
+// from clang (a duplicate `mec_helper` across two -rt inputs), the GNU ld text is
+// that linker's documented wording.
 func TestDuplicateSymbolIsNotReportedAsUnresolved(t *testing.T) {
 	ld64 := "duplicate symbol '_mec_helper' in:\n" +
 		"    /var/folders/T/rt2-6af1d3.o\n" +

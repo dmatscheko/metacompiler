@@ -92,8 +92,8 @@ func sprintTraceStack(stack []r.Object, space string) string {
 
 // traceTagTop/traceTagBottom print the tag trace (the -vvN / c.compile(..., true)
 // debug aid) around one tag execution. Both engines share them, and they write
-// to STDERR: printing to stdout corrupted the -q byte identity and would leak
-// into the next -pipe segment's input.
+// to STDERR: printing to stdout would break the -q byte identity and leak into
+// the next -pipe segment's input.
 func traceTagTop(traceCount int, tag *r.Rule, slot int, depth int, stack []r.Object, ltr map[string]r.Object, upStream map[string]r.Object) {
 	space := "  "
 
@@ -136,7 +136,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name scriptName, upStream m
 	// tag), whose tags point up/push/pop at their own upStream. Restore the
 	// caller's afterwards like the frozen engine does (walkEngine saves curUp),
 	// so the rest of the outer script does not keep operating on the LAST inner
-	// tag's upStream - that leaked, and goja and -frozen printed different up.in.
+	// tag's upStream (goja and -frozen would print different up.in).
 	// Restoring 'up' costs nothing: it puts a goja Value that already exists
 	// back into the global object.
 	savedUp, savedUpVal := cs.curUp, cs.vm.Get("up")
@@ -213,9 +213,9 @@ func (cs *compilerscript) initFuncMap() {
 
 	// The local stack functions are installed ONCE and work on the upStream of
 	// the tag that is running (cs.curUp, set by HandleTagCode). Re-setting them
-	// per tag execution made goja build two fresh native function objects every
-	// time - the single largest allocation source of the compile phase. ('up'
-	// itself is still rebound per tag, see HandleTagCode.)
+	// per tag execution would make goja build two fresh native function objects
+	// every time, a major allocation source. ('up' itself is still rebound per
+	// tag, see HandleTagCode.)
 	cs.vm.Set("pop", func() interface{} {
 		stack, ok := cs.curUp["stack"].([]interface{})
 		if !ok {

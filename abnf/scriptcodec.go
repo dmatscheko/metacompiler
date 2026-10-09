@@ -2,12 +2,11 @@ package abnf
 
 // A binary form of the compiled script modules for the frozen script cache.
 //
-// The cache used to keep each module as LLVM assembly TEXT and rebuild it with
-// the llir parser. That parser is the slowest thing in a -frozen run that has a
-// warm cache: one Kotlin run reloads 104 modules and spends 57 ms of its 253 ms
-// in there, most of it on the two big shared includes of languages/lib (777 KB
-// and 272 KB of .ll). The text is a general purpose interchange format; nothing
-// here needs one, because the only consumer is the IR interpreter in llvmmap.go.
+// Rebuilding a module from LLVM assembly TEXT with the llir parser is the slowest
+// thing in a -frozen run with a warm cache (the big shared includes of
+// languages/lib are hundreds of KB of .ll). The text is a general purpose
+// interchange format; nothing here needs one, because the only consumer is the IR
+// interpreter in llvmmap.go.
 //
 // So a module is written as the subset of the IR that the interpreter actually
 // executes: types, constants, globals, functions, blocks, the ~30 instructions
@@ -17,7 +16,7 @@ package abnf
 // backtracking.
 //
 // The format is a CACHE format, so it may refuse work: encodeModule returns an
-// error for anything it does not know, and the caller then stores .ll as before.
+// error for anything it does not know, and the caller then stores .ll instead.
 // decodeModule likewise returns an error rather than guessing, and a failed
 // decode just recompiles the script. scriptCacheFormat (scriptcache.go) is part
 // of every cache key, so changing anything here invalidates old entries.

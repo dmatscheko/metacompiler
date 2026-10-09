@@ -199,8 +199,7 @@ func inlineIncludes(src string, dir string) (string, error) {
 // inlineDirectives replaces every whole line matched by re (group 1 = the file
 // name, resolved relative to dir) with that file's content, repeatedly, so
 // nested includes expand too. The brake counts total replacements (a cycle
-// grows without bound); it used to count each replacement as a nesting level,
-// so more than 16 FLAT includes aborted with a bogus cycle error.
+// grows without bound), not nesting levels, so many FLAT includes are fine.
 func inlineDirectives(src string, dir string, re *regexp.Regexp, what string) (string, error) {
 	for count := 0; ; count++ {
 		m := re.FindStringSubmatchIndex(src)

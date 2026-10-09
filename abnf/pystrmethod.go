@@ -1,7 +1,7 @@
 package abnf
 
 // Python's str METHOD LIBRARY for the Go twin - the third of the three engines
-// that carry it (docs/todo.md 1.5).
+// that carry it.
 //
 // The other two are the "str methods" chapter at the end of
 // languages/lib/python-rt.metajs (layer 2, what a NATIVE binary runs) and the
@@ -77,7 +77,7 @@ func (e *pyStrEnv) fail(msg string)              { e.rt.fail("%s", msg) }
 
 // raiseKey is a CATCHABLE KeyError, for the one place in this chunk where
 // CPython raises rather than aborts: "{a}".format(b=1). fail is the engine's
-// abort and cannot be caught (docs/todo.md 1.7). pySRaiseKey in
+// abort and cannot be caught. Twins: pySRaiseKey in
 // languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
 func (e *pyStrEnv) raiseKey(nm string) {
 	panic(&jsThrown{value: e.rt.pyExcInstanceV("KeyError", nm)})
@@ -955,8 +955,8 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		case *jsArray:
 			return e.join(s, sq.elems)
 		}
-		// A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/filter/
-		// zip/enumerate) is materialized rather than refused - `", ".join(map(str,
+		// A GENERATOR or an ITERATOR object (iter/map/filter/zip/enumerate) is
+		// materialized rather than refused - `", ".join(map(str,
 		// xs))` is ordinary Python. Keep in step with the join arm of pyStrMethod
 		// in languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
 		if a := pysArgAt(args, 0); pyIterName(e.rt, a) != "" || pyIsGenerator(a) {

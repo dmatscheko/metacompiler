@@ -12,8 +12,8 @@ import (
 // ----------------------------------------------------------------------------
 // Linking a separately compiled runtime into a run of the IR interpreter.
 //
-// docs/runtime-rework-plan.md wants every layer compiled by this repository, which
-// means a language runtime is a .ll produced by one of the grammars in languages/
+// Every layer is meant to be compiled by this repository, so a language runtime is
+// a .ll produced by one of the grammars in languages/
 // (lib/runtime.ll from runtime.c, lib/batch-rt.ll from batch-rt.c) rather than IR
 // text hand-written inside the emitter. For -exe that is enough on its own: clang
 // links the program object against the runtime object.

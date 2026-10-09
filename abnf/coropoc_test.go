@@ -1,7 +1,6 @@
 package abnf
 
-// coropoc_test.go - the llvm.Run half of the COROUTINE proof of concept
-// (docs/runtime-next-plan.md, "Coroutines - the fifth-language wall").
+// coropoc_test.go - the llvm.Run half of the COROUTINE proof of concept.
 //
 // It parses tests/coro-poc/gen.ll - the SAME module tests/coro-poc/build.sh
 // links into a native binary - and runs it through runJSModule, which is exactly
@@ -27,8 +26,8 @@ import (
 )
 
 func TestCoroPoC(t *testing.T) {
-	// MEC_CORO_LL points the same harness at another hand-written module, which
-	// is how the handoff cost of the two engines was measured against one file.
+	// MEC_CORO_LL points the same harness at another hand-written module, e.g. to
+	// compare the handoff cost of the two engines on one file.
 	path := os.Getenv("MEC_CORO_LL")
 	if path == "" {
 		path = filepath.Join("..", "tests", "coro-poc", "gen.ll")

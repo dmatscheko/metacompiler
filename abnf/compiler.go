@@ -27,13 +27,13 @@ var WarnUnsupported = false
 // calling the Go externals: languages/metajs-to-llvm-ir.abnf then compiles
 // languages/lib/rt-prims.metajs into the emitted module and routes js_ne, js_le,
 // js_typeof and friends to those IR functions, so whatever is still `declare`d
-// afterwards is the measured floor of primitives that must be written in C
-// (docs/runtime-rework-plan.md, phase 1). Grammars read it as c.rtPrims.
+// afterwards is the measured floor of primitives that must be written in C.
+// Grammars read it as c.rtPrims.
 var RuntimePrims = false
 
 // RuntimeLib is set from the -rt-lib CLI flag. It asks metajs-to-llvm-ir.abnf to
-// compile its input as a LINKABLE RUNTIME LIBRARY (layer 2 of
-// docs/runtime-rework-plan.md) rather than as a program: every top-level js_*
+// compile its input as a LINKABLE RUNTIME LIBRARY (layer 2) rather than as a
+// program: every top-level js_*
 // function gets an exported C-ABI shim, the module's own function/string names are
 // offset so they cannot collide with the program module it is linked against, and
 // the function table it emits is jsdispatch_ext (the tail the program's own
@@ -90,10 +90,9 @@ type scriptEngine interface {
 // The ltr.in accumulator
 
 // ltrText holds the text of all Token the walk has seen so far - the value
-// behind ltr.in. Appending to a plain string copied the whole text per Token,
-// which made the walk quadratic in the input size (185 MB of copying for one
-// compile of languages/kotlin-to-llvm-ir.abnf, the largest allocation site of
-// the phase). The text is therefore appended to a buffer and only materialized
+// behind ltr.in. Appending to a plain string would copy the whole text per Token,
+// making the walk quadratic in the input size. The text is therefore appended to
+// a buffer and only materialized
 // into a string when a script actually READS ltr.in - which the engines
 // mediate: the goja engine hands out ltr through a dynamic object and the
 // frozen engine through importGoValue, and both call String() there. A
@@ -225,11 +224,10 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	if len(*localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
 
 		// 'in' and the up.str*/up.arr* keys are accumulated in local buffers and
-		// stored into the map ONCE, at the end: merging a sibling list by
-		// concatenating string into string per child made a node with n children
-		// copy its text n times (the widest node of languages/kotlin-to-llvm-ir.abnf
-		// has 1102 children), and storing a slice back into an interface{} per
-		// child boxed a fresh slice header every time.
+		// stored into the map ONCE, at the end: concatenating string into string
+		// per child would make a node with n children (over a thousand in a large
+		// grammar) copy its text n times, and storing a slice back into an
+		// interface{} per child would box a fresh slice header every time.
 		var inBuf []byte
 		var strBufs map[string][]byte     // up.str*, on demand: most nodes have none.
 		var arrs map[string][]interface{} // up.arr*, likewise.
@@ -295,8 +293,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 // compileRule is the walk of ONE rule (one split arm). localASG is the single
 // rule list the enclosing compile() was called with - the list a Tag script sees
 // as c.localAsg. The sibling walk above has no such list and passes nil; only a
-// Tag then needs one, so only a Tag allocates it (it used to wrap every child of
-// every node in a one element r.Rules just to re-enter compile()).
+// Tag then needs one, so only a Tag allocates it.
 func (co *compiler) compileRule(rule *r.Rule, localASG *r.Rules, slot int, depth int) map[string]r.Object { // => (upStream)
 	switch rule.Operator {
 	case r.Token:

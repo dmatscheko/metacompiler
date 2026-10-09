@@ -228,10 +228,8 @@ func newWalkRuntime() (*jsrt, *walkEngine) {
 //
 // It is the same work compileScript would do, just not serialized: reading a
 // cached module means running the llir assembly parser over its .ll text, which
-// costs about 0.5 ms per module and is dominated by allocation - one Kotlin run
-// loads 104 of them and spent 57 ms of its 266 ms in there, single threaded,
-// while a goja run compiles the same scripts with goja itself. The modules are
-// independent, so on a multi core machine this is nearly free. Everything here
+// is allocation bound and adds up over the ~100 modules of a large grammar. The
+// modules are independent, so on a multi core machine this is nearly free. Everything here
 // is best effort: a script with no (or a corrupt) cache entry is simply left for
 // compileScript.
 func (k *fkernel) prefetchCachedScripts(agrammar *r.Rules) {
@@ -318,7 +316,7 @@ func (k *fkernel) compileScript(code string, name scriptName) *ir.Module {
 	}
 
 	// Only from here on is the name needed - so it is formatted here, not on
-	// every one of the ~10 000 tag executions of a grammar compile.
+	// every one of the many thousand tag executions of a grammar compile.
 	scriptFile := name.String()
 	asg, err := ParseWithAgrammar(k.jsG, code, scriptFile, &Parseropts{PreventDefaultOutput: true})
 	if err != nil {
@@ -422,9 +420,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"ABNFagrammar": AbnfAgrammar,
 		"compile": func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
 			// Like the goja engine: the JS parameter can only turn the tag
-			// trace on, never override the command line flags off (it used to
-			// be ignored here, so c.compile(asg, 0, true) traced under goja
-			// but not under -frozen).
+			// trace on, never override the command line flags off.
 			eng.traceEnabled = eng.traceEnabled || traceEnabled
 			return eng.co.compile(asg, slot, 0)
 		},
@@ -526,8 +522,8 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		mod := frozenKernel().compileScript(StripBOM(string(dat)), fileScript(resolved))
 		// The included file runs AS its own module (goja names each program
 		// after its file): a nested include(), load() or moduleName() inside
-		// it resolves relative to the included file, not to the includer -
-		// resolving everything against the grammar dir broke nested includes.
+		// it resolves relative to the included file, not to the includer;
+		// resolving everything against the grammar dir would break nested includes.
 		savedFile := eng.fileName
 		eng.fileName = resolved
 		defer func() { eng.fileName = savedFile }()

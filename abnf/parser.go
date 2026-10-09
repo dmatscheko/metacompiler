@@ -192,9 +192,9 @@ func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces b
 // The skip is a pure function of (ws, position): it creates no productions (skippingSpaces
 // is true), reads nothing but the target text and leaves no state behind, so its end
 // position is memoized per whitespace rule and start position. That matters because the
-// probes dominate the parse - for a C style ' { @+" \t\r\n" | Comment } ' about 15 rule
-// applications and 15 allocations for the usual O(1) answer "the next char is not a
-// space", at every terminal attempt of every backtracking path (73 % of all apply() calls).
+// probes dominate the parse: a C style ' { @+" \t\r\n" | Comment } ' costs about 15 rule
+// applications for the usual answer "the next char is not a space", at every terminal
+// attempt of every backtracking path.
 //
 // Two cases opt out: a whitespace rule containing a :script(), whose result can depend on
 // parser state that is not part of the key, and tracing, whose output would otherwise lose
@@ -237,8 +237,7 @@ func (pa *parser) skipSpaces(ws *r.Rule, depth int) {
 // production before they put it into the found list (-lf) or the block list (-lb):
 // the Python grammars track their indentation in :script() rules, so the result of
 // e.g. their Block production depends on an indentation stack, and reusing an earlier
-// result at the same position silently broke the parse ("Not everything could be
-// parsed", tests/python-test-1.py:13:1).
+// result at the same position would be wrong.
 //
 // The answer only depends on the a-grammar, which no longer changes once the parsing
 // has started (an :include() runs before it), so it is computed once per rule instead
@@ -469,12 +468,10 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		// AN INCLUDED FILE'S :startScript IS SILENTLY DISCARDED, so say so.
 		// r.GetStartScript returns the FIRST :startScript in the a-grammar and the
 		// include appends below the host's, so the host's always wins - with no
-		// error, no warning, and a fragment whose script simply never runs. That
-		// cost one investigation: it is the fact that settles docs/todo.md 5.2,
-		// because sw_kget/sw_kset/sw_safeget are start-script CLOSURES over
-		// m/curF/callExt/emitStr, so no shared .abnf module can carry them however
-		// much text they share. Warn rather than fail: a fragment could legitimately
-		// carry one for standalone use, and this is the only place that can tell.
+		// error and a fragment whose script simply never runs. (This is also why
+		// start-script closures cannot be shared through an included .abnf module.)
+		// Warn rather than fail: a fragment could legitimately carry one for
+		// standalone use, and this is the only place that can tell.
 		for _, ir := range *aGrammar {
 			if ir.Operator == r.Command && ir.String == "startScript" {
 				fmt.Fprintf(os.Stderr,
@@ -546,8 +543,8 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	// Created lazily (see appendProd and r.AppendPossibleSequence, both of which take a
 	// nil target): most applications are terminals that fail on the first byte or
-	// lookaheads that produce nothing, and eagerly allocating one *r.Rules per apply()
-	// was 58 % of all bytes a program parse allocated. Careful with the convention
+	// lookaheads that produce nothing, so eagerly allocating one *r.Rules per apply()
+	// would dominate the parse's allocations. Careful with the convention
 	// around it: nil as a RESULT means FAILURE, so every successful path has to hand
 	// back a non-nil (possibly empty) *r.Rules - see the end of this function.
 	var localProductions *r.Rules
@@ -950,8 +947,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 					n = int(binary.LittleEndian.Uint16(bytes))
 				case 3, 4:
 					// Odd sizes are padded up: for little endian the high zero
-					// bytes go behind the data (Uint32/Uint64 need full width;
-					// the bare slice panicked for 3 and 5...7 bytes).
+					// bytes go behind the data (Uint32/Uint64 need full width).
 					n = int(binary.LittleEndian.Uint32(padBytes(bytes, 4, false)))
 				case 5, 6, 7, 8:
 					n = int(binary.LittleEndian.Uint64(padBytes(bytes, 8, false)))
@@ -1156,9 +1152,7 @@ func (re *references) correctReferencesAndIDs(rules *r.Rules) {
 // One forward pass: a run of adjacent Tokens is located first, then built with a single
 // strings.Builder and written back over the input slice (out always trails i, so the
 // compaction can never overwrite an element that is still to be read). Merging char by
-// char instead - concatenating the strings and shifting the tail down per merged token -
-// cost O(k*n) shifts and O(k^2) copied bytes per run of k tokens, which made the parse
-// of a large grammar quadratic in its own size (93 % of the parse time, GC bound).
+// char instead would be quadratic per run of tokens, and so in the size of a large grammar.
 func mergeTerminals(productions *r.Rules) {
 	if productions == nil {
 		return
@@ -1254,8 +1248,8 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 
 	// An index loop, not a range: an :include() appends the included grammar's
 	// rules (with THEIR :include() commands) to *pa.agrammar, and a range over
-	// the initial slice header would never visit them - nested includes were
-	// silently ignored, leaving their productions undefined.
+	// the initial slice header would never visit them, leaving nested includes'
+	// productions undefined.
 	for i := 0; i < len(*pa.agrammar); i++ {
 		if rule := (*pa.agrammar)[i]; rule.Operator == r.Command {
 			pa.applyCommand(rule)
@@ -1292,10 +1286,8 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	// nil is FAILURE (see apply(): a successful path always returns a non-nil, possibly
 	// empty *r.Rules), and it has to be reported even when nothing is left over: a start
 	// rule that fails at position 0 on a file whose whole text the WHITESPACE rule can
-	// consume used to fall through both checks and return (nil, nil), i.e. a silent
-	// success with no ASG - the caller then died inside the grammar's :startScript() with
-	// 'TypeError: Value is not an object: null' instead of a parse error. Found by a
-	// js Module guard refusing '<!--' in a file that is nothing but that comment.
+	// consume would otherwise fall through both checks and return (nil, nil), a silent
+	// success with no ASG that the :startScript() then trips over.
 	if newProductions == nil {
 		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), "<nothing: the start production did not match>"))
 	}

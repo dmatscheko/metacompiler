@@ -1014,12 +1014,8 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 // they must NOT be stubbed; every OTHER declared-but-undefined function is a
 // user/language function with no linkable symbol (e.g. a lisp form that references a
 // never-defined name inside a short-circuit) and would make clang fail at link time.
-//
-// This list was `{putchar, getchar, puts, abs}` until 2026-08-02, which meant that
-// `malloc` got a null-returning STUB: a C program that allocated built successfully
-// under -exe and segfaulted on its first field write, while the identical module
-// handed straight to clang printed the right answer. Same failure class as bash's
-// rt_regex_search - a missing symbol became a wrong answer instead of a link error.
+// A libc name missing from this list gets a zero stub under -exe (malloc returning
+// null), i.e. a wrong answer instead of a link error.
 //
 // THE BAR FOR ADDING A NAME HERE is that the C model can implement it CORRECTLY, not
 // merely consistently. Two conditions, both required:
@@ -1037,54 +1033,35 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 // this project most wants surfaced, and byte-identity between the two engines is exactly
 // the invariant that cannot see it.
 //
-// HISTORY, kept short so that nobody re-derives it. Until 2026-08-02 the whole str*/mem*
-// family, atoi/atol and strdup were deliberately absent, because languages/c-to-llvm-ir.abnf
-// gave `char` a FOUR-byte cell: "hello" was emitted as `[6 x i32]`, so a byte-oriented
-// strlen stopped at the first padding NUL and answered 1 where cc answers 5, and atoi("42")
-// read '4', 0 and answered 4 where cc answers 42. Listing them then made BOTH engines agree
-// on a wrong answer, which is strictly worse than both failing loudly, so 43cf14e reverted
-// it. Commit 93c814f removed that obstacle - a `char` is now a real i8 cell and a string
-// literal a real `[n x i8]` - and the family is listed below, RE-MEASURED against cc rather
-// than taken over from the earlier report.
+// The str*/mem* family relies on languages/c-to-llvm-ir.abnf giving `char` a one-byte
+// cell and string literals a real `[n x i8]`; with wider cells both engines would agree
+// on a wrong answer. Condition 2 is pinned by abnf/libcnative_test.go (a differential
+// test against Go's strings/bytes/strconv); condition 1 was checked against real cc, see
+// the header of tests/c-test-full.c. These names are NOT in tests/c-test-full.c on
+// purpose: languages/c-interpreter.abnf has no standard library, so such a section would
+// make the two halves of the language disagree.
 //
-// WHERE THE EVIDENCE IS. Condition 2 is pinned by abnf/libcnative_test.go, a differential
-// test of all 18 against Go's own strings/bytes/strconv. Condition 1 was measured by hand
-// against real cc (Apple clang 21.0.0, arm64-darwin) over a 49-line probe covering every
-// name: cc, `llvm.Run` and the clang-built -exe binary printed the same 49 lines. It is
-// NOT in tests/c-test-full.c, and that is deliberate - the ratchet file is run by BOTH
-// halves of the language and languages/c-interpreter.abnf has no standard library at all,
-// so a section calling these names takes that half from FULL to a reported gap and the
-// two halves are then reported as disagreeing. The measurement is written down in the
-// header of tests/c-test-full.c so nobody re-derives it.
-//
-// Still deliberately absent, and still for condition 2, NOT for the memory model: the
-// varargs printf family (printf, fprintf, sprintf, snprintf, fwrite, fputs, putc, fputc),
-// exit, abort, qsort and bsearch. See libcNative for why the interpreter cannot implement
-// each of them; clang could link them, and that is precisely the divergence condition 2
-// forbids. Re-confirmed 2026-08-02: the interpreter still has no varargs ABI (arguments
-// reach a native already flattened to uint64 with no type tags), still no unwind path out
-// of ma.call for exit/abort, and a C function pointer is still a funcId in an i32 rather
-// than an address, so qsort/bsearch cannot call back through one.
+// Still deliberately absent, for condition 2: the varargs printf family, exit, abort,
+// qsort and bsearch. See the note above libcNative for why the interpreter cannot
+// implement them; clang could link them, and that is precisely the divergence
+// condition 2 forbids.
 var libcExterns = map[string]bool{
-	// stdio / stdlib character and integer primitives, all pre-existing.
+	// stdio / stdlib character and integer primitives.
 	"putchar": true, "getchar": true, "puts": true, "abs": true,
-	// The allocator. Address-based, so even the old four-byte `char` cell did not reach
-	// it: sizes come from sizeof over structs and wide integers, which ctBytes() and
-	// machBytes() agree on. This is the family Phase 0 exists for.
+	// The allocator. Sizes come from sizeof over structs and wide integers, which
+	// ctBytes() and machBytes() agree on.
 	"malloc": true, "calloc": true, "realloc": true, "free": true,
 	// Pure integer arithmetic, so it cannot be affected by the memory model at all.
 	"labs": true,
-	// The byte/address family, unlocked by the one-byte `char` of 93c814f. Every one is
-	// pure work over the flat arena, so libcNative implements it exactly (condition 2)
-	// and clang's real symbol sees the same bytes at the same addresses (condition 1).
-	// All 18 are pinned by abnf/libcnative_test.go; see the note above for why they are
-	// not in tests/c-test-full.c.
+	// The byte/address family. Every one is pure work over the flat arena, so libcNative
+	// implements it exactly (condition 2) and clang's real symbol sees the same bytes at
+	// the same addresses (condition 1). Pinned by abnf/libcnative_test.go.
 	"strlen": true, "strcmp": true, "strncmp": true,
 	"strcpy": true, "strncpy": true, "strcat": true, "strncat": true,
 	"strchr": true, "strrchr": true, "strstr": true,
 	"memcpy": true, "memmove": true, "memset": true, "memcmp": true, "memchr": true,
 	"atoi": true, "atol": true, "strdup": true,
-	// CAVEAT, measured: for strcmp/strncmp/memcmp the magnitude is unspecified by C and
+	// CAVEAT: for strcmp/strncmp/memcmp the magnitude is unspecified by C and
 	// Apple's libc returns the UNSIGNED byte difference (strcmp("xy","xc") == 22), which
 	// is what byteDiff reproduces. Only the SIGN is portable, so only the sign is
 	// asserted. See byteDiff for the constant-folding trap that goes with it.
@@ -1114,8 +1091,8 @@ func undefinedSymbols(m *ir.Module) []string {
 // a missing symbol and a silently wrong answer.
 //
 // It is skipped entirely when the build links a runtime (see buildExecutable): there
-// the same symbol is a genuine link error, and papering over it with a zero would
-// reintroduce the malloc-returns-null failure class phase 0 removed.
+// the same symbol is a genuine link error, and papering over it with a zero would turn
+// a missing runtime function into a silent 0/null.
 func stubUndefined(m *ir.Module) {
 	for _, f := range m.Funcs {
 		if len(f.Blocks) > 0 || libcExterns[f.Name()] {
@@ -1186,14 +1163,10 @@ func isSymByte(b byte) bool {
 // duplicateSymbols returns the names a link failure blamed for being defined MORE
 // THAN ONCE, sorted and deduplicated, or nil when the failure was not of that kind.
 //
-// It exists because the undefined-symbol report below is built by filtering the
-// module's declared-but-undefined names by whether the linker text MENTIONS them -
-// and a duplicate-symbol error mentions exactly the same names, since a name the
-// module declares as an extern is a name some input defines. So a build whose real
-// problem was two runtime inputs defining `mec_helper` was reported as
-// "1 unresolved symbol(s) ... defined by neither the module nor any linked input",
-// which is the precise opposite of the truth. PHP hit this; every language that
-// links more than one runtime file can.
+// It exists because the undefined-symbol report is built by filtering the module's
+// declared-but-undefined names by whether the linker text MENTIONS them - and a
+// duplicate-symbol error mentions exactly the same names, so without this check two
+// runtime inputs defining the same symbol would be reported as an unresolved symbol.
 //
 // Both linker spellings are recognised:
 //
@@ -1255,27 +1228,6 @@ func quotedSymbol(s string) string {
 	return name
 }
 
-// buildExecutable emits m as LLVM IR text and links it into a native executable with
-// clang (override with the MEC_CLANG env var), together with the runtime files the
-// grammar and -rt supply and the -L/-l libraries. It returns "" on success, else an
-// error message the calling grammar prints before exiting non-zero.
-//
-// TWO MODES, and the difference is what an undefined symbol means:
-//
-//   - Nothing to link with (no runtime, no -l). The module must stand alone, so a
-//     declared-but-undefined function can only be a language-level name that has no
-//     symbol anywhere - the lisp form referencing a never-defined name inside a
-//     short-circuit. stubUndefined links a zero body and warns. This is the historical
-//     behaviour and it is preserved exactly.
-//   - A runtime IS declared. Then every remaining declaration is a symbol the runtime
-//     was supposed to define, and stubbing it would turn a missing runtime function
-//     into an answer of 0/null at run time - the exact failure class phase 0 removed
-//     from malloc. So nothing is stubbed, clang links for real, and if the link fails
-//     the unresolved names are reported on stderr and the build fails.
-//
-// The failure report is built from the MODULE (sorted names, filtered by what the
-// linker's output mentions), never from the raw linker text: that text carries the
-// temp file names, and this path is in the test matrix, which compares bytes.
 // rdynamicFlags answers the link flags a generator needs to find its own thread
 // entry, and it is a PLATFORM question rather than a preference.
 //
@@ -1288,21 +1240,15 @@ func quotedSymbol(s string) string {
 //
 //   - Mach-O (darwin) puts every non-static global symbol of the executable in
 //     the symbol table that dlsym searches, so the lookup works with no flag.
-//     Passing -rdynamic here would still be ACCEPTED (Apple clang maps it to
-//     ld -export_dynamic and warns about nothing - measured), but it is not a
-//     no-op: it enlarges the exported symbol table, which changes the binary and
-//     therefore its code layout, and this project measures native binaries down
-//     to a percent (manual chapter 4). So darwin does not get it.
+//     Passing -rdynamic would be accepted but is not a no-op: it enlarges the
+//     exported symbol table and so changes the binary's code layout, which the
+//     native benchmarks are sensitive to (manual chapter 4). So darwin does not
+//     get it.
 //   - ELF (linux and the BSDs) exports NOTHING from an executable by default.
 //     Without -rdynamic the dlsym answers NULL and gen_resume dies with
-//     "coroutines: dlsym of coro_entry failed" at the first generator - i.e. the
-//     first native build of any language with a coroutine. That is what this
-//     adds.
+//     "coroutines: dlsym of coro_entry failed" at the first generator.
 //   - Anything else (windows/PE) gets nothing: -rdynamic is not a flag clang
 //     accepts for a PE target, and no coroutine build is claimed to work there.
-//
-// Not verifiable on this machine (nothing here builds on linux); the darwin half
-// - that the flag is absent and the build is byte-for-byte what it was - is.
 //
 // Known and NOT handled here, because it is a separate question and would be a
 // guess: on a glibc older than 2.34, dlopen/dlsym live in libdl and
@@ -1317,6 +1263,26 @@ func rdynamicFlags() []string {
 	}
 }
 
+// buildExecutable emits m as LLVM IR text and links it into a native executable with
+// clang (override with the MEC_CLANG env var), together with the runtime files the
+// grammar and -rt supply and the -L/-l libraries. It returns "" on success, else an
+// error message the calling grammar prints before exiting non-zero.
+//
+// TWO MODES, and the difference is what an undefined symbol means:
+//
+//   - Nothing to link with (no runtime, no -l). The module must stand alone, so a
+//     declared-but-undefined function can only be a language-level name that has no
+//     symbol anywhere - the lisp form referencing a never-defined name inside a
+//     short-circuit. stubUndefined links a zero body and warns.
+//   - A runtime IS declared. Then every remaining declaration is a symbol the runtime
+//     was supposed to define, and stubbing it would turn a missing runtime function
+//     into an answer of 0/null at run time. So nothing is stubbed, clang links for
+//     real, and if the link fails the unresolved names are reported on stderr and the
+//     build fails.
+//
+// The failure report is built from the MODULE (sorted names, filtered by what the
+// linker's output mentions), never from the raw linker text: that text carries the
+// temp file names, and this path is in the test matrix, which compares bytes.
 func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	// Before stubUndefined rewrites anything: -why reports the module the
 	// grammar emitted, and it must read the same under -exe as without it.
@@ -1348,8 +1314,7 @@ func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	// -O2 is not cosmetic. languages/c-to-llvm-ir.abnf gives every local and every
 	// parameter an alloca/store/load and has no mem2reg of its own, and the MetaJS and
 	// Lua floors are compiled by it, so the emitted module leans on the backend to
-	// promote those slots to registers. Without any -O flag clang does none of it. The
-	// effect is measured in docs/runtime-rework-plan.md.
+	// promote those slots to registers. Without any -O flag clang does none of it.
 	args := []string{"-Wno-override-module", "-O2", "-o", outPath, tmpName}
 	args = append(args, rdynamicFlags()...)
 	args = append(args, inputs...)
@@ -1442,11 +1407,11 @@ func callgraph(m *ir.Module) string {
 //
 // A small LLVM IR interpreter, so that the IR modules generated by the compiler
 // grammars can be executed and verified without an external LLVM installation.
-// It supports the integer subset that the grammars in tests/ generate: alloca,
-// load, store, getelementptr (into arrays), the integer arithmetic / logic /
-// shift / compare instructions, zext / sext / trunc, select, phi, br, condbr,
-// ret, direct calls, and the external functions putchar, getchar, puts and abs.
-// Not supported: floats, structs, function pointers, and everything else.
+// It supports the integer subset the compiler grammars generate: alloca, load,
+// store, getelementptr (into arrays and packed structs), the integer arithmetic /
+// logic / shift / compare instructions, casts, select, phi, br, condbr, ret,
+// direct calls, the host externs of an attached runtime, and the libc subset of
+// libcNative. Not supported: floats, indirect calls, and everything else.
 
 // RunResult is what llvm.Run() returns to JS.
 type RunResult struct {
@@ -1486,9 +1451,8 @@ type machine struct {
 	// as soon as the extern table is known and completed lazily for functions that
 	// appear later. It exists because llir's f.Name() is not a field read: it runs
 	// a strconv.ParseInt over the name to decide whether it needs quoting, and that
-	// parse FAILS (allocating a *strconv.NumError plus a copy of the name) for every
-	// name that is not a number - i.e. for all of them. With ~1.5 M extern calls per
-	// frozen run that was 12 % of all allocated bytes.
+	// parse FAILS (allocating a *strconv.NumError) for every name that is not a
+	// number - far too costly per extern call.
 	externBound map[*ir.Func]func(args []uint64) uint64
 
 	layouts   map[*ir.Func]*funcLayout       // Decoded program per function, built on first call.
@@ -1514,11 +1478,8 @@ type machine struct {
 // can define - its parameters and the results of its instructions - gets a dense
 // slot, so one invocation is a flat register array instead of a map keyed by the
 // instruction, and every instruction is decoded ONCE into a small fixed struct
-// with an opcode, a destination slot and pre-resolved operands. Before that the
-// interpreter walked the llir data structure itself: a type switch over an
-// interface per instruction, a hash lookup per operand (valueOf), a big.Int read
-// per constant use and a re-scan for the leading phis on every block entry -
-// together ~20 % of a frozen mec run and ~40 % of the interpreter's own time.
+// with an opcode, a destination slot and pre-resolved operands, instead of walking
+// the llir data structure (type switches, hash lookups, big.Int reads) per step.
 //
 // The slot numbering is parameters first, then the instructions of the blocks in
 // order; instructions without a result (a store) still take a slot so the
@@ -1729,8 +1690,8 @@ func (ma *machine) decode(f *ir.Func) *funcLayout {
 // recycle marks the calls whose result may be reclaimed when the SAME call
 // executes again in the SAME frame.
 //
-// The handle runtime (jsrt.go) never freed anything, and a loop body is a block,
-// so a program that runs a loop N times leaves N scopes behind - the dominant
+// Without this the handle runtime (jsrt.go) frees nothing, and a loop body is a
+// block, so a program that runs a loop N times leaves N scopes behind - the dominant
 // memory cost of a long-running compiled program. There is no root set to trace:
 // handles live in these register arrays and in the arena as bare integers. What
 // IS decidable is where a handle can go, because the decoded program below holds
@@ -2015,8 +1976,8 @@ func (ma *machine) releaseFrame(fr *frame) {
 }
 
 // stepLimitMsg names the safety valve that just tripped. The limit is not a
-// property of the program, so the message says what it is and how to lift it -
-// a long but finite run used to abort with a text that read like a grammar bug.
+// property of the program, so the message says what it is and how to lift it, so
+// that a long but finite run does not read like a grammar bug.
 func (ma *machine) stepLimitMsg() string {
 	return fmt.Sprintf("IR interpreter: step limit exceeded - one call ran more than %d instructions.\n"+
 		"This is a safety valve against endless loops, not a limit of the language: if the program\n"+
@@ -2128,9 +2089,6 @@ func (ma *machine) sizeOfUncached(t types.Type) uint64 {
 	}
 }
 
-// gepStep resolves one inner getelementptr index: it returns the byte offset of
-// the selected element and the type to continue with. Arrays step by the element
-// size, struct indices select a field (packed layout, see sizeOf).
 // sextIdx sign-extends a gep index that was computed at bits wide to 64 bits.
 // Registers hold values zero-extended, so a negative index arrives with its
 // high bits clear; without this the subsequent unsigned multiply produces a
@@ -2145,6 +2103,9 @@ func sextIdx(v uint64, bits uint8) uint64 {
 	return v
 }
 
+// gepStep resolves one inner getelementptr index: it returns the byte offset of
+// the selected element and the type to continue with. Arrays step by the element
+// size, struct indices select a field (packed layout, see sizeOf).
 func (ma *machine) gepStep(t types.Type, idx uint64) (uint64, types.Type) {
 	switch t := t.(type) {
 	case *types.ArrayType:
@@ -2620,8 +2581,8 @@ func (ma *machine) bindExterns() {
 //     varargs and FILE* streams. The interpreter has no varargs ABI at all - the
 //     argument list it receives is already flattened to uint64 with no type tags - so a
 //     format string could not be walked correctly, and an approximation that got %ld
-//     wrong would be exactly the "wrong answer instead of an error" this change is
-//     about. Use putchar/puts under llvm.Run.
+//     wrong would be exactly a "wrong answer instead of an error". Use putchar/puts
+//     under llvm.Run.
 //   - exit / abort: the interpreter has no unwind path out of ma.call, so these would
 //     have to fake a return, which is not what they mean.
 //   - qsort / bsearch: they call back through a function pointer, and in the C model a
@@ -2680,7 +2641,7 @@ func (ma *machine) cstrEnd(addr uint64) uint64 {
 // the MAGNITUDE unspecified - only the sign is defined - and Apple's libc returns the
 // UNSIGNED byte difference, so that is what these return here.
 //
-// MEASURED 2026-08-02, Apple clang 21.0.0 / arm64-darwin, tests/../tmp probe:
+// Apple clang / arm64-darwin:
 //
 //	char a[4]="xy", b[4]="xc";  strcmp(a,b)          ==> 22    ('y'-'c')
 //	const char *A="\x80", *B="\x01";  strcmp(A,B)    ==> 127   (0x80-0x01, UNSIGNED)
@@ -2735,9 +2696,9 @@ func (ma *machine) min(addr uint64) uint64 {
 // name is not one it implements (see the list of exclusions above).
 func libcNative(ma *machine, name string) func(args []uint64) uint64 {
 	switch name {
-	// ----- The byte/address family, unlocked by the one-byte `char` of 93c814f -----
+	// ----- The byte/address family -----
 	// Every one of these is pure work over ma.mem (plus heapAlloc for strdup), which is
-	// laid out exactly as the clang-built binary lays it out now that a char is a byte.
+	// laid out exactly as the clang-built binary lays it out (a char is a byte).
 	case "strlen":
 		return func(args []uint64) uint64 { return ma.cstrEnd(args[0]) - args[0] }
 	case "strcmp":

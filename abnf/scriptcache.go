@@ -8,10 +8,10 @@ package abnf
 // tag-heavy grammar that is 1.5-2s of identical work on every run. The
 // compile is deterministic and its only inputs are the script source and the
 // bootstrap snapshot (jsbootstrap.ll + jsagrammar.go, regenerated together by
-// -freeze). So compileScript stores each emitted module as .ll text, keyed by
-// a hash of snapshot+source, and later runs reload it with asm.ParseString -
-// the same print/parse round trip the snapshot itself goes through at -freeze
-// time. Cache entries never go stale silently: a refreeze changes the
+// -freeze). So compileScript stores each emitted module (in the binary form of
+// scriptcodec.go, or as .ll text where the codec does not cover it), keyed by a
+// hash of snapshot+source, and later runs reload it. Cache entries never go
+// stale silently: a refreeze changes the
 // snapshot hash and with it every key.
 //
 // Location: $MEC_SCRIPT_CACHE if set (the value "off" disables caching),
