@@ -739,11 +739,14 @@ int main() {
   check("tpat-map-value",
         switch ({"k": 1}) { {"k": String v} => "s", {"k": int v} => "i$v", _ => "no" } == "i1");
   // An IRREFUTABLE position: the declaration downcasts, and a failure is a TypeError.
+  // The bad value has to reach the pattern as `dynamic`: a statically mistyped value in
+  // an irrefutable position is a compile-time error, while `dynamic` inserts a cast.
   var (int tpOk, String tpOk2) = (4, "z");
   check("tpat-declaration-binds", tpOk == 4 && tpOk2 == "z");
   var tpDeclErr = "none";
   try {
-    var (int tpBad, int tpBad2) = (1, "s");
+    dynamic tpBadSrc = (1, "s");
+    var (int tpBad, int tpBad2) = tpBadSrc;
     tpDeclErr = "ran$tpBad$tpBad2";
   } on TypeError catch (e) { tpDeclErr = "typeerror"; }
   check("tpat-declaration-raises-typeerror", tpDeclErr == "typeerror");
@@ -755,7 +758,8 @@ int main() {
   var tpLoopErr = "none";
   var tpShort = 0;
   try {
-    for (var (int n, String s) in [(1, "a"), (2, 9), (3, "c")]) { tpShort = tpShort + 1; }
+    List<dynamic> tpMixed = [(1, "a"), (2, 9), (3, "c")];
+    for (var (int n, String s) in tpMixed) { tpShort = tpShort + 1; }
     tpLoopErr = "ran";
   } on TypeError catch (e) { tpLoopErr = "typeerror"; }
   check("tpat-for-in-raises-not-skips", tpLoopErr == "typeerror" && tpShort == 1);

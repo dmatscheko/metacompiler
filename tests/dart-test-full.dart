@@ -1338,12 +1338,14 @@ void s32() {
   check("nm-pat9", switch (NmSq()) { NmShape() => "os", _ => "no" } == "os");
   // Irrefutable: the declaration and the for-in binder downcast, and a failure is a
   // TypeError. The trip COUNT is asserted, because a loop that silently skips a
-  // non-matching element still exits 0.
+  // non-matching element still exits 0. The failing values arrive as `dynamic`: a
+  // statically mistyped value in an irrefutable position is a compile-time error.
   var (NmShape nmA, int nmB) = (NmSq(), 2);
   check("nm-pat10", nmA.area() == 4.0 && nmB == 2);
   var nmDeclErr = "none";
   try {
-    var (NmLoud nmC, int nmD) = (NmSq(), 2);
+    dynamic nmCSrc = (NmSq(), 2);
+    var (NmLoud nmC, int nmD) = nmCSrc;
     nmDeclErr = "ran${nmD}";
   } on TypeError catch (e) { nmDeclErr = "typeerror"; }
   check("nm-pat11", nmDeclErr == "typeerror");
@@ -1355,7 +1357,8 @@ void s32() {
   var nmLoopErr = "none";
   var nmShort = 0;
   try {
-    for (var (NmShape sh, int k) in [(NmSq(), 1), (7, 2), (NmSub(), 3)]) { nmShort = nmShort + 1; }
+    List<dynamic> nmMixed = [(NmSq(), 1), (7, 2), (NmSub(), 3)];
+    for (var (NmShape sh, int k) in nmMixed) { nmShort = nmShort + 1; }
     nmLoopErr = "ran";
   } on TypeError catch (e) { nmLoopErr = "typeerror"; }
   check("nm-pat13", nmLoopErr == "typeerror" && nmShort == 1);
