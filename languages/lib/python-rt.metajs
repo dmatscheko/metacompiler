@@ -1,10 +1,8 @@
-// python-rt.metajs -- PYTHON'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the NINTH and last language after the Lua
-// pilot, PHP, Swift, Java, C#, Dart, Go and Ruby.
+// python-rt.metajs -- PYTHON'S OWN SEMANTICS, in MetaJS: python's layer-2 runtime.
 //
-// languages/python-to-llvm-ir.abnf emits handle IR that calls 86 js_* externs over
-// the full-syntax ratchet. 32 of them are generic primitives languages/lib/runtime.c
-// already provides (the C floor, layer 1). The other 54 are here.
+// languages/python-to-llvm-ir.abnf emits handle IR that calls js_* externs. The
+// generic primitives come from languages/lib/runtime.c (the C floor, layer 1); the
+// Python-specific ones are here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/python-rt.metajs -q -rt-lib
@@ -19,17 +17,17 @@
 // helper functions - pyString / pyRepr / pyTypeName / pyEqual / pyMRO / pyLookup /
 // pyGetAttr / pySetAttr / pyMethodCall / pyBindCall / pyArith / pyFormat / memberCall)
 // plus abnf/jsrtregexpy.go for the `re` module. This file matches them function for
-// function; where it CANNOT, the site says so in full.
+// function; where it CANNOT, the site says so.
 //
 // ----- the value model -------------------------------------------------------
 //
 //     null / undefined            ==  None
 //     true / false                ==  True / False
-//     a PLAIN NUMBER              ==  int when it is integral and finite, else float.
-//                                     There is no box: pyTypeName decides by
-//                                     Math.trunc, exactly like abnf/jsrt.go:9332.
+//     a PLAIN NUMBER              ==  int. There is no box for an int: pyTypeName
+//                                     answers "int" for every plain number.
+//     {__flo: f}                  ==  float (a boxed double, see pyIsFlo)
 //     {__pybig, neg, limbs}       ==  an arbitrary precision int (js_bigint). Go uses
-//                                     math/big; the base-10000 limbs are chunk A's.
+//                                     math/big; here it is base-10000 limbs.
 //     a string                    ==  str
 //     an array                    ==  list AND tuple (Python's tuple has no separate
 //                                     representation in either half)
@@ -39,54 +37,42 @@
 //     {__mro, __name, __super}    ==  a class object; __mro is the C3 linearization
 //     {__class: <class>}          ==  an instance
 //     a function                  ==  a function (typeof "function"; tag 16, a
-//                                     generator FUNCTION, answers that too since the
-//                                     floor's type_of learned t == 16)
+//                                     generator FUNCTION, answers that too)
 //     a tag-15 cell               ==  a generator. There is NO tag test in layer 2,
 //                                     so pyIsGen below is STRUCTURAL - the floor
 //                                     answers exactly one member on a generator,
-//                                     "next" (runtime.c:2868), and a cursor cannot be
-//                                     stored on one, which is php's finding.
+//                                     "next", and a cursor cannot be stored on one.
 //
-// ----- what Python needed from the floor, and what it did NOT ----------------
+// ----- what Python needs from the floor --------------------------------------
 //
-//  1. NO sized-integer tag and NO boxed double. Python's int and float are the same
-//     plain double, discriminated by Math.trunc, so neither tag 13 nor tag 14 is
-//     reached from this file. The si_norm question ("is the language's unboxed
-//     representation the one si_norm produces") does not arise. Python's ARBITRARY
-//     PRECISION int does, and the answer is a base-10000 bignum in MetaJS rather
-//     than a floor tag: Go reaches math/big through *jsBigInt and the floor has no
-//     equivalent, so chunk A's pyABig* is the whole of it.
-//  2. `__raw` IS needed, and Python is only the third language that needs it (lua
-//     and php are the others). `grep -n truthyExt languages/python-to-llvm-ir.abnf`
-//     answers `core.truthyExt = "js_pytruthy"`, so compile-core's truthy() emits
+//  1. NO sized-integer tag. Python's int is a plain double, so tag 13 is never
+//     reached from this file. Python's ARBITRARY PRECISION int is a base-10000
+//     bignum in MetaJS rather than a floor tag: Go reaches math/big through
+//     *jsBigInt and the floor has no equivalent.
+//  2. `__raw` IS needed. python-to-llvm-ir.abnf sets
+//     `core.truthyExt = "js_pytruthy"`, so compile-core's truthy() emits
 //     `icmp ne <call>, 0` on THIS FILE's function and consumes the result as a RAW
 //     INTEGER. js_pytruthy is therefore written as js_pytruthy__raw.
-//  3. A coroutine primitive IS used: `grep -c 'js_genfn\|js_yield'
-//     languages/python-to-llvm-ir.abnf` is 6. Python is the first language on the
-//     floor's generators that needed layer-2 lines for them - the emitter drives
-//     js_genfn/js_yield itself (csharp's zero-line finding), but the INSPECTION
-//     surface (next / send / close / drain / len) is Python's own and is here.
+//  3. The emitter drives the floor's coroutine primitives (js_genfn/js_yield)
+//     itself; the generator INSPECTION surface (next / send / close / drain / len)
+//     is Python's own and is here.
 //  4. NO jsChar. Python has no character type and the emitter emits js_char /
 //     js_char_code / js_kindex zero times.
 //
 // ----- the scope chain: lowered in the EMITTER, not here ---------------------
 //
-// SIX externs took a scope handle - js_pyfnscope, js_pyglobal, js_pynonlocal,
-// js_pyset_var, js_pydel_var and js_pyannot - plus js_pyclass_fill, which enumerated
-// one. A scope is the C floor's PRIVATE storage, so none of them could be written
-// here, and runtime.c says so itself at js_pyset_var ("A Python layer 2 will have to
-// add them"). They are lowered in python-to-llvm-ir.abnf instead, over
-// js_scope_new / js_scope_decl / js_scope_get / js_scope_set / js_scope_typeof,
-// which BOTH engines have. That is the seventh confirmation of the
-// private-representation rule and by far the largest: six externs left the module,
-// where php lowered 2, swift 2, java 1, csharp 0, dart 2, go 1 and ruby 1.
+// The externs that take a scope handle (js_pyfnscope, js_pyglobal, js_pynonlocal,
+// js_pyset_var, js_pydel_var, js_pyannot, js_pyclass_fill) cannot be written here:
+// a scope is the C floor's PRIVATE storage. They are lowered in
+// python-to-llvm-ir.abnf instead, over js_scope_new / js_scope_decl / js_scope_get /
+// js_scope_set / js_scope_typeof, which BOTH engines have.
 //
 // ----- the regular-expression engine is IMPORTED, not copied ------------------
 //
 // languages/lib/regex.js is the shared backtracking engine that every INTERPRETER
 // grammar includes into its tag script, and abnf/jsrtregex.go is its line-by-line Go
 // port. It is written in the same MetaJS this file is, so layer 2 needs no third
-// copy - ruby found this and python is the language it was found FOR.
+// copy.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -103,14 +89,9 @@
 
 import "./regex.js"
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+// The shared layer-2 runtime: the externs every language implements identically,
+// parameterised by the rtk* hooks below.
 import "./runtime.metajs"
-// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
-// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
-// only to keep scope_find's linear module-scope scan off non-callers and the
-// hash index in runtime.c removed that scan. One import, not three.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return pyAJavaStr(v) }
@@ -123,8 +104,7 @@ function rtkIsArr(v) { return pyIsArr(v) }
 // DELIBERATELY NOT SHARED. This predicate is asked at ~30 sites, several of
 // them inside the arithmetic and attribute paths every Python statement walks,
 // and delegating it to a shared body costs a MetaJS call - a scope frame - per
-// ask (measured: python +41%, ruby's rbIsObj +11%). Size the CALL SITE, not the
-// body: a shared body is free on a cold path and enormous for a hot predicate.
+// ask, which is measurably slower on a predicate this hot.
 //
 // It is NOT rtIsObj either: that one deliberately leaves the array rejection out,
 // because its own callers walk __class/__super and an array carries neither.
@@ -142,17 +122,10 @@ function pyIsBool(v) { return typeof v == "boolean" }
 function pyIsFn(v) { return typeof v == "function" }
 function pyIsCallable(v) { return typeof v == "function" }
 
-// pyIsNone is SHARED as rtIsNil - lib/runtime.metajs. Eight call sites, one of
-// them hot (pyDTruthy, which js_pytruthy reaches on every `while` condition),
-// and all eight were already calls in the same pinned scope. docs/todo.md 5.1.
+// pyIsNone is SHARED as rtIsNil - lib/runtime.metajs.
 
-// pyTag is SHARED as rtTag - lib/runtime.metajs - and rtTag INLINES the four
-// tests pyIsObj makes instead of calling them, because a shared body cannot name
-// pyIsObj and the delegating spelling cost python +10.60% at 9 of 9 paired
-// draws. Inlining REMOVES a frame from the hottest predicate in this file (five
-// rtTag calls per js_pybin operator) and the row reads -13.90%, faster in 9 of 9,
-// with collections down 3,574 -> 3,017. The full write-up is at rtTag.
-// docs/todo.md 5.1.
+// pyTag is SHARED as rtTag - lib/runtime.metajs - which inlines the tests pyIsObj
+// makes rather than calling it, to keep a frame off the hottest predicate here.
 function pyIsDict(v) { return rtTag(v, "__dict") }
 function pyIsCplx(v) { return rtTag(v, "__cplx") }
 function pyIsBig(v) { return rtTag(v, "__pybig") }
@@ -193,24 +166,13 @@ function pyIsClass(v) {
 }
 
 // A GENERATOR is a floor cell (tag 15). Layer 2 has no tag test, so the question is
-// answered structurally: the floor answers exactly ONE member on a generator, "next"
-// (runtime.c:2868).
+// answered structurally: the floor answers exactly ONE member on a generator, "next".
 //
-// THE __pyit LINE IS LOAD-BEARING and was missing (docs/todo.md 1.4). The comment
-// here used to claim "none of the objects this value model builds carries a
-// callable next of its own", and pyMkIter contradicts it - a CURSOR is a plain
-// object built to look exactly like a generator, callable "next" and all. So
-// pyIsGen answered TRUE for one, this half alone: the Go twin asks
-// `target.(*jsGenerator)`, a real type test, and the interpreter half asks for a
-// __gen tag. Three engines, and only this one thought a list_iterator was a
-// generator. What it reached: pyDMethodCall's generator arm made `it.send(7)`
-// step the cursor where CPython raises AttributeError and `it.close()` abort
-// natively with "member 'apply' of undefined", and pyMemberCall's arm reported
-// "unknown method '__iter__' ON A GENERATOR".
-//
-// Every site that used to be served by the accident now names pyIsIter itself:
-// pySeqElems and js_pysum grew the arm the Go twin already had, and
-// pyDMethodCall grew the CURSOR arm below.
+// THE __pyit LINE IS LOAD-BEARING: a CURSOR (pyMkIter) is a plain object built to
+// look exactly like a generator, callable "next" and all, so without it a
+// list_iterator would answer TRUE here. The Go twin asks `target.(*jsGenerator)`, a
+// real type test, and the interpreter half asks for a __gen tag. Callers that want
+// cursors too ask pyIsIter themselves (pySeqElems, js_pysum, pyDMethodCall).
 function pyIsGen(v) {
     if (v === null) { return false }
     if (v === undefined) { return false }
@@ -223,14 +185,10 @@ function pyIsGen(v) {
     if (v["__pyit"] !== undefined) { return false }
     if (v["__mro"] !== undefined) { return false }
     if (v["__class"] !== undefined) { return false }
-    // A MODULE object is not a generator, and the test HAD to be added: the
-    // `builtins` module holds every builtin under its own name, one of which is
-    // `next` - so this structural test answered TRUE for it, type(builtins) read
-    // "generator" in the native binary against "module" under llvm.Run, and
-    // `builtins.next(it)` would have taken pyDMethodCall's generator arm and
-    // stepped the MODULE. The Go twin tests a real type and never saw it: a
-    // native-only divergence of exactly the shape docs/todo.md 1.4 recorded for
-    // cursors. docs/todo.md 1.7.
+    // A MODULE object is not a generator: the `builtins` module holds every
+    // builtin under its own name, one of which is `next`, so the structural test
+    // would answer TRUE for it (type(builtins) would read "generator" and
+    // `builtins.next(it)` would step the MODULE). The Go twin tests a real type.
     if (v["__pymod"] !== undefined) { return false }
     return typeof v["next"] == "function"
 }
@@ -241,9 +199,8 @@ function pyFail(msg) { fail(msg) }
 //
 // abnf/jsrt.go's dictParts / dictFind / dictAppend (the Go twin's dictFind is an
 // index over the same array; the scan is the same answer). A dict KEY is compared
-// with STRICT equality, not with Python ==, and that IS Python: `1 == 1.0` and
-// `1 == True` are the only equalities `===` misses, the first is free here (int
-// and float are the same plain double) and the second is pyKeyAlias below.
+// with STRICT equality plus the rules in pyKeyEq, and the bool/int alias is
+// pyKeyAlias below.
 //
 // The one CPython rule that needs writing down: `bool` subclasses `int`, so
 //
@@ -277,8 +234,7 @@ function pyKeyAlias(k) {
 function pyKeyEq(a, b) {
     // === FIRST, because pyDictFind has no index and calls this once per stored
     // key: an identical key is the whole answer under every rule below, so the hit
-    // path costs one comparison and no call at all. It used to pay two pyIsFlo
-    // calls before reaching the same conclusion.
+    // path costs one comparison and no call at all.
     if (a === b) { return true }
     if (pyIsFlo(a) || pyIsFlo(b)) {
         if (!pyIsNumeric(a) || !pyIsNumeric(b)) { return false }
@@ -286,12 +242,9 @@ function pyKeyEq(a, b) {
     }
     // A TUPLE key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
     // is a hit off two different objects - and a tuple IS an array in this value
-    // model (docs/todo.md 3.1). All three engines answered identity here and raised
-    // KeyError on `d[i, j]`, while the SET side of the same engines already
-    // deduplicated with Python's == (pySetHas -> pyEqual): the two halves of one
-    // engine did not even agree with each other. Both sides are == now. The typeof
-    // gate keeps the Array.isArray CALL off the string and number keys that are
-    // almost every key.
+    // model, so arrays compare by Python ==, the same rule the set side uses
+    // (pySetHas -> pyEqual). The typeof gate keeps the Array.isArray CALL off the
+    // string and number keys that are almost every key.
     if (typeof a == "object") {
         if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
     }
@@ -382,8 +335,7 @@ function pyDictSet(d, k, v) {
 //
 // abnf/jsrt.go's newPySet / pySetElems / pySetHas / pySetAdd. MEMBERSHIP is Python
 // ==, which the dict keys above reach the other way round (=== plus pyKeyAlias);
-// the two now answer the same question for every value this model builds, and the
-// remaining difference is which is cheaper.
+// the two answer the same question for every value this model builds.
 
 function pyNewSet(elems) { return {__set: true, elems: elems} }
 
@@ -439,14 +391,14 @@ function pyNum(v) {
 }
 
 // rt.toString. The one arm `"" + v` does not give is the bignum, whose Go twin
-// answers big.Int.String(); rtABigStr (chunk A) is that, and top-level function
+// answers big.Int.String(); rtABigStr is that, and top-level function
 // declarations hoist, so it is reachable from here.
 function pyToStr(v) {
     if (pyIsBig(v)) { return rtABigStr(v) }
     return "" + v
 }
 
-// pyStrLen counts CODE POINTS (abnf/jsrt.go:9773), where the string indexing of
+// pyStrLen counts CODE POINTS (as abnf/jsrt.go does), where the string indexing of
 // js_pyget counts UTF-16 code units. That inconsistency is the Go twin's and is
 // reproduced rather than repaired.
 function pyStrLen(s) {
@@ -477,7 +429,7 @@ function pyStrAt(s, i) {
 
 // ===================================================== rendering ============
 //
-// abnf/jsrt.go's pyString (2467) and pyRepr (2458), one for one.
+// abnf/jsrt.go's pyString and pyRepr, one for one.
 
 function pyStr(v) {
     if (v === null) { return "None" }
@@ -535,29 +487,23 @@ function pyStr(v) {
     }
     // A GENERATOR, on the same rule. CPython says <generator object gen at
     // 0x...>; neither the address nor the generating function's name is
-    // recoverable from the value, so the short form is printed. Every engine
-    // printed a raw host dump before. docs/todo.md 1.4.
+    // recoverable from the value, so the short form is printed.
     if (pyIsGen(v)) { return "<generator object>" }
-    // A compiled PATTERN and a MATCH render the way CPython's repr does. The
-    // interpreter half has had both since the regex engine landed and both
-    // compiled halves printed [object Object]: a live halves divergence found by
-    // the docs/todo.md 1.4 repr sweep. js_pyrxstr already answered them for
-    // str()/print(); repr() and every CONTAINER element went past it.
+    // A compiled PATTERN and a MATCH render the way CPython's repr does.
+    // js_pyrxstr answers them for str()/print(); this covers repr() and every
+    // CONTAINER element.
     var rxr = pyERxRepr(v)
     if (rxr["ok"]) { return rxr["s"] }
     // A FUNCTION, on the same rule as the iterator line above: CPython prints
     // <function fn at 0x...> and the address cannot be matched, so it is left off
-    // rather than invented. Without it this half and the native binary printed the
-    // C floor's [function] while the interpreter half printed the function's
-    // METAJS SOURCE TEXT - a live halves divergence. The name comes from the
-    // js_pyfnname side table; CPython calls an unnamed one <lambda>, and so does
-    // every engine here. docs/todo.md 1.8.
+    // rather than invented. The name comes from the js_pyfnname side table;
+    // CPython calls an unnamed one <lambda>, and so does every engine here.
     if (typeof v == "function") { return pyFuncRender(v) }
     return pyToStr(v)
 }
 
 function pyFuncRender(v) {
-    // A BOUND METHOD prints as one - docs/todo.md 1.4.
+    // A BOUND METHOD prints as one.
     var bmi = pyBMFind(v)
     if (bmi >= 0) { return pyBMRender(bmi) }
     // A BUILTIN prints its own way, and its table is asked FIRST: a user
@@ -683,9 +629,7 @@ function pyRepr(v) {
     return pyStr(v)
 }
 
-// pyUserRender renders a USER INSTANCE. This half had no such arm at all, so a
-// class with a __repr__ printed [object Object] under llvm.Run and the native
-// binary where the interpreter and CPython print V(3). It is pyUserRender in
+// pyUserRender renders a USER INSTANCE. It is pyUserRender in
 // languages/python-interpreter.abnf and rt.pyUserRender in abnf/jsrt.go, one for
 // one: str() and print() prefer __str__ and fall back to __repr__, repr() and
 // every CONTAINER element use __repr__ only, an exception falls back to
@@ -704,10 +648,8 @@ function pyUserRender(v, cls, wantRepr) {
         if (Array.isArray(ea)) {
             if (ea.length == 0) { return "" }
             // KeyError OVERRIDES BaseException.__str__ with repr(args[0]), which
-            // is why str(KeyError('x')) is "'x'" and not "x". Every engine here
-            // used to fake that by pre-repr'ing the ARGUMENT, which made str()
-            // right and repr() doubly quoted (docs/todo.md 1.7). The argument is
-            // now the key itself and the repr happens here.
+            // is why str(KeyError('x')) is "'x'" and not "x". The argument is the
+            // key itself and the repr happens here, so repr() is not doubly quoted.
             if (ea.length == 1 && pyIsKeyErrCls(cls)) { return pyRepr(ea[0]) }
             if (ea.length == 1) { return pyStr(ea[0]) }
             var oe = "("
@@ -736,7 +678,7 @@ function pyUserRender(v, cls, wantRepr) {
     return "<" + nm + " object>"
 }
 
-// abnf/jsrt.go's pyTypeName (9324). A __pybig is an int, which is why the arm is
+// abnf/jsrt.go's pyTypeName. A __pybig is an int, which is why the arm is
 // ahead of the object arms - Go reaches it earlier because *jsBigInt is not a
 // *jsObject and here it IS one.
 function pyTypeName(v) {
@@ -754,8 +696,7 @@ function pyTypeName(v) {
     // CPython's type(gen).__name__, and the name its AttributeError uses.
     if (pyIsGen(v)) { return "generator" }
     if (typeof v == "function") {
-        // docs/todo.md 1.4: a BOUND method and a BUILTIN are their own CPython
-        // types, and both compiled halves answered 'function' for all three.
+        // A BOUND method and a BUILTIN are their own CPython types.
         var bml = pyBMFind(v)
         if (bml >= 0) {
             // An UNBOUND descriptor is its own CPython type; a module-level
@@ -776,8 +717,7 @@ function pyTypeName(v) {
     if (pyIsObj(v)) {
         // type(C) is 'type' for a class object - a BUILTIN one (what type(3)
         // hands out, which carries only __name and no __mro) as well as a user
-        // class. The interpreter half already answered 'type' here and this one
-        // said 'object': a live halves divergence, docs/todo.md 1.4.
+        // class.
         if (pyIsClass(v)) { return "type" }
         if (v["__name"] !== undefined && pyInstClassOf(v) === null) { return "type" }
         if (pySetElemsOf(v) != null) { return "set" }
@@ -794,10 +734,6 @@ function pyTypeName(v) {
         // AttributeError interpolates, and CPython says "'re.Pattern' object has
         // no attribute 'nope'". type(p).__name__ is the SHORT 'Pattern', which is
         // why pyGetAttr's __name__ arm cuts at the last dot (pyShortName).
-        // docs/todo.md 1.6 recorded this as declined, on the reasoning that one
-        // arm would trade one wrong answer for another - both strings are in fact
-        // reachable from the same one, and the two spellings differ only by that
-        // cut.
         if (v["__pyre"] === true) { return "re.Pattern" }
         if (v["__pymatch"] === true) { return "re.Match" }
         if (v["__pysm"] !== undefined) { return "staticmethod" }
@@ -821,8 +757,8 @@ function pyShortName(n) {
 
 // ===================================================== equality and order ===
 //
-// abnf/jsrt.go's pyEqual (8580). The bigint arms are chunk A's rtABigCmp /
-// pyABigEqFloat; they are called from here so every caller of pyEqual gets them.
+// abnf/jsrt.go's pyEqual. The bigint arms are rtABigCmp / pyABigEqFloat; they are
+// called from here so every caller of pyEqual gets them.
 
 // The int a bool IS (True is 1, False is 0), against a value that is not a bool.
 // The three arms are exactly the three pyEqual takes below for a plain number,
@@ -992,12 +928,10 @@ function pyInstanceDict(inst) {
 }
 
 function pyGetAttr(obj, name) {
-    // None has no attributes and CPython says so with a catchable AttributeError;
-    // this used to fall through to the floor's get_member and abort the program
-    // with "member 'x' of undefined" - the last uncatchable attribute read left
-    // after docs/todo.md 1.4. __class__ is the one name None does answer, and it
-    // is handled by the instance arm below (pyInstClassOf), so the guard is
-    // placed after it in effect by naming it here. docs/todo.md 1.8.
+    // None has no attributes and CPython says so with a catchable AttributeError
+    // rather than the floor's uncatchable "member 'x' of undefined". __class__ is
+    // the one name None does answer, and it is handled by the instance arm below
+    // (pyInstClassOf).
     if (obj === undefined) {
         if (name != "__class__") {
             pyRaiseExc("AttributeError", "'NoneType' object has no attribute '" + name + "'")
@@ -1022,10 +956,8 @@ function pyGetAttr(obj, name) {
             if (pyDIsStatic(cv) || pyDIsClsM(cv)) { return pyDDescGet(cv, obj, name) }
             return cv
         }
-        // docs/todo.md 1.4: a CATCHABLE AttributeError, as CPython raises. This
-        // was fail(), which layer 2 cannot catch at all, so `try: getattr(C,
-        // "nope") except AttributeError:` ended the program in both compiled
-        // halves while the interpreter half caught it.
+        // A CATCHABLE AttributeError, as CPython raises: fail() cannot be caught
+        // from layer 2.
         pyRaiseExc("AttributeError",
                    "type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
     }
@@ -1043,10 +975,7 @@ function pyGetAttr(obj, name) {
             var get = pyDescriptor(v, "__get__")
             if (get !== undefined) { return get.apply(undefined, [v, obj, cls]) }
             // A METHOD read off an instance comes back BOUND, so `f = a.m; f()`
-            // passes the instance as self. Both compiled halves used to hand back
-            // the raw function and died with "member 'v' of undefined" where the
-            // interpreter half (pyattr's bindMethod) answered - a live halves
-            // divergence, found by the docs/todo.md 1.9 sweep.
+            // passes the instance as self (the interpreter half's bindMethod).
             if (pyIsCallable(v)) { return pyDBindMethod(obj, v, name) }
             return v
         }
@@ -1070,20 +999,20 @@ function pyGetAttr(obj, name) {
     var bcm = pyBuiltinClsMethod(obj, name)
     if (bcm !== undefined) { return bcm }
     // list.count / str.upper / dict.get read off the BUILTIN type object: an
-    // unbound method descriptor (docs/todo.md 1.7). It sits HERE rather than in
-    // the pyIsClass branch above because a builtin type object carries only a
-    // __name and no __mro, so pyIsClass declines it - which is also why
-    // dict.fromkeys is answered on this same line.
+    // unbound method descriptor. It sits HERE rather than in the pyIsClass branch
+    // above because a builtin type object carries only a __name and no __mro, so
+    // pyIsClass declines it - which is also why dict.fromkeys is answered on this
+    // same line.
     var dtn0 = pyClassName(obj)
     if (dtn0 !== null) {
         var samp0 = pyDTypeSample(dtn0)
         if (samp0 !== undefined && pyDBuiltinAttr(samp0, name)) { return pyDUnboundDesc(obj, name) }
     }
-    // A BOUND METHOD knows its own name, receiver and underlying function
-    // (docs/todo.md 1.4). __qualname__ is answered HERE and nowhere else on
-    // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
-    // fall out of the record, while a plain function's qualname would need the
-    // DEFINING scope recorded at every def site in four places.
+    // A BOUND METHOD knows its own name, receiver and underlying function.
+    // __qualname__ is answered HERE and nowhere else on purpose: 'list.count' and
+    // 'C.m' are exactly CPython's answers and both fall out of the record, while a
+    // plain function's qualname would need the DEFINING scope recorded at every
+    // def site in four places.
     if (typeof obj == "function") {
         var bmj = pyBMFind(obj)
         if (bmj >= 0) {
@@ -1114,19 +1043,16 @@ function pyGetAttr(obj, name) {
             }
         }
     }
-    // DECLINED, and it is worth saying where: __doc__ and __module__ stay
-    // unanswered (an AttributeError, like any other absent attribute). __doc__
-    // needs a def's leading string statement recorded in three engines AND
-    // CPython's own text for every builtin; __module__ needs a builtin-vs-user
-    // marker on a CLASS object, which neither compiled half has.
+    // Not answered: __doc__ and __module__ (an AttributeError, like any other
+    // absent attribute). __doc__ needs a def's leading string statement recorded
+    // in three engines AND CPython's own text for every builtin; __module__ needs
+    // a builtin-vs-user marker on a CLASS object, which neither compiled half has.
     // __qualname__ rides with __name__ below. It is EXACT for a module-level
     // def, a lambda, a builtin function and a builtin type, and wrong for exactly
     // one shape: a function read off a class body, where CPython says 'C.m' and
-    // this says 'm'. Closing that one needs the DEFINING scope recorded at every
-    // def site in three engines and the emitter; the bound-method arm above
-    // already answers 'C.m'. docs/todo.md 1.4.
+    // this says 'm'. The bound-method arm above already answers 'C.m'.
     // len.__self__ is the builtins MODULE in CPython, not a receiver - the
-    // builtin functions are that module's members. docs/todo.md 1.7.
+    // builtin functions are that module's members.
     if (name == "__self__" && typeof obj == "function") {
         var bsc = rtPairGet(pyBBFnObjs, pyBBFnCodes, obj)
         if (bsc !== undefined && pyDBuiltinsMod !== null) { return pyDBuiltinsMod }
@@ -1134,22 +1060,20 @@ function pyGetAttr(obj, name) {
     if (name == "__name__" || name == "__qualname__") {
         // A synthetic class object for a BUILTIN type (what type(3) hands out)
         // carries only its name, and a function carries none of its own - the name
-        // its def bound it under was recorded by js_pyfnname (chunk B).
+        // its def bound it under was recorded by js_pyfnname.
         if (pyIsObj(obj)) {
             if (obj["__name"] !== undefined) { return pyShortName(pyToStr(obj["__name"])) }
         }
-        // docs/todo.md 1.9: the BUILTIN table is asked too, and FIRST, exactly
-        // as pyFuncRenderOf asks it - len.__name__ is 'len' where before this
-        // fell through to pyGetMember and answered None. The two tables are
-        // keyed by identity, so a user `def len(...)` still answers its own.
+        // The BUILTIN table is asked too, and FIRST, exactly as pyFuncRenderOf
+        // asks it, so len.__name__ is 'len'. The two tables are keyed by identity,
+        // so a user `def len(...)` still answers its own.
         var bfc = rtPairGet(pyBBFnObjs, pyBBFnCodes, obj)
         if (bfc !== undefined) { return pyBBFnName(pyToStr(bfc)) }
         var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
     }
-    // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1) is
-    // the 1 CPython answers rather than whatever pyGetMember made of the name.
-    // Ahead of pyGetMember because a dict literally has a "keys" property
+    // A BOUND built-in method, so getattr(xs, "count")(1) answers as CPython
+    // does. Ahead of pyGetMember because a dict literally has a "keys" property
     // holding its key ARRAY, and CPython's d.keys is the method.
     if (pyDBuiltinAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
     // x.__class__ for a value that is not a user instance - the same synthetic
@@ -1157,18 +1081,14 @@ function pyGetAttr(obj, name) {
     if (name == "__class__") { return js_pytype(obj) }
     // CPython names a TYPE OBJECT differently from a value: "type object 'list'
     // has no attribute 'nope'", not "'type' object has no attribute 'nope'".
-    // Both compiled halves used the value wording for a builtin type object -
-    // only the user-class arm above had the type wording. docs/todo.md 1.7.
     var tn2 = pyClassName(obj)
     if (tn2 !== null) {
         pyRaiseExc("AttributeError", "type object '" + tn2 + "' has no attribute '" + name + "'")
     }
-    // docs/todo.md 1.4: an attribute a builtin value does NOT have raises, as
-    // CPython does. This used to fall into pyGetMember and answer None - so
-    // `[1,2].nope` and getattr([1,2], "nope") were None in both compiled halves
-    // where the interpreter half raised AttributeError. An OWN property is still
-    // answered first, because a value that really holds None must not be
-    // mistaken for a missing one (a compiled regex and a match are read so).
+    // An attribute a builtin value does NOT have raises AttributeError, as
+    // CPython does. An OWN property is still answered first, because a value that
+    // really holds None must not be mistaken for a missing one (a compiled regex
+    // and a match are read so).
     if (pyIsObj(obj)) {
         if (obj[name] !== undefined) { return obj[name] }
     }
@@ -1211,13 +1131,10 @@ function pySlotAllows(slots, name) {
 }
 
 // pySlotsAllow applies __slots__ over the WHOLE resolution order, which is
-// CPython's rule and not the nearest-declaration one all three engines used to
-// apply: a name is writable if ANY class on the MRO declares it in its own
-// __slots__, and any name at all is writable as soon as one class on the MRO
-// declares no __slots__ (that class gives its instances a __dict__). With
-// `class A: __slots__ = ["s"]` and `class B(A): __slots__ = ["t"]`, writing
-// B().s raised AttributeError in every engine where CPython allows it. Go:
-// rt.pySlotsAllow.
+// CPython's rule (not the nearest declaration): a name is writable if ANY class
+// on the MRO declares it in its own __slots__, and any name at all is writable as
+// soon as one class on the MRO declares no __slots__ (that class gives its
+// instances a __dict__). Go: rt.pySlotsAllow.
 function pySlotsAllow(cls, name) {
     var mro = pyMRO(cls)
     var all = true
@@ -1303,12 +1220,12 @@ function pyBuiltinClsName(v) {
 }
 
 // The method surface a builtin TYPE OBJECT itself carries - only dict.fromkeys so
-// far, and it is the reason this exists at all. Its RECEIVER is the type rather
-// than an instance, so it reaches neither the dict dispatcher nor a class MRO, and
-// each of the three engines resolves such a receiver in an arm of its own. Both
-// the mcall path (pyDMethodCall) and the value path (pyGetAttr) need it, or it is
-// reachable one way and not the other. Keep in step with pyBuiltinClsMethod in
-// abnf/jsrt.go and in languages/python-interpreter.abnf. docs/todo.md 1.8.
+// far. Its RECEIVER is the type rather than an instance, so it reaches neither
+// the dict dispatcher nor a class MRO, and each of the three engines resolves
+// such a receiver in an arm of its own. Both the mcall path (pyDMethodCall) and
+// the value path (pyGetAttr) need it, or it is reachable one way and not the
+// other. Keep in step with pyBuiltinClsMethod in abnf/jsrt.go and in
+// languages/python-interpreter.abnf.
 function pyBuiltinClsMethod(target, name) {
     if (pyBuiltinClsName(target) != "dict") { return undefined }
     if (name != "fromkeys") { return undefined }
@@ -1328,8 +1245,7 @@ function pyDictFromKeys(ks, dv) {
     return d
 }
 
-// vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO engine
-// while the attribute worked in all three. docs/todo.md 1.8.
+// vars(o) IS o.__dict__ - CPython's own definition.
 function js_pyvars(o) { return pyGetAttr(o, "__dict__") }
 
 // abnf/jsrt.go's pyExcInstance: the class is a stable per-name object deriving from
@@ -1342,11 +1258,9 @@ function pyExcInstance(name, msg) {
 
 // The class a RUNTIME-raised exception carries, with CPython's hierarchy above
 // it rather than a flat derivation from Exception: pyDIsInstance walks the
-// __super chain by name, so a KeyError whose __super was Exception was not
-// caught by `except LookupError` even though the interpreter half caught it
-// (docs/todo.md 1.7). The parent table is pyExcParent in
-// languages/python-interpreter.abnf and the excParent block of
-// languages/python-to-llvm-ir.abnf.
+// __super chain by name, so `except LookupError` must see KeyError's real parent.
+// The parent table is pyExcParent in languages/python-interpreter.abnf and the
+// excParent block of languages/python-to-llvm-ir.abnf.
 function pyExcParentName(name) {
     if (name == "ZeroDivisionError") { return "ArithmeticError" }
     if (name == "IndexError") { return "LookupError" }
@@ -1370,12 +1284,10 @@ function pyRaiseExc(name, msg) { throw pyExcInstance(name, msg) }
 
 // pyExcInstanceV is pyExcInstance with the argument kept as a VALUE rather than
 // as text. It exists for KeyError, whose argument is the KEY: CPython's
-// KeyError.__str__ is repr(args[0]), so every engine here used to pre-repr the
-// argument, which made str(e) right by accident and left repr(e) doubly quoted -
-// KeyError('3') where CPython says KeyError(3) - and e.args[0] a string where
-// CPython has the key (docs/todo.md 1.7). The repr now happens in pyUserRender.
-// A separate function rather than a wider parameter because MetaJS is typed and
-// pyExcInstance's msg is a string at every other call site.
+// KeyError.__str__ is repr(args[0]), so the repr happens in pyUserRender and
+// e.args[0] stays the key. A separate function rather than a wider parameter
+// because MetaJS is typed and pyExcInstance's msg is a string at every other call
+// site.
 function pyExcInstanceV(name, arg) {
     return {__class: pyExcClass(name), args: [arg]}
 }
@@ -1407,7 +1319,7 @@ function pyCallSelf(f, self, args) {
 
 // ===================================================== sequences ============
 //
-// abnf/jsrt.go's pySeqElems (8759): the element list of anything a slice assignment
+// abnf/jsrt.go's pySeqElems: the element list of anything a slice assignment
 // may take on its right hand side. A GENERATOR is DRAINED, which is the one arm that
 // has to be written structurally here (see pyIsGen).
 
@@ -1437,11 +1349,7 @@ function pySeqElems(v) {
     }
     if (pyIsGen(v)) { return pyDrainGen(v) }
     // A CURSOR gives what is LEFT of it, and the read exhausts it - the same rule
-    // js_pylist and js_pyiter follow. This arm used to be reached by accident,
-    // through pyIsGen answering true for a cursor (see pyIsGen), and the Go twin's
-    // pySeqElems had no cursor arm at all: `xs[1:3] = iter([5, 6])` was
-    // [9, 5, 6, 9] natively and in the interpreter and "cannot assign a object to
-    // a slice" under llvm.Run. A live halves divergence, found while closing 1.4.
+    // js_pylist and js_pyiter follow, so `xs[1:3] = iter([5, 6])` is [9, 5, 6, 9].
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (typeof v == "string") {
         var s = []
@@ -1455,11 +1363,10 @@ function pySeqElems(v) {
 
 // ===================================================== slices ===============
 //
-// abnf/jsrt.go's pyClampIndex (8729) and pySliceIndices (8699). Go's own
-// pySliceRange (2432) has NO counterpart here: every slice this value model
-// takes goes through pySliceIndices, whose step-aware clamping answers the
-// two-bound case identically, and a second clamper would be a second place to
-// keep in step.
+// abnf/jsrt.go's pyClampIndex and pySliceIndices. Go's own pySliceRange has NO
+// counterpart here: every slice this value model takes goes through
+// pySliceIndices, whose step-aware clamping answers the two-bound case
+// identically, and a second clamper would be a second place to keep in step.
 
 function pyClampIndex(i, n, step) {
     var k = i
@@ -1505,35 +1412,18 @@ function pySliceIndices(n, loV, hiV, stepV) {
     }
     return out
 }
-// chunkA.metajs -- CHUNK A of languages/lib/python-rt.metajs: NUMBERS,
-// OPERATORS and CONVERSIONS, plus the arbitrary precision integer.
+// NUMBERS, OPERATORS and CONVERSIONS, plus the arbitrary precision integer
+// (the pyA* helpers).
 //
 // THE AUTHORITATIVE SPECIFICATION IS abnf/jsrt.go, not its comments. Every block
 // below names the Go function it ports. Where the port CANNOT be exact the site
-// says so in full.
-//
-// Ported here:
-//     js_pybin      abnf/jsrt.go:7540   (reaching pySetBin, pyComplexBin,
-//                                        pyDunderBin, pyArith, pyFloorMod,
-//                                        pyContains, pySeqRepeat, jsAdd,
-//                                        jsCompare, pyEqual, toInt32)
-//     js_pyunary    abnf/jsrt.go:7757
-//     js_pyint      abnf/jsrt.go:7741
-//     js_pyfloat    abnf/jsrt.go:7994
-//     js_pybool     abnf/jsrt.go:7981
-//     js_pycomplex  abnf/jsrt.go:7359
-//     js_pysum      abnf/jsrt.go:8000
-//     js_pymax / js_pymin   abnf/jsrt.go:7651 -> pyMinMax (jsrt.go:9557)
-//     js_pyrange    abnf/jsrt.go:7142
-//     js_pyeq       abnf/jsrt.go:7179
-//     js_jadd       abnf/jsrt.go:5151
-//     js_bigint     abnf/jsrt.go:5366
+// says so.
 //
 // js_lt is a FLOOR extern and is deliberately absent.
 
 // ============================================================================
-// The arbitrary precision integer   (Go: *jsBigInt over math/big, jsrt.go:2561,
-// bigPair jsrt.go:2710, bigArith jsrt.go:2724, bigEqFloat jsrt.go:8650)
+// The arbitrary precision integer   (Go: *jsBigInt over math/big, bigPair,
+// bigArith, bigEqFloat)
 // ============================================================================
 //
 // The representation is {__pybig: true, neg: <bool>, limbs: [...]}: the
@@ -1545,24 +1435,17 @@ function pySliceIndices(n, loV, hiV, stepV) {
 // Zero is canonical: limbs == [0] and neg == false, so rtABigCmp needs no
 // negative-zero case.
 //
-// WHAT IS DELIBERATELY NOT IMPLEMENTED, and why:
+// Limits, and why:
 //
-//   * A bignum SHIFT and a bignum BITWISE and/or/xor. Go never has one either:
-//     js_pybin's "|" "&" "^" "<<" ">>" arms run rt.toInt32, and toInt32 goes
-//     through rt.toNumber, whose *jsBigInt arm does not exist - it falls into
-//     the default and answers NaN, hence 0. A big meeting a bit operator is 0 in
-//     Go and is 0 here.
-//
-//   * A bignum <-> double CONVERSION. Same reason: Go's rt.toNumber has NO
-//     *jsBigInt case, so `bigval // 2`, `bigval % 2`, `bigval ** 2`, float(big)
-//     and int(float) of a big all see NaN in Go. Reproducing that only needs the
-//     PRELUDE's pyNum to answer NaN for a plain object, which it does; nothing
-//     is needed here. rtABigFromNum below is the one direction that IS needed
-//     (bigEqFloat), and it is exact.
+//   * pyNum (rt.toNumber) answers NaN for a big, as Go's toNumber has no
+//     *jsBigInt arm. The paths that need a big as a double convert explicitly:
+//     pyAToF for `/`, rtABigFromNum for bigEqFloat. Integer arithmetic with a
+//     big operand goes through pyABigPair / pyABigBin, the bit operators through
+//     pyABitBin, both exact.
 //
 //   * Base-0 literal parsing. Go's js_bigint calls big.Int.SetString(s, 0),
 //     which also accepts 0x / 0o / 0b prefixes and a leading-zero OCTAL. The one
-//     caller, makeIntLit in languages/python-to-llvm-ir.abnf:1216, reaches
+//     caller, makeIntLit in languages/python-to-llvm-ir.abnf, reaches
 //     js_bigint ONLY on the radix-10 branch with the '_' separators already
 //     stripped, so pyABigFromStr accepts a sign and decimal digits only and
 //     fails loudly on anything else - exactly where Go's `!ok` fails.
@@ -1624,7 +1507,7 @@ function pyABigFromStr(text) {
     return rtkABigNew(neg, limbs)
 }
 
-// Go: bigEqFloat (jsrt.go:8650). Only an integral, finite double can equal an
+// Go: bigEqFloat. Only an integral, finite double can equal an
 // arbitrary precision int. `f - f != 0` is the finiteness test: it is NaN for
 // both an infinity and a NaN and exactly 0 for everything else - there is no
 // isFinite and no exponent literal in this dialect.
@@ -1634,11 +1517,7 @@ function pyABigEqFloat(x, f) {
     return rtABigCmp(x, rtABigFromNum(f)) == 0
 }
 
-// Go: bigArith (jsrt.go:2724), including bigPair's rule that BOTH operands must
-// be bigs - a big meeting a double falls back to the double path, where the big
-// converts to NaN. Answers null for "not applicable", never a value, so the
-// caller can tell it apart from a legitimate result.
-// Go: pyBigOperand (jsrt.go). An exact bignum for a Python int operand: a big as
+// Go: pyBigOperand. An exact bignum for a Python int operand: a big as
 // itself, an integral double inside the exactly representable range as itself,
 // a bool as 0/1. A float box, a non-integral double and anything past 2^53 - where
 // the double is ALREADY an approximation - answer null, so the caller falls back
@@ -1655,7 +1534,7 @@ function pyABigOperand(v) {
     return null
 }
 
-// Go: pyBigBin (jsrt.go). Python's integer arithmetic in arbitrary precision.
+// Go: pyBigBin. Python's integer arithmetic in arbitrary precision.
 // `//` and `%` FLOOR, as Python's do: pyABigQuo/pyABigRem truncate (Go's Quo/Rem),
 // which is not Python's answer for a negative divisor - 1e30 % -7 is -6, not +1.
 // null for an operator with no exact integer form, so the caller falls through to
@@ -1688,12 +1567,8 @@ function pyABigBin(op, x, y) {
 // ----- the BITWISE operators, at arbitrary precision -------------------------
 //
 // Go: pyBitBin (abnf/jsrt.go), which is math/big's And/Or/Xor/Lsh/Rsh/Not.
-//
-// Both halves used to run the floor's ECMAScript |, &, ^, << and >>, which are
-// ToInt32 and a shift count masked to five bits: `-1 & 0xffffffff` was -1 where
-// CPython says 4294967295, `1 << 40` was 256, and every operand past 2^31 was
-// truncated. BOTH HALVES AGREED, so --cross and the matrix could not see any of
-// it; python3 3.14.6 is the oracle. 439 of 944 rows of a differential probe.
+// ECMAScript's |, &, ^, << and >> are ToInt32 with a five-bit shift count, which
+// is wrong for every operand past 2^31 (`1 << 40` would be 256).
 //
 // Python's rule is INFINITE two's complement: a negative x behaves like the
 // endless run of 1 bits above ~(|x| - 1). Working on magnitudes only, that is
@@ -1865,7 +1740,7 @@ function pyABitIsExactInt(v) {
     return v >= 0 - 9007199254740992 && v <= 9007199254740992
 }
 
-// Go: pyBigPair (jsrt.go). Both operands as exact bignums when AT LEAST ONE is a
+// Go: pyBigPair. Both operands as exact bignums when AT LEAST ONE is a
 // big and the other is an exact Python int. Python has ONE int type and it is
 // arbitrary precision, so an int operand meeting a big PROMOTES - which is why
 // this is not pyABigArith below, whose ECMAScript-shaped rule (BOTH sides big)
@@ -1879,6 +1754,10 @@ function pyABigPair(l, r) {
     return {x: x, y: y}
 }
 
+// Go: bigArith, including bigPair's rule that BOTH operands must be bigs - a big
+// meeting a double falls back to the double path, where the big converts to NaN.
+// Answers null for "not applicable", never a value, so the caller can tell it
+// apart from a legitimate result.
 function pyABigArith(op, l, r) {
     if (!pyIsBig(l)) { return null }
     if (!pyIsBig(r)) { return null }
@@ -1903,7 +1782,7 @@ function pyABigArith(op, l, r) {
 // pyEqual, pyFloorMod)
 // ============================================================================
 
-// Go: rt.truthy (jsrt.go:~910). A big is truthy when its sign is not 0.
+// Go: rt.truthy. A big is truthy when its sign is not 0.
 function pyATruthy(v) {
     if (v === null) { return false }
     if (v === undefined) { return false }
@@ -1917,7 +1796,7 @@ function pyATruthy(v) {
     return true
 }
 
-// Go: rt.typeOf (jsrt.go:1523) - the JAVASCRIPT typeof, which is what the two
+// Go: rt.typeOf - the JAVASCRIPT typeof, which is what the two
 // failure messages of js_pybin and js_pysum interpolate. It is NOT pyTypeName.
 function pyAJsTypeOf(v) {
     if (v === undefined) { return "undefined" }
@@ -1931,7 +1810,7 @@ function pyAJsTypeOf(v) {
     return "object"
 }
 
-// Go: rt.strictEq (jsrt.go:1164), narrowed to the Python value model - none of
+// Go: rt.strictEq, narrowed to the Python value model - none of
 // the Char / boxed-double / sized-integer arms is reachable from Python. Two
 // DISTINCT bigs of the same value are equal (Go compares them with Cmp), so
 // `x is y` on two big literals of the same value is true in both engines.
@@ -1953,11 +1832,11 @@ function pyAStrictEq(a, b) {
     return a === b
 }
 
-// Go: rt.jsCompare (jsrt.go:1490). Chunk A owns the ONLY comparison path here.
-// It carries two things a plain jsCompare port would not: the bigPair arm (both operands big -> Cmp; a big against a double falls into
-// toNumber, which is NaN for a big, so EVERY ordering against a mixed pair is
-// false in Go) and the answer 2 for NaN, which is what makes <, >, <= and >=
-// all false at once.
+// Go: rt.jsCompare. The ONLY comparison path here. It carries two things a plain
+// jsCompare port would not: the bigPair arm (both operands big -> Cmp; a big
+// against a double falls into toNumber, which is NaN for a big, so EVERY ordering
+// against a mixed pair is false in Go) and the answer 2 for NaN, which is what
+// makes <, >, <= and >= all false at once.
 function pyACompare(a, b) {
     if (typeof a == "string" && typeof b == "string") {
         if (a < b) { return -1 }
@@ -1973,16 +1852,16 @@ function pyACompare(a, b) {
     return 0
 }
 
-// Go: rt.pyEqual (jsrt.go:8580). The set / list / dict arms are the prelude's
+// Go: rt.pyEqual. The set / list / dict arms are the prelude's
 // pyEqual; the two bigint arms come FIRST here only because a __pybig is a plain
 // object and the prelude's pyEqual has no reason to know about it. A big against
 // anything that is neither a big nor a number falls through to strictEq in Go,
 // which is false, so this answers false directly.
 function pyAEqual(x, y) {
-    // A bool IS an int, and the Go twin normalizes it AHEAD of its *jsBigInt cases
-    // (jsrt.go's pyEqual), so `True == <a big>` has to reach bigEqFloat with 1 and
-    // not answer false in the arm below. The prelude's pyEqual carries exactly
-    // that arm, bigint case included, so a bool operand goes straight there.
+    // A bool IS an int, and the Go twin normalizes it AHEAD of its *jsBigInt cases,
+    // so `True == <a big>` has to reach bigEqFloat with 1 and not answer false in
+    // the arm below. The prelude's pyEqual carries exactly that arm, bigint case
+    // included, so a bool operand goes straight there.
     if (typeof x == "boolean" || typeof y == "boolean") { return pyEqual(x, y) }
     if (pyIsBig(x)) {
         if (pyIsBig(y)) { return rtABigCmp(x, y) == 0 }
@@ -1998,10 +1877,6 @@ function pyAEqual(x, y) {
     return pyEqual(x, y)
 }
 
-// Go: pyFloorMod (jsrt.go:9403). Python's % takes the SIGN OF THE DIVISOR.
-// math.Mod is fmod, which JavaScript's % is exactly - and, unlike
-// `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
-// this is a byte-for-byte match rather than an approximation.
 // Go: rt.pyToF. toNumber for the operands of `/`: a Python bigint is an
 // arbitrary precision INT, so 10**28 / 1 has to be the float 1e+28 where pyNum
 // (rt.toNumber) answers NaN for one.
@@ -2010,6 +1885,10 @@ function pyAToF(v) {
     return pyNum(v)
 }
 
+// Go: pyFloorMod. Python's % takes the SIGN OF THE DIVISOR.
+// math.Mod is fmod, which JavaScript's % is exactly - and, unlike
+// `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
+// this is a byte-for-byte match rather than an approximation.
 function pyAFloorMod(x, y) {
     var r = x % y
     if (r != 0 && (r < 0) != (y < 0)) { return r + y }
@@ -2017,7 +1896,7 @@ function pyAFloorMod(x, y) {
 }
 
 // ============================================================================
-// Go: rt.jsAdd (jsrt.go:1124)
+// Go: rt.jsAdd
 // ============================================================================
 function pyAJsAdd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return pyToStr(l) + pyToStr(r) }
@@ -2029,10 +1908,9 @@ function pyAJsAdd(l, r) {
     // concatenate where Go falls through.
     //
     // Falling through is the whole point: bigArith needs BOTH operands to be
-    // bigints (bigPair, jsrt.go:2710), and rt.toNumber has no *jsBigInt arm, so
-    // `0 + 10000000000000000000000000001` is NaN in the Go twin. Measured on the
-    // differential probe, where this file answered the concatenation
-    // '010000000000000000000000000001' instead.
+    // bigints (bigPair), and rt.toNumber has no *jsBigInt arm, so
+    // `0 + 10000000000000000000000000001` is NaN in the Go twin, not the
+    // concatenation '010000000000000000000000000001'.
     var big = pyABigArith("+", l, r)
     if (big !== null) { return big }
     // The float box ahead of the object arms, which would otherwise CONCATENATE
@@ -2044,14 +1922,13 @@ function pyAJsAdd(l, r) {
     return pyNum(l) + pyNum(r)
 }
 
-// Go: rt.pyArith (jsrt.go:9412) - the -, * and / that take the bigint path.
-// ----- PROMOTION PAST 2^53 (docs/todo.md 1.1) --------------------------------
+// Go: rt.pyArith - the -, * and / that take the bigint path.
+// ----- PROMOTION PAST 2^53 ----------------------------------------------------
 //
 // A plain Python int is a double, so it is EXACT up to 2^53 and silently rounds
-// above it: 9007199254740992 + 1 answered 9007199254740992 in all three engines.
-// The arbitrary precision box already existed (the literal half landed in
-// 506000a); these two helpers are the TRIGGER, and they sit in the + / - / *
-// arms of js_pybin, which is the hot path of every Python program.
+// above it. These two helpers are the TRIGGER for promoting to the arbitrary
+// precision box, and they sit in the + / - / * arms of js_pybin, which is the
+// hot path of every Python program.
 //
 // pyAOver53 is sound BOTH WAYS, which is what keeps the fast path to two
 // comparisons. By the time an arm runs, both operands are plain and therefore
@@ -2097,7 +1974,7 @@ function pyAArith(op, l, r) {
 }
 
 // ============================================================================
-// Go: pySeqRepeat (jsrt.go:9810)
+// Go: pySeqRepeat
 // ============================================================================
 // Answers {v: ...} or null, because Go's second result is a separate ok.
 function pyASeqRepeat(seq, n) {
@@ -2139,7 +2016,7 @@ function pyASeqRepeat(seq, n) {
 }
 
 // ============================================================================
-// Go: rt.pySetBin (jsrt.go:8824)
+// Go: rt.pySetBin
 // ============================================================================
 // Answers {v: ...} or null. The wrapper is required and not cosmetic: the
 // subset orderings answer the BOOLEAN false, which null cannot stand in for.
@@ -2210,7 +2087,7 @@ function pyASetBin(op, l, r) {
 }
 
 // ============================================================================
-// Go: rt.pyComplexBin (jsrt.go:8918)
+// Go: rt.pyComplexBin
 // ============================================================================
 // A real operand is promoted to (n, 0). Python has NO ordering on complex
 // numbers, so < > <= >= answer null and js_pybin falls through to its usual
@@ -2246,7 +2123,7 @@ function pyAComplexBin(op, l, r) {
 }
 
 // ============================================================================
-// Go: pyBinDunder / pyBinReflected / rt.pyDunderBin (jsrt.go:9429-9462)
+// Go: pyBinDunder / pyBinReflected / rt.pyDunderBin
 // ============================================================================
 // The two maps are written as functions because there is no for..in and an
 // object used as a table would need the "$" interning the dialect demands. An
@@ -2314,7 +2191,7 @@ function pyADunderBin(op, l, r) {
 }
 
 // ============================================================================
-// Go: rt.pyContains (jsrt.go:9375)
+// Go: rt.pyContains
 // ============================================================================
 function pyAContains(x, y) {
     var els = pySetElemsOf(y)
@@ -2338,10 +2215,8 @@ function pyAContains(x, y) {
     if (typeof y == "string") { return y.indexOf(pyToStr(x)) >= 0 }
     if (pyIsDict(y)) { return pyDictFind(y["keys"], x) >= 0 }
     // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
-    // rule, and `3 in iter(xs)` aborted with the message below in both compiled
-    // halves while the interpreter answered a silent False. The scan STOPS at the
-    // match rather than draining, so `it = iter(xs); 1 in it; list(it)` leaves
-    // the rest. docs/todo.md 1.4.
+    // rule. The scan STOPS at the match rather than draining, so
+    // `it = iter(xs); 1 in it; list(it)` leaves the rest.
     if (pyIsIter(y) || pyIsGen(y)) {
         var nx = y["next"]
         while (true) {
@@ -2359,7 +2234,7 @@ function pyAContains(x, y) {
 // EXPORTS
 // ============================================================================
 
-// Go: js_pybin (jsrt.go:7540). Every user visible binary operator of the Python
+// Go: js_pybin. Every user visible binary operator of the Python
 // compiler goes through here so an instance of a user class can answer it with a
 // dunder. THE ORDER OF THE ARMS IS THE SPECIFICATION: the bit operators are
 // tested BEFORE the complex and dunder paths, so a class defining __or__ never
@@ -2379,8 +2254,7 @@ function js_pybin(opv, l, r) {
     }
     var sb = pyASetBin(op, l, r)
     if (sb !== null) { return sb["v"] }
-    // The bit operators, at ARBITRARY PRECISION - see pyABitBin above for what
-    // they used to be and why nothing in the suite could see it.
+    // The bit operators, at ARBITRARY PRECISION - see pyABitBin above.
     //
     // Three tiers, and the first two exist so nothing allocates on the path a
     // loop takes. INSIDE int32 the floor's own ECMAScript |, &, ^ (runtime.c's
@@ -2434,9 +2308,8 @@ function js_pybin(opv, l, r) {
                 return rtABigNarrow(bb)
             }
         }
-        // Not two ints: a user class gets its __and__ / __lshift__ chance (which
-        // the int32 arm used to swallow by sitting in front of it), and anything
-        // else keeps the old ToInt32 answer.
+        // Not two ints: a user class gets its __and__ / __lshift__ chance, and
+        // anything else keeps the ToInt32 answer.
         var bd = pyADunderBin(op, l, r)
         if (bd !== null) { return bd["v"] }
         if (op == "|") { return pyNum(l) | pyNum(r) }
@@ -2452,16 +2325,15 @@ function js_pybin(opv, l, r) {
     var db = pyADunderBin(op, l, r)
     if (db !== null) { return db["v"] }
     // An int operand meeting an arbitrary precision int PROMOTES, because Python
-    // has one int type. Without this, 10**30 + 1 was NaN here and exact in the
-    // interpreter, and so were //, % and ** on any big at all. Go: the pyBigPair
-    // arm of js_pybin.
+    // has one int type, so 10**30 + 1 and //, % and ** on a big stay exact. Go:
+    // the pyBigPair arm of js_pybin.
     var bp = pyABigPair(l, r)
     if (bp !== null) {
         var bv = pyABigBin(op, bp["x"], bp["y"])
         if (bv !== null) { return rtABigNarrow(bv) }
         // The ORDER comparisons need the same promotion: pyACompare's big arm is
-        // pyABigArith's, so a big meeting a plain int reached pyNum, answered NaN
-        // and made every relation false.
+        // pyABigArith's, so a big meeting a plain int would reach pyNum, answer
+        // NaN and make every relation false.
         if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=") {
             var bc = rtABigCmp(bp["x"], bp["y"])
             if (op == "<") { return bc < 0 }
@@ -2526,11 +2398,9 @@ function js_pybin(opv, l, r) {
     if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
-    // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int.
-    // ...and a Python int is ARBITRARY PRECISION, so 10**30 is
-    // 1000000000000000000000000000000, not the double 1e+30 this used to fold.
-    // rtABigNarrow hands back a plain number whenever it still fits, so nothing
-    // below 2^53 changes shape.
+    // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int,
+    // at arbitrary precision (10**30 is exact). rtABigNarrow hands back a plain
+    // number whenever it still fits, so nothing below 2^53 changes shape.
     if (op == "**") {
         var ex = pyNum(r)
         if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
@@ -2556,7 +2426,7 @@ function js_pybin(opv, l, r) {
     return false
 }
 
-// Go: js_pyunary (jsrt.go:7757). Unary - / ~ with the __neg__ / __invert__
+// Go: js_pyunary. Unary - / ~ with the __neg__ / __invert__
 // fallback. Go guards the bigint arm with rt.hasBigInt, a flag js_bigint sets;
 // the test here is structural instead, which is the same answer because the flag
 // can only be false when no big value exists to test.
@@ -2570,9 +2440,9 @@ function js_pyunary(opv, v) {
         if (pyIsCallable(m)) { return pyCallSelf(m, v, []) }
     }
     if (op == "~") {
-        // ~x is -x-1 at ARBITRARY PRECISION, not ECMAScript's ToInt32 complement:
-        // ~(2**40) used to be -257. Inside int32 the two agree exactly, so the
-        // hot path is still the floor's own operator.
+        // ~x is -x-1 at ARBITRARY PRECISION, not ECMAScript's ToInt32 complement.
+        // Inside int32 the two agree exactly, so the hot path is still the floor's
+        // own operator.
         if (pyABitIsSmall(v)) { return ~pyNum(v) }
         var bv = pyABigOperand(v)
         if (bv !== null) { return rtABigNarrow(pyABitNot(bv)) }
@@ -2584,7 +2454,7 @@ function js_pyunary(opv, v) {
     return -pyNum(v)
 }
 
-// Go: js_pyint (jsrt.go:7741). int(v): Python's truncation toward zero, and a
+// Go: js_pyint. int(v): Python's truncation toward zero, and a
 // bigint stays exact.
 function js_pyint(v) {
     if (pyIsBig(v)) { return v }
@@ -2592,11 +2462,11 @@ function js_pyint(v) {
 }
 
 // float("inf") - CPython's float_from_string accepts "inf", "infinity" and "nan"
-// case-insensitively, with an optional sign, after stripping whitespace.
-// JavaScript's parseFloat accepts "Infinity" and none of the rest, so float("inf")
-// was nan in all three engines. pyStrToF in languages/python-interpreter.abnf is
-// the same body; the whole reasoning, including why the infinity is BUILT with
-// Math.pow(2, 1024) and why only the non-finite spellings are handled, is there.
+// case-insensitively, with an optional sign, after stripping whitespace;
+// JavaScript's parseFloat accepts "Infinity" and none of the rest. pyStrToF in
+// languages/python-interpreter.abnf is the same body; the whole reasoning,
+// including why the infinity is BUILT with Math.pow(2, 1024) and why only the
+// non-finite spellings are handled, is there.
 function pyStrToF(s) {
     var t = s.trim()
     var sign = 1
@@ -2614,7 +2484,7 @@ function pyStrToF(s) {
     return parseFloat(s)
 }
 
-// Go: js_pyfloat (jsrt.go:7994). A STRING goes through pyStrToF, which is
+// Go: js_pyfloat. A STRING goes through pyStrToF, which is
 // JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5) plus CPython's three
 // non-finite spellings, not toNumber.
 function js_pyfloat(v) {
@@ -2626,9 +2496,8 @@ function js_pyfloat(v) {
 // languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
 function js_pyflo(v) { return pyMkFlo(pyNum(v)) }
 
-// js_pyabs: abs(), which used to be bound straight from JS Math and would answer
-// NaN on a box. It keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5,
-// and abs() of an arbitrary precision int stays exact.
+// js_pyabs: abs(). It keeps the type: abs(-2) is the int 2, abs(-1.5) the float
+// 1.5, and abs() of an arbitrary precision int stays exact.
 function js_pyabs(v) {
     if (pyIsFlo(v)) {
         var f = v["__flo"]
@@ -2644,7 +2513,7 @@ function js_pyabs(v) {
     return n
 }
 
-// Go: js_pybool (jsrt.go:7981). An empty container is false; everything else is
+// Go: js_pybool. An empty container is false; everything else is
 // the ordinary truthiness.
 function js_pybool(v) {
     var els = pySetElemsOf(v)
@@ -2654,12 +2523,12 @@ function js_pybool(v) {
     return pyATruthy(v)
 }
 
-// Go: js_pycomplex (jsrt.go:7359).
+// Go: js_pycomplex.
 function js_pycomplex(re, im) { return pyNewCplx(pyNum(re), pyNum(im)) }
 
 // A generator drained to a list - Go's (*jsGenerator).drain, which js_pysum
 // calls before summing. There is no tag test in layer 2, so the generator is
-// driven structurally, as the brief prescribes.
+// driven structurally.
 function pyADrainGen(g) {
     var out = []
     var step = g["next"].apply(g, [])
@@ -2670,16 +2539,15 @@ function pyADrainGen(g) {
     return out
 }
 
-// Go: js_pysum (jsrt.go:8000). Note that the failure message interpolates
+// Go: js_pysum. Note that the failure message interpolates
 // rt.typeOf - the JAVASCRIPT type name - and reports it for the ORIGINAL
 // argument, not for the drained one.
 function js_pysum(v) {
     var it = anytype
     it = v
     if (pyIsGen(it)) { it = pyADrainGen(it) }
-    // An ITERATOR object is materialized too, so sum(map(f, xs)) works. The Go
-    // twin has had this arm all along (its pyIterName test); here it was reached
-    // by accident, through pyIsGen answering true for a cursor.
+    // An ITERATOR object is materialized too, so sum(map(f, xs)) works (the Go
+    // twin's pyIterName test).
     if (pyIsIter(it)) { it = pyIterRest(it) }
     var els = pySetElemsOf(it)
     if (els !== null) { it = els }
@@ -2699,7 +2567,7 @@ function js_pysum(v) {
     return total
 }
 
-// Go: rt.pyMinMax (jsrt.go:9557). want is +1 for max, -1 for min. A SINGLE
+// Go: rt.pyMinMax. want is +1 for max, -1 for min. A SINGLE
 // argument that is a list is iterated; anything else is the argument list itself.
 function pyAMinMax(argsV, want) {
     if (!pyIsArr(argsV)) { pyFail("max/min needs an argument array") }
@@ -2719,12 +2587,12 @@ function pyAMinMax(argsV, want) {
     return best
 }
 
-// Go: js_pymax / js_pymin (jsrt.go:7651). declBuiltin passes the WHOLE argument
-// array (languages/python-to-llvm-ir.abnf:3165, argc 0).
+// Go: js_pymax / js_pymin. declBuiltin passes the WHOLE argument
+// array (argc 0 in languages/python-to-llvm-ir.abnf).
 function js_pymax(args) { return pyAMinMax(args, 1) }
 function js_pymin(args) { return pyAMinMax(args, -1) }
 
-// Go: js_pyrange (jsrt.go:7142). range(a) or range(a, b) as a MATERIALIZED list.
+// Go: js_pyrange. range(a) or range(a, b) as a MATERIALIZED list.
 // Only a genuinely missing second argument means range(0, a): Go tests jsUndefT,
 // so an explicit None still reaches toNumber and answers 0.
 function js_pyrange(a, b) {
@@ -2744,10 +2612,8 @@ function js_pyrange(a, b) {
     return out
 }
 
-// ord(c) / chr(n). They were missing from ALL THREE engines (docs/todo.md 2.9
-// said the compiled halves had them; a probe at 114fbd5 showed `variable not
-// defined: ord` under llvm.Run too), so they land here, in
-// languages/python-interpreter.abnf and in abnf/jsrt.go together.
+// ord(c) / chr(n); the same builtins live in languages/python-interpreter.abnf
+// and abnf/jsrt.go.
 //
 // A string is UTF-16 in every engine here, so a character ABOVE the BMP is a
 // surrogate PAIR of code units and ONE character to Python: js_pyord decodes the
@@ -2789,7 +2655,7 @@ function js_pychr(n) {
     return pyBCodePoint(v)
 }
 
-// ===== docs/todo.md 1.4: the builtins missing from ALL THREE engines ========
+// ===== iterators and the variadic builtins ===================================
 //
 // Each is bound by declBuiltin in languages/python-to-llvm-ir.abnf, has a Go
 // twin of the same js_py* name in abnf/jsrt.go and a hostGlobals entry in
@@ -2801,18 +2667,17 @@ function js_pychr(n) {
 // format, frozenset, hash, id.
 //
 // THE ITERATOR OBJECT. iter/enumerate/zip/map/filter/reversed answer an ITERATOR
-// in CPython and next() drives it, and this project had no such value: the only
-// steppable thing was a generator. So an iterator is built to LOOK like one - a
-// plain object carrying a callable "next" that answers {value, done} - which is
-// exactly what pyIsGen tests for and what the compiled for-loop tests for
+// in CPython and next() drives it. An iterator (a CURSOR) is built to LOOK like
+// a generator - a plain object carrying a callable "next" that answers
+// {value, done} - which is what the compiled for-loop tests for
 // (python-to-llvm-ir.abnf's makeForStmt reads js_get(v, "next")), so a for loop
-// over one is LAZY with no change to the emitter and `it.__next__()` raises
-// StopIteration through pyDMethodCall's generator arm.
+// over one is LAZY with no change to the emitter. The __pyit tag tells it apart
+// from a generator (see pyIsGen).
 //
 // The SOURCE is materialized, and that is the line drawn: CPython's
 // map/filter/zip/enumerate are lazy in their input too, so `map(f, endless())`
 // works there and hangs here. iter(gen) answers the GENERATOR ITSELF - CPython's
-// rule as well - so the lazy case docs/todo.md 1.7 fixed is untouched.
+// rule as well.
 //
 // Go: rt.pyMkIter / rt.pyItStep (abnf/jsrt.go).
 function pyMkIter(name, arr) {
@@ -2867,8 +2732,7 @@ function pyElemsOf(v) {
 // interpolates, so the names are CPython 3.14's and not invented: a str whose
 // code points are all ASCII gets str_ascii_iterator and any other str
 // str_iterator (CPython splits the two implementations), a dict gets
-// dict_keyiterator and a set set_iterator. Before docs/todo.md 1.4 a dict and a
-// set both answered the bare "iterator".
+// dict_keyiterator and a set set_iterator.
 function pyIterKind(v) {
     if (typeof v == "string") {
         var ci = 0
@@ -2896,11 +2760,8 @@ function js_pyiterfn(v) {
 // `_y = _i.send(_s)`. A CURSOR has no send, so sending a non-None value into a
 // `yield from` over a list, a string, a dict or any other materialized delegate
 // raises AttributeError INSIDE the generator - which ends it, so the next
-// send() answers StopIteration. Every engine here forwarded the value to the
-// cursor's next() instead, which ignores it: `g.send(7)` over
-// `yield from [1,2,3]` answered 2 in all three, where CPython raises. All three
-// agreed, so --cross and the matrix were blind to it by construction; only the
-// oracle could see it. docs/todo.md 1.4.
+// send() answers StopIteration. (Forwarding the value to the cursor's next()
+// would silently ignore it.)
 //
 // Delegating to a real GENERATOR is untouched - that is what makes send() reach
 // the delegate at all - and so is the first turn, which sends undefined.
@@ -2911,9 +2772,7 @@ function js_pyyfsend(d, sent) {
                         "'" + pyToStr(d["__pyit"]) + "' object has no attribute 'send'")
 }
 
-// next(it[, default]). The COMPILER half had no `next` at all, which is
-// docs/todo.md 1.4's sharpest gap: next(g) is the ordinary way to drive a
-// generator.
+// next(it[, default]), the ordinary way to drive a generator.
 function js_pynext(args) {
     var it = pyEArgAt(args, 0)
     if (pyIsIter(it)) {
@@ -3274,7 +3133,7 @@ function pyDHasAttr(obj, name) {
         return pyLookupHas(cls, name)
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
-    // has to agree with what `math.sqrt` answers. docs/todo.md 1.7.
+    // has to agree with what `math.sqrt` answers.
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
             if (obj[name] !== undefined) { return true }
@@ -3282,17 +3141,16 @@ function pyDHasAttr(obj, name) {
             return false
         }
     }
-    // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
-    // __class__, which EVERY value has (None.__class__ is NoneType).
+    // The BUILT-IN methods of str / list / dict / set, and __class__, which
+    // EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
     if (pyDBuiltinAttr(obj, name)) { return true }
-    // docs/todo.md 1.9: hasattr must answer exactly what the getattr above can
-    // answer, or the three-argument getattr - which asks this first - hands back
-    // its default for a name that IS readable. Both tables, in the same order.
-    // The synthetic class object for a BUILTIN type (what type(3) hands out)
-    // carries only its name and has no __isclass, so the arm above misses it -
-    // hasattr(str, "__name__") was False here and True in the Go twin, which has
-    // had this line all along. A layer-2-only gap, found by the 1.9 probe.
+    // hasattr must answer exactly what the getattr above can answer, or the
+    // three-argument getattr - which asks this first - hands back its default for
+    // a name that IS readable. Both tables, in the same order. The synthetic
+    // class object for a BUILTIN type (what type(3) hands out) carries only its
+    // name and has no __isclass, so the arm above misses it; the Go twin has the
+    // same line.
     if (name == "__name__" || name == "__qualname__") {
         if (pyIsObj(obj) && obj["__name"] !== undefined) { return true }
         if (rtPairGet(pyBBFnObjs, pyBBFnCodes, obj) !== undefined) { return true }
@@ -3310,8 +3168,6 @@ function pyDHasAttr(obj, name) {
     return obj[name] !== undefined
 }
 
-// Go: js_pyeq (jsrt.go:7179). Python's == compares CONTAINERS BY VALUE, unlike
-// JavaScript's. 'is' keeps using js_seq, because that one really is identity.
 // The str-method chunk's hook for "materialize a generator or an iterator
 // object", null when the value is neither. See the join arm of pyStrMethod.
 function pySSeqOf(v) {
@@ -3319,18 +3175,19 @@ function pySSeqOf(v) {
     return null
 }
 
+// Go: js_pyeq. Python's == compares CONTAINERS BY VALUE, unlike
+// JavaScript's. 'is' keeps using js_seq, because that one really is identity.
 function js_pyeq(x, y) { return pyAEqual(x, y) }
 
-// Go: js_jadd (jsrt.go:5151). Java/C# +: string concat, 32 bit add for two int
-// values, float add otherwise. The Python emitter reaches it only through
-// makeStrConcat / makeFString / emitSpecText (python-to-llvm-ir.abnf:1385,
-// 1462, 1478), each of which seeds the chain with emitStr(b, ""), so the STRING
-// arm always wins and the numeric arms below are dead - they are ported anyway
-// because the extern is shared. Go's jvmIsFlo arm (a boxed double) has no
-// counterpart at all: Python has no boxed double in this value model.
+// Go: js_jadd. Java/C# +: string concat, 32 bit add for two int values, float
+// add otherwise. The Python emitter reaches it only through makeStrConcat /
+// makeFString / emitSpecText in python-to-llvm-ir.abnf, each of which seeds the
+// chain with emitStr(b, ""), so the STRING arm always wins and the numeric arms
+// are dead. Go's jvmIsFlo arm (a boxed double) has no counterpart: Python's
+// float box is not the JVM's.
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-// Go: rt.javaString (jsrt.go:2523) - null and undefined render as "null" here,
+// Go: rt.javaString - null and undefined render as "null" here,
 // NOT as Python's "None". That is what Go does and the difference is
 // unobservable: every value the emitter hands to js_jadd has already been
 // rendered by js_pyrxstr / js_pyrepr / js_pyformat.
@@ -3341,45 +3198,34 @@ function pyAJavaStr(v) {
 }
 
 
-// Go: js_bigint (jsrt.go:5366). The digits of a decimal integer literal too
+// Go: js_bigint. The digits of a decimal integer literal too
 // large for a double, as an arbitrary precision integer.
 function js_bigint(text) { return pyABigFromStr(pyToStr(text)) }
 // ============================================================================
-// CHUNK B - strings, printing and formatting.
+// Strings, printing and formatting (the pyB* helpers).
 //
-// Ports, function for function:
-//   js_pyprint   (jsrt.go:8025)
-//   js_pyrepr    (jsrt.go:7974)
-//   js_pyformat  (jsrt.go:8022) over rt.pyFormat (jsrt.go:9682),
-//                rt.pyFormatBody (jsrt.go:9737) and pyIsAlign (jsrt.go:9680)
-//   js_pyfnname  (jsrt.go:7749) plus its reader pyBFuncName
+// Ports js_pyprint, js_pyrepr, js_pyformat (over rt.pyFormat, rt.pyFormatBody
+// and pyIsAlign) and js_pyfnname plus its reader. The float/int RENDERING
+// primitives (rtFixed / rtBaseStr and the exact-decimal bignum under them) are
+// shared, in languages/lib/runtime.metajs.
 //
-// and it owns the float/int RENDERING primitives (rtFixed / rtBaseStr and the
-// exact-decimal bignum under them), copied from languages/lib/ruby-rt.metajs
-// lines ~508-800 where they were written language-neutrally. Ruby's pyBSci
-// ('e' verb), pyBByteCut and pyBLower came across with them and were deleted
-// again: Python's format mini-language reaches none of the three.
-//
-// js_num_str is a FLOOR extern (languages/lib/rt-prims.metajs:192) and is not
-// written here.
+// js_num_str is a FLOOR extern and is not written here.
 // ============================================================================
 
 
 // ===================================================== the side table =======
 //
-// js_pyfnname (jsrt.go:7749) records the name a `def` bound a closure under, so
+// js_pyfnname records the name a `def` bound a closure under, so
 // that f.__name__ can answer it (a closure carries no name of its own). The Go
 // twin keys rt.pyFuncNames by the closure VALUE (map[interface{}]string), and a
-// MetaJS object cannot be keyed by a function, so this is the identity-keyed
-// SIDE TABLE shape rbLambdas uses in languages/lib/ruby-rt.metajs: two parallel
-// arrays and a linear `===` scan.
+// MetaJS object cannot be keyed by a function, so this is an identity-keyed
+// SIDE TABLE: two parallel arrays and a linear `===` scan.
 var pyBFnObjs = []       // the closures a def bound (identity scan)
 var pyBFnNames = []      // the name each one was bound under, same index
 
 // The recorded name of fn, or undefined when no def ever bound it. pyGetAttr
-// (jsrt.go:9134) and the other chunks read the table through this.
+// and the other chunks read the table through this.
 // The two-parallel-array lookup is SHARED as rtPairGet - lib/runtime.metajs.
-// kotlin's k4NameOf was the same eight lines over k4NameFns/k4NameStrs.
 
 // (closure, name) -> closure. A Go map assignment REPLACES an existing entry, so
 // a second def that binds the same closure object under another name overwrites
@@ -3399,10 +3245,9 @@ function js_pyfnname(fn, name) {
     return fn
 }
 
-// ----- the BUILTIN render table (docs/todo.md 1.4) --------------------------
+// ----- the BUILTIN render table ----------------------------------------------
 //
-// `print(len)` said "<function <lambda>>" in all three engines where CPython
-// says "<built-in function len>", and `print(map)` the same where CPython says
+// CPython prints `len` as "<built-in function len>" and `map` as
 // "<class 'map'>". A builtin has no `def` to record a name in the table above,
 // so it gets one of its own: the emitter fills this at boot, once per builtin,
 // with js_pybfn(closure, code).
@@ -3413,24 +3258,9 @@ function js_pyfnname(fn, name) {
 // half rather than three times. The def-name table above is left alone, so
 // f.__name__ still reads exactly what a `def` recorded and nothing else.
 //
-// WHAT THIS COSTS, because it is not free and the numbers are worth keeping.
-// Forty-two entries are ~3.2 KB of LIVE data, and tests/bench/mod.py sits on an
-// ARENA GROWTH THRESHOLD: the heap goes 9,530,224 -> 11,627,376 bytes, and since
-// that program collects 3,574 times and the sweep walks the HEAP, the bench row
-// reads +2.67% (33.28 G -> 34.12 G, median over 21 draws, two paired runs
-// agreeing to 0.01%, spread 7.5-8.9%). The EXACT counters settle the cause:
-// collections=3574 either way and the program prints the same answer, so no
-// executed work changed - only the heap the sweep walks.
-//
-// AND THE FLOOR IS NOT ZERO, which is the part worth knowing before optimising
-// this. A control experiment at the base commit - one UNUSED 1 KB string global
-// added to this file and NOTHING else - moves the same row +2.40% and steps the
-// arena to 10,578,544. So on this benchmark a kilobyte of anything costs ~2.4%,
-// this table is within ~0.3% of that floor, and no shape of it can be free.
-// Shapes tried and measured before settling here: the finished text instead of
-// the code (11.63 MB, the same), a joined-code string plus an array (12.68 MB,
-// WORSE - two more module globals), the codes pushed into the def-name table
-// above (11.63 MB, the same). The clearest shape was kept.
+// Module-level live data is not free: the sweep walks the heap, so a benchmark
+// sitting on an arena growth threshold pays for every kilobyte of it. Keep the
+// table as small as it is.
 var pyBBFnObjs = []      // the builtin closures (identity scan)
 var pyBBFnCodes = []     // the code for each one, same index
 
@@ -3447,7 +3277,7 @@ function pyBBFnRender(c) {
     return "<built-in function " + c + ">"
 }
 
-// The builtin's __name__, from the same code (docs/todo.md 1.9). CPython
+// The builtin's __name__, from the same code. CPython
 // answers 'len' for the function form and 'map' for the class form, so the
 // leading "*" is the only difference between the two.
 function pyBBFnName(c) {
@@ -3457,7 +3287,7 @@ function pyBBFnName(c) {
 
 // ===================================================== print / repr =========
 //
-// js_pyprint (jsrt.go:8025): print(...) with Python's rendering - the argument
+// js_pyprint: print(...) with Python's rendering - the argument
 // array joined with a single space and written with a trailing newline.
 //
 // The Go twin runs the joined line through wtf8Clean before Fprintln, which
@@ -3478,21 +3308,14 @@ function js_pyprint(args) {
     return undefined
 }
 
-// js_pyrepr (jsrt.go:7974): repr(x).
+// js_pyrepr: repr(x).
 function js_pyrepr(v) { return pyRepr(v) }
 
 
 // ===================================================== float rendering ======
 //
-// The exact-decimal bignum this section carried is now SHARED, in
-// languages/lib/runtime.metajs under "the decimal bignum". This file's copy was
-// a verbatim transfer out of ruby-rt.metajs and the old comment here said so:
-// "Copied verbatim from languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum /
-// rbBigMulSmall / rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci /
-// rbBaseStr / rbByteCut), renamed to the pyB prefix. The comments are theirs."
-// A shape scan confirmed nine of the ten were byte-identical and the tenth
-// differed only in the NAME of its digit alphabet, so the merge took no knobs.
-//
+// The exact-decimal bignum is SHARED, in languages/lib/runtime.metajs under
+// "the decimal bignum" (rtExactDec / rtRoundHalfEven / rtFixed / rtBaseStr).
 // What stays here is the one thing Python does its own way: where repr(float)
 // switches to exponential form.
 
@@ -3527,39 +3350,17 @@ function pyFloNegate(f) {
     return 0 - f
 }
 
-// ----- EXACT decimal expansion of a double ---------------------------------
-//
-// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
-// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
-// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
-// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
-// measured on the differential probe.
-//
-// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
-// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
-// multiplied by 5 exactly -e times with the point placed -e digits from the
-// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
-// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
-// 50000 + 10000, which a double holds exactly.
-
-// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
-// Round the digit string `digits` (an integer written out) to `keep` digits,
-// half to EVEN, and answer the kept digits - one longer when the rounding
-// carried all the way (999 -> 1000), which the caller detects by the length.
-// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
-// cut to prec fraction digits with half-to-even rounding.
 // ----- "fmt" % args, CPython's printf-style formatting -----
 //
-// UNIMPLEMENTED in both halves until now: js_pybin's "%" on a string fell into
-// pyAFloorMod and answered NaN. The whole reasoning - what is supported, what
-// fails loudly, and the ARGUMENT TUPLE rule an array has to be read under while a
-// tuple is still a list in this value model - is at rt.pyPct in abnf/jsrt.go.
-// pyPct in languages/python-interpreter.abnf is this same body.
+// The whole reasoning - what is supported, what fails loudly, and the ARGUMENT
+// TUPLE rule an array has to be read under while a tuple is still a list in this
+// value model - is at rt.pyPct in abnf/jsrt.go. pyPct in
+// languages/python-interpreter.abnf is this same body.
 //
 // The float verbs are where the three halves differ in SPELLING and not in
 // answer: Go says strconv.FormatFloat, and this half (like the interpreter's)
 // builds the same text out of rtFixed and floPrec - host id 70 of
-// languages/lib/runtime.c, the one lua's formatter already leans on.
+// languages/lib/runtime.c.
 function pyBPctCount(f) {
     var n = 0
     var i = 0
@@ -3626,11 +3427,9 @@ function pyBPctStrip(t) {
 // The obvious source for this is floPrec, and it is the WRONG one here: floPrec's
 // contract is only "at least nd digits" - the floor's implementation (host id 70,
 // g_mindig + shortest_digits) answers the SHORTEST round-tripping form when nd is
-// smaller than that, so %e of 1234.5678 came out 1.234567e+03 from the native
-// binary (a truncation of the 8-digit shortest form) against 1.234568e+03 from Go
-// and from the interpreter. Every existing floPrec caller asks for an nd at least
-// as large as the shortest form, where the two contracts coincide; %e and %g do
-// not. The exact decimal answers it outright and is already here.
+// smaller than that, so %e of 1234.5678 would come out 1.234567e+03 (a
+// truncation of the 8-digit shortest form) where Go says 1.234568e+03. The exact
+// decimal answers it outright.
 function pyBPctSig(a, nd) {
     if (a == 0) {
         var z = ""
@@ -3733,10 +3532,7 @@ function pyBPctOne(v, typ, left, zero, plus, space, width, prec) {
     return rtRepeat(" ", pad) + body
 }
 
-// pyBRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros - and
-// the seven call sites above and below call it under that name. Same pinned
-// scope, same kind of name, no frame added: every one of them was already a
-// call, and all seven are in the format-spec padding arms. docs/todo.md 5.1.
+// pyBRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros.
 
 // The first `n` CODE POINTS of s - what a %.Ns precision truncates to.
 function pyStrSlice(s, n) {
@@ -3843,10 +3639,9 @@ function pyBPct(f, arg) {
 // does reach them, which is why they are in the shared body.
 
 // strings.ToUpper - the full Unicode SIMPLE mapping. The C floor's own
-// toUpperCase is exactly that (runtime.c generated its 328 ranges from the Go
-// runtime's own answers), so an ASCII loop here would be a third, worse, copy:
-// it printed "CAFé" for "café". strings.ToLower has no caller in Python's
-// surface and is not carried.
+// toUpperCase is exactly that (runtime.c generated its ranges from the Go
+// runtime's own answers), so an ASCII loop here would be a third, worse, copy.
+// strings.ToLower has no caller in Python's surface and is not carried.
 function pyBUpper(s) { return s.toUpperCase() }
 
 // Go's body[:n] BYTE cut has no counterpart here either: pyFormatBody uses `prec`
@@ -3855,7 +3650,7 @@ function pyBUpper(s) { return s.toUpperCase() }
 
 // ===================================================== format ===============
 //
-// rt.pyFormat (jsrt.go:9682) and rt.pyFormatBody (jsrt.go:9737):
+// rt.pyFormat and rt.pyFormatBody:
 // [[fill]align][sign][0][width][.precision][type], which is the slice of the
 // format mini-language an f-string replacement field in practice writes.
 //
@@ -3871,17 +3666,11 @@ function pyBUpper(s) { return s.toUpperCase() }
 //   - '=' alignment does not put the padding after the sign the way CPython
 //     does; the Go twin treats '=' as a synonym for '>'.
 
-// pyIsAlign (jsrt.go:9680).
+// pyIsAlign.
 function pyBIsAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
 
-// pyBRepeat WAS DECLARED A SECOND TIME HERE, with the same body written over
-// six lines instead of four. Two top-level `function pyBRepeat` in one file is
-// not an error for a non-js_* helper - the later declaration simply wins in the
-// pinned scope, so this one was the live copy and the earlier one was dead code
-// no fix could ever reach. Found by the -min 40 shape tier (docs/todo.md 5.1)
-// and removed 2026-08-10; the surviving body is next to pyStrSlice above.
 
-// pyFormatBody (jsrt.go:9737). `prec` is -1 when the spec carried no `.`.
+// pyFormatBody. `prec` is -1 when the spec carried no `.`.
 function pyBFormatBody(v, typ, prec, sign, conv) {
     var body = ""
     if (typ == "f" || typ == "F") {
@@ -3913,7 +3702,7 @@ function pyBFormatBody(v, typ, prec, sign, conv) {
     return body
 }
 
-// js_pyformat (jsrt.go:8022) over rt.pyFormat (jsrt.go:9682).
+// js_pyformat over rt.pyFormat.
 // format(v, spec, conv); conv is "", "r", "s" or "a" (the !conversion).
 function js_pyformat(v, specV, convV) {
     var spec = pyToStr(specV)
@@ -3982,40 +3771,21 @@ function js_pyformat(v, specV, convV) {
     return body + rtRepeat(fill, pad)
 }
 // ============================================================================
-// CHUNK C - containers, indexing, slicing and destructuring
+// Containers, indexing, slicing and destructuring (the pyC* helpers).
 //
-// Ports, function for function, from abnf/jsrt.go:
-//
-//   js_pyget      6297   js_pyset      6339   js_dict_new   6369
-//   js_pylen      6974   js_pylist     6997   js_pyiter     7020
-//   js_pyrest     7105   js_pyspread   7300   js_pykwspread 7325
-//   js_pyset_new  7386   js_pyset_spread 7397 js_pyslice3   7420
-//   js_pysetslice 7443   js_pydelslice 7477   js_pydict     7639
-//   js_pyellipsis 7677   js_pydel_item 7699   js_pymatchseq 7794
-//   js_pymatchmap 7806   js_pymaprest  7827   js_pymatchargs 7856
-//   js_is_type    5266  (rt.isTypeName, jsrt.go:8432)
-//
-// plus the helpers those need that the prelude does not carry:
-// rt.pyGenericAlias (8662), rt.pyClampIndex (8728) and rt.pySliceStart (8750).
-//
-// `js_pyget` / `js_pyset` / `js_pylen` / `js_dict_new` / `js_is_type` were
-// already written twice in layer 2 - languages/lib/dart-rt.metajs (1301-1485)
-// and languages/lib/ruby-rt.metajs (2111-2216). Those two are the base here;
-// what BOTH of them deleted as unreachable from their language is added back:
-//
-//   - the `__getitem__` / `__setitem__` / `__len__` dunder arms (a Python class
-//     may define them; a Dart or Ruby class cannot name a member that way),
-//   - the generic-alias arm of js_pyget (list[int] is a VALUE in Python),
-//   - the set arm of js_pylen (Ruby's twin has no Python set),
-//   - the code-POINT string length of js_pylen (Ruby counted code units).
+// Each extern below names the abnf/jsrt.go function it ports. Python's are the
+// fullest of the layer-2 copies: the `__getitem__` / `__setitem__` / `__len__`
+// dunder arms (a Python class may define them), the generic-alias arm of
+// js_pyget (list[int] is a VALUE in Python), the set arm and the code-POINT
+// string length of js_pylen.
 //
 // ---- one Go inconsistency that is ported as it stands -----------------------
 // Go indexes and slices a string by UTF-16 CODE UNIT (rt.strLen / rt.strAt /
 // rt.strRange) but measures it with `len()` in CODE POINTS (pyStrLen). So
 // s[0] of an emoji string is half a surrogate pair while len(s) is 1. That is
-// what abnf/jsrt.go does, the brief says the Go code is the specification, and
-// so `.length` / `.charAt` (code units) are used everywhere Go used strLen /
-// strAt, and the prelude's pyStrLen (code points) only in js_pylen.
+// what abnf/jsrt.go does, and the Go code is the specification, so `.length` /
+// `.charAt` (code units) are used everywhere Go used strLen / strAt, and the
+// prelude's pyStrLen (code points) only in js_pylen.
 // ============================================================================
 
 
@@ -4069,7 +3839,7 @@ function pyCStrChars(s) {
     return out
 }
 
-// jsGenerator.drain (jsrt.go:566): materialize what is left of a generator.
+// jsGenerator.drain: materialize what is left of a generator.
 // There is no tag test in layer 2, so the caller decides with pyIsGen and this
 // only drives the protocol: next() -> {value, done} until done.
 function pyCDrain(g) {
@@ -4085,7 +3855,7 @@ function pyCDrain(g) {
     return out
 }
 
-// rt.pyClampIndex (jsrt.go:8728): one written slice bound as a position -
+// rt.pyClampIndex: one written slice bound as a position -
 // negative counts from the end, out of range clamps to the edge the step runs
 // towards. Only pyCSliceStart below needs it; the full index list comes from
 // the prelude's pySliceIndices.
@@ -4106,7 +3876,7 @@ function pyCClampIndex(i_in, n, step) {
     return i
 }
 
-// rt.pySliceStart (jsrt.go:8750): where an EMPTY step-1 slice splices at.
+// rt.pySliceStart: where an EMPTY step-1 slice splices at.
 function pyCSliceStart(n, lo) {
     if (rtIsNil(lo)) { return 0 }
     return pyCClampIndex(Math.trunc(pyNum(lo)), n, 1)
@@ -4138,17 +3908,14 @@ function pyCRemoveAt(arr, i) {
     return undefined
 }
 
-// rt.pyGenericAlias (jsrt.go:8662): the memoized list[int]-style alias of a
+// rt.pyGenericAlias: the memoized list[int]-style alias of a
 // type object. Keyed by the origin's NAME and the rendered parameter, so the
 // same written alias is the same value twice and `type X = list[int]` compares
 // equal.
 //
-// NOT EXACT in one place, and it cannot be: Go recovers a closure's name from
-// rt.pyFuncNames, the side table js_pyfnname fills, which lives in another
-// chunk of this file. The name is read back through the prelude's pyGetAttr,
-// whose "__name__" arm reads that same table (jsrt.go:9134) - the same answer
-// by a different route, and the __name arm of a class object below is Go's
-// literally.
+// Go recovers a closure's name from rt.pyFuncNames, the side table js_pyfnname
+// fills; here the name is read back through the prelude's pyGetAttr, whose
+// "__name__" arm reads that same table - the same answer by a different route.
 function pyCGenericAlias(origin, param) {
     var isObj = pyIsObj(origin)
     if (!isObj && !pyIsFn(origin)) { return undefined }
@@ -4173,15 +3940,13 @@ function pyCGenericAlias(origin, param) {
 
 // ================================================== the externs =============
 
-// ----- js_dict_new (jsrt.go:6369) -------------------------------------------
-// An empty Python dict handle. Identical to the dart-rt.metajs twin.
-// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
+// ----- js_dict_new ------------------------------------------------------------
+// js_dict_new is SHARED - lib/runtime.metajs.
 
 
-// ----- js_pyget (jsrt.go:6297) ----------------------------------------------
-// Sequence indexing (negative wraps), dict lookup, and - the arm Ruby and Dart
-// both deleted - the __getitem__ dunder of a user class plus the generic-alias
-// reading of `list[int]`.
+// ----- js_pyget ---------------------------------------------------------------
+// Sequence indexing (negative wraps), dict lookup, the __getitem__ dunder of a
+// user class, and the generic-alias reading of `list[int]`.
 function js_pyget(c, k) {
     var cls = pyInstClassOf(c) // A user class may define __getitem__.
     if (cls !== null && cls !== undefined) {
@@ -4190,13 +3955,11 @@ function js_pyget(c, k) {
             if (pyIsCallable(m)) { return pyCallSelf(m, c, [k]) }
         }
     }
-    // A subscript MISS is a CATCHABLE exception, not an abort. All three engines
-    // used to fail() here, so `try: d[k] / except KeyError` - which CPython
-    // supports and which js_pydel_item already did - killed the process instead
-    // (docs/todo.md 1.7). The KeyError carries the KEY ITSELF, never its repr:
-    // CPython's KeyError.__str__ is repr(args[0]) and pyUserRender now does that,
-    // so pre-repr'ing here made str(e) right by accident and repr(e) doubly
-    // quoted. CPython's sequence message carries no index, so neither does this.
+    // A subscript MISS is a CATCHABLE exception, not an abort, so
+    // `try: d[k] / except KeyError` works. The KeyError carries the KEY ITSELF,
+    // never its repr: CPython's KeyError.__str__ is repr(args[0]) and
+    // pyUserRender does that. CPython's sequence message carries no index, so
+    // neither does this.
     if (pyIsDict(c)) {
         var di = pyDictFind(c["keys"], k)
         if (di < 0) { pyRaiseExcV("KeyError", k) }
@@ -4220,16 +3983,15 @@ function js_pyget(c, k) {
     // (origin, parameter) pair, so 'list[int] == list[int]' holds.
     var alias = pyCGenericAlias(c, k)
     if (alias !== undefined) { return alias }
-    // CPython's TypeError, and CATCHABLE: this was fail(), so `None[0]` ended the
-    // program where CPython runs the except clause. docs/todo.md 1.8.
+    // CPython's TypeError, and CATCHABLE, so `None[0]` runs the except clause.
     pyRaiseExc("TypeError", "'" + pyTypeName(c) + "' object is not subscriptable")
     return undefined
 }
 
 
-// ----- js_pyset (jsrt.go:6339) ----------------------------------------------
+// ----- js_pyset ---------------------------------------------------------------
 // List element (negative wraps) or dict entry assignment, with the __setitem__
-// dunder arm restored.
+// dunder arm.
 function js_pyset(c, k, v) {
     var cls = pyInstClassOf(c) // A user class may define __setitem__.
     if (cls !== null && cls !== undefined) {
@@ -4254,9 +4016,9 @@ function js_pyset(c, k, v) {
 }
 
 
-// ----- js_pylen (jsrt.go:6974) ----------------------------------------------
-// len() for strings, lists, sets and dicts, with the __len__ dunder arm and the
-// set arm restored. The string arm counts CODE POINTS (Go: pyStrLen), so len of
+// ----- js_pylen ---------------------------------------------------------------
+// len() for strings, lists, sets and dicts, with the __len__ dunder arm. The
+// string arm counts CODE POINTS (Go: pyStrLen), so len of
 // a single astral character is 1 and not 2 - this is the ONE place Go measures
 // a string that way.
 //
@@ -4281,7 +4043,7 @@ function js_pylen(v) {
 }
 
 
-// ----- js_pylist (jsrt.go:6997) ---------------------------------------------
+// ----- js_pylist --------------------------------------------------------------
 // list(x): ALWAYS a fresh list. A generator is drained.
 function js_pylist(v) {
     // An ITERATOR object gives what is LEFT of it, and the read exhausts it.
@@ -4297,7 +4059,7 @@ function js_pylist(v) {
 }
 
 
-// ----- js_pyiter (jsrt.go:7020) ---------------------------------------------
+// ----- js_pyiter --------------------------------------------------------------
 // The list a for loop runs over: a generator is drained first, a set gives a
 // COPY of its elements, a dict its keys, a string its characters, and a list
 // ITSELF - the Go twin returns the handle it was given, not a copy, so a loop
@@ -4316,10 +4078,10 @@ function js_pyiter(v) {
 }
 
 
-// ----- js_pyrest (jsrt.go:7105) ---------------------------------------------
+// ----- js_pyrest --------------------------------------------------------------
 // *args: the call arguments from index N on, as a list. N is a RAW parameter -
 // the emitter writes it with a bare handle(k) (see the js_pyrest entry in the
-// raw-argument mask at jsrt.go:679), which is what the i_raw name tells
+// raw-argument mask in abnf/jsrt.go), which is what the i_raw name tells
 // -rt-lib to box.
 function js_pyrest(args, i_raw) {
     var out = []
@@ -4333,7 +4095,7 @@ function js_pyrest(args, i_raw) {
 }
 
 
-// ----- js_pyspread (jsrt.go:7300) -------------------------------------------
+// ----- js_pyspread ------------------------------------------------------------
 // (positional array, iterable): append every element of the iterable.
 // The source length is read ONCE, which is what Go's `append(dst, src...)` does
 // when dst and src are the same handle.
@@ -4372,7 +4134,7 @@ function js_pyspread(arr, it) {
 }
 
 
-// ----- js_pykwspread (jsrt.go:7325) -----------------------------------------
+// ----- js_pykwspread ----------------------------------------------------------
 // (keyword dict, mapping): merge the mapping in, an existing key OVERWRITTEN in
 // place so the insertion order of the destination survives.
 function js_pykwspread(dst, src) {
@@ -4396,15 +4158,14 @@ function js_pykwspread(dst, src) {
 }
 
 
-// ----- js_pyset_new (jsrt.go:7386) ------------------------------------------
+// ----- js_pyset_new -----------------------------------------------------------
 // {a, b, c} / {e for x in it}: a real set from the candidate list the literal or
 // the comprehension collected, deduplicated with Python's == (pySetAdd), NOT
 // with ===. A non-array argument yields the empty set.
 function js_pyset_new(src) {
     var out = []
-    // ANY iterable, not just a list: set("aab") was {'a','b'} in the interpreter
-    // and the EMPTY set in both compiled halves - a live halves divergence found
-    // by the docs/todo.md 1.4 sweep. set() with no argument is still empty.
+    // ANY iterable, not just a list: set("aab") is {'a','b'}. set() with no
+    // argument is empty.
     if (src !== undefined && src !== null) {
         var els = pyElemsOf(src)
         var i = 0
@@ -4417,7 +4178,7 @@ function js_pyset_new(src) {
 }
 
 
-// ----- js_pyset_spread (jsrt.go:7397) ---------------------------------------
+// ----- js_pyset_spread --------------------------------------------------------
 // (candidate list, iterable): add every element of an iterable to the list a set
 // literal is being built from. NO deduplication here - js_pyset_new does that.
 // A non-array destination is silently ignored, exactly as in Go.
@@ -4460,7 +4221,7 @@ function js_pyset_spread(dst, src) {
 }
 
 
-// ----- js_pyslice3 (jsrt.go:7420) -------------------------------------------
+// ----- js_pyslice3 ------------------------------------------------------------
 // s[lo:hi:step] on lists and strings. The open ends arrive as undefined and mean
 // what Python's defaults mean for the DIRECTION of the step, so xs[::-1] is the
 // reversal.
@@ -4491,7 +4252,7 @@ function js_pyslice3(c, lo, hi, step) {
 }
 
 
-// ----- js_pysetslice (jsrt.go:7443) -----------------------------------------
+// ----- js_pysetslice ----------------------------------------------------------
 // xs[lo:hi:step] = values. A step of 1 SPLICES (the replacement may have a
 // different length, so xs[1:3] = [9] shortens the list); an extended step
 // assigns element by element and needs exactly as many values as it selects.
@@ -4544,7 +4305,7 @@ function js_pysetslice(arr, lo, hi, step, values) {
 }
 
 
-// ----- js_pydelslice (jsrt.go:7477) -----------------------------------------
+// ----- js_pydelslice ----------------------------------------------------------
 // del xs[lo:hi:step]: drop every selected element. Go builds the drop set as a
 // map[int]bool and then compacts; a boolean array over the same range is the
 // same thing without a map.
@@ -4580,7 +4341,7 @@ function js_pydelslice(arr, lo, hi, step) {
 }
 
 
-// ----- js_pydict (jsrt.go:7639) ---------------------------------------------
+// ----- js_pydict --------------------------------------------------------------
 // dict(x): a fresh dict copying the entries of a dict argument, in its
 // insertion order. Anything else - including a list of pairs, which real Python
 // accepts - yields the EMPTY dict, which is what the Go twin does.
@@ -4604,7 +4365,7 @@ function js_pydict(src) {
 }
 
 
-// ----- js_pyellipsis (jsrt.go:7677) -----------------------------------------
+// ----- js_pyellipsis ----------------------------------------------------------
 // The Ellipsis singleton: `...` is a value of its own and `x is ...` has to
 // hold, so there is exactly one of it per runtime.
 function js_pyellipsis() {
@@ -4613,7 +4374,7 @@ function js_pyellipsis() {
 }
 
 
-// ----- js_pydel_item (jsrt.go:7699) -----------------------------------------
+// ----- js_pydel_item ----------------------------------------------------------
 // del obj[k]. Unlike js_pyget, whose miss is an rt.fail, this one RAISES a
 // catchable KeyError / IndexError - the Go twin panics with a jsThrown.
 function js_pydel_item(c, k) {
@@ -4635,7 +4396,7 @@ function js_pydel_item(c, k) {
 }
 
 
-// ----- js_pymatchseq (jsrt.go:7794) -----------------------------------------
+// ----- js_pymatchseq ----------------------------------------------------------
 // A sequence pattern matches lists and tuples (one type here), never a string
 // and never a dict: (value, count before the *rest, count after it, is there a
 // *rest) -> does the shape fit.
@@ -4648,7 +4409,7 @@ function js_pymatchseq(v, before, after, hasRest) {
 }
 
 
-// ----- js_pymatchmap (jsrt.go:7806) -----------------------------------------
+// ----- js_pymatchmap ----------------------------------------------------------
 // A mapping pattern matches a dict (not a set) that holds every listed key.
 // Membership is pyDictFind, which compares keys with === - Go's rt.dictFind.
 function js_pymatchmap(v, want) {
@@ -4666,7 +4427,7 @@ function js_pymatchmap(v, want) {
 }
 
 
-// ----- js_pymaprest (jsrt.go:7827) ------------------------------------------
+// ----- js_pymaprest -----------------------------------------------------------
 // The **rest of a mapping pattern: a fresh dict of every entry whose key the
 // pattern did not name, in the subject's insertion order. The skip test is
 // pyEqual - Python's == - and NOT the === of pyDictFind that js_pymatchmap
@@ -4699,7 +4460,7 @@ function js_pymaprest(v, want) {
 }
 
 
-// ----- js_pymatchargs (jsrt.go:7856) ----------------------------------------
+// ----- js_pymatchargs ---------------------------------------------------------
 // The POSITIONAL sub-values of a class pattern: (value, class, count) -> the n
 // attributes __match_args__ names, or undefined when the class cannot provide
 // them. A class WITHOUT __match_args__ accepts exactly one positional pattern
@@ -4728,30 +4489,16 @@ function js_pymatchargs(v, cls, count) {
 }
 
 
-// ----- js_is_type (jsrt.go:5266 -> rt.isTypeName, jsrt.go:8432) -------------
-// `v is T`, the language-neutral spelling. The jsChar arm of the Go twin is
-// Kotlin's and is unreachable from Python, which has no character type; the
-// rest is the Go function line for line. The name switch is the JVM/Kotlin
-// vocabulary, not Python's - the Python grammars do not emit this extern at
-// all, and it is here because -rt-lib must export every language-neutral
-// symbol of the table.
+// ----- js_is_type (Go: rt.isTypeName) -----------------------------------------
 // js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
+// The Python grammars do not emit it; it is exported because -rt-lib must
+// export every language-neutral symbol of the table.
 // ============================================================================
-// CHUNK D -- classes, attributes, calls and exceptions.
+// Classes, attributes, calls and exceptions (the pyD* helpers).
 //
-// Ports, function for function, from abnf/jsrt.go:
-//     js_pyclass_new  (7193)   js_pyclass_fill (7220)   js_pygetattr   (7234)
-//     js_pysetattr    (7239)   js_pycall       (7256)   js_pysig       (7284)
-//     js_pytype       (7345)   js_pyisinst     (7353)   js_pybuiltincls(7788)
-//     js_pyexc        (5273)   js_pyexcmatch   (7501)   js_pyexcsplit  (7515)
-//     js_pyenter      (7657)   js_pyexit       (7666)   js_pytruthy    (6273)
-// plus the helpers rt.pyBindCall (9486), rt.pyMethodCall (9207),
-// rt.callPyValue (9260), rt.pyIsInstance (9280), pyLinearize (9010),
-// pyRootExcType (9593) and rt.pyExcGroupLeaves (9620).
-//
-// js_pyannot is LOWERED IN THE EMITTER and is deliberately absent.
-// js_supercall is NOT emitted by languages/python-to-llvm-ir.abnf
-// (`grep -n js_supercall` on it is empty), so it is deliberately absent too.
+// Each extern below names the abnf/jsrt.go function it ports.
+// js_pyannot is LOWERED IN THE EMITTER and is deliberately absent, and
+// js_supercall is not emitted by languages/python-to-llvm-ir.abnf.
 //
 // Every helper carries the `pyD` prefix, EXCEPT `pyBindCall`, which the other
 // chunks call by that exact name.
@@ -4766,17 +4513,17 @@ function js_pymatchargs(v, cls, count) {
 // attribute anyway.
 // ============================================================================
 
-// ----- Python truthiness (Go: js_pytruthy, jsrt.go:6273) --------------------
+// ----- Python truthiness (Go: js_pytruthy) ------------------------------------
 
 // A RAW RETURN. languages/python-to-llvm-ir.abnf sets
-// `core.truthyExt = "js_pytruthy"` (line 3312) and compile-core's truthy()
+// `core.truthyExt = "js_pytruthy"` and compile-core's truthy()
 // emits `icmp ne <call>, 0` straight on that extern's result, so it must answer
 // a RAW INTEGER rather than a handle. The `__raw` suffix is what tells
 // languages/metajs-to-llvm-ir.abnf's export scanner to export the symbol as
 // `js_pytruthy` and put this function's result through the floor's own
 // js_truthy first. Without it a MetaJS `false` would come back as the HANDLE of
 // false, which is 2, and 2 != 0, so EVERY condition in the program would be
-// taken - silently. See docs/runtime-next-plan.md part 3, item 2.
+// taken - silently.
 function js_pytruthy__raw(v) {
     var els = pySetElemsOf(v)
     if (els !== null) { return els.length > 0 }
@@ -4785,13 +4532,11 @@ function js_pytruthy__raw(v) {
     return pyDTruthy(v)
 }
 
-// Go's rt.truthy (jsrt.go:909) for the Python value model. The boxed float /
-// sized-integer / Java-double arms of the Go switch are unreachable from
-// Python (its int and float are both the plain number), and the *jsBigInt arm
-// is `t.v.Sign() != 0` - which here has to be read off the {__pybig} shape
-// chunk A owns, because a plain object would otherwise take the `default: true`
-// arm and `if 0n:` would be taken. The prelude has no big-sign helper, so the
-// limbs are scanned directly.
+// Go's rt.truthy for the Python value model. The sized-integer / Java-double
+// arms of the Go switch are unreachable from Python, and the *jsBigInt arm
+// is `t.v.Sign() != 0` - which here has to be read off the {__pybig} shape,
+// because a plain object would otherwise take the `default: true` arm and
+// `if 0n:` would be taken. The limbs are scanned directly.
 function pyDTruthy(v) {
     if (rtIsNil(v)) { return false }
     if (pyIsBool(v)) { return v }
@@ -4890,7 +4635,7 @@ function pySuperAttr(s, name) {
         pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
     }
     // A staticmethod / classmethod found through super(), same rule as the call
-    // path in pySuperMCall. docs/todo.md 1.7.
+    // path in pySuperMCall.
     if (pyDIsStatic(m) || pyDIsClsM(m)) { return pyDDescGet(m, pyDSuperOwner(s), name) }
     if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m, name) }
     return m
@@ -4910,36 +4655,25 @@ function pyDBindMethod(self, m, name) {
     return pyBMSet(b, name, self, m)
 }
 
-// ----- what a BOUND METHOD knows about itself (docs/todo.md 1.4) ------------
+// ----- what a BOUND METHOD knows about itself ---------------------------------
 //
-// getattr([1,2], "count").__name__ was None in both compiled halves and
-// '<lambda>' in the interpreter where CPython says 'count'. Neither of the two
+// getattr([1,2], "count").__name__ is 'count' in CPython. Neither of the two
 // name tables above can answer it: pyBFnObjs holds what a `def` bound and
 // pyBBFnObjs the builtins, and both are keyed by the closure VALUE, while a
 // bound method is a FRESH closure minted at the attribute read.
 //
-// ONE flat array with a stride of four - closure, method name, receiver,
-// underlying function (null for a builtin method) - and not four parallel
-// arrays, because every module-level global in this file costs (see the arena
-// note on pyBBFnObjs above). It starts EMPTY, so it adds no live bytes to a
-// program that never reads a method off a value; it then grows with the number
-// of bound methods created, exactly as pyBFnObjs grows with the number of times
-// a `def` runs. The scan is walked only by introspection, never by a call.
-//
-// WHAT IT COSTS, measured, because the arena note above says a kilobyte of
-// anything on tests/bench/mod.py is worth ~2.4%. It is NOT on a threshold this
-// time and the exact counters say so: collections=3574 and heap=11,627,376 are
-// IDENTICAL before and after (the live set moves 237,440 -> 243,392 bytes, all
-// of it boot-time code, and the arena does not step). The binary grows 1,205,064
-// -> 1,241,736 bytes. `tests/bench.sh python --paired <base> --draws 21`, run
-// with ONLY this file's change in the tree so no other agent's work is in it,
-// reads -0.23% - "no difference".
+// ONE flat array with a stride of FIVE - closure, method name, receiver,
+// underlying function (null for a builtin method), kind - and not parallel
+// arrays, because every module-level global in this file costs (see the note
+// on pyBBFnObjs above). It starts EMPTY, so it adds no live bytes to a program
+// that never reads a method off a value; it then grows with the number of bound
+// methods created, exactly as pyBFnObjs grows with the number of times a `def`
+// runs. The scan is walked only by introspection, never by a call.
 //
 // Keep in step with pyBoundInfo / pyBoundOf in abnf/jsrt.go and the pyBM*
 // family in languages/python-interpreter.abnf.
-// The stride is FIVE, not four: the fifth slot is the KIND, because three
-// different CPython callables now share this record and they print, name and
-// introspect differently (docs/todo.md 1.7).
+// The KIND distinguishes three CPython callables that share this record and
+// print, name and introspect differently:
 //
 //   ""  a bound method
 //   "d" an unbound METHOD DESCRIPTOR read off a builtin type object - list.count,
@@ -4999,7 +4733,7 @@ function pyBMRender(i) {
 }
 // The class a classmethod reached through super() binds to: the ORIGINAL cls -
 // `super().who()` inside C.who() must still pass C - which __sobj already is
-// when the frame's first argument was a class. docs/todo.md 1.7.
+// when the frame's first argument was a class.
 function pyDSuperOwner(s) {
     var o = s["__sobj"]
     if (pyIsClass(o)) { return o }
@@ -5023,7 +4757,7 @@ function pySuperMCall(s, name, args, kw) {
 
 // ----- class objects (Go: js_pyclass_new / pyLinearize / js_pyclass_fill) ---
 
-// pyLinearize (jsrt.go:9010) is the C3 merge of the bases' MROs with the base
+// pyLinearize is the C3 merge of the bases' MROs with the base
 // list itself - the order Python computes, minus the class itself (the caller
 // prepends it). A hierarchy C3 cannot resolve consistently falls back to
 // first-seen order rather than aborting the program. Go consumes each sequence
@@ -5171,24 +4905,18 @@ function js_pyclass_fill(cls, bodyDict) {
 // obj.name: an instance checks its own attributes, then the MRO of its class
 // (running a __get__ descriptor found there); a class checks its own MRO.
 // Anything else takes the ordinary member read. The whole lookup order is
-// rt.pyGetAttr (jsrt.go:9094), which the prelude provides.
+// rt.pyGetAttr, which the prelude provides.
 function js_pygetattr(obj, name) { return pyGetAttr(obj, pyToStr(name)) }
 
 // obj.name = v: a __set__ descriptor on the class wins; __slots__ (when the
 // class declares it) rejects an unknown name by raising, like Python.
-// rt.pySetAttr is jsrt.go:9158, in the prelude.
+// rt.pySetAttr is in the prelude.
 function js_pysetattr(obj, name, v) {
     pySetAttr(obj, pyToStr(name), v)
     return undefined
 }
 
-// del obj.name (Go: js_pydel_attr, jsrt.go:14096). THIS BODY WAS SIMPLY MISSING:
-// python-to-llvm-ir.abnf's makeDel emits js_pydel_attr and abnf/jsrt.go defines it,
-// so `del o.attr` ran under llvm.Run and the NATIVE build failed to LINK -
-// "1 unresolved symbol(s): js_pydel_attr". No gate could see it: the matrix,
-// --full and --cross all run llvm.Run (manual chapter 3), and clang-check only
-// builds the ratchet, which had no `del obj.attr` in it. Found by a stress probe
-// for docs/todo.md 1.6, which is how the whole class gets found.
+// del obj.name (Go: js_pydel_attr). python-to-llvm-ir.abnf's makeDel emits it.
 // `delKey` is the floor's js_del under its host-builtin name (runtime.c host id
 // 63); it drops the key AND its insertion-order entry, which is what keeps
 // keysOf, and therefore vars()/dir(), right after a delete.
@@ -5200,14 +4928,13 @@ function js_pydel_attr(obj, name) {
     return undefined
 }
 
-// ----- the signature registry (Go: pySig / js_pysig, jsrt.go:9479) ----------
+// ----- the signature registry (Go: pySig / js_pysig) ----------------------------
 
 // Go keys rt.pySigs by the callee VALUE (a Go map over interface{}). A closure
 // here is a floor cell: nothing can be stored on it and there is no Map in the
 // frozen subset, so the registry is an identity-keyed side table - four
-// parallel arrays and a `===` scan, the shape rbLambdas uses in ruby-rt.metajs.
-// It is O(n) in the defs a program has ever registered, which is a constant per
-// module.
+// parallel arrays and a `===` scan. It is O(n) in the defs a program has ever
+// registered, which is a constant per module.
 var pyDSigFn = []
 var pyDSigNames = []
 var pyDSigKwOnly = []
@@ -5250,7 +4977,7 @@ function js_pysig(clo, names, nkwonly, ext) {
 }
 
 // pyBindCall turns (positional, keyword dict) into the callee's argument array.
-// Go: rt.pyBindCall, jsrt.go:9486. NAMED WITHOUT THE CHUNK PREFIX because the
+// Go: rt.pyBindCall. NAMED WITHOUT THE CHUNK PREFIX because the
 // other chunks call it by this exact name.
 function pyBindCall(callee, pos, kw) {
     var hasKw = pyIsDict(kw)
@@ -5409,16 +5136,13 @@ function js_pycall(callee, pos, kw) {
     // in exactly those cases, so handing `bound` on covers both and needs no
     // test. It must NOT be decided by LENGTH: the extended layout is
     // [p0..pn-1, *args, **kwargs], so a positional count of names.length + 2
-    // rebinds to an array of the same length - `def f(a, *rest, **kw)` called
-    // `f(1, 2, 3)`, where passing `pos` bound `rest` and `kw` to numbers and
-    // the first len(rest) aborted.
+    // rebinds to an array of the same length (`def f(a, *rest, **kw)` called
+    // `f(1, 2, 3)`).
     return pyCall(callee, bound)
 }
 
 // [v, ...args], the receiver-prepending Python's `self` needs, is SHARED as
-// rtPrepend - lib/runtime.metajs. pyDPrepend was recorded as merged in Part A's
-// first pass and a fourth copy was still here; rtPrepend's null/undefined guard
-// is a superset of it.
+// rtPrepend - lib/runtime.metajs.
 
 // Allocate an instance of cls and run its __init__ with self prepended.
 function pyDInstantiate(cls, args, kw) {
@@ -5436,25 +5160,21 @@ function pyDInstantiate(cls, args, kw) {
 
 // The value a `raise` actually raises. `raise SomeClass` names a CLASS, and
 // CPython instantiates it with no arguments; anything else is raised as it
-// stands. Without this both compiled halves threw the class OBJECT, which no
-// except clause matches, so `raise ValueError` aborted the process while the
-// interpreter half - whose makeRaise has the same line - caught it.
-// docs/todo.md 1.7. Go: js_pyraiseval in abnf/jsrt.go.
+// stands (a class OBJECT would match no except clause). The interpreter half's
+// makeRaise has the same line. Go: js_pyraiseval in abnf/jsrt.go.
 function js_pyraiseval(v) {
     if (pyClassOf(v) === null) { return v }
     return pyDInstantiate(pyClassOf(v), [], undefined)
 }
 
-// callPyValue (jsrt.go:9260) calls a value that may itself be a class or a
+// callPyValue calls a value that may itself be a class or a
 // __call__ instance.
 function pyDCallPyValue(v, args, kw) {
     if (pyIsSuper(v)) { return pySuperCall(v, args) }
     // A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
     // float/... to js_pybuiltincls's stable class object with the conversion
-    // closure hung on it as __conv (declBind in python-to-llvm-ir.abnf).
-    // js_pycall had this arm and this function did not, so `map(str, xs)` - a
-    // builtin class passed as a function - died with "call of a non function
-    // value". Go: rt.callPyValue in abnf/jsrt.go.
+    // closure hung on it as __conv (declBind in python-to-llvm-ir.abnf), so
+    // `map(str, xs)` works. Go: rt.callPyValue in abnf/jsrt.go.
     if (v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v)) {
         var cv = v["__conv"]
         if (typeof cv == "function") { return pyCall(cv, args) }
@@ -5474,13 +5194,6 @@ function pyDCallPyValue(v, args, kw) {
     return pyCall(v, pyBindCall(v, args, kw))
 }
 
-// pyMethodCall (jsrt.go:9207) is obj.name(args) with Python's binding rule: an
-// instance prepends itself, a class object does not (so Base.m(self) works).
-//
-// NOTE FOR THE CHUNK THAT OWNS js_pymcall: call this as
-// pyDMethodCall(target, name, args, kw). Its final fall-through is Go's
-// rt.memberCall - the builtin method table for strings / lists / dicts - which
-// this chunk does not own; it is spelled pyMemberCall(target, name, args) here.
 // One {value, done} record from a floor generator step, in PYTHON's protocol: the
 // yielded value, or a StopIteration carrying the body's return value. Shared by
 // send()/next()/__next__() and by throw(), which answers the same way.
@@ -5491,16 +5204,10 @@ function pyGenValue(st) {
         // CPython's StopIteration carries NO argument when the body returned None
         // and exactly one when it returned a value: repr() says StopIteration()
         // against StopIteration(7). pyExcInstance's one-string args is every other
-        // runtime exception's shape, so this one is rewritten here. Both engines
-        // used to disagree with CPython AND with each other - this half said
-        // StopIteration('') and the interpreter StopIteration(None).
-        // StopIteration carries the body's RETURN value, and a generator that
-        // returned nothing (or that close() abandoned) carries None. It has to be
-        // spelled null and not undefined: pyGetAttr's own test is
-        // `obj[name] !== undefined`, so an undefined-valued attribute reads as
-        // ABSENT and `e.value` died natively with "'StopIteration' object has no
-        // attribute 'value'" while llvm.Run answered None - a layer-2-only
-        // divergence, which only a native probe can see.
+        // runtime exception's shape, so this one is rewritten here.
+        // The value (and e.value) is spelled null and not undefined: pyGetAttr's
+        // own test is `obj[name] !== undefined`, so an undefined-valued attribute
+        // would read as ABSENT.
         var sv = anytype
         sv = st["value"]
         if (sv === undefined) { sv = null }
@@ -5513,13 +5220,17 @@ function pyGenValue(st) {
     return st["value"]
 }
 
+// pyMethodCall is obj.name(args) with Python's binding rule: an instance
+// prepends itself, a class object does not (so Base.m(self) works). Its final
+// fall-through is Go's rt.memberCall - the builtin method table for strings /
+// lists / dicts - spelled pyMemberCall(target, name, args) here.
 function pyDMethodCall(target, name, args, kw) {
     // super().m(...): the lookup starts one past the defining class in the
     // instance's MRO, and the instance is prepended as self.
     if (pyIsSuper(target)) { return pySuperMCall(target, name, args, kw) }
     // str's own method library (the str-methods chapter at the end of this file).
-    // Checked FIRST and by NAME, so a name it does not know still reaches
-    // pyFStrMethod's Java-style builtins exactly as it did before.
+    // Checked FIRST and by NAME, so a name it does not know falls through to
+    // pyMemberCall's string arm (pyFStrMethod), which reports it.
     if (typeof target == "string") {
         if (pySIsStrMethod(name)) { return pyStrMethod(target, name, args, kw) }
     }
@@ -5528,7 +5239,6 @@ function pyDMethodCall(target, name, args, kw) {
     // function. It sits FIRST because a module holds arbitrary member names, one
     // of which is literally `next`: without this the cursor and generator arms
     // below would claim it. math is handled ahead of this, in js_pyrxmcall.
-    // docs/todo.md 1.7.
     if (pyIsObj(target)) {
         if (target["__pymod"] !== undefined) {
             var mv = target[pyToStr(name)]
@@ -5539,16 +5249,13 @@ function pyDMethodCall(target, name, args, kw) {
             return pyDCallPyValue(mv, args, kw)
         }
     }
-    // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, and this arm is
-    // what says so. It used to fall into the generator arm below, because
-    // pyIsGen answered true for one - a plain object carrying a callable "next"
-    // is exactly what pyMkIter builds. docs/todo.md 1.4.
+    // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, and this arm
+    // keeps it out of the generator arm below.
     //
     // CPython's list_iterator carries __next__ and __iter__ and NOTHING else, so
-    // send / close / throw - and every other name - are AttributeError. All three
-    // are answered here rather than left to fall through, because falling through
-    // reached pyMemberCall and aborted the process instead of raising something an
-    // `except AttributeError:` can catch.
+    // send / close / throw - and every other name - are AttributeError, raised
+    // here rather than left to fall through to pyMemberCall, which would abort
+    // instead of raising something an `except AttributeError:` can catch.
     if (pyIsIter(target)) {
         // pyItStep answers the same {value, done} record a generator step does,
         // so the StopIteration protocol is pyGenValue's, unchanged. An exhausted
@@ -5574,9 +5281,7 @@ function pyDMethodCall(target, name, args, kw) {
             // A CLOSED generator needs no special case here: close() below is a
             // real close in the floor (runtime.c's gen_close sets the cell's done
             // flag), so gen_next answers {undefined, true} for it exactly as
-            // (*jsGenerator).step does. It used to need an identity-keyed side
-            // table, which the for-loop's own iteration never consulted - so
-            // `for v in g` after g.close() still yielded the rest, natively only.
+            // (*jsGenerator).step does.
             st = target["next"].apply(target, [sent])
             return pyGenValue(st)
         }
@@ -5590,7 +5295,7 @@ function pyDMethodCall(target, name, args, kw) {
             tv = undefined
             if (args.length > 0) { tv = args[0] }
             // g.throw(SomeClass) instantiates it, exactly as `raise SomeClass`
-            // does (js_pyraiseval, docs/todo.md 1.7).
+            // does (js_pyraiseval).
             tv = js_pyraiseval(tv)
             var tst = anytype
             tst = target["throw"].apply(target, [tv])
@@ -5613,7 +5318,6 @@ function pyDMethodCall(target, name, args, kw) {
     // object rather than read as a value. The emitter routes a method call
     // through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
     // on both paths or the read works and the call says "unknown method".
-    // docs/todo.md 1.7.
     var dtn = pyClassName(target)
     if (dtn !== null) {
         var dsamp = pyDTypeSample(dtn)
@@ -5681,12 +5385,9 @@ function pyDMethodCall(target, name, args, kw) {
             fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
         }
     }
-    // THE WHOLE DICT AND SET METHOD SURFACE - docs/todo.md 1.3, the residue of
-    // 51436f9 (which did the list surface). Only set.add and dict.pop were here,
-    // and keys/values/get reached pyMemberCall's shared dict arm (pyFDictMethod);
-    // clear/copy/setdefault/update and pop/clear/copy/remove/discard/union all
-    // aborted in every engine. Go: pySetMethod/pyDictMethod in abnf/jsrt.go; the
-    // interpreter: the same two in languages/python-interpreter.abnf.
+    // THE DICT AND SET METHOD SURFACE. Go: pySetMethod/pyDictMethod in
+    // abnf/jsrt.go; the interpreter: the same two in
+    // languages/python-interpreter.abnf.
     //
     // A name the OTHER type owns raises AttributeError, which is what CPython
     // does - and the two "only" lists are narrower than the two method sets,
@@ -5706,11 +5407,8 @@ function pyDMethodCall(target, name, args, kw) {
                                 "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
         }
     }
-    // THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. `count` was the only one
-    // 6eec533 added (pyMemberCall's `count` arm is KOTLIN's `xs.count { pred }`);
-    // sort/insert/remove/extend/index/reverse/clear/copy all aborted with
-    // "unknown list method" in every engine, and pop IGNORED its index argument
-    // in all three ([3,1,2].pop(0) answered 2 where CPython answers 3). Go:
+    // THE LIST METHOD SURFACE. pyMemberCall's `count` arm is KOTLIN's
+    // `xs.count { pred }`, so Python's list methods are answered here first. Go:
     // pyListMethod in abnf/jsrt.go; the interpreter: pyListMethod in
     // languages/python-interpreter.abnf.
     if (pyIsArr(target)) {
@@ -5740,7 +5438,7 @@ function pyDListCount(xs, v) {
     return n
 }
 
-// docs/todo.md 1.3 - Python's list methods, the NAME SET first so that
+// Python's list methods, the NAME SET first so that
 // hasattr()/getattr() can ask exactly what the dispatcher answers. Keep in step
 // with pyIsListMethod in abnf/jsrt.go and in languages/python-interpreter.abnf.
 function pyIsListMethod(name) {
@@ -5945,10 +5643,9 @@ function pyKwArg(kw, name) {
 
 // ------------------------------------------------------------ dict / set ---
 //
-// docs/todo.md 1.3, the residue of 51436f9. The NAME SETS first, so that
-// hasattr()/getattr() ask exactly what the dispatcher answers. Keep in step
-// with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
-// languages/python-interpreter.abnf.
+// The NAME SETS first, so that hasattr()/getattr() ask exactly what the
+// dispatcher answers. Keep in step with pyIsDictMethod/pyIsSetMethod in
+// abnf/jsrt.go and in languages/python-interpreter.abnf.
 //
 // NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
 // symmetric_difference/isdisjoint/issuperset and their *_update forms are
@@ -5993,10 +5690,8 @@ function pyDictMethod(d, name, args, kw) {
     if (name == "values") { return pyCCopyArr(vals) }
     // .items(): a list of [key, value] pairs in insertion order (each pair a
     // 2 element list, since the subset has no tuples; CPython answers a
-    // dict_items VIEW of TUPLES, which is docs/todo.md 3.1 and not this item).
-    // The compiler grammar USED to lower a written d.items() into a loop of its
-    // own and never reach here, so getattr(d, "items")() aborted; that lowering
-    // is gone and every form arrives here.
+    // dict_items VIEW of TUPLES). Every form, written or via getattr, arrives
+    // here.
     if (name == "items") {
         var pairs = []
         var pi2 = 0
@@ -6026,8 +5721,8 @@ function pyDictMethod(d, name, args, kw) {
     }
     // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
     // The pair is a 2-element list, like items()' pairs, because this subset has
-    // no tuple (docs/todo.md 3.1). Empty raises the KeyError whose argument is a
-    // sentence rather than a key.
+    // no tuple. Empty raises the KeyError whose argument is a sentence rather
+    // than a key.
     if (name == "popitem") {
         if (keys.length == 0) {
             throw pyExcInstanceV("KeyError", "popitem(): dictionary is empty")
@@ -6075,8 +5770,8 @@ function pyDictMethod(d, name, args, kw) {
     // KEYWORD one works only on a WRITTEN call: a bound builtin from getattr()
     // cannot carry keyword arguments (a signature-less builtin receives its kw
     // dict as a trailing positional and the wrapper cannot tell that from a real
-    // argument - docs/todo.md 2.13), so getattr(d, "update")(a=1) is not
-    // d.update(a=1); the written call is.
+    // argument), so getattr(d, "update")(a=1) is not d.update(a=1); the written
+    // call is.
     if (name == "update") {
         if (args.length > 1) {
             throw pyExcInstance("TypeError",
@@ -6235,13 +5930,10 @@ function pySetMethod(els, name, args) {
     return undefined
 }
 
-// docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
-// object's own property map, so hasattr([3,1,2], "count") was False and
-// hasattr("s", "upper") was False where CPython answers True in both. This is
-// the same question the DISPATCHER answers, asked by name: the str table
-// (pySIsStrMethod), the list table (pyIsListMethod), and the dict/set arms of
-// pyDMethodCall. Keep in step with pyBuiltinAttr in abnf/jsrt.go and in
-// languages/python-interpreter.abnf.
+// hasattr()/getattr() on a builtin value: the same question the DISPATCHER
+// answers, asked by name - the str table (pySIsStrMethod), the list table
+// (pyIsListMethod), and the dict/set arms of pyDMethodCall. Keep in step with
+// pyBuiltinAttr in abnf/jsrt.go and in languages/python-interpreter.abnf.
 //
 // A builtin this project does not HAVE stays False on purpose - hasattr(3,
 // "bit_length") is False here and True in CPython - because the alternative is
@@ -6276,13 +5968,12 @@ function pyDBoundBuiltin(target, name) {
     return pyBMSet(f, name, target, null)
 }
 
-// ----- staticmethod / classmethod (docs/todo.md 1.7) ------------------------
+// ----- staticmethod / classmethod ----------------------------------------------
 //
-// Both were undefined in every engine, so `@staticmethod` aborted the run. They
-// are DESCRIPTORS: the decorator only WRAPS, and the unwrapping happens at the
-// class-member lookup, which is the one place that knows both the receiver and
-// its class. A staticmethod yields the plain function; a classmethod yields it
-// bound to a class - and to the class of the RECEIVER, so a subclass instance
+// Both are DESCRIPTORS: the decorator only WRAPS, and the unwrapping happens at
+// the class-member lookup, which is the one place that knows both the receiver
+// and its class. A staticmethod yields the plain function; a classmethod yields
+// it bound to a class - and to the class of the RECEIVER, so a subclass instance
 // passes the subclass as cls, which is what makes alternative constructors work.
 //
 // The wrapper is a plain object with a __-prefixed slot, so keysOf hides it and
@@ -6308,15 +5999,14 @@ function pyDDescGet(m, owner, name) {
     return pyDBindMethod(owner, m["__pycm"], name)
 }
 
-// ----- the UNBOUND method descriptor (docs/todo.md 1.7) ---------------------
+// ----- the UNBOUND method descriptor -------------------------------------------
 //
 // `list.count` read off the TYPE OBJECT is not a bound method: CPython hands
 // back <method 'count' of 'list' objects>, a descriptor with no __self__ that
 // takes the receiver as its first argument, so list.count([1,2,2], 2) is 2.
-// Every engine raised "type object 'list' has no attribute 'count'" instead.
-// The item named list.count as the EXAMPLE; the whole family falls out of one
-// arm, because "is this a method of that type" is already answered per type by
-// pyDBuiltinAttr - it just needs a VALUE of the type, which pyDTypeSample gives.
+// The whole family falls out of one arm, because "is this a method of that
+// type" is already answered per type by pyDBuiltinAttr - it just needs a VALUE
+// of the type, which pyDTypeSample gives.
 function pyDTypeSample(tname) {
     if (tname == "list") { return [] }
     if (tname == "str") { return "" }
@@ -6350,9 +6040,8 @@ function pyDUnboundDesc(cls, name) {
 
 // A MODULE-level builtin function read off a module object as a VALUE -
 // `f = math.sqrt` - rather than called through it. Minted ON DEMAND, so a
-// program that never does it pays nothing: the alternative was twenty-five
-// closures held in the module object forever, and tests/bench/mod.py sits on an
-// arena threshold (docs/todo.md 2.9).
+// program that never does it pays nothing, rather than holding twenty-five
+// closures in the module object forever (live data costs, see pyBBFnObjs).
 function pyDModuleFn(mod, name) {
     var f = function() {
         var args = []
@@ -6366,21 +6055,17 @@ function pyDModuleFn(mod, name) {
     return pyBMSetK(f, name, mod, null, "m")
 }
 
-// docs/todo.md 5.2 and 2.4. pyMemberCall is layer 2's copy of the SHARED
-// member-call table rt.memberCall (abnf/jsrt.go), which nine languages land in,
-// and sixteen of its names are ones Python cannot utter: `xs.sumOf(f)` answered
-// 6 and `xs.size()` answered 2 in both compiled halves where CPython raises
+// pyMemberCall is layer 2's copy of the SHARED member-call table rt.memberCall
+// (abnf/jsrt.go), which nine languages land in, and some of its names are ones
+// Python cannot utter (`xs.sumOf(f)`, `xs.size()`): CPython raises
 // AttributeError. The names are denied here - AFTER the user-class arms above,
-// so a Python class that DEFINES a method called forEach is unaffected - and the
-// arms themselves are gone from pyFStrMethod / pyFListMethod below. The same
+// so a Python class that DEFINES a method called forEach is unaffected. The same
 // table is pyForeignMethod in abnf/jsrt.go, called at the same point by
-// pyMethodCall, so the two compiled halves keep agreeing. isEmpty and removeLast
-// stay in lib/swift-rt.metajs and lib/dart-rt.metajs, where they are the
-// language's real methods.
+// pyMethodCall, so the two compiled halves keep agreeing.
 //
 // The denial is keyed by RECEIVER TYPE, not by name alone: `get` is a real dict
 // method (d.get(k, default)) and `add` is a real set method, so a flat name
-// switch - which is what the four-name version was - would have broken both.
+// switch would break both.
 function pyDForeign(target, name) {
     if (pyIsArr(target)) {
         // Kotlin's, Java's, Dart's and Swift's list methods. `count` is NOT here:
@@ -6420,7 +6105,7 @@ function js_pytype(v) {
 }
 
 // isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
-// Go: rt.pyIsInstance, jsrt.go:9280.
+// Go: rt.pyIsInstance.
 function pyDIsInstance(v, target) {
     var i = 0
     if (pyIsArr(target)) {
@@ -6477,19 +6162,14 @@ function js_pyisinst(v, target) { return pyDIsInstance(v, target) }
 //     object is the base of everything      isinstance(1, object)  -> True
 //     bool derives from int                 isinstance(True, int)  -> True
 //
-// Both were wrong, in two different ways: isinstance(1, object) was True in the
-// interpreter and FALSE in both compiled halves (a live halves divergence the
-// docs/todo.md 1.4 sweep turned up and the item did not list), while
-// isinstance(True, int) and issubclass(bool, int) were False in EVERY engine -
-// the defect class byte-identity cannot see. Go: pyBuiltinSub in abnf/jsrt.go.
+// Go: pyBuiltinSub in abnf/jsrt.go.
 function pyBuiltinSub(child, base) {
     if (child == base) { return true }
     if (base == "object") { return true }
     return child == "bool" && base == "int"
 }
 
-// issubclass(C, B) - docs/todo.md 1.4, one of its two named compiler-half gaps
-// (`variable not defined: issubclass`). Go: rt.pyIsSubclass in abnf/jsrt.go;
+// issubclass(C, B). Go: rt.pyIsSubclass in abnf/jsrt.go;
 // interpreter: clsIsSub in languages/python-interpreter.abnf.
 function js_pyissubclass(c, target) { return pyDIsSubclass(c, target) }
 
@@ -6562,7 +6242,7 @@ function js_pyexc(name, args) {
     return inst
 }
 
-// pyRootExcType (jsrt.go:9593): is the except clause's type the ROOT of the
+// pyRootExcType: is the except clause's type the ROOT of the
 // exception hierarchy - the only one that catches a raised non-instance value?
 // A tuple of types (written as a list here) counts when any element is a root.
 function pyDRootExcType(target) {
@@ -6592,7 +6272,7 @@ function js_pyexcmatch(v, target) {
     return pyDRootExcType(target)
 }
 
-// pyExcGroupLeaves (jsrt.go:9620) flattens an ExceptionGroup instance into its
+// pyExcGroupLeaves flattens an ExceptionGroup instance into its
 // leaf exceptions and answers its message alongside. `ok` is false for anything
 // that is not an instance of a class called ExceptionGroup, which is what makes
 // 'except*' fall through to a re-raise on an ordinary exception. The nested
@@ -6674,9 +6354,8 @@ function js_pyexcsplit(grp, typ, cls) {
 // ----- the context-manager protocol (Go: js_pyenter / js_pyexit) ------------
 
 // A context expression that is NOT a context manager (no __enter__) binds its
-// own value and runs the body: that is the approximation `with` had before the
-// protocol existed, kept as the fallback so a plain value still works instead
-// of aborting.
+// own value and runs the body, so a plain value still works instead of
+// aborting.
 function js_pyenter(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null) {
@@ -6701,7 +6380,7 @@ function js_pyexit(mgr, e) {
     }
     return false
 }
-// ============================================================ CHUNK E ======
+// ======================================================= the re module ======
 //
 // The `re` module: the Python half of the shared regular-expression subsystem.
 // This is the line-by-line port of the WHOLE of abnf/jsrtregexpy.go.
@@ -6813,8 +6492,8 @@ function pyERePat(src) {
 // ----- The compile cache -----
 //
 // SHARED as rxCache / rxGet - lib/regex.js, imported at the top of this file,
-// which is where abnf/jsrtregex.go has always kept it: ONE cache for js, kotlin,
-// python and ruby. Four byte-identical private copies retired (fifth pass).
+// which is where abnf/jsrtregex.go keeps it: ONE cache for js, kotlin,
+// python and ruby.
 
 // ----- The three value shapes (Go rxPyIsMod / rxPyIsRe / rxPyIsMatch) -----
 //
@@ -6897,16 +6576,10 @@ function pyERxMkMatch(rv, anchoredSrc, flags, s, m) {
     }
 }
 
-// pyERxMatchOf is Go rxMatchOf. Go answers three values; MetaJS has one return,
-// so the three travel in a record. The program is recovered from the match's own
+// pyERxMatchOf is Go rxMatchOf: the program is recovered from the match's own
 // __rxsrc/__rxflags (Go rxObjRe), NOT from the pattern object's __src/__nf: a
 // match made by re.match carries the ANCHORED source, and the two must not be
-// confused.
-// SHARED as rxMatchOf - lib/regex.js, with kotlin's k5MatchOf and ruby's
-// rbRxMatchOf. rxObjRe reads __rxsrc/__rxflags with the same "" default this
-// spelled as pyERxSlotStr, and the pyNum coercion is the identity on every value
-// __rxcaps can hold (it is written from the engine's own m.caps in three places
-// and nowhere else).
+// confused. SHARED as rxMatchOf - lib/regex.js.
 function pyERxMatchOf(v) { return rxMatchOf(v) }
 
 // pyERxSearch is Go (*jsrt).rxPySearch. The Go body checks the engine's second
@@ -6923,9 +6596,9 @@ function pyERxSearch(rv, s, from) {
 // pyERxAnchored is Go (*jsrt).rxPyAnchoredMatch - re.match / re.fullmatch. These
 // are NOT a search plus a position check: a fullmatch has to BACKTRACK into an
 // alternation, so re.fullmatch("a|ab", "ab") is "ab" and not None. The engine's
-// own anchored entry points express both, including Python's `pos` argument -
-// and unlike the \A(?:...)\z wrapper this used to build, they have no quarrel
-// with the x flag's trailing comments.
+// own anchored entry points express both, including Python's `pos` argument,
+// and unlike a \A(?:...)\z wrapper they have no quarrel with the x flag's
+// trailing comments.
 function pyERxAnchored(rv, s, from, whole) {
     // The two arms are spelled out rather than assigning into one local: a local
     // keeps the TYPE CLASS it is first assigned, so `var m = null` followed by a
@@ -7195,9 +6868,8 @@ function pyERxEscape(s) {
 
 // ----- Dispatch -----
 
-// argAt (jsrt.go:4311): the i'th argument, or undefined past the end. Shared
-// with the section below, whose pyFArgAt was a byte-identical copy until
-// 2026-08-10 - 12 call sites here, 28 there.
+// argAt: the i'th argument, or undefined past the end. Also used by the
+// builtin method table below.
 function pyEArgAt(args, i) {
     if (i < args.length) { return args[i] }
     return undefined
@@ -7328,7 +7000,7 @@ function js_pyrxmcall(target, name, args, kw) {
     // The `math` module rides the same dispatcher: js_pyrxmcall is the ONE
     // extern the python emitter routes every method call through, and a module
     // object is not an instance, a class, a dict or a list, so nothing further
-    // down js_pymcall would find it. docs/todo.md 1.7.
+    // down js_pymcall would find it.
     if (pyMIsMathMod(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
         return pyMathCall(pyToStr(name), args)
@@ -7346,13 +7018,12 @@ function js_pyrxmcall(target, name, args, kw) {
 // ================================================ the `math` module ========
 //
 // Go twin: abnf/jsrtpymath.go. Interpreter: hostGlobals["math"] plus pyMathCall
-// in languages/python-interpreter.abnf. docs/todo.md 1.7.
+// in languages/python-interpreter.abnf.
 //
 // Every arm routes to the host `Math`, which the C floor seeds in full
-// (runtime.c host ids 51-93, thirty-one members) - manual chapter 7.7's rule
-// that d_pow / d_exp / d_log / d_sqrt already exist in the floor and must NOT be
-// reimplemented here. What is NOT in Math is written out: expm1, log1p, fmod,
-// copysign, gcd, lcm and factorial.
+// (runtime.c host ids 51-93) - d_pow / d_exp / d_log / d_sqrt already exist in
+// the floor and must NOT be reimplemented here. What is NOT in Math is written
+// out: expm1, log1p, fmod, copysign, gcd, lcm and factorial.
 //
 // THE ANSWER'S TYPE IS PART OF THE SPECIFICATION, and CPython is not uniform:
 // sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
@@ -7361,11 +7032,10 @@ function js_pyrxmcall(target, name, args, kw) {
 // is the {__flo} box; a plain number is an int.
 //
 // The module is a plain object with no function members, dispatched BY NAME
-// through js_pyrxmcall - twenty-five stored closures would be twenty-five floor
-// cells held forever, and tests/bench/mod.py sits on an arena threshold
-// (docs/todo.md 2.9).
+// through js_pyrxmcall: twenty-five stored closures would be twenty-five floor
+// cells held forever (live data costs, see pyBBFnObjs).
 
-// ----- the `builtins` module (docs/todo.md 1.7) -----------------------------
+// ----- the `builtins` module -------------------------------------------------
 //
 // CPython's len.__self__ IS the builtins module, and `builtins.len is len`
 // holds. The emitter fills this object at boot from the very scope bindings the
@@ -7410,7 +7080,7 @@ function js_pymath_module() {
 }
 
 // MetaJS has no exponent literal (1e308 parses as the identifier e308), so an
-// infinity is BUILT - manual chapter 4. A NaN comes from an invalid operation.
+// infinity is BUILT. A NaN comes from an invalid operation.
 function pyMInf() { return Math.pow(2, 1024) }
 function pyMNaN() { return Math.pow(2, 1024) - Math.pow(2, 1024) }
 
@@ -7425,8 +7095,7 @@ function pyMArg(args, i) {
 }
 
 // CPython 3.14's own domain-error texts, which quote the offending operand as a
-// FLOAT repr ("expected a nonnegative input, got -1.0"). Getting the wording from
-// the oracle rather than inventing one is what makes these rows assertable.
+// FLOAT repr ("expected a nonnegative input, got -1.0").
 function pyMDom(kind, v) {
     var got = pyStr(pyMkFlo(v))
     if (kind == "nonneg") { pyRaiseExc("ValueError", "expected a nonnegative input, got " + got) }
@@ -7521,7 +7190,7 @@ function pyMathCall(name, args) {
         var cs = pyMArg(args, 1)
         // The sign BIT, not `cs < 0`: copysign(1, -0.0) is -1.0 in CPython. A
         // negative zero is recognised by 1/x being negative infinity, and the
-        // negation divides by -1 rather than subtracting (manual chapter 4).
+        // negation divides by -1 rather than subtracting.
         if (cs < 0 || (cs === 0 && 1 / cs < 0)) { return pyMkFlo(cm / (0 - 1)) }
         return pyMkFlo(cm)
     }
@@ -7627,81 +7296,27 @@ function js_pyrxstr(v) {
 // ===================================================== js_pymcall ===========
 //
 // abnf/jsrt.go's js_pymcall: a METHOD CALL. python-to-llvm-ir.abnf never emits it
-// directly - js_pyrxmcall (chunk E) intercepts the `re` module, a Pattern and a
+// directly - js_pyrxmcall intercepts the `re` module, a Pattern and a
 // Match first and falls through to here - so it is not in the export list the
 // emitter needs, but it IS the entry point of the whole method surface.
 function js_pymcall(target, name, args, kw) { return pyDMethodCall(target, name, args, kw) }
 
 // ============================================================================
-// CHUNK F - the builtin method table.
+// The builtin method table (the pyF* helpers).
 //
-// Ports abnf/jsrt.go:2761  func (rt *jsrt) memberCall(target, name, args)
-// and the helpers it reaches that the prelude does not already provide:
-//   argAt            (jsrt.go:4311)
-//   rt.typeOf        (jsrt.go:1523)
-//   dictParts        (jsrt.go:2322)
-//
-// Five more were ported and are GONE again - see the note where they used to
-// stand, below, for the deadness proof (docs/todo.md 2.9).
-//
-// The entry point is deliberately NOT prefixed: chunk D's pyDMethodCall calls
-// it by exactly this name as its final fall-through
+// Ports abnf/jsrt.go's memberCall(target, name, args) for the Python value
+// model. The entry point is deliberately NOT prefixed: pyDMethodCall calls it by
+// exactly this name as its final fall-through
 // (js_pyrxmcall -> js_pymcall -> pyDMethodCall -> pyMemberCall).
 //
-// A note on scope, because it looks alarmingly small for "the builtin method
-// table": Go's memberCall is the LANGUAGE-NEUTRAL dispatcher shared by Java,
-// Kotlin, Go, Dart and Python, and the only Python-reachable names in it are
-// the dict trio (keys / values / get), the list pair (append / pop) and the
-// generator protocol. Python's `.upper()`, `.split()`, `.startswith()`,
-// `.join()`, `.format()`, `.strip()`, `.replace()`, `.sort()`, `.index()`,
-// `.count()` DO NOT EXIST anywhere in abnf/jsrt.go - the Python subset does not
-// have them, and a program using one fails today with
-// "unknown String method: upper". `.items()` is not here either: the compiler
-// lowers `d.items()` to a loop over the keys before it ever emits a call
-// (languages/python-to-llvm-ir.abnf, foldCallMember), and the interpreter
-// answers it in its own grammar-level mcall. The regex methods (.group,
-// .search, .match, .sub, .findall, .span, ...) are intercepted one layer up by
-// js_pyrxmcall (abnf/jsrtregexpy.go) and never reach here.
+// Go's memberCall is the LANGUAGE-NEUTRAL dispatcher shared by Java, Kotlin,
+// Go, Dart and Python. Python's own method surface (str methods, the list, dict
+// and set surfaces, the generator protocol, `re`) is answered in pyDMethodCall
+// before this is reached, and pyDForeign denies the other languages' method
+// names first, so what is left here is mostly the error arms.
 // ============================================================================
 
-// argAt (jsrt.go:4311) WAS re-declared here as pyFArgAt: a byte-identical copy
-// of pyEArgAt above, deleted 2026-08-10 (docs/todo.md 5.1). The merge is
-// INTRA-FILE - one module scope either way - so every one of the 28 call sites
-// below resolves the same kind of name at the same cost, and the emitted
-// python-rt.ll loses a declaration.
-//
-// MEASURED: this merge plus the duplicate-pyBRepeat deletion below reads
-// python -0.87%, faster in 8 of 9 paired layout draws - two fewer permanently
-// live top-level declarations in the collection-heaviest module in the tree
-// (3,574 collections per bench run). It is the same effect, with the sign
-// reversed, that lib/runtime.metajs's dart/swift fold measured at +1.46% on
-// this row; the two cancel to +0.03% over 21 draws.
-
-// rt.strictEq, rt.truthy and their two bignum helpers (pyFStrictEq, pyFTruthy,
-// pyFBigEq, pyFBigIsZero) USED TO LIVE HERE, and so did clampSubstringIndex
-// (pyFClampSub), jsToInt (pyFToInt), rt.call-of-one-argument (pyFCall1) and the
-// int32 truncation (pyFWrap32). All eight were ports of memberCall arms that
-// 6eec533 deleted, and every one of them was DEAD: the only callers left were
-// each other (pyFStrictEq -> pyFBigEq, pyFTruthy -> pyFBigIsZero), a closed
-// cluster with no entry point.
-//
-// PROVED BEFORE DELETING, because docs/todo.md 5.2 records that an item calling
-// code dead has already been wrong once (floExt was live). Two proofs:
-//
-//   1. grep for each name over BOTH grammars, all of languages/lib/*.metajs,
-//      abnf/jsrt*.go and lib/*-core.js - the only hits were the definitions and
-//      the two intra-cluster calls above.
-//   2. a FATAL PROBE - fail("PROBE-DEAD <name>") as the first statement of each
-//      of the eight bodies, python-rt.ll regenerated, and every python program
-//      this repository has built NATIVELY and run: python-test-1, -complete,
-//      -features, -full, -try, -widen, -multifile, tests/bench/mod.py and
-//      tests/probe/python-intarith.py. ZERO of the eight fired.
-//
-// The arms that would have called them are gone: pyDForeign denies the six
-// Java-style string builtins before pyFStrMethod is reached, and Python's own
-// method surface (chunks D and E) answers everything else first.
-
-// rt.typeOf (jsrt.go:1523), for the final failure message only. The one place
+// rt.typeOf, for the final failure message only. The one place
 // it differs from the floor's own `typeof` is the arbitrary-precision integer:
 // Go's *jsBigInt answers "bigint", while layer 2 represents it as a plain
 // object, which `typeof` would call "object".
@@ -7710,21 +7325,15 @@ function pyFTypeOf(v) {
     return typeof v
 }
 
-// A fresh copy of an array - Go's append([]interface{}{}, xs...), which the
-// dict keys/values arms use so the caller cannot mutate the dict through the
-// answer. There is no Array.prototype.slice in this dialect. pyFCopyArr is
-// SHARED as rtCopyArr - lib/runtime.metajs, one of seven copies in six
-// languages, ZERO differences.
+// pyFCopyArr is SHARED as rtCopyArr - lib/runtime.metajs.
 
 // ---------------------------------------------------------------- strings ---
 
-// The string arm of memberCall (jsrt.go:2763-2784) - the "Java style builtins",
-// and NONE of the six is ported. length / charAt / equals / substring /
-// indexOf / isEmpty are Java's and Kotlin's spellings; Python says len(s), s[i],
-// s == t, s[a:b] and s.index(t), and CPython raises AttributeError for every one
-// of them. pyDForeign denies all six before this table is reached, exactly as
-// abnf/jsrt.go's pyForeignMethod does for llvm.Run, so what is left is the
-// error arm. See docs/todo.md 2.4.
+// The string arm of memberCall - the "Java style builtins" - and NONE of them
+// is ported: length / charAt / equals / substring / indexOf / isEmpty are
+// Java's and Kotlin's spellings, and CPython raises AttributeError for every
+// one of them. pyDForeign denies all six before this table is reached, exactly
+// as abnf/jsrt.go's pyForeignMethod does, so what is left is the error arm.
 //
 // The function itself stays because pyMemberCall dispatches on the RECEIVER and
 // pyStrMethod (the real Python string library) dispatches by NAME: a name
@@ -7736,8 +7345,7 @@ function pyFStrMethod(o, name, args) {
 
 // ------------------------------------------------------------------ lists ---
 
-// The *jsArray arm (jsrt.go:2834-2913), in its original order: the Kotlin and
-// Python style list methods. Go's o.dropIdx() invalidates the array's dict
+// The *jsArray arm of memberCall. Go's o.dropIdx() invalidates the array's dict
 // index cache before a mutation; layer 2 has no such cache, so those calls have
 // no counterpart and are simply absent.
 function pyFListMethod(o, name, args) {
@@ -7748,40 +7356,34 @@ function pyFListMethod(o, name, args) {
     }
     if (name == "pop") {
         // Python: removes and returns the last element. Go's arm takes NO index
-        // argument, so `xs.pop(0)` silently pops the last element - reproduced
-        // rather than corrected, since the Go twin is the pin. Its `removeLast`
-        // alias is DART's spelling and is not ported: pyDForeign denies the name
-        // before this table is reached (docs/todo.md 5.2).
+        // argument; pyListMethod answers Python's pop(i) before this is reached.
         if (o.length == 0) { fail("pop from empty list") }
         return o.pop()
     }
     // add / size / get / contains / map / filter / any / sumOf / forEach are
     // KOTLIN's, Java's, Dart's and Swift's list methods and are NOT ported:
     // CPython raises AttributeError for every one of them and pyDForeign denies
-    // all nine before this table is reached (docs/todo.md 2.4 and 5.2). The Go
-    // twin still HAS them, because nine languages share that table - which is
-    // why the denial and these deletions are one change.
+    // them before this table is reached. The Go twin still HAS them, because
+    // nine languages share that table.
     //
     // `count` is not among them: Python HAS list.count(x), and it counts EQUAL
     // elements where the Go twin's shared arm counts a Kotlin PREDICATE's
     // successes. pyDMethodCall answers it before reaching here (pyDListCount),
-    // so this table never sees the name. docs/todo.md 1.5.
+    // so this table never sees the name.
     fail("unknown list method '" + name + "'")
     return null
 }
 
 // ------------------------------------------------------------------ dicts ---
 
-// The dict prefix of the *jsObject arm (jsrt.go:2786-2803). dictParts requires
+// The dict prefix of the *jsObject arm of memberCall. dictParts requires
 // __dict === true AND both keys and vals to be arrays; the prelude's pyIsDict
 // is that test.
 //
-// UNREACHABLE FROM PYTHON since docs/todo.md 1.3: pyDMethodCall answers the
-// whole dict surface (pyDictMethod) before pyMemberCall is ever reached, and
-// `items` - which was never here, because the compiler used to lower
-// `d.items()` into a loop of its own - is answered there too. The function
-// stays for the reason pyFStrMethod does: pyMemberCall dispatches on the
-// RECEIVER, so a name nothing knows has to land somewhere and say so.
+// UNREACHABLE FROM PYTHON: pyDMethodCall answers the whole dict surface
+// (pyDictMethod) before pyMemberCall is ever reached. The function stays for
+// the reason pyFStrMethod does: pyMemberCall dispatches on the RECEIVER, so a
+// name nothing knows has to land somewhere and say so.
 function pyFDictMethod(o, name, args) {
     if (name == "keys") { return rtCopyArr(o["keys"]) }
     if (name == "values") { return rtCopyArr(o["vals"]) }
@@ -7797,7 +7399,7 @@ function pyFDictMethod(o, name, args) {
 
 // ------------------------------------------------------- memberCall itself ---
 
-// memberCall (jsrt.go:2761). The method call convention the class based
+// memberCall. The method call convention the class based
 // language subsets share: instances are objects with a "__class" property
 // pointing to their class descriptor object, whose properties hold the method
 // closures (called with the instance prepended to the arguments); the lookup
@@ -7828,7 +7430,7 @@ function pyMemberCall(target, name, args) {
         // is applied WITH the cell as its receiver (Go's getMember hands back an
         // already-bound *boundMethod and then calls it with jsUndef; the two are
         // the same call). Note that Python's own send/next/__next__/close never
-        // arrive here - chunk D's pyDMethodCall answers them first, with the
+        // arrive here - pyDMethodCall answers them first, with the
         // StopIteration protocol - so this arm covers only the raw JS-shaped
         // members such as `return`.
         var gm = target[name]
@@ -7864,9 +7466,10 @@ function pyMemberCall(target, name, args) {
         // read here also sees Object.prototype under goja, so a method call
         // literally named "toString" / "valueOf" / "constructor" on a plain
         // object would find an inherited function and call it instead of
-        // failing. The same collision is left standing in chunk D's instance arm
-        // and in pyGetAttr, because guarding it with a "$" prefix here would
-        // desynchronize this lookup from the one that stores the attributes.
+        // failing. The same collision is left standing in pyDMethodCall's
+        // instance arm and in pyGetAttr, because guarding it with a "$" prefix
+        // here would desynchronize this lookup from the one that stores the
+        // attributes.
         var own = target[name]
         if (own !== undefined && pyIsCallable(own)) { return own.apply(undefined, args) }
         fail("unknown method '" + name + "'")
@@ -7880,7 +7483,7 @@ function pyMemberCall(target, name, args) {
 function pySFail(msg) { fail(msg) }
 // A CATCHABLE KeyError, for the one place in the str-method chunk where CPython
 // raises rather than aborts: "{a}".format(b=1). pySFail is the engine's abort
-// and cannot be caught (docs/todo.md 1.7).
+// and cannot be caught.
 function pySRaiseKey(nm) { pyRaiseExc("KeyError", nm) }
 function pySFormat1(v, spec, conv) { return js_pyformat(v, spec, conv) }
 function pySGetAttr(v, nm) { return pyGetAttr(v, nm) }
@@ -7901,11 +7504,11 @@ function pySKwGet(kw, nm) {
 }
 // ===================================================== str methods ==========
 //
-// Python's str method library, per docs/todo.md 1.5. Written ONCE and carried in
-// three engines - languages/python-interpreter.abnf, languages/lib/python-rt.metajs
-// (this text, verbatim) and abnf/pystrmethod.go (a line-by-line Go port) - because
-// a Python method call reaches a different implementation in each
-// (interpreter / llvm.Run's Go twin / the native C floor + layer 2).
+// Python's str method library. Written ONCE and carried in three engines -
+// languages/python-interpreter.abnf, languages/lib/python-rt.metajs (this text,
+// verbatim) and abnf/pystrmethod.go (a line-by-line Go port) - because a Python
+// method call reaches a different implementation in each (interpreter /
+// llvm.Run's Go twin / the native C floor + layer 2).
 //
 // Everything below is built out of the seven string primitives the frozen MetaJS
 // subset has (.length, charAt, charCodeAt, substring, indexOf, toUpperCase,
@@ -8632,10 +8235,8 @@ function pySJoin(s, seq) {
     return out
 }
 
-// The names this table answers. The caller checks it FIRST so that a name it does
-// not know keeps whatever behaviour it had (the Go twin's Java-style .length /
-// .charAt / .substring / .indexOf / .equals / .isEmpty, which are not Python and
-// are left reachable rather than removed).
+// The names this table answers. The caller checks it FIRST so that a name it
+// does not know falls through to the generic method table.
 function pySIsStrMethod(name) {
     if (name == "upper" || name == "lower" || name == "casefold") { return true }
     if (name == "title" || name == "capitalize" || name == "swapcase") { return true }
@@ -8699,11 +8300,11 @@ function pyStrMethod(s, name, args, kw) {
         var seq = anytype
         seq = args[0]
         if (typeof seq == "string") { return pySJoin(s, pySChars(seq)) }
-        // A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/filter/
-        // zip/enumerate) is materialized rather than refused - `", ".join(map(str,
-        // xs))` is ordinary Python. pySSeqOf answers null for anything else, and
-        // is the one hook this chunk needs for it. Keep in step with the join arm
-        // in abnf/pystrmethod.go and languages/python-interpreter.abnf.
+        // A GENERATOR or an ITERATOR object (iter/map/filter/zip/enumerate) is
+        // materialized rather than refused - `", ".join(map(str, xs))` is
+        // ordinary Python. pySSeqOf answers null for anything else, and is the
+        // one hook this chunk needs for it. Keep in step with the join arm in
+        // abnf/pystrmethod.go and languages/python-interpreter.abnf.
         var jseq = pySSeqOf(seq)
         if (jseq !== null) { seq = jseq }
         if (!pySIsArr(seq)) { pySFail("TypeError: can only join an iterable") }
