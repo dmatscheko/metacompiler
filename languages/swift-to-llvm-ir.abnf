@@ -263,14 +263,14 @@ FunDecl     <~~ push(makeFun(takeAll())) ~~>
 // body and died with *unknown name: return*. Every other `return` form fails
 // ExprBody on its own and reached Block; this one did not.
 FnBody      = RetBody | ExprBody | Block ;
-ExprBody    <~~ push(makeExprBody(pop())) ~~>
-            = "{" Expression "}" ;
+ExprBody    <~~ swAnnClose(); push(makeExprBody(pop())) ~~>
+            = "{" <~~ swAnnOpen() ~~> Expression "}" ;
 FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
 // A generic constraint clause on a function/type: where T: P, U == V (ignored).
 GenWhere    = KwWhere GenConstraint { "," GenConstraint } ;
 GenConstraint = Type ( ":" TypeList | "==" Type | "=" Type ) ;
 
-ParamList   <~~ push({params: takeAll()}) ~~>
+ParamList   <~~ var ps = takeAll(); swAnnParams(ps); push({params: ps}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
 // A parameter is [externalLabel] internalName : Type; the last identifier binds.
 // With two identifiers the first is the ARGUMENT LABEL and the second the bound
@@ -342,7 +342,7 @@ MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
 // {prop} record, so the type builder sees them in declaration order.
 PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push(makeProp(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
 // A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
 // getter-only shorthand `var family: String { "beast" }`) and a stored property
 // with willSet/didSet observers - the two share one syntax, told apart by which
@@ -439,10 +439,10 @@ ProtoVar    <~~ push({}) ~~>
             = ( "let" | "var" ) KwEnd Id <~~ push({preq: up.in}) ~~> [ ":" Type ]
               "{" ProtoAcc { ProtoAcc } "}" ;
 ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
-ProtoFunc   <~~ push({}) ~~>
+ProtoFunc   <~~ swAnnParams([]); push({}) ~~>
             = KwFunc FuncName <~~ push({preq: stripWs(up.in)}) ~~> [ SkipAngle ] ParamList
               [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
-ProtoInit   <~~ push({}) ~~>
+ProtoInit   <~~ swAnnParams([]); push({}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] [ ";" ] ;
 ProtoSubscript <~~ push({}) ~~>
             = KwSubscript [ SkipAngle ] SkipParen "->" Type "{" ProtoAcc { ProtoAcc } "}" ;
@@ -507,8 +507,8 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // AnnType also carries the second job DeclAnnType has: an `Int8`/`Double`/`Float`
 // annotation pushes its {itype} so the RETURN TYPE of a function and the declared
 // type of a STORED PROPERTY adopt it, exactly as a `let`/`var` annotation does.
-// Every consumer of AnnType (makeFun, makeProp, makeComputed, makeSubscript,
-// ProtoFunc) skips or reads the record; see js_swadopt.
+// Every consumer of AnnType (makeFun, makeComputed, makeSubscript, ProtoFunc)
+// skips or reads the record (a stored property's PropBind reads DeclAnnType); see js_swadopt.
 // FnAnnType is here for the same reason it is in DeclAnnType: a STORED PROPERTY
 // and a RETURN TYPE put the function type on the slot, not on the value. It costs
 // nothing at a PARAMETER, which reads its own ParamType rather than AnnType.
@@ -673,10 +673,10 @@ PatArg      = [ PatArgLabel ] Pattern ;
 PatArgLabel = Id ":" ;
 Wildcard    = "_" KwEnd ;
 
-Block       <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" { PoundIfStmt | Statement } "}" ;
-RetBody     <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" Return { PoundIfStmt | Statement } "}" ;
+Block       <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
+            = "{" <~~ swAnnOpen() ~~> { PoundIfStmt | Statement } "}" ;
+RetBody     <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
+            = "{" <~~ swAnnOpen() ~~> Return { PoundIfStmt | Statement } "}" ;
 
 Decl        = DeclTuple | DeclPlain ;
 // One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
@@ -693,7 +693,10 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
 // general Type; the names are spelled longest-first (PEG first-match: "Int" would
 // otherwise match the front of "Int8") and closed with a KwEnd so a user type called
 // `Int8Box` is not read as `Int8`.
-DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
+DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
+// Any other annotation is captured as TEXT only for the write-site check that an
+// EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
+OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
 // A FUNCTION-TYPED SLOT. Every other adoption site in this front end reads the type
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
@@ -5079,7 +5082,16 @@ KwContinue  = "continue" KwEnd ;
         // +10.3% measured in a68e16d. swElemTyOf declines it, in both halves.
         var elemTy = (ref.path.length == 1 && ref.path[0].key == undefined)
                      ? swElemTyOf(declTyOf(ref.name)) : ""
+        var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
+        var hasLocal = localAnn != "?"
         return function(b) {
+            // A write to an existential slot keeps what it is given; see swKeepMode.
+            // An implicit `self.x` is decided by the enclosing type, statically.
+            var mode = swKeepMode(ref, hasLocal, localAnn)
+            if (mode == 2 && ref.path.length == 0) {
+                mode = curType() != null && swSelfExist(curType().name, ref.name) ? 1 : 0
+            }
+            var keepTy = mode == 1
             var r = valT(b)
             b = r.b
             var v = emitCopy(b, r.v)
@@ -5103,7 +5115,7 @@ KwContinue  = "continue" KwEnd ;
                     var selfB2 = curF.NewBlock("")
                     var joinB2 = curF.NewBlock("")
                     b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv2, emitStr(b, "undefined")])), selfB2, localB2)
-                    var vLoc = callExt(localB2, "js_swadoptlike",
+                    var vLoc = keepTy ? v : callExt(localB2, "js_swadoptlike",
                                        [localB2.NewCall(rtKGet(), [curScopeV, nameV]), v, emitStr(localB2, declTy)])
                     localB2.NewCall(rtKSet(), [curScopeV, nameV, vLoc])
                     localB2.NewBr(joinB2)
@@ -5116,8 +5128,11 @@ KwContinue  = "continue" KwEnd ;
                     // not run one to decide a type. The interpreter's swObsSlot
                     // answers exactly the same.
                     var selfV2 = selfB2.NewCall(rtKGet(), [curScopeV, emitStr(selfB2, "self")])
-                    var oldObs = selfB2.NewCall(rtSafeGet(), [selfV2, emitStr(selfB2, "__v_" + ref.name)])
-                    var vSelf = callExt(selfB2, "js_swadoptlike", [oldObs, v, emitStr(selfB2, declTy)])
+                    var vSelf = v
+                    if (!keepTy) {
+                        var oldObs = selfB2.NewCall(rtSafeGet(), [selfV2, emitStr(selfB2, "__v_" + ref.name)])
+                        vSelf = callExt(selfB2, "js_swadoptlike", [oldObs, v, emitStr(selfB2, declTy)])
+                    }
                     selfB2.NewCall(rtSetProp(), [selfV2, nameV, vSelf])
                     selfB2.NewBr(joinB2)
                     return {b: joinB2, v: v}
@@ -5126,22 +5141,30 @@ KwContinue  = "continue" KwEnd ;
                     b.NewCall(rtAssignSelf(), [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), v])
                     return {b: b, v: v}
                 }
-                // A write adopts the slot's declared type, which the value it already
-                // holds carries - docs/todo.md 1.1. It sits BELOW the two early exits
+                // A write to a numeric slot adopts its declared type, which the value
+                // it already holds carries - docs/todo.md 1.1. It sits BELOW the two early exits
                 // above on purpose: sw_kget aborts on a name that is neither a local
                 // nor a property of `this`, and an unqualified write to an OBSERVED
                 // property (`level = raw / 10` inside `set(raw)`) is exactly that
                 // shape - the interpreter's lookupOrNull declines it in the same way.
-                if (oldL == null) { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
-                v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, declTy)])
+                if (!keepTy) {
+                    if (oldL == null) { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
+                    v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, declTy)])
+                }
                 b.NewCall(rtKSet(), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (p.isField) {
-                    var oldf = emitFieldRead(b, p.obj, p.keyName)
-                    if (op != "=") { v = emitBin(b, op, oldf, v) }
-                    v = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")])
+                    if (op != "=" || !keepTy) {
+                        var oldf = emitFieldRead(b, p.obj, p.keyName)
+                        if (op != "=") { v = emitBin(b, op, oldf, v) }
+                        if (mode == 2) {
+                            var exfV = b.NewCall(rtSafeGet(), [b.NewCall(rtClassOf(), [p.obj]), emitStr(b, "__exf_" + p.keyName)])
+                            var adV = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")])
+                            v = b.NewSelect(truthy(b, exfV), v, adV)
+                        } else if (!keepTy) { v = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")]) }
+                    }
                     if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
                     } else {
@@ -5152,14 +5175,14 @@ KwContinue  = "continue" KwEnd ;
                         var olds = b.NewCall(rtSubGet(), [p.obj, p.key])
                         v = emitBin(b, op, olds, v)
                     }
-                    v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)])
+                    if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
                     b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_swidx", [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
-                    v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)])
+                    if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
             }
@@ -5226,6 +5249,133 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks: function(block) -> block -----
 
+    // ----- Where a write must NOT adopt -----
+    //
+    // A write adopts the type of the value the slot already holds (swAdoptLike)
+    // only because a NUMERIC slot can hold nothing else. An EXISTENTIAL slot - Any,
+    // AnyObject, a protocol, a composition, an Optional of one - holds whatever was
+    // written last: `var a: Any = 1.5; a = 2` holds the Int 2. So the write site
+    // finds the slot's declared type and skips the adoption when it is existential.
+    // A generic parameter is not existential: a `T` slot only ever holds a T, so
+    // adopting from the value is right there. Nor is an unknown name (a typealias),
+    // which keeps adopting.
+    //
+    // localAnnReg: the annotation of the nearest declaration of each local NAME,
+    // walk-time ("" when it is unannotated or numeric, "?" when no declaration is in
+    // scope), restored at the end of each body. propTyReg: the declared type of
+    // every stored property of each NAME, across all types.
+    var localAnnReg = {}
+    var localAnnLog = []
+    var localAnnMarks = []
+    function swNoteLocalAnn(n, t) {
+        var had = hasOwn(localAnnReg, "$" + n)
+        localAnnLog.push({n: n, prev: had ? localAnnReg["$" + n] : "?"})
+        localAnnReg["$" + n] = t
+    }
+    // A parameter list's names and types, declared into the body that follows it.
+    var localAnnPending = []
+    function swAnnParams(ps) {
+        localAnnPending = []
+        for (var i = 0; i < ps.length; i++) {
+            var q = ps[i]
+            if (typeof q == "object" && q != null && q.name != undefined) {
+                localAnnPending.push({n: q.name, t: q.type})
+            }
+        }
+    }
+    function swAnnOpen() {
+        localAnnMarks.push(localAnnLog.length)
+        var ps = localAnnPending
+        localAnnPending = []
+        for (var i = 0; i < ps.length; i++) { swNoteLocalAnn(ps[i].n, ps[i].t) }
+    }
+    function swAnnClose() {
+        var m = localAnnMarks.pop()
+        while (localAnnLog.length > m) {
+            var e = localAnnLog.pop()
+            var n = e.n
+            var t = e.prev
+            localAnnReg["$" + n] = t
+        }
+    }
+    var propTyReg = {}
+    function notePropTy(name, ty) {
+        if (!hasOwn(propTyReg, "$" + name)) { propTyReg["$" + name] = [] }
+        propTyReg["$" + name].push(ty)
+    }
+    var swStdProtos = {"$CustomStringConvertible": 1, "$CustomDebugStringConvertible": 1,
+                       "$Error": 1, "$Sendable": 1, "$Codable": 1, "$Encodable": 1, "$Decodable": 1}
+    function swTyIsExist(t0) {
+        var t = swTyStripOptText(swTyTrim(t0))
+        if (t == "Any" || t == "AnyObject" || t == "AnyHashable") { return true }
+        if (swTySplit(t, "&").length > 1) { return true }
+        if (t.length > 3 && t.substring(0, 3) == "any") {
+            var c = t.charCodeAt(3)
+            if (c >= 65 && c <= 90) { return true }
+        }
+        return protoNames[t] == 1 || swStdProtos["$" + t] == 1
+    }
+    // The element type n subscripts below an array/dictionary annotation, or "".
+    function swTyPeel(ty0, n) {
+        var ty = ty0
+        for (var i = 0; i < n; i++) {
+            ty = swTyStripOptText(swTyTrim(ty))
+            if (ty.length < 3 || ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
+            var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
+            ty = kv[kv.length - 1]
+        }
+        return ty
+    }
+    // Whether the write `ref = ...` adopts: 0 it does, 1 the slot is existential and
+    // it does not, 2 it depends on the TYPE of the object owning the property. The
+    // declared type is the local's (`a`, `a[0]`) or else the last PROPERTY's on the
+    // path (`s.v`, `s.xs[0]`; an unqualified name with no local declaration is an
+    // implicit `self.x`), peeled by the subscripts after it. Properties are known by
+    // NAME, so a name declared existential in one type and numeric in another is 2
+    // - answered by the owner's `__exf_<name>` marker - when the property is the
+    // last step, and adopts otherwise. Asked after the walk, so every protocol and
+    // property is known.
+    function swKeepMode(ref, hasLocal, localAnn) {
+        var lk = -1
+        for (var i = 0; i < ref.path.length; i++) { if (ref.path[i].key != undefined) { lk = i } }
+        if (lk < 0 && hasLocal) { return swTyIsExist(swTyPeel(localAnn, ref.path.length)) ? 1 : 0 }
+        var pn = lk >= 0 ? ref.path[lk].key : ref.name
+        if (!hasOwn(propTyReg, "$" + pn)) { return 0 }
+        var cands = propTyReg["$" + pn]
+        var n = ref.path.length - 1 - lk
+        var ex = 0
+        for (var j = 0; j < cands.length; j++) {
+            if (swTyIsExist(swTyPeel(cands[j], n))) { ex = ex + 1 }
+        }
+        if (ex == 0) { return 0 }
+        if (ex == cands.length) { return 1 }
+        return n == 0 ? 2 : 0
+    }
+    // Per type NAME, its stored properties and its superclass, so a descriptor can
+    // carry an `__exf_<name>` marker for every existential property it has,
+    // inherited ones included.
+    var typeFieldAnn = {}
+    function swTypeExFields(tn0) {
+        var out = []
+        var tn = tn0
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length; i++) {
+                var a = r.fs[i].ann
+                if (a != undefined && swTyIsExist(a)) { out.push(r.fs[i].store) }
+            }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return out
+    }
+    // An implicit `self.x` inside a type body, decided by that type's own property.
+    function swSelfExist(tn, name) {
+        var exf = swTypeExFields(tn)
+        for (var i = 0; i < exf.length; i++) { if (exf[i] == name) { return true } }
+        return false
+    }
     // The numeric type each name was DECLARED at, filled as the walk passes the
     // declaration. It is the last resort of the write-site adoption and is read only
     // when the slot holds nil - see js_swadoptlike.
@@ -5262,6 +5412,11 @@ KwContinue  = "continue" KwEnd ;
             declTyReg["$" + name] = elemTy
             k++
         }
+        // The nearest declaration of this name, for swKeepMode: only an
+        // OTHER annotation can be existential, so a numeric one records "".
+        var annTxt = elemTy
+        if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        swNoteLocalAnn(name, annTxt)
         var init = items[k]
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
@@ -6006,8 +6161,11 @@ KwContinue  = "continue" KwEnd ;
         }
         else if (items[k] != undefined && items[k].itype != undefined) { ty = items[k].itype; k++ }
         else if (items[k] != undefined && items[k].atype != undefined) { ty = items[k].atype; k++ }
-        if (items[k] != undefined) { return {prop: items[0], ty: ty, hasInit: true, init: items[k]} }
-        return {prop: items[0], ty: ty, hasInit: false, init: null}
+        var annTxt = ty
+        if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        notePropTy(items[0], annTxt)
+        if (items[k] != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: items[k]} }
+        return {prop: items[0], ty: ty, ann: annTxt, hasInit: false, init: null}
     }
     function plainParam(n) {
         return {name: n, label: n, type: "", adopt: "", variadic: false, auto: false,
@@ -6081,6 +6239,7 @@ KwContinue  = "continue" KwEnd ;
         var observed = (will != null || did != null)
         if (get != null || observed) { computedNames["$" + name] = 1 }
         if (set != null || observed) { setterNames["$" + name] = 1 }
+        notePropTy(name, pty)
         return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
                         did: did, didP: didP, observed: observed, dflt: dflt, ty: pty}}
     }
@@ -6158,7 +6317,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.preq != undefined) { mem.reqs.push(it.preq); continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
-                var f = {name: it.prop, store: it.prop, ty: it.ty, hasInit: it.hasInit, init: it.init}
+                var f = {name: it.prop, store: it.prop, ty: it.ty, ann: it.ann, hasInit: it.hasInit, init: it.init}
                 if (isStatic) { mem.statProps.push(f) }
                 else if (isLazy) {
                     mem.lazies.push({name: it.prop, init: it.init})
@@ -7001,6 +7160,7 @@ KwContinue  = "continue" KwEnd ;
             }
         }
         rec.fields = fieldNames
+        typeFieldAnn["$" + name] = {fs: mem.fields, sup: superName}
         classNames[name] = 1
         noteDeclRec(rec)
         return function(b) {
@@ -7014,6 +7174,9 @@ KwContinue  = "continue" KwEnd ;
                 for (var z = 0; z < fieldNames.length; z++) { callExt(b, "js_arr_push", [fa, emitStr(b, fieldNames[z])]) }
                 callExt(b, "js_set", [clsV, emitStr(b, "__fields"), fa])
             }
+            // An existential stored property is marked on the type; see swKeepMode.
+            var exf = swTypeExFields(name)
+            for (var xf = 0; xf < exf.length; xf++) { callExt(b, "js_set", [clsV, emitStr(b, "__exf_" + exf[xf]), hTrue]) }
             // ONE binding, under the qualified key (== the bare name at top level).
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV])
             if (superName != null) {

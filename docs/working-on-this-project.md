@@ -990,14 +990,19 @@ Two things follow that are worth knowing before touching this area:
 ## 7.15 The value model already carries the type — you rarely need a type table
 
 Swift's write-site adoption looked like it needed a per-variable declared-type
-table in both engines. It did not: floatness (`{__flo}` / `__f32`) and integer
-width (`{__sz}`) live **on the value**, and the language is statically typed, so a
-write can adopt *the type of what the slot already holds*. One extern
-(`js_swadoptlike`) in three engines closed every write site the item listed.
-csharp reached the same conclusion from the other direction — its unqualified-write
-branch has to identify the member and its declaring class anyway, so adoption came
-free inside it. **Ask what the existing value already knows before designing a
-side table.**
+table in both engines. Mostly it did not: floatness (`{__flo}` / `__f32`) and
+integer width (`{__sz}`) live **on the value**, so a write to a slot whose declared
+or inferred type is **numeric** can adopt *the type of what the slot already
+holds* - one extern (`js_swadoptlike`) in three engines. The rule is only that
+narrow: an **existential** slot (`Any`, a protocol, `any P`, an Optional of one)
+holds whatever it was given, so `var a: Any = 1.5; a = 2` holds the Int 2. The
+write site therefore still asks the declaration (`swKeepMode`: the local's
+annotation, else the property's, by name and per type when names collide) and
+skips adoption for an existential one. csharp reached the same conclusion from
+the other direction — its unqualified-write branch has to identify the member and
+its declaring class anyway, so adoption came free inside it. **Ask what the
+existing value already knows before designing a side table - and what the
+declaration allows it to become.**
 
 ## 7.13 Who imports what
 

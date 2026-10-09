@@ -2425,6 +2425,112 @@ func s38() {
     check("38ab", ac.count == 3 && ac[0]() == 9 && ac[2]() == 7)
 }
 
+// ===== SECTION 39: a write to an EXISTENTIAL slot keeps the value's own type =====
+// A write to a numeric slot adopts the slot's type, which the value it already
+// holds carries: `var d = 1.5; d = 2` holds 2.0. An existential slot - Any, a
+// protocol, `any P`, an Optional of one - holds whatever it was given last, so
+// `var a: Any = 1.5; a = 2` holds the Int 2 in swiftc 6.1.2, and the same is true
+// of a stored property, an array element, a dictionary value, an implicit
+// `self.q` and an inout parameter. Every engine answered 2.0 for each of them.
+// 39k-39n are the controls: inferred and numeric slots still adopt, and a
+// shadowing declaration decides for its own scope only. 39p-39r: one property
+// NAME declared Any in one type and Double in another is decided by the type of
+// the object written, an inherited property included.
+protocol P39 {}
+extension Int: P39 {}
+extension Double: P39 {}
+struct S39 { var v: Any; var d: Double; var xs: [Any] }
+class C39 {
+    var q: Any = 1.5
+    var r: Double = 1.5
+    func setBoth() { q = 8; r = 8 }
+}
+func io39(_ x: inout Any) { x = 5 }
+struct MA39 { var m39: Any; mutating func set() { m39 = 4 } }
+struct MD39 { var m39: Double; mutating func set() { m39 = 4 } }
+class BA39 { var m39: Any = 1.5; func set() { m39 = 5 } }
+class SA39: BA39 { func set2() { m39 = 6 } }
+func s39() {
+    var a: Any = 1.5
+    a = 2
+    check("39a", "\(a)" == "2")
+    var arr: [Any] = [1.5, "x"]
+    arr[0] = 3
+    check("39b", "\(arr[0])" == "3" && "\(arr[1])" == "x")
+    var s = S39(v: 1.5, d: 1.5, xs: [1.5])
+    s.v = 7
+    s.d = 7
+    s.xs[0] = 3
+    check("39c", "\(s.v)" == "7" && "\(s.d)" == "7.0" && "\(s.xs[0])" == "3")
+    var dd: [String: Any] = ["k": 1.5]
+    dd["k"] = 4
+    let dk = dd["k"]!
+    check("39d", "\(dk)" == "4")
+    var oa: Any? = 1.5
+    oa = 3
+    check("39e", "\(oa!)" == "3")
+    var p: P39 = 1.5
+    p = 5
+    var ep: any P39 = 1.5
+    ep = 6
+    check("39f", "\(p)" == "5" && "\(ep)" == "6")
+    var nest: [[Any]] = [[1.5]]
+    nest[0][0] = 3
+    check("39g", "\(nest[0][0])" == "3")
+    let c = C39()
+    c.setBoth()
+    check("39h", "\(c.q)" == "8" && "\(c.r)" == "8.0")
+    c.q = 6
+    c.r = 6
+    check("39i", "\(c.q)" == "6" && "\(c.r)" == "6.0")
+    var ia: Any = 1.5
+    io39(&ia)
+    check("39j", "\(ia)" == "5")
+    var d = 1.5
+    d = 2
+    check("39k", "\(d)" == "2.0")
+    var dn: [String: Double] = ["k": 1.5]
+    dn["k"] = 4
+    let dnk = dn["k"]!
+    check("39l", "\(dnk)" == "4.0")
+    var sh = 1.5
+    do {
+        var sh: Any = 1.5
+        sh = 2
+        check("39m", "\(sh)" == "2")
+    }
+    sh = 3
+    var sh2: Any = 1.5
+    do {
+        var sh2 = 1.5
+        sh2 = 2
+        check("39n", "\(sh2)" == "2.0")
+    }
+    sh2 = 2
+    check("39o", "\(sh)" == "3.0" && "\(sh2)" == "2")
+    var ma = MA39(m39: 1.5)
+    ma.m39 = 2
+    let ma1 = "\(ma.m39)"
+    ma.set()
+    var md = MD39(m39: 1.5)
+    md.m39 = 2
+    let md1 = "\(md.m39)"
+    md.set()
+    check("39p", ma1 == "2" && "\(ma.m39)" == "4" && md1 == "2.0" && "\(md.m39)" == "4.0")
+    let sa = SA39()
+    sa.m39 = 3
+    let sa1 = "\(sa.m39)"
+    sa.set()
+    let sa2 = "\(sa.m39)"
+    sa.set2()
+    check("39q", sa1 == "3" && sa2 == "5" && "\(sa.m39)" == "6")
+    var ams = [MA39(m39: 1.5)]
+    ams[0].m39 = 9
+    var mds = [MD39(m39: 1.5)]
+    mds[0].m39 = 9
+    check("39r", "\(ams[0].m39)" == "9" && "\(mds[0].m39)" == "9.0")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2466,6 +2572,7 @@ func main() {
     s36() // SECTION-CALL 36
     s37() // SECTION-CALL 37
     s38() // SECTION-CALL 38
+    s39() // SECTION-CALL 39
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -335,9 +335,10 @@ func init() {
 		//
 		// No var-type table is needed, because this value model already carries
 		// the two things an annotation decides - FLOATNESS (the jsJFlo box, at
-		// its own width) and integer WIDTH (jsGInt) - on the value itself, and
-		// Swift is statically typed, so the slot's type is exactly the type of
-		// what it already holds. So a write adopts the type of the OLD value.
+		// its own width) and integer WIDTH (jsGInt) - on the value itself, and a
+		// NUMERIC slot only ever holds its own type. So a write adopts the type
+		// of the OLD value. The emitter does not call this for an existential
+		// slot (`Any`, a protocol), which holds anything - see swKeepMode.
 		// The one shape it cannot see is a slot that holds nil, which is a
 		// `var d: Double` never yet assigned; there the write is untouched
 		// unless `ty` names the annotation - the LAST RESORT, "" almost

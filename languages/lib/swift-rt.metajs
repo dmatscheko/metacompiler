@@ -2116,9 +2116,10 @@ function js_swadopt(v, ty) {
 //
 // No var-type table is needed, because this value model already carries the two
 // things an annotation decides - FLOATNESS (the float box, at its own width) and
-// integer WIDTH (the sized-integer box) - on the value itself, and Swift is
-// statically typed, so a slot's declared type is exactly the type of what it
-// already holds. So a write adopts the type of the OLD value. The one shape it
+// integer WIDTH (the sized-integer box) - on the value itself, and a NUMERIC slot
+// only ever holds its own type. So a write adopts the type of the OLD value. The
+// emitter does not call this for an existential slot (`Any`, a protocol), which
+// holds anything - see swKeepMode in the emitter. The one shape it
 // cannot see is a slot holding nil, i.e. a `var d: Double` never yet assigned;
 // there the write is untouched - unless `ty` names one, which is the LAST RESORT
 // and is "" almost everywhere: the annotation of a `var d: Double` with no
