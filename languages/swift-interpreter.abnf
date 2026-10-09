@@ -150,7 +150,7 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 //
 // swRunTop, not the loop written out here, because an error NOBODY CAUGHT has to
 // be reported as a diagnostic rather than allowed to escape into the engine - see
-// its comment in the start script below. docs/todo.md 1.12.
+// its comment in the start script below.
 // The Program tag runs the TOP-LEVEL defers, once, after the last TopExec: each
 // TopExec executes ONE top-level statement as it is parsed, so a `defer` marker
 // has to be parked in a script-side list and drained here. swiftc runs them at
@@ -258,12 +258,9 @@ FunDecl     <~~ push(makeFun(takeAll())) ~~>
 // expression without writing `return`, so the one-expression form is tried first;
 // anything else is an ordinary block. ExprBody is ordered first on purpose - a body
 // that starts with a declaration or a `return` fails it immediately.
-// RetBody is Block with a leading `return` REQUIRED, and it is ordered ahead of
-// ExprBody because `return` is not an expression but `return (1, 2)` parses as
-// one - the identifier `return` applied to a tuple - so
-// `func t() -> (n: Int, v: Int) { return (1, 2) }` was read as a one-expression
-// body and died with *unknown name: return*. Every other `return` form fails
-// ExprBody on its own and reached Block; this one did not.
+// RetBody is Block with a leading `return` REQUIRED, ordered ahead of ExprBody
+// because `return (1, 2)` would otherwise parse as one expression - the identifier
+// `return` applied to a tuple.
 FnBody      = RetBody | ExprBody | Block ;
 ExprBody    <~~ swAnnClose(); push(makeExprBody(pop())) ~~>
             = "{" <~~ swAnnOpen() ~~> Expression "}" ;
@@ -330,7 +327,6 @@ MemberType  <~~ push({nested: pop(), nidx: lastDeclIdx}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
-// deinit and subscript are accepted structurally, not implemented.
 // deinit is accepted and ignored - this runtime is garbage collected, so there is
 // no deterministic point at which to run it.
 DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
@@ -383,10 +379,7 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
-// (`: Int`, `: String`); every entry there may equally be a PROTOCOL, and both
-// halves used to drop the trailing ones on the floor - `enum E: Greet` adopted
-// nothing at all, so a default implementation from `extension Greet` was
-// `unknown method` in every engine where swiftc 6.1.2 answers (docs/todo.md 1.1).
+// (`: Int`, `: String`); every entry there may equally be a PROTOCOL.
 // The first entry is recorded BOTH ways: rawKind decides whether it is really a
 // raw-value type, and the adoption ignores a name that is no protocol.
 EnumConform = EnumRawType { "," EnumProto } ;
@@ -402,7 +395,7 @@ ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type ;
 ECaseLabel  = Id <~~ push({clabel: up.in}) ~~> ":" ;
 ECaseRaw    <~~ push({craw: pop()}) ~~> = Expression ;
 
-// protocol / extension / typealias: accepted structurally, not implemented.
+// import / protocol / extension / typealias declarations.
 UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
 // import Geom (or a submodule import 'import struct A.B'): the module name is resolved by
 // resolveImport - a builtin module (core.stdlibImports) is a no-op, otherwise it maps to a
@@ -420,9 +413,9 @@ ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
 // the default implementations an extension of the protocol adds are what a
 // conforming type inherits. A type's inheritance clause adopts every protocol it
 // names, and the adoption also records the conformance, which is what makes
-// `x is P` answerable (docs/todo.md 1.1).
+// `x is P` answerable.
 //
-// THE NAMES MATTER, and they used to be thrown away with the rest: Swift dispatches
+// THE NAMES MATTER: Swift dispatches
 // a call made from inside a protocol extension DYNAMICALLY only for a name the
 // protocol declares. A member the extension alone introduces is bound statically to
 // the extension's own implementation even when the conforming type declares one.
@@ -434,8 +427,7 @@ ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
 // the value of a variable called `get`.
 ProtoMember = PoundIfProto | ProtoReq | Member ;
 // A #if inside a PROTOCOL body. PoundIfMember (reached through Member) collects
-// only Members, and a protocol REQUIREMENT is not one - so `#if FOO / func f() ->
-// Int / #endif` inside a protocol died on the `#`.
+// only Members, and a protocol REQUIREMENT is not one.
 PoundIfProto <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyProto { PoundElseIf PoundCond PoundBodyProto }
               [ PoundElse PoundBodyProto ] PoundEndif ;
@@ -538,10 +530,7 @@ NotArrow    = !"->" ;
 TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-// do/throw are genuinely executed (try/catch via excTry, throw via excThrow); the
-// Cplx* / Local* / defer / fallthrough forms are recognized but not executed - they
-// route to notImplStmt (a warning under -warn-unsupported).
-// A declaration STATEMENT carrying an attribute - `@_noImplicitCopy let y = x`
+// AttrDecl is a declaration STATEMENT carrying an attribute - `@_noImplicitCopy let y = x`
 // inside a body, `@A<Float> var test0: Int { ... }` at top level. It needs at
 // least one `@`, so it can never be confused with a bare expression statement.
 Statement   = AttrDecl
@@ -551,13 +540,13 @@ Statement   = AttrDecl
             | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
             | TrailCallStmt | ExprStmt ;
 
-// `keep11 { 20 }` - a call of a plain function written with one trailing closure and
+AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
+
+// TrailCallStmt: `keep11 { 20 }` - a call of a plain function written with one trailing closure and
 // no parentheses. It is a STATEMENT form rather than an expression form on purpose:
 // as an expression, `cond { ... }` would swallow the block of `if cond { ... }`, and
 // PEG never goes back to re-read the condition. Every keyword-led statement is
 // matched before this rule, so only a bare `name { ... }` reaches it.
-AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
-
 TrailCallStmt <~~ push(exprToStmt(pop())) ~~> = TrailCall [ ";" ] ;
 TrailCall   <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> TrailArg { LabTrail } ;
@@ -567,7 +556,6 @@ TrailCall   <~~ push(makeCall(takeAll())) ~~>
 // label and a labelled break/continue can name the loop it leaves.
 LoopLabel   = Id <~~ push({lbl: up.in}) ~~> ":" ;
 
-// A nested function or nested type declaration inside a body.
 // A nested function declaration inside a body: a closure over the enclosing scope
 // bound to its own name (so it can recurse and can capture surrounding locals).
 LocalFunc   <~~ push(makeLocalFunStmt(pop())) ~~>
@@ -581,7 +569,7 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // catch clause whose pattern MATCHES wins; a catch with no
 // `let NAME` binds the implicit name `error`. return/break/continue inside a do still
 // propagate to the enclosing loop or function. Each part is marked so excTry can tell
-// them apart on the stack. defer and fallthrough stay not implemented.
+// them apart on the stack.
 Do          <~~ push(swTry(takeAll())) ~~>
             = KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -593,11 +581,9 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 // `catch let VendErr.limit(k)`, which binds only for that case.
 CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
             = KwCatch [ CatchPat { "," CatchPat } [ CatchWhere ] ] Block ;
-// `catch let e as NetErr`: the `as TYPE` used to be parsed and DISCARDED, so the
-// clause bound e and matched EVERYTHING - a DiskErr and a plain struct error both ran
-// the NetErr arm, in all three engines, where swiftc runs the next clause
-// (docs/todo.md 1.1's sweep, swift's arm). It is now carried on the pattern as `asty`
-// and tested by matchPat/emitMatchPat with exactly the `is` operator's test, so
+// `catch let e as NetErr`: the `as TYPE` is carried on the pattern as `asty` and
+// tested by matchPat/emitMatchPat with exactly the `is` operator's test, so a
+// clause whose type does not match falls to the next clause, and
 // `catch let e as T` and `catch is T` agree by construction.
 CatchPat    <~~ push({cpat: makeCatchPat(takeAll())}) ~~> = Pattern [ "as" KwEnd CatchAsType ] ;
 CatchAsType <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
@@ -652,8 +638,7 @@ BindName    <~~ push(up.in) ~~> = Wildcard | Id ;
 Pattern     <~~ push(makePattern(takeAll())) ~~>
             = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
 PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatEnum | PatExpr ;
-// `case is Double:` - a TYPE pattern, which did not parse in either half and took
-// the whole switch statement down with it. It runs exactly the test the `is`
+// `case is Double:` - a TYPE pattern. It runs exactly the test the `is`
 // OPERATOR runs, so it agrees with `case let z where z is Double` by construction.
 // It is tried FIRST: PatEnum would otherwise read the bare word `is` as a case
 // name to compare the subject against, match, and leave the type standing.
@@ -713,8 +698,8 @@ OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
 // out here: `let f: (Double) -> Double = { x in x/2 }` puts the type on the SLOT and
-// the closure carries nothing, so `f(3)` divided an Int and answered 1 where swiftc
-// says 1.5. The annotation is the only thing that says the argument is a Double, so
+// the closure carries nothing, yet `f(3)` must divide a Double (1.5, not 1).
+// The annotation is the only thing that says the argument is a Double, so
 // it is captured (the general Type would discard it) and the declaration wraps the
 // value in a synthetic function that adopts each argument, calls the original and
 // adopts the result - swAdoptFn here, swEmitAdoptFn in the compiler.
@@ -727,9 +712,7 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
 // The STRUCTURAL annotation forms, whose captured TEXT is walked by swAdoptDeep:
 // an array `[Double]`, a dictionary `[String: Double]`, a tuple `(Double, Int)`
 // and any of them nested, each carrying its numeric leaf down to the untyped
-// literals inside the initializer. Only the array form adopted before, so
-// `let m: [String: Double] = ["a": 3]` gave m["a"]! / 2 == 1 where swiftc 6.1.2
-// says 1.5 (docs/todo.md 1.3).
+// literals inside the initializer (`let m: [String: Double] = ["a": 3]` holds 3.0).
 //
 // OptNumAnnType is the same rule for `var op: Double? = 1`: an Optional IS its
 // value in this model, so the annotation adopts exactly as the bare name does.
@@ -853,9 +836,7 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
 // An assignment TARGET is a name followed by field reads, tuple-element reads,
-// force-unwraps and subscripts, in any order: `n.next!.v = 4` and `tp.0 = 3` are
-// both ordinary Swift and neither parsed before (docs/todo.md 1.3) - the whole
-// statement was rejected, in both halves.
+// force-unwraps and subscripts, in any order: `n.next!.v = 4` and `tp.0 = 3`.
 //
 // TForce is spelled with the same NoSpace/NotChar61 guard ForceSfx uses, and the
 // guard is what makes the rule safe: Assignment is tried before Ternary, so
@@ -884,15 +865,14 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "===" | "!==" | "==" | "!=" | "~=" ) <~~ push(stripWs(up.in)) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
-// e as T / e as? T / e as! T / e is T: recognized, routed to notImplExpr. With no
-// cast operator it is a pure pass-through (a single item), so behavior is
-// unchanged for programs that do not cast.
+// e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
+// pass-through (a single item).
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
             = RangeExpr { CastOp CastType } ;
 // a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
 // pattern-match operator ~= tests it, and a for-in can walk it.
-// The upper bound is OPTIONAL so that `a[1...]` - a PartialRangeFrom - parses; it
-// used to fail the whole file at the `]` (docs/todo.md 2.10). PEG never re-enters
+// The upper bound is OPTIONAL so that `a[1...]` - a PartialRangeFrom - parses.
+// PEG never re-enters
 // a rule that already succeeded, so `a[0...1]` cannot be recovered by ordering two
 // alternatives: the optional bound has to live in RangeExpr itself, where the
 // greedy Coalesce still takes `1` first and only a genuinely absent bound falls
@@ -1115,9 +1095,9 @@ CallArg     <~~ push(makeCallArg(takeAll())) ~~>
             = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
 // `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
 // on purpose - `f(-1)` is an expression, and only a run of operator characters that
-// no expression could read reaches this rule. It now builds the two-argument
+// no expression could read reaches this rule. It builds the two-argument
 // function the operator denotes, which goes THROUGH binOp, so a `static func +` an
-// operand's type declares still wins (docs/todo.md 2.10). The twin is makeOpRef in
+// operand's type declares still wins. The twin is makeOpRef in
 // swift-to-llvm-ir.abnf, which emits a js_closure over the same operator externs.
 OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
@@ -1135,11 +1115,10 @@ Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Templat
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
 // decimal ones (0 would otherwise match and leave xFF behind), and the fractional
-// form before the plain integer. NONE of them come from lib/numbers.abnf any more:
-// the shared INTEGER forms go through parseInt, which is a double, so
-// 9223372036854775807 came back as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as
-// 18446744073709552000 - both ordinary Swift literals, which swRadix reads exactly
-// into a sized-integer box (lib/interp-core.js, the sz* layer). And the shared
+// form before the plain integer. None of them come from lib/numbers.abnf: its
+// INTEGER forms go through parseInt, a double, which would round
+// 9223372036854775807 - swRadix reads it exactly into a sized-integer box
+// (lib/interp-core.js, the sz* layer). And its
 // FRACTIONAL form pushes a plain number, where a Swift float literal has to push
 // the {__flo} box that makes it a Double rather than an Int (see swFlo below);
 // SwFloLit is NumDec's rule with that one difference.
@@ -1197,14 +1176,13 @@ PoundBareLit <~~ push(notImplExpr("# literal", up.pos)) ~~>
             = ( "#fileID" | "#filePath" | "#file" | "#function" | "#line"
               | "#column" | "#dsohandle" ) KwEnd ;
 
-// ( e ) is a pass-through; ( e, e, ... ) is a tuple, recognized and routed to
-// notImplExpr. Element labels (x: e) are accepted and dropped.
+// ( e ) is a pass-through; ( e, e, ... ) is a tuple, whose elements live under
+// "0", "1", ... and, for a labelled element (x: e), under its label too.
 Paren       <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" TupleElem { "," TupleElem } ")" ;
 TupleElem   <~~ push(makeTupleElem(takeAll())) ~~>
             = [ TupleLabel ] Expression ;
 TupleLabel  = Id <~~ push({tlabel: up.in}) ~~> ":" ;
-// Closure shorthand arguments ($0, $1, ...): recognized, routed to notImplExpr.
 // Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
 // its arguments under exactly these names, so the shorthand is an ordinary read.
 Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
@@ -1217,8 +1195,7 @@ ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
 Closure     <~~ push(makeClosure(takeAll())) ~~>
             = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
 // A closure's own signature declares types just as a func does, and they adopt the
-// same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0,
-// and answered 1 while the signature's types were discarded (docs/todo.md 1.3).
+// same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0.
 // Both the parameter types and the return type are captured; each is the full
 // annotation text, walked by swAdoptDeep, so `(xs: [Double])` adopts too.
 ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
@@ -1256,13 +1233,11 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
 // `[Int]()`, `[String: Int]()`, `[() async -> ()]()` - a collection TYPE written as
 // a literal and immediately constructed EMPTY. It is ordered BEFORE ArrayLit and
-// DictLit: those two match `[Int]` and `[String: Int]` as a one-element array / a
-// one-entry dictionary and then hand the `()` to CallSfx, which aborted with "call
-// of a non-function value" - so every one of these three constructions used to fail
-// at RUNTIME, and `[() async -> ()]()` did not even parse. The empty argument list
+// DictLit: those two would match `[Int]` and `[String: Int]` as a one-element array /
+// a one-entry dictionary and then hand the `()` to CallSfx ("call of a non-function
+// value"). The empty argument list
 // is part of the rule, so nothing that is genuinely an array literal (`[a][0]`,
-// `[f](x)`) can be taken for a type. `[Int](repeating: 0, count: 3)` is NOT covered
-// and still aborts the way it did before.
+// `[f](x)`) can be taken for a type. `[Int](repeating: 0, count: 3)` is NOT covered.
 ArrayTypeLit <~~ push(makeEmptyColl(takeAll())) ~~>
             = "[" Type [ TypeLitDict ] "]" NoSpaceParen "(" ")" ;
 TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
@@ -1323,18 +1298,16 @@ MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 
 // Raw string literals: #"..."# and ##"..."##. Nothing inside is an escape - a
 // backslash is a backslash - and the only interpolation is \#( ... ) / \##( ... ),
-// whose pound count matches the delimiter's. Two pound levels are supported, which
-// is what real code uses; more would just be more of the same rules.
-// Three pound levels. The multi-line raw forms (###""" ... """###) ride the same
-// rules: the opening delimiter starts with ###" and the closing one ends with "###,
-// so the extra quotes are simply content - which is exactly the text Swift keeps.
-// Raw string delimiters BEYOND three pounds - `#####"This is a string"#####`.
-// The levels 1..3 above are spelled as ordinary rules because they support the
-// matching `\#( ... )` interpolation, which needs a real Expression sub-parse; a
-// scanner cannot call the parser back. Level 4 and up is a `:script` that counts
-// the pounds and returns the whole literal as ONE token, so the level is unbounded.
-// Two shapes are deliberately DECLINED rather than mis-read, and each stays the
-// parse failure it already was: a MULTI-LINE raw literal (`####""" ... """####`),
+// whose pound count matches the delimiter's. Levels 1..3 are ordinary rules
+// (RawStr1..3) because the matching `\#( ... )` interpolation needs a real
+// Expression sub-parse; a scanner cannot call the parser back. The multi-line raw
+// forms (###""" ... """###) ride the same rules: the opening delimiter starts with
+// ###" and the closing one ends with "###, so the extra quotes are simply content -
+// which is exactly the text Swift keeps.
+// Level 4 and up (`#####"This is a string"#####`) is RawScan, a `:script` that
+// counts the pounds and returns the whole literal as ONE token, so the level is
+// unbounded. Two shapes are deliberately DECLINED rather than mis-read (a parse
+// failure): a MULTI-LINE raw literal (`####""" ... """####`),
 // whose closing-delimiter indentation strip lives in makeMultiStr, and any literal
 // carrying its own `\####(` interpolation.
 RawStrN     <~~ push(makeRawScanned(up.in)) ~~> = RawScan ;
@@ -1750,11 +1723,8 @@ KwContinue  = "continue" KwEnd ;
             // A RAW astral character in the source (an emoji written as itself
             // rather than as \u{...}) is TWO code units, and copying it one unit at
             // a time hands a LONE SURROGATE to the host: it cannot be encoded in
-            // UTF-8, so it comes back as U+FFFD and the pair became two separate
-            // replacement characters. `"a<emoji>b".count` was 4 here and 3 under
-            // llvm.Run and swiftc - and 3 here for the ESCAPE spelling of the same
-            // string, so one literal had two values depending on how it was
-            // written. Copy the pair in ONE substring.
+            // UTF-8, so it comes back as U+FFFD. Copy the pair in ONE substring.
+            // Twin in swift-to-llvm-ir.abnf.
             if (c1 != 92) {
                 if (c1 >= 0xD800 && c1 <= 0xDBFF && i + 1 < str.length) {
                     out += str.substring(i, i + 2)
@@ -1950,11 +1920,8 @@ KwContinue  = "continue" KwEnd ;
         return n
     }
     // The same walk, keeping the CLUSTERS instead of counting them. `Array(s)` and
-    // `for c in s` both need the elements swGraphemeCount counts, and before this
-    // they indexed the string by CODE UNIT and silently disagreed with .count:
-    // `for c in "cafe\u{301}"` walked to swGraphemeCount's 4 and read units 0..3, so
-    // the combining mark was dropped and `é` printed as `e`. swiftc 6.1.2 yields
-    // c, a, f, é.
+    // `for c in s` both need the elements swGraphemeCount counts:
+    // `for c in "cafe\u{301}"` yields c, a, f, é (swiftc 6.1.2).
     function swGraphemes(str) {
         var out = []
         var i = 0
@@ -1982,12 +1949,7 @@ KwContinue  = "continue" KwEnd ;
     // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
     // String(describing:) - what print writes and what "\(v)" interpolates.
-    //
-    // This used to fall through to JavaScript's ToString, so an Array printed
-    // "1,2,3" and a Dictionary, a tuple, a struct and an enum case all printed
-    // "[object Object]", while swift-to-llvm-ir.abnf handed the raw value to the
-    // shared println and printed Go's %v form (`<nil>`, `[1 2 3]`, a map with a
-    // raw pointer address in it). Real Swift prints
+    // Real Swift prints
     //   nil / [1, 2, 3] / ["x": 1] / (x: 1, y: "s") / P(x: 1, y: 2) / a(1, "x")
     // (verified against swift 6.1.2). The Go twin of this renderer is swRender in
     // abnf/jsrtswift.go; ./test.sh --cross diffs the two, so they must stay in step.
@@ -2029,8 +1991,7 @@ KwContinue  = "continue" KwEnd ;
         // 1.0 is "1.0", not the "1" a JS number would give.
         if (isFlo(v)) { return swFloDesc(v) }
         if (typeof v != "object") { return "" + v }
-        // A Range printed as itself. Both halves used to answer "[object Object]" -
-        // agree-and-wrong, which byte-identity cannot see. swiftc 6.1.2 prints
+        // A Range printed as itself: swiftc 6.1.2 prints
         // `0..<3` and `1...3`, which is what a...b / a..<b are spelled as.
         // A ONE-SIDED range prints Swift's PartialRangeFrom/Through/UpTo, whose real
         // form names the static element type (`PartialRangeFrom<Int>(lowerBound: 1)`)
@@ -2108,11 +2069,11 @@ KwContinue  = "continue" KwEnd ;
     }
     // ----- Double: a boxed {__flo: value} -----
     // Swift's Double is a DIFFERENT type from Int, and this value model has one JS
-    // number, so `7.0 / 2.0` used to arrive with exactly the operands `7 / 2` has
-    // and divided as integers (3, not 3.5). Telling the two apart by "does the
+    // number, so `7.0 / 2.0` would arrive with exactly the operands `7 / 2` has
+    // (3.5, not 3). Telling the two apart by "does the
     // value have a fraction" cannot repair that, because 7.0 has no fraction. So
     // the type goes ON the value: a float is BOXED, the same trick the sized
-    // integers next door use and the one commit 636e326 gave Java/Kotlin/Go/C#.
+    // integers next door use (and Java/Kotlin/Go/C# use for their floats).
     //
     // Invariant, in BOTH halves:
     //     a plain number / a {__sz} box  ==  an Int (or a sized integer type)
@@ -2120,18 +2081,7 @@ KwContinue  = "continue" KwEnd ;
     //
     // The residual "a fractional plain number counts as a Double" test is kept as a
     // safety net for any value that reaches arithmetic without having been boxed.
-    //
-    // DELIBERATE SIMPLIFICATION, both halves: Float is an ALIAS of Double, i.e. it
-    // is modelled at 64 bit precision. Every value both types hold exactly gives
-    // the same answer and the same text; a computation that LOSES precision does
-    // not - real swift prints `Float(1) / Float(3)` as 0.33333334 and this prints
-    // 0.3333333333333333. Modelling the 32 bit width honestly needs float32
-    // rounding after every operator AND a float32 shortest-round-trip renderer in
-    // the frozen JS subset (which has no toPrecision and no Math.fround), which is
-    // a bigger machine than Float's share of real Swift justifies. Aliasing was
-    // chosen over refusing `Float` outright because a program that writes Float is
-    // asking for floating point, and Double answers it correctly everywhere the
-    // two widths agree.
+    // A Float is the same box with a width flag (see "Float: the 32 bit WIDTH").
     //
     // DELIBERATE SIMPLIFICATION, both halves: real Swift does NOT implicitly
     // convert between Int and Double - `x + 2.0` with `let x = 5` is a COMPILE
@@ -2401,11 +2351,7 @@ KwContinue  = "continue" KwEnd ;
     // IEEE-754's rule - and which THIS DIALECT LOSES when both operands are
     // integral-valued, because the tag engine then multiplies them as INTEGERS
     // and `-7 * 0` is +0 (the `x * 0` trap of docs/working-on-this-project.md
-    // chapter 4). `0.0 * -7.0` therefore printed 0.0 where swiftc 6.1.2 and BOTH
-    // compiled halves say -0.0: a PRE-EXISTING interpreter-vs-compiler divergence
-    // for plain Double, reproducible at 4f2e6e4 in two lines of swift, which
-    // --cross never reached. The float work only made it show up 336 times in a
-    // 6,442-line probe. The NINTH appearance of this shape; the same fix as
+    // chapter 4). `0.0 * -7.0` must print -0.0. The same fix as
     // kZeroSign in kotlin-interpreter.abnf and jZeroSign in java-interpreter.abnf.
     function swZeroSign(p, a, b) {
         if (p !== 0) { return p }
@@ -2421,7 +2367,6 @@ KwContinue  = "continue" KwEnd ;
     // in swiftc 6.1.2 and in both compiled halves, where `0 - Math.round(0.1)` is
     // `0 - 0` and this dialect answers +0.0 for that (docs/working-on-this-project.md
     // chapter 7.10 - the working spelling of a negative zero is a DIVISION).
-    // Pre-existing for a plain Double, reproducible at 4f2e6e4.
     function swRoundHalfAway(f) {
         if (f < 0) {
             var r = Math.round(0 - f)
@@ -2450,7 +2395,7 @@ KwContinue  = "continue" KwEnd ;
     function swadd(l, r) {
         if (typeof l == "string" || typeof r == "string") { return swstr(l) + swstr(r) }
         // Array + Array is CONCATENATION in Swift, not the JS "1,23" that the
-        // untyped + produced.
+        // untyped + produces.
         if (Array.isArray(l) && Array.isArray(r)) { return concat2impl(l, r) }
         if (swIntish(l, r)) { return szArith("+", l, r) }
         return swFloArith("+", l, r)
@@ -2565,20 +2510,17 @@ KwContinue  = "continue" KwEnd ;
         if (name == "UInt8") { return {w: 8, u: true} }
         return null
     }
-    // ----- Declared-type adoption (docs/todo.md 1.1) -----
+    // ----- Declared-type adoption -----
     //
     // An untyped literal takes the FLOATNESS and the WIDTH of the type it is
-    // written at. `let d: Double = 3` has always done this (makeDecl); these
+    // written at. `let d: Double = 3` does this in makeDecl; these
     // helpers are what the OTHER declared-type sites use - a parameter, a
     // function's return type, a stored property, and the element type of an
     // array annotation.
     //
-    // This is not cosmetic and it is not a Float story: an Int literal that does
-    // not adopt stays an Int and INTEGER-DIVIDES, so
+    // An Int literal that does not adopt stays an Int and INTEGER-DIVIDES, so
     //     func g(_ x: Double) -> Double { return x / 2 };  g(3)
-    // answered 1 where swiftc 6.1.2 says 1.5, in both halves, at every one of
-    // those sites. The Float half of the same rule is what makes `f(1)` exact
-    // where only `f(Float(1))` used to be.
+    // must adopt to answer 1.5 (swiftc 6.1.2).
     //
     // A value that is not a bare number, a sized integer or a float box is
     // returned UNCHANGED. At these sites the only value a type-correct Swift
@@ -2594,15 +2536,13 @@ KwContinue  = "continue" KwEnd ;
         return swIntWidthOf(ty) != null
     }
     // Does this annotation TEXT carry an adoptable leaf anywhere inside it? A
-    // parameter's adoption used to be gated on swAdoptable, i.e. on a plain type
-    // NAME, so `func f(_ xs: [Double])` called `f([3])` bound a plain Int array and
-    // `xs[0] / 2` integer-divided to 1 where swiftc 6.1.2 says 1.5 (docs/todo.md
-    // 1.2) - and the comment above ParamType claimed the opposite.
+    // parameter gated on swAdoptable alone (a plain type NAME) would miss
+    // `func f(_ xs: [Double])`.
     //
     // The gate is not simply "is it structural": the compiler half would then put
     // js_swadoptdeep on the per-call path of every structurally annotated parameter
-    // in every program, which is the +10.3% charAt trap its swTyIsDeep comment
-    // records. Both halves therefore ask the narrower question, at WALK time - does
+    // in every program (see its swTyIsDeep). Both halves therefore ask the narrower
+    // question, at WALK time - does
     // any identifier token in the text name a type that adopts - so a `[String]`, a
     // `[T]` or a `(String, Bool)` parameter costs nothing at all.
     //
@@ -2654,10 +2594,9 @@ KwContinue  = "continue" KwEnd ;
         if (iw == null || isFlo(v)) { return v }
         return swAdoptNum(v) ? szConv(v, iw.w, iw.u) : v
     }
-    // The WRITE half of the same rule (docs/todo.md 1.1). `var d: Double = 0;
-    // d = 3` answered 1, because only the INITIAL value ever adopted: the
-    // declaration knows the annotation and the assignment three lines later does
-    // not.
+    // The WRITE half of the same rule: `var d: Double = 0; d = 3` must hold 3.0,
+    // yet the declaration knows the annotation and the assignment three lines
+    // later does not.
     //
     // No var-type table is needed, because this value model already carries the
     // two things an annotation decides - FLOATNESS (the {__flo} box, at its own
@@ -2686,18 +2625,16 @@ KwContinue  = "continue" KwEnd ;
         }
         return v
     }
-    // ----- The STRUCTURAL declared type (docs/todo.md 1.3) -----
+    // ----- The STRUCTURAL declared type -----
     //
     // `let a: [Double] = [3, 4]` types the array's ELEMENTS, so a[0] / 2 is 1.5;
     // the same is true of a dictionary's VALUES (`[String: Double]`), of a tuple's
-    // elements (`(Double, Int)`) and through an Optional (`Double?`), each of
-    // which answered 1 before because only the array form was walked. So the walk
+    // elements (`(Double, Int)`) and through an Optional (`Double?`). So the walk
     // is written once, over the annotation TEXT, and recurses on the containers -
     // `[String: [Double]]` and `([Double], Int)` fall out of the same three arms.
     //
     // The text is the whole annotation, brackets and all, which is what makes the
-    // recursion uniform (the old contract passed the array's ELEMENT type and had
-    // to re-add a level for nesting). An Optional annotation is stripped rather
+    // recursion uniform. An Optional annotation is stripped rather
     // than modelled: an Optional IS its value in this model, so `Double?` adopts
     // exactly as `Double` does. A name this does not recognise adopts nothing,
     // so a user type, a generic and a function type all pass through untouched.
@@ -2806,14 +2743,10 @@ KwContinue  = "continue" KwEnd ;
         return swAdoptable(e) ? e : ""
     }
     // A declared type as WRITTEN, which is where a function type is recognised.
-    // It used to be deliberately OUTSIDE swAdoptDeep's recursion, because the
-    // compiler's twin for a nested annotation is layer 2's js_swadoptdeep and layer
-    // 2 builds no closures - so wrapping the elements of `[(Double) -> Double]` here
-    // and not there would have traded one wrong answer for a halves divergence.
-    // The compiler half now reaches those leaves too (the emitter builds one MAKER
-    // closure per distinct function-type text and hands js_swadoptdeep a map of
-    // them), so the recursion is INSIDE the walk in both halves and the function
-    // type is recognised wherever the walk reaches it. Twins: swFnMakerOf /
+    // The recursion is INSIDE the walk in both halves (the compiler's emitter
+    // builds one MAKER closure per distinct function-type text and hands
+    // js_swadoptdeep a map of them), so the function type is recognised wherever
+    // the walk reaches it, `[(Double) -> Double]` included. Twins: swFnMakerOf /
     // js_swadoptdeep in languages/lib/swift-rt.metajs, swAdoptDeep in
     // abnf/jsrtswift.go, swCollectFnTys / swFnMaker in swift-to-llvm-ir.abnf.
     function swAdoptAnn(v, ty) { return swAdoptDeep(v, ty) }
@@ -2876,12 +2809,9 @@ KwContinue  = "continue" KwEnd ;
         if (v.__range === true) { return rangeLen(v) }
         return v.length
     }
-    // isEmpty / first / last are PROPERTIES on every Collection, and all three
-    // answered nil in BOTH halves where swiftc 6.1.2 answers false / 10 / 30 -
-    // agree-and-wrong with an oracle installed, which is the class this project
-    // treats as the one byte-identity cannot see. `first`/`last` existed only as
-    // METHOD names in arrayMethod, so `a.first()` worked and `a.first` did not.
-    // On a String they are the first and last CLUSTER, not code unit.
+    // isEmpty / first / last are PROPERTIES on every Collection (arrayMethod has
+    // only the METHOD forms). On a String they are the first and last CLUSTER,
+    // not code unit.
     function swIsColl(v) {
         if (typeof v == "string") { return true }
         if (v === null || v === undefined) { return false }
@@ -2903,9 +2833,7 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
         if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
-        // indices is a PROPERTY on every Collection and answered nil in all three
-        // engines (docs/todo.md 2.10 lists it among the members that "abort"; it did
-        // not abort, it answered the wrong thing silently, which is worse). Only an
+        // indices is a PROPERTY on every Collection. Only an
         // Array is answered: a String's indices are String.Index values with no
         // printable form here, and a Dictionary's are opaque too. swiftc 6.1.2
         // prints `0..<3` for [3, 1, 2].indices, which this matches exactly.
@@ -2924,11 +2852,9 @@ KwContinue  = "continue" KwEnd ;
             if (name == "isFinite") { return fv === fv && fv !== swInfF && fv !== swInfF * swNegOne }
             if (name == "isZero") { return fv === 0 }
             if (name == "description") { return swFloDesc(o) }
-            // `< 0` is FALSE for -0.0, so (-0.0).magnitude answered -0.0 where
-            // swiftc 6.1.2 and BOTH compiled halves (which go through Math.abs)
-            // answer 0.0. The sign of a zero only shows through 1/v - the same
-            // guard the `abs` host global already carries. Pre-existing for a
-            // plain Double, reproducible at 4f2e6e4.
+            // `< 0` is FALSE for -0.0, yet (-0.0).magnitude is 0.0 (swiftc 6.1.2,
+            // and the compiled halves through Math.abs). The sign of a zero only
+            // shows through 1/v - the same guard the `abs` host global carries.
             if (name == "magnitude") { return swReFlo(fv < 0 || (fv == 0 && 1 / fv < 0) ? 0 - fv : fv, isF32(o)) }
             var ft = builtinTable("Double", false)
             if (ft != null && hasOwn(ft, name)) { return ft[name] }
@@ -2966,9 +2892,8 @@ KwContinue  = "continue" KwEnd ;
         }
         if (hasOwn(o, name)) { return o[name] }
         // A nested type declared inside an ENUM is installed on the enum's MEMBER
-        // TABLE, not on the descriptor, so `Outer.Mode` read as a field found nothing
-        // and `Outer.Mode.b` failed with `field .b of nil` where the compiler half and
-        // swiftc both answer. Only a type descriptor is answered here - an instance
+        // TABLE, not on the descriptor, so `Outer.Mode` as a field read has to look
+        // there. Only a type descriptor is answered here - an instance
         // method reached the same way would change what `Type.m` means.
         if (typeof o == "object" && o.__isenum === true && o.__members != undefined && o.__members !== null) {
             var mt = o.__members
@@ -2984,13 +2909,9 @@ KwContinue  = "continue" KwEnd ;
         if (g != null) { return g(o) }
         return undefined
     }
-    // A subscript that cannot answer. The four messages are swiftc 6.1.2's OWN,
+    // A subscript that cannot answer. The messages are swiftc 6.1.2's OWN,
     // read off the toolchain, and the twins of js_swidx in lib/swift-rt.metajs and
-    // abnf/jsrtswift.go - all three engines used to say something different here
-    // (docs/todo.md 1.12), and one of the three leaked PYTHON: llvm.Run routed
-    // Swift's subscript through the shared js_pyget, so `nil[0]` answered
-    // "'NoneType' object is not subscriptable" and a missing dictionary key
-    // answered CPython's KeyError.
+    // abnf/jsrtswift.go.
     //
     //     xs[7]     Swift/ContiguousArrayBuffer.swift:692: Fatal error: Index out of range
     //     s[i]      Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
@@ -3006,7 +2927,7 @@ KwContinue  = "continue" KwEnd ;
         if (kind == "string") { fail("Fatal error: String index is out of bounds") }
         // The twins have a fourth arm, "cannot subscript a value of this type". This
         // half cannot reach it: an object with numeric slots falls through to the
-        // array arm below, which is what it has always done.
+        // array arm below.
         fail("Fatal error: Index out of range")
     }
     // a[1...] / a[0..<2] / s[1...3]: a RANGE subscript answers the slice. Swift's
@@ -3054,8 +2975,7 @@ KwContinue  = "continue" KwEnd ;
         }
         if (o === null || o === undefined) { swIndexFail("nil") }
         // NOT guarded on Array.isArray: an object with numeric slots (a tuple) is
-        // indexable here and the length test below is inert for it, which is the
-        // behaviour this half has always had. Only the MESSAGES changed.
+        // indexable here and the length test below is inert for it.
         var ai = szNum(i)
         if (ai < 0) { ai += o.length }
         if (ai < 0 || ai >= o.length) { swIndexFail("array") }
@@ -3091,9 +3011,8 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Builtins available to the running program -----
-    // Swift's print is VARIADIC and joins its arguments with a space. Taking only
-    // the first one silently swallowed output - print(1, 2, 3) printed "1" here and
-    // "1 2 3" in swift-to-llvm-ir.abnf, which is what real Swift prints.
+    // Swift's print is VARIADIC and joins its arguments with a space:
+    // print(1, 2, 3) prints "1 2 3".
     hostGlobals["print"] = function() {
         var args = arguments
         var out = ""
@@ -3103,9 +3022,8 @@ KwContinue  = "continue" KwEnd ;
         }
         println(out)
     }
-    // print(_:separator:terminator:). The two labelled arguments used to be
-    // dropped (they arrived positionally, so `print(1, 2, separator: "-")`
-    // printed `1 2 -`); makeCall splits them out and calls this instead.
+    // print(_:separator:terminator:). The two labelled arguments would otherwise
+    // arrive positionally; makeCall splits them out and calls this instead.
     function swPrintSep(argv, sep, term) {
         var s = (sep === undefined || sep === null) ? " " : swstr(sep)
         var t = (term === undefined || term === null) ? "\n" : swstr(term)
@@ -3118,21 +3036,19 @@ KwContinue  = "continue" KwEnd ;
     }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
-    // not the 1 the |0 truncation gave) and compares by its VALUE (two boxes are two
+    // not the 1 a |0 truncation gives) and compares by its VALUE (two boxes are two
     // objects, and `a > b` between objects is false).
     hostGlobals["abs"] = function(v) {
-        // `< 0` is FALSE for -0.0, so abs(-0.0) answered -0.0 where swift 6.1.2
-        // (and both compiled halves, which go through Math.abs) answer 0.0. The
-        // sign of a zero only shows through 1/v.
+        // `< 0` is FALSE for -0.0, yet abs(-0.0) is 0.0 (swift 6.1.2, and the
+        // compiled halves through Math.abs). The sign of a zero only shows through 1/v.
         if (isFlo(v)) { var f = v.__flo; return swReFlo(f < 0 || (f == 0 && 1 / f < 0) ? 0 - f : f, isF32(v)) }
         return v < 0 ? -v | 0 : v | 0
     }
     // Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a TIE
     // keeps the LEFT operand for min and takes the right for max, and a NaN
-    // operand keeps the left one because every comparison against it is false.
-    // Written the other way round (`a < b ? a : b`) both were lost:
-    // min(-0.0, 0.0) answered 0.0 where swift answers -0.0, min(0.0, -0.0)
-    // answered -0.0, and min(nan, 1.0) answered 1.0 where swift answers nan.
+    // operand keeps the left one because every comparison against it is false:
+    // min(-0.0, 0.0) is -0.0 and min(nan, 1.0) is nan. Do not write it the other
+    // way round (`a < b ? a : b`).
     hostGlobals["max"] = function(a, b) {
         if (isFlo(a) || isFlo(b)) { return swD(b) >= swD(a) ? b : a }
         return a > b ? a : b
@@ -3150,7 +3066,7 @@ KwContinue  = "continue" KwEnd ;
         var mcLabels = pendingLabels
         // `self.m()` from inside a protocol extension, where m is NOT a requirement:
         // Swift binds it to the extension's own member, not to the conforming type's
-        // override (docs/todo.md 1.1). Only a call on the RECEIVER takes the test.
+        // override. Only a call on the RECEIVER takes the test.
         // protoStatic FIRST, because it answers null on one property read when the
         // running method was not declared in a protocol - which is every call in a
         // program with no protocol extension in it - while findThis() walks the whole
@@ -3177,7 +3093,7 @@ KwContinue  = "continue" KwEnd ;
             }
             // A String IS a Collection of Characters in Swift, so every Sequence
             // member applies to it - `"hello".map { $0 }` is
-            // ["h", "e", "l", "l", "o"] (docs/todo.md 2.10). The receiver is split
+            // ["h", "e", "l", "l", "o"]. The receiver is split
             // into GRAPHEME CLUSTERS, the array member runs, and the five members
             // whose Swift result is a String/Substring are joined back:
             // `"hello".filter { $0 != "l" }` is the String "heo" and
@@ -3241,7 +3157,7 @@ KwContinue  = "continue" KwEnd ;
             // members (toString, valueOf, ...) under a host JS engine.
             var m = classFind(target.__class, name)
             // A STORED PROPERTY holding a closure is callable as `q.fn(3)`, and the
-            // member table has no such name - so this used to abort. The own slot is
+            // member table has no such name. The own slot is
             // consulted only after the method table has declined, which keeps a real
             // method of the same name winning, and it is called WITHOUT a receiver:
             // a function-typed field is a plain value, not a method (js_swmcall in
@@ -3259,8 +3175,7 @@ KwContinue  = "continue" KwEnd ;
         var out
         if (name == "count") { return t.length }
         if (name == "append") { t.push(args[0]); return undefined }
-        // insert(_:at:) existed in no engine and aborted with *unknown Array
-        // method*, found while closing docs/todo.md 1.2's append bullet. There is
+        // insert(_:at:). There is
         // no splice in this dialect, so the tail is shifted up by one. Twins:
         // js_swmcall in languages/lib/swift-rt.metajs and abnf/jsrtswift.go.
         if (name == "insert") {
@@ -3275,12 +3190,9 @@ KwContinue  = "continue" KwEnd ;
         }
         // removeLast() and popLast() differ ONLY on an empty array: swiftc 6.1.2
         // traps on `[].removeLast()` ("Can't remove last element from an empty
-        // collection") and answers nil for `[].popLast()`. removeLast was already
-        // in BOTH compiled halves (the shared list table in abnf/jsrt.go and
-        // swListMethod in lib/swift-rt.metajs) and missing only here, so it was a
-        // live halves divergence; popLast was in none of the three, and the two
-        // refusals disagreed - "unknown Array method: popLast" here against
-        // "unknown list method 'popLast'" under llvm.Run. docs/todo.md 2.11.
+        // collection") and answers nil for `[].popLast()`. The compiled halves'
+        // removeLast is the shared list table in abnf/jsrt.go and swListMethod in
+        // lib/swift-rt.metajs; popLast is rtPopLast in swift-to-llvm-ir.abnf.
         if (name == "popLast") {
             if (t.length == 0) { return null }
             return t.pop()
@@ -3290,10 +3202,8 @@ KwContinue  = "continue" KwEnd ;
             return t.pop()
         }
         // contains(_:) is a value test and contains(where:) a PREDICATE; the label
-        // does not reach here, so the closure argument is what tells them apart.
-        // `[1, 3].contains(where: { $0 > 2 })` answered FALSE in all three engines
-        // against swiftc 6.1.2's true - agree-and-wrong, which byte-identity cannot
-        // see (docs/todo.md 2.10).
+        // does not reach here, so the closure argument is what tells them apart
+        // (`[1, 3].contains(where: { $0 > 2 })` is true).
         if (name == "contains") {
             if (args.length > 0 && typeof args[0] == "function") {
                 for (i = 0; i < t.length; i++) { if (args[0](t[i])) { return true } }
@@ -3319,20 +3229,18 @@ KwContinue  = "continue" KwEnd ;
         }
         return arraySeqMethod(t, name, args)
     }
-    // ----- The Sequence/Collection members, docs/todo.md 2.10 -----
-    // Every one of these was measured against swiftc 6.1.2 before it was written;
-    // the four that CANNOT be matched exactly are recorded at their arms below.
+    // ----- The Sequence/Collection members -----
+    // Every one of these is checked against swiftc 6.1.2; the four that CANNOT be
+    // matched exactly are recorded at their arms below.
     // The twins are swListMethod in languages/lib/swift-rt.metajs and swListMethod
     // in abnf/jsrtswift.go, and all three have to answer the same values AND the
-    // same refusal - the two engines used to disagree even about the WORDING
-    // ("unknown Array method: sorted" here against "unknown list method 'sorted'"
-    // under llvm.Run), which is the symptom this item names.
+    // same refusal wording.
     //
     // The comparison is swOrd's, not `<`: a UInt64 above 2^63 reads as a NEGATIVE
     // value through a plain relational operator, and a Double is a BOX, which is an
     // object to JS's `<`. A String pair compares as text.
-    // A user type's own `static func <` WINS. `[P(n: 3), P(n: 1)].sorted()` answered
-    // [3, 1] in all three engines against swiftc 6.1.2's [1, 3]: Comparable is how
+    // A user type's own `static func <` WINS (`[P(n: 3), P(n: 1)].sorted()` is
+    // [1, 3]): Comparable is how
     // Swift sorts anything that is not a built-in, and the built-in comparison sees
     // two opaque objects. The operand's type is asked first, then the other's -
     // exactly what sw_opfn does for a written `a < b`.
@@ -3403,8 +3311,8 @@ KwContinue  = "continue" KwEnd ;
     }
     // `a.reduce(0, +)` / `a.sorted(by: >)`: the operator NAMED as a value. It becomes
     // the two-argument function binOp already dispatches, so an overload a user type
-    // declares is picked up for free. An operator the table has no entry for is still
-    // reported not-implemented, at PARSE time as before - binOps is fully populated
+    // declares is picked up for free. An operator the table has no entry for is
+    // reported not-implemented - binOps is fully populated
     // by then only for the built-ins, so the check is deferred to the first call.
     // The twin is makeOpRef in swift-to-llvm-ir.abnf.
     function makeOpRef(sym, pos) {
@@ -3486,8 +3394,8 @@ KwContinue  = "continue" KwEnd ;
         // the STATIC element type - `ReversedCollection<Array<Int>>(_base: [3, 1, 2])`.
         // That needs a type checker (manual 7.9's Optional argument, exactly), so a
         // plain reversed ARRAY is answered instead: every use except printing the
-        // collection itself agrees, and `print(a.reversed())` is one measured line of
-        // divergence, `[2, 1, 3]` against swiftc's ReversedCollection spelling.
+        // collection itself agrees (`print(a.reversed())` prints `[2, 1, 3]`, not
+        // swiftc's ReversedCollection spelling).
         if (name == "reversed") {
             out = []
             for (i = n - 1; i >= 0; i--) { out.push(t[i]) }
@@ -3597,7 +3505,7 @@ KwContinue  = "continue" KwEnd ;
             return out
         }
         // indices answers a Range, and `print(a.indices)` is `0..<3` in swiftc, which
-        // this now matches exactly.
+        // this matches exactly.
         if (name == "indices") { return {__range: true, lo: 0, hi: n, closed: false} }
         // enumerated() answers an EnumeratedSequence whose own printed form names the
         // static type, like reversed(); `Array(a.enumerated())` is what programs use
@@ -3660,11 +3568,8 @@ KwContinue  = "continue" KwEnd ;
     // e is T answers the dynamic type test, e as? T answers the value or nil, and
     // e as / e as! T pass the value through - this value model has one representation
     // per value, so an upcast and a forced downcast are both identities.
-    // `A & B` is a protocol COMPOSITION and every component has to match. Both
-    // halves used to look the whole spelling up as one name, find nothing and answer
-    // false - and once `is P` started working, testing only the first component
-    // would have answered TRUE for a type conforming to A alone. swiftc 6.1.2
-    // settles it: `U2() is A2 & B2` is false with `struct U2: A2`. The twin is
+    // `A & B` is a protocol COMPOSITION and every component has to match:
+    // `U2() is A2 & B2` is false with `struct U2: A2` (swiftc 6.1.2). The twin is
     // swSplitAmp in swift-to-llvm-ir.abnf's emitIsType.
     function swSplitAmp(t) {
         var out = []
@@ -3699,13 +3604,10 @@ KwContinue  = "continue" KwEnd ;
     }
     // The DYNAMIC type test, for the names this value model answers itself.
     //
-    // The shared rtIsType predates the {__flo} box and gets every numeric name in
-    // Swift wrong, in both directions: it says "an integral number" for Int AND for
-    // Double, so `3 is Double` was TRUE and `3.0 is Double` was FALSE - swiftc 6.1.2
-    // says exactly the reverse - and `3 is Float` was true as well. It also has no
-    // arm for the name `Bool` at all (its boolean arm spells the Java/Kotlin name
-    // `Boolean`), so `true is Bool` was false. Since swIsType also drives `as?` and
-    // `as!`, every one of those was a wrong VALUE, not just a wrong flag.
+    // The shared rtIsType does not know the {__flo} box: it says "an integral
+    // number" for Int AND for Double (`3 is Double` must be false, `3.0 is Double`
+    // true), and its boolean arm spells the Java/Kotlin name `Boolean`, not `Bool`.
+    // swIsType also drives `as?` and `as!`.
     //
     // The value model carries the answer already (docs/working-on-this-project.md
     // 7.15): a {__flo} box is a Double, the same box with __f32 is a Float, a plain
@@ -3718,14 +3620,14 @@ KwContinue  = "continue" KwEnd ;
     // them apart needs a nominal type on the value, which nothing else in this
     // front end would use. Every other row settled against swiftc 6.1.2.
     //
-    // Non-numeric names fall through to the shared probe unchanged, so a String, an
-    // Array, a user class and `Any` behave exactly as before. Twins: js_swis in
+    // Non-numeric names fall through to the shared probe unchanged (a String, an
+    // Array, a user class and `Any`). Twins: js_swis in
     // abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
     function swIsNamed(v, tname) {
         var t = swBaseTy(tname)
         // A user PROTOCOL is answered by the conformance marker adoptProtocol wrote,
         // not by the name walk below - a conforming type's descriptor is named for
-        // itself, never for the protocol (docs/todo.md 1.1).
+        // itself, never for the protocol.
         if (protoNames["$" + t] == 1) { return swConforms(v, t) }
         var opt = tname.length > 0 &&
                   (tname.charAt(tname.length - 1) == "?" || tname.charAt(tname.length - 1) == "!")
@@ -3742,7 +3644,7 @@ KwContinue  = "continue" KwEnd ;
         if (isB) { return typeof v == "boolean" }
         // The box tests come first in all three engines: in the COMPILED halves a
         // float box and a sized box are floor tags, and `typeof` answers "number"
-        // for both, so an isD arm placed above them claimed a big sized integer.
+        // for both, so an isD arm placed above them would claim a big sized integer.
         if (isFlo(v)) { return isF32(v) ? isF : isD }
         if (szIs(v)) { return szWidth(v, v) == bits && szUns(v, v) === uns }
         if (typeof v != "number") { return false }
@@ -3756,13 +3658,12 @@ KwContinue  = "continue" KwEnd ;
         if (op == "is") { return function() { return swIsType(t(), tname) } }
         if (op == "as?") { return function() { var v = t(); return swIsType(v, tname) ? v : null } }
         // `3 as Int8` is a COERCION, not a no-op: the literal takes the WIDTH (and
-        // the floatness) of the named type exactly as a declared type would. It was
-        // dropped, so `(3 as Double) / 2` was 1 where swiftc says 1.5, `(250 as
-        // UInt8) &+ 10` was 260 where swiftc says 4, and `(3 as Int8) is Int8` was
-        // false while `is Int` was true - the reverse of swiftc, in both halves.
+        // the floatness) of the named type exactly as a declared type would, so
+        // `(3 as Double) / 2` is 1.5, `(250 as UInt8) &+ 10` is 4 and
+        // `(3 as Int8) is Int8` is true (swiftc 6.1.2).
         // A name that is not Double/Float/a sized integer adopts NOTHING, so `x as
         // Any`, `as String` and every upcast are untouched, and `as Int64` stays the
-        // plain number Int already is (docs/todo.md 2.10 is unaffected).
+        // plain number Int already is.
         if (!swAdoptable(tname)) { return t }
         return function() { return swAdoptTy(t(), tname) }
     }
@@ -4070,14 +3971,10 @@ KwContinue  = "continue" KwEnd ;
     // cannot be asked about:
     //  - EVERY value a Swift program can throw conforms to Error, and Any matches
     //    anything, so both always match. swiftc would not compile the throw otherwise.
-    //  - a user PROTOCOL used to be exempt too - conformance was recorded on no
-    //    value in either engine, so filtering on the false answer it gave would have
-    //    turned a caught error into an UNCAUGHT one. adoptProtocol now records it
-    //    (docs/todo.md 1.1) and swIsType answers, so the exemption is GONE and the
-    //    clause filters: `catch let e as Recoverable` no longer catches a thrown
-    //    value that does not conform. Asserted both directions, in SECTION 33 of
-    //    tests/swift-test-full.swift and catch-filters-on-a-user-protocol in
-    //    tests/swift-test-features.swift.
+    //  - a user PROTOCOL is NOT exempt: adoptProtocol records conformance and
+    //    swIsType answers, so `catch let e as Recoverable` does not catch a thrown
+    //    value that does not conform (catch-filters-on-a-user-protocol in
+    //    tests/swift-test-features.swift).
     // The twin is the same two-way test in swift-to-llvm-ir.abnf's emitMatchPat.
     function swCatchTyMatch(v, t0) {
         var t = swBaseTy(t0)
@@ -4315,14 +4212,9 @@ KwContinue  = "continue" KwEnd ;
     // TopExec tag (see the Program rule), and it is a function rather than the loop
     // written inline there because the loop is where an uncaught `throw` surfaces.
     //
-    // Without the try, the thrown record left the tag as a HOST error and the ENGINE
-    // printed it - which is not a diagnostic at all, and, worse, not even the same
-    // text twice: goja rendered it "[object Object] at lib/interp-core.js:143" while
-    // -frozen rendered the Go value behind it,
-    // "&{%!s(*abnf.jsObject=&{{4363 0x50b4...} map[__exc:true v:0x...]})}" - a Go type
-    // name AND A HEAP ADDRESS, so the two script hosts disagreed on USER-VISIBLE
-    // OUTPUT and the -frozen half could not repeat itself between two runs. Same
-    // class as the (*abnf.jsArray) leak b56c2b0 removed from the Go twin.
+    // Without the try, the thrown record would leave the tag as a HOST error and the
+    // ENGINE would print it - not a diagnostic, and different between goja and
+    // -frozen (which would even print a Go heap address).
     //
     // The wording is swiftc 6.1.2's own, read off the toolchain:
     //
@@ -4334,7 +4226,7 @@ KwContinue  = "continue" KwEnd ;
     // this runtime has no module concept, and every other place a type name is
     // printed drops the qualifier the same way. js_swtop in lib/swift-rt.metajs and
     // abnf/jsrtswift.go print the IDENTICAL line, so all three engines agree.
-    // docs/todo.md 1.12.
+    //
     // A TOP-LEVEL defer is not a block defer, and the difference is settled against
     // swiftc 6.1.2 rather than assumed. Top-level defers run at the END of the top
     // level, LIFO, ON THE NORMAL PATH ONLY:
@@ -4350,9 +4242,6 @@ KwContinue  = "continue" KwEnd ;
     // statement after it runs unless the program traps or calls exit(), so running
     // the registered bodies in reverse after the loop is exactly Swift's order.
     // (exit() does not run them either, in Swift or here - it is libc's exit.)
-    // Before this, a marker record reached makeSeq's call site and both script hosts
-    // died with a HOST error, differently: goja "TypeError: Not a function:
-    // [object Object]", -frozen "call of a non function value". docs/todo.md 2.11.
     // Parked top-level defer bodies, drained by the Program tag in LIFO order.
     var swTopDefers = []
     function swTopSeq(xs) {
@@ -4424,34 +4313,19 @@ KwContinue  = "continue" KwEnd ;
             return r
         }
     }
-    // ----- How a Swift program DIES (docs/todo.md 1.1) -----
-    // Three things were wrong with this leg and all three are swift-local.
-    //
-    //  - THE STREAM. interp-core.js's fail() prints on STDOUT (println) while both
-    //    compiled halves are already on stderr, so an abort landed in the middle of
-    //    the program's own output here and beside it there. swiftc writes to stderr.
-    //  - THE PREFIX. `swift interpreter error: ` sat in front of an otherwise
-    //    byte-correct `Fatal error: Error raised at top level: boom`. A message that
-    //    is ALREADY in swiftc's own wording is printed bare; an engine-level
-    //    complaint that no toolchain would ever say ("unknown Array method: x") keeps
-    //    its prefix, because it is the engine talking and manual chapter 3 says that
-    //    has to stay distinguishable.
-    //  - THE EXIT CODE stays 1. swiftc traps at 133 (SIGTRAP) and that is DECLINED
-    //    here, with the measurement, for two reasons. First, `800ef57` left C# at
-    //    exit 1 on the argument that .NET's 134 is the HOST calling abort() rather
-    //    than a language property, and the same holds twice over here: swiftc's
-    //    trapped binary also DISCARDS its pending stdout, and that discard is pure
-    //    libc - block-buffered stdout never flushed because `brk` skips exit() - so
-    //    on a terminal the same binary prints everything and only through a pipe
-    //    loses it. Second, and decisively, the interpreter and llvm.Run legs run
-    //    INSIDE the mec process: raising SIGTRAP there kills the metacompiler, not
-    //    the program, so at most the native leg could match and the other two could
-    //    not. Making 1 of 3 legs "right" WIDENS the halves gap, which is exactly the
-    //    argument that keeps docs/todo.md 2.11 unasserted.
+    // ----- How a Swift program DIES -----
+    //  - THE STREAM: stderr, as swiftc and both compiled halves (interp-core.js's
+    //    fail() prints on STDOUT).
+    //  - THE PREFIX: a message that is ALREADY in swiftc's own wording is printed
+    //    bare; an engine-level complaint that no toolchain would ever say ("unknown
+    //    Array method: x") keeps `swift interpreter error: `, because it is the
+    //    engine talking and manual chapter 3 says that has to stay distinguishable.
+    //  - THE EXIT CODE stays 1, not swiftc's 133 (SIGTRAP): the interpreter and
+    //    llvm.Run legs run INSIDE the mec process, where raising SIGTRAP would kill
+    //    the metacompiler, so only the native leg could match.
     //
     // Twins: js_swtop / swAbort in languages/lib/swift-rt.metajs and rt.swAbort in
-    // abnf/jsrtswift.go. The pattern is java's js_jvtop, which has printed its
-    // uncaught line bare on stderr since docs/todo.md 1.14.
+    // abnf/jsrtswift.go. The pattern is java's js_jvtop.
     function swIsFatalMsg(msg) {
         return typeof msg == "string" && msg.slice(0, 12) == "Fatal error:"
     }
@@ -4614,9 +4488,9 @@ KwContinue  = "continue" KwEnd ;
     var sigReg = {}
     function regSig(name, params) { scopePut(sigReg, "$" + name, params) }
     // A TYPE's initializer signature, registered under the type's BARE name. Two
-    // same-named nested types (`A.Inner` and `B.Inner`) therefore land on one entry,
-    // and planArgs then filled `Inner(x: 4)` against the OTHER type's `init(z:)` -
-    // `nil` in all three engines where swiftc 6.1.2 constructs the value. There is no
+    // same-named nested types (`A.Inner` and `B.Inner`) would land on one entry,
+    // and planArgs would fill `Inner(x: 4)` against the OTHER type's `init(z:)`.
+    // There is no
     // type context at this point in the walk to key it by, so an ambiguous name is
     // simply UNREGISTERED: with no signature the arguments stay positional and the
     // callee prologue fills the trailing defaults, which is the documented fallback.
@@ -4661,9 +4535,7 @@ KwContinue  = "continue" KwEnd ;
         //
         // swAdoptNeeded, not swAdoptable: a STRUCTURAL annotation adopts too
         // (`[Double]`, `[String: Double]`, `(Double, Int)`, `Double?`,
-        // `(Double) -> Double`), which is what the comment above the ParamType rule
-        // always claimed and the code did not do (docs/todo.md 1.2). The compiler
-        // half's twin is the same one-word change in its own makeParam.
+        // `(Double) -> Double`). The compiler half's twin is its own makeParam.
         var ad = (!isVar && swAdoptNeeded(type)) ? type : ""
         return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt}
@@ -4754,8 +4626,8 @@ KwContinue  = "continue" KwEnd ;
                 v = v.v
             }
             // The declared parameter type adopts the argument: `func g(_ x: Double)`
-            // called `g(3)` binds 3.0, so `x / 2` is 1.5 and not the 1 an Int
-            // division gave. The memberwise initializer runs through here too, which
+            // called `g(3)` binds 3.0, so `x / 2` is 1.5, not an Int division's 1.
+            // The memberwise initializer runs through here too, which
             // is how `T(a: 3)` fills a `var a: Double` field.
             if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptAnn(v, prm.adopt)) }
             else { vals.push(v) }
@@ -4770,7 +4642,7 @@ KwContinue  = "continue" KwEnd ;
     // bare type name in a stored property's default (`var x = Inner()`), in a
     // memberwise default or in an initializer body resolves LEXICALLY against it -
     // construction runs from whatever frame asked for the value, and without this the
-    // nested Inner lost to a same-named top-level one. A user-declared init pushes the
+    // nested Inner would lose to a same-named top-level one. A user-declared init pushes the
     // same owner again through makeMethodClosure, which is harmless.
     function constructInstance(f, argv, labels) {
         ownerStack.push(f)
@@ -4819,9 +4691,9 @@ KwContinue  = "continue" KwEnd ;
             //
             // Resolved BEFORE the arguments, and pushed as the owner while they are
             // evaluated: planArgs materialises a callee's DEFAULTS as argument records
-            // at the CALL SITE, so `struct A { struct I {}; var x = I() }` evaluated
-            // the memberwise default `I()` in the caller's frame, where the nested I
-            // is not in scope at all.
+            // at the CALL SITE, so `struct A { struct I {}; var x = I() }` would
+            // evaluate the memberwise default `I()` in the caller's frame, where the
+            // nested I is not in scope at all.
             var fh = swResolve(name)
             var f = fh == null ? getVar(name) : fh.v
             var ownT = isTypeVal(f)
@@ -4866,9 +4738,8 @@ KwContinue  = "continue" KwEnd ;
     // The name a chain STARTS with, when it starts with a bare one: the matched text
     // up to the first `.`, and "" for every other shape (`f(x).m()`, `a[0].m()`,
     // a literal). It exists for one reason - `arr.append(3)` into a `var arr:
-    // [Double]` stored a plain Int, so `arr[1] / 2` answered 1 where swiftc 6.1.2
-    // says 1.5 (docs/todo.md 1.2), while the INDEX write `arr[1] = 3` had adopted
-    // since the write-site work because makeAssign knows the target's name.
+    // [Double]` must store 3.0, as the INDEX write `arr[1] = 3` does through
+    // makeAssign, which knows the target's name.
     //
     // The value model cannot answer this one (manual 7.15): an element added by a
     // method call to an EMPTY `[Double]` has no sibling to take a type from. So the
@@ -4944,9 +4815,8 @@ KwContinue  = "continue" KwEnd ;
     }
     // An OBSERVED stored property (`var p: Double = 0 { didSet {} }`) does not live
     // under its own name - observedAccessors keeps it under `__v_<name>` and puts a
-    // generated getter/setter in front. So the write-site adoption looked the slot
-    // up, found nothing, and left `o.p = 3` an Int where swiftc says 3.0
-    // (docs/todo.md 1.3). The BACKING STORE is read rather than the getter,
+    // generated getter/setter in front, so the write-site adoption of `o.p = 3`
+    // reads it here. The BACKING STORE is read rather than the getter,
     // deliberately: a real computed `get` may have side effects, and adoption must
     // not run one to decide a type.
     function swObsSlot(o, k) {
@@ -4980,8 +4850,8 @@ KwContinue  = "continue" KwEnd ;
         // when that element type is a plain adoptable leaf. A structural element
         // (`[String: [Double]]`) would need the deep walker, and js_swadoptlike's
         // `ty` arm is js_swadopt in both compiled engines: routing it through
-        // js_swadoptdeep costs a charAt in the floor on EVERY write, which is the
-        // +10.3% measured in a68e16d. swElemTyOf declines it, in both halves.
+        // js_swadoptdeep would cost a charAt in the floor on EVERY write.
+        // swElemTyOf declines it, in both halves.
         var elemTy = (ref.path.length == 1 && ref.path[0].key == undefined)
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
@@ -5183,8 +5053,7 @@ KwContinue  = "continue" KwEnd ;
         else if (items[k] != undefined && items[k].atype != undefined) {
             elemTy = items[k].atype
             // The STRUCTURAL annotation is recorded too, not only a plain numeric
-            // name: makeAssign reads its ELEMENT type for a write to a new key
-            // (docs/todo.md 1.4).
+            // name: makeAssign reads its ELEMENT type for a write to a new key.
             scopePut(declTyReg, "$" + name, elemTy)
             k++
         }
@@ -5310,10 +5179,8 @@ KwContinue  = "continue" KwEnd ;
     // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. Iterating a dictionary with a
     // tuple pattern yields (key, value) pairs; with a plain name it yields the keys.
     // What a for-in walks: a Range's elements, a `repeat` pack's tuple elements, and
-    // a String's CLUSTERS. The string arm is the fix: the loop used to take its trip
-    // count from swlen (grapheme clusters) and its elements from arr[i] (code
-    // UNITS), so `for c in "cafe\u{301}"` ran 4 times and printed c a f e - dropping
-    // the combining mark swiftc 6.1.2 keeps on the fourth. Everything else, arrays
+    // a String's CLUSTERS (`for c in "cafe\u{301}"` is c, a, f, é - the trip count
+    // and the elements must both be clusters). Everything else, arrays
     // and dictionaries included, passes through untouched.
     function swSeqVal(v) {
         if (isRange(v)) { return rangeArray(v) }
@@ -5334,8 +5201,8 @@ KwContinue  = "continue" KwEnd ;
         return function() {
             // OUT OF LINE, and it has to be: MetaJS is typed and a local that has
             // held a string cannot later hold the array swGraphemes answers - and
-            // the interpreter only enforces that under -frozen, so the goja leg was
-            // green while --full read FROZEN-DIFF (manual chapter 4).
+            // only -frozen enforces that, so goja alone would not catch it
+            // (manual chapter 4).
             var arr = anytype
             arr = swSeqVal(listT())
             var res = undefined
@@ -5531,20 +5398,14 @@ KwContinue  = "continue" KwEnd ;
     // OVERLOAD SELECTION only. It is not the dynamic type test: overload selection
     // sees the argument BEFORE the declared type adopts it, so an untyped integer
     // literal is still a plain number at a `Double` parameter and Swift converts it.
-    // The shared rtIsType gets both halves of that wrong since swift's Double became
-    // a {__flo} BOX - it answers false for the box a real Double is, so EVERY
-    // `Double` overload was rejected and the dispatcher fell back to the first entry.
-    // That is how `MB(a: 3, b: 4)` ran `init(_ x: Double)` and answered 3.
+    // The shared rtIsType gets both halves of that wrong: it answers false for the
+    // {__flo} BOX a real Double is.
     // An untyped integer literal is also an acceptable argument at EVERY sized
     // integer parameter (`f(3)` picks `func f(_ x: UInt8)`), and the shared probe
     // cannot say so - it answers by the box, which the literal does not carry yet.
-    // `Bool` is here for the opposite reason: the shared probe spells the name
-    // `Boolean`, so a `Bool` overload was never selectable at all and the
-    // dispatcher fell back to its first entry.
+    // `Bool` is here because the shared probe spells the name `Boolean`.
     // An `inout` argument arrives as the one-slot `{__ref, v}` write-back box the
-    // call site built, so overload selection was asking whether a BOX is an Int and
-    // every answer was no - `func ov(_ x: inout Int)` / `ov(_ x: inout String)` both
-    // ran the first entry, in all three engines (docs/todo.md 1.2). The declared
+    // call site built (`func ov(_ x: inout Int)` / `ov(_ x: inout String)`). The declared
     // type belongs to what the box HOLDS, so the box is opened here rather than at
     // every caller. Twins: swUnref in languages/lib/swift-rt.metajs and js_swfits in
     // abnf/jsrtswift.go.
@@ -5673,10 +5534,9 @@ KwContinue  = "continue" KwEnd ;
             return pick.apply(undefined, arguments)
         }
     }
-    // A SUBCLASS that overrides ONE of several inherited overloads used to shadow the
+    // A SUBCLASS that overrides ONE of several inherited overloads must not shadow the
     // whole group: the derived table's plain `m` slot is found before the base's
-    // dispatcher is ever reached, so `Sub.m(String)` ran the overriding `m(Int)` in
-    // all three engines where swiftc 6.1.2 runs the inherited one (docs/todo.md 1.2).
+    // dispatcher is ever reached, yet `Sub.m(String)` has to run the inherited one.
     // The base's candidates are therefore MERGED into the derived group, minus the
     // ones the derived overrides - which is decided by the declared signature, the
     // same information `override` carries. Derived candidates come first, so an
@@ -5836,10 +5696,9 @@ KwContinue  = "continue" KwEnd ;
         var willP = "newValue"
         var did = null
         var didP = "oldValue"
-        // The declared numeric type of an OBSERVED stored property. It was dropped
-        // here, so `var p: Double = 0 { didSet {} }` held the Int 0 and `o.p = 3`
-        // stayed an Int: the storage lives under __v_p, so neither the default nor
-        // the later write had anything to adopt from (docs/todo.md 1.3).
+        // The declared numeric type of an OBSERVED stored property: the storage lives
+        // under __v_p, so without it neither the default of
+        // `var p: Double = 0 { didSet {} }` nor a later `o.p = 3` would adopt.
         var pty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
@@ -6051,13 +5910,11 @@ KwContinue  = "continue" KwEnd ;
         for (var lz = 0; lz < mem.lazies.length; lz++) { installLazy(mem.lazies[lz], cls) }
         for (var wp = 0; wp < mem.wrapped.length; wp++) { installWrapped(mem.wrapped[wp], cls) }
         // addMethod, not tput: two `static func g` of the same name are an OVERLOAD
-        // exactly as two instance methods are, and a bare-name slot kept only the
-        // LAST of them, so `K.g(3)` ran `g(_ a: String)` in all three engines where
-        // swiftc 6.1.2 runs the Int one (docs/todo.md 1.2). A static is reached with
+        // exactly as two instance methods are (a bare-name slot would keep only the
+        // LAST of them). A static is reached with
         // the type descriptor at argv[0], the same shape addMethod's dispatcher
         // already skips, so the whole mechanism transfers unchanged - including to a
-        // `static func +`, whose two operands now pick by TYPE rather than by
-        // declaration order.
+        // `static func +`, whose two operands pick by TYPE.
         for (var sm = 0; sm < mem.statMethods.length; sm++) {
             addMethod(cls, "__static_" + mem.statMethods[sm].name,
                       makeMethodClosure(mem.statMethods[sm], cls), mem.statMethods[sm].params)
@@ -6074,8 +5931,7 @@ KwContinue  = "continue" KwEnd ;
         // inheritance clause and static initialisers can already see its siblings.
         // BEFORE the static property initialisers, which may CONSTRUCT one: a static
         // initialiser runs eagerly here (Swift's is lazy), so `static let s = Inner()`
-        // used to answer the wrong Inner. The compiler half aborted outright on the
-        // same order; both are pre-existing.
+        // needs the nested descriptor already installed.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastType = null
             mem.nested[nt]()
@@ -6118,9 +5974,8 @@ KwContinue  = "continue" KwEnd ;
         // when it declares none and every stored property has a value, and a SUBCLASS
         // that declares no designated initializer of its own INHERITS its
         // superclass's, which is why `class Derived: Base {}` still answers
-        // `Derived(3.0).n == 3.0` under swiftc 6.1.2. Synthesising an empty
-        // memberwise init for such a subclass SHADOWED the inherited one and left
-        // every inherited property nil.
+        // `Derived(3.0).n == 3.0` under swiftc 6.1.2 (a synthesised memberwise init
+        // for such a subclass would shadow the inherited one).
         // Only a class with no superclass synthesises here, and it synthesises the
         // struct memberwise list: that is wider than swiftc's `init()`, but the extra
         // calls it accepts are programs swiftc rejects outright, so no answer moves.
@@ -6150,10 +6005,9 @@ KwContinue  = "continue" KwEnd ;
             // resolves to a protocol contributes its default implementations.
             // The SUPERCLASS is decided here because installMembers below needs it
             // (inheritOverloads walks it); the protocols are adopted AFTER, because
-            // adopting first put the protocol's default in the slot and the type's
-            // own declaration then read as an OVERLOAD of it - `A().tag()` answered
-            // the protocol's "?" where swiftc 6.1.2 answers A's own, in the
-            // interpreter half alone (docs/todo.md 1.1).
+            // adopting first would put the protocol's default in the slot and the
+            // type's own declaration would then read as an OVERLOAD of it (`A().tag()`
+            // must answer A's own).
             var myProtos = []
             for (var h = 0; h < mem.inherits.length; h++) {
                 var sup = swResolve(baseTypeName(mem.inherits[h]))
@@ -6200,8 +6054,8 @@ KwContinue  = "continue" KwEnd ;
             // The inherited initializers are COPIED onto this descriptor rather than
             // left to classFind's __super walk, because an `extension Derived { init
             // ... }` further down installs an init on THIS descriptor and would
-            // otherwise shadow the whole inherited set - which turned a convenience
-            // init delegating with `self.init(x)` into unbounded recursion. Copying
+            // otherwise shadow the whole inherited set (a convenience init delegating
+            // with `self.init(x)` would recurse forever). Copying
             // makes the extension's addMethod merge into the inherited overload list,
             // which is also exactly what the compiler half does with its init slots.
             if (inheritInit && cls.__super != undefined && cls.__super !== null) {
@@ -6253,8 +6107,7 @@ KwContinue  = "continue" KwEnd ;
             // introduces does NOT - swiftc 6.1.2 answers `hi:?` for
             // `extension P { func hi() { tag() }; func tag() {"?"} }` with a
             // conforming type overriding tag(), and `hi:A` for the same program with
-            // `func tag() -> String` declared in the protocol body. Both halves used
-            // to ignore the requirement list entirely (docs/todo.md 1.1).
+            // `func tag() -> String` declared in the protocol body.
             // The requirements a parent protocol declares count as this one's.
             var reqs = {}
             var reqKeys = []
@@ -6306,9 +6159,8 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     // Adopting also RECORDS the conformance, under __conf_<name> on the very table a
-    // value reaches through accTable - which is what makes `x is P` answerable at all
-    // (docs/todo.md 1.1: it was false for every conforming type in all three engines,
-    // so --cross was blind to it). scopePut and not tput on purpose: the marker must
+    // value reaches through accTable - which is what makes `x is P` answerable at
+    // all. scopePut and not tput on purpose: the marker must
     // stay out of __keys, or copyDefaults would carry one protocol's conformance into
     // an unrelated type as if it were a member. Inherited protocols are marked by the
     // recursion above, so `struct S: P` with `protocol P: Q` answers `S() is Q` true.
@@ -6376,9 +6228,8 @@ KwContinue  = "continue" KwEnd ;
     }
     // `extension A.Inner { ... }`: a NESTED type is installed as a member of its
     // enclosing descriptor, so a dotted extension name is resolved one component at a
-    // time from the scope. baseTypeName keeps the dot, so the whole path used to miss
-    // the scope, miss isBuiltinTypeName and install NOTHING - `unknown method 'dbl'`
-    // where swiftc prints the answer, and an outright compile abort in the other half.
+    // time from the scope (baseTypeName keeps the dot, so the whole path would miss
+    // the scope and isBuiltinTypeName alike).
     function extTargetOf(path) {
         var parts = swSplitDots(path)
         var h = swResolve(parts[0])
@@ -6438,23 +6289,16 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Nested types are NOT in the surrounding scope -----
     //
-    // A nested type used to declare itself into the scope its enclosing type was
-    // declared in, under its bare name, and that is docs/todo.md 1.2: with
-    // `struct Inner {...}` beside `struct A { struct Inner {...} }`, A's nested Inner
-    // overwrote the top-level binding and `Inner()` in main answered "nested" where
-    // swiftc 6.1.2 answers "top". Two nested types of the same name at DIFFERENT
-    // levels (`A.Mode` and `A.M2.Mode`) collided in the same binding, and there this
-    // engine was the wrong one of the two: the compiler half resolves both correctly
-    // through typeKeyOf while a bare read here found whichever ran last and aborted.
+    // A bare binding would let `struct A { struct Inner {...} }` overwrite a
+    // top-level `struct Inner` (and `A.Mode` / `A.M2.Mode` collide).
     //
-    // Swift's rule is lexical, and both halves now implement it as such. A nested type
+    // Swift's rule is lexical, and both halves implement it as such. A nested type
     // is a MEMBER of its enclosing descriptor (installMembers already put it there)
     // and nothing else; the compiler half resolves a bare type name STATICALLY through
     // typeKeyOf/typeStack, and this half resolves it at RUN time through
     // swLookupType, which walks the enclosing type of the running member outward along
-    // the `__outer` slot each nested descriptor now carries. `__outer` is the value
-    // model answering the question rather than a side table (manual 7.15): the
-    // descriptor already knows who installed it, it just never recorded it.
+    // the `__outer` slot each nested descriptor carries. `__outer` is the value
+    // model answering the question rather than a side table (manual 7.15).
     //
     // Whether a declaration is nested is decided at WALK time, by the enclosing
     // declaration marking its children (MemberType hands up their indices), so the
@@ -6629,10 +6473,7 @@ KwContinue  = "continue" KwEnd ;
             installMembers(tbl, mem)
             // An enum conforms to the protocols in its clause exactly as a struct
             // does - the defaults land on the member table its case values carry as
-            // __class. This half adopted NOTHING here, so `E.one.hi()` from a
-            // protocol extension was `unknown method 'hi' on E` where the compiler
-            // half (which has always adopted) and swiftc both answer: a live halves
-            // divergence found while probing outward from docs/todo.md 1.1.
+            // __class, so `E.one.hi()` reaches a protocol extension's `hi`.
             var eInh = [mem.raw]
             for (var pe0 = 0; pe0 < mem.inherits.length; pe0++) { eInh.push(mem.inherits[pe0]) }
             for (var pe = 0; pe < eInh.length; pe++) {
@@ -6700,8 +6541,7 @@ KwContinue  = "continue" KwEnd ;
         return null
     }
     // Swift's ==. Array, Dictionary and tuple are VALUE types, so they compare
-    // element by element; this used to fall through to `l === r`, which compares
-    // them by identity - so `[1, 2] == [1, 2]` was always false in BOTH halves.
+    // element by element, not by identity (`[1, 2] == [1, 2]`).
     // The Go twin is swEqualDepth in abnf/jsrtswift.go.
     function swEq(l, r) { return swEqD(l, r, 0) }
     function swEqD(l, r, depth) {
@@ -6728,9 +6568,7 @@ KwContinue  = "continue" KwEnd ;
             return true
         }
     // Two RANGES compare by their bounds - a Range is Equatable in Swift and
-    // `0..<3 == 0..<3` is true there, where these engines fell through to object
-    // IDENTITY and answered false. Adjacent to docs/todo.md 2.10: nothing could
-    // build a comparable Range value until `indices` did.
+    // `0..<3 == 0..<3` is true there, not an object IDENTITY test.
         if (isRange(l) || isRange(r)) {
             if (!isRange(l) || !isRange(r)) { return false }
             return l.lo === r.lo && l.hi === r.hi && l.closed === r.closed
@@ -6795,7 +6633,7 @@ KwContinue  = "continue" KwEnd ;
     binOps["==="] = function(l, r) { return l === r }
     binOps["!=="] = function(l, r) { return l !== r }
     // == / != understand enum case values (name plus associated values); everything
-    // else keeps the identity/value comparison it had.
+    // else keeps the identity/value comparison.
     swOverloadable("==", function(l, r) { return swEq(l, r) })
     swOverloadable("!=", function(l, r) { return !swEq(l, r) })
     // The bitwise and overflow operators, on the sized-integer box of
@@ -6819,17 +6657,13 @@ KwContinue  = "continue" KwEnd ;
     swOverloadable("+", function(l, r) { return swadd(l, r) })
     swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swFloArith("-", l, r) })
     swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swFloArith("*", l, r) })
-    // AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S (docs/todo.md 1.1). All three
-    // engines said `integer divide by zero`, which is the text of GO'S OWN runtime
-    // panic and is correct for go and for nobody else - it comes from the shared
-    // sized-integer layer (interp-core.js's szArith here, languages/lib/runtime.c's
-    // si_arith and abnf/jsrtint.go natively and under llvm.Run). swiftc 6.1.2 says
+    // AN INTEGER DIVISION BY ZERO IS SWIFT'S, NOT GO'S. The shared sized-integer
+    // layer (interp-core.js's szArith here, languages/lib/runtime.c's si_arith and
+    // abnf/jsrtint.go) says `integer divide by zero`, Go's own panic text; swiftc 6.1.2 says
     //     Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
     // so the guard sits in FRONT of the shared primitive, in each language's own
-    // file - which is how go itself already does it (goRTPanic in go-rt.metajs) and
-    // what leaves the floor's Go-correct wording untouched. java needed nothing: it
-    // already answers `java.lang.ArithmeticException: / by zero` in all three legs,
-    // which is byte-exact against java 24.0.2. Twins: swGiArith in
+    // file (as go's goRTPanic in go-rt.metajs does), leaving the floor's Go-correct
+    // wording untouched. Twins: swGiArith in
     // languages/lib/swift-rt.metajs and js_swarith in abnf/jsrtswift.go.
     function swDivGuard(op, l, r) {
         if (swIntish(l, r) && szNum(r) === 0) { fail("Fatal error: Division by zero") }
@@ -6869,7 +6703,7 @@ KwContinue  = "continue" KwEnd ;
             var f = findOpFn("-", v)
             if (f != null) { return f(undefined, v) }
             // A float negates by MULTIPLYING by -1: `0 - 0.0` is +0.0 in JS, so
-            // -0.0 would have lost its sign (and print "0.0" where swift says "-0.0").
+            // subtraction would lose the sign of -0.0.
             // Negation is exact, so the width is only carried, never re-rounded.
             return swWhole(v) ? szNeg(v) : swReFlo(swD(v) * swNegOne, isF32(v))
         }
@@ -6942,8 +6776,7 @@ KwContinue  = "continue" KwEnd ;
     // widens to. Kept as text for parseFloat (no exponent literal in this dialect -
     // `5e-324` lexes as the identifier `e324`) and duplicated verbatim in
     // swift-to-llvm-ir.abnf, the convention for every other swift table the two
-    // halves share. docs/todo.md 1.10 named two of these eight; all eight answered
-    // nil in all three engines.
+    // halves share.
     function swFloStatics() {
         return [{n: "greatestFiniteMagnitude", d: "1.7976931348623157e308",  f: "3.4028234663852886e38"},
                 {n: "leastNonzeroMagnitude",   d: "5e-324",                  f: "1.401298464324817e-45"},
@@ -7001,17 +6834,14 @@ KwContinue  = "continue" KwEnd ;
         return swstr(x)
     }
     hostGlobals["String"] = {__convl: swStrInit}
-    // Array(seq) and Array(repeating:count:). Both aborted in every engine, and the
-    // two refusals did not even agree: "unknown name: Array" here against "call of a
-    // non function value: [object Object]" under llvm.Run - a name bound to the
-    // builtin-type table and never made callable. swiftc 6.1.2:
+    // Array(seq) and Array(repeating:count:). swiftc 6.1.2:
     //   Array("hi")                  ["h", "i"]     (Characters, i.e. CLUSTERS)
     //   Array([4, 5])                [4, 5]         (a COPY - Array is a value type)
     //   Array(0..<3)                 [0, 1, 2]
     //   Array(["a": 1])              [(key: "a", value: 1)]
     //   Array(repeating: 0, count: 3)  [0, 0, 0]
     // Two positional arguments IS the repeating:count: form; nothing else in Swift
-    // spells Array with two. docs/todo.md 2.11.
+    // spells Array with two.
     function swArrayOf(x, n) {
         if (n !== undefined) {
             var rep = []
@@ -7060,9 +6890,8 @@ KwContinue  = "continue" KwEnd ;
     // Unqualified names fall back to properties of the enclosing self.
     // A Dictionary key that is a BOX - a Double or a sized integer - is an object,
     // and dictFind's index is built on ===, so two boxes holding the same number
-    // were two different keys: `[Int8(1): "x"]` then `m[Int8(1)]` could not find its
-    // own entry, and neither could `[1.5: "a"]` then `m[1.5]`. Normalising the key
-    // to its numeric text fixes both, and makes 1 and 1.0 the SAME key, which is
+    // would be two different keys (`[Int8(1): "x"]` then `m[Int8(1)]`). The key is
+    // normalised to its numeric text, which also makes 1 and 1.0 the SAME key -
     // Swift's rule (1.0 == 1 and equal values hash equal).
     // The id is the value's NUMERIC text, not its Swift rendering, so 1.0, 1 and
     // Int8(1) all land on the same id - which is what makes them one key. A NaN key
