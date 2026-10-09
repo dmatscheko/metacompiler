@@ -1,10 +1,8 @@
-// ruby-rt.metajs -- RUBY'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the sixth language after the Lua pilot,
-// PHP, Swift, Java, C# and Dart.
+// ruby-rt.metajs -- RUBY'S OWN SEMANTICS, in MetaJS: ruby's layer-2 runtime.
 //
-// languages/ruby-to-llvm-ir.abnf emits handle IR that calls 93 js_* externs over
-// the full-syntax ratchet. 30 of them are generic primitives languages/lib/runtime.c
-// already provides (the C floor, layer 1). The other 63 are here.
+// languages/ruby-to-llvm-ir.abnf emits handle IR that calls js_* externs. The
+// generic primitives come from languages/lib/runtime.c (the C floor, layer 1);
+// the Ruby-specific ones are here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/ruby-rt.metajs -q -rt-lib
@@ -19,13 +17,15 @@
 // rubyInspect / rubyEq / rubySpaceship / rubyFormat / rubyMethod /
 // rubyArrayMethod / rubyIsA / rubyExc / memberCall and the js_r* extern table)
 // plus abnf/jsrtregex.go for the Regexp and MatchData halves. This file matches
-// them function for function; where it CANNOT, the site says so in full.
+// them function for function; where it CANNOT, the site says so.
 //
 // ----- the value model -------------------------------------------------------
 //
 //     null / undefined     ==  nil
 //     a boolean            ==  true / false
-//     a PLAIN NUMBER       ==  Integer. Exact and NEVER truncated to 32 bit.
+//     a PLAIN NUMBER       ==  Integer. Exact and NEVER truncated to 32 bit; past
+//                              2^53 it is the {__bint} box (see the arbitrary
+//                              precision section).
 //     {__flo: true, f}     ==  Float          (Go: jsFlo)
 //     {__rat: true, n, d}  ==  Rational       (Go: jsRat, sign in n, reduced)
 //     {__cpx: true, re, im} == Complex        (Go: jsCpx)
@@ -33,15 +33,10 @@
 //     a string             ==  String
 //     an array             ==  Array
 //     a {__dict} object    ==  Hash: keys/vals parallel arrays, INSERTION ordered
-//     {__rrange, begin, end, excl}  == a Range. EVERY range, bounded or open. It
-//                              used to be only the open ones: a bounded literal
-//                              was MATERIALIZED into an Array, so `p (1..3)'
-//                              printed [1, 2, 3], `.begin' aborted with *unknown
-//                              Array method*, `r.class' said Array and a range
-//                              could not be a Hash key. rbRangeToArr materializes
-//                              on demand instead, and the Range method table
-//                              delegates the whole Enumerable surface to the
-//                              Array's. docs/todo.md 1.5.
+//     {__rrange, begin, end, excl}  == a Range. EVERY range, bounded or open.
+//                              rbRangeToArr materializes on demand, and the Range
+//                              method table delegates the whole Enumerable
+//                              surface to the Array's.
 //     {__isclass, __name, __super, ...}   == a class / module descriptor. A BUILTIN
 //                              class additionally carries __rbuiltin.
 //     {__rxsrc, __rxflags}            == a Regexp
@@ -62,46 +57,39 @@
 // descriptors), and rbEq/rbDictFind below compare the tower BY VALUE, so no
 // reachable path sees the difference.
 //
-// ----- what Ruby needed from the floor, and what it did NOT ------------------
+// ----- what Ruby needs from the floor ----------------------------------------
 //
-//  1. NO sized-integer tag and NO boxed double. Ruby's Integer is the plain,
-//     un-truncated double and its Float is the {__flo} box above - the same
-//     representation abnf/jsrt.go uses - so neither tag 13 nor tag 14 is reached
-//     from this file at all. The si_norm question the plan asks ("is the
-//     language's unboxed representation the one si_norm produces") does not arise:
-//     Ruby never builds a tag-13 cell.
+//  1. NO sized-integer tag in the value model and NO boxed double. Ruby's Integer
+//     is the plain, un-truncated double and its Float is the {__flo} box above -
+//     the same representation abnf/jsrt.go uses. (rbBits64 borrows tag 13's
+//     arithmetic for one operation and reads the result straight back.)
 //  2. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0` on
 //     core.truthyExt, so that extern must answer a RAW INTEGER - and a shim handing
 //     back a boolean HANDLE gives 2 for false, which is != 0, so every condition in
-//     the program would be taken, silently. `grep -n truthyExt
-//     languages/ruby-to-llvm-ir.abnf` is EMPTY, and Ruby goes further than the four
-//     languages that merely keep the default: it overrides truthy() itself with a
-//     single unsigned handle compare `v >= 3` (only 0/1/2 - undefined/null/false -
-//     are falsy, which IS Ruby truthiness). There is no extern in the path at all.
-//     The compare is sound natively because runtime.c seeds H_UNDEF/H_NULL/
-//     H_FALSE/H_TRUE as 0/1/2/3, the same four handles abnf/jsrt.go uses.
-//  3. NO `_raw` PARAMETERS. Every selector the ruby emitter passes goes through
-//     emitStr / emitNum; the bare handle(k) arguments go to js_closure, js_arg,
-//     js_rargrest, js_rblockarg and js_rrangearr - the first two are floor externs
-//     and the last three take a plain COUNT, so they are declared `_raw` below.
-//  4. NO coroutine primitive. `grep -c 'js_genfn\|js_yield'
-//     languages/ruby-to-llvm-ir.abnf` is 0: Ruby's `yield` is a call of the block
-//     the caller passed, not a generator, and no test file uses Fiber or
-//     Enumerator. WALL 1 does not touch this language.
+//     the program would be taken, silently. ruby-to-llvm-ir.abnf sets no
+//     truthyExt: it overrides truthy() itself with a single unsigned handle
+//     compare `v >= 3` (only 0/1/2 - undefined/null/false - are falsy, which IS
+//     Ruby truthiness). There is no extern in the path at all. The compare is
+//     sound natively because runtime.c seeds H_UNDEF/H_NULL/H_FALSE/H_TRUE as
+//     0/1/2/3, the same four handles abnf/jsrt.go uses.
+//  3. NO `_raw` PARAMETERS beyond the counts. Every selector the ruby emitter
+//     passes goes through emitStr / emitNum; the bare handle(k) arguments go to
+//     js_closure, js_arg, js_rargrest, js_rblockarg and js_rrangearr - the first
+//     two are floor externs and the last three take a plain COUNT, so they are
+//     declared `_raw` below.
+//  4. NO coroutine primitive. Ruby's `yield` is a call of the block the caller
+//     passed, not a generator.
 //  5. NO jsChar. Ruby has no character type; `?a` is a one-character String and the
 //     emitter never emits js_char / js_char_code / js_kindex.
 //
-// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+// ----- the scope chain --------------------------------------------------------
 //
-// js_rdefined took a SCOPE HANDLE and walked the chain, and for a while it WAS
-// lowered into the emitter as the IR helper `rb_defined` over js_scope_typeof -
-// PHP recorded that generalisation, Swift/Java/Dart confirmed it and Ruby was the
-// fifth lowering. THAT LOWERING IS GONE AGAIN (docs/todo.md 5.3): js_scope_typeof
-// cannot tell "holds undefined" from "absent", an unsupplied block parameter holds
-// exactly undefined, and scopeHas can - see js_rdefined below, which is the only
-// scope-taking extern this file implements besides js_rmethodval. The wall the
-// paragraph above describes is real and unchanged; what moved is which side of it
-// this particular probe belongs on.
+// A scope is the C floor's private storage, so scope-taking externs are
+// normally lowered in the emitter over js_scope_typeof and friends. js_rdefined
+// is the exception and is implemented here: js_scope_typeof cannot tell "holds
+// undefined" from "absent", an unsupplied block parameter holds exactly
+// undefined, and scopeHas can. It is the only scope-taking extern this file
+// implements besides js_rmethodval.
 //
 // ----- the regular-expression engine is IMPORTED, not copied ------------------
 //
@@ -109,9 +97,7 @@
 // grammar includes into its tag script, and abnf/jsrtregex.go is its line-by-line
 // Go port. It is written in the same MetaJS this file is, so layer 2 does not need
 // a third copy: `import "./regex.js"` below compiles it into ruby-rt.ll with
-// everything else. That is the first time a layer-2 library has imported a shared
-// source rather than restating it, and it is worth copying - the whole Regexp /
-// MatchData surface cost 1,559 lines of nothing.
+// everything else.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -124,14 +110,9 @@
 
 import "./regex.js"
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below.
+// The shared layer-2 runtime: the externs every language implements identically,
+// parameterised by the rtk* hooks below.
 import "./runtime.metajs"
-// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
-// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
-// only to keep scope_find's linear module-scope scan off non-callers and the
-// hash index in runtime.c removed that scan. One import, not three.)
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rbJStr(v) }
@@ -164,9 +145,8 @@ var rbArityFns = []      // the closures js_rarity has recorded a shape for
 var rbArityRec = []      // [required, optional, hasSplat] for rbArityFns[i]
 // The function values `method(:x)' handed out. MRI's Method is a class of its own
 // - #class is Method, #to_s is `#<Method: Object#x>' and #arity counts optionals
-// like a lambda's - and every engine here answered Proc, `#<Proc>' and a proc's
-// arity. A side table and not a property on the value, exactly as rbLambdas is,
-// and ungated because reaching it means calling Kernel#method. docs/todo.md 2.5.
+// like a lambda's. A side table and not a property on the value, exactly as
+// rbLambdas is, and ungated because reaching it means calling Kernel#method.
 var rbMethodFns = []     // the closures `method(:x)' produced (identity scan)
 var rbMethodRec = []     // [ownerClassName, methodName] for rbMethodFns[i]
 var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
@@ -184,13 +164,8 @@ function rbIsObj(v) {
     return !Array.isArray(v)
 }
 
-// rbTag is SHARED as rtTag - lib/runtime.metajs - and rtTag INLINES the four
-// tests rbIsObj makes rather than calling them: a shared body cannot name
-// rbIsObj, and the delegating spelling is the +38.79% shape rbNumBin's own
-// comment records below (rbIsBig -> rbTag -> rbIsObj). Measured at python
-// +10.60% delegating and -13.90% inlined; ruby's bench row sees neither, because
-// rbBin's number path reaches rbUserObj and rbNumBin and never a tag. The seven
-// predicates below are asked at 113 sites in this file. docs/todo.md 5.1.
+// rbTag is SHARED as rtTag - lib/runtime.metajs - which INLINES the tests
+// rbIsObj makes rather than calling it, to keep a frame off these predicates.
 function rbIsSym(v) { return rtTag(v, "__sym") }
 function rbIsBig(v) { return rtTag(v, "__bint") }
 function rbIsFlo(v) { return rtTag(v, "__flo") }
@@ -199,10 +174,7 @@ function rbIsCpx(v) { return rtTag(v, "__cpx") }
 function rbIsDict(v) { return rtTag(v, "__dict") }
 function rbIsRange(v) { return rtTag(v, "__rrange") }
 function rbIsArr(v) { return Array.isArray(v) }
-// rbIsNil is SHARED as rtIsNil - lib/runtime.metajs, the same body python's
-// pyIsNone was. Thirty-six call sites, none of them on mod.rb's loop (ruby's
-// `while` does not reach rbTruthy), all of them already calls in the same pinned
-// scope. docs/todo.md 5.1.
+// rbIsNil is SHARED as rtIsNil - lib/runtime.metajs.
 function rbIsFn(v) { return typeof v == "function" }
 
 // The operator METHOD names Object#send may be handed - see rbMethod. The Go
@@ -252,15 +224,13 @@ function rbSym(name) {
 //
 // The three twins that MUST agree with this digit for digit are the big* family
 // in languages/ruby-interpreter.abnf, rubyBig* in abnf/jsrt.go (math/big) and
-// the js_bigint literal ruby-to-llvm-ir.abnf emits. ./test.sh --cross diffs two
-// of them on every run and tests/probe.sh runs all four legs.
+// the js_bigint literal ruby-to-llvm-ir.abnf emits.
 //
 // Sign and magnitude, the magnitude a little endian array of base 10000 limbs -
-// the same representation runtime.metajs's bignum section already uses for the exact
-// decimal expansion of a double, so rtBigStr renders one unchanged. A limb
-// product stays below 1e8, well inside a double's exact range. The limb
-// arithmetic is runtime.metajs's rtABig* layer, shared with python; this file
-// supplies the {__bint} constructor rtkABigNew.
+// the same representation runtime.metajs's decimal bignum uses, so rtBigStr
+// renders one unchanged. A limb product stays below 1e8, well inside a double's
+// exact range. The limb arithmetic is runtime.metajs's rtABig* layer, shared with
+// python; this file supplies the {__bint} constructor rtkABigNew.
 //
 // What is deliberately NOT here, and is stated rather than hidden: a big meeting
 // a Rational, a Float or a Complex PROMOTES THROUGH THE DOUBLE (rbToF), so
@@ -634,8 +604,8 @@ function rbABigBaseStr(v, base) {
 
 // The Integer method set for a value past 2^53, and the twin of bigMethod in
 // ruby-interpreter.abnf and rubyBigMethod in abnf/jsrt.go. Every step is routed
-// through the exact arithmetic instead of the double - `(2**64).abs` answered
-// 1.8446744073709552e+19 through rbToF. `undefined` hands the name back to
+// through the exact arithmetic instead of the double (rbToF would answer
+// `(2**64).abs` as 1.8446744073709552e+19). `undefined` hands the name back to
 // rbNumMethod's own list, which answers it in double precision or reports it
 // unknown.
 function rbABigMethod(t, name, args) {
@@ -647,8 +617,8 @@ function rbABigMethod(t, name, args) {
     // digit argument a Ruby program can write here.
     if (name == "to_i" || name == "to_int") { return t }
     // ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
-    // 10**-ndigits, which past 2**53 has to be exact. #truncate is one of the four
-    // and used to ignore its ndigits. docs/todo.md 1.2, 1.3.
+    // 10**-ndigits, which past 2**53 has to be exact. #truncate is one of the
+    // four.
     if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
         var bnd = 0
         if (args.length > 0) { bnd = Math.trunc(rbToF(args[0])) }
@@ -724,9 +694,8 @@ function rbMkCpx(re, im) { return {__cpx: true, re: re, im: im} }
 // product and the subtraction are done at INFINITE precision and only the final
 // result is rounded. The C floor's clang does not fuse, so the same source gives a
 // different answer the moment |q*y| leaves the exactly-representable range:
-// `9007199254740991 % -3` is -2 under llvm.Run and -1 without the fusion. Measured
-// on the 36,000-line probe; real ruby 2.6.10 says -2, so the FUSED answer is also
-// the CORRECT one and this is layer 2's defect, not the Go twin's.
+// `9007199254740991 % -3` is -2 under llvm.Run and -1 without the fusion. Real
+// ruby says -2, so the FUSED answer is also the CORRECT one.
 //
 // rbFmaSub reproduces the fused `x - q*y` exactly, with the standard Dekker
 // two-product / two-sum emulation of an FMA. It is used by BOTH the Integer and
@@ -745,18 +714,11 @@ function rbSplitHi(a) {
     return c - (c - a)
 }
 
-// x - q*y, correctly rounded as if ONE fused multiply-add had computed it.
-//
-// The two-product needs both operands under 2^500 or the 2^27 split overflows, and
-// a Float remainder legitimately has |q| near DBL_MAX (1e308 % 2.5). Scaling by a
-// POWER OF TWO is exact, so each operand is brought down first and the exact
-// product (p1 + e1) is scaled back by the same amount - |p1 * scale| is about |x|,
-// so the scale-back cannot overflow.
 // A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG IN
 // THIS DIALECT: the tag engine keeps an integral value as an integer, so
-// `-4 * 0` is the integer 0 and the sign is gone - measured, `1 / (x * 0)` is
-// +Infinity for x = -4, where `1 / (z / (0 - 1))` is -Infinity. Dividing a zero
-// by -1 is a float division in every engine and keeps the sign. zeroSigned in
+// `-4 * 0` is the integer 0 and the sign is gone (`1 / (x * 0)` is +Infinity for
+// x = -4, where `1 / (z / (0 - 1))` is -Infinity). Dividing a zero by -1 is a
+// float division in every engine and keeps the sign. zeroSigned in
 // languages/ruby-interpreter.abnf is the same body; abnf/jsrt.go spells it
 // math.Copysign(0, x), which Go has and this dialect does not.
 function rbZeroSign(x) {
@@ -769,14 +731,10 @@ function rbZeroSign(x) {
 // ----- Float#round / #floor / #ceil AND Integer#round / #floor / #ceil with a
 // DIGIT COUNT -----------------------------------------------------------------
 //
-// This file applied `Math.floor(x * 10**n + 0.5) / 10**n` for #round and IGNORED
-// ndigits outright for #floor / #ceil, where ruby-interpreter.abnf ignored it for
-// all three - a live halves divergence (2.345.round(2) was 2 there and 2.35 here)
-// on top of three defects both halves shared: half-away-from-zero where MRI
-// corrects toward the DECIMAL the double prints as, a Float where a negative
-// ndigits answers an INTEGER, and Infinity/NaN where MRI answers the receiver.
-//
-// Measured against /usr/bin/ruby 2.6.10 (Float#round is unchanged in 3.x):
+// MRI's algorithm (numeric.c): ties are corrected toward the DECIMAL the double
+// prints as, a negative ndigits answers an INTEGER, and an Infinity/NaN or an
+// ndigits past the mantissa answers the receiver. Against ruby 2.6.10 (Float#round
+// is unchanged in 3.x):
 //
 //     2.345.round(2)   2.35     (2.345 is really 2.3449999999999997513)
 //     2.675.round(2)   2.68     (2.675 is really 2.6749999999999998224)
@@ -785,12 +743,11 @@ function rbZeroSign(x) {
 //     1.7976931348623157e308.round(1) -> itself, where x*10 is Infinity
 //     5e-324.round(374) -> NaN, because MRI's own pow(10, 374) is Infinity
 //
-// So this is MRI's algorithm (numeric.c) and not an approximation of it; the
-// twins are floBinExp/floDigitRound/intDigitOp in languages/ruby-interpreter.abnf
-// and rubyFloDigitRound/rubyIntDigitOp in abnf/jsrt.go (which asks math.Frexp
-// for the binary exponent the other two compute by scaling), and the
-// three agree by construction because every step is the same double arithmetic.
-// docs/todo.md 1.2.
+// The twins are floBinExp/floDigitRound/intDigitOp in
+// languages/ruby-interpreter.abnf and rubyFloDigitRound/rubyIntDigitOp in
+// abnf/jsrt.go (which asks math.Frexp for the binary exponent the other two
+// compute by scaling), and the three agree by construction because every step
+// is the same double arithmetic.
 
 // frexp's exponent: the e with x == m * 2**e and 0.5 <= |m| < 1. x must be finite
 // and non-zero. The 2**32 steps keep a subnormal off a 1074-iteration loop.
@@ -886,7 +843,7 @@ function rbFloDigitCeil(x, nd) {
 // return 0", decided on the receiver's BYTE SIZE with log_256(10) > 0.415241 and
 // log_256(1/2) == -0.125, where a Fixnum's size is sizeof(long) == 8 whatever the
 // value is. So `(-1234).floor(-20)` is 0 in MRI where the arithmetic says
-// -10**20. Measured, first-zero-at: -20 for every Fixnum and for 2**63, -22 for
+// -10**20. First-zero-at in MRI: -20 for every Fixnum and for 2**63, -22 for
 // 2**64 (9 bytes), -32 for 2**100 (13), -63 for 2**200 (26), -304 for 2**1000
 // (126), -309 for Float::MAX floored (128).
 function rbIntByteSize(v) {
@@ -930,8 +887,7 @@ function rbDecIncr(s) {
 // One deliberate NON-convergence: MRI 2.6.10's BIGNUM #ceil adds the step even
 // when the receiver is already a multiple of it - `10000000000000000000.ceil(-1)`
 // is 10000000000000000010 there, while the Fixnum `1250.ceil(-1)` is 1250. MRI
-// disagrees with itself, so this is a bug in the oracle and not a rule; the two
-// rows it costs are named in the report.
+// disagrees with itself, so this is treated as an oracle bug and not a rule.
 function rbIntDigitOp(v, k, mode) {
     if (rbIntRoundZero(v, k)) { return 0 }
     var s = ""
@@ -956,9 +912,7 @@ function rbIntDigitOp(v, k, mode) {
         i = i + 1
     }
     var away = false
-    // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200. It was
-    // absent, so #truncate ignored its ndigits outright in every engine -
-    // docs/todo.md 1.3's second argument-list rule.
+    // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200.
     if (!zeroTail && mode != "t") {
         if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
         else if (mode == "f") { away = neg }
@@ -1019,6 +973,13 @@ function rbNumDigitOp(t, big, isInt, mode, nd) {
     return rbIntDigitOp(rbIntFromF(w), 0 - nd, mode)
 }
 
+// x - q*y, correctly rounded as if ONE fused multiply-add had computed it.
+//
+// The two-product needs both operands under 2^500 or the 2^27 split overflows, and
+// a Float remainder legitimately has |q| near DBL_MAX (1e308 % 2.5). Scaling by a
+// POWER OF TWO is exact, so each operand is brought down first and the exact
+// product (p1 + e1) is scaled back by the same amount - |p1 * scale| is about |x|,
+// so the scale-back cannot overflow.
 function rbFmaSub(x, q, y) {
     var p = q * y
     if (p !== p) { return x - p }
@@ -1054,8 +1015,8 @@ function rbGcd(a, b) {
     var y = Math.abs(b)
     while (y != 0) {
         // math.Mod is EXACT in the Go twin (it is not the fusable expression, it is
-        // a scaled subtraction loop), so the naive x - floor(x/y)*y was wrong for a
-        // numerator past 2^53 and reduced 90071992547409900/3 to 30023997515803300/1.
+        // a scaled subtraction loop), so the naive x - floor(x/y)*y would be wrong
+        // for a numerator past 2^53.
         var t = rbFmaSub(x, Math.trunc(x / y), y)
         x = y
         y = t
@@ -1094,22 +1055,20 @@ function rbImOf(v) {
 // ----- Float#to_r, EXACTLY -------------------------------------------------
 //
 // A double IS m * 2^e with m an integer below 2^53, so its Rational is exact and needs
-// NO bit access - the same argument manual 7.7 makes for ruby's %a, and the same safety
-// property: scaling a double by a power of two is exact provided you never overflow and
-// never enter the subnormals, and the loops below are driven so they do not. (1.5).to_r
-// was (1.5/1) in all four legs where MRI says (3/2).
+// NO bit access: scaling a double by a power of two is exact provided you never
+// overflow and never enter the subnormals, and the loops below are driven so they
+// do not. (1.5).to_r is (3/2).
 //
 // WHAT THIS CANNOT REACH is a property of the value model, not of the arithmetic: n and
 // d are DOUBLES, so d = 2^-e is representable only while -e <= 1023. A normal double may
 // need 2^1074 (the second-smallest normal reduces to an ODD numerator over 2^1074), so
 // |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
-// denominator this model cannot hold, and falls back to the old x/1. Closing it is the
-// bignum-Rational second value model docs/todo.md 2.4 already names.
+// denominator this model cannot hold, and falls back to x/1. Closing it needs a
+// Rational whose parts are bigs.
 //
-// An infinity or a NaN has no Rational: MRI raises FloatDomainError, and WITHOUT the
-// guard this HUNG - rbGcd does `x % y` with y = NaN forever, so Float::INFINITY.to_r
-// never returned in any engine. The twins are ratOfFlo in ruby-interpreter.abnf and
-// rubyRatOfFlo in abnf/jsrt.go.
+// An infinity or a NaN has no Rational: MRI raises FloatDomainError, and without
+// the guard rbGcd would run `x % y` with y = NaN forever. The twins are ratOfFlo
+// in ruby-interpreter.abnf and rubyRatOfFlo in abnf/jsrt.go.
 function rbRatOfFlo(x) {
     rbFloDomain(x)
     if (x == 0) { return rbMkRat(0, 1) }
@@ -1126,8 +1085,8 @@ function rbRatOfFlo(x) {
     // and d is a power of two, so their gcd is 1 - so the record is built directly
     // rather than through rbMkRat. That is not only a saving: rbMkRat's Euclid runs
     // `x % y` on a pair spanning 1074 binades, and the floor's d_mod_go is a
-    // shift-and-subtract loop, one iteration per binade. The fallback pair (5e-324, 1)
-    // took the NATIVE binary past 45 seconds through it at base, and does not any more.
+    // shift-and-subtract loop, one iteration per binade (the fallback pair
+    // (5e-324, 1) would take the native binary tens of seconds).
     //
     // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
     // integral Float past 2^53, whose numerator rbIntStr expands exactly.
@@ -1149,35 +1108,25 @@ function rbAsRat(v) {
 // ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) --------------
 //
 // The plain sum SQUARES both parts, so it overflows to Infinity above ~1.3e154 and
-// underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well:
-// Complex(1e200, 1e200).abs was Infinity and Complex(1e-200, 1e-200).abs was 0.0, in all
-// four legs, against MRI's 1.414213562373095e+200 and 1.414213562373095e-200.
-// Complex(3, 4).abs is 5.0 either way, which is why the claim does not reproduce at small
-// integers.
+// underflows to 0 below ~1.5e-154 where MRI answers the magnitude perfectly well
+// (Complex(1e200, 1e200).abs is 1.414213562373095e+200).
 //
-// THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to the
-// textbook `hi * sqrt(1 + (lo/hi)^2)`. Measured against /usr/bin/ruby over the pairs where
-// the plain sum is unsafe, 40,000 per band:
+// THE FIX IS TO SCALE BY A POWER OF TWO AND KEEP THE PLAIN SUM, not to switch to
+// the textbook `hi * sqrt(1 + (lo/hi)^2)`, which differs from MRI far more often
+// and also moves pairs in the ORDINARY range. Scaling by 2^k is EXACT, so the
+// scaled operands carry the same significands and the same roundings as the
+// unscaled ones - which is why the two paths agree bit-for-bit wherever both are
+// defined, and the safe-band branch below is a SPEED guard and not a second
+// answer.
 //
-//	                     hi >= 2^511      hi <= 2^-511
-//	hi*sqrt(1+t*t)       1,825 differ     1,937 differ
-//	power-of-two scaled     23 differ        21 differ
-//
-// and the ratio form also moves 5,370 of 20,000 pairs in the ORDINARY range, so it cannot
-// simply replace the plain sum either. Scaling by 2^k is EXACT (manual 7.7's %a argument),
-// so the scaled operands carry the same significands and the same roundings as the
-// unscaled ones - which is why the two paths agree bit-for-bit wherever both are defined,
-// and the safe-band branch below is a SPEED guard and not a second answer.
-//
-// The residue is ~1 in 1,700 pairs at 1 ulp, and it is not closable here: Apple's libm
-// hypot is not correctly rounded (3,165 of 20,000 differ from the exactly-rounded answer,
-// computed in Ruby over exact Rationals), so no double formula matches it everywhere. All
-// three engines run this same arithmetic, so they agree by construction. The twins are
+// A ~1 ulp residue on rare pairs is not closable here: Apple's libm hypot is not
+// correctly rounded, so no double formula matches it everywhere. All three
+// engines run this same arithmetic, so they agree by construction. The twins are
 // hypotOf in ruby-interpreter.abnf and rubyHypot in abnf/jsrt.go.
 //
 // 2^511 is the widest safe threshold: hi <= 2^511 keeps hi*hi + hi*hi under 2^1023, and
 // hi >= 2^-511 keeps hi*hi at or above 2^-1022, so it never goes subnormal. Built by a
-// loop because MetaJS has no exponent literal (manual chapter 4), and cached because it is
+// loop because MetaJS has no exponent literal, and cached because it is
 // 511 multiplies.
 var RB_HYP_BIG = 0
 function rbHypBig() {
@@ -1216,15 +1165,13 @@ function rbHypot(a, b) {
 }
 
 // Rational#to_s and Complex#to_s. The SIGN is the whole content of the second one:
-// a negative imaginary part joins with "-" and its own magnitude, and every engine
-// wrote the "+" unconditionally, so Complex(3, -4) rendered `3+-4i' where MRI
-// writes `3-4i'. Agreed in all four legs and wrong in all four. docs/todo.md 1.3.
+// a negative imaginary part joins with "-" and its own magnitude, so
+// Complex(3, -4) renders `3-4i', not `3+-4i'.
 // Both parts go through rbIntStr and NOT through `"" + n`, because a Rational's parts
 // are INTEGERS and `"" + n` answers the SHORTEST ROUND-TRIPPING form, which past 2^53 is
-// a different integer: `"" + 36028797018963968` (2^55) is "36028797018963970". That
-// became reachable the moment #to_r started answering the exact pair - MRI's (0.001).to_r
-// is 1152921504606847/1152921504606846976 - and it printed 36028797018963970 for
-// (0.1).to_r in all four legs. rbIntStr is the exact expansion.
+// a different integer: `"" + 36028797018963968` (2^55) is "36028797018963970". MRI's
+// (0.001).to_r is 1152921504606847/1152921504606846976, so this is reachable.
+// rbIntStr is the exact expansion.
 function rbRatText(v) { return rbIntStr(v["n"]) + "/" + rbIntStr(v["d"]) }
 function rbCpxText(v) {
     var im = v["im"]
@@ -1233,11 +1180,11 @@ function rbCpxText(v) {
 }
 
 // Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI keeps the Rational at
-// a positive ndigits - `(2r/3r).round(1)' is (7/10) and not the 0.7 every engine
-// answered off rbToF. The full rule and the 2^53 ceiling are at ratDigitOp in
-// languages/ruby-interpreter.abnf; rubyRatDigitOp in abnf/jsrt.go is the other
-// twin. `round' is half AWAY FROM ZERO and is written on integers, (2n +/- d) over
-// 2d, so it does not depend on a double holding n/d exactly. docs/todo.md 1.3.
+// a positive ndigits - `(2r/3r).round(1)' is (7/10), not 0.7. The full rule and
+// the 2^53 ceiling are at ratDigitOp in languages/ruby-interpreter.abnf;
+// rubyRatDigitOp in abnf/jsrt.go is the other twin. `round' is half AWAY FROM
+// ZERO and is written on integers, (2n +/- d) over 2d, so it does not depend on a
+// double holding n/d exactly.
 function rbRatIntOp(n, d, mode) {
     if (mode == "f") { return Math.floor(n / d) }
     if (mode == "c") { return Math.ceil(n / d) }
@@ -1308,10 +1255,9 @@ function rbNumBin(op, l, r) {
         if (op == "/") { return rbMkFlo(x / y) }
         // Float#% - see rubyFloMod in abnf/jsrt.go. Ruby's flodivmod IS
         // `mod = fmod(x, y); if (y*mod < 0) mod += y`, so this is that body
-        // verbatim; `x - floor(x/y)*y` was an approximation of it that lost
-        // every digit once floor(x/y)*y stopped being exact. rbZeroSign puts
-        // back the DIVIDEND's sign that fmod's zero carries and the tag engine
-        // drops.
+        // verbatim (`x - floor(x/y)*y` loses every digit once floor(x/y)*y stops
+        // being exact). rbZeroSign puts back the DIVIDEND's sign that fmod's zero
+        // carries and the tag engine drops.
         if (op == "%") {
             var fm = x % y
             if (fm == 0) { return rbMkFlo(rbZeroSign(x)) }
@@ -1325,13 +1271,9 @@ function rbNumBin(op, l, r) {
     // otherwise the double answer is computed first and only PROMOTED when it
     // leaves the exact range, so a loop of small arithmetic pays one comparison.
     // At rank 0 an operand that is not a plain number can only be a big, so the
-    // gate is two `typeof`s and NO CALL. It was `rbIsBig(l) || rbIsBig(r)`, and
-    // that is three MetaJS calls a side (rbIsBig -> rbTag -> rbIsObj) on the
-    // hottest line in the language: tests/bench.sh --draws 5 measured the ruby
-    // row at +38.79% against a 3.26% spread. Same finding, same shape, as the
-    // rbIsObj row this file's head records at +11.19%.
-    // ... and the SAME two typeofs then answer rbToF without calling it, which is
-    // two MetaJS calls per arithmetic step the base version was already paying.
+    // gate is two `typeof`s and NO CALL - rbIsBig would be three MetaJS calls a
+    // side on the hottest line in the language, which is measurably slower. The
+    // SAME two typeofs then answer rbToF without calling it.
     var a = 0
     var b = 0
     if (typeof l == "number" && typeof r == "number") {
@@ -1343,9 +1285,10 @@ function rbNumBin(op, l, r) {
         a = rbToF(l)
         b = rbToF(r)
     }
-    // rbAOver53 is INLINED at these four sites for the same reason. RB_MIN53 is
-    // a module constant and not `0 - 9007199254740992`, which is a subtraction
-    // per operation on the hottest line in the language.
+    // The promotion trigger (see the arbitrary precision section) is INLINED at
+    // these four sites for the same reason. RB_MIN53 is a module constant and not
+    // `0 - 9007199254740992`, which is a subtraction per operation on the hottest
+    // line in the language.
     if (op == "+") {
         var sa = a + b
         if (sa >= 9007199254740992 || sa <= RB_MIN53) { return rbABigOr(op, a, b, sa) }
@@ -1371,10 +1314,8 @@ function rbNumBin(op, l, r) {
     }
     // & | ^ << >> are INFINITE two's complement at ARBITRARY precision in Ruby:
     // `1 << 100` is a 31-digit Integer and `-1 & 0xffffffffffffffff` is
-    // 18446744073709551615. int64 IS that answer for the range it holds, which is
-    // what a bit-twiddling loop pays (rbBits64 is the floor's sized-integer
-    // arithmetic - MetaJS's own & | ^ are ToInt32 and would wrap at 32 bits);
-    // outside it the operands promote.
+    // 18446744073709551615. MetaJS's own & | ^ are ToInt32 and would wrap at 32
+    // bits, so anything wider promotes.
     if (op == "&" || op == "|" || op == "^") {
         // Inside int32 the tag engine's own operators ARE the infinite two's
         // complement answer - the sign bit stands for exactly the endless run of
@@ -1417,12 +1358,12 @@ function rbABigOr(op, a, b, dbl) {
 }
 
 // & | ^ over the full int64 range, which is what `float64(int64(x) op int64(y))`
-// is in the Go twin. The floor's sized-integer tag (tag 13, docs part 2) does
-// exactly that arithmetic, and sintNum reads the signed 64 bit result back as a
-// double - so the whole of it is four calls and no 32 bit wrap. sint() applies
-// si_norm, which is precisely right here: an Integer IS "a value exact in a
-// double" until it leaves the tower, so a result inside +-2^53 comes back unboxed
-// and one outside it stays a cell that sintNum reads.
+// is in the Go twin. The floor's sized-integer tag (tag 13) does exactly that
+// arithmetic, and sintNum reads the signed 64 bit result back as a double - so
+// the whole of it is four calls and no 32 bit wrap. sint() applies si_norm,
+// which is precisely right here: an Integer IS "a value exact in a double" until
+// it leaves the tower, so a result inside +-2^53 comes back unboxed and one
+// outside it stays a cell that sintNum reads.
 function rbBits64(op, a, b) {
     var x = sintRaw(sintHi(Math.trunc(a)), sintLo(Math.trunc(a)), 64, false)
     var y = sintRaw(sintHi(Math.trunc(b)), sintLo(Math.trunc(b)), 64, false)
@@ -1449,10 +1390,9 @@ function rbNumCmp(l, r) {
     return 0
 }
 
-// rubyNeg: unary minus over the tower. Written `0 - x` NOWHERE - the signed-zero
-// trap the plan records has bitten five languages, and `0 - 0.0` is `+0.0` where
-// the sign has to survive. MetaJS's own unary minus compiles to js_neg, which is
-// the floor's sign flip.
+// rubyNeg: unary minus over the tower. Written `0 - x` NOWHERE: `0 - 0.0` is
+// `+0.0` where the sign has to survive. MetaJS's own unary minus compiles to
+// js_neg, which is the floor's sign flip.
 function rbNeg(v) {
     if (typeof v == "number") { return -v }
     if (rtTag(v, "__bint")) { return rtABigNarrow(rtABigNeg(v)) }
@@ -1472,13 +1412,11 @@ function rbNeg(v) {
 // `decpt < -3 || (decpt > DBL_DIG (15) && decpt >= digits.length)` - the high test
 // has TWO parts, because MRI goes exponential only when the fixed form would have
 // to pad with zeros, the mantissa always carrying a fraction
-// digit and the exponent always signed and at least two digits. The full before /
-// after table and the ground truth (ruby 2.6.10p210 - Float#to_s is unchanged in
-// 3.x and needs no Ruby-3 syntax to probe) are at rubyFloStr in abnf/jsrt.go.
+// digit and the exponent always signed and at least two digits. The full
+// table is at rubyFloStr in abnf/jsrt.go.
 
 // rtSplit10 (languages/lib/runtime.metajs) turns a > 0 into {d: significant
-// digits, e: the scientific exponent}; python, ruby and swift had three copies of
-// it, byte-identical bar swift's comments. rtSciText and rtFixText are the two
+// digits, e: the scientific exponent}. rtSciText and rtFixText are the two
 // halves of the rendering, also shared. What is RUBY'S is the boundary between
 // them and the forced ".0" on a one-digit mantissa - `dot` - which is why
 // 1e+20.to_s is "1.0e+20" where Python and Swift print "1e+20".
@@ -1527,9 +1465,7 @@ function rbStr(v) {
         // A plain instance with no #to_s of its own. MRI writes
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
-        // the same rule rbFuncRender below follows. Without this the native binary
-        // printed "[object Object]" and the interpreter half aborted with
-        // *unknown method 'to_s'*. docs/todo.md 1.3.
+        // the same rule rbFuncRender below follows.
         var cn = rbInstClassName(v)
         if (cn != "") { return "#<" + cn + ">" }
     }
@@ -1539,15 +1475,11 @@ function rbStr(v) {
 
 // How a PROC prints. MRI says `#<Proc:0x0000...@f.rb:4 (lambda)>`; the address is
 // its own and cannot be matched, and neither can the source location, so both are
-// left off rather than invented - the same rule python's <function fn> follows
-// (da43fee). Without it the native binary and llvm.Run printed the C floor's
-// `[function]` while the interpreter half printed the closure's whole METAJS
-// SOURCE TEXT, a live halves divergence that no gate could see because neither
-// half was ever asserted. Mirrors rstr of ruby-interpreter.abnf and
-// rubyFuncRender of abnf/jsrt.go. docs/todo.md 1.5.
+// left off rather than invented - the same rule python's <function fn> follows.
+// Mirrors rstr of ruby-interpreter.abnf and rubyFuncRender of abnf/jsrt.go.
 // A METHOD value renders as MRI's `#<Method: Object#foo>', and that one IS
 // byte-exact against the oracle: MRI 2.6 writes exactly it, and only 3.0 appends a
-// source location. docs/todo.md 2.5.
+// source location.
 function rbFuncRender(v) {
     var mrec = rtPairGet(rbMethodFns, rbMethodRec, v)
     if (mrec !== undefined) { return "#<Method: " + mrec[0] + "#" + mrec[1] + ">" }
@@ -1603,13 +1535,12 @@ function rbInspect(v) {
     if (rbIsSym(v)) { return ":" + v["s"] }
     // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
     // `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one place the
-    // two differ for a numeric. Every engine fell through to #to_s.
-    // docs/todo.md 1.3.
+    // two differ for a numeric.
     if (rbIsRat(v)) { return "(" + rbRatText(v) + ")" }
     if (rbIsCpx(v)) { return "(" + rbCpxText(v) + ")" }
     // Range#inspect INSPECTS its endpoints where #to_s renders them, which is the
     // only place the two differ: `("a".."e").inspect' is `"a".."e"' and its #to_s
-    // is `a..e'. Both used to be the materialized array's. docs/todo.md 1.5.
+    // is `a..e'.
     if (rbIsRange(v)) { return rbRangeText(v, true) }
     if (rbIsArr(v)) {
         var out = "["
@@ -1636,10 +1567,9 @@ function rbInspect(v) {
     }
     // Exception#inspect / a plain instance's #inspect. MRI answers
     // `#<RuntimeError: boom>' - the CLASS NAME and #to_s - and the bare class name
-    // when #to_s is empty. It was unimplemented in all three engines: `p exc'
-    // printed the message alone here and aborted the interpreter half. A class that
-    // defines #inspect of its own stays in charge. Mirrors rubyExcInspect of
-    // abnf/jsrt.go and excInspect of ruby-interpreter.abnf. docs/todo.md 1.3.
+    // when #to_s is empty. A class that defines #inspect of its own stays in
+    // charge. Mirrors rubyExcInspect of abnf/jsrt.go and excInspect of
+    // ruby-interpreter.abnf.
     if (rbIsObj(v)) {
         if (v["__isclass"] !== true && v["__class"] !== undefined) {
             var im = rbFindMethod(v, "inspect")
@@ -1673,27 +1603,9 @@ function rbExcInspect(name, msg) {
 // rubyFormat: the printf directives Ruby shares with C,
 // %[-][0][+][ ][width][.prec](d|i|f|s|x|X|o|b|e|%).
 
-// ----- EXACT decimal expansion of a double ---------------------------------
-//
-// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
-// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
-// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
-// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
-// measured on the differential probe.
-//
-// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
-// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
-// multiplied by 5 exactly -e times with the point placed -e digits from the
-// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
-// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
-// 50000 + 10000, which a double holds exactly.
+// The exact decimal expansion of a double (rtExactDec / rtRoundHalfEven /
+// rtFixed) is shared, in languages/lib/runtime.metajs.
 
-// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
-// Round the digit string `digits` (an integer written out) to `keep` digits,
-// half to EVEN, and answer the kept digits - one longer when the rounding
-// carried all the way (999 -> 1000), which the caller detects by the length.
-// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
-// cut to prec fraction digits with half-to-even rounding.
 // strconv.FormatFloat(v, 'e', prec, 64): d.dddde+XX, at least two exponent digits.
 function rbSci(x, prec) {
     if (x !== x) { return "NaN" }
@@ -1740,12 +1652,9 @@ function rbSci(x, prec) {
 
 // ----- %g / %G -------------------------------------------------------------
 //
-// UNIMPLEMENTED in every half until now: "g" reached rbFormat's default arm, which
-// emitted the letter itself and did not even consume its argument, so
-// ("%g" % 1.5) was "g". The twin (rt.rubyFormat in abnf/jsrt.go) has
-// strconv.FormatFloat(v, 'g', P, 64); this is that function spelled out, and the
-// two were diffed digit for digit against ruby 2.6.10 over 14 values x 4
-// precisions (Float#% is unchanged in 3.x, so the row is settleable there).
+// The twin (rt.rubyFormat in abnf/jsrt.go) has strconv.FormatFloat(v, 'g', P,
+// 64); this is that function spelled out, checked digit for digit against ruby
+// 2.6.10 (Float#% is unchanged in 3.x).
 //
 // The rule: P is the precision, defaulting to 6, and P == 0 means 1. Round to P
 // SIGNIFICANT digits; if the resulting decimal exponent X is below -4 or at least
@@ -1821,16 +1730,10 @@ function rbGen(x, prec) {
 
 // ----- the # (alternate) flag ----------------------------------------------
 //
-// UNPARSED in all three halves until now, and the two compiled ones did not even
-// reach the directive letter: the flag loop stopped at "#", the width scan stopped
-// there too, and "#" itself became the conversion, so ("%#g" % 1.5) was "#g" with
-// the argument left unconsumed for the NEXT directive. The interpreter swallowed
-// the "#" into its spec string and then ignored it, so it printed plain %g - a
-// live halves divergence that --cross never saw because no test used the flag.
 // MRI: it keeps %g's trailing zeros ("%#g" % 100.0 is "100.000"), it forces a
 // decimal point wherever there would be none ("%#.0f" % 1.0 is "1.", "%#.1g" %
 // 1234.0 is "1.e+03"), and it puts a base prefix on %x/%X/%o/%b - but not on a
-// zero. Measured against ruby 2.6.10 over the whole flag/width/precision matrix.
+// zero.
 
 // A decimal point at the END of the mantissa when there is none, in front of any
 // exponent suffix.
@@ -1866,11 +1769,11 @@ function rbGenAlt(x, prec) {
 // The caller keeps the length so the 0 flag can pad behind it: "%#010x" % 255 is
 // "0x000000ff".
 //
-// The test is on the VALUE and not on the digit string, which is what the first
-// spelling got wrong: a precision pads the digits, and "%#.5x" % 0 is "00000" in
-// MRI with no prefix at all. Octal is a different rule again and lives in
-// rbIntBody - "#" on %o means "make sure there is a leading zero", so "%#.5o" % 255
-// is "00377" and MRI leaves it off the ".." two's-complement form entirely.
+// The test is on the VALUE and not on the digit string: a precision pads the
+// digits, and "%#.5x" % 0 is "00000" in MRI with no prefix at all. Octal is a
+// different rule again and lives in rbIntBody - "#" on %o means "make sure there
+// is a leading zero", so "%#.5o" % 255 is "00377" and MRI leaves it off the ".."
+// two's-complement form entirely.
 function rbBasePrefix(conv, v) {
     if (rbIsBig(v)) {
         if (rtABigIsZero(v)) { return "" }
@@ -1899,13 +1802,11 @@ function rbCharCode(cp) {
 
 // ----- the three integer directives -----------------------------------------
 //
-// %d/%i/%x/%X/%o/%b ran through rtBaseStr and `"" + Math.trunc(v)`, which are
-// wrong in two independent ways past 2^53: rtBaseStr converts through int64 and
-// SATURATES (1e30 came out "7fffffffffffffff") and `"" + v` prints the double's
-// SHORTEST form ("1e+30"). MRI converts the Float with to_i - truncation toward
-// zero - and prints the resulting Integer EXACTLY, all 31 digits of
-// 1e30.to_i == 1000000000000000019884624838656. Settled against ruby 2.6.10 over
-// a 61-format x 38-value table; Integer formatting is unchanged in 3.x.
+// Past 2^53 neither rtBaseStr (int64, SATURATES: 1e30 would be
+// "7fffffffffffffff") nor `"" + v` (the double's SHORTEST form, "1e+30") is
+// right. MRI converts the Float with to_i - truncation toward zero - and prints
+// the resulting Integer EXACTLY, all 31 digits of 1e30.to_i ==
+// 1000000000000000019884624838656. Integer formatting is unchanged in 3.x.
 //
 // abnf/jsrt.go's twin has math/big and asks it for Int.Text(base). There is no
 // bignum multiply here, so the exact digits come out of the double's own BINARY
@@ -2107,33 +2008,28 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
     return {b: body, f: fill, k: keep}
 }
 
-// The base of a conversion character, and 0 for the ones that are not integers.
 // ----- what a numeric directive may be GIVEN --------------------------------
 //
 // MRI's numeric directives do not read a number out of the operand, they CONVERT it with
 // Kernel#Integer / Kernel#Float rules - so they raise on a value that has no number in
-// it, and they PARSE one that has a number in its text. Every engine here went straight
-// to rbToF, whose answer is 0 for nil, true, false, a Symbol and an Array, AND 0 for the
-// perfectly good string "12". Measured against /usr/bin/ruby, agreed and wrong in all
-// four legs:
+// it, and they PARSE one that has a number in its text (rbToF would answer 0 for
+// all of these):
 //
-//   "%d" % [nil]    "0"   MRI: TypeError    can't convert nil into Integer
-//   "%d" % [true]   "0"   MRI: TypeError    can't convert true into Integer
-//   "%d" % [:s]     "0"   MRI: TypeError    can't convert Symbol into Integer
-//   "%d" % ["x"]    "0"   MRI: ArgumentError invalid value for Integer(): "x"
-//   "%d" % ["12"]   "0"   MRI: "12"
-//   "%f" % [nil]    "0.000000"  MRI: TypeError can't convert nil into Float
-//   "%c" % [nil]    ""    MRI: TypeError    no implicit conversion from nil to integer
+//   "%d" % [nil]    MRI: TypeError    can't convert nil into Integer
+//   "%d" % [true]   MRI: TypeError    can't convert true into Integer
+//   "%d" % [:s]     MRI: TypeError    can't convert Symbol into Integer
+//   "%d" % ["x"]    MRI: ArgumentError invalid value for Integer(): "x"
+//   "%d" % ["12"]   MRI: "12"
+//   "%f" % [nil]    MRI: TypeError can't convert nil into Float
+//   "%c" % [nil]    MRI: TypeError    no implicit conversion from nil to integer
 //
 // nil / true / false name THEMSELVES in the message and everything else names its CLASS,
 // which is MRI's wording and not a simplification. %c has a message of its own. The twins
 // are fmtIntOperand / fmtFloOperand / fmtCharOperand in ruby-interpreter.abnf and
 // rubyFmtIntOperand / rubyFmtFloOperand / rubyFmtCharOperand in abnf/jsrt.go.
-// docs/todo.md 2.4.
-// rbOwnerName and NOT rbClassName: rbClassName answers "" for a USER OBJECT, so the
-// message read "can't convert Object into Integer" here while ruby-interpreter.abnf
-// said "Plain" off classOf - a halves divergence caught by a native probe before it
-// shipped. rbOwnerName is the existing helper that walks __class.__name first.
+// rbOwnerName and NOT rbClassName: rbClassName answers "" for a USER OBJECT, and
+// MRI (like ruby-interpreter.abnf's classOf) names the user class.
+// rbOwnerName walks __class.__name first.
 function rbFmtConvName(v) {
     if (rtIsNil(v)) { return "nil" }
     if (v === true) { return "true" }
@@ -2197,10 +2093,10 @@ function rbFmtCharOperand(v) {
     return 0
 }
 
+// The base of a conversion character, and 0 for the ones that are not integers.
 function rbIntBase(conv) {
     // %u is MRI's %d: the 1.8 "unsigned" meaning is long gone and "%u" % -5 is
-    // "-5". It was in the interpreter half's intBase and in neither compiled one,
-    // so both of those printed the literal letter "u" - a live halves divergence.
+    // "-5".
     if (conv == "d" || conv == "i" || conv == "u") { return 10 }
     if (conv == "x" || conv == "X") { return 16 }
     if (conv == "o") { return 8 }
@@ -2210,8 +2106,8 @@ function rbIntBase(conv) {
 
 // Ruby prints "Inf", "-Inf" and "NaN" for a non-finite float under EVERY float
 // directive, in that case whatever the directive's own case is, and pads them with
-// spaces even under the 0 flag. Go's strconv says "+Inf", which is what reached the
-// output before. rubyFloatWord in abnf/jsrt.go is the twin.
+// spaces even under the 0 flag (Go's strconv would say "+Inf"). rubyFloatWord
+// in abnf/jsrt.go is the twin.
 function rbFloatWord(x) {
     if (x !== x) { return "NaN" }
     if (x - x !== 0) {
@@ -2227,18 +2123,15 @@ function rbFloatWord(x) {
 
 // strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
 // floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
-// 328 ranges from the Go runtime's own answers), so an ASCII loop here would be a
-// third, worse, copy: it printed "CAFé" for "café".
+// ranges from the Go runtime's own answers), so an ASCII loop here would be a
+// third, worse, copy.
 function rbUpper(s) { return s.toUpperCase() }
 function rbLower(s) { return s.toLowerCase() }
 
 // MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
 // "%10s" % "café" is six spaces and four characters, and its result has
-// String#length 10 and #bytesize 11. This file counted BYTES, because it was
-// written to match abnf/jsrt.go's `len(body)` and that file was never checked
-// against MRI - docs/working-on-this-project.md chapter 7.7 states the byte rule
-// and cites this very example, and it is wrong for Ruby. Both halves agreeing and
-// both wrong, so --cross could not see it; only the oracle could.
+// String#length 10 and #bytesize 11 (abnf/jsrt.go's `len(body)` byte rule is
+// wrong for Ruby).
 //
 // A surrogate PAIR is one character to MRI ("%5c" % 128512 is four spaces), so
 // this counts code points and not the UTF-16 units String#length answers.
@@ -2256,8 +2149,7 @@ function rbCharCount(s) {
 }
 
 // The first `n` CHARACTERS of a string, which is what a %s or %p precision cuts
-// to: "%.1s" % "日本語" is "日" in MRI, where the byte cut this replaces
-// answered nothing at all.
+// to: "%.1s" % "日本語" is "日" in MRI.
 function rbCharCut(s, n) {
     var out = ""
     var seen = 0
@@ -2295,8 +2187,7 @@ function rbIsSignChar(c) { return c == "-" || c == "+" || c == " " }
 // "0x0p+0". Without a precision the fraction's trailing zeros go; with one it is
 // rounded half to even, or zero-padded, to exactly that many digits.
 //
-// Chapter 7.7 of docs/working-on-this-project.md points at d_frexp for this and
-// it is NOT needed. Scaling a double by a POWER OF TWO is exact as long as the
+// No d_frexp is needed. Scaling a double by a POWER OF TWO is exact as long as the
 // result neither overflows nor falls into the subnormals, and both directions can
 // be driven so that it never does: divide only while the value is >= the power
 // (the quotient stays >= 1), multiply only while the product stays < 2. So this
@@ -2307,7 +2198,7 @@ function rbIsSignChar(c) { return c == "-" || c == "+" || c == " " }
 //
 // The powers are built by REPEATED SQUARING (2, 4, 16, ... 2^512): the ladder of
 // exponents 1, 2, 4, ... 512 that the two loops walk downward. MetaJS has no
-// exponent literal (manual chapter 4), so they cannot be written out.
+// exponent literal, so they cannot be written out.
 var rbHexP2v = []
 var rbHexP2k = []
 
@@ -2449,10 +2340,8 @@ function rbHexBody(fv, prec, alt, upper) {
 // Every route from a Float to an Integer - #to_i, #to_int, #truncate, #round,
 // #floor, #ceil, and the %d / %x / %o / %b directives, whose operand MRI converts
 // with to_i - raises FloatDomainError on an infinity or a NaN, with the float's
-// own #to_s as the message. All three engines answered the infinity itself
-// instead, agreed and wrong, so --cross was blind. floDomainGuard in
-// languages/ruby-interpreter.abnf and rubyFloDomain in abnf/jsrtruby.go are the
-// twins. docs/todo.md 1.5.
+// own #to_s as the message. floDomainGuard in languages/ruby-interpreter.abnf and
+// rubyFloDomain in abnf/jsrtruby.go are the twins.
 function rbFloDomain(x) {
     if (x !== x) { rbRaiseErr("FloatDomainError", "NaN") }
     if (x - x !== 0) { rbRaiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
@@ -2461,10 +2350,7 @@ function rbFloDomain(x) {
 // ----- the ARGUMENT SELECTORS ----------------------------------------------
 //
 // A directive does not have to take the next argument, and MRI offers four ways
-// of saying which one it takes. This file implemented NONE of them and read the
-// "$" of "%1$s" as the CONVERSION, so "%1$s-%2$s" % ["a","b"] answered "$s- $s"
-// while ruby-interpreter.abnf read the digits as WIDTHS and answered "a- b": a
-// live three-way divergence. docs/todo.md 1.5.
+// of saying which one it takes:
 //
 //   %N$s          the Nth argument, 1-based, in any order and reusable
 //   %<name>s      the Hash entry :name, formatted by the directive
@@ -2475,13 +2361,11 @@ function rbFloDomain(x) {
 // The `*` argument is read BEFORE the value and width before precision, and `*`
 // takes an explicit selector too ("%1$*2$d" % [7, 6] is "     7").
 //
-// "TOO FEW ARGUMENTS" IS RAISED, since docs/todo.md 1.3's 2026-08-10 pass; the
-// paragraph that used to stand here declined it, and answering nil made
-// "%s %s" % ["a"] read "a " in all three engines - agreed and wrong. Measured
-// against /usr/bin/ruby 2.6.10 (unchanged in 3.x); the full row table, and the
-// shapes that do NOT raise, are at fmtTooFew in languages/ruby-interpreter.abnf.
-// rubyFmtTooFew in abnf/jsrtruby.go is the other twin. STILL not implemented:
-// MRI's four ArgumentErrors for MIXING the numbered, unnumbered and named styles.
+// "TOO FEW ARGUMENTS" IS RAISED ("%s %s" % ["a"] is an ArgumentError in MRI
+// 2.6.10, unchanged in 3.x); the full row table, and the shapes that do NOT
+// raise, are at fmtTooFew in languages/ruby-interpreter.abnf. rubyFmtTooFew in
+// abnf/jsrtruby.go is the other twin. NOT implemented: MRI's four
+// ArgumentErrors for MIXING the numbered, unnumbered and named styles.
 function rbFmtTooFew() {
     rbRaiseErr("ArgumentError", "too few arguments")
 }
@@ -2533,23 +2417,19 @@ function rbFmtStar(spec, j, args, st) {
     return {n: Math.trunc(rbToF(v)), j: j}
 }
 
-// MRI raises ArgumentError on a malformed format string, and every engine here
-// accepted one - in three DIFFERENT ways. Measured against /usr/bin/ruby 2.6.10
-// (sprintf is unchanged in 3.x); the columns are ruby-interpreter.abnf, llvm.Run
-// and the native binary:
+// MRI raises ArgumentError on a malformed format string (sprintf is unchanged in
+// 3.x):
 //
-//     "%z" % 5     5      z     z          MRI: malformed format string - %z
-//     "%5" % 5     %5     %5    ""         MRI: malformed format string - %*[0-9]
-//     "100%" % []  100%   100%  100%       MRI: incomplete format specifier…
+//     "%z" % 5      malformed format string - %z
+//     "%5" % 5      malformed format string - %*[0-9]
+//     "100%" % []   incomplete format specifier…
 //
-// The native column is THIS file's `break`, which discarded the rest of the
-// string; nothing but a native probe could see it. The messages are MRI's own,
-// chosen by what the head consumed last - see the table in ruby-interpreter.abnf.
+// The messages are MRI's own, chosen by what the head consumed last - see the
+// table in ruby-interpreter.abnf.
 //
-// MRI's "too few arguments" is raised too, since 2026-08-10 - see rbFmtTooFew
-// above. The one row a selector still saves in MRI and not here is "%1$%" % 5,
-// which is "%" there and *invalid format character - %* here; it never reaches
-// the argument list, so it is a malformed-head row. docs/todo.md 1.3.
+// The one row a selector still saves in MRI and not here is "%1$%" % 5, which is
+// "%" there and *invalid format character - %* here; it never reaches the
+// argument list, so it is a malformed-head row.
 function rbIsFmtConv(c) {
     return c == "d" || c == "i" || c == "u" || c == "f" || c == "s" || c == "p"
         || c == "c" || c == "x" || c == "X" || c == "o" || c == "b" || c == "B"
@@ -2578,11 +2458,8 @@ function rbFormat(spec, arg) {
             continue
         }
         i = i + 1
-        // A MALFORMED directive is an ArgumentError in MRI, and it was accepted by
-        // all three engines here in three DIFFERENT ways - this file's `break`
-        // below DISCARDED the rest of the string, so "%5" % 5 was "" natively and
-        // "%5" in the other two. rbFmtCheckConv carries the measurements.
-        // docs/todo.md 1.3.
+        // A MALFORMED directive is an ArgumentError in MRI; rbFmtCheckConv
+        // carries the table.
         if (i >= spec.length) { rbRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead") }
         if (spec.charAt(i) == "%") {
             out = out + "%"
@@ -2747,8 +2624,7 @@ function rbFormat(spec, arg) {
             if (!rbIsBig(iv) && (iv !== iv || iv - iv !== 0)) {
                 // MRI's integer directives convert the operand with to_i, so an
                 // infinity or a NaN raises FloatDomainError here exactly as
-                // Float#to_i does. This used to print the number's own word or
-                // rtBaseStr's int64 saturation, which was ARCHITECTURE-DEPENDENT.
+                // Float#to_i does.
                 rbFloDomain(iv)
             } else {
                 var ib = rbIntBody(iv, base, conv == "X" || conv == "B", alt, plus || space, prec)
@@ -2794,24 +2670,21 @@ function rbFormat(spec, arg) {
             }
         } else if (conv == "s") {
             body = rbStr(nx)
-            // body[:prec] in Go is a BYTE slice; the cut has to count bytes too.
+            // A precision cuts CHARACTERS (rbCharCut), as MRI does.
             if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
         } else if (conv == "c") {
             // %c is ONE character: a code point from an Integer (a Float is
-            // truncated, as it is under %d) or the first character of a String. It
-            // is not a numeric directive - "%05c" % 65 is "    A" - and MRI ignores
-            // a precision on it outright ("%.0c" % 65 is "A"). MRI demands a String
-            // of EXACTLY one character and raises ArgumentError otherwise; this
-            // takes the first.
-            // A String operand must be EXACTLY one character. This took the first and
-            // said so at the site; MRI raises, and the message is its own.
+            // truncated, as it is under %d) or a String of EXACTLY one character
+            // (MRI raises ArgumentError otherwise, with its own message). It is not
+            // a numeric directive - "%05c" % 65 is "    A" - and MRI ignores a
+            // precision on it outright ("%.0c" % 65 is "A").
             if (typeof nx == "string") {
                 if (rbCharCount(nx) != 1) { rbRaiseErr("ArgumentError", "%c requires a character") }
                 body = nx
             }
             else { body = rbCharCode(Math.trunc(rbFmtCharOperand(nx))) }
         } else if (conv == "p") {
-            // %p is #inspect where %s is #to_s, and it truncates by BYTES the same
+            // %p is #inspect where %s is #to_s, and its precision cuts the same
             // way: "%.2p" % "abcdef" is `"a'.
             body = rbInspect(nx)
             if (prec >= 0 && prec < rbCharCount(body)) { body = rbCharCut(body, prec) }
@@ -2835,22 +2708,20 @@ function rbFormat(spec, arg) {
         } else {
             body = conv
         }
-        // The + and SPACE flags were parsed and thrown away, in every half, so
-        // "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
-        // wrong, the one class byte-identity cannot see. They apply to the NUMERIC
+        // The + and SPACE flags: "%+d" % 7 is "+7". They apply to the NUMERIC
         // directives only, Inf and NaN included ("%+f" % Float::INFINITY is "+Inf").
         var numeric = rbFmtNumeric(conv)
         if (numeric && body.charAt(0) != "-") {
             if (plus) { body = "+" + body } else if (space) { body = " " + body }
             if ((plus || space) && keep >= 0) { keep = keep + 1 }
         }
-        // The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab", where this used
-        // to pad with zeros. A non-finite float is never zero-padded either, and
-        // neither is an integer directive that carried a precision.
+        // The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab". A non-finite
+        // float is never zero-padded either, and neither is an integer directive
+        // that carried a precision.
         var pad = " "
         if (zero && !left && !nonFinite && !intPrec && numeric) { pad = fill }
-        // The width counts CHARACTERS: "%10s" of "café" gets SIX spaces in MRI,
-        // where this counted the five BYTES of its UTF-8 form. rbCharCount.
+        // The width counts CHARACTERS: "%10s" of "café" gets SIX spaces in MRI
+        // (rbCharCount).
         // The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
         // "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff". For the ".."
         // two's-complement form they go behind that too, and they are f/7/1 rather
@@ -2890,19 +2761,17 @@ function rbTruthy(v) {
 // dictFind / dictScan / dictAppend of abnf/jsrt.go. The Go side keeps an index
 // alongside the keys array as a pure ACCELERATOR (a hit is confirmed against the
 // array before it is used), so a linear scan answers exactly what it answers.
-// SHARED as rtDictFind - lib/runtime.metajs. This body was byte-identical in
-// dart, ruby and swift, and equal to go's goDictFind; see the argument there.
-// rtDictFind is `===`, and two bigs of the same value are different objects - so
-// `{2**64 => :big}[2**64]` missed. The value comparison is the FALLBACK SCAN and
-// nothing else: a hit costs exactly what it did, and a miss costs one type test.
-// A big is only ever the key equal of another big, which is what the Go twin's
-// strictEq (its *jsBigInt arm demands two of them) and the interpreter's
-// core.keyId namespace both say.
+// The `===` scan is SHARED as rtDictFind - lib/runtime.metajs.
+// Two bigs of the same value are different objects, so the value comparison is
+// the FALLBACK SCAN and nothing else: a hit costs exactly what rtDictFind costs,
+// and a miss costs one type test. A big is only ever the key equal of another
+// big, which is what the Go twin's strictEq (its *jsBigInt arm demands two of
+// them) and the interpreter's core.keyId namespace both say.
 // An ARRAY (and a Hash) is a VALUE key in Ruby - Array#hash and Array#eql? are
-// structural - so `{[1] => 5}[[1]]` is 5 where `===` answered nil
-// (docs/todo.md 2.11). That arm rides on the SAME fallback scan and for the same
-// reason, and it stays in RUBY's find rather than in rtDictFind, which nine
-// languages share and in which two arrays are two objects.
+// structural - so `{[1] => 5}[[1]]` is 5. That arm rides on the SAME fallback
+// scan and for the same reason, and it stays in RUBY's find rather than in
+// rtDictFind, which nine languages share and in which two arrays are two
+// objects.
 function rbDictFind(keys, k) {
     var at = rtDictFind(keys, k)
     if (at >= 0) { return at }
@@ -2910,7 +2779,7 @@ function rbDictFind(keys, k) {
     if (typeof k != "object") { return 0 - 1 }
     // A Range is a VALUE key too - `h[1..3]' has to find the entry `h[1..3] = v'
     // made, and two range literals are two distinct objects that rtDictFind (an
-    // identity/strictEq scan) can never match. docs/todo.md 1.5.
+    // identity/strictEq scan) can never match.
     if (rbIsArr(k) || rbIsDict(k) || rbIsRange(k)) {
         var a = 0
         while (a < keys.length) {
@@ -2965,41 +2834,35 @@ function rbHashDefault(o, k) {
     if (d === undefined) { return null }
     return d
 }
-// rbCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
-// languages, ZERO differences).
+// rbCopyArr is SHARED as rtCopyArr - lib/runtime.metajs.
 
 // ===================================================== equality =============
 
 // pyEqual: structural for Array and Hash, === for everything else.
 function rbPyEqual(x, y) {
     // Two bigs of the same value are different objects, so the `x === y` this
-    // ends in answers false for them - which made `[a, b] == [c, d]` false
-    // whenever an element was past 2^53. The Go twin has the same arm inside
+    // ends in would answer false for them. The Go twin has the same arm inside
     // strictEq, and the interpreter reaches numEq through core.keyEq.
     if (rtTag(x, "__bint")) {
         if (!rtTag(y, "__bint")) { return false }
         return rtABigCmp(x, y) == 0
     }
     // A Float / Rational / Complex is a BOX for the same reason, and two boxes of
-    // one value are two objects - so `[1.0] == [1.0]` was FALSE in the NATIVE
-    // BINARY and true under llvm.Run, whose jsFlo is a Go VALUE struct that ==
-    // compares field by field, and true in MRI. A run-vs-native divergence that
-    // predates this round's Array work and that only a native probe could see:
-    // the matrix, --full and --cross all run llvm.Run. rbEq settles two numbers
-    // without reaching this function again.
+    // one value are two objects, while llvm.Run's jsFlo is a Go VALUE struct
+    // that == compares field by field - so `[1.0] == [1.0]` needs this arm to be
+    // true natively too. rbEq settles two numbers without reaching this function
+    // again.
     if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
     // A Range is a VALUE for the same reason a boxed number is: two range literals
-    // are two objects, so `[1..2] == [1..2]` was false in the NATIVE BINARY (the Go
-    // twin reaches rubyEq's own range arm through strictEq) while llvm.Run agreed
-    // with MRI. Exactly the run-vs-native shape the boxed-number arm above records.
-    // docs/todo.md 1.5.
+    // are two objects, and `[1..2] == [1..2]` is true in MRI (the Go twin reaches
+    // rubyEq's own range arm through strictEq).
     if (rbIsRange(x) || rbIsRange(y)) {
         if (!rbIsRange(x) || !rbIsRange(y)) { return false }
         return rbRangeEq(x, y)
     }
     // undefined and nil both spell Ruby's nil: an ABSENT block parameter reaches
-    // this half as undefined, so `[a, b] == [5, nil]` compared undefined against
-    // null and answered false where ruby-interpreter.abnf and MRI answer true.
+    // this half as undefined, so `[a, b] == [5, nil]` must not compare undefined
+    // against null by identity.
     if (x === undefined || x === null || y === undefined || y === null) {
         var xn = x === undefined || x === null
         var yn = y === undefined || y === null
@@ -3056,9 +2919,9 @@ function rbEq(l, r) {
         }
         return rbToF(l) == rbToF(r)
     }
-    // Two Ranges compare by their endpoints. Identity was all a plain object got,
-    // so `(1..3) == (1..3)' was false and a Range could not be a Hash KEY - rbEql,
-    // which is what rbDictFind scans with, lands here. docs/todo.md 1.5.
+    // Two Ranges compare by their endpoints, so `(1..3) == (1..3)' holds and a
+    // Range can be a Hash KEY - rbEql, which is what rbDictFind scans with, lands
+    // here.
     if (rbIsRange(l) && rbIsRange(r)) { return rbRangeEq(l, r) }
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "==")
@@ -3067,7 +2930,7 @@ function rbEq(l, r) {
     // An ABSENT argument reaches this half as UNDEFINED (js_arg / js_rblockarg
     // answer undefined for one that was not passed) and ruby-interpreter.abnf as
     // nil. Both spell Ruby's nil, so `b == nil` and `[a, b] == [1, nil]` have to
-    // hold either way - they answered false here and true there.
+    // hold either way.
     if (l === undefined || l === null || r === undefined || r === null) {
         var ln = l === undefined || l === null
         var rn = r === undefined || r === null
@@ -3081,7 +2944,6 @@ function rbEq(l, r) {
     return rbPyEqual(l, r)
 }
 
-// rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
 // The first position at which an element is Ruby-== to v, or -1. Array#include?,
 // #index and #find_index are all defined on ==.
 function rbArrIndex(t, v) {
@@ -3100,6 +2962,7 @@ function rbEql(a, b) {
     return rbEq(a, b)
 }
 
+// rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
 function rbSpaceship(l, r) {
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "<=>")
@@ -3113,10 +2976,9 @@ function rbSpaceship(l, r) {
         return 0
     }
     // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
-    // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI and
-    // raised *comparison of Symbol with :a failed* in every engine here. It is the
-    // name comparison and nothing else: `:a <=> 1' is nil, the `return null' below.
-    // Measured on /usr/bin/ruby 2.6.10. docs/todo.md 1.3.
+    // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI. It is
+    // the name comparison and nothing else: `:a <=> 1' is nil, the `return null'
+    // below.
     if (rbIsSym(l) && rbIsSym(r)) {
         var ln = l["s"]
         var rn = r["s"]
@@ -3124,10 +2986,9 @@ function rbSpaceship(l, r) {
         if (rn < ln) { return 1 }
         return 0
     }
-    // ONE incomparable element pair makes the WHOLE comparison nil - skipping it
-    // and carrying on made `[1, "a"] <=> [1, 2]` answer 0 where MRI answers nil -
-    // and the answer is NORMALISED to -1/0/1, so `[1,2,3] <=> [1]` is 1, not 2.
-    // Both measured against ruby 2.6.10p210.
+    // ONE incomparable element pair makes the WHOLE comparison nil (`[1, "a"] <=>
+    // [1, 2]` is nil in MRI) and the answer is NORMALISED to -1/0/1, so
+    // `[1,2,3] <=> [1]` is 1, not 2.
     if (rbIsArr(l) && rbIsArr(r)) {
         var i = 0
         while (i < l.length && i < r.length) {
@@ -3173,16 +3034,16 @@ function rbCmp(l, r) {
 
 // ===================================================== classes ==============
 
-// ----- The PER-OBJECT singleton method table (docs/todo.md 1.3) -----
+// ----- The PER-OBJECT singleton method table -----
 //
 // Ruby gives every object a singleton ("eigen") class in front of its own class.
 // `def obj.m', a def inside `class << obj' and #define_singleton_method write the
 // __sing slot (name -> closure, with __singn holding the names in definition
 // order); `obj.extend(M)' pushes the module object onto __sext instead. The two
 // tiers are separate because MRI keeps them apart - `def a.hi' then `a.extend(M)'
-// still answers the def. Both slots are __-prefixed, so keysOf hides them
-// (manual 7.9). Twins: singFind / singPut / singExtend of
-// languages/ruby-interpreter.abnf, rubySingFind and friends of abnf/jsrt.go.
+// still answers the def. Both slots are __-prefixed, so keysOf hides them.
+// Twins: singFind / singPut / singExtend of languages/ruby-interpreter.abnf,
+// rubySingFind and friends of abnf/jsrt.go.
 function rbSingFind(o, name) {
     var t = o["__sing"]
     if (t !== undefined && t !== null) {
@@ -3285,11 +3146,11 @@ function rbSingNames(o) {
 }
 // Object#dup / Object#clone. Both are SHALLOW: a fresh instance of the same class
 // with the same instance variables. keysOf answers exactly those - it hides every
-// __-prefixed slot (manual 7.9) - so the copy cannot pick the singleton slots up by
+// __-prefixed slot - so the copy cannot pick the singleton slots up by
 // accident, which is the trap the Go twin's generic clone falls into: it walks
 // o.keys RAW. The one difference between the two IS those slots: #clone keeps the
 // singleton class, #dup drops it, and the tables are COPIED rather than shared so a
-// def on the clone does not reach the original. Measured on /usr/bin/ruby 2.6.10.
+// def on the clone does not reach the original.
 // `clone(freeze: false)' is not modelled and does not need to be: nothing here has
 // a frozen bit to clear (Object#frozen? answers true only for the immediate
 // values), so the keyword would be a no-op.
@@ -3332,7 +3193,7 @@ function rbSingCopy(o, withSing) {
 }
 
 // Object#respond_to?: the singleton table, then the class chain (an instance) or
-// the $s$ class-method chain (a class object). It was absent from all four engines.
+// the $s$ class-method chain (a class object).
 function rbSingRespond(o, name) {
     if (rbSingFind(o, name) !== undefined) { return true }
     if (o["__isclass"] === true) {
@@ -3351,7 +3212,7 @@ function rbSingRespond(o, name) {
 // an INSTANCE for a method.
 function rbFindMethod(v, name) {
     if (!rbIsObj(v)) { return undefined }
-    // Two slot reads, and the CALL only when one of them is set - manual 5.1.
+    // Two slot reads, and the CALL only when one of them is set.
     if (v["__sing"] !== undefined || v["__sext"] !== undefined) {
         var gm = rbSingFind(v, name)
         if (gm !== undefined) { return gm }
@@ -3366,12 +3227,10 @@ function rbFindMethod(v, name) {
     return undefined
 }
 
-// BasicObject#equal? - OBJECT IDENTITY, which existed in no engine at all
-// (`1.equal?(1)' aborted with *method call 'equal?' on a number* here and with
-// *unknown Integer method: equal?* in the interpreter half). docs/todo.md 2.5.
+// BasicObject#equal? - OBJECT IDENTITY.
 //
 // The rule is NOT a bare `===' and the reasoning is at identicalP in
-// languages/ruby-interpreter.abnf, which carries the measured row table: a Float
+// languages/ruby-interpreter.abnf, which carries the row table: a Float
 // compares by its DOUBLE (MRI's flonum makes 1.0.equal?(1.0) true, and NaN false
 // falls out), a String / Rational / Complex is always false (MRI allocates a fresh
 // object per value and this model has no identity for any of them), and everything
@@ -3402,15 +3261,11 @@ function rbClassName(v) {
     if (rbIsEnum(v)) { return "Enumerator" }
     // A Range is a VALUE, so it has a class like everything else. This one arm
     // gates `.class', `is_a?(Range)', `case r when Range', eql? and therefore the
-    // hash-key comparison, and the emitter's own `*r' splat test - all of which
-    // answered Array while a bounded range was a materialized array.
-    // docs/todo.md 1.5.
+    // hash-key comparison, and the emitter's own `*r' splat test.
     if (rbIsRange(v)) { return "Range" }
-    // A Proc / lambda / block closure. Without this arm `blk.class' and
-    // `blk.is_a?(Proc)' aborted both compiled halves with "method call 'class' on a
-    // function", where ruby-interpreter.abnf answered off classOf.
+    // A Proc / lambda / block closure answers Proc.
     // A Method is a class of its own in MRI and is NOT a Proc, so this test comes
-    // first and the Proc arm excludes it. docs/todo.md 2.5.
+    // first and the Proc arm excludes it.
     if (rbIsMethodVal(v)) { return "Method" }
     if (rbIsFn(v)) { return "Proc" }
     return ""
@@ -3424,9 +3279,8 @@ function rbBuiltinClass(name) {
     if (got !== undefined) { return got }
     var c = {__isclass: true, __rbuiltin: name, __name: name}
     // Math::PI and Math::E: a scoped constant is a "$c$"-prefixed slot on the
-    // namespace object (makeScopedConst in ruby-to-llvm-ir.abnf), and Math had
-    // none, so `Math::PI' printed an empty line. The twin is rubyBuiltinClass in
-    // abnf/jsrt.go.
+    // namespace object (makeScopedConst in ruby-to-llvm-ir.abnf). The twin is
+    // rubyBuiltinClass in abnf/jsrt.go.
     if (name == "Math") {
         c["$c$PI"] = rbMkFlo(Math.PI)
         c["$c$E"] = rbMkFlo(Math.E)
@@ -3443,9 +3297,7 @@ function rbBuiltinClass(name) {
 // languages/ruby-interpreter.abnf.
 //
 // Every name below is a member of the host Math, which languages/lib/runtime.c
-// seeds and abnf/jsrt.go's standardJSBindings binds - the SAME set in both, since
-// docs/todo.md 1.1 converged them. Before that the floor had eleven members and
-// this table could not have existed natively at all.
+// seeds and abnf/jsrt.go's standardJSBindings binds - the SAME set in both.
 function rbMathCall(name, args) {
     var x = rbToF(rbArgAt(args, 0))
     if (name == "sqrt") { return rbMkFlo(Math.sqrt(x)) }
@@ -3488,7 +3340,7 @@ var rbExcParent = {
     $RangeError: "StandardError",
     $ZeroDivisionError: "StandardError",
     // FloatDomainError < RangeError: what Float::INFINITY.to_i and "%d" %
-    // Float::INFINITY raise. docs/todo.md 1.5.
+    // Float::INFINITY raise.
     $FloatDomainError: "RangeError",
     $StopIteration: "IndexError",
     $FrozenError: "RuntimeError",
@@ -3526,18 +3378,13 @@ function rbExcIsA(v, bn) {
     return false
 }
 
-// rubyIsA: `v.is_a?(cls)` / `cls === v`. A builtin class matches by the value's
-// runtime kind (Integer/Float also count as Numeric and Comparable), a compiled
-// class by walking the instance's __class / __super chain.
 // rbMixIsA: the mixin half of is_a?. The COMPILER FLATTENS `include M' at build
 // time - M's method bodies are re-emitted into the including class and the module
-// itself is never named again - so nothing at run time knew M was an ancestor and
-// `obj.is_a?(M)' / `case obj when M' were FALSE in both compiled halves and TRUE in
-// the interpreter, whose class objects carry a real __mixins list. The emitter now
-// records the ancestry: `$mix$<Name>' -> the module object on every class in the
-// chain (include and prepend), `$xmix$<Name>' on the class OBJECT for `extend M'.
-// Identity, not the name, decides. Twin: rubyMixIsA in abnf/jsrt.go;
-// emitMixRecord in languages/ruby-to-llvm-ir.abnf. docs/todo.md 1.3.
+// itself is never named again - so the emitter records the ancestry instead:
+// `$mix$<Name>' -> the module object on every class in the chain (include and
+// prepend), `$xmix$<Name>' on the class OBJECT for `extend M'. Identity, not the
+// name, decides. Twin: rubyMixIsA in abnf/jsrt.go; emitMixRecord in
+// languages/ruby-to-llvm-ir.abnf.
 function rbMixIsA(v, cls) {
     if (!rbIsObj(v)) { return false }
     var nm = cls["__name"]
@@ -3545,7 +3392,7 @@ function rbMixIsA(v, cls) {
     // An INSTANCE that was `extend'ed is a member of that module too, and of every
     // module THAT one includes - `o.extend(B)' where `module B; include A' makes o
     // an A as well ($mix$<Name> is the module object's own ancestry record). The
-    // per-object twin of the class case below. docs/todo.md 1.3.
+    // per-object twin of the class case below.
     var xs = v["__sext"]
     if (xs !== undefined && xs !== null) {
         var xi = 0
@@ -3567,6 +3414,9 @@ function rbMixIsA(v, cls) {
     return false
 }
 
+// rubyIsA: `v.is_a?(cls)` / `cls === v`. A builtin class matches by the value's
+// runtime kind (Integer/Float also count as Numeric and Comparable), a compiled
+// class by walking the instance's __class / __super chain.
 function rbIsA(v, cls) {
     if (!rbIsObj(cls)) { return false }
     // The `typeof' guard keeps the mixin walk off `1.is_a?(Integer)' entirely: only
@@ -3585,7 +3435,7 @@ function rbIsA(v, cls) {
         // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in MRI,
         // a Module is not a Class, and neither name means anything for a value that
         // is not a class object at all. rbClassName answers "" for one, so the
-        // kind == bn test above never fires here. docs/todo.md 1.3.
+        // kind == bn test above never fires here.
         if (bn == "Class" || bn == "Module") {
             if (!rbIsObj(v) || v["__isclass"] !== true) { return false }
             if (bn == "Module") { return true }
@@ -3612,11 +3462,9 @@ function rbIsA(v, cls) {
 }
 
 // ----- Module#ancestors and the module relational operators -----
-// Every one of these was missing from BOTH compiled halves (`unknown method
-// 'ancestors'' / 'include?'', and `A < M' raised *comparison of Object with Object
-// failed*) and answered [] in the interpreter. They all read the same emitted
-// record rbMixIsA reads. Twins: rubyAncestors / rubyModRel in abnf/jsrt.go,
-// ancestorsOf / modRel in languages/ruby-interpreter.abnf. docs/todo.md 1.3.
+// They all read the same emitted record rbMixIsA reads. Twins: rubyAncestors /
+// rubyModRel in abnf/jsrt.go, ancestorsOf / modRel in
+// languages/ruby-interpreter.abnf.
 function rbIsClassObj(v) { return rbIsObj(v) && v["__isclass"] === true }
 
 function rbRootAncestor(n) { return n == "Object" || n == "Kernel" || n == "BasicObject" }
@@ -3695,9 +3543,8 @@ function rbExc(cls, args) {
 // Exception#message / #to_s: the first constructor argument, or the class name.
 // rbExcInst is "v is an EXCEPTION instance", which "has args" alone is not: the
 // emitter gives every body-less class a default initialize that stores its
-// arguments under `args`, so an ordinary instance has the same shape. Without the
-// class-chain test a plain object rendered as its class NAME where MRI writes
-// "#<Name>". Mirrors rubyExcInst of abnf/jsrt.go. docs/todo.md 1.3.
+// arguments under `args`, so an ordinary instance has the same shape (and MRI
+// writes "#<Name>" for it). Mirrors rubyExcInst of abnf/jsrt.go.
 function rbExcInst(v) {
     if (!rbIsObj(v) || v["__isclass"] === true) { return false }
     if (v["args"] === undefined || v["__class"] === undefined) { return false }
@@ -3800,11 +3647,10 @@ function rbFromCodes(codes) {
     return out
 }
 
-// TWO DELIBERATE DIVERGENCES FROM MRI LIVE HERE, both measured this round against
-// /usr/bin/ruby 2.6.10 and both PRE-EXISTING - they are what materializing means,
-// not what making a Range a value changed:
+// TWO DELIBERATE DIVERGENCES FROM MRI LIVE HERE (ruby 2.6.10); they are what
+// materializing means:
 //   * a FLOAT range iterates: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5] where MRI raises
-//     TypeError ("can't iterate from Float"). rbRangeAt / rbRangeLen now use the
+//     TypeError ("can't iterate from Float"). rbRangeAt / rbRangeLen use the
 //     SAME arithmetic, so for-in and to_a at least agree with each other.
 //   * `("a".."e").size' is 5 where MRI answers nil - see the Range method table.
 // rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
@@ -3840,12 +3686,11 @@ function rbRangeArr(lo, hi, excl) {
 }
 
 // ----- A Range as a VALUE ---------------------------------------------------
-// Every range is a {__rrange, begin, end, excl} object now, so these four are the
+// Every range is a {__rrange, begin, end, excl} object, so these four are the
 // whole of what a range CAN do that an Array cannot; everything else materializes
 // and delegates. Twins: rubyRangeText / rubyRangeToArr / rubyRangeLen /
 // rubyRangeAt in abnf/jsrt.go, and rangeToA / rangeMethod in
-// languages/ruby-interpreter.abnf, which had the right model all along.
-// docs/todo.md 1.5.
+// languages/ruby-interpreter.abnf.
 function rbRangeText(r, insp) {
     var dots = r["excl"] === true ? "..." : ".."
     var lo = r["begin"]
@@ -3876,11 +3721,10 @@ function rbRangeNumeric(r) {
 // THE ARITHMETIC HERE MUST BE rbRangeArr'S, EXACTLY. rbRangeArr walks `i = lo;
 // while (i <= hi) { push(i); i = i + 1 }', so element i is lo + i and the count is
 // floor(hi - lo) + 1 - NOT trunc(hi) - trunc(lo) + 1, which is the same for
-// integers and differs for a FLOAT range: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5]
-// while a truncating index answered 1, 2, 3, so `for x in 1.5..3.5' disagreed with
-// the range's own to_a. (MRI raises TypeError for both - that is rbRangeArr's own
-// pre-existing divergence, unchanged here - but the two paths of ONE value model
-// have to agree with each other.) docs/todo.md 1.5.
+// integers and differs for a FLOAT range: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5],
+// so `for x in 1.5..3.5' has to yield the same. (MRI raises TypeError for both -
+// rbRangeArr's divergence - but the two paths of ONE value model have to agree
+// with each other.)
 function rbRangeSpan(r) {
     var hi = rbToF(r["end"])
     if (r["excl"] === true) { hi = hi - 1 }
@@ -3919,11 +3763,8 @@ function rbRangeEq(l, r) {
 // here; EVERYTHING ELSE MATERIALIZES AND DELEGATES to rbArrayMethod, which is what
 // keeps the whole Enumerable surface (each / map / select / sum / reduce / zip /
 // group_by / each_slice / find / reverse_each / …) working without a second copy of
-// it. That delegation is why the seven methods this table used to answer were
-// enough while a bounded range WAS an array, and why the list had to grow the
-// moment it stopped being one. ruby-interpreter.abnf's rangeMethod is the same
-// shape and always was; rubyRangeMethod in abnf/jsrt.go is the twin.
-// docs/todo.md 1.5.
+// it. ruby-interpreter.abnf's rangeMethod is the same shape; rubyRangeMethod in
+// abnf/jsrt.go is the twin.
 function rbRangeMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
@@ -3969,20 +3810,18 @@ function rbRangeMethod(t, name, args) {
     }
     if (npos == 0 && blk === null) {
         // #size, #length and #count all answer the ELEMENT COUNT, and that is a
-        // DELIBERATE divergence, measured and left. MRI's Range#size is nil for a
-        // non-numeric range (`("a".."e").size' is nil) while #count is 5 - but
-        // ruby-to-llvm-ir.abnf lowers every bare `.size' / `.length' straight to
-        // js_pylen (the smcall / field arms), so it never reaches this table, and
-        // js_pylen is ALSO what for-in asks for its trip count. Splitting them
-        // would mean taking `.size' off that lowering in every ruby program, which
-        // is a far larger change than the answer is worth. All three engines agree,
-        // and agreed before this round too. docs/todo.md 1.5.
+        // DELIBERATE divergence. MRI's Range#size is nil for a non-numeric range
+        // (`("a".."e").size' is nil) while #count is 5 - but ruby-to-llvm-ir.abnf
+        // lowers every bare `.size' / `.length' straight to js_pylen (the smcall /
+        // field arms), so it never reaches this table, and js_pylen is ALSO what
+        // for-in asks for its trip count. Splitting them would mean taking `.size'
+        // off that lowering in every ruby program, which is a far larger change
+        // than the answer is worth. All three engines agree.
         if (name == "size" || name == "length" || name == "count") { return rbRangeLen(t) }
     }
-    // Range#step(n): every n-th element. It existed in NO engine, interpreter
-    // included - `(1..10).step(3)' aborted with *unknown Array method: step*.
-    // Without a block MRI answers an ArithmeticSequence; the nearest thing in this
-    // value model is an Enumerator, which answers #to_a and #each the same way.
+    // Range#step(n): every n-th element. Without a block MRI answers an
+    // ArithmeticSequence; the nearest thing in this value model is an
+    // Enumerator, which answers #to_a and #each the same way.
     if (name == "step") {
         var by = Math.trunc(rbToF(rbArgAt(args, 0)))
         if (by <= 0) { rbRaiseErr("ArgumentError", "step can't be 0 or negative") }
@@ -4009,9 +3848,8 @@ function rbRangeMethod(t, name, args) {
     return av
 }
 
-// rubyOpenRangeCover: `r.cover?(v)` / `r === v` for ANY range - it was written for
-// the open ones and is exactly right for a bounded one too, exclusive end included,
-// which is why making every range an object needed no change here.
+// rubyOpenRangeCover: `r.cover?(v)` / `r === v` for ANY range, bounded or open,
+// exclusive end included.
 function rbOpenRangeCover(o, v) {
     var lo = o["begin"]
     if (!rtIsNil(lo)) {
@@ -4031,9 +3869,7 @@ function rbOpenRangeCover(o, v) {
 
 // ===================================================== binary operators =====
 
-// rbRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros. Its one
-// call site is String#* in rbBin below, which was already a call in the same
-// pinned scope, so no frame is added. docs/todo.md 5.1.
+// rbRepeat is SHARED as rtRepeat - lib/runtime.metajs, next to rtZeros.
 
 // rubyBin: the one binary operator step. A user object dispatches to its own
 // operator method, strings and arrays get their Ruby operators, everything else
@@ -4085,8 +3921,8 @@ function rbBin(op, l, r) {
     }
     if (op == "-") {
         // Array#- is eql?/hash, like uniq and unlike include?: MRI answers
-        // `[1, 2.0] - [2]` with [1, 2.0]. This was rbPyEqual, which converts
-        // across the numeric classes and dropped the 2.0.
+        // `[1, 2.0] - [2]` with [1, 2.0] (rbPyEqual would convert across the
+        // numeric classes and drop the 2.0).
         if (rbIsArr(l) && rbIsArr(r)) {
             var diff = []
             var a = 0
@@ -4107,8 +3943,7 @@ function rbBin(op, l, r) {
         }
     }
     // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand order,
-    // both dedupe, and both compare with eql? like Array#- above. Without these
-    // arms they reached rbNumBin and ABORTED with "not a number in '&'".
+    // both dedupe, and both compare with eql? like Array#- above.
     if (op == "&") {
         if (rbIsArr(l) && rbIsArr(r)) { return rbArrAnd(l, r) }
     }
@@ -4137,8 +3972,7 @@ function rbBin(op, l, r) {
 
 // The compile cache and the two value tests are SHARED - rxCache / rxGet,
 // rxIsRegexObj / rxIsMatchObj and rxObjRe, all lib/regex.js, all under the Go
-// twin's own names. jsrtregex.go has had exactly one of each since it was
-// written; this side had four copies of the cache and two of everything else.
+// twin's own names.
 function rbRxIsRegex(v) { return rxIsRegexObj(v) }
 
 function rbRxIsMatch(v) { return rxIsMatchObj(v) }
@@ -4162,9 +3996,7 @@ function rbRxNewMatch(src, flags, text, m) {
 // three travel in a record. text stays a STRING: regex.js indexes UTF-16 code
 // units where the Go engine indexes runes, which agree for everything in the
 // Basic Multilingual Plane and therefore for every pattern in the corpus.
-// SHARED as rxMatchOf - lib/regex.js, with kotlin's k5MatchOf and python's
-// pyERxMatchOf. The rbToF coercion was the only difference and it is the
-// identity on every value __rxcaps can hold.
+// SHARED as rxMatchOf - lib/regex.js.
 function rbRxMatchOf(v) { return rxMatchOf(v) }
 
 // rxSetGlobals publishes $~, $& and $1..$9 after a match attempt. A FAILED match
@@ -4357,10 +4189,10 @@ function rbRxMethod(target, name, args) {
         if (name == "split" || name == "index") { wants = true }
         if (!wants) { return undefined }
         // `var pat = anytype`, not `var pat = args[0]`: MetaJS is typed and a local
-        // keeps the type of its first assignment, so with a STRING pattern (which
-        // reaches here since js_rxmcall's gate learned about them) the re-assignment
-        // below died with "variable 'pat' has type string and cannot hold a object"
-        // - NATIVELY ONLY, layer 2 being the only engine that compiles this file.
+        // keeps the type of its first assignment, so with a STRING pattern the
+        // re-assignment below would die with "variable 'pat' has type string and
+        // cannot hold a object" - natively only, layer 2 being the only engine
+        // that compiles this file.
         var pat = anytype
         pat = args[0]
         if (!rbRxIsRegex(pat)) {
@@ -4411,20 +4243,15 @@ function rbNumMethod(t, name, args) {
             if (rbAIsExact(x)) { return rtBaseStr(x, Math.trunc(rbToF(args[0]))) }
             return rbABigBaseStr(rtABigFromNum(x), Math.trunc(rbToF(args[0])))
         }
-        // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes -
-        // and this arm answered rbStr for both, so `p 2r/3r' printed the bracketed
-        // form off rbInspect while `(2r/3r).inspect' printed the bare one, inside
-        // one engine. docs/todo.md 1.3.
+        // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
         if (name == "inspect") { return rbInspect(t) }
         return rbStr(t)
     }
     // An infinity or a NaN has no Integer, so every conversion to one raises
-    // FloatDomainError (rbFloDomain). MRI's #round / #floor / #ceil with a POSITIVE
-    // ndigits answer a Float and do not raise, which is why only the no-argument
-    // forms are guarded. docs/todo.md 1.5.
-    // #truncate is NOT here any more: it takes an ndigits like #floor and #round,
-    // and this arm ignored it - `1.567.truncate(1)' answered the Integer 1 where
-    // MRI answers the Float 1.5. docs/todo.md 1.3.
+    // FloatDomainError (rbFloDomain). MRI's #round / #floor / #ceil / #truncate
+    // with a POSITIVE ndigits answer a Float and do not raise, which is why only
+    // the no-argument forms are guarded; those four are handled with their
+    // ndigits below.
     if (name == "to_i" || name == "to_int") {
         rbFloDomain(x)
         return rbIntFromF(Math.trunc(x))
@@ -4434,20 +4261,15 @@ function rbNumMethod(t, name, args) {
         return rbMkFlo(x)
     }
     if (name == "to_r") { return rbAsRat(t) }
-    // #to_c existed in NEITHER compiled half: `5.to_c' died with *method call 'to_c' on
-    // a number* while ruby-interpreter.abnf answered 5+0i, a live halves divergence at
-    // base. MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is (5.0+0i));
-    // this Complex carries two raw doubles, so it answers (5+0i) for both - the same
-    // part-ness gap Complex(0, 0).abs has, recorded rather than invented around.
-    // docs/todo.md 1.2.
+    // #to_c. MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is
+    // (5.0+0i)); this Complex carries two raw doubles, so it answers (5+0i) for
+    // both - the same part-ness gap Complex(0, 0).abs has.
     if (name == "to_c") {
         if (rbIsCpx(t)) { return t }
         return rbMkCpx(x, 0)
     }
-    // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE. Both went
-    // through rbToF, so (2r/3r).abs answered a Float and (3+4i).abs answered 3.0 -
-    // the REAL PART - where MRI says (2/3) and 5.0. Agreed in all four legs and
-    // wrong in all four. docs/todo.md 1.3.
+    // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE: MRI says
+    // (2r/3r).abs is (2/3) and (3+4i).abs is 5.0.
     if (name == "abs" || name == "magnitude") {
         if (rbIsRat(t)) {
             if (t["n"] < 0) { return rbMkRat(0 - t["n"], t["d"]) }
@@ -4459,7 +4281,7 @@ function rbNumMethod(t, name, args) {
     }
     // #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
     // one answers a Float (and does not raise on an infinity); 0 and negatives
-    // answer an Integer. rbNumDigitOp is the whole rule. docs/todo.md 1.2.
+    // answer an Integer. rbNumDigitOp is the whole rule.
     if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
         var nd = 0
         if (args.length > 0) { nd = Math.trunc(rbToF(args[0])) }
@@ -4472,10 +4294,8 @@ function rbNumMethod(t, name, args) {
     if (name == "zero?") { return x == 0 }
     if (name == "positive?") { return x > 0 }
     if (name == "negative?") { return x < 0 }
-    // Float#nan? / #infinite? / #finite?, which existed in NO engine: both compiled
-    // halves aborted with *method call 'nan?' on a object* and the interpreter with
-    // *unknown Numeric method: nan?*. #infinite? answers 1, -1 or NIL, not a
-    // boolean. docs/todo.md 1.5.
+    // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL, not a
+    // boolean.
     if (name == "nan?") { return x !== x }
     if (name == "finite?") { return x === x && x - x === 0 }
     if (name == "infinite?") {
@@ -4490,8 +4310,8 @@ function rbNumMethod(t, name, args) {
     if (name == "integer?") { return isInt }
     if (name == "numerator") { return rbAsRat(t)["n"] }
     if (name == "denominator") { return rbAsRat(t)["d"] }
-    // The block, NOT the trailing argument: since the block marker exists the two
-    // are different things, and these three arms read the raw argument list.
+    // The block, NOT the trailing argument: the block marker makes the two
+    // different things, and these three arms read the raw argument list.
     if (name == "times") {
         var tblk = rbBlockOf(args)
         var i = 0
@@ -4528,9 +4348,8 @@ function rbNumMethod(t, name, args) {
     if (name == "fdiv") { return rbMkFlo(x / rbToF(rbArgAt(args, 0))) }
     if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
     if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }
-    // between? / clamp used to be here, on rbToF. They are Comparable's, they are
-    // shared with String, and on a big Integer the double was not exact -
-    // rbMethod answers both through rbSpaceship before this table is reached.
+    // between? / clamp are Comparable's, shared with String, and answered
+    // exactly by rbMethod through rbSpaceship before this table is reached.
     if (name == "real") { return rbReOf(t) }
     if (name == "imaginary" || name == "imag") { return rbImOf(t) }
     if (name == "+" || name == "-" || name == "*" || name == "/" || name == "%") { return rbBin(name, t, rbArgAt(args, 0)) }
@@ -4550,12 +4369,12 @@ function rbNumMethod(t, name, args) {
 // keeps it in a parameter of its own. rbBlockOf / rbPosArgs split the two apart;
 // rubyBlockArgs is the Go twin's spelling.
 //
-// THE BLOCK MARKER. Until this existed a block travelled as the BARE closure,
-// which made it indistinguishable from a Proc handed over as an ordinary
-// positional argument: `def m(f = 3); end; m(some_proc)' took the default and
-// `def m(f); block_given?; end; m(some_proc)' answered true. js_rblkwrap wraps a
-// block in a one-slot object nothing else produces, so "the trailing argument is
-// a block" is a fact about the CALL SITE. rubyBlkOf of abnf/jsrt.go is the twin.
+// THE BLOCK MARKER. A bare closure would be indistinguishable from a Proc
+// handed over as an ordinary positional argument (`def m(f = 3); end;
+// m(some_proc)' would take the default, and `def m(f); block_given?; end;
+// m(some_proc)' would answer true). js_rblkwrap wraps a block in a one-slot
+// object nothing else produces, so "the trailing argument is a block" is a fact
+// about the CALL SITE. rubyBlkOf of abnf/jsrt.go is the twin.
 // The body of rbIsObj is spelled out rather than called: rbNPos below runs on
 // every array-method call and a MetaJS call is a scope frame (see rbIsObj).
 function rbIsBlk(v) {
@@ -4591,15 +4410,13 @@ function rbEndsWith(target, args) {
     return false
 }
 // String#strip / #chars / #split with a plain separator - the interpreter half's
-// bodies, which the compiled halves had no equivalent of at all. split has no
-// `split` in the frozen engine to lean on, so it walks.
+// bodies. split has no `split` in the frozen engine to lean on, so it walks.
 //
 // DELIBERATE DIVERGENCE FROM MRI, kept because the two halves must agree and this
-// is what ruby-interpreter.abnf has always done: MRI treats a SINGLE SPACE (and no
+// is what ruby-interpreter.abnf does: MRI treats a SINGLE SPACE (and no
 // argument at all) as the "awk" separator - any run of whitespace, with leading
 // whitespace dropped - while this splits on the literal separator, so
 // `"a  b".split(" ")` is ["a", "", "b"] here and ["a", "b"] in MRI.
-// docs/todo.md 1.10.
 function rbStrStrip(s) {
     var a = 0
     var b = s.length
@@ -4608,12 +4425,8 @@ function rbStrStrip(s) {
     return s.slice(a, b)
 }
 // `\u000c` and NOT `"\f"`: MetaJS's string literal has no \f and DROPS THE
-// BACKSLASH, so `c == "\f"` compiles to `c == "f"` - and `"ffoo barf".strip`
-// answered "oo bar" in the NATIVE BINARY while the interpreter and MRI both
-// said "ffoo barf". The matrix, --full and --cross all run llvm.Run against the
-// Go twin and are structurally blind to layer 2, so nothing here could see it.
-// \u000b beside it was ALREADY spelled this way, which is how the broken one
-// survived. tools/metajs-lint now catches the whole class.
+// BACKSLASH, so `c == "\f"` compiles to `c == "f"` (and `"ffoo barf".strip`
+// would answer "oo bar" natively). tools/metajs-lint catches the whole class.
 function rbIsSpaceCh(c) {
     return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\u000c" || c == "\u000b" || c == "\u0000"
 }
@@ -4780,7 +4593,6 @@ function rbArrNorm(t, v) {
 // Ruby's SUBSEQUENCE rule for Array#[start, len]. nil for a negative length or a
 // start past the end, [] for a start exactly at the end, and len clamped to what is
 // left. Mirrors rsubseq of ruby-interpreter.abnf and rubyArrSubseq of abnf/jsrt.go.
-// docs/todo.md 1.10.
 function rbArrSubseq(t, start, len) {
     var s = Math.trunc(rbToF(start))
     var k = Math.trunc(rbToF(len))
@@ -4799,10 +4611,8 @@ function rbStrSubseq(t, start, len) {
     if (s + k > t.length) { k = t.length - s }
     return t.slice(s, s + k)
 }
-// rbRangeSubseq is GONE. It read a materialized range's first element as the low
-// bound and its length as the count, which is exactly the guesswork a range that
-// carries its own endpoints makes unnecessary - js_rsubrange is the only path now.
-// docs/todo.md 1.5.
+// A Range subsequence goes through js_rsubrange, which reads the range's own
+// endpoints.
 function rbArrSub(t, from, len) {
     var out = []
     var i = from
@@ -4935,8 +4745,7 @@ function rbPermIdx(n, k) {
 // ruby-interpreter.abnf and rubyMkEnum / rubyEnumMethod of abnf/jsrt.go.
 // An Enumerator remembers the OPERATION that made it: `h.map` is an Enumerator
 // whose pending op is map, so `h.map.with_index { }` has to answer the MAPPED list,
-// not the receiver. An eager Enumerator that forgot the op answered the Enumerator
-// itself and every `map.with_index` was silently wrong.
+// not the receiver.
 function rbMkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
 function rbMkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
 // What one pass of the pending operation answers, given the block results.
@@ -5019,8 +4828,9 @@ function rbEnumMethod(t, name, args) {
     // Everything else is Enumerable, and an eager Enumerator IS its element list.
     return rbArrayMethod(items, name, args)
 }
-// rubyArrayMethod. select and reject use RUBY truthiness, and pop/first/last
-// answer nil (not an error) on an empty array.
+// rubyArrayMethod (rbArrayMethod, below the Hash surface). select and reject use
+// RUBY truthiness, and pop/first/last answer nil (not an error) on an empty
+// array.
 
 // ===================================================== Hash surface =========
 // The Hash-specific and Enumerable half of Hash's methods, in one place. It
@@ -5253,7 +5063,6 @@ function rbArrayMethod(t, name, args) {
     var nPos = rbNPos(args)
     if (name == "size" || name == "length") { return t.length }
     // Array#[]: one index or a materialized range (js_rget), or start+len.
-    // docs/todo.md 1.10.
     if (name == "[]") {
         if (nPos > 1) { return rbArrSubseq(t, args[0], args[1]) }
         return js_rget(t, rbPosAt(args, nPos, 0))
@@ -5267,8 +5076,7 @@ function rbArrayMethod(t, name, args) {
         return t
     }
     // first / last / pop / shift all take an optional COUNT, and then answer an
-    // ARRAY. Without it they answered the single element whatever was passed, so
-    // `[1,2,3].first(2)` was a silent 1 in every engine.
+    // ARRAY: `[1,2,3].first(2)` is [1, 2].
     if (name == "pop") {
         if (nPos > 0) {
             var pn = Math.trunc(rbToF(args[0]))
@@ -5324,14 +5132,12 @@ function rbArrayMethod(t, name, args) {
         return rbArrReplace(t, pre)
     }
     // Array#include? / #index / #find_index are ==, not === and not eql?:
-    // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. This was
-    // a `===` find, which answered false to both. A plain scan and not the dict
-    // index: an ordinary data array must not grow a key index to be searched.
+    // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. A plain
+    // scan and not the dict index: an ordinary data array must not grow a key
+    // index to be searched.
     if (name == "include?" || name == "contains") { return rbArrIndex(t, rbPosAt(args, nPos, 0)) >= 0 }
-    // inspect / index / find_index / rindex / uniq, all missing from every engine
-    // (docs/todo.md 2.9 recorded them as an interpreter gap; they were not). index
-    // and uniq compare BY VALUE - `[[1]].index([1])` is 0 in MRI - which is what
-    // rbDictFind says.
+    // inspect / index / find_index / rindex / uniq. index and uniq compare BY
+    // VALUE - `[[1]].index([1])` is 0 in MRI - which is what rbDictFind says.
     if (name == "inspect") { return rbInspect(t) }
     if (name == "index" || name == "find_index") {
         if (blk !== null && nPos == 0) {
@@ -5432,10 +5238,9 @@ function rbArrayMethod(t, name, args) {
         }
         return rej
     }
-    // sum accumulated through toInt32 at every step, so it WRAPPED at 32 bits and
-    // truncated every Float: `[1.5, 2.5].sum` answered 3 in all three engines.
     // Ruby's sum is ordinary + from an Integer 0 (or from the given initial value),
-    // with the block applied to each element first.
+    // with the block applied to each element first - not a ToInt32 accumulation:
+    // `[1.5, 2.5].sum` is 4.0.
     // MRI's sum starts from an Integer 0 and REFUSES a non-numeric element:
     // `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
     // NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])` is
@@ -5463,9 +5268,8 @@ function rbArrayMethod(t, name, args) {
     if (name == "sort!") { return rbArrReplace(t, rbMSort(t, blk, false)) }
     if (name == "sort_by") { return rbUndecorate(rbArrKeyed(t, blk)) }
     if (name == "sort_by!") { return rbArrReplace(t, rbUndecorate(rbArrKeyed(t, blk))) }
-    // #reverse_each yields (or enumerates) from the back. It was missing in ALL
-    // THREE engines - surfaced by Range#reverse_each, which delegates here.
-    // docs/todo.md 1.5.
+    // #reverse_each yields (or enumerates) from the back. Range#reverse_each
+    // delegates here.
     if (name == "reverse_each") {
         var rvz = []
         var zi = t.length - 1
@@ -5848,10 +5652,7 @@ function rbArrayMethod(t, name, args) {
         return va
     }
     if (name == "slice") {
-        // A Range argument is a SUBSEQUENCE, read from its own endpoints. It used
-        // to arrive materialized as an array, so this guessed the bounds from the
-        // elements: `[1,2,3].slice(1..2)' answered the element at index 1 the
-        // moment a range became a value. docs/todo.md 1.5.
+        // A Range argument is a SUBSEQUENCE, read from its own endpoints.
         if (rbIsRange(rbPosAt(args, nPos, 0))) {
             var rr = args[0]
             return js_rsubrange(t, rr["begin"], rr["end"], rr["excl"])
@@ -6047,9 +5848,7 @@ function rbMemberCall(target, name, args) {
 // reached only through js_rxmcall, which is the one the ruby emitter emits).
 function rbMethod(target, name, args) {
     // Object#send / #__send__ / #public_send: the method NAME is the first
-    // argument and the rest of the list (block marker included) is the call. It
-    // was implemented in no engine at all - `"a".send(:upcase)' aborted with
-    // *unknown String method: send* in all four legs, so --cross never saw it.
+    // argument and the rest of the list (block marker included) is the call.
     if (name == "send" || name == "__send__" || name == "public_send") {
         if (args.length == 0) { fail("no method name given") }
         var mn = rbStr(args[0])
@@ -6082,21 +5881,16 @@ function rbMethod(target, name, args) {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
     if (name == "nil?") { return rtIsNil(target) }
-    // TrueClass / FalseClass. Without this arm both compiled halves fell through
-    // to the shared member call and aborted with "method call 'inspect' on a
-    // boolean", where ruby-interpreter.abnf answered.
+    // TrueClass / FalseClass, which would otherwise fall through to the shared
+    // member call and abort.
     if (name == "to_s" || name == "inspect") {
         if (target === true) { return "true" }
         if (target === false) { return "false" }
-        // A Proc / Method. Both are the same string in MRI, and neither existed:
-        // `method(:x).inspect' aborted with *method call 'inspect' on a function*
-        // while "#{method(:x)}" answered off rbStr, so the interpolation and the
-        // explicit call disagreed inside ONE engine. docs/todo.md 2.5.
+    // A Proc / Method. Both are the same string in MRI, and match what
+    // "#{method(:x)}" answers off rbStr.
         if (rbIsFn(target)) { return rbFuncRender(target) }
-        // A user INSTANCE with no to_s / inspect of its own: `e.inspect' and
-        // `obj.to_s' aborted with *unknown method ... on an instance*. A Hash or an
+        // A user INSTANCE with no to_s / inspect of its own. A Hash or an
         // Enumerator carries no __class, so their own arms still answer.
-        // docs/todo.md 1.3.
         if (rbIsObj(target) && target["__class"] !== undefined && target["__isclass"] !== true) {
             if (rbFindMethod(target, name) === undefined) {
                 if (name == "inspect") { return rbInspect(target) }
@@ -6108,7 +5902,7 @@ function rbMethod(target, name, args) {
         // Exception#message, only for an INSTANCE that defines no message method
         // of its own, so a user class named message stays in charge. MRI's
         // Exception#message IS #to_s, so a subclass that overrides to_s changes its
-        // message too - rbStr prefers that to_s. docs/todo.md 1.3.
+        // message too - rbStr prefers that to_s.
         if (rbIsObj(target) && target["__isclass"] !== true) {
             if (rbFindMethod(target, name) === undefined) {
                 if (rbExcInst(target)) { return rbStr(target) }
@@ -6122,7 +5916,6 @@ function rbMethod(target, name, args) {
     // spelling - "prog.rb:2:in `<main>'". An exception raised by the runtime rather
     // than by a `raise', and one that was never raised at all, has no site and
     // answers nil, which is exactly what MRI does for an un-raised exception object.
-    // docs/todo.md 1.7.
     if (name == "backtrace") {
         if (rbIsObj(target) && target["__isclass"] !== true && rbFindMethod(target, name) === undefined) {
             var bw = target["__rwhere"]
@@ -6132,7 +5925,7 @@ function rbMethod(target, name, args) {
     }
     // Object#dup / #clone on a user INSTANCE, only when the class defines neither -
     // so a user #dup still wins, exactly as the to_s / inspect arm above works. A
-    // String / Array / Hash keeps its own arm further down. docs/todo.md 1.3.
+    // String / Array / Hash keeps its own arm further down.
     if (name == "dup" || name == "clone") {
         if (rbUserObj(target) && rbFindMethod(target, name) === undefined) {
             return rbSingCopy(target, name == "clone")
@@ -6165,19 +5958,16 @@ function rbMethod(target, name, args) {
         if (rbIsFn(target)) { return target }
     }
     // Method#name: the Symbol `#<Method: Object#x>' ends in. #owner is NOT
-    // implemented, in any engine, and that is deliberate rather than an oversight -
-    // it has to answer the class OBJECT, and the two compiled halves reach a user
-    // class's object only through the emitted module, so one of the three would
-    // have had to answer a synthetic stand-in. An omission is not a divergence.
+    // implemented, deliberately - it has to answer the class OBJECT, and the two
+    // compiled halves reach a user class's object only through the emitted
+    // module, so one of the three engines would have to answer a synthetic
+    // stand-in. An omission is not a divergence.
     if (name == "name") {
         var mvr = rtPairGet(rbMethodFns, rbMethodRec, target)
         if (mvr !== undefined) { return rbSym(mvr[1]) }
     }
     // Comparable#between? and #clamp are defined by <=> ALONE, so Integer, Float,
-    // Rational and String all answer them off ONE pair of arms. They used to sit
-    // in the numeric table only, which left `"m".between?("a", "z")` aborting
-    // (docs/todo.md 2.9) - and that table compared through rbToF, so a big
-    // Integer answered on the double rather than exactly. rbSpaceship is the
+    // Rational and String all answer them off ONE pair of arms. rbSpaceship is the
     // whole rule and it is big-aware. A user class that defines either method
     // itself still wins: its own dispatch is below.
     if (name == "between?" || name == "clamp") {
@@ -6221,21 +6011,16 @@ function rbMethod(target, name, args) {
     if (typeof target == "string") {
         if (name == "length" || name == "size") { return target.length }
         if (name == "to_s") { return target }
-        // The QUOTED form. Missing from both compiled halves, where
-        // ruby-interpreter.abnf answered - so `p` of a string, or any .inspect
-        // reaching a String, was a halves divergence.
+        // The QUOTED form, for `p` of a string or any .inspect reaching a String.
         if (name == "inspect") { return rbInspect(target) }
         if (name == "to_sym" || name == "intern") { return rbSym(target) }
-        // String#ord: the code point of the FIRST character. It worked in
-        // ruby-interpreter.abnf and aborted here, so `"\e".ord' - the ordinary way to
-        // name a control character - was a halves divergence.
+        // String#ord: the code point of the FIRST character.
         if (name == "ord") {
             if (target.length == 0) { return 0 }
             return target.charCodeAt(0)
         }
         // String#to_i / #to_f parse a LEADING number and answer 0 when there is
-        // none. Both worked in ruby-interpreter.abnf and aborted here, so any
-        // program reading a number out of text was a halves divergence.
+        // none.
         if (name == "to_i") {
             var pi = parseInt(target, 10)
             return pi != pi ? 0 : pi
@@ -6248,24 +6033,18 @@ function rbMethod(target, name, args) {
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
         // String#[] / #slice: one index or a materialized range (js_rget), or
-        // start+len. docs/todo.md 1.10.
+        // start+len.
         if (name == "[]" || name == "slice") {
             var sPos = rbNPos(args)
             if (sPos > 1) { return rbStrSubseq(target, args[0], args[1]) }
             return js_rget(target, rbPosAt(args, sPos, 0))
         }
         // String#start_with? / #end_with? take ANY NUMBER of prefixes/suffixes and
-        // answer true when one of them matches. Both existed only in
-        // ruby-interpreter.abnf, so a program testing a prefix aborted in both
-        // compiled halves with "unknown String method". docs/todo.md 1.10.
+        // answer true when one of them matches.
         if (name == "start_with?") { return rbStartsWith(target, args) }
         if (name == "end_with?") { return rbEndsWith(target, args) }
-        // THE PLAIN STRING METHODS THAT EXISTED ONLY IN ruby-interpreter.abnf.
-        // Every one of them aborted both compiled halves with "unknown String
-        // method", including split/strip/chars/empty?/index - so any program doing
-        // ordinary text work was a halves divergence, not just the start_with? the
-        // item named. Bodies are ruby-interpreter.abnf's, line for line.
-        // docs/todo.md 1.10.
+        // The plain String methods. Bodies are ruby-interpreter.abnf's, line for
+        // line.
         if (name == "capitalize") {
             if (target.length == 0) { return target }
             return rbUpper(target.charAt(0)) + rbLower(target.slice(1))
@@ -6296,8 +6075,8 @@ function rbMethod(target, name, args) {
         }
         if (name == "dup" || name == "clone" || name == "freeze") { return target }
         if (name == "to_str" || name == "+@" || name == "-@" || name == "itself") { return target }
-        // The String surface the item's six names belong to (bytes / tr / center /
-        // ljust / rjust / count / delete and their families). docs/todo.md 1.3.
+        // The rest of the String surface (bytes / tr / center / ljust / rjust /
+        // count / delete and their families).
         var sx = rbStrExtra(target, name, args)
         if (sx["ok"]) { return sx["v"] }
         fail("unknown String method: " + name)
@@ -6323,12 +6102,12 @@ function rbMethod(target, name, args) {
                 return pairs
             }
             // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
-            // js_rget. String and Array answer it too. docs/todo.md 1.10.
+            // js_rget. String and Array answer it too.
             if (name == "[]") { return js_rget(target, rbArgAt(args, 0)) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
             if (name == "each") {
-                // The block, NOT args[0]: since the block marker exists the two are
-                // different things, and this arm read the raw argument list.
+                // The block, NOT args[0]: the block marker makes the two different
+                // things.
                 var eblk = rbBlockOf(args)
                 var e = 0
                 while (e < keys.length) {
@@ -6360,10 +6139,10 @@ function rbMethod(target, name, args) {
         }
         // The SINGLETON table comes first: `def obj.m', `class << obj' and an
         // extended module all sit in front of the object's own class, for an
-        // instance and for a class object alike. docs/todo.md 1.3.
+        // instance and for a class object alike.
         // The two slot reads come first and the CALL only when one of them is set:
-        // in MetaJS a call is a scope frame (manual 5.1) and this sits on the
-        // method-dispatch path of every user object.
+        // in MetaJS a call is a scope frame and this sits on the method-dispatch
+        // path of every user object.
         if (target["__sing"] !== undefined || target["__sext"] !== undefined) {
             var gm = rbSingFind(target, name)
             if (gm !== undefined) {
@@ -6380,7 +6159,7 @@ function rbMethod(target, name, args) {
         // same name. MRI would let the user method win (Object#extend and friends
         // are ordinary, overridable methods); `method' below is guarded because a
         // user `method' is plausible. All three engines do the same thing, so this
-        // is not a halves divergence - but it is a divergence from MRI.
+        // is a divergence from MRI only.
         if (target["__isclass"] === true || target["__class"] !== undefined) {
             if (name == "extend") {
                 var xn = rbNPos(args)
@@ -6402,10 +6181,9 @@ function rbMethod(target, name, args) {
             if (name == "singleton_methods") { return rbSingNames(target) }
             if (name == "respond_to?") { return rbSingRespond(target, rbStr(rbArgAt(args, 0))) }
             // Object#method with an explicit RECEIVER (Kernel#method with none is
-            // js_rmethodval). It aborted in every engine, and it is the one way a
-            // singleton method is reachable as a value. A user class that defines
-            // `method' itself still wins - the singleton table was searched first
-            // and the class chain is asked here.
+            // js_rmethodval), the one way a singleton method is reachable as a
+            // value. A user class that defines `method' itself still wins - the
+            // singleton table was searched first and the class chain is asked here.
             if (name == "method" && rbFindMethod(target, "method") === undefined) {
                 var mnm = rbStr(rbArgAt(args, 0))
                 var mm = rbFindMethod(target, mnm)
@@ -6418,13 +6196,13 @@ function rbMethod(target, name, args) {
             var c0 = target["__class"]
             if (c0 !== undefined) { return c0 }
         }
-        // A class OBJECT has no __class slot, so this arm answered false for
+        // A class OBJECT has no __class slot, so this arm would answer false for
         // `A.instance_of?(Class)'; the __isclass block below owns that case.
         if (name == "instance_of?" && target["__isclass"] !== true) { return target["__class"] === rbArgAt(args, 0) }
         // rbIsA, not a bare identity walk of __super. A builtin class object carries
-        // no __super (the hierarchy is a name table), so the walk alone answered
+        // no __super (the hierarchy is a name table), so the walk alone would answer
         // false for `raise "x" rescue e; e.is_a?(Exception)' and for every user
-        // exception subclass tested against Exception. docs/todo.md 1.3.
+        // exception subclass tested against Exception.
         if (name == "is_a?" || name == "kind_of?") { return rbIsA(target, rbArgAt(args, 0)) }
         // A singleton (class) method: `def self.m` / `class << self` stores the
         // method on the class descriptor under a "$s$" prefixed key, so it cannot
@@ -6446,11 +6224,10 @@ function rbMethod(target, name, args) {
                 sc = sc["__super"]
             }
             // Class#name and Class#inspect are the class NAME, which is what
-            // Class#to_s already answered here: `Foo.inspect' and `Foo.name'
-            // aborted this half while ruby-interpreter.abnf answered.
+            // Class#to_s answers.
             if (name == "name" || name == "inspect") { return rbStr(target) }
             // The reflection surface. A user `def self.ancestors' still wins - the
-            // $s$ walk above runs first. docs/todo.md 1.3.
+            // $s$ walk above runs first.
             if (name == "ancestors") { return rbAncestors(target) }
             if (name == "include?") { return rbAncestorHas(target, rbArgAt(args, 0)) }
             if (name == "class") {
@@ -6486,7 +6263,7 @@ function rbMethod(target, name, args) {
         }
         // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
         // are ordinarily called without a receiver, but naming Kernel explicitly is
-        // legal Ruby and aborted in every engine.
+        // legal Ruby.
         if (target["__rbuiltin"] === "Kernel") {
             if (name == "format" || name == "sprintf") {
                 var kf = []
@@ -6511,9 +6288,7 @@ function rbMethod(target, name, args) {
 }
 
 // rbIsLambda is SHARED as rtHas - lib/runtime.metajs: an identity scan of an
-// array, which is dart's dtSeen and php's phNameIn and, returning the index
-// instead, rtDictFind. The array was a file global here rather than a parameter,
-// which is the only reason three copies of it were invisible for so long.
+// array.
 
 // ===================================================== $globals =============
 
@@ -6535,7 +6310,7 @@ function rbGset(name, v) {
 // them, and they are here only because the C floor does not have them yet.
 
 // An empty Hash / Python dict / Go map handle.
-// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
+// js_dict_new is SHARED - lib/runtime.metajs.
 
 // js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 // The jsChar arm of the shared body is Kotlin's; rtkIsChar answers false here,
@@ -6577,9 +6352,7 @@ function js_pyget(c, k) {
     // A Range. THIS ARM AND js_pylen'S CARRY EVERY SEQUENCE USE OF A RANGE THERE
     // IS: `for x in a..b', `[*r]', `a, b, c = *r' and every destructure lower to
     // js_pylen once and js_pyget per element - the emitter has no separate range
-    // path. js_pylen answered 0 for a range and this function had no arm at all,
-    // which is why the two of them are the FIRST thing to make right: a miss here
-    // is silent, the loop simply runs zero times. docs/todo.md 1.5.
+    // path. A miss here is silent: the loop simply runs zero times.
     if (rbIsRange(c)) { return rbRangeAt(c, idx) }
     if (typeof c == "string") {
         if (idx < 0) { idx = idx + c.length }
@@ -6591,8 +6364,7 @@ function js_pyget(c, k) {
 }
 
 // List element (negative wraps) or dict entry assignment.
-// js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
-// rtkDictFind; the index coercion now truncates, which is the oracle).
+// js_pyset is SHARED - lib/runtime.metajs (knobs rtkIsDict and rtkDictFind).
 
 // len() for strings, lists and dicts. Ruby never reaches the Python set arm.
 function js_pylen(v) {
@@ -6604,18 +6376,14 @@ function js_pylen(v) {
     // smcall / field arms), so it never reaches rbEnumMethod.
     if (rbIsEnum(v)) { return v["items"].length }
     // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
-    // materializing, because for-in asks for it once and then indexes. This
-    // answered a flat 0 while a bounded range was an array and only the empty
-    // (1..-1) shape ever reached it - so `for x in 1..3' ran zero times the instant
-    // a range became a value. See js_pyget. docs/todo.md 1.5.
+    // materializing, because for-in asks for it once and then indexes. See
+    // js_pyget.
     if (rbIsRange(v)) { return rbRangeLen(v) }
     fail("len() of a " + typeof v)
     return 0
 }
 
-// js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
-// Ruby's copy was the only one of the four with no 64-step cap on the walk; it
-// takes the cap now, for the reason recorded at the merged body.
+// js_supercall is SHARED - lib/runtime.metajs (one knob: rtkCall).
 
 // ----- Ruby's own -----------------------------------------------------------
 
@@ -6665,8 +6433,8 @@ function js_rshr(l, r) { return rbBin(">>", l, r) }
 function js_rneg(v) { return rbNeg(v) }
 // ~x is -(x+1) at any size, which is one negate and one decrement on the box.
 function js_rbnot(v) {
-    // Past 2^53 the double cannot hold the +1, so ~9007199254740992 came back as
-    // -9007199254740992 instead of ...993.
+    // Past 2^53 the double cannot hold the +1 (~9007199254740992 must be
+    // -9007199254740993).
     if (!rbIsBig(v)) {
         var x = rbToF(v)
         if (x > 0 - 9007199254740992 && x < 9007199254740992) { return -x - 1 }
@@ -6680,15 +6448,11 @@ function js_req(l, r) { return rbEq(l, r) }
 function js_rne(l, r) { return !rbEq(l, r) }
 // < > <= >= between two MODULES is the ancestry relation, not a value comparison:
 // `A < M' after `include M' is true and `A < String' is NIL, where rbCmp's contract
-// is to raise. Both compiled halves raised *comparison of Object with Object
-// failed* for every one of these. docs/todo.md 1.3.
+// is to raise.
 // The `typeof l == "object"' guard is NOT redundant with rbIsClassObj, it is the
-// whole cost of this arm: `while i < 40000' calls js_rlt once per iteration, and
-// in MetaJS A CALL IS A SCOPE FRAME (docs/todo.md 5.1). Two rbIsClassObj calls per
-// comparison measured ruby +3.07%, SLOWER IN 15 OF 15 PAIRS on tests/bench/mod.rb -
-// a paired sign test, not a layout draw. `typeof' is an operator, so a numeric
-// operand now short-circuits with no call at all and the row is back inside its
-// spread.
+// whole cost of this arm: js_rlt runs once per iteration of a `while i < n'
+// loop, and in MetaJS A CALL IS A SCOPE FRAME. `typeof' is an operator, so a
+// numeric operand short-circuits with no call at all.
 function js_rlt(l, r) {
     if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, "<") }
     return rbCmp(l, r) < 0
@@ -6713,14 +6477,9 @@ function js_rcmp(l, r) {
     return c
 }
 
-// lo..hi / lo...hi with BOTH bounds. It used to MATERIALIZE the array here, and
-// carry a one-slot `rbLastRange' cache of the raw endpoints beside it because a
-// materialized range cannot carry its own bounds and `s[1..-1]' needs them. Both
-// are gone: the object IS the endpoints. The cache was also wrong by construction -
-// one slot, so `a[r1]' after `r2' had been evaluated read r2's bounds - and that
-// whole class of bug is now unreachable. This entry point stays separate from
-// js_rrangeopen only because the emitter distinguishes the two syntactic forms;
-// the two build the same thing. docs/todo.md 1.5.
+// lo..hi / lo...hi with BOTH bounds. The object IS the endpoints. This entry
+// point stays separate from js_rrangeopen only because the emitter distinguishes
+// the two syntactic forms; the two build the same thing.
 function js_rrangearr(lo, hi, excl) {
     return js_rrangeopen(lo, hi, excl)
 }
@@ -6753,9 +6512,7 @@ function rbWhen(l, r) {
     if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
     // `when' is Ruby's ===, and a Range's === is MEMBERSHIP. The emitter routes a
     // range LITERAL to js_rcase by syntax, so this only bites when the when value
-    // is a variable (`when r'), which answered false in both compiled halves the
-    // moment a range stopped being an array that == could compare elementwise.
-    // docs/todo.md 1.5.
+    // is a variable (`when r').
     if (rbIsRange(l)) { return rbOpenRangeCover(l, r) }
     return rbEq(l, r)
 }
@@ -6857,11 +6614,8 @@ function js_rget(o, k) {
         return o["vals"][i]
     }
     // a[0..2] / s[6..] / a[1..-1]: a Range as the subscript of an Array or a String
-    // is a SUBSEQUENCE, and it is now EXACT for every range, because the range
-    // carries its own raw endpoints. This is the part that was already right for
-    // open ranges (10 of 10 MRI rows) and it is now the only path - the
-    // materialized-array key and its one-slot endpoint cache are gone.
-    // docs/todo.md 1.5.
+    // is a SUBSEQUENCE, EXACT for every range, because the range carries its own
+    // raw endpoints.
     if (rbIsRange(k) && (rbIsArr(o) || typeof o == "string")) {
         return js_rsubrange(o, k["begin"], k["end"], k["excl"])
     }
@@ -6881,13 +6635,12 @@ function js_rget(o, k) {
 }
 
 // s[lo..hi] / a[lo...hi] written as a RANGE LITERAL at the subscript: the endpoints
-// arrive RAW, because a materialized range cannot carry them - `(1..-1)` is the
-// empty array while `s[1..-1]` means "from index 1 to the last character". A nil
+// arrive RAW - `s[1..-1]` means "from index 1 to the last character". A nil
 // endpoint is the beginning / the end (`s[1..]`), and an exclusive end with no
 // endpoint is still the end. Anything that is not a String or an Array (a Hash whose
 // key is a range, a user class' own `def []`) keeps the materialized-array form, so
 // nothing else changes. Mirrors rsubrange of ruby-interpreter.abnf and
-// rubySubrange of abnf/jsrt.go. docs/todo.md 1.10.
+// rubySubrange of abnf/jsrt.go.
 function js_rsubrange(o, lo, hi, excl) {
     if (rbIsArr(o) || typeof o == "string") {
         var n = o.length
@@ -6910,10 +6663,10 @@ function js_rsubrange(o, lo, hi, excl) {
 }
 
 // rbSliceBounds resolves a Ruby subscript pair to {s, l} against a receiver of
-// size n. An absent second subscript means a ONE-element write, unless the key is a
-// materialized range (an Array - a closed range reaches the compiled halves as
-// one), whose first element is the low bound and whose length is the count.
-// Mirrors rubySliceBounds of abnf/jsrt.go. docs/todo.md 1.3.
+// size n. An absent second subscript means a ONE-element write, unless the key is
+// a Range (read from its own endpoints) or an Array, whose first element is the
+// low bound and whose length is the count. Mirrors rubySliceBounds of
+// abnf/jsrt.go.
 function rbSliceBounds(n, k1, k2) {
     var st = 0
     var ln = 1
@@ -6922,9 +6675,7 @@ function rbSliceBounds(n, k1, k2) {
         ln = Math.trunc(rbToF(k2))
         if (ln < 0) { ln = 0 }
     } else if (rbIsRange(k1)) {
-        // A RANGE key, read from its own endpoints. It used to be a materialized
-        // array, so this arm guessed the bounds from the elements and could not
-        // express `a[1..-1] = v' at all. docs/todo.md 1.5.
+        // A RANGE key, read from its own endpoints, so `a[1..-1] = v' works.
         var rb0 = rtIsNil(k1["begin"]) ? 0 : Math.trunc(rbToF(k1["begin"]))
         if (rb0 < 0) { rb0 = rb0 + n }
         var re0 = n - 1
@@ -6950,10 +6701,8 @@ function rbSliceBounds(n, k1, k2) {
 
 // a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
 // (possibly NEW) container, because a Ruby String is a VALUE in this model and the
-// emitter writes the result back - exactly what `s << "x"` already does. Two-
-// argument index assignment used to write ONE element, a range key wrote index 0,
-// and a String element assignment aborted. Mirrors rubySetSlice of abnf/jsrt.go
-// and rsetSlice of ruby-interpreter.abnf. docs/todo.md 1.3.
+// emitter writes the result back - exactly what `s << "x"` already does. Mirrors
+// rubySetSlice of abnf/jsrt.go and rsetSlice of ruby-interpreter.abnf.
 function js_rsetsl(o, k1, k2, v) {
     if (rbUserObj(o)) {
         if (rtIsNil(k2)) { rbMethod(o, "[]=", [k1, v]) } else { rbMethod(o, "[]=", [k1, k2, v]) }
@@ -6970,8 +6719,7 @@ function js_rsetsl(o, k1, k2, v) {
         return o.substring(0, sb["s"]) + rbStr(v) + o.substring(sb["s"] + ls, o.length)
     }
     if (!rbIsArr(o)) { js_rset(o, k1, v); return o }
-    // A RANGE key is a slice write, not an element write - it reached js_rset as a
-    // whole object once a range stopped being an array. docs/todo.md 1.5.
+    // A RANGE key is a slice write, not an element write.
     if (rtIsNil(k2) && !rbIsArr(k1) && !rbIsRange(k1)) { js_rset(o, k1, v); return o }
     var ab = rbSliceBounds(o.length, k1, k2)
     if (ab["s"] < 0) { fail("index " + ab["s"] + " too small for array") }
@@ -7012,8 +6760,7 @@ function js_rset(o, k, v) {
 
 // `def obj.m' and a def inside `class << obj': install ONE closure in the
 // receiver's own singleton table. The class machinery of ruby-to-llvm-ir.abnf is
-// build time and the receiver of these two forms is only known at run time, which
-// is why a def here used to be notImplemented outright. docs/todo.md 1.3.
+// build time and the receiver of these two forms is only known at run time.
 function js_rsingdef(obj, name, fn) {
     rbSingPut(obj, rbStr(name), fn)
     return undefined
@@ -7029,15 +6776,11 @@ function js_rnew(cls, args) {
         var bn = cls["__rbuiltin"]
         if (typeof bn == "string") {
             if (bn == "Proc") { return rbBlockOf(argv) }
-            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this
-            // arm it fell into the exception construction below and answered the
-            // first argument - a silent wrong answer, and a different one in each
-            // engine.
+            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }, ahead of
+            // the exception construction below.
             if (bn == "Array") { return rbArrNew(argv) }
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default lives in the
-            // hidden __hdef / __hdefp slot and rbHashDefault honours it at every read;
-            // before that the two argument forms fell through to rbExc below and
-            // answered an exception object.
+            // hidden __hdef / __hdefp slot and rbHashDefault honours it at every read.
             if (bn == "Hash") { return rbNewHash(argv) }
             return rbExc(cls, argv)
         }
@@ -7047,25 +6790,19 @@ function js_rnew(cls, args) {
     return inst
 }
 
-// Ruby's `raise` in one step. rbMakeExc turns a class / a string / a bare
-// re-raise into the exception object, which is then thrown exactly as js_throw
-// does - MetaJS's own `throw` compiles to the floor's js_throw.
 // Raise a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue "d"' works. A
-// plain fail() is an ENGINE abort no rescue clause can see, which made every
-// runtime error uncatchable. Mirrors rubyRaiseErr of abnf/jsrt.go and raiseErr of
-// ruby-interpreter.abnf. docs/todo.md 1.3.
+// plain fail() is an ENGINE abort no rescue clause can see. Mirrors rubyRaiseErr
+// of abnf/jsrt.go and raiseErr of ruby-interpreter.abnf.
 function rbRaiseErr(clsName, msg) {
     js_rraise(rbBuiltinClass(clsName), msg)
 }
 
 
 // ----- Kernel#Integer / #Float / #String / #Array: the CONVERSION functions.
-// They existed in no engine - the name resolved to the builtin CLASS object, so
-// `Integer("5")` built an INSTANCE of Integer in the interpreter half and aborted
-// both compiled halves with *call of a non function value*. Integer and Float are
-// STRICT (MRI raises ArgumentError on anything the whole string is not), which is
-// what makes `Integer(s) rescue default` the idiom it is. Mirrors rubyKernelConv
-// of abnf/jsrt.go and kernelConv of ruby-interpreter.abnf. docs/todo.md 1.3.
+// Integer and Float are STRICT (MRI raises ArgumentError on anything the whole
+// string is not), which is what makes `Integer(s) rescue default` the idiom it
+// is. Mirrors rubyKernelConv of abnf/jsrt.go and kernelConv of
+// ruby-interpreter.abnf.
 function rbConvDigit(ch) {
     if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
     if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
@@ -7075,9 +6812,8 @@ function rbConvDigit(ch) {
 
 // BY CHARACTER CODE, not by comparing against "\f" / "\v". MetaJS's string
 // literal has no \f and no \v escape: it drops the backslash, so `ch == "\f"'
-// is `ch == "f"' and rbConvTrim ATE the f's of Integer("0xff"). Green under goja
-// and in the Go twin, wrong only in the native binary, which is exactly the class
-// of defect only clang-check / native-full can see. docs/todo.md 1.3.
+// is `ch == "f"' - correct under goja and in the Go twin, wrong only in the
+// native binary.
 function rbIsConvSpace(ch) {
     var cc = ch.charCodeAt(0)
     return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 12 || cc == 11
@@ -7179,11 +6915,8 @@ function js_rkconv(name, args) {
     if (rbIsArr(args) && args.length > 0) { v = args[0] }
     if (name == "String") { return rbStr(v) }
     // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
-    // two parts. They were absent from the list, so `Rational(1, 3)' aborted both
-    // compiled halves with *call of a non function value* and built an INSTANCE of
-    // the class Rational in the interpreter half. Rational(a) IS a.to_r and
-    // Rational(a, b) is a.to_r / b.to_r, so both go through rbAsRat and inherit
-    // exactly what #to_r already answers. docs/todo.md 1.3.
+    // two parts. Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so
+    // both go through rbAsRat and inherit exactly what #to_r already answers.
     if (name == "Rational") {
         var rp = rbAsRat(v)
         if (!rbIsArr(args) || args.length < 2) { return rbMkRat(rp["n"], rp["d"]) }
@@ -7239,12 +6972,10 @@ function js_rkconv(name, args) {
 
 // ===== String methods shared by all three engines ==========================
 //
-// The item named six missing String methods (bytes, tr, center, ljust/rjust,
-// count, delete). A sweep of MRI's whole String surface found SEVENTY-EIGHT that
-// aborted every engine with *unknown String method*, so these are the six plus
-// their families plus the cheap remainder. Everything here is a pure function of
+// bytes, tr, center, ljust/rjust, count, delete, their families and the cheap
+// remainder of MRI's String surface. Everything here is a pure function of
 // strings and numbers, so the three copies (abnf/jsrt.go, lib/ruby-rt.metajs and
-// ruby-interpreter.abnf) are line-for-line the same. docs/todo.md 1.3.
+// ruby-interpreter.abnf) are line-for-line the same.
 
 // The UTF-8 bytes of a string whose units are UTF-16, surrogate pairs included.
 // String#bytes / #bytesize / #getbyte / #each_byte / #sum all read this.
@@ -7411,8 +7142,8 @@ function smDelete(s, specs) {
 }
 
 // String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
-// left. MRI counts CHARACTERS here (unlike printf's %10s, which counts bytes),
-// and a width at or below the receiver's length answers the receiver.
+// left. MRI counts CHARACTERS here, and a width at or below the receiver's length
+// answers the receiver.
 function smPad(s, width, pad, mode) {
     if (pad.length == 0 || width <= s.length) { return s }
     var total = width - s.length
@@ -7715,7 +7446,6 @@ function rbStrExtra(target, name, args) {
 // in this model, so the in-place effect is unrepresentable (the same limitation
 // sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
 // string, or nil when nothing changed, and that is what these produce.
-// docs/todo.md 1.3.
 function smBangBase(name) {
     if (name.length < 2 || name.charAt(name.length - 1) != "!") { return "" }
     var b = name.substring(0, name.length - 1)
@@ -7743,6 +7473,9 @@ function smUptoList(s, limit, excl) {
     return out
 }
 
+// Ruby's `raise` in one step. rbMakeExc turns a class / a string / a bare
+// re-raise into the exception object, which is then thrown exactly as js_throw
+// does - MetaJS's own `throw` compiles to the floor's js_throw.
 function js_rraise(v, msg) {
     throw rbMakeExc(v, msg)
 }
@@ -7751,7 +7484,6 @@ function js_rraise(v, msg) {
 // `<main>'", exactly MRI's first backtrace frame. Only makeRaise emits this form, so
 // a re-raise (js_rraise, which hands the same object back) keeps the ORIGINAL site,
 // as MRI does. js_rtop prints it when the exception reaches the top of the program.
-// docs/todo.md 1.7.
 function js_rraiseat(v, msg, where) {
     var e = rbMakeExc(v, msg)
     if (rbIsObj(e) && e["__rwhere"] === undefined && typeof where == "string") {
@@ -7760,12 +7492,11 @@ function js_rraiseat(v, msg, where) {
     throw e
 }
 
-// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the value left
-// the module and the floor's uncaught-throw handler rendered it with the generic
-// object toString, so every uncaught `raise' in both compiled halves read
-// "js runtime error: uncaught exception: [object Object]" - no message, no class.
-// This is MRI's own first line, and rbExcTopLine is shared with the interpreter
-// half's runProgram so all three engines print the SAME text. docs/todo.md 1.7.
+// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the floor's
+// uncaught-throw handler would render it with the generic object toString
+// ("[object Object]"). This is MRI's own first line, and rbExcTopLine is shared
+// with the interpreter half's runProgram so all three engines print the SAME
+// text.
 function js_rtop(exc) {
     println(rbExcTopLine(exc))
     exit(1)
@@ -7799,7 +7530,6 @@ function js_rundef(v) { return v === undefined }
 // follow, `expected 1+` when a *splat does. `kinds` is js_rposbind's
 // per-parameter code string ("0" required, "1" optional, "2" splat). Mirrors
 // argCountErr of ruby-interpreter.abnf and rubyArgCountErr of abnf/jsrt.go.
-// docs/todo.md 1.5.
 function rbArgCountErr(given, kinds) {
     var req = 0
     var opt = 0
@@ -7823,7 +7553,7 @@ function rbArgCountErr(given, kinds) {
 // list with js_arg rather than js_rposbind, so that the common case allocates no
 // binding array - and that path therefore has to ask the question separately.
 // Answers nothing; it either raises or returns. off and req are RAW parameters:
-// the emitter writes them with handle(). docs/todo.md 1.5.
+// the emitter writes them with handle().
 function js_rargchk(args, off_raw, req_raw) {
     if (!rbIsArr(args)) { return null }
     var off = off_raw
@@ -7832,7 +7562,7 @@ function js_rargchk(args, off_raw, req_raw) {
     if (npos < 0) { npos = 0 }
     if (npos > 0 && rbIsBlk(args[args.length - 1])) { npos = npos - 1 }
     // TOO MANY is an error as well: this arm's parameter list is all-required, so
-    // the count must be EXACTLY req. docs/todo.md 1.6.
+    // the count must be EXACTLY req.
     if (npos == req) { return null }
     var kinds = ""
     var i = 0
@@ -7845,14 +7575,9 @@ function js_rargchk(args, off_raw, req_raw) {
 // there - and then an INSTANCE METHOD of the running `self`, bound to it. The
 // whole of it is one extern because js_scope_get ABORTS on a miss and so cannot be
 // used to ask a question, while scopeHas / scopeParent / scopeGet (host 65-67 of
-// runtime.c) can.
-//
-// The note this replaced called the bound case impossible ("binding one needs a
-// variadic closure, and layer 2's MetaJS has no `arguments`"). THE SECOND HALF WAS
-// FALSE: metajs-to-llvm-ir.abnf binds `arguments` in every compiled function,
-// lib/go-rt.metajs already builds a bound receiver with it, and a two-line probe
-// compiled and ran the construct in both engines. Mirrors hostGlobals["method"] of
-// ruby-interpreter.abnf and js_rmethodval of abnf/jsrt.go. docs/todo.md 1.5.
+// runtime.c) can. The bound case uses `arguments`, which metajs-to-llvm-ir.abnf
+// binds in every compiled function. Mirrors hostGlobals["method"] of
+// ruby-interpreter.abnf and js_rmethodval of abnf/jsrt.go.
 function js_rmethodval(scope, name) {
     var n = rbStr(name)
     // A slot that holds a scope handle, a Ruby value and undefined in turn: MetaJS
@@ -7872,12 +7597,10 @@ function js_rmethodval(scope, name) {
             // The outermost scope of the chain is the HOST's, and it carries
             // MetaJS's own `print', `printf' and `sprintf' - Go's fmt, not Ruby's -
             // which is the same collision the emitter's printf arm exists to avoid
-            // for a plain call ("%!f(string=1.)" under llvm.Run). Reached through
-            // method(:printf) it made the two compiled halves answer
-            // `#<Method: Object#printf>` with arity 0 while the interpreter half
-            // answered MRI's `#<Method: Object(Kernel)#printf>` and -1. A Ruby
-            // `def printf' lands in the MODULE's scope, which has a parent, so this
-            // test costs a program's own definition nothing. docs/todo.md 2.5.
+            // for a plain call. Reached through method(:printf) it must answer MRI's
+            // `#<Method: Object(Kernel)#printf>` with arity -1. A Ruby `def printf'
+            // lands in the MODULE's scope, which has a parent, so this test costs a
+            // program's own definition nothing.
             if (typeof v == "function") {
                 var atRoot = scopeParent(s) === undefined || scopeParent(s) === null
                 if (!atRoot || rbKernelMethodIndex(n) < 0) { return rbMarkMethodVal(v, "Object", n) }
@@ -7906,9 +7629,7 @@ function js_rmethodval(scope, name) {
         else { js_rarity(kw, rbKernelMethodArity[ki], 0, false) }
         return rbMarkMethodVal(kw, "Object(Kernel)", kn)
     }
-    // A CATCHABLE NameError, which is what MRI raises; a host abort here printed on
-    // stderr where the interpreter half printed on stdout, so the miss itself was a
-    // halves divergence.
+    // A CATCHABLE NameError, which is what MRI raises.
     js_rraise(rbBuiltinClass("NameError"), "undefined method '" + n + "' for class 'Object'")
     return null
 }
@@ -7931,17 +7652,12 @@ function rbBindMethod(self, name, m) {
     return rbMarkMethodVal(w, rbOwnerName(self), name)
 }
 
-// The owner name `#<Method: C#m>' carries: the receiver's class, which is what MRI
-// prints for a method defined in that class. A method INHERITED from a superclass
-// is written `D(C)#m' by MRI and plainly `D#m' here - the one shape this leaves
-// divergent, and it can only shorten the answer.
 // A Kernel method reachable by name, and the ARITY MRI reports for it. `puts`,
-// `format` and their neighbours are ordinary Methods in MRI and every engine here
-// raised NameError instead, agreed and wrong. THE LIST AND ITS ORDER ARE THE SAME
-// in languages/ruby-interpreter.abnf (kernelMethodNames) and abnf/jsrt.go
-// (rubyKernelMethodNames) - a name in one and not the others would be a halves
-// divergence by construction; what is deliberately left out, and why, is written
-// out once at kernelMethodNames in the interpreter half. docs/todo.md 2.5.
+// `format` and their neighbours are ordinary Methods in MRI. THE LIST AND ITS
+// ORDER ARE THE SAME in languages/ruby-interpreter.abnf (kernelMethodNames) and
+// abnf/jsrt.go (rubyKernelMethodNames) - a name in one and not the others would
+// be a halves divergence by construction; what is deliberately left out, and
+// why, is written out once at kernelMethodNames in the interpreter half.
 var rbKernelMethodNames = ["puts", "print", "p", "format", "sprintf", "printf", "rand",
                            "Integer", "Float", "String", "Array", "Rational", "Complex"]
 var rbKernelMethodArity = [0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1,
@@ -7976,6 +7692,10 @@ function rbKernelInvoke(n, args) {
     return js_rkconv(n, args)
 }
 
+// The owner name `#<Method: C#m>' carries: the receiver's class, which is what MRI
+// prints for a method defined in that class. A method INHERITED from a superclass
+// is written `D(C)#m' by MRI and plainly `D#m' here - the one shape this leaves
+// divergent, and it can only shorten the answer.
 function rbOwnerName(self) {
     if (rbUserObj(self) && rbIsObj(self["__class"])) {
         var nm = self["__class"]["__name"]
@@ -8067,14 +7787,13 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     // Too few positional arguments is an ArgumentError in MRI, and this is the
     // general shape of the check; the all-required fast path skips js_rposbind
     // entirely and asks it separately, through js_rargchk. A BLOCK never reaches
-    // here - the
-    // emitter binds one with js_rblockarg, and Ruby arity-checks methods and
-    // lambdas only. docs/todo.md 1.5.
+    // here - the emitter binds one with js_rblockarg, and Ruby arity-checks
+    // methods and lambdas only.
     if (npos < required) { rbArgCountErr(npos, kinds) }
     // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises for
-    // `->(x, y = 2) { }.call(1, 2, 3)' exactly as it does for too few; the extra
-    // arguments were silently dropped here. bindParams of ruby-interpreter.abnf and
-    // js_rargchk's fast path ask the same question. docs/todo.md 1.6.
+    // `->(x, y = 2) { }.call(1, 2, 3)' exactly as it does for too few.
+    // bindParams of ruby-interpreter.abnf and js_rargchk's fast path ask the same
+    // question.
     var star = false
     var s0 = 0
     while (s0 < kinds.length) {
@@ -8189,7 +7908,7 @@ function js_rlambda(f) {
 // `kinds' is js_rposbind's encoding, recorded at the block LITERAL by the emitter -
 // the arity registry could not supply it, being armed only when the program names
 // `arity'. The registry entry, if there is one, is re-registered onto the wrapper so
-// Proc#arity still answers. docs/todo.md 1.6.
+// Proc#arity still answers.
 function js_rlamchk(f, kinds) {
     if (!rbIsFn(f)) { return f }
     var w = function() {
@@ -8246,7 +7965,7 @@ function rbProcArity(f) {
     if (rec === undefined) { return 0 }
     if (rec[2] === true) { return 0 - (rec[0] + 1) }
     // A METHOD counts optionals the way a lambda does: MRI's `method(:m).arity' for
-    // `def m(a, b = 1)' is -2, and every engine answered the proc's 1.
+    // `def m(a, b = 1)' is -2, not the proc's 1.
     if ((rtHas(rbLambdas, f) || rbIsMethodVal(f)) && rec[1] > 0) { return 0 - (rec[0] + 1) }
     return rec[0]
 }
@@ -8291,23 +8010,19 @@ function js_rgdefined(name, kind) {
 // source text; this only answers whether the name is BOUND anywhere up the
 // chain.
 //
-// WHY IT IS HERE AND NOT IN THE EMITTER, which is the whole of docs/todo.md 5.3
-// for ruby. ruby-to-llvm-ir.abnf used to lower this into an IR helper
-// (`rb_defined`) over js_scope_typeof, because an emitter may call that and may
-// not open a scope. But js_scope_typeof CANNOT DISTINGUISH "holds undefined"
-// from "absent" (docs/working-on-this-project.md 7.3), and a Ruby BLOCK
-// PARAMETER the caller did not supply holds exactly undefined - js_arg answers
-// undefined for a missing index and js_scope_decl stores it, which is what
-// emitParamDefault's js_rundef test then reads. So:
+// WHY IT IS HERE AND NOT IN THE EMITTER: an emitter may call js_scope_typeof but
+// may not open a scope, and js_scope_typeof CANNOT DISTINGUISH "holds undefined"
+// from "absent" (docs/working-on-this-project.md 7.3). A Ruby BLOCK PARAMETER the
+// caller did not supply holds exactly undefined - js_arg answers undefined for a
+// missing index and js_scope_decl stores it, which is what emitParamDefault's
+// js_rundef test then reads. So:
 //
 //     [1].each { |a, b| puts defined?(b).inspect }
 //
-// answered nil in BOTH COMPILED HALVES where ruby-interpreter.abnf and MRI both
-// answer "local-variable". scopeHas is the own-scope test that CAN tell the two
-// apart, and it is a HOST BUILTIN (ids 65..68), reachable only from here - the
-// same wall and the same answer as js_rmethodval above. The call site is
-// `defined?` itself, which no hot path in any test program contains, so nothing
-// here pays the MetaJS scope frame that declined php's probe (cc28d07).
+// must answer "local-variable", as MRI does. scopeHas is the own-scope test that
+// CAN tell the two apart, and it is a HOST BUILTIN (ids 65..68), reachable only
+// from here - the same wall and the same answer as js_rmethodval above. The call
+// site is `defined?` itself, which no hot path in any test program contains.
 function js_rdefined(scope, name, kind) {
     var n = rbStr(name)
     var s = anytype
@@ -8368,14 +8083,10 @@ function js_rxnew(src, flags) {
 
 function js_rxmcall(target, name, args) {
     var mn = rbStr(name)
-    // A STRING PATTERN reaches the regexp half too. The gate used to require a
-    // Regexp RECEIVER or a Regexp first ARGUMENT, so `s.sub("a", "z")` - Ruby
-    // compiles a String pattern to a Regexp - never reached rbRxMethod and died in
-    // the base dispatch with "unknown String method: sub". Six methods were
-    // unreachable that way in both compiled halves while ruby-interpreter.abnf
-    // answered: sub, gsub, sub!, gsub!, match, match? (and =~ / scan, whose
-    // spellings a program rarely writes with a string). rbRxMethod itself already
-    // normalized a String argument; nothing but the gate was missing.
+    // A STRING PATTERN reaches the regexp half too: Ruby compiles a String
+    // pattern to a Regexp, so `s.sub("a", "z")` (and gsub, sub!, gsub!, match,
+    // match?, =~, scan) must reach rbRxMethod, which normalizes a String
+    // argument.
     if (rbRxIsRegex(target) || rbRxIsMatch(target)
         || (rbIsArr(args) && args.length > 0 && rbRxIsRegex(args[0]))
         || (typeof target == "string" && rbRxWantsPattern(mn))) {
