@@ -7,15 +7,11 @@ package abnf
 // The handle runtime models a number as one JS double, which is enough for a
 // dynamically typed language but not for a statically typed one: `1.0 / 3.0` and
 // `1 / 3` are the SAME two operands there, and Java answers 0.3333333333333333 for
-// the first and 0 for the second. The compiler used to lower every arithmetic
-// operator onto js_sub/js_mul/js_div followed by a 32 bit wrap, so the float half
-// of the language was silently integer arithmetic: 2.5 * 1.5 was 3, 1.0 / 3.0 was
-// 0, println(1.0) printed "1" and there was no Infinity, no NaN and no -0.0.
+// the first and 0 for the second.
 //
-// jsJFlo is the fix and it mirrors what the interpreter grammar does with its
-// {__flo} box (and what jsPhpFlo does for PHP, and jsFlo for Ruby): a
-// floating-point value is BOXED, so the runtime can still tell a double from an
-// int. The invariant is
+// jsJFlo mirrors what the interpreter grammar does with its {__flo} box (and what
+// jsPhpFlo does for PHP, and jsFlo for Ruby): a floating-point value is BOXED, so
+// the runtime can still tell a double from an int. The invariant is
 //
 //	plain number  ==  an integral type (int / long / short / byte)
 //	jsJFlo        ==  a double / float
@@ -23,11 +19,10 @@ package abnf
 // and every operator that meets a jsJFlo evaluates in floating point and answers a
 // jsJFlo (JLS 5.6.2, binary numeric promotion).
 //
-// This file is append-only with respect to the rest of the runtime: nothing here
-// runs unless a program calls one of the js_jf* externs, which only the Java and
-// Kotlin compiler grammars emit. The exception is the jsJFlo box itself, which
-// rt.truthy / rt.toNumber / rt.toString / rt.toGoNatural / rt.typeOf / rt.strictEq
-// learn about in jsrt.go - each as one extra case for a type nothing else creates.
+// Nothing here runs unless a program calls one of the js_jf* externs, which only
+// the statically typed compiler grammars emit. The exception is the jsJFlo box
+// itself, which rt.truthy / rt.toNumber / rt.toString / rt.toGoNatural / rt.typeOf /
+// rt.strictEq know about in jsrt.go.
 
 import (
 	"fmt"
@@ -50,54 +45,33 @@ import (
 //	floGoF   the GO `float32`    - go's print style at a 32 BIT WIDTH
 //	floCSF   the C# `float`      - C#'s print style at a 32 BIT WIDTH
 //
-// THE STYLE BYTE CARRIES THE WIDTH, and that is a deliberate choice with one
-// consequence worth stating. `float` is not a print style: a Java float is a
-// binary32, so `1.0f/3.0f` is 0.33333334 where the double is 0.3333333333333333,
-// and every arithmetic result has to be ROUNDED to 24 significant bits. The value
-// itself still travels as a float64 (every float is exactly representable as a
-// double), so the only thing that has to go ON the box is the width - and the box
-// already has a byte for a per-language tag. Reusing it means ZERO change to
-// languages/lib/runtime.c, whose tag 14 cell stores cell.b as an opaque long and
-// hands it back through jf_style_of.
+// THE STYLE BYTE CARRIES THE WIDTH. A Java float is a binary32, so `1.0f/3.0f` is
+// 0.33333334 where the double is 0.3333333333333333, and every arithmetic result
+// has to be ROUNDED to 24 significant bits. The value itself still travels as a
+// float64 (every float is exactly representable as a double), so the only thing
+// that has to go ON the box is the width - and the box already has a byte for a
+// per-language tag, which languages/lib/runtime.c's tag 14 cell stores as an
+// opaque long and hands back through jf_style_of.
 //
-// THE WIDTH IS GENERAL AND THE PRINT STYLE IS NOT, which is why the second
-// 32-bit style is a NEW byte rather than a reuse of floJavaF. A Go float32 prints
-// with Go's rules (`1e+20`, `+Inf`, no forced ".0") and a Java float with Java's
-// (`1.0E20`, `Infinity`, a forced ".0"), so the two cannot share a byte; but they
-// round identically, promote identically and compare identically, so everything
-// about the WIDTH is asked through jvmIs32 below rather than through an equality
-// against one constant. THE THIRD 32-BIT LANGUAGE (C# `float`) COST EXACTLY WHAT
-// THAT PARAGRAPH PREDICTED: one byte, one arm of jvmIs32, one arm of jvmWidens32
-// and one renderer arm in jvmFloText, and no other edit in this file. Nothing
-// else here tests a style for its width, which was checked by deleting the one
-// helper that had no caller rather than leaving it for the next agent to reason
-// about.
+// THE WIDTH IS GENERAL AND THE PRINT STYLE IS NOT: a Go float32 prints with Go's
+// rules and a Java float with Java's, so each 32-bit language has its own byte;
+// but they round, promote and compare identically, so everything about the WIDTH
+// is asked through jvmIs32 rather than an equality against one constant.
 //
-// The other half of the mechanism is per-language and deliberately so: WHAT A
-// MIXED 32/64 PAIR PROMOTES TO. Java widens (JLS 5.6.2: `1.0f + 1.0` is a
-// double), and so does C# - ECMA-334 12.4.7.3 binary numeric promotion reads
-// "otherwise, if either operand is of type double, the other operand is
-// converted to type double; otherwise, if either operand is of type float, the
-// other operand is converted to type float", i.e. exactly JLS 5.6.2's wider-type
-// rule. Go has no implicit conversion between float32 and float64 at all -
-// "the operand types must be identical", so a mixed pair is a compile error and
-// the only pair that reaches the runtime is a float32 against an UNTYPED
-// CONSTANT, which Go converts TO float32. The two answers are opposite and
-// jvmWidens32 is the one-line switch that says which.
+// WHAT A MIXED 32/64 PAIR PROMOTES TO is per-language: Java widens (JLS 5.6.2:
+// `1.0f + 1.0` is a double), and so does C# (ECMA-334 12.4.7.3). Go has no
+// implicit conversion between float32 and float64 - a mixed pair is a compile
+// error, so the only pair that reaches the runtime is a float32 against an
+// UNTYPED CONSTANT, which Go converts TO float32. jvmWidens32 says which.
 //
-// The consequence of putting the width on the style: THE FLOOR CANNOT RENDER A
-// 32-BIT BOX. runtime.c's jf_text switches on the style and has arms for 0, 1 and
-// 2 only, so it would print a float with the DOUBLE renderer.
-// languages/lib/java-rt.metajs, go-rt.metajs and csharp-rt.metajs therefore
-// intercept every rendering and every arithmetic result of a 32-bit box before
-// the floor sees it (jvFloText / jvFloFix, goFloText / js_gf32fix, csFloText /
-// csFloFix), and llvm.Run's side of that contract is jvmFloText / jvmArith here.
-//
-// THE FLOOR IS NOT THE ANSWER AND THAT IS MEASURED, not a preference:
-// languages/lib/runtime.c is compiled by our own c-to-llvm-ir.abnf, which
-// computes EVERY float at double precision (ctF("flt") is 8 and floating
-// arithmetic is emitted as integer soft-float), so it cannot spell `(float)x` at
-// all. See e5e68b5 and docs/todo.md 1.1.
+// THE FLOOR CANNOT RENDER A 32-BIT BOX: runtime.c's jf_text has arms for styles
+// 0, 1 and 2 only. languages/lib/java-rt.metajs, go-rt.metajs and csharp-rt.metajs
+// therefore intercept every rendering and every arithmetic result of a 32-bit box
+// before the floor sees it (jvFloText / jvFloFix, goFloText / js_gf32fix,
+// csFloText / csFloFix), and llvm.Run's side of that contract is jvmFloText /
+// jvmArith here. The floor itself cannot do it: runtime.c is compiled by our own
+// c-to-llvm-ir.abnf, which computes every float at double precision and so cannot
+// spell `(float)x`.
 const (
 	floJava  = 0
 	floGo    = 1
@@ -174,7 +148,7 @@ func jvmFloStr(d float64) string { return jvmFloStrN(d, 64) }
 // binary32. 1.0f/3.0f is "0.33333334" where the double is "0.3333333333333333",
 // and Float.MIN_VALUE is "1.4E-45" - the two-significant-digit minimum again,
 // against the ACTUAL value (1.401298464324817E-45), not a padded "1.0E-45".
-// Measured against java 24.0.2.
+// Checked against java 24.0.2.
 func jvmFloStr32(d float64) string { return jvmFloStrN(d, 32) }
 
 // bits is 64 for a double and 32 for a float; it is the ONLY difference between
@@ -209,14 +183,9 @@ func jvmFloStrN(d float64, bits int) string {
 		// Java's Double.toString takes the SHORTEST decimal that round-trips,
 		// except that it never uses fewer than TWO significant digits - and
 		// when the shortest has one, the second digit is not a zero but the
-		// closest two digit decimal to the actual value. For every normal
-		// double those are the same thing (the value is within ~1e-16 of the
-		// one digit form, a thousandth of a two digit step), so it shows only
-		// among the SUBNORMALS, where the gap between neighbours is comparable
-		// to the value: Double.MIN_VALUE is 4.9406564584124654E-324, so Java
-		// renders it "4.9E-324" where appending ".0" to the shortest gives
-		// "5.0E-324". Measured against real java 24.0.2; 254 lines of the
-		// 17,674 line java probe (docs/runtime-next-plan.md part 3).
+		// closest two digit decimal to the actual value. That only differs
+		// from padding among the SUBNORMALS: Double.MIN_VALUE renders
+		// "4.9E-324" where appending ".0" to the shortest gives "5.0E-324".
 		// FormatFloat with precision 1 IS "the closest two digit decimal",
 		// carry included (9.99e-321 -> "1.0E-320"), so the one digit case is
 		// simply re-formatted rather than padded.
@@ -253,15 +222,10 @@ func jvmFloStrN(d float64, bits int) string {
 // number too - a plain one, another double, a char, or a SIZED INTEGER - and then
 // the comparison is numeric, so 1.0 == 1 is true and NaN == NaN is false.
 //
-// THE jsGInt ARM IS A FIX. It was missing, and its absence was called
-// deliberate at three sites ("a box against a jsGInt is false"); it is a DEFECT.
-// `long x = 0; double y = 0.0; x == y` is TRUE in both languages - JLS 15.21.1
-// and ECMA-334 12.12.9 promote the integral operand to double first - and java
-// 24.0.2 confirms it. Both COMPILER halves said false (this, and the floor's
-// jf_num_eq through lib/runtime-jvm.metajs's rtjStrictEq, which takes the same
-// fix) while both INTERPRETER halves said true; --cross never saw it because
-// nothing in the matrix compared a long to a double. giEq (jsrtint.go:283)
-// already read the pair this way, and rt.strictEq short-circuited past it.
+// The jsGInt arm matters: `long x = 0; double y = 0.0; x == y` is TRUE - JLS
+// 15.21.1 and ECMA-334 12.12.9 promote the integral operand to double first. The
+// floor's twin is rtjStrictEq in lib/runtime.metajs; giEq (jsrtint.go) reads
+// the pair the same way.
 func jvmNumEq(f float64, other interface{}) bool {
 	switch t := other.(type) {
 	case jsJFlo:
@@ -283,16 +247,14 @@ func jvmNumEq(f float64, other interface{}) bool {
 
 // jvmArith is one binary arithmetic operator of the Java subset. A double on
 // either side makes the whole operation floating point and its result a double;
-// two integral operands keep the 32 bit wrap the compiler emitted before (the
-// int-width work is a separate concern, so this reproduces it exactly).
+// two integral operands keep the 32 bit wrap.
 func (rt *jsrt) jvmArith(op byte, l, r interface{}) interface{} {
 	a, b := rt.toNumber(l), rt.toNumber(r)
 	sty := jvmArithStyle(l, r)
 	// BOTH OPERANDS CONVERT FIRST, and rounding only the result is not the same
 	// answer: `float f = 0.1f; f + 16777217` is 1.6777216E7 in java, because the
 	// int becomes a float (JLS 5.6.2 binary numeric promotion) BEFORE the add.
-	// Rounding once at the end gives 1.6777218E7 - measured against java 24.0.2,
-	// 156 rows of a 1,231-value probe.
+	// Rounding once at the end gives 1.6777218E7.
 	if jvmIs32(sty) {
 		a, b = jvmFround(a), jvmFround(b)
 	}
@@ -359,7 +321,7 @@ func jvmFloNumeric(v interface{}) bool {
 // NON-widening one (go) the 32-bit side wins instead, because the only mixed pair
 // Go accepts is a float32 against an untyped constant and Go converts the
 // constant - see jvmWidens32. A pairing with no 32-bit operand at all is
-// unchanged, so C# (which never builds one) sees exactly the old answer.
+// jvmStyleOf's answer.
 func jvmArithStyle(l, r interface{}) uint8 {
 	lf, lok := l.(jsJFlo)
 	rf, rok := r.(jsJFlo)
@@ -410,19 +372,17 @@ func (rt *jsrt) jvmArithRaw(op byte, l, r interface{}) interface{} {
 
 // jvmTakeL is the OPERAND CHOICE of Math.max / Math.min, and the two cases a
 // plain `>` / `<` cannot see. java.lang.Math documents both for the double
-// overloads, and java 24.0.2 confirms each:
+// overloads:
 //
 //	Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0) is 0.0 - "if one
 //	argument is positive zero and the other negative zero, the result of min
 //	is negative zero" (and of max, positive zero). -0.0 < 0.0 is FALSE, so a
-//	bare comparison took the right operand and answered 0.0 for min.
+//	bare comparison would take the right operand.
 //
 //	Math.min(NaN, 1.0) and Math.max(NaN, 1.0) are both NaN - "if either value
-//	is NaN, then the result is NaN". Every comparison against NaN is false, so
-//	a bare `<` took the right operand and answered 1.0.
+//	is NaN, then the result is NaN". Every comparison against NaN is false.
 //
-// Everything else is the ordinary comparison, tie going to the right operand
-// exactly as before.
+// Everything else is the ordinary comparison, tie going to the right operand.
 func jvmTakeL(a, b float64, wantMax bool) bool {
 	if a != a {
 		return true // the left one is the NaN
@@ -470,12 +430,11 @@ func (rt *jsrt) jvmMinMax(l, r interface{}, takeL bool) interface{} {
 	return v
 }
 
-// js_jflo32 is the ONE new extern the float width needs: `(float) e`, a
-// `1.0f` literal and a `float x = e` declaration all lower to it, and its layer-2
-// twin is js_jflo32 in languages/lib/java-rt.metajs. It is registered here rather
-// than in abnf/jsrt.go's table because the width belongs to this file; the
-// emitter wraps its operand in js_jvnum first, exactly as it does for js_jflo,
-// so a Java `long` (a tag-13 cell marked UNSIGNED) reads signed.
+// js_jflo32 is the float-width extern: `(float) e`, a `1.0f` literal and a
+// `float x = e` declaration all lower to it, and its layer-2 twin is js_jflo32 in
+// languages/lib/java-rt.metajs. The emitter wraps its operand in js_jvnum first,
+// exactly as it does for js_jflo, so a Java `long` (a tag-13 cell marked
+// UNSIGNED) reads signed.
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		// js_jvchareq is js_jchareq (abnf/jsrt.go) with the float promotion of
@@ -496,15 +455,11 @@ func init() {
 		}
 		// THE JAVA LAUNCHER'S UNCAUGHT-EXCEPTION LINE, called from the catch
 		// clause of the one js_try the emitter wraps the entry call in
-		// (buildMain in languages/java-to-llvm-ir.abnf). Without it the value
-		// left the module and runJSModule's uncaught-throw handler rendered it
-		// with excText - which finds neither the {name, message} nor the
-		// {__class, args} shape a Java exception has - so an uncaught `throw'
-		// read "js runtime error: uncaught exception: [object Object]" here,
-		// natively AND in the interpreter half. All three agreed and all three
-		// were wrong (manual chapter 5). docs/todo.md 1.14.
+		// (buildMain in languages/java-to-llvm-ir.abnf). Without it
+		// runJSModule's handler would render the value with excText, which
+		// knows neither the {name, message} nor the {__class, args} shape.
 		//
-		// Measured, java 24.0.2, on stderr with exit status 1:
+		// java 24.0.2, on stderr with exit status 1:
 		//     Exception in thread "main" java.lang.RuntimeException: abort probe
 		//     Exception in thread "main" P2$NoMsg      <- getMessage() == null
 		// The "\tat Main.main(Main.java:4)" frames are deliberately not
@@ -565,7 +520,7 @@ func (rt *jsrt) jvmThrowableStr(o *jsObject) string {
 
 // jvmNullish is "absent, undefined or null" - the three ways a message slot can
 // say that getMessage() would answer null. An EMPTY message is not one of them:
-// real java prints the colon and the space for it (measured).
+// real java prints the colon and the space for it.
 func jvmNullish(v interface{}) bool {
 	if v == nil {
 		return true
@@ -589,9 +544,8 @@ func jvmMathObject() *jsObject {
 		if f, ok := v.(jsJFlo); ok {
 			return jsJFlo{f: math.Abs(f.f), sty: f.sty}
 		}
-		// A long is a 64-bit jsGInt box, and toInt32 truncates it: Math.abs of
-		// 3000000000L answered -1294967296 and of Long.MAX_VALUE answered 0.
-		// Negate in the box instead. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
+		// A long is a 64-bit jsGInt box, and toInt32 would truncate it, so
+		// negate in the box. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
 		// (JLS 15.15.4) and falls out of two's-complement negation unaided.
 		if b, ok := v.(jsGInt); ok && b.w == 64 {
 			if b.v < 0 {
@@ -617,11 +571,9 @@ func jvmMathObject() *jsObject {
 
 // jfBindings adds the TEN flo* host globals that languages/lib/runtime.c seeds
 // (host ids 51..60, `seed_root("flo", mk_host(51))` and the nine after it) to a
-// program's global set. It is the jsJFlo twin of jsrtint.go's giBindings and it
-// exists for the same reason, which f19a8ad's sint* work found the hard way: a
-// layer-2 file written against the C floor could otherwise be linked natively
-// but not run by llvm.Run, because `flo` would be "variable not defined" in the
-// Go half. programJSBindings (jsrtint.go) calls both.
+// program's global set. It is the jsJFlo twin of jsrtint.go's giBindings: without
+// it a layer-2 file written against the C floor could be linked natively but not
+// run by llvm.Run. programJSBindings (jsrtint.go) calls both.
 //
 // Every function below is the jvmXxx above, so the three engines - the
 // interpreter grammar's {__fl} box, llvm.Run through here, and tag 14 of the C
@@ -670,11 +622,10 @@ func jfBindings(b map[string]interface{}) {
 	// floEq IS THE FLOOR'S jf_num_eq (languages/lib/runtime.c), and the two have
 	// to answer the same thing on every input or layer 2 and the twin diverge.
 	// jf_num_eq has NO tag 13 arm, so a box against a SIZED INTEGER is false
-	// here as well - even though jvmNumEq gained one, because that arm belongs to
-	// the LANGUAGE's `==` (which promotes the integral operand to double first,
-	// JLS 15.21.1 / ECMA-334 12.12.9) and not to the primitive. The promotion is
-	// the CALLER's: lib/runtime-jvm.metajs's rtjStrictEq does it before it gets
-	// here. tests/metajs-test-full.js's flo38 pins this contract.
+	// here - unlike jvmNumEq, because that arm belongs to the LANGUAGE's `==`
+	// (JLS 15.21.1 / ECMA-334 12.12.9) and not to the primitive. The promotion
+	// is the CALLER's: lib/runtime.metajs's rtjStrictEq does it first.
+	// tests/metajs-test-full.js's flo38 pins this contract.
 	b["floEq"] = jsHostFunc("floEq", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
 		if f, ok := l.(jsJFlo); ok {
@@ -706,12 +657,10 @@ func jfBindings(b map[string]interface{}) {
 		if f, ok := v.(jsJFlo); ok {
 			return jsJFlo{f: math.Abs(f.f), sty: f.sty}
 		}
-		// The same 64-bit arm jvmMathObject's own abs carries, for the same
-		// reason: toInt32 TRUNCATES a long, so the plain wrap answered
-		// -1294967296 for 3000000000L and 0 for Long.MAX_VALUE. Negate in the
-		// box instead; two's-complement negation maps Long.MIN_VALUE to itself,
-		// which is what JLS 15.15.4 asks for. Everything narrower than a long
-		// widens to int before the call and keeps the 32-bit wrap.
+		// The same 64-bit arm jvmMathObject's own abs carries: toInt32 would
+		// TRUNCATE a long, so negate in the box; two's-complement negation maps
+		// Long.MIN_VALUE to itself (JLS 15.15.4). Everything narrower than a
+		// long widens to int before the call and keeps the 32-bit wrap.
 		if bx, ok := v.(jsGInt); ok && bx.w == 64 {
 			if !bx.u && bx.v < 0 {
 				return jvBox(-bx.v)
@@ -744,7 +693,7 @@ func goFloStr(f float64) string {
 // "0.33333334" where the float64 prints "0.3333333333333333", and the
 // scientific-notation window (a decimal exponent below -4 or at least 6) is the
 // same one, because for the shortest form Go fixes that threshold at 6 whatever
-// the digit count. Measured against `go run`.
+// the digit count. Checked against `go run`.
 func goFloStr32(f float64) string {
 	if math.IsNaN(f) {
 		return "NaN"
@@ -788,34 +737,21 @@ func csFloStr(f float64) string {
 }
 
 // csFloStr32 is System.Single.ToString() - the C# `float`, ECMA-334 8.3.7's
-// binary32 - and it is THE LEAST CONFIDENT FUNCTION IN THIS FILE, because there
-// is no C# toolchain on this machine (docs/working-on-this-project.md chapter 5)
-// and because ECMA-334 does not specify ToString()'s TEXT at all: 8.3.7 fixes the
-// type as IEEE-754 binary32 and refers the string conversion to the library,
-// which is ECMA-335 / the .NET BCL. So the ARITHMETIC below it is settled - a
-// binary32 add is the same operation in Java, and `java` 24.0.2 is a real oracle
-// for every value - while the DIGIT PLACEMENT here is derived, and stated as
-// derived rather than measured.
-//
-// What is derived, and from what:
+// binary32. ECMA-334 does not specify ToString()'s TEXT (it refers the string
+// conversion to the BCL), and no C# toolchain is available here, so the DIGIT
+// PLACEMENT is derived rather than measured; the arithmetic is the same binary32
+// operation as Java's and is settled.
 //
 //   - The digits are the SHORTEST round-tripping decimal read at 24 significant
-//     bits, which .NET Core 3.0 made the default for Single.ToString() (before
-//     it, "G7"). That is the same change of bitSize that separates
-//     Float.toString from Double.toString, so 1.0f/3.0f is "0.33333334".
-//   - NO forced ".0" and no two-significant-digit minimum: those are Java's, and
-//     C#'s double renderer above already omits both (1.0 prints "1").
-//   - The plain/scientific window. .NET's general format goes scientific when the
-//     decimal point sits past the type's G-precision, which is 7 for Single and
-//     15 for Double - hence 1e7f prints "1E+07" where the double 1e7 prints
-//     "10000000". THE UPPER BOUND IS THE ONLY PART OF THE WINDOW THIS FUNCTION
-//     CHANGES: the lower bound is taken from csFloStr above UNCHANGED, so the two
-//     renderers cannot disagree with each other. That lower bound is itself
-//     unverified - 1e-5 renders here as "0.00001" and .NET is reported to answer
-//     "1E-05" - and it is left exactly as csFloStr has always had it rather than
-//     changed on a reading of the BCL source that nothing here can run. Nothing
-//     is asserted at that boundary in tests/csharp-test-full.cs for the same
-//     reason.
+//     bits, the .NET Core 3.0+ default for Single.ToString(), so 1.0f/3.0f is
+//     "0.33333334".
+//   - NO forced ".0" and no two-significant-digit minimum (those are Java's).
+//   - The plain/scientific window: .NET's general format goes scientific when the
+//     decimal point sits past the type's G-precision, 7 for Single and 15 for
+//     Double - hence 1e7f prints "1E+07" where the double 1e7 prints "10000000".
+//     Only the UPPER bound differs from csFloStr; the lower bound is csFloStr's,
+//     itself unverified (1e-5 renders "0.00001"; .NET is reported to answer
+//     "1E-05"), and nothing in tests/csharp-test-full.cs asserts that boundary.
 //   - "NaN" / "Infinity" / "-Infinity" are NumberFormatInfo.InvariantInfo's
 //     symbols, and "-0" for a negative zero, both exactly as csFloStr has them.
 func csFloStr32(f float64) string {

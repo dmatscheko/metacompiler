@@ -3,29 +3,23 @@
  * ignored), annotations, casts (identity), interfaces, enums, annotation types,
  * nested types, lambdas, method references and anonymous classes.
  *
- * Every construct here is genuinely implemented now, in both grammars, so the
- * file runs and self checks with or without -warn-unsupported: Main.main exits
- * with the failure count (0 when all pass). (try/catch/finally + throw are
- * implemented too - see java-test-try.java.)
- *
- * History: interfaces, enums, annotation types, nested types, lambdas, method
- * references and anonymous classes used to be recognised but not lowered, so a
- * flagless run aborted at the top-level interface below and this file was a
- * by-design SHOULD-FAIL guard. The full-syntax work implemented all of them,
- * which removed the guard's premise, so the matrix entry became an ordinary
- * one. Do not re-arm it. **/
+ * Every construct here is implemented in both grammars, so the file runs and
+ * self checks with or without -warn-unsupported: Main.main exits with the
+ * failure count (0 when all pass). (try/catch/finally + throw are covered by
+ * java-test-try.java.) This is an ordinary matrix entry, not a SHOULD-FAIL
+ * guard; do not re-arm it. **/
 
 import java.util.List;
 
-// Accepted structurally, reported as not implemented (no interface model).
+// An interface.
 interface Greeter {
     String greet(String who);
 }
 
-// Accepted structurally, reported as not implemented (no enum model).
+// An enum.
 enum Color { RED, GREEN, BLUE }
 
-// Accepted structurally, reported as not implemented (annotation type).
+// An annotation type (parsed; nothing reads it at run time).
 @interface Marker { }
 
 // A generic class header with an implements clause: the type parameter and the
@@ -42,7 +36,7 @@ class Box<T> implements Greeter {
         return "hi " + who;
     }
 
-    // A nested type inside a class body: accepted, not implemented.
+    // A nested type inside a class body.
     static class Inner { }
 
     int get() throws Exception {                // throws clause: parsed and ignored
@@ -50,9 +44,8 @@ class Box<T> implements Greeter {
     }
 }
 
-// A subclass with an explicit super(args) call: the call is accepted and reported as
-// not implemented (the implicit no-argument super already ran); the subclass's own
-// field initializer still runs.
+// A subclass with an explicit super(args) call; the subclass's own field
+// initializer still runs.
 class Big extends Box {
     int extra = 100;
 
@@ -82,15 +75,15 @@ public class Main {
     }
 
     // A varargs parameter with an annotation: the annotation and the `...` are
-    // parsed (varargs packing itself is not modelled, so this is not called for
-    // its value; the method reference below just needs it to exist).
+    // parsed. It is not called for its value; the method reference below just
+    // needs it to exist.
     static int firstOr0(@Deprecated int... xs) {
         return 0;
     }
 
     @SuppressWarnings("unchecked")              // annotation with an argument
     public static void main(String[] args) {
-        // casts are identity
+        // casts (reference and same-type casts are identity)
         int ci = (int) 7;
         Main.check("prim cast identity", ci, 7);
         Object obj = "hi";                      // Object type parsed, dynamic value
@@ -112,9 +105,7 @@ public class Main {
         Big big = new Big();                    // super(7) accepted; own field init runs
         Main.check("subclass own field init", big.extra, 100);
 
-        // (try/catch/finally and throw are now implemented - see java-test-try.java.)
-
-        // lambdas, method references and anonymous classes: parsed, not implemented
+        // lambdas, method references and anonymous classes
         var f = (int x, int y) -> x + y;
         var g = Main::firstOr0;
         var anon = new MyErr() { };

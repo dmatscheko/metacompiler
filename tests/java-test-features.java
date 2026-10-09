@@ -1,11 +1,9 @@
 /* Fast feature-matrix test for the Java interpreter (java-interpreter.abnf) and the
- * LLVM-IR compiler (java-to-llvm-ir.abnf). It replaces the four algorithm-themed
- * java-test-big-* stress tests: instead of large loops (Ackermann, sieves, ciphers)
- * every implemented construct is exercised with the SMALLEST program that can prove
- * it works - loops run 0, 1, 3 or 4 times, recursion stays below depth 6. A failed
- * check prints its id (so a diff pinpoints it) and Main.main exits with the failure
- * count; exit 0 and byte-identical output on all four legs (interpreter/compiler x
- * goja/-frozen) mean everything passed. **/
+ * LLVM-IR compiler (java-to-llvm-ir.abnf). Every implemented construct is exercised
+ * with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+ * recursion stays below depth 6. A failed check prints its id (so a diff pinpoints
+ * it) and Main.main exits with the failure count; exit 0 and byte-identical output
+ * on all four legs (interpreter/compiler x goja/-frozen) mean everything passed. **/
 
 import java.util.function.Function;
 import java.util.function.BinaryOperator;
@@ -168,15 +166,9 @@ class Box {
     }
 }
 
-/* ----- anonymous classes over the enclosing METHOD's scope (docs/todo.md 1.5) -----
+/* ----- anonymous classes over the enclosing METHOD's scope -----
  *
- * An anonymous body could already read the enclosing instance's fields, its statics
- * and Outer.this; a LOCAL or PARAMETER of the enclosing method was the case left, and
- * the interpreter half aborted with `unknown name: k` where the compiler half and
- * javac both answered. The three rows below are the precedence, measured against
- * java 24.0.2 - and the middle one went the other way in the COMPILER half, which
- * probed the scope before the field and so let an enclosing local beat the anonymous
- * class' own declaration.
+ * The precedence, checked against java 24.0.2:
  *
  *   1. the anonymous class' OWN field wins over everything outside the body
  *   2. the enclosing METHOD's local/parameter wins over the enclosing class' field,
@@ -224,8 +216,8 @@ class Encl {
 }
 
 // Throwable#toString, the text the launcher's uncaught-exception line is built
-// from (docs/todo.md 1.14). Two shapes the built-in hierarchy cannot cover: a
-// user exception with a message and one without.
+// from. Two shapes the built-in hierarchy cannot cover: a user exception with a
+// message and one without.
 class TopExc extends RuntimeException {
     TopExc(String m) { super(m); }
 }
@@ -808,9 +800,7 @@ public class Main {
 
         // ----- unqualified instance / static field access -----
         // A member body may name a field without `this.` / `Cls.`, and a local or
-        // a parameter of the same name shadows it (JLS 6.5.6.1). Every OTHER class
-        // in this file writes `this.w`, which is exactly why nothing here reached
-        // the bare form: both halves aborted on it while javac printed the field.
+        // a parameter of the same name shadows it (JLS 6.5.6.1).
         int[] ufOps = {5, 2};
         Unq u = new Unq();
         Main.check("unq-read", u.own() == 2 && u.inherited() == 1);
@@ -826,7 +816,7 @@ public class Main {
         Unq.reset();
         Main.check("unq-static-write", Unq.step() == 1 && Unq.step() == 2 && Unq.counter == 2);
 
-        // ----- anonymous classes over the enclosing method's scope (docs/todo.md 1.5) -----
+        // ----- anonymous classes over the enclosing method's scope -----
         // Every operand comes out of an array so the constant folder cannot answer
         // these at compile time.
         int[] anOps = {3, 7};
@@ -837,20 +827,12 @@ public class Main {
         Main.check("anon-local-beats-field", enc.localBeatsField(anOps[1]).get().equals("7/42"));
         Main.check("anon-nested-locals", enc.nested(anOps[0]).get().equals("12:42"));
 
-        // ----- 17 significant digit doubles (docs/todo.md 2.8) -----
-        // 359000550 * 2^-38 is 0.0013060363926342689, seventeen significant digits.
-        // THREE separate things printed 0.001306036392634269 for it, a SIXTEEN digit
-        // decimal that reads back as the next double up:
-        //   - the interpreter's Double.toString, which took its digits from the tag
-        //     host's `"" + a` (goja's printer is not always the shortest round
-        //     tripping form; the frozen host's is, so this was also a live
-        //     goja-vs--frozen divergence that no matrix entry reached),
-        //   - the EMITTER, which shipped the same text for js_num_str to parse back,
-        //     so the compiled program held a DIFFERENT DOUBLE from the source's,
-        //   - and therefore both halves at once, agreeing and both wrong.
+        // ----- 17 significant digit doubles -----
+        // 359000550 * 2^-38 is 0.0013060363926342689, seventeen significant digits;
+        // the sixteen digit 0.001306036392634269 reads back as the next double up.
         // The literal and the arithmetic must agree, and both must render all
         // seventeen digits. Read out of arrays; the literal row is deliberately a
-        // LITERAL, because the emitter's own parse is one of the three defects.
+        // LITERAL, because it checks the emitter's own parse of the source text.
         double[] dLit = {0.0013060363926342689, 1.2345678901234567, 8.829779733692889E-31};
         double[] dOps = {359000550.0, 274877906944.0};    // 274877906944 == 2^38
         double dBuilt = dOps[0] / dOps[1];
@@ -872,13 +854,10 @@ public class Main {
                                 && ("" + fEdge[2]).equals("0.1"));
 
         // ----- Throwable#toString, i.e. the uncaught-exception text -----
-        // Measured against java 24.0.2, which prints exactly these strings. The
-        // ABORT LINE is "Exception in thread \"main\" " plus this, so asserting
-        // toString is how a ratchet (which has to exit 0) reaches the text of
-        // docs/todo.md 1.14 at all. Every row below read "RuntimeException@1a2b3c01"
-        // - the java.lang.Object default - in ALL THREE engines before that item:
-        // agreed and wrong, the class byte identity cannot see. Read out of an
-        // array so no constant folder can evaluate the concatenation.
+        // java 24.0.2 prints exactly these strings. The ABORT LINE is
+        // "Exception in thread \"main\" " plus this, so asserting toString is how
+        // a ratchet (which has to exit 0) reaches that text. Read out of an array
+        // so no constant folder can evaluate the concatenation.
         Throwable[] thr = {new RuntimeException("abort probe"), new RuntimeException(),
                            new RuntimeException(""), new IllegalStateException("ise"),
                            new ArithmeticException("/ by zero"), new NullPointerException(),
@@ -924,7 +903,7 @@ public class Main {
         }
         Main.check("thr-tostring-arith", caught1.equals("java.lang.ArithmeticException: / by zero"));
         // A DECLARED toString() still wins over Throwable's - the same precedence
-        // real java has, and the arm the new one had to be inserted behind.
+        // real java has.
         Main.check("thr-tostring-override", ("" + new OwnStr("q")).equals("own:q"));
 
         // ----- everything combined -----

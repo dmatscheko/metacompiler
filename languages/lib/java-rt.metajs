@@ -1,11 +1,7 @@
-// java-rt.metajs -- JAVA'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the third language after the Lua pilot
-// and PHP.
-//
-// languages/java-to-llvm-ir.abnf emits handle IR that calls 55 js_* externs over
-// every tests/java-test-*.java; 29 of them are generic primitives
-// languages/lib/runtime.c already provides (the C floor, layer 1). The other 26
-// are here.
+// java-rt.metajs -- JAVA'S OWN SEMANTICS, in MetaJS: the layer-2 runtime for
+// languages/java-to-llvm-ir.abnf. The generic js_* primitives come from
+// languages/lib/runtime.c (the C floor, layer 1) and the shared
+// lib/runtime.metajs; the Java-specific externs are here.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/java-rt.metajs -q -rt-lib
@@ -40,53 +36,34 @@
 //                              It is SAFE because java-to-llvm-ir.abnf emits
 //                              js_typeof for exactly one test (=== "function")
 //                              and compares chars with js_jchareq / js_jvcmp,
-//                              never with the floor's js_seq. Measured, not
-//                              assumed: see the extern audit in
-//                              docs/runtime-next-plan.md part 3.
+//                              never with the floor's js_seq.
 //     an {__isclass} object ==  a class descriptor, built by the emitter
 //     any other object      ==  an instance / an array is a floor array
 //
-// ----- THE LONG PROBLEM, and how `sintRaw` removed it ------------------------
+// ----- THE LONG: an honest signed 64 bit box ---------------------------------
 //
 // Java's `long` must stay DISTINGUISHABLE from `int` at every value, because
 // `1000000L * 1000000L` is 1000000000000 and `1000000 * 1000000` is -727379968.
 // abnf/jsrtjava.go says so directly: jvBox() "is 'read this as a long': always a
 // box, never a plain number".
 //
-// The floor's tag 13 will not do that on its own. si_norm - the ONE place the
-// sized-integer invariant is applied - unboxes a SIGNED 64 bit value a double
-// holds exactly, and every one of the eleven sint* host builtins goes through it.
-// So `sint(0, 5, 64, 0)` is the plain number 5, indistinguishable from `int` 5.
-//
-// This file used to answer that by marking the box UNSIGNED - the one shape
-// si_norm will not unbox - and then re-supplying the six operations whose SIGNED
-// reading the floor would get wrong (`/ % >>`, compare, decimal text, double
-// reading) as jlDiv / jlMod / jlSar / jlCmp / jlStr / jlNum. The floor now has
+// si_norm - the ONE place the floor applies the sized-integer invariant - unboxes
+// a SIGNED 64 bit value a double holds exactly, and every sint* host builtin goes
+// through it. So a long is built with
 //
 //     sintRaw(hi, lo, bits, unsigned)   si_trunc, then si_make: a tag 13 cell
 //                                       ALWAYS, never si_norm's unboxing arm
 //
-// so a Java long is an HONEST {w: 64, u: 0} box, exactly as csharp-rt.metajs has
-// carried one from the start, and all six go back to the floor: sintOp's `/`,
-// `%` and `>>` branch on the cell's own signedness, sintCmp compares signed when
-// the type is, sintStr prints the minus sign and sintNum reads the negative half.
+// and is a {w: 64, u: 0} box, as in csharp-rt.metajs: sintOp's `/`, `%` and `>>`
+// branch on the cell's own signedness, sintCmp compares signed, sintStr prints the
+// minus sign and sintNum reads the negative half. `>>>` is the one operation a
+// signed cell does not give directly - see jlShr. (java-to-llvm-ir.abnf still
+// EMITS js_jvnum, because llvm.Run runs abnf/jsrtjava.go's own long box.)
 //
-// The swap is not free and the trade is named here rather than buried. What the
-// unsigned box bought was `>>>`, which was sintOp code 10 DIRECT because a
-// logical shift is what an unsigned cell already does; a signed cell shifts
-// arithmetically, so `>>>` now costs jlShr - jlSar traded for jlShr, one helper
-// for one helper. What it cost was every FLOOR extern that reads a tag 13 cell
-// numerically: to_number of an unsigned 64 bit cell is its MAGNITUDE, so
-// `(double) -1L` answered 1.8446744073709552E19 through js_jflo and the emitter
-// owes a js_jvnum unwrap in front of it. With a signed cell that whole hazard
-// class is gone from layer 2. (java-to-llvm-ir.abnf still EMITS js_jvnum,
-// because llvm.Run runs abnf/jsrtjava.go, whose jvBox is unchanged.)
-//
-// THE ONE RULE THE SWAP IMPOSES, and it is the thing to get right: si_apply
-// ends in si_norm, so a signed 64 bit RESULT that a double holds exactly comes
-// back as a PLAIN NUMBER - an int, as far as everything below is concerned.
-// Every long-producing sintOp therefore goes through jlOp, which re-boxes.
-// csharp-rt.metajs spells the same rule csNorm.
+// THE ONE RULE THIS IMPOSES: si_apply ends in si_norm, so a signed 64 bit RESULT
+// that a double holds exactly comes back as a PLAIN NUMBER - an int, as far as
+// everything below is concerned. Every long-producing sintOp therefore goes
+// through jlOp, which re-boxes. csharp-rt.metajs spells the same rule csNorm.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -97,14 +74,9 @@
 // split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
 // assignable, and there are no exponent literals.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
-// the externs every language implements identically, parameterised by the rtk*
-// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+// The shared layer-2 runtime. It supplies the externs every language implements
+// identically, parameterised by the rtk* hooks below.
 import "./runtime.metajs"
-// (runtime-decimal.metajs, runtime-bignum.metajs and runtime-jvm.metajs were
-// folded INTO runtime.metajs by its sixth pass, 2026-08-09: the split existed
-// only to keep scope_find's linear module-scope scan off non-callers and the
-// hash index in runtime.c removed that scan. One import, not three.)
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
@@ -127,9 +99,7 @@ function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 function jlZero() { return sintRaw(0, 0, 64, false) }
 function jlOnes() { return sintRaw(4294967295, 4294967295, 64, false) }
 // jlMaxL / jlMinL are SHARED as rtjMaxL / rtjMinL - lib/runtime.metajs, beside
-// rtjIsIntegral. csharp's csMaxI64/csMinI64 were the byte-identical other copy
-// (docs/todo.md 5.1, 2026-08-10). Six call sites here: jlOfDouble, jlOfFlo and
-// the two Long statics, which run once at module init.
+// rtjIsIntegral.
 
 // A long is the ONE sized integer of width 64; byte and short are 8 and 16.
 function jvIsLong(v) {
@@ -168,8 +138,7 @@ function jlFromNum(v) {
 // arithmetic one. Reading the same bits through an UNSIGNED cell is what the
 // floor's own `if (u)` arm of code 10 wants; the result is re-marked signed,
 // because the type of a shift is the left operand's (JLS 15.19) and Java has no
-// unsigned long. This is the ONE operation the unsigned representation got for
-// free, and it is what jlSar traded away.
+// unsigned long.
 function jlShr(a, s) {
     var t = sintOp(10, sintRaw(sintHi(a), sintLo(a), 64, true), s)
     return sintRaw(sintHi(t), sintLo(t), 64, false)
@@ -177,8 +146,7 @@ function jlShr(a, s) {
 
 // ===================================================== the char box =========
 //
-// rtCharBox / rtIsCharBox are lib/runtime.metajs's; jvChar and jvIsChar were
-// byte-identical to csharp's csChar / csIsChar.
+// rtCharBox / rtIsCharBox are lib/runtime.metajs's (shared with csharp).
 
 function jvChar(code) { return rtCharBox(code) }
 
@@ -189,7 +157,7 @@ function jvIsChar(v) { return rtIsCharBox(v) }
 
 // rtjIsIntegral - an operand of INTEGER arithmetic; a char is one (Java's char is
 // an integral type) and a double is not - is SHARED with csharp,
-// lib/runtime.metajs's JVM-family section. The two copies had ZERO differences.
+// lib/runtime.metajs's JVM-family section.
 
 // jvW: JLS 5.6.2 binary numeric promotion for two integral operands - long when
 // either side is long, int otherwise. So byte + byte is an int.
@@ -235,8 +203,7 @@ function jvToLongBox(v) {
 // That asymmetry is the whole of jvNarrow's `if isFlo` in abnf/jsrtjava.go and
 // it is easy to get wrong: reading a plain 2147483648 through the saturating
 // path answers 2147483647 where the Go twin's int32(giVal(...)) answers
-// -2147483648, and `2147483648 - 1` then differs by one. Measured, not guessed:
-// that was the first defect the native build of tests/java-test-full.java found.
+// -2147483648, and `2147483648 - 1` then differs by one.
 function jvLow32(v) {
     if (jvIsChar(v)) { return v["__char"] }
     if (floIs(v)) {
@@ -264,12 +231,8 @@ function jvI(v) {
 }
 
 // rtjNum, the double reading of anything numeric, is SHARED with csharp -
-// lib/runtime.metajs's JVM-family section. The two copies differed in the char test and the string
-// coercion and BOTH differences were identity: jvIsChar and csIsChar are each
-// `rtIsCharBox(v)`, and jpStrNum - deleted with this merge - was a one-line
-// wrapper on parseFloat. Its sintIs arm reads a SIGNED 64 bit cell with sintNum
-// (si_float / d_from_long); the long arm this used to need (jlNum) is the
-// floor's own now.
+// lib/runtime.metajs's JVM-family section. Its sintIs arm reads a SIGNED 64 bit
+// cell with sintNum (si_float / d_from_long).
 
 // jvNarrow is (byte) / (short) / (int) / (long) or a declared integral type. An
 // integral source truncates its bits; a floating point one saturates first.
@@ -291,13 +254,11 @@ function jvNarrow(v, w) {
 // ============================================ the runtime-raised exceptions ==
 
 // The class descriptors js_jvexc hands over once each at module init, so that a
-// divide by zero, an out-of-range index and a negative array length can THROW
-// rather than abort. None of these externs has access to the program's scope,
-// which is exactly why the emitter passes the descriptors in. Four separate
-// module-level slots rather than a dictionary: the lookup is on a THROW path in
-// three cases and on the array-index path in the fourth, and in MetaJS a call is
-// a scope frame (docs/todo.md 5.1). Five slots, counting the NullPointerException
-// a null array reference raises.
+// divide by zero, an out-of-range index, a negative array length and a null array
+// reference can THROW rather than abort. None of these externs has access to the
+// program's scope, which is exactly why the emitter passes the descriptors in.
+// Separate module-level slots rather than a dictionary: the lookup is on a THROW
+// path or the array-index path, and in MetaJS a call is a scope frame.
 var jvArithExcCls = undefined
 var jvAioobeCls = undefined
 var jvSioobeCls = undefined
@@ -429,8 +390,8 @@ function jvCmp(op, l, r) {
 
 // rtjArith (abnf/jsrtjvm.go) - a double on either side makes the whole operation
 // floating point and its result a double, two integral operands keep the 32 bit
-// wrap - is SHARED with csharp, lib/runtime.metajs's JVM-family section. Its ONE knob is the
-// operand mapper below, reached through rtjkFloOperand.
+// wrap - is SHARED with csharp, lib/runtime.metajs's JVM-family section. Its ONE
+// knob is the operand mapper below, reached through rtjkFloOperand.
 
 // floOp reads its operands with the floor's to_number, which knows tag 13 and
 // tag 14 but not the {__char} box - and reads an UNSIGNED 64 bit box as a
@@ -443,13 +404,12 @@ function jvmOperand(v) {
 
 // jvmTakeL is the OPERAND CHOICE of Math.max / Math.min, and the two cases a
 // plain `>` / `<` cannot see. java.lang.Math documents both for the double
-// overloads and java 24.0.2 confirms each: Math.min(-0.0, 0.0) is -0.0 and
-// Math.max(-0.0, 0.0) is 0.0 ("if one argument is positive zero and the other
-// negative zero, the result of min is negative zero", and of max positive
-// zero), and Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the
-// result is NaN"). Both comparisons are FALSE, so a bare `<` took the right
-// operand and answered 0.0 and 1.0. Everything else is the ordinary
-// comparison, a tie still going to the right operand. The twins are
+// overloads: Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0) is 0.0 ("if one
+// argument is positive zero and the other negative zero, the result of min is
+// negative zero", and of max positive zero), and Math.min(NaN, 1.0) is NaN ("if
+// either value is NaN, then the result is NaN"). Both comparisons are FALSE, so a
+// bare `<` would take the right operand. Everything else is the ordinary
+// comparison, a tie going to the right operand. The twins are
 // abnf/jsrtjvm.go's jvmTakeL and languages/lib/runtime.c's jf_take_l.
 function jvmTakeL(a, b, wantMax) {
     if (a !== a) { return true }
@@ -514,8 +474,7 @@ function jvFloStyle2(l, r) {
 //
 //   float op INT converts the int to a FLOAT FIRST. Rounding only the result is
 //   a different answer: `float f = 0.1f; f + 16777217` is 1.6777216E7 in java
-//   and 1.6777218E7 if the int keeps its exact value into the addition -
-//   measured against java 24.0.2, 156 rows of a 1,231-value probe. So the
+//   and 1.6777218E7 if the int keeps its exact value into the addition. So the
 //   operation is redone on two converted operands.
 function jvFloFix(op, rr, l, r) {
     if (floIs(r)) { if (floStyle(r) != 3) { return flo(floNum(rr), floStyle(r)) } }
@@ -527,7 +486,7 @@ function jvFloFix(op, rr, l, r) {
 // JLS 5.6.2 for the RELATIONS as well: a float operand converts the other side
 // to a float, so `16777217 == 16777216f` is TRUE. It answers false unless the
 // promoted type really is float, so every double and every integral pair keeps
-// the path it had.
+// the ordinary path.
 function jvFloPromotes(l, r) {
     if (!floIs(l) && !floIs(r)) { return false }
     if (jvFloStyle2(l, r) != 3) { return false }
@@ -544,7 +503,7 @@ function jvFloText(v) {
     return floStr(v)
 }
 
-// js_jflo32 is the only new extern the width needs: `(float) e`, a `1.0f`
+// js_jflo32 is the extern the float width needs: `(float) e`, a `1.0f`
 // literal and a `float x = e` declaration all lower to it. Its Go twin is
 // registered in abnf/jsrtjvm.go.
 function js_jflo32(v) { return flo(rtF32Round(rtjNum(v)), 3) }
@@ -561,8 +520,7 @@ function jpRender(v, depth) {
     if (typeof v == "string") { return v }
     if (typeof v == "boolean") { return v ? "true" : "false" }
     if (floIs(v)) { return jvFloText(v) }
-    // sintStr is si_str, which prints a SIGNED cell with its minus sign - the
-    // long arm this used to need (jlStr) is the floor's own now.
+    // sintStr is si_str, which prints a SIGNED cell with its minus sign.
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "" + v }
@@ -574,21 +532,13 @@ function jpRender(v, depth) {
 // jpObj renders the object shapes the two Java grammars build.
 function jpObj(o, depth) {
     // A user toString() wins over every built-in rendering, as it does in Java.
-    // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs. This
-    // file called it 400 lines below and STILL carried a second private copy of
-    // the same eleven lines, as csharp-rt.metajs did under the name
-    // cpFindToString. Byte-identical after normalising the identifiers. Zero
-    // knobs.
+    // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
     var f = rtFindMethod(o["__class"], "toString")
     if (f !== undefined) { return jpRender(f.apply(undefined, [o]), depth + 1) }
     // java.lang.Throwable#toString: the BINARY class name and, only when
-    // getMessage() is non-null, ": " and the message. Measured, java 24.0.2 -
-    // println(new RuntimeException("x")) is "java.lang.RuntimeException: x", not
-    // the Object default below ("RuntimeException@1a2b3c01", which all three
-    // engines agreed on and all three had wrong). Throwable#toString carries NO
-    // stack trace - printStackTrace() is the method that does - so unlike C#'s
-    // ToString (manual 7.9) there is nothing here this engine cannot produce.
-    // docs/todo.md 1.14.
+    // getMessage() is non-null, ": " and the message - println(new
+    // RuntimeException("x")) is "java.lang.RuntimeException: x" (java 24.0.2).
+    // It carries NO stack trace (printStackTrace() is the method that does).
     if (jvIsThrowable(o)) { return jvThrowableStr(o) }
     // The class descriptor itself.
     if (o["__isclass"] === true) {
@@ -761,10 +711,8 @@ function jvBoxType(name) {
     if (name == "Math") {
         // Math.abs is OVERLOADED on the argument type and answers THAT type:
         // abs(long) is a long, abs(int) an int, abs(double) a double. A long
-        // must therefore not take the int overload's 32 bit wrap - it made
-        // Math.abs(3000000000L) answer -1294967296 where java 24 says
-        // 3000000000, and Math.abs(Long.MAX_VALUE) answer 0 - and it cannot go
-        // through rtjNum either, which is a double and loses the low bits past
+        // must therefore not take the int overload's 32 bit wrap, and it cannot
+        // go through rtjNum either, which is a double and loses the low bits past
         // 2^53. Negating in 64 bit two's complement is exact and maps
         // Long.MIN_VALUE to ITSELF, which is Java's answer and not an error
         // (JLS 15.15.4: there is no positive long of that magnitude).
@@ -791,10 +739,9 @@ function jvBoxType(name) {
         o["BYTES"] = 2
         return o
     }
-    // Double / Boolean carry only what todo.md 1.10 asked for. A member NOT on one
-    // of these descriptors reads as null in both halves rather than aborting -
-    // Character has been that way since it was added - so a partial descriptor is
-    // the existing shape here, not a new failure mode.
+    // Double / Boolean carry only a subset of their members. A member NOT on one
+    // of these descriptors reads as null in both halves rather than aborting,
+    // as Character's always has.
     if (name == "Double") {
         o["NaN"] = flo(NaN, 0)
         o["SIZE"] = 64
@@ -831,7 +778,7 @@ function jvAddCommon(o, width, size, bytes) {
     }
 }
 
-// Integer.toHexString / Long.toHexString (todo.md 1.10): the UNSIGNED hex reading
+// Integer.toHexString / Long.toHexString: the UNSIGNED hex reading
 // of the value AT ITS OWN WIDTH, lowercase, with no leading zeros -
 // Integer.toHexString(-1) is "ffffffff" and not "-1". java 24.0.2 is the oracle.
 //
@@ -861,7 +808,7 @@ function jvToHex64(v) {
     return jvHexDigits(hi) + lo
 }
 
-// Boolean.valueOf / Boolean.parseBoolean (todo.md 1.10). java.lang.Boolean:
+// Boolean.valueOf / Boolean.parseBoolean. java.lang.Boolean:
 // a STRING argument is true iff it equalsIgnoreCase("true") - so "TrUe" is true
 // and "no" is false rather than an error - and anything else is its own truth.
 function jvBoolOf(v) {
@@ -914,14 +861,12 @@ function jvParseInt(s, width) {
 
 // ----- the language-NEUTRAL nine --------------------------------------------
 // None of these is Java's. They live in abnf/jsrt.go, several languages emit
-// them, and they are here only because the C floor does not have them - see the
-// extern split in docs/runtime-next-plan.md part 3.
+// them, and they are here only because the C floor does not have them.
 
-// js_arr_new_n is SHARED with csharp - lib/runtime.metajs's JVM-family section. Once jvNum and
-// csNum turned out to be the same function, the two copies had zero differences.
+// js_arr_new_n is SHARED with csharp - lib/runtime.metajs's JVM-family section.
 
-// js_char is SHARED - lib/runtime.metajs; it was the same one-line delegation to
-// the char boxer in csharp, java and kotlin, and the _raw suffix travels with it.
+// js_char is SHARED - lib/runtime.metajs (csharp, java and kotlin); the _raw
+// suffix travels with it.
 
 // The shared dynamic type test behind instanceof. abnf/jsrt.go's isTypeName is
 // the spec, including the part that surprises: the Int/Long/Short/Byte arm tests
@@ -937,26 +882,17 @@ function jvParseInt(s, width) {
 // Java & | ^: the non-short-circuit boolean operator when both sides are
 // booleans, the int32 bit operation otherwise.
 //
-// DUPLICATED, DELIBERATELY, with kotlin-rt.metajs's js_jband, and the difference
-// list is ONE item that NOTHING CAN REACH. The bodies differ only in the int32
-// coercion (jvI here, k1I32 there - two integer models, one per value model),
-// and NEITHER EMITTER EVER PRODUCES A CALL THAT REACHES IT: `&` lowers to
-// js_jvarith / js_ktarith (java-to-llvm-ir.abnf:2606, kotlin-to-llvm-ir.abnf:4098)
-// and the ONLY js_jband either grammar emits is the boolean fold of a structural
-// equality (java:3934, kotlin:6682), which returns from the arm above.
+// DUPLICATED, DELIBERATELY, with kotlin-rt.metajs's js_jband. The bodies differ
+// only in the int32 coercion (jvI here, k1I32 there - one per value model), and
+// neither emitter produces a call that reaches it: `&` lowers to js_jvarith /
+// js_ktarith, and the ONLY js_jband either grammar emits is the boolean fold of
+// a structural equality, which returns from the arm above. Sharing it would need
+// another rtk* hook in every importer of lib/runtime.metajs for a coercion that
+// is dead in both callers.
 //
-// So the four lines are shared in every sense but the text, and merging them
-// still costs more than they are worth: kotlin does not import
-// lib/runtime.metajs's JVM-family section (it has neither rtjkCmp nor rtjkFloOperand and wants
-// none of that file's six bodies), and a home in lib/runtime.metajs would need an
-// ELEVENTH rtk* hook declared in all ten importers to carry a coercion that is
-// dead in both callers. Re-judged in the fifth pass, after the declaration tax
-// was measured at zero, and declined on the plumbing rather than on the tax.
-//
-// NOTE FOR WHEN THE ARM WAKES UP: the Go twin (abnf/jsrt.go:5781) has ONE
-// js_jband for both languages and coerces with rt.toInt32 for both. If an
-// emitter ever routes a non-boolean here, THAT is where java and kotlin will
-// disagree with their own twin - and they will disagree in two directions.
+// If an emitter ever routes a non-boolean here: the Go twin (abnf/jsrt.go) has
+// ONE js_jband for both languages and coerces with rt.toInt32 for both, so that
+// is where java and kotlin would disagree with their own twin.
 function js_jband(l, r) {
     if (typeof l == "boolean") { if (typeof r == "boolean") { return l && r } }
     return jvI(l) & jvI(r)
@@ -967,8 +903,8 @@ function js_jband(l, r) {
 function js_jcharat(target, args) {
     if (typeof target == "string") {
         var i = rtjNum(args[0])
-        // THROWS StringIndexOutOfBoundsException; it used to fail() the run, which
-        // no program could catch. See jStrIdx in java-interpreter.abnf.
+        // THROWS StringIndexOutOfBoundsException, which a program can catch.
+        // See jStrIdx in java-interpreter.abnf.
         if (i < 0 || i >= target.length) { jvThrowSioobe(i, target.length) }
         return jvChar(target.charCodeAt(i))
     }
@@ -994,10 +930,9 @@ function js_jchareq(l, r) {
 // The floor's === with the two boxes taught to it - a sized integer and a boxed
 // double are both `typeof "number"`, and MetaJS's own === on two boxes is
 // identity, so the numeric cases are spelled out - is rtjStrictEq, SHARED with
-// csharp in lib/runtime.metajs's JVM-family section, its ONE knob being rtjkCmp. Its sized-integer
-// arm is a FIX the merge found: floEq (jf_num_eq / jvmNumEq) has no tag 13 case,
-// so `long == double` answered false in BOTH compiler engines while both
-// interpreter halves answered true. See the note at the shared body.
+// csharp in lib/runtime.metajs's JVM-family section, its ONE knob being rtjkCmp.
+// Its sized-integer arm promotes `long == double` (floEq has no tag 13 case);
+// see the note at the shared body.
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher; only the arms java-to-llvm-ir.abnf can reach
@@ -1017,8 +952,7 @@ function js_mcall(recv, name, args) {
             var e = args.length > 1 ? rtjNum(args[1]) : recv.length
             // java.lang.String.substring checks the RANGE, so begin > end is out of
             // bounds too - which is why the message names a range and not one index.
-            // rtSubstring CLAMPS (the Go twin's substringRange), so both halves used
-            // to answer a truncated string where java throws.
+            // rtSubstring CLAMPS (the Go twin's substringRange), java throws.
             if (b < 0 || e > recv.length || b > e) { jvThrowRange(b, e, recv.length) }
             return rtSubstring(recv, b, e)
         }
@@ -1081,10 +1015,9 @@ function js_mcall(recv, name, args) {
 
 // jpPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
-// String.substring with the Go twin's substringRange clamping.
 // js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
-// ----- Java's own sixteen ---------------------------------------------------
+// ----- Java's own externs ---------------------------------------------------
 
 // One runtime-raised exception class descriptor, handed over by NAME at module
 // init so that the externs below can THROW rather than abort.
@@ -1104,7 +1037,7 @@ function js_jvexc(name, cls) {
 // emits this for both halves: the write site discards the value and keeps only
 // the check (emitRefPath in java-to-llvm-ir.abnf).
 //
-// A NON-array receiver keeps the old js_get behaviour: `this.f[i]` walks through
+// A NON-array receiver keeps js_get behaviour: `this.f[i]` walks through
 // object steps that are not arrays, and a null one is Java's NullPointerException.
 function js_jvidx(o, i) {
     if (Array.isArray(o)) {
@@ -1153,16 +1086,11 @@ function js_jvexcmatch(v, n) {
     return false
 }
 
-// THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE, and the top of the program.
+// THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE, and the top of the program. Without it
+// the floor's uncaught-throw handler would render the value with the generic
+// object toString - no class, no message.
 //
-// Without this the exception left the module and the floor's uncaught-throw handler
-// rendered it with the generic object toString, so every uncaught `throw' in BOTH
-// compiled halves read "js runtime error: uncaught exception: [object Object]" - no
-// class, no message - and the interpreter half said the same thing. All three
-// engines AGREED and all three were wrong, which is the one defect class byte
-// identity cannot see (manual chapter 5).
-//
-// Measured against java 24.0.2 (stderr, exit status 1):
+// java 24.0.2 (stderr, exit status 1):
 //
 //     Exception in thread "main" java.lang.RuntimeException: abort probe
 //     Exception in thread "main" P2$MyExc: custom msg
@@ -1170,10 +1098,10 @@ function js_jvexcmatch(v, n) {
 //
 // The line is the fixed prefix plus Throwable#toString: the BINARY class name
 // (jpClassName, which reads the __bname the emitter writes - "java.lang.*" for the
-// built-in Throwables since docs/todo.md 1.14) and, only when getMessage() is
-// non-null, ": " and the message. The "\tat Main.main(Main.java:4)" frames that
-// follow in real java are NOT reproduced: there is no call-site line table here,
-// and inventing frames would be a worse divergence than omitting them.
+// built-in Throwables) and, only when getMessage() is non-null, ": " and the
+// message. The "\tat Main.main(Main.java:4)" frames that follow in real java are
+// NOT reproduced: there is no call-site line table here, and inventing frames
+// would be a worse divergence than omitting them.
 //
 // The message slot differs between the halves: the emitted builtin constructor
 // writes __msg (emitBuiltinExc in java-to-llvm-ir.abnf), the interpreter half's
@@ -1213,11 +1141,10 @@ function js_jvtop(exc) {
 
 // java.lang.String.substring. A SEPARATE EXTERN rather than a wrapper on js_mcall
 // because the Go extern table is filled ONCE for every language: overriding
-// js_mcall in abnf/jsrtjava.go made a C# `Substring` raise java's "Range [10, 6)
-// out of bounds for length 6" (observed). js_ktsmcall and js_swmcall are the same
-// pattern for the same reason. Only the java emitter emits this, and only for the
-// name `substring`; the range check itself lives in js_mcall's arm below, which is
-// java's own copy.
+// js_mcall in abnf/jsrtjava.go would make a C# `Substring` raise java's message.
+// js_ktsmcall and js_swmcall are the same pattern for the same reason. Only the
+// java emitter emits this, and only for the name `substring`; the range check
+// itself lives in js_mcall's arm below, which is java's own copy.
 function js_jvsub(target, args) { return js_mcall(target, "substring", args) }
 
 // One dimension of `new T[n]`: answers it, and raises NegativeArraySizeException
@@ -1255,40 +1182,19 @@ function js_jvshift(op, l, r) { return jvShift(op, l, r) }
 // An ordered comparison. Two integers compare at the promoted width; anything
 // else (a double, a string pair) keeps the shared comparison, rtCompare.
 //
-// A DEFECT WAS HERE, in BOTH ENGINES, and the two halves gave two DIFFERENT
-// wrong answers. rtCompare is abnf/jsrt.go:1530's jsCompare, which answers the
-// SENTINEL 2 when either operand coerces to NaN and says at the site that it
-// means "every relation is false". The old jpCompare - deleted, it was the
-// fourth copy of this body - dropped the sentinel and fell through to `return
-// 0`, i.e. EQUAL, and its comment claimed that was "the Go twin's behaviour
-// exactly". It was not. Read by the four tests below:
-//
-//     sentinel 2 (the Go twin)     <  false   >  TRUE    <= false   >= TRUE
-//     0          (old layer 2)     <  false   >  false   <= TRUE    >= TRUE
-//     JLS 15.20.1 (real java)      <  false   >  false   <= false   >= false
-//
-// Measured against java 24 on a fourteen-row probe (NaN and 1.0 in both orders,
-// NaN against itself, and the float NaN): java 24 says false everywhere except
-// `!=`; the GO TWIN was wrong on 4 rows, LAYER 2 on 6, and the two halves
-// disagreed with EACH OTHER on 6 - which --cross would have caught had it ever
-// probed a NaN relation, and --full has no such assertion. This is the same
-// defect docs/runtime-merge-plan.md fixed for C# in Part A; java was the twin of
-// it and was not looked at. abnf/jsrtjava.go:467 takes the same three lines.
-// Smoothing the 2 to 0 in rtCompare is still wrong and still must not be done:
-// 0 makes `<=` and `>=` true.
-// The body is rtjRel - SHARED with csharp's js_cscmp, lib/runtime.metajs's JVM-family section, so
-// that the fix below cannot be made in one language and not the other a third
-// time.
+// rtCompare (abnf/jsrt.go's jsCompare) answers the SENTINEL 2 when either operand
+// coerces to NaN, meaning "every relation is false" - JLS 15.20.1. It must be
+// read that way, not as an ordering: smoothing the 2 to 0 would make `<=` and
+// `>=` true. The body is rtjRel - SHARED with csharp's js_cscmp,
+// lib/runtime.metajs's JVM-family section; the Go twin is js_jvcmp in
+// abnf/jsrtjava.go.
 // A float operand promotes the other side to float too (JLS 5.6.2), so
 // `16777217 < 16777216f` is false - the int converts to 1.6777216E7 first.
 function js_jvcmp(op, l, r) {
     // THE INTEGRAL FAST PATH IS SPELLED OUT HERE rather than reached through
-    // rtjRel, and that is a MEASUREMENT, not a preference. `i < 40000` is the
-    // whole of tests/bench/mod.java's loop condition, and asking the float
-    // question first cost java +5.32% against a 4.96% spread over 9 draws. The
-    // arm below is rtjRel's own first line with rtjkCmp expanded (it is jvCmp
-    // here), so it is the same answer by construction - and the integer path now
-    // does two rtjIsIntegral calls where it used to do two more floIs on top.
+    // rtjRel on purpose: asking the float question first is measurably slower on
+    // a hot loop condition. The arm is rtjRel's own first line with rtjkCmp
+    // expanded (it is jvCmp here), so it is the same answer by construction.
     if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvCmp(op, l, r) }
     if (jvFloPromotes(l, r)) { return rtjRel(op, flo(rtF32Round(rtjNum(l)), 3), flo(rtF32Round(rtjNum(r)), 3)) }
     return rtjRel(op, l, r)
@@ -1296,8 +1202,7 @@ function js_jvcmp(op, l, r) {
 
 // js_jchareq with the same promotion. The emitter calls THIS for `==` and `!=`;
 // js_jchareq itself stays as it is, because it is shared with kotlin (which has
-// no float width) and the switch-label site still uses it. (The record-component
-// site used to; it calls js_jvaleq below now.)
+// no float width) and the switch-label site still uses it.
 function js_jvchareq(l, r) {
     // Two host calls before the delegation, for the same reason js_jvcmp spells
     // its integral arm out: everything that is not a float box must reach
@@ -1390,11 +1295,10 @@ function jvSignBit(d) {
 //
 // The record COMBINATION pinned here is OpenJDK's, the one
 // java.lang.runtime.ObjectMethods generates: h = 0; per component
-// h = h*31 + hash(component), at int width. It was MEASURED against java 24.0.2
-// rather than assumed - record R(int,String,double) of (1,"x",2.5) answers
-// 1074008649 there and here. Something has to be pinned, because two engines
-// must agree and the invariant that must hold (equal records hash equally) does
-// not choose a value.
+// h = h*31 + hash(component), at int width - record R(int,String,double) of
+// (1,"x",2.5) answers 1074008649 in java 24.0.2 and here. Something has to be
+// pinned, because two engines must agree and the invariant that must hold
+// (equal records hash equally) does not choose a value.
 //
 // The twin is m["js_jhash"] / rt.jvHash in abnf/jsrtjava.go, arm for arm. That
 // one reads the IEEE-754 pattern with math.Float64bits; MetaJS cannot see a
@@ -1406,11 +1310,10 @@ function js_jhash(v) {
     if (v === true) { return 1231 }
     if (v === false) { return 1237 }
     if (typeof v == "string") { return jvStrHash(v) }
-    // THE BOX TESTS COME FIRST, and that ordering is a defect this file already
-    // paid for once: a tag-13 sized integer and a tag-14 float box are both
-    // `typeof "number"` to the floor, so a plain-number arm above these would
-    // answer 1 for the double 1.0 where java answers 1072693248. The interpreter
-    // twin is ordered the same way even though ITS boxes are objects.
+    // THE BOX TESTS COME FIRST: a tag-13 sized integer and a tag-14 float box
+    // are both `typeof "number"` to the floor, so a plain-number arm above these
+    // would answer 1 for the double 1.0 where java answers 1072693248. The
+    // interpreter twin is ordered the same way even though ITS boxes are objects.
     if (jvIsChar(v)) { return v["__char"] }
     if (floIs(v)) {
         if (floStyle(v) == 3) { return jvFloatBits(floNum(v)) }
@@ -1443,14 +1346,13 @@ function js_jhash(v) {
 // js_jisclass: is this value a CLASS DESCRIPTOR? The one thing the emitted probe
 // in makeVarRef needs in order to apply JLS 6.4.2 - a variable name OBSCURES a
 // type name - because the descriptor is declared in the same scope chain a bare
-// name reads (docs/todo.md 2.9). The twin is m["js_jisclass"] in
-// abnf/jsrtjava.go.
+// name reads. The twin is m["js_jisclass"] in abnf/jsrtjava.go.
 function js_jisclass(v) {
     if (!rtIsObj(v)) { return false }
     return v["__isclass"] === true
 }
 
-// js_jouter: THE OUTER HOP (docs/todo.md 1.6). An inner or anonymous class body
+// js_jouter: THE OUTER HOP. An inner or anonymous class body
 // names a field of its ENCLOSING instance unqualified and javac resolves it there
 // (JLS 6.5.6.1: the innermost enclosing class that declares the name wins). Every
 // creation site of a nested or anonymous class records that enclosing instance as
@@ -1495,9 +1397,8 @@ function jvStaticOwner(cls, name) {
 
 // js_jouterthis: `Outer.this` - out along __outer until an instance whose class
 // chain is named Outer. One unconditional __outer hop is wrong at two levels of
-// nesting, and inside an anonymous body there used to be no __outer at all. The
-// twins are m["js_jouterthis"] in abnf/jsrtjava.go and makeOuterThis in
-// languages/java-interpreter.abnf.
+// nesting. The twins are m["js_jouterthis"] in abnf/jsrtjava.go and
+// makeOuterThis in languages/java-interpreter.abnf.
 function js_jouterthis(self, name) {
     var v = anytype // Walks from an instance to its enclosing instance.
     v = self
@@ -1572,7 +1473,7 @@ function jvDblBits(d) {
 }
 
 // floatToIntBits of a value that is ALREADY binary32 (a float box holds the
-// rounded value, since 8f43e84), as one unsigned 32-bit number turned signed.
+// rounded value), as one unsigned 32-bit number turned signed.
 function jvFloatBits(d) {
     if (d !== d) { return 2143289344 - 4294967296 }      // 0x7fc00000, signed
     var sign = jvSignBit(d) ? 2147483648 : 0
@@ -1701,12 +1602,11 @@ function js_jvchar(v) { return jvChar(jvLow32(jvNarrow(v, 64)) & 65535) }
 //
 // The Go twin converts a jsGInt and passes everything else through, because its
 // consumers already understand jsChar and jsJFlo. The C floor does not know the
-// {__char} box at all, so that one is still converted here; the sized-integer
-// arm is now REDUNDANT for correctness - a signed tag 13 cell reads correctly
-// through to_number - and is kept because it is also what js_jflo's Go twin
-// does, and because a raw consumer wants a plain number rather than a cell.
-// Everything else still passes through unchanged, which is what keeps
-// `(double) "1"` reading the same in both halves.
+// {__char} box at all, so that one is converted here; the sized-integer arm is
+// not needed for correctness (a signed tag 13 cell reads correctly through
+// to_number) but matches js_jflo's Go twin, and a raw consumer wants a plain
+// number rather than a cell. Everything else passes through unchanged, which is
+// what keeps `(double) "1"` reading the same in both halves.
 function js_jvnum(v) {
     if (sintIs(v)) { return rtjNum(v) }
     if (jvIsChar(v)) { return v["__char"] }

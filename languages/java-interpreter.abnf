@@ -117,10 +117,9 @@ ImplicitHead <~~ push("Main"); jEnterClass("Main") ~~>
 // top-level item is `class` / `record` / `interface` / `enum` / `@interface` is
 // an ordinary compilation unit, and if that declaration does not parse the file
 // is broken - it is not a member of an implicit class. Without this, a record
-// javac refuses (`record R(final int x) {}`) matched Method (`record` as the
-// return type, `R(...)` as the signature, `{}` as the body) and five reject
-// files were accepted for eight parse files gained; with it, the eight stay and
-// the five come back. The modifier run is walked exactly as NoDupMods walks it.
+// javac refuses (`record R(final int x) {}`) would match Method (`record` as the
+// return type, `R(...)` as the signature, `{}` as the body). The modifier run is
+// walked exactly as NoDupMods walks it.
 NotTypeKw   = :script(~~
     (function() {
         var i = 0
@@ -541,8 +540,8 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 
-// break / continue accept an optional target label; a labeled form is recognized but
-// not implemented (labels are dropped) and falls back to the plain innermost jump.
+// break / continue accept an optional target label; a labeled one travels as its
+// own signal (makeBreakL) to the loop or Labeled wrapper of that name.
 Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LabelRef ] ";" ;
 Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LabelRef ] ";" ;
 LabelRef    <~~ push({label: stripWs(up.in)}) ~~> = Id ;
@@ -555,7 +554,7 @@ Assert      <~~ push(makeAssert(takeAll(), up.pos)) ~~>
 // is evaluated and the block still runs.
 Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
             = KwSync "(" Expression ")" Block ;
-// label: stmt  recognized, not implemented (the label is dropped); the statement runs.
+// label: stmt - the label is offered to the loop it wraps (makeLabeled).
 // NotSwitchKw keeps a switch's 'default:' / 'case ...:' from being misread as a label
 // (Id matches keywords in this grammar), the same guard C's Label uses.
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
@@ -580,14 +579,9 @@ NotSwitchKw = :script(~~
     })()
 ~~) ;
 
-// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
-// raises the value, catch binds it (the first catch clause wins - exception types,
-// including multi-catch A | B, are parsed but not discriminated), finally always runs.
-// return/break/continue inside a try still propagate. A try-with-resources header is
-// skipped (SkipParen), so its resources are not bound or auto-closed.
-// try-with-resources, typed and MULTI catch clauses, finally. The clauses carry
-// their declared type(s), so excTryTyped (lib/interp-core.js) can pick the first
-// one that matches through core.excMatches instead of always taking the first.
+// try-with-resources, typed and MULTI catch clauses, finally (excThrow/excTry,
+// languages/lib). The clauses carry their declared type(s), so excTryTyped
+// (lib/interp-core.js) picks the first one that matches through core.excMatches.
 // JLS 14.20: a try must have a resource list, or a catch clause, or a finally -
 // a bare `try { }` is try.without.catch.finally.or.resource.decls. Spelling that
 // as three alternatives is what makes the requirement a PARSE failure; the
@@ -616,9 +610,9 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ";" ;
 
-// An explicit constructor invocation (super(args) or this(args)): accepted and
-// reported as not implemented (the implicit no-argument super already ran). The
-// arguments are still evaluated so their calls stay visible.
+// An explicit constructor invocation (super(args) or this(args)). It may only
+// stand first in a constructor body; makeCtorHead lifts it out and
+// makeCtorClosure decides what it initializes.
 CtorCall    <~~ push(makeCtorHead(takeAll())) ~~>
             = [ SkipAngle ] CtorWhich "(" [ Expression { "," Expression } ] ")" ";" ;
 CtorWhich   <~~ push({cwhich: stripWs(up.in)}) ~~>
@@ -678,8 +672,8 @@ ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
             = PlaceAhead Primary ChainSfx { ChainSfx } ;
 ChainSfx    = QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx ;
 // Without this fast-fail every expression in the file is parsed TWICE per
-// nesting level - once for the ChainTarget attempt, once for real - which
-// measured 30x on a 400-line file of nested calls. It scans ahead for an
+// nesting level - once for the ChainTarget attempt, once for real - which is
+// exponential on nested calls. It scans ahead for an
 // assignment operator or a ++/-- at the SAME bracket depth, stopping at the
 // first `;`, `,`, `:`, `?`, brace or unbalanced closer, and skips string, char
 // and comment text so a `;` inside a literal cannot end the scan early. A run
@@ -832,8 +826,8 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | PreIncDec | Neg | Not | BitNot | UPlus | PostfixExpr ;
-// Prefix ++/-- yields the new value (genuine; must be tried before Neg so "--x" is not
-// parsed as "-(-x)"). Unary + is identity. ~x is recognized but not implemented.
+// Prefix ++/-- yields the new value (must be tried before Neg so "--x" is not
+// parsed as "-(-x)"). Unary + is identity.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> PreTarget ;
 // The target of a PREFIX ++/-- may be a member chain (`--iBar(b).i`), and
@@ -896,8 +890,6 @@ NewObject   <~~ push(makeNew(takeAll())) ~~>
 NewName     <~~ push(jJoinDots(takeAll())) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
-// An anonymous class: accepted, reported as not implemented; the constructor
-// arguments still run so their calls stay visible under -warn-unsupported.
 // new Type(args) { members } - an anonymous subclass (of a class OR an interface),
 // built once on first evaluation and instantiated like any other class.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
@@ -993,24 +985,19 @@ Primary     = ArrClassLit | PrimClassLit | NewExpr | SwitchExpr | Lambda | Metho
 // name alone and leave the argument list behind.
 BareCall    <~~ push(makeBareCall(takeAll())) ~~>
             = BareName "(" [ Expression { "," Expression } ] ")" ;
-// A reserved word is not a method name (`case 0 -> if (true);` used to parse as
+// A reserved word is not a method name (`case 0 -> if (true);` must not parse as
 // a call to a method named `if`) - but `this(...)` and `super(...)` reach this
 // rule whenever they are NOT the first thing in a constructor body, which JEP
-// 447 flexible constructors and the whole javac/SuperInit/ directory rely on.
-// MEASURED AND REVERTED: refusing an unqualified call to `yield`
-// (invalid.yield, InvalidYield.java) gains 1 reject file and costs 2 must-parse
-// ones - javac/diags/examples/InvalidYieldWarning.java and
-// javac/switchexpr/WarnWrongYieldTest.java both call a method named `yield` and
-// are compiled with an older -source, where javac only WARNS. 1 < 2, so there is
-// no NotYield guard here.
+// 447 flexible constructors rely on. There is deliberately no guard against an
+// unqualified call to `yield` (invalid.yield): under an older -source javac only
+// WARNS about it, and corpus files that must parse call a method named `yield`.
 BareName    <~~ push(stripWs(up.in)) ~~>
             = "this" KwEnd | KwSuper | NotResvKw Id ;
 
-// `int.class`, `void.class` - a class literal over a PRIMITIVE type. It used to
-// read as a variable named `int` with a field named `class`, which stopped
-// working the moment a reserved word stopped being a variable; it is no member
-// chain, so it needs its own Primary. Class objects are not modelled: the value
-// is null, exactly as for the array form below.
+// `int.class`, `void.class` - a class literal over a PRIMITIVE type. It is no
+// member chain (a reserved word is not a variable), so it needs its own Primary.
+// Class objects are not modelled: the value is null, exactly as for the array
+// form below.
 PrimClassLit <~~ push(makeConst(null)) ~~>
             = ( PrimName KwEnd | "void" KwEnd ) "." "class" KwEnd ;
 
@@ -1053,8 +1040,8 @@ NotJavaKw   = :script(~~
                    "int", "long", "short", "byte", "char", "float", "double", "boolean"]
         var hit = false
         // This guard sits on LamId, which every Primary attempt reaches, so the
-        // first byte is compared before the word: without that screen the
-        // 28-word loop showed up as a measurable share of a whole-file parse.
+        // first byte is compared before the word - the word loop is otherwise a
+        // measurable share of a whole-file parse.
         var f0 = c.peek(s)
         for (var k = 0; k < kws.length; k++) {
             var w = kws[k]
@@ -1108,12 +1095,10 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = NotUscore ( "this" KwEnd | KwSuper | NotResvKw Id ) ;
 
-// ----- Widened literals. The numeric forms are genuine now: hex / binary /
-// octal / underscored / suffixed integers and fractional / exponent / hex-float
-// doubles all evaluate to their value (one number type; an L/f/D suffix only
-// selects the parse - see numLit). Char literals and text blocks stay
-// recognized-but-not-implemented. Each form matches something plain IntLit
-// cannot, so ordinary decimal integers still reach IntLit untouched. -----
+// ----- Literals. Hex / binary / octal / underscored / suffixed integers,
+// fractional / exponent / hex-float doubles, char literals and text blocks. Each
+// form matches something plain IntLit cannot, so ordinary decimal integers still
+// reach IntLit untouched. -----
 
 // A char literal. Java's char is an integral type that PRINTS as a glyph, so the
 // value is a boxed {__char: code}: every operator unboxes it (so 'b' - 'a' == 1 and
@@ -1230,8 +1215,8 @@ ImplRef     <~~ push({impl: jJoinDots(takeAll())}) ~~>
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = Type { "|" Type } ;
 
-// Type declarations accepted structurally, then reported as not implemented (so a
-// whole Java file parses; -warn-unsupported lets the rest run). Bodies are skipped.
+// The type declarations other than class and record: annotation types (dropped),
+// interfaces and enums.
 UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // An interface: constants (implicitly static final), abstract methods, `default`
 // and `private` instance methods and `static` methods. `sealed ... permits` is
@@ -1347,13 +1332,9 @@ NotResvKw   = :script(~~
     })()
 ~~) ;
 
-// MEASURED AND REVERTED: refusing `var` as a class / record / interface / enum
-// name (restricted.type.not.allowed, VarNotAllowed.java) gains 1 reject file and
-// costs 2 must-parse ones - javac/diags/examples/FutureVarNotAllowed.java and
-// javac/lvti/badTypeReference/pkg/var.java both declare `class var { }` and are
-// compiled with `--release 9`, where javac downgrades it to
-// compiler.WARN.restricted.type.not.allowed. 1 gained < 2 lost, so there is no
-// NotVarKw guard here.
+// There is deliberately no NotVarKw guard on a class / record / interface / enum
+// NAME (restricted.type.not.allowed): under `--release 9` javac only warns about
+// `class var { }`, and corpus files that must parse declare one.
 
 // `case default:` on its own is default.label.not.allowed; `case null, default ->`
 // is legal (JEP 441), so the guard sits only on the FIRST label of a case.
@@ -2138,12 +2119,10 @@ HasStatic   = :script(~~
     // an int and a double overload of each).
     hostGlobals["Math"] = {
         abs: function(v) {
-            // `f < 0` is FALSE for -0.0, so Math.abs(-0.0) answered -0.0 where
-            // java 24.0.2 (and both compiled halves, which negate the raw sign
-            // bit) answer 0.0. The sign of a zero only shows through 1/f.
+            // `f < 0` is FALSE for -0.0, and Math.abs(-0.0) is 0.0; the sign of a
+            // zero only shows through 1/f.
             if (jIsFlo(v)) { var f = v.__flo; var af = f < 0 || (f == 0 && 1 / f < 0) ? jNegF(f) : f; return jIsF32(v) ? {__flo: af, __f32: true} : jFlo(af) }
-            // A long is a BOX, so `v < 0` is false for every one of them and
-            // `v | 0` then answered 0 - for positive longs too. Compare and
+            // A long is a BOX, so `v < 0` / `v | 0` cannot read it. Compare and
             // negate in the box. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
             // (JLS 15.15.4), which two's-complement negation gives unaided.
             if (jIsLong(v)) { return szCmp(v, jL(0)) < 0 ? szNeg(v) : v }
@@ -2173,7 +2152,7 @@ HasStatic   = :script(~~
         if (neg) { p = i64Neg(p) }
         return jNarrow(szMake(p, 64, jNoU), w)
     }
-    // Integer.toHexString / Long.toHexString (docs/todo.md 1.10): the UNSIGNED hex
+    // Integer.toHexString / Long.toHexString: the UNSIGNED hex
     // reading AT THE VALUE'S OWN WIDTH, lowercase, no leading zeros, so
     // Integer.toHexString(-1) is "ffffffff" and not "-1". java 24.0.2 is the
     // oracle. The twins are jvToHex32 / jvToHex64 in languages/lib/java-rt.metajs
@@ -2199,7 +2178,7 @@ HasStatic   = :script(~~
         while (ls.length < 8) { ls = "0" + ls }
         return jHexDigits(p.h) + ls
     }
-    // Boolean.valueOf / Boolean.parseBoolean (docs/todo.md 1.10): a STRING argument
+    // Boolean.valueOf / Boolean.parseBoolean: a STRING argument
     // is true iff it equalsIgnoreCase("true"), anything else is its own truth.
     function jBoolOf(v) {
         if (typeof v == "string") return v.toLowerCase() == "true"
@@ -2236,10 +2215,9 @@ HasStatic   = :script(~~
     hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
                             MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2}
     hostGlobals["Character"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE: 16, BYTES: 2}
-    // Double / Boolean carry only what docs/todo.md 1.10 asked for. A member NOT on
-    // one of these descriptors reads as null rather than aborting - Character has
-    // been that way since it was added - so a partial descriptor is the existing
-    // shape here, not a new failure mode.
+    // Double / Boolean carry only a subset of their members. A member NOT on one
+    // of these descriptors reads as null rather than aborting, as Character's
+    // always has.
     // Spelled inline, not as jFlo(0 / jZeroF): jFlo and jZeroF are declared BELOW
     // this point and only the included lib is textually in scope at script body
     // time, which is the same reason Byte/Short above build their pairs by hand.
@@ -2290,13 +2268,10 @@ HasStatic   = :script(~~
     }
     function jFloRes(f, f32) { return f32 ? jFlo32(f) : jFlo(f) }
     // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
-    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` comes back
-    // +0 where IEEE-754, both compiler halves and java 24.0.2 all say -0.0 (the
-    // `x * 0` trap of docs/working-on-this-project.md chapter 4). It is a
-    // PRE-EXISTING interpreter-vs-run divergence for `double`, present at
-    // 114fbd5 and measurable there with three lines of java; the float work only
-    // made it show up 44 times in a 1,231-value probe. The rule is IEEE-754's:
-    // the sign of a zero product or quotient is the XOR of the operand signs.
+    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` would come
+    // back +0 where IEEE-754 and java say -0.0 (the `x * 0` trap of
+    // docs/working-on-this-project.md chapter 4). The rule is IEEE-754's: the
+    // sign of a zero product or quotient is the XOR of the operand signs.
     function jZeroSign(p, a, b) {
         if (p !== 0) { return p }
         if (a !== a) { return p }
@@ -2310,14 +2285,14 @@ HasStatic   = :script(~~
     // Math.max/min pick an operand, but the DOUBLE overload is selected as soon as
     // one side is a double, so the answer is a double then (Math.max(1.5, 2) is 2.0).
     // jTakeL is the OPERAND CHOICE, and the two cases a plain `>` / `<` cannot
-    // see. java.lang.Math documents both for the double overloads and java
-    // 24.0.2 confirms each: Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0)
-    // is 0.0 ("if one argument is positive zero and the other negative zero, the
-    // result of min is negative zero", and of max positive zero), and
-    // Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the result is
-    // NaN"). Both comparisons are FALSE, so a bare `<` took the right operand
-    // and answered 0.0 and 1.0. The twins are abnf/jsrtjvm.go's jvmTakeL,
-    // languages/lib/runtime.c's jf_take_l and java-rt.metajs's jvmTakeL.
+    // see. java.lang.Math documents both for the double overloads:
+    // Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0) is 0.0 ("if one
+    // argument is positive zero and the other negative zero, the result of min
+    // is negative zero", and of max positive zero), and Math.min(NaN, 1.0) is
+    // NaN ("if either value is NaN, then the result is NaN"). Both comparisons
+    // are FALSE, so a bare `<` would take the right operand. The twins are
+    // abnf/jsrtjvm.go's jvmTakeL, languages/lib/runtime.c's jf_take_l and
+    // java-rt.metajs's jvmTakeL.
     function jTakeL(a, b, wantMax) {
         if (a !== a) { return true }
         if (b !== b) { return false }
@@ -2370,9 +2345,8 @@ HasStatic   = :script(~~
     //     a {__char} box   ==  a char (16 bit unsigned, rendered as a glyph)
     //
     // int is the type of every unsuffixed integer literal and of every arithmetic
-    // result that has no long operand, so keeping IT unboxed is what makes the
-    // change affordable - an ordinary program allocates no box at all and runs the
-    // 32 bit path it ran before. The cost is that a 64 bit value must stay boxed
+    // result that has no long operand, so it stays unboxed - an ordinary program
+    // allocates no box at all. The cost is that a 64 bit value must stay boxed
     // even when it would fit in a double, because a plain number means `int`
     // here: szNorm unboxes such a result, so jL boxes it straight back.
     var jNoU = false
@@ -2404,12 +2378,9 @@ HasStatic   = :script(~~
     //
     // EVERY array access is bounds-checked in Java and a violation THROWS
     // ArrayIndexOutOfBoundsException - it does not answer a default value, and it
-    // does not extend the array on a write. This engine used to answer `undefined`
-    // for a read past the end and to GROW the array on a write past the end, in all
-    // four engines; the closed docs/todo.md 1.2 converged the *value* on NaN, which
-    // was the cheap fix. This is the correct one.
+    // does not extend the array on a write.
     //
-    // The message text is java 24.0.2's, verified against the real toolchain:
+    // The message text is java 24.0.2's:
     //   a[3]   on int[3]    Index 3 out of bounds for length 3
     //   "abc".charAt(3)     Index 3 out of bounds for length 3     (StringIndex...)
     //   "abc".substring(-1) Range [-1, 3) out of bounds for length 3
@@ -2574,8 +2545,7 @@ HasStatic   = :script(~~
         // is not the same answer as rounding only the result: `float f = 0.1f;
         // f + 16777217` is 1.6777216E7 in java, because the int becomes a float
         // BEFORE the addition. It decides the RELATIONS too - 16777217 ==
-        // 16777216f is true. Measured against java 24.0.2, 156 rows of a
-        // 1,231-value probe.
+        // 16777216f is true.
         var f32 = jF32Res(l, r)
         var a = jNumD(l)
         var b = jNumD(r)
@@ -2614,23 +2584,17 @@ HasStatic   = :script(~~
         return neg ? "-" + s : s
     }
     // Java's d.dddEnn from the shortest digit run. The digits arrive already
-    // recovered (coreDecDigits): the host's own exponent threshold is not Java's and
-    // is no longer consulted at all - see interp-core.js's binary32 section for
-    // why `"" + a` could not be the source.
+    // recovered (coreDecDigits); the host's own exponent threshold is not Java's
+    // and is not consulted - see interp-core.js's binary32 section.
     function jFloSci(a, digits, e10) {
         // Double.toString never uses fewer than TWO significant digits, and
         // where the shortest form has ONE the second is not a zero but the
-        // closest two digit decimal to the ACTUAL value. For every normal
-        // double those are the same (the value is within ~1e-16 of its one
-        // digit form, a thousandth of a two digit step); it shows among the
-        // SUBNORMALS, where the gap between neighbours is comparable to the
-        // value: Double.MIN_VALUE is 4.9406564584124654E-324, so java writes
-        // "4.9E-324" where appending ".0" writes "5.0E-324". Measured against
-        // real java 24.0.2 - it was 254 lines of the 17,674 line java probe.
-        // The same fix is in languages/lib/runtime.c (g_mindig), in
-        // abnf/jsrtjvm.go (FormatFloat precision 1) and in
-        // languages/metajs-interpreter.abnf (flTwo); all four are checked
-        // against `java` over 613 values. docs/runtime-next-plan.md part 3.
+        // closest two digit decimal to the ACTUAL value. That differs from
+        // padding only among the SUBNORMALS: Double.MIN_VALUE is
+        // 4.9406564584124654E-324, so java writes "4.9E-324" where appending
+        // ".0" writes "5.0E-324". The same rule is in languages/lib/runtime.c
+        // (g_mindig), abnf/jsrtjvm.go (FormatFloat precision 1) and
+        // languages/metajs-interpreter.abnf (flTwo).
         if (digits.length == 1) {
             // The scaling exponent is the VALUE's, not the shortest form's -
             // 1e-322 is really 9.88e-323, whose two digit form is 9.9E-323 -
@@ -2844,15 +2808,12 @@ HasStatic   = :script(~~
                 var ts = jFindMember(v.__class, "toString")
                 if (typeof ts == "function") { return jstrD(ts.apply(undefined, [v]), depth + 1) }
                 // java.lang.Throwable#toString: the BINARY class name and, only
-                // when getMessage() is non-null, ": " and the message. Measured,
-                // java 24.0.2 - `System.out.println(new RuntimeException("x"))` is
-                // "java.lang.RuntimeException: x", not the Object default this used
-                // to fall through to ("RuntimeException@1a2b3c01" in all three
-                // engines, agreed and wrong). It is the SAME text the launcher's
-                // uncaught line prints, which is why jExcTopLine is one call to
-                // jThrowableStr. Unlike C#'s ToString (manual 7.9), Throwable's
-                // carries NO stack trace - printStackTrace() is the method that
-                // does - so nothing here is unreproducible. docs/todo.md 1.14.
+                // when getMessage() is non-null, ": " and the message -
+                // `System.out.println(new RuntimeException("x"))` is
+                // "java.lang.RuntimeException: x" (java 24.0.2). It is the SAME
+                // text the launcher's uncaught line prints, which is why
+                // jExcTopLine is one call to jThrowableStr. Throwable's toString
+                // carries NO stack trace (printStackTrace() is the method that does).
                 if (jIsThrowable(v)) { return jThrowableStr(v) }
                 // An enum constant prints its name (java.lang.Enum#toString) and a
                 // record its canonical form P[x=1, y=2] (java.lang.Record) - with
@@ -2928,11 +2889,10 @@ HasStatic   = :script(~~
                 // interface's single abstract method with the closure itself.
                 if (target.__sam != undefined) { return target.__sam.apply(undefined, args) }
                 // Object#toString and Object#equals, the two members of the
-                // java.lang.Object contract a class inherits without declaring -
-                // the same gap hashCode had until 77eb804, and reached the same
-                // way: the DECLARED method wins (the walk above just failed to
-                // find one), so what is left is the record form and then the
-                // Object default. jstr already renders both (a record's canonical
+                // java.lang.Object contract a class inherits without declaring.
+                // The DECLARED method wins (the walk above just failed to find
+                // one), so what is left is the record form and then the Object
+                // default. jstr already renders both (a record's canonical
                 // R[a=1, b=x], otherwise getName() + "@" + hex(hashCode())) and
                 // jValEq is already Objects.equals arm for arm, including a
                 // record's component-wise comparison. The compiler half routes the
@@ -3184,21 +3144,18 @@ HasStatic   = :script(~~
             if (hasOwn(jCmpOps, op) || op == "==" || op == "!=") { return jCmp(op, l, r) }
         }
         // An `undefined` operand is not a Java value at all - it is what a read past
-        // the end of an array answers in this engine, where java 24.0.2 throws
+        // the end of an array answers in this engine, where java throws
         // ArrayIndexOutOfBoundsException. BOTH compiled halves read it as NaN
-        // (rtjNum in lib/runtime-jvm.metajs, rt.toNumber in abnf/jsrt.go); this half
-        // reached the host's own `+` and answered `a[5] + 1 == 1`. That was a live
-        // halves divergence --cross had never reached, and it is the java half of
-        // docs/todo.md 1.2. The string form is left alone: "x" + a[5] renders "null"
-        // in all three engines already.
+        // (rtjNum in lib/runtime.metajs, rt.toNumber in abnf/jsrt.go), so this half
+        // does too rather than reaching the host's own `+`. The string form is left
+        // alone: "x" + a[5] renders "null" in all three engines already.
         //
-        // `+` ONLY, and that is measured rather than tidy. `+` is the one operator
-        // whose compiled path reads the operand as a DOUBLE; `-` `*` `/` `%` and the
-        // relations go through the integral path, which answers 0 / false outright
-        // for an operand that is not integral - so both compiled halves say
-        // `1 - a[5] == 0` and `!(a[5] < 1)`, and so does this one. Widening this arm
-        // past `+` was tried and made the interpreter the odd one out in the other
-        // direction. tests/java-test-full.java SECTION 34 pins all of them.
+        // `+` ONLY, on purpose. `+` is the one operator whose compiled path reads
+        // the operand as a DOUBLE; `-` `*` `/` `%` and the relations go through the
+        // integral path, which answers 0 / false outright for an operand that is
+        // not integral - so both compiled halves say `1 - a[5] == 0` and
+        // `!(a[5] < 1)`, and so does this one. tests/java-test-full.java SECTION 34
+        // pins all of them.
         if (l === undefined || r === undefined) {
             if (op == "+" && typeof l != "string" && typeof r != "string") { return 0 / jZeroF }
         }
@@ -3438,8 +3395,6 @@ HasStatic   = :script(~~
             return jAllocArr(ns, 0, leaf)
         }
     }
-    // An anonymous class is not lowered; evaluate the constructor arguments (so their
-    // calls stay visible) and yield undefined.
     // new Type(args) { members } - an anonymous subclass. The class is built on
     // first evaluation (its supertype must already exist) and then reused, so a
     // lambda-like anonymous class inside a loop does not rebuild per iteration.
@@ -3465,10 +3420,10 @@ HasStatic   = :script(~~
             // An anonymous class body names the enclosing instance's fields
             // unqualified and reads `Outer.this`, so the instance records it -
             // unconditionally, because an anonymous class is ALWAYS enclosed.
-            // __cscope is the DEFINING scope chain (docs/todo.md 1.5): the body
-            // may also name a local or parameter of the ENCLOSING METHOD, which
-            // no field walk can reach. jOuterOwner reads it, and its comment has
-            // the precedence rule.
+            // __cscope is the DEFINING scope chain: the body may also name a
+            // local or parameter of the ENCLOSING METHOD, which no field walk
+            // can reach. jOuterOwner reads it, and its comment has the
+            // precedence rule.
             var obj = {__class: built, __outer: jEnclSelf(), __cscope: scopes.slice(0)}
             var argv = []
             for (var a = 0; a < args.length; a++) { argv.push(args[a]()) }
@@ -3476,7 +3431,6 @@ HasStatic   = :script(~~
             return obj
         }
     }
-    // A cast is identity: (Type) expr evaluates to expr.
     // (Type) expr. A (char) cast BOXES its operand back into a char (that is what
     // makes (char)(c + 1) == 'c' work); the integral casts truncate to int32 the way
     // Java does; every other cast, reference casts included, is the identity.
@@ -3526,7 +3480,7 @@ HasStatic   = :script(~~
     // A method reference Recv::m -> a closure that forwards its arguments to
     // mcall(Recv, "m", args). Static (Class::m), bound (obj::m) and unbound
     // (Type::m, the receiver is the first argument) all work, because mcall picks
-    // the this-binding from the receiver kind. ::new is not modelled.
+    // the this-binding from the receiver kind.
     function makeMethodRef(text, pos) {
         var sep = text.indexOf("::")
         var tgtPath = jStripTargs(text.slice(0, sep))
@@ -3689,8 +3643,8 @@ HasStatic   = :script(~~
         }
     }
     function jExcGetMessage() { return arguments[0].message }
-    // THE PACKAGE-QUALIFIED (binary) NAME of a built-in Throwable. Measured against
-    // java 24.0.2: `new RuntimeException("x").getClass().getName()` is
+    // THE PACKAGE-QUALIFIED (binary) NAME of a built-in Throwable: in java 24.0.2
+    // `new RuntimeException("x").getClass().getName()` is
     // "java.lang.RuntimeException", and Throwable#toString - which is what the
     // launcher's uncaught-exception line prints - spells the same name. Only
     // IOException of the names jExcTree lists lives outside java.lang.
@@ -3733,8 +3687,8 @@ HasStatic   = :script(~~
     for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
         jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])
     }
-    // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE. Measured, java 24.0.2, on stderr,
-    // exit status 1:
+    // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE. java 24.0.2, on stderr, exit
+    // status 1:
     //
     //     Exception in thread "main" java.lang.RuntimeException: abort probe
     //     Exception in thread "main" P2$MyExc: custom msg
@@ -3744,9 +3698,6 @@ HasStatic   = :script(~~
     // i.e. the fixed prefix plus Throwable#toString, which is the BINARY class name
     // and, only when getMessage() is non-null, ": " and the message. An empty
     // message still prints the colon and the space; a null one prints neither.
-    // All three engines printed "uncaught exception: [object Object]" before this -
-    // the defect class chapter 5 names, where engine-vs-engine byte identity is
-    // blind by construction and only an oracle can see it. docs/todo.md 1.14.
     //
     // WHAT IS DELIBERATELY NOT REPRODUCED: the "\tat Main.main(Main.java:4)" frames
     // that follow. This engine has no call-site line table (the same wall as dart's
@@ -3814,7 +3765,6 @@ HasStatic   = :script(~~
         var bodyT = items[1]
         return function() { lockT(); return bodyT() }
     }
-    // label: stmt -- not implemented; the label is dropped and the statement still runs.
     // A labeled statement: the wrapper offers its name via pendingLabel right
     // before running the inner thunk - the loop consumes it on entry, so only
     // the directly labeled loop takes the name (an inner loop sees null). A
@@ -4185,7 +4135,7 @@ HasStatic   = :script(~~
     // enclosing CtorBody lifts it out, and makeCtorClosure decides what it means.
     // NOTE the unique name: two `function` declarations sharing a name inside this
     // script silently rebind TAGS to the wrong productions (a Method node then runs
-    // the Ctor tag), which is a very long afternoon to debug. Keep names unique.
+    // the Ctor tag). Keep names unique.
     function makeCtorHead(items) {
         var which = items[0].cwhich
         var args = items.slice(1)
@@ -4202,12 +4152,9 @@ HasStatic   = :script(~~
         var i
         for (i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
         // `var dflt = anytype` and NOT `var dflt = 0`, because MetaJS is TYPED and
-        // a local keeps the type of its first value: the plain spelling aborted the
-        // whole program on `boolean f = true;` with "variable 'dflt' has type
-        // number and cannot hold a boolean" - UNDER -frozen ONLY, so goja was
-        // green and every gate agreed with it. It was reachable at 15af058 and
-        // reproduced there; nothing under tests/ declared a boolean FIELD, which
-        // is the only reason it was never seen.
+        // a local keeps the type of its first value: the plain spelling aborts
+        // `boolean f = true;` with "variable 'dflt' has type number and cannot
+        // hold a boolean" - under -frozen only.
         var dflt = anytype
         dflt = 0
         if (ty == "boolean") dflt = false
@@ -4225,7 +4172,6 @@ HasStatic   = :script(~~
         return function() { return jTypeAdopt(initT(), ty) }
     }
 
-    // Runs a method body with a fresh scope: params bound, this bound for instance methods.
     // Builds one class descriptor from its members. Shared by class, record,
     // interface, enum, nested/local/anonymous declarations - they differ only in
     // which members they hand in and in the extra pieces bolted on afterwards.
@@ -4391,29 +4337,23 @@ HasStatic   = :script(~~
             return undefined
         }
     }
-    // ONE component of a record's canonical equals, per JLS 8.10.3. Every value
-    // this language has a box for used to fall off the end of this function and
-    // answer FALSE for two equal values - a double, a float, a long, a byte and a
-    // short all did, measured against java 24.0.2 - because identity is the only
-    // test a box passes. The three arms are the twin of js_jvaleq
-    // (abnf/jsrtjava.go and languages/lib/java-rt.metajs):
+    // ONE component of a record's canonical equals, per JLS 8.10.3. Identity is
+    // the only test a box passes, so it cannot be ===. The three arms are the twin
+    // of js_jvaleq (abnf/jsrtjava.go and languages/lib/java-rt.metajs):
     //   - a double / float component compares with Double.compare(a,b)==0, so NaN
     //     EQUALS NaN and +0.0 does NOT equal -0.0 (both the opposite of ===);
     //   - the other primitives compare by value, chars and longs included;
     //   - a reference compares with Objects.equals, i.e. identity and then the
-    //     component's OWN equals. That is a DISPATCH, so a nested record still
-    //     recurses (this half always got that one case right, through the arm
-    //     that used to walk __record here) and a class with a user-declared
-    //     equals now uses it, which no engine did.
+    //     component's OWN equals. That is a DISPATCH, so a nested record
+    //     recurses and a class with a user-declared equals uses it.
     function jValEq(a, b) {
         // TWO PRIMITIVES OF DIFFERENT KINDS ARE NEVER EQUAL. Integer#equals asks
         // `instanceof Integer` before it compares, so ((Object) 1).equals(1L) is
-        // false. This half got every cross-kind pair right by accident EXCEPT
-        // Float vs Double, which the arm below compared as two doubles; the twins
-        // are jvEqKind in abnf/jsrtjava.go and languages/lib/java-rt.metajs, where
-        // the guard is load-bearing for more pairs. Only PRIMITIVES are screened -
-        // kind 0 (an instance, an array, null) must still reach the dispatch, so a
-        // declared equals(Object) can compare against a String.
+        // false - and Float vs Double would otherwise compare as two doubles. The
+        // twins are jvEqKind in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+        // Only PRIMITIVES are screened - kind 0 (an instance, an array, null) must
+        // still reach the dispatch, so a declared equals(Object) can compare
+        // against a String.
         var ka = jEqKind(a)
         var kb = jEqKind(b)
         if (ka != 0 && kb != 0 && ka != kb) { return false }
@@ -4466,11 +4406,10 @@ HasStatic   = :script(~~
     //
     // The record COMBINATION pinned here is OpenJDK's - the one
     // java.lang.runtime.ObjectMethods generates - h = 0, then h = h*31 +
-    // hash(component) per component at int width. MEASURED against java 24.0.2
-    // rather than assumed. Something has to be pinned, because three engines must
-    // agree and the invariant that must hold does not choose a value. The twins
-    // are rt.jvHash (abnf/jsrtjava.go) and js_jhash (languages/lib/java-rt.metajs),
-    // arm for arm.
+    // hash(component) per component at int width (checked against java 24.0.2).
+    // Something has to be pinned, because three engines must agree and the
+    // invariant that must hold does not choose a value. The twins are rt.jvHash
+    // (abnf/jsrtjava.go) and js_jhash (languages/lib/java-rt.metajs), arm for arm.
     function jHash(v) {
         if (v === undefined || v === null) { return 0 }
         if (v === true) { return 1231 }
@@ -4542,7 +4481,7 @@ HasStatic   = :script(~~
         return {hi: sign + biased * 1048576 + hi32, lo: mant - hi32 * 4294967296}
     }
     // floatToIntBits of a value that is ALREADY binary32 (a float box holds the
-    // rounded value, since 8f43e84), as a signed 32-bit number.
+    // rounded value), as a signed 32-bit number.
     function jFloatBits(d) {
         if (d !== d) { return 2143289344 - 4294967296 }   // 0x7fc00000, signed
         var sign = jZeroNeg(d) ? 2147483648 : 0
@@ -4921,8 +4860,6 @@ HasStatic   = :script(~~
             fail("no enclosing instance of " + nm)
         }
     }
-    // o.new Inner(args) - a qualified creation: the new instance records o as
-    // its enclosing instance, which is what Outer.this then finds.
     // The target of an assignment whose root is an arbitrary primary. The value
     // it returns is an ordinary target record with a `base` thunk in place of a
     // variable name; the resolveRef override below is what reads that thunk.
@@ -4938,6 +4875,8 @@ HasStatic   = :script(~~
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
     }
+    // o.new Inner(args) - a qualified creation: the new instance records o as
+    // its enclosing instance, which is what Outer.this then finds.
     function makeQNewSfx(items) {
         var qargs = []
         var qmembers = []
@@ -5019,9 +4958,9 @@ HasStatic   = :script(~~
         var last = ref.path[ref.path.length - 1]
         if (o === undefined || o === null) fail(core.nullWord + " in assignment path")
         if (last.key != undefined) { return {obj: o, key: last.key} }
-        // The WRITE half of the bounds check. `a[3] = 5` on an int[3] used to GROW
-        // the array here (and in both compiled halves); java throws. Every writer -
-        // makeAssign, makeIncDec, makePreIncDec - goes through this one place.
+        // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws
+        // rather than growing the array. Every writer - makeAssign, makeIncDec,
+        // makePreIncDec - goes through this one place.
         var ki = last.idx()
         if (Array.isArray(o)) { return {obj: o, key: jArrIdx(o, ki)} }
         return {obj: o, key: ki}
@@ -5035,9 +4974,8 @@ HasStatic   = :script(~~
         return undefined
     }
     // `a[i]` on an array is bounds-checked (jArrIdx). A null reference throws
-    // NullPointerException rather than reaching hasOwn, which used to abort the
-    // whole run with the HOST's "Cannot convert undefined or null to object" -
-    // uncatchable, and reachable from `m[3][0]` on any int[2][3].
+    // NullPointerException rather than reaching hasOwn, which would abort the
+    // whole run with the HOST's error (reachable from `m[3][0]` on any int[2][3]).
     core.getIndex = function(o, i) {
         if (Array.isArray(o)) { return o[jArrIdx(o, i)] }
         if (o === undefined || o === null) { jThrowExc("NullPointerException", null) }
@@ -5047,11 +4985,8 @@ HasStatic   = :script(~~
 
     // ----- unqualified instance / static field access -----
     //
-    // `class P { int w = 3; int get() { return w; } }` is ordinary Java, and this
-    // half used to abort on it with "unknown name: w" (the compiler half said
-    // "variable not defined: w"). Only `this.w` worked, and every class in
-    // tests/java-test-*.java writes `this.w`, which is why 6,258 assertions never
-    // reached it.
+    // `class P { int w = 3; int get() { return w; } }`: a bare name that is no
+    // local resolves to a field of the enclosing class.
     //
     // A LOCAL OR PARAMETER OF THE SAME NAME SHADOWS THE FIELD. That falls out for
     // free here: interp-core's getVar/setVar walk the whole scope chain first and
@@ -5101,9 +5036,9 @@ HasStatic   = :script(~~
     // statics of this' class chain, then __outer, and out. The < 64 cap is the one
     // chapter 7.9 of the manual keeps on every such walk here.
     //
-    // The twins are jOuterOwner in languages/lib/java-rt.metajs and rt.jvOuterOwner
-    // in abnf/jsrtjava.go, both reached through the js_jouter extern; this half
-    // needs no extern because it holds the objects directly.
+    // The twins are js_jouter in languages/lib/java-rt.metajs and m["js_jouter"]
+    // in abnf/jsrtjava.go; this half needs no extern because it holds the
+    // objects directly.
     function jOuterOwner(self, name) {
         var v = anytype // Walks from an instance to its enclosing instance, and off the end.
         v = self
@@ -5112,11 +5047,11 @@ HasStatic   = :script(~~
             if (hasOwn(v, name)) { return v }
             var st = jStaticOwner(v.__class, name)
             if (st != null) { return st }
-            // docs/todo.md 1.5. Between an instance's own members and its ENCLOSING
-            // instance's members sits the enclosing METHOD's scope: an anonymous
-            // class body is lexically INSIDE that method, so a local or parameter
-            // there shadows a field of the enclosing class. Measured against java
-            // 24.0.2 - `Sup f(int fld) { return new Sup(){ ... fld ... }; }` inside a
+            // Between an instance's own members and its ENCLOSING instance's
+            // members sits the enclosing METHOD's scope: an anonymous class body
+            // is lexically INSIDE that method, so a local or parameter there
+            // shadows a field of the enclosing class. In java 24.0.2,
+            // `Sup f(int fld) { return new Sup(){ ... fld ... }; }` inside a
             // class that also declares `int fld` answers the PARAMETER, while
             // `Outer.this.fld` still answers the field. Only an anonymous instance
             // carries __cscope (makeNewAnon / jNewInnerAnon); for every other object
@@ -5133,7 +5068,7 @@ HasStatic   = :script(~~
     }
     // The object an unqualified `name` reads/writes through, or null when the name
     // is not a field of the enclosing type at all (getVar then goes on to
-    // hostGlobals and its own error, exactly as before).
+    // hostGlobals and its own error).
     function jSelfWith(name) {
         var sc = scopes
         for (var i = sc.length - 1; i >= 0; i--) {
@@ -5146,13 +5081,12 @@ HasStatic   = :script(~~
         }
         return null
     }
-    // ----- a field whose name equals a TYPE's (docs/todo.md 2.9) -----
+    // ----- a field whose name equals a TYPE's -----
     //
-    // `class Ctr { int Ctr = 7; int f() { return Ctr; } }` answered `class Ctr` in
-    // every engine here: the class descriptor is declared in the same scope chain
-    // the bare name reads, and it is found there before varMiss is ever consulted.
-    // JLS 6.4.2 says the opposite - a variable name OBSCURES a type name - so the
-    // field wins wherever it is in scope.
+    // `class Ctr { int Ctr = 7; int f() { return Ctr; } }`: the class descriptor
+    // is declared in the same scope chain the bare name reads, and it is found
+    // there before varMiss is ever consulted. JLS 6.4.2 says a variable name
+    // OBSCURES a type name, so the field wins wherever it is in scope.
     //
     // The test costs one typeof per variable read and nothing else: the field is
     // only looked for once the scope walk has ALREADY answered a class descriptor,
@@ -5251,11 +5185,8 @@ HasStatic   = :script(~~
     if (entry == undefined || entry == "") { entry = "main" }
     // A user exception that escapes the entry point is reported the way the java
     // LAUNCHER reports it - "Exception in thread "main" java.lang.RuntimeException:
-    // abort probe", on stderr, exit status 1 - and no longer as an engine error
-    // ("java interpreter error: uncaught exception: [object Object]", which was also
-    // on STDOUT here while both compiled halves put it on stderr). js_jvtop of
+    // abort probe", on stderr, exit status 1. js_jvtop of
     // languages/lib/java-rt.metajs and of abnf/jsrtjvm.go are the twins.
-    // docs/todo.md 1.14.
     function jReportUncaught(v) {
         eprintln(jExcTopLine(v))
         exit(1)

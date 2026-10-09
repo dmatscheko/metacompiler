@@ -135,10 +135,8 @@ class S03 {
         switch (c) { case 'b': hit = 1; break; default: hit = 2; }
         Main.check("chr6", hit == 1 && "abc".charAt(1) == 'b');
         Main.check("chr7", "A\102".equals("AB") && "a\tb".length() == 3);
-        // char is an INTEGRAL type that PRINTS as its glyph, and the two halves used
-        // to disagree about which of the two it is: the interpreter concatenated
-        // 'a' as 97, and the compiler answered a one-character String from charAt,
-        // so charAt(1) + 0 was "e0" instead of 101 (JLS 4.2.1, 15.18.1).
+        // char is an INTEGRAL type that PRINTS as its glyph: "x" + c concatenates
+        // the glyph, and charAt(1) + 0 is 101, not "e0" (JLS 4.2.1, 15.18.1).
         Main.check("chr8", ("x" + c).equals("xb") && ("" + 'q').equals("q"));
         String hi = "hello";
         Main.check("chr9", hi.charAt(1) + 0 == 101 && hi.charAt(1) == 'e');
@@ -365,11 +363,10 @@ record Named(String name) {
 }
 record Pair2<T>(T first, T second) {}
 record Glyph(char c, int n) {}
-// The component types the generated equals used to compare with ===, and the
-// three shapes that answers wrongly: a floating-point component (Double.compare,
-// not ==), a boxed integral one (a long is a box at every magnitude, so identity
-// answered false for two equal values in the interpreter half) and a REFERENCE
-// one (Objects.equals dispatches the component's own equals).
+// The component types the generated equals cannot compare with ===: a
+// floating-point component (Double.compare, not ==), a boxed integral one (a long
+// is a box at every magnitude) and a REFERENCE one (Objects.equals dispatches the
+// component's own equals).
 record RNum(double d, float f) {}
 record RWide(long l, byte b, short s) {}
 record Inner12(int a) {}
@@ -403,19 +400,17 @@ class S12 {
         Main.check("rec5", n.name().equals("Mr. x"));
         Pair2<String> p = new Pair2<>("a", "b");
         Main.check("rec6", (p.first() + p.second()).equals("ab"));
-        // A CHAR record component. The generated equals compared components with
-        // js_seq, and a char is the one shape === answers differently in the two
-        // engines: the Go twin's char is a comparable struct, layer 2's is a
-        // {__char} box that === settles by identity. So this held in llvm.Run and
-        // in the interpreter half and FAILED in the native binary. Every operand is
-        // read out of an array so the grammar's constant folder cannot answer it.
+        // A CHAR record component. A char is the one shape === answers differently
+        // in the engines: the Go twin's char is a comparable struct, layer 2's is a
+        // {__char} box that === settles by identity. Every operand is read out of
+        // an array so the grammar's constant folder cannot answer it.
         char[] gs = {'q', 'q', 'r'};
         int[] gn = {5, 5, 6};
         Main.check("rec7", new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[1])));
         Main.check("rec8", !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[2], gn[1]))
                         && !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[2])));
-        // The rest of JLS 8.10.3, all of it measured against java 24.0.2 and all
-        // of it wrong before js_jvaleq. Every operand is read out of an array.
+        // The rest of JLS 8.10.3, checked against java 24.0.2. Every operand is
+        // read out of an array.
         //
         // A double / float component is Double.compare(a,b)==0, which === is NOT
         // in either direction: NaN equals NaN, and +0.0 does not equal -0.0.
@@ -427,9 +422,8 @@ class S12 {
         Main.check("rec10", !new RNum(dz[0], fz[2]).equals(new RNum(dz[1], fz[3]))
                         && !new RNum(dz[2], fz[0]).equals(new RNum(dz[3], fz[1]))
                         && new RNum(dz[2], fz[2]).equals(new RNum(dz[3], fz[3])));
-        // long / byte / short are BOXES here, so identity said two equal values
-        // were unequal - in the interpreter half only, which is why --cross saw it
-        // and the two compiler engines did not.
+        // long / byte / short are BOXES here, so identity would call two equal
+        // values unequal.
         long[] lz = {5000000000L, 5000000000L, 5000000001L};
         byte[] bz = {7, 7, 8};
         short[] sz = {300, 300, 301};
@@ -438,8 +432,7 @@ class S12 {
                         && !new RWide(lz[0], bz[2], sz[0]).equals(new RWide(lz[0], bz[0], sz[0]))
                         && !new RWide(lz[0], bz[0], sz[2]).equals(new RWide(lz[0], bz[0], sz[0])));
         // A reference component is Objects.equals: a nested record compares
-        // component-wise and a user-declared equals is CALLED, where identity had
-        // both answering false in the two compiler engines.
+        // component-wise and a user-declared equals is CALLED.
         int[] iz = {3, 3, 4};
         Inner12[] inz = {new Inner12(iz[0]), new Inner12(iz[1]), new Inner12(iz[2])};
         Main.check("rec13", new Outer12(inz[0]).equals(new Outer12(inz[1]))
@@ -458,8 +451,7 @@ class S12 {
         Main.check("rec16", new RArr(az[0]).equals(new RArr(az[0]))
                         && !new RArr(az[0]).equals(new RArr(az[1])));
         // equals takes an Object, so equals(null) is a legal call that answers
-        // false. Reading __class off it ABORTED the whole program in both
-        // compiler engines.
+        // false (it must not read __class off the null).
         Main.check("rec17", !new Outer12(inz[0]).equals(null)
                         && !new Outer12(inz[0]).equals("x")
                         && new Outer12(null).equals(new Outer12(null)));
@@ -824,10 +816,8 @@ class S22 {
 
 // ===== SECTION 23: floating point arithmetic =====
 // double/float are a DIFFERENT type from int, and every value below was checked
-// against `java` (JDK 24) before it was written down. The whole section exists
-// because both grammars used to evaluate every arithmetic operator in 32 bit
-// integers: 1.0 / 3.0 was 0, 2.5 * 1.5 was 3, println(1.0) printed "1" and
-// Infinity / NaN / -0.0 did not exist at all.
+// against `java` (JDK 24) before it was written down: 1.0 / 3.0 is not 0,
+// println(1.0) prints "1.0", and Infinity / NaN / -0.0 exist.
 class S23 {
     static String s(double d) { return "" + d; }
     static String f(float v) { return "" + v; }
@@ -854,13 +844,7 @@ class S23 {
         Main.check("flt9", S23.s(inf).equals("Infinity") && S23.s(-1.0 / 0.0).equals("-Infinity"));
         Main.check("flt10", S23.s(nan).equals("NaN") && nan != nan);
         // JLS 15.20.1: if either operand is NaN then <, <=, > and >= are ALL
-        // false. Both halves got this wrong, in DIFFERENT directions, and until
-        // these four lines nothing in the suite asked. The Go twin took the
-        // sentinel 2 that jsCompare answers for a NaN and read it as an ordering,
-        // so `>` and `>=` were true; layer 2's own copy of jsCompare dropped the
-        // sentinel and answered 0, so `<=` and `>=` were true. The same defect
-        // was found and fixed for C# in Part A of docs/runtime-merge-plan.md;
-        // java is its twin and was not looked at.
+        // false. (jsCompare's NaN sentinel 2 must not be read as an ordering.)
         Main.check("flt10a", !(nan < 1.0) && !(nan > 1.0) && !(nan <= 1.0) && !(nan >= 1.0));
         Main.check("flt10b", !(1.0 < nan) && !(1.0 > nan) && !(1.0 <= nan) && !(1.0 >= nan));
         Main.check("flt10c", !(nan <= nan) && !(nan >= nan) && !(nan < nan) && !(nan > nan));
@@ -868,14 +852,8 @@ class S23 {
         Main.check("flt10d", !(fnan >= 1.0f) && !(fnan <= 1.0f) && !(fnan > 1.0f) && !(fnan < 1.0f));
         // JLS 15.21.1: == between two numeric operands applies binary numeric
         // promotion (5.6.2) first, so a long is compared against a double AS a
-        // double. Both COMPILER halves answered false - floEq (the floor's
-        // jf_num_eq, the twin's jvmNumEq) had no sized-integer arm and a comment
-        // at three sites called that deliberate - while both INTERPRETER halves
-        // answered true. Nothing in the suite had ever compared a long to a
-        // double, so --cross could not see it either. Found by the shape merge of
-        // java's and csharp's strict equality into lib/runtime-jvm.metajs, and
-        // confirmed against real java 24.0.2. The operands come out of arrays so
-        // the constant folder cannot answer at compile time.
+        // double (java 24.0.2 agrees). The operands come out of arrays so the
+        // constant folder cannot answer at compile time.
         long[] lz = {0L, 3L, 9007199254740993L};
         double[] dz = {0.0, 3.0, 9007199254740992.0};
         Main.check("flt10e", lz[0] == dz[0] && lz[1] == dz[1] && !(lz[0] != dz[0]));
@@ -917,10 +895,10 @@ class S23 {
         // A d/D suffix is a double; an f/F suffix is a FLOAT (see below).
         float f = 3;
         Main.check("flt28", f / 2 == 1.5 && 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
-        // ----- the float WIDTH (todo.md 1.2) -----
+        // ----- the float WIDTH -----
         // `float` is a binary32, not a double spelled differently. Every value
-        // below was read off `java` 24.0.2 before it was written down; the whole
-        // block used to answer the DOUBLE result, so each line discriminates.
+        // below was read off `java` 24.0.2 before it was written down; each line
+        // discriminates the float result from the double one.
         Main.check("flt29", 1.0f / 3.0f == 0.33333334f && 1.0f / 3.0f != 1.0 / 3.0);
         Main.check("flt30", S23.f(1.0f / 3.0f).equals("0.33333334"));
         Main.check("flt31", S23.f(0.1f + 0.2f).equals("0.3") && S23.s(0.1f + 0.2).equals("0.30000000149011613"));
@@ -966,11 +944,7 @@ class S23 {
 // Checked against `java` (JDK 24) before it was written down. The identity hash
 // after the '@' is deliberately NOT asserted - real java prints
 // System.identityHashCode, which differs between two runs of the SAME program,
-// so only the class-name prefix is reproducible. The section exists because the
-// compiler half used to hand the raw runtime value to Go's formatter (<nil> for
-// null, [1 2 3] for an array, a pointer-bearing map dump for an instance) while
-// the interpreter half fell through to JavaScript's ToString ("1,2,3",
-// "Box@obj"), and neither printed what java prints.
+// so only the class-name prefix is reproducible.
 class S24 {
     static class Box { int x; }
     static class Shown { public String toString() { return "NAMED"; } }
@@ -1022,12 +996,6 @@ class S24 {
 // .java file under `java` (JDK 24) BEFORE it was written down, and the whole
 // ratchet file is itself a valid Java program - so `java tests/java-test-full.java`
 // prints the same summary line both grammar halves print.
-//
-// The area used to be simply absent: Integer.MAX_VALUE was an undefined
-// variable, `long` was a 32 bit int (1L << 40 answered 256), Long.MAX_VALUE
-// could not even be spelled because a double rounds 9223372036854775807 to
-// 9223372036854776000 - and the two script engines rounded it DIFFERENTLY, so
-// the goja and -frozen runs of the same program disagreed.
 class S25 {
     static int overflow(int x) { return x + 1; }
     static long lid(long x) { return x; }
@@ -1165,13 +1133,7 @@ class S25 {
         Main.check("int58", ("" + (Long.MAX_VALUE - 1)).equals("9223372036854775806"));
 
         // ----- Math.abs is OVERLOADED, and abs(long) answers a LONG -----
-        // Every engine took the int overload's 32 bit wrap for a long argument, so
-        // Math.abs(3000000000L) was -1294967296 and Math.abs(Long.MAX_VALUE) was 0
-        // (the interpreter answered 0 for EVERY long, its `v < 0` reading a box).
-        // All three agreed with each other, which is why the ratchet had no
-        // assertion here and neither --cross nor the byte-identity matrix could
-        // see it. 20 of the 26 lines on which our java differed from java 24 over
-        // the whole long surface were this one cause.
+        // (A long must not take the int overload's 32 bit wrap.)
         Main.check("int59", Math.abs(3000000000L) == 3000000000L && Math.abs(-3000000000L) == 3000000000L);
         Main.check("int60", Math.abs(Long.MAX_VALUE) == Long.MAX_VALUE && Math.abs(-1L) == 1L);
         // JLS 15.15.4: there is no positive long of MIN_VALUE's magnitude, so
@@ -1286,9 +1248,8 @@ class S26 {
 // ===== SECTION 29: unqualified instance and static field access =====
 // A member body may name a field WITHOUT `this.` / `Cls.`, and a local or a
 // parameter of the same name shadows it (JLS 6.5.6.1, 15.11). Every class in
-// this file's other sections spells `this.w`, which is exactly why nothing here
-// reached the bare form - both java halves aborted on it, with `unknown name: w`
-// and `variable not defined: w`, while javac printed the field.
+// this file's other sections spells `this.w`, so this section is the one that
+// reaches the bare form.
 
 interface K29 { int LIM = 42; default int lim() { return LIM; } }
 
@@ -1634,8 +1595,8 @@ class S27 {
 // characters. The escape may also produce a raw CONTROL character, which is a
 // legal string / char character (JStrPlain, CharPlain).
 // Java's own escape set (JLS 3.10.7) carries the octal escapes and \s, which
-// the shared unescapeJs does not know - both halves decode them with jUnescape
-// now. `{,}` is javac's single-comma array initializer, and `case 3, 4:` is a
+// the shared unescapeJs does not know - both halves decode them with jUnescape.
+// `{,}` is javac's single-comma array initializer, and `case 3, 4:` is a
 // colon case with stacked labels, which falls through into the next one.
 // Verified against OpenJDK 24.0.2: javac -XDshould-stop.ifNoError=PARSE exits 0
 // and `java` prints 15 of the checks below with 0 failures.
@@ -1692,7 +1653,7 @@ class S28 {
 
 // ===== SECTION 31: Object#toString and Object#equals =====
 // The other two members of the java.lang.Object contract a class inherits
-// WITHOUT declaring - the same gap hashCode had until 77eb804. A declared or
+// WITHOUT declaring. A declared or
 // inherited method wins; then a record's canonical form (JLS 8.10.3, which DOES
 // specify both of these exactly, unlike the hashCode combination); then Object's
 // own: identity for equals, and getClass().getName() + "@" +
@@ -1791,8 +1752,7 @@ class S31 {
         // ----- two PRIMITIVES OF DIFFERENT KINDS are never equal -----
         // Integer#equals asks `instanceof Integer` before it compares, so
         // ((Object) 1).equals(1L) is false - where a by-value comparison would
-        // say true. This was a live halves divergence the moment Object#equals
-        // started routing through the record-component comparison.
+        // say true.
         Object[] prims = { (Object) 1, (Object) 1L, (Object) 1.0, (Object) 1.0f,
                            (Object) 'a', (Object) true, "1" };
         Main.check("eq18", prims[0].equals(prims[0]) && !prims[0].equals(prims[1]));
@@ -1807,7 +1767,7 @@ class S31 {
         // guard screens primitives only, never an instance.
         Main.check("eq24", !new Eq31(1).equals(prims[6]));
 
-        // ----- the equals / hashCode contract, over the pair 77eb804 opened -----
+        // ----- the equals / hashCode contract -----
         Main.check("eq16", recs[0].equals(recs[1]) && recs[0].hashCode() == recs[1].hashCode());
         Main.check("eq17", plains[0].equals(plains[0]) && plains[0].hashCode() == plains[0].hashCode());
     }
@@ -1817,8 +1777,8 @@ class S31 {
 // javac resolves an unqualified name in an inner or anonymous class body against
 // the innermost ENCLOSING class that declares it (JLS 6.5.6.1), which needs the
 // enclosing instance at run time. Every creation site of a nested or anonymous
-// class now records it, and `Outer.this` walks the same chain - correctly at more
-// than one level, which one unconditional hop was not.
+// class records it, and `Outer.this` walks the same chain - correctly at more
+// than one level.
 
 interface Sup32 { int get(); }
 
@@ -1869,7 +1829,7 @@ class S32 {
         // implicitly, exactly as `o.new In32()` does.
         Main.check("oc8", o.viaBareNew() == 42);
 
-        // TWO levels out - the case one unconditional __outer hop got wrong.
+        // TWO levels out - one unconditional __outer hop would get this wrong.
         Out32.In32.Deep32[] deeps = { ins[0].new Deep32() };
         Main.check("oc9", deeps[0].twoLevels() == 45);
         Main.check("oc10", deeps[0].deepOuterThis() == 46);
@@ -1894,11 +1854,10 @@ class S32 {
 }
 
 // ===== SECTION 33: a field whose name equals a type's =====
-// JLS 6.4.2: a variable name OBSCURES a type name. Every engine here answered the
-// CLASS DESCRIPTOR for `Ctr33` inside Ctr33's own methods, because the descriptor
-// is declared in the same scope chain the bare name reads. The controls below are
-// what a wrong fix breaks: a bare type name used where NO field of that name is in
-// scope must still be the type.
+// JLS 6.4.2: a variable name OBSCURES a type name, even though the class
+// descriptor is declared in the same scope chain the bare name reads. The
+// controls below are what a wrong fix breaks: a bare type name used where NO
+// field of that name is in scope must still be the type.
 
 class Ctr33 {
     int Ctr33 = 7;
@@ -1941,29 +1900,13 @@ class S33 {
 // ===== SECTION 34: Integer/Long.toHexString, Double.NaN, Boolean.valueOf, and
 // the double reading of a value that is not one =====
 //
-// docs/todo.md 1.10 (the java bullets) and 1.2. Every value in the first three
-// groups was EXECUTED against `java` 24.0.2 on this machine, so they are oracle
-// values and not spec citations.
+// Every value in the first three groups was EXECUTED against `java` 24.0.2, so
+// they are oracle values and not spec citations. java.lang.Integer#toHexString
+// is the UNSIGNED reading at the value's own width, which is why -1 is
+// "ffffffff" and not "-1".
 //
-// WHAT WAS BROKEN. Integer.toHexString, Long.toHexString, Double.NaN,
-// Boolean.valueOf and Boolean.parseBoolean did not exist in ANY of the four
-// engines: the descriptors java.lang.Integer / Long carried no toHexString at all
-// and java.lang.Double / Boolean were not descriptors, so the program aborted with
-// "unknown method 'toHexString'" / "unknown class". java.lang.Integer#toHexString
-// is the UNSIGNED reading at the value's own width, which is why -1 is "ffffffff"
-// and not "-1".
-//
-// THE LAST GROUP IS docs/todo.md 1.2 AND IT IS NOT JAVA'S ANSWER. A read past the
-// end of an array throws ArrayIndexOutOfBoundsException in real java; this engine
-// answers `undefined`, and the three engines then DISAGREED about what that is
-// worth in arithmetic - the interpreter said `a[5] + 1 == 1`, llvm.Run said NaN,
-// and the native binary said 1. rtjNum (languages/lib/runtime-jvm.metajs) now
-// reads it as NaN in layer 2, which is what abnf/jsrt.go's rt.toNumber always
-// answered, and java-interpreter.abnf's binOp agrees. The value asserted here is
-// therefore ENGINE BEHAVIOUR, deliberately, and the point of asserting it is that
-// all four engines say the same thing. `-` `*` `/` `%` `<` `>` reach jvLow32
-// instead of rtjNum and read the same operand as 0, in all four engines; those are
-// asserted too, so a future widening of the NaN arm cannot pass silently.
+// The last group: a read or write past the end of an array THROWS, with java's
+// own message.
 //
 // Every operand is read out of an ARRAY so no constant folder can answer early.
 class S34 {
@@ -2000,15 +1943,8 @@ class S34 {
         Main.check("bv6", !Boolean.parseBoolean(w[2]));
         Main.check("bv7", Boolean.TRUE && !Boolean.FALSE);
 
-        // ----- docs/todo.md 1.2: OUT OF BOUNDS THROWS, in all four engines.
-        //
-        // This group USED to assert the opposite - that a read past the end
-        // answered `undefined`, read as NaN in arithmetic - because converging the
-        // VALUE was the cheap half of the fix and all four engines agreed on it.
-        // They now throw, which is java's actual answer, and every message below is
-        // java 24.0.2's own text, diffed against the real toolchain four ways with
-        // tests/probe.sh. The whole group is therefore an ORACLE test now, not an
-        // engine-behaviour test: `java tests/java-test-full.java` runs it green.
+        // ----- OUT OF BOUNDS THROWS, in all four engines. Every message below is
+        // java 24.0.2's own text: `java tests/java-test-full.java` runs it green.
         int[] a = new int[2];
         Main.check("un0", a[0] + 1 == 1);          // the control: in range, still 0
 
@@ -2017,8 +1953,7 @@ class S34 {
         Main.check("un1", S34.aioobe(a, 5).equals("Index 5 out of bounds for length 2"));
         Main.check("un2", S34.aioobe(a, -1).equals("Index -1 out of bounds for length 2"));
         Main.check("un3", S34.aioobe(a, 1000).equals("Index 1000 out of bounds for length 2"));
-        // A WRITE past the end throws too - it does not GROW the array, which is
-        // what every engine here used to do.
+        // A WRITE past the end throws too - it does not GROW the array.
         Main.check("un4", S34.aioobeW(a, 5).equals("Index 5 out of bounds for length 2"));
         Main.check("un5", S34.aioobeW(a, -1).equals("Index -1 out of bounds for length 2"));
         Main.check("un6", a.length == 2);
@@ -2030,8 +1965,7 @@ class S34 {
         Main.check("un9", S34.aioobe2(m, 0, 5).equals("Index 5 out of bounds for length 3"));
 
         // ----- String: charAt is an INDEX, substring is a RANGE, and the two
-        // messages are different because of it. substring used to CLAMP in both
-        // compiled halves and slice from the end in the interpreter.
+        // messages are different because of it.
         String s = "abc";
         Main.check("un10", S34.sioobe(s, 3).equals("Index 3 out of bounds for length 3"));
         Main.check("un11", S34.sioobe(s, -1).equals("Index -1 out of bounds for length 3"));
@@ -2049,9 +1983,7 @@ class S34 {
         Main.check("un18", S34.nase2(0, -3).equals("-3"));
 
         // ----- the TYPE of the throw is observable, and the clauses are tried in
-        // source order. Until this section existed the compiled half kept only the
-        // FIRST catch clause and ignored its type, so these four could not have
-        // been written at all.
+        // source order.
         Main.check("un19", S34.which(1).equals("AIOOBE"));
         Main.check("un20", S34.which(2).equals("SIOOBE"));
         Main.check("un21", S34.which(3).equals("NASE"));

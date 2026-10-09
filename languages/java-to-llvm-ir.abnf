@@ -109,28 +109,16 @@ Program     <~~ buildMain(takeAll()) ~~>
 // means nothing - the member-level form is EmptyMember below.
 StraySemi   = ";" ;
 
-// ----- JEP 512: an IMPLICITLY DECLARED class. A compilation unit that declares
-// no class at all but does declare members is one class body without the
-// `class X {` around it: `void main() { ... }` alone in a file is a program.
-// The members are built into a synthetic class named Main, which is exactly the
-// class this grammar's entry point looks for, and its `main` may be an INSTANCE
-// method - the launcher instantiates the class when the static lookup misses.
-// It is the LAST element of Program, so an ordinary file consumes everything
-// through the declaration repetition and reaches it at EOF, where Member fails
-// at once and the optional is skipped.
+// ----- JEP 512: an IMPLICITLY DECLARED class - `void main() { ... }` alone in a
+// file is a program, built into a synthetic class Main. Twin of ImplicitClass in
+// java-interpreter.abnf; see there.
 ImplicitClass <~~ push(makeClassStmt(takeAll())) ~~>
             = ImplicitHead Member { Member } ;
 ImplicitHead <~~ push("Main"); jEnterClass("Main") ~~>
             = NotTypeKw ;
 
-// The implicit class may not START with a type declaration: a file whose first
-// top-level item is `class` / `record` / `interface` / `enum` / `@interface` is
-// an ordinary compilation unit, and if that declaration does not parse the file
-// is broken - it is not a member of an implicit class. Without this, a record
-// javac refuses (`record R(final int x) {}`) matched Method (`record` as the
-// return type, `R(...)` as the signature, `{}` as the body) and five reject
-// files were accepted for eight parse files gained; with it, the eight stay and
-// the five come back. The modifier run is walked exactly as NoDupMods walks it.
+// The implicit class may not START with a type declaration. Twin of NotTypeKw in
+// java-interpreter.abnf; see there.
 NotTypeKw   = :script(~~
     (function() {
         var i = 0
@@ -216,20 +204,9 @@ NotTypeKw   = :script(~~
     })()
 ~~) ;
 
-// ----- Phase ONE of the Java compilation pipeline (JLS 3.3): a unicode escape
-// is translated into the character it denotes BEFORE the scanner runs, so
-// `public class X {}` really is `public class X {}` and a `\` really
-// is a backslash the scanner then reads as an escape. It is a source PRE-PASS,
-// not a grammar rule, and it is expressed as one: the script reads the whole
-// source with c.getSrc(), rewrites it and hands it back with c.setSrc(), then
-// restarts the parse position - the same shape as C's -pipe preprocessor stage,
-// but inside one grammar so the corpus row measures it.
-// A backslash is ELIGIBLE only when the run of backslashes ending at it has ODD
-// length (JLS: an even number of preceding backslashes), so `"\\u0041"` stays
-// the six characters A; the eligible one may then be followed by any
-// number of `u` and must be followed by exactly four hex digits.
-// The whole pass leaves after one indexOf on a file that contains no `\u`,
-// which is every file but a handful.
+// ----- Phase ONE of the Java compilation pipeline (JLS 3.3): unicode escapes are
+// translated by a source PRE-PASS before the scanner runs. Twin of UniPre in
+// java-interpreter.abnf; see there.
 UniPre      = :script(~~
     (function() {
         var src = c.getSrc()
@@ -274,15 +251,9 @@ UniPre      = :script(~~
     })()
 ~~) ;
 
-// --- module-info.java: a JPMS module declaration (JLS 7.7). Modules are not
-// modelled, and there is nothing in one to compile, so the whole declaration is
-// pure syntax: no tag anywhere, so it pushes no statement and buildMain never
-// sees it. Kept identical to the interpreter half's copy.
-//
-// `module`, `open`, `requires`, `transitive`, `exports`, `opens`, `to`, `uses`,
-// `provides` and `with` are RESTRICTED keywords - ordinary identifiers
-// everywhere else in the language - so each is matched as a bare literal HERE
-// and is never added to ModKw or to any Kw* rule.
+// --- module-info.java: a JPMS module declaration (JLS 7.7). Pure syntax with no
+// tag, so it pushes no statement and buildMain never sees it. Twin of ModuleDecl
+// in java-interpreter.abnf (the restricted keywords are explained there).
 ModuleDecl  = LeadMods [ "open" KwEnd ] "module" KwEnd ModName "{" { ModDirective } "}" ;
 // A module / package / service name is dotted, and nothing consumes it, so this
 // is QualName without QualName's push.
@@ -558,8 +529,8 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 Yield       <~~ push(makeYield(pop())) ~~>
             = KwYield Expression ";" ;
 
-// break / continue accept an optional target label; a labeled form is recognized but
-// not implemented (labels are dropped) and falls back to the plain innermost jump.
+// break / continue accept an optional target label, which branches to the labeled
+// loopStack entry (makeBreakL / findLabeled).
 Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LabelRef ] ";" ;
 Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LabelRef ] ";" ;
 LabelRef    <~~ push({label: stripWs(up.in)}) ~~> = Id ;
@@ -572,7 +543,7 @@ Assert      <~~ push(makeAssert(takeAll(), up.pos)) ~~>
 // is lowered and the block still runs.
 Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
             = KwSync "(" Expression ")" Block ;
-// label: stmt  recognized, not implemented (the label is dropped); the statement runs.
+// label: stmt - the label names the loopStack entry the statement pushes (makeLabeled).
 // NotSwitchKw keeps a switch's 'default:' / 'case ...:' from being misread as a label
 // (Id matches keywords in this grammar), the same guard C's Label uses.
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
@@ -597,12 +568,11 @@ NotSwitchKw = :script(~~
     })()
 ~~) ;
 
-// try/catch/finally and throw are implemented: throw calls js_throw, each try/catch/
-// finally body compiles to its own closure handed to js_try, and a return/break/
-// continue leaving a try or catch body becomes a control signal that excDispatch
-// re-issues in the enclosing frame. The first catch clause wins (types, including
-// multi-catch A | B, are parsed but not discriminated); a try-with-resources header
-// is skipped.
+// try/catch/finally and throw: throw calls js_throw, each try/catch/finally body
+// compiles to its own closure handed to js_try, and a return/break/continue
+// leaving a try or catch body becomes a control signal that excDispatch re-issues
+// in the enclosing frame. The catch clauses are dispatched by their declared type
+// (jCatchDispatch), and try-with-resources closes in reverse order.
 // JLS 14.20: a try must have a resource list, or a catch clause, or a finally -
 // a bare `try { }` is try.without.catch.finally.or.resource.decls. Spelling that
 // as three alternatives is what makes the requirement a PARSE failure; the
@@ -625,10 +595,7 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 CatchClause <~~ push(jCatch(takeAll())) ~~>
             = KwCatch "(" { Annotation | "final" KwEnd } CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
 // The declared type(s) of the catch parameter, kept as the source wrote them
-// ("AErr|BErr" for a multi-catch). Until this rule existed the type never
-// reached makeTry at all: every clause but the FIRST was discarded and that one
-// caught everything, so `catch (NumberFormatException e)` ran on an
-// IllegalStateException. See jCatchDispatch.
+// ("AErr|BErr" for a multi-catch). See jCatchDispatch.
 CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
             = CatchType ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
@@ -636,9 +603,9 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression ";" ;
 
-// An explicit constructor invocation (super(args) or this(args)): accepted and
-// reported as not implemented (the implicit no-argument super already ran). The
-// arguments are still lowered so their calls stay visible.
+// An explicit constructor invocation (super(args) or this(args)) that is NOT the
+// first statement of a constructor body (that one is CtorDelegate): reported as
+// not implemented. The arguments are still lowered so their calls stay visible.
 CtorCall    <~~ push(makeCtorCall(takeAll(), up.pos)) ~~>
             = [ SkipAngle ] ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
 
@@ -836,9 +803,8 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | PreIncDec | Neg | Not | BitNot | UPlus | PostfixExpr ;
-// Prefix ++/-- yields the new value (genuine; reuses js_jadd/js_sub like the postfix
-// form, so it must be tried before Neg so "--x" is not parsed as "-(-x)"). Unary + is
-// identity. ~x is recognized but not implemented (no bit externs).
+// Prefix ++/-- yields the new value (same extern as the postfix form; it must be
+// tried before Neg so "--x" is not parsed as "-(-x)"). Unary + is identity.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> PreTarget ;
 // The target of a PREFIX ++/-- may be a member chain (`--Box.mk(b).v`), and
@@ -1070,7 +1036,7 @@ OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
 // descriptor is used there too. Tried before VarRef, which would read the name alone.
 BareCall    <~~ push(makeBareCall(takeAll())) ~~>
             = BareName "(" [ Expression { "," Expression } ] ")" ;
-// A reserved word is not a method name (`case 0 -> if (true);` used to parse as
+// A reserved word is not a method name (`case 0 -> if (true);` must not parse as
 // a call to a method named `if`) - but `this(...)` and `super(...)` reach this
 // rule whenever they are NOT the first thing in a constructor body, which JEP
 // 447 flexible constructors rely on.
@@ -1085,20 +1051,17 @@ BareName    <~~ push(stripWs(up.in)) ~~>
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = NotUscore ( "this" KwEnd | KwSuper | NotResvKw Id ) ;
 
-// ----- Widened literals. The numeric forms are genuine now: hex / binary /
-// octal / underscored / suffixed integers and fractional / exponent / hex-float
-// doubles all evaluate to their value (one number type; an L/f/D suffix only
-// selects the parse - see numLit). Char literals and text blocks stay
-// recognized-but-not-implemented. Each form matches something plain IntLit
-// cannot, so ordinary decimal integers still reach IntLit untouched. -----
+// ----- Literals. Hex / binary / octal / underscored / suffixed integers,
+// fractional / exponent / hex-float doubles, char literals and text blocks. Each
+// form matches something plain IntLit cannot, so ordinary decimal integers still
+// reach IntLit untouched. -----
 
 // A char literal 'c' (escapes included). Reuses the balanced SkipChar shape. The
 // value is a genuine char: it does arithmetic and compares as its code, prints as
 // its glyph, and concatenates as its glyph - see makeCharLit.
 // The escape set is Java's: the single letters, a one-to-three digit OCTAL
-// escape and the \u form. SkipChar - a balanced run of anything - used to stand
-// here, which accepted the empty literal '' (empty.char.lit) and a raw newline
-// inside one (illegal.line.end.in.char.lit).
+// escape and the \u form. The empty literal '' (empty.char.lit) and a raw newline
+// inside one (illegal.line.end.in.char.lit) are refused.
 CharLit     <~~ push(makeCharLit(up.in)) ~~>
             = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
 CharBody    = "\\" CharEscBody | CharPlain ;
@@ -1114,25 +1077,16 @@ CharPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x
 
 // Java's string literal. Same shape as lib/dq-strings.abnf, but the escape set
 // is Java's own (JLS 3.10.7), not lib/dq-strings' "backslash plus any
-// printable": `"\!"` is illegal.esc.char, and StrEsc accepted it. jUnescape
-// decodes it - it knows Java's octal escapes ("A\102") and \s, which the shared
-// unescapeJs does not, so the two halves now agree on the VALUE as well.
+// printable": `"\!"` is illegal.esc.char. jUnescape decodes it - it knows Java's
+// octal escapes ("A\102") and \s, which the shared unescapeJs does not.
 JStrPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 JavaStr     = '"' :whitespace() { JStrEsc | JStrPlain } <~~ push(makeConst(jUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
 JStrEsc     = "\\" ( CharEsc | JOct | "u" ) | UniBS "\\" "\x20"..."\x7e" ;
-// JLS 3.10.5: a StringCharacter is any InputCharacter but `"` and `\` - which
-// includes the raw CONTROL characters, and lib/dq-strings' DqPlain starts at
-// \x20. They are not typed directly; the unicode-escape pre-pass produces them
-// (`"foo\u0000bar"` is a real NUL in the literal), and javac accepts that -
-// verified with -XDshould-stop.ifNoError=PARSE, which exits 0. Only the two
-// line terminators are excluded (illegal.line.end.in.string).
+// JLS 3.10.5: the raw CONTROL characters are StringCharacters too. Twin of the
+// note at JStrPlain in java-interpreter.abnf; see there.
 
-// javac translates unicode escapes in PHASE ONE, before the scanner runs, so a
-// `\u005C` earlier on the line has already become a real backslash and the
-// escape that follows is whatever those two characters spell -
-// javac/UnicodeBackslash/UnicodeBackslash.java is a whole file of
-// `test("1.2", "\u005C\]", "\\]")`. Without this the escape set above costs
-// that file. The scan stops at the line start, which no string literal crosses.
+// A `\` earlier on the line is already a real backslash (phase one). Twin of
+// UniBS in java-interpreter.abnf; see there.
 UniBS       = :script(~~
     (function() {
         var i = -1
@@ -1247,7 +1201,7 @@ ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstr
 // with no run-time meaning here, so the clause is parsed and dropped.
 PermitsSkip = "permits" KwEnd Type { "," Type } ;
 LeadMods    = { Annotation | ModKw } ;
-// `implements I, J` is kept now: the first named interface becomes the class's
+// `implements I, J` is kept: the first named interface becomes the class's
 // __super when it has no superclass (so its default methods and `instanceof`
 // work), and every further one has its default methods copied in.
 ImplementsSkip <~~ push({impls: takeAll()}) ~~> = KwImplements IType { "," IType } ;
@@ -1255,8 +1209,8 @@ IType       <~~ push(stripWs(up.in)) ~~> = Type ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = { Annotation } Type { "|" { Annotation } Type } ;
 
-// Type declarations accepted structurally, then reported as not implemented (so a
-// whole Java file parses; -warn-unsupported lets the rest compile). Bodies are skipped.
+// The type declarations other than class and record: annotation types,
+// interfaces and enums.
 UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // An annotation type declaration (@interface M { int id(); ... }). Annotations
 // themselves are parsed and dropped everywhere they may appear, and this subset has
@@ -1269,14 +1223,9 @@ AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
 // its properties. It has no constructor, so a class implementing it does not chain
 // to one; putting it on the implementor's __super chain is what makes the default
 // methods reachable and `instanceof` answer true.
-// MEASURED: the InterfaceSkip / EnumSkip fallbacks - LeadMods ... SkipBlock, a
-// balanced skip over any body the member set declines - are GONE. They cost the
-// three reject files InitializerNotAllowed, EnumConstantExpected and
-// EnumConstantNotExpected, because a body javac's parser refuses was swallowed
-// whole by the skip; removing them is 3 reject files gained for 1 must-parse
-// file lost (DefaultAllowedInIntfAnnotationMember, which the interpreter half
-// does not parse either), and it is what makes the two halves agree file for
-// file on the corpus.
+// There is deliberately no balanced-skip fallback (LeadMods ... SkipBlock) for
+// an interface or enum body the member set declines: it would swallow bodies
+// javac's parser refuses, and the two halves agree file for file without it.
 Interface   = InterfaceReal ;
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
             = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
@@ -1344,13 +1293,8 @@ KwYield     = "yield" KwEnd ;
 // one step too wide costs must-parse files. Each is a pure function of
 // (source, position), like NotSwitchKw / NotIfaceKw above.
 
-// A RESERVED word is never an identifier (JLS 3.9). Id in this grammar matches
-// keywords, so `int assert;`, `Object this;`, `return null;` as a class member
-// and `case 0 -> if (true);` (an `if` read as a method call) all parsed. The
-// list is the 50 reserved words plus the three literals; the CONTEXTUAL ones
-// (var, record, sealed, permits, yield, module, ...) are deliberately absent.
-// Screened on first byte AND length before any comparison - this guard sits on
-// Type and on every declarator, so it runs constantly.
+// A RESERVED word is never an identifier (JLS 3.9). Twin of NotResvKw in
+// java-interpreter.abnf; see there.
 NotResvKw   = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1415,16 +1359,8 @@ NoAnnot     = :script(~~
     })()
 ~~) ;
 
-// A NUMERIC literal that javac's SCANNER refuses. Four checks, all anchored on
-// the literal token that starts right here, and all of them shapes no legal
-// program contains:
-//   `1_`     illegal.underscore            - an underscore must sit BETWEEN digits
-//   `08`     illegal.digit.in.octal.literal - a leading zero makes it octal
-//   1e9999   fp.number.too.large / .too.small - a 4-digit decimal exponent is
-//            out of double's range in both directions (max ~1.8e308)
-//   12345678901234567890  int.number.too.large - more than 10 significant
-//            digits, or 10 that read above 2147483648, with no L suffix
-// The magnitude test compares DIGITS, never arithmetic, so nothing overflows.
+// A NUMERIC literal that javac's SCANNER refuses. Twin of NumOk in
+// java-interpreter.abnf; see there.
 NumOk       = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1522,12 +1458,8 @@ NumOk       = :script(~~
     })()
 ~~) ;
 
-// The parameter list that starts here (at its '(') must place a VARARGS
-// parameter last, and that parameter may not be a receiver or carry the C-style
-// array suffix - varargs.must.be.last, varargs.and.receiver,
-// varargs.and.old.array.syntax. One scan of the group answers all three.
-// Generic arguments are tracked with their own depth so `Map<String, Integer>...`
-// is one parameter, not two.
+// varargs.must.be.last / varargs.and.receiver / varargs.and.old.array.syntax.
+// Twin of ParamOk in java-interpreter.abnf; see there.
 ParamOk     = :script(~~
     (function() {
         var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1591,10 +1523,7 @@ ParamOk     = :script(~~
 ~~) ;
 
 // A lambda's parameters are ALL implicit, ALL `var` or ALL explicitly typed
-// (JLS 15.27.1) - `(int x, y)`, `(x, var y)` and `(int x, var y)` are all
-// invalid.lambda.parameter.declaration. The guard sits at the head of Lambda,
-// which every parenthesized expression reaches, so it leaves immediately unless
-// the group is really followed by `->`.
+// (JLS 15.27.1). Twin of LamUniform in java-interpreter.abnf; see there.
 LamUniform  = :script(~~
     (function() {
         var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1706,11 +1635,8 @@ NoBracket   = :script(~~
     })()
 ~~) ;
 
-// `_` alone is not an identifier since Java 9 and is reserved for the UNNAMED
-// variable since Java 21: it may name a local, a lambda parameter, a pattern or
-// a catch parameter and nothing else - not a field, not a value
-// (use.of.underscore.not.allowed, .non.variable), and it never takes the
-// C-style array suffix (.with.brackets, which UsBrkt adds on top).
+// `_` is reserved for the UNNAMED variable. Twin of NotUscore in
+// java-interpreter.abnf; see there.
 NotUscore   = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1757,10 +1683,8 @@ NotDiamond  = :script(~~
     })()
 ~~) ;
 
-// `var[]` is not a type (restricted.type.not.allowed.array). The `var` branch of
-// Type already declines a following '[', but the general Id branch would then
-// read `var` as an ordinary type name - which it legitimately is under
-// `--release 9`, so ONLY the bracketed form is refused here.
+// `var[]` is not a type (restricted.type.not.allowed.array). Twin of NotVarArr in
+// java-interpreter.abnf; see there.
 NotVarArr   = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1829,15 +1753,8 @@ NoSealed    = :script(~~
     })()
 ~~) ;
 
-// javac's not.stmt: an ExpressionStatement is an assignment, a pre/post
-// increment or decrement, a method invocation or a class instance creation
-// (JLS 14.8) - `x + 1;` is none of them. The test is deliberately WEAK: the
-// statement is accepted if it ends in `)`, `++` or `--`, or if it contains a
-// top-level assignment operator, which every legal statement expression does.
-// A ternary or a parenthesized expression still slips through, and that is the
-// point - this guard is easy to over-apply, so it only refuses shapes that
-// cannot be a statement under any reading. Strings, chars and comments are
-// skipped so a `;` inside one never ends the scan early.
+// javac's not.stmt (JLS 14.8), deliberately WEAK. Twin of StmtExprOk in
+// java-interpreter.abnf; see there.
 StmtExprOk  = :script(~~
     (function() {
         var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1901,10 +1818,7 @@ StmtExprOk  = :script(~~
     })()
 ~~) ;
 
-// javac's repeated.modifier: `public public String toString()`. The modifier run
-// in front of a member is walked exactly as HasStatic walks it (annotations, with
-// their argument list, are stepped over rather than ending the run), and a word
-// that has already been seen refuses the member.
+// javac's repeated.modifier. Twin of NoDupMods in java-interpreter.abnf; see there.
 NoDupMods   = :script(~~
     (function() {
         var i = 0
@@ -1979,12 +1893,8 @@ NoDupMods   = :script(~~
     })()
 ~~) ;
 
-// An annotation's argument list is otherwise SkipParen - balanced text, never
-// read. This is the one shape inside it that javac's parser refuses: an
-// element-value ARRAY that starts with a comma and then has a VALUE,
-// `@SuppressWarnings({,0})` (annotation.missing.element.value) - the bare `{,}`
-// is legal, and javac has a positive test for it. Strings, chars and comments
-// are skipped so a `{,` inside one is never seen.
+// annotation.missing.element.value (`@SuppressWarnings({,0})`). Twin of AnnArgOk in
+// java-interpreter.abnf; see there.
 AnnArgOk    = :script(~~
     (function() {
         var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -2049,11 +1959,8 @@ TBOpen      = :script(~~
     })()
 ~~) ;
 
-// The modifier run that starts here must contain `static`. Only a record body
-// uses it: a record may declare STATIC fields and nothing else
-// (record.cannot.declare.instance.fields). The scan walks annotations (name,
-// then a balanced argument list) and modifier words, and stops at the first
-// word that is neither - which is the type of the member.
+// The modifier run that starts here must contain `static` (record bodies). Twin
+// of HasStatic in java-interpreter.abnf; see there.
 HasStatic   = :script(~~
     (function() {
         var i = 0
@@ -2136,13 +2043,13 @@ HasStatic   = :script(~~
     // ----- Imports & errors -----
     function fail(msg) { println("java compiler error: " + msg); exit(1) }
 
-    // ----- the scope probe (docs/runtime-next-plan.md part 3) -----
+    // ----- the scope probe -----
     // "the value of this name if it is declared anywhere up the chain, else a
     // default". A SCOPE is the C floor's private storage, so layer 2 cannot open
     // one - but an EMITTER may call js_scope_typeof and js_scope_get, which is
     // exactly what this is. One module-level helper FUNCTION rather than an inline
-    // branch, so every call site stays a single-value expression: the shape PHP's
-    // php_scope_probe established and the remaining languages reuse.
+    // branch, so every call site stays a single-value expression (the shape of
+    // PHP's php_scope_probe).
     var jvProbeF = undefined
     function jvScopeProbe(b, nameV, dfltV) {
         if (jvProbeF == undefined) {
@@ -2254,12 +2161,11 @@ HasStatic   = :script(~~
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key)}
         var kr = last.idx(b)
-        // The WRITE half of the bounds check, and it is here rather than at the
-        // three js_set call sites because makeAssign, makeIncDec and makePreIncDec
-        // all resolve their place through this one function. js_jvidx is reused as
-        // the CHECK - reading an element has no effect and the value is discarded -
-        // so one extern serves both halves in all three engines. Without it `a[3]=5`
-        // GREW an int[3] to length 4, in every engine.
+        // The WRITE half of the bounds check, here rather than at the three js_set
+        // call sites because makeAssign, makeIncDec and makePreIncDec all resolve
+        // their place through this one function. js_jvidx is reused as the CHECK -
+        // reading an element has no effect and the value is discarded - so one
+        // extern serves both halves in all three engines.
         callExt(kr.b, "js_jvidx", [o, kr.v])
         return {b: kr.b, obj: o, key: kr.v}
     }
@@ -2346,10 +2252,9 @@ HasStatic   = :script(~~
             return {b: b, v: v}
         }
     }
-    // x++ / x-- : one js_jfstep with the step as its second argument. js_jfstep
+    // x++ / x-- : one js_jvstep with the step as its second argument. js_jvstep
     // keeps the TYPE of what it steps (a double stays a double, a char stays a
-    // char, everything else wraps to int32), so the intWrap that used to follow -
-    // and that turned d++ on a double into integer arithmetic - is gone.
+    // char, a byte wraps as a byte, ...).
     function makeIncDec(items) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
@@ -2440,7 +2345,7 @@ HasStatic   = :script(~~
         // makeNumConst emits js_jflo32, which rounds. (The decimal is read into a
         // double first and rounded to a float second; javac rounds once, so a
         // decimal that lands exactly on a float midpoint AFTER a double rounding
-        // can differ - no value in the corpus or the 20,000-row probe does.)
+        // could differ.)
         var isF32 = false
         if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) {
             isSfx = true; isFlt = true
@@ -2621,8 +2526,7 @@ HasStatic   = :script(~~
     // arithmetic and comparison on the code, exactly like Java's char.
     // Java's escape set (JLS 3.10.7), decoded exactly as the interpreter half
     // decodes it: \b \f \s, the one-to-three digit OCTAL escapes and \u with any
-    // number of u's. The shared unescapeJs knows none of those, so `"A\102"` and
-    // `'\s'` used to compile to a different value than they interpret to.
+    // number of u's. The shared unescapeJs knows none of those.
     function jUnescape(s2) {
         var out = ""
         var i = 0
@@ -2675,9 +2579,8 @@ HasStatic   = :script(~~
 
     // Unary + is identity; ~x is the int32 complement (x ^ -1).
     function makeUPlus(inner) { return inner }
-    // -x keeps the operand's type: js_jfneg negates a double as a double (so -0.0
-    // and -1.0/0.0 are real) and wraps everything else to int32, which is what the
-    // shared js_neg + intWrap did.
+    // -x keeps the operand's type (js_jvneg): a double negates as a double (so
+    // -0.0 and -1.0/0.0 are real), a long as a long, everything else at int.
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
@@ -2685,33 +2588,28 @@ HasStatic   = :script(~~
         }
     }
     // ~x is the complement at the PROMOTED width (JLS 5.6.1): int for a
-    // byte/short/char/int, long for a long. js_bxor with -1 was JavaScript's
-    // 32 bit complement, so ~0L answered -1 by luck and ~(1L<<40) did not.
+    // byte/short/char/int, long for a long.
     function makeBitNot(inner, pos) {
         return function(b) {
             var r = inner(b)
             return {b: r.b, v: callExt(r.b, "js_jvnot", [r.v])}
         }
     }
-    // Java's bitwise / shift operators on top of the core set: & | ^ go through
-    // the boolean-aware js_jb* externs (two booleans -> the non-short-circuit
-    // boolean operator, else the int32 op); >>> keeps Java's int semantics via
-    // the |0 wrap (JS >>> yields unsigned). The compound forms reuse the same
-    // externs (makeAssign hands the raw operator to emitBin).
+    // Java's binary operators on top of the core set: every arithmetic, bitwise,
+    // shift and ordered-comparison operator goes through a js_jv* extern that
+    // applies JLS 5.6.2 promotion. The compound forms reuse the same externs
+    // (makeAssign hands the raw operator to emitBin).
     var coreEmitBin = emitBin
     emitBin = function(b, op, l, r) {
-        // '+' is js_jadd plus Java's VALUE RENDERING on the string-concat side:
-        // js_jadd stringifies through the shared toString, so "" + arr was "1,2,3"
-        // and "" + obj was "[object Object]" where java writes [I@... / Main$Box@...
-        // (see abnf/jsrtjava.go). Arithmetic is unchanged.
+        // '+' renders the string-concat side through Java's VALUE RENDERING, so
+        // "" + arr is [I@... and "" + obj is Main$Box@... (see abnf/jsrtjava.go).
         if (op == "+" || op == "+=") return callExt(b, "js_jvadd", [l, r])
         if (op == "&" || op == "&=") return callExt(b, "js_jvarith", [emitStr(b, "&"), l, r])
         if (op == "|" || op == "|=") return callExt(b, "js_jvarith", [emitStr(b, "|"), l, r])
         if (op == "^" || op == "^=") return callExt(b, "js_jvarith", [emitStr(b, "^"), l, r])
         // The shift COUNT is masked - & 31 for an int, & 63 for a long - and the
         // result type is the LEFT operand's alone (JLS 15.19), which is why
-        // `1 << 32` is 1 here and not 0. js_shl/js_shr/js_ushr were JavaScript's
-        // THIRTY-TWO bit operators, so 1L << 40 answered 256.
+        // `1 << 32` is 1 here and not 0.
         if (op == "<<" || op == "<<=") return callExt(b, "js_jvshift", [emitStr(b, "<<"), l, r])
         if (op == ">>" || op == ">>=") return callExt(b, "js_jvshift", [emitStr(b, ">>"), l, r])
         if (op == ">>>" || op == ">>>=") return callExt(b, "js_jvshift", [emitStr(b, ">>>"), l, r])
@@ -2721,23 +2619,19 @@ HasStatic   = :script(~~
         if (op == ">") return callExt(b, "js_jvcmp", [emitStr(b, ">"), l, r])
         if (op == "<=") return callExt(b, "js_jvcmp", [emitStr(b, "<="), l, r])
         if (op == ">=") return callExt(b, "js_jvcmp", [emitStr(b, ">="), l, r])
-        // The arithmetic operators are DOUBLE-aware: js_jfsub/js_jfmul/js_jfdiv/
-        // js_jfmod answer a boxed double when either operand is one (JLS 5.6.2) and
-        // wrap to int32 when both are integral - so the shared intWrap, which turned
-        // every one of them into integer arithmetic, is gone. '+' already went
-        // through js_jadd, which now has the same rule.
+        // The arithmetic operators are DOUBLE-aware: js_jvarith answers a boxed
+        // double when either operand is one (JLS 5.6.2) and wraps at the promoted
+        // integral width when both are integral.
         if (op == "-" || op == "-=") return callExt(b, "js_jvarith", [emitStr(b, "-"), l, r])
         if (op == "*" || op == "*=") return callExt(b, "js_jvarith", [emitStr(b, "*"), l, r])
         if (op == "/" || op == "/=") return callExt(b, "js_jvarith", [emitStr(b, "/"), l, r])
         if (op == "%" || op == "%=") return callExt(b, "js_jvarith", [emitStr(b, "%"), l, r])
-        // == / != go through the char-aware equality (js_jchareq is js_seq unless a
-        // char meets the one-character String that charAt answers).
-        // js_jvchareq is js_jchareq plus JLS 5.6.2 for the FLOAT width: a float
-        // operand promotes the other side to a float too, so 16777217 ==
-        // 16777216f is TRUE. It is a java-only extern because js_jchareq itself
-        // lives in abnf/jsrt.go and is shared with kotlin, which has no float
-        // width; the record-component and switch-label sites below keep the
-        // shared one, neither of which can see a float against an int.
+        // == / != go through js_jvchareq: js_jchareq (js_seq unless a char meets
+        // the one-character String that charAt answers) plus JLS 5.6.2 for the
+        // FLOAT width - a float operand promotes the other side to a float too, so
+        // 16777217 == 16777216f is TRUE. It is a java-only extern because
+        // js_jchareq itself lives in abnf/jsrt.go and is shared with kotlin, which
+        // has no float width; the switch-label site keeps the shared one.
         if (op == "==") return callExt(b, "js_jvchareq", [l, r])
         if (op == "!=") return callExt(b, "js_not", [callExt(b, "js_jvchareq", [l, r])])
         return coreEmitBin(b, op, l, r)
@@ -2864,11 +2758,8 @@ HasStatic   = :script(~~
     }
     // ----- unqualified instance / static field access -----
     //
-    // `class P { int w = 3; int get() { return w; } }` is ordinary Java and every
-    // engine here used to abort on it ("variable not defined: w" in both compiler
-    // engines, "unknown name: w" in the interpreter) - only `this.w` worked, and
-    // every class in tests/java-test-*.java writes `this.w`, which is why 6,258
-    // assertions never reached it.
+    // `class P { int w = 3; int get() { return w; } }`: a bare name that is no
+    // local resolves to a field of the enclosing class.
     //
     // fieldKind is the twin of methodKind above: class name -> member name ->
     // "instance" | "static", filled while the declarations are walked and read
@@ -2882,15 +2773,11 @@ HasStatic   = :script(~~
     // declaration enters the class stack from a tag on its Id, but `new Sup() {
     // ... }` has no name until makeNewAnon invents one - long after its members
     // have been walked - so curClassName is still the ENCLOSING class inside the
-    // body. Without this counter `int w` of the outer class made a bare `w` in the
-    // anon body emit `this.w`, and `this` there is the anon instance: the compiler
-    // answered null where the interpreter aborted, which is a halves divergence.
-    // The counter is still what keeps `this` out of the answer inside an anon body -
-    // but the lookup is no longer SKIPPED there. jEnclChain below carries the flag,
-    // and every field it finds through it is marked `hop` and read through
-    // js_jouter, which walks __outer from `this` at run time. A LAMBDA body is a
-    // different case and needs none of it: a lambda has no `this` of its own, so
-    // the captured scope's `this` IS the outer instance.
+    // body. This counter keeps `this` out of the answer there: jEnclChain carries
+    // the flag, and every field it finds through it is marked `hop` and read
+    // through js_jouter, which walks __outer from `this` at run time. A LAMBDA body
+    // needs none of it: a lambda has no `this` of its own, so the captured scope's
+    // `this` IS the outer instance.
     var jAnonDepth = 0
     // The anonymous bodies currently OPEN, innermost last, each under an id of its
     // own, plus the id of the one most recently closed. makeNewAnon's tag fires
@@ -2898,15 +2785,14 @@ HasStatic   = :script(~~
     // be kept: it is how the body's own field declarations get registered against
     // the body they belong to (jAnonOwnFields).
     //
-    // WHY AN ID AND NOT THE DEPTH (docs/todo.md 1.5). Inside an anonymous body an
-    // unqualified name can be three things, and javac's order is: the anonymous
-    // class' OWN field, then the enclosing METHOD's local, then the enclosing
-    // class' field. The runtime probe in makeVarRef / jUnqualWrite implements the
-    // last two - scope first, field second - and gets the FIRST one backwards, so
-    // `new Sup(){ int v = 900; ... v ... }` inside `f(int v)` answered the
-    // parameter where javac answers 900. The anonymous class has no name at walk
-    // time (makeNewAnon invents Anon$N long afterwards), so `is this MY field` is
-    // exactly the question fieldKind cannot answer and this table can.
+    // WHY AN ID AND NOT THE DEPTH. Inside an anonymous body an unqualified name can
+    // be three things, and javac's order is: the anonymous class' OWN field, then
+    // the enclosing METHOD's local, then the enclosing class' field. The runtime
+    // probe in makeVarRef / jUnqualWrite implements the last two - scope first,
+    // field second - which would get the FIRST one backwards (`new Sup(){ int v =
+    // 900; ... v ... }` inside `f(int v)` is 900). The anonymous class has no name
+    // at walk time, so `is this MY field` is exactly the question fieldKind cannot
+    // answer and this table can.
     var jAnonIdSeq = 0
     var jAnonStack = []
     var jAnonClosed = ""
@@ -2934,13 +2820,12 @@ HasStatic   = :script(~~
             }
         }
     }
-    // THE ENCLOSING CHAIN, snapshotted at WALK time (docs/todo.md 1.6). An inner or
-    // anonymous class body names a field of its ENCLOSING instance unqualified and
-    // javac resolves it there - JLS 6.5.6.1, the innermost enclosing class that
-    // declares the name wins. Reaching it needs two things the descriptor did not
-    // carry: the enclosing NAMES here (jClassStack is exactly that nesting, so the
-    // chain is free) and, at run time, an __outer hop, which every creation site of
-    // a nested or anonymous class now records (see makeNew / makeNewAnon).
+    // THE ENCLOSING CHAIN, snapshotted at WALK time. An inner or anonymous class
+    // body names a field of its ENCLOSING instance unqualified and javac resolves
+    // it there - JLS 6.5.6.1, the innermost enclosing class that declares the name
+    // wins. That needs the enclosing NAMES here (jClassStack is exactly that
+    // nesting) and, at run time, an __outer hop, which every creation site of a
+    // nested or anonymous class records (see makeNew / makeNewAnon).
     //
     // Innermost first. Inside an anonymous body curClassName is still the ENCLOSING
     // class - the trap the jAnonDepth counter was introduced for - so the whole
@@ -2957,9 +2842,8 @@ HasStatic   = :script(~~
     // Does ANY declared class have a field of this name? Only consulted inside an
     // anonymous body, and only after the enclosing chain has missed: the anonymous
     // class' OWN fields are registered under the name makeNewAnon invents long
-    // after this walk, so they cannot be looked up by class here. Being loose costs
-    // nothing that was working - every name it lets through was an abort before,
-    // and js_jouter aborts on the same names with a message of its own.
+    // after this walk, so they cannot be looked up by class here. Being loose is
+    // safe: js_jouter aborts with a message of its own on a name no object has.
     function jAnyFieldNamed(name) { return fieldNames["$" + name] == true }
     // The field an unqualified `name` refers to from `chain`, or null. `hop` marks
     // the ones that are NOT declared by the innermost named class - those need the
@@ -3015,11 +2899,10 @@ HasStatic   = :script(~~
     // unchanged, byte for byte. This is csharp-to-llvm-ir.abnf's makeVarRef, which
     // solves the identical problem for C#.
     //
-    // THE SECOND SHADOW is a TYPE name (docs/todo.md 2.9). `class Ctr { int Ctr =
-    // 7; int f() { return Ctr; } }` answered `class Ctr` in every engine here,
-    // because the class descriptor is js_scope_decl'd into the same chain the bare
-    // name reads and so is never "undefined". JLS 6.4.2 says a variable name
-    // OBSCURES a type name, so the field wins - and only there: the probe is
+    // THE SECOND SHADOW is a TYPE name. In `class Ctr { int Ctr = 7; int f() {
+    // return Ctr; } }` the class descriptor is js_scope_decl'd into the same chain
+    // the bare name reads and so is never "undefined". JLS 6.4.2 says a variable
+    // name OBSCURES a type name, so the field wins - and only there: the probe is
     // js_jisclass on what the scope actually holds, which no local, parameter or
     // loop variable ever answers true for. `new Ctr()` never reaches here (makeNew
     // resolves the name itself) and a qualifier like `Ctr.staticField` is obscured
@@ -3079,12 +2962,10 @@ HasStatic   = :script(~~
         }
     }
 
-    // Outer.this - the enclosing instance of the named class. It used to be one
-    // unconditional __outer hop, which is wrong twice: two levels of nesting need
-    // two, and inside an ANONYMOUS class body `Outer.this` failed outright because
-    // the instance carried no __outer at all (makeNewAnon now records one). The walk
-    // is js_jouterthis, the twin of makeOuterThis in java-interpreter.abnf: out
-    // along __outer until an instance whose class chain is named Outer.
+    // Outer.this - the enclosing instance of the named class: js_jouterthis walks
+    // out along __outer until an instance whose class chain is named Outer (two
+    // levels of nesting need two hops). Twin of makeOuterThis in
+    // java-interpreter.abnf.
     function makeOuterThis(text) {
         var nm = stripWs(text).split(".")[0]
         return function(b) {
@@ -3157,9 +3038,7 @@ HasStatic   = :script(~~
         // JLS 15.10.1: EVERY dimension expression is validated BEFORE any array is
         // allocated, so `new int[0][-1]` throws even though the inner allocation
         // would never run. js_jvnewlen answers its argument and raises
-        // NegativeArraySizeException on a negative one. Without it `new int[-1]`
-        // answered a zero-length array in the interpreter and killed the compiled
-        // halves outright (`runtime error: makeslice: len out of range`).
+        // NegativeArraySizeException on a negative one.
         if (idx == 0) {
             for (var d = 0; d < dimVs.length; d++) { callExt(b, "js_jvnewlen", [dimVs[d]]) }
         }
@@ -3210,9 +3089,8 @@ HasStatic   = :script(~~
     function makeCast(inner) { return inner }
     // A PRIMITIVE cast converts: (double)/(float) box their operand into a double
     // (that is what makes (double)7 / 2 == 3.5), the integral casts narrow to
-    // their own WIDTH - (byte)200 is -56 and (int)3000000000L is -1294967296,
-    // where the old js_jfint wrapped everything to int32 - and (char) re-boxes as
-    // a char. A reference cast stays the identity.
+    // their own WIDTH - (byte)200 is -56 and (int)3000000000L is -1294967296 -
+    // and (char) re-boxes as a char. A reference cast stays the identity.
     function makePrimCast(inner, ty) {
         if (ty == "double" || ty == "float") {
             // (float) is the NARROWING one - JLS 5.1.3, double to float - and it
@@ -3222,14 +3100,10 @@ HasStatic   = :script(~~
             return function(b) {
                 var rf = inner(b)
                 // js_jvnum FIRST. js_jflo is a FLOOR primitive and reads its
-                // operand with the runtime's own to_number, which cannot know
-                // Java's value model: layer 2 carries a `long` as a tag 13 box
-                // marked UNSIGNED (the only shape si_norm will not unbox back
-                // into an `int` - see languages/lib/java-rt.metajs), so the floor
-                // would read -1L as 1.8446744073709552E19. js_jvnum is the
-                // language's own "read this as a plain double" and answers the
-                // SIGNED value; in the Go twin it converts a jsGInt and passes
-                // everything else through, so llvm.Run is unchanged.
+                // operand with the runtime's own to_number, which does not know
+                // Java's value model (the {__char} box, for one). js_jvnum is the
+                // language's own "read this as a plain double"; in the Go twin it
+                // converts a jsGInt and passes everything else through.
                 return {b: rf.b, v: callExt(rf.b, ext, [callExt(rf.b, "js_jvnum", [rf.v])])}
             }
         }
@@ -3282,7 +3156,7 @@ HasStatic   = :script(~~
     // A method reference Recv::m -> jsf_N(env, args) that resolves the receiver from
     // the captured scope and forwards the exact args array to js_mcall(recv, "m",
     // args). Static / bound / unbound all work (js_mcall picks the this-binding from
-    // the receiver kind). ::new is not modelled.
+    // the receiver kind).
     function makeMethodRef(text, pos) {
         var sep = text.indexOf("::")
         var tgtPath = jStripTargs(text.slice(0, sep))
@@ -3440,22 +3314,17 @@ HasStatic   = :script(~~
                     // String, a boxed long, a double, a plain int, an array, an
                     // instance of a class that declares no method by that name.
                     // js_jhash answers all of them AND still dispatches to a
-                    // user-declared hashCode, so a class that overrides it is
-                    // unaffected. Same shape as the charAt arm above; only the
-                    // no-argument form is Object#hashCode, so an overload with
-                    // parameters still goes to js_mcall.
+                    // user-declared hashCode. Only the no-argument form is
+                    // Object#hashCode, so an overload with parameters still goes
+                    // to js_mcall.
                     // x.toString() and x.equals(y) are the other two members of
                     // the java.lang.Object contract a class inherits without
-                    // declaring, and until now they aborted with "unknown method"
-                    // wherever a class declared neither - the same gap hashCode
-                    // had until 77eb804. js_jvstr is String.valueOf, which
-                    // already DISPATCHES to a declared or inherited toString
-                    // before falling back to the record form and then to
-                    // getName() + "@" + hex(hashCode()); js_jvaleq is
-                    // Objects.equals arm for arm, which dispatches to a declared
-                    // equals and otherwise keeps Object's identity. So an
-                    // override is unaffected in both cases and no class needs a
-                    // generated method. Only the exact arities are Object's.
+                    // declaring. js_jvstr is String.valueOf, which DISPATCHES to
+                    // a declared or inherited toString before falling back to the
+                    // record form and then to getName() + "@" + hex(hashCode());
+                    // js_jvaleq is Objects.equals arm for arm, which dispatches to
+                    // a declared equals and otherwise keeps Object's identity.
+                    // Only the exact arities are Object's.
                     // String.substring checks the RANGE (begin > end is out of
                     // bounds too, JLS java.lang.String) where the shared js_mcall
                     // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
@@ -3499,12 +3368,10 @@ HasStatic   = :script(~~
 
     // ----- Statement thunks: function(block) -> block -----
 
-    // try/catch/finally has no exception model; the try block is still compiled. throw
-    // lowers its expression (keeping calls visible) but does not unwind.
     // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
-    // becomes a control signal that excDispatch re-issues here. The first catch wins.
+    // becomes a control signal that excDispatch re-issues here.
     // One try-with-resources resource: `Type name = init` (DType is dropped - the
     // resource is only ever closed, never target-typed).
     function makeResDecl(items) {
@@ -3550,12 +3417,7 @@ HasStatic   = :script(~~
         return parts[parts.length - 1]
     }
     // ONE catch closure that dispatches over the clauses in source order, which is
-    // what a Java try/catch actually is (JLS 14.20.1). This half used to keep only
-    // the FIRST clause and ignore its type entirely - a live halves divergence
-    // --cross never reached, because every test program had one catch clause whose
-    // type matched: `catch (NumberFormatException e) {} catch (IllegalStateException e) {}`
-    // ran the NumberFormatException body on an IllegalStateException, and the
-    // second clause was not emitted at all.
+    // what a Java try/catch actually is (JLS 14.20.1).
     //
     // A value that matches nothing is RE-THROWN, so an outer try still sees it -
     // excTryTyped in lib/interp-core.js does the same, and the finally closure
@@ -3651,7 +3513,6 @@ HasStatic   = :script(~~
             return bodyT(r.b)
         }
     }
-    // label: stmt -- not implemented; the label is dropped and the statement still runs.
     // A labeled statement: the wrapper offers its name via pendingLabel right
     // before emitting the inner statement - a loop emitter consumes it into its
     // loopStack entry, so only the directly labeled loop takes the name (inner
@@ -4188,8 +4049,6 @@ HasStatic   = :script(~~
         return doneB
     }
 
-    // Emits one method/ctor as jsf_N(env, args). For instance functions args[0] is this.
-    // fields != null marks a constructor: the field initializers run before the body.
     // The class whose body is currently being built (for super calls).
     var curClassName = ""
     // curClassName is what super.m() and an unqualified call resolve against. A
@@ -4232,6 +4091,8 @@ HasStatic   = :script(~~
     // "Outer", "Nested" -> "Nested": nested types are hoisted under their simple name.
     function jLastSeg(parts) { return parts[parts.length - 1] }
 
+    // Emits one method/ctor as jsf_N(env, args). For instance functions args[0] is this.
+    // fields != null marks a constructor: the field initializers run before the body.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
     function emitFunc(params, body, isInstance, fields, recordParams, superName, isCtl, preBody) {
@@ -4362,44 +4223,23 @@ HasStatic   = :script(~~
         curFTag = savedTag
         return idx
     }
-    // A record's value equality: same class descriptor and every component equal.
-    //
-    // The component test WAS js_jchareq, not js_seq, and js_jvaleq below keeps
-    // that arm: js_jchareq IS js_seq unless a
-    // char meets something, and a char is where the two engines part company: the
-    // Go twin's char is a comparable struct that === settles by value, while layer
-    // 2's is a {__char} BOX that === settles by identity (chapter 7.9 of the
-    // manual: the floor's strict_eq has no char arm). So `record R(char c)`
-    // compared two equal chars as UNEQUAL in the native binary while llvm.Run, the
-    // interpreter half and java 24.0.2 all answered true. Measured, not reasoned:
-    // tests/java-test-full.java rec-char / rec-char2 are the assertions, and both
-    // fail natively at df9199a.
-    //
-    // The rest of JLS 8.10.3 is js_jvaleq, ONE new extern (abnf/jsrtjava.go plus
-    // languages/lib/java-rt.metajs), because none of it can be spelled with the
-    // externs that already exist. It replaces the js_jchareq above and answers,
-    // per component:
-    //   - a double / float component with Double.compare(a,b)==0, where === said
-    //     NaN records are UNEQUAL (all three engines) and +0.0 / -0.0 records are
-    //     EQUAL (both compiler engines) - real java 24.0.2 says the opposite in
-    //     both directions, measured;
-    //   - a reference component with Objects.equals, where === said identity - so
-    //     a record holding a record (`record Line(Dot a, Dot b)`) and any object
-    //     with a user-declared equals compared UNEQUAL in both compiler engines.
-    //     A class without an equals, and an array, keep identity: Object.equals
-    //     IS identity and an array does not override it. (java-interpreter.abnf's
-    //     jValEq carries the same three arms; it recursed into a nested record
-    //     already but had every other case wrong, boxed longs included.)
-    // The shape is csharp-to-llvm-ir.abnf's $valeq turned inside out: Java needs
-    // no recursive IR helper, because Objects.equals DISPATCHES - the nested
-    // record's own generated equals is what compares its components, and the
-    // recursion happens through the class descriptor rather than in this file.
+    // A record's value equality: same class descriptor and every component equal
+    // per JLS 8.10.3, through js_jvaleq (abnf/jsrtjava.go and
+    // languages/lib/java-rt.metajs), which answers per component:
+    //   - a double / float component with Double.compare(a,b)==0 (NaN equals NaN,
+    //     +0.0 does not equal -0.0 - both the opposite of ===);
+    //   - a char compares by value (a layer-2 {__char} box is not === to an equal
+    //     one: the floor's strict_eq has no char arm, chapter 7.9 of the manual);
+    //   - a reference component with Objects.equals, so a record holding a record
+    //     and any object with a user-declared equals compare by value. A class
+    //     without an equals, and an array, keep identity.
+    // Java needs no recursive IR helper (unlike csharp-to-llvm-ir.abnf's $valeq),
+    // because Objects.equals DISPATCHES - the nested record's own generated equals
+    // compares its components.
     //
     // The class test is a branch rather than a js_jband chain because `equals`
     // takes an Object: `r.equals(null)` is a legal call that must answer false,
-    // and js_get of __class on a null reference ABORTS (it did: "member '__class'
-    // of null" killed the whole program in both compiler engines while the
-    // interpreter half and java answered false).
+    // and js_get of __class on a null reference ABORTS.
     function emitRecordEquals(clsName, comps) {
         var body = function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -4697,13 +4537,8 @@ HasStatic   = :script(~~
     //
     // A descriptor the runtime raises has to exist before the raise, so it cannot
     // be emitted on demand the way `noteTypeUse` emits the ones a program NAMES.
-    // Emitting all five unconditionally is what the first version did, and the
-    // exact counters said no: on tests/bench/mod.java - a program with no array
-    // indexing at all - the emitted module went 24,978 -> 40,196 bytes, the native
-    // binary 427K -> 464K and the GC's live set 129,296 -> 139,856 bytes, for five
-    // class descriptors it could never reach. (Collections were unchanged at 1,054,
-    // and the instruction count moved +2.6% against java's own 3.21% spread, i.e.
-    // not measurable there - chapter 4.)
+    // Emitting all five unconditionally would put five class descriptors most
+    // programs can never reach into every module (and every native binary).
     //
     // So each is gated on the FEATURE, not on the type name: the flags below are
     // set by the grammar actions, which run while the file is walked and are
@@ -4716,16 +4551,15 @@ HasStatic   = :script(~~
         if (sfx.name == "charAt" || sfx.name == "substring") { jUsesStrIdx = true }
         return sfx
     }
-    // Four of these are needed whether or not the program names them, because the
+    // These are needed whether or not the program names them, because the
     // RUNTIME raises them from code that has no access to the program's scope:
     // ArithmeticException on an integer divide by zero (JLS 15.17.2, js_jvarith),
     // ArrayIndexOutOfBoundsException on every out-of-range array access (JLS 10.4,
     // js_jvidx), StringIndexOutOfBoundsException from charAt/substring and
     // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen).
-    // js_jvexc registers each descriptor by NAME; so they, and their ancestors, are
-    // always emitted.
-    // ArithmeticException alone is unconditional: an integer divide by zero is
-    // reachable from arithmetic the emitter cannot see around (JLS 15.17.2).
+    // js_jvexc registers each descriptor by NAME. ArithmeticException alone is
+    // unconditional: an integer divide by zero is reachable from arithmetic the
+    // emitter cannot see around; the others are gated on the flags above.
     var neededExc = {"$ArithmeticException": true, "$RuntimeException": true,
                      "$Exception": true, "$Throwable": true}
     // The names handed to the runtime by js_jvexc. jNoteRuntimeExc, called once
@@ -4912,8 +4746,7 @@ HasStatic   = :script(~~
         }
         // java.lang.Enum#toString answers the constant's name unless the enum
         // overrides it. java-interpreter.abnf installs the same default the same way
-        // (`if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }`), and without
-        // it RED.toString() failed to dispatch here while the interpreter answered.
+        // (`if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }`).
         var enumHasToString = false
         for (var t = 0; t < members.length; t++) {
             if (members[t].kind == "method" && members[t].name == "toString") { enumHasToString = true }
@@ -5142,13 +4975,11 @@ HasStatic   = :script(~~
         // System.out.println / System.out.print / System.exit from the host globals.
         var sysV = callExt(b, "js_obj_new", [])
         var outV = callExt(b, "js_obj_new", [])
-        // println/print are NOT the shared host functions: those hand the raw
-        // runtime value to Go's %v, which prints <nil> for null, [1 2 3] for an
-        // array and a pointer-bearing map dump for an instance (and overflows the
-        // stack on an enum constant, whose descriptor points back at it). Each is a
-        // one-line closure over js_jvprint / js_jvwrite, which render the way java
-        // does - see abnf/jsrtjava.go. The whole ARGUMENT ARRAY is passed, so the
-        // no-argument println() stays distinguishable from println(null).
+        // println/print are NOT the shared host functions, which hand the raw
+        // runtime value to Go's %v. Each is a one-line closure over js_jvprint /
+        // js_jvwrite, which render the way java does - see abnf/jsrtjava.go. The
+        // whole ARGUMENT ARRAY is passed, so the no-argument println() stays
+        // distinguishable from println(null).
         var jvPrintlnF = emitFunc([], function(bb) {
             callExt(bb, "js_jvprint", [curF.Params[1]])
             bb.NewRet(hUndef)
@@ -5168,15 +4999,12 @@ HasStatic   = :script(~~
         // JavaScript one, whose abs/max/min always answer a plain number - so
         // Math.abs(-2.0) is 2.0 here, exactly like in java-interpreter.abnf.
         //
-        // __jmath is a HOST GLOBAL of the Go runtime (jvmMathObject, abnf/jsrt.go)
-        // and languages/lib/runtime.c seeds no such name, so a natively linked
-        // binary has to build the object itself. This is the scope PROBE of
-        // docs/runtime-next-plan.md part 3, generalised from PHP: the emitter is
-        // the side that may read a scope, so it asks whether the host global is
-        // there and falls back to layer 2's own java.lang descriptor when it is
-        // not. Under llvm.Run the hit arm is always taken and nothing changes;
-        // js_jvboxtype("Math") is the miss arm and answers jvBoxType's empty
-        // object in the Go twin, which is never read there.
+        // __jmath is a HOST GLOBAL of the Go runtime (jvmMathObject,
+        // abnf/jsrtjvm.go) and languages/lib/runtime.c seeds no such name, so a
+        // natively linked binary has to build the object itself: the emitter asks
+        // the scope whether the host global is there and falls back to layer 2's
+        // own java.lang descriptor when it is not. Under llvm.Run the hit arm is
+        // always taken; js_jvboxtype("Math") is the miss arm.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
                                      jvScopeProbe(b, emitStr(b, "__jmath"),
                                                   callExt(b, "js_jvboxtype", [emitStr(b, "Math")]))])
@@ -5197,15 +5025,11 @@ HasStatic   = :script(~~
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
         // THE WHOLE ENTRY CALL RUNS INSIDE ONE js_try, so an exception nobody caught
-        // is reported BY THE PROGRAM (js_jvtop) instead of escaping the module. What
-        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
-        // which renders a value with the generic object toString, so every uncaught
-        // `throw' in both compiled halves read "js runtime error: uncaught
-        // exception: [object Object]" - no class and no message. This is exactly the
-        // shape ruby-to-llvm-ir.abnf (js_try + js_rtop) and go-to-llvm-ir.abnf
-        // (js_gotry + js_gotop) already use; js_jvtop prints the java LAUNCHER's own
-        // line and exits 1, which is what real java does (measured, 24.0.2).
-        // docs/todo.md 1.14.
+        // is reported BY THE PROGRAM (js_jvtop) instead of escaping the module to
+        // the floor's / the Go twin's uncaught-throw handler, which knows neither
+        // the class nor the message. This is the shape ruby-to-llvm-ir.abnf
+        // (js_try + js_rtop) and go-to-llvm-ir.abnf (js_gotry + js_gotop) use;
+        // js_jvtop prints the java LAUNCHER's own line and exits 1, as real java does.
         var entryT = function(bb) {
             if (mainIsSnippet(entry)) {
                 bb = emitMainSnippet(bb, entry, "Statement")
@@ -5248,7 +5072,7 @@ HasStatic   = :script(~~
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -5257,8 +5081,8 @@ HasStatic   = :script(~~
     // (lib/java-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
     // indices are offset by a million, so the two chains cannot overlap and one
     // js_call reaches either module. Emitted ONLY for -exe, so every other run keeps
-    // the module it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged -
-    // the mechanism is the reusable part of phase 4 and nothing here is Java's.
+    // the module it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged;
+    // nothing here is Java's.
     function emitDispatch() {
         var idxs = []
         var fns = []

@@ -3,29 +3,19 @@ package abnf
 // jsrtjava.go -- Java's VALUE RENDERING for the compiler grammar
 // (languages/java-to-llvm-ir.abnf).
 //
-// java-to-llvm-ir.abnf used to bind System.out.println straight to the shared
-// `println` host function, which hands the raw runtime value to Go's `%v`. That
-// printed `<nil>` for a null reference, `[1 2 3]` for an array and a full
-// `map[__class:map[__isclass:true __name:Box ...] x:0]` dump - containing raw Go
-// POINTER addresses, so the compiler's stdout was not even reproducible between
-// two runs - for an instance. Printing an ENUM CONSTANT crashed the process
-// outright with a Go stack overflow, because the constant's `__class` points at a
-// descriptor that points back at the constant and `toGoNatural` has no cycle
-// guard. Real java 24 prints
+// The shared `println` host function hands the raw runtime value to Go's `%v`,
+// which is wrong for every Java reference: real java 24 prints
 //
 //	null / [I@1dbd16a6 / Main$Box@7344699f / RED / P[x=1, y=2]
 //
-// The interpreter half was wrong in its own way: its `jstr` fell through to
-// JavaScript's ToString, so an array printed "1,2,3", an instance "Box@obj", a
-// record "P@obj" and a `double[]` "[object Object]". Both halves now render
-// through the same rules; this file is the Go twin of `jstr` / `jIdHash` /
-// `jArrayTag` in java-interpreter.abnf and the two MUST stay in step, because
-// ./test.sh --cross diffs them.
+// (and Go's `%v` of an enum constant would recurse forever, because the
+// constant's `__class` points at a descriptor that points back at it). This file
+// is the Go twin of `jstr` / `jIdHash` / `jArrayTag` in java-interpreter.abnf and
+// the two MUST stay in step, because ./test.sh --cross diffs them.
 //
 // Registration is additive: an init() appends a registrar to rxExtraExterns, so
 // nothing here runs unless a program calls one of the js_jv* externs, and only the
-// Java compiler grammar emits them. No existing extern is renamed, removed or
-// rebound, and abnf/jsrt.go's printArgs is untouched.
+// Java compiler grammar emits them.
 //
 // Known simplifications, all DELIBERATE and all shared by the two halves:
 //
@@ -41,11 +31,10 @@ package abnf
 //     mixed -> [Ljava.lang.Object;. So `Object[] o = {1, 2}` renders as `[I@...`
 //     where real java says `[Ljava.lang.Object;@...`, and a nested `int[][]` renders
 //     as `[Ljava.lang.Object;@...` where real java says `[[I@...`.
-//   - `Object#toString` IS a callable member now: `b.toString()` on a class that
+//   - `Object#toString` IS a callable member: `b.toString()` on a class that
 //     declares none routes to js_jvstr, the same rendering println / `+` /
 //     String.valueOf use, and `b.equals(o)` routes to js_jvaleq. Both dispatch to a
-//     declared or inherited method first, so an override is unaffected - the shape
-//     js_jhash established for hashCode.
+//     declared or inherited method first, so an override is unaffected.
 
 import (
 	"fmt"
@@ -73,10 +62,9 @@ import (
 //	a jsChar        ==  a char
 //
 // int is the type of every unsuffixed integer literal and of every arithmetic
-// result with no long operand, so keeping IT unboxed is what makes the change
-// affordable. The cost is that a 64 bit value stays boxed even when it would fit
-// in a double, because a plain number means `int` here - giNorm unboxes such a
-// result, so jvBox boxes it straight back.
+// result with no long operand, so it stays unboxed. The cost is that a 64 bit
+// value stays boxed even when it would fit in a double, because a plain number
+// means `int` here - giNorm unboxes such a result, so jvBox boxes it straight back.
 //
 // languages/java-interpreter.abnf implements exactly these rules on top of the
 // sz* layer in lib/interp-core.js, and ./test.sh --cross diffs the two halves,
@@ -117,14 +105,12 @@ func jvI(rt *jsrt, v interface{}) int32 { return int32(giVal(rt, v)) }
 // by js_jvexc at module init, because the externs that raise them have no access
 // to the program's scope; without one the raise aborts the run instead of
 // throwing. One compile runs one program, so a package-level holder is
-// per-program - the same reasoning the jvpIdent counter below records, and it
-// keeps this out of the shared jsrt struct.
+// per-program and stays out of the shared jsrt struct.
 //
-// ArithmeticException is "/ by zero" (JLS 15.17.2). The other four: an out-of-range array
-// access, an out-of-range string index or range, a negative array length and a
-// null array reference all THROW rather than abort. Same reasoning, same
-// per-program lifetime; the layer-2 twin is the block of jv*Cls slots in
-// languages/lib/java-rt.metajs.
+// ArithmeticException is "/ by zero" (JLS 15.17.2). The other four: an
+// out-of-range array access, an out-of-range string index or range, a negative
+// array length and a null array reference. The layer-2 twin is the block of
+// jv*Cls slots in languages/lib/java-rt.metajs.
 var jvArithExcCls *jsObject
 var jvAioobeCls *jsObject
 var jvSioobeCls *jsObject
@@ -387,7 +373,7 @@ func (rt *jsrt) jvParseInt(s string, width uint8) interface{} {
 	return jvNarrow(rt, jvBox(v), width)
 }
 
-// jvHexOf is Integer.toHexString / Long.toHexString (todo.md 1.10): the UNSIGNED
+// jvHexOf is Integer.toHexString / Long.toHexString: the UNSIGNED
 // hex reading of the value AT THE GIVEN WIDTH, lowercase, no leading zeros - so
 // Integer.toHexString(-1) is "ffffffff". The twin is jvToHex32 / jvToHex64 in
 // languages/lib/java-rt.metajs.
@@ -488,8 +474,8 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jsChar{code: 0})
 		o.set("SIZE", float64(16))
 		o.set("BYTES", float64(2))
-	// Double / Boolean carry only what todo.md 1.10 asked for; see the note on the
-	// layer-2 twin in languages/lib/java-rt.metajs.
+	// Double / Boolean carry only a subset; see the note on the layer-2 twin
+	// in languages/lib/java-rt.metajs.
 	case "Double":
 		o.set("NaN", jsJFlo{f: math.NaN(), sty: floJava})
 		o.set("SIZE", float64(64))
@@ -625,10 +611,10 @@ func init() {
 		// java.lang.String.substring checks the RANGE - begin > end is out of
 		// bounds too - where the shared memberCall CLAMPS through substringRange.
 		// A SEPARATE EXTERN, not a wrapper on js_mcall: rxExtraExterns fills ONE
-		// map for every language, so overriding js_mcall here made a C# Substring
-		// raise java's "Range [10, 6) out of bounds" (observed). js_ktsmcall and
-		// js_swmcall are the same pattern for the same reason. Only the java
-		// emitter emits js_jvsub, and only for the name `substring`.
+		// map for every language, so overriding js_mcall here would make a C#
+		// Substring raise java's message. js_ktsmcall and js_swmcall are the
+		// same pattern for the same reason. Only the java emitter emits
+		// js_jvsub, and only for the name `substring`.
 		baseMcall := m["js_mcall"]
 		m["js_jvsub"] = func(a []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
@@ -686,16 +672,11 @@ func init() {
 			// so 16777217 < 16777216f is FALSE - the int converts to 1.6777216E7.
 			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
-			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
-			// there as "every relation is false" - and that is exactly Java's
-			// rule (JLS 15.20.1: if either operand is NaN then <, <=, > and >=
-			// all produce false). Read as an ordering the sentinel made `>` and
-			// `>=` TRUE here, while layer 2's own copy of jsCompare dropped the
-			// sentinel and answered 0, making `<=` and `>=` true - so the two
-			// halves were wrong in DIFFERENT directions and disagreed with each
-			// other. It is not 0 either. This is the same fix jsrtcsharp.go:477
-			// took; java is its twin and was missed. languages/lib/java-rt.metajs
-			// (js_jvcmp) carries the identical three lines.
+			// jsCompare answers the SENTINEL 2 for a NaN operand ("every
+			// relation is false"), which is exactly Java's rule (JLS 15.20.1:
+			// if either operand is NaN then <, <=, > and >= all produce false);
+			// it must not be read as an ordering. Twins: jsrtcsharp.go and
+			// js_jvcmp in languages/lib/java-rt.metajs.
 			if c == 2 {
 				return boolH(false)
 			}
@@ -873,12 +854,9 @@ func init() {
 			// `((Object) 1).equals(1L)` is FALSE in java - while the floor's
 			// strict_eq deliberately compares a sized integer and a plain number
 			// BY VALUE (chapter 7.9 of the manual), and js_jchareq below falls
-			// through to it. That gap was invisible while this extern only ever
-			// saw two components of the SAME declared type; routing Object#equals
-			// here made it a live halves divergence against the interpreter, which
-			// has always been exact. The guard is right for a record component
-			// too: an Object-typed component holding 1 does not equal one holding
-			// 1L. Only PRIMITIVES are screened - kind 0 (an instance, an array,
+			// through to it. The same holds for a record component: an
+			// Object-typed component holding 1 does not equal one holding 1L.
+			// Only PRIMITIVES are screened - kind 0 (an instance, an array,
 			// null) must still reach the dispatch below, because a declared
 			// equals(Object) legitimately compares against a String.
 			kx, ky := jvEqKind(x), jvEqKind(y)
@@ -926,8 +904,8 @@ func init() {
 		// Is this value a CLASS DESCRIPTOR? The one thing an emitted probe needs to
 		// know to apply JLS 6.4.2 - a variable name obscures a type name - because
 		// a class descriptor is declared in the same scope chain a bare name reads
-		// (see makeVarRef in java-to-llvm-ir.abnf, docs/todo.md 2.9). The layer-2
-		// twin is js_jisclass in languages/lib/java-rt.metajs.
+		// (see makeVarRef in java-to-llvm-ir.abnf). The layer-2 twin is js_jisclass
+		// in languages/lib/java-rt.metajs.
 		m["js_jisclass"] = func(a []uint64) uint64 {
 			o, ok := u(a[0]).(*jsObject)
 			if !ok {
@@ -935,7 +913,7 @@ func init() {
 			}
 			return boolH(o.props["__isclass"] == true)
 		}
-		// THE OUTER HOP (docs/todo.md 1.6). An inner or anonymous class body names a
+		// THE OUTER HOP. An inner or anonymous class body names a
 		// field of its ENCLOSING instance unqualified, and javac resolves it there
 		// (JLS 6.5.6.1: the innermost enclosing class that declares the name wins).
 		// The instance carries that enclosing instance as __outer - every creation
@@ -1124,15 +1102,12 @@ func (rt *jsrt) jvpObj(o *jsObject, depth int) string {
 		return rt.jvpRender(rt.call(f, o, []interface{}{o}), depth+1)
 	}
 	// java.lang.Throwable#toString: the BINARY class name and, only when
-	// getMessage() is non-null, ": " and the message. Measured, java 24.0.2 -
-	// println(new RuntimeException("x")) is "java.lang.RuntimeException: x", not
-	// the Object default at the bottom of this function, which all three engines
-	// agreed on and all three had wrong. Throwable#toString carries NO stack
-	// trace (printStackTrace() is the method that does), so unlike C#'s
-	// ToString (manual 7.9) nothing about it is unreproducible here. The twins
-	// are jThrowableStr in languages/java-interpreter.abnf and jvThrowableStr in
-	// languages/lib/java-rt.metajs, and jvmExcTopLine in abnf/jsrtjvm.go prints
-	// exactly this text after the launcher's fixed prefix. docs/todo.md 1.14.
+	// getMessage() is non-null, ": " and the message - println(new
+	// RuntimeException("x")) is "java.lang.RuntimeException: x" (java 24.0.2).
+	// It carries NO stack trace (printStackTrace() is the method that does).
+	// The twins are jThrowableStr in languages/java-interpreter.abnf and
+	// jvThrowableStr in languages/lib/java-rt.metajs, and jvmExcTopLine in
+	// abnf/jsrtjvm.go prints exactly this text after the launcher's fixed prefix.
 	if jvIsThrowable(o) {
 		return rt.jvmThrowableStr(o)
 	}
@@ -1295,9 +1270,8 @@ func jvpHash(v interface{}) string {
 //
 // For the record COMBINATION we pin OpenJDK's, which is what
 // java.lang.runtime.ObjectMethods generates: `h = 0; for each component h =
-// h*31 + hash(component)`, at int width. Measured against java 24.0.2 on this
-// machine rather than assumed - `record R(int a, String b, double c)` with
-// (1, "x", 2.5) answers 1074008649 there and 1074008649 here. It is pinned
+// h*31 + hash(component)`, at int width - `record R(int a, String b, double c)`
+// with (1, "x", 2.5) answers 1074008649 in java 24.0.2 and here. It is pinned
 // because the invariant that MUST hold (equal records hash equally) does not
 // choose a value, and two engines have to agree on one.
 //
