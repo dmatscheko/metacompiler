@@ -56,9 +56,8 @@ Program     <~~ buildMain(takeAll()) ~~>
 // shape most of a spec suite has). Body and Program therefore accept the same items.
 BodyItem    = HdBodyItem | AliasTop | Statement ;
 
-// module M ... end: accepted but not implemented (no namespacing). Its body is a
-// program of the same items; under -warn-unsupported they run in the current scope
-// so any defs/classes/calls stay visible. A nested module recurses.
+// module M ... end: creates (or reopens) the module object and runs its body, a program
+// of the same items. A nested module recurses.
 ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
@@ -73,10 +72,8 @@ ClassPath   = KwNilPath | ScopedName ;
 KwNilPath   = "nil" KwEnd "::" Name ;
 
 // A def: implicit return of the last expression, or an explicit return. A singleton
-// receiver (def self.m / def obj.m) is accepted but not implemented (routed as a
-// plain method of that name). The parameter list accepts default / splat / double-
-// splat / block / keyword parameters; the fancy forms are notImplemented (the method
-// is still built with the parameter names, so its body stays compilable).
+// receiver (def self.m / def obj.m) defines a singleton method. The parameter list
+// accepts default / splat / double-splat / block / keyword parameters.
 Def         <~~ push(makeFun(takeAll())) ~~>
             = KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
 // The name a def may carry. SetterName comes FIRST (PEG): `def name=(v)` declares the
@@ -108,7 +105,7 @@ SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
 // The receiver TEXT is carried up so that anything but `self` becomes a def on that
-// one OBJECT (docs/todo.md 1.3); ScopedName already accepts a plain local name.
+// one OBJECT; ScopedName already accepts a plain local name.
 SelfRecvHead <~~ push(up.in) ~~>
             = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
@@ -156,8 +153,6 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
-// A superclass (class D < Base) is accepted but not implemented (no inheritance);
-// the class body still compiles as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ]
               { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
@@ -300,18 +295,13 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
             = StmtRescue [ SameLine ModKw ModCond ] ;
-// STMT rescue STMT: the STATEMENT modifier form of rescue, which is where MRI
-// really puts it. It used to live inside the expression chain alone, and that was
-// wrong in both directions: `raise "a" rescue 7' did not parse at all (the raise
-// is a statement, not an expression), `g 1/0 rescue 9' bound the rescue to g's
-// ARGUMENT and called g, and `x = f rescue "c"' rescued the ASSIGNMENT so x was
-// never written. MRI's own grammar allows the modifier at exactly three places -
-// a statement, an assignment's right-hand side and a parenthesised body - and
-// REJECTS `f(a rescue b)' outright, so the tail moved out of the expression chain
-// to here and to AssignRhs; `(a rescue b)' reaches it through ParenBody.
+// STMT rescue STMT: the STATEMENT modifier form of rescue. MRI allows the modifier at
+// exactly three places - a statement, an assignment's right-hand side (AssignRhs) and a
+// parenthesised body (reached through ParenBody) - and REJECTS `f(a rescue b)', so it is
+// not part of the expression chain.
 // NotAfterSemi is what keeps a one-line `def f; raise "x"; rescue; 1; end' intact:
 // ExprStmt consumes the `;', so without it this rule would steal the def's own
-// rescue CLAUSE. docs/todo.md 1.3.
+// rescue CLAUSE.
 StmtRescue  <~~ push(makeRescueMod(takeAll())) ~~>
             = SimpleStmt [ SameLine NotAfterSemi KwRescue SimpleStmt ] ;
 // `remove_method :m if method_defined? :m` - the condition of a modifier is a full
@@ -386,13 +376,9 @@ MGroup      <~~ push({group: takeAll()}) ~~>
             = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
-// SameLine is what makes the no-argument form a no-argument form. Without it the
-// optional Expression reached ACROSS the newline and a bare `puts' swallowed the
-// start of the next statement: `puts' followed by `p x' parsed as `puts p' (the
-// bare name `p' is a method reference, so it printed "#<Proc>") and left `x' as a
-// dead statement, while `puts' followed by `f x' called `f' with no arguments.
-// CommandForm already spells the same guard for exactly this reason.
-// docs/todo.md 1.3.
+// SameLine is what makes the no-argument form a no-argument form: without it the
+// optional Expression reaches ACROSS the newline, and a bare `puts' followed by `p x'
+// parses as `puts p'. CommandForm spells the same guard for the same reason.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> [ SameLine Expression { "," Expression } ] ;
 
@@ -431,7 +417,6 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // the very first token when the right side is anything else.
 // The right-hand side carries the rescue modifier (`x = f rescue "c"'), because
 // in Ruby `rescue' binds TIGHTER than `=': the fallback is what gets assigned.
-// docs/todo.md 1.3.
 AssignRhs   <~~ push(makeRescueMod(takeAll())) ~~>
             = RhsCore [ SameLine KwRescue RhsCore ] ;
 RhsCore     = SplatRhs | CommandForm | AssignExpr ;
@@ -550,11 +535,8 @@ ParenTargetAhead = :script(~~
 ~~) ;
 
 // A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
-// user-defined `[]=` with three). Only the first is lowered; the rest are parsed so
-// the surrounding file is understood, which is what a multi-key []= costs here.
-// The SECOND subscript is kept: `a[1, 2] = 9' replaces two elements in MRI and
-// used to write one here, because this action dropped everything after n[0].
-// docs/todo.md 1.3.
+// user-defined `[]=` with three). The first two are lowered (`a[1, 2] = 9' replaces two
+// elements); the rest are parsed so the surrounding file is understood.
 TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = "[" Arg { "," Arg } "]" ;
 
@@ -673,9 +655,7 @@ SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}
 // A subscript reaches a user-defined #[] with a full argument list. A ONE-argument
 // subscript is the ordinary index (js_rxget); a TWO-argument one is Ruby's
 // `s[start, len]' / `a[start, len]' subsequence and is routed through the `[]'
-// METHOD instead, which is also what a user class' `def [](a, b)' wants. Before
-// this only the first argument was lowered, so `"hello world"[0, 6]' answered ONE
-// CHARACTER in every engine. docs/todo.md 1.10.
+// METHOD instead, which is also what a user class' `def [](a, b)' wants.
 IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
             = LineCont "[" Arg { "," Arg } "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
@@ -684,10 +664,8 @@ IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.lengt
 // the `foo (1)` spelling working, which Ruby warns about but accepts.)
 MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ] | Block ;
 
-// A call argument: an ordinary expression, or one of the forms accepted for
-// recognition but not implemented - keyword argument (name: v), splat / double-splat
-// (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
-// placeholder argument, so the call still compiles.
+// A call argument: an ordinary expression, a keyword argument (name: v), a splat /
+// double-splat (*a, **h) or a block pass (&blk, &:sym).
 // FwdArg comes LAST: a leading "..." is first offered to Expression, which reads it
 // as a beginless exclusive range and only fails when no operand follows - so `f(...)`
 // forwards while `f(...9)` stays a range.
@@ -921,8 +899,7 @@ ForVar      = "(" ForVarList ")" | ForPathAhead Target <~~ push({ftarget: pop()}
 SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
             = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ Block ] ;
 
-// yield / yield(args) / yield args: accepted but not implemented (no block passing);
-// warns and yields a placeholder value.
+// yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
             = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
 
@@ -932,12 +909,10 @@ YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
 // it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
 // 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
 // Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
-// The Integer literals are ruby's OWN productions rather than lib/numbers.abnf's
-// NumHex / NumBin / NumOct / NumInt, because those build the value with parseInt
-// and parseInt ROUNDS past 2^53: 0x20000000000001 arrived as 9007199254740992 and
-// 12345678901234567890 as ...567000. The syntax is unchanged (the digit
-// productions are still the shared ones); only the value builder differs, and it
-// hands makeConst a {rbig} marker for anything the double cannot count exactly.
+// The Integer literals use ruby's OWN value builders (intLitDec / intLitRadix) rather
+// than lib/numbers.abnf's, whose parseInt ROUNDS past 2^53; the digit productions are
+// still the shared ones, and makeConst gets a {rbig} marker for anything the double
+// cannot count exactly.
 RbHexLit    <~~ push(makeConst(intLitRadix(up.in, 16, 2))) ~~>
             = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
 RbBinLit    <~~ push(makeConst(intLitRadix(up.in, 2, 2))) ~~>
@@ -1630,16 +1605,16 @@ LcId        = ( "a"..."z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"...
 PatValue    <~~ push(makePatValue(pop())) ~~> = RangeExpr ;
 
 // begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
-// finally). A raise in the body unwinds to the first rescue (exception types are
-// parsed but not discriminated), which binds its `=> Id` name; else runs only when the
+// finally). A raise in the body unwinds to the first rescue whose types match, which
+// binds its `=> Id` name; else runs only when the
 // body raised nothing and produced no return/break/next; ensure always runs. A
 // return/break/next leaving the body propagates as the ordinary control signal.
 BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = KwBegin Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
               [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] End ;
-// rescue [Type[, Type]] [=> Id]: the type list is parsed and discarded (types are not
-// discriminated); the `=> Id` name is pushed so makeExcept can bind it to the value.
+// rescue [Type[, Type]] [=> Id]: makeExcept collects the type list and the `=> Id`
+// target the raised value is bound to.
 // SameLine is what keeps a bare `rescue` whose body OPENS the next line with a
 // constant (`rescue` newline `ScratchPad << :x`) from reading that constant as the
 // rescued exception type - the type list, like every command argument in Ruby, has
@@ -2090,14 +2065,8 @@ CmdArgAhead = :script(~~
         // Characters that can only continue an expression, never open one.
         // `{` IS ONE OF THEM, and that is Ruby's rule rather than a convenience: a
         // brace after a method name is always a BLOCK, never a Hash argument - MRI
-        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}` with
-        // *syntax error, unexpected ':'*. Without 123 here, CommandForm read the
-        // brace as an ArrowArg and `x = proc { }` became `x = proc({})`, so this
-        // half died with *variable not defined: proc* and the interpreter answered
-        // *unknown Hash method: lambda?*. The shape is specifically a command
-        // argument list: `p proc { }.lambda?` always worked, because there the
-        // brace is reached through Primary -> Call -> `BareName Block`.
-        // docs/todo.md 1.3.
+        // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}`. Without
+        // 123 here, `x = proc { }` would read as `x = proc({})`.
         if (cc === 40 || cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
@@ -2305,8 +2274,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function fail(msg) { println("ruby compiler error: " + msg); exit(1) }
 
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
-    // -why. Ruby had NO line attribution in any of the four (docs/todo.md 6.1);
-    // this is the same marker every other handle-IR language emits, but it cannot
+    // -why: the same marker every other handle-IR language emits, but it cannot
     // be core stmtPos (lib/compile-core.js): up.pos is the position AFTER the
     // tag's node matched, and Ruby's whitespace INCLUDES newlines and comments, so
     // a statement's node ends past every blank line that follows it - `x = 1' as
@@ -2353,9 +2321,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // One `return' of the value v, from wherever it was written. Inside a block it
     // leaves the enclosing METHOD: the [value, tag] marker emitBlkBreakCall unwraps.
-    // A plain ret there would only end this one block run - which is `next', and is
-    // what made `def u; A.each { |v| return v if v == 2 }; nil; end' answer nil in
-    // this half alone.
+    // A plain ret there would only end this one block run - which is `next'.
     function emitRubyRet(b, v) {
         if (curIsBlockFn && curBlkNonlocal && curMethodTag != 0) {
             var margs = callExt(b, "js_arr_new", [])
@@ -2568,17 +2534,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // ----- ranges (eager arrays), arrays, hashes, templates -----
+    // ----- ranges, arrays, hashes, templates -----
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
-        // EVERY range is a {__rrange} VALUE now, bounded or not. A bounded one used
-        // to be MATERIALIZED into an Array here, which is why `p (1..3)' printed
-        // [1, 2, 3], `.begin' aborted with *unknown Array method*, `r.class' said
-        // Array and a range could not be a Hash key. The two entry points below are
-        // kept apart only because the two syntactic forms are distinguishable here;
-        // js_rrangearr and js_rrangeopen build the same object. Everything
-        // downstream that iterates one (for-in, splat, destructure) goes through
-        // js_pylen / js_pyget, which now know a Range. docs/todo.md 1.5.
+        // EVERY range is a {__rrange} VALUE, bounded or not. The two entry points below
+        // are kept apart only because the two syntactic forms are distinguishable here;
+        // js_rrangearr and js_rrangeopen build the same object. Everything downstream
+        // that iterates one (for-in, splat, destructure) goes through js_pylen /
+        // js_pyget, which know a Range.
         var beginless = typeof items[0] == "string"
         var loT = beginless ? null : items[0]
         var op = beginless ? items[0] : items[1]
@@ -2711,26 +2674,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // that shape can only be kept in a registry keyed by function identity - which
     // RETAINS every closure it records, together with its whole scope chain, and a
     // block literal builds one closure per call. So the registry is armed only for a
-    // program that NAMES the method. Measured on a 20,000-iteration loop containing
-    // one block: always-on took the native live set from 181 KB to 5.1 MB and the
-    // heap from 11.6 MB to 22.1 MB. A program that reaches the method some other way
-    // (send(:arity)) answers 0, which is what an unrecorded closure answers anyway.
+    // program that NAMES the method; always-on multiplies the live set of any loop that
+    // builds blocks. A program that reaches the method some other way (send(:arity))
+    // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity") { usesArity = true } return n }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
     // JavaScript's set - it is right about \n \t \r \xNN \uNNNN and copies anything
-    // else through as the bare letter - and Ruby's set is wider in four ways that all
-    // reached a program's OUTPUT silently, because both halves called the same shared
-    // helper and therefore agreed:
+    // else through as the bare letter - and Ruby's set is wider in four ways:
     //   \a \b \f \v \e   the four control spellings JS does not have (\e is ESC);
     //   \s               a space;
-    //   \nnn             an OCTAL byte, one to three digits ("\101" is "A"); the
-    //                    shared helper read "\101" as NUL followed by "01";
+    //   \nnn             an OCTAL byte, one to three digits ("\101" is "A");
     //   \u{...}          the braced form, which may be ASTRAL - encoded here as the
     //                    surrogate PAIR the floor's UTF-16 strings are made of.
     // Everything else keeps the shared helper's rule: the character itself, so \" \\
-    // \# and \/ stay right. \C-x / \M-x are NOT decoded here and were not before
-    // either - ctlCharVal handles them for ?x character literals only.
+    // \# and \/ stay right. \C-x / \M-x are NOT decoded here - ctlCharVal handles them
+    // for ?x character literals only.
     function unescapeRb(s) {
         var out = ""
         var i = 0
@@ -2785,12 +2744,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (bn == 0) { out += "u"; i = i + 2; continue }
                     if (bv > 65535) {
                         var pv = bv - 65536
-                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a
-                        // time. Handing both to String.fromCharCode in one call makes
-                        // the COMPILER half print the character and leaves the other
-                        // two at U+FFFD - a halves divergence - so the two-call form
-                        // is kept, and astral text is U+FFFD everywhere, which is what
-                        // it already is in swift and in Go's byte slicing.
+                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a time:
+                        // handing both to String.fromCharCode in one call makes the COMPILER
+                        // half print the character while the other two print U+FFFD, so the
+                        // two-call form is kept and astral text is U+FFFD everywhere, as it
+                        // already is in swift and in Go's byte slicing.
                         out += String.fromCharCode(55296 + Math.trunc(pv / 1024))
                         out += String.fromCharCode(56320 + (pv - Math.trunc(pv / 1024) * 1024))
                     } else {
@@ -3004,9 +2962,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         cur = callExt(b, "js_pylen", [cur])
                     } else if (s.name == "to_s") {
                         // js_rstr is Ruby's to_s (nil -> "", a class -> its name, a
-                        // Float keeps its point). js_jadd was JavaScript's, which
-                        // rendered nil as "null" - a live divergence from the
-                        // interpreter, whose rstr() has always answered "".
+                        // Float keeps its point), as the interpreter's rstr() is.
                         cur = callExt(b, "js_rstr", [cur])
                     } else if (s.name == "new") {
                         // Foo.new without parens: a zero argument constructor call.
@@ -3155,10 +3111,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var bodyStmt = blockBodyOf(items)
         // blkKinds travels beside the block so that Kernel#lambda can arity-check it
         // (makeCall below). The arity REGISTRY cannot carry it: it is armed only when
-        // the program names `arity' (it retains every closure with its whole scope
-        // chain - measured 181 KB -> 5.1 MB), and behaviour must not depend on that.
+        // the program names `arity', and behaviour must not depend on that.
         // The block's PARAMETER SHAPE is known right here, at the literal, which is
-        // the one place it is free. docs/todo.md 1.6.
+        // the one place it is free.
         return {blkKinds: paramKinds(params), blkT: function(b) {
             var idx = emitFunc(params, bodyStmt, false, false, true)
             return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
@@ -3185,11 +3140,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     // A block reaches a call as a marker, so a call can tell it from its arguments.
-    // The LLVM lowering keeps the interpreter's older convention of handing the block
-    // to js_rmcall as the LAST positional argument, so unwrapArgs simply puts it back
-    // at the end of the argument list.
-    // name: v and *arr / **h call arguments have no lowering yet; each becomes the
-    // notImplemented placeholder so the call itself still compiles.
     // An argument list reaches the emitter as a mix of plain thunks and markers, and
     // stays that way: emitArgs below is what turns it into the runtime argument array.
     function unwrapArgs(args) { return args }
@@ -3251,19 +3201,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blkT != null) {
             var rb = blkT(b)
             b = rb.b
-            // THE BLOCK MARKER. The block used to be pushed as the bare closure,
-            // which made it indistinguishable from a Proc passed as an ordinary
-            // positional argument: js_rposbind could only guess ("the trailing
-            // callable is the block"), so `def m(f = 3); end; m(some_proc)' took
-            // the default and `block_given?' answered true for a method that was
-            // never given a block. js_rblkwrap puts it in a one-slot object
-            // nothing else produces, so the fact is recorded HERE, at the call
+            // THE BLOCK MARKER. js_rblkwrap puts the block in a one-slot object
+            // nothing else produces, so it stays distinguishable from a Proc
+            // passed as an ordinary positional argument (`def m(f = 3); end;
+            // m(some_proc)' binds f, and `block_given?' is false for a method
+            // never given a block). The fact is recorded HERE, at the call
             // site that knows it. js_rblock unwraps at the other end.
             callExt(b, "js_arr_push", [argsV, callExt(b, "js_rblkwrap", [rb.v])])
         }
         return {b: b, v: argsV}
     }
-    // &expr as an argument: the value is handed over as the block itself.
     // &expr as an argument: a Proc travels straight through, a Symbol becomes the
     // "call this method on each element" proc (js_rsymproc).
     function makeBlockArg(t) {
@@ -3273,15 +3220,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     // yield ARGS: call the block the running method was given. The block is the
-    // trailing argument of the call (see emitArgs / emitParams), which js_rblock
-    // reads out of the method's own argument array - but NOT out of curArgsV, which
-    // is the argument array of the IR function CURRENTLY being emitted. Inside a
-    // begin/rescue (or a literal block, or a `x rescue y') that is a ctl closure with
-    // an argument array of its own, and js_rblock answered null there: `yield' inside
-    // a begin/rescue aborted the compiler half while the interpreter answered. So the
-    // block is published ONCE per method, into that method's scope under `$blk'
-    // (exactly what the interpreter's invokeRuby does), and every yield site reads it
-    // through the scope CHAIN - which is what makes it survive a nested closure.
+    // trailing argument of the call (see emitArgs / emitParams) - but NOT of
+    // curArgsV, which is the argument array of the IR function CURRENTLY being
+    // emitted: inside a begin/rescue, a literal block or a `x rescue y' that is a
+    // ctl closure with an argument array of its own. So the block is published ONCE
+    // per method, into that method's scope under `$blk' (exactly what the
+    // interpreter's invokeRuby does), and every yield site reads it through the
+    // scope CHAIN - which is what makes it survive a nested closure.
     function curBlockV(b) {
         return callExt(b, "js_scope_get", [curScopeV, emitStr(b, blkSlot)])
     }
@@ -3385,8 +3330,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // js_rputs / js_rprint render with RUBY's to_s (nil -> "", a Float
             // keeps its point, a class prints its name) and puts FLATTENS an
             // array one element per line. The shared println host function does
-            // none of that - it printed Go's %v, so `puts nil' said "<nil>" and
-            // `puts [1, 2]' said "[1 2]" while the interpreter said "" and "1\n2".
+            // none of that.
             var extName = isPrint ? "js_rprint" : "js_rputs"
             if (args.length == 0) {
                 if (!isPrint) { callExt(b, "js_rputs", [emitStr(b, "")]) }
@@ -3482,7 +3426,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `s[0] = "H"' has to be written back to the variable - exactly what
     // makeAppendStmt already does for `s << "x"'. The write-back is emitted only for
     // a one-step path with an assignable head; a deeper path would have to re-walk
-    // itself and re-run its side effects. docs/todo.md 1.3.
+    // itself and re-run its side effects.
     function emitPathSet(b, ref, p, v) {
         if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]); return b }
         var nv = callExt(b, "js_rsetsl", [p.obj, p.key, p.key2, v])
@@ -3574,15 +3518,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isTypeNamed(b, valV, nm) {
         return callExt(b, "js_seq", [typeNameV(b, valV), emitStr(b, nm)])
     }
-    // What `*x' on a right-hand side SPLICES rather than wraps: an Array, and now
-    // also a Range - `[*1..3]' is [1, 2, 3] and `a, b, c = *r' unpacks. It worked
-    // by accident while a bounded range WAS an array and would have silently
-    // regressed to a one-element wrap the moment it stopped being one. Written as
+    // What `*x' on a right-hand side SPLICES rather than wraps: an Array and a
+    // Range - `[*1..3]' is [1, 2, 3] and `a, b, c = *r' unpacks. Written as
     // js_rbor of two name tests rather than a new extern: js_rbor already answers
-    // `bool || truthy', both operands are pure, and this keeps the engine boundary
-    // where it is. NOTE that emitAsArray is deliberately NOT changed - MRI does not
-    // splat a bare range in `a, b = 1..3', which leaves a = 1..3 and b = nil.
-    // docs/todo.md 1.5.
+    // `bool || truthy', and both operands are pure. emitAsArray is deliberately
+    // NOT the same - MRI does not splat a bare range in `a, b = 1..3', which
+    // leaves a = 1..3 and b = nil.
     function isSplatSeq(b, valV) {
         return callExt(b, "js_rbor", [isTypeNamed(b, valV, "Array"), isTypeNamed(b, valV, "Range")])
     }
@@ -3972,9 +3913,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var testV
                     if (subject != null) {
                         var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, subjName)])
-                        // when V is Ruby's `V === subject`: a Range (an eager array
-                        // here) and a `when *arr` splat match by MEMBERSHIP, a class
-                        // by is_a?, everything else by ==. js_rcase is all three.
+                        // when V is Ruby's `V === subject`: a Range and a `when *arr`
+                        // splat match by MEMBERSHIP, a class by is_a?, everything else
+                        // by ==. js_rcase is all three.
                         if (vals[k].isRange || vals[k].isSplat === true) {
                             testV = truthy(b, callExt(b, "js_rxcase", [rv.v, subjV]))
                         }
@@ -4239,7 +4180,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // A value about to be DESTRUCTURED must be an Array: a single non-array right side
     // destructures as a one-element list (`a, b = 1` gives a == 1, b == nil), and
-    // js_pylen aborts on anything else - which is what this used to do.
+    // js_pylen aborts on anything else.
     function emitAsArray(b, v) {
         var tmp = patTemp(b, v)
         var okB = curF.NewBlock("")
@@ -4299,8 +4240,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // begin / rescue / else / ensure. makeExcept pairs a rescue's `=> Id` name (if any)
-    // with its body; items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
+    // begin / rescue / else / ensure. makeExcept turns one rescue clause into
+    // {handler, href, etypes}.
     function makeExcept(items) {
         var href = null
         var body = null
@@ -4445,7 +4386,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // SOURCE SITE, in MRI's own backtrace spelling, recorded on the
             // exception so js_rtop can print MRI's uncaught-exception line. Only
             // this site passes one, so a re-raise (js_rraise) keeps the original
-            // site, exactly as MRI does. docs/todo.md 1.7.
+            // site, exactly as MRI does.
             callExt(b, "js_rraiseat", [v, msgV, emitStr(b, raiseSite(pos))])
             b.NewRet(hUndef) // Never reached: js_rraise unwinds on the host side.
             return {b: deadBlock(), v: hNull}
@@ -4489,7 +4430,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // entry is re-registered onto it (js_rlamchk does that) and two
                     // `lambda' calls on the SAME block object answer two different
                     // Procs. Neither is observable in Ruby - a block literal is not a
-                    // value there at all. docs/todo.md 1.6.
+                    // Procs. Neither is observable in Ruby - a block literal is not a value there at all.
                     var lv = r.v
                     if (blkKinds != null) { lv = callExt(r.b, "js_rlamchk", [lv, emitStr(r.b, blkKinds)]) }
                     return {b: r.b, v: callExt(r.b, "js_rlambda", [lv])}
@@ -4501,16 +4442,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // def was declared under, and js_rmethodval does that chain walk with the
         // RUNTIME name; the interpreter half's hostGlobals["method"] is its twin.
         //
-        // IT ALSO REACHES AN INSTANCE METHOD OF THE RUNNING SELF, which the note that
-        // used to sit here called impossible ("binding one needs a variadic closure,
-        // and layer 2's MetaJS has no `arguments`"). THE SECOND HALF OF THAT WAS
-        // FALSE: metajs-to-llvm-ir.abnf binds `arguments` in every compiled function,
-        // lib/go-rt.metajs already builds a bound receiver with it, and a two-line
-        // probe compiled and ran the construct in both engines. So the scope walk,
-        // the `self` lookup and the bound wrapper all live in one extern rather than
-        // in emitted IR - js_scope_get aborts on a miss and cannot be used to ASK,
-        // while layer 2 has scopeHas/scopeParent/scopeGet and the Go twin has the
-        // scope itself. docs/todo.md 1.5.
+        // It ALSO REACHES AN INSTANCE METHOD OF THE RUNNING SELF, bound to it: layer
+        // 2's MetaJS binds `arguments` in every compiled function, so the variadic
+        // bound wrapper is expressible. The scope walk, the `self` lookup and the bound
+        // wrapper all live in one extern rather than in emitted IR - js_scope_get
+        // aborts on a miss and cannot be used to ASK, while layer 2 has
+        // scopeHas/scopeParent/scopeGet and the Go twin has the scope itself.
         if (name == "method" && args.length == 1 && typeof args[0] == "function") {
             var mT = args[0]
             var mFallback = makePlainCall(name, args)
@@ -4546,12 +4483,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rformat", [ea.v])}
             }
         }
-        // Kernel#rand. It resolved to a scope lookup and aborted with `variable not
-        // defined: rand` in both compiler halves, where ruby-interpreter.abnf has had
-        // it as a host global all along - a halves divergence. There is no random
-        // source here, so js_rrand is deterministically zero OF THE RIGHT CLASS; see
-        // rubyRand in abnf/jsrt.go. Like printf/p below it steps aside for a program
-        // that defines a `rand` of its own.
+        // Kernel#rand. There is no random source here, so js_rrand is
+        // deterministically zero OF THE RIGHT CLASS; see rubyRand in abnf/jsrt.go.
+        // Like printf/p below it steps aside for a program that defines a `rand` of
+        // its own.
         if (name == "rand" && !hasBlockArg(args)) {
             var randArgs = args
             var randT = function(b) {
@@ -4572,24 +4507,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // file counts) and curClsName is the class being emitted. `p` in
         // particular is an ordinary Ruby method name.
         //
-        // printf is print(format(...)). Without this arm the bare name resolved to
-        // the SHARED host printf, which is not Ruby's and was not even one answer:
-        // `printf("%.2f", 1.5)` came out "%!f(string=1.)" under llvm.Run (Go's
-        // fmt) and "%.2f" verbatim from the native binary. docs/todo.md 2.9
-        // recorded only the missing interpreter half. p writes INSPECT one
-        // argument per line and answers the argument; the whole of it is js_rp, so
-        // both engines agree on that return value too.
+        // printf is print(format(...)) - Ruby's format, not the shared host
+        // printf. p writes INSPECT one argument per line and answers the argument;
+        // the whole of it is js_rp, so both engines agree on that return value too.
         // Kernel#Integer / #Float / #String / #Array: the CONVERSION functions, which
         // are ordinary Kernel methods that happen to be spelled like the classes.
-        // They existed in no engine: the name resolved to the builtin CLASS object,
-        // so `Integer("5")' built an INSTANCE of Integer in the interpreter half and
-        // aborted both compiled halves with *call of a non function value*. Integer
-        // and Float are STRICT (MRI raises ArgumentError on trailing junk, which is
-        // what makes `Integer("z") rescue 5' the idiom it is) - js_rkconv is that
-        // parse, shared by all three engines. docs/todo.md 1.3.
-        // Rational and Complex are two more of them, and the only spelling that
-        // builds either from two parts: `Rational(1, 3)' aborted here with *call of
-        // a non function value*. docs/todo.md 1.3.
+        // Integer and Float are STRICT (MRI raises ArgumentError on trailing junk,
+        // which is what makes `Integer("z") rescue 5' the idiom it is) - js_rkconv is
+        // that parse, shared by all three engines. Rational and Complex are two more
+        // of them, and the only spelling that builds either from two parts.
         if ((name == "Integer" || name == "Float" || name == "String" || name == "Array"
              || name == "Rational" || name == "Complex")
             && args.length > 0 && !hasBlockArg(args)) {
@@ -4749,10 +4675,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { kinds = kinds + "0" }
         }
         // The COMMON shape - every positional parameter required, no keywords - is
-        // emitted the old way, one js_arg per index, because js_rposbind's answer is
-        // then provably args[off + k] for every k and the call would allocate one
-        // Array per invocation for nothing. Measured on 200,000 calls of a method
-        // that DOES need it: 3,478 collections against 6,460.
+        // emitted as one js_arg per index, because js_rposbind's answer is then
+        // provably args[off + k] for every k and the call would allocate one Array
+        // per invocation for nothing.
         var simple = !wantsKw
         for (i = 0; i < kinds.length; i++) { if (kinds.charAt(i) != "0") { simple = false } }
         var bindV = null
@@ -4761,22 +4686,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                                wantsKw ? hTrue : hFalse])
         }
         // TOO FEW POSITIONAL ARGUMENTS IS AN ARGUMENT ERROR, and the check has to be
-        // in TWO places because the fast path above skips js_rposbind entirely - the
-        // common all-required shape is exactly the one `def one(a); end; one' hits,
-        // and it bound a to nil and ran where MRI raises (docs/todo.md 1.5).
+        // in TWO places because the fast path above skips js_rposbind entirely;
         // js_rposbind carries it for the general shape.
         //
         // Here it is js_rargchk, ONE call in the entry block of a method whose
-        // parameters are all required. A FREE version was written first and does not
-        // work: comparing the last required slot against handle 0 (undefined) catches
-        // every short call that carried NO BLOCK, but a call that passes a block and
-        // too few positional arguments (`def r(n); end; r(&:upcase)`) leaves the
-        // BLOCK MARKER in that slot - an object, which no icmp can see. js_rposbind
-        // and the interpreter's bindParams both strip the trailing block before
-        // counting, so the icmp-only version made the two halves DISAGREE on exactly
-        // that program; ./test.sh --cross caught it on tests/ruby-test-recognize.rb,
-        // which contains one. A BLOCK is never checked: Ruby arity-checks methods
-        // and lambdas only.
+        // parameters are all required. Comparing the last required slot against
+        // handle 0 (undefined) is NOT enough: a call that passes a block and too few
+        // positional arguments (`def r(n); end; r(&:upcase)`) leaves the BLOCK MARKER
+        // in that slot - an object, which no icmp can see - while js_rposbind and the
+        // interpreter's bindParams both strip the trailing block before counting. A
+        // BLOCK is never checked: Ruby arity-checks methods and lambdas only.
         var chkLast = isBlock !== true && bindV == null && kinds.length > 0
         var pi = 0
         var kwhV = null
@@ -4957,7 +4876,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The receiver of a `def X.m', with the whitespace the token match may have
     // carried stripped. "self" keeps the class-method path; anything else names an
-    // object whose own singleton table the def writes at RUN time. docs/todo.md 1.3.
+    // object whose own singleton table the def writes at RUN time.
     function srecvText(t) {
         if (typeof t != "string") { return "" }
         var s = ""
@@ -4982,8 +4901,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // One `def obj.m' / `class << obj; def m' closure, installed in the receiver's own
     // singleton table at run time. The build-time class machinery cannot hold it: the
-    // receiver is a VALUE, not a class name, which is exactly why a def in a
-    // `class << VALUE' body used to be notImplemented. docs/todo.md 1.3.
+    // receiver is a VALUE, not a class name.
     function emitSingletonDef(b, targetV, m) {
         var savedMeth = curMethName
         var savedParams = curMethParams
@@ -5019,7 +4937,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // math/big) under llvm.Run and rbABigFromStr in languages/lib/ruby-rt.metajs
     // natively. js_bigint reads DECIMAL text, so a 0x / 0o / 0b literal is
     // converted to exact decimal first rather than handed to parseInt, which
-    // rounds: 0x20000000000001 used to arrive as 2^53.
+    // rounds past 2^53.
     function mkBig(dec) { return {rbig: dec} }
     // The matched text carries the '_' separators and whatever the production's
     // trailing whitespace skip picked up, and neither js_bigint nor radixToDec is
@@ -5107,17 +5025,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Regular expression literals -----
     // The engine is the shared one: languages/lib/regex.js on the interpreter side,
     // its Go twin abnf/jsrtregex.go here, reached through js_rxnew and the js_rx*
-    // wrappers. Ruby's flag letters are NOT the engine's - Ruby /m/ means "dot
-    // matches newline" (the engine spells that "s") and Ruby's ^ and $ are always
-    // line anchors, so the engine's multiline mode is unconditionally on. o/u/n/e/s
-    // are encoding and once-only hints that do not change the match; they are
-    // accepted and ignored.
+    // wrappers.
     // Ruby's flag letters are NOT the engine's. Ruby /m/ is dot-matches-newline (the
     // engine's "s"), Ruby's ^ and $ are always line anchors (the engine's "m", always
     // on), and "p" is the engine's POSIX BRACKET EXPRESSIONS and nothing else: Ruby
     // has [[:alpha:]] but is NOT a POSIX ERE - it keeps \d, \w, \s, lazy quantifiers,
     // (?...) groups and an escaping backslash inside a bracket, all of which the
-    // engine's whole-dialect "e" letter would remove.
+    // engine's whole-dialect "e" letter would remove. o/u/n/e/s are encoding and
+    // once-only hints that do not change the match; they are accepted and ignored.
     function rubyReFlags(rflags) {
         var out = "mp"
         for (var i = 0; i < rflags.length; i++) {
@@ -5345,9 +5260,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // <<~ removes the SMALLEST indentation of any non-blank line from every line.
     // No split()/join() and no indexOf FROM-INDEX here: the frozen engine has
     // neither, so the body is walked line by line by hand.
-    // <<~ removes the SMALLEST indentation of any non-blank line from every line.
-    // No split()/join() and no indexOf FROM-INDEX here: the frozen engine has
-    // neither, so the body is walked line by line by hand.
     function nlAt(s, from) {
         for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
         return -1
@@ -5500,63 +5412,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeGvarRef(name) {
         return function(b) { return {b: b, v: callExt(b, "js_rgget", [emitStr(b, name)])} }
     }
-    // ----- the scope probe, AND WHY IT WENT BACK TO BEING AN EXTERN -----
+    // ----- the scope probe -----
     //
-    // js_rdefined takes a SCOPE HANDLE and walks the chain, so between 018c693 and
-    // docs/todo.md 5.3 it was lowered right here into an IR helper (`rb_defined`,
-    // one js_scope_typeof and a compare): a scope is the C floor's PRIVATE storage,
-    // layer 2 could not open one, and an emitter may call js_scope_typeof. That is
-    // the wall php, swift, java and dart met and it is still real.
+    // js_rdefined is an EXTERN (abnf/jsrt.go's under llvm.Run, lib/ruby-rt.metajs's
+    // under -exe) because the full question needs scopeHas + scopeParent, MetaJS
+    // HOST BUILTINS reachable only from a layer-2 file. js_scope_typeof alone cannot
+    // answer it: it says "undefined" for a slot that HOLDS undefined and for an
+    // absent name alike (docs/working-on-this-project.md 7.3), and a BLOCK OR
+    // OPTIONAL PARAMETER the caller did not supply holds exactly undefined (js_arg
+    // answers undefined for a missing index and emitParamDefault's js_rundef test
+    // relies on that). So
     //
-    // WHAT THE LOWERING COULD NOT DO, and it was written down at this site as a
-    // theoretical inexactness that "no program in tests/ does". It is reachable in
-    // three lines and MRI disagrees with it:
+    //     [1].each { |a, b| puts defined?(b).inspect }     MRI: "local-variable"
     //
-    //     [1].each { |a, b| puts defined?(b).inspect }
-    //         MRI + ruby-interpreter.abnf   "local-variable"
-    //         both compiled halves          nil
+    // needs the walk. Declaring the slot with hNull first would break js_rundef,
+    // the one thing that distinguishes an absent argument from an explicit nil.
     //
-    // js_scope_typeof answers "undefined" for a slot that HOLDS undefined and for an
-    // absent name alike (docs/working-on-this-project.md 7.3). A Ruby local is
-    // created-on-assign and a declared one holds nil, but a BLOCK OR OPTIONAL
-    // PARAMETER the caller did not supply holds exactly undefined - js_arg answers
-    // undefined for a missing index and emitParamDefault's js_rundef test relies on
-    // that - so `defined?` on one answered nil. The site's own suggested fix
-    // (declare the slot with hNull first) would have broken js_rundef, which is the
-    // one thing that distinguishes an absent argument from an explicit nil.
-    //
-    // scopeHas + scopeParent ARE that question, they are MetaJS HOST BUILTINS
-    // (ids 65..68) reachable only from a layer-2 file, and lib/ruby-rt.metajs's
-    // js_rmethodval had already shipped on them. So the probe is an extern again,
-    // answered by abnf/jsrt.go's js_rdefined under llvm.Run and by
-    // lib/ruby-rt.metajs's under -exe, and both halves now agree with the
-    // interpreter and with MRI.
-    //
-    // BUT ONLY THE COLD ARM LEAVES, which is the judgement todo.md 5.3 asks for and
-    // the reason this is not php's decline (cc28d07: php's probe was all hot arm and
-    // cost +0.77%). In MetaJS a call is a scope frame, so the two arms an EMITTER can
-    // already answer stay here:
+    // Only the COLD arm leaves, though - in MetaJS a call is a scope frame - so the
+    // two arms an EMITTER can already answer stay here:
     //
     //   1. js_scope_typeof != "undefined" - the name is bound and holds a value.
-    //      Unchanged from the lowering, and it is every `defined?` a program that
-    //      asks about a real local writes.
+    //      This is every `defined?` a program that asks about a real local writes.
     //   2. js_scope_typeof == "undefined" AND js_scope_has - js_scope_has is the
     //      OWN-SCOPE twin of the scopeHas builtin and IS an extern, so the innermost
-    //      scope's "holds undefined" is separable right here. kotlin's kt_ktgetp does
-    //      exactly this at a6df3a8 and this is the second emitter use of it. It
-    //      answers the common shape of the defect on its own: a block's own
-    //      unsupplied parameter is bound in the block's own scope.
+    //      scope's "holds undefined" is separable right here (kotlin's kt_ktgetp
+    //      does the same). A block's own unsupplied parameter is bound in the
+    //      block's own scope.
     //
-    // Only when BOTH miss does the layer-2 walk run - a name bound nowhere (nil
-    // either way, so this arm buys nothing and is charged for the correctness of the
-    // next one) or a slot holding undefined in an ENCLOSING scope, which is
+    // Only when BOTH miss does the layer-2 walk run - a name bound nowhere, or a
+    // slot holding undefined in an ENCLOSING scope, which is
     // `[1].each { |a, b| [2].each { |c| defined?(b) } }` and needs scopeParent.
-    //
-    // Measured, because mod.rb emits `defined?` ZERO times and the shared bench row
-    // therefore cannot see any of this: tests/bench/defined.rb, five probes per
-    // iteration over all four shapes, 9 draws paired against a clean 61aa3de. The
-    // readings are in that file's header; routing EVERY call to layer 2 read +9.70%
-    // on it (9 of 9 pairs) and this split takes it to what the header records.
+    // Routing EVERY call to layer 2 is measurably slower.
     var definedF = undefined
     function rbScopeProbe(b, nameV, kindV) {
         if (definedF == undefined) {
@@ -5612,22 +5498,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (!isPlainName(txt)) {
             return function(b) { return {b: b, v: emitStr(b, "expression")} }
         }
-        // `self` is always defined and MRI names its own kind for it; both engines of
-        // the interpreter half answer "self" too, and the scope probe below answered
-        // "local-variable" inside a method and NIL at top level, where `self` is not a
-        // scope binding at all. Three legs, one answer, and it is not the probe's.
+        // `self` is always defined and MRI names its own kind for it; the scope probe
+        // below would answer "local-variable" inside a method and NIL at top level,
+        // where `self` is not a scope binding at all.
         if (txt == "self") {
             return function(b) { return {b: b, v: emitStr(b, "self")} }
         }
         // The keyword literals are not names, and MRI gives each its OWN kind:
-        // `defined?(nil)` is "nil", not "expression". The compiled halves used to run
-        // them through the probe and answer nil for all three; the first pass of this
-        // round converged them on ruby-interpreter.abnf's "expression", which closed
-        // the halves divergence at the price of three legs agreeing on something MRI
-        // contradicts - docs/todo.md 8's own example of a WRONG FIX. The interpreter
-        // half answers the keyword now too, so all four legs are MRI's. They are
-        // KEYWORDS, so no local, method or constant can carry the name and the text
-        // needs no further test.
+        // `defined?(nil)` is "nil", not "expression". They are KEYWORDS, so no local,
+        // method or constant can carry the name and the text needs no further test.
         if (txt == "nil" || txt == "true" || txt == "false") {
             return function(b) { return {b: b, v: emitStr(b, txt)} }
         }
@@ -5733,16 +5612,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the reference is EMITTED, after every tag has run, so a def anywhere in the file
     // counts.
     //
-    // Every def is auto-called, WHATEVER its parameters. It used to be only the ones
-    // that declare none, on the argument that a bare name for a method taking arguments
-    // is an error in Ruby - which is only true of a REQUIRED parameter:
-    // `def q(a = 1); end; q` is an ordinary call in MRI and printed nothing here. The
-    // feature-matrix file used the old shape to pass a method around as a value; it now
-    // says `method(:double)`, which is how Ruby spells that (see makeCall), so the guard
-    // has no case left to protect.
+    // Every def is auto-called, WHATEVER its parameters: `def q(a = 1); end; q` is
+    // an ordinary call in MRI. A method passed around as a value is spelled
+    // `method(:double)` (see makeCall).
     var rubyMethods = {}
     // Every def of the file by name; defined? uses this one to answer "method". It is
-    // now the same set as rubyMethods and is kept separate because the two are read in
+    // the same set as rubyMethods and is kept separate because the two are read in
     // different places and one of them may narrow again.
     var rubyAllMethods = {}
     makeVarRef = function(name) {
@@ -5754,11 +5629,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         return function(b) {
-            // A BARE `rand` is Kernel#rand called with no arguments, not a name: without
-            // this arm the scope lookup below failed with "variable not defined: rand"
-            // while `rand()` worked, and the interpreter answered the host function
-            // itself. Guarded exactly like the `rand(...)' call arm above, so a program
-            // that defines a rand of its own still wins.
+            // A BARE `rand` is Kernel#rand called with no arguments, not a name. Guarded
+            // exactly like the `rand(...)' call arm above, so a program that defines a rand
+            // of its own still wins.
             if (name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
                 return {b: b, v: callExt(b, "js_rrand", [callExt(b, "js_arr_new", [])])}
             }
@@ -5803,8 +5676,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function selfMethod(clsName, name) {
         for (var p = 0; p < curMethParams.length; p++) { if (curMethParams[p] == name) { return false } }
         if (classHasMethod(clsName, name)) { return true }
-        // THE MODULE OBJECT's copy of its own instance methods is now reachable:
-        // `obj.extend(M)' dispatches to it, where before only a module_function did.
+        // THE MODULE OBJECT's copy of its own instance methods is reachable:
+        // `obj.extend(M)' dispatches to it.
         // A mixin method routinely calls a method of the class it is mixed INTO
         // (`def who; "M:" + tag; end'), and that class is not known while the module
         // is emitted - the copy folded into an `include'ing class resolves it because
@@ -5813,7 +5686,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // file is an implicit-self call. The residual risk is a LOCAL variable that
         // shares a name with some class's method, which is the same risk the
         // class-scoped test above already takes, narrowed here to module bodies.
-        // docs/todo.md 1.3.
         if (curModObjBody == "") { return false }
         return anyClassHasMethod(name)
     }
@@ -5851,8 +5723,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeDefStmt(fn) {
         // `def obj.m' - a def on ONE object. The receiver is read at run time and the
-        // closure lands in its singleton table; before this the receiver was ignored
-        // and the def became a plain method of that name. docs/todo.md 1.3.
+        // closure lands in its singleton table.
         if (fn.srecv != "") {
             var recvT = srecvThunk(fn.srecv)
             return function(b) {
@@ -5934,10 +5805,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var moduleDefs = {}       // module name -> instance method descriptors
     var moduleSDefs = {}      // module name -> descriptors callable ON the module
     var moduleConsts = {}     // module name -> the constant names its body assigns
-    // module name -> the module names ITS OWN body includes/prepends. Without this
-    // an `include' one level deep was invisible: `module P; include N; end; class C;
-    // include P; end' left C with none of N's methods and C.new.is_a?(N) false, in
-    // ALL THREE engines. mixAncestry closes over it. docs/todo.md 1.3.
+    // module name -> the module names ITS OWN body includes/prepends, so that
+    // `module P; include N; end; class C; include P; end' gives C N's methods and
+    // makes C.new.is_a?(N) true. mixAncestry closes over it.
     var moduleIncludes = {}
 
     // A nested `class X ... end` / `module X ... end` reaches the enclosing module as
@@ -6096,8 +5966,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // already did, so `method(:inst).arity` answers the parameter count rather
             // than the 0 an UNRECORDED closure answers. emitArity is the gate as well
             // as the write - it emits nothing unless the program names `arity`, which
-            // is what keeps b086d07's measured 181 KB -> 5.1 MB live-heap cost off
-            // every program that does not ask. docs/todo.md 1.5.
+            // keeps the registry's retention cost off every program that does not ask.
             var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
             callExt(b, "js_set", [dstV, emitStr(b, key), fnV])
             if (rk != "" && prefix == "") {
@@ -6167,9 +6036,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Emit the `$mix$<Name>' markers and the __mixorder / __preorder lists that
     // rbIsA / rubyIsA, Module#ancestors, Module#include? and Module#< all read.
     // The compiler FLATTENS a mixin at build time (mixinDefsAll above), so without
-    // this record nothing at run time knew the module was ever there: `obj.is_a?(M)'
-    // and `case obj when M' were false in BOTH compiled halves and true in the
-    // interpreter, a live halves divergence. docs/todo.md 1.3.
+    // this record nothing at run time would know the module was ever there:
+    // `obj.is_a?(M)' and `case obj when M' need it.
     function emitMixRecord(b, dstV, anc, slot, orderKey) {
         var listV = callExt(b, "js_arr_new", [])
         for (var i = 0; i < anc.length; i++) {
@@ -6189,7 +6057,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // for every module an object was extended with, and neither is enumerable at
     // run time - keysOf would also hand back $s$/$c$/$mix$ keys, and the frozen
     // engine has no for..in. The interpreter half keeps the same two lists as
-    // __snames and __methodNames. docs/todo.md 1.3.
+    // __snames and __methodNames.
     function emitNameList(b, dstV, names, slot) {
         var listV = callExt(b, "js_arr_new", [])
         for (var i = 0; i < names.length; i++) {
@@ -6315,15 +6183,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
             // The superclass is a BUILTIN, which carries no compiled `initialize'
-            // for js_supercall to find, so both compiled halves aborted with
-            // *unknown super method 'initialize'* on code the interpreter half ran.
+            // for js_supercall to find.
             // A synthetic ancestor is spliced in between the class and the builtin
             // to carry the SAME default `initialize' a body-less subclass already
             // gets - it stores the constructor arguments under `args', which is
             // where Exception#message reads the message from. The shim is an
             // ordinary class object with no __rbuiltin, so rubyExcIsA / rbIsA walk
             // straight through it to the builtin and `rescue StandardError' is
-            // unaffected. docs/todo.md 1.3.
+            // unaffected.
             var builtinSuper = (superName == "" || classMethods["$" + superName] == undefined)
             var hasShim = false
             if (baseSet && hasInit && builtinSuper) {
@@ -6332,7 +6199,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_set", [shimV, emitStr(b, "__name"), emitStr(b, name + "$builtin")])
                 // Marked SYNTHETIC so Module#ancestors and Class#superclass step
                 // over it: it is an artifact of the lowering and MRI has no such
-                // level. docs/todo.md 1.3.
+                // level.
                 callExt(b, "js_set", [shimV, emitStr(b, "__synth"), hTrue])
                 callExt(b, "js_set", [shimV, emitStr(b, "__super"), baseV])
                 baseV = shimV
@@ -6386,11 +6253,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // class << VALUE ... end - the singleton class of a value. The class machinery here
     // is BUILD time (a class name maps to a method table decided while walking) and the
-    // target of a `class << EXPR` is only known at run time, so a def inside one used to
-    // be notImplemented outright. It is not any more: the def is emitted as an ordinary
-    // method closure and js_rsingdef installs it in THAT ONE OBJECT's singleton table -
-    // the per-object table docs/todo.md 1.3 is about. The target and the ordinary body
-    // statements are still emitted, with `self` bound to the target.
+    // target of a `class << EXPR` is only known at run time, so a def inside one is
+    // emitted as an ordinary method closure and js_rsingdef installs it in THAT ONE
+    // OBJECT's singleton table. The target and the ordinary body statements are
+    // emitted with `self` bound to the target.
     function makeSingletonStmt(items, pos) {
         var targetT = null
         var isSelf = false
@@ -6502,7 +6368,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // `obj.extend(M); obj.singleton_methods' has to answer. keysOf would not
             // do: the module object also carries $s$ / $c$ / __ slots, and the frozen
             // engine has no for..in - the same reason the interpreter half's module
-            // objects keep __methodNames. docs/todo.md 1.3.
+            // objects keep __methodNames.
             b = emitNameList(b, modV, mnames, "__mnames")
             b = emitNameList(b, modV, snames, "__snames")
             b = emitMethods(b, modV, r.sdefs, "$s$", name, [])
@@ -6528,13 +6394,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (cur != "") { parts.push(cur) }
         // ----- Float's scoped constants -----
-        // `Float::INFINITY' printed an EMPTY LINE in both compiled halves (js_get of
-        // a slot the Float class object does not carry answers nil, and puts prints
-        // nil as ""), and aborted the interpreter half with *uninitialized constant
-        // Float::INFINITY*. A silent wrong answer and a hard error, from the same
-        // gap; the item that named this only saw the interpreter's half.
-        // docs/todo.md 1.5.
-        //
         // Folded HERE rather than hung on the class object, because a runtime slot
         // would have to be seeded in the C floor's twin, in abnf/jsrt.go's
         // rubyBuiltinClass and in rbBuiltinClass - three engines and a per-program
@@ -6543,9 +6402,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // reads a decimal text and there is no text for an infinity.
         //
         // The price of folding: a program that reopens `class Float' and defines a
-        // constant of one of these thirteen names sees the builtin. MRI would let
-        // the redefinition win. No corpus program does this, and it buys a
-        // three-engine value slot.
+        // constant of one of these thirteen names sees the builtin, where MRI would
+        // let the redefinition win.
         if (parts.length == 2 && parts[0] == "Float" && rbFloatConst(parts[1]) != "") {
             var fname = parts[1]
             return function(b) {
@@ -6642,41 +6500,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var rubyBuiltinClasses = ["Integer", "Float", "Rational", "Complex", "Numeric",
         "String", "Symbol", "Array", "Hash", "Range", "Proc",
         // Method is what `method(:x)' answers to #class, and `m.is_a?(Method)' is
-        // the ordinary way to ask - without the name declared it aborted with
-        // *variable not defined: Method* while the interpreter half answered.
-        // Five IR lines in the prologue, on the measurement two paragraphs down.
-        // docs/todo.md 2.5.
+        // the ordinary way to ask.
         "Method", "NilClass", "TrueClass",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
         "Enumerator",
         // Class and Module are what a class object and a module object ANSWER to
         // #class, and `A.instance_of?(Class)' / `M.is_a?(Module)' are the ordinary
-        // way to ask. Without the names declared, both aborted with *variable not
-        // defined: Class*. docs/todo.md 1.3.
-        //
-        // THE PRICE OF THIS WHOLE ITEM, MEASURED. These two names cost every ruby
-        // program +10 IR lines in its prologue, and languages/lib/ruby-rt.ll grew
-        // 115,609 -> 117,637 for the reflection surface. Paired against a clean
-        // e89fd9e archive, 15 layout draws built to the same paths,
-        // tests/bench/mod.rb (which declares no class at all, so the mixin record
-        // itself costs it nothing): +0.41%, SLOWER IN 15 OF 15 PAIRS. Unanimous, so
-        // it is real and not a layout draw - but it is inside ruby's recorded 4.14%
-        // row spread and it is layer-2 SIZE, the arena-occupancy mechanism of
-        // docs/todo.md 2.9, not work in the loop. The 3.07% that a first cut cost
-        // WAS work in the loop, and is fixed - see js_rlt in
-        // languages/lib/ruby-rt.metajs.
+        // way to ask.
         "Class", "Module",
         // Math is a MODULE, and it belongs here for the same reason the classes do:
-        // without it the name fell through to the ROOT scope's JavaScript Math, so
-        // Math.sqrt(4) answered the integer 2 where Ruby answers 2.0, Math::PI
-        // answered nil, and every member the C floor did not carry (Math.sin) worked
-        // under llvm.Run and aborted the native binary. docs/todo.md 1.1.
+        // without it the name falls through to the ROOT scope's JavaScript Math, and
+        // Math.sqrt(4) has to answer 2.0, not 2.
         "Math",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError",
         // FloatDomainError < RangeError: what Float::INFINITY.to_i and
-        // "%d" % Float::INFINITY raise. docs/todo.md 1.5.
+        // "%d" % Float::INFINITY raise.
         "FloatDomainError"]
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its top-level
@@ -6703,15 +6543,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                          callExt(b, "js_rclass", [emitStr(b, bn)])])
         }
         // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an exception nobody rescued
-        // is reported BY THE PROGRAM (js_rtop) instead of escaping the module. What
-        // escaped before reached the floor's / the Go twin's uncaught-throw handler,
-        // which renders a value with the generic object toString - so every uncaught
-        // `raise' in both compiled halves read "js runtime error: uncaught
-        // exception: [object Object]", with no message and no class. This is the
+        // is reported BY THE PROGRAM (js_rtop), in MRI's spelling, instead of
+        // escaping the module to the generic uncaught-throw handler. This is the
         // shape go-to-llvm-ir.abnf already uses for an unrecovered panic (js_gotry /
         // js_gotop); the difference is that Ruby's top level IS the program, so the
         // BODY goes inside the closure rather than a call to an entry function.
-        // docs/todo.md 1.7.
         var bodyT = function(bb) {
             bb = emitImportedWith(bb, function(item, b2) { return item(b2).b })
             for (var i = 0; i < items.length; i++) { bb = items[i](bb).b }
@@ -6734,7 +6570,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -6743,8 +6579,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // (lib/ruby-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
     // indices are offset by a million, so the two chains cannot overlap and one js_call
     // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
-    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
-    // the reusable part of phase 4 and nothing here is Ruby's.
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged; nothing here
+    // is Ruby's.
     function emitDispatch() {
         var idxs = []
         var fns = []
