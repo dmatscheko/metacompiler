@@ -106,9 +106,8 @@ EchoEol = :script(~~
     })()
 ~~) ;
 // `echo` glued to a "." ":" or "/" with NO space: the punctuation is a separator, not part
-// of the text, and whatever follows it on the line IS the text. Ground truth is wine's own
-// expectation file (tests/reference/batch/wine-cmd-tests/tests/test_builtins.cmd.exp - there
-// is no cmd.exe or wine on this machine to run):
+// of the text, and whatever follows it on the line IS the text. Ground truth is wine's
+// expectation file (tests/reference/batch/wine-cmd-tests/tests/test_builtins.cmd.exp):
 //     echo.       -> (empty line)      echo.word  -> word
 //     echo:       -> (empty line)      echo:word  -> word
 //     echo/       -> (empty line)      echo/word  -> word
@@ -219,8 +218,7 @@ SepNL       = { Newline } ;
 Cond        = ErrCond | ExistCond | DefinedCond | CmpCond | StrCond ;
 // 'if errorlevel N' is true when the code is N or greater.
 ErrCond     <~~ push(mkErrLevel(pop())) ~~> = KwErrorlevel Word ;
-// There is no filesystem here, so `if exist` can only answer for the reserved device names
-// (nul, con, prn, aux, com1-9, lpt1-9), which always exist; anything else answers false.
+// `if exist` answers from the path model described in fsKind (no real filesystem).
 ExistCond   <~~ push(mkExist(pop())) ~~> = KwExist Word ;
 DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
 CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
@@ -233,8 +231,7 @@ CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
 // ----- words & %expansion% -----
 // After the first Part, :whitespace() keeps the remaining Parts ADJACENT (no space
 // between them); the word ends at the first space, which :whitespace(Hspace) then skips.
-// Without this the engine's leading skip would let { Part } slurp across spaces and
-// swallow the next token (1 EQU 1 became one word 1EQU1).
+// Otherwise the engine's leading skip lets { Part } slurp across spaces (1 EQU 1 -> 1EQU1).
 Word        <~~ push(makeWord(takeAll())) ~~>
             = Part :whitespace() { Part } :whitespace(Hspace) ;
 Part        = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
@@ -338,8 +335,7 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 // LineText: the rest of the line (for echo / set value), with %expansion%.
 // The FIRST part is matched with the ambient whitespace rule in force, so the single
 // separator after 'echo' is skipped; whitespace is then turned OFF, so a space that sits
-// between two parts is text and survives ('echo a %x% b' really prints 'a 7 b'). Without
-// that the engine's leading skip ate every space that followed an expansion.
+// between two parts is text and survives ('echo a %x% b' really prints 'a 7 b').
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
@@ -834,10 +830,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     function mkDefined(name) { return function(ci) { return isDefined(name) } }
     function mkErrLevel(wT) { return function(ci) { return errlvl >= toInt(wT()) } }
-    // There is NO filesystem behind a grammar run, so `if exist` answers from a small MODEL
-    // of the paths every Windows install has - exactly the shape bash-interpreter.abnf uses
-    // for its -e/-f/-d predicates. 0 = absent, 1 = exists and is not a directory,
-    // 2 = directory. The reserved device names are the ones that matter in practice.
+    // The path model (see :description): 0 = absent, 1 = exists and is not a directory,
+    // 2 = directory.
     var FSDIRS = ["c:", "c:\x5c", "c:\x5cwindows", "c:\x5cwindows\x5csystem32",
                   "c:\x5cusers", "c:\x5cprogram files", "c:\x5cprogramdata"]
     function fsKind(raw) {
@@ -1198,9 +1192,9 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     var progItems = null
     var progLabels = null
-    // 'call :label' runs the subroutine INLINE, right where the call stands. Handing a signal
-    // to the program counter instead made every enclosing block treat the call as a control
-    // transfer: a 'call' inside a for body ended the LOOP after one round.
+    // 'call :label' runs the subroutine INLINE, right where the call stands. Returning a
+    // signal to the program counter instead would make every enclosing block treat the call
+    // as a control transfer (a 'call' inside a for body would end the loop).
     function batCall(label, args) {
         if (progItems == null || !hasOwn(progLabels, "$" + label)) {
             println("The system cannot find the batch label specified - " + label)

@@ -46,6 +46,8 @@ cannot see it. See docs/abnf-dialect-gotchas.md.") ;
 :startRule(Program) ;
 :whitespace(Hspace) ;
 
+// The parse grammar is the interpreter's; the rule comments live in batch-interpreter.abnf.
+
 // ----- program: a flat list of labels and statement-lines (PC executes them) -----
 Program     <~~ push(runProgram(takeAll())) ~~>
             = { Line } ;
@@ -59,9 +61,6 @@ StmtLine    <~~ push({stmt: pop()}) ~~>
 At          = "@" :whitespace() ;
 
 // ----- command chains and redirection -----
-// 'a & b' runs both, 'a && b' runs b only after success, 'a || b' only after failure.
-// A redirection is attached to the piece it follows; there is no filesystem here, so an
-// output redirection DISCARDS (the same capture machinery that backs for /f 'command').
 Chain       <~~ push(makeChain(takeAll())) ~~>
             = Piece { ChainOp Piece } ;
 ChainOp     <~~ push(up.in) ~~> = "&&" | "||" | "&" ;
@@ -82,10 +81,6 @@ Stmt        = Rem | EchoCtl | EchoDot | EchoParen | Echo
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
-// `echo on` / `echo off` toggle command echoing - but ONLY when the on/off is the whole
-// rest of the line. Wine's expectation file records `echo off now` printing "off now"
-// (test_builtins.cmd.exp line 58), i.e. it is an ordinary echo, so EchoEol asserts the
-// end of the line before this rule may claim the statement.
 EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) EchoEol ;
 EchoEol = :script(~~
     (function() {
@@ -96,16 +91,7 @@ EchoEol = :script(~~
         return abnf.newToken("\x01echo-eol", 0)
     })()
 ~~) ;
-// `echo` glued to a "." ":" or "/" with NO space: the punctuation is a separator, not part
-// of the text, and whatever follows it on the line IS the text. Ground truth is wine's own
-// expectation file (tests/reference/batch/wine-cmd-tests/tests/test_builtins.cmd.exp - there
-// is no cmd.exe or wine on this machine to run):
-//     echo.       -> (empty line)      echo.word  -> word
-//     echo:       -> (empty line)      echo:word  -> word
-//     echo/       -> (empty line)      echo/word  -> word
-// while the SPACED forms go through Echo and keep the punctuation:
-//     echo .      -> .                 echo .word -> .word
-// The :whitespace() comes BEFORE the separator: only the GLUED form is this rule.
+// Glued `echo.` / `echo:` / `echo/` (see the interpreter for the wine-derived table).
 EchoDot     <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh LineText ;
 EchoSepCh   = "." | ":" | "/" ;
 EchoParen   <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "(" :whitespace(Hspace) ;
@@ -115,12 +101,8 @@ Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 SetA        <~~ push(makeSetA(pop())) ~~> = KwSet "/a" :whitespace(Hspace) ArithBody ;
 ArithBody   = ArithQuoted | Arith ;
 ArithQuoted <~~ push(pop()) ~~> = '"' :whitespace(Hspace) Arith '"' :whitespace(Hspace) ;
-// set /p prompts and reads a line; there is no stdin in this runtime, so it always reads
-// nothing and (as cmd.exe does on end of file) leaves the variable unchanged.
 SetP        <~~ push(makeSetP(takeAll())) ~~>
             = KwSet "/p" :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
-// 'set "name=value"' is the quoted form: the quotes delimit the assignment rather than
-// becoming part of the value, which is how a value with a trailing space is written.
 SetQ        <~~ push(makeSet(takeAll())) ~~>
             = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
 QLineText   <~~ push(makeWord(takeAll())) ~~>
@@ -147,8 +129,6 @@ Ver         <~~ push(makeVer()) ~~> = KwVer ;
 GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
 // 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
 Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
-// 'call set NAME=text' re-parses its argument, so the text goes through a SECOND round of
-// %VAR% expansion - the documented way to expand a name that another variable holds.
 CallSet     <~~ push(makeCallSet(takeAll())) ~~>
             = KwCall KwSet SetName "=" ( LineText | Empty ) ;
 Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { ArgWord } :whitespace(Hspace) ;
@@ -172,19 +152,12 @@ ForF        <~~ push(makeForF(takeAll())) ~~>
 ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
 ForFSrc     = ForFLit | ForFCmd | ForFFile ;
 ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
-// The single-quoted form is a COMMAND whose output is parsed. External programs are out of
-// scope for this runtime, so the command is a chain of the internal commands that produce
-// capturable output - echo and ver.
 ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
 SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
 SqCmd       = SqEchoDot | SqEcho | SqVer ;
 SqVer       <~~ push(makeVer()) ~~> = KwVer ;
-// cmd parses the command inside for /f ('...') with the same command parser, so the glued
-// `echo.` / `echo:` / `echo/` separator (see EchoDot) applies here too.
 SqEchoDot   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh SqText ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
-// A bare word is a FILE set. The path model behind this runtime answers existence, not
-// contents, so a file set always reads nothing and the loop runs zero times.
 ForFFile    <~~ push({file: pop()}) ~~> = Word ;
 SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
 SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
@@ -210,8 +183,6 @@ SepNL       = { Newline } ;
 Cond        = ErrCond | ExistCond | DefinedCond | CmpCond | StrCond ;
 // 'if errorlevel N' is true when the code is N or greater.
 ErrCond     <~~ push(mkErrLevel(pop())) ~~> = KwErrorlevel Word ;
-// There is no filesystem here, so `if exist` can only answer for the reserved device names
-// (nul, con, prn, aux, com1-9, lpt1-9), which always exist; anything else answers false.
 ExistCond   <~~ push(mkExist(pop())) ~~> = KwExist Word ;
 DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
 CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
@@ -222,10 +193,6 @@ CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
               | "equ" | "neq" | "lss" | "leq" | "gtr" | "geq" ) <~~ push(up.in) ~~> ;
 
 // ----- words & %expansion% -----
-// After the first Part, :whitespace() keeps the remaining Parts ADJACENT (no space
-// between them); the word ends at the first space, which :whitespace(Hspace) then skips.
-// Without this the engine's leading skip would let { Part } slurp across spaces and
-// swallow the next token (1 EQU 1 became one word 1EQU1).
 Word        <~~ push(makeWord(takeAll())) ~~>
             = Part :whitespace() { Part } :whitespace(Hspace) ;
 Part        = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
@@ -256,13 +223,7 @@ SubFChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\x3c" | "\x3e"..."\U0010ffff"
 SubTChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\U0010ffff" ;                    // not %
 
 // %%i for-variables, with the ~ modifiers (pure string operations on the value).
-// A for-variable is a LETTER, and so is every modifier, so `%%~ff` (the ~f modifier on the
-// variable f) and `%%~pd` (~p on d) are ambiguous to a greedy scan - it eats the variable
-// and then finds none. The wine cmd suite settles it: tests/reference/batch/wine-cmd-tests
-// has `for %%f in ("C D" E) do echo %%~ff` and `for %%d in ("I J" K) do echo %%~pd`, whose
-// .exp files expect the path of the loop variable. So the rule is: take the maximal run of
-// modifier letters, and if what follows it is NOT another letter, hand the run's LAST letter
-// back to be the variable. ModOkFor is that decision, as a pure lookahead.
+// ModOkFor: the LAST letter of a modifier run is the variable (%%~ff); see the interpreter.
 ForRef      <~~ push(mkForRef(takeAll())) ~~>
             = "%%" :whitespace() [ TildeModF ] ForLetter :whitespace() ;
 TildeModF   <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetterF } :whitespace() ;
@@ -327,17 +288,11 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
             = BareChar :whitespace() { BareChar } :whitespace() ;
 
 // LineText: the rest of the line (for echo / set value), with %expansion%.
-// The FIRST part is matched with the ambient whitespace rule in force, so the single
-// separator after 'echo' is skipped; whitespace is then turned OFF, so a space that sits
-// between two parts is text and survives ('echo a %x% b' really prints 'a 7 b'). Without
-// that the engine's leading skip ate every space that followed an expansion.
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
             | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars ;
-// A ( ) pair is ordinary text - `echo Done (ok)` and `set x=(a)` are values, not blocks.
-// Requiring the run to be BALANCED is what keeps it from stealing the ) that closes an
-// enclosing block: inside `(set x=1)` the value has no ( , so the ) still terminates.
+// A balanced ( ) pair is ordinary text (see the interpreter).
 LineParen   <~~ push(makeWord(takeAll())) ~~>
             = LParen :whitespace() { LinePart } RParen :whitespace() ;
 LParen      <~~ push(makeStr("(")) ~~> = "(" ;
@@ -430,8 +385,6 @@ LabelName   <~~ push(up.in) ~~>
 BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x5d"
             | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
 // A line-text char: the same set plus space, tab and , but not % ! " ( ) & | < > ^ .
-// ( and ) are excluded so a run stops at them and LineParen gets its chance; an unbalanced
-// ( then falls through to LParenLit.
 LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d"
             | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // A redirection target: printable except whitespace " & < > | .
@@ -531,8 +484,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     var m = llvm.ir.NewModule()
 
-    // The arena (rt_bump) and the output capture stack live in languages/lib/batch-rt.c
-    // now, as statics of the runtime module, so nothing here declares or initializes them.
+    // The arena (rt_bump) and the output capture stack are statics of languages/lib/batch-rt.c.
     var gExitCode = m.NewGlobalDef("exit_code", zero)
     var gErrLvl = m.NewGlobalDef("errorlevel", zero)
     var gDelayed = m.NewGlobalDef("delayed_on", zero)
@@ -553,10 +505,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var ARGN = 10
     var argsTy = llvm.types.NewArray(DEPTH * ARGN, i8ptr)
     var frameTy = llvm.types.NewArray(DEPTH, i8ptr)
-    // args and frame are DEFINED in languages/lib/batch-rt.c, because bat_shift lives
-    // there now; the linker binds these declarations to those definitions by name
-    // (abnf/llvmlink.go for llvm.Run, clang for -exe). Every other byte of runtime state
-    // is still private to one side or the other.
+    // args and frame are DEFINED in languages/lib/batch-rt.c (bat_shift uses them); the
+    // linker binds these declarations by name (abnf/llvmlink.go for llvm.Run, clang for -exe).
     var gArgs = m.NewGlobal("args", argsTy)
     gArgs.Linkage = llvm.enum.LinkageExternal
     var gArgTail = m.NewGlobalDef("arg_tail", llvm.constant.NewZeroInitializer(frameTy))
@@ -653,18 +603,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     // ===================================================================================
     //  The string runtime: languages/lib/batch-rt.c, compiled by languages/c-to-llvm-ir.abnf
     //  into languages/lib/batch-rt.ll (tests/gen-batch-rt-ll.sh) and LINKED, not emitted.
-    //
-    //  These were 26 hand-written IR bodies inside this grammar. The ABI is unchanged -
-    //  a string is a char* into the runtime's arena, an integer is an int - so no call
-    //  site below changed; only where the bodies come from. The arena and the output
-    //  capture stack moved with them and are now statics of batch-rt.c, which is why
-    //  main no longer initializes them (a C static starts at zero by itself).
-    //
-    //  rt_expand was the last to move, and only after e8bf2c3: it CALLS BACK into this
-    //  module, through the bat_lookup generated below, and c-to-llvm-ir.abnf used to
-    //  emit a declared-only function's pointer parameter as a plain i32. It now emits
-    //  `declare i32* @bat_lookup(i32* %0)`, so the C prototype survives and the call is
-    //  resolved across the two modules by name (clang, and abnf/llvmlink.go for llvm.Run).
+    //  ABI: a string is a char* into the runtime's arena, an integer is an int. rt_expand
+    //  calls back into this module through the generated bat_lookup, resolved by name.
     // ===================================================================================
 
     var rtStrlen = m.NewFunc("rt_strlen", i32, llvm.ir.NewParam("s", i8ptr))
@@ -692,8 +632,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     // rt_mods(s, mask): the ~ modifiers as pure string arithmetic.
     // mask bits: 1 = drive, 2 = path, 4 = name, 8 = extension (~f is 1|2|4|8).
     var rtMods = m.NewFunc("rt_mods", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("mask", i32)])
-    // There is NO filesystem behind a compiled run either, so `if exist` answers from a
-    // small MODEL of the standard paths the interpreter uses (batch-rt.c, rt_fskind):
+    // `if exist`: the interpreter's path model (batch-rt.c, rt_fskind):
     // 0 = absent, 1 = exists and is not a directory, 2 = directory.
     var rtFskind = m.NewFunc("rt_fskind", i32, llvm.ir.NewParam("s", i8ptr))
 
@@ -770,13 +709,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
         return b.NewCall(rtSubst, [v, gepStr(b, mod.from), gepStr(b, mod.to), ci32(mod.star ? 1 : 0)])
     }
-    // The effective set of path components a ~ modifier run asks for: 1 = drive, 2 = path,
-    // 4 = name, 8 = extension; -1 = there was no ~ at all (the value is raw) and -2 = a bare
-    // ~ (strip the quotes and nothing else). ~s asks for the SHORT path, which on a volume
-    // with 8.3 names switched off is the long one, so it is a no-op flag on top of the others
-    // and means the whole path when it stands alone. ~a ~t ~z would have to stat the file,
-    // which the path model cannot do, so they ask for nothing - which is also what cmd.exe
-    // answers for a file that is not there.
+    // Twin of effMask in batch-interpreter.abnf (the ~s / ~a ~t ~z rules are explained
+    // there). Extra here: -1 = no ~ at all (the value is raw), -2 = a bare ~ (strip quotes).
     function maskOf(mods) {
         if (mods == null) { return -1 }
         if (mods == "") { return -2 }
@@ -1053,16 +987,10 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
     }
 
-    // Pop a return id (or leave main with the current errorlevel when the stack is empty).
-    // A BOUNDS CHECK ON A TABLE THE RUNTIME CANNOT DEFEND.
-    //
-    // `call :label`, `setlocal` and the call/return stack all index fixed global arrays
-    // whose index is incremented by the code emitted below, not by batch-rt.c - so
-    // 4a2facd's nine runtime checks could not reach them. Measured at base: a batch script
-    // that recurses 400 deep exits 139 having printed nothing, because makeCall stored
-    // args[frame*10 + i] with frame past DEPTH and walked over whatever the linker had put
-    // after `args`. bat_shift already refused to COMPOUND that (it is the one consumer that
-    // lives in C); this is the store itself.
+    // A bounds check on a table the runtime cannot defend: `call :label`, `setlocal` and
+    // the call/return stack index fixed global arrays whose index is incremented by the
+    // code emitted here, not by batch-rt.c, so without this a deep recursion writes past
+    // `args`.
     //
     // `val >= cap` is the test, signed, because the counters are i32 and only ever grow by
     // one from zero - so a signed compare cannot itself wrap before the check fires.
@@ -1077,6 +1005,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return okB
     }
 
+    // Pop a return id (or leave main with the current errorlevel when the stack is empty).
     function emitReturn(b) {
         var sp = b.NewLoad(i32, gCsp)
         var exitP = nb(), popP = nb()
@@ -1130,8 +1059,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             b.NewStore(fr, gFrame)
             // The call returns to RIGHT HERE, not to the next top-level line: a fresh
             // continuation block is registered as the return site and handed back as the
-            // current block. Returning to the next line instead made a 'call' inside a for
-            // body end the LOOP after one round.
+            // current block, so a 'call' inside a for body does not end the loop.
             var contB = nb()
             var retid = retSites.length
             retSites.push(contB)
@@ -1143,15 +1071,10 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             return contB
         }
     }
-    // UNSETTLED, AND DELIBERATELY LEFT: does `exit /b` implicitly pop an open `setlocal`?
-    // There is no cmd.exe on this machine, so this cannot be measured, and the normative
-    // help texts do not settle it either. What Microsoft DOES document (`setlocal /?`,
-    // `endlocal /?`) is that localization ends "when the endlocal command is encountered or
-    // the end of the batch file is reached" - it says nothing about returning from a CALLed
-    // label. So a subroutine here that does `setlocal` and then `exit /b` without an
-    // `endlocal` leaks one frame of loc_v/loc_d, and 32 such leaks now reach the depth guard
-    // in bat_setlocal instead of walking past the array. Implementing an implicit pop would
-    // be a guess about the language; the guard makes the consequence of NOT guessing loud.
+    // Unsettled, deliberately: does `exit /b` implicitly pop an open `setlocal`? `setlocal /?`
+    // only says localization ends at endlocal or at the end of the batch file, nothing about
+    // returning from a CALLed label. So `setlocal` + `exit /b` without `endlocal` leaks one
+    // loc_v/loc_d frame, and 32 such leaks hit the depth guard in bat_setlocal.
     function makeExitB(items) {
         var codeT = (items.length > 0) ? items[0] : null
         return function(b) {
@@ -1440,9 +1363,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var e = batSetlocal.NewBlock("entry")
         var sp = e.NewLoad(i32, gLsp)
         // The third table the runtime cannot defend: loc_v / loc_d are LDEPTH frames of N
-        // slots and loc_sp is incremented here, so the 33rd nested `setlocal` used to write
-        // past all three. batEndlocal already refuses to pop an empty stack; this is the
-        // push. rt_die does not return, so the ret below is only there to terminate.
+        // slots and loc_sp is incremented here (endlocal refuses to pop an empty stack).
+        // rt_die does not return, so the ret below is only there to terminate.
         e = emitDepthGuard(e, function() { return batSetlocal.NewBlock("") }, sp, LDEPTH,
                            "setlocal nesting", function(db) { db.NewRet(zero) })
         var base = e.NewMul(sp, ci32(N))
@@ -1483,9 +1405,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     function runProgram(items) {
         batSetlocal = m.NewFunc("bat_setlocal", i32)
         batEndlocal = m.NewFunc("bat_endlocal", i32)
-        // bat_shift is DEFINED in languages/lib/batch-rt.c - it walks ARGN and the frame
-        // stride, both compile-time constants, so unlike the other four it never depended
-        // on the program being compiled.
+        // bat_shift is DEFINED in languages/lib/batch-rt.c: it only needs ARGN and the frame
+        // stride, both compile-time constants, unlike the program-dependent bat_* functions.
         batShift = m.NewFunc("bat_shift", i32, llvm.ir.NewParam("from", i32))
         batLookup = m.NewFunc("bat_lookup", i8ptr, llvm.ir.NewParam("nm", i8ptr))
         var main = m.NewFunc("main", i32)

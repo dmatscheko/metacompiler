@@ -7,27 +7,18 @@ rem recursion stays below depth 6. A failed check prints its id and the file end
 rem with 'exit /b %fails%'; exit 0 and byte-identical output on all four legs
 rem (interpreter/compiler x goja/-frozen) mean everything passed.
 rem
-rem WHY THIS FILE EXISTS (docs/todo.md 4.1)
+rem The assertions are aimed at the entry points of the C runtime
+rem languages/lib/batch-rt.c: rt_subst and rt_substr for %v:a=b% and %v:~n,m%,
+rem rt_mods for the %~dpnx modifiers, rt_tokb and rt_isdelim for 'for /f'
+rem tokenising, rt_lineat and rt_nlines for its multi-line string sets, rt_streqi
+rem for case-insensitive 'if ==' and 'if /i', rt_fskind for 'if exist', rt_stripq
+rem for %~1, rt_expand for 'call set', rt_capstart/rt_capend for 'for /f' over a
+rem command, and bat_shift for 'shift'.
 rem
-rem batch's layer 2 is the C runtime languages/lib/batch-rt.c, and until this file
-rem existed the ONLY program that ever exercised it was tests/batch-test-full.cmd -
-rem the same single-gate hole item 4.1 names for bash. batch was also missing from
-rem tests/native-full.sh's ROWS entirely; both are fixed together. The assertions
-rem below are aimed at the runtime's entry points on purpose: rt_subst and
-rem rt_substr for %v:a=b% and %v:~n,m%, rt_mods for the %~dpnx modifiers, rt_tokb
-rem and rt_isdelim for 'for /f' tokenising, rt_lineat and rt_nlines for its
-rem multi-line string sets, rt_streqi for case-insensitive 'if ==' and 'if /i',
-rem rt_fskind for 'if exist', rt_stripq for %~1, rt_expand for delayed expansion,
-rem rt_capstart/rt_capend for 'for /f' over a command, and bat_shift for 'shift'.
-rem
-rem GROUND TRUTH, and this is the honest limitation: there is no cmd.exe on the
-rem development machine, so - exactly as tests/batch-test-full.cmd says in its own
-rem header - none of these assertions could be executed against the real shell.
-rem Nothing NEW is claimed here: every form below is one the ratchet already
-rem settled from the cmd.exe help texts and the wine-cmd-tests corpus under
-rem tests/reference/batch, condensed into the small file where a freshly fixed
-rem defect can get its assertion cheaply. Anything the ratchet left out for being
-rem ambiguous is left out here too.
+rem Ground truth: no cmd.exe is available, so every form below is one
+rem tests/batch-test-full.cmd settled from the cmd.exe help texts and the
+rem wine-cmd-tests corpus under tests/reference/batch; anything left out there for
+rem being ambiguous is left out here too.
 rem
 rem Out of scope, same reasons as the ratchet: external programs, creating or
 rem reading files, directory enumeration (so no 'for /r' and no 'for /d'), the
@@ -405,17 +396,12 @@ exit /b 0
 
 rem ----- delayed expansion: rt_expand -----
 rem
-rem NOTE, and it cost three silent assertions to find: `endlocal` restores the
-rem WHOLE environment, so a `set /a checks=checks+1` executed between setlocal and
-rem endlocal is thrown away with everything else - the check runs, prints its FAIL,
-rem and then vanishes from the count and from %fails%, which is a failure the exit
-rem status cannot see. So nothing calls :check inside a setlocal region here.
-rem The probe does its own comparing and reports through its exit code, and the
+rem `endlocal` restores the WHOLE environment, so a `set /a fails=...` between
+rem setlocal and endlocal would be thrown away silently. So nothing calls :check
+rem inside a setlocal region: the probe reports through its exit code and the
 rem assertion is made outside. Each probe calls `endlocal` EXPLICITLY on both
-rem paths: whether `exit /b` pops an open setlocal by itself is exactly the kind of
-rem thing no oracle on this machine can settle (our engines leave it open; the
-rem cmd.exe help text says the changes are discarded when the batch file ends),
-rem so nothing here depends on it either way.
+rem paths, because whether `exit /b` pops an open setlocal is unsettled (our
+rem engines leave it open).
 :fe09
 call :fe09probe
 set cid=dly1

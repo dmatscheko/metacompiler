@@ -20,14 +20,12 @@ rem     the summary line
 rem     'full: <checks> checks, <failures> failures'
 rem   - the file ends with 'exit /b %fails%' (exit 0 == full support)
 rem
-rem GROUND TRUTH. There is no cmd.exe on the development machine, so unlike the
-rem bash ratchet NONE of these assertions could be executed. Every one of them is
-rem derived from the documented behaviour of cmd.exe (the 'cmd /?', 'set /?',
-rem 'for /?', 'if /?' and 'call /?' help texts, which are the normative
-rem description of the language) and from the behaviour the wine-cmd-tests corpus
-rem under tests/reference/batch encodes. Where a form is genuinely ambiguous in
-rem the documentation it was left OUT rather than guessed at; the report that
-rem accompanies this file lists the areas that could not be settled.
+rem GROUND TRUTH. No cmd.exe is available, so none of these assertions could be
+rem executed against it. Every one is derived from the documented behaviour of
+rem cmd.exe (the 'cmd /?', 'set /?', 'for /?', 'if /?' and 'call /?' help texts,
+rem the normative description of the language) and from the behaviour the
+rem wine-cmd-tests corpus under tests/reference/batch encodes. Where a form is
+rem genuinely ambiguous in the documentation it was left OUT rather than guessed.
 rem
 rem Deliberately out of scope (not syntax, or unrunnable in this harness):
 rem external programs of every kind (findstr, more, xcopy, ...), so no pipeline
@@ -1031,9 +1029,8 @@ rem cmd treats a "." ":" or "/" GLUED to the echo keyword as a separator, not as
 rem text: `echo.word` prints "word", `echo.` prints an empty line. With a space
 rem in between the punctuation is ordinary text again. And `echo on` / `echo off`
 rem only toggle echoing when that is the whole line - `echo off now` prints
-rem "off now". There is no cmd.exe and no wine on this machine, so the ground
-rem truth for every value below is wine's own expectation file, which the harness
-rem in tests/reference/batch/wine-cmd-tests/tests/batch.c compares cmd against:
+rem "off now". Ground truth is wine's expectation file, which the harness in
+rem tests/reference/batch/wine-cmd-tests/tests/batch.c compares cmd against:
 rem   test_builtins.cmd.exp:  echo.word -> word     echo .word -> .word
 rem                           echo:word -> word     echo :word -> :word
 rem                           echo/word -> word     echo /word -> /word
@@ -1093,18 +1090,10 @@ echo/here
 goto :eof
 
 rem ===== SECTION 26: a captured command larger than the capture buffer =====
-rem languages/lib/batch-rt.c's rt_capstart bumps an 8192-byte block and rt_println
-rem used to copy into it with NO length check of any kind, so a captured command
-rem producing more than that walked out of the buffer and over the rest of the
-rem arena. It got the right answer whenever nothing else had been bumped since,
-rem which is exactly why no test caught it - the same defect, and now the same
-rem fix, as bash-rt.c's rt_putc: the buffer GROWS by doubling, because truncating
-rem would be a regression on the cases that used to work by luck.
-rem
-rem MEASURED discriminating power: 16 lines of 592 bytes is 9,488 bytes, 1.16
-rem buffers. Against a clean `git archive` build of the parent this section
-rem reports capb1 = 15 rather than 16 - the sixteenth line lands on top of the
-rem loop's own state - and capb2 is wrong with it. Both pass here.
+rem languages/lib/batch-rt.c's rt_capstart bumps an 8192-byte block and
+rem rt_println must GROW it (by doubling) when a captured command produces more.
+rem 16 lines of 592 bytes is 9,488 bytes, 1.16 buffers; an unchecked copy would
+rem overwrite the loop's own state (capb1 = 15).
 :s26
 set s26u=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789
 set s26h=%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%%s26u%
@@ -1136,15 +1125,11 @@ rem ===== SECTION 27: the two stacks the emitted code indexes itself =====
 rem batch-to-llvm-ir.abnf's makeCall increments `frame` and `call_sp`, and
 rem bat_setlocal increments `loc_sp`. All three index FIXED global arrays -
 rem args[DEPTH*ARGN], call_stack[DEPTH] with DEPTH 256, and loc_v/loc_d with
-rem LDEPTH 32 - and none of the increments was checked, so this is emitted code
-rem that no runtime can defend from the inside (bat_shift could only refuse to
-rem COMPOUND the overflow, which is what it already did). Measured at the parent
-rem commit: a script recursing 400 deep exits 139 having printed nothing, and 40
-rem nested setlocals silently walk over the globals behind loc_v.
+rem LDEPTH 32 - guarded by emitted depth checks that exit 70.
 rem
-rem These assertions go the OTHER way, because a run that crosses a limit exits
-rem 70 and this file must exit 0: they pin the guards' bounds by staying just
-rem inside them. A guard written with the wrong comparison would break here.
+rem A run that crosses a limit exits 70 and this file must exit 0, so these
+rem assertions pin the guards' bounds by staying just inside them. A guard
+rem written with the wrong comparison would break here.
 :s27
 set /a s27n=0
 call :s27rec 1
@@ -1177,8 +1162,7 @@ exit /b 0
 
 rem 31 nested setlocals - one below LDEPTH - each shadowing the same name, then
 rem 31 endlocals: the outermost value has to come back untouched. The 32nd push
-rem is the one the new guard refuses, and it exits 70 with a diagnostic rather
-rem than writing past loc_v.
+rem is the one the guard refuses (exit 70 with a diagnostic).
 :s27loc
 setlocal
 set s27v=lvl%1

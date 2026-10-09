@@ -2,13 +2,9 @@
  * batch-rt.c - the string/arena runtime of languages/batch-to-llvm-ir.abnf.
  *
  * Batch compiles to UNBOXED self-contained IR: every value is a NUL-terminated
- * byte string in a bump arena, and there is no handle runtime under it. That
- * codegen is deliberate and is NOT changing - measured, a self-contained native
- * batch binary runs a 200k-iteration loop in 0.44s / 5.75 MB where Lua through
- * the handle runtime takes 2.41s / 3615 MB. What converges with the rest of the
- * plan (docs/runtime-rework-plan.md) is the RUNTIME LAYER: these 26 helpers used
- * to be hand-written LLVM text inside the grammar, and they are now C compiled by
- * languages/c-to-llvm-ir.abnf.
+ * byte string in a bump arena, and there is no handle runtime under it. That is
+ * deliberate: it is several times faster and far smaller than going through the
+ * handle runtime.
  *
  * IT IS COMPILED BY languages/c-to-llvm-ir.abnf, NOT BY CLANG.
  * The link input is languages/lib/batch-rt.ll, regenerated with
@@ -19,7 +15,7 @@
  * reason: llvm.BuildExecutable hands its runtime inputs straight to clang, so
  * passing this .c would let CLANG compile the layer.
  *
- * ABI - it is the one the emitted call sites already used, unchanged:
+ * ABI:
  *   a string is a char* into the arena or a module string literal, an integer is
  *   a plain int. Our C compiler carries a pointer VALUE as i32* where the batch
  *   emitter writes i8*; the two never meet inside one module (clang links the two
@@ -32,12 +28,8 @@
  *     the module, and checks that @__mec_ginit is empty - which is why NO global
  *     in this file has an initializer: an initialized global emits a store into
  *     __mec_ginit, and nothing would call it once main is gone.
- *   - The arena IS bounds-checked now. This header used to say "There is no
- *     bounds check on the arena, exactly as the hand-emitted IR had none. It is
- *     2 MB and a batch program that outruns it walks off the end" - and that is
- *     precisely what happened: tests/bench/mod.bat runs 40,000 iterations at
- *     ~32 bytes each against a 2 MiB arena, a 1.6x margin, and past the ceiling
- *     the binary exits 139 having printed nothing. See rt_bump and rt_die.
+ *   - The 2 MiB arena is bounds-checked (rt_bump, rt_die); tests/bench/mod.bat
+ *     uses most of it.
  */
 
 int putchar(int c);
@@ -47,16 +39,13 @@ int bat_shift(int from);
  * The two libc names languages/lib/runtime.c already uses for the same job.
  *
  * NEITHER IS AVAILABLE TO `llvm.Run`, deliberately: abnf/llvmmap.go's
- * libcExterns lists only what the IR interpreter can implement EXACTLY, and it
- * can implement neither. Its comment settles the trade - "Loud-and-absent beats
- * listed-and-wrong" - so a limit crossed under llvm.Run stops the run with
+ * libcExterns lists only what the IR interpreter can implement EXACTLY. So a
+ * limit crossed under llvm.Run stops the run with
  *
  *     IR interpreter: call to undefined external function @write
  *
- * and a nonzero status, while a clang-built -exe prints the diagnostic on
- * stderr and exits 70. Both are a diagnosis; the SIGSEGV they replaced was not.
- * If you are reading that interpreter message from a batch program, you are out
- * of arena.
+ * and a nonzero status (from a batch program: you are out of arena), while a
+ * clang-built -exe prints the diagnostic on stderr and exits 70.
  *
  * Neither is reached on any successful path. */
 long write(int fd, const char *buf, unsigned long n);
@@ -93,8 +82,7 @@ int rt_enum(int v) {
 
 /* The one exit from a fixed-size table that has run out. 70 is EX_SOFTWARE, and
  * it is deliberately not 139: a compiled batch script that segfaults is
- * indistinguishable from the compiler having emitted a broken binary, and that
- * confusion is the whole reason this function exists. */
+ * indistinguishable from the compiler having emitted a broken binary. */
 void rt_die(char *what, int want, int used, int cap) {
     rt_estr("batch-rt: ");
     rt_estr(what);
@@ -128,14 +116,10 @@ char *rt_bump(int n) {
 /* A real "" at a nonzero address: the IR interpreter traps a load at address 0. */
 static char EMPTY[1];
 
-/* Call arguments: DEPTH (256) frames of ARGN (10) slots. These are the FIRST
- * globals batch shares with the emitted program - every other byte of runtime
- * state here is private. They are shared because bat_shift, which used to be
- * generated, is not program-coupled at all: it walks two compile-time constants
- * over a fixed-size array, and the only thing keeping it in the grammar was
- * that the array lived on the emitter's side. abnf/llvmlink.go binds a global
- * declaration to its definition by name in both directions, and clang does the
- * same for -exe, so the array can live here and the emitter can declare it. */
+/* Call arguments: DEPTH (256) frames of ARGN (10) slots. These are the only
+ * globals shared with the emitted program (bat_shift needs them; the emitter
+ * declares them). abnf/llvmlink.go binds a global declaration to its definition
+ * by name in both directions, and clang does the same for -exe. */
 char *args[2560];
 int frame;
 
@@ -177,7 +161,7 @@ int rt_streqi(char *a, char *b) {
     return 0;
 }
 
-/* Concatenating with "" is the common case and it used to cost a copy: every
+/* Concatenating with "" is the common case and is not copied: every
  * accumulator in this file starts at EMPTY and grows one rt_strcat at a time,
  * and `set /a` rebuilds a variable's decimal text on every assignment. An arena
  * string is never written after it is built - the only mutation is rt_println
@@ -257,9 +241,8 @@ int rt_findstr(char *s, char *nd, int f) {
 
 /* --------------------------------------------------------- the 32-bit ints */
 
-/* The digits are formed in a stack buffer anyway, so the length is known before
- * anything is bumped: this used to take a flat 16 bytes of arena whatever the
- * value, which for a `set /a` counter is three to four times what it needs. */
+/* The digits are formed in a stack buffer first, so only the exact length is
+ * bumped from the arena. */
 char *rt_int2str(int n) {
     char tmp[16];
     char *dst;
@@ -317,13 +300,9 @@ int rt_prints(char *s) {
     return 0;
 }
 
-/* The capture stack for `for /f ... in ('CMD')`. CAP_SZ is new: the buffers used
- * to be a flat 8192 bytes with NO length check anywhere, so a captured command
- * producing more than that walked out of its buffer and over the rest of the
- * arena - and got the right answer whenever nothing else had been bumped since,
- * which is why no test caught it. bash-rt.c's rt_putc had the identical defect
- * and the identical fix: the buffer GROWS, because truncating would be a
- * regression on exactly the cases that used to work by luck. */
+/* The capture stack for `for /f ... in ('CMD')` and output redirection. A buffer
+ * starts at 8192 bytes and GROWS (rt_println) rather than truncating; twin of
+ * bash-rt.c's rt_putc. */
 static char *CAP_BUFS[8];
 static int CAP_LENS[8];
 static int CAP_SZ[8];
@@ -452,9 +431,7 @@ char *rt_mods(char *s, int mask) {
     return out;
 }
 
-/* There is NO filesystem behind a compiled run, so `if exist` answers from the same
-   small MODEL of the standard paths the interpreter uses - the shape
-   bash-to-llvm-ir.abnf established for its -e/-f/-d predicates. 0 = absent, 1 =
+/* Twin of fsKind in batch-interpreter.abnf (the `if exist` path model). 0 = absent, 1 =
    exists and is not a directory, 2 = directory. Both spellings of a directory (with
    and without the trailing separator) are in the table, which is cheaper than
    stripping. Written as a compare chain rather than a table because a table of
@@ -580,19 +557,11 @@ char *rt_lineat(char *s, int idx) {
 
 /* bat_lookup is GENERATED per program by batch-to-llvm-ir.abnf, from the variable
    table of the batch script being compiled - it is the one thing in this file that
-   calls BACK into the program module. That is why rt_expand was the one helper of
-   the 26 that could not move when the other 25 did: c-to-llvm-ir.abnf used to emit
-   a declared-only function's POINTER PARAMETER as a plain i32
-   (`declare i32* @bat_lookup(i32 %0)`), which in a native binary truncates a 64-bit
-   pointer to 32 bits. Commit e8bf2c3 fixed that - funcParamPtrs now records
-   pointer-ness for a declared-only function and emitCallArgs converts - and it is
-   pinned by SECTION 48 of tests/c-test-full.c, so the prototype below survives:
-
-       declare i32* @bat_lookup(i32* %0)
-
-   The call is resolved across modules by NAME, in both directions: clang links the
-   two objects, and llvm.Run binds a block-less function object to the definition
-   carrying its name (abnf/llvmlink.go). */
+   calls BACK into the program module. The pointer parameter must survive as
+   `declare i32* @bat_lookup(i32* %0)` (pinned by tests/c-test-full.c), or a native
+   binary truncates it to 32 bits. The call is resolved across modules by NAME:
+   clang links the two objects, and llvm.Run binds a block-less function object to
+   the definition carrying its name (abnf/llvmlink.go). */
 char *bat_lookup(char *nm);
 
 /* rt_expand(s): one more %VAR% pass over an already-expanded string, which is what
@@ -622,17 +591,14 @@ int main(void) { return 0; }
 
 /* `shift /n`: slide args[from..ARGN-2] of the CURRENT frame down by one and
  * blank the last slot. ARGN is 10 and the frame stride is ARGN, both compile-
- * time constants, so nothing here depends on the program being compiled - which
- * is why this moved out of batch-to-llvm-ir.abnf. */
+ * time constants, so nothing here depends on the program being compiled. */
 int bat_shift(int from)
 {
     int base;
     int i;
     /* args is DEPTH (256) frames of ARGN (10), and `frame` is written by the
-     * EMITTED program, not here - batch-to-llvm-ir.abnf's makeCall increments it
-     * with no depth check, so a batch script that recurses 256 deep indexes past
-     * args. This runtime cannot stop that store, but it can refuse to compound
-     * it, and the diagnostic names the real cause. */
+     * EMITTED program (makeCall, which has its own depth guard); this check
+     * keeps shift from indexing past args regardless. */
     if (frame < 0 || frame >= 256) {
         rt_die("call nesting", 1, frame, 256);
     }
