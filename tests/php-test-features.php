@@ -1,9 +1,7 @@
 <?php
 // Fast feature-matrix test for the PHP interpreter (php-interpreter.abnf) and the
-// LLVM-IR compiler (php-to-llvm-ir.abnf). It replaces the four algorithm-themed
-// php-test-big-* stress tests: instead of large loops (sorting batteries, Roman
-// numerals, expression parsers) every implemented construct is exercised with the
-// SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
+// LLVM-IR compiler (php-to-llvm-ir.abnf). Every implemented construct is exercised
+// with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
 // recursion stays below depth 6. A failed check prints its id (so a diff pinpoints
 // it) and the program ends with exit($fails); exit 0 and byte-identical output on
 // all four legs (interpreter/compiler x goja/-frozen) mean everything passed.
@@ -21,7 +19,7 @@ function check($name, $got, $want) {
     }
 }
 
-// ----- numbers, arithmetic, precedence (ints only; / truncates toward zero) -----
+// ----- numbers, arithmetic, precedence -----
 check("arith-precedence", 2 + 3 * 4, 14);
 check("arith-paren", (2 + 3) * 4, 20);
 check("arith-unary-minus", -3 + 5, 2);
@@ -511,14 +509,11 @@ function transform($list) {
 }
 check("combined-pipeline", transform([1, 2, -3]), "o1e2x");
 
-// ----- the recoverable name / method errors (docs/todo.md 3.2) --------------
+// ----- the recoverable name / method errors ---------------------------------
 //
-// Each of these ended the program with an UNCATCHABLE `js runtime error:` in all
-// three engines, worded differently in each; PHP 8 raises a catchable \Error and
-// these lines prove the program CONTINUES. get_class + getMessage pin the class
-// AND the exact text, because the text is what the two compiled halves used to
-// disagree on: `$s->nope()` said "unknown String method: nope" under llvm.Run and
-// "member 'apply' of undefined" in the native binary.
+// PHP 8 raises a catchable \Error for each of these, and these lines prove the
+// program CONTINUES. get_class + getMessage pin the class AND the exact text, which
+// all three engines must agree on.
 class MissTarget { public $p = 1; function ok() { return 7; } }
 function missMsg($fn) {
     try { $fn(); return "no-throw"; }
@@ -551,11 +546,8 @@ try {
 } catch (Error $e) { $missEsc = "escaped-to-error"; }
 check("miss-error-is-not-exception", $missEsc, "escaped-to-error");
 // A generator, a closure stored in a PROPERTY (which PHP does not make callable
-// as a method) and a string callable naming nothing. The last two were live
-// divergences of their own: with `__call` declared anywhere in the module the two
-// compiled halves reported the miss against `__call` instead of the method asked
-// for, and `$s()` on a string naming no function aborted with the floor's
-// "call of a non function value: null" where the interpreter half raised.
+// as a method) and a string callable naming nothing. With `__call` declared
+// anywhere in the module (MissMagic), the miss must still name the method asked for.
 function missGen() { yield 1; }
 class MissMagic { function __call($n, $a) { return "magic:" . $n; } }
 class MissProp { public $f; }

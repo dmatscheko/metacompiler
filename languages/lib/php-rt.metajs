@@ -1,12 +1,7 @@
-// php-rt.metajs -- PHP'S OWN SEMANTICS, in MetaJS. Layer 2 of
-// docs/runtime-next-plan.md part 3, for the second language after the Lua pilot.
-//
-// languages/php-to-llvm-ir.abnf emits handle IR that calls 100 js_* externs for
-// its own full-syntax ratchet (106 over every php test in tests/). 31 of them are
-// generic primitives languages/lib/runtime.c already provides (the C floor,
-// layer 1) - js_genfn and js_yield joined that list on 2026-08-03, which is why
-// they are no longer defined here. The other 75 are, plus two loud stubs for
-// js_phthis / js_phclslookup, which the emitter lowers itself now.
+// php-rt.metajs -- PHP'S OWN SEMANTICS, in MetaJS: layer 2 over the C floor
+// (languages/lib/runtime.c, layer 1). It defines the js_ph* externs
+// languages/php-to-llvm-ir.abnf emits that the floor does not provide, plus two
+// loud stubs for js_phthis / js_phclslookup, which the emitter lowers itself.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/php-rt.metajs -q -rt-lib
@@ -17,8 +12,7 @@
 // deliberately named ph*.
 //
 // THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtphp.go plus the js_ph* block of
-// abnf/jsrt.go, and this file matches them function for function. Where it
-// CANNOT, the site says so in full: see "THE THREE WALLS" below.
+// abnf/jsrt.go, and this file matches them function for function.
 //
 // ----- the value model -------------------------------------------------------
 //
@@ -30,14 +24,10 @@
 //                              floor has the same thing as a REAL PRIMITIVE TYPE
 //                              (tag 13 of languages/lib/runtime.c) reached
 //                              through the sint/sintOp/sintCmp/... host
-//                              builtins. This is why PHP could go second: it is
-//                              the ONE of the eleven remaining languages whose Go
-//                              twin uses zero jsJFlo, so the only sized type it
-//                              needs is the one the floor already has.
+//                              builtins.
 //     a {__pf} box         ==  a PHP float. The Go twin uses jsPhpFlo, a Go TYPE.
-//                              Layer 2 has no way to make a new primitive type
-//                              (the finding the Lua pilot recorded), so this is
-//                              an OBJECT box - and unlike Lua's {__f}, which the
+//                              Layer 2 has no way to make a new primitive type,
+//                              so this is an OBJECT box - and unlike Lua's {__f}, which the
 //                              emitter builds in IR, this shape is built and read
 //                              ONLY here, because every float in a PHP program
 //                              enters through js_phflo / js_phlit / arithmetic.
@@ -45,9 +35,7 @@
 //                              value ever reaches a FLOOR generic that asks its
 //                              type: js_typeof would answer "object" where the Go
 //                              twin answers "double". php-to-llvm-ir.abnf emits
-//                              no js_typeof, which is what makes the box safe -
-//                              stated here so a future emitter change cannot
-//                              quietly break it.
+//                              no js_typeof, which is what makes the box safe.
 //     a {__dict} object    ==  a PHP array: ONE ordered map, keys/vals parallel
 //                              arrays plus __next, the next automatic int key.
 //                              Built by js_pharr and by the emitter alike.
@@ -56,46 +44,28 @@
 //     a {__isclass} object ==  a class descriptor, built by the emitter.
 //     any other object     ==  a PHP object instance.
 //
-// ----- THE THREE WALLS, ALL THREE CLOSED --------------------------------------
+// ----- the three floor walls -------------------------------------------------
 //
-// Three groups of extern could not be written here at all when this file was
-// first written, and each was a missing FLOOR primitive rather than anything
-// about PHP. That was the finding the port existed to produce, and it is why
-// they are still described: the remaining nine languages meet the same three.
-// All three are closed now, and the answer to each is recorded at the site.
+// Three things layer 2 cannot spell by itself; each is met by the floor or the
+// emitter:
 //
-//  1. COROUTINES - js_genfn / js_yield. A generator suspends a call stack and
-//     resumes it later. The Go twin does it with a goroutine and two channels;
-//     setjmp/longjmp (js_throw/js_try) can UNWIND a stack but cannot resume one,
-//     and MetaJS has no continuations, so there was NO spelling of this in layer
-//     2 at any effort. CLOSED IN THE FLOOR (2026-08-03): languages/lib/runtime.c
-//     has real stackful coroutines as tags 15 and 16, and js_genfn / js_yield are
-//     therefore NOT defined here - defining them again is a hard
-//     `ld: duplicate symbol '_js_genfn'`. The floor exposes one member, next(v),
-//     and PHP's whole Generator class is layer 2 over it: see phGenCall.
+//  1. COROUTINES - js_genfn / js_yield are the floor's stackful coroutines (tags
+//     15 and 16 of languages/lib/runtime.c) and are NOT defined here: defining
+//     them again is a hard `ld: duplicate symbol '_js_genfn'`. The floor exposes
+//     one member, next(v), and PHP's whole Generator class is layer 2 over it: see
+//     phGenCall.
 //
-//  2. AN OBJECT'S OWN KEYS - needed by var_dump of an object (js_phdump), by
-//     `==` between two objects (js_pheq/js_phne/js_phcmp), by (array) on an
-//     object (js_phcast) and by clone (js_phclone). The floor always HAD this as
-//     the js_keys extern - it went in for the Lua pilot - but an extern is only
-//     callable from an EMITTER, MetaJS has no for..in and the floor seeded no
-//     `Object`, so layer 2 could not reach it. CLOSED (2026-08-03) by the
-//     language-NEUTRAL fix this file asked for: `keysOf` is a host builtin in all
-//     three engines now (seed_root id 61 in runtime.c over the same js_keys,
-//     keysBindings in abnf/jsrtint.go, metajs-interpreter.abnf). It answers an
-//     object's own keys in INSERTION order and already skips the __-prefixed
-//     slots, which is phpHiddenProp's rule exactly - so the four sites read it
-//     straight, and only js_phclone has to put __class back by hand.
+//  2. AN OBJECT'S OWN KEYS - `keysOf` (a host builtin in all three engines) answers
+//     an object's own keys in INSERTION order and already skips the __-prefixed
+//     slots, which is phpHiddenProp's rule exactly - so js_phdump, js_pheq/ne/cmp,
+//     js_phcast and js_phclone read it straight, and only js_phclone has to put
+//     __class back by hand.
 //
-//  3. THE SCOPE CHAIN - js_phthis, js_phclslookup and js_phrtinit each take a
-//     SCOPE handle and walk it. A scope is the floor's private storage; the Lua
-//     pilot put js_scope_decl/set/typeof INTO the floor precisely because layer 2
-//     cannot open one. Two of the three do not need the floor at all - they are
-//     lowered in php-to-llvm-ir.abnf itself now, out of js_scope_typeof and
-//     js_scope_get, which the emitter CAN call - and that is the general answer
-//     for the remaining nine: a scope probe belongs in the emitter, not in layer
-//     2. js_phrtinit is the one that still needs a floor primitive, and it is the
-//     same one as wall 2 would not solve: see js_phrtinit below.
+//  3. THE SCOPE CHAIN ("WALL 3") - a scope is the floor's private storage and layer 2 cannot
+//     open one. js_phthis and js_phclslookup are therefore lowered in
+//     php-to-llvm-ir.abnf itself (scope probes belong in the emitter), and
+//     js_phrtinit takes a plain array of descriptors instead of a scope: see
+//     js_phrtinit below.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -106,7 +76,7 @@
 // split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
 // assignable, and there are no exponent literals.
 
-// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// The shared layer-2 runtime. It supplies
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
@@ -444,9 +414,7 @@ function phFloRound(d, decpt, nd) {
     if (keep == "0") { pt = 1 }
     return {d: keep, e: pt}
 }
-// phZeros is SHARED as rtZeros - lib/runtime.metajs. It lives THERE and not in
-// runtime-decimal.metajs (where the other copy was) because php has no decimal
-// bignum and must not import one for nine lines.
+// Zero padding is rtZeros, from lib/runtime.metajs.
 
 function phFloFormat(n, nd) {
     if (n !== n) { return "NAN" }
@@ -1172,10 +1140,9 @@ function phArrHas(av, k) {
     if (typeof av == "string") {
         if (!phNumericKey(k)) { return false }
         var j = phNumOf(phToLong(k))
-        // A NEGATIVE string offset counts from the end and has since PHP 7.1, so
-        // isset("abc"[-1]) is true and reading it answers "c" - which js_phget has
-        // always done here, while this answered false and made the two disagree
-        // inside one expression. The valid negative range is -length .. -1.
+        // A NEGATIVE string offset counts from the end (PHP 7.1+), so
+        // isset("abc"[-1]) is true, matching what js_phget reads. The valid negative
+        // range is -length .. -1.
         if (j < 0) { return 0 - j <= av.length }
         return j < av.length
     }
@@ -1469,12 +1436,9 @@ function phDump(v, ind) {
         return out + pad + "}\n"
     }
     if (phIsObj(v)) {
-        // WALL 2 IS CLOSED. keysOf is a host builtin in all three engines now (host
-        // id 61 of languages/lib/runtime.c over the js_keys that was always there,
-        // keysBindings in abnf/jsrtint.go, metajs-interpreter.abnf), and it answers
-        // an object's OWN keys in INSERTION order, already skipping the internal
-        // __-prefixed slots - which is exactly phpHiddenProp's rule in the Go twin,
-        // so no filtering is needed here.
+        // keysOf answers an object's OWN keys in INSERTION order, already skipping
+        // the internal __-prefixed slots - phpHiddenProp's rule in the Go twin - so
+        // no filtering is needed here.
         var names = keysOf(v)
         var oout = pad + "object(" + phClassName(v) + ")#" + phStr(phDumpID(v)) +
                    " (" + phStr(names.length) + ") {\n"
@@ -1509,9 +1473,7 @@ function phObjPropsEq(a, b) {
     }
     return true
 }
-// phNameIn is SHARED as rtHas - lib/runtime.metajs, which is rtDictFind's `===`
-// scan read as a membership test. dart's dtSeen and ruby's rbIsLambda were the
-// same eight lines.
+// rtHas (lib/runtime.metajs) is the `===` membership scan used above.
 
 // ===================================================== casts ================
 
@@ -1545,7 +1507,7 @@ function phCast(kind, v) {
 
 // ===================================================== generators ===========
 //
-// WALL 1 IS CLOSED. The C floor has real stackful coroutines (tags 15 and 16 of
+// The C floor has real stackful coroutines (tags 15 and 16 of
 // languages/lib/runtime.c: js_genfn wraps a closure into a generator FUNCTION,
 // calling that makes a generator, js_yield suspends the body and gen_next
 // resumes it), so js_genfn and js_yield are NOT defined here - defining them
@@ -1698,9 +1660,7 @@ function phGenCall(g, name, args) {
     if (name == "rewind") { return null }
     if (name == "getReturn") { return st["ret"] }
     // PHP 8 makes this the same catchable Error as any other missing method:
-    // `Call to undefined method Generator::nope()`. It used to be a fatal, and one
-    // the INTERPRETER half spelled with a capital G - a third wording for one site.
-    // docs/todo.md 3.2.
+    // `Call to undefined method Generator::nope()`.
     phRaise("Error", "Call to undefined method Generator::" + name + "()")
     return null
 }
@@ -1711,13 +1671,10 @@ function phGenCall(g, name, args) {
 // under its own C symbol. The order follows abnf/jsrtphp.go and the js_ph* block
 // of abnf/jsrt.go.
 
-// ----- the language-NEUTRAL six ---------------------------------------------
+// ----- the language-NEUTRAL externs -----------------------------------------
 // None of these is PHP's. They live in abnf/jsrt.go, every language can emit
-// them, and they are here only because the C floor does not have them yet - see
-// the extern split in docs/runtime-next-plan.md part 3.
-
-// js_bytelen is the C FLOOR's now (lib/runtime.c). It was HERE, and having both
-// is a duplicate-symbol link error - the two edits land as one commit.
+// them, and they are here only because the C floor does not have them.
+// (js_bytelen is the floor's; defining it here too is a duplicate-symbol error.)
 
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // php-to-llvm-ir.abnf emits it ONLY for its own loop counters, so the float arm -
@@ -1747,20 +1704,18 @@ function phJavaStr(v) {
 // and which chapter 4 of the manual forbids overriding by name, since
 // rxExtraExterns fills ONE extern map for every language and a wrapped js_mcall
 // leaks into C# and java. So php-to-llvm-ir.abnf emits its own name and the twin
-// is the js_phmcall arm of abnf/jsrtphp.go. docs/todo.md 3.2.
+// is the js_phmcall arm of abnf/jsrtphp.go.
 function js_phmcall(recv, name, args) {
     if (phIsGen(recv)) { return phGenCall(recv, name, args) }
     if (recv !== undefined && recv !== null && typeof recv == "object") {
         var cls = recv["__class"]
         if (cls !== undefined) {
-            // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs,
-            // and so is the receiver prepend this used to spell inline.
+            // The __class/__super walk and the receiver prepend are SHARED -
+            // rtFindMethod / rtPrepend, lib/runtime.metajs.
             var mm = rtFindMethod(cls, name)
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             // PHP 8: `Error: Call to undefined method Foo::nope()`, and it is an
-            // Error rather than a fatal - `catch (Error $e)` recovers. This used to
-            // be an UNCATCHABLE abort in both compiled halves, worded differently in
-            // each ("unknown method 'nope' on an instance" here and in the twin).
+            // Error rather than a fatal - `catch (Error $e)` recovers.
             phRaise("Error", "Call to undefined method " + phClassName(recv) + "::" + name + "()")
         }
         var f = recv[name]
@@ -1769,9 +1724,6 @@ function js_phmcall(recv, name, args) {
     // Everything that is not an object: a string, an int, null, an array. PHP 8
     // spells it `Call to a member function nope() on string`, with phDebugType's
     // names (null / bool / int / float / string / array), and it is catchable.
-    // Both compiled halves were wrong here and wrong DIFFERENTLY - llvm.Run
-    // aborted with "unknown String method: nope" and this half with
-    // "member 'apply' of undefined", a live halves divergence nothing asserted on.
     phRaise("Error", "Call to a member function " + name + "() on " + phDebugType(recv))
     return undefined
 }
@@ -1790,9 +1742,8 @@ function js_phmcall(recv, name, args) {
 //
 // The second one is declined here rather than approximated: the floor's hook can
 // only answer a value to THROW, never a value to RETURN, so warn-and-continue
-// needs a floor change - and a throw would be a new wrong answer rather than the
-// old one. `$` names therefore keep the `variable not defined` abort they had.
-// docs/todo.md 3.2 records the sizing.
+// needs a floor change, and throwing would be a different wrong answer. `$` names
+// therefore keep the `variable not defined` abort.
 function js_phmissname(name) {
     var s = phStr(name)
     if (s.length == 0) { return undefined }
@@ -2219,10 +2170,10 @@ function js_phscall(target, name, self, args) {
 }
 
 // A class descriptor by name, or null when nothing of that name is declared yet -
-// an interface list must not abort on a forward reference. The SCOPE walk it used
-// to be is now lowered in php-to-llvm-ir.abnf itself, out of js_scope_typeof and
-// js_scope_get; this entry remains so a module that still emits the extern links.
-// WALL 3: a scope is the floor's private storage and layer 2 cannot open one.
+// an interface list must not abort on a forward reference. The SCOPE walk is
+// lowered in php-to-llvm-ir.abnf itself, out of js_scope_typeof and js_scope_get;
+// this loud stub remains so a module that still emits the extern links. WALL 3:
+// a scope is the floor's private storage and layer 2 cannot open one.
 function js_phclslookup(env, name) {
     fail("php layer 2: js_phclslookup walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3")
     return null
@@ -2330,8 +2281,5 @@ function js_phpfa(bound, supplied, forward) {
 
 // ----- generators -----------------------------------------------------------
 //
-// js_genfn and js_yield are NOT here. They are the C floor's (tags 15 and 16 of
-// languages/lib/runtime.c) and defining them again is a hard
-// `ld: duplicate symbol '_js_genfn'`. PHP's Generator class is layer 2 over the
-// floor's one member - see the generators section above, and phGenCall, which
-// js_mcall dispatches to.
+// js_genfn and js_yield are NOT here: they are the C floor's. See the generators
+// section above, and phGenCall, which js_phmcall dispatches to.

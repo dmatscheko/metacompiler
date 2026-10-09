@@ -1,12 +1,11 @@
 <?php
 // PHP try/catch/finally/throw, genuinely executed (interpreter and compiler).
 //
-// throw raises a value that unwinds through calls to the nearest catch; catch binds it
-// (the first catch clause wins - exception types, including multi-catch A | B, are parsed
-// but not discriminated, and the catch variable is optional); finally always runs. A
-// return/break/continue that leaves a try or catch body works in both engines. An
-// uncaught throw is a clean runtime error. Control flow inside a finally is not modelled,
-// so this file keeps its finally blocks side-effect only.
+// throw raises a value that unwinds through calls to the nearest catch; the first catch
+// clause whose type list (including multi-catch A | B) matches binds it, and the catch
+// variable is optional; finally always runs. A return/break/continue that leaves a try
+// or catch body works in both engines. An uncaught throw is a clean runtime error. This
+// file keeps its finally blocks side-effect only.
 //
 // The program counts failed checks in $fails and ends with exit($fails), so the run exits
 // 0 exactly when every check passes; the interpreter (php-interpreter.abnf) and the
@@ -24,8 +23,7 @@ function check($name, $got, $want) {
 
 // Real PHP 8 refuses to throw an object that does not implement Throwable
 // ("Cannot throw objects that do not implement Throwable"), so this has to
-// extend Exception - otherwise the file cannot run under any correct PHP, and
-// the grammar has to keep a fudge that makes every catch clause accept it.
+// extend Exception - otherwise the file cannot run under any correct PHP.
 class Boom extends Exception {
     public $code;
     public function __construct($c) {
@@ -151,7 +149,7 @@ try {
 }
 check("multi-catch clause", $multi, 7);
 
-// ----- several catch clauses: the FIRST one wins (types are not discriminated) -----
+// ----- several matching catch clauses: the FIRST one wins -----
 $first = 0;
 try {
     throw new Boom(11);

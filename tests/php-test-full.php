@@ -754,9 +754,8 @@ function s26declared(): int {
 }
 
 // ===== SECTION 27: interpreter/compiler agreement ratchet =====
-// strlen() measures PHP's string form of its argument. php-to-llvm-ir.abnf measured
-// the JAVASCRIPT form, so strlen(true) was 4 and strlen(false) 5 while
-// php-interpreter.abnf (and PHP 8) answer 1 and 0.
+// strlen() measures PHP's string form of its argument: strlen(true) is 1 and
+// strlen(false) 0 (the JavaScript form would give 4 and 5).
 function s27() {
     check("agr1", strlen(true) === 1);
     check("agr2", strlen(false) === 0);
@@ -916,9 +915,8 @@ function s29dump() {
 }
 
 // ===== SECTION 30: the widened parse surface =====
-// The constructs php-src's own test suite uses that this grammar could not read
-// before 2026-07-27. Each line here unblocked real corpus files, and the count of
-// files it unblocked is the reason it is in the ratchet rather than in a comment.
+// Constructs php-src's own test suite uses; each is in the ratchet because it
+// unblocks real corpus files.
 //
 // The three PHP 8.5 forms below are pinned to php-src's own --EXPECT-- blocks under
 // tests/reference/php/php-src-tests/extracted/tests/ (there is no php binary on this
@@ -932,12 +930,9 @@ function s29dump() {
 //                                       so '??' binds LOOSER than '|>'
 // All four of those corpus files reproduce byte-for-byte against this grammar.
 //
-// Multi-level array auto-vivification ('$a[0]["k"] = 1') was trimmed out of the '@'
-// assertion below while the compiler half could not do it. It can now (js_phviv /
-// js_phvivpush / js_phvivroot in abnf/jsrtphp.go answer the walk emitRefPathV makes),
-// so the assertion is back in its full form and the av1..av8 block beside it covers
-// the rest of the step shapes - including the two that must create NOTHING, isset()
-// and unset().
+// Multi-level array auto-vivification ('$a[0]["k"] = 1') is covered by the '@'
+// assertion and the av1..av8 block beside it - including the two step shapes that
+// must create NOTHING, isset() and unset().
 class S30Box { public $a, $b; public $p = 1; }
 class S30Vis { public private(set) int $n = 4; }
 function s30dbl($x) { return $x * 2; }
@@ -986,9 +981,8 @@ function s30() {
     check("u4", $d === "y");
 
     // --- '@' error suppression is a pass-through, and covers a whole assignment ---
-    // The target is deliberately a MULTI-LEVEL one: the compiler half did not
-    // auto-vivify intermediate levels, so this assertion used to be trimmed to a
-    // single step. It is pinned to lang/engine_assignExecutionOrder_002.phpt, whose
+    // The target is deliberately a MULTI-LEVEL one. It is pinned to
+    // lang/engine_assignExecutionOrder_002.phpt, whose
     // '$ee["array entry created after f()"][f()] = "hello";' is exactly this shape and
     // whose --EXPECTF-- print_r shows the intermediate array created.
     $ar = [];
@@ -1191,20 +1185,12 @@ function s30() {
 // ===== SECTION 31: isset() diagnoses NOTHING =====
 // isset() and unset() are the two forms PHP 8 guarantees never to warn and never
 // to raise, whatever the operand: an undeclared variable, a path through one, a
-// property of null. All three used to take the C floor's UNCATCHABLE `variable not
-// defined` / `member '__class' of null` abort in the compiled halves - the second
-// only in a program that declares __isset or __get anywhere, which this file does
-// (SECTION 12), so it is the shape a real program hits. None of it is
-// docs/todo.md 2.5: that item is blocked because the floor's miss hook can only
-// answer a value to THROW where a plain `$x` READ needs one to RETURN, and isset
-// needs no value at all.
+// property of null. This file declares __isset and __get (SECTION 12), which is
+// the shape where the compiled halves' magic fallback must not probe a null.
 //
-// The string-offset rows are the other half: a NEGATIVE offset counts from the end
-// (PHP 7.1+), so isset($s[-1]) is true - and js_phget has always ANSWERED "c" for
-// it, so isset and the read disagreed inside one expression. The out-of-range
-// rows (isset($s[3]), isset($s["x"]), both false in PHP 8) are correct in the
-// compiled halves and WRONG in the interpreter half, which answers true for every
-// offset; they are deliberately not asserted here, see docs/todo.md.
+// The string-offset rows: a NEGATIVE offset counts from the end (PHP 7.1+), so
+// isset($s[-1]) is true and agrees with the read; isset($s[3]) and isset($s["x"])
+// are false in PHP 8.
 class S31M {
     private $d = ["k" => 3];
     public function __isset($n) { return isset($this->d[$n]); }
@@ -1220,8 +1206,8 @@ function s31() {
     check("is05", !isset($o->n->b) && !isset($o->zz->b));
     $m = new S31M();
     check("is06", isset($m->k) && !isset($m->nope) && $m->k === 3);
-    // A reference is dereferenced before the path is walked: the root used to be
-    // the reference CELL, so this answered false in the compiled halves alone.
+    // A reference is dereferenced before the path is walked: the root is the
+    // array, not the reference CELL.
     $arr = [1, 2];
     $r = &$arr;
     check("is07", isset($r[0]) && !isset($r[9]));
@@ -1235,17 +1221,16 @@ function s31() {
     check("is10", isset($s[$vals[2]]) && $s[$vals[2]] === "a");
     check("is11", isset($s[$vals[3]]) && $s[$vals[3]] === "b");
     // And the offsets that are NOT set: past the end, past the start, and one that
-    // is not a number at all. isset() answers false for each and diagnoses nothing;
-    // the interpreter half used to answer TRUE for all three, because reading an
-    // invalid offset yields "" and "" is not null. All three engines agree now.
+    // is not a number at all. isset() answers false for each and diagnoses nothing
+    // (reading such an offset yields "", which is not null, so the walk alone is
+    // not enough).
     $bad = ["abc", 3, -4, "x", 0];
     $t = $bad[0];
     check("is12", !isset($t[$bad[1]]));
     check("is13", !isset($t[$bad[2]]));
     check("is14", !isset($t[$bad[3]]) && isset($t[$bad[4]]));
-    // unset() through a name that was never assigned is a no-op, not a diagnostic:
-    // the interpreter half raised `unknown name`, the compiled halves aborted in the
-    // floor. Nothing here may raise, and the array beside it must survive untouched.
+    // unset() through a name that was never assigned is a no-op, not a diagnostic.
+    // Nothing here may raise, and the array beside it must survive untouched.
     $keep = ["x" => 1];
     unset($s31gone[0]);
     unset($s31gone->p);

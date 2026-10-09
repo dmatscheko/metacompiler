@@ -70,8 +70,7 @@ The program runs top to bottom; a self checking program ends with exit(failures)
 // PHP whitespace: blanks plus '#' and '//' line comments and '/* */' block comments.
 Whitespace  = { @+" \t\r\n" | LineComment | BlockComment } ;
 // '#' starts a line comment, but '#[' opens an ATTRIBUTE - the negative lookahead
-// keeps the attribute out of the comment (without it '#[Foo] $p' swallows the rest
-// of the line, which is how attributes used to "work" by accident).
+// keeps the attribute out of the comment.
 LineComment = ( "//" | HashOnly ) :whitespace() { NotNewline } :whitespace(Whitespace) ;
 HashOnly    = "#" !"[" ;
 BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
@@ -248,7 +247,6 @@ TraitVis    <~~ push({tvis: stripWs(up.in)}) ~~>
             = ( "public" | "private" | "protected" ) KwEnd ;
 TraitAlias  <~~ push({talias: stripWs(up.in)}) ~~> = MemberName ;
 
-// interface / trait / namespace / use-import: accepted structurally and routed to
 // An interface is a named type with (abstract) method signatures: no bodies to run,
 // but instanceof and the implements list need the name to exist at run time.
 TypeDecl    = InterfaceDecl | TraitDecl ;
@@ -279,7 +277,6 @@ UseItem     = UseGroup | UsePath ;
 UseGroup    = [ "\\" ] Id { "\\" Id } "\\" "{" UseInner { "," UseInner } [ "," ] "}" ;
 UseInner    = [ UseKind ] UsePath ;
 UsePath     = [ "\\" ] Id { "\\" Id } [ KwAs Id ] ;
-// enum Name : backing-type implements I { case A; ... }: recognized structurally and
 // enum E: string implements I { case A = "a"; const C = 1; methods } - an enum is a
 // class whose cases are SINGLETON instances, published as class constants (which is
 // why E::A works with no extra machinery) and carrying ->name and, for a backed
@@ -311,7 +308,7 @@ PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length
 // it. The property itself stays a declared property and IS the backing store: inside
 // its own hook '$this->x' reads and writes that store directly instead of re-entering
 // the hook, which is PHP's rule and the only thing that keeps a backed hook from
-// recursing forever. Mirrors php-to-llvm-ir.abnf member for member.
+// recursing forever. Twin of PropHooks in php-to-llvm-ir.abnf.
 PropHooks   <~~ push({hooks: takeAll()}) ~~>
             = "{" { PropHook } "}" ;
 PropHook    <~~ push(makeHook(takeAll())) ~~>
@@ -323,7 +320,7 @@ HookBlock   <~~ push({hblock: pop().body}) ~~> = [ ParamList ] Block ;
 
 // 'private(set)' / 'protected(set)' is PHP 8.4 asymmetric visibility: the setter is
 // more restricted than the getter. Visibility is not enforced in this subset, so the
-// '(set)' suffix is simply accepted (as php-to-llvm-ir.abnf already did).
+// '(set)' suffix is simply accepted.
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd [ SetVis ] ;
 SetVis      = "(" "set" ")" ;
 // The modifier text is CAPTURED (as {mod}) rather than dropped: 'static' decides
@@ -338,8 +335,7 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // Every statement pushes exactly one thunk: function() -> value | signal.
 // A declaration is a statement too: PHP allows `if (...) { class Foo {} }` and a
 // function declared inside a function body, and a conditionally declared class is
-// common enough in real files to be worth parsing. Mirrors php-to-llvm-ir.abnf,
-// whose Statement already carried them. DefStmt has to wrap Def so the thunk it
+// common enough in real files to be worth parsing. DefStmt has to wrap Def so the thunk it
 // pushes is the same makeDefStmt record TopItem builds; an ANONYMOUS function still
 // rolls back here (Def demands a Name) and reaches ClosureExpr through ExprStmt.
 Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
@@ -349,9 +345,7 @@ Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | Stati
             | Empty | LabelStmt | ExprStmt ;
 DefStmt     <~~ push(makeDefStmt(pop())) ~~> = Def ;
 
-// ----- widened statement surface -----
-// switch, do-while, declare, goto and the static locals below are all genuinely
-// modelled, as try/catch/finally and throw are.
+// ----- switch, do-while, declare, goto, static locals -----
 // static $n = 0; inside a function: a variable whose STORAGE outlives the call. The
 // cell is created on the first execution of this very statement and re-bound into
 // every later frame, which is exactly PHP's per-declaration (not per-object) rule.
@@ -383,9 +377,9 @@ LabelStmt   <~~ push(makeLabel(pop())) ~~>
             = LabelName ":" !":" ;
 LabelName   <~~ push(stripWs(up.in)) ~~> = Name ;
 // try/catch/finally + throw are genuinely modelled (excThrow/excTry, lib/interp-core.js):
-// throw raises a value that unwinds to the nearest catch; catch binds it (the first catch
-// clause wins - the exception type list, including multi-catch A | B, is parsed but not
-// discriminated, and the catch variable is optional); finally always runs; a
+// throw raises a value that unwinds to the nearest catch; the first catch clause whose
+// type list (including multi-catch A | B) matches binds it (the catch variable is
+// optional); finally always runs; a
 // return/break/continue inside a try still propagates. A PHP Block is {body: thunk}, so
 // the marked sub-rules unwrap it (pop().body). finBody passes the finally body's signal
 // through: a normally-completing finally yields null (which excTry ignores), while a
@@ -538,9 +532,6 @@ RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
 RefAssignVal <~~ var rv = pop(); push(makeAssign([pop(), "=", rv])) ~~>
             = Target PlainEq "&" !"&" Expression ;
 
-// list($a, $b) = e  /  [$a, $b] = e  -- positional destructuring of an indexed
-// array into a list of assignment targets (tried before a plain expression so a
-// bracketed target list is not mistaken for an array literal).
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]),
 // and the same patterns bind a foreach value. Tried before a plain expression so a
@@ -563,8 +554,7 @@ DPlain      <~~ push({dval: pop()}) ~~>
 DValue      = DestructPat | DTarget ;
 // list(&$a, &$b) = $arr / foreach ($c as [&$x, $y]): a slot may bind BY REFERENCE.
 // References into array storage are not modelled here, so the '&' is accepted and the
-// slot binds by value - the syntax is what was blocking the file. The literal pushes
-// nothing, so the rule stays item-neutral.
+// slot binds by value. The literal pushes nothing, so the rule stays item-neutral.
 DTarget     <~~ push({dt: pop()}) ~~>
             = [ "&" !"&" ] Target ;
 
@@ -799,11 +789,6 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
             | Suppress | ThrowExpr | PowExpr ;
-// '@expr' is PHP's error-suppression operator: it evaluates its operand and throws
-// away any DIAGNOSTIC the evaluation would have produced. This subset does not model
-// the diagnostic channel at all, so the operator is a pass-through and the rule is
-// deliberately item-NEUTRAL (no tag) exactly like Pos - it pushes the one thunk its
-// operand pushed. 19 files of php-src's suite open with '@foo()' or '@include $f'.
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -822,7 +807,7 @@ CastKw      = ( "integer" | "int" | "boolean" | "bool" | "float" | "double" | "r
 // clone $o  /  clone($o)  and PHP 8.5's clone-WITH, 'clone($o, ["p" => 1])', which
 // copies the object and then overwrites the named properties on the copy. CloneWith
 // demands the comma, so an ordinary parenthesized 'clone($o)' rolls back into the
-// UnaryExpr arm and keeps its exact previous parse.
+// UnaryExpr arm.
 Clone       = CloneWith | ClonePlain ;
 ClonePlain  <~~ push(makeClone(pop())) ~~>
             = KwClone UnaryExpr ;
@@ -832,8 +817,8 @@ CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ;
 // $x instanceof Foo : the runtime type test, matching the class itself, every base
-// class and every implemented interface. Tried before the plain unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
-// ordinary unary keeps its exact original parse (byte-identical).
+// class and every implemented interface. Tried before the plain unary path; if no
+// 'instanceof' follows, this alternative fails and rolls back.
 InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
 InstRef     = InstDyn | InstName ;
@@ -844,6 +829,10 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Pos         = "+" UnaryExpr ;
+// '@expr' is PHP's error-suppression operator: it evaluates its operand and throws
+// away any DIAGNOSTIC the evaluation would have produced. This subset does not model
+// the diagnostic channel at all, so the operator is a pass-through and the rule is
+// deliberately item-NEUTRAL (no tag) exactly like Pos.
 Suppress    = "@" UnaryExpr ;
 
 PostfixExpr = IncDec | CallMember ;
@@ -968,8 +957,6 @@ NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
 AnonArgs    <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 
-// fn (params) => expr : an arrow function (auto-capturing, single-expression), and
-// match (subject) { arms }: a match expression. Both recognized and routed to
 // fn (params) => expr : a single-expression closure that captures the enclosing
 // variables its body mentions BY VALUE at creation time (changing $m afterwards
 // cannot change what an already-created fn sees), which is what makeArrowFn snapshots.
@@ -993,7 +980,7 @@ MatchCond   <~~ push({mcond: pop()}) ~~>
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
 // file's top-level function / class declarations register globally (resolveImport /
 // core.importFile, lib/interp-core.js). Any other operand - a dynamic expression, or a
-// double-quoted string - is parsed and routed to notImplemented, exactly as before.
+// double-quoted string - is parsed and routed to notImplemented.
 IncludeExpr <~~ push(makeInclude(takeAll(), up.pos)) ~~>
             = ( "include_once" | "include" | "require_once" | "require" ) KwEnd ( IncPath | IncDyn ) ;
 // A single-quoted literal path, captured raw like SqStr but kept as the import path
@@ -1002,16 +989,15 @@ IncPath     = "'" :whitespace() { SqEsc | SqPlain } <~~ push({incpath: unescapeS
 IncDyn      <~~ push({incdyn: pop()}) ~~>
             = Expression ;
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
-// M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
-// notImplemented. Placed last so calls, statics and keywords are matched first.
+// M_PI, __DIR__, __LINE__, ...), resolved by makeConstRef. Placed last so calls,
+// statics and keywords are matched first.
 ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
             = QName ;
 // A qualified name: \Foo, Foo\Bar, \Foo\Bar. Names are not qualified in this subset,
 // so only the LAST segment carries meaning - which is also what PHP itself falls back
 // to for an unqualified function or constant that the namespace does not define.
 // 'namespace\foo' names a constant/function/class RELATIVE to the current namespace.
-// Names are not qualified in this subset, so the prefix is skipped and the last
-// segment is what lastSeg keeps - the same treatment '\foo\foo' already gets.
+// The prefix is skipped like any other qualifier.
 // KwNamespace carries a KwEnd, so it cannot swallow the start of 'namespaced_thing'.
 QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 
@@ -1549,12 +1535,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
         // A BAREWORD that resolves nowhere is a function name here (a constant goes
         // through the constant rule below and words itself differently), and PHP 8
-        // raises a CATCHABLE `Error: Call to undefined function zzz()` on one where
-        // this used to be a fatal. A `$name` keeps the fatal: PHP only WARNS there
-        // and evaluates to null, which is a different fix and is not this one - see
-        // js_phmissname in languages/lib/php-rt.metajs for the sizing. The compiler
-        // half reaches the same two answers through the floor's js_rt_missvar hook.
-        // docs/todo.md 3.2.
+        // raises a CATCHABLE `Error: Call to undefined function zzz()` on one. A
+        // `$name` stays a fatal here although PHP only WARNS and evaluates to null
+        // (see js_phmissname in languages/lib/php-rt.metajs). The compiler reaches
+        // the same two answers through the floor's js_rt_missvar hook.
         if (name.length > 0 && name.charAt(0) != "$") {
             phpRaise("Error", "Call to undefined function " + name + "()")
         }
@@ -1656,11 +1640,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var t2 = items.length > 0 ? items[0] : null
         return function() { return {cont: true, n: t2 == null ? 1 : trunc(numOf(toNumV(t2())))} }
     }
-    // A finally body always runs but never contributes a value: a normal completion
-    // yields undefined so excTry (lib/interp-core.js) does not overwrite the try/catch
-    // signal with the body's last statement value (PHP's makeBody returns null, not
-    // undefined). Control flow inside a finally is unsupported, so this is byte-for-byte
-    // what the compiler's js_try does (it discards the finally closure's return).
+    // The finally body's completion passes straight through: a normal completion
+    // yields null, which excTry (lib/interp-core.js) ignores, while a return/break/
+    // continue signal out of the finally overrides the try/catch completion - the
+    // same semantics js_try gives the compiler.
     function finBody(t) { return function() { return t() } }
 
     // ----- The PHP value model -----
@@ -2195,8 +2178,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // consumer's loop body belongs to the ENCLOSING generator, not to the one being
     // driven. The sink also runs in the CONSUMER's scope chain (buf.cs, captured
     // before the body started) - it is the loop body of a foreach that lives outside
-    // the generator, and running it in the generator's frame made every variable it
-    // touches unknown. Both are restored on the exception path too, so a user
+    // the generator, whose frame does not hold the variables it touches. Both are restored on the exception path too, so a user
     // exception thrown by the loop body leaves the stacks where genDrive expects them.
     function genCallSink(buf, k, v) {
         genCollect.pop()
@@ -2225,7 +2207,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (name == "getReturn") { return buf.ret }
         if (name == "send") { fail("Generator::send() needs a suspendable body, which this engine does not have") }
         // The same catchable Error the two compiled halves raise (js_phmcall in
-        // languages/lib/php-rt.metajs and abnf/jsrtphp.go). docs/todo.md 3.2.
+        // languages/lib/php-rt.metajs and abnf/jsrtphp.go).
         phpRaise("Error", "Call to undefined method Generator::" + name + "()")
     }
     // bump is false for a delegated ('yield from') element: the inner keys are passed
@@ -2415,13 +2397,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var k = anytype
             k = st.idx()
             if (isArr(o)) { if (!arrHas(o, k)) { return false } }
-            // A STRING OFFSET is a containment question too, and this arm was missing:
-            // phpIndex answers "" for an offset outside the string, "" is neither null
-            // nor undefined, so isset("abc"[3]) came out TRUE. PHP 8 says false for an
-            // out-of-range offset, false for a too-negative one, and false for a
-            // non-numeric one - isset() never diagnoses, it just answers. The rule is
-            // phArrHas's in languages/lib/php-rt.metajs and phpArrHas's in
-            // abnf/jsrtphp.go, and the three engines now agree on all seven offsets.
+            // A STRING OFFSET is a containment question too: phpIndex answers "" for
+            // an offset outside the string, which is not null, so the walk alone would
+            // say true. PHP 8 says false for an out-of-range, a too-negative and a
+            // non-numeric offset - isset() never diagnoses, it just answers. Twins:
+            // phArrHas in languages/lib/php-rt.metajs, phpArrHas in abnf/jsrtphp.go.
             else if (typeof o == "string") { if (!strOffsetExists(o, k)) { return false } }
             o = phpIndex(o, k)
         }
@@ -2433,11 +2413,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (languages/lib/php-rt.metajs): an int, a float, a bool, or a string that is a
     // number at all - and NOT an arbitrary string, which is why isset($s["x"]) is
     // false rather than isset($s[0]).
-    // NOTE THE NAME. strOffsetSet is ALREADY TAKEN in this file (the '$s[0] = "H"'
-    // splice writer, ~1400 lines below), and calling it from here instead compiled,
-    // ran, answered isset() TRUE for every offset and then died in unescapeSq on an
-    // unrelated program. An unprefixed helper added to a file that already has one of
-    // that name silently replaces it - docs/working-on-this-project.md chapter 4.
+    // Not to be confused with strOffsetSet, the '$s[0] = "H"' splice writer below: an
+    // unprefixed helper added under an existing name silently replaces it
+    // (docs/working-on-this-project.md chapter 4).
     function strOffsetExists(s, k) {
         var ok = false
         if (isNum(k) || typeof k == "boolean") { ok = true }
@@ -2464,11 +2442,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // unset() DIAGNOSES NOTHING, and neither does a path through a name
                 // that was never assigned: `unset($undef[0])` and `unset($undef->p)`
                 // are no-ops in PHP 8, where resolveRefPhpV's walk raises the engine's
-                // `unknown name: $undef` for a root it cannot find. The compiled halves
-                // read that root with the non-aborting scope probe now
-                // (php-to-llvm-ir.abnf's refRootV), so this arm is what keeps the two
-                // halves answering the same thing. A call head and a static-property
-                // head have no name to be missing and are left alone.
+                // `unknown name: $undef` for a root it cannot find. Twin of the
+                // non-aborting root probe in php-to-llvm-ir.abnf's refRootV. A call head
+                // and a static-property head have no name to be missing and are left alone.
                 var plainRoot = (ref.headT == null || ref.headT == undefined) &&
                                 (ref.sref == null || ref.sref == undefined)
                 if (plainRoot && !varExists(nm)) { continue }
@@ -3391,7 +3367,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (name == "E_DEPRECATED") { return 8192 }
             if (hasOwn(phpConsts, name)) { return phpConsts[name] }
             // PHP 8: a catchable `Error: Undefined constant "X"`. The compiler half
-            // words it in makeConstRef. docs/todo.md 3.2.
+            // words it in makeConstRef.
             phpRaise("Error", "Undefined constant " + String.fromCharCode(34) + name + String.fromCharCode(34))
         }
     }
@@ -3506,22 +3482,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return closureBody(params, body, captured, isGen)
         }
     }
-    // fn (...) => expr : auto-capture BY VALUE. Snapshotting the scope objects (the
-    // globals stay shared, so functions and classes declared later are still found)
-    // is what makes an arrow function keep the values it saw at creation.
+    // An arrow function's body: its one expression, returned.
     function arrowBody(t) { return function() { return {ret: true, v: t()} } }
     // fn (...) => expr : auto-capture BY VALUE, of exactly the variables the body
     // mentions (varLog since the 'fn' keyword, minus this function's own parameters).
     // The snapshot goes into ONE overlay scope on top of the live chain, so a name the
     // body can read is always shadowed by its captured value while functions, classes
     // and constants - which carry no '$' sigil and are therefore never in the capture
-    // set - keep resolving live, including ones declared after this point.
-    //
-    // Copying whole SCOPE OBJECTS was the earlier shape and had a silent bug: scopes[0]
-    // was shared rather than copied, so an arrow function created at GLOBAL scope did
-    // not capture by value at all -
-    //     $m = 10; $times = fn($x) => $x * $m; $m = 0; $times(3)
-    // answered 0 where PHP (and php-to-llvm-ir.abnf) answer 30.
+    // set - keep resolving live, including ones declared after this point. This
+    // holds at GLOBAL scope too: '$m = 10; $t = fn($x) => $x * $m; $m = 0; $t(3)' is 30.
     //
     // The slot is copied AS IT STANDS, cell and all: a variable some closure holds by
     // reference has to stay shared, which is what phpCopy of the raw slot preserves.
@@ -3683,8 +3652,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function resolveRefPhp(ref) { return resolveRefPhpV(ref, true) }
     // ... except under unset(), which walks the same path and creates NOTHING:
     // `unset($j["z"]["w"])` on an empty $j leaves it empty, it does not give it a
-    // "z" holding an empty array. (The compiler half never vivified at all, so this
-    // was the one case where its answer was the right one.)
+    // "z" holding an empty array.
     function resolveRefPhpV(ref, viv) {
         var o = anytype
         if (ref.headT != null && ref.headT != undefined) {
@@ -3734,11 +3702,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (p.last.key != undefined) { return phpGetProp(p.obj, p.last.key) }
         return phpIndex(p.obj, p.last.idx())
     }
-    // A property declaration inside a class body: the name without its '$' sigil and
-    // the (optional) default-value thunk, re-run for every instance.
-    // A property declaration's items are the captured modifiers ({mod}), the '$name'
-    // string and, optionally, the initializer thunk - so they are scanned rather than
-    // indexed: 'static' moves the property onto the CLASS instead of the instance.
     // One property hook, reduced to {hkind, hparam, body}. 'get => e' is a body that
     // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
     // 'get;' / 'set;' declares nothing to run and is dropped.
@@ -3782,6 +3745,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
+    // A property declaration inside a class body: the name without its '$' sigil and
+    // the (optional) default-value thunk, re-run for every instance. The items are
+    // the captured modifiers ({mod}), the '$name' string and, optionally, the
+    // initializer thunk - so they are scanned rather than indexed: 'static' moves the
+    // property onto the CLASS instead of the instance.
     function makeProp(items) {
         var nm = ""
         var init = null
@@ -4034,7 +4002,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote}
     }
-    // The name is no longer items[0]: a method may carry captured modifiers in front
+    // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
     // because a static method must run with no $this.
     function makeFun(items) {
@@ -4069,12 +4037,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return notImplStmt("namespace", pos)
     }
-    // The text an uncaught throw is reported with, and the twin of exc_text in
+    // The text an uncaught throw is reported with: twin of exc_text in
     // languages/lib/runtime.c (the native binary) and excText in abnf/jsrt.go
-    // (llvm.Run). It used to be a bare `"" + e.v`, which for an Exception INSTANCE
-    // is "[object Object]" - so `throw new Exception("abort probe")` read
-    // `uncaught exception: [object Object]` here while both compiled halves read
-    // `uncaught exception: abort probe`. docs/todo.md 1.13.
+    // (llvm.Run).
     //
     // phpStr is deliberately NOT the stringifier used: an object with no
     // __toString is a fatal in phpStr ("could not be converted to string"), which
@@ -4084,12 +4049,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // `message` wins, prefixed by `name` when that is a non-empty string, and the
     // name alone when the message is empty.
     //
-    // exc_text has a third arm, `args[0]` when `args` is a floor ARRAY. It is
-    // deliberately not ported: a PHP array is an ordered dict here, never a floor
-    // array (tag 5), so the arm is unreachable in both compiled halves - verified,
-    // `class A { public $args = [7, 8]; } throw new A();` prints
-    // "[object Object]" from llvm.Run AND from the native binary. Porting it would
-    // MAKE a divergence rather than close one.
+    // exc_text's third arm (`args[0]` when `args` is a floor ARRAY) is deliberately
+    // not ported: a PHP array is an ordered dict, never a floor array, so the arm is
+    // unreachable in both compiled halves and porting it would MAKE a divergence.
     function phpExcSlot(o, name) {
         var i = dictFind(o.p, phpKey(name))
         if (i >= 0) { return deref(o.p.vals[i]) }
@@ -4108,15 +4070,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         // Everything else falls through to the host's own text, which is what
-        // to_string()/jsvString() give the compiled halves for a scalar: `throw 5`,
-        // `throw "txt"`, `throw true`, `throw null` and `throw [1,2]` already read
-        // identically in all three engines. The one non-object that does not is a
-        // FLOAT - the interpreter's float is a {__flo} box and prints
-        // "[object Object]" where the compiled halves print "1.5" - and it is left
-        // alone: `throw 1.5` is "Can only throw objects" in real PHP, so the
-        // divergence is unreachable from a valid program, and matching the floor
-        // would mean matching its JS shortest-digits rendering rather than PHP's
-        // own precision=14 floStr.
+        // to_string()/jsvString() give the compiled halves for a scalar. A FLOAT
+        // (a {__flo} box here) prints differently, and is left alone: `throw 1.5` is
+        // "Can only throw objects" in real PHP, so no valid program reaches it.
         return "" + v
     }
     function runProgram(items) {
@@ -4884,7 +4840,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // clone($o, $overrides): the clone is built exactly as 'clone $o' builds it - the
     // property copy and the __clone hook - and the second operand, an ordered map of
     // property name to value, is then written onto the COPY. Anything that is not an
-    // array is ignored rather than raising, since this subset has no Error channel.
+    // array is ignored rather than raising.
     function makeCloneWith(objT, withT) {
         var base = makeClone(objT)
         return function() {
@@ -4970,10 +4926,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     declBuiltinClass("ArithmeticError", "Error")
     declBuiltinClass("DivisionByZeroError", "ArithmeticError")
     // A method call on something that is not an object. PHP 8 words it
-    // `Call to a member function nope() on string`, with phpDebugType's names, and
-    // it is a catchable Error rather than the fatal this used to be. The two
-    // compiled halves reach the identical text through js_phmcall
-    // (languages/lib/php-rt.metajs and abnf/jsrtphp.go). docs/todo.md 3.2.
+    // `Call to a member function nope() on string`, with phpDebugType's names, as a
+    // catchable Error. Twin of js_phmcall (languages/lib/php-rt.metajs and
+    // abnf/jsrtphp.go).
     function phpMissMethod(target, name) {
         phpRaise("Error", "Call to a member function " + name + "() on " + phpDebugType(target))
     }

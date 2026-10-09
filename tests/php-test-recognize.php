@@ -1,10 +1,10 @@
 <?php
-// PHP recognition test: a real-world-looking file that exercises syntax the grammar
-// now RECOGNIZES but does not yet compile. Every unsupported construct is routed to
+// PHP recognition test: a real-world-looking file mixing compiled syntax with syntax
+// the grammar only RECOGNIZES. Every unsupported construct is routed to
 // notImplemented, so the whole file PARSES end to end.
 //
 // Because those constructs are notImplemented, this file is a SHOULD-FAIL by default:
-// a normal run aborts at the first one (`declare` below) with a nonzero exit. Run with
+// a normal run aborts at the first one (the double-quoted require_once below) with a nonzero exit. Run with
 // -warn-unsupported and each becomes a warned no-op, the file compiles, runs, and ends
 // with exit(0). The interpreter (php-interpreter.abnf) and the LLVM-IR compiler
 // (php-to-llvm-ir.abnf) accept it identically, and the -warn-unsupported compiler
@@ -15,7 +15,7 @@ require_once "vendor/autoload.php";
 
 const GREETING = "hi";
 
-// ----- enum / interface / trait / abstract class: declarations recognized, skipped -----
+// ----- enum / interface / trait / abstract class declarations -----
 enum Direction: int {
     case North = 0;
     case South = 1;
@@ -62,7 +62,7 @@ $greeter = new Greeting("php");
 $hello   = $greeter?->greet();          // nullsafe operator (compiled as ->)
 $sum     = total([1, 2, 3, 4]);
 
-// ----- newly recognized (notImplemented) expression forms, assigned but not relied on -----
+// ----- expression forms, assigned but not relied on -----
 $asInt     = (int) "10";                    // type cast
 $asFloat   = (float) $sum;                  // type cast
 $copy      = clone $greeter;                // clone
@@ -78,7 +78,7 @@ $anon      = new class implements Greeter { // anonymous class
     public function greet(): string { return "anon"; }
 };
 
-// ----- newly recognized (notImplemented) statement forms -----
+// ----- statement forms -----
 switch ($sum) {
     case 10:
         $sum = $sum + 0;

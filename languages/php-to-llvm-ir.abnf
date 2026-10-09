@@ -61,10 +61,7 @@ directly by php-interpreter.abnf, and the two must agree.") ;
 // PHP whitespace: blanks plus '#' and '//' line comments and '/* */' block comments.
 Whitespace  = { @+" \t\r\n" | LineComment | BlockComment } ;
 // '#' starts a line comment, but '#[' opens an ATTRIBUTE - the negative lookahead
-// keeps the attribute out of the comment. Without it '#[Foo] $p' swallows the rest
-// of the line, which is how attributes used to "work" by accident: one written on
-// its own line looked like a comment and the declaration under it still parsed,
-// while a parameter attribute ate the parameter.
+// keeps the attribute out of the comment.
 LineComment = ( "//" | HashOnly ) :whitespace() { NotNewline } :whitespace(Whitespace) ;
 HashOnly    = "#" !"[" ;
 BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
@@ -93,12 +90,7 @@ OpenTag     = "<?php" :whitespace(Whitespace) ;
 // only the newline directly after a CLOSE tag is swallowed.
 LeadHtml    <~~ push(makeHtmlOut(pop(), false)) ~~>
             = HtmlText [ OpenTag ] ;
-// '?>' leaves PHP mode. Everything up to the next '<?php' (or end of file) is echoed
-// verbatim, and the newline immediately after '?>' is swallowed - PHP's own rule, so
-// that a template line does not gain a blank line per tag. It is a STATEMENT, which
-// is what makes the interleaved template form work inside a body:
-//     <?php foreach ($rows as $r): ?><li><?php echo $r; ?></li><?php endforeach; ?>
-// '?>' also stands in for a missing ';' (see Semi), exactly as in PHP.
+// '?>' leaves PHP mode. Twin of InlineHtml in php-interpreter.abnf; see there.
 InlineHtml  <~~ push(makeHtmlOut(pop(), true)) ~~>
             = "?>" HtmlText [ OpenTag ] ;
 // The raw run itself. Whitespace skipping is turned OFF around the scan: the leading
@@ -241,8 +233,8 @@ MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
 // occur in php-src's own suite. The typed form has to be its own alternative and be
 // tried FIRST - writing it as an optional [ TypeHint ] would let 'const SIZE = 4'
 // consume SIZE as the type and then fail on '=', because a PEG never retries an
-// optional that matched. CIds still covers the plain 'const int SIZE' spelling, so
-// both routes reach makeCItem with exactly the {cname} records it always saw.
+// optional that matched. CIds also covers the plain 'const int SIZE' spelling, so
+// both routes reach makeCItem with the same {cname} records.
 ClassConst  <~~ push({cconsts: takeAll()}) ~~>
             = [ AttrGrp ] { Modifier } KwConst ( ConstTyped | ConstPlain ) ";" ;
 ConstTyped  = TypeHint CItem { "," CItem } ;
@@ -294,10 +286,8 @@ NsBody      <~~ push({nsbody: makeBody(takeAll())}) ~~>
             = "{" { TopItem } "}" ;
 // use A\B; / use A\B as C, D\E as F; / use function f; / use const C;
 // and the GROUP form 'use Foo\Bar\{A, B as C, function f, const K,};' of PHP 7.
-// Imports are not modelled in this subset, so the whole declaration is recognized
-// structurally and routed to notImplemented - but it has to be recognized WHOLE, or
-// the rest of the file is lost. UseGroup is tried first: its prefix ends in the '\{'
-// that a plain path can never contain.
+// Recognized whole and routed to notImplemented. Twin of UseDecl in
+// php-interpreter.abnf; see there.
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
             = KwUse [ UseKind ] UseItem { "," UseItem } Semi ;
 UseKind     = ( "function" | "const" ) KwEnd ;
@@ -338,8 +328,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // One declaration may introduce SEVERAL properties - 'public $name, $bars;' and
 // 'static public $a, $aa;' both occur in php-src's own suite - so the tag pushes one
 // {propdecl} per name rather than exactly one, and every name inherits the shared
-// modifiers and type hint. makeClassStmt already walks the member list, so N records
-// need no change there.
+// modifiers and type hint.
 PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length; pi++) { push({propdecl: pds[pi]}) } ~~>
             = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ]
               { "," DollarName [ "=" Expression ] } ( ";" | PropHooks ) ;
@@ -398,9 +387,7 @@ Label       <~~ push(makeLabelStmt(popLabel())) ~~>
             = Name <~~ push({lbl: up.in}) ~~> ":" !":" ;
 KwGoto      = "goto" KwEnd ;
 
-// ----- widened statement surface -----
-// declare, switch, do-while, goto and the static locals below are all genuinely
-// compiled, as try/catch/finally and throw already were.
+// ----- static locals, switch, do-while, try, declare -----
 // static $n = 0; -- a local whose storage SURVIVES the call. The slot is a reference
 // cell in the global scope, created once where the program starts (the initializer is
 // a constant expression, so evaluating it there is not observable), and the statement
@@ -443,12 +430,8 @@ FinallyClause <~~ push({finbody: pop().body}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression Semi ;
-// declare(strict_types=1); / declare(ticks=1) { ... }. None of PHP's three directives
-// changes anything this subset models - there is no type coercion to tighten, no tick
-// handler and no alternate source encoding - so the declaration itself is a no-op and
-// the BRACED form simply emits its body where it stands. The one visible consequence:
-// under strict_types real PHP raises a TypeError for a mismatched argument, and this
-// subset does not check parameter types at all, so it accepts the call instead.
+// declare(...): a no-op whose BRACED form emits its body where it stands. Twin of
+// Declare in php-interpreter.abnf; see there.
 Declare     <~~ push(makeDeclare(takeAll())) ~~>
             = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
 DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
@@ -456,8 +439,7 @@ DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
 // as classes and functions here (they carry no '$' sigil, so no PHP variable can
 // collide with one), which is what lets ConstRef resolve them with a plain scope read.
 // A global 'const' may carry an ATTRIBUTE GROUP of its own ('#[A1(11)] const C = 1;'
-// appears five times in php-src's attributes tests). AttrGrp pushes nothing, so
-// makeConstDecl sees exactly the items it always saw.
+// appears five times in php-src's attributes tests). AttrGrp pushes nothing.
 ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
             = [ AttrGrp ] KwConst CItem { "," CItem } Semi ;
 CatchType   = CatchName { "|" CatchName } ;
@@ -527,11 +509,8 @@ AltForeachBody = ":" AltBody KwEndforeach Semi ;
 // in an assignment, so both spellings bind identically.
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
-// The bound slot is any assignable TARGET, not just a variable: PHP writes into
-// '$obj->prop', '$arr[0]' and '$this->var["key"]' exactly as it does into '$v'
-// (tests/foreach/bug34310, bug34467, bug34873, lang/foreachLoop.004, lang/040,
-// tests/enum/no-write-properties-through-foreach-reference). A '=>' pair may put a
-// DESTRUCTURING pattern in the value position (tests/lang/foreach_list_001).
+// The bound slot is any assignable TARGET, and a '=>' pair may put a DESTRUCTURING
+// pattern in the value position. Twin of ForeachV1 in php-interpreter.abnf.
 ForeachV1   <~~ push({v1: pop()}) ~~>
             = [ FeRef ] Target ;
 ForeachV2   = DestructPat | ForeachV2T ;
@@ -591,7 +570,7 @@ RefAmp      <~~ noteRef() ~~> = "&" !"&" ;
 // share, so this form cannot go through makeRefAssign; it degrades to an ordinary
 // assignment of the returned value, which is what the alias would have observed for
 // every read. Tried AFTER RefAssign, so '$b = &$a' keeps its exact real-reference
-// binding. The '&' pushes nothing, so makeAssign sees the two items it always saw.
+// binding. The '&' pushes nothing, so makeAssign sees just the two items.
 RefAssignVal <~~ push(makeAssign(takeAll())) ~~>
             = Target PlainEq <~~ push("=") ~~> "&" !"&" Expression ;
 
@@ -617,8 +596,7 @@ DPlain      <~~ push({dval: pop()}) ~~>
 DValue      = DestructPat | DTarget ;
 // list(&$a, &$b) = $arr / foreach ($c as [&$x, $y]): a slot may bind BY REFERENCE.
 // References into array storage are not modelled here, so the '&' is accepted and the
-// slot binds by value - the syntax is what was blocking the file. The literal pushes
-// nothing, so the rule stays item-neutral.
+// slot binds by value. The literal pushes nothing, so the rule stays item-neutral.
 DTarget     <~~ push({dt: pop()}) ~~>
             = [ "&" !"&" ] Target ;
 
@@ -651,21 +629,12 @@ TgtOnly     <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { TStep }
             | CallHead TStep { TStep } ;
 TStep       = ArrowField | ArrowDyn | TIndex | TAppend ;
-// A CALL is an assignable head: 'foo()->bar[1] = "123"', 'foo($a)[0] = 2'. What is
-// written into is the value the call RETURNED, so it reaches the caller exactly when
-// that value is a shared one - an object, which is what php-src's own witnesses for
-// this form use (tests/bug37144, tests/bug70332, tests/closures/closure_write_prop).
-// A by-value ARRAY return is a temporary here, as it is in PHP without '&'.
-// At least one step is required: 'foo() = 1' is not a target in any reading.
+// A CALL is an assignable head ('foo()->bar[1] = "123"'). Twin of CallHead in
+// php-interpreter.abnf; see there.
 CallHead    <~~ push({headT: pop()}) ~~>
             = Call ;
-// Is the text ahead a call-headed TARGET? Without this, 'Assignment = Target ...'
-// parses every ordinary call statement twice - once speculatively as a target, once
-// for real - which is 2^depth on nested calls (the documented Dart trap). The guard
-// answers in one capped forward scan: a name, a balanced argument list, at least one
-// '->' or '[' step, and then an assignment operator or '++'/'--' at bracket depth 0
-// before the statement ends. A false POSITIVE only costs the parse that would have
-// happened anyway; a false negative is a parse failure, so it errs toward yes.
+// Is the text ahead a call-headed TARGET? Twin of CallTgtAhead in
+// php-interpreter.abnf; see there.
 CallTgtAhead = :script(~~
     (function() {
         var CAP = 40000
@@ -821,24 +790,14 @@ OrOp        = "||" | ( "or" KwEnd ) ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = PipeExpr { AndOp PipeExpr } ;
 AndOp       = "&&" | ( "and" KwEnd ) ;
-// '$x |> f(...)' is PHP 8.5's pipe: the left value becomes the single argument of the
-// callable on the right, and the operator is LEFT associative, so '5 |> a |> b' is
-// 'b(a(5))'. Its level is fixed by php-src's own test
-//     assert(false && foo() . bar() |> baz() . quux());
-// which means 'false && ((foo() . bar()) |> (baz() . quux()))' - tighter than '&&',
-// looser than '.'. The right operand is any callable VALUE: a first-class callable
-// 'f(...)', a closure, or a function name in a string, which is what phpCallable
-// already normalizes for call_user_func.
+// '$x |> f(...)' is PHP 8.5's pipe. Twin of PipeExpr in php-interpreter.abnf (the
+// precedence level and its php-src witness are explained there); the right operand
+// is normalized by phpCallable.
 PipeExpr    <~~ push(makePipe(takeAll())) ~~>
             = BitOrExpr { "|>" BitOrExpr } ;
 
-// The binary operator ladder, in PHP's own precedence order (loosest first):
-//   ||  &&  |  ^  &  == != === !== <=>  < <= > >=  .  << >>  + -  * / %  **
-// Note that since PHP 8 the concatenation '.' binds LOOSER than the shifts and the
-// additive operators, which is why it has its own level rather than sitting next
-// to '+'. The single-character bitwise operators decline their doubled forms
-// ('&' !'&'), or 'a && b' parses as 'a & (&b)' - a wrong tree, not an error.
-// Mirrors the same ladder in php-interpreter.abnf.
+// The binary operator ladder. Twin of the ladder in php-interpreter.abnf (above
+// OrExpr there), which documents PHP's precedence order.
 BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
             = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
 SingleBar   = "|" !"|" !">" ;
@@ -888,12 +847,11 @@ Cast        <~~ push(makeCast(takeAll())) ~~>
 CastKw      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "int" | "integer" | "bool" | "boolean" | "float" | "double" | "real"
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
-// clone $o : a copy of the instance whose __clone hook, when the class has one,
-// runs on the COPY. Array properties are values, so they are copied along.
-// clone $o  /  clone($o)  and PHP 8.5's clone-WITH, 'clone($o, ["p" => 1])', which
-// copies the object and then overwrites the named properties on the copy. CloneWith
-// demands the comma, so an ordinary parenthesized 'clone($o)' rolls back into the
-// ClonePlain arm and keeps its exact previous parse.
+// clone $o / clone($o): a copy of the instance whose __clone hook, when the class
+// has one, runs on the COPY. Array properties are values, so they are copied along.
+// PHP 8.5's clone-WITH, 'clone($o, ["p" => 1])', then overwrites the named
+// properties on the copy. CloneWith demands the comma, so an ordinary parenthesized
+// 'clone($o)' rolls back into the ClonePlain arm.
 Clone       = CloneWith | ClonePlain ;
 ClonePlain  <~~ push(makeClone(pop())) ~~>
             = KwClone UnaryExpr ;
@@ -901,8 +859,7 @@ CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
             = KwClone "(" Expression "," Expression ")" ;
 // $x instanceof Foo : the runtime type test (js_phisa), which matches the class
 // itself, every base class and every implemented interface. Tried before the plain
-// unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
-// ordinary unary keeps its exact original parse.
+// unary path; if no 'instanceof' follows, this alternative fails and rolls back.
 InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
 InstRef     = InstDyn | InstName ;
@@ -956,11 +913,8 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // an argument that denotes one, and '$name' is exactly the spelling that does.
 ArgList     = Arg { "," Arg } [ "," ] ;
 Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | PosArg ;
-// PHP 8.5 partial application: a '?' in an argument position is a PLACEHOLDER, so
-// the call yields a closure taking one parameter per '?' instead of calling. It is
-// spelled 'b: ?' when the placeholder names the parameter it stands for. ArgEnd is
-// what keeps it apart from a ternary - only a ',' or ')' may follow a placeholder,
-// and no expression here starts with '?'.
+// PHP 8.5 partial application ('f(1, ?)', 'f(b: ?)'). Twin of PlaceArg in
+// php-interpreter.abnf; see there.
 PlaceArg    <~~ push({aplace: true}) ~~>
             = "?" ArgEnd ;
 NamedPlaceArg <~~ push({aname: argLabel(up.in), aplace: true}) ~~>
@@ -1004,7 +958,7 @@ Primary     = "(" Expression ")"
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
 // file's top-level function / class declarations are prepended to phpmain (resolveImport
 // / core.importFile, lib/compile-core.js). Any other operand - a dynamic expression, or a
-// double-quoted string - is parsed and routed to notImplemented, exactly as before.
+// double-quoted string - is parsed and routed to notImplemented.
 IncludeExpr <~~ push(makeInclude(takeAll(), up.pos)) ~~>
             = ( "include_once" | "include" | "require_once" | "require" ) KwEnd ( IncPath | IncDyn ) ;
 // A single-quoted literal path, captured raw like SqStr but kept as the import path
@@ -1012,26 +966,19 @@ IncludeExpr <~~ push(makeInclude(takeAll(), up.pos)) ~~>
 IncPath     = "'" :whitespace() { SqEsc | SqPlain } <~~ push({incpath: unescapeSq(up.in)}) ~~> "'" :whitespace(Whitespace) ;
 IncDyn      <~~ push({incdyn: pop()}) ~~>
             = Expression ;
-// A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
-// M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
-// notImplemented. Placed last so calls, statics and keywords are matched first.
 // A namespace-qualified name in expression position: \PHP_EOL, Foo\Bar::baz(),
-// new \ReflectionClass(...). Namespaces have no runtime model here (NsDecl and
-// UseDecl are notImplemented), so a qualified name resolves on its LAST segment,
-// which is what makes the common `\Exception` / `\strlen` spelling work.
-// 'namespace\foo' names a constant/function/class RELATIVE to the current namespace.
-// Names are not qualified in this subset, so the prefix is skipped and the last
-// segment is what lastSeg keeps - the same treatment '\foo\foo' already gets.
-// KwNamespace carries a KwEnd, so it cannot swallow the start of 'namespaced_thing'.
+// new \ReflectionClass(...). Namespaces have no runtime model here, so a qualified
+// name resolves on its LAST segment, which is what makes the common `\Exception` /
+// `\strlen` spelling work. 'namespace\foo' (RELATIVE to the current namespace) has
+// its prefix skipped the same way. KwNamespace carries a KwEnd, so it cannot
+// swallow the start of 'namespaced_thing'.
 QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
+// A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
+// M_PI, __DIR__, __LINE__, ...), resolved by makeConstRef. Placed last so calls,
+// statics and keywords are matched first.
 ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
             = QName ;
 
-// new C(...) / new static(...) / new $cn(...) / new ($expr)(...). The class may be
-// named, RELATIVE (self/static/parent - `new static()` is what a late-static-binding
-// factory returns) or computed at run time from a string or a descriptor. Declared
-// property defaults are replayed by the class's own __initprops hook, so the dynamic
-// forms get them too.
 // isset($a, $b["k"], $o->p): true when every operand is set AND not null. It is a
 // language construct, not a function - the operands are storage LOCATIONS, so a
 // missing variable or a missing array key answers false instead of aborting.
@@ -1046,6 +993,11 @@ KwIsset     = "isset" KwEnd ;
 KwEmpty     = "empty" KwEnd ;
 KwUnset     = "unset" KwEnd ;
 
+// new C(...) / new static(...) / new $cn(...) / new ($expr)(...). The class may be
+// named, RELATIVE (self/static/parent - `new static()` is what a late-static-binding
+// factory returns) or computed at run time from a string or a descriptor. Declared
+// property defaults are replayed by the class's own __initprops hook, so the dynamic
+// forms get them too.
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
             = KwNew NewTarget [ "(" [ ArgList ] ")" ] ;
 NewTarget   = NewRel | NewDyn | NewParen | NewName ;
@@ -1151,17 +1103,8 @@ ArrRef      <~~ notImpl("array element by reference", up.pos) ~~> = "&" !"&" ;
 Call        <~~ push(makeCall(takeAll())) ~~>
             = QName <~~ push(lastSeg(stripWs(up.in))) ~~> "(" [ ArgList ] ")" ;
 
-// A float literal. It has to be tried BEFORE IntLit, because "3.5" and "1e3" both
-// start exactly like an integer - without it "3.5" parsed as the integer 3, the
-// concatenation operator '.', and the integer 5, and quietly produced the string
-// "35". The leading-dot form ('.5') is PHP's too. Mirrors PhpFloat in the
-// interpreter grammar; the underscore separators PHP 7.4 allows are stripped in
-// phpFloatLit.
-// The longer / prefixed forms come FIRST (ordered choice), and PhpFloat leads because
-// '5.' and '1_0.2_5' start exactly like an integer. A leading zero followed by octal
-// digits is the legacy octal form (017 == 15); '0o17' is the PHP 8.1 spelling of the
-// same thing. '_' separators are stripped by the builders. Mirrors NumLit in the
-// interpreter grammar.
+// PHP number literals. Twin of NumLit in php-interpreter.abnf; see there. PhpFloat
+// must lead, or "3.5" parses as 3 . 5 (a concatenation yielding "35").
 NumLit      = PhpFloat | PhpHex | PhpBin | PhpOct | PhpLegOct | PhpInt ;
 PhpFloat    <~~ push(makeFloat(phpFloatLit(up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ ExpPart ] :whitespace(Whitespace)
@@ -1242,11 +1185,8 @@ SqEsc       = "\\" ( "'" | "\\" ) ;
 SqBack      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
 
-// A heredoc / nowdoc. The body lives on the lines AFTER the marker, so it cannot be
-// written as ordinary productions: HdScan is a :script lexer that returns the marker
-// line, the body and the terminator line as ONE token, and makeHeredoc splits that
-// text apart again (terminator-indent strip, escapes and interpolation unless the
-// marker was single-quoted). Modelled on the Ruby grammar's heredoc lexer.
+// A heredoc / nowdoc, lexed whole by HdScan. Twin of HeredocLit in
+// php-interpreter.abnf; see there.
 HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
@@ -1438,9 +1378,8 @@ KwInstanceof = "instanceof" KwEnd ;
     function fail(msg) { println("php compiler error: " + msg); exit(1) }
 
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
-    // -why. PHP had NO line attribution in any of the four (docs/todo.md 6.1);
-    // this is the same marker every other handle-IR language emits, but it cannot
-    // be core stmtPos (lib/compile-core.js): up.pos is the position AFTER the
+    // -why. This is the same marker every other handle-IR language emits, but it
+    // cannot be core stmtPos (lib/compile-core.js): up.pos is the position AFTER the
     // tag's node matched, and PHP's whitespace INCLUDES newlines and comments, so
     // a statement's node ends past every blank and comment line that follows its
     // ';' - the last statement of a file would be attributed past EOF. The
@@ -1479,8 +1418,8 @@ KwInstanceof = "instanceof" KwEnd ;
     //
     // The dereference is a BRANCH, so it is armed only for a program that actually
     // writes a '&' somewhere: noteRef() is called from the four productions that can
-    // create a cell, and a file without one emits exactly the IR it did before
-    // references existed. Every tag has run by the time the first thunk emits
+    // create a cell, and a file without one emits no dereference at all. Every tag
+    // has run by the time the first thunk emits
     // anything (buildMain is the Program tag), so the flag is final at emit time.
     var usesRefs = false
     function noteRef() { usesRefs = true }
@@ -1527,20 +1466,13 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // ----- scope PROBES, lowered here instead of in a runtime -------------------
     //
-    // js_phthis and js_phclslookup were externs that WALKED THE SCOPE CHAIN, and a
-    // scope is the C floor's private storage: layer 2 (languages/lib/php-rt.metajs,
-    // docs/runtime-next-plan.md part 3, WALL 3) has no way to open one, because
-    // MetaJS reaches the floor only through host builtins and there is no scope
-    // builtin - by design, since the Lua pilot put js_scope_decl/set/typeof into the
-    // floor for exactly that reason.
-    //
-    // Both are pure PROBES - "the value of this name if it is declared anywhere up
-    // the chain, else a default" - and an EMITTER may call js_scope_typeof and
-    // js_scope_get, which is all a probe needs. So they are spelled out here. ONE
+    // A scope is the C floor's private storage: layer 2 (languages/lib/php-rt.metajs)
+    // cannot open one, because MetaJS reaches the floor only through host builtins
+    // and there is no scope builtin, by design. A scope probe - "the value of this
+    // name if it is declared anywhere up the chain, else a default" - therefore
+    // belongs in the emitter, which may call js_scope_typeof and js_scope_get. ONE
     // module-level helper does it, rather than an inline branch, so that every call
-    // site stays a single-value expression and none of the twelve of them has to be
-    // restructured. The generalisation for the remaining nine languages: a scope
-    // probe belongs in the emitter, not in layer 2.
+    // site stays a single-value expression.
     var probeF = undefined
     function scopeProbe(b, nameV, dfltV) {
         if (probeF == undefined) {
@@ -1670,8 +1602,6 @@ KwInstanceof = "instanceof" KwEnd ;
     //   - an arrow function's automatic capture copies the scope SLOT as it stands, so
     //     a slot that already holds a cell stays a cell and a nested `use (&$x)` keeps
     //     writing where everyone else reads.
-    // Getting the first one wrong made `function () use ($k)` see a later write through
-    // an unrelated `use (&$k)`.
     function emitCapture(b, byVal, byRef, raw) {
         if (byVal.length == 0 && byRef.length == 0) { return {b: b, v: curScopeV} }
         var env = callExt(b, "js_scope_new", [curScopeV])
@@ -1723,14 +1653,12 @@ KwInstanceof = "instanceof" KwEnd ;
     // A bareword: a magic constant, or a global / already-declared constant.
     //
     // js_phclslookup answers null rather than aborting - an interface list has to
-    // survive a forward reference - so reading it alone made an UNDEFINED constant
-    // evaluate to null and the program run on, where PHP raises ("Undefined constant
-    // NOPE") and the interpreter half fails. The null answer is ambiguous on its own,
-    // though: `const X = null;` looks the same. So the null arm PROBES the scope
+    // survive a forward reference - but null is ambiguous: `const X = null;` looks
+    // the same as an UNDEFINED constant. So the null arm PROBES the scope
     // (scopeProbe, which does not abort) and splits the two apart: a declared null is
     // answered, and a name that is nowhere raises PHP 8's catchable
-    // `Error: Undefined constant "X"`. It used to re-read with js_scope_get and take
-    // the floor's uncatchable `variable not defined` abort. docs/todo.md 3.2.
+    // `Error: Undefined constant "X"` (js_scope_get would take the floor's
+    // uncatchable `variable not defined` abort instead).
     // PHP 8 quotes the constant name in `Undefined constant "X"`. Spelled as a
     // variable so the tag script never carries an escaped quote inside a string
     // literal, which the two script hosts do not agree on.
@@ -1749,16 +1677,9 @@ KwInstanceof = "instanceof" KwEnd ;
             var haveB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), missB, haveB)
-            // The name is not a class descriptor. It is either a CONSTANT declared
-            // with a null value (js_phclslookup cannot tell those apart) or nothing
-            // at all - and the second one used to reach the shared js_scope_get and
-            // die in the floor with `variable not defined`, an UNCATCHABLE abort
-            // where PHP 8 raises `Error: Undefined constant "X"` that a
-            // `catch (Error $e)` recovers. The scope PROBE distinguishes the two
-            // without aborting, and it is affordable here because this whole block
-            // is cold: js_phclslookup already answered null. The bareword hook
-            // (js_phmissname) must not be the one to answer, because its message is
-            // the FUNCTION one. docs/todo.md 3.2.
+            // A declared-null constant or nothing at all (see above). The probe is
+            // affordable because this block is cold. The bareword hook
+            // (js_phmissname) must not answer here: its message is the FUNCTION one.
             var probed = scopeProbe(missB, emitStr(missB, name), hUndef)
             var badB = curF.NewBlock("")
             var okB = curF.NewBlock("")
@@ -1856,8 +1777,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // one that does not FIT is a float rather than a wrapped int
     // (0xFFFFFFFFFFFFFFFF is float(1.8446744073709552E+19)). The digits are
     // therefore handed to js_philit whenever they leave the exactly representable
-    // range; a small literal stays an ordinary emitNum constant, so a program that
-    // never writes a big number emits exactly the IR it emitted before.
+    // range; a small literal stays an ordinary emitNum constant.
     // Corpus: lang/integer_literals/*_64bit.phpt.
     function digitsOnly(s, radix) {
         var out = ""
@@ -2137,7 +2057,7 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // break / continue go through emitBreak / emitContinue so a jump that leaves a try
     // body (with no loop of its own) becomes a control signal instead of an invalid
-    // branch; outside a try body these are the same b.NewBr as before (byte-identical).
+    // branch; outside a try body they are a plain b.NewBr.
     // 'break N' / 'continue N' name the N-th enclosing loop or switch, counted from the
     // innermost - which is a direct branch to that level's exit / continue block.
     function jumpLevel(items) {
@@ -2250,12 +2170,12 @@ KwInstanceof = "instanceof" KwEnd ;
             return deadBlock()
         }
     }
-    // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body compiles to its own IR closure handed to js_try. The
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
     // becomes a control signal that excDispatch re-issues here; the finally is a plain
-    // closure (its value is discarded by js_try). The first catch wins.
-    // A catch clause carries its type list, so the clauses can be discriminated.
+    // closure (its value is discarded by js_try).
+    // This makeCatch replaces the shared one (lib/compile-core.js): a PHP catch clause
+    // carries its type list, so the clauses can be discriminated.
     makeCatch = function(items) {
         var types = []
         var nm = anytype
@@ -2388,8 +2308,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // foreach over indexed arrays (key = index) and ordered maps (key/value),
     // uniformly via js_range_len / js_range_key / js_range_val.
     // Bind one element of the iteration to the slot the header declared. A plain
-    // variable keeps the single js_pyset_var it always had; anything else is an
-    // ordinary assignment target and goes through the path walk.
+    // variable is a single js_pyset_var; anything else is an ordinary assignment
+    // target and goes through the path walk.
     function emitFeBind(b, ref, v) {
         if (ref == null) { return b }
         if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null) {
@@ -2895,7 +2815,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // js_ph* already answers in PHP's own type (an int stays an int, any float
     // operand makes the result a float), so the C-family 32-bit truncation the
     // shared emitBin applies must be off for every one of them. PHP integers are
-    // 64 bit and '/' is float division (7 / 2 is 3.5), which intWrap destroyed.
+    // 64 bit and '/' is float division (7 / 2 is 3.5), which intWrap would destroy.
     wraps["/"] = 0
     wraps["/="] = 0
     wraps["-"] = 0
@@ -2917,8 +2837,8 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: r.b, v: callExt(r.b, "js_phnot", [r.v])}
         }
     }
-    // The rest of PHP's binary ladder. The bitwise / shift forms truncate to a
-    // 32-bit integer, which is what phpBit does in the interpreter.
+    // The rest of PHP's binary ladder. The bitwise / shift forms are exact 64 bit,
+    // like phpBit in the interpreter.
     binExt["&"] = "js_phband"
     binExt["|"] = "js_phbor"
     binExt["^"] = "js_phbxor"
@@ -2984,10 +2904,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- arrays: ONE type, the ordered key/value map ---------------------------
     // PHP has a single array type: [1, 2, 3] IS the map 0=>1, 1=>2, 2=>3, which is why
     // $a === $b compares the keys and their ORDER while $a == $b ignores it, and why
-    // [5 => "x"] followed by $m[] = "y" lands at key 6. The compiler used to build an
-    // indexed literal as a runtime LIST and a keyed one as a dict, so the two spellings
-    // of the same value were different types. js_pharr / js_phset / js_phpush build the
-    // one map (the __dict shape js_range_* already iterates), carrying __next - the
+    // [5 => "x"] followed by $m[] = "y" lands at key 6. js_pharr / js_phset / js_phpush
+    // build that one map (the __dict shape js_range_* iterates), carrying __next - the
     // next automatic integer key - exactly like the interpreter's newArr/arrPush.
     // A '...$a' spread merges another array in: its INTEGER keys are renumbered and its
     // string keys are kept, PHP's rule for the array-unpacking operator.
@@ -3214,8 +3132,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // ordinary member access finds nothing. Each therefore costs a branch at every
     // property read, property write or method call - so, exactly like the operator
     // overloading in csharp-to-llvm-ir.abnf, the branch is emitted only when some class
-    // in the program declares that hook. A program with no magic method emits the IR it
-    // did before they existed.
+    // in the program declares that hook. A program with no magic method emits none.
     var magicGet = false
     var magicSet = false
     var magicIsset = false
@@ -3231,7 +3148,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- property hooks (PHP 8.4) ---------------------------------------------
     // hookedProps holds every property name some class gives a hook, so a read or write
     // of that NAME can be compiled with a dispatch in front of it and every other
-    // property keeps the plain js_get / js_set it always had.
+    // property keeps a plain js_get / js_set.
     // hookBacking is the property whose hook body is being emitted right now: inside it
     // '$this->x' is the backing STORE, not another hook call, which is what stops a
     // backed hook from recursing into itself.
@@ -3334,11 +3251,9 @@ KwInstanceof = "instanceof" KwEnd ;
     // declares __get anywhere - emitHasMethod's js_get(objV, "__class"). It is the
     // intermediate step of `isset($undef->a->b)` / `isset($o->missing->p)`.
     //
-    // ONLY the non-creating walk gets it. An ordinary `$null->p` READ keeps the abort
-    // it has always had, because php-interpreter.abnf aborts there too ("property ->p
-    // of null") and this half answering PHP 8's warn-and-null would be a new halves
-    // divergence in the one place --cross would eventually find it. Both halves being
-    // wrong together is a recorded defect, not something to half-fix; see the report.
+    // ONLY the non-creating walk gets it. An ordinary `$null->p` READ aborts, because
+    // php-interpreter.abnf aborts there too ("property ->p of null"); answering PHP 8's
+    // warn-and-null in this half alone would make the two halves diverge.
     function emitPropGetSafe(b, objV, keyV, name) {
         var nullB = curF.NewBlock("")
         var liveB = curF.NewBlock("")
@@ -3389,8 +3304,8 @@ KwInstanceof = "instanceof" KwEnd ;
         return emitPropSetPlain(b, objV, keyV, valV)
     }
     // Writing a property whose slot holds a reference CELL has to write through it.
-    // Emitted only for a program that writes a '&' somewhere; otherwise this is the
-    // single js_set it always was.
+    // Emitted only for a program that writes a '&' somewhere; otherwise this is a
+    // single js_set.
     function emitPropStore(b, objV, keyV, valV) {
         if (!usesRefs) { callExt(b, "js_set", [objV, keyV, valV]); return b }
         var raw = callExt(b, "js_get", [objV, keyV])
@@ -3436,13 +3351,11 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // isset($o->p), with __isset as the fallback.
     //
-    // THE MAGIC FALLBACK IS SKIPPED FOR A NULLISH RECEIVER, and only a program that
-    // declares __isset ANYWHERE ever reached the difference: emitHasMethod opens with
-    // js_get(objV, "__class"), which is the floor's uncatchable `member '__class' of
-    // null`, so `isset($undef->p)` and `isset($o->missing->p)` aborted in all three
-    // legs of such a program while the SAME source without an __isset answered false.
-    // PHP 8 answers false for both and never diagnoses inside isset(). Two integer
-    // compares against the interned handles, no runtime call - isSetHandle's trick.
+    // THE MAGIC FALLBACK IS SKIPPED FOR A NULLISH RECEIVER: emitHasMethod opens with
+    // js_get(objV, "__class"), the floor's uncatchable `member '__class' of null`,
+    // while PHP 8 answers false for `isset($undef->p)` and never diagnoses inside
+    // isset(). Two integer compares against the interned handles, no runtime call -
+    // isSetHandle's trick.
     function emitPropIsset(b, objV, keyV) {
         var plain = callExt(b, "js_phisset", [objV, keyV])
         if (!magicIsset) { return {b: b, v: plain} }
@@ -3467,8 +3380,8 @@ KwInstanceof = "instanceof" KwEnd ;
         // __call is a fallback for an INSTANCE only. A receiver that is not one - a
         // generator answering its own protocol, a string, a runtime object - goes
         // straight to the runtime's dispatch; without this guard a `$gen->next()` in a
-        // program that declares __call anywhere probed the generator for a class chain,
-        // found none and tried to call __call on it.
+        // program that declares __call anywhere would probe the generator for a class
+        // chain, find none and try to call __call on it.
         var instB = curF.NewBlock("")
         var otherB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
@@ -3479,13 +3392,10 @@ KwInstanceof = "instanceof" KwEnd ;
         hm.b.NewCondBr(truthy(hm.b, hm.v), directB, magB)
         var dv = callExt(directB, "js_phmcall", [objV, nameV, argsV])
         directB.NewBr(mergeB)
-        // __call is only a fallback when the class HAS one. Any program that spells
-        // __call anywhere sets magicCall for the whole module, so a class without one
-        // came through here too and reported the miss against the wrong name:
-        // `$d->f()` on a class with no __call and no f raised
-        // `Call to undefined method D::__call()` in both compiled halves where the
-        // interpreter half and PHP 8 name f. Falling back to js_phmcall with the
-        // ORIGINAL name puts the three engines back on one text. docs/todo.md 3.2.
+        // __call is only a fallback when the class HAS one: magicCall is module-wide,
+        // so a class without one comes through here too, and its miss must be reported
+        // with the ORIGINAL name (`Call to undefined method D::f()`), as PHP 8 and the
+        // interpreter do.
         var hc = emitHasMethod(magB, objV, emitStr(magB, "__call"))
         var haveCallB = curF.NewBlock("")
         var noCallB = curF.NewBlock("")
@@ -3755,7 +3665,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // operand - an ordered map of property name to value - is then written onto the
     // COPY by a runtime loop over its keys, the same js_range_len / js_range_key /
     // js_range_val walk foreach uses. A non-array second operand yields a zero-length
-    // range, so it is ignored rather than raising: this subset has no Error channel.
+    // range, so it is ignored rather than raising.
     function makeCloneWith(objT, withT) {
         var base = makeClone(objT)
         return function(b) {
@@ -3985,10 +3895,8 @@ KwInstanceof = "instanceof" KwEnd ;
             var argsV = ean.v
             // The constructor is resolved through the __super chain, not read off the
             // class with js_get: `class Boom extends Exception {}` declares no
-            // __construct of its own, and the plain lookup answered undefined -
-            // which is why every subclass of the built-in exceptions failed to
-            // instantiate. js_phscall also makes the NAMED class the late-static-
-            // binding class, so `new static()` inside the constructor is right.
+            // __construct of its own. js_phscall also makes the NAMED class the
+            // late-static-binding class, so `new static()` inside the constructor is right.
             callExt(b, "js_phscall", [clsV, emitStr(b, "__construct"), objV, argsV])
             return {b: b, v: objV}
         }
@@ -4040,9 +3948,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var head = items[0]
         // A CALL head ('foo()->bar[1] = "123"'): the path starts from the value the
         // call returned, so there is no name and no scope slot - refRootV runs the
-        // thunk. A write reaches the caller exactly when that value is a shared one,
-        // which is what php-src's witnesses for this form use (tests/bug37144,
-        // tests/bug70332); a by-value array return is a temporary, as in PHP.
+        // thunk. See CallHead in php-interpreter.abnf.
         if (head.headT != undefined) {
             return {name: null, nameT: null, path: items.slice(1), sbase: undefined, sname: undefined,
                     snameT: null, headT: head.headT}
@@ -4054,20 +3960,14 @@ KwInstanceof = "instanceof" KwEnd ;
     // The value a target's PATH starts from: a plain variable, or a static property
     // (self::$rows[0] = e reads the property, then indexes it).
     //
-    // THE NON-CREATING WALK READS THE ROOT WITH THE PROBE, not with js_scope_get, and
-    // that is not a tidy-up: isset() and unset() are the two forms PHP guarantees
-    // never to diagnose, and `isset($undef[0])` / `isset($undef->p)` / `unset($u[0])`
-    // took the floor's UNCATCHABLE `variable not defined` abort in all three legs
-    // where PHP 8 answers false and runs on. It is NOT docs/todo.md 2.5: that item is
-    // blocked because the floor's miss hook can only answer a value to THROW and a
-    // plain `$undef` READ needs a value to RETURN, and isset needs no value at all -
-    // the emitter's own non-aborting probe is the whole answer, with no floor change.
+    // THE NON-CREATING WALK READS THE ROOT WITH THE PROBE, not with js_scope_get:
+    // isset() and unset() are the two forms PHP guarantees never to diagnose, and
+    // js_scope_get takes the floor's UNCATCHABLE `variable not defined` abort on
+    // `isset($undef[0])` where PHP 8 answers false and runs on.
     //
-    // The probe also answers the RAW slot, so the root is dereferenced here: with
-    // `$r = &$arr`, `isset($r[0])` used to index the reference CELL and answer false
-    // where the interpreter half and PHP both say true. A write walk keeps
-    // js_scope_get: it has setVarV and js_phvivroot for the same job, and reaching
-    // this abort from a write is docs/todo.md 2.5's territory, not isset's.
+    // The probe answers the RAW slot, so the root is dereferenced here: with
+    // `$r = &$arr`, `isset($r[0])` must index the array, not the reference CELL. A
+    // write walk keeps js_scope_get: it has setVarV and js_phvivroot for the same job.
     function refRootV(b, ref, viv) {
         if (ref.headT != undefined) { return ref.headT(b) }
         if (ref.sbase != undefined) {
@@ -4082,7 +3982,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // emitRefPath walks a target's path down to the container the LAST step writes
     // into. `viv` says whether the walk may create what is missing: PHP auto-vivifies
     // the intermediate levels of an assignment target ($a[0]["k"] = 1 makes $a[0] an
-    // array), and php-interpreter.abnf's resolveRefPhp has done that all along - but
+    // array), as php-interpreter.abnf's resolveRefPhp does - but
     // isset() and unset() walk the same path and must NOT create anything, which is
     // why it is a parameter and not the default.
     //
@@ -4312,7 +4212,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // re-parsed as a Target (argTarget) - the same door heredoc interpolation uses to
     // reach the grammar from a tag - which yields the very ref record makeAssign and
     // targetCell already understand, so every assignable form is covered at once.
-    // Anything else answers null and is passed by value, exactly as before.
+    // Anything else answers null and is passed by value.
     function trimWs(t) {
         var a = 0
         var z = t.length
@@ -4386,7 +4286,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // the receiver's class, so a named argument can only be placed when every class
     // that declares a method of that name declares the SAME parameter names. Two
     // declarations that disagree mark the name ambiguous and the call falls back to
-    // plain positional binding, which is what it did before named arguments existed.
+    // plain positional binding.
     // (php-interpreter.abnf has no such problem: it binds named arguments in the
     // CALLEE, where the parameter list is always the right one.)
     var methSigs = {}
@@ -4413,7 +4313,7 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // "every argument is an ordinary positional one". A NAMED argument carries a
     // thunk under the same key, so it has to be excluded explicitly - without that
-    // check `f(2, scale: 10)` quietly passed 10 as the SECOND positional argument.
+    // check `f(2, scale: 10)` would pass 10 as the SECOND positional argument.
     function argsArePlain(args) {
         for (var i = 0; i < args.length; i++) {
             var a = args[i]
@@ -4433,8 +4333,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // The positional argument list a call is made with.
     //
     // The fast path - every argument positional, no by-reference parameter and no
-    // variadic tail - is the plain js_arr_new / js_arr_push run the compiler always
-    // emitted. Anything else is assembled through a PHP array first: positional
+    // variadic tail - is a plain js_arr_new / js_arr_push run. Anything else is
+    // assembled through a PHP array first: positional
     // arguments push, named ones store under their name, a spread MERGES (js_phmerge
     // renumbers integer keys and keeps string ones, which is exactly PHP's unpacking
     // rule), and the result is then read back into the parameter positions the callee
@@ -4683,11 +4583,10 @@ KwInstanceof = "instanceof" KwEnd ;
         var mergeB = curF.NewBlock("")
         b.NewCondBr(isStr, strB, mergeB)
         var looked = phClsLookup(strB, v)
-        // A STRING callable naming nothing. The probe answers null, which then
-        // reached js_call and died with the floor's `call of a non function value:
-        // null` - an uncatchable abort, and one the interpreter half did not make:
-        // it raises PHP 8's `Error: Call to undefined function x()`. One compare on
-        // a path that has already decided the callee is a string. docs/todo.md 3.2.
+        // A STRING callable naming nothing: the probe answers null, and js_call would
+        // take the floor's uncatchable `call of a non function value` abort, where PHP 8
+        // (and the interpreter) raise `Error: Call to undefined function x()`. One
+        // compare on a path that has already decided the callee is a string.
         var badB = curF.NewBlock("")
         var okB = curF.NewBlock("")
         strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), badB, okB)
@@ -4728,9 +4627,8 @@ KwInstanceof = "instanceof" KwEnd ;
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
-        // strlen() measures PHP's string form of the argument: true is "1", false
-        // and null are "". js_bytelen alone measured the JAVASCRIPT form, so
-        // strlen(true) was 4 and strlen(false) 5 - php-interpreter.abnf said 1 and 0.
+        // strlen() measures PHP's string form of the argument (true is "1", false
+        // and null are ""), not the JavaScript form js_bytelen alone would measure.
         if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [callExt(b, "js_phstr", [vs[0]])])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
         if (name == "in_array") { return {b: b, v: callExt(b, "js_phin", [vs[0], vs[1]])} }
@@ -4922,7 +4820,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // A parameter default becomes a prologue statement: the parameter was already
     // declared from js_arg, which answers undefined when the call passed nothing, so
     // the prologue substitutes the declared value in exactly that case. A function
-    // with no defaults gets no prologue and therefore the same IR as before.
+    // with no defaults gets no prologue.
     // Deviation: the default expression is evaluated on EVERY call, not only when the
     // argument is missing. PHP defaults are constant expressions, so this is only
     // observable for the PHP 8.1 'new' in initializers.
@@ -4967,9 +4865,6 @@ KwInstanceof = "instanceof" KwEnd ;
             return b
         }
     }
-    // A property declaration reduced to {name, init}: the name without its '$' (that is
-    // the key "$this->x" reads) and the default-value thunk, or null for a bare 'public
-    // $x;' and for every 'static' property (no static model here).
     // One property hook, reduced to {kind, param, body}. 'get => e' is a body that
     // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
     // 'get;' / 'set;' declares nothing to run and is dropped.
@@ -5054,10 +4949,9 @@ KwInstanceof = "instanceof" KwEnd ;
                               callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
-    // Declared instance-property defaults, by class, plus the extends edge. Both maps are
-    // filled while the tags run and read back at EMIT time (buildMain is the Program tag,
-    // so every class in the program is already recorded when the first `new` is emitted),
-    // which is what lets makeNew replay a base class's defaults without a runtime walk.
+    // Declared instance-property defaults, by class, plus the extends edge, recorded
+    // while the tags run. Nothing reads them back: defaults are replayed at run time
+    // by each class's __initprops (emitInitProps).
     var classProps = {}
     var classSuper = {}
     // ----- traits ---------------------------------------------------------------
@@ -5477,32 +5371,26 @@ KwInstanceof = "instanceof" KwEnd ;
         // runtime is handed them to raise with. See phpRaise in abnf/jsrtphp.go and
         // phpRaise in php-interpreter.abnf.
         //
-        // It used to be handed the SCOPE, and could not be any more: layer 2 cannot
-        // open one (WALL 3, docs/runtime-next-plan.md part 3). What goes over now is
-        // a PHP ARRAY of name => descriptor, which is a plain VALUE both halves can
-        // read - and the emitter, which may call js_scope_get, is the one that reads
-        // the scope. abnf/jsrtphp.go accepts either shape, so llvm.Run is unchanged
-        // for a module built before this.
+        // What goes over is a PHP ARRAY of name => descriptor, a plain VALUE: layer 2
+        // cannot open a scope, so the emitter (which may call js_scope_get) reads it.
         var regV = callExt(b, "js_pharr", [])
         // "Error" is here for the METHOD and NAME misses (js_phmcall / js_phmissname
         // in languages/lib/php-rt.metajs and abnf/jsrtphp.go), which PHP 8 raises as a
-        // catchable Error where both compiled halves used to abort. docs/todo.md 3.2.
+        // catchable Error.
         var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error"]
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])
         }
         callExt(b, "js_phrtinit", [regV])
-        // The floor's RECOVERABLE-NAME hook. js_scope_get is shared by all sixteen
-        // languages and used to end in an uncatchable `variable not defined` abort;
-        // the floor (languages/lib/runtime.c) and abnf/jsrt.go take a per-language
-        // closure that ANSWERS the value to throw, and a language that registers none
-        // is bit-for-bit unchanged. php's answer is js_phmissname's, which declines a
-        // `$variable` (PHP 8 WARNS there and evaluates to null - a value the hook
-        // cannot express, see the note at js_phmissname) and raises PHP's
-        // `Error: Call to undefined function zzz()` for a bareword. The registration
-        // has to come AFTER js_phrtinit, because the Error descriptor the hook builds
-        // its object from is the one handed over there. docs/todo.md 3.2.
+        // The floor's RECOVERABLE-NAME hook: on a js_scope_get miss the floor
+        // (languages/lib/runtime.c) and abnf/jsrt.go call a per-language closure that
+        // ANSWERS the value to throw instead of aborting. php's answer is
+        // js_phmissname's, which declines a `$variable` (PHP 8 WARNS there and
+        // evaluates to null - a value the hook cannot express, see the note at
+        // js_phmissname) and raises PHP's `Error: Call to undefined function zzz()` for
+        // a bareword. The registration has to come AFTER js_phrtinit, because the Error
+        // descriptor the hook builds its object from is the one handed over there.
         funcCount++
         var mnIdx = funcCount
         var mnf = m.NewFunc("jsf_" + mnIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5520,7 +5408,7 @@ KwInstanceof = "instanceof" KwEnd ;
 
     c.compile(c.asg)
 
-    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
     // stores a raw function index, and under llvm.Run the Go runtime turns that index
     // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
@@ -5528,9 +5416,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // jsdispatch_ext, the same table emitted by the layer-2 runtime library
     // (lib/php-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
     // are offset by a million, so the two chains cannot overlap and one js_call reaches
-    // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
-    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is the
-    // reusable part of phase 4 and nothing here is PHP's.
+    // either module. Emitted ONLY for -exe. Twin of lua-to-llvm-ir.abnf's emitDispatch:
+    // nothing here is PHP's.
     function emitDispatch() {
         var idxs = []
         var fns = []
@@ -5568,7 +5455,7 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // runtime.c's main() calls jsmain(env, args); PHP's top level is phpmain, which has
     // the same signature. One forwarding definition rather than a rename, so the module
-    // llvm.Run is handed keeps the entry point it always had.
+    // llvm.Run is handed keeps phpmain as its entry point.
     function emitJsMain() {
         var i = 0
         var pm = undefined
@@ -5606,22 +5493,11 @@ KwInstanceof = "instanceof" KwEnd ;
     //     mec languages/php-to-llvm-ir.abnf tests/php-test-full.php -q \
     //         -exe /tmp/php-native.out && /tmp/php-native.out
     //
-    // which prints `full: 306 checks, 0 failures` - byte-identical with llvm.Run
+    // which prints `full: N checks, 0 failures` - byte-identical with llvm.Run
     // on stdout, on stderr and in its exit code.
     //
-    // This grammar CARRIED the row-held marker tests/clang-check.sh greps for
-    // (see the comment at its call site; the literal is deliberately not repeated
-    // here, because repeating it would hold the row again) until 2026-08-03, so
-    // that the suite printed a HELD row instead of building and running
-    // tests/php-test-full.php natively: two floor primitives were missing -
-    // object-key enumeration and coroutines, WALL 2 and WALL 1 of
-    // docs/runtime-next-plan.md part 3 - and 85 of the 306 assertions could not
-    // pass, so the row would have been permanently RED, which destroys its own
-    // signal because the next genuine regression hides behind a failure readers
-    // have learned to expect. Both primitives landed in languages/lib/runtime.c
-    // (keysOf as host id 61, and the tag-15/16 coroutines behind js_genfn /
-    // js_yield / gen_next), layer 2 was written over them in lib/php-rt.metajs,
-    // and the marker is deleted: php is an ordinary run-it row now.
+    // Do not write tests/clang-check.sh's row-held marker literal anywhere in this
+    // grammar: the script greps for it and would hold the row.
     if (c.exePath != undefined && c.exePath != "") {
         emitJsMain()
         emitDispatch()
