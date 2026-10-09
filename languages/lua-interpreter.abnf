@@ -1073,31 +1073,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (neg) { return 0 - v }
         return v
     }
-    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the
-    // decimal exponent of the FIRST digit, so the text handed to parseFloat
-    // carries the point after that digit.
-    function luaSigVal(s) {
-        var ei = s.indexOf("e")
-        var ds = s.substring(0, ei)
-        var frac = ds.substring(1)
-        if (frac == "") { frac = "0" }
-        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
-    }
-    // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
-    // round-trip a binary64, so the loop terminates with an exact answer. The
-    // reference is coreDecDigits in languages/lib/interp-core.js; floPrec's
-    // contract is "exactly n significant digits", so asking for a small n and
-    // parsing the answer back IS the shortest-form search.
-    function luaDecDigits(a) {
-        var n = 1
-        while (n < 17) {
-            var c = floPrec(a, n)
-            if (luaSigVal(c) === a) { return c }
-            n = n + 1
-        }
-        return floPrec(a, 17)
-    }
     // The text a float table key is addressed by: the shortest round-tripping
     // decimal, in the "D.DDDeEXP" spelling luaNumVal reads back - luaKeyBack turns
     // a key text back into the number pairs() hands the program, and that only
@@ -1105,7 +1080,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // |a|, so the sign is carried here.
     function luaFloKey(n) {
         var neg = n < 0
-        var s = luaDecDigits(neg ? 0 - n : n)
+        var s = coreDecDigits(neg ? 0 - n : n)
         var ei = s.indexOf("e")
         var ds = s.substring(0, ei)
         var frac = ds.substring(1)
@@ -1123,7 +1098,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // only if they read back as the same double, otherwise take seventeen.
         var t = floPrec(n, 15)
         var P = 15
-        if (luaSigVal(t) !== n) { P = 17; t = floPrec(n, 17) }
+        if (coreSigVal(t) !== n) { P = 17; t = floPrec(n, 17) }
         var ei = t.indexOf("e")
         var dig = t.substring(0, ei)
         var ex = luaAtoi(t.substring(ei + 1))
