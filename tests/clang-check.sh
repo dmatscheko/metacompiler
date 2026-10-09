@@ -12,24 +12,15 @@
 # runs correctly under both engines, prints the right answer, and reports FULL.
 # Both engines agree, so byte-identity is satisfied by construction. See the
 # "parameter-name/block-label namespace collision" entry in
-# docs/abnf-dialect-gotchas.md, which records exactly that bug being found in
-# batch-to-llvm-ir.abnf long after both engines were green.
+# docs/abnf-dialect-gotchas.md.
 #
 # WHY THIS IS NOT ./test.sh -exe
 #
-# -exe PATH hands the module to clang AND LINKS IT into a native executable, so
-# it only works for a grammar whose IR is self-contained. Only three of the
-# fifteen languages emit that: bash, batch and c (plus the toys - calculator,
-# brainfuck, lisp, tinyc). The other twelve emit HANDLE IR that calls js_* externs
-# implemented in Go (abnf/jsrt.go), which clang has nothing to link against, so
-# -exe is not available to them and never will be. As of 2026-07-27 the matrix
-# invoked -exe zero times, so in practice NO language was clang-checked at all.
-#
-# The fix is to stop at compile: `clang -S -x ir` parses, verifies and codegens
-# the module without linking, so undefined externs are simply declarations and
-# stay undefined. That gets every one of the fifteen languages checked, which is
-# the whole point - the collision class lives in the emitter, and eleven of the
-# twelve emitters it can afflict had no check on them whatsoever.
+# -exe PATH hands the module to clang AND LINKS IT, so it only covers a grammar
+# that can link natively (it names `exePath`). `clang -S -x ir` parses, verifies
+# and codegens the module without linking, so undefined externs simply stay
+# declarations and every compiler grammar is checked. Where the grammar does
+# link natively, the row below goes further and RUNS the executable.
 #
 # The input is each language's own tests/<lang>-test-full.<ext>, because that
 # file is the one input designed to walk the WHOLE syntax of its language, so it
@@ -58,12 +49,10 @@ go build -o "$BIN" . || { echo "clang-check.sh: build failed" >&2; exit 2; }
 # -q (the module is a compiler's default output, not noise), so the module has to
 # be cut out of the combined stream.
 #
-# Do NOT do this by finding the LAST line that looks like the end of IR. That is
-# the obvious approach and it is wrong, because the PROGRAM's output can contain
-# such a line: php's var_dump prints a bare "}" to close an array, which pushes
-# the cut past the real end and feeds program text to clang. It reports
-#     error: expected top-level entity ... int(9223372036854775807)
-# which reads exactly like an emitter bug and is not one.
+# Do NOT do this by finding the LAST line that looks like the end of IR: the
+# PROGRAM's output can contain such a line (php's var_dump prints a bare "}" to
+# close an array), which would feed program text to clang. Twin of strip_module
+# in test.sh.
 #
 # Scan forward instead, tracking brace depth. The module is a prefix: at depth 0
 # only @globals, declare, define and blanks belong to it, and the first line at
@@ -91,8 +80,8 @@ printf -- '------------------------------------------------------------\n'
 rc=0 n=0 bad=0
 for f in tests/*-test-full.*; do
     base="$(basename "$f")"; lang="${base%%-test-full.*}"
-    # A language may have MORE THAN ONE ratchet file (js was split in two - see
-    # docs/todo.md 6.2). The glob picks the second one up on its own; `lang` still names
+    # A language may have MORE THAN ONE ratchet file (js is split in two). The
+    # glob picks the second one up on its own; `lang` still names
     # the grammar pair, and the LABEL gets the file's own suffix so that two rows of one
     # language are told apart ("js" and "js2"). A named-language argument still selects
     # by lang, so `tests/clang-check.sh js` checks both files.
@@ -117,36 +106,18 @@ for f in tests/*-test-full.*; do
     if clang -S -x ir "$ll" -o /dev/null 2>"$ll.err"; then
         # Parsing is not the whole story. `clang -S -x ir` proves the module is
         # WELL-FORMED; it says nothing about whether the compiled program
-        # BEHAVES the way it does under our own llvm.Run. Those can differ - on
-        # 2026-07-27 the bash ratchet passed 289/289 under llvm.Run and failed 7
-        # assertions in the clang-built executable, all in the regex path, a
-        # defect that had been sitting behind a green matrix and a green
-        # clang-check.
+        # BEHAVES the way it does under our own llvm.Run. For a grammar that
+        # links natively, RUN it: the ratchet file is self-checking, it exits
+        # non-zero and prints its own failure count. Otherwise the module check
+        # is all there is and the row says so.
         #
-        # For the three languages that emit self-contained IR (bash, batch, c -
-        # plus the toys) we can go further and RUN it, because the ratchet file
-        # is self-checking: it exits non-zero and prints its own failure count.
-        # Do that. For a handle-IR language there is nothing to link, so the
-        # module check is all there is and the row says so.
         # A grammar can HOLD its native row while still implementing -exe. The two
-        # questions are genuinely different: `exePath` answers "does this grammar
-        # link natively at all" (main.go greps for the same literal, and refuses
-        # -exe without it, so a silent no-op cannot look like a native build),
-        # while this row answers "does its whole ratchet PASS natively yet".
-        #
-        # php was the first language where those diverged, and is also the proof
-        # that holding the row is the right move rather than a euphemism for
-        # failure. It linked, and 221 of its 306 ratchet assertions agreed
-        # byte-for-byte with llvm.Run, but the rest needed two primitives the C
-        # floor did not have (object-key enumeration and coroutines - WALL 2 and
-        # WALL 1 of docs/runtime-next-plan.md part 3). Leaving the row RED would
-        # have destroyed its own signal: readers learn to expect the failure and
-        # the next genuine regression hides behind it. So the row was held, the
-        # two primitives were built, and php now passes 306/306 with the marker
-        # deleted - which is all that turning a held row back on ever takes.
-        #
-        # No language holds the row today. The mechanism stays because the next
-        # migration will need it: js, typescript and python are still to come.
+        # questions are different: `exePath` answers "does this grammar link
+        # natively at all" (main.go greps for the same literal, and refuses -exe
+        # without it, so a silent no-op cannot look like a native build), while
+        # this row answers "does its whole ratchet PASS natively yet". Holding the
+        # row instead of leaving it RED keeps its signal: a row everyone expects
+        # to fail hides the next genuine regression.
         #
         # A grammar opts out with one comment line, `clang-check: native-row-held`,
         # and the row below says so rather than going quiet. Deleting that line from

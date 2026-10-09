@@ -86,61 +86,27 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-# THE DEFAULT JOB COUNT IS PER GROUP, and the reason is measured rather than
-# assumed (docs/todo.md 7.1).
-#
-# The MATRIX is 351 short, independent subprocesses, most of which spend a large
-# part of their life not on a core at all - process start, reading the grammar,
-# writing results. At one job per CPU it therefore does NOT saturate the machine:
-# `./test.sh` was measured at 35.0 s and 768% CPU against `-j 32`'s 25.4 s at
-# 1143%, same result. Re-measured 2026-08-08 as six INTERLEAVED A/B pairs, three
-# with the default first and three with -j 32 first so the ordering cannot
-# explain it: -j 32 was faster in all six (130.5/82.6, 76.5/60.5, 58.8/54.4,
-# 66.3/48.0, 51.4/50.6, 51.6/50.6 s, default/32). Those runs were taken on a
-# machine at load 40-70 from other work, which compresses the margin - the win is
-# largest when there is idle capacity, which is exactly the case being fixed.
-# Twelve runs, six of them oversubscribed: 351/351 every time, no flakiness.
-#
-# --full and --cross keep one job per CPU. --full is TAIL-BOUND on ~16 ratchet
-# files - one of them (js) dominates the whole group, so more jobs cannot help
-# (measured 95 s -> 91 s) - and each of its probes holds a whole ratchet file's
-# compile in memory, which is the one place oversubscription costs something real.
-# --cross measured 12 s either way.
-#
+# THE DEFAULT JOB COUNT IS PER GROUP. The MATRIX is hundreds of short
+# subprocesses that spend much of their life off-core (process start, reading the
+# grammar), so at one job per CPU it does not saturate the machine; 2x CPU is
+# measurably faster and not flaky.
+# --full and --cross keep one job per CPU: --full is tail-bound on the js ratchet,
+# so more jobs cannot help, and each probe holds a whole ratchet file's compile in
+# memory, the one place oversubscription costs something real.
 # An explicit -j always wins, for every group.
 if [ "$JOBS_EXPLICIT" = 0 ]; then
     if [ "$FULL" -eq 1 ] || [ "$CROSS" -eq 1 ]; then JOBS="$NCPU"; else JOBS=$((NCPU * 2)); fi
 fi
 case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
 
-# THE DEFAULT PER-RUN TIMEOUT IS ALSO PER GROUP, and for the same reason: the
-# groups are not the same size. The matrix is 383 short runs and 120 s is many
-# times the slowest of them. --full is not: it runs the whole ratchet FILE of a
-# language through one grammar, four times per language.
-#
-# MEASURED on this machine at 1c76ec8, the four legs of the biggest ratchet
-# (tests/js-test-full.js), each a SINGLE run and therefore each subject to this
-# timeout on its own:
-#
-#     js-interpreter                110 s
-#     js-interpreter  -frozen       423 s     <- the slowest run in the suite
-#     js-to-llvm-ir                  42 s
-#     js-to-llvm-ir   -frozen       171 s
-#
-# The `-frozen` interpreter leg is the tail because there the MetaJS engine is
-# itself a MetaJS program running on the IR interpreter. tests/gates.sh measured
-# the same leg at 456 s idle and 482 s after the fifteenth round's additions, so
-# treat ~480 s as the number and 423 s here as the same figure on a quieter
-# moment - NOT as a second, smaller measurement.
-#
-# 900 s is that with ~1.9x of headroom, and it is deliberately the same constant
-# gates.sh already passes in as FULL_TIMEOUT: the bare command a human types by
-# hand and the gate should not have different brakes, because the whole point of
-# docs/todo.md 4.3 is that they DID, and the bare command was the one that
-# reported a kill as though it were a defect. If js grows much further the answer
-# is to split its ratchet, not to keep raising this.
-#
-# --cross keeps 120: its slowest program is a feature file, not a ratchet.
+# THE DEFAULT PER-RUN TIMEOUT IS ALSO PER GROUP. The matrix is short runs and
+# 120 s is many times the slowest of them. --full runs a whole ratchet FILE
+# through one grammar; its slowest single run is the js-interpreter -frozen leg
+# (~480 s: there the MetaJS engine is itself a MetaJS program running on the IR
+# interpreter). 900 s is that with ~1.9x headroom, and it is deliberately the same
+# constant tests/gates.sh passes in as FULL_TIMEOUT, so the bare command and the
+# gate have the same brakes. If js grows much further, split its ratchet rather
+# than raising this. --cross keeps 120: its slowest program is a feature file.
 if [ "$TIMEOUT_EXPLICIT" = 0 ]; then
     if [ "$FULL" -eq 1 ]; then TIMEOUT=900; else TIMEOUT=120; fi
 fi
@@ -183,32 +149,12 @@ fi
 #
 #     id <TAB> name <TAB> first line <TAB> last line
 #
-# IT IS THE ONE PLACE THAT DECIDES WHERE A SECTION ENDS, and it exists because
-# the previous answer - "the section region ends at `===== END SECTIONS =====`" -
-# had silently stopped being true in ELEVEN of the sixteen ratchet files, and a
-# twelfth never had the marker at all (docs/todo.md 4.2, which named three of the
-# eleven). Both awks below used to `exit` at that marker, so every
-# section after it was invisible: it could not be isolated, it could not be
-# deleted-and-retried, and a grammar choking inside one reported
-#
-#     error at line N outside the sections (prologue/main must stay minimal)
-#
-# and gave up on the whole file - one broken section hiding every gap behind it.
-# Measured at f1910a9, sections living AFTER the marker: go 18, typescript 13,
-# js 12, python 11, bash 9, java 6, ruby 4, csharp 3, dart 3, kotlin 3, lua 1 =
-# 83, plus the last section of tests/metajs-test-full.js, which has no marker at
-# all and so ran off the end of the scan. 84 of 627 sections, unreachable.
-#
-# WHY THIS RATHER THAN MOVING THE MARKER IN EACH FILE. Moving it is the smaller
-# diff and it is the fragile one: the marker is a hand-maintained line in sixteen
-# files that different people append sections to, and it has already drifted in
-# eleven of them and gone missing in a twelfth. Nothing checks it, because it
-# IS the check. The boundary is derivable from structure that cannot drift - a
-# section header, and the SECTION-CALL driver that every one of these files must
-# have to run at all - so it is derived here instead, and the marker becomes one
-# optional hint among three rather than the only one. Ruby settles the argument
-# on its own: its driver is SPLIT, calls 01-38, then sections 40-43, then calls
-# 39-43, so there is no single position a marker could be moved to.
+# IT IS THE ONE PLACE THAT DECIDES WHERE A SECTION ENDS. The boundary is derived
+# from structure that cannot drift - section headers and the SECTION-CALL driver
+# every file needs to run at all - not from the hand-maintained
+# `===== END SECTIONS =====` marker, which is only one optional hint among three:
+# the marker drifts as sections are appended, and ruby's driver is SPLIT (calls
+# 01-38, sections 40-43, calls 39-43), so no single marker position works there.
 #
 # The rule, in priority order. A section starts at its header and ends at the
 # line before the first ANCHOR after it:
@@ -226,14 +172,10 @@ fi
 #   * nothing - end of file. That is the right answer for java, whose main() sits
 #     in the PROLOGUE and whose last section runs to the last line of the file.
 #
-# The name is extracted exactly as before, so multi-line section headers (bash 33,
-# csharp 33) keep reading the way they always did.
-#
-# CHECKED RATHER THAN ARGUED, over all sixteen files: every one of the 543
-# sections the old scan could see keeps BYTE-IDENTICAL bounds here, the 84 it
-# could not see are now bounded, no two ranges overlap, no range runs past the
-# end of its file, and no range contains a `SECTION-CALL <nn>` line - which is
-# the property that says a deletion cannot eat the driver.
+# Multi-line section headers (bash 33, csharp 33) are named by their first line.
+# Invariants: no two ranges overlap, no range runs past the end of its file, and
+# no range contains a `SECTION-CALL <nn>` line - so a deletion cannot eat the
+# driver.
 full_section_table() {
     awk '
         { line[NR] = $0 }
@@ -286,10 +228,7 @@ full_isolate() {
     for id in $ids; do
         # Keep the skeleton (anything in no section's range) plus the one section
         # being classified. The ranges come from full_section_table, so a section
-        # after the END SECTIONS marker is isolated like any other - before
-        # docs/todo.md 4.2 every such section was treated as skeleton and was
-        # therefore present in EVERY isolation run, which is how one unparsable
-        # late section could fail all of them.
+        # after the END SECTIONS marker is isolated like any other.
         awk -v keep="$id" -v tbl="$tbl" '
             BEGIN {
                 while ((getline t < tbl) > 0) {
@@ -325,49 +264,30 @@ full_probe() {
     local work="$R.work"
     cp "$F" "$work"
     local gaps=0 iter=0 rc out ln reason impl info id name start end
-    # THREE facts come out of this probe, and until 2026-08-10 they were crammed
-    # into ONE file ($R.checks), which is docs/todo.md 6.1:
+    # THREE facts come out of this probe, in three files:
     #
     #   $R.checks  the assertion COUNT, or '-' when nothing was measured
     #   $R.flag    WHAT HAPPENED: FULL | PARTIAL | FROZEN-DIFF | RUN-FAILED |
     #              VACUOUS | UNMEASURED
     #   $R.gaps    how many SECTIONS had to be deleted to get there
     #
-    # Overloading one file meant every non-FULL outcome DESTROYED the count. A
-    # half with one gap wrote no count at all, a FROZEN-DIFF half overwrote its
-    # count with the word, and both then contributed ZERO to the ratchet total -
-    # a language that ran 375 of its 384 assertions was reported as '-' and
-    # subtracted 384 from the number this project is gated on. Measured at
-    # db6bf43 by inserting one unparsable line into tests/lua-test-full.lua:
-    # `lua -` and `0 assertions in total; 0 languages with halves that disagree`.
-    # Splitting them means the count survives every outcome that produced one.
+    # Kept separate so the count survives every outcome that produced one: a half
+    # with a gap or a FROZEN-DIFF still contributes its assertions to the total.
     echo -          > "$R.checks"
     echo UNMEASURED > "$R.flag"
     echo 0          > "$R.gaps"
     {
         # The FILE is named beside the grammar: a language whose ratchet is split runs
-        # the same grammar pair twice, and two identical headers in the report would be
-        # unreadable (docs/todo.md 6.2).
+        # the same grammar pair twice, and two identical headers would be unreadable.
         printf '%s (%s):\n' "$(basename "$G" .abnf)" "$(basename "$F")"
         while :; do
             iter=$((iter + 1))
             if [ "$iter" -gt 60 ]; then printf '    (stopped after 60 rounds)\n'; break; fi
             out="$(RUN "$BIN" "$G" "$work" -q 2>&1)"; rc=$?
-            # A run KILLED BY THE PER-RUN TIMEOUT is not a language gap, and until
-            # this arm existed it was reported as one - SILENTLY, which is the worst
-            # available outcome here.
-            #
-            # The path: the kill leaves $out empty, so no 'Last good parse position',
-            # no 'not implemented' and no 'line N' can be extracted, and the probe
-            # fell through to full_isolate / 'error without a usable position' and
-            # broke out of the loop WITHOUT EVER WRITING $R.checks. The count then
-            # reads '-'. If both halves of a language were killed - which is the
-            # normal case, because whatever is slow is slow in both - the two halves
-            # AGREE on '-', the CHECK-COUNT report prints no MISMATCH, no
-            # RUN-FAILED/FROZEN-DIFF line exists anywhere in the output for
-            # tests/gates.sh to grep, and the only trace is that the total assertion
-            # count is smaller. Observed for real: gates.sh reported the ratchet 437
-            # assertions below baseline with no failure reported anywhere.
+            # A run KILLED BY THE PER-RUN TIMEOUT is not a language gap. The kill
+            # leaves $out empty, so without this arm the probe would fall through
+            # to full_isolate and record no count: both halves would then agree on
+            # '-' and the only trace would be a silently smaller assertion total.
             #
             # 124 is timeout(1)/gtimeout(1); 142 is the perl-alarm fallback (SIGALRM);
             # 137/143 are a KILL/TERM from anything else.
@@ -382,26 +302,17 @@ full_probe() {
             if [ "$rc" -eq 0 ]; then
                 # A zero exit is NOT enough. Every *-test-full.* file ends main()
                 # with the summary line 'full: <checks> checks, <failures> failures'
-                # (see the conventions in tests/js-test-full.js). If a grammar runs
-                # the file top to bottom without ever entering main() - which is
-                # exactly what the python grammar did until 2026-07-27 - it exits 0
-                # having executed NOTHING, and this probe used to report that as
-                # full support. Demand the summary line, so an empty ratchet is
-                # loud instead of green.
+                # (see the conventions in tests/js-test-full.js). A grammar that
+                # runs the file without ever entering main() exits 0 having
+                # executed NOTHING. Demand the summary line, so an empty ratchet
+                # is loud instead of green.
                 if ! printf '%s\n' "$out" | grep -Eq '^full: [0-9]+ checks, [0-9]+ failures$'; then
                     printf '    VACUOUS - exits 0 but never printed the summary line: main() is not being run\n'
                     echo VACUOUS > "$R.flag"
                     break
                 fi
-                # THE COUNT IS RECORDED WHETHER OR NOT SECTIONS HAD TO BE REMOVED
-                # (docs/todo.md 6.1). It used to be recorded only in the gaps == 0
-                # arm, so a half with a single gap printed "(the remaining sections
-                # pass)" - true, and it never said how many, and the summary read
-                # '-'. The rest of the file is a REAL MEASUREMENT of the rest of
-                # the file; refusing to report it does not make the ratchet safer,
-                # it makes the number this project gates on drop by a whole
-                # language while the report says only that some sections passed.
-                #
+                # THE COUNT IS RECORDED WHETHER OR NOT SECTIONS HAD TO BE REMOVED:
+                # the rest of the file is a real measurement of the rest of the file.
                 # The count and the gap count are both reported; the total adds the
                 # count, the summary names the gaps, and tests/gates.sh has a
                 # recorded FULL_GAPS ceiling so a NEW gap is still red.
@@ -414,11 +325,9 @@ full_probe() {
                     # on it - see the CHECK-COUNT report at the end of this group.
                     printf '%s\n' "$out" | sed -n 's/^full: \([0-9]*\) checks.*/\1/p' | head -1 > "$R.checks"
                     printf '%s\n' "$gaps" > "$R.gaps"
-                    # stderr is compared too, not discarded: warnings live there
-                    # (they used to pollute stdout), so a ratchet file that starts
-                    # warning under one engine only would otherwise pass unseen.
-                    # Every ratchet file runs with an EMPTY stderr today, on both
-                    # engines and both halves - measured, all 15 languages.
+                    # stderr is compared too, not discarded: warnings live there,
+                    # so a ratchet file that starts warning under one engine only
+                    # would otherwise pass unseen.
                     # $work, NOT $F: with gaps == 0 it is a byte copy of $F, and
                     # with gaps > 0 it is the file MINUS the sections that do not
                     # parse - which is the only version of the file this half can
@@ -451,21 +360,11 @@ full_probe() {
                     else
                         printf '    %s under goja, BUT -frozen fails or differs - inspect before celebrating\n' \
                             "$([ "$gaps" -eq 0 ] && echo FULL || echo PARTIAL)"
-                        # And make the SUMMARY say so. The count above was recorded
-                        # from the goja run, so without this the end-of-group report
-                        # compares two goja numbers, finds them equal, and prints "0
-                        # languages with halves that disagree" while this very line
-                        # says otherwise. Found 2026-08-02 by an agent whose frozen
-                        # half was silently losing every store (ASI: a bare `return`
-                        # followed by an expression on the next line) - 17 of 59 new
-                        # assertions red in ONE half, invisible to the summary that
-                        # everyone actually quotes.
-                        # The COUNT IS KEPT, and only the flag says FROZEN-DIFF.
-                        # It used to overwrite $R.checks, which meant a language
-                        # whose halves differ under -frozen ALSO silently
-                        # subtracted its whole ratchet from the total - the same
-                        # defect as 6.1, one arm over. The flag is what the
-                        # summary and tests/gates.sh read.
+                        # And make the SUMMARY say so: the count above was recorded
+                        # from the goja run, so without the flag the end-of-group
+                        # report would compare two goja numbers and call them equal.
+                        # The COUNT IS KEPT; only the flag says FROZEN-DIFF. The flag
+                        # is what the summary and tests/gates.sh read.
                         echo FROZEN-DIFF > "$R.flag"
                     fi
                 }
@@ -475,19 +374,12 @@ full_probe() {
             # generic "line N" messages carry a position; everything else goes
             # through the per-section isolation fallback.
             #
-            # TWO SPELLINGS, and the first one has not existed for a long time.
-            # abnf/parser.go:1288 says
+            # TWO SPELLINGS: the current one from abnf/parser.go
             #
             #     Not everything could be parsed. Last good parse position: <file>:<ln>:<col>
             #
-            # and the pattern here only knew the older `was ln N,` wording, so it
-            # matched NOTHING: every parse failure in every ratchet fell through to
-            # the isolation fallback and was reported as "error without a usable
-            # position", which is the slowest path and the least informative one.
-            # Found while probing docs/todo.md 4.2 - a deliberately broken section
-            # in lua was reported as 25 VACUOUS sections plus one real gap, and the
-            # dead sed is half of why. Both spellings are read now; the old one
-            # costs a line and cannot fire wrongly.
+            # and the older `was ln N,` wording, which costs a line and cannot fire
+            # wrongly.
             ln="$(printf '%s\n' "$out" | sed -n 's/.*Last good parse position was ln \([0-9][0-9]*\),.*/\1/p' | head -1)"
             if [ -z "$ln" ]; then
                 ln="$(printf '%s\n' "$out" \
@@ -540,7 +432,7 @@ if [ "$FULL" -eq 1 ]; then
     i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&4; i=$((i + 1)); done
 
     # A LANGUAGE MAY HAVE ITS RATCHET IN MORE THAN ONE FILE, and the two names it
-    # needs are then different things (docs/todo.md 6.2):
+    # needs are then different things:
     #
     #   lang  picks the GRAMMAR PAIR, and comes from the name up to '-test-full.'
     #   unit  is the ACCOUNTING KEY of the check-count agreement below, and is one
@@ -548,11 +440,8 @@ if [ "$FULL" -eq 1 ]; then
     #
     # tests/js-test-full.js and tests/js-test-full.2.js are both js, so both run
     # through languages/js-{interpreter,to-llvm-ir}.abnf - but their assertion counts
-    # are of DIFFERENT FILES and must not be compared with each other. The agreement
-    # rule is "the two halves of one language run the same file, so they must agree";
-    # what that is really about is one FILE through two grammars, which is what `unit`
-    # keys. Grouping both files under "js" would have reported the split as a
-    # MISMATCH - the most serious word this group prints - for no defect at all.
+    # are of DIFFERENT FILES and must not be compared with each other: the agreement
+    # rule is about one FILE through two grammars, which is what `unit` keys.
     #
     # The suffix a second file carries is the part between '-test-full.' and the
     # extension, so js-test-full.2.js is unit "js2". It stays [a-z0-9]+ on purpose:
@@ -596,20 +485,13 @@ if [ "$FULL" -eq 1 ]; then
     # self-maintaining: it needs no expected number checked into the repo.
     echo
     echo "assertion counts (both halves run the SAME FILE, so they must agree)"
-    # A KILLED RUN IS NOT A MISMATCH, and calling it one is docs/todo.md 4.3.
-    # MISMATCH is the most serious word this group prints - it means the two
-    # halves of a language computed different numbers of assertions from one
-    # file - and until now a run the harness KILLED was reported in exactly those
-    # words. Four gate runs in one round printed a red line for a timeout rather
-    # than for a defect, which is how a suite teaches people to ignore it. So the
-    # two are separated here: a kill says it was killed, says what the brake was,
-    # and says how to raise it.
+    # A KILLED RUN IS NOT A MISMATCH. MISMATCH is the most serious word this group
+    # prints - the two halves computed different assertion counts from one file -
+    # so a kill says it was killed, says what the brake was, and how to raise it.
     #
-    # It stays a FAILURE, though, and in three independent ways, because the
-    # exact hole this project has already fallen into is the opposite one (see
-    # the FULL_ASSERTIONS comment in tests/gates.sh): killed probes recorded no
-    # count, both halves therefore "agreed", and the summary printed 437
-    # assertions below baseline as though that were the answer.
+    # It stays a FAILURE, though, in three independent ways, because killed probes
+    # record no count and the total silently shrinks (see the FULL_ASSERTIONS
+    # comment in tests/gates.sh):
     #   1. the per-language line still carries the literal token RUN-FAILED,
     #      which is what tests/gates.sh greps for;
     #   2. the total line SAYS SO ON ITSELF, and is followed by an explicit
@@ -617,34 +499,13 @@ if [ "$FULL" -eq 1 ]; then
     #   3. this group exits NON-ZERO when anything was killed - the only case in
     #      which it does. A language GAP remains informational, exit 0.
     #
-    # WHAT A KILLED LANGUAGE CONTRIBUTES TO THE TOTAL (docs/todo.md 4.4). If one
-    # half was killed and the other finished, the survivor's count IS added, and
-    # that is a deliberate choice re-argued rather than inherited from e1816b3:
-    # zeroing the language would move the total FURTHER from the answer - by that
-    # language's whole ratchet, typically hundreds of assertions - and the number
-    # people read next to it is FULL_ASSERTIONS, a floor. A total short by 1,500
-    # because a run was killed and a total short by 1,500 because someone deleted
-    # a section look identical, and only one of them is a defect. Keeping the
-    # survivor's count means the residual delta still measures assertion LOSS.
-    #
-    # WHAT ACTUALLY CHANGES, then, is the READING of it, not the arithmetic:
-    # the total line was UNMARKED. It read exactly like a clean one, so the number
-    # could be quoted - or written into FULL_ASSERTIONS - with the disclaimer
-    # three lines below it left behind. The line now carries the disclaimer
-    # itself, and the banner names the surviving half's number instead of leaving
-    # the reader to work out which number is the suspect one. The leading
-    # "<N> assertions in total" spelling is preserved for tests/gates.sh's sed:
-    # it must still SEE the number to report it short.
-    #
-    # One SUSPECTED half of the defect turned out not to be live, and saying so is
-    # worth more than pretending it was. The contribution is v[0], the first half
-    # in the sorted list, which looks order-dependent - kill the interpreter and
-    # get 0, kill the compiler and get the full count. It is not: MEASURED at
-    # f1910a9 by injecting rc=124 for one grammar, a one-half kill on lua gave
-    # `384 assertions in total` BOTH ways, because the feeding pipeline sorts
-    # WHOLE LINES and "384" sorts before "RUN-FAILED". The asymmetry is latent,
-    # not live; it is spelled out at the site below rather than left resting on
-    # the ASCII order of a token name.
+    # WHAT A KILLED LANGUAGE CONTRIBUTES TO THE TOTAL. If one half was killed and
+    # the other finished, the survivor's count IS added: zeroing the language would
+    # move the total further from the answer by a whole ratchet, and the residual
+    # delta against FULL_ASSERTIONS (a floor) should still measure assertion LOSS.
+    # The total line carries the disclaimer itself, so the number cannot be quoted
+    # without it, and the banner names the surviving half's number. The leading
+    # "<N> assertions in total" spelling is preserved for tests/gates.sh's sed.
     awk_out="$RESDIR/full.summary"
     for r in $REPORTS; do
         [ -f "$r.lang" ] || continue
@@ -655,13 +516,10 @@ if [ "$FULL" -eq 1 ]; then
     done | sort | awk -F'\t' -v tmo="$TIMEOUT" '
         { if ($1 != last) { if (last != "") emit(); last = $1; n = 0 }
           v[n] = $2; f[n] = $3; g[n] = $4 + 0; n++ }
-        # THE COUNT AND THE VERDICT ARE NOW SEPARATE FIELDS (docs/todo.md 6.1).
+        # THE COUNT AND THE VERDICT ARE SEPARATE FIELDS.
         # v[] is the assertion count or "-"; f[] is FULL/PARTIAL/FROZEN-DIFF/
         # RUN-FAILED/VACUOUS/UNMEASURED; g[] is the number of sections that had to
-        # be deleted before the half would run. Previously ONE field carried all
-        # three, so every non-FULL outcome erased the count and the language
-        # contributed 0 - the total silently stopped being a measurement, which is
-        # the whole reason this item exists.
+        # be deleted before the half would run.
         function emit(   i, bad, killed, nocount, got, gs, ng) {
             bad = 0; killed = 0; nocount = 0; got = ""; gs = 0; ng = 0
             for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
@@ -674,12 +532,8 @@ if [ "$FULL" -eq 1 ]; then
                 # RUN-FAILED is the harness saying it stopped the run. Not a
                 # disagreement; reported separately.
                 if (f[i] == "RUN-FAILED") killed = 1
-                # NO COUNT AT ALL. Before this field existed the only trace of
-                # this was a "-" in the count column, which was caught by
-                # tests/gates.sh only BY OVERLAP: both halves silent read as
-                # agreement and produced no MISMATCH, and one half silent printed
-                # "MISMATCH: - 384" and was caught by the OTHER grep. It is a
-                # named category now and gates.sh looks for it by name.
+                # NO COUNT AT ALL: a named category, which tests/gates.sh looks
+                # for by name.
                 if (v[i] !~ /^[0-9]+$/) nocount = 1
                 gs += g[i]; if (g[i] > 0) ng++
             }
@@ -699,13 +553,8 @@ if [ "$FULL" -eq 1 ]; then
                                ngappy++; gapnames = gapnames sprintf(" %s(%d)", last, gs); totgaps += gs }
             else            printf "  %-12s %s\n", last, v[0]
             # WHICH value goes into the total: the FIRST NUMERIC one, in every
-            # case. This used to be v[0] except when killed, which was right only
-            # by an ASCII accident the old comment here spelled out at length -
-            # the feeding pipeline sorts WHOLE LINES, so "lua<TAB>384" sorted
-            # before "lua<TAB>RUN-FAILED" because "3" < "R". Renaming a token
-            # would have moved the total. Scanning for the first numeric is the
-            # same answer for every case that has one and does not depend on the
-            # sort order at all.
+            # case, so the answer does not depend on the sort order of the
+            # feeding pipeline (which sorts whole lines, flag tokens included).
             for (i = 0; i < n; i++) if (v[i] ~ /^[0-9]+$/ && got == "") got = v[i]
             if (got != "") total += got
             if (killed) {
@@ -723,7 +572,7 @@ if [ "$FULL" -eq 1 ]; then
               # and must keep seeing it, so that a short read is reported as short
               # rather than as "no total at all". Everything after the number is
               # free text, which is where the kill disclaimer goes - ON THE LINE,
-              # so the number cannot be quoted without it (docs/todo.md 4.4).
+              # so the number cannot be quoted without it.
               #
               # THE TOTAL SAYS WHAT KIND OF NUMBER IT IS. Three shapes, and only
               # the last one is a clean measurement:
@@ -731,10 +580,6 @@ if [ "$FULL" -eq 1 ]; then
               #   no-count - a half produced no count; its work is missing
               #   gaps     - sections were deleted to make the file run; the
               #              count is of what remains and is HONEST, just smaller
-              # A gap is the case docs/todo.md 6.1 is about: it used to make the
-              # WHOLE language contribute 0 and print "-", so one unparsable line
-              # in lua took 384 assertions off the total and the summary still
-              # read "0 languages with halves that disagree".
               if (nkilled > 0)
                   printf "\n  %d assertions in total - NOT A MEASUREMENT, %d language(s) killed, see below; %d languages with halves that disagree\n", total, nkilled, mismatch
               else if (nnocount > 0)
@@ -778,10 +623,9 @@ if [ "$FULL" -eq 1 ]; then
     # exit 1 iff something was killed OR a half recorded no count at all.
     # Language GAPS stay informational (exit 0) - that is what this group is for,
     # and the gap is reported, counted and ratcheted by tests/gates.sh's FULL_GAPS
-    # instead. A NO-COUNT half is different in kind: it is a half of the suite
-    # that produced no measurement, which is the failure mode this whole group's
-    # comments are written against, so it is a non-zero exit as well as a named
-    # line. The verdict is read back out of the text that was just printed rather
+    # instead. A NO-COUNT half is different in kind: it produced no measurement,
+    # so it is a non-zero exit as well as a named line.
+    # The verdict is read back out of the text that was just printed rather
     # than carried in a variable, because the awk above runs in a pipeline and its
     # subshell cannot set one.
     if grep -q 'WERE KILLED BY THE' "$awk_out" 2>/dev/null; then exit 1; fi
@@ -813,21 +657,17 @@ fi
 # define. On interpreter output nothing matches and the text passes through.
 # It also drops the harness's own trailers, which name the half that ran and so
 # differ by construction ("ruby interpreter: program finished" vs "ruby compiler:
-# jsmain() returned 0"), and blank padding. An abort message is one of those: the
-# interpreter half's "<lang> interpreter error: ..." was already dropped, so the
-# compiled half's "IR interpreter: ..." is dropped with it - otherwise the two
-# halves aborting on the SAME cause read as a divergence purely because only one
-# of the two spellings survived. An abort is still visible either way, as the
-# output that stops. What survives is the program's own
+# jsmain() returned 0"), and blank padding. Abort messages are dropped in both
+# spellings ("<lang> interpreter error: ..." and "IR interpreter: ...") so two
+# halves aborting on the SAME cause do not read as a divergence; an abort is
+# still visible as the output that stops. What survives is the program's own
 # output plus any warning text - and a warning present in one half and not the
 # other IS a real finding, because it means the halves implement different
 # subsets, so those are deliberately kept.
 #
 # Warnings need one extra step to survive that. A COMPILER emits them while it
 # is building the module, so they land BEFORE the IR and the structural strip
-# above would delete them wholesale - which made all thirteen languages look as
-# though only their interpreter half warned, when in fact both halves warn
-# identically and the harness was eating one copy. So lift every "warning:" line
+# would delete them. So lift every "warning:" line
 # out first and re-emit it ahead of the stripped body. Relative order between a
 # warning and the program output is not comparable across the halves anyway (one
 # warns during compilation, the other during the run), but PRESENCE is exactly
@@ -841,14 +681,9 @@ strip_module() {
     awk '
         # Drop the emitted module, keep the program output that follows it.
         #
-        # This used to search for the LAST line that looked like the end of IR
-        # and cut there. That is wrong, and it silently truncated the very
-        # output this group exists to compare: the PROGRAM can print such a
-        # line - php var_dump closes an array with a bare "}" - so the cut
-        # jumped PAST real output. Worse, it did so ASYMMETRICALLY, because the
-        # interpreter half has no module at all: one half lost the lines before
-        # its last "}" and the other lost module-plus-output, so a genuine
-        # divergence could cancel out into a clean diff.
+        # Do not cut at the LAST IR-looking line: the PROGRAM can print one
+        # (php var_dump closes an array with a bare "}"), and only the compiled
+        # half has a module, so that would truncate the halves asymmetrically.
         #
         # Scan forward with brace depth instead. The module is a prefix: at
         # depth 0 only @globals, declare, define and blanks belong to it, and
@@ -886,22 +721,17 @@ cross_strip() {
 }
 
 # ----------------------------------------------------------------------------
-# abort_norm - the normaliser behind the SHOULD ABORT rows (docs/todo.md 4.1).
+# abort_norm - the normaliser behind the SHOULD ABORT rows.
 #
-# WHY THIS EXISTS. Until now nothing in the suite could ratchet an ABORT TEXT.
-# The matrix compares each engine against ITSELF (goja vs -frozen), so a
+# WHY THIS EXISTS. It is the only place the suite ratchets an ABORT TEXT: the
+# matrix compares each engine against ITSELF (goja vs -frozen), so a
 # wrong-but-consistent message passes; --cross deliberately DELETES abort lines
-# before diffing (see cross_strip's comment) so the two halves aborting for the
-# same cause do not read as a divergence; and an -exe row only BUILDS. That is
-# how b56c2b0 came to find five halves divergences in abort messages by hand,
-# one of them llvm.Run leaking a Go type name ((*abnf.jsArray)) into
-# user-visible output.
+# before diffing (see cross_strip's comment); and an -exe row only BUILDS.
 #
-# The property that was missing is ENGINE AGAINST ENGINE on the diagnostic
-# itself, and it is deliberately NOT a checked-in .expected fixture: a stderr
-# fixture has to be blessed every time a message legitimately changes, whereas
-# "the three implementations of this language must say the same thing" is
-# self-maintaining and is exactly the invariant that was broken.
+# The check is ENGINE AGAINST ENGINE on the diagnostic itself, and deliberately
+# NOT a checked-in .expected fixture: a stderr fixture has to be blessed every
+# time a message legitimately changes, whereas "the three implementations of
+# this language must say the same thing" is self-maintaining.
 #
 # WHAT IS NORMALISED, and nothing else. An over-normalised comparison that can
 # never fail is worse than no gate at all, so this list is short and every entry
@@ -956,18 +786,11 @@ cross_one() {
     # resolve, -warn-imports skips it, and each half then fails its own way on the
     # missing symbol. That compares the recovery paths instead of the feature, so
     # pass the same include root here. It is inert for every other program.
-    # THE SAME KILLED-RUN HAZARD AS THE RATCHET, and it was live here too
-    # (docs/todo.md 4.3 asked; this is what was found). This used to be
-    #     oi="$(RUN ... | cross_strip)"; ri=$?
-    # which records the exit status of CROSS_STRIP, not of the run - so it was
-    # always 0 and was never read again. A leg killed by the per-run timeout
-    # therefore arrived as TRUNCATED output and was compared as though it were an
-    # answer: one leg killed reads as DIFFER (a defect that is not there), and
-    # BOTH legs killed - the normal case, because whatever is slow is slow in both
-    # halves - reads as "agree" and the group prints "0 divergent" while having
-    # measured nothing at all. That last one is silent, which is worse.
     #
-    # So capture the RUN's own status, from a file rather than a pipeline, and
+    # THE SAME KILLED-RUN HAZARD AS THE RATCHET: a leg killed by the per-run
+    # timeout leaves TRUNCATED output, which would read as DIFFER (one leg) or,
+    # silently, as "agree" (both legs). So capture the RUN's own status - from a
+    # file, not a pipeline, whose status would be cross_strip's - and
     # report a kill as its own kind. 124 is timeout(1)/gtimeout(1), 142 is the
     # perl-alarm fallback, 137/143 are KILL/TERM from anything else. Only those
     # four codes: a program that merely EXITS non-zero is normal here (several
@@ -1001,9 +824,7 @@ cross_one() {
     # -warn-unsupported the two halves can warn at different points for the same
     # construct - which is worth seeing, but it is NOT the two of them computing
     # different answers, and reporting both the same way makes the important
-    # kind easy to misread. (It misread once during development: a warning-only
-    # row looked like the compiler implementing ||= that the interpreter
-    # lacked, when in fact both refuse it identically.)
+    # kind easy to misread.
     if printf '%s\n' "$d" | grep -E '^[<>]' | grep -qvE '^[<>] *(warning:|$)'; then
         kind="DIFFER"
     else
@@ -1123,12 +944,9 @@ run_entry() {
     case " ${args[*]} " in *smaller-match-first*|*infinite-loop*) should_fail=1 ;; esac
 
     # EXPECT-NONZERO NATIVE ROWS. `mec ... -exe PATH` only BUILDS: it links the
-    # binary, prints the path and exits 0, so every -exe entry above asks "does
-    # this link" and nothing else. The three tests/metajs-fail-test*.js programs
-    # are the ones whose whole point is the ABORT, and their native halves were
-    # therefore not run by anything - which is exactly why the C floor's abort
-    # path (werr, die, die2, die3, wstr, o_cstr, class_name) read as untested
-    # while the coverage sweep called it "proved by probe".
+    # binary, prints the path and exits 0. These rows also RUN the binary, which
+    # is how the C floor's abort path (werr, die, die2, die3, wstr, o_cstr,
+    # class_name) is reached by a test.
     #
     # An entry whose name says SHOULD ABORT declares: the BUILD must succeed
     # (rc 0, so it is NOT a "SHOULD FAIL" entry and the word "fail" must stay out
@@ -1145,10 +963,9 @@ run_entry() {
     # program under languages/<lang>-interpreter.abnf. Three independent
     # implementations of one language's abort text, compared against each other
     # (see abort_norm above for exactly what is normalised and what is not).
-    # It is a separate token because it is not universally green yet - several
-    # languages have a live interpreter-vs-compiler divergence in their abort
-    # text, and those rows carry the two-leg form until their owner closes it.
-    # Promoting a row is a one-word edit in .vscode/launch.json.
+    # It is a separate token because not every language's halves agree on their
+    # abort text yet; those rows carry the two-leg form. Promoting a row is a
+    # one-word edit in .vscode/launch.json.
     local abort_exe=0 abort_all=0 exe="" i
     case "$name" in *"SHOULD ABORT"*) abort_exe=1 ;; esac
     case "$name" in *"ALL HALVES"*) abort_all=1 ;; esac
@@ -1179,15 +996,12 @@ run_entry() {
         RUN "$BIN" "${interp[@]}" >"$ni.o" 2>"$ni"; rc_ni=$?
     fi
 
-    # A KILLED RUN IS NEVER A PASS, whatever the row expects (docs/todo.md 4.3).
-    # This is checked FIRST and outside the should_fail branch because of the
-    # trap: the by-design-failing rows - every name containing FAIL, and the
-    # SHOULD ABORT rows below - assert only that the exit status is NON-ZERO, and
-    # timeout(1) kills with 124, which is non-zero. So a row whose whole purpose
-    # is to fail would have gone GREEN on a machine too loaded to run it, and the
-    # matrix would have reported a pass for a run that never finished. The four
-    # codes are timeout/gtimeout's 124, the perl-alarm fallback's 142, and
-    # KILL/TERM's 137/143.
+    # A KILLED RUN IS NEVER A PASS, whatever the row expects. This is checked
+    # FIRST and outside the should_fail branch: the by-design-failing rows (FAIL,
+    # SHOULD ABORT) assert only a NON-ZERO exit, and timeout(1) kills with 124,
+    # which would otherwise turn them green on a loaded machine. The four codes
+    # are timeout/gtimeout's 124, the perl-alarm fallback's 142, and KILL/TERM's
+    # 137/143.
     local problems=()
     killed_rc() { case "$1" in 124|137|142|143) return 0 ;; *) return 1 ;; esac; }
     killed_rc "$rc_g" && problems+=("goja was KILLED (exit $rc_g) after the ${TIMEOUT}s --timeout - nothing was measured, raise --timeout")
@@ -1214,7 +1028,7 @@ run_entry() {
             killed_rc "$rc_ni" && problems+=("the interpreter half was KILLED (exit $rc_ni) after the ${TIMEOUT}s --timeout, it did not abort")
             cmp -s "$ng" "$nf" || problems+=("goja-built vs frozen-built native stderr differ")
             cmp -s "$ng.o" "$nf.o" || problems+=("goja-built vs frozen-built native stdout differ")
-            # The ABORT TEXT COMPARISON (docs/todo.md 4.1). abort_norm strips the
+            # The ABORT TEXT COMPARISON. abort_norm strips the
             # emitted module and each engine's own self-identification and
             # nothing else, so what is compared here IS the program's diagnostic,
             # and it is compared between implementations that share no code.
@@ -1243,24 +1057,9 @@ run_entry() {
     if [ "$has_q" -eq 1 ] && ! cmp -s "$og" "$of"; then
         problems+=("goja vs frozen -q output differ")
     fi
-    # STDERR is compared on exactly the same entries as stdout. Two reasons:
-    #
-    #   1. warnings live here now (they used to be printed to stdout, where they
-    #      polluted a compiler's emitted module and a program's output). Without
-    #      this line, moving them off stdout would silently DROP the 35 entries
-    #      that pass -warn-imports / -warn-unsupported out of the byte-identity
-    #      check - a coverage loss disguised as a clean change.
-    #   2. it closes an older gap: an ERROR message that differs between the two
-    #      engines was invisible to this matrix.
-    #
-    # Adding it found two entries (Kotlin delegation SHOULD FAIL, PHP undefined
-    # constant SHOULD FAIL) whose stderr had diverged all along: a panic from the
-    # RUNNING PROGRAM was re-panicked by the frozen engine wrapped in the whole
-    # startScript source (~4800 lines), where goja printed two lines. That is
-    # fixed at the source (jsProgramPanic in abnf/jsrt.go), not excluded here -
-    # and the fix also retired the documented exception, the MetaJS type
-    # violation entry, which had to run without -q for exactly that reason and
-    # now carries -q like everything else.
+    # STDERR is compared on exactly the same entries as stdout: warnings live
+    # there (so the -warn-imports / -warn-unsupported entries stay under the
+    # byte-identity check), and so do error messages, which must match too.
     #
     # Entries that still differ on stderr between the engines are the trace and
     # timing ones (-vv/-vv2 tag traces, -speed) - all of them without -q, so they

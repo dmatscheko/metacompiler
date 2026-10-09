@@ -3,18 +3,8 @@
 # selftest.sh - VERIFY tests/probe.sh BY SABOTAGE.
 #
 # probe.sh is a gate, and this project's standard for a gate is that it must be
-# shown to FAIL on a broken input, not merely to pass on a good one. Until
-# 2026-08-09 probe.sh failed that standard in the worst available way: on a
-# self-contained-IR language (bash, batch, c and the four toys) `-qq` on the
-# compiler half printed NOTHING, the empty file was diffed like any other, and
-# a probe whose other legs were also quiet reported "all N legs agree" having
-# compared nothing at all. Two live examples, both green before the fix:
-#
-#     tests/probe.sh calculator tests/calculator-test-1.txt
-#         -> "all 2 legs agree (run native)"   comparing two EMPTY files,
-#            one of which exited 0 and the other 55.
-#     tests/probe.sh js tests/js-test-1.js
-#         -> "all 3 legs agree"                comparing three EMPTY files.
+# shown to FAIL on a broken input, not merely to pass on a good one - above all,
+# it must never report "all N legs agree" over EMPTY legs.
 #
 # So the cases below are the negative half, and tests/probe/good.sh is the
 # positive one. A gate that only goes red proves as little as one that only goes
@@ -65,13 +55,12 @@ check "calculator (no stdout at all)" 2 "THERE WAS NO COMPARISON" -- \
     "$PROBE" calculator tests/calculator-test-1.txt
 
 # The sharpest one: sabotage the IR-flavour classifier so bash is treated as a
-# handle-IR language again, which is exactly the pre-fix behaviour, and check
-# that the three surviving legs agreeing PERFECTLY is still not a pass.
+# handle-IR language (its run leg then comes out empty), and check that the
+# three surviving legs agreeing PERFECTLY is still not a pass.
 #
 # The copy has to live in tests/ rather than in $WORK, because probe.sh finds
 # the repo root as `dirname $0`/..  - a copy anywhere else would cd somewhere
-# else and fail for the wrong reason, which is its own little version of the
-# bug this file is about.
+# else and fail for the wrong reason.
 SAB=tests/.probe-selftest-sabotage.sh
 trap 'rm -rf "$WORK" "$SAB"' EXIT
 sed 's/^handle_ir() {.*$/handle_ir() { return 0; }/' "$PROBE" >"$SAB"
@@ -90,9 +79,8 @@ check "grammar does not exist" 2 "no languages/calculator-interpreter.abnf" -- \
 check "misspelled --legs drops a leg" 2 "unknown leg" -- \
     "$PROBE" bash tests/probe/good.sh --legs interp,run,nativ
 
-# A leg that prints some of its rows and is then killed is the manual's most
-# expensive diff ("a truncated leg is not a measurement"): before the timeout
-# existed this input hung probe.sh forever instead.
+# A leg that prints some of its rows and is then killed: "a truncated leg is not
+# a measurement".
 cat >"$WORK/hang.sh" <<'EOF'
 V=(1 2 3 4 5)
 for i in "${!V[@]}"; do echo "row ${V[$i]}"; done

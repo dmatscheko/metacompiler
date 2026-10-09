@@ -9,29 +9,14 @@
 # ./test.sh --full and ./test.sh --cross are ALL BLIND to layer 2. A change to a
 # *-rt.metajs file cannot make any of them red.
 #
-# Measured, so this is not an argument: with a deliberately wrong `dot` knob in
-# ruby's rtkFloDigits, `./test.sh --full --filter ruby` reports "279 assertions,
-# goja and -frozen byte-identical, 0 languages with halves that disagree" and
-# exits green, while the native -exe of the SAME tests/ruby-test-full.rb reports
-# 4 failures (n16b n16c n16d n16e).
-#
-# WHY THE FEATURE FILE IS RUN HERE TOO (todo.md 4.3)
+# WHY THE FEATURE FILE IS RUN HERE TOO
 #
 # The feature-matrix files ARE in .vscode/launch.json, but their native rows are
-# `-exe` with no run, and `mec ... -exe PATH` only BUILDS (manual 7.10). So until
-# this script grew the second row, a fix asserted ONLY in a feature-matrix file
-# never executed inside a native binary in ANY gate - both layer-2 gates ran the
-# ratchet and nothing else. That is not theoretical: a layer-2 `Hash#each` defect
-# in ruby-rt.metajs survived all seven gates on the b3eb5c3 round and was found
-# only because someone ran the binary by hand.
-#
-# The alternative - a matrix row that builds AND runs, like `SHOULD ABORT` does -
-# was rejected on cost and on blast radius: the matrix runs every entry TWICE
-# (goja and -frozen), so it would pay for 28 extra native links in the fast gate
-# that people run constantly, and it needs a new marker in test.sh. Here the
-# build is already the price of admission and the feature files are the SMALL
-# ones - about 40% of the ratchets by line. To keep the bill down the whole
-# script now fans out (MEC_JOBS, default: cores) instead of running serially.
+# `-exe` with no run, and `mec ... -exe PATH` only BUILDS (manual 7.10), so this
+# is the only gate where a fix asserted only in a feature-matrix file runs inside
+# a native binary. It is not a build-and-run matrix row (like `SHOULD ABORT`)
+# because the matrix runs every entry TWICE and would pay for every native link
+# in the fast gate. The script fans out (MEC_JOBS, default: cores).
 #
 # The two files are complementary, not redundant: --full's ratchet walks a
 # language's whole syntax, the feature matrix is where a freshly fixed defect
@@ -40,20 +25,18 @@
 # tests/clang-check.sh is the only other gate that links layer 2, and it runs the
 # ratchet only.
 #
-# THE SECOND TABLE: PROGRAMS WITH NO SELF-CHECK LINE (todo.md 4.1)
+# THE SECOND TABLE: PROGRAMS WITH NO SELF-CHECK LINE
 #
 # The four toys - brainfuck, calculator, lisp, tinyc - have feature files and
-# `exePath`, and none of them was ever run natively. todo.md 4.1 said that was
-# because none of them follows the `"... checks, N failures"` + `exit(fails)`
-# protocol. MEASURED, AND TWO OF THE FOUR DO:
+# `exePath`. Two of them follow the `"... checks, N failures"` + `exit(fails)`
+# protocol:
 #
 #   lisp      prints `features: 63 checks, 0 failures` and the value of its last
 #             top-level form becomes the exit status (`failures`).
 #   tinyc     prints `features: 44 checks, 0 failures` and `return failures` from
 #             main becomes the exit status.
 #
-# So those two just go in ROWS below with everything else, and the item was wrong
-# about them. The other two genuinely cannot:
+# So those two just go in ROWS below with everything else. The other two cannot:
 #
 #   brainfuck has no arithmetic on strings and no way to count anything - it
 #             prints a fixed six-byte banner, `BF8 OK`, and any broken opcode
@@ -94,11 +77,6 @@
 # nowhere else - a stray `; native-full: ...` at grammar top level is not a
 # comment, it is a rule, and the grammar then fails to parse at all.
 #
-# No language holds a row today, and as of 2026-08-08 EVERY language in the table
-# has both files: bash and batch were the two with no feature matrix, and both got
-# one (tests/bash-test-features.sh, 286 checks against real bash 5.3 as the oracle;
-# tests/batch-test-features.cmd, 87 checks, no oracle - see that file's header).
-#
 # Usage: tests/native-full.sh [lang ...]        (default: every language)
 #        MEC_JOBS=4 tests/native-full.sh        cap the fan-out
 #        tests/native-full.sh --bless [lang ...]  rewrite the EXPECT_ROWS fixtures
@@ -118,19 +96,12 @@ trap 'rm -rf "$OUT"' EXIT
 # one-word edit here, and leaving the field off means "both", which is still the
 # default and still the thing that complains when a file goes missing.
 #
-#   batch    has a ratchet and `exePath` and had NEVER been in this table, though
-#            tests/clang-check.sh does native-run it - todo.md 4.1's "undocumented
-#            asymmetry". It is here now, with a feature file of its own written the
-#            same round for the same reason bash got one: batch's layer 2 is also a
-#            C runtime (languages/lib/batch-rt.c) and also had exactly one program
-#            on it.
 #   lisp     and tinyc are toys with a feature file and no ratchet; both follow the
 #   tinyc    self-check protocol exactly (see the second-table comment above).
-#   js       has TWO ratchet files. tests/js-test-full.js was split in two because its
-#            -frozen interpreter leg had reached 70% of ./test.sh --full's brake and had
-#            been KILLED under gate load (docs/todo.md 6.2); the second half is
-#            tests/js-test-full.2.js and tests/js-test-full.3.js, and the kinds `full.2`
-#            and `full.3` are what name them here. The
+#   js       has several ratchet files (split so its -frozen interpreter leg stays
+#            under ./test.sh --full's timeout): tests/js-test-full.js,
+#            tests/js-test-full.2.js and tests/js-test-full.3.js, named by the kinds
+#            `full`, `full.2` and `full.3`. The
 #            THIRD FIELD IS COMMA-SEPARATED, because ROWS itself is split on whitespace.
 ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
       js:js:full,features,full.2,full.3

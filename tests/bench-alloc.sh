@@ -3,19 +3,12 @@
 # bench-alloc.sh - how much memory and time one operation of the self-hosted
 # runtime costs, measured rather than guessed.
 #
-# WHY THIS EXISTS
+# languages/lib/runtime.c has a mark/sweep heap, so RSS is BOUNDED and does not
+# measure allocation by itself. The script reports both numbers, from the same
+# binary:
 #
-# languages/lib/runtime.c USED TO allocate from a bump arena that was never
-# freed, so a long-running program's resident set WAS its allocation total, and
-# peak RSS divided by the iteration count was an exact figure for "bytes
-# allocated per operation" - no profiler, no sampling.
-#
-# docs/runtime-next-plan.md part 1b made it a mark/sweep heap, so RSS is now
-# BOUNDED and no longer measures allocation. Both numbers still matter and the
-# script reports both, from the same binary:
-#
-#   MEC_GC=off   the collector never runs, which is exactly the old arena, so
-#                RSS / iterations is still the allocation rate in bytes per op
+#   MEC_GC=off   the collector never runs, so nothing is freed and
+#                RSS / iterations is the allocation rate in bytes per op
 #   default      the collector runs, and RSS must FLATTEN as the iteration
 #                count grows instead of scaling with it. That is the gate.
 #

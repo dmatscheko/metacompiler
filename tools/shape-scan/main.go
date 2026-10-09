@@ -1,14 +1,10 @@
 // shape-scan reports layer-2 function bodies that are IDENTICAL MODULO NAMES
 // across languages/lib/*.metajs.
 //
-// Why this exists, and why the obvious view does not work: for months the only
-// view anyone had of layer-2 duplication was the table of `js_*` extern names
-// defined in more than one file. That table both UNDERSTATES the duplication
-// (python and ruby wrote the same exact-decimal bignum under different names for
-// months, and the name view is blind to it by construction) and OVERSTATES it
-// (24 duplicated names, of which only two have bodies that group at any
-// threshold; `js_pylen`'s five copies are 7, 9, 11, 16 and 7 lines of genuinely
-// different code). It is measuring names. The thing being merged is bodies.
+// Why not just list `js_*` extern names defined in more than one file: that view
+// UNDERSTATES the duplication (the same body under different names is invisible
+// to it) and OVERSTATES it (same-named externs often have genuinely different
+// bodies). It measures names; the thing being merged is bodies.
 //
 // So: strip comments, tokenise, rewrite every non-keyword identifier to a
 // positional token (#1, #2, ... in order of first appearance), and group by the
@@ -162,10 +158,8 @@ func braceDelta(line string) int {
 // function is part of its parent's body and is normalised with it.
 //
 // The end of a function is found by BRACE COUNTING, not by looking for a `}` in
-// column 0. The house style mostly puts one there, but the one-line form
-// `function k1I32(v) { return ktNorm(k1Val(v), 32, 0) }` does not - and scanning
-// for the next column-0 brace made that swallow the following 1,800 lines and
-// report a group of three "identical" bodies of 6, 35 and 41 lines.
+// column 0: the one-line form `function k1I32(v) { return ktNorm(k1Val(v), 32, 0) }`
+// has none, and a column-0 scan would swallow the following functions.
 func collect(path string) ([]body, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -217,12 +211,10 @@ func main() {
 	min := flag.Int("min", 140, "minimum normalised body length to consider")
 	verbose := flag.Bool("v", false, "list every member of every group")
 	max := flag.Int("max", -1, "exit 1 if more than this many groups (CI ratchet)")
-	// -max alone is NOT a sufficient ratchet, and the gap is easy to hit by
-	// accident: copying a body that is ALREADY duplicated into a third language
-	// grows an existing group instead of creating a new one, so the group COUNT
-	// does not move. Measured: pasting pyABigMul into lua-rt.metajs left the count
-	// at 15 while recoverable went 481 -> 511. The recoverable-line total is the
-	// number that actually tracks the debt, so tests/gates.sh ratchets both.
+	// -max alone is NOT a sufficient ratchet: copying a body that is ALREADY
+	// duplicated into a third language grows an existing group instead of creating
+	// a new one, so the group COUNT does not move. The recoverable-line total is
+	// the number that actually tracks the debt, so tests/gates.sh ratchets both.
 	maxLines := flag.Int("max-lines", -1, "exit 1 if more than this many RECOVERABLE lines (CI ratchet)")
 	dir := flag.String("dir", "languages/lib", "directory of .metajs layer-2 files")
 	flag.Parse()

@@ -3,9 +3,6 @@
 # tools/pre-commit - refuse a commit that changes the frozen bootstrap's SOURCE
 # without also committing the regenerated SNAPSHOT.
 #
-# docs/todo.md 7.6: "Did you -freeze after touching the emitter?" is a question a
-# script should ask.
-#
 # The rule (manual chapter 4, "Regenerate the frozen snapshot"): any change to
 #
 #     languages/metajs-to-llvm-ir.abnf
@@ -19,8 +16,7 @@
 # and a second -freeze must produce a byte-identical file. Forget it and every
 # `-frozen` leg in the suite runs the OLD emitter against the NEW one - which is
 # not a clean red: the matrix demands goja and -frozen agree byte for byte, so a
-# stale snapshot reads as a divergence in whatever the change happened to touch,
-# and people have gone hunting for a defect that was not there.
+# stale snapshot reads as a divergence in whatever the change happened to touch.
 #
 # WHAT THIS CHECKS, and what it deliberately does not:
 #

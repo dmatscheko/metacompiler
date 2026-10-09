@@ -5,11 +5,11 @@
 #
 # WHY THE .ll IS CHECKED IN
 #
-# Same reason as tests/gen-runtime-ll.sh, which this is copied from:
+# Same reason as tests/gen-runtime-ll.sh:
 # llvm.BuildExecutable hands its runtime inputs straight to clang, so passing
-# batch-rt.c would have CLANG compile the layer - and the point of the runtime
-# rework (docs/runtime-rework-plan.md) is that every layer is compiled by this
-# repository. batch-rt.ll is a generated artifact exactly like abnf/jsbootstrap.ll
+# batch-rt.c would have CLANG compile the layer - and every runtime layer is
+# meant to be compiled by this repository. batch-rt.ll is a generated artifact
+# exactly like abnf/jsbootstrap.ll
 # and languages/lib/runtime.ll: regenerate it whenever batch-rt.c or
 # c-to-llvm-ir.abnf changes, and commit the result.
 #
@@ -35,11 +35,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# A shared binary, if the caller built one. tests/gen-all.sh builds mec ONCE and
-# exports MEC_BIN so the fifteen generators do not each pay for a go build. This
-# is opt-in and it fails safe: MEC_BIN unset, empty, or not executable means this
-# script builds its own private temp binary exactly as it always has, so running
-# this script by hand with no environment set up still does the right thing.
+# A shared binary, if the caller built one: tests/gen-all.sh builds mec ONCE and
+# exports MEC_BIN so the generators do not each pay for a go build. Opt-in and
+# fail-safe: MEC_BIN unset, empty, or not executable means this script builds its
+# own private temp binary.
 # Resolved to an absolute path BEFORE the cd, so a relative MEC_BIN also works.
 MEC_BIN_ABS=""
 if [ -n "${MEC_BIN:-}" ]; then

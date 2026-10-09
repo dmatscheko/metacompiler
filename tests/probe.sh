@@ -46,16 +46,10 @@
 # ---------------------------------------------------------------------------
 # A LEG THAT DID NOT RUN IS NOT A LEG THAT AGREED.
 #
-# This script used to compare whatever legs happened to produce a file and then
-# print "all N legs agree". That is the one thing this project treats as worst:
-# green for a comparison that was never made. The manual has the general form
-# twice - "A DIFF OF TWO RUNS IS NOT A MEASUREMENT UNLESS BOTH RAN TO
-# COMPLETION" (a -frozen leg truncated at the step brake and the diff faithfully
-# reported the truncation), and gates.sh's "a short read is a FAILURE" (a killed
-# first run made two halves record `-`, therefore AGREE, and print a smaller
-# number as if it were the answer).
+# Green for a comparison that was never made is the worst outcome here ("A DIFF
+# OF TWO RUNS IS NOT A MEASUREMENT UNLESS BOTH RAN TO COMPLETION", manual).
 #
-# So every leg is now in exactly one of two states. It either produced output
+# So every leg is in exactly one of two states. It either produced output
 # that is compared, or it is BROKEN, named with its reason, and the script exits
 # non-zero. A leg is broken when it is requested and:
 #
@@ -65,9 +59,7 @@
 #   - the oracle command does not exist on this machine (exit 127);
 #   - it was killed by the timeout, or died on a signal;
 #   - the IR interpreter hit its step brake, so the output is TRUNCATED;
-#   - it produced NO OUTPUT AT ALL.
-#
-# The last one is the case that was live: see the -q/-qq note below.
+#   - it produced NO OUTPUT AT ALL (see the -q/-qq note below).
 #
 # `tests/probe/selftest.sh` VERIFIES ALL OF THAT BY SABOTAGE, positive case
 # included. Run it after touching this file; it takes about twenty seconds.
@@ -76,8 +68,7 @@
 # passing: `calculator`'s result IS its exit code, it has no
 # `calculator-interpreter.abnf` (the interpreter grammars are
 # calculator-global-stack, -local-stacks, -scientific, -latex), and the probe
-# reports both facts instead of comparing two empty files, which is what it used
-# to do.
+# reports both facts instead of comparing two empty files.
 # ---------------------------------------------------------------------------
 #
 # Exit 0 iff every requested leg ran AND every leg that ran agrees.
@@ -100,9 +91,8 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$PROG" ] || { echo "probe.sh: no such program: $PROG" >&2; exit 2; }
 
-# A MISSPELLED LEG NAME MUST NOT QUIETLY REMOVE A LEG. `--legs nativ` used to
-# mean "run three legs and say nothing", which is the same silent-degradation
-# class this script exists to refuse.
+# A MISSPELLED LEG NAME MUST NOT QUIETLY REMOVE A LEG (`--legs nativ` would
+# otherwise run three legs and say nothing).
 for l in ${LEGS//,/ }; do
     case "$l" in
         interp|run|native|oracle) ;;
@@ -133,27 +123,22 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 #                     on a side channel. So -qq drops the module and keeps
 #                     exactly the program - with no parsing at all.
 #
-# ...AND THAT LAST SENTENCE IS FALSE FOR A SELF-CONTAINED-IR LANGUAGE, which is
-# the defect this script carried. bash, batch, c and the four toys emit IR that
-# calls libc directly; there is no js_* side channel, llvm.Run's write stub goes
-# through the same output channel -qq gates, and so `-qq` on those seven
-# compiler halves prints NOTHING AT ALL. The run leg was empty, the empty file
-# was diffed like any other, and a probe whose interpreter leg was also quiet
-# reported "all legs agree" having compared two empty files.
+# ...AND THAT LAST SENTENCE IS FALSE FOR A SELF-CONTAINED-IR LANGUAGE. bash,
+# batch, c and the four toys emit IR that calls libc directly; there is no js_*
+# side channel, llvm.Run's write stub goes through the same output channel -qq
+# gates, and so `-qq` on those compiler halves prints NOTHING AT ALL.
 #
 # So the flavour decides the flag:
 #
-#   handle IR (13 languages)   -qq, exactly as before.
-#   self-contained IR (7)      -q, then CUT THE MODULE off the front.
+#   handle IR                  -qq
+#   self-contained IR          -q, then CUT THE MODULE off the front.
 #
 # and the flavour is read off the grammar rather than a hard-coded name list:
 # a handle-IR grammar links the C floor, `libPath("runtime.ll")`, and a
-# self-contained one does not. (c.exePath cannot be used for this - clang-check's
-# comment predates the native migration and every one of the twenty compiler
-# grammars declares exePath today, so it answers "does this link natively",
-# which is now yes for all of them.) The classification is checked, not trusted:
+# self-contained one does not. (c.exePath cannot be used for this: every
+# compiler grammar declares it.) The classification is checked, not trusted:
 # if it is wrong in either direction the leg comes out empty or full of IR, and
-# an empty leg is now a loud failure.
+# an empty leg is a loud failure.
 #
 # Cutting the module is the case the manual warns about: do NOT look for the
 # last line that looks like IR, because var_dump prints a bare `}` and PHP will
@@ -171,10 +156,7 @@ handle_ir() { grep -q 'libPath("runtime.ll")' "$COMPILE" 2>/dev/null; }
 #
 # THE `declare` ARM REQUIRES AN `@`, and that is not decoration. Every LLVM
 # `declare` names a symbol (`declare i64 @js_add(i64, i64)`); a BASH program
-# printing `declare -a a=([0]="pa")` does not. Matching a bare `^declare ` ate the
-# first output line of any bash probe whose output begins with `declare -p`, so
-# the `run` leg read short and the probe reported a halves divergence that did not
-# exist. Cost one agent a false finding before it was spotted.
+# printing `declare -a a=([0]="pa")` does not, and must not be eaten as module.
 module_lines() {
     tr -d '\000' <"$1" | awk '
         BEGIN { depth = 0; n = 0 }
@@ -194,11 +176,10 @@ module_lines() {
 # against an oracle, or a leg reads one line longer than the others and looks like
 # a halves divergence when it is not.
 #
-# ENUMERATING THE WORDINGS DOES NOT WORK, and I tried twice. `grep` over
-# languages/*.abnf finds at least: `program ran to completion`, `program
-# finished`, `program value is`, `main() returned N`, `phpmain() returned N`,
-# `wrote executable ...`. Each attempt to list them missed one and the miss showed
-# up as a fake divergence in a real investigation.
+# ENUMERATING THE WORDINGS DOES NOT WORK: there are many (`program ran to
+# completion`, `program finished`, `program value is`, `main() returned N`,
+# `phpmain() returned N`, `wrote executable ...`) and a missed one shows up as a
+# fake divergence.
 #
 # So match the SHAPE: a line beginning `<lang> interpreter:` or `<lang> compiler:`
 # at column 0. Every grammar's sign-off has that prefix and nothing else on any
@@ -206,8 +187,7 @@ module_lines() {
 # positive available, and it would have to start the line with its own language's
 # name to collide.
 #
-# The self-contained grammars added a second shape, which only became visible
-# once the run leg stopped being empty: bash and batch sign off as
+# The self-contained grammars have a second shape: bash and batch sign off as
 # `bash-to-llvm-ir: exit status 0`, and lisp and tinyc as `lisp: program value
 # is 0` / `tinyc: main() returned 0` - the GRAMMAR FILE's own basename, or the
 # bare language name, with no `interpreter`/`compiler` word at all. That is
@@ -219,15 +199,13 @@ GNAMES="$(basename "$COMPILE" .abnf)|$(basename "$INTERP" .abnf)|$LANG_NAME"
 # `-a` is load-bearing and it is the awk-truncates-at-NUL trap wearing a
 # different hat: a probe whose output contains a NUL byte (brainfuck's cell dump
 # does) makes grep decide the stream is BINARY, print `Binary file (standard
-# input) matches`, and discard every real line. Both legs then held that one
-# sentence and the probe reported them identical.
+# input) matches`, and discard every real line - so two legs would compare equal.
 strip_engine() {
     # A sign-off is normally its own line. But it is written to the same stdout
     # the program writes, so when the program's LAST output has no trailing
     # newline - `echo -n x`, which is ordinary in bash and batch - the tag is
     # GLUED onto it: `xbash-to-llvm-ir: exit status 0`. No line-anchored filter
-    # can see that, and the probe then reports a one-line "halves divergence"
-    # between two legs that agree. Strip the glued form first, then the plain one.
+    # can see that. Strip the glued form first, then the plain one.
     sed -E "s/($GNAMES): (exit status [0-9]+|wrote executable .*)\$//" \
   | grep -a -v -E "^([a-z0-9#+-]+ (interpreter|compiler)|$GNAMES): "
 }
@@ -291,7 +269,7 @@ accept_leg() {   # accept_leg NAME [module]
         return 1
     fi
     # The IR interpreter's endless-loop brake stops mid-program and leaves a
-    # PARTIAL file. The manual's most expensive diff was one of these.
+    # PARTIAL file.
     if grep -q 'step limit exceeded' "$work/$name.err" "$work/$name.raw" 2>/dev/null; then
         reject "$name" "hit the IR step brake - output is TRUNCATED (raise -max-steps)"
         return 1

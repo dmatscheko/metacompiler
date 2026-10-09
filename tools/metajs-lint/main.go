@@ -1,10 +1,9 @@
-// metajs-lint makes the MetaJS dialect's gaps LOUD (docs/todo.md 6.4).
+// metajs-lint makes the MetaJS dialect's gaps LOUD.
 //
-// docs/abnf-dialect-gotchas.md lists a dozen ways MetaJS is not JavaScript, and
-// until now NOTHING ENFORCED ANY OF THEM. Every one is discovered the same way:
-// a confusing failure, usually under `-frozen` only, usually behind a green goja
-// run, and in one case (`\f`) in the NATIVE BINARY ONLY, where no gate in this
-// project can see it at all. Each has cost at least one agent-round.
+// docs/abnf-dialect-gotchas.md lists a dozen ways MetaJS is not JavaScript. Each
+// otherwise shows up as a confusing failure, usually under `-frozen` only,
+// usually behind a green goja run, and in one case (`\f`) in the NATIVE BINARY
+// ONLY, where no other gate in this project can see it at all.
 //
 // WHY A STANDALONE TOOL AND NOT A `-verify` PASS. `mec <grammar> -verify` takes a
 // GRAMMAR and checks it after loading; abnf/verifier.go's whole surface is rules,
@@ -14,25 +13,20 @@
 // Wiring layer-2 files through -verify would mean inventing a second meaning for
 // the flag. A standalone tool also runs over the WHOLE corpus in one command,
 // the way `go run ./tools/shape-scan` does, which is what makes it usable as a
-// gate; and it touches no shared Go code, which matters when other work is in
-// flight in abnf/.
+// gate.
 //
 // WHAT IT CHECKS. Every rule below is a line in docs/abnf-dialect-gotchas.md or
-// chapter 4 of docs/working-on-this-project.md, and every one has a recorded
-// cost:
+// chapter 4 of docs/working-on-this-project.md:
 //
 //	exponent-literal   `1e308` LEXES AS `1` FOLLOWED BY THE NAME `e308`. The
 //	                   grammar becomes unparseable under -frozen with "cannot
-//	                   parse script", pointing nowhere near the line. Two agents
-//	                   hit it independently on one day.
+//	                   parse script", pointing nowhere near the line.
 //	string-escape      MetaJS's string literal has no \f and no \v AND DROPS THE
-//	                   BACKSLASH, so `ch == "\f"` compiles to `ch == "f"`. This
-//	                   ate the f's of Integer("0xff") in the native binary only -
-//	                   goja and the Go twin were green, so the matrix, --full and
-//	                   --cross were ALL blind to it.
+//	                   BACKSLASH, so `ch == "\f"` compiles to `ch == "f"` - in
+//	                   layer 2 that is wrong in the native binary only, where
+//	                   the matrix, --full and --cross cannot see it.
 //	asi-return         a value-less `return` followed by an expression on the
-//	                   next line parses as `return (expr)`. It silently lost
-//	                   EVERY STORE in one half for an entire agent-round.
+//	                   next line parses as `return (expr)`, silently.
 //	to-precision       no toPrecision.
 //	for-in             no for...in under -frozen.
 //	frozen-builtin     no splice and no lastIndexOf; 2-argument indexOf IGNORES
@@ -54,20 +48,11 @@
 //	                   `redefinition of global`.
 //	warn-on-stdout     a warning on println lands INSIDE the emitted module.
 //
-// THREE CLAIMS IN docs/abnf-dialect-gotchas.md ARE STALE and are deliberately NOT
-// rules here, because a rule that fires on working code is how a linter gets
-// switched off. MEASURED 2026-08-10 with a two-line probe grammar in both script
-// hosts and with a MetaJS program compiled to a native binary:
-//
-//	string.split   works   (grammar script goja AND -frozen, and layer 2)
-//	array.join     works   (same three)
-//	array.length = works   (same three; ruby-rt.metajs:6858 does it and the
-//	                        native ruby slice-assign rows are correct)
-//
-// The doc lists all three under "The frozen MetaJS engine" as absent. They are
-// not, today. What IS absent there, measured the same way: splice, lastIndexOf,
-// toPrecision, for...in - and indexOf's from-index is accepted and ignored,
-// which is the dangerous one because it is silent.
+// string.split, array.join and `array.length =` WORK in all three hosts (goja,
+// -frozen and layer 2), so they are deliberately NOT rules: a rule that fires on
+// working code is how a linter gets switched off. What IS absent under -frozen:
+// splice, lastIndexOf, toPrecision, for...in - and indexOf's from-index is
+// accepted and ignored, which is the dangerous one because it is silent.
 //
 // Each finding prints file:line and the rule name. Nothing here is a heuristic
 // about intent: every rule fires on a construct that is wrong in this dialect.
@@ -349,9 +334,7 @@ func checkASIReturn(u *unit, fs *[]finding) {
 // checkNamedCalls. localFns is every `function NAME` declared anywhere in the
 // same FILE (all of a grammar's script blocks together), because a grammar that
 // defines its own helper is not using the missing one. Four grammars define
-// their own `hasOwn` in exactly this way - c, bash, batch and lisp - and
-// without this the rule reported 47 findings, every one of them wrong. A linter
-// that cries wolf 47 times is a linter nobody runs.
+// their own `hasOwn` in exactly this way - c, bash, batch and lisp.
 func checkNamedCalls(u *unit, fs *[]finding, lay2Defined, localFns map[string]bool) {
 	ts := code(u.toks)
 	for i := 0; i < len(ts); i++ {
@@ -474,7 +457,6 @@ func checkDupFunctions(u *unit, fs *[]finding) {
 		}
 	}
 }
-
 
 // litType classifies a literal token so a re-typed slot can be spotted without a
 // type checker. Only the three PRIMITIVE kinds are classified: those are the ones
@@ -934,14 +916,12 @@ const rulesDoc = `metajs-lint rules - each is a documented dialect gap with a re
                      printed there ends up inside the module. Use eprintln.
 `
 
-
 // ---------------------------------------------------------------------------
 // The self-test. Each case is (rule, source, mustFire).
 //
-// The NEGATIVE cases are not decoration: three of them are constructs this tool
-// used to report wrongly and no longer does - a grammar that defines its own
-// hasOwn, an escaped backslash before an f, and a `return` whose value is on its
-// own line but whose next token is a closing brace.
+// The NEGATIVE cases are not decoration: they pin constructs that are easy to
+// report wrongly - a grammar that defines its own hasOwn, an escaped backslash
+// before an f, and a value-less `return` whose next token is a closing brace.
 type selfCase struct {
 	rule string
 	kind string // "lay2", "core", "compi-gram", "gram"

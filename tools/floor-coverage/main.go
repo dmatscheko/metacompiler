@@ -1,12 +1,9 @@
 // floor-coverage answers one question: WHICH BODIES OF languages/lib/runtime.c
 // DOES THE TEST SUITE NEVER REACH?
 //
-// docs/todo.md 6.2. That question gates every proposal to move a floor body up
-// into layer 2 (3.2): a body no test reaches is a body no move can be validated
-// against, so "move it and see if the suite stays green" is not a check at all
-// for 24 of them. The instrumentation that first measured this was written by
-// hand, run once and thrown away, which is why the number in that item has no
-// date and cannot be re-derived. This is that instrumentation, kept.
+// That question gates every proposal to move a floor body up into layer 2: a
+// body no test reaches is a body no move can be validated against, so "move it
+// and see if the suite stays green" is not a check at all for those.
 //
 // HOW IT WORKS, and why it does not need runtime.c edited permanently:
 //
@@ -52,19 +49,12 @@
 //     body, so it survives), but a body the C grammar compiles away entirely
 //     would read as unreached. None does today.
 //
-// WHAT IT COSTS. Measured on this 16-core machine, warm Go cache, idle tree:
-//
-//	whole corpus (13 languages x 2 programs)   64 s   26 native builds + 26 runs
-//	one language (-langs lua)                   7 s
-//	the instrumented floor's own compile        ~4 s  (61,535 lines of IR)
-//
-// That is one native build per program, which is the same bill tests/native-full.sh
-// pays, plus the floor compile - so it is NOT cheap enough for tests/gates.sh's
-// default path and it is deliberately NOT wired in there. It is an instrument you
-// run when you are about to move a floor body, not a gate you run every time.
+// WHAT IT COSTS: one native build per program (the same bill tests/native-full.sh
+// pays, about a minute for the whole corpus) plus the floor compile - so it is
+// deliberately NOT wired into tests/gates.sh's default path. It is an instrument
+// you run when you are about to move a floor body, not a gate you run every time.
 // Instrumentation overhead on the binaries themselves is one increment of a
-// global per call; the instrumented lua ratchet's stdout is BYTE-IDENTICAL to the
-// uninstrumented one (checked).
+// global per call.
 //
 // Usage:
 //
@@ -420,10 +410,7 @@ func main() {
 	max := flag.Int("max", -1, "exit 1 if more than N bodies are unreached (a ratchet); -1 disables")
 	// -ids is how you check this tool by hand. Keep an instrumented build with
 	// -keep, run any program of your own against it, and the `#FC <id> <count>`
-	// lines on its stderr translate through this table. That is how the exit
-	// hook was verified: a js program that throws uncaught exits through
-	// exit(1) inside main's setjmp handler, and its stderr still ends #FCEND
-	// with exc_text, o_cstr, wstr and werr among the ids.
+	// lines on its stderr translate through this table.
 	ids := flag.Bool("ids", false, "print the body id table used by the #FC lines, and stop")
 	flag.Parse()
 
@@ -453,15 +440,9 @@ func main() {
 	}
 
 	// THE INSTRUMENTED COPY LIVES IN THE TEMP DIR, NOT IN languages/lib.
-	//
-	// It was written next to the real one at first, on the assumption that the C
-	// grammar resolves includes relative to the source. runtime.c HAS NO
-	// #include AT ALL - it declares its own libc prototypes - so nothing is
-	// resolved relative to anything, and the copy can live anywhere. That
-	// matters more than it sounds: a tool that drops a file into languages/lib
-	// is unsafe to run beside tests/gates.sh, and a killed run leaves the file
-	// behind for the next person to find in `git status`. Which is exactly what
-	// happened once while this was being written.
+	// runtime.c has no #include (it declares its own libc prototypes), so the
+	// copy can live anywhere; a file dropped into languages/lib would be unsafe
+	// beside tests/gates.sh and a killed run would leave it in `git status`.
 	instPath := filepath.Join(work, "runtime.floorcov.c")
 	must(os.WriteFile(instPath, []byte(inst), 0o644))
 
@@ -532,10 +513,9 @@ func runOne(abs, mec, covLL, work, lang, kind, file string) langResult {
 	bin := filepath.Join(work, lang+"."+kind+".out")
 	os.Remove(bin)
 	// WHICH LAYER 2, read out of the grammar rather than assumed to be
-	// lib/<lang>-rt.ll. typescript's is lib/js-rt.ll, and assuming the naming
-	// cost this tool its first two rows: an explicit -rt REPLACES the grammar's
-	// defaults, so naming a file that does not exist is a silent BUILD FAILED
-	// rather than a fallback.
+	// lib/<lang>-rt.ll (typescript's is lib/js-rt.ll): an explicit -rt REPLACES
+	// the grammar's defaults, so naming a file that does not exist is a BUILD
+	// FAILED rather than a fallback.
 	rt2, err := layer2Of(abs, lang)
 	if err != nil {
 		res.problem = err.Error()
@@ -553,10 +533,9 @@ func runOne(abs, mec, covLL, work, lang, kind, file string) langResult {
 		return res
 	}
 	_, rse, _ := run(abs, bin)
-	// The exit status is NOT the verdict here: several corpus programs exit
-	// non-zero by design under an instrumented floor is not expected, but a
-	// program that fails its own checks still exercised the floor on the way,
-	// and its counts are valid. What must hold is that the dump ran.
+	// The exit status is NOT the verdict here: a program that fails its own
+	// checks still exercised the floor on the way, and its counts are valid.
+	// What must hold is that the dump ran.
 	if !strings.Contains(rse, "#FCEND") {
 		res.problem = "UNUSABLE: no #FCEND sentinel - the binary died before it could dump (its counts are NOT folded in)"
 		return res

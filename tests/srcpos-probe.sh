@@ -8,14 +8,14 @@
 # -why), and FOUR tools read those markers: the event stream's "line" field, the
 # CFG's per-block line ranges, the call graph's definition lines, and -why's
 # per-statement attribution. Nothing in the matrix, --full or --cross looks at
-# any of them, so a wrong marker is invisible to every gate this project has -
-# which is how python shipped an off-by-one (a file whose statements are on
-# lines 1, 2, 3 reported 2, 3, 4, the last pointing PAST EOF) and ruby and php
-# shipped with no markers at all. docs/todo.md 6.1.
+# any of them, so a wrong marker is invisible to every other gate. The two
+# defect shapes it catches: an off-by-one (statements on lines 1, 2, 3
+# reported as 2, 3, 4, the last pointing PAST EOF), and a grammar that emits
+# no markers at all.
 #
 # WHAT IT ASSERTS, and why exactly this much. Every case below is three
 # CONSECUTIVE SIMPLE STATEMENTS at known lines, and the two properties checked
-# are the two the defect had:
+# are those two shapes:
 #
 #   1. each of those three lines is reported by a statement marker, and
 #   2. NO marker points past the end of the file.

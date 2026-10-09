@@ -8,8 +8,7 @@
 # tests the grammar's constant folder, not the runtime.
 #
 # Deliberately absent, because our bash and real bash disagree on them and this
-# file's job is to be the control, not the finding (they are written up in the
-# round report instead):
+# file's job is to be the control, not the finding:
 #   printf %x / %o        our compiler half prints decimal; our interpreter half
 #                         gets %x right and %o wrong, so this is both a halves
 #                         divergence and a both-halves-wrong.
