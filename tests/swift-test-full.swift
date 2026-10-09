@@ -388,22 +388,18 @@ func s13() {
     check("inh4", (pets[0] as? Dog13)?.fetch() == "ball" && (pets[1] as? Dog13) == nil)
     let up = Dog13() as Beast13 // guaranteed upcast
     check("inh5", (pets[0] as! Dog13).legs == 4 && up.family == "canine+beast")
-    // INITIALIZER INHERITANCE (docs/todo.md 1.3). A class does NOT get a memberwise
+    // INITIALIZER INHERITANCE. A class does NOT get a memberwise
     // initializer - that is structs - and a subclass declaring no initializer of its
-    // own inherits its superclass's. `Cub13(legs: 3)` used to run an EMPTY
-    // synthesised init and answer nil for every inherited property; every value here
-    // is swiftc 6.1.2's own.
+    // own inherits its superclass's. Every value here is swiftc 6.1.2's own.
     check("inh6", Cub13(legs: 3).legs == 3 && Cub13(legs: 3).intro() == "beast/mew/3")
     // The subclass's OWN defaulted property is still laid down, and the two-level
     // chain inherits through the middle class.
     check("inh7", Kit13(legs: 2).spots == 5 && Kit13(legs: 2).legs == 2)
     // The superclass's OVERLOADS all arrive, under their own argument labels - and
-    // an inherited init is picked BY DECLARED TYPE, which the shared rtIsType could
-    // not do once a Double became a box, so every Double overload was rejected and
-    // the dispatcher fell back to the first entry.
+    // an inherited init is picked BY DECLARED TYPE (a Double is a box).
     check("inh8", Pup13().tag == "z" && Pup13(pair: 1.5, plus: 3.5).tag == "p")
     // An extension's convenience initializer MERGES with the inherited set instead
-    // of shadowing it - self.init(legs:) here used to reach itself and recurse.
+    // of shadowing it - self.init(legs:) here must reach the inherited init.
     check("inh9", Cub13(triple: 4).legs == 12 && Cub13(legs: 7).legs == 7)
     // The CONTROLS, which pass either way and are not counted as coverage: a
     // subclass that declares its own designated init keeps it and super.init runs;
@@ -738,10 +734,8 @@ struct Outer22 {
     struct Inner { let tag = "in" } // nested types
     enum Mode { case fast, slow }
 }
-// A SECOND type nesting the SAME leaf names. The compiler half kept typeInfo under
-// the BARE name, so both Inners shared one record and the second one's memberwise
-// initializer landed on a key nothing looked up - `call of a non function value`
-// where the interpreter and swiftc 6.1.2 both answer (docs/todo.md 1.7).
+// A SECOND type nesting the SAME leaf names: each Inner keeps its own record and
+// its own memberwise initializer.
 struct Peer22 {
     struct Inner { let tag = "peer" }
     enum Mode { case fast, slow }
@@ -851,8 +845,7 @@ func s23() {
     check("eqv3", ["a": 1] == ["a": 1] && ["a": 1] != ["a": 2])
     check("eqv4", (1, "a") == (1, "a") && (1, "a") != (2, "a"))
     check("eqv5", empty == [])
-    // print's separator: and terminator: labels (they used to be dropped and
-    // printed as two extra positional arguments). Asserted through stdout, which
+    // print's separator: and terminator: labels. Asserted through stdout, which
     // the matrix compares byte for byte between the two engines and --cross
     // between the two halves. Real Swift writes "1-2-3\nt!\n" here.
     print(1, 2, 3, separator: "-")
@@ -883,7 +876,7 @@ func s24() {
     check("int4", Int32.max == 2147483647 && Int32.min == -2147483648 && UInt32.max == 4294967295)
     check("int5", Int16.max == 32767 && Int16.min == -32768 && UInt16.max == 65535)
     check("int6", Int8.max == 127 && Int8.min == -128 && UInt8.max == 255)
-    // A shift that used to fall off a 32 bit int.
+    // A shift past 32 bits.
     check("int7", 1 << 62 == 4611686018427387904 && 1 << 63 == Int.min)
     // The wrapping operators, at 64 bits and at 8.
     check("int8", Int.max &+ 1 == Int.min && Int.min &- 1 == Int.max && Int.max &* 2 == -2)
@@ -939,7 +932,7 @@ func s24() {
 // on: `n / m == 1.0 / 3.0` with n, m declared Float is TRUE in swiftc, because
 // the untyped literals take the Float type from the comparison itself. Recovering
 // that needs a type checker, which this front end does not have; it is the same
-// wall as Optional(3). One line of an 8,042-line probe.
+// wall as Optional(3).
 struct Flo25 { var x: Double; var y: Int }
 
 // The Float renderer and the Double one, reached through a function boundary so
@@ -947,9 +940,7 @@ struct Flo25 { var x: Double; var y: Int }
 func s25f(_ v: Float) -> String { return "\(v)" }
 func s25d(_ v: Double) -> String { return "\(v)" }
 // Read out of arrays for the same reason. Written with Float(...) rather than a
-// `[Float]` annotation because that is what it had to be before SECTION 29 gave
-// an array annotation's ELEMENT type its adoption; it is left as it was, and
-// SECTION 29 asserts the annotated spelling separately.
+// `[Float]` annotation; SECTION 29 asserts the annotated spelling separately.
 let f25 = [Float(1.0), Float(3.0), Float(0.1), Float(16777216.0), Float(16777217.0), Float(2.0)]
 let z25 = [-14447655.0, 0.0]
 func s25() {
@@ -960,12 +951,11 @@ func s25() {
     // description / interpolation: a whole Double keeps its ".0".
     check("flo4", "\(1.0)" == "1.0" && "\(3.5)" == "3.5" && (1.0).description == "1.0")
     check("flo5", "\(1e15)" == "1000000000000000.0" && "\(1e16)" == "1e+16")
-    // THE UPPER BOUNDARY IS 2^53, NOT 1e16. Both halves used to switch to
-    // scientific at a decimal exponent of 16; SwiftDtoa switches above 2^53, and
-    // the two rules part between 9007199254740992 and 1e16. Every literal below is
-    // swift 6.1.2's own answer. flo5 above cannot see the difference (both rules
-    // agree at 1e15 and 1e16), so this is the line with the discriminating power:
-    // under the old rule flo5b's first term rendered 9007199254740994.0.
+    // THE UPPER BOUNDARY IS 2^53, NOT 1e16: SwiftDtoa switches to scientific above
+    // 2^53, not at a decimal exponent of 16, and the two rules part between
+    // 9007199254740992 and 1e16. Every literal below is swift 6.1.2's own answer.
+    // flo5 above cannot see the difference (both rules agree at 1e15 and 1e16);
+    // this line can.
     check("flo5b", "\(9007199254740992.0)" == "9007199254740992.0" &&
                    "\(9007199254740994.0)" == "9.007199254740994e+15")
     check("flo5c", "\(9999999999999000.0)" == "9.999999999999e+15" &&
@@ -973,7 +963,7 @@ func s25() {
                    "\(-9007199254740994.0)" == "-9.007199254740994e+15")
     check("flo6", "\(1e-4)" == "0.0001" && "\(1e-5)" == "1e-05")
     check("flo7", "\(0.1 + 0.2)" == "0.30000000000000004" && "\(1.0 / 3.0)" == "0.3333333333333333")
-    // The infinities and the NaN - none of which existed before the box.
+    // The infinities and the NaN.
     let inf = 1.0 / 0.0
     let nan = 0.0 / 0.0
     check("flo8", inf == Double.infinity && "\(inf)" == "inf" && "\(-inf)" == "-inf")
@@ -1002,7 +992,7 @@ func s25() {
     check("flo23", "\([1.5, 2.0])" == "[1.5, 2.0]" && [1.0, 2.0] == [1.0, 2.0])
     let q = "\""
     check("flo24", "\(["a": 1.5])" == "[" + q + "a" + q + ": 1.5]")
-    // Array + Array is CONCATENATION, where the untyped + gave the text "1,23".
+    // Array + Array is CONCATENATION, not the text "1,23".
     check("flo25", [1, 2] + [3] == [1, 2, 3] && "\([1, 2] + [3])" == "[1, 2, 3]")
     // A Double accumulator stays a Double across a loop.
     var acc = 0.0
@@ -1015,7 +1005,7 @@ func s25() {
     let f: Float = 3
     check("flo29", f / 2 == 1.5 && "\(f)" == "3.0")
     // A BOXED value as a Dictionary key: a Double and a sized integer are both
-    // objects in this value model, so a key had to be normalised to be found again.
+    // objects in this value model, so a key has to be normalised to be found again.
     var dm = [1.5: "h", 2.5: "j"]
     dm[3.5] = "k"
     check("flo30", dm[1.5] == "h" && dm[2.5] == "j" && dm[3.5] == "k" && dm.count == 3)
@@ -1029,8 +1019,7 @@ func s25() {
     // A Swift Float is an IEEE-754 single, so Float(1) / Float(3) is 0.33333334
     // and NOT the Double's 0.3333333333333333, and Float.description is
     // SwiftDtoa's rule read at 24 significant bits. swiftc 6.1.2 settles every
-    // row below, and an 8,042-line probe over 40 float values - every operand
-    // read out of an array - is byte-identical to it in all three engines.
+    // row below.
     //
     // Swift FORBIDS mixed Float/Double and Float/Int arithmetic outright, so
     // "if either operand is a Float, both are" is the whole promotion rule and
@@ -1068,13 +1057,12 @@ func s25() {
     // Unary minus and both signed zeros survive the width.
     check("f32k", s25f(-f25[2]) == "-0.1" && s25f(f25[0] * Float(0.0)) == "0.0"
                   && s25f(Float(0.0) / Float(-1.0)) == "-0.0")
-    // THE PRE-EXISTING SIGNED-ZERO DEFECT this work turned up 336 times, in the
-    // INTERPRETER half only and for a plain Double: an integral-valued operand
-    // times a zero lost its sign (0.0 where swiftc, IEEE-754 and both compiled
-    // halves say -0.0). Reproduced at 4f2e6e4 in two lines of swift.
+    // An integral-valued operand times a zero keeps the XOR sign (-0.0, as swiftc
+    // and IEEE-754 say) - the interpreter's tag engine multiplies such operands as
+    // integers, which would lose it.
     check("f32l", s25d(z25[1] * z25[0]) == "-0.0" && s25d(z25[1] / z25[0]) == "-0.0")
     // A Float method answers a Float; .rounded() and .magnitude keep a signed
-    // zero, which the interpreter half also lost for a plain Double.
+    // zero.
     check("f32m", s25f(f25[5].squareRoot()) == "1.4142135"
                   && s25f(Float(-0.1).rounded()) == "-0.0"
                   && s25f(Float(-0.0).magnitude) == "0.0")
@@ -1186,31 +1174,24 @@ func s28() {
     check("lam2", counted() == 9)
 }
 
-// ===== SECTION 29: a literal ADOPTS its declared type (docs/todo.md 1.1) =====
+// ===== SECTION 29: a literal ADOPTS its declared type =====
 // An untyped literal takes the FLOATNESS and the WIDTH of the type it is written
-// at. Only ONE site did that before this section existed - a `let`/`var`
-// annotation - and the four here did not: a PARAMETER, a RETURN type, a STORED
-// PROPERTY, and the ELEMENT type of an array annotation.
+// at - not only at a `let`/`var` annotation but at a PARAMETER, a RETURN type, a
+// STORED PROPERTY, and the ELEMENT type of an array annotation.
 //
-// It reads like a Float story and it is not. The same missing adoption gave
-// DOUBLE the wrong answer, because an Int literal that stays an Int
-// INTEGER-DIVIDES: every `29d*` row below answered 1 where swiftc 6.1.2 says 1.5,
-// in BOTH halves, which is why --cross was blind to it for three float rounds.
-// Every value here is swift 6.1.2's own output.
+// An Int literal that stays an Int INTEGER-DIVIDES, so every `29d*` row below
+// would answer 1 where swiftc 6.1.2 says 1.5. Every value here is swift 6.1.2's
+// own output.
 //
-// THE WRITE SITES ARE CLOSED TOO, and their rows are the `29s*` block at the end:
-// `var d: Double = 0; d = 3`, `t.a = 3` on a stored property, and `ar[0] = 3` on an
-// element all used to answer 1, because only the INITIAL value ever adopted. No
-// var-type table was needed: this value model carries floatness and integer width
-// ON THE VALUE, and Swift is statically typed, so a write adopts the type of what
-// the slot already holds. The one shape that cannot see is a slot still holding
-// nil - a `var d: Double` with no initializer - and 29s7 pins that as the gap.
+// THE WRITE SITES are the `29s*` block at the end: `var d: Double = 0; d = 3`,
+// `t.a = 3` on a stored property, and `ar[0] = 3` on an element. This value model
+// carries floatness and integer width ON THE VALUE, and Swift is statically typed,
+// so a write adopts the type of what the slot already holds. A slot still holding
+// nil - a `var d: Double` with no initializer - falls back to the annotation (29s7).
 //
-// The three sites this paragraph used to list as STILL NOT ADOPTED are closed:
-// the dictionary annotation's value type and the tuple type's element types went
-// in with the structural annotation, and the function-typed slot
-// (`let f: (Double) -> Double`) is SECTION 30. What is left is one nested case,
-// asserted there with its own reason.
+// The dictionary annotation's value type and the tuple type's element types are
+// covered by the structural annotation, and the function-typed slot
+// (`let f: (Double) -> Double`) is SECTION 30.
 func a29d(_ x: Double) -> Double { return x / 2 }
 func a29f(_ x: Float) -> Float { return x / 2 }
 func a29u(_ x: UInt8) -> UInt8 { return x &+ 10 }
@@ -1235,7 +1216,7 @@ func s29() {
     // ----- the parameter -----
     check("29d1", a29d(3) == 1.5 && s25d(a29d(3)) == "1.5")
     check("29d2", a29lab(a: 3) == 3.0 && a29lab(a: 3, b: 5) == 4.0)
-    // A value that is ALREADY a Double travels as it always did.
+    // A value that is ALREADY a Double travels unchanged.
     check("29d3", a29d(Double(n29[0])) == 1.5)
     // The width half of the same rule, at three widths.
     check("29w1", a29u(250) == 4 && a29u(UInt8(n29[1])) == 4)
@@ -1252,8 +1233,7 @@ func s29() {
     // A single-expression body returns through the same site.
     check("29r3", e29d() / 2 == 1.5)
     // A LABELLED tuple return type still names its elements - and `return (1, 2)`
-    // used to parse as the identifier `return` applied to a tuple, so this whole
-    // shape died with *unknown name: return* before FnBody grew RetBody.
+    // must not parse as the identifier `return` applied to a tuple (FnBody's RetBody).
     check("29r4", t29().n == 1 && t29().v == 2)
 
     // ----- the stored property -----
@@ -1278,8 +1258,7 @@ func s29() {
     let nd: [[Double]] = [[3, 4]]
     check("29a4", nd[0][0] / 2 == 1.5 && nd[0][1] / 2 == 2.0)
 
-    // ----- the WRITE sites (docs/todo.md 1.1) -----
-    // Only the INITIAL value used to adopt: every row below answered 1.
+    // ----- the WRITE sites -----
     var wd: Double = 0
     wd = 3
     check("29s1", wd / 2 == 1.5 && s25d(wd) == "3.0")
@@ -1316,24 +1295,17 @@ func s29() {
 }
 
 // ===== SECTION 30: member overloads, function-typed slots, `case is` =====
-// Four defects that share one root - the front end knowing a type it then threw
-// away - and one that is the opposite, a type it never recorded.
-//
-//  * MEMBER OVERLOADS were picked at WALK time in the compiler half, by argument
-//    LABELS and ARITY only. `MB(3.0)` ran `init(_ x: Int)` where the interpreter
-//    and swiftc say Double; ordinary METHODS and SUBSCRIPTS had no dispatcher in
-//    that half at all, so `m(1.5)`, `m("a")` and even `m(1, 2)` all ran
-//    `m(_ x: Int)`. A live halves divergence --cross never reached.
+//  * MEMBER OVERLOADS are picked by argument TYPE, not by LABELS and ARITY only:
+//    `MB(3.0)` runs `init(_ x: Double)`, and `m(1.5)`, `m("a")` and `m(1, 2)`
+//    each run their own METHOD overload; SUBSCRIPTS likewise.
 //  * A FUNCTION-TYPED SLOT puts the type on the slot and the closure carries
-//    nothing, so `let f: (Double) -> Double = { x in x/2 }; f(3)` integer-divided
-//    and answered 1. A stored property holding a closure could not even be CALLED
-//    ("unknown method 'fn'", all three engines).
-//  * A NEW DICTIONARY KEY has no old value to adopt from, so `var d: [String:
-//    Double] = [:]; d["b"] = 5` left an Int and `d["b"]! / 2` was 2.
-//  * `case is T:` did not parse in EITHER half and took the whole switch down.
-//  * `3 as Int8` was a no-op rather than a coercion: `(3 as Double) / 2` was 1,
-//    `(250 as UInt8) &+ 10` was 260, and `(3 as Int8) is Int8` was false while
-//    `is Int` was true - the reverse of swiftc 6.1.2 on every row.
+//    nothing, yet `let f: (Double) -> Double = { x in x/2 }; f(3)` is 1.5. A stored
+//    property holding a closure is CALLABLE.
+//  * A NEW DICTIONARY KEY has no old value to adopt from, yet `var d: [String:
+//    Double] = [:]; d["b"] = 5` makes `d["b"]! / 2` 2.5.
+//  * `case is T:` is a type pattern.
+//  * `3 as Int8` is a coercion: `(3 as Double) / 2` is 1.5,
+//    `(250 as UInt8) &+ 10` is 4, and `(3 as Int8) is Int8` is true.
 //
 // Every value below is swiftc 6.1.2's own output.
 struct M30 {
@@ -1368,8 +1340,8 @@ func k30(_ v: Any) -> String {
 let g30: (Double) -> Double = { x in x / 2 }
 let g30b: (Double, Double) -> Double = { a, b in a / b }
 func mk30() -> (Double) -> Double { return { x in x / 2 } }
-// A PARAMETER whose declared type is structural adopts its argument too - the head
-// of docs/todo.md 1.2. ap30's is a function type (the wrapper is built by the
+// A PARAMETER whose declared type is structural adopts its argument too.
+// ap30's is a function type (the wrapper is built by the
 // emitter), aq30's has no adoptable leaf anywhere in it, so it must still emit no
 // adoption call at all and answer its argument untouched.
 func ap30(_ f: (Double) -> Double) -> Double { return f(3) }
@@ -1394,13 +1366,10 @@ func s30() {
     check("30h", F30(fn: { x in x / 2 }).fn(3) == 1.5)
     check("30i", mk30()(3) == 1.5)
     // A function type NESTED in a container annotation - an array, a dictionary
-    // value and a tuple element (docs/todo.md 1.2). It used to answer 1 and was
-    // asserted at that value, because the compiler half hands a structural
-    // annotation to js_swadoptdeep in LAYER 2 and layer 2 builds no closures. It
-    // does not have to: the emitter knows every function-type leaf of the
-    // annotation text at compile time, so it builds one MAKER closure per distinct
-    // leaf and passes js_swadoptdeep a map from the leaf's canonical text to its
-    // maker. swiftc 6.1.2 says 1.5 for all three.
+    // value and a tuple element. Layer 2 builds no closures, so the emitter builds
+    // one MAKER closure per distinct function-type leaf and passes js_swadoptdeep
+    // a map from the leaf's canonical text to its maker. swiftc 6.1.2 says 1.5 for
+    // all three.
     let arr30: [(Double) -> Double] = [{ x in x / 2 }]
     check("30j", arr30[0](3) == 1.5)
     let dic30: [String: (Double) -> Double] = ["h": { x in x / 2 }]
@@ -1439,29 +1408,18 @@ func s30() {
 // ===== SECTION 31: structural PARAMETERS, collection method adoption, =====
 // =====             inout overloads, inherited overload groups, statics =====
 //
-// docs/todo.md 1.2, all five reproduced against swiftc 6.1.2 and all five wrong
-// in ALL THREE engines before this section, so --cross was blind to every one.
-//
-//  * A STRUCTURALLY TYPED PARAMETER did not adopt. `func f(_ xs: [Double])`
-//    called `f([3])` bound a plain Int array and `xs[0] / 2` answered 1 where
-//    swiftc says 1.5. makeParam's gate was swAdoptable, i.e. a plain type NAME,
-//    and the comment above the ParamType rule claimed the opposite. The gate is
-//    now swAdoptNeeded, which asks whether any identifier token in the annotation
-//    text names an adopting type - so `[String]` still emits no call at all, and
-//    js_swadoptdeep does not go on the per-call path of every annotated program
-//    (the +10.3% charAt trap of a68e16d).
-//  * ELEMENT ADOPTION THROUGH A METHOD CALL. `arr.append(3)` into a
-//    `var arr: [Double]` stored an Int, while the index write `arr[1] = 3` had
-//    adopted since the write-site work - makeAssign knows its target's NAME and a
-//    method chain did not. The value model cannot answer it either (manual 7.15):
-//    appending to an EMPTY [Double] has no sibling to take a type from.
-//  * AN INOUT OVERLOAD was not selectable by type: the argument arrives as the
-//    one-slot {__ref, v} write-back box, so js_swfits was asking whether a BOX is
-//    an Int and both `ov(inout Int)` and `ov(inout String)` ran the first entry.
-//  * A SUBCLASS OVERRIDING ONE OF SEVERAL inherited overloads shadowed the whole
-//    group: the derived table's plain `m` slot is what the __class walk finds, so
-//    the un-overridden siblings were unreachable.
-//  * STATIC METHOD OVERLOADS were stored under a bare name and the last one won.
+//  * A STRUCTURALLY TYPED PARAMETER adopts: `func f(_ xs: [Double])` called
+//    `f([3])` binds [3.0], so `xs[0] / 2` is 1.5 (swAdoptNeeded; `[String]` still
+//    emits no call at all).
+//  * ELEMENT ADOPTION THROUGH A METHOD CALL: `arr.append(3)` into a
+//    `var arr: [Double]` stores 3.0, like the index write `arr[1] = 3`. The value
+//    model cannot answer it (manual 7.15): appending to an EMPTY [Double] has no
+//    sibling to take a type from.
+//  * AN INOUT OVERLOAD is selectable by type: the argument arrives as the
+//    one-slot {__ref, v} write-back box, which is opened first.
+//  * A SUBCLASS OVERRIDING ONE OF SEVERAL inherited overloads does not shadow the
+//    un-overridden siblings.
+//  * STATIC METHOD OVERLOADS are overloads, not a last-one-wins bare name.
 //
 // Every value below is swiftc 6.1.2's own output.
 func p31a(_ xs: [Double]) -> Double { return xs[0] / 2 }
@@ -1519,8 +1477,7 @@ func s31() {
     var d31: [String] = []
     d31.append(ss[0])
     check("31j", d31[0] == "x")
-    // insert(_:at:) existed in NO engine and aborted with *unknown Array method*;
-    // it is the same element-adoption site as append.
+    // insert(_:at:) is the same element-adoption site as append.
     var e31: [Double] = []
     e31.insert(7, at: 0)
     e31.insert(9, at: 0)
@@ -1548,11 +1505,8 @@ func s31() {
 }
 
 // ===== SECTION 32: extension overloads, and the FloatingPoint range statics =====
-// An extension used to restart the overload counter at 0 in the COMPILER half, so
-// its member overwrote the one the type declared: static funcs, instance methods
-// and subscripts all lost the type's own, where an initializer did not. The
-// interpreter's addMethod merged onto the same table and was always right, so every
-// row here was a live halves divergence --cross never reached (docs/todo.md 1.4).
+// An extension's overloads JOIN the ones the type declared (static funcs, instance
+// methods and subscripts as well as initializers) instead of overwriting them.
 struct S32 {
     var v: Int = 0
     static func f32(_ a: String) -> String { return "sS" }
@@ -1600,17 +1554,13 @@ extension P32 {
     func t32(_ a: String) -> String { return "tS" }
 }
 struct V32: P32 {}
-// A SECOND `extension Int` used to declare a second, empty table under the same
-// name, and every member the first block added became unreachable - an outright
-// abort in the compiler half where the interpreter printed the right answer.
+// A SECOND `extension Int` shares the first block's member table.
 extension Int { func aa32() -> String { return "aa\(self)" } }
 extension Int { func bb32() -> String { return "bb\(self)" } }
 // A static OPERATOR and a STATIC SUBSCRIPT are the two remaining shapes of the
 // static overload surface. The static subscript is the one static reached WITH a
 // receiver - sw_subget pushes the type descriptor at args[0] - so its dispatcher
-// counts arguments from 1; counting from 0 made the arity test reject every
-// candidate and the fallback run the first, and that was already wrong at base
-// with no extension involved.
+// counts arguments from 1.
 struct M32 {
     var v: Int
     static func + (a: M32, b: M32) -> M32 { return M32(v: a.v + b.v) }
@@ -1648,8 +1598,7 @@ func s32() {
     check("32w", (ms[0] + ms[1]).v == 3 && (ms[0] + ii[0]).v == 31)
     check("32x", M32[ii[0]] == "yI" && M32[ss[0]] == "yS" && M32[dd[0]] == "yD")
 
-    // The FloatingPoint range statics: all eight answered nil in all three engines
-    // (docs/todo.md 1.10 named two). Float's are FLOATS, so they print at float
+    // The FloatingPoint range statics. Float's are FLOATS, so they print at float
     // precision; the values are read back as text, which is what pins them.
     check("32m", "\(Double.greatestFiniteMagnitude)" == "1.7976931348623157e+308")
     check("32n", "\(Double.leastNonzeroMagnitude)" == "5e-324")
@@ -1670,9 +1619,7 @@ func s32() {
 }
 
 // ===== SECTION 33: protocol conformance, and dispatch inside an extension =====
-// docs/todo.md 1.1. Three rules no engine here implemented: `x is P` is TRUE for a
-// conforming type (conformance is recorded on no descriptor, so it answered false
-// in all three engines and --cross was blind); a call from inside a protocol
+// Three rules: `x is P` is TRUE for a conforming type; a call from inside a protocol
 // extension binds STATICALLY unless the protocol declares the name as a
 // REQUIREMENT; and an `extension Int { ... }` method must not hijack a user type's
 // member of the same name. Every operand is read out of an array so the constant
@@ -1763,7 +1710,7 @@ func s33() {
     check("33k", ns[0].tag33() == "I" && ns[0].hi33() == "hi:I")
     let sd = [S33D()]
     check("33l", sd[0].mine33() == "struct" && ns[0].mine33() == "int")
-    // catch filtering on a user protocol: it FILTERS now, in both directions.
+    // catch filtering on a user protocol: it FILTERS, in both directions.
     var caught = ""
     for n in [0, 1] {
         do { _ = try thrower33(n) }
@@ -1799,23 +1746,14 @@ struct T33S: S33 { static func make33() -> String { return "m" } }
 func g33<T: A33>(_ x: T) -> String { return "g:" + x.a33() }
 
 // ===== SECTION 34: uppercased()/lowercased() are the SIMPLE per-rune map =====
-// docs/todo.md 4.3. The interpreter half has had both since it was written and
-// NEITHER compiled half did - `"Hello".uppercased()` aborted with "unknown String
-// method: uppercased" under llvm.Run and natively. That is why swift got no
-// case-mapping pins in `e1816b3` while kotlin (+8), ruby (+8) and python (+4)
-// did: the gap was a halves CAPABILITY gap, and `--cross` could not see it
-// because no test program called the method.
-//
-// Both now reach the FLOOR's mapping the same way the other three do - the
-// string's own toUpperCase/toLowerCase (runtime.c member ids 27/28, whose
-// per-code-point table `case_map` is; strings.ToUpper in the Go twin). Nothing
-// moved into layer 2: `case_map` was moved there once, measured at 135x on a real
-// workload and reverted (manual chapter 5), and this needs no move at all.
+// The compiled halves reach the FLOOR's mapping the way kotlin, ruby and python
+// do - the string's own toUpperCase/toLowerCase (runtime.c member ids 27/28, whose
+// per-code-point table `case_map` is; strings.ToUpper in the Go twin).
 //
 // THE ANSWERS ARE NOT SWIFTC'S, and that is the recorded decision, the same one
 // kotlin's SECTION 81 records. Real Swift is FULL Unicode case mapping:
 // "\u{00df}".uppercased() is "SS", "\u{fb01}" is "FI", "\u{0130}".lowercased() is
-// "i" + U+0307 - measured against swiftc 6.1.2 on this machine. This project
+// "i" + U+0307 - read off swiftc 6.1.2. This project
 // answers the SIMPLE per-rune mapping in all four engines.
 //
 // Every character is an ESCAPE, never a raw literal: manual chapter 4, test
@@ -1844,20 +1782,11 @@ func s34() {
 }
 
 // ===== SECTION 35: Array(...), popLast()/removeLast(), and String as a SEQUENCE =====
-// docs/todo.md 2.11. `popLast()` and `Array(...)` were implemented in NO engine
-// and their two refusals did not even agree - "unknown Array method: popLast" /
-// "unknown name: Array" here against "unknown list method 'popLast'" / "call of a
-// non function value: [object Object]" under llvm.Run. `removeLast()` was worse:
-// implemented in BOTH compiled halves and missing from the interpreter, i.e. a
-// live halves divergence. swiftc 6.1.2 answers all of them.
+// swiftc 6.1.2 answers all of these.
 //
-// The String rows are the second half of the same fix. A String is a sequence of
-// extended grapheme CLUSTERS, and `Array(s)` and `for c in s` must both yield
-// what `.count` counts. They did not: each loop took its trip count from one
-// counter and its elements from a code-UNIT index, so `for c in "cafe\u{301}"`
-// ran four times here (dropping the combining mark) and FIVE times under
-// llvm.Run, where js_pylen counts code points. Three answers, none of them
-// swiftc's c, a, f, é.
+// A String is a sequence of extended grapheme CLUSTERS, and `Array(s)` and
+// `for c in s` must both yield what `.count` counts: `for c in "cafe\u{301}"`
+// is c, a, f, é.
 func s35() {
     var a35 = [1, 2, 3]
     check("35a", a35.popLast() == 3 && a35 == [1, 2])
@@ -1874,7 +1803,7 @@ func s35() {
     check("35g", Array(repeating: 7, count: 3) == [7, 7, 7]
                  && Array(repeating: 0, count: 0).count == 0)
     // A String walked as a sequence, and Array(s), agree with .count - on a
-    // combining mark and on an astral pair, which is where they did not.
+    // combining mark and on an astral pair.
     let uni35 = "cafe\u{301}"
     var seen35 = ""
     var n35 = 0
@@ -1886,21 +1815,17 @@ func s35() {
     for _ in ast35 { m35 += 1 }
     check("35j", m35 == 3 && ast35.count == 3 && Array(ast35).count == 3)
     // THE SAME STRING WRITTEN AS ITSELF. A raw astral character in the source is
-    // two code units, and both grammars used to copy the literal one unit at a
-    // time - which hands a LONE SURROGATE to the host, cannot be encoded in UTF-8,
-    // and comes back U+FFFD. So `raw35` and `ast35` were DIFFERENT VALUES: .count
-    // was 4 in the interpreter (two replacement characters) and 3 under llvm.Run
-    // (one cluster that PRINTED as two U+FFFD, the divergence the manual records
-    // in chapter 7.9). swiftc 6.1.2 says 3, and says the two spellings are equal.
-    // No test file had an astral literal, which is exactly why --cross never saw it.
+    // two code units, and copying the literal one unit at a time would hand a LONE
+    // SURROGATE to the host (U+FFFD). swiftc 6.1.2 says 3, and says the two
+    // spellings are equal.
     let raw35 = "a😀b"
     check("35k", raw35 == ast35 && raw35.count == 3 && Array(raw35).count == 3)
     check("35l", Array(raw35)[1] == Array(ast35)[1] && String(Array(raw35)[1]).count == 1)
     var r35 = ""
     for c in raw35 { r35 += String(c) }
     check("35m", r35 == raw35 && r35.count == 3)
-    // isEmpty / first / last are PROPERTIES on every Collection and all three
-    // answered nil in BOTH halves where swiftc says false / a value. A user type
+    // isEmpty / first / last are PROPERTIES on every Collection; swiftc says
+    // false / a value. A user type
     // that declares a member of one of those names must still win.
     check("35n", !a35.isEmpty && e35.isEmpty && !raw35.isEmpty && "".isEmpty)
     check("35o", a35.first == 1 && a35.last == 1 && e35.first == nil && e35.last == nil)
@@ -1912,12 +1837,7 @@ func s35() {
 struct Own35 { var isEmpty = 99; var first = 7; var last = 8 }
 
 // ===== SECTION 36: the Sequence/Collection members, and Range as a VALUE =====
-// docs/todo.md 2.10. Nineteen members aborted in every engine - AND WITH TWO
-// DIFFERENT WORDINGS, "unknown Array method: sorted" in the interpreter against
-// "unknown list method 'sorted'" under llvm.Run and natively, because the compiled
-// halves fell through to the shared list table in abnf/jsrt.go. Both the members
-// and the wording are closed here; a name no engine knows now says
-// "unknown Array method: X" in all three.
+// A name no engine knows says "unknown Array method: X" in all three.
 //
 // Every value below was read off swiftc 6.1.2. FOUR THINGS ARE DELIBERATELY NOT
 // ASSERTED because they cannot be matched and each is recorded at its site:
@@ -1954,12 +1874,10 @@ func s36() {
     check("36p", a36.contains(where: { $0 > 2 }) && !a36.contains(where: { $0 > 3 }))
     // A user type's own `static func <` WINS: Comparable is how Swift sorts anything
     // that is not a built-in, and the built-in comparison sees two opaque objects.
-    // All three engines answered [3, 1] here against swiftc 6.1.2's [1, 3].
+    // swiftc 6.1.2 says [1, 3].
     let cs36 = [C36(n: 3), C36(n: 1)]
     check("36pa", cs36.sorted().map { $0.n } == [1, 3] && cs36.min()!.n == 1 && cs36.max()!.n == 3)
-    // The MUTATING members, each on a FRESH LITERAL: `var b = a` does not copy in
-    // this value model, where Swift's Array is a value type - a pre-existing gap
-    // recorded at the bottom of this section, not one of them.
+    // The MUTATING members, each on a FRESH LITERAL.
     var b36 = [3, 1, 2]
     b36.removeFirst()
     check("36q", b36 == [1, 2])
@@ -1980,8 +1898,7 @@ func s36() {
     var i36 = [1, 2, 3]
     i36.removeFirst(2)
     check("36w", i36 == [3])
-    // enumerated(), joined(), reduce - and an OPERATOR USED AS A VALUE, which
-    // parsed and then reported not-implemented at run time in both halves.
+    // enumerated(), joined(), reduce - and an OPERATOR USED AS A VALUE.
     var eo36 = ""
     for (i, v) in a36.enumerated() { eo36 += "\(i):\(v);" }
     check("36x", eo36 == "0:3;1:1;2:2;")
@@ -2001,15 +1918,8 @@ func s36() {
     check("36ah", s36.dropFirst() == "ello" && s36.dropLast() == "hell")
     check("36ai", s36.allSatisfy { $0 != "z" } && s36.reduce(0, { n, _ in n + 1 }) == 5)
     check("36aj", s36.sorted() == ["e", "h", "l", "l", "o"])
-    // `String(s.sorted())` used to answer the DESCRIPTION here, because String(x)
-    // and String(describing: x) were one conversion. They are two now and SECTION
-    // 37 asserts both; the label is the whole of the difference, and neither
-    // grammar needed it at run time - the interpreter reads it off the argument
-    // records and the emitter picks the extern statically.
-    // A RANGE printed as itself. Both halves answered "[object Object]" - a value
-    // that no test had ever printed - and `r.count` ABORTED in both compiled halves
-    // with "len() of a object" while the interpreter answered 3, and a for-in over a
-    // range VALUE walked its own KEYS ("lo", "hi", "closed") in the compiler half.
+    // `String(s.sorted())` is not String(describing:); SECTION 37 asserts both.
+    // A RANGE printed as itself, its `count`, and a for-in over a range VALUE.
     let r36 = 0..<3
     let q36 = 1...3
     check("36ak", "\(r36)" == "0..<3" && "\(q36)" == "1...3")
@@ -2020,8 +1930,7 @@ func s36() {
     var x36: [Int] = []
     for i in a36.indices { x36.append(i) }
     check("36an", x36 == [0, 1, 2])
-    // A ONE-SIDED range subscript. `a[1...]` did not PARSE at all before - the file
-    // failed at the `]`.
+    // A ONE-SIDED range subscript.
     check("36ao", Array(a36[1...]) == [1, 2] && a36[1...].count == 2)
     check("36ap", Array(a36[...1]) == [3, 1] && Array(a36[..<2]) == [3, 1])
     check("36aq", Array(a36[0...1]) == [3, 1] && Array(a36[0..<3]) == a36)
@@ -2029,12 +1938,7 @@ func s36() {
     // an integer range, use a String.Index range instead" - while both halves here
     // accept it and answer "ello". A String.Index is not representable in this value
     // model, so the superset is kept and recorded rather than removed.
-    // NOT ASSERTED, and measured while writing this section: `var b = a` SHARES the
-    // array here where Swift's Array is a VALUE TYPE and copies -
-    //     var a = [1,2,3]; var b = a; b.append(9); print(a)
-    // is [1, 2, 3] under swiftc 6.1.2 and [1, 2, 3, 9] in all three engines. That is
-    // a copy-on-assign rule for every array, dictionary, tuple and struct binding in
-    // three engines, not a member, so it is recorded here rather than started.
+    // (Copy-on-assign for `var b = a` is SECTION 37.)
 }
 
 struct C36: Comparable {
@@ -2044,9 +1948,7 @@ struct C36: Comparable {
 }
 
 // ===== SECTION 37: VALUE SEMANTICS - every copy site, and String(_:) =====
-// docs/todo.md 1.1, the largest swift gap that was left. `var b = a` SHARED the
-// array: copy-on-assign was missing for every Array, Dictionary and tuple binding
-// in all three engines, and a struct copy stopped at its first non-struct field.
+// `var b = a` COPIES every Array, Dictionary, tuple and struct (all the way down).
 //
 // EVERY VALUE BELOW WAS READ OFF swiftc 6.1.2, and the design the rows pin down is
 // COPY AT STORE, which is complete: two locations can only alias if one stored a
@@ -2061,7 +1963,7 @@ struct C36: Comparable {
 // copy is shallow at a reference element) and an `inout` argument is an alias
 // (37d, 37n).
 //
-// An enum CASE value is deliberately NOT copied, and that is a measurement: its
+// An enum CASE value is deliberately NOT copied: its
 // payload is reachable only through a pattern binding, which is itself a copy
 // site, so no program can observe two case values sharing a payload. swiftc
 // agrees on the probe.
@@ -2210,8 +2112,7 @@ func s37() {
     check("37ae", { (l: [Int], r: [Int]) -> Bool in var m2 = l; m2.append(9); return m2.count == 3 && r.count == 2 }(bc, bc) && bc == [1, 2])
 
     // --- String(_:) is NOT String(describing:) ---
-    // Swift's idiom for rebuilding a String out of Characters. Both spellings
-    // used to be one conversion here and answered the DESCRIPTION.
+    // Swift's idiom for rebuilding a String out of Characters.
     let bd = "hello"
     check("37af", String(bd.sorted()) == "ehllo")
     check("37ag", String(describing: bd.sorted()) == "[\"e\", \"h\", \"l\", \"l\", \"o\"]")
@@ -2227,23 +2128,18 @@ func s37() {
 }
 
 // ===== SECTION 38: a loop variable is a FRESH BINDING per iteration =====
-// docs/todo.md 1.1. Swift's for-in binds its element with a `let` INSIDE the body,
+// Swift's for-in binds its element with a `let` INSIDE the body,
 // so a closure made in iteration k captures iteration k's binding and nothing
 // else. `for i in 0..<3 { fs.append({ i }) }` then fs[0]() / fs[2]() is 0 / 2 in
-// swiftc 6.1.2. Both compiled halves answered 3 / 3: the emitter opened ONE scope
-// per loop, declared the variable in it and wrote it per iteration, so every
-// closure shared one cell. The interpreter half was right all along (it pushes a
-// scope frame per iteration), which makes this a live halves divergence --cross
-// never reached, and the reason it never reached it is that no test in this file
-// or in the features file ever captured a loop variable.
+// swiftc 6.1.2 (one shared cell would give 3 / 3).
 //
 // Every loop form that BINDS a name is asserted here, because slot reuse is a
 // property of the emitter and not of the sequence: the range loop (makeForRange),
 // the list loop over arrays / strings / dictionaries / enumerated() (makeForList),
-// `for case` (makeForCase) and `while let` (makeCondWhile) each had their own copy
-// of the one-scope shape. `while` and `repeat` needed no change - their body is an
-// ordinary Block, and a Block's js_scope_new is emitted INTO the loop body block,
-// so it already ran once per iteration - and 38k/38l are here to keep it that way.
+// `for case` (makeForCase) and `while let` (makeCondWhile) each open their own
+// per-iteration scope. `while` and `repeat` bodies are ordinary Blocks, whose
+// js_scope_new is emitted INTO the loop body block, so it runs once per
+// iteration - 38k/38l keep it that way.
 //
 // The other half of the property, and the one a careless fix breaks: a `var`
 // declared OUTSIDE the loop is still ONE cell, shared by every closure and by the
@@ -2431,7 +2327,7 @@ func s38() {
 // protocol, `any P`, an Optional of one - holds whatever it was given last, so
 // `var a: Any = 1.5; a = 2` holds the Int 2 in swiftc 6.1.2, and the same is true
 // of a stored property, an array element, a dictionary value, an implicit
-// `self.q` and an inout parameter. Every engine answered 2.0 for each of them.
+// `self.q` and an inout parameter (adopting would wrongly give 2.0).
 // 39k-39n are the controls: inferred and numeric slots still adopt, and a
 // shadowing declaration decides for its own scope only. 39p-39r: one property
 // NAME declared Any in one type and Double in another is decided by the type of

@@ -1,7 +1,6 @@
 // Fast feature-matrix test for the Swift interpreter (swift-interpreter.abnf) and
-// the LLVM-IR compiler (swift-to-llvm-ir.abnf). It replaces the four algorithm-
-// themed swift-test-big-* stress tests: instead of large loops (sieves, sorts,
-// Roman numerals) every implemented construct is exercised with the SMALLEST
+// the LLVM-IR compiler (swift-to-llvm-ir.abnf). Instead of large loops (sieves,
+// sorts, Roman numerals) every implemented construct is exercised with the SMALLEST
 // program that can prove it works - loops run 0, 1, 3 or 4 times, recursion stays
 // below depth 6, arrays and dictionaries hold 3-5 elements. A failed check prints
 // "FAIL <id>" (so a diff pinpoints it); top level code runs in source order and
@@ -9,9 +8,8 @@
 // (interpreter/compiler x goja/-frozen) mean everything passed.
 //
 // Subset notes honoured here: strings index as one-character strings (s[i]),
-// dictionary reads must hit an existing key, structs/classes are reference types,
-// there is no inheritance dispatch, no bitwise operators, no float arithmetic,
-// no fallthrough, and Swift has NO finally (so none is tested).
+// dictionary reads must hit an existing key, and Swift has NO finally (so none
+// is tested).
 
 var fails = 0
 var checks = 0
@@ -24,23 +22,22 @@ func check(_ id: String, _ cond: Bool) {
     }
 }
 
-// Declared-type adoption (docs/todo.md 1.1): the four sites, smallest form each.
+// Declared-type adoption: the four sites, smallest form each.
 func halfOf(_ x: Double) -> Double { return x / 2 }
 func threeD() -> Double { return 3 }
 struct Boxed { var v: Double; var w: UInt8 }
 let dbls: [Double] = [3, 4]
 let ints: [Int] = [3, 4]
 let nestedD: [[Double]] = [[3, 4]]
-// The STRUCTURAL declared type (docs/todo.md 1.3): a dictionary's VALUE type, a
+// The STRUCTURAL declared type: a dictionary's VALUE type, a
 // tuple's element types and an Optional annotation each carry the numeric leaf
-// down to the untyped literal, exactly as `[Double]` does. All three answered 1
-// in every engine where swiftc 6.1.2 says 1.5.
+// down to the untyped literal, exactly as `[Double]` does (swiftc 6.1.2: 1.5).
 let dmap: [String: Double] = ["a": 3]
 let dtup: (Double, Int) = (3, 4)
 let dltup: (x: Double, y: Int) = (3, 4)
 var dopt: Double? = 3
-// An OBSERVED stored property keeps its value under a hidden name, so neither its
-// default nor a later write had a declared type to adopt from.
+// An OBSERVED stored property keeps its value under a hidden name; its default
+// and a later write still adopt the declared type.
 struct Obs {
     var p: Double = 3 { didSet { } }
     mutating func bump() { p = 3 }
@@ -49,13 +46,10 @@ class ObsC {
     var p: Double = 3 { didSet { } }
     func bump() { p = 3 }
 }
-// A LINKED write through a force-unwrap, and a write to a tuple ELEMENT: neither
-// parsed at all before - the whole statement was rejected in both halves.
+// A LINKED write through a force-unwrap, and a write to a tuple ELEMENT.
 class Node { var v: Double = 0; var next: Node? = nil }
-// OVERLOAD SELECTION by declared parameter type. The compiler half tested the
-// argument with the shared js_is_type, which says "an integral number" for
-// `Double` and has no arm for `Bool`, so ovl(3.0) ran the Int body and ovl(true)
-// fell back to the first candidate - wrong in that half only.
+// OVERLOAD SELECTION by declared parameter type: ovl(3.0) runs the Double body
+// and ovl(true) the Bool one.
 func ovl(_ x: Int) -> String { return "int" }
 func ovl(_ x: Double) -> String { return "dbl" }
 func ovl(_ x: String) -> String { return "str" }
@@ -223,7 +217,7 @@ class Rect {
     }
 }
 
-// A subclass that declares no initializer of its own (docs/todo.md 1.3).
+// A subclass that declares no initializer of its own.
 class Square: Rect { var sides = 4 }
 
 enum Direction {
@@ -232,13 +226,10 @@ enum Direction {
     case west
 }
 
-// ----- MEMBER overload selection, run-time, by argument TYPE (docs/todo.md 1.2) -----
-// The compiler half picked an initializer at WALK time by labels and arity alone,
-// so MB(3.0) ran `init(_ x: Int)` where the interpreter and swiftc both say
-// Double; ordinary METHODS and SUBSCRIPTS had no dispatcher at all in that half,
-// so s.m(1.5), s.m("a") and even s.m(1, 2) all ran `m(_ x: Int)`. A live halves
-// divergence --cross never reached, because both files agreed on the wrong answer
-// only in the compiler.
+// ----- MEMBER overload selection, run-time, by argument TYPE -----
+// Labels and arity alone cannot pick: MB(3.0) runs `init(_ x: Double)`, and
+// s.m(1.5), s.m("a") and s.m(1, 2) each run their own METHOD overload (swiftc
+// 6.1.2); SUBSCRIPTS likewise.
 struct MB {
     var s: String
     init(_ x: Int) { s = "I" }
@@ -256,14 +247,14 @@ struct OvM {
     subscript(i: Int) -> String { return "sI" }
     subscript(t: String) -> String { return "sS" }
 }
-// A function-typed SLOT (docs/todo.md 1.4): the type is on the slot and the
-// closure carries nothing, so f(3) integer-divided and answered 1.
+// A function-typed SLOT: the type is on the slot and the closure carries
+// nothing, yet f(3) must divide a Double (1.5).
 let fslot: (Double) -> Double = { x in x / 2 }
 let fslot2: (Double, Double) -> Double = { a, b in a / b }
-// A stored property holding a closure is CALLABLE - it is not in the member
-// table, and calling it aborted with "unknown method 'fn'" in all three engines.
+// A stored property holding a closure is CALLABLE, though it is not in the
+// member table.
 struct FnField { var fn: (Double) -> Double }
-// `case is T:` did not parse in either half and took the whole switch down.
+// `case is T:` - a TYPE pattern.
 enum IsE { case a, b }
 func isKind(_ v: Any) -> String {
     switch v {
@@ -346,10 +337,7 @@ func loopContinueInDo() -> Int {
 }
 
 // ----- value description (print / String(describing:)) and value-type == -----
-// print used to hand the RAW runtime value to the shared println host function in
-// the compiler (`<nil>`, `[1 2 3]`, a Go map holding a POINTER address for an
-// instance) and to fall through to JavaScript's ToString in the interpreter
-// ("1,2,3", "[object Object]"). Every string below is what swift 6.1.2 prints.
+// Every string below is what swift 6.1.2 prints.
 
 struct PtDesc { var x: Int; var y: String }
 struct MoneyDesc: CustomStringConvertible {
@@ -377,10 +365,9 @@ func transform(_ list: [Int]) -> String {
     return out
 }
 
-// ----- docs/todo.md 1.2: a STRUCTURALLY typed parameter, collection method
-// ----- adoption, inout overloads, inherited overload groups, static overloads.
-// Every value here is swiftc 6.1.2's own; all five were wrong in all three
-// engines, so --cross could not see any of them.
+// ----- a STRUCTURALLY typed parameter, collection method adoption, inout
+// ----- overloads, inherited overload groups, static overloads.
+// Every value here is swiftc 6.1.2's own.
 func adoptArrParam(_ xs: [Double]) -> Double { return xs[0] / 2 }
 func adoptDictParam(_ m: [String: Double]) -> Double { return m["k"]! / 2 }
 func adoptFnParam(_ f: (Double) -> Double) -> Double { return f(3) }
@@ -399,14 +386,10 @@ class StatOv {
     static func g(_ a: String) -> String { return "S" }
 }
 
-// ----- NESTED TYPES (docs/todo.md 1.7) -----
-// typeInfo used to be keyed by the BARE type name, so two same-named nested types
-// shared one record. The memberwise initializer's overload slot is taken from that
-// record at walk time while the descriptor installs it at a per-declaration index,
-// so the SECOND Inner's `init` landed on a key nothing looked up and the compiler
-// half aborted with `call of a non function value` where the interpreter and
-// swiftc 6.1.2 both print the answer. It needs the LABELS to collide to show, which
-// is why the item's own `{var x}` beside `{var y}` example survived.
+// ----- NESTED TYPES -----
+// Two same-named nested types keep separate records, so each one's memberwise
+// `init` is found (the LABELS collide here, which is what would expose a shared
+// record).
 struct NA { struct Inner { var x: Int; func t() -> Int { return x } }
     enum E: Int { case a = 1, b = 2 }
     static func mk() -> Int { return Inner(x: 4).x } }
@@ -424,21 +407,17 @@ struct NF { struct Inner { var v = 0
         init(y: String) { v = y.count } } }
 struct NG { struct Inner { var v = 0
         init(z: Int) { v = z + 100 } } }
-// extension of a NESTED type: baseTypeName keeps the dot, so `A.Inner` matched no
-// registered type and the block installed NOTHING - `unknown method` in the
-// interpreter, `extension of an unknown type` in the compiler.
+// extension of a NESTED type (`extension NH.Inner`).
 struct NH { struct Inner { var x: Int } }
 extension NH.Inner { func dbl() -> Int { return x * 2 }
     static func s() -> Int { return 77 }
     init(twice t: Int) { self.x = t * 2 }
     subscript(i: Int) -> Int { return x + i } }
-// A type nested in an ENUM lives on the enum's MEMBER TABLE, not on the descriptor,
-// so a field read of it answered nil in the interpreter alone.
+// A type nested in an ENUM lives on the enum's MEMBER TABLE, not on the descriptor;
+// a field read of it must still find it.
 enum NI { enum Mode: Int { case fast = 3, slow = 4 } }
 extension NI.Mode { func tag() -> Int { return self.rawValue + 10 } }
-// A static method reading its own type's static member UNQUALIFIED: sw_kget
-// answers an unqualified name from `this`, and a static was emitted with no `this`,
-// so the compiler half aborted with `variable not defined` for every type.
+// A static method reading its own type's static member UNQUALIFIED.
 struct NJ { static var sv = 5
     static func f() -> Int { return sv + 1 }
     struct Inner { static var sv = 50
@@ -453,14 +432,9 @@ struct NL { struct Inner: NTag { var x: Int
         func tag() -> String { return "L\(x)" }
         static subscript(i: Int) -> Int { return i * 3 } } }
 func ntake(_ p: NTag) -> String { return p.tag() }
-// A nested type must NOT shadow a same-named TOP-LEVEL one (docs/todo.md 1.2). It
-// used to be declared into the SURROUNDING scope under its bare name as well as
-// being installed on its enclosing descriptor, so the nested descriptor overwrote
-// the top-level binding and `NSInner()` at file scope answered the nested type in
-// all three engines where swiftc 6.1.2 answers the top-level one. Two nested types
-// of the same name at DIFFERENT depths collided in that one binding too, and there
-// the two halves DISAGREED: the compiler resolved both correctly through typeKeyOf
-// while the interpreter read whichever ran last.
+// A nested type must NOT shadow a same-named TOP-LEVEL one: `NSInner()` at file
+// scope is the top-level type (swiftc 6.1.2). Two nested types of the same name
+// at DIFFERENT depths must not collide either.
 struct NSInner { func who() -> Int { return 1 } }
 enum NSMode: Int { case on = 1 }
 struct NSOuter {
@@ -473,14 +447,11 @@ struct NSOuter {
     static func mk() -> Int { return NSInner().who() * 10 + NSMode.on.rawValue }
     static func cub() -> Int { return NSCub().f() }
 }
-// `catch let e as T` used to parse the `as T` and DISCARD it, so the clause bound e
-// and matched EVERY thrown value - the swift arm of docs/todo.md 1.1's sweep.
-// `as Error` still matches everything, which is what swiftc does. A user PROTOCOL
-// used to match everything too, because conformance was on no value in either half;
-// it is recorded now (docs/todo.md 1.1) and the clause filters - see PCat below.
-// ----- protocol conformance and dispatch inside an extension (docs/todo.md 1.1) --
-// `x is P` was FALSE for every conforming type in all three engines, so --cross was
-// blind to it and the catch clause above had to exempt user protocols. And the
+// `catch let e as T` matches only a thrown value of type T; `as Error` matches
+// everything, which is what swiftc does. A user PROTOCOL filters by conformance -
+// see PCat below.
+// ----- protocol conformance and dispatch inside an extension --------------------
+// `x is P` is TRUE for a conforming type. And the
 // dispatch rule inside a protocol extension is not "always dynamic": a REQUIREMENT
 // dispatches to the conforming type's override, a member only the extension
 // introduces does not. swiftc 6.1.2 settles every row here.
@@ -525,10 +496,8 @@ func pcatch(_ n: Int) -> String {
     do { _ = try pthrow(n) } catch is PSub { return "sub" } catch { return "any" }
     return "none"
 }
-// Two nested types of the same name at different depths AND of different KINDS.
-// classNames/enumNames are keyed by the bare name, so `Mode()` inside Sub took the
-// enum rawValue arm and aborted with `list index out of range` in both compiled
-// engines while the interpreter aborted on the clobbered bare binding.
+// Two nested types of the same name at different depths AND of different KINDS
+// (classNames/enumNames are keyed by the bare name).
 struct NSKind {
     enum Mode: Int { case on = 1 }
     struct Sub { struct Mode { func t() -> Int { return 9 } }
@@ -538,7 +507,7 @@ struct NSKind {
 // A nested type constructed by a stored property's DEFAULT, by a memberwise default
 // and by a static initialiser: none of those runs in the enclosing type's own frame -
 // planArgs materialises a callee's defaults as argument records at the CALL SITE, and
-// a static initialiser used to run before the nested declaration had been installed.
+// a static initialiser runs eagerly while the type is being built.
 struct NSDef { var q = 7 }
 struct NSHost {
     struct NSDef { var q = 1 }
@@ -778,13 +747,11 @@ func main() {
     let add3 = makeAdder(3)
     let add9 = makeAdder(9)
     check("closure-factory-independent", add3(1) == 4 && add9(1) == 10)
-    // A LOOP VARIABLE IS A FRESH BINDING PER ITERATION (docs/todo.md 1.1). Swift
+    // A LOOP VARIABLE IS A FRESH BINDING PER ITERATION. Swift
     // binds the element with a `let` inside the body, so the closure made in
-    // iteration k captures iteration k's cell: swiftc 6.1.2 answers 0 / 2 where both
-    // compiled halves answered 3 / 3 from one shared slot. The interpreter half was
-    // right, so --cross was blind to it - nothing here had ever captured a loop
-    // variable. The full-syntax file's SECTION 38 walks every loop form; these four
-    // are the ones cheap enough for the matrix.
+    // iteration k captures iteration k's cell: swiftc 6.1.2 answers 0 / 2 (one
+    // shared slot would give 3 / 3). The full-syntax file's SECTION 38 walks every
+    // loop form; these four are the ones cheap enough for the matrix.
     var caps: [() -> Int] = []
     for i in 0..<3 { caps.append({ i }) }
     check("closure-captures-for-in-per-iteration", caps[0]() == 0 && caps[2]() == 2)
@@ -949,23 +916,21 @@ func main() {
     check("eq-array", [1, 2] == [1, 2] && [1, 2] != [1, 3] && [[1]] == [[1]])
     check("eq-dict", ["a": 1] == ["a": 1] && ["a": 1] != ["a": 2])
     check("eq-tuple", (1, "a") == (1, "a") && (1, "a") != (2, "a"))
-    // print's separator:/terminator: labels used to be dropped and printed as two
-    // extra positional arguments. Real Swift writes "1-2-3\nt!\n" here.
+    // print's separator:/terminator: labels. Real Swift writes "1-2-3\nt!\n" here.
     print(1, 2, 3, separator: "-")
     print("t", terminator: "!\n")
 
-    // ----- a literal ADOPTS its declared type (docs/todo.md 1.1) -----
+    // ----- a literal ADOPTS its declared type -----
     // A parameter, a return type, a stored property and an array annotation's
     // element type all retype an untyped literal, exactly as a `let`/`var`
-    // annotation does. Not a Float story: an Int literal that does not adopt
-    // stays an Int and INTEGER-DIVIDES, so every row here answered 1 in both
-    // halves where swiftc 6.1.2 says 1.5.
+    // annotation does. An Int literal that does not adopt would INTEGER-DIVIDE
+    // and answer 1; swiftc 6.1.2 says 1.5.
     check("adopt-param", halfOf(3) == 1.5)
     check("adopt-return", threeD() / 2 == 1.5)
     check("adopt-field", Boxed(v: 3, w: 250).v / 2 == 1.5 && Boxed(v: 3, w: 250).w &+ 10 == 4)
     check("adopt-array", dbls[0] / 2 == 1.5 && ints[0] / 2 == 1)
-    // The WRITE half of the same rule: only the INITIAL value used to adopt, so
-    // `var d: Double = 0; d = 3` and `b.v = 3` both answered 1.
+    // The WRITE half of the same rule: `var d: Double = 0; d = 3` and `b.v = 3`
+    // adopt too.
     var wv: Double = 0
     wv = 3
     var wb = Boxed(v: 0, w: 0)
@@ -975,7 +940,7 @@ func main() {
     wr[0] = 3
     check("adopt-write", wv / 2 == 1.5 && wb.v / 2 == 1.5 && wb.w &+ 10 == 4 && wr[0] / 2 == 1.5)
     check("adopt-nested", nestedD[0][0] / 2 == 1.5)
-    // The STRUCTURAL declared type and the two write sites it did not reach.
+    // The STRUCTURAL declared type and two more write sites.
     check("adopt-dict", dmap["a"]! / 2 == 1.5)
     check("adopt-tuple", dtup.0 / 2 == 1.5 && dtup.1 / 2 == 2)
     // A LABELLED tuple type declares element types too, and both copies of a
@@ -996,7 +961,7 @@ func main() {
     let obcOut = obc.p / 2
     obc.bump()
     check("adopt-observed-class", obcOut == 1.5 && obc.p / 2 == 1.5)
-    // `n.next!.v = 4` and `tp.0 = 3` did not PARSE in either half.
+    // `n.next!.v = 4` and `tp.0 = 3` as assignment targets.
     let nd = Node()
     nd.next = Node()
     nd.next!.v = 4
@@ -1008,12 +973,9 @@ func main() {
     let ne1 = 1
     check("target-bang-not-noteq", ne1 != 2)
 
-    // ----- `is` / `as?` answer by the VALUE, not by "is it a number"
-    // (docs/todo.md 1.2) -----
-    // The shared probe predates the float box: it said "an integral number" for Int
-    // AND for Double, so `3 is Double` was TRUE and `3.0 is Double` FALSE - the
-    // reverse of swiftc 6.1.2 - and had no arm for the name `Bool` at all. The `?`
-    // rows go through the same test, so each was a wrong VALUE and not just a flag.
+    // ----- `is` / `as?` answer by the VALUE, not by "is it a number" -----
+    // `3 is Double` is false and `3.0 is Double` true (swiftc 6.1.2), and `Bool`
+    // is a name of its own. The `?` rows go through the same test.
     let f32v: Float = 2.5
     let u8v: UInt8 = 7
     let anys: [Any] = [3.0, 3, "s", true, f32v, u8v]
@@ -1028,7 +990,7 @@ func main() {
     check("overload-by-type", ovl(3) == "int" && ovl(3.0) == "dbl"
                               && ovl("s") == "str" && ovl(true) == "bool")
 
-    // ----- member overloads picked by argument TYPE (docs/todo.md 1.2) -----
+    // ----- member overloads picked by argument TYPE -----
     let ovInts: [Int] = [1, 2]
     let ovDbls: [Double] = [1.5]
     let ovStrs: [String] = ["a"]
@@ -1042,11 +1004,11 @@ func main() {
     check("method-overload-arity", ovm.m(ovInts[0], ovInts[1]) == "II")
     check("subscript-overload-type", ovm[ovInts[0]] == "sI" && ovm[ovStrs[0]] == "sS")
 
-    // ----- a function-typed SLOT adopts its arguments (docs/todo.md 1.4) -----
+    // ----- a function-typed SLOT adopts its arguments -----
     check("fn-slot-arg", fslot(3) == 1.5 && fslot2(3, 2) == 1.5)
     check("fn-field-call", FnField(fn: { x in x / 2 }).fn(3) == 1.5)
 
-    // ----- a NEW dictionary key adopts the declared element type (todo 1.4) -----
+    // ----- a NEW dictionary key adopts the declared element type -----
     var newk: [String: Double] = [:]
     newk["b"] = 5
     var newk2: [String: Double] = ["a": 1]
@@ -1059,7 +1021,7 @@ func main() {
                                 && newki[1]! / 2 == 2.5)
     check("dict-newkey-width", newkw["q"]! &+ 100 == -56)
 
-    // ----- `case is T:` - a TYPE pattern (docs/todo.md 1.4) -----
+    // ----- `case is T:` - a TYPE pattern -----
     let isAnys: [Any] = [3.0, "s", true, IsE.a, 3]
     check("case-is", isKind(isAnys[0]) == "D" && isKind(isAnys[1]) == "S"
                      && isKind(isAnys[2]) == "B" && isKind(isAnys[3]) == "E"
@@ -1070,16 +1032,15 @@ func main() {
     check("as-coerces", (3 as Double) / 2 == 1.5 && (250 as UInt8) &+ 10 == 4
                         && (asAny[0] is Int8) && !(asAny[0] is Int) && (asAny[1] is Double))
 
-    // ----- a subclass with no init of its own INHERITS one (docs/todo.md 1.3) -----
-    // A class never gets a memberwise initializer - that is structs - and the empty
-    // one that used to be synthesised here shadowed the inherited init, so every
-    // inherited property came back nil.
+    // ----- a subclass with no init of its own INHERITS one -----
+    // A class never gets a memberwise initializer - that is structs - so the
+    // inherited init must not be shadowed.
     check("inherit-init", Square(w: 2, h: 3).area() == 6 && Square(w: 2, h: 3).sides == 4)
 
     // ----- combined pipeline -----
     check("combined-pipeline", transform([1, 2, -3]) == "o1e2x")
 
-    // ----- docs/todo.md 1.2 -----
+    // ----- structural parameters, inout and static overloads -----
     let ovInts: [Int] = [3]
     let ovStrs: [String] = ["x"]
     check("param-struct-adopts", adoptArrParam([3]) == 1.5 && adoptDictParam(["k": 3]) == 1.5)
@@ -1101,7 +1062,7 @@ func main() {
     check("inherited-overload-group", ovs.pick(ovInts[0]) == "sI" && ovs.pick(ovStrs[0]) == "bS")
     check("static-overloads", StatOv.g(ovInts[0]) == "I" && StatOv.g(ovStrs[0]) == "S")
 
-    // ----- nested types (docs/todo.md 1.7) -----
+    // ----- nested types -----
     check("nested-same-name-memberwise", NA.Inner(x: 3).t() == 3 && NB.Inner(x: 3).t() == 30)
     check("nested-bare-inside-outer", NA.mk() == 4)
     check("nested-enum-same-name", NA.E.a.rawValue == 1 && NB.E.b.rawValue == 20)
@@ -1131,7 +1092,7 @@ func main() {
     check("toplevel-declared-after-nested-still-wins",
           NSLater().who() == 6 && NSOuter2.NSLater().who() == 5)
 
-    // ----- typed catch (docs/todo.md 1.1, swift's arm) -----
+    // ----- typed catch -----
     check("catch-as-type-discriminates",
           ccatch(0) == "net" && ccatch(1) == "refused42" && ccatch(2) == "disk"
             && ccatch(3) == "boom7" && ccatch(4) == "ok")
@@ -1140,7 +1101,7 @@ func main() {
     check("catch-as-type-rethrows-to-outer",
           ccatchOuter(2) == "inner-disk" && ccatchOuter(0) == "outer" && ccatchOuter(4) == "ok")
 
-    // ----- protocol conformance / extension dispatch (docs/todo.md 1.1) -----
+    // ----- protocol conformance / extension dispatch -----
     let pvals: [Any] = [PS1(), PS2(), PC1(), PC2(), PE.one, PS3(), 7, "z"]
     var pIs = ""
     var pSub = ""
@@ -1170,10 +1131,8 @@ func main() {
     check("protocol-composition-tests-every-component",
           (pvals[4] is PGreet & PSub) && !(pvals[0] is PGreet & PSub))
 
-    // ----- the Sequence/Collection members (docs/todo.md 2.10) -----
-    // Nineteen members aborted in every engine and with TWO DIFFERENT WORDINGS -
-    // "unknown Array method: sorted" here against "unknown list method 'sorted'"
-    // under llvm.Run, which is the shared table in abnf/jsrt.go. SECTION 36 of
+    // ----- the Sequence/Collection members -----
+    // SECTION 36 of
     // tests/swift-test-full.swift carries the whole set and swiftc 6.1.2 passes it
     // as written; these are the ones with a rendering the matrix should watch,
     // because a Range and a labelled tuple are new PRINTED shapes and the
@@ -1195,22 +1154,13 @@ func main() {
 
 // ----- The TOP LEVEL, deliberately outside main() -------------------------
 // Every other check in this file runs inside main(). These run where the program
-// itself does, and that is the environment docs/todo.md 1.12 changed: the
-// compiler half now emits the WHOLE program inside one js_try, whose catch calls
-// js_swtop, so that an error nobody caught is reported by the program instead of
-// escaping the module and being rendered "[object Object]" by the floor's generic
-// uncaught-throw handler. That wrapping puts the top level inside an IR CLOSURE,
-// so the four things it could plausibly have broken are pinned here: a top-level
-// binding stays visible to a top-level function, a top-level type is still
-// usable, a top-level do/catch still wins over the new outer try, and try? still
-// answers nil rather than being swallowed by it.
-//
-// DISCRIMINATING POWER AGAINST ec39aef: ZERO, and that is the honest number.
-// These four pass at base too - base simply had no wrapper to break them. They
-// are here because nothing else in the suite executes a do/catch at the top
-// level, so without them the wrapper's blast radius is untested. What DOES
-// discriminate is the abort text itself, and the only vehicle for that is a
-// SHOULD-ABORT row in .vscode/launch.json (see tests/swift-abort-test*.swift).
+// itself does: the compiler half emits the WHOLE program inside one js_try,
+// whose catch calls js_swtop, which puts the top level inside an IR CLOSURE.
+// Pinned here: a top-level binding stays visible to a top-level function, a
+// top-level type is still usable, a top-level do/catch still wins over the outer
+// try, and try? still answers nil rather than being swallowed by it. The abort
+// text itself is checked by the SHOULD-ABORT rows in .vscode/launch.json (see
+// tests/swift-abort-test*.swift).
 enum TopErr: Error { case boom(Int) }
 let topLet = 7
 struct TopS { var v: Int }
@@ -1232,17 +1182,13 @@ check("top-level-do-catch-wins-over-the-program-wide-try", topLog == "boom3;012"
 check("top-level-try-optional-still-answers-nil", topOpt == nil)
 
 // ----- An ASTRAL literal, and the Collection PROPERTIES --------------------
-// This file is what ./test.sh --cross diffs the two halves with, and it had no
-// astral character anywhere - which is why a literal that meant two different
-// things in the two halves survived. A raw astral character is TWO code units,
-// and copying a literal one unit at a time hands the host a LONE SURROGATE that
-// cannot be encoded in UTF-8: `"a<emoji>b".count` was 4 in the interpreter and 3
-// under llvm.Run, where the same string spelled \u{1F600} was 3 in both. swiftc
-// 6.1.2 says 3 for both spellings and says they are equal.
+// This file is what ./test.sh --cross diffs the two halves with. A raw astral
+// character is TWO code units, and a literal must not be copied one unit at a
+// time: `"a<emoji>b".count` is 3 for both spellings (raw and \u{1F600}) and the
+// two are equal (swiftc 6.1.2).
 //
-// isEmpty / first / last rode along: all three are properties on every
-// Collection and all three answered nil in BOTH halves, where swiftc says false
-// and a value - agree-and-wrong, which byte-identity cannot see by construction.
+// isEmpty / first / last are properties on every Collection; swiftc says false
+// and a value.
 let astRaw = "a😀b"
 let astEsc = "a\u{1F600}b"
 let astComb = "cafe\u{301}"
@@ -1265,15 +1211,7 @@ check("first-and-last-of-an-empty-collection-are-nil",
 check("a-user-member-of-those-names-is-not-hijacked",
       AstOwn().isEmpty == 99 && AstOwn().first == 7 && AstOwn().last == 8)
 
-// ----- A TOP-LEVEL defer (docs/todo.md 2.11) ------------------------------
-// A `defer` among the top-level statements used to kill BOTH halves with a HOST
-// error rather than a diagnostic - the marker record reached a call site that
-// expected a thunk. The interpreter said "TypeError: Not a function:
-// [object Object]" under goja and "call of a non function value" under -frozen
-// (so the crash was itself a live goja-vs--frozen divergence) and llvm.Run said
-// "TypeError: Not a function ... compile-core.js:617". A block defer worked in
-// every engine; only the top level did not.
-//
+// ----- A TOP-LEVEL defer ------------------------------------------------------
 // swiftc 6.1.2 settles the semantics, and they are NOT the block's:
 //   * top-level defers run at the END of the top level, LIFO;
 //   * an uncaught error at top level TRAPS, so they do NOT run on that path
