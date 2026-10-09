@@ -1054,7 +1054,7 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 Do          <~~ push(makeDo(pop(), pop())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
 
-// for (x in <iterable>): ONE rule for every source, because a range is now a genuine
+// for (x in <iterable>): ONE rule for every source, because a range is a genuine
 // value (see makeRange) rather than a for-loop-only shape. The subject expression may
 // therefore be a range (1..n, 0..<n, a until b, n downTo 1, any of them `step k`), a
 // char range ('a'..'c'), a list, or a string; makeForIn dispatches at run time. The
@@ -1766,9 +1766,8 @@ LamExpr     <~~ push({expr: pop()}) ~~>
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = [ LParam ] { "," [ LParam ] } "->" ;
 // A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
-// over a Pair/data-class/Triple argument. Destructuring is recognised but not lowered
-// (like a val destructuring declaration): the names bind to undefined and makeLambda
-// warns once, so the lambda still parses and runs under -warn-unsupported.
+// over a Pair/data-class/Triple argument, whose names makeLambda binds through
+// componentN.
 LParam      = { Annotation } ( DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ) ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
             = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwVB { "," DNameKwVB } [ "," ] "]"
@@ -2634,8 +2633,8 @@ NotMemberKw = :script(~~
     // point, the shortest digit run that round-trips, plain decimal for
     // 1e-3 <= |d| < 1e7 and scientific notation ("1.0E20") outside it.
     // The digits come from coreDecDigits, never from `"" + a` - see interp-core.js for
-    // why the host's own printer cannot be the source, and note that the host's
-    // exponent threshold is not Kotlin's and is no longer consulted at all.
+    // why the host's own printer cannot be the source; the host's exponent threshold is
+    // not Kotlin's and is not consulted.
     function kFloStr(d) {
         if (d !== d) return "NaN"
         if (d === kInf) return "Infinity"
@@ -3162,7 +3161,7 @@ NotMemberKw = :script(~~
     // time), st is the positive step and down the direction; ch remembers that the
     // bounds were Chars, so iterating yields Chars again. Because it is a value, the
     // same object serves `for (i in r)`, `x in r` (rangeHas) and a range stored in a
-    // variable - the for-loop no longer needs its own range syntax.
+    // variable - the for-loop needs no range syntax of its own.
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone
     // (`1.5 in 1.0..2.0` is true).
@@ -3428,8 +3427,8 @@ NotMemberKw = :script(~~
     function kExcMatches(v, tname) {
         var t = resolveAlias(tname.split("<")[0])
         if (t == "Throwable" || t == "Any") { return true }
-        // Exception / RuntimeException / Error are REAL classes now that
-        // installThrowables builds the java.lang chain, so they go through the ordinary
+        // Exception / RuntimeException / Error are REAL classes (installThrowables
+        // builds the java.lang chain), so they go through the ordinary
         // type test whenever the thrown value is itself a throwable: `catch (e:
         // Exception)` must not catch a StackOverflowError. A value that is not a
         // throwable at all - this model lets any value be thrown - still matches them,
