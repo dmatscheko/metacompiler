@@ -1,11 +1,10 @@
 /* Fast feature-matrix test for the Kotlin interpreter (kotlin-interpreter.abnf) and
- * the LLVM-IR compiler (kotlin-to-llvm-ir.abnf). It replaces the four algorithm-themed
- * kotlin-test-big-* stress tests: instead of large loops (sorts, Ackermann, sieves)
- * every implemented construct is exercised with the SMALLEST program that can prove it
- * works - loops run 0, 1, 3 or 4 times, recursion stays below depth 6. A failed check
- * prints its id (so a diff pinpoints it) and main() ends with exitProcess(fails);
- * exit 0 and byte-identical output on all four legs (interpreter/compiler x
- * goja/-frozen) mean everything passed. **/
+ * the LLVM-IR compiler (kotlin-to-llvm-ir.abnf): every implemented construct is
+ * exercised with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4
+ * times, recursion stays below depth 6. A failed check prints its id (so a diff
+ * pinpoints it) and main() ends with exitProcess(fails); exit 0 and byte-identical
+ * output on all four legs (interpreter/compiler x goja/-frozen) mean everything
+ * passed. **/
 
 var fails = 0
 var checks = 0
@@ -102,8 +101,8 @@ class Counter(val start: Int, var step: Int) {
     fun reset() { value = start }
 }
 
-// A class whose primary-constructor parameters carry default values (parsed and
-// dropped, like function-parameter defaults - callers pass every argument).
+// A class whose primary-constructor parameters carry default values (callers below
+// pass every argument).
 class Spec(val action: String = "none", var flags: Int = 0, val tag: String = "t") {
     fun describe(): String = action + ":" + tag
 }
@@ -302,9 +301,9 @@ fun transform(list: List<Int>): String {
 val List<Int>.midRecv: Int get() = this[size / 2]
 
 // Throwable#toString, i.e. the text the launcher's uncaught-exception line is built
-// from (docs/todo.md 1.2). Four shapes the builtin hierarchy cannot cover: a user
-// exception with a message, one without, one under a builtin that used not to store
-// its message at all, and one that overrides toString.
+// from. Four shapes the builtin hierarchy cannot cover: a user exception with a
+// message, one without, one under a builtin that is not a direct subclass of
+// RuntimeException, and one that overrides toString.
 class ThrTop(m: String) : RuntimeException(m)
 class ThrNoMsg : RuntimeException()
 class ThrIoobe(m: String) : IndexOutOfBoundsException(m)
@@ -312,7 +311,7 @@ class ThrOwn(val tag: String) : Exception("ignored") {
     override fun toString(): String = "own:" + tag
 }
 
-// docs/todo.md 2.9: the text of whatever a block throws, or the value it answered.
+// The text of whatever a block throws, or the value it answered.
 // A lambda, so the operand cannot be constant-folded at the call site.
 fun ixCatch(f: () -> Any?): String {
     return try { "" + f() } catch (e: Throwable) { e.toString() }
@@ -330,9 +329,8 @@ class IxOuter {
     class IxPlain(val n: Int)
 }
 
-// A nested class of a top-level OBJECT. A third level (IxOuter.IxObj.IxDeep) does
-// not resolve in the compiler half at all - "method call 'IxDeep' on a function",
-// which reproduces on a clean db6bf43 tree and is a separate defect.
+// A nested class of a top-level OBJECT. A third level (IxOuter.IxObj.IxDeep) is not
+// asserted: the compiler half answers "method call 'IxDeep' on a function" there.
 object IxObj2 {
     class IxDeep(m: String) : Exception(m)
 }
@@ -450,11 +448,9 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("for-downto-step", fds == 963)
 
     // ----- the INDEX properties, and a progression read as a value -----
-    // `for (i in vs.indices)` ran in the interpreter and died in the compiler with
-    // "member 'length' of undefined", because js_ktfget answered undefined for every
-    // one of Kotlin's index properties (todo.md 1.8). Every receiver the stdlib
-    // declares them for is asserted, and the elements are read out of a list so the
-    // grammar's folder cannot answer any of this at compile time.
+    // Every receiver the stdlib declares Kotlin's index properties for is asserted,
+    // and the elements are read out of a list so the grammar's folder cannot answer
+    // any of this at compile time.
     val idxSrc = listOf(10, 20, 30)
     var idxSum = 0
     for (i in idxSrc.indices) { idxSum = idxSum * 10 + i }
@@ -462,7 +458,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("indices-list-value", idxSrc.indices.toString() == "0..2")
     check("indices-lastIndex", idxSrc.lastIndex == 2 && idxSrc.indices.size == 3)
     // An EMPTY IntRange still carries the bounds it was DECLARED with, so
-    // `listOf<Int>().indices` is 0..-1 and not "[]" - todo.md 1.8.
+    // `listOf<Int>().indices` is 0..-1 and not "[]".
     check("indices-empty", listOf<Int>().indices.toString() == "0..-1" &&
         listOf<Int>().lastIndex == -1)
     val idxStr = listOf("abcd")[0]
@@ -476,7 +472,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // A progression's own properties. IntProgression.last is the last ELEMENT, not
     // the bound it was built from - (1..10 step 4) runs 1, 5, 9 - and downTo carries
     // the DIRECTION in its step, which the kotlin.ranges.downTo documentation gives
-    // as -1. Both were wrong in this half and unanswerable in the other.
+    // as -1.
     val progs = listOf(1..5, 1..10 step 4, 5 downTo 1, 5 downTo 2 step 2, 0 until 3)
     var progTxt = ""
     for (p in progs) { progTxt += "" + p.first + "/" + p.last + "/" + p.step + " " }
@@ -484,15 +480,13 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // IntProgression.reversed() answers a PROGRESSION, not a List: it is declared
     // `public fun IntProgression.reversed(): IntProgression` and returns
     // fromClosedRange(last, first, -step), so (0..2).reversed() prints "2 downTo 0
-    // step 1" and NOT "[2, 1, 0]" - which is what this assertion used to pin, in
-    // every engine, wrongly. todo.md 1.5.
+    // step 1" and NOT "[2, 1, 0]".
     check("indices-reversed", idxSrc.indices.reversed().toString() == "2 downTo 0 step 1" &&
         2 in idxSrc.indices && 9 !in idxSrc.indices)
-    // ----- todo.md 1.5: the range / progression / string-slice surface -----
+    // ----- the range / progression / string-slice surface -----
     // A reversed progression keeps the STEP and starts at the old LAST ELEMENT:
     // (1..10 step 3) runs 1,4,7,10 so its reverse is 10 downTo 1 step 3, and
-    // reversing twice is the identity. All four were a materialized List before,
-    // whose .first/.last/.step then answered kotlin.Unit in both compiled halves.
+    // reversing twice is the identity.
     val revSrc = listOf(1, 10, 3, 5)
     val revProg = (revSrc[0]..revSrc[1] step revSrc[2]).reversed()
     check("prog-reversed", revProg.toString() == "10 downTo 1 step 3" &&
@@ -510,23 +504,20 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         (revSrc[0]..revSrc[1]) is IntRange)
     // `step` answers an IntProgression whatever the step is, so `(1..5) step 1`
     // prints "1..5 step 1" where the plain 1..5 prints "1..5"; the method spelling
-    // is the same operator. rangeTo/until/downTo as FUNCTIONS aborted with
-    // "unknown Int method: rangeTo" in all three engines.
+    // is the same operator, and rangeTo/until/downTo also work as FUNCTIONS.
     check("prog-step-forms", ((revSrc[0]..revSrc[3]) step revSrc[0]).toString() == "1..5 step 1" &&
         (revSrc[0]..revSrc[3]).step(revSrc[2]).toString() == "1..4 step 3" &&
         revSrc[0].rangeTo(revSrc[3]).toString() == "1..5" &&
         revSrc[0].until(revSrc[3]).toString() == "1..4" &&
         revSrc[3].downTo(revSrc[0]).toString() == "5 downTo 1 step 1" &&
         'a'.rangeTo('c').toString() == "a..c")
-    // A Long step used to reach the interpreter half's `st` slot unconverted, so
-    // `1L..5L step 2L` printed "1..NaN step [object Object]" there while both
-    // compiled halves answered "1..5 step 2" - a live halves divergence.
+    // A Long step: `1L..5L step 2L` prints "1..5 step 2".
     val longSrc = listOf(1L, 5L, 2L)
     check("prog-long-step", (longSrc[0]..longSrc[1] step longSrc[2]).toString() == "1..5 step 2" &&
         (longSrc[0]..longSrc[1] step longSrc[2]).reversed().toString() == "5 downTo 1 step 2")
     // kotlin.text: substring(IntRange) and slice(IntRange) are substring(start,
     // endInclusive + 1) and answer a STRING; slice(Iterable<Int>) picks characters
-    // and answers a String too. All three answered the whole string or a char list.
+    // and answers a String too.
     val sliceSrc = listOf("abcdef")
     val sliceIx = listOf(1, 3, 0, 2)
     check("string-slice", sliceSrc[0].substring(sliceIx[0]..sliceIx[1]) == "bcd" &&
@@ -536,7 +527,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // The _Strings.kt family that SELECTS characters answers a String, not a
     // List<Char>: filter/filterNot/filterIndexed/takeWhile/dropWhile/onEach, and
     // partition answers Pair<String, String>. chunked/windowed answer List<String>
-    // and honour their transform. Every one of these printed "[a, b, d]".
+    // and honour their transform.
     check("string-select-family",
         sliceSrc[0].filter { it != 'c' } == "abdef" &&
         sliceSrc[0].filterNot { it == 'c' } == "abdef" &&
@@ -549,9 +540,8 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         sliceSrc[0].windowed(sliceIx[3]).toString() == "[ab, bc, cd, de, ef]" &&
         sliceSrc[0].chunked(sliceIx[3]) { it.length }.toString() == "[2, 2, 2]" &&
         sliceSrc[0].map { it }.size == 6)
-    // The collection halves of the same two: chunked's transform was dropped on the
-    // floor and windowed's partialWindows was ignored, so the tail window it asks
-    // for was never produced. sliceArray aborted outright.
+    // The collection halves of the same two: chunked's transform, windowed's
+    // partialWindows tail, and sliceArray.
     val chSrc = listOf(10, 20, 30, 40, 50)
     check("chunked-windowed", chSrc.chunked(sliceIx[3]) { it.sum() }.toString() == "[30, 70, 50]" &&
         chSrc.windowed(sliceIx[3], sliceIx[3]).toString() == "[[10, 20], [30, 40]]" &&
@@ -675,12 +665,12 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("suspend-fn-type-arg", callSuspendArg { n -> n + 1 } == 21)
     check("suspend-recv-fn-type", callSuspendRecv { r -> r + 1 } == 11)
 
-    // ----- collection constructors: set/array constructors collapse onto listOf -----
+    // ----- collection constructors: a set is its own shape, arrays collapse onto lists -----
     check("ctor-setof", setOf(1, 2, 3).size == 3 && setOf("a", "b").contains("b"))
     check("ctor-arrayof", arrayOf(7, 8).size == 2 && arrayListOf(9).contains(9))
     check("ctor-empty", emptyList<Int>().size == 0 && emptySet<Int>().size == 0)
     // A Set keys by equals, and java.lang.Float.equals demands a Float: 1.5f and
-    // 1.5 are TWO keys (java 24.0.2). Reachable only through Any, since kotlinc
+    // 1.5 are TWO keys (java). Reachable only through Any, since kotlinc
     // rejects `1.5f == 1.5`. See SECTION 24 of tests/kotlin-test-full.kt.
     check("ctor-setof-float-key", setOf<Any>(1.5f, 1.5).size == 2 && setOf<Any>(1.5f, 1.5f).size == 1)
 
@@ -706,7 +696,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("lambda-stmt-annotation", annSum == 24)
 
-    // ----- callable references (bare ::fn; qualified refs stay unsupported) -----
+    // ----- callable references -----
     val addRef = ::add
     check("callable-ref-call", addRef(2, 3) == 5)
     check("callable-ref-as-arg", nums.map(::sign).sumOf { it } == 3)
@@ -730,7 +720,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("lret-filter-paths", lrPicked.size == 2)
 
-    // ----- constructor-parameter defaults (parsed and dropped; all args passed) -----
+    // ----- constructor-parameter defaults (all args passed here) -----
     val spec = Spec("view", 3, "act")
     check("ctor-default-header", spec.describe() == "view:act" && spec.flags == 3)
 
@@ -757,7 +747,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("ext-safe-skip", extNull?.doubled() == null)
     check("ext-recursion", 6.fold0() == 6)
 
-    // ----- object expressions (anonymous instances; supertypes ignored) -----
+    // ----- object expressions (anonymous instances) -----
     val oeBase = 30
     val oe = object : Comparable<Int> {
         var hits = 0
@@ -971,15 +961,12 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         shapeTag(Dot()) == "dot" && shapeTag(Line()) == "linear" && shapeTag(Ray()) == "linear")
 
     // ----- Double.toString: the digit run comes from a floPrec round-trip -----
-    // docs/todo.md 1.8. kDecDigits used to take the digits from `"" + a`, i.e.
-    // from whatever the script host printed, and GOJA'S Number-to-String IS NOT
-    // ALWAYS THE SHORTEST ROUND-TRIPPING FORM: for the first seven values below
-    // it prints one digit too few (a run that reads back as a different double),
-    // and for #2..#4, which sit at the subnormal boundary, it emits a non-digit
-    // character outright ("B.70548258834231e-309"). There is no kotlinc on this
-    // machine, so the oracle is the ENGINES: these strings are what the compiled
-    // half, the native binary and the -frozen interpreter all already answered,
-    // and it is the goja interpreter that used to disagree.
+    // The digits come from a round-trip, not from the script host's printer: goja's
+    // Number-to-String is NOT ALWAYS THE SHORTEST ROUND-TRIPPING FORM - for the first
+    // seven values below it prints one digit too few, and for #2..#4, which sit at
+    // the subnormal boundary, it emits a non-digit character ("B.70548258834231e-309").
+    // There is no kotlinc on this machine, so the oracle is the ENGINES: the compiled
+    // half, the native binary and the -frozen interpreter agree on these strings.
     //
     // Every operand is read out of THIS ARRAY rather than written at the check,
     // so the constant folder cannot answer in the renderer's place.
@@ -1004,9 +991,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // Double.MIN_VALUE is really 4.9406564584124654E-324, and Kotlin/JVM's
     // Double.toString IS java.lang.Double.toString, which never prints fewer than
     // two significant digits and takes the second from the ACTUAL value rather
-    // than padding a zero. This half printed "5.0E-324" while the compiled half
-    // and the native binary both said "4.9E-324" - a halves divergence --cross
-    // had never reached, found by the probe for this item.
+    // than padding a zero.
     check("dblstr-two-sig-min", kflo[7].toString() == "4.9E-324")
     check("dblstr-third", kflo[8].toString() == "0.3333333333333333")
     // The plain/scientific boundary is a VALUE window, 1e-3 <= |d| < 1e7, and it
@@ -1018,25 +1003,19 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         kflo[5].toFloat().toString() == "9.33973E-4" && kflo[8].toFloat().toString() == "0.33333334")
 
     // ----- the IMPLICIT RECEIVER: which read answers an unqualified name -----
-    // todo.md 1.10. The compiler half's `this` probe chose its read with
-    // js_typeof == "object", which is true of a Map and a List as much as of a
-    // class instance, so every object-shaped BUILTIN was read with the shared
-    // js_get: `with(m) { entries }` answered a raw Pair list where `m.entries`
-    // written out, the interpreter and the native binary all say `[a=1, b=2]`,
-    // and an unqualified `size` on an extension receiver aborted outright. The
-    // test is `__class` now, gated by the ktRecvProp table so a builtin's
-    // METHODS stay methods. Section 76 of tests/kotlin-test-full.kt carries the
-    // whole sweep; these four are the ones worth having in the matrix.
+    // An object-shaped BUILTIN receiver is not a class instance: `with(m) { entries }`
+    // must read Kotlin's `entries` (`[a=1, b=2]`), and an unqualified `size` on an
+    // extension receiver must resolve, while a builtin's METHODS stay methods. Section
+    // 76 of tests/kotlin-test-full.kt carries the whole sweep; these four are the ones
+    // worth having in the matrix.
     val recvM = mutableMapOf("a" to 1, "b" to 2)
     check("recv-entries", with(recvM) { entries.toString() } == "[a=1, b=2]")
     check("recv-ext-size", listOf(1, 2, 3).midRecv == 2)
     check("recv-method-stays-method", with(listOf(4, 5, 6)) { first() } == 4)
     check("recv-plain-object", with(Pair(1, "x")) { first } == 1 && with(lazy { 42 }) { value } == 42)
-    // todo.md 1.6, the round after. `first` is a PROPERTY of IntProgression and a
-    // member FUNCTION of List, and a range materializes here as a plain list - so the
-    // NAME cannot decide, but the SITE can, and it is the site the resolution now
-    // carries. Section 77 of tests/kotlin-test-full.kt carries the sweep; these three
-    // are the ones worth having in the matrix.
+    // `first` is a PROPERTY of IntProgression and a member FUNCTION of List, so the
+    // NAME cannot decide, but the SITE can. Section 77 of tests/kotlin-test-full.kt
+    // carries the sweep; these three are the ones worth having in the matrix.
     val recvProg = listOf(1, 7, 2)[0]..listOf(1, 7, 2)[1] step listOf(1, 7, 2)[2]
     check("recv-progression-prop", with(recvProg) { first } == 1 && with(recvProg) { last } == 7 &&
         with(recvProg) { step } == 2 && with(recvProg) { first() } == 1)
@@ -1047,14 +1026,11 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         with(runCatching { 7 }) { getOrNull() } == 7)
 
     // ----- Throwable#toString, i.e. the uncaught-exception text -----
-    // docs/todo.md 1.2. Kotlin's throwables ARE java.lang's (typealiases), so
-    // java 24.0.2 prints exactly these strings; there is no kotlinc on this
-    // machine. The ABORT LINE is "Exception in thread \"main\" " plus this, so
-    // asserting toString is how a ratchet (which has to exit 0) reaches the text
-    // of the item at all. Every row below read "RuntimeException@1" - the
-    // java.lang.Object default - in ALL THREE engines before it: agreed and
-    // wrong, the class byte identity cannot see. Read out of an array so no
-    // constant folder can evaluate the concatenation.
+    // Kotlin's throwables ARE java.lang's (typealiases), so java prints exactly these
+    // strings; there is no kotlinc on this machine. The ABORT LINE is "Exception in
+    // thread \"main\" " plus this, so asserting toString is how a ratchet (which has to
+    // exit 0) reaches that text at all. Read out of an array so no constant folder can
+    // evaluate the concatenation.
     val thr: Array<Any> = arrayOf(RuntimeException("abort probe"), RuntimeException(),
         RuntimeException(""), IllegalStateException("ise"), ArithmeticException("/ by zero"),
         NullPointerException(), NumberFormatException("nfe"), Exception("checked"),
@@ -1082,12 +1058,11 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // A class the PROGRAM declares keeps its own (unqualified) binary name, and
     // "" + e goes through the same rendering as an explicit toString().
     check("thr-tostring-user", thr[12].toString() == "ThrTop: top" && "" + thr[12] == "ThrTop: top")
-    // A user class under a builtin OUTSIDE the eight emitSuperCtor used to know
-    // about: its message was dropped entirely in both compiled halves.
+    // A user class under a builtin that is not a direct subclass of RuntimeException:
+    // its message is kept.
     check("thr-user-message", thr[14].toString() == "ThrIoobe: uio" &&
         (thr[14] as IndexOutOfBoundsException).message == "uio")
-    // A no-argument super constructor stores message = NULL, not "absent": the
-    // compiled halves answered kotlin.Unit where the interpreter said null.
+    // A no-argument super constructor stores message = NULL, not "absent".
     check("thr-nomsg-message", (thr[13] as RuntimeException).message == null)
     // A RUNTIME-raised exception renders the same way, and this arm reaches the
     // descriptors the runtime registers rather than the ones `new` builds.
@@ -1100,15 +1075,13 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("thr-tostring-runtime", thrCaught == "java.lang.ArithmeticException: / by zero")
     // A declared toString() still wins over Throwable's - the same precedence real
-    // Kotlin has, and the arm the new one had to be inserted behind.
+    // Kotlin has.
     check("thr-tostring-override", thr[15].toString() == "own:q")
 
     // ----- out-of-range indexing is a CATCHABLE THROWABLE -----
-    // docs/todo.md 2.9. `listOf(1,2)[5]` and `arrayOf(1,2)[5]` answered kotlin.Unit
-    // in BOTH halves, and `"ab"[5]` was a LIVE HALVES DIVERGENCE - the interpreter
-    // gave a blank character, the compiler ABORTED with "string index 5 out of
-    // range". Every message here is java 24.0.2's verbatim (Kotlin's throwables ARE
-    // java.lang's - typealiases - and there is no kotlinc on this machine).
+    // `listOf(1,2)[5]`, `arrayOf(1,2)[5]` and `"ab"[5]` throw. Every message here is
+    // java's verbatim (Kotlin's throwables ARE java.lang's - typealiases - and there
+    // is no kotlinc on this machine).
     //
     // The JVM's CLASS for the collection read depends on the List implementation:
     // Arrays$ArrayList (what listOf/arrayOf produce) raises
@@ -1140,19 +1113,16 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // index 0 of an EMPTY list is out of range; the length in the message is 0.
     check("ix-empty", ixCatch { listOf<Int>()[ixIdx[2]] } ==
         "java.lang.IndexOutOfBoundsException: Index 0 out of bounds for length 0")
-    // The METHOD spellings of the same read. `get` fell to the shared list surface
-    // and aborted with "list index 5 out of range" in the compiled halves while the
-    // interpreter answered kotlin.Unit; `elementAt` aborted in all three.
+    // The METHOD spellings of the same read: `get` and `elementAt`.
     check("ix-get", ixCatch { ixList.get(ixIdx[0]) } == ixOob &&
         ixCatch { ixStr.get(ixIdx[0]) } == ixSoob)
     check("ix-elementat", ixCatch { ixList.elementAt(ixIdx[0]) } == ixOob)
-    // IN-RANGE reads are untouched, including the last index and a StringBuilder,
-    // which answered kotlin.Unit for EVERY index before.
+    // IN-RANGE reads are untouched, including the last index and a StringBuilder.
     check("ix-inrange", ixList[ixIdx[3] - 2] == 20 && ixStr[ixIdx[3] - 2] == 'b' &&
         ixSb[ixIdx[2]] == 'a' && ixArr[ixIdx[2]] == 10 &&
         ixList.get(ixIdx[2]) == 10 && ixList.elementAt(ixIdx[2]) == 10)
     // The class is catchable BY NAME, and StringIndexOutOfBoundsException is under
-    // IndexOutOfBoundsException (instanceof, java 24.0.2) - not beside it.
+    // IndexOutOfBoundsException (java instanceof) - not beside it.
     var ixBy = "none"
     try { ixList[ixIdx[0]] } catch (e: IndexOutOfBoundsException) { ixBy = "io:" + e.message }
     check("ix-catch-typed", ixBy == "io:Index 5 out of bounds for length 2")
@@ -1172,15 +1142,12 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // A CLASS INSTANCE that carries a numeric `length` field of its own is NOT an
     // array, and its indexed read still answers kotlin.Unit rather than throwing.
     // The bounds check's fast path cannot tell the two apart cheaply, so the exact
-    // Array.isArray test lives on the miss path; without it this threw in the NATIVE
-    // leg only, and no gate but a native -exe probe could see it.
+    // Array.isArray test lives on the miss path (a native -exe leg sees this case).
     check("ix-classlen", "" + IxLen(3)[ixIdx[0]] == "kotlin.Unit")
 
     // ----- a NESTED throwable's BINARY name -----
-    // docs/todo.md 2.9's adjacent note: `class Inner : Exception(m)` inside
-    // `class Outer` rendered "Inner: in" where java.lang.Class#getName - and so
-    // Throwable#toString - says "Outer$Inner". java carried the bookkeeping all
-    // along (jBinStack); kotlin now does too, in both grammars.
+    // `class Inner : Exception(m)` inside `class Outer` renders "Outer$Inner", as
+    // java.lang.Class#getName - and so Throwable#toString - says.
     // The dollar is ESCAPED: an unescaped one is a Kotlin string template, and
     // "IxOuter$IxInner" reads the VARIABLE IxInner.
     check("nest-bname", IxOuter.IxInner("in").toString() == "IxOuter\$IxInner: in")

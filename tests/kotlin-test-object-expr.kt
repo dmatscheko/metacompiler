@@ -6,13 +6,12 @@
  *         override fun getComponent(): Navigator = Navigator()
  *     })
  *
- * These are GENUINE now: each evaluation builds a fresh instance whose descriptor
- * holds the methods and whose fields are the initialized properties; methods and
- * property initializers close over the expression site's scope (like a lambda) and
- * see the new object as `this`. Supertypes (including generic ones) are parsed and
- * ignored - no inheritance, but passing the object where an interface is expected
- * works because method calls dispatch by name. main() ends with exitProcess(fails);
- * exit 0 and byte-identical output on all four legs mean everything passed. */
+ * Each evaluation builds a fresh instance whose descriptor holds the methods and whose
+ * fields are the initialized properties; methods and property initializers close over
+ * the expression site's scope (like a lambda) and see the new object as `this`.
+ * Supertypes (including generic ones) give the object its parents. main() ends with
+ * exitProcess(fails); exit 0 and byte-identical output on all four legs mean
+ * everything passed. */
 
 package demo.objectexpr
 

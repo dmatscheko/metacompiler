@@ -1,21 +1,17 @@
 /* Compact self-check for the Kotlin parse-surface widenings, in a small geometry theme
- * deliberately unlike any real application. Every construct here is genuine now and is
- * asserted, including the abstract (bodiless) member function, which the full-syntax
- * work implemented. main() runs to exitProcess(fails), which is 0 when every check
- * passes, with or without -warn-unsupported.
- *
- * History: the abstract member used to be recognised-but-not-lowered, which made a
- * flagless run abort, so this file was a by-design SHOULD-FAIL guard. Implementing it
- * removed that premise and the matrix entry became an ordinary one.
+ * deliberately unlike any real application. Every construct here is genuine and is
+ * asserted, including the abstract (bodiless) member function. main() runs to
+ * exitProcess(fails), which is 0 when every check passes, with or without
+ * -warn-unsupported.
  *
  * Covers: labelled receiver this@Box; calls with a trailing lambda, the no-paren form,
  * and explicit type arguments (top-level and method); `when` with a val-binding subject
- * and is-type arms (never match, else wins) on consecutive lines (a postfix `is` must
+ * and is-type arms on consecutive lines (a postfix `is` must
  * not swallow the following arrow); a statement-level annotation; the infix `to` (a
  * Pair read via .first/.second); and a top-level extension function (genuine: the
  * receiver binds to `this`). */
 
-// A genuine top-level extension function; the abstract (bodiless) member only warns.
+// A genuine top-level extension function.
 fun Int.stepped(): Int = this + 1
 
 abstract class Shape {
@@ -44,7 +40,7 @@ class Box(val side: Int) {
 }
 
 // A `when` whose subject binds a name read in the arms; the is-arms are genuine type
-// tests now (an Int subject hits `is Number`, never `is CharSequence`). The two
+// tests (an Int subject hits `is Number`, never `is CharSequence`). The two
 // `is ... ->` on consecutive lines exercise the arrow guard.
 fun grade(n: Int): Int = when (val doubled = n + n) {
     0 -> -1
@@ -77,11 +73,11 @@ fun main() {
     val flagged = 42
     if (flagged != 42) { fails = fails + 1 }
 
-    // the infix `to` is genuine now: a Pair with first/second
+    // the infix `to`: a Pair with first/second
     val paired = 3 to 4
     if (paired.first + paired.second != 7) { fails = fails + 1 }
 
-    // the top-level extension function is genuine now: receiver bound to `this`
+    // the top-level extension function: receiver bound to `this`
     if (41.stepped() != 42) { fails = fails + 1 }
 
     exitProcess(fails)

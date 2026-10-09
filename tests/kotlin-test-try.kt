@@ -1,9 +1,9 @@
 /* Kotlin try/catch/finally/throw, genuinely executed (interpreter and compiler).
  *
  * throw raises a value (a String or an object) that unwinds through any depth of
- * calls to the nearest catch; catch binds the value (the first catch clause wins -
- * exception types are parsed but not discriminated without runtime types); finally
- * always runs. An uncaught throw is a clean runtime error.
+ * calls to the nearest catch; catch binds the value (the first clause whose declared
+ * type matches wins); finally always runs. An uncaught throw is reported the way the
+ * JVM launcher reports it.
  *
  * A return/break/continue that LEAVES a try or catch body works in both engines: the
  * interpreter propagates the statement signal, and the compiler turns it into a control

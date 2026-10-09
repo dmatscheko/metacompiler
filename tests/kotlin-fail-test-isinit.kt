@@ -9,12 +9,7 @@
 // and a receiver that is neither absent nor `this` / `this@Label` cannot name a
 // lexically accessible property. (`Type::prop` is refused by the same rule for a second
 // reason: it is a KProperty1 - an UNBOUND reference - and isInitialized is declared on
-// KProperty0 alone.)
-//
-// Before the rule, BOTH halves were wrong and in different ways: the interpreter
-// answered `false` - a wrong answer to a program Kotlin does not compile - and the
-// compiler aborted for the unrelated reason that it had no callable references at all.
-// Both must now refuse it, and say so.
+// KProperty0 alone.) Both halves must refuse it, and say so.
 class Li {
     lateinit var a: String
 }

@@ -1,30 +1,29 @@
 /* Kotlin delegation with `by`. The grammar PARSES every delegated form a real-world
- * file uses, and the `by lazy { ... }` form is now GENUINE: its initializer is run
- * once and the value becomes a plain field/binding (evaluated eagerly at the
- * declaration - single-threaded and deterministic - not on first access). Every OTHER
- * delegate still needs the getValue/setValue protocol, which is outside the subset:
- * a DI `by inject()`, a custom delegate, and interface delegation (class C : I by impl,
- * which parses and is ignored). Those route through notImpl, so a plain run stops at
- * the FIRST such delegate with a clean file:line message (this file SHOULD fail by
- * default). With -warn-unsupported each unsupported delegate is warned and its field
- * omitted, while the lazy properties and ordinary members drive the self-check;
- * main() ends with exitProcess(fails) so that run exits 0 when the checks pass.
- * Interpreter and compiler must agree byte-for-byte. */
+ * file uses. `by lazy { ... }` is special-cased: its initializer is run once and the
+ * value becomes a plain field/binding (evaluated eagerly at the declaration -
+ * single-threaded and deterministic - not on first access). Every other delegate goes
+ * through the getValue/setValue protocol, and a `by` expression with no getValue - the
+ * DI-style `by inject()` below, which answers a plain Int - is reported as not
+ * implemented when the declaration runs, so a plain run stops there with a clean
+ * file:line message (this file SHOULD fail by default). With -warn-unsupported it is
+ * warned and its field omitted, while the lazy properties and ordinary members drive
+ * the self-check; main() ends with exitProcess(fails) so that run exits 0 when the
+ * checks pass. Interpreter and compiler must agree byte-for-byte. */
 
 package demo.delegation
 
 import kotlin.system.exitProcess
 
-// A trivial "provider" so the delegate expressions reference real functions; the
-// delegate expression is parsed and discarded, so what it returns does not matter.
+// A trivial "provider" so the delegate expressions reference real functions; neither
+// answers a delegate.
 fun inject(): Int { return 0 }
 fun provide(): Int { return 0 }
 
-// Interface delegation (class C : I by impl): parsed and ignored - there is no
-// inheritance in the subset, so the delegate expression is discarded and the class
-// still lowers with its own primary-constructor property and methods.
+// Interface delegation (class C : I by impl) against an interface this file does not
+// declare: the class still lowers with its own primary-constructor property and
+// methods.
 class Service(val name: String) : Greeter by provide() {
-    // A member property delegate in the Koin/DI style (by inject()): not implemented.
+    // A member property delegate in the Koin/DI style (by inject()): not a delegate.
     private val hook: Int by inject()
     // A member property delegate with a trailing-lambda delegate (by lazy { ... }):
     // GENUINE - the initializer runs once and `cached` becomes an ordinary field.

@@ -1,14 +1,12 @@
 /* Kotlin widened surface v2: type/member declarations this grammar pair recognizes
  * (interface, object, enum class, annotation class, typealias, companion object, init
- * block, secondary constructor, property accessor, destructuring), plus constructs we
- * GENUINELY lower - the multi-statement lambda body and the extension DELEGATED
- * property. Every declaration listed above started out reported via notImpl and has
- * since been lowered for real; what is left unsupported is ONE construct, the
- * multi-argument indexed access at the top of main's file scope. Without flags the run
- * stops there with a clean file:line message (this file SHOULD fail by default); with
- * -warn-unsupported it is warned, dropped, and the rest runs, so the genuinely lowered
- * forms self-check. main() ends with exitProcess(fails), so that run exits 0 when they
- * pass.
+ * block, secondary constructor, property accessor, destructuring), plus the
+ * multi-statement lambda body and the extension DELEGATED property - all of them
+ * genuinely lowered. What is left unsupported is ONE construct, the multi-argument
+ * indexed access in a top-level property initializer. Without flags the run stops there
+ * with a clean file:line message (this file SHOULD fail by default); with
+ * -warn-unsupported it is warned, dropped, and the rest runs, so the lowered forms
+ * self-check. main() ends with exitProcess(fails), so that run exits 0 when they pass.
  * SkipBlock is stressed inside the skipped bodies: nested braces, a string holding a
  * lone } and a string template ${...}, and a char literal. The marker interface and
  * empty object below exercise the OPTIONAL body (a bodiless declaration - no { } at all). **/
@@ -40,23 +38,21 @@ annotation class Marker
 typealias IntList = List<Int>
 
 // Bodiless declarations (no { } body): a marker interface, one with a supertype, and an
-// empty object. Each still parses and is reported via notImpl, exactly like the bodied
-// interface/object above - the body is optional, not required.
+// empty object - the body is optional, not required.
 interface Marker
 
 interface Tagged : Marker
 
 object Singleton
 
-// A top-level extension property (receiver + get() accessor). Both the receiver and the
-// accessor are recognised and notImpl - the flat model has no extension/computed props.
+// A top-level extension property (receiver + get() accessor).
 val Int.asMarker: String
     get() = "marker"
 
-// A top-level extension DELEGATED property (receiver + a `by` delegate). GENUINELY
-// lowered since extension delegates landed: the delegate object belongs to the
-// DECLARATION site (storeDelegate("m") runs ONCE, here), and every read calls its
-// getValue with the EXTENSION RECEIVER as thisRef - which is what `stamp` records.
+// A top-level extension DELEGATED property (receiver + a `by` delegate). The delegate
+// object belongs to the DECLARATION site (storeDelegate("m") runs ONCE, here), and every
+// read calls its getValue with the EXTENSION RECEIVER as thisRef - which is what `stamp`
+// records.
 class StoreDelegate(val tag: String) {
     var reads = 0
     operator fun getValue(thisRef: Any?, property: KProperty<*>): String {
@@ -67,14 +63,10 @@ class StoreDelegate(val tag: String) {
 fun storeDelegate(tag: String) = StoreDelegate(tag)
 val Int.viaStore: String by storeDelegate("m")
 
-// A MULTI-ARGUMENT indexed access (operator get(a, b)) - still outside the subset in
-// both halves, and the one construct in this file that is. It sits in a top-level
-// property INITIALIZER so that, exactly as the extension delegated property used to,
-// it aborts the default run before main() and is warned-and-dropped under
-// -warn-unsupported. Everything else this file was written for - interface, object,
-// enum class, annotation class, typealias, companion object, init block, secondary
-// constructor, property accessor, destructuring, and now the extension delegated
-// property - has since been genuinely lowered.
+// A MULTI-ARGUMENT indexed access (operator get(a, b)) - outside the subset in both
+// halves, and the one construct in this file that is. It sits in a top-level property
+// INITIALIZER so that it aborts the default run before main() and is warned-and-dropped
+// under -warn-unsupported.
 class Grid { operator fun get(r: Int, c: Int) = r * 10 + c }
 val cell = Grid()[1, 2]
 
@@ -120,7 +112,7 @@ fun main() {
     }
     if (mapped[3] != 17) { fails = fails + 1 }
 
-    // destructuring declaration: not implemented; its initializer still runs
+    // destructuring declaration
     val (p, q) = listOf(10, 20)
 
     // the extension delegated property: thisRef is the RECEIVER of each read, and the

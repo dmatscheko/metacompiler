@@ -15,12 +15,7 @@
  * own body run, rather than aborting - the same warn-and-continue decision the
  * user already made by passing -warn-imports, which is the only way this state
  * is reachable at all. The property read and the property write degrade the same
- * way, and the assignment's right-hand side still runs.
- *
- * Before this was pinned the two halves disagreed on SEVERITY: the interpreter
- * ERRORED with "no super method 'onCreate'" and stopped, while the compiler
- * warned "super call outside a subclass not implemented (ignored)" and continued
- * - and only under -warn-unsupported, so the default was a hard stop there too. **/
+ * way, and the assignment's right-hand side still runs. **/
 
 import com.example.widget.Widget
 import com.example.widget.Base as Aliased
