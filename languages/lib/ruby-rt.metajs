@@ -7488,11 +7488,6 @@ function rbConvStrToFloat(s0) {
     return {ok: true, v: parseFloat(clean)}
 }
 
-function rbTrunc0(x) {
-    if (x < 0) { return 0 - Math.floor(0 - x) }
-    return Math.floor(x)
-}
-
 function js_rkconv(name, args) {
     var v = null
     if (rbIsArr(args) && args.length > 0) { v = args[0] }
@@ -7537,8 +7532,11 @@ function js_rkconv(name, args) {
             if (ri["ok"]) { return ri["v"] }
             rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
         }
-        if (rbIsFlo(v)) { return rbTrunc0(v["f"]) }
-        if (typeof v == "number") { return rbTrunc0(v) }
+        // A Float converts as Float#to_i does.
+        if (rbIsFlo(v)) {
+            rbFloDomain(v["f"])
+            return rbIntFromF(Math.trunc(v["f"]))
+        }
         return v
     }
     if (name == "Float") {

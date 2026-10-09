@@ -7061,11 +7061,10 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 			}
 			rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 		}
+		// A Float converts as Float#to_i does.
 		if f, isFlo := v.(jsFlo); isFlo {
-			return math.Trunc(f.f)
-		}
-		if n, isNum := v.(float64); isNum {
-			return math.Trunc(n)
+			rubyFloDomain(rt, f.f)
+			return rt.rubyIntFromF(math.Trunc(f.f))
 		}
 		return v
 	case "Float":

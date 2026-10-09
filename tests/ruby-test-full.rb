@@ -381,6 +381,12 @@ def s06
                 FrozenError.superclass == RuntimeError && ZeroDivisionError.superclass == StandardError &&
                 (begin; raise KeyError, "k"; rescue IndexError => e; e.class; end) == KeyError &&
                 (begin; raise FrozenError, "f"; rescue RuntimeError => e; e.class; end) == FrozenError)
+  # Kernel#Integer converts a Float exactly as Float#to_i does.
+  fl = [1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0, 1.0e20, -2.5]
+  check("flc8", (begin; Integer(fl[0]); rescue FloatDomainError => e; e.message; end) == "Infinity" &&
+                (begin; Integer(fl[1]).to_s(2); rescue FloatDomainError => e; e.message; end) == "-Infinity" &&
+                (begin; Integer(fl[2]); rescue FloatDomainError => e; e.message; end) == "NaN" &&
+                Integer(fl[3]) == 10**20 && Integer(fl[3]).to_s(16) == "56bc75e2d63100000" && Integer(fl[4]) == -2)
 end
 # %c through a rescue, for the rows where MRI raises. Section 06 needs it too.
 def s06c(v)
