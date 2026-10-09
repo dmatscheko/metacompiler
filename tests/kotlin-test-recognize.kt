@@ -69,7 +69,7 @@ fun main() {
     // a bare callable reference is genuine: the function value, stored and called
     val ref = ::helper
     if (ref(2) != 6) { fails = fails + 1 }
-    val kref = String::length              // type-qualified callable reference: notImpl
+    val kref = String::length
     val adder = fun(x: Int): Int {         // anonymous function expression
         return x + 100
     }
@@ -117,8 +117,8 @@ fun main() {
 
     // a range as a VALUE (outside a for-loop / when-in) is a progression value; the
     // for-loop and when-in range forms bind their bounds lower and are checked here too.
-    val someRange = helper(0) until helper(3)      // a until b as a value: notImpl
-    val stepped = 0..10 step 2                      // a..b step c as a value: notImpl
+    val someRange = helper(0) until helper(3)
+    val stepped = 0..10 step 2
     var loopSum = 0
     for (i in 0 until 4) { loopSum = loopSum + i }  // for-loop range: still genuine
     if (loopSum != 6) { fails = fails + 1 }
