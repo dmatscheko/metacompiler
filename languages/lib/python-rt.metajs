@@ -6278,11 +6278,9 @@ function pyKwArg(kw, name) {
 // languages/python-interpreter.abnf.
 //
 // NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
-// symmetric_difference/isdisjoint/issubset/issuperset and their *_update forms
-// are absent, hasattr() therefore says False for them, and a written call still
-// ABORTS rather than raising - the 51436f9 rule. The set ALGEBRA is spelled with
-// the operators & - ^ <= >= instead, and those are complete. popitem joined the
-// set at docs/todo.md 1.9.
+// symmetric_difference/isdisjoint/issuperset and their *_update forms are
+// absent, hasattr() therefore says False for them, and a written call ABORTS
+// rather than raising. The operators & - ^ <= >= are complete.
 function pyIsDictMethod(name) {
     if (name == "keys" || name == "values" || name == "items") { return true }
     if (name == "get" || name == "pop" || name == "clear") { return true }
@@ -6294,7 +6292,7 @@ function pyIsDictMethod(name) {
 function pyIsSetMethod(name) {
     if (name == "add" || name == "pop" || name == "clear") { return true }
     if (name == "copy" || name == "remove" || name == "discard") { return true }
-    if (name == "union" || name == "update") { return true }
+    if (name == "union" || name == "update" || name == "issubset") { return true }
     return false
 }
 
@@ -6309,7 +6307,7 @@ function pyIsDictOnly(name) {
 
 function pyIsSetOnly(name) {
     if (name == "add" || name == "remove") { return true }
-    if (name == "discard" || name == "union") { return true }
+    if (name == "discard" || name == "union" || name == "issubset") { return true }
     return false
 }
 
@@ -6549,6 +6547,16 @@ function pySetMethod(els, name, args) {
     if (name == "update") {
         pySetAddAll(els, args)
         return undefined
+    }
+    // issubset(other) takes ANY iterable, as union does.
+    if (name == "issubset") {
+        var other = pyElemsOf(pyEArgAt(args, 0))
+        var bi = 0
+        while (bi < els.length) {
+            if (!pySetHas(other, els[bi])) { return false }
+            bi = bi + 1
+        }
+        return true
     }
     fail("unknown set method: " + name)
     return undefined

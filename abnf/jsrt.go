@@ -18990,12 +18990,10 @@ func (rt *jsrt) pyDictFromKeys(ks, dv interface{}) interface{} {
 // dispatcher answers. Keep in step with pyIsDictMethod/pyIsSetMethod in
 // languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
 //
-// NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
-// difference/symmetric_difference/isdisjoint/issubset/issuperset and their
-// *_update forms are absent, hasattr() therefore says False for them, and a
-// written call still ABORTS rather than raising - the 51436f9 rule. The set
-// ALGEBRA is spelled with the operators & - ^ <= >= instead, and those are
-// complete.
+// NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
+// symmetric_difference/isdisjoint/issuperset and their *_update forms are
+// absent, hasattr() therefore says False for them, and a written call ABORTS
+// rather than raising. The operators & - ^ <= >= are complete.
 func pyIsDictMethod(name string) bool {
 	if name == "popitem" {
 		return true
@@ -19009,7 +19007,7 @@ func pyIsDictMethod(name string) bool {
 
 func pyIsSetMethod(name string) bool {
 	switch name {
-	case "add", "pop", "clear", "copy", "remove", "discard", "union", "update":
+	case "add", "pop", "clear", "copy", "remove", "discard", "union", "update", "issubset":
 		return true
 	}
 	return false
@@ -19031,7 +19029,7 @@ func pyIsDictOnly(name string) bool {
 
 func pyIsSetOnly(name string) bool {
 	switch name {
-	case "add", "remove", "discard", "union":
+	case "add", "remove", "discard", "union", "issubset":
 		return true
 	}
 	return false
@@ -19266,6 +19264,15 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 			return newPySet(out)
 		}
 		return jsUndef
+	case "issubset":
+		// issubset(other) takes ANY iterable, as union does.
+		other := &jsArray{elems: rt.pyElemsOf(argAt(args, 0))}
+		for _, e := range els.elems {
+			if !rt.pySetHas(other, e) {
+				return false
+			}
+		}
+		return true
 	}
 	rt.fail("unknown set method '%s'", name)
 	return nil

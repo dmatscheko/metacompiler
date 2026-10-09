@@ -4522,16 +4522,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
     // languages/lib/python-rt.metajs.
     //
-    // NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
-    // symmetric_difference/isdisjoint/issubset/issuperset and their *_update
-    // forms are absent, hasattr() therefore says False for them, and a
-    // written call still ABORTS rather than raising - the 51436f9 rule, because
-    // (popitem joined the set at docs/todo.md 1.9; fromkeys did NOT, because it
-    // is a CLASSMETHOD on the `dict` type object and that receiver reaches a
-    // different dispatcher in each of the three engines - see the report)
-    // a hard stop says "this project does not have it" where an AttributeError
-    // would say "Python does not have it". The set ALGEBRA is spelled with the
-    // operators & - ^ <= >= instead, and those are complete.
+    // NOT the whole of CPython's: dict.fromkeys (a classmethod on the `dict` type
+    // object) and set.intersection/difference/symmetric_difference/isdisjoint/
+    // issuperset and their *_update forms are absent, hasattr() therefore says
+    // False for them, and a written call ABORTS rather than raising: a hard stop
+    // says "this project does not have it" where an AttributeError would say
+    // "Python does not have it". The operators & - ^ <= >= are complete.
     function pyIsDictMethod(name) {
         if (name == "keys" || name == "values" || name == "items") { return true }
         if (name == "get" || name == "pop" || name == "clear") { return true }
@@ -4542,7 +4538,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyIsSetMethod(name) {
         if (name == "add" || name == "pop" || name == "clear") { return true }
         if (name == "copy" || name == "remove" || name == "discard") { return true }
-        if (name == "union" || name == "update") { return true }
+        if (name == "union" || name == "update" || name == "issubset") { return true }
         return false
     }
     // The names one of the two types owns and the other does NOT, which is
@@ -4555,7 +4551,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyIsSetOnly(name) {
         if (name == "add" || name == "remove") { return true }
-        if (name == "discard" || name == "union") { return true }
+        if (name == "discard" || name == "union" || name == "issubset") { return true }
         return false
     }
     // Every error below is a CATCHABLE Python exception with CPython 3.14's
@@ -4733,6 +4729,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "update") {
             pySetAddAll(s, args)
             return undefined
+        }
+        // issubset(other) takes ANY iterable, as union does.
+        if (name == "issubset") {
+            var sub = pySetOf(pyIterOrTypeErr(pyArgAt(args, 0)))
+            for (var bi = 0; bi < s.keys.length; bi++) {
+                if (dictFind(sub, s.keys[bi]) < 0) { return false }
+            }
+            return true
         }
         fail("unknown dict method: " + name)
         return undefined

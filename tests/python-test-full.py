@@ -2211,7 +2211,10 @@ def s36():
     # popitem arrived with docs/todo.md 1.9 and is a DICT name only, so a set
     # still answers False for it - as CPython does.
     check("dm43", hasattr(mkd(), "popitem") and not hasattr(mks(), "popitem"))
-    check("dm43b", not hasattr(mkd(), "fromkeys") and not hasattr(mks(), "issubset"))
+    # issubset is a SET name: it takes any iterable, as union does.
+    check("dm43b", hasattr(mks(), "issubset") and not hasattr(mkd(), "issubset"))
+    check("dm43c", mks().issubset([3, 2, 1, 0]) and not mks().issubset({1: 0, 2: 0}) and
+          set().issubset("") and getattr(mks(), "issubset")(range(4)))
     # getattr hands back a BOUND method that runs. It cannot carry KEYWORD
     # arguments, so update()'s keyword form is only available on a written call.
     gd = mkd()
@@ -2219,14 +2222,9 @@ def s36():
     gs = mks()
     check("dm45", getattr(gs, "discard")(1) is None and len(gs) == 2)
     check("dm46", len(getattr(mks(), "copy")()) == 3)
-    # items() is no longer lowered by the emitter, so the bound form works too -
-    # it used to abort in both compiled halves. keys()/values()/items() answer
-    # LISTS here where CPython answers dict_keys/dict_values/dict_items views of
-    # TUPLES, which is the tuple gap of docs/todo.md 3.1 and not this item -
-    # these two rows and dm43b are the only ones in the section that CPython
-    # would fail.
-    check("dm47", getattr(mkd(), "items")() == [["a", 1], ["b", 2], ["c", 3]])
-    check("dm48", getattr(mkd(), "keys")() == ["a", "b", "c"])
+    # The bound items() and keys() run too.
+    check("dm47", [list(p) for p in getattr(mkd(), "items")()] == [["a", 1], ["b", 2], ["c", 3]])
+    check("dm48", list(getattr(mkd(), "keys")()) == ["a", "b", "c"])
 
     # --- the shapes NEXT DOOR --------------------------------------------
     # Key ALIASING survives copy/setdefault/update: a bool, an int and a float
