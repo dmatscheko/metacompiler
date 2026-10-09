@@ -3,25 +3,17 @@ package abnf
 // jsrtgolang.go -- Go's VALUE RENDERING (fmt's %v) for the compiler grammar
 // (languages/go-to-llvm-ir.abnf).
 //
-// go-to-llvm-ir.abnf used to bind fmt.Println / fmt.Print / fmt.Sprint straight
-// to the shared `println` host function, which hands the RAW runtime value to
-// Go's own %v. That is recurring shape 1 in docs/abnf-dialect-gotchas.md, and in
-// Go it was unusually loud, because this grammar's value model puts a class
-// descriptor on every struct and a {a,o,n,c} header on every slice:
-//
-//	map[string]int{"a": 1}  ->  map[__dict:true keys:[a] vals:[1] zero:0]
-//	P{1}                    ->  map[X:1 __class:map[__isclass:true ...]]
-//	[]int{1, 2} (a header)  ->  map[__class:map[__name:$sl ...] a:[1 2] c:2 n:2 o:0]
-//
-// where real go 1.26.5 prints `map[a:1]`, `{1}` and `[1 2]`. The interpreter half
-// had its own renderer (`gstr`) which was already close, so this file is the Go
-// twin of that function and the two MUST stay in step - ./test.sh --cross diffs
-// them.
+// The shared `println` host function hands the RAW runtime value to Go's own %v
+// (recurring shape 1 in docs/abnf-dialect-gotchas.md), and this grammar's value
+// model puts a class descriptor on every struct and a {a,o,n,c} header on every
+// slice, so fmt.Println / fmt.Print / fmt.Sprint need their own renderer: real
+// go prints `map[a:1]`, `{1}` and `[1 2]`. This file is the Go twin of the
+// interpreter half's `gstr` and the two MUST stay in step - ./test.sh --cross
+// diffs them.
 //
 // Registration is additive: an init() appends a registrar to rxExtraExterns, so
 // nothing here runs unless a program calls one of the three js_go* externs, and
-// only the Go compiler grammar emits them. abnf/jsrt.go, printArgs and every
-// existing extern are untouched.
+// only the Go compiler grammar emits them.
 //
 // The three externs, each taking the callee's ARGUMENT ARRAY plus a mode number:
 //
@@ -46,14 +38,13 @@ package abnf
 //     object and both print `{1}` where go prints `&{1}` for the first. Fixing
 //     that needs a real pointer representation for struct pointers, which would
 //     change field access, method dispatch, assignment, equality and type
-//     switches in both halves - see the report in the commit that added this file.
-//   - A nil MAP prints `map[]`, as go does, since docs/todo.md 1.9: the zero value
-//     of a map type is a MARKED EMPTY MAP (__nil) and no longer the null value, so
-//     that it can also be READ like an empty one, which is what go does and what
-//     this model could not express while it was null. (A nil SLICE prints `[]` and
-//     a nil pointer / nil interface `<nil>`, both as go does. Since docs/todo.md 1.7
-//     the zero value of a SLICE type carries the same __nil mark for the same reason,
-//     so `var s []int; s == nil` is true as well - see giIsNilZero in abnf/jsrt.go.)
+//     switches in both halves.
+//   - A nil MAP prints `map[]`, as go does: the zero value of a map type is a
+//     MARKED EMPTY MAP (__nil) and not the null value, so that it can also be
+//     READ like an empty one, which is what go does. (A nil SLICE prints `[]` and
+//     a nil pointer / nil interface `<nil>`, both as go does. The zero value of a
+//     SLICE type carries the same __nil mark for the same reason, so
+//     `var s []int; s == nil` is true as well - see giIsNilZero in abnf/jsrt.go.)
 //   - Only a String() method declared on the type ITSELF is a Stringer; a String()
 //     promoted from an embedded struct is not found. Go's method set rules are not
 //     modelled either, so a String() with a POINTER receiver is used for the value
@@ -225,12 +216,10 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 
 	// THE error INTERFACE WINS OVER fmt.Stringer, WHICH WINS OVER EVERY BUILT-IN
 	// RENDERING - exactly the order fmt's handleMethods uses (error first, then
-	// Stringer). Error() was not consulted at all, so a value with `Error() string`
-	// printed the memberwise `{missing b}` where go prints `missing b`, in ALL THREE
-	// ENGINES - so --cross was blind to it by construction. Guarded by depth so a
+	// Stringer): a value with `Error() string` prints `missing b`, not the
+	// memberwise `{missing b}`. Guarded by depth so a
 	// method that prints its own receiver terminates. The twins are gstr in
 	// languages/go-interpreter.abnf and gopObj in languages/lib/go-rt.metajs.
-	// docs/todo.md 1.3.
 	if cls != nil && depth < 32 {
 		if mth, ok := cls.props["Error"]; ok && isCallable(mth) {
 			return rt.gopRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
@@ -281,14 +270,12 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 
 	// A complex: Go spells it (re+imi), with the sign always written out. BOTH
 	// PARTS ARE float64 AND RENDER AS ONE - a complex128 has no other component
-	// type - so goFloStr is what has to be used and rt.toString is not: it
-	// printed `(1234567.125-0.5i)` where go prints `(1.234567125e+06-0.5i)`,
-	// `Infinity` where go prints `+Inf`, and lost the sign of a -0.0 part
-	// entirely. 27 of 100 rows of a 600-line complex probe, in all three
-	// engines. The sign of the imaginary part is written out by hand, so the
-	// MAGNITUDE is what is rendered - and a -0.0 imaginary part prints as
-	// `-0i`, which go agrees with because it takes the same route. The twins are
-	// cxStr in go-interpreter.abnf and goCxStr in languages/lib/go-rt.metajs.
+	// type - so goFloStr is what has to be used and rt.toString is not
+	// (`(1.234567125e+06-0.5i)`, `+Inf`, and the sign of a -0.0 part). The sign of
+	// the imaginary part is written out by hand, so the MAGNITUDE is what is
+	// rendered - and a -0.0 imaginary part prints as `-0i`, which go agrees with
+	// because it takes the same route. The twins are cxStr in go-interpreter.abnf
+	// and goCxStr in languages/lib/go-rt.metajs.
 	if name == "$cx" {
 		return "(" + goFloStr(rt.toNumber(o.props["re"])) +
 			goCxImag(goFloStr(rt.toNumber(o.props["im"]))) + "i)", true
@@ -329,8 +316,6 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 			// in go while the exported `Exp{Err: E{"bad"}}` prints `{bad}`.
 			// Raising the depth to the method guard's own limit says exactly
 			// that, transitivity included: depth only grows on the way down.
-			// This was already wrong for String() before Error() was added.
-			// docs/todo.md 1.3.
 			fd := depth + 1
 			if fd < gopNoMeth && !goNameExported(fn) {
 				fd += gopNoMeth
@@ -594,14 +579,12 @@ func giNumeric(v interface{}) bool {
 // the WIDTH applied to a binary operator's RESULT, and go-to-llvm-ir.abnf wraps
 // every arithmetic operator and every comparison in it - but ONLY in a program
 // whose source text mentions `float32` at all (usesF32 there, the gate
-// usesComplex already established). Every other Go program emits exactly the IR
-// it did before, which is a diff against a clean archive of the base commit and
-// not an argument.
+// usesComplex already established). Every other Go program's IR is unaffected.
 //
 // The extern exists because the C floor cannot carry the width. runtime.c is
 // compiled by our own c-to-llvm-ir.abnf, which computes every float at DOUBLE
-// precision (measured in e5e68b5: ctF("flt") is 8 and float arithmetic is emitted
-// as integer soft-float), so si_apply / jf_arith can never round to 24 bits.
+// precision (ctF("flt") is 8 and float arithmetic is emitted as integer
+// soft-float), so si_apply / jf_arith can never round to 24 bits.
 //
 // IT IS A POST-FIX AND NOT A REPLACEMENT, and that shape is forced by layer 2
 // rather than chosen here: the operators it corrects are FLOOR externs, and a
@@ -678,14 +661,11 @@ func goCxDiv(a, b, c, d float64) (float64, float64) {
 	//
 	// EVERY PRODUCT IS WRAPPED IN float64(), AND THAT IS LOAD-BEARING RATHER THAN
 	// NOISE. Go's spec lets an implementation fuse `x*y + z` into a single FMA,
-	// and on arm64 gc does - so this function, written the obvious way, agreed
-	// with `go run` on six probe rows where the OTHER TWO ENGINES CANNOT: neither
-	// MetaJS nor the emitted IR has a fused multiply-add, so layer 2 and the
-	// interpreter round the product first. An explicit conversion is exactly what
-	// the spec says forces the rounding, so this keeps the three engines
-	// byte-identical. The residual disagreement with real go - 6 division rows
-	// and 11 multiplication rows of a 600-line probe - is the FMA and is recorded
-	// rather than chased; see docs/working-on-this-project.md 7.4.
+	// and on arm64 gc does - but neither MetaJS nor the emitted IR has a fused
+	// multiply-add, so layer 2 and the interpreter round the product first. An
+	// explicit conversion is exactly what the spec says forces the rounding, so
+	// this keeps the three engines byte-identical. The residual disagreement with
+	// real go is the FMA; see docs/working-on-this-project.md 7.4.
 	if math.Abs(c) >= math.Abs(d) {
 		ratio := d / c
 		denom := c + float64(ratio*d)
@@ -898,9 +878,8 @@ func init() {
 			}
 			// THE BOUND IS THE HEADER'S LENGTH, NOT THE BACKING ARRAY'S, and the
 			// index reported is the one the program wrote. `base[0:2]` of a five
-			// element slice has cap 5, so a check against the storage let sub[4]
-			// through - and with a non-zero offset the old message named the
-			// OFFSET index. docs/todo.md 1.9.
+			// element slice has cap 5, so a check against the storage would let
+			// sub[4] through.
 			if ui < 0 || ui >= int(rt.toNumber(h.props["n"])) {
 				goIdxFail(ui, int(rt.toNumber(h.props["n"])))
 			}
@@ -932,8 +911,8 @@ func init() {
 		}
 		// x[i] THROUGH A SLICE HEADER: the read that mirrors js_gisetsl. It exists
 		// for the BOUND - js_map_get sees only the backing array and cannot know
-		// the header's length, so `base[0:2][4]` read the storage in both halves
-		// where go panics. The twin is js_gislget in languages/lib/go-rt.metajs.
+		// the header's length (`base[0:2][4]` panics in go). The twin is
+		// js_gislget in languages/lib/go-rt.metajs.
 		m["js_gislget"] = func(a []uint64) uint64 {
 			h, ok := u(a[0]).(*jsObject)
 			if !ok {
@@ -965,8 +944,7 @@ func init() {
 			if p == nil {
 				return 0
 			}
-			// THE WORDING IS GO'S OWN SINCE docs/todo.md 1.14. Measured,
-			// go 1.26.5, on stderr with exit status 2:
+			// THE WORDING IS GO'S OWN (go 1.26.5, on stderr with exit status 2):
 			//
 			//     panic: abort probe
 			//     panic: runtime error: index out of range [5] with length 0
@@ -989,9 +967,8 @@ func init() {
 		}
 		// The DIVISOR of an integer '/' or '%', checked before the operator runs.
 		// Go's integer divide by zero is a recoverable run-time panic; the floor's
-		// si_arith raises it with die(), which no js_gotry can catch, so the native
-		// binary aborted where llvm.Run recovered. A layer-2 file cannot call a
-		// floor extern by name, so the emitter (emitDivZ in
+		// si_arith raises it with die(), which no js_gotry can catch. A layer-2 file
+		// cannot call a floor extern by name, so the emitter (emitDivZ in
 		// languages/go-to-llvm-ir.abnf) emits this as a PRE-CHECK instead. A float
 		// divisor is passed over: a float64 divided by zero is an infinity in Go,
 		// not a panic. The twin is js_gidivz in languages/lib/go-rt.metajs.
@@ -1013,9 +990,8 @@ func init() {
 				panic("assignment to entry in nil map")
 			}
 			// An out of range ARRAY store panics with the same wording the READ
-			// uses. It used to fall through to js_pyset, whose message is
-			// "list assignment index out of range" - and whose layer-2 twin uses
-			// the floor's hard-aborting `fail`. docs/todo.md 1.9.
+			// uses, not js_pyset's "list assignment index out of range" (whose
+			// layer-2 twin uses the floor's hard-aborting `fail`).
 			if arr, ok := u(a[0]).(*jsArray); ok {
 				i := int(rt.toNumber(u(a[1])))
 				if i < 0 || i >= len(arr.elems) {
@@ -1031,12 +1007,10 @@ func init() {
 
 		// A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it
 		// exactly when it has every method. js_gotypeis can only compare type
-		// NAMES, so `v.(Sp)` was false for a value that DOES satisfy Sp,
-		// `case Sp:` never fired, and the single-result `v.(Sp)` never panicked
-		// for one that does not - in all three engines. The method set arrives as
-		// a comma-joined string the emitter built at parse time. The twins are
-		// js_goifis / js_goifas in languages/lib/go-rt.metajs and typeMatches /
-		// goAssertIface in languages/go-interpreter.abnf. docs/todo.md 1.5.
+		// NAMES, which is not enough for `v.(Sp)` and `case Sp:`. The method set
+		// arrives as a comma-joined string the emitter built at parse time. The
+		// twins are js_goifis / js_goifas in languages/lib/go-rt.metajs and
+		// typeMatches / goAssertIface in languages/go-interpreter.abnf.
 		m["js_goifis"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if goClassOf(v) == nil || goMissingMethod(rt, v, rt.toString(u(a[1]))) != "" {
@@ -1050,8 +1024,7 @@ func init() {
 			// go says `interface conversion: interface is nil, not main.I` and
 			// names no method, because there is no dynamic type to name.
 			// goMissingMethod answers "" for a value that is not an instance, so
-			// nil used to pass straight through in all three engines.
-			// docs/todo.md 1.3.
+			// nil needs this arm.
 			if v == nil || v == jsNull || v == jsUndef {
 				panic("interface conversion: interface is nil, not " + rt.toString(u(a[1])))
 			}
@@ -1071,7 +1044,7 @@ func init() {
 		// array could not be told from a Go ARRAY value ([3]int is a plain array
 		// in this value model, by design). The twins are js_gomv / js_gomvargs in
 		// languages/lib/go-rt.metajs and goMvArr / goMvArgs in
-		// languages/go-interpreter.abnf. docs/todo.md 1.5.
+		// languages/go-interpreter.abnf.
 		m["js_gomv"] = func(a []uint64) uint64 {
 			if arr, ok := goMvArr(u(a[0])); ok {
 				return w(arr)
@@ -1089,17 +1062,13 @@ func init() {
 			return a[0]
 		}
 
-		// A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, and reading a
-		// member of nil, writing one and calling a method on one each reached a
-		// DIFFERENT message here: rt.getMember said "member 'X' of null",
-		// rt.setMember "member assignment 'X' on null", rt.memberCall "method call
-		// 'Get' on a object". The other two engines aborted outright on the same
-		// programs, so `defer func(){ recover() }()` around `p.X` was a THREE-WAY
-		// split. All three now raise goNilDeref's single wording; the twins are
-		// goNilDeref in languages/go-interpreter.abnf and in
-		// languages/lib/go-rt.metajs. Wrapping rather than editing js_gofield /
-		// js_gomcall in abnf/jsrt.go keeps this go-local: both names are emitted
-		// only by go's grammar. docs/todo.md 1.5.
+		// A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC with ONE
+		// wording (goNilDeref) for reading a member of nil, writing one and
+		// calling a method on one - not the shared getMember / setMember /
+		// memberCall messages. The twins are goNilDeref in
+		// languages/go-interpreter.abnf and in languages/lib/go-rt.metajs.
+		// Wrapping rather than editing js_gofield / js_gomcall in abnf/jsrt.go
+		// keeps this go-local: both names are emitted only by go's grammar.
 		baseField := m["js_gofield"]
 		baseMcall := m["js_gomcall"]
 		baseSetField := m["js_gosetfield"]
@@ -1117,11 +1086,10 @@ func init() {
 			// A FUNC-TYPED FIELD IS CALLABLE: `type H struct { f func(int) int }`
 			// makes h.f(4) a call of the field's value, with NO receiver - it is a
 			// field, not a method. rt.memberCall walks the __class chain for an
-			// instance and never looks at the own slot, so this half died with
-			// "unknown method 'f' on an instance" while the NATIVE binary answered
-			// (layer 2's goMemberCall reads the slot through goGetMember). Checked
+			// instance and never looks at the own slot, so this arm is needed (layer
+			// 2's goMemberCall reads the slot through goGetMember). Checked
 			// only AFTER rt.goMethod missed, so a real method still wins - which is
-			// what layer 2's js_gomcall does too. docs/todo.md 1.5.
+			// what layer 2's js_gomcall does too.
 			if o, ok := u(a[0]).(*jsObject); ok {
 				name := rt.toString(u(a[1]))
 				if _, _, found := rt.goMethod(u(a[0]), name); !found {
@@ -1162,9 +1130,9 @@ func init() {
 // `pkga.Counter` see a write the package made after the object was assembled, and what
 // makes `pkga.Counter = 50` reach the variable the package's own functions resolve.
 // The twin is the __pkgscope arm of js_gofield / js_gosetfield / js_gomcall in
-// languages/lib/go-rt.metajs; the interpreter half binds the scope directly and has
-// always been live. Answers false for every other receiver, at the cost of one map
-// lookup on a member access whose receiver is an object. docs/todo.md 1.5.
+// languages/lib/go-rt.metajs; the interpreter half binds the scope directly.
+// Answers false for every other receiver, at the cost of one map lookup on a
+// member access whose receiver is an object.
 func goPkgSlot(rt *jsrt, recv, key interface{}) (*jsScope, string, bool) {
 	o, ok := recv.(*jsObject)
 	if !ok {

@@ -8,11 +8,9 @@ package abnf
 //	string (byte based) / array (ONE ordered key->value map, so === compares the
 //	keys AND their order while == does not) / object
 //
-// The compiler used to lower PHP onto the plain JS value semantics of the handle
-// runtime, which made three answers silently WRONG rather than merely missing:
-// `3.0 === 3` was true (no boxed float), `"0"` was truthy (JS truthiness) and
-// `==` was strict (binExt["=="] was js_seq). The js_ph* externs below give the
-// compiler the same model the interpreter has, so the two agree again.
+// The js_ph* externs below give the compiler the same model the interpreter
+// has; plain JS value semantics would be silently WRONG (`3.0 === 3` must be
+// false, `"0"` is falsy, and `==` is loose).
 //
 // This file is append-only with respect to the rest of the runtime: nothing here
 // runs unless a program calls one of the js_ph* externs, which only the PHP
@@ -265,8 +263,7 @@ func phpIsArr(v interface{}) bool {
 // Everything below reads THROUGH a cell, which is what makes `$b = &$a`,
 // `foreach (... as &$v)`, `use (&$v)` and a by-reference parameter one mechanism.
 // A program that never writes a '&' creates no cell at all, so every phpDeref here
-// is a type assertion that fails immediately and the answers are the ones from
-// before references existed.
+// is a type assertion that fails immediately.
 func phpCellOf(v interface{}) *jsObject {
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -749,17 +746,16 @@ func (rt *jsrt) phpRaise(clsName, msg string) {
 // value to throw rather than throwing it - the slot is cleared for the duration
 // of the call so a hook that itself trips the same site cannot recurse - so
 // js_phmissname needs the object without the raise. nil means "no descriptor,
-// keep the fatal". docs/todo.md 3.2.
+// keep the fatal".
 func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 	h, has := phpMainScope[rt]
 	if !has {
 		return nil
 	}
-	// TWO shapes, because layer 2 cannot open a scope (WALL 3 of
-	// docs/runtime-next-plan.md part 3). php-to-llvm-ir.abnf now hands over a PHP
-	// ARRAY of name => descriptor, which is a plain value the MetaJS runtime
-	// library can read too; a module built before that change still hands over the
-	// SCOPE, and is still accepted.
+	// TWO shapes, because layer 2 cannot open a scope. php-to-llvm-ir.abnf hands
+	// over a PHP ARRAY of name => descriptor, which is a plain value the MetaJS
+	// runtime library can read too; a SCOPE (an older module's shape) is still
+	// accepted.
 	if keys, vals, ok := phpArrParts(rt.unwrap(h)); ok {
 		var found interface{}
 		for i := range keys.elems {
@@ -1856,16 +1852,13 @@ func init() {
 			phpMainScope[rt] = a[0]
 			return 0
 		}
-		// ----- the two RECOVERABLE-ERROR arms (docs/todo.md 3.2) --------------
+		// ----- the two RECOVERABLE-ERROR arms ---------------------------------------
 		//
 		// js_phmcall is php's own name for the method dispatch, and it exists
 		// BECAUSE of chapter 4's rxExtraExterns trap: this map is filled once for
 		// every language, so overriding m["js_mcall"] here would make a C# or java
 		// method miss raise a PHP Error. The layer-2 twin is js_phmcall in
-		// languages/lib/php-rt.metajs and the two texts are byte for byte the same,
-		// which they were NOT before - llvm.Run aborted with the shared dispatcher's
-		// "unknown String method: nope" where the native binary said
-		// "member 'apply' of undefined".
+		// languages/lib/php-rt.metajs and the two texts are byte for byte the same.
 		m["js_phmcall"] = func(a []uint64) uint64 {
 			recv := u(a[0])
 			name := rt.phpStr(u(a[1]))
@@ -1885,8 +1878,7 @@ func init() {
 			if o, isObj := recv.(*jsObject); isObj {
 				if cls, has := o.props["__class"]; has && !isNullish(cls) {
 					if rt.phpFindMethod(cls, name) == nil {
-						// PHP 8, and CATCHABLE: `catch (Error $e)` recovers where both
-						// halves used to abort uncatchably.
+						// PHP 8, and CATCHABLE: `catch (Error $e)` recovers.
 						rt.phpRaise("Error", "Call to undefined method "+rt.phpClassName(recv)+"::"+name+"()")
 					}
 					return w(rt.memberCall(recv, name, args.elems))
@@ -1919,8 +1911,8 @@ func init() {
 			}
 			return w(o)
 		}
-		// The four that REPLACE a jsrt.go entry: each of them was 32 bit or
-		// double based and is now exact 64 bit.
+		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
+		// shared one is 32 bit or double based.
 		m["js_phneg"] = func(a []uint64) uint64 { return w(rt.phpNeg(u(a[0]))) }
 		m["js_phbnot"] = func(a []uint64) uint64 { return w(phpMkInt(^rt.phpToLong(u(a[0])))) }
 		m["js_phintdiv"] = func(a []uint64) uint64 {

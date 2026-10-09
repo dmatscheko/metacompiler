@@ -29,10 +29,8 @@ package abnf
 //	jsGInt{w:64,u:false}   ==  an integer outside that range
 //	*jsObject with "__f"   ==  a float whose value IS integral (1.0, 1e100), the
 //	                           only case the plain reading could not tell from an
-//	                           integer. The Lua compiler grammar already created
-//	                           this box in IR before this file existed, and it
-//	                           stays exactly that shape so the IR that reads it
-//	                           directly keeps working.
+//	                           integer. The Lua compiler grammar creates this box
+//	                           in IR and reads it directly, so the shape is fixed.
 //
 // Registration is additive: an init() appends a registrar to rxExtraExterns, so
 // nothing here runs unless a program calls one of the js_lu* externs, which only
@@ -469,13 +467,11 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 	// Lua's float modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5).
 	//
 	// It is luai_nummod - fmod, then one correction - and NOT x - Floor(x/y)*y.
-	// The two agree only while x/y fits 53 bits: real lua 5.5 (the oracle here)
-	// answers 10 % 3.14159265358979 with 0.57522203923063, and the floor form
-	// gives 0.5752220392306295. The floor form was also ARCHITECTURE DEPENDENT:
-	// on arm64 Go contracts x - Floor(x/y)*y into a fused multiply-subtract,
-	// which goja (lua-interpreter.abnf) and the C floor cannot do, so the two
-	// halves of this language answered differently in 128 of a 12,557-line
-	// differential probe - invisible to --cross, which printed none of them.
+	// The two agree only while x/y fits 53 bits: real lua 5.5 answers
+	// 10 % 3.14159265358979 with 0.57522203923063, and the floor form gives
+	// 0.5752220392306295. The floor form is also ARCHITECTURE DEPENDENT: on arm64
+	// Go contracts x - Floor(x/y)*y into a fused multiply-subtract, which goja
+	// (lua-interpreter.abnf) and the C floor cannot do.
 	m := math.Mod(x, y)
 	if m != 0 && (m < 0) != (y < 0) {
 		m += y
@@ -609,10 +605,8 @@ func luNumStr(v interface{}) string {
 // JavaScript's String(-0) is "0" and so that %g never sees a negative.
 //
 // WHICH form Lua picks: lua 5.5.0 tries "%.15g" and, if the text does not read
-// back as the same double, "%.17g". It never tries 16 - settled against the local
-// lua 5.5.0 over 91 values, 31 hand-picked plus 60 random 64-bit patterns, where a
-// 15/16/17 model differs on 10 of them (1/3 is "0.33333333333333331", not the
-// 16-digit shortest form) and 15-then-17 matches all 91. The round-trip test is
+// back as the same double, "%.17g". It never tries 16 (1/3 is
+// "0.33333333333333331", not the 16-digit shortest form). The round-trip test is
 // "does the shortest form have at most 15 significant digits", which is the same
 // question: a 15-digit text that reads back IS a round-tripping form of at most 15
 // digits, and conversely the correctly rounded 15-digit decimal is no further from
@@ -932,11 +926,11 @@ func init() {
 			return w(luMkFlo(math.Mod(luNumOf(l), luNumOf(r))))
 		}
 		// ---- the four math members whose answer is not a bare Math call ----
-		// docs/todo.md 1.1: the rest of Lua's math library needs no extern at all
-		// now that the host Math carries the same thirty-four members in all three
-		// engines, so lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight through
-		// it. These four cannot: an argument COUNT or the integer SUBTYPE decides
-		// what they answer. The layer-2 twins are in languages/lib/lua-rt.metajs.
+		// The rest of Lua's math library needs no extern at all: the host Math
+		// carries the same thirty-four members in all three engines, so
+		// lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight through it. These
+		// four cannot: an argument COUNT or the integer SUBTYPE decides what they
+		// answer. The layer-2 twins are in languages/lib/lua-rt.metajs.
 		//
 		// math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument
 		// means Atan": lmathlib.c passes the default through atan2, and the two

@@ -8,16 +8,12 @@ package abnf
 // externs, and nothing here rebinds an existing one: the registrar below only ADDS
 // js_dart* names, so every other grammar emits and runs exactly as before.
 //
-// Why it has to exist at all. The compiler half used to hand a RAW handle to the
-// shared println host function, so Go's %v reached stdout - `print(null)` said
-// "<nil>", `print([1, 2, 3])` said "[1 2 3]", a Map said
-// "map[__dict:true keys:[a] vals:[1]]" and an instance dumped its whole class
-// descriptor INCLUDING A GO POINTER ADDRESS, which is not even reproducible between
-// two runs of the same program. (`print(SomeClass)` did not print at all: the
-// descriptor's __class back-reference sent toGoNatural into a stack overflow.)
-// Each language wants a different answer here, so the fix is a per-language print
-// extern - the shape js_rputs / js_rprint (Ruby) and js_luaprint already have - and
-// not a change to the shared printArgs.
+// Why it has to exist at all: the shared println host function prints a raw
+// handle with Go's %v (`<nil>`, `[1 2 3]`, a Map's internals, an instance's
+// class descriptor with a Go pointer address). Each language wants a different
+// answer here, so this is a per-language print extern - the shape js_rputs /
+// js_rprint (Ruby) and js_luaprint have - and not a change to the shared
+// printArgs.
 //
 // The rendering implemented here is Dart's Object.toString() and its overrides:
 //
@@ -346,12 +342,6 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	m["js_dartstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.dartStr(u(a[0]))) }
 	// const e: the canonical value for e.
 	m["js_dartcanon"] = func(a []uint64) uint64 { return w(rt.dartCanon(u(a[0]), consts, 0)) }
-	// `v is T` for Dart's OWN type names. The shared js_is_type knows the JVM
-	// spelling (Int, Double, Boolean, List) and answers false for everything it
-	// does not recognize - so `1 is int`, `1 is num`, `true is bool`, `{1: 2} is
-	// Map` and `{1, 2} is Set` were all FALSE here while dart-interpreter.abnf's
-	// dartIsType answered true for each. This is that function, in Go; user class
-	// names still fall through to the shared walk of the __class chain.
 	// One of dart:core's sixteen errors / exceptions: (class name, named
 	// constructor or "", args array). See dartExcAnc.
 	m["js_dartexc"] = func(a []uint64) uint64 {
@@ -370,6 +360,12 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		e.set("__dexcType", u(a[0]))
 		return w(e)
 	}
+	// `v is T` for Dart's OWN type names. The shared js_is_type knows the JVM
+	// spelling (Int, Double, Boolean, List) and answers false for everything it
+	// does not recognize, so `1 is int`, `1 is num`, `true is bool`, `{1: 2} is
+	// Map` and `{1, 2} is Set` need this: dart-interpreter.abnf's dartIsType, in
+	// Go. User class names still fall through to the shared walk of the __class
+	// chain.
 	m["js_dartis"] = func(a []uint64) uint64 {
 		t, _ := u(a[1]).(string)
 		if rt.dartIsType(u(a[0]), t) {
@@ -379,16 +375,8 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// js_dtidx / js_dtidxset are DART's list and string indexing. They exist because
-	// the shared js_pyget / js_pyset are PYTHON's, and routing Dart through them made
-	// one out-of-range index answer three different things (docs/todo.md 1.6):
-	//
-	//	interpreter  abort   "dart interpreter error: list index out of range"
-	//	llvm.Run     python's IndexError - CATCHABLE, and `$e` rendered
-	//	                                  "Instance of 'IndexError'"
-	//	native       abort   "list index out of range: 7"
-	//
-	// A three-way split that --cross cannot see by construction: it diffs a language's
-	// two HALVES, and two of the three legs are the same half.
+	// the shared js_pyget / js_pyset are PYTHON's (a catchable IndexError, and a
+	// negative index that wraps).
 	//
 	// What Dart does. dart:core's List.operator [] is documented "Throws a RangeError
 	// if index is out of bounds", and the object thrown is an IndexError
@@ -409,8 +397,7 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	// `IndexError(7, xs)` written by hand rendering without the "(index)" it would have
 	// in Dart. THERE IS NO dart TOOLCHAIN ON THIS MACHINE (manual chapter 5).
 	//
-	// Python's negative-index WRAP goes with it: `xs[-1]` is the last element in Python
-	// and a RangeError in Dart, and the wrap was reachable from every Dart program.
+	// Python's negative-index WRAP is not Dart's: `xs[-1]` is a RangeError in Dart.
 	dtIndexErr := func(idx interface{}, indexable interface{}) {
 		panic(&jsThrown{value: rt.dartExcNew("IndexError", "",
 			[]interface{}{idx, indexable, "index"})})
@@ -504,10 +491,9 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 			// dart:core, List.operator +: "Returns the concatenation of this list
 			// and other" - a NEW list holding this list's elements followed by
 			// other's, neither operand touched. The runtime's own rt.jsAdd is
-			// JavaScript's + and renders both sides instead, so `[1, 2] + [3]`
-			// used to be the STRING "1,23" with length 4 rather than the list
-			// [1, 2, 3] with length 3. No dart toolchain is installed here, so
-			// the dart:core signature is the oracle.
+			// JavaScript's + and renders both sides instead (`[1, 2] + [3]` would be
+			// the STRING "1,23"). No dart toolchain is installed here, so the
+			// dart:core signature is the oracle.
 			if la, ok := l.(*jsArray); ok {
 				if ra, ok2 := r.(*jsArray); ok2 {
 					out := make([]interface{}, 0, len(la.elems)+len(ra.elems))
@@ -627,7 +613,7 @@ func (rt *jsrt) dartIsType(v interface{}, t string) bool {
 	// int and double are DISJOINT types in Dart: `1 is double` is false and
 	// `1.0 is int` is false, even though 1 == 1.0. The answer comes from the BOX
 	// (see the number layer at the end of this file), not from the value - an
-	// unboxed number is an int, which is why this used to answer true for both.
+	// unboxed number is an int.
 	case "int":
 		return dartIsInt(v)
 	case "double":
@@ -670,8 +656,8 @@ func (rt *jsrt) dartIsType(v interface{}, t string) bool {
 			return strings.Contains(dartExcAnc[n], "|"+t+"|")
 		}
 		// A USER class's supertype set, for exactly the same reason: isTypeName walks
-		// __super and knows `extends` alone, so `class A implements B` answered false
-		// for `A() is B` (docs/todo.md 1.5). dart-to-llvm-ir.abnf's makeClassStmt
+		// __super and knows `extends` alone, so `class A implements B` needs this for
+		// `A() is B`. dart-to-llvm-ir.abnf's makeClassStmt
 		// writes __anc on the descriptor, flattened over extends/with/implements at
 		// emit time; the twins are dxUserAnc in languages/dart-interpreter.abnf and
 		// dtIsType in languages/lib/dart-rt.metajs. No walk is needed here because
@@ -1095,18 +1081,17 @@ func (rt *jsrt) dartExcFormatStr(o *jsObject) string {
 
 // ===== Dart's numbers: a 64-bit int and a separate double =====
 //
-// Dart has TWO numeric types and no implicit conversion between them, and the
-// handle runtime models every number as one JS double - so 1 and 1.0 arrived here
-// as the same value. print(1.0) said "1", `1 / 1` said "1" although Dart's `/`
-// ALWAYS yields a double, `1 is double` was true and `1.0 is int` was true. Dart's
-// int is also exactly 64-bit two's complement on the VM and WRAPS, which a double
-// cannot represent: 9223372036854775807 + 1 printed 9.2e+18 here and -1 in the
-// interpreter half - a live cross-half divergence.
+// Dart has TWO numeric types and no implicit conversion between them, while the
+// handle runtime models every number as one JS double - so 1 and 1.0 would be
+// the same value. Dart's `/` ALWAYS yields a double, `1 is double` is false, and
+// Dart's int is exactly 64-bit two's complement on the VM and WRAPS
+// (9223372036854775807 + 1 is -9223372036854775808), which a double cannot
+// represent.
 //
-// The fix is the one commit 636e326 used for the JVM languages and aaa195e for
-// Go's widths: the type goes ON the value. The invariant, in BOTH halves of this
-// language (languages/dart-interpreter.abnf implements exactly these rules with
-// the {__flo} box and the shared {__sz} layer of lib/interp-core.js):
+// So the type goes ON the value, as for the JVM languages and Go's widths. The
+// invariant, in BOTH halves of this language (languages/dart-interpreter.abnf
+// implements exactly these rules with the {__flo} box and the shared {__sz}
+// layer of lib/interp-core.js):
 //
 //	plain number   ==  an int whose value is exact in a double (|v| <= 2^53)
 //	jsGInt         ==  an int outside that range (w = 64, u = false, always)
@@ -1197,8 +1182,7 @@ func (rt *jsrt) dartArith(op string, l, r interface{}) interface{} {
 			if math.IsNaN(q) || math.IsInf(q, 0) {
 				// A real UnsupportedError rather than the rendered string, so
 				// `on UnsupportedError catch` claims it. Its toString prepends
-				// "Unsupported operation: " itself (errors.dart:584), so the text
-				// reaching stdout is byte-identical to what this used to raise.
+				// "Unsupported operation: " itself (errors.dart:584).
 				panic(&jsThrown{value: rt.dartExcNew("UnsupportedError", "",
 					[]interface{}{"Result of truncating division is " + dartFloStr(q)})})
 			}
@@ -1244,10 +1228,10 @@ func (rt *jsrt) dartArith(op string, l, r interface{}) interface{} {
 		// the dartModF branch above, and `1.5 ~/ 0` is _Double.~/.
 		//
 		// The test belongs in the two operator branches and not at the head of
-		// this function; written once at the top, the layer-2 twin of it cost
-		// tests/bench/mod.dart 9.61% (slower in 15 of 15 paired draws) by running
-		// on every `+`, `-`, `*` and `&` in the program. A sized integer is only
-		// ever built past 2^53, so a zero divisor is always the plain number.
+		// this function: at the top it would run on every `+`, `-`, `*` and `&`
+		// in the program, which is measurably slower in the layer-2 twin. A sized
+		// integer is only ever built past 2^53, so a zero divisor is always the
+		// plain number.
 		if ri == float64(0) {
 			panic(&jsThrown{value: rt.dartExcNew("IntegerDivisionByZeroException", "", nil)})
 		}
@@ -1325,8 +1309,8 @@ func (rt *jsrt) dartIdentical(a, b interface{}) bool {
 }
 
 // dartNumMember answers num's own members - the getters and methods dart:core
-// declares on num / int / double. They matter far more now that int and double are
-// distinct, because toInt / toDouble are how a program crosses between them.
+// declares on num / int / double. toInt / toDouble are how a program crosses
+// between the two distinct types.
 // floor, ceil, round and truncate answer an INT even on a double; abs keeps the
 // operand's type.
 // Cited: language/operator/arithmetic_test.dart:96-116 (floor/ceil/round/truncate on

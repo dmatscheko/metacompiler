@@ -17,8 +17,8 @@ package abnf
 //
 // The first two need the DECLARED WIDTH of the variable to survive into the
 // increment; the last three need 64 bits of precision, which a double has not
-// got. So the type goes ON the value, exactly as commit 636e326 put floatness on
-// the value with the jsJFlo box.
+// got. So the type goes ON the value, as the jsJFlo box puts floatness on the
+// value.
 //
 // jsGInt is that box. The invariant, in both halves of every language that opts
 // in:
@@ -32,8 +32,8 @@ package abnf
 //	jsJFlo         ==  a float64 / float32                    (jsrtjvm.go)
 //
 // Keeping the common case a PLAIN NUMBER is deliberate and is what makes the
-// change affordable: a program that never writes a sized type and never leaves
-// 2^53 allocates no box at all and runs exactly the code it ran before. The box
+// box affordable: a program that never writes a sized type and never leaves
+// 2^53 allocates no box at all. The box
 // is rare, so the handful of places that consume a number raw (an array index, a
 // slice bound, a map key) meet one only in the programs that asked for it.
 //
@@ -162,9 +162,8 @@ func (rt *jsrt) giArith(op string, l, r interface{}) interface{} {
 	// `>> <RHS: BinaryInteger>` (the count is any integer type, the result is
 	// Self). giWidthOf reads the type off WHICHEVER operand is boxed, so a plain
 	// `int` shifted by a `uint8` count would come out 8 bits UNSIGNED. Every
-	// language's layer 2 normalises the count before it gets here - measured, see
-	// the note in si_apply - so this is a guard on the primitive, not a repair of
-	// an observable bug.
+	// language's layer 2 normalises the count before it gets here (see the note
+	// in si_apply), so this is a guard on the primitive.
 	if op == "<<" || op == ">>" {
 		w, u = giWidthOf(l, l)
 	}
@@ -352,11 +351,8 @@ var giOpNames = []string{"+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>
 //
 // WHY IT IS HERE. A natively linked program reaches a sized integer through
 // those names; a program run by llvm.Run reaches the very same runtime through
-// abnf/jsrt*.go, and until this existed it reached NOTHING - `sint` was
-// "variable not defined" in the Go half while it worked in the C one. A layer-2
-// file written against the C floor (languages/lib/lua-rt.metajs is the first)
-// therefore could not be run by llvm.Run at all, and no MetaJS source program
-// could pin the tag's semantics in a test that both halves run. Every function
+// abnf/jsrt*.go, so a layer-2 file written against the C floor (e.g.
+// languages/lib/lua-rt.metajs) needs them bound here too. Every function
 // below is the same giXxx the C floor's si_xxx transliterates, so the three
 // engines (goja/frozen interpreter, llvm.Run, native) implement one spec.
 func giBindings(b map[string]interface{}) {
@@ -477,11 +473,8 @@ func programJSBindings() map[string]interface{} {
 	})
 	fnMetaBindings(b)
 	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
-	// languages/lib/runtime.c, whose comment already claims "the Go twin's rt.fail
-	// panics with exactly this text". It did, but the name was not BOUND here, so
-	// `fail` was a floor-only global: every layer-2 file calls it (kotlin-rt 73
-	// times, python-rt 65, ruby-rt 38) and a MetaJS program could call it in a
-	// native binary and not under llvm.Run. docs/todo.md 4.1.
+	// languages/lib/runtime.c (rt.fail panics with exactly that text). Every
+	// layer-2 file calls it, so it must be bound under llvm.Run too.
 	b["fail"] = jsHostFunc("fail", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		rt.fail("%s", rt.toString(argAt(args, 0)))
 		return jsUndef
@@ -615,13 +608,10 @@ func fnMetaBindings(b map[string]interface{}) {
 //
 // WHY THEY EXIST. A scope is the floor's private storage. An emitter hands a
 // layer-2 function a scope handle - js_pyset_var's `s`, and every `defined?` /
-// `isset` / `global` / `nonlocal` probe - and until now layer 2 could do
-// NOTHING with it: MetaJS cannot open a cell, and no extern is callable from a
-// MetaJS source file. Six languages answered that by lowering the probe into
-// their EMITTER instead (docs/runtime-next-plan.md: swift, dart, go, ruby,
-// kotlin's nine helpers, python's six), which is the same IR-building written
-// out once per language for one language-neutral question. Three separate
-// migration reports asked for this API by name.
+// `isset` / `global` / `nonlocal` probe - and MetaJS cannot open a cell, and no
+// extern is callable from a MetaJS source file. Without these the probe has to
+// be lowered into each language's EMITTER instead, the same IR-building
+// written out once per language for one language-neutral question.
 //
 //	scopeNew(parent)      a scope whose parent is `parent`; undefined / null /
 //	                      a missing argument means NO parent
@@ -691,11 +681,9 @@ func scopeBindings(b map[string]interface{}) {
 	// host engine's, where a closure, a host function and a bound method are
 	// one JS function. Every OTHER distinction a tag would carry already has a
 	// name layer 2 can use: typeof, sintIs, floIs, and `typeof v.length ==
-	// "number"` for an array. A generator is the one shape with no such name,
-	// and languages/lib/php-rt.metajs's phIsGen is the evidence - it excludes
-	// __dict / __refcell / __isclass / __class / length one at a time and then
-	// asks whether v["next"] is callable, which php's own migration report
-	// calls "the one guess in this port".
+	// "number"` for an array. A generator is the one shape with no such name
+	// (without it, a check has to exclude __dict / __refcell / __isclass /
+	// __class / length one at a time and then guess from a callable v["next"]).
 	//
 	// A generator is an OBJECT to typeof in all three halves, so this refines
 	// typeof and never contradicts it.
