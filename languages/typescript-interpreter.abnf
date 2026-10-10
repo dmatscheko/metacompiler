@@ -442,7 +442,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = SuperPreUpdate | PreIncDec | PreUpdateExpr | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = SuperPreUpdate | PreIncDec | PreUpdateExpr | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | DeleteLhs | Delete | Void | Await | PostfixExpr ;
 // '++super.x' / '--super[i]'. Target starts at 'NotReserved Id', which refuses the
 // reserved word 'super', so PreIncDec cannot reach a super property and the form needs
 // its own production - exactly the reason SuperAssign exists next to Assignment. It is
@@ -460,6 +460,10 @@ DeleteMember <~~ push(makeDeleteMember(pop())) ~~>
             = KwDelete DeleteTarget ;
 DeleteTarget <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead LhsSuffixes NotChainSuffix ;
+// See the twin of this comment in js-interpreter.abnf. A parenthesised cast,
+// 'delete (Math as any).sqrt', is such a primary.
+DeleteLhs   <~~ push(makeDeleteMember(makeLhsRef(takeAll()))) ~~>
+            = KwDelete LhsHead LhsSuffixes NotChainSuffix ;
 // Deleting anything that is not a property ('delete x', 'delete 1') is a no-op that
 // yields true in sloppy mode; it is accepted and not lowered.
 Delete      <~~ pop(); push(notImplExpr("delete operator", up.pos)) ~~>
@@ -7373,6 +7377,10 @@ NotFuncHead = :script(~~
             refSet(ref, v)
             return v
         }
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function makeLhsRef(items) {
+        return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1)}
     }
     // See the twin of this comment in js-interpreter.abnf.
     function makeLhsAssign(items) {

@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-60.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-61.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,10 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-60, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-61, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty
+//                             hasOwnProperty, delete
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1230,6 +1230,16 @@ function s60() {
     check("hop4", Math.hasOwnProperty("abs") && !Math.hasOwnProperty("nope") && ({hasOwnProperty: () => 9}).hasOwnProperty() === 9)
 }
 
+// ===== SECTION 61: delete through any primary =====
+// The object a delete removes from may be any primary: a comma expression, an array
+// literal's element, a call's result, a parenthesized name. Values read off node 24.
+function s61() {
+    var o = {a: 1, b: 2, c: {d: 4, e: 5}, f: 6}
+    function g() { return o }
+    var r = [delete (0, o).a, delete [o][0].b, delete g().c.d, delete (o).f]
+    check("del1", r.join() === "true,true,true,true" && JSON.stringify(o) === '{"c":{"e":5}}' && Object.keys(o).join() === "c")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1249,6 +1259,7 @@ function main() {
     s58() // SECTION-CALL 58
     s59() // SECTION-CALL 59
     s60() // SECTION-CALL 60
+    s61() // SECTION-CALL 61
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

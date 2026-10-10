@@ -3158,6 +3158,16 @@ function s54() {
     check("hop03", Object.prototype.hasOwnProperty.call([5], "0") && !Object.prototype.hasOwnProperty.call([5], "1"));
 }
 
+// ===== SECTION 55: delete through a type assertion =====
+// 'delete (x as T).k' deletes through the parenthesized assertion, as through any other
+// primary. Values read off node 24.
+function s55() {
+    const o: any = {a: 1, b: 2, c: {d: 4, e: 5}};
+    const m: {sqrt?: number, abs: number} = {sqrt: 1, abs: 2};
+    const r = [delete (o as any).a, delete (o.c as {d?: number}).d, delete (o!).b, delete (m as any).sqrt];
+    check("del01", r.join() === "true,true,true,true" && JSON.stringify(o) === '{"c":{"e":5}}' && Object.keys(m).join() === "abs");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3215,6 +3225,7 @@ function main(): number {
     s52(); // SECTION-CALL 52
     s53(); // SECTION-CALL 53
     s54(); // SECTION-CALL 54
+    s55(); // SECTION-CALL 55
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -476,13 +476,17 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = PreIncDec | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = PreIncDec | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | DeleteLhs | Delete | Void | Await | PostfixExpr ;
 // 'delete o.k' removes the property: the value model has no host delete, so the slot is
 // blanked AND the key is dropped from the object's __keys list, which is what 'in' and
 // for-in read (see jsKeys / makeIn). Tried before the general Delete so the member form
 // always wins.
 DeleteMember <~~ push(makeDeleteMember(pop())) ~~>
             = KwDelete Target ;
+// A property of any other primary: 'delete (0, o).k', 'delete f().k' - the LhsAssign
+// head and path, with nothing chained after the last member.
+DeleteLhs   <~~ push(makeDeleteMember(makeLhsRef(takeAll()))) ~~>
+            = KwDelete LhsHead LhsSuffixes NotSuffix ;
 // Deleting anything that is not a property ('delete x', 'delete 1') is a no-op that
 // yields true in sloppy mode; it is accepted and not lowered.
 Delete      <~~ pop(); push(notImplExpr("delete operator", up.pos)) ~~>
@@ -8774,6 +8778,10 @@ NotFuncHead = :script(~~
     // arbitrary expression reached through at least one member access, so the reference
     // it builds carries the primary's thunk instead of a variable name; everything after
     // that is the ordinary assignment path.
+    // The reference an LhsHead and its suffixes name: resolveRef evaluates the primary.
+    function makeLhsRef(items) {
+        return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1)}
+    }
     function makeLhsAssign(items) {
         var ref = {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length - 2)}
         var op = items[items.length - 2]
