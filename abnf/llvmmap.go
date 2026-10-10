@@ -1762,10 +1762,33 @@ func (ma *machine) recycle(l *funcLayout, f *ir.Func) {
 	if argSlot >= 0 {
 		live[argSlot] = true
 	}
-	use := func(o int32) { delete(live, o) }
+	// A phi with ONE incoming value is a copy of it, not a use: compile-core's
+	// makeBlockStmt hands a block's scope to its body through exactly such a phi.
+	// A use of the copy is a use of what it copies.
+	alias := map[int32]int32{}
+	for bi := range l.blocks {
+		for _, ph := range l.blocks[bi].phis {
+			if len(ph.incs) == 1 {
+				alias[ph.dst] = ph.incs[0].x
+			}
+		}
+	}
+	use := func(o int32) {
+		for n := 0; n <= len(alias); n++ {
+			delete(live, o)
+			src, ok := alias[o]
+			if !ok {
+				return
+			}
+			o = src
+		}
+	}
 	for bi := range l.blocks {
 		db := &l.blocks[bi]
 		for _, ph := range db.phis {
+			if len(ph.incs) == 1 {
+				continue
+			}
 			for _, inc := range ph.incs {
 				use(inc.x)
 			}

@@ -1827,8 +1827,7 @@ NotYieldBind = :script(~~
         // Re-derived from the source text on every call - see NotStrict for why a guard
         // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
         // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
-        var back = 0
-        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
         var gen = 0          // 1 when the code here is inside a generator's params or body
@@ -2096,8 +2095,7 @@ InGen = :script(~~
         // Re-derived from the source text on every call - see NotStrict for why a guard
         // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
         // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
-        var back = 0
-        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
         var gen = 0          // 1 when the code here is inside a generator's params or body
@@ -2261,8 +2259,7 @@ InFunc = :script(~~
         // Re-derived from the source text on every call - see NotStrict for why a guard
         // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
         // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
-        var back = 0
-        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
         var gen = 0          // 1 when the code here is inside a generator's params or body

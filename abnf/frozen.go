@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 	"time"
@@ -757,6 +758,17 @@ func (ps *frozenParserScript) init() {
 		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
 		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
 		"popSource":      func() { popTraceSource() },
+	}
+	// A raw Go func gets a fresh handle every time it is read (funcs are not
+	// comparable, so they cannot be interned), and a lookahead guard reads c.peek
+	// once per byte it scans: as host functions the members are read as the same
+	// pointer, hence the same handle, every time.
+	for k, v := range ps.cMap {
+		if fv := reflect.ValueOf(v); fv.Kind() == reflect.Func {
+			ps.cMap[k] = &hostFunc{name: k, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.reflectCall(fv, args)
+			}}
+		}
 	}
 	bindings := frozenBaseBindings(ps.pa.opts.PreventDefaultOutput)
 	bindings["llvm"] = llvmFuncMap
