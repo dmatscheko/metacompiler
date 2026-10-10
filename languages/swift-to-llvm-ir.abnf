@@ -3304,18 +3304,33 @@ KwContinue  = "continue" KwEnd ;
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
-            || name == "forEach" || name == "shuffled"
+            || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
+            || name == "count" || name == "contains"
     }
     function swSeqKeepsString(name) {
         return name == "filter" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast"
     }
-    function rtStrMeth(name) {
+    //
+    // A Dictionary IS a Sequence of `(key: K, value: V)` pairs (rtArrayOf), and the
+    // member runs over those; `filter` alone answers a Dictionary again
+    // (rtPairsDict). `contains` with a String argument is the substring test, which
+    // the runtime answers on the unsplit receiver. Twin: the String and Dictionary
+    // arms of mcall in swift-interpreter.abnf.
+    function rtSeqMeth(name) {
         var keep = swSeqKeepsString(name)
-        return rtFunc("sw_strm_" + name, 2, function(b, ps) {
+        return rtFunc("sw_seqm_" + name, 2, function(b, ps) {
             var sB = curF.NewBlock("")
             var oB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
+            plainB.NewRet(callExt(plainB, "js_swmcall", [ps[0], emitStr(plainB, name), ps[1]]))
+            if (name == "contains") {
+                var splitB = curF.NewBlock("")
+                var a0 = callExt(sB, "js_arg", [ps[1], handle(0)])
+                sB.NewCondBr(truthy(sB, callExt(sB, "js_is_type", [a0, emitStr(sB, "String")])), plainB, splitB)
+                sB = splitB
+            }
             var gV = sB.NewCall(rtGSplit(), [ps[0]])
             var rV = callExt(sB, "js_swmcall", [gV, emitStr(sB, name), ps[1]])
             if (!keep) { sB.NewRet(rV) }
@@ -3323,7 +3338,39 @@ KwContinue  = "continue" KwEnd ;
                 sB.NewRet(callExt(sB, "js_swmcall", [rV, emitStr(sB, "joined"),
                                                      callExt(sB, "js_arr_new", [])]))
             }
-            oB.NewRet(callExt(oB, "js_swmcall", [ps[0], emitStr(oB, name), ps[1]]))
+            // The Dictionary test has to be safe on ANY receiver (nil, a number, a
+            // struct), so both parallel arrays are read through rtProbe.
+            var notArrB = curF.NewBlock("")
+            var valsB = curF.NewBlock("")
+            var dictB = curF.NewBlock("")
+            oB.NewCondBr(truthy(oB, callExt(oB, "js_is_type", [ps[0], emitStr(oB, "Array")])), plainB, notArrB)
+            var kV = notArrB.NewCall(rtProbe("sw_dkeys", "keys"), [ps[0]])
+            notArrB.NewCondBr(truthy(notArrB, callExt(notArrB, "js_is_type", [kV, emitStr(notArrB, "Array")])), valsB, plainB)
+            var vV = valsB.NewCall(rtProbe("sw_dvals", "vals"), [ps[0]])
+            valsB.NewCondBr(truthy(valsB, callExt(valsB, "js_is_type", [vV, emitStr(valsB, "Array")])), dictB, plainB)
+            var dV = callExt(dictB, "js_swmcall", [dictB.NewCall(rtArrayOf(), [ps[0]]), emitStr(dictB, name), ps[1]])
+            if (name == "filter") { dV = dictB.NewCall(rtPairsDict(), [dV]) }
+            dictB.NewRet(dV)
+        })
+    }
+    // The way back from rtArrayOf's pairs to a Dictionary, in order.
+    function rtPairsDict() {
+        return rtFunc("sw_pairsdict", 1, function(b, ps) {
+            var d = callExt(b, "js_dict_new", [])
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [ps[0]])])), bodyB, doneB)
+            var pV = callExt(bodyB, "js_swidx", [ps[0], iV])
+            callExt(bodyB, "js_pyset", [d, callExt(bodyB, "js_get", [pV, emitStr(bodyB, "0")]),
+                                        callExt(bodyB, "js_get", [pV, emitStr(bodyB, "1")])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(d)
         })
     }
     // `a.reduce(0, +)` / `a.sorted(by: >)`: the operator NAMED as a value. It becomes
@@ -3375,7 +3422,7 @@ KwContinue  = "continue" KwEnd ;
         if (name == "popLast") { return b.NewCall(rtPopLast(), [recvV]) }
         if (name == "uppercased") { return b.NewCall(rtCased(true), [recvV]) }
         if (name == "lowercased") { return b.NewCall(rtCased(false), [recvV]) }
-        if (swIsSeqMember(name)) { return b.NewCall(rtStrMeth(name), [recvV, argsV]) }
+        if (swIsSeqMember(name)) { return b.NewCall(rtSeqMeth(name), [recvV, argsV]) }
         return callExt(b, "js_swmcall", [recvV, nameV, argsV])
     }
     function swEmitSub(b, sV, aV, bV) {
@@ -4286,7 +4333,9 @@ KwContinue  = "continue" KwEnd ;
             // Array and falls through to js_get for everything else, so a user type
             // with a member of that name is not hijacked. It PRODUCES a Range, so it
             // arms hasRanges: a program can hold one with no `...` in its text.
-            || name == "indices") {
+            || name == "indices"
+            // A Dictionary's .values: the floor's js_get does not know the name.
+            || name == "values") {
             if (name == "indices") { hasRanges = true }
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
@@ -5595,8 +5644,9 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. The sequence walked by index is
-    // the array itself, or - for a dictionary - its key array (js_keys); a tuple
-    // pattern over a dictionary binds (key, value), like the interpreter.
+    // the array itself, or - for a dictionary - its `(key:, value:)` pairs, which a
+    // plain name binds whole and `(k, v)` destructures. Twin: swSeqVal in
+    // swift-interpreter.abnf.
     function makeForList(items) {
         var lbl = itemLbl(items)
         var rest = itemsAfterLbl(items)
@@ -5606,11 +5656,9 @@ KwContinue  = "continue" KwEnd ;
         var whereT = null
         if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
         var bodyT = rest[k]
-        var wantPair = pat.tnames != undefined
         return function(b) {
             hidCount++
             var iName = "$i" + hidCount
-            var aName = "$a" + hidCount
             var sName = "$s" + hidCount
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
@@ -5625,9 +5673,8 @@ KwContinue  = "continue" KwEnd ;
             // A String is a sequence of CLUSTERS, not of code units - see rtStrSeq.
             if (hasUniStr) { r = {b: r.b, v: r.b.NewCall(rtStrSeq(), [r.v])} }
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
             // The indexable sequence: the value itself for an array or a string, its
-            // key array for a dictionary.
+            // `(key:, value:)` pairs for a dictionary (rtArrayOf).
             var rd = emitIsDict(b, r.v)
             b = rd.b
             var arrB = curF.NewBlock("")
@@ -5635,9 +5682,9 @@ KwContinue  = "continue" KwEnd ;
             var seqB = curF.NewBlock("")
             b.NewCondBr(truthy(b, rd.v), dictB, arrB)
             arrB.NewBr(seqB)
-            var keysV = callExt(dictB, "js_keys", [r.v])
+            var pairsV = dictB.NewCall(rtArrayOf(), [r.v])
             dictB.NewBr(seqB)
-            var seqV = seqB.NewPhi([llvm.ir.NewIncoming(r.v, arrB), llvm.ir.NewIncoming(keysV, dictB)])
+            var seqV = seqB.NewPhi([llvm.ir.NewIncoming(r.v, arrB), llvm.ir.NewIncoming(pairsV, dictB)])
             b = seqB
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
@@ -5652,27 +5699,7 @@ KwContinue  = "continue" KwEnd ;
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
-            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            var rawV = callExt(bodyB, "js_swidx", [sV2, iV2])
-            var elV = rawV
-            if (wantPair) {
-                // A tuple pattern over a dictionary iterates (key, value) pairs; over an
-                // array the element already IS the tuple.
-                var rd2 = emitIsDict(bodyB, aV2)
-                bodyB = rd2.b
-                var pArrB = curF.NewBlock("")
-                var pDictB = curF.NewBlock("")
-                var pJoinB = curF.NewBlock("")
-                bodyB.NewCondBr(truthy(bodyB, rd2.v), pDictB, pArrB)
-                pArrB.NewBr(pJoinB)
-                var pairV = callExt(pDictB, "js_obj_new", [])
-                callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "__tuple"), emitNum(pDictB, 2)])
-                callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "0"), rawV])
-                callExt(pDictB, "js_set", [pairV, emitStr(pDictB, "1"), callExt(pDictB, "js_swidx", [aV2, rawV])])
-                pDictB.NewBr(pJoinB)
-                elV = pJoinB.NewPhi([llvm.ir.NewIncoming(rawV, pArrB), llvm.ir.NewIncoming(pairV, pDictB)])
-                bodyB = pJoinB
-            }
+            var elV = callExt(bodyB, "js_swidx", [sV2, iV2])
             // A FRESH SCOPE per iteration, and emitBindForPat declares INTO it - see the
             // header above makeForRange. Both names of a tuple pattern are per-iteration
             // bindings, so `for (k, v) in m { fs.append({ k }) }` captures each one.

@@ -2575,6 +2575,50 @@ func s43() {
     check("43c", hits == 3 && [apply43 { 4 }, apply43 { 5 }] == [4, 5])
 }
 
+// ===== SECTION 44: a Dictionary as a Sequence of (key:, value:) pairs =====
+// One binder in a for-in takes the whole pair; the Sequence members run over the
+// pairs, and `filter` alone answers a Dictionary. Swift's iteration order is
+// unspecified, so every check is order-free. Every value is swiftc 6.1.2's.
+func s44() {
+    let one = ["a": 1]
+    var seen = ""
+    for e in one { seen += e.key + String(e.value) + "\(e)" }
+    check("44a", seen == "a1(key: \"a\", value: 1)")
+    let d = ["a": 1, "b": 2, "c": 3]
+    var keys = [String]()
+    for (k, v) in d where v > 1 { keys.append(k) }
+    check("44b", keys.sorted() == ["b", "c"] && d.map { $0.value * 2 }.sorted() == [2, 4, 6])
+    let f = d.filter { $0.value > 1 }
+    check("44c", f.count == 2 && f["b"] == 2 && f["a"] == nil && d.filter { $0.value > 5 }.isEmpty)
+    check("44d", d.first(where: { $0.value == 2 })!.key == "b" && d.min(by: { $0.value < $1.value })!.key == "a"
+                 && d.max(by: { $0.value < $1.value })!.value == 3)
+    let s = d.sorted(by: { $0.key < $1.key })
+    check("44e", s.map { $0.key } == ["a", "b", "c"] && s[2].value == 3 && d.sorted { $0.value > $1.value }[0].key == "c")
+    check("44f", d.contains(where: { $0.key == "b" }) && !d.contains(where: { $0.value > 3 })
+                 && d.reduce(0) { $0 + $1.value } == 6 && d.count(where: { $0.value > 1 }) == 2
+                 && d.allSatisfy { $0.value > 0 } && d.values.sorted() == [1, 2, 3])
+}
+
+// ===== SECTION 45: the String members that take a String =====
+// hasPrefix / hasSuffix / starts(with:) / contains(_:) compare text; the closure
+// forms contains(where:), first(where:) and count(where:) walk the Characters, as
+// first(where:) / last(where:) / count(where:) walk an Array.
+// Every value is swiftc 6.1.2's.
+func s45() {
+    let ws = ["abc", "xbz", ""]
+    var row = ""
+    for w in ws {
+        row += "\(w.hasPrefix("ab")),\(w.hasSuffix("bc")),\(w.contains("b")),\(w.starts(with: "x"));"
+    }
+    check("45a", row == "true,true,true,false;false,false,true,true;false,false,false,false;")
+    let w = ws[0]
+    check("45b", w.hasPrefix("") && w.hasSuffix("") && !w.hasSuffix("zabc") && w.contains("bc") && !w.contains("ac"))
+    check("45c", w.contains(where: { $0 == "c" }) && !w.contains(where: { $0 == "q" })
+                 && w.first(where: { $0 > "a" })! == "b" && w.count(where: { $0 != "b" }) == 2)
+    check("45d", [3, 1, 2].first(where: { $0 < 3 })! == 1 && [3, 1, 2].last(where: { $0 > 1 })! == 2
+                 && [3, 1, 2].count(where: { $0 > 1 }) == 2 && [1].first(where: { $0 > 1 }) == nil)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2621,6 +2665,8 @@ func main() {
     s41() // SECTION-CALL 41
     s42() // SECTION-CALL 42
     s43() // SECTION-CALL 43
+    s44() // SECTION-CALL 44
+    s45() // SECTION-CALL 45
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -2899,6 +2899,8 @@ KwContinue  = "continue" KwEnd ;
                 for (var i = 0; i < lb.length; i++) { if (lb[i] == name) { return o.__vals[i] } }
             }
         }
+        // A Dictionary's `values` live under `vals` (its `keys` are an own field).
+        if (name == "values" && isDict(o)) { return o.vals.slice(0) }
         if (hasOwn(o, name)) { return o[name] }
         // A nested type declared inside an ENUM is installed on the enum's MEMBER
         // TABLE, not on the descriptor, so `Outer.Mode` as a field read has to look
@@ -3093,12 +3095,19 @@ KwContinue  = "continue" KwEnd ;
             if (typeof bm == "function") { return bm.apply(undefined, concat2impl([target], args)) }
         }
         if (typeof target == "string") {
-            if (name == "count") { return swGraphemeCount(target) }
+            if (name == "count" && args.length == 0) { return swGraphemeCount(target) }
             if (name == "uppercased") { return target.toUpperCase() }
             if (name == "lowercased") { return target.toLowerCase() }
-            if (name == "hasPrefix") { return target.slice(0, args[0].length) === args[0] }
-            if (name == "contains" && (args.length == 0 || typeof args[0] != "function")) {
-                return target.indexOf(args[0]) >= 0
+            // The members that take a String argument compare text, with no
+            // Character walk. The compiled halves' twins are swStrMethod in
+            // abnf/jsrtswift.go and the String arm of js_mcall in lib/swift-rt.metajs.
+            if (args.length > 0 && typeof args[0] == "string") {
+                var sa = args[0]
+                if (name == "hasPrefix" || name == "starts") { return target.slice(0, sa.length) === sa }
+                if (name == "hasSuffix") {
+                    return sa.length <= target.length && target.slice(target.length - sa.length, target.length) === sa
+                }
+                if (name == "contains") { return target.indexOf(sa) >= 0 }
             }
             // A String IS a Collection of Characters in Swift, so every Sequence
             // member applies to it - `"hello".map { $0 }` is
@@ -3106,7 +3115,7 @@ KwContinue  = "continue" KwEnd ;
             // into GRAPHEME CLUSTERS, the array member runs, and the five members
             // whose Swift result is a String/Substring are joined back:
             // `"hello".filter { $0 != "l" }` is the String "heo" and
-            // `"hello".prefix(2)` prints `he`. The twin is rtStrMeth in
+            // `"hello".prefix(2)` prints `he`. The twin is rtSeqMeth in
             // swift-to-llvm-ir.abnf, which emits the same split-run-join around the
             // same js_swmcall - so layer 2 and the Go twin never see a String here.
             if (swIsSeqMember(name)) {
@@ -3132,9 +3141,18 @@ KwContinue  = "continue" KwEnd ;
             fail("unknown Double method: " + name)
         }
         if (isDict(target)) {
-            if (name == "count") { return target.keys.length }
+            if (name == "count" && args.length == 0) { return target.keys.length }
             if (name == "keys") { return target.keys.slice(0) }
             if (name == "values") { return target.vals.slice(0) }
+            // A Dictionary IS a Sequence of `(key: K, value: V)` pairs, so its
+            // Sequence members run over those; `filter` alone answers a Dictionary
+            // again (swiftc: `["a": 1].filter { $0.value > 0 }` is ["a": 1]). The
+            // twin is rtSeqMeth in swift-to-llvm-ir.abnf.
+            if (swIsSeqMember(name)) {
+                var dres = arrayMethod(swDictPairs(target), name, args)
+                if (name == "filter") { return swPairsDict(dres) }
+                return dres
+            }
             fail("unknown Dictionary method: " + name)
         }
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
@@ -3182,7 +3200,12 @@ KwContinue  = "continue" KwEnd ;
     function arrayMethod(t, name, args) {
         var i
         var out
-        if (name == "count") { return t.length }
+        if (name == "count") {
+            if (args.length == 0) { return t.length }
+            var cn = 0
+            for (i = 0; i < t.length; i++) { if (args[0](t[i])) { cn++ } }
+            return cn
+        }
         if (name == "append") { t.push(args[0]); return undefined }
         // insert(_:at:). There is
         // no splice in this dialect, so the tail is shifted up by one. Twins:
@@ -3220,8 +3243,14 @@ KwContinue  = "continue" KwEnd ;
             }
             return t.indexOf(args[0]) >= 0
         }
-        if (name == "first") { return t.length == 0 ? null : t[0] }
-        if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
+        // first(where:) / last(where:); the property forms are swFirstLast.
+        if (name == "first" || name == "last") {
+            for (i = 0; i < t.length; i++) {
+                var fe = name == "last" ? t[t.length - 1 - i] : t[i]
+                if (args[0](fe)) { return fe }
+            }
+            return null
+        }
         if (name == "map") {
             out = []
             for (i = 0; i < t.length; i++) { out.push(args[0](t[i])) }
@@ -3340,17 +3369,41 @@ KwContinue  = "continue" KwEnd ;
     // as bare text). `firstIndex(of:)` is deliberately NOT in the list: on a String
     // it answers a String.Index, whose printed form is an opaque `Index(_rawBits:)`
     // that no value model here can produce. These two lists are duplicated in
-    // rtStrMeth (swift-to-llvm-ir.abnf) and must stay in step.
+    // rtSeqMeth (swift-to-llvm-ir.abnf) and must stay in step.
     function swIsSeqMember(name) {
         return name == "map" || name == "filter" || name == "sorted" || name == "reversed"
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
-            || name == "forEach" || name == "shuffled"
+            || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
+            || name == "count" || name == "contains"
     }
     function swSeqKeepsString(name) {
         return name == "filter" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast"
+    }
+    // A Dictionary's elements: one `(key: K, value: V)` tuple per entry, in order.
+    // swPairsDict is the way back, for the members whose result is a Dictionary.
+    function swDictPairs(x) {
+        var pairs = []
+        for (var d = 0; d < x.keys.length; d++) {
+            var pt = {__tuple: 2}
+            scopePut(pt, "__tlabels", ["key", "value"])
+            scopePut(pt, "0", x.keys[d])
+            scopePut(pt, "key", x.keys[d])
+            scopePut(pt, "1", x.vals[d])
+            scopePut(pt, "value", x.vals[d])
+            pairs.push(pt)
+        }
+        return pairs
+    }
+    function swPairsDict(ps) {
+        var out = {__dict: true, keys: [], vals: []}
+        for (var i = 0; i < ps.length; i++) {
+            out.keys.push(ps[i]["0"])
+            out.vals.push(ps[i]["1"])
+        }
+        return out
     }
     function swJoinStrs(xs) {
         if (!Array.isArray(xs)) { return xs }
@@ -5373,16 +5426,16 @@ KwContinue  = "continue" KwEnd ;
             return res
         }
     }
-    // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. Iterating a dictionary with a
-    // tuple pattern yields (key, value) pairs; with a plain name it yields the keys.
-    // What a for-in walks: a Range's elements, a `repeat` pack's tuple elements, and
-    // a String's CLUSTERS (`for c in "cafe\u{301}"` is c, a, f, é - the trip count
-    // and the elements must both be clusters). Everything else, arrays
-    // and dictionaries included, passes through untouched.
+    // items = [{lbl}?, pat, listT, {fwhere}?, bodyT].
+    // What a for-in walks: a Range's elements, a `repeat` pack's tuple elements, a
+    // String's CLUSTERS (`for c in "cafe\u{301}"` is c, a, f, é - the trip count
+    // and the elements must both be clusters), and a Dictionary's `(key:, value:)`
+    // pairs, which a plain name binds whole and `(k, v)` destructures.
     function swSeqVal(v) {
         if (isRange(v)) { return rangeArray(v) }
         if (isTupleVal(v)) { return tupleArray(v) }
         if (typeof v == "string") { return swGraphemes(v) }
+        if (isDict(v)) { return swDictPairs(v) }
         return v
     }
     function makeForList(items) {
@@ -5394,7 +5447,6 @@ KwContinue  = "continue" KwEnd ;
         var whereT = null
         if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
         var bodyT = rest[k]
-        var wantPair = pat.tnames != undefined
         return function() {
             // OUT OF LINE, and it has to be: MetaJS is typed and a local that has
             // held a string cannot later hold the array swGraphemes answers - and
@@ -5403,14 +5455,10 @@ KwContinue  = "continue" KwEnd ;
             var arr = anytype
             arr = swSeqVal(listT())
             var res = undefined
-            var isD = isDict(arr)
             var n = swlen(arr)
             for (var i = 0; i < n; i++) {
-                var el = anytype
-                if (isD) { el = wantPair ? newTupleVal([arr.keys[i], arr.vals[i]]) : arr.keys[i] }
-                else { el = arr[i] }
                 scopes.push({})
-                bindForPat(pat, el)
+                bindForPat(pat, arr[i])
                 var r = undefined
                 if (whereT == null || core.test(whereT())) { r = bodyT() }
                 scopes.pop()
@@ -7057,19 +7105,7 @@ KwContinue  = "continue" KwEnd ;
         if (typeof x == "string") { return swGraphemes(x) }
         if (isRange(x)) { return rangeArray(x) }
         if (isTupleVal(x)) { return tupleArray(x) }
-        if (isDict(x)) {
-            var pairs = []
-            for (var d = 0; d < x.keys.length; d++) {
-                var pt = {__tuple: 2}
-                scopePut(pt, "__tlabels", ["key", "value"])
-                scopePut(pt, "0", x.keys[d])
-                scopePut(pt, "key", x.keys[d])
-                scopePut(pt, "1", x.vals[d])
-                scopePut(pt, "value", x.vals[d])
-                pairs.push(pt)
-            }
-            return pairs
-        }
+        if (isDict(x)) { return swDictPairs(x) }
         if (Array.isArray(x)) { return x.slice(0) }
         fail("Array(): not a sequence")
         return []

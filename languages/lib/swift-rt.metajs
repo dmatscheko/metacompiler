@@ -1230,6 +1230,19 @@ function js_mcall(recv, name, args) {
         }
         if (name === "indexOf") { return recv.indexOf("" + args[0]) }
         if (name === "isEmpty") { return recv.length == 0 }
+        // The members that take a String argument and compare text, with no
+        // Character walk. Twins: swStrMethod in abnf/jsrtswift.go and the String
+        // arm of mcall in languages/swift-interpreter.abnf.
+        if (args.length > 0 && typeof args[0] == "string") {
+            var sa = args[0]
+            if (name === "contains") { return recv.indexOf(sa) >= 0 }
+            if (name === "hasPrefix" || name === "starts" || name === "hasSuffix") {
+                if (sa.length > recv.length) { return false }
+                var at = 0
+                if (name === "hasSuffix") { at = recv.length - sa.length }
+                return recv.substring(at, at + sa.length) === sa
+            }
+        }
         fail("unknown String method: " + name)
     }
     if (rtIsArr(recv)) { return swListMethod(recv, name, args) }
@@ -1598,6 +1611,18 @@ function swSeqMethod(o, name, args) {
             i = i + 1
         }
         return found
+    }
+    // first(where:) / last(where:); the property forms never reach here.
+    if (name === "first" || name === "last") {
+        i = 0
+        while (i < n) {
+            var fe = anytype
+            fe = o[i]
+            if (name === "last") { fe = o[n - 1 - i] }
+            if (swTruth(args[0].apply(undefined, [fe]))) { return fe }
+            i = i + 1
+        }
+        return null
     }
     if (name === "allSatisfy") {
         i = 0
@@ -2358,6 +2383,8 @@ function js_swget(v, k) {
     // indices is a PROPERTY on every Collection. Only an Array is answered: a String's indices are String.Index values
     // with no printable form here. swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
     if (k === "indices" && rtIsArr(v)) { return swMkRange(0, v.length, false) }
+    // A Dictionary's values, as a copy. The Go twin answers it in abnf/jsrt.go's js_get.
+    if (k === "values" && rtIsDictObj(v)) { return rtCopyArr(v["vals"]) }
     // The same three on a value that stayed a plain number, which is where every
     // integer inside +/- 2^53 lives.
     if (typeof v == "number") {

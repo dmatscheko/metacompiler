@@ -918,6 +918,11 @@ func init() {
 				// plain value, not a method. Twins: js_mcall in
 				// languages/lib/swift-rt.metajs, swMethodCall in
 				// languages/swift-interpreter.abnf.
+				if s, isStr := u(a[0]).(string); isStr {
+					if v, ok := swStrMethod(s, rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
+						return w(v)
+					}
+				}
 				if fn := swFieldFn(rt, u(a[0]), rt.toString(u(a[1]))); fn != nil {
 					args, _ := u(a[2]).(*jsArray)
 					var elems []interface{}
@@ -2294,6 +2299,21 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 			}
 		}
 		return found, true
+	case "first", "last":
+		// first(where:) / last(where:); the property forms never reach here.
+		if len(args) == 0 || !isCallable(args[0]) {
+			return nil, false
+		}
+		for i := 0; i < n; i++ {
+			e := o.elems[i]
+			if name == "last" {
+				e = o.elems[n-1-i]
+			}
+			if rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
+				return e, true
+			}
+		}
+		return jsNull, true
 	case "allSatisfy":
 		for _, e := range o.elems {
 			if !rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
@@ -2391,6 +2411,28 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 			}
 		}
 		return acc, true
+	}
+	return nil, false
+}
+
+// swStrMethod answers the String members that take a String argument and compare
+// text, with no Character walk. Twins: the String arm of mcall in
+// languages/swift-interpreter.abnf and of js_mcall in languages/lib/swift-rt.metajs.
+func swStrMethod(s, name string, args []interface{}) (interface{}, bool) {
+	if len(args) == 0 {
+		return nil, false
+	}
+	p, isStr := args[0].(string)
+	if !isStr {
+		return nil, false
+	}
+	switch name {
+	case "hasPrefix", "starts":
+		return strings.HasPrefix(s, p), true
+	case "hasSuffix":
+		return strings.HasSuffix(s, p), true
+	case "contains":
+		return strings.Contains(s, p), true
 	}
 	return nil, false
 }
