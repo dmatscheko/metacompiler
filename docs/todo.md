@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-273** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-278** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,57 +103,32 @@ DECLINE with the measurement.
 
 # RB — Ruby
 
-### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
-Round 1 measured it: `respond_to?` on a builtin aborts in every leg ("unknown Integer
-method: respond_to?"). MRI's surface is ~730 names over 13 classes × 3 engines.
-Decision: answer the ENGINE'S IMPLEMENTED surface (true iff the call would dispatch).
-There are no per-class tables to derive it from (dispatch is if-chains, ~300 names in
-the interpreter alone). Design: ONE shared per-class name table included by the
-interpreter and layer 2 (the regex.js way), a Go copy with a `go test` comparing the
-two, and a probe checking every listed name dispatches in all three engines.
-`respond_to?` on non-objects needs a universal-method table (exact fix: a
-`js_rselfcall(scope, name, args)` extern, ~3 engines × 25 lines). `method(:x)` for
-`lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` answers NameError where MRI
-answers a Method - identical in all legs, reasons recorded at the site.
+### T-273 ruby: dispatch gaps that differ between the legs · P1 · RB · OPEN [V]
+Interpreter only (compiled aborts): Object#between?/clamp/hash/object_id/tap on
+builtins; String#match/match?/scan/sub/gsub with a non-regex argument; Symbol#to_proc.
+Compiled only (interpreter aborts): Integer#chr/gcd/numerator/denominator/finite?/
+infinite?/nan?/real/imag/magnitude; Float/Rational/Complex #succ/pred/times/upto/
+downto/even?/odd?/gcd/chr (check MRI: most are NoMethodError there - then the compiled
+answer is the wrong one); Symbol#upcase/downcase; String#itself; Hash/Range/
+Enumerator#backtrace (MRI NoMethodError). Regexp/MatchData #send/public_send/is_a?/
+nil?/frozen?/equal? abort compiled. Converge every row on MRI and widen
+ruby-respond.js accordingly.
 
-### T-223 ruby: `Integer#[]` (bit reference) answers nil · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
-`5[0]` and `(-3)[0]` must be 1 (MRI); nil in every leg. Also `5[1..2]` is Ruby 2.7+,
-skip that.
+### T-274 ruby: Boolean `&`, `|`, `^` in the interpreter · P1 · RB · OPEN [V]
+`a = [true, false]; p a[0] & a[1]`: interpreter aborts "not a number in '&'"; compiled
+and MRI `false`. Then `defined?(true & false)` becomes "method" again.
 
-### T-224 ruby: `(m -1)` inside parentheses is a subtraction · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
-A method `m` (no local `m`): `(m -1)` calls m(-1) in MRI; every leg subtracts. The
-parenthesised Expression path never tries the command form.
+### T-275 ruby: a class's singleton `to_s` is ignored by rendering · P1 · RB · OPEN [V]
+`class C; def self.to_s; "Cz"; end; end; puts C` prints `C` in all legs; MRI `Cz`.
 
-### T-225 ruby: top-level `p self` · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
-Interpreter prints nil, compiler aborts; MRI prints `main` (and `self.to_s` is "main").
+### T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` · P2 · RB · OPEN [V]
+A root class without its own initialize stores a visible "args" slot, so
+`instance_variable_get(:@args)` answers the args array (MRI nil) and
+`#instance_variables` (unimplemented) would list it. Hide the slot, then implement
+`instance_variables`.
 
-### T-226 ruby: the interpreter ignores singleton `to_s`/`inspect`; no `instance_variable_set` · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
-`def o.to_s; "X"; end; puts o` / `p o` with a singleton inspect: the compiled halves
-honour it, the interpreter does not (halves divergence). `instance_variable_set` is
-missing in the interpreter.
-
-### T-227 ruby: `sym.length` aborts compiled · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
-`:abc.length` / `.size`: compiled halves "len() of a symbol" (the lowered `js_pylen`
-has no Symbol arm; the Go `js_pylen` is shared - prefer a ruby-specific lowering).
-
-### T-228 ruby: top-level locals and top-level defs share one namespace · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
-`def w; 10; end; w = 4; p w -1` - compiler calls 4 ("call of a non function value: 4")
-and the def is overwritten; MRI prints 3, and `w()` still calls the method.
-
-### T-229 ruby: `Math.atan2` is one ulp from MRI · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
-e.g. `Math.atan2(3, 0.5)`, all three engines agree with each other. Check whether MRI
-uses the platform libm (then compare against C atan2 on this machine) before porting.
-
-### T-231 ruby: `NotLocalCmd` reads scopes from indentation · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
-The parse guard that keeps `x -1` (local x) a subtraction rebuilds the local table from
-the source by indentation; unusual indentation misleads it. Replace with a walk-time
-local table (the grammar sees assignments before uses) if the PEG allows it; else
-document the limit at the site and close.
-
-### T-232 ruby: `defined?` residual gaps · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
-`defined?(nil + 1)` and `defined?(x.nope)` give "method" (MRI nil - the receiver's
-respond-check); `defined?(Math::PI)` nil (MRI "constant"); `defined?(not x)` nil (MRI
-"method").
+### T-277 ruby: `respond_to?(name, true)` ignores include_all · P3 · RB · OPEN [V]
+`respond_to?(:top, true)` on main for a private top-level def: false, MRI true.
 
 ---
 
@@ -611,6 +586,16 @@ T-234 swift: `hasPrefix` / `contains` on String abort compiled — DONE 235b31a
 T-235 swift: `Optional(2.5)` and `Optional.map` — DONE bf62c55 (`Optional<Int>(5)` is T-270)
 T-236 swift: a bare trailing closure call in expression position, compiler only — DONE 07442bf
 T-237 swift: extension-only members through a protocol type with no declared receiver — DONE bf62c55 (method-call results stay dynamic)
+T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names — DONE 132864d (shared table languages/lib/ruby-respond.js + Go copy kept equal by a go test; include_all is T-277)
+T-223 ruby: `Integer#[]` (bit reference) answers nil — DONE 36b888d
+T-224 ruby: `(m -1)` inside parentheses is a subtraction — DONE 49a8f5a
+T-225 ruby: top-level `p self` — DONE f0ec96f
+T-226 ruby: the interpreter ignores singleton `to_s`/`inspect`; no `instance_variable_set` — DONE 72978f1
+T-227 ruby: `sym.length` aborts compiled — DONE 06fc50c
+T-228 ruby: top-level locals and top-level defs share one namespace — DONE 00b5a45
+T-229 ruby: `Math.atan2` is one ulp from MRI — DECLINED: MRI calls Apple libm, whose atan2 differs from Go math.Atan2 on 26%, from fdlibm on 9.4%, from the correctly rounded value on 1.6% of random pairs - no portable algorithm reproduces it; recorded at rubyMathCall
+T-231 ruby: `NotLocalCmd` reads scopes from indentation — DECLINED: a guard decides the parse before any tag runs and must stay stateless, so a walk-time table cannot inform it; limit and reproduction recorded in both grammars
+T-232 ruby: `defined?` residual gaps — DONE 25e257b
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -658,7 +643,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
