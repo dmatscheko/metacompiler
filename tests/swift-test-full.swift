@@ -2522,6 +2522,37 @@ func s41() {
     check("41g", "\(nb.p) \(nb.q) \(sb.p)" == "2.0 3.0 4")
 }
 
+// ===== SECTION 42: an extension-only member through a protocol-typed receiver =====
+// A member a protocol extension adds and the protocol does not require is bound
+// STATICALLY: through a value whose declared type is the protocol it is the
+// extension's, through the concrete type it is the type's own. A requirement
+// (here an inherited one) still dispatches dynamically. Every value is swiftc 6.1.2's.
+protocol Base42 { func req() -> String }
+protocol Named42: Base42 { var name: String { get } }
+extension Named42 {
+    var shout: String { return name + "!" }
+    func greet(to who: String, times n: Int) -> String { return "hi \(who) x\(n) " + name }
+    func req() -> String { return "default req" }
+}
+class K42: Named42 {
+    var name: String { return "k" }
+    var shout: String { return "own" }
+    func greet(to who: String, times n: Int) -> String { return "own greet" }
+    func req() -> String { return "K req" }
+}
+struct S42: Named42 { var name = "s" }
+func use42(_ a: Named42, _ b: K42) -> String { return a.shout + "|" + b.shout + "|" + a.req() }
+func s42() {
+    let d: Named42 = K42()
+    let c = K42()
+    check("42a", d.shout == "k!" && d.greet(to: "b", times: 2) == "hi b x2 k" && d.req() == "K req"
+                 && c.shout == "own" && c.greet(to: "b", times: 2) == "own greet")
+    let ps: [Named42] = [K42(), S42()]
+    check("42b", ps[0].shout + ps[1].shout == "k!s!")
+    let o: Named42? = K42()
+    check("42c", o!.shout == "k!" && use42(K42(), K42()) == "k!|own|K req")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2566,6 +2597,7 @@ func main() {
     s39() // SECTION-CALL 39
     s40() // SECTION-CALL 40
     s41() // SECTION-CALL 41
+    s42() // SECTION-CALL 42
     print("full: \(checks) checks, \(fails) failures")
 }
 

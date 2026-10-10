@@ -4319,6 +4319,49 @@ KwContinue  = "continue" KwEnd ;
         if (txt.charAt(i) != ".") { return "" }
         return txt.substring(0, i)
     }
+    // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
+    // protocol does not require binds STATICALLY, to the extension's, when the
+    // receiver's declared type is that protocol (swiftc 6.1.2). The receiver this
+    // can see is a bare local NAME, optionally subscripted (`ps[0].shout` with
+    // `ps: [Named]`), typed by the walk-time annotation record swKeepMode reads.
+    // swProtoRecv answers {ann, at} at walk time (at: the suffix the member is, -1
+    // for none); swProtoStaticOn the protocol at emit time, when every protocol and
+    // extension is known, or "". Twins in swift-interpreter.abnf.
+    function swProtoRecv(txt, suffixes) {
+        var none = {ann: "", at: -1}
+        if (txt == undefined || txt == null) { return none }
+        var i = 0
+        while (i < txt.length) {
+            var k = txt.charCodeAt(i)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            i = i + 1
+        }
+        if (i == 0 || i >= txt.length || ".[!?".indexOf(txt.charAt(i)) < 0) { return none }
+        // Subscripts peel the annotation; `!` and `?.` leave it (an Optional IS its
+        // value here).
+        var n = 0
+        var ix = 0
+        while (n < suffixes.length && (suffixes[n].kind == "index" || suffixes[n].kind == "force" || suffixes[n].kind == "opt")) {
+            if (suffixes[n].kind == "index") { ix = ix + 1 }
+            n = n + 1
+        }
+        if (n >= suffixes.length || (suffixes[n].kind != "field" && suffixes[n].kind != "mcall")) { return none }
+        var ann = swInferAnn(txt.substring(0, i))
+        if (ann == "") { return none }
+        return {ann: swTyPeel(ann, ix), at: n}
+    }
+    function swProtoStaticOn(pr, suffixes) {
+        if (pr.at < 0) { return "" }
+        var p = swTyUnalias(pr.ann)
+        if (protoNames[p] != 1) { return "" }
+        var s = suffixes[pr.at]
+        if (protoHasReq(p, s.name)) { return "" }
+        var key = s.kind == "field" ? "__get_" + s.name : s.name
+        var ks = protoMembers["$" + p]
+        if (ks == undefined) { return "" }
+        for (var j = 0; j < ks.length; j++) { if (ks[j] == key) { return p } }
+        return ""
+    }
     // The methods that add an ELEMENT to a collection, i.e. the ones whose first
     // argument the receiver's element type adopts.
     function swAddsElem(n) { return n == "append" || n == "insert" }
@@ -4385,7 +4428,9 @@ KwContinue  = "continue" KwEnd ;
         // The bare name the chain starts with, when that name is a TYPE: it seeds the
         // qualified path A.Inner(...) is resolved against.
         var headName = swRecvName(txt)
+        var precv = swProtoRecv(txt, suffixes)
         return function(b) {
+            var psP = swProtoStaticOn(precv, suffixes)
             var r = primary(b)
             b = r.b
             var cur = r.v
@@ -4412,6 +4457,16 @@ KwContinue  = "continue" KwEnd ;
                     if (!(i > 0 && suffixes[i - 1].kind == "mcall" && suffixes[i - 1].name == "init")) {
                         cur = callExt(b, "js_swforce", [cur])
                     }
+                } else if (i == precv.at && psP != "") {
+                    // A protocol-typed receiver: the extension's member, statically.
+                    var pkey = s.kind == "field" ? "__get_" + s.name : s.name
+                    var pdV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(psP))])
+                    var pargs = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [pargs, cur])
+                    var pea = s.kind == "field" ? {b: b, boxes: []} : emitArgRecsInto(b, s.args, pargs)
+                    b = pea.b
+                    cur = callExt(b, "js_call", [callExt(b, "js_get", [pdV, emitStr(b, pkey)]), hUndef, pargs])
+                    emitWriteBacks(b, pea.boxes)
                 } else if (s.kind == "mcall" && i == 0 && headName == "self"
                            && protoStaticName(s.name) != "") {
                     // `self.m()` inside a protocol extension, m not a requirement:

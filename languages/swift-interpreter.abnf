@@ -4801,6 +4801,50 @@ KwContinue  = "continue" KwEnd ;
         if (txt.charAt(i) != ".") { return "" }
         return txt.substring(0, i)
     }
+    // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
+    // protocol does not require binds STATICALLY, to the extension's, when the
+    // receiver's declared type is that protocol (swiftc 6.1.2). The receiver this
+    // can see is a bare local NAME, optionally subscripted (`ps[0].shout` with
+    // `ps: [Named]`), typed by the walk-time annotation record swKeepMode reads.
+    // swProtoRecv answers {ann, at} at walk time (at: the suffix the member is, -1
+    // for none); swProtoStaticFn the extension's member at run time, or null.
+    // Twins of swProtoRecv / swProtoStaticOn in swift-to-llvm-ir.abnf.
+    function swProtoRecv(txt, suffixes) {
+        var none = {ann: "", at: -1}
+        if (txt == undefined || txt == null) { return none }
+        var i = 0
+        while (i < txt.length && swIdCh(txt.charCodeAt(i))) { i = i + 1 }
+        if (i == 0 || i >= txt.length || ".[!?".indexOf(txt.charAt(i)) < 0) { return none }
+        // Subscripts peel the annotation; `!` and `?.` leave it (an Optional IS its
+        // value here).
+        var n = 0
+        var ix = 0
+        while (n < suffixes.length && (suffixes[n].kind == "index" || suffixes[n].kind == "force" || suffixes[n].kind == "opt")) {
+            if (suffixes[n].kind == "index") { ix = ix + 1 }
+            n = n + 1
+        }
+        if (n >= suffixes.length || (suffixes[n].kind != "field" && suffixes[n].kind != "mcall")) { return none }
+        var ann = swInferAnn(txt.substring(0, i))
+        if (ann == "") { return none }
+        // Only a protocol name is worth a run-time lookup; one declared further
+        // down is found by swAhead.
+        var p = swTyUnalias(swTyPeel(ann, ix))
+        if (protoNames["$" + p] != 1 && !swAhead(p).proto) { return none }
+        return {ann: p, at: n}
+    }
+    function swProtoStaticFn(pr, suffixes) {
+        var p = pr.ann
+        if (protoNames["$" + p] != 1) { return null }
+        var pd = swResolve(p)
+        if (pd == null || pd.v == undefined || pd.v === null || pd.v.__isprotocol !== true) { return null }
+        var tbl = pd.v.__members
+        var s = suffixes[pr.at]
+        if (tbl == undefined || tbl === null || hasOwn(tbl.__reqs, "$" + s.name)) { return null }
+        var key = s.kind == "field" ? "__get_" + s.name : s.name
+        if (!hasOwn(tbl, key)) { return null }
+        var f = tbl[key]
+        return typeof f == "function" ? f : null
+    }
     // The methods that add an ELEMENT to a collection, i.e. the ones whose first
     // argument the receiver's element type adopts.
     function swAddsElem(n) { return n == "append" || n == "insert" }
@@ -4813,12 +4857,23 @@ KwContinue  = "continue" KwEnd ;
             recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
         }
         var eTy0 = recvETy
+        var precv = swProtoRecv(txt, suffixes)
         return function() {
             var cur = anytype
+            var pf = precv.at < 0 ? null : swProtoStaticFn(precv, suffixes)
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "opt") {
+                if (i == precv.at && pf != null) {
+                    // A protocol-typed receiver: the extension's member, statically.
+                    if (s.kind == "field") { cur = pf(cur) } else {
+                        var pea = evalArgs(s.args)
+                        pendingLabels = recLabels(s.args)
+                        cur = pf.apply(undefined, concat2impl([cur], pea.argv))
+                        pendingLabels = null
+                        writeBacks(pea.boxes)
+                    }
+                } else if (s.kind == "opt") {
                     // Optional chaining: a nil here makes the WHOLE chain nil.
                     if (cur === null || cur === undefined) { return null }
                 } else if (s.kind == "force") {
