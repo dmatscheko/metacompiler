@@ -2158,7 +2158,7 @@ HasStatic   = :script(~~
         E: {__flo: 2.718281828459045},
         sqrt: function(v) { return jFlo(Math.sqrt(jNumD(v))) },
         cbrt: function(v) { return jFlo(Math.cbrt(jNumD(v))) },
-        exp: function(v) { return jFlo(Math.exp(jNumD(v))) },
+        exp: function(v) { return jFlo(jExpJ(jNumD(v))) },
         expm1: function(v) { return jFlo(Math.expm1(jNumD(v))) },
         log: function(v) { return jFlo(Math.log(jNumD(v))) },
         log10: function(v) { return jFlo(Math.log10(jNumD(v))) },
@@ -2252,6 +2252,53 @@ HasStatic   = :script(~~
         }
         if (bad) { jThrowExc("ArithmeticException", "long overflow") }
         return r
+    }
+    // java.lang.Math#exp, which answers as StrictMath#exp - fdlibm's e_exp.c -
+    // does (java 24.0.2 agrees with StrictMath on 3,000,028 probe values; the
+    // host's exp parts from it on about 1 value in 40, exp(1) among them). The
+    // high-word tests of the C are the |x| thresholds they encode, and adding k
+    // to the exponent is an exact scaling by 2^k. MetaJS has no exponent
+    // literal, so the small constants are written out. Twin of jvExpJ in
+    // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jExpJ(xIn) {
+        var x = xIn
+        if (x !== x) { return x + x }
+        var neg = x < 0
+        var ax = neg ? jNegF(x) : x
+        if (ax >= 709.7822265625) {
+            if (ax == jInf) { return neg ? 0 : x }
+            if (x > 709.782712893383973096) { return jInf }
+            if (x < 0 - 745.133219101941108420) { return 0 }
+        }
+        var ln2HI = 0.693147180369123816490
+        var ln2LO = 0.000000000190821492927058770002
+        var hi = 0
+        var lo = 0
+        var k = 0
+        if (ax >= 0.3465735912322998) {
+            if (ax < 1.0397205352783203) {
+                hi = neg ? x + ln2HI : x - ln2HI
+                lo = neg ? jNegF(ln2LO) : ln2LO
+                k = neg ? jNegOne : 1
+            } else {
+                var kf = 1.44269504088896338700 * x + (neg ? 0 - 0.5 : 0.5)
+                k = kf < 0 ? jNegF(Math.floor(jNegF(kf))) : Math.floor(kf)
+                hi = x - k * ln2HI
+                lo = k * ln2LO
+            }
+            x = hi - lo
+        } else if (ax < 0.000000003725290298461914) {
+            return 1 + x
+        }
+        var t = x * x
+        var c = x - t * (0.166666666666666019037 + t * (0 - 0.00277777777770155933842
+                + t * (0.0000661375632143793436117 + t * (0 - 0.00000165339022054652515390
+                + t * 0.0000000413813679705723846039))))
+        if (k == 0) { return 1 - ((x * c) / (c - 2) - x) }
+        var y = 1 - ((lo - (x * c) / (2 - c)) - hi)
+        if (k == 1024) { return y * 2 * jPow2(1023) }
+        if (k >= 0 - 1021) { return y * jPow2(k) }
+        return y * jPow2(k + 1000) * jPow2(0 - 1000)
     }
     // java.lang.Math#pow where it parts from IEEE-754's pow: a NaN exponent is
     // always NaN, and |x| == 1 to an infinite power is NaN (not 1). Twin of

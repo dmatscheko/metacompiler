@@ -85,6 +85,7 @@ class Main {
         S39.run(); // SECTION-CALL 39
         S40.run(); // SECTION-CALL 40
         S41.run(); // SECTION-CALL 41
+        S42.run(); // SECTION-CALL 42
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2467,4 +2468,18 @@ class S41 {
 interface S41Fn {
     double go(double x);
     default double twice(double x) { return go(x) * 2; }
+}
+
+// ===== SECTION 42: Math.exp is StrictMath.exp (fdlibm) =====
+//
+// java.lang.Math#exp answers what fdlibm's e_exp.c answers, which is one ulp
+// away from a libm exp at e = exp(1), and reaches into the subnormals down to
+// exp(-745). Every expected string is java 24.0.2's output.
+class S42 {
+    static void run() {
+        double[] x = { 1.0, -745.0, -33.58169999999959, 0.5, 709.0, -0.0 };
+        Main.check("xp1", ("" + Math.exp(x[0])).equals("2.7182818284590455") && ("" + Math.exp(x[1])).equals("4.9E-324"));
+        Main.check("xp2", ("" + Math.exp(x[2])).equals("2.6040720551475586E-15") && ("" + Math.exp(x[3])).equals("1.6487212707001282"));
+        Main.check("xp3", ("" + Math.exp(x[4])).equals("8.218407461554972E307") && ("" + Math.exp(x[5])).equals("1.0"));
+    }
 }
