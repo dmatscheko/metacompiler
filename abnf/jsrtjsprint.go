@@ -478,18 +478,13 @@ func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
 	case "hasOwnProperty", "propertyIsEnumerable":
 		enumerable := name == "propertyIsEnumerable"
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			// `name` and `length` are own properties of every function, so
-			// hasOwnProperty says true - and they are the one pair here for which
+			// `name` and `length` are the one pair of own properties for which
 			// propertyIsEnumerable says FALSE, which is what `enumerable` is for.
-			if k := rt.toString(argAt(args, 0)); k == "name" || k == "length" {
-				return !enumerable
-			}
-			p := jsvFnPropsOf(recv)
-			if p == nil {
+			k := rt.toString(argAt(args, 0))
+			if enumerable && (k == "name" || k == "length") {
 				return false
 			}
-			_, found := p.props[rt.toString(argAt(args, 0))]
-			return found
+			return jsvFnOwn(recv, k)
 		})
 	case "toString":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -537,6 +532,52 @@ func jsvSfTrack(statics *jsObject, name string) {
 		}
 	}
 	lst.elems = append(lst.elems, name)
+}
+
+// jsvFnOwn answers whether k is an own property of a function: `name` and `length`
+// are own properties of every function, the rest live in the side table.
+func jsvFnOwn(f interface{}, k string) bool {
+	if k == "name" || k == "length" {
+		return true
+	}
+	p := jsvFnPropsOf(f)
+	if p == nil {
+		return false
+	}
+	_, found := p.props[k]
+	return found
+}
+
+// jsvHasOwn is Object.prototype.hasOwnProperty(k) for any receiver: a function's
+// own properties, an array's or a string's `length` and indices (canonical index
+// strings only, so "01" is not one), an Error's own `stack` / `message`, and an
+// object's own slots - the KEY MAP, so a slot holding undefined is still one. A class
+// instance's methods live on its class and are not own. Twins: jvHasOwn in
+// languages/lib/js-rt.metajs, jsHasOwn in both *-interpreter.abnf.
+func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
+	if jsvIsFnLike(v) {
+		return jsvFnOwn(v, k)
+	}
+	n := -1
+	switch o := v.(type) {
+	case *jsObject:
+		if own, ok := jsvErrOwn(o, k); ok {
+			return own
+		}
+		_, has := o.props[k]
+		return has
+	case *jsArray:
+		n = len(o.elems)
+	case string:
+		n = rt.strLen(o)
+	default:
+		return false
+	}
+	if k == "length" {
+		return true
+	}
+	i, err := strconv.Atoi(k)
+	return err == nil && strconv.Itoa(i) == k && i >= 0 && i < n
 }
 
 // jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
@@ -1788,20 +1829,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return u(this)
 		}))
 		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			// A FUNCTION's own properties live in the side table.
-			if p := jsvFnPropsOf(u(this)); p != nil {
-				_, has := p.props[rt.toString(argAt(args, 0))]
-				return has
-			}
-			self, isObj := u(this).(*jsObject)
-			if !isObj {
-				return false
-			}
-			if own, ok := jsvErrOwn(self, rt.toString(argAt(args, 0))); ok {
-				return own
-			}
-			_, has := self.props[rt.toString(argAt(args, 0))]
-			return has
+			return rt.jsvHasOwn(u(this), rt.toString(argAt(args, 0)))
 		}))
 		o.set("prototype", proto)
 		return w(o)
@@ -2307,6 +2335,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if v, ok := rt.mcallMiss(); ok {
 				return w(v)
 			}
+		}
+		// `v.hasOwnProperty(k)` on a receiver with no member of that name, which is
+		// every one but a function (jsvFnMethod) - there is no Object.prototype to
+		// inherit it from. Twins: jvFallbackCall in languages/lib/js-rt.metajs, mcall
+		// in both *-interpreter.abnf.
+		if name := rt.toString(u(a[1])); name == "hasOwnProperty" && !isUndefOrNull(u(a[0])) &&
+			isUndefOrNull(u(m["js_jsvget"]([]uint64{a[0], a[1]}))) {
+			return w(rt.jsvHasOwn(u(a[0]), rt.toString(argAt(arr.elems, 0))))
 		}
 		if next := m["js_jsxmcall"]; next != nil {
 			return next(a)

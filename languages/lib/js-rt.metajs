@@ -715,17 +715,49 @@ function js_jskeys(o) {
 // here keeps a function's source text and String(f) has always said "[function]".
 function jvFnHasOwnShim(f, enumerable) {
     return function (k) {
-        // `name` and `length` are own properties of every function, so hasOwnProperty
-        // says true - and they are the one pair here for which propertyIsEnumerable
-        // says FALSE, which is what the flag is for.
+        // `name` and `length` are the one pair of own properties for which
+        // propertyIsEnumerable says FALSE, which is what the flag is for.
         var kk = jvStr(k)
-        if (kk === "name" || kk === "length") { return !enumerable }
-        if (jvFnPropsN == 0) { return false }
-        var fp = anytype
-        fp = jvFnPropsFind(f)
-        if (fp === undefined) { return false }
-        return js_has(fp, jvStr(k))
+        if (enumerable) {
+            if (kk === "name" || kk === "length") { return false }
+        }
+        return jvFnOwn(f, kk)
     }
+}
+// Whether kk is an own property of a function: `name` and `length` are own properties
+// of every function, the rest live in the side table. Twin: jsvFnOwn in
+// abnf/jsrtjsprint.go.
+function jvFnOwn(f, kk) {
+    if (kk === "name" || kk === "length") { return true }
+    if (jvFnPropsN == 0) { return false }
+    var fp = anytype
+    fp = jvFnPropsFind(f)
+    if (fp === undefined) { return false }
+    return js_has(fp, kk)
+}
+// Object.prototype.hasOwnProperty(k) for any receiver. See jsvHasOwn in
+// abnf/jsrtjsprint.go, its twin; jsHasOwn in both *-interpreter.abnf is the third.
+function jvHasOwn(self, k) {
+    var kk = jvStr(k)
+    if (jvIsCallable(self)) { return jvFnOwn(self, kk) }
+    if (Array.isArray(self) || typeof self == "string") {
+        if (kk === "length") { return true }
+        if (jvStr(jvToNumber(kk)) !== kk) { return false }
+        return jvIndexIn(kk, self.length)
+    }
+    if (!jvIsObj(self)) { return false }
+    var eo = anytype
+    eo = jvErrOwn(self, kk)
+    if (eo !== jvMiss) { return eo }
+    if (self[kk] !== undefined) { return true }
+    // A present slot holding undefined: keysOf answers the own keys.
+    var ks = keysOf(self)
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] === kk) { return true }
+        i = i + 1
+    }
+    return false
 }
 function jvFnToStringShim(f) { return function () { return jvStr(f) } }
 function jvFnValueOfShim(f) { return function () { return f } }
@@ -1917,21 +1949,7 @@ function js_jsobject() {
     var proto = {}
     proto["toString"] = function () { return jvProtoTag(js_this()) }
     proto["valueOf"] = function () { return js_this() }
-    proto["hasOwnProperty"] = function (k) {
-        var self = anytype
-        self = js_this()
-        // A FUNCTION's own properties live in the side table.
-        if (jvFnPropsN > 0) {
-            var fp = anytype
-            fp = jvFnPropsOf(self)
-            if (fp !== undefined) { return fp[jvStr(k)] !== undefined }
-        }
-        if (!jvIsObj(self)) { return false }
-        var eo = anytype
-        eo = jvErrOwn(self, jvStr(k))
-        if (eo !== jvMiss) { return eo }
-        return self[jvStr(k)] !== undefined
-    }
+    proto["hasOwnProperty"] = function (k) { return jvHasOwn(js_this(), k) }
     o["prototype"] = proto
     return o
 }
@@ -3042,6 +3060,11 @@ function jvFallbackCall(recv, name, args) {
                 var av = jvAccGet(acc, recv)
                 if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
             }
+            // There is no Object.prototype to inherit hasOwnProperty from. Twin of
+            // the js_jsmcall arm in abnf/jsrtjsprint.go.
+            if (name == "hasOwnProperty") {
+                if (recv[name] === undefined) { return jvHasOwn(recv, jvArg(args, 0)) }
+            }
             // Nothing on the __class chain: the call site turns the sentinel into
             // node's "<callee> is not a function" TypeError.
             if (jvMissCallSet) { return jvMissCall }
@@ -3050,6 +3073,11 @@ function jvFallbackCall(recv, name, args) {
     }
     var own = js_jsmget(recv, name)
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
+    if (name == "hasOwnProperty") {
+        if (own === undefined) {
+            if (!jvUndefOrNull(recv)) { return jvHasOwn(recv, jvArg(args, 0)) }
+        }
+    }
     if (jvMissCallSet) { return jvMissCall }
     fail("unknown method '" + name + "' on " + typeof recv)
     return undefined

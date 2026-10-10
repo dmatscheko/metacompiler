@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58 and 59.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-60.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,9 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58 and 59, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-60, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
-//                             constructors, JSON, guards, Set and Map, iterator closing
+//                             constructors, JSON, guards, Set and Map, iterator closing,
+//                             hasOwnProperty
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1202,6 +1203,33 @@ function s59() {
     check("itc3", log59.join() === "ret2,ret2,ret1,ret2,ret3,ret1,thr" && r.done && t.done)
 }
 
+// ===== SECTION 60: hasOwnProperty on every kind of receiver =====
+// `v.hasOwnProperty(k)` and Object.prototype.hasOwnProperty.call(v, k) on a plain
+// object (a slot holding undefined is own), a class instance (its methods are not),
+// an array and a string (length and canonical indices), Math and JSON, an Error and a
+// function. Values read off node 24.
+class C60 { constructor() { this.x = 1 } m() { return 1 } }
+function s60() {
+    var ks = ["a", "b", "x", "m", "0", "1", "01", "length", "abs", "PI", "parse", "message", "name", "nope"]
+    var vals = [{a: 1, b: undefined}, new C60(), [5, 6], Math, JSON, new Error("e"), "ab", 7, function f() {}]
+    var h = Object.prototype.hasOwnProperty
+    var rows = []
+    var same = true
+    for (var i = 0; i < vals.length; i++) {
+        var row = ""
+        for (var j = 0; j < ks.length; j++) {
+            var r = vals[i].hasOwnProperty(ks[j])
+            if (r !== h.call(vals[i], ks[j])) { same = false }
+            row = row + (r ? "1" : "0")
+        }
+        rows.push(row)
+    }
+    check("hop1", rows.slice(0, 3).join() === "11000000000000,00100000000000,00001101000000" && same)
+    check("hop2", rows.slice(3, 6).join() === "00000000110000,00000000001000,00000000000100")
+    check("hop3", rows.slice(6).join() === "00001101000000,00000000000000,00000001000010")
+    check("hop4", Math.hasOwnProperty("abs") && !Math.hasOwnProperty("nope") && ({hasOwnProperty: () => 9}).hasOwnProperty() === 9)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1220,6 +1248,7 @@ function main() {
     s56() // SECTION-CALL 56
     s58() // SECTION-CALL 58
     s59() // SECTION-CALL 59
+    s60() // SECTION-CALL 60
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

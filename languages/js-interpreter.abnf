@@ -3488,22 +3488,23 @@ NotFuncHead = :script(~~
     var jsObjectProto = {
         "toString": function() { return jsProtoTag(jsThisArg()) },
         "valueOf": function() { return jsThisArg() },
-        "hasOwnProperty": function(k) {
-            var self = anytype // The receiver may be any value.
-            self = jsThisArg()
-            if (self == undefined || self == null) { return false }
-            // A FUNCTION's own properties live in the side table.
-            if (fnPropsN > 0) {
-                var fp = anytype
-                fp = fnPropsOf(self)
-                if (fp !== undefined) { return fp["__keys"].indexOf("" + k) >= 0 }
-            }
-            if (typeof self != "object") { return false }
-            var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
-            eo = jsErrOwn(self, "" + k)
-            if (eo !== undefined) { return eo }
-            return hasOwn(self, "" + k)
+        "hasOwnProperty": function(k) { return jsHasOwn(jsThisArg(), k) }
+    }
+    // Object.prototype.hasOwnProperty(k) for any receiver. See jsvHasOwn in
+    // abnf/jsrtjsprint.go, its twin; jvHasOwn in languages/lib/js-rt.metajs is the third.
+    function jsHasOwn(self, k) {
+        var kk = "" + k
+        if (typeof self == "function") { return fnOwn(self, kk) }
+        if (typeof self == "string" || Array.isArray(self)) {
+            if (kk == "length") { return true }
+            var n = kk - 0
+            return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
         }
+        if (self == undefined || self == null || typeof self != "object") { return false }
+        var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
+        eo = jsErrOwn(self, kk)
+        if (eo !== undefined) { return eo }
+        return hasOwn(self, kk)
     }
     // The receiver a Function.prototype shim armed for the call now running. The shims
     // set pendingThis and callWithThis clears it again, so it is read once at entry.
@@ -5199,17 +5200,23 @@ NotFuncHead = :script(~~
         return function() {
             var k = anytype // The queried key may be any value; it is compared as text.
             k = (arguments.length > 0) ? arguments[0] : undefined
-            // `name` and `length` are own properties of every function, so
-            // hasOwnProperty says true - and they are the one pair here for which
+            // `name` and `length` are the one pair of own properties for which
             // propertyIsEnumerable says FALSE, which is what the `enumerable` flag is
             // for.
-            if (k === "name" || k === "length") { return !enumerable }
-            if (fnPropsN == 0) { return false }
-            var fp = anytype
-            fp = fnPropsFind(fn)
-            if (fp === undefined) { return false }
-            return fp["__keys"].indexOf("" + k) >= 0
+            if (enumerable && (k === "name" || k === "length")) { return false }
+            return fnOwn(fn, "" + k)
         }
+    }
+    // Whether kk is an own property of a function: `name` and `length` are own
+    // properties of every function, the rest live in the side table. Twin: jsvFnOwn
+    // in abnf/jsrtjsprint.go.
+    function fnOwn(fn, kk) {
+        if (kk === "name" || kk === "length") { return true }
+        if (fnPropsN == 0) { return false }
+        var fp = anytype
+        fp = fnPropsFind(fn)
+        if (fp === undefined) { return false }
+        return fp["__keys"].indexOf(kk) >= 0
     }
     // Function.prototype.toString / .valueOf. toString agrees with String(fn) rather
     // than inventing a second spelling; valueOf is the identity, as it is in node.
@@ -7778,12 +7785,21 @@ NotFuncHead = :script(~~
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
             for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
+            if (m == undefined && jsHasOwnCall(target, name)) { return jsHasOwn(target, args[0]) }
             // A missing (or non-callable) instance method is node's ordinary
             // "not a function" TypeError, and CATCHABLE.
             if (typeof m != "function") { biRaise("TypeError: " + site + " is not a function") }
             return m.apply(undefined, concat2impl([target], args))
         }
+        if (jsHasOwnCall(target, name)) { return jsHasOwn(target, args[0]) }
         biRaise("TypeError: " + site + " is not a function")
+    }
+    // `v.hasOwnProperty(k)` on a receiver with no member of that name, which is every
+    // one but a function (getMember's shim) - there is no Object.prototype to inherit
+    // it from. Twins: the js_jsmcall arm in abnf/jsrtjsprint.go, jvFallbackCall in
+    // languages/lib/js-rt.metajs.
+    function jsHasOwnCall(target, name) {
+        return name == "hasOwnProperty" && target != undefined && target != null && getMemberRaw(target, name) === undefined
     }
 
     // ----- Class members -----
