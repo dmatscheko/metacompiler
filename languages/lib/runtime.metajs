@@ -1537,13 +1537,45 @@ function rtDecVal(s) {
     return m
 }
 
+// The n-digit neighbour of a DIGITS "e" EXP form: one unit in the n-th digit
+// up (up true) or down. Below a power of ten the grid is a decade finer, so
+// 1.00e5 steps down to 9.99e4. Twin of coreDigStep in lib/interp-core.js.
+function rtDigStep(s, n, up) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    while (ds.length < n) { ds = ds + "0" }
+    var out = ""
+    var carry = up ? 1 : 0 - 1
+    var k = n - 1
+    while (k >= 0) {
+        var d = ds.charCodeAt(k) - 48 + carry
+        carry = 0
+        if (d == 10) { d = 0; carry = 1 }
+        if (d < 0) { d = 9; carry = 0 - 1 }
+        out = "" + d + out
+        k = k - 1
+    }
+    if (carry == 1) { out = "1" + out; ex = ex + 1 }
+    if (out.charAt(0) == "0") { out = out.substring(1) + "9"; ex = ex - 1 }
+    var endz = out.length
+    while (endz > 1 && out.charAt(endz - 1) == "0") { endz = endz - 1 }
+    return out.substring(0, endz) + "e" + ex
+}
+
 // The shortest decimal that round-trips as a binary32. Nine digits always do.
+// At a power of two the rounding interval is lopsided, so when the NEAREST
+// n-digit decimal misses it the neighbour on the far side of a can still hit
+// it: 2^-96 is 1.2621775E-29, not the nine digit 1.26217745E-29.
 function rtF32Sig(a) {
     var full = rtDecDigits(a)
     var n = 1
     while (n < 9) {
         var c = rtRoundDig(full, n)
-        if (rtF32Round(rtDecVal(c)) === a) { return c }
+        var v = rtF32Round(rtDecVal(c))
+        if (v === a) { return c }
+        var o = rtDigStep(c, n, v < a)
+        if (rtF32Round(rtDecVal(o)) === a) { return o }
         n = n + 1
     }
     return rtRoundDig(full, 9)

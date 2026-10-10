@@ -81,6 +81,7 @@ class Main {
         S35.run(); // SECTION-CALL 35
         S36.run(); // SECTION-CALL 36
         S37.run(); // SECTION-CALL 37
+        S38.run(); // SECTION-CALL 38
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2286,5 +2287,32 @@ class S37 {
         long lsum = 0;
         for (long x : k) { lsum = lsum + x * 1000000 * 1000; }
         Main.check("ac16", seen.equals("2.0;3.0;1.6777217E7;97.0;") && lsum == 16777319000000000L);
+    }
+}
+
+// ===== SECTION 38: the shortest digits at a power of two =====
+//
+// Double.toString and Float.toString print the SHORTEST decimal that reads back
+// as the same value. Just above a power of two the rounding interval is twice as
+// wide as just below it, so the nearest n-digit decimal can miss while its
+// neighbour on the far side hits: 2^-24 is exactly 5.9604644775390625E-8 and
+// prints with 16 digits. Every expected string is java 24.0.2's output.
+class S38 {
+    static void run() {
+        double[] d = { 16777216.0, 2.0, 1.0 };
+        float[] f = { 2.0f, 1.0f };
+        double x = d[2];
+        for (int i = 0; i < 24; i++) x = x / d[1];
+        Main.check("sd1", ("" + d[2] / d[0]).equals("5.960464477539063E-8") && ("" + x).equals("5.960464477539063E-8"));
+        for (int i = 24; i < 44; i++) x = x / d[1];
+        Main.check("sd2", ("" + x).equals("5.684341886080802E-14"));
+        for (int i = 44; i < 140; i++) x = x / d[1];
+        Main.check("sd3", ("" + x).equals("7.174648137343064E-43"));
+        float g = f[1];
+        for (int i = 0; i < 96; i++) g = g / f[0];
+        Main.check("sd4", ("" + g).equals("1.2621775E-29"));
+        g = f[1];
+        for (int i = 0; i < 87; i++) g = g * f[0];
+        Main.check("sd5", ("" + g).equals("1.5474251E26") && ("" + g * f[0] * f[0] * f[0]).equals("1.2379401E27"));
     }
 }

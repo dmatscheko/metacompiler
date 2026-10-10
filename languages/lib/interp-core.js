@@ -1205,13 +1205,43 @@ function coreSigVal(s) {
     if (frac == "") { frac = "0" }
     return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
 }
+// The n-digit neighbour of a DIGITS "e" EXP form: one unit in the n-th digit
+// up (up true) or down. Below a power of ten the grid is a decade finer, so
+// 1.00e5 steps down to 9.99e4. Twin of rtDigStep in lib/runtime.metajs.
+function coreDigStep(s, n, up) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    while (ds.length < n) { ds = ds + "0" }
+    var out = ""
+    var carry = up ? 1 : coreNegOne
+    for (var k = n - 1; k >= 0; k--) {
+        var dg = ds.charCodeAt(k) - 48 + carry
+        carry = 0
+        if (dg == 10) { dg = 0; carry = 1 }
+        if (dg < 0) { dg = 9; carry = coreNegOne }
+        out = "" + dg + out
+    }
+    if (carry == 1) { out = "1" + out; ex = ex + 1 }
+    if (out.charAt(0) == "0") { out = out.substring(1) + "9"; ex = ex - 1 }
+    var ez = out.length
+    while (ez > 1 && out.charAt(ez - 1) == "0") { ez-- }
+    return out.substring(0, ez) + "e" + ex
+}
 // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP.
+// At a power of two the rounding interval is lopsided (the gap below is half
+// the gap above), so when the NEAREST n-digit decimal falls outside it, its
+// neighbour on the far side of a can still fall inside: 2^-24 is
+// 5.9604644775390625e-8, nearest 16 digits ...062 misses, ...063 is shortest.
 // Seventeen digits always round-trip a binary64, so the loop always ends.
 function coreDecDigits(a) {
     var n = 1
     while (n < 17) {
         var c = floPrec(a, n)
-        if (coreSigVal(c) === a) { return c }
+        var v = coreSigVal(c)
+        if (v === a) { return c }
+        var o = coreDigStep(c, n, v < a)
+        if (coreSigVal(o) === a) { return o }
         n = n + 1
     }
     return floPrec(a, 17)
@@ -1272,7 +1302,11 @@ function coreF32Sig(a) {
     var n = 1
     while (n < 9) {
         var c = coreRoundDig(full, n)
-        if (coreF32Round(coreDecVal(c)) === a) { return c }
+        var v = coreF32Round(coreDecVal(c))
+        if (v === a) { return c }
+        // The far-side neighbour, as in coreDecDigits.
+        var o = coreDigStep(c, n, v < a)
+        if (coreF32Round(coreDecVal(o)) === a) { return o }
         n = n + 1
     }
     return coreRoundDig(full, 9)
