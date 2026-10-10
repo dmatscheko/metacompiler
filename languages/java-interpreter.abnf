@@ -2488,15 +2488,19 @@ HasStatic   = :script(~~
     // this point and only the included lib is textually in scope at script body
     // time, which is the same reason Byte/Short above build their pairs by hand.
     var jZeroDiv = 0
-    // 2^n, exactly: halving and doubling a double is exact down to the smallest
-    // subnormal. MetaJS has no exponent literal, so the IEEE-754 extremes below
-    // are built from it.
+    // 2^n, exactly, by squaring: every product of powers of two is exact down to
+    // the smallest subnormal, and the squares past the last one used may
+    // overflow or vanish harmlessly. MetaJS has no exponent literal, so the
+    // IEEE-754 extremes below are built from it. Twin of jvPow2 in
+    // languages/lib/java-rt.metajs.
     function jPow2(n) {
         var x = 1
+        var base = n < 0 ? 0.5 : 2
         var k = n < 0 ? 0 - n : n
         while (k > 0) {
-            x = n < 0 ? x / 2 : x * 2
-            k = k - 1
+            if (k % 2 == 1) { x = x * base }
+            base = base * base
+            k = (k - k % 2) / 2
         }
         return x
     }

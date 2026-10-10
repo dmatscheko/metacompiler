@@ -889,16 +889,20 @@ function jvDoubleCompare(a, b) {
     return 0
 }
 
-// 2^n, exactly: halving and doubling a double is exact down to the smallest
-// subnormal. MetaJS has no exponent literal, so the IEEE-754 extremes are built
-// from it.
+// 2^n, exactly, by squaring: every product of powers of two is exact down to
+// the smallest subnormal, and the squares past the last one used may overflow
+// or vanish harmlessly. MetaJS has no exponent literal, so the IEEE-754
+// extremes are built from it. Twin of jPow2 in java-interpreter.abnf.
 function jvPow2(n) {
     var x = 1
+    var base = 2
+    if (n < 0) { base = 0.5 }
     var k = n
     if (k < 0) { k = 0 - k }
     while (k > 0) {
-        if (n < 0) { x = x / 2 } else { x = x * 2 }
-        k = k - 1
+        if (k % 2 == 1) { x = x * base }
+        base = base * base
+        k = (k - k % 2) / 2
     }
     return x
 }
