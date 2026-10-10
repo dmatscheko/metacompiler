@@ -4,7 +4,7 @@
 //
 // EVERY construct here is implemented in both grammars: the type assertion x.(T), the
 // type switch, the interface declaration (satisfaction is structural), the goroutine,
-// the channel make/send/receive, and the select. `go work(5)` really runs, so tally
+// the channel make/send/receive, and the select. `go work(5, done)` really runs, so tally
 // reaches 6 via a genuine goroutine.
 //
 // The file runs to os.Exit(fails) with fails == 0, with or without -warn-unsupported,
@@ -34,7 +34,12 @@ type Stringer interface {
 
 var tally = 0
 
-func work(n int) { tally += n } // a goroutine callee; stays visible in call graphs
+// A goroutine callee (it stays visible in call graphs); done orders it before the
+// read of tally, which real go needs.
+func work(n int, done chan int) {
+	tally += n
+	done <- 1
+}
 
 // A boxed value comes in as interface{}; the assertion recovers it unchanged.
 func unbox(x interface{}) int {
@@ -42,16 +47,18 @@ func unbox(x interface{}) int {
 }
 
 func main() {
-	// GENUINE: type assertions x.(T) return the value unchanged (identity).
+	// GENUINE: a type assertion on an interface value answers the dynamic value.
 	check("assert via param", unbox(42), 42)
-	a := 7
+	var a interface{} = 7
 	check("assert direct", a.(int), 7)
 	check("assert in expr", a.(int)+3, 10)
 
 	// The goroutine callee bumps tally to 5.
-	go work(5)
+	done := make(chan int, 1)
+	go work(5, done)
+	<-done
 
-	ch := make(chan int)
+	ch := make(chan int, 1)
 	ch <- 9
 	_ = <-ch
 
