@@ -101,10 +101,11 @@ trap 'rm -rf "$OUT"' EXIT
 #   js       has several ratchet files (split so its -frozen interpreter leg stays
 #            under ./test.sh --full's timeout): tests/js-test-full.js,
 #            tests/js-test-full.2.js and tests/js-test-full.3.js, named by the kinds
-#            `full`, `full.2` and `full.3`. The
+#            `full`, `full.2` and `full.3`, and a MODULE, tests/js-test-full.4.mjs,
+#            whose kind `full.4.mjs` carries its own extension. The
 #            THIRD FIELD IS COMMA-SEPARATED, because ROWS itself is split on whitespace.
 ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
-      js:js:full,features,full.2,full.3
+      js:js:full,features,full.2,full.3,full.4.mjs
       lua:lua metajs:js php:php python:py ruby:rb swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"
 
@@ -228,6 +229,8 @@ for row in $ROWS; do
     langs="$langs $L:$e:$(echo $kinds | tr ' ' ,)"
     for kind in $kinds; do
         f="tests/$L-test-$kind.$e"
+        # A kind that names its own extension is the file name as it stands.
+        [ -f "$f" ] || [ ! -f "tests/$L-test-$kind" ] || f="tests/$L-test-$kind"
         if [ ! -f "$f" ]; then
             printf "%-20s %-6s %s\n" "$L/$kind" "-" "no $f" > "$OUT/$L.$kind.row"
             echo skip > "$OUT/$L.$kind.rc"

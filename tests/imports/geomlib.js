@@ -1,4 +1,4 @@
-// An imported library for tests/js-test-multifile.js (found via -i tests/imports). It is
+// An imported library for tests/js-test-multifile.mjs (found via -i tests/imports). It is
 // loaded by `import { Vec, hypotSq } from './geomlib.js'`; its top-level class and
 // function register in the shared global scope, so the main file can use them directly.
 // The named-binding list in the import is cosmetic - loading the file is what registers

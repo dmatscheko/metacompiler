@@ -178,8 +178,9 @@ ModuleStrict <~~ push({ustrict: true}) ~~> = IsModule ;
 // An import or an export is a MODULE ITEM, not a statement: it may only stand at the top
 // level of the file. '{ import a from "b"; }', '{ export {a}; }' and
 // '{ export default 3; }' are syntax errors, not a block containing a declaration, so the
-// two forms live here rather than among the Statement alternatives.
-TopStatement = TopModuleItem | Statement ;
+// two forms live here rather than among the Statement alternatives. A Script has none
+// at all (IsModule, see "The GOAL SYMBOL").
+TopStatement = IsModule TopModuleItem | Statement ;
 TopModuleItem <~~ push(stmtPos(pop())) ~~>
             = ImportStmt | ExportStmt ;
 
@@ -368,7 +369,10 @@ DestructAssign <~~ push(makeDestructAssign(takeAll())) ~~>
 // left-hand side at all, so an expression that is not an assignment never tries any of
 // these. Second, the sixteen operators share ONE production (Assignment below) instead of
 // three, so the target is parsed once rather than three times.
-AssignExpr  = AssignForm | Yield | CondExpr ;
+// An arrow function is an AssignmentExpression, not a primary: it may not be the operand
+// of an operator, so 'typeof () => {}', '!() => 1' and 'a || () => 1' are syntax errors
+// while '(() => 1)()' and 'a ? () => 1 : b' are not.
+AssignExpr  = AssignForm | Yield | AsyncArrow | ArrowFn | CondExpr ;
 AssignForm  = AssignAhead ( Assignment | SuperAssign | DestructAssign ) ;
 
 // An assignment whose left side is not a reference at all - '0 = 0', '[0] = 0',
@@ -714,7 +718,7 @@ Arg         = SpreadElem | AssignExpr ;
 SpreadElem  <~~ push({spreadT: pop()}) ~~>
             = "..." AssignExpr ;
 
-Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
+Primary     = NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | PrivateNameRef | VarRef ;
 // '#field in obj' - the ergonomic brand check of ES2022. A private name is stored under
@@ -2432,12 +2436,10 @@ InFunc = :script(~~
 //     are syntax errors (NotModule at the three sites that carry NotStrict) and the top
 //     level carries the strict flag at run time (ModuleStrict in Program);
 //   - 'await' is a reserved word, so it is not an identifier (see NotReserved);
-//   - the Annex B HTML-like comments do not exist (NoModuleHtml).
-//
-// Deliberately NOT enforced: a Script may not contain 'import'/'export' at all. Refusing
-// them would reject our own must-parse test files, which use 'export' from plain
-// '.js'/'.ts' files (they would have to be renamed to '.mjs'/'.mts' first). For
-// TypeScript the rule does not exist: tsc decides module-ness from the CONTENT.
+//   - the Annex B HTML-like comments do not exist (NoModuleHtml);
+//   - 'import' and 'export' declarations exist only there: a Script refuses them
+//     (TopStatement). An import() CALL is an expression and stands in both.
+// For TypeScript the rule does not exist: tsc decides module-ness from the CONTENT.
 NotModule = :script(~~
     (function() {
         var mn = c.srcName(), ml = mn.length
@@ -3093,8 +3095,8 @@ AsiEnd = :script(~~
 // The '[lookahead notin { {, function, async function, class, let [ }]' of an
 // ExpressionStatement (see ExprStmt). NotDeclHead is the related guard for a nested
 // single-statement BODY; this one is about the statement list itself, and differs by
-// listing 'function' and 'class' unconditionally - a statement may never START with
-// either - while leaving 'const' and 'let <name>' to the declaration productions that
+// listing '{', 'function' and 'class' unconditionally - a statement may never START with
+// any of them - while leaving 'const' and 'let <name>' to the declaration productions that
 // are tried before it. Returns the impossible token to FAIL, undefined to succeed.
 NotStmtHead = :script(~~
     (function() {
@@ -3103,6 +3105,9 @@ NotStmtHead = :script(~~
             i = i + 1
             cc = c.peek(i)
         }
+        // A '{' opens a Block, never an object literal: '{ *m() {} }' and '{ a() {} }'
+        // are syntax errors, not expression statements.
+        if (cc === 123) { return abnf.newToken("\x01stmt-head", 0) }
         var w = ""
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
             w = w + String.fromCharCode(cc)

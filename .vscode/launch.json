@@ -404,13 +404,13 @@
             "name": "JS multifile (interpreter)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-interpreter.abnf", "tests/js-test-multifile.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-interpreter.abnf", "tests/js-test-multifile.mjs", "-q"]
         },
         {
             "name": "JS multifile (compiler)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.mjs", "-q"]
         },
         {
             "name": "TypeScript multifile (interpreter)",
@@ -2071,7 +2071,7 @@
             "name": "JS native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q", "-exe", "tests/js-native-multi.out"]
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.mjs", "-q", "-exe", "tests/js-native-multi.out"]
         },
         {
             "name": "TypeScript native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",

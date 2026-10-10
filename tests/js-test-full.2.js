@@ -1,19 +1,21 @@
-// Full-syntax test: JavaScript - part 2 of 3, sections 36-43.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43.
 //
-// THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
-// ./test.sh --full's time brake (peak memory grew superlinearly with the file).
+// THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
+// ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
+// the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
 //   tests/js-test-full.3.js   sections 44-56, the call/class/private-name model, the Unicode
 //                             identifier tables, iterators, derived constructors, JSON, guards
+//   tests/js-test-full.4.mjs  section 57, export in a Module
 //
-// The section NUMBERS are global (grammar comments and docs cite them), the three
+// The section NUMBERS are global (grammar comments and docs cite them), the four
 // files together run the assertions in order, and ./test.sh --full reports them as the
-// units js, js2 and js3 - one per FILE, because the check-count agreement rule
+// units js, js2, js3 and js4 - one per FILE, because the check-count agreement rule
 // compares the two GRAMMARS of one file and never two files of one language. Add a
 // new section to whichever file it belongs in, and keep the numbers globally unique
-// across the three.
+// across the four.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full

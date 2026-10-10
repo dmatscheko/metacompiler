@@ -1,11 +1,12 @@
 // Recognition test for the widened JavaScript grammars (js-interpreter.abnf and
-// js-to-llvm-ir.abnf). It is a real-world-looking module that USES the modern syntax
+// js-to-llvm-ir.abnf). It is a real-world-looking program that USES the modern syntax
 // these grammars RECOGNIZE: spread/rest, the modern object-literal property forms,
 // default parameters, optional chaining, nullish coalescing, **, instanceof/in,
 // delete/void/await/yield, async/generator functions, class expressions, new.target,
-// ES export, with/debugger, regex literals and the widened number literals
-// (binary/octal/BigInt/numeric-separator). ES import is project-file loading and is
-// exercised by tests/js-test-multifile.js instead.
+// with/debugger, regex literals and the widened number literals
+// (binary/octal/BigInt/numeric-separator). It is a Script ('.js'), so it has no ES
+// import or export: those are a Module's, exercised by tests/js-test-multifile.mjs and
+// SECTION 57 of tests/js-test-full.4.mjs.
 //
 // A construct that is ACCEPTED but not lowered is routed to notImplemented, so:
 //   * a DEFAULT run of either grammar aborts cleanly at the first not-lowered construct
@@ -15,9 +16,6 @@
 //
 // Only genuinely supported behavior is asserted; the not-lowered constructs are merely
 // exercised (so they warn) and their placeholder results are never checked.
-
-export const VERSION = 2;                       // export: declaration
-export { VERSION as v };                        // export: named with 'as'
 
 // Default and rest parameters: the bare names still bind by position; the default value
 // and the rest gathering are dropped (a + b is genuinely computed from the passed args).

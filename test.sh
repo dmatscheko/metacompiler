@@ -221,7 +221,7 @@ full_error_msg() {
 # (prologue + that section + main with only its call). Prints one line per
 # still-failing section.
 full_isolate() {
-    local G="$1" work="$2" iso="$2.iso" tbl="$2.tbl"
+    local G="$1" work="$2" iso="${2%.*}.iso.${2##*.}" tbl="$2.tbl"
     local id ids name rc out
     full_section_table "$work" > "$tbl"
     ids="$(cut -f1 "$tbl")"
@@ -261,7 +261,9 @@ full_isolate() {
 # full_probe writes the gap report for one grammar/test-file pair to $3.
 full_probe() {
     local G="$1" F="$2" R="$3"
-    local work="$R.work"
+    # The copies keep the file's EXTENSION: a grammar may read it (a js '.mjs' is a
+    # Module, the one goal symbol in which 'export' parses).
+    local work="$R.work.${F##*.}"
     cp "$F" "$work"
     local gaps=0 iter=0 rc out ln reason impl info id name start end
     # THREE facts come out of this probe, in three files:

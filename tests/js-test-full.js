@@ -1,19 +1,21 @@
-// Full-syntax test: JavaScript (ECMAScript 2022 core grammar) - part 1 of 3.
+// Full-syntax test: JavaScript (ECMAScript 2022 core grammar) - part 1 of 4.
 //
-// THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
-// ./test.sh --full's time brake (peak memory grew superlinearly with the file).
+// THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
+// ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
+// the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
 //   tests/js-test-full.3.js   sections 44-56, the call/class/private-name model, the Unicode
 //                             identifier tables, iterators, derived constructors, JSON, guards
+//   tests/js-test-full.4.mjs  section 57, export in a Module
 //
-// The section NUMBERS are global (grammar comments and docs cite them), the three
+// The section NUMBERS are global (grammar comments and docs cite them), the four
 // files together run the assertions in order, and ./test.sh --full reports them as the
-// units js, js2 and js3 - one per FILE, because the check-count agreement rule
+// units js, js2, js3 and js4 - one per FILE, because the check-count agreement rule
 // compares the two GRAMMARS of one file and never two files of one language. Add a
 // new section to whichever file it belongs in, and keep the numbers globally unique
-// across the three.
+// across the four.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full
@@ -36,9 +38,7 @@
 // (Symbol, Proxy, Promise combinators, RegExp methods, ...).
 // Async/generator SYNTAX is covered; where running it needs an event loop,
 // functions are only defined and type-checked, never awaited.
-// `export` IS covered (section 34): an import here runs the referenced file
-// into the shared global scope, so an export is a transparent prefix on its
-// declaration and the specifier forms are no-ops.
+// `export` IS covered, in a Module: SECTION 57, tests/js-test-full.4.mjs.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the ECMAScript 2022 specification grammar with the
@@ -962,22 +962,8 @@ function s33() {
     check("cat6", r === "nobind")
 }
 
-// ===== SECTION 34: export, and the debugger no-op =====
-export const S34K = 7
-export function s34f(x) { return x * 2 }
-export class S34C { constructor() { this.v = 3 } }
-var s34side = 0
-export { s34side as s34sideOut }
-export { S34K as s34alias }
-export default class S34D { m() { return "d" } }
-export function s34mark() { s34side = 42; return s34side }
-
+// ===== SECTION 34: the debugger no-op, and the Script goal =====
 function s34() {
-    check("exp1", S34K === 7)
-    check("exp2", s34f(4) === 8)
-    check("exp3", new S34C().v === 3)
-    check("exp4", s34mark() === 42)
-    check("exp5", new S34D().m() === "d")
     var n = 0
     debugger
     n = n + 1
@@ -988,9 +974,10 @@ function s34() {
     // things a Module does not: 'await' is an ordinary identifier, the Annex B legacy
     // octal forms are legal, and '<!--' / '-->' are HTML-like line comments. A '.mjs' or
     // '.module.js' file refuses all three - see NotModule in the js grammars, which is
-    // where the file name reaches a :script() guard (c.srcName()). These checks are the
-    // Script half of that pair; the Module half is test262's reject corpus, which cannot
-    // live here because a Module file would need its own suite entry.
+    // where the file name reaches a :script() guard (c.srcName()). A Script in turn
+    // refuses 'import' and 'export', so the export walk is SECTION 57, in
+    // tests/js-test-full.4.mjs. The Module half of the refusals is test262's reject
+    // corpus.
     var await = 5
     check("goal1", await === 5)
     check("goal2", 01 === 1 && 08 === 8 && 0777 === 511)

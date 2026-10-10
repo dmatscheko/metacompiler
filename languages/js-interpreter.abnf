@@ -158,8 +158,9 @@ HtmlCloseAtStart = "-->" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 // An import or an export is a MODULE ITEM, not a statement: it may only stand at the top
 // level of the file. '{ import a from "b"; }', '{ export {a}; }' and
 // '{ export default 3; }' are syntax errors, not a block containing a declaration, so the
-// two forms live here rather than among the Statement alternatives.
-TopStatement = ImportStmt | ExportStmt | Statement ;
+// two forms live here rather than among the Statement alternatives. A Script has none
+// at all (IsModule, see "The GOAL SYMBOL").
+TopStatement = IsModule ( ImportStmt | ExportStmt ) | Statement ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | ClassDecl | ClassDeclWidened | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
@@ -328,7 +329,10 @@ Expression  <~~ push(makeSequence(takeAll(), up.pos)) ~~>
 
 // Assignment is an expression and associates to the right: a = b = c.
 // If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
-AssignExpr  = Assignment | PatternAssign | LogicalAssign | AssignExtended | SuperAssign | LhsAssign | Yield | CondExpr ;
+// An arrow function is an AssignmentExpression, not a primary: it may not be the operand
+// of an operator, so 'typeof () => {}', '!() => 1' and 'a || () => 1' are syntax errors
+// while '(() => 1)()' and 'a ? () => 1 : b' are not.
+AssignExpr  = Assignment | PatternAssign | LogicalAssign | AssignExtended | SuperAssign | LhsAssign | Yield | AsyncArrow | ArrowFn | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll(), up.in)) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
@@ -613,7 +617,7 @@ Arg         = SpreadElem | AssignExpr ;
 SpreadElem  <~~ push({spread: true, t: pop()}) ~~>
             = "..." AssignExpr ;
 
-Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
+Primary     = NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | ClassExprWidened | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | PrivateNameRef | VarRef ;
 // '#field in obj' - the ergonomic brand check of ES2022. A private name is an ordinary
@@ -2496,12 +2500,10 @@ InFunc = :script(~~
 //     are syntax errors (NotModule at the three sites that carry NotStrict) and the top
 //     level carries the strict flag at run time (ModuleStrict in Program);
 //   - 'await' is a reserved word, so it is not an identifier (see NotReserved);
-//   - the Annex B HTML-like comments do not exist (NoModuleHtml).
-//
-// Deliberately NOT enforced: a Script may not contain 'import'/'export' at all. Refusing
-// them would reject our own must-parse test files, which use 'export' from plain
-// '.js'/'.ts' files (they would have to be renamed to '.mjs'/'.mts' first). For
-// TypeScript the rule does not exist: tsc decides module-ness from the CONTENT.
+//   - the Annex B HTML-like comments do not exist (NoModuleHtml);
+//   - 'import' and 'export' declarations exist only there: a Script refuses them
+//     (TopStatement). An import() CALL is an expression and stands in both.
+// For TypeScript the rule does not exist: tsc decides module-ness from the CONTENT.
 NotModule = :script(~~
     (function() {
         var mn = c.srcName(), ml = mn.length
@@ -3056,8 +3058,8 @@ AsiEnd = :script(~~
 // The '[lookahead notin { {, function, async function, class, let [ }]' of an
 // ExpressionStatement (see ExprStmt). NotDeclHead is the related guard for a nested
 // single-statement BODY; this one is about the statement list itself, and differs by
-// listing 'function' and 'class' unconditionally - a statement may never START with
-// either - while leaving 'const' and 'let <name>' to the declaration productions that
+// listing '{', 'function' and 'class' unconditionally - a statement may never START with
+// any of them - while leaving 'const' and 'let <name>' to the declaration productions that
 // are tried before it. Returns the impossible token to FAIL, undefined to succeed.
 NotStmtHead = :script(~~
     (function() {
@@ -3066,6 +3068,9 @@ NotStmtHead = :script(~~
             i = i + 1
             cc = c.peek(i)
         }
+        // A '{' opens a Block, never an object literal: '{ *m() {} }' and '{ a() {} }'
+        // are syntax errors, not expression statements.
+        if (cc === 123) { return abnf.newToken("\x01stmt-head", 0) }
         var w = ""
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
             w = w + String.fromCharCode(cc)
