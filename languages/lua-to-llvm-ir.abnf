@@ -843,7 +843,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_strarg: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+    var luaFnArity = {lua_catstr: 1, lua_strarg: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
@@ -853,6 +853,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
+        if (name == "lua_catstr") {
+            // A concatenation operand: a string as it is, a number as tostring
+            // renders it, anything else a Lua error. Twin of luaCatStr in
+            // lua-interpreter.abnf.
+            var isStrB = curF.NewBlock("")
+            var notStrB = curF.NewBlock("")
+            var numB = curF.NewBlock("")
+            var badB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "string")])), isStrB, notStrB)
+            isStrB.NewRet(ps[0])
+            notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, badB)
+            numB.NewRet(callExt(numB, "js_lustr", [ps[0]]))
+            callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to concatenate a "),
+                callExt(badB, "js_lutname", [ps[0]])]), emitStr(badB, " value")])])
+            badB.NewRet(hUndef)
+            return
+        }
         if (name == "lua_strarg") {
             // A number where the string library wants a string is converted the
             // way tostring renders it. Twin of luaStrArg in lua-interpreter.abnf.
@@ -1533,8 +1550,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: joinB, v: lenV}
         }
     }
-    // Concatenation: right associative, so at most two operands per node. Both sides are
-    // rendered to strings (js_pystr) and joined (js_add on two strings concatenates).
+    // Concatenation: right associative, so at most two operands per node. Each side
+    // becomes a string through lua_catstr and js_add joins the two.
     function makeConcat(items) {
         if (items.length == 1) { return items[0] }
         var l = items[0]
@@ -1544,8 +1561,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rl.b
             var rr = r(b)
             b = rr.b
-            var ls = callLua(b, "lua_str", [callLua(b, "lua_first", [rl.v])])
-            var rs = callLua(b, "lua_str", [callLua(b, "lua_first", [rr.v])])
+            var ls = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rl.v])])
+            var rs = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rr.v])])
             return {b: b, v: callExt(b, "js_add", [ls, rs])}
         }
     }

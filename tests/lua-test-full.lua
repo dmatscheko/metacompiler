@@ -1149,6 +1149,21 @@ function s27()
     check("err34", (pcall(math.floor, "x")), false)
     ok, e = pcall(function() undefinedGlobal.x = 1 end)
     check("err35", ok, false)
+    -- Only strings and numbers concatenate (the left operand is reported first),
+    -- and only two numbers or two strings compare; the message names the operands
+    -- in the order lua evaluates them, a > b being b < a.
+    ok, e = pcall(function() return id({}) .. id(true) end)
+    check("err36", at(e, "attempt to concatenate a table value"), 107)
+    ok, e = pcall(function() return "x" .. id(true) end)
+    check("err37", at(e, "attempt to concatenate a boolean value"), 109)
+    check("err38", id(1) .. id(2.0), "12.0")
+    ok, e = pcall(function() return id({}) < id({}) end)
+    check("err39", at(e, "attempt to compare two table values"), 112)
+    ok, e = pcall(function() return id(1) < id("x") end)
+    check("err40", at(e, "attempt to compare number with string"), 114)
+    ok, e = pcall(function() return id(1) >= id("x") end)
+    check("err41", at(e, "attempt to compare string with number"), 116)
+    check("err42", id("a") < id("b"), true)
 end
 
 -- ===== SECTION 28: pairs hands a key back as the value that stored it =====

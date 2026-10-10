@@ -1371,6 +1371,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (op == "<=") { return c <= 0 }
             return c >= 0
         }
+        // Only two numbers or two strings have an order; anything else is a Lua
+        // error, which names the operands in the order lua evaluates them: a > b
+        // is b < a. Twin of luCmp in abnf/jsrtlua.go and js_lucmp in lua-rt.metajs.
+        if (!(isNum(l) && isNum(r)) && !(typeof l == "string" && typeof r == "string")) {
+            var swap = op == ">" || op == ">="
+            var tl = luaType(swap ? r : l)
+            var tr = luaType(swap ? l : r)
+            if (tl == tr) { fail("attempt to compare two " + tl + " values") }
+            fail("attempt to compare " + tl + " with " + tr)
+        }
         var a = anytype // The operands compare as numbers or as strings.
         var b = anytype
         a = isNum(l) ? numOf(l) : l
@@ -1421,12 +1431,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var r = items[1]
         return function() { return luaArith("^", luaFirst(l()), luaFirst(r())) }
     }
-    // Concatenation: right associative, so at most two operands per node.
+    // Concatenation: right associative, so at most two operands per node. Only a
+    // string or a number concatenates; the left operand is checked first, as in
+    // luaG_concaterror. Twin of lua_catstr in lua-to-llvm-ir.abnf.
     function makeConcat(items) {
         if (items.length == 1) { return items[0] }
         var l = items[0]
         var r = items[1]
-        return function() { return luaToStr(luaFirst(l())) + luaToStr(luaFirst(r())) }
+        return function() {
+            var a = anytype // Both operands are evaluated before either is checked.
+            a = luaFirst(l())
+            var b = anytype
+            b = luaFirst(r())
+            return luaCatStr(a) + luaCatStr(b)
+        }
+    }
+    function luaCatStr(v) {
+        if (typeof v == "string") { return v }
+        if (isNum(v)) { return luaNumStr(v) }
+        fail("attempt to concatenate a " + luaType(v) + " value")
     }
     // and / or keep the deciding operand, with Lua truthiness.
     makeOrAnd = function(items, isOr) {

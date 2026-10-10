@@ -525,7 +525,7 @@ function luToIntOp(v) {
 
 // luCmpV is the -1/0/1 of Lua's ordered comparison, or 2 for "unordered" (a NaN
 // operand), which makes every relation false.
-function luCmpV(l, r) {
+function luCmpV(l, r, swap) {
     if (luIsInt(l) && luIsInt(r)) { return i64CmpS(luPair(l), luPair(r)) }
     if (luIsNum(l) && luIsNum(r)) {
         var a = luNumOf(l)
@@ -535,7 +535,15 @@ function luCmpV(l, r) {
         if (a !== b) { return 2 }
         return 0
     }
-    // jsCompare: two strings lexicographically, everything else as ToNumber.
+    // Only two numbers or two strings have an order; the error names the
+    // operands in lua's order (`swap`: a > b is b < a). Twin of luCmp in
+    // abnf/jsrtlua.go.
+    if (typeof l != "string" || typeof r != "string") {
+        var tl = luTypeName(swap ? r : l)
+        var tr = luTypeName(swap ? l : r)
+        if (tl == tr) { luFail("attempt to compare two " + tl + " values") }
+        luFail("attempt to compare " + tl + " with " + tr)
+    }
     if (l < r) { return 0 - 1 }
     if (l > r) { return 1 }
     return 0
@@ -732,7 +740,7 @@ function js_lucmp(op_raw, l, r) {
         // luCmpV then makes all four comparisons false, which is right.
         if (l === r) { return op === 2 || op === 3 }
     }
-    var c = luCmpV(l, r)
+    var c = luCmpV(l, r, op === 1 || op === 3)
     if (c === 2) { return false }         // a NaN operand is unordered
     if (op === 0) { return c < 0 }
     if (op === 1) { return c > 0 }

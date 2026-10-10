@@ -579,7 +579,22 @@ func (rt *jsrt) luCmp(op int, l, r interface{}) bool {
 			return false // a NaN operand is unordered
 		}
 	} else {
-		c = rt.jsCompare(l, r)
+		// Only two numbers or two strings have an order; the error names the
+		// operands in lua's order, a > b being b < a. Twin of luaCmp in
+		// lua-interpreter.abnf.
+		ls, lok := l.(string)
+		rs, rok := r.(string)
+		if !lok || !rok {
+			tl, tr := rt.luTypeName(l), rt.luTypeName(r)
+			if op == 1 || op == 3 {
+				tl, tr = tr, tl
+			}
+			if tl == tr {
+				rt.luFail("attempt to compare two %s values", tl)
+			}
+			rt.luFail("attempt to compare %s with %s", tl, tr)
+		}
+		c = rt.jsCompare(ls, rs)
 	}
 	switch op {
 	case 0:
