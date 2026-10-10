@@ -678,7 +678,10 @@ function rbIsNum(v) { return rbNumRank(v) >= 0 }
 function rbToF(v) {
     if (typeof v == "number") { return v }
     if (rbIsFlo(v)) { return v["f"] }
-    if (rbIsRat(v)) { return v["n"] / v["d"] }
+    if (rbIsRat(v)) {
+        if (rbIsBig(v["n"]) || rbIsBig(v["d"])) { return rbIntFdiv(v["n"], v["d"]) }
+        return v["n"] / v["d"]
+    }
     if (rbIsCpx(v)) { return rbToF(v["re"]) }
     if (rbIsBig(v)) { return rbABigToF(v) }
     return 0
@@ -1025,10 +1028,56 @@ function rbGcd(a, b) {
     return x
 }
 
+// A Rational's parts are Integers of any size (a big past 2^53), reduced, with
+// the sign on n. Twin of mkRatBig in ruby-interpreter.abnf and rubyMkRatB in
+// abnf/jsrtruby.go.
+function rbMkRatBig(n, d) {
+    var nn = anytype
+    var dd = anytype
+    nn = n
+    dd = d
+    if (rbNumCmp(dd, 0) < 0) {
+        nn = rbNeg(nn)
+        dd = rbNeg(dd)
+    }
+    var x = anytype
+    var y = anytype
+    x = rbRealAbs(nn)
+    y = dd
+    while (!rbEq(y, 0)) {
+        var t = anytype
+        t = rbNumBin("%", x, y)
+        x = y
+        y = t
+    }
+    if (rbNumCmp(x, 1) > 0) {
+        nn = rbNumBin("/", nn, x)
+        dd = rbNumBin("/", dd, x)
+    }
+    return {__rat: true, n: nn, d: dd}
+}
+function rbIntText(v) {
+    if (rbIsBig(v)) { return rtABigStr(v) }
+    return rbIntStr(v)
+}
+// A Rational against an Integer or a Rational compares EXACTLY, by cross
+// multiplication. Twin of ratCmp in ruby-interpreter.abnf.
+function rbRatExactPair(l, r) {
+    if (!rbIsRat(l) && !rbIsRat(r)) { return false }
+    if (!(rbIsRat(l) || typeof l == "number" || rbIsBig(l))) { return false }
+    return rbIsRat(r) || typeof r == "number" || rbIsBig(r)
+}
+function rbRatCmp(l, r) {
+    var p = rbAsRat(l)
+    var q = rbAsRat(r)
+    return rbNumCmp(rbNumBin("*", p["n"], q["d"]), rbNumBin("*", q["n"], p["d"]))
+}
+
 // The sign lives in the numerator and the pair is reduced, so two equal Rationals
 // have equal fields - which is what makes the Go twin's value equality reachable
 // through rbEq here.
 function rbMkRat(n, d) {
+    if (rbIsBig(n) || rbIsBig(d)) { return rbMkRatBig(n, d) }
     var nn = n
     var dd = d
     if (dd < 0) {
@@ -1119,12 +1168,8 @@ function rbRealAbs(v) {
 // overflow and never enter the subnormals, and the loops below are driven so they
 // do not. (1.5).to_r is (3/2).
 //
-// WHAT THIS CANNOT REACH is a property of the value model, not of the arithmetic: n and
-// d are DOUBLES, so d = 2^-e is representable only while -e <= 1023. A normal double may
-// need 2^1074 (the second-smallest normal reduces to an ODD numerator over 2^1074), so
-// |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
-// denominator this model cannot hold, and falls back to x/1. Closing it needs a
-// Rational whose parts are bigs.
+// A double denominator holds 2^-e only while -e <= 1023; below about 2^-971 the
+// denominator is built as a big.
 //
 // An infinity or a NaN has no Rational: MRI raises FloatDomainError, and without
 // the guard rbGcd would run `x % y` with y = NaN forever. The twins are ratOfFlo
@@ -1150,7 +1195,11 @@ function rbRatOfFlo(x) {
     //
     // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
     // integral Float past 2^53, whose numerator rbIntStr expands exactly.
-    if (e >= 0 || e < 0 - 1023) { return {__rat: true, n: x, d: 1} }
+    if (e >= 0) { return {__rat: true, n: x, d: 1} }
+    if (e < 0 - 1023) {
+        if (neg) { return {__rat: true, n: 0 - a, d: rbNumBin("**", 2, 0 - e)} }
+        return {__rat: true, n: a, d: rbNumBin("**", 2, 0 - e)}
+    }
     var d = 1
     var k = 0
     while (k < 0 - e) { d = d * 2 ; k = k + 1 }
@@ -1161,7 +1210,7 @@ function rbRatOfFlo(x) {
 function rbAsRat(v) {
     if (rbIsRat(v)) { return v }
     if (rbIsFlo(v)) { return rbRatOfFlo(v["f"]) }
-    if (typeof v == "number") { return rbMkRat(v, 1) }
+    if (typeof v == "number" || rbIsBig(v)) { return rbMkRat(v, 1) }
     return rbMkRat(rbToF(v), 1)
 }
 
@@ -1232,7 +1281,7 @@ function rbHypot(a, b) {
 // a different integer: `"" + 36028797018963968` (2^55) is "36028797018963970". MRI's
 // (0.001).to_r is 1152921504606847/1152921504606846976, so this is reachable.
 // rbIntStr is the exact expansion.
-function rbRatText(v) { return rbIntStr(v["n"]) + "/" + rbIntStr(v["d"]) }
+function rbRatText(v) { return rbIntText(v["n"]) + "/" + rbIntText(v["d"]) }
 // Complex#to_s (insp false) and the inside of #inspect: MRI's f_format. Twin of
 // cpxText in ruby-interpreter.abnf.
 function rbCpxText(v, insp) {
@@ -1251,24 +1300,51 @@ function rbCpxText(v, insp) {
 }
 
 // Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI keeps the Rational at
-// a positive ndigits - `(2r/3r).round(1)' is (7/10), not 0.7. The full rule and
-// the 2^53 ceiling are at ratDigitOp in languages/ruby-interpreter.abnf;
+// a positive ndigits - `(2r/3r).round(1)' is (7/10), not 0.7. The full rule is
+// at ratDigitOp in languages/ruby-interpreter.abnf;
 // rubyRatDigitOp in abnf/jsrt.go is the other twin. `round' is half AWAY FROM
 // ZERO and is written on integers, (2n +/- d) over 2d, so it does not depend on a
 // double holding n/d exactly.
 function rbRatIntOp(n, d, mode) {
+    if (rbIsBig(n) || rbIsBig(d)) { return rbRatIntOpBig(n, d, mode) }
     if (mode == "f") { return Math.floor(n / d) }
     if (mode == "c") { return Math.ceil(n / d) }
     if (mode == "t") { return Math.trunc(n / d) }
     if (n >= 0) { return Math.floor((2 * n + d) / (2 * d)) }
     return Math.ceil((2 * n - d) / (2 * d))
 }
+// The same on Integer parts of any size. Twin of ratIntOpBig.
+function rbRatIntOpBig(n, d, mode) {
+    if (mode == "f") { return rbNumBin("/", n, d) }
+    if (mode == "c") { return rbNeg(rbNumBin("/", rbNeg(n), d)) }
+    if (mode == "t") {
+        if (rbNumCmp(n, 0) < 0) { return rbRatIntOpBig(n, d, "c") }
+        return rbNumBin("/", n, d)
+    }
+    var n2 = anytype
+    n2 = rbNumBin("*", 2, n)
+    var d2 = anytype
+    d2 = rbNumBin("*", 2, d)
+    if (rbNumCmp(n, 0) >= 0) { return rbNumBin("/", rbNumBin("+", n2, d), d2) }
+    return rbNeg(rbNumBin("/", rbNumBin("-", d, n2), d2))
+}
+// A Rational to an Integer power, exactly. Twin of ratPow in ruby-interpreter.abnf.
+function rbRatPow(p, k) {
+    if (rbNumCmp(k, 0) >= 0) { return rbMkRat(rbNumBin("**", p["n"], k), rbNumBin("**", p["d"], k)) }
+    if (rbEq(p["n"], 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    var nk = rbNeg(k)
+    return rbMkRat(rbNumBin("**", p["d"], nk), rbNumBin("**", p["n"], nk))
+}
 function rbRatDigitOp(v, mode, nd) {
     if (nd > 0) {
         var p = rbPow10(nd)
-        return rbMkRat(rbRatIntOp(v["n"] * p, v["d"], mode), p)
+        return rbMkRat(rbRatIntOp(rbNumBin("*", v["n"], p), v["d"], mode), p)
     }
-    var k = rbIntFromF(rbRatIntOp(v["n"], v["d"], mode))
+    var k0 = anytype
+    k0 = rbRatIntOp(v["n"], v["d"], mode)
+    var k = anytype
+    k = k0
+    if (!rbIsBig(k0)) { k = rbIntFromF(k0) }
     if (nd == 0) { return k }
     return rbIntDigitOp(k, 0 - nd, mode)
 }
@@ -1299,10 +1375,18 @@ function rbNumBin(op, l, r) {
     if (rk == 1) {
         var p = rbAsRat(l)
         var q = rbAsRat(r)
-        if (op == "+") { return rbMkRat(p["n"] * q["d"] + q["n"] * p["d"], p["d"] * q["d"]) }
-        if (op == "-") { return rbMkRat(p["n"] * q["d"] - q["n"] * p["d"], p["d"] * q["d"]) }
-        if (op == "*") { return rbMkRat(p["n"] * q["n"], p["d"] * q["d"]) }
-        if (op == "/") { return rbMkRat(p["n"] * q["d"], p["d"] * q["n"]) }
+        if (op == "+") { return rbMkRat(rbNumBin("+", rbNumBin("*", p["n"], q["d"]), rbNumBin("*", q["n"], p["d"])), rbNumBin("*", p["d"], q["d"])) }
+        if (op == "-") { return rbMkRat(rbNumBin("-", rbNumBin("*", p["n"], q["d"]), rbNumBin("*", q["n"], p["d"])), rbNumBin("*", p["d"], q["d"])) }
+        if (op == "*") { return rbMkRat(rbNumBin("*", p["n"], q["n"]), rbNumBin("*", p["d"], q["d"])) }
+        if (op == "/") { return rbMkRat(rbNumBin("*", p["n"], q["d"]), rbNumBin("*", p["d"], q["n"])) }
+        if (op == "%") {
+            var fq = rbNumBin("/", p, q)
+            return rbNumBin("-", p, rbNumBin("*", q, rbRatIntOp(fq["n"], fq["d"], "f")))
+        }
+        if (op == "**") {
+            if (typeof r == "number" || rbIsBig(r)) { return rbRatPow(p, r) }
+            if (rbIsRat(r) && rbEq(r["d"], 1)) { return rbRatPow(p, r["n"]) }
+        }
     }
     if (rk >= 1) {
         var x = rbToF(l)
@@ -1452,10 +1536,27 @@ function rbIntFdiv(a, b) {
     else { q = rbNumBin("/", pa, rbNumBin("*", pb, rbNumBin("**", 2, 0 - s))) }
     var r = rbToF(q)
     var k = s
-    while (k > 0) { r = r / 2; k = k - 1 }
+    var lo = rbMinNormal()
+    while (k > 0 && r / 2 >= lo) { r = r / 2; k = k - 1 }
+    if (k > 0) {
+        var pk = 1
+        while (k > 0) { pk = pk / 2; k = k - 1 }
+        r = r * pk
+    }
     while (k < 0) { r = r * 2; k = k + 1 }
     if (na != nb) { return rbFdivSign(0 - r, x, y) }
     return rbFdivSign(r, x, y)
+}
+// 2^-1022, the smallest normal double. Twin of minNormal.
+var RB_MIN_NORMAL = 0
+function rbMinNormal() {
+    if (RB_MIN_NORMAL == 0) {
+        var m = 1
+        var i = 0
+        while (i < 1022) { m = m / 2; i = i + 1 }
+        RB_MIN_NORMAL = m
+    }
+    return RB_MIN_NORMAL
 }
 // A zero quotient keeps the sign IEEE-754 gives it. Twin of fdivSign.
 function rbFdivSign(r, x, y) {
@@ -1471,6 +1572,7 @@ function rbNumCmp(l, r) {
             var cr = rbABigCmpOf(r)
             if (cl != null && cr != null) { return rtABigCmp(cl, cr) }
         }
+        if (rbRatExactPair(l, r)) { return rbRatCmp(l, r) }
     }
     var a = rbToF(l)
     var b = rbToF(r)
@@ -1486,7 +1588,7 @@ function rbNeg(v) {
     if (typeof v == "number") { return -v }
     if (rtTag(v, "__bint")) { return rtABigNarrow(rtABigNeg(v)) }
     if (rbIsFlo(v)) { return rbMkFlo(-v["f"]) }
-    if (rbIsRat(v)) { return {__rat: true, n: -v["n"], d: v["d"]} }
+    if (rbIsRat(v)) { return {__rat: true, n: rbNeg(v["n"]), d: v["d"]} }
     if (rbIsCpx(v)) { return rbMkCpx(rbNeg(v["re"]), rbNeg(v["im"])) }
     if (rbUserObj(v)) { return rbMethod(v, "-@", []) }
     fail("cannot negate a " + typeof v)
@@ -3002,7 +3104,7 @@ function rbEq(l, r) {
     if (rbIsNum(l) && rbIsNum(r)) {
         if (rbIsCpx(l) || rbIsCpx(r)) { return rbEq(rbReOf(l), rbReOf(r)) && rbEq(rbImOf(l), rbImOf(r)) }
         if (typeof l != "number" || typeof r != "number") {
-            if (rbIsBig(l) || rbIsBig(r)) { return rbNumCmp(l, r) == 0 }
+            if (rbIsBig(l) || rbIsBig(r) || rbRatExactPair(l, r)) { return rbNumCmp(l, r) == 0 }
         }
         return rbToF(l) == rbToF(r)
     }
@@ -4374,26 +4476,26 @@ function rbFloDivmod(x, y) {
 }
 
 function rbRationalize(t, args) {
-    if (typeof t == "number" || rbIsBig(t)) { return rbMkRat(rbToF(t), 1) }
+    if (typeof t == "number" || rbIsBig(t)) { return rbMkRat(t, 1) }
     if (rbIsRat(t) && args.length == 0) { return t }
     var e = anytype
     e = 0
     if (args.length > 0) { e = args[0] }
     if (rbIsRat(t) && !rbIsFlo(e)) {
         var er = rbAsRat(e)
-        if (er["n"] == 0) { return t }
+        if (rbEq(er["n"], 0)) { return t }
         var rd = rbNumBin("*", t["d"], er["d"])
-        var rc = rbNumBin("*", Math.abs(t["n"]), er["d"])
-        var re = rbNumBin("*", Math.abs(er["n"]), t["d"])
+        var rc = rbNumBin("*", rbRealAbs(t["n"]), er["d"])
+        var re = rbNumBin("*", rbRealAbs(er["n"]), t["d"])
         var rr = rbRatSimplest(rbNumBin("-", rc, re), rd, rbNumBin("+", rc, re), rd)
-        if (t["n"] < 0) { return rbMkRat(0 - rr["n"], rr["d"]) }
+        if (rbNumCmp(t["n"], 0) < 0) { return rbMkRat(rbNeg(rr["n"]), rr["d"]) }
         return rr
     }
     var x = rbToF(t)
     rbFloDomain(x)
     var r = rbFloRatBounds(Math.abs(x), args.length > 0, e)
     if (r === null) { return rbAsRat(t) }
-    if (x < 0) { return rbMkRat(0 - r["n"], r["d"]) }
+    if (x < 0) { return rbMkRat(rbNeg(r["n"]), r["d"]) }
     return r
 }
 
@@ -4463,7 +4565,7 @@ function rbRatSimplest(an0, ad0, bn0, bd0) {
             q1 = q2
         }
     }
-    return rbFiniteRat(rbToF(rbNumBin("+", rbNumBin("*", c, p1), p0)), rbToF(rbNumBin("+", rbNumBin("*", c, q1), q0)))
+    return rbMkRat(rbNumBin("+", rbNumBin("*", c, p1), p0), rbNumBin("+", rbNumBin("*", c, q1), q0))
 }
 
 function rbFiniteRat(p, q) {
@@ -4565,6 +4667,7 @@ function rbNumMethod(t, name, args) {
     // with a POSITIVE ndigits answer a Float and do not raise, which is why only
     // the no-argument forms are guarded; those four are handled with their
     // ndigits below.
+    if ((name == "to_i" || name == "to_int") && rbIsRat(t)) { return rbRatDigitOp(t, "t", 0) }
     if (name == "to_i" || name == "to_int") {
         rbFloDomain(x)
         return rbIntFromF(Math.trunc(x))
@@ -4581,7 +4684,7 @@ function rbNumMethod(t, name, args) {
     // Rational#abs stays a RATIONAL (Complex#abs is rbCpxAbs).
     if (name == "abs" || name == "magnitude") {
         if (rbIsRat(t)) {
-            if (t["n"] < 0) { return rbMkRat(0 - t["n"], t["d"]) }
+            if (rbNumCmp(t["n"], 0) < 0) { return rbMkRat(rbNeg(t["n"]), t["d"]) }
             return t
         }
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
@@ -7316,8 +7419,8 @@ function js_rkconv(name, args) {
         var rp = rbAsRat(v)
         if (!rbIsArr(args) || args.length < 2) { return rbMkRat(rp["n"], rp["d"]) }
         var rq = rbAsRat(args[1])
-        if (rq["n"] == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
-        return rbMkRat(rp["n"] * rq["d"], rp["d"] * rq["n"])
+        if (rbEq(rq["n"], 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        return rbMkRat(rbNumBin("*", rp["n"], rq["d"]), rbNumBin("*", rp["d"], rq["n"]))
     }
     if (name == "Complex") {
         var nargs = rbIsArr(args) ? args.length : 0

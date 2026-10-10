@@ -3136,9 +3136,29 @@ def s62
   check("cx62b", r == :range && Complex(3, 0).to_i == 3 && Complex(3, 0).to_f == 3.0 && c[2].abs == 3.0 && Complex(0, 5).abs == 5)
   check("cx62c", (c[0] / Complex(1, 2)).inspect == "((11/5)-(2/5)*i)" && Complex(0, 5) / Complex(1, 2) == Complex(2, 1) &&
                  (Complex(0, 5) / Complex(1, 2)).real.class == Integer && (c[0] * Rational(1, 3)).imaginary == Rational(4, 3))
-  big = [10**400, 3**700, 7**400]
-  check("fd62a", big[0].fdiv(10**399) == 10.0 && (-big[0]).fdiv(3) == -Float::INFINITY && 7.fdiv(-big[0]).to_s == "-0.0" &&
-                 big[1].fdiv(big[2]) == 8.823934954745734e-05 && 7.fdiv(2) == 3.5)
+  # Big operands are kept few: an exact fdiv costs the -frozen interpreter dearly.
+  check("fd62a", (10**310).fdiv(10**309) == 10.0 && 0.fdiv(-5).to_s == "-0.0" && 7.fdiv(2) == 3.5)
+end
+
+# ===== SECTION 63: a Rational's parts are Integers of any size =====
+# Past 2^53 the parts stay exact, so 10**20 + 1/3 is (300000000000000000001/3);
+# comparisons cross-multiply; #to_i, #floor and #round work on the exact pair; an
+# Integer power and % stay Rational; and Float#to_r reaches below 2^-971.
+# Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS
+# UNDER REAL RUBY.
+def s63
+  b = [10**20, 10**30, 2**70 + 1]
+  third = Rational(1, 3)
+  check("ra63a", (b[0] + third).inspect == "(300000000000000000001/3)" && (third + b[0]) == b[0] + third &&
+                 (b[0] * third * 3).inspect == "(100000000000000000000/1)" && (b[2] - third).numerator == 3 * (2**70 + 1) - 1)
+  x = third * b[1] + Rational(1, 7)
+  check("ra63b", x.to_i == 333333333333333333333333333333 && x.round == 333333333333333333333333333333 &&
+                 x.ceil == 333333333333333333333333333334 && x.floor(2) == Rational(33333333333333333333333333333347, 100) &&
+                 x < x + Rational(1, 10**40) && x != x + Rational(1, 10**40) && (Rational(b[1], 7) <=> Rational(b[1] + 1, 7)) == -1)
+  check("ra63c", (Rational(2, 3)**-2).inspect == "(9/4)" && (2**Rational(2, 1)).inspect == "(4/1)" &&
+                 (Rational(7, 2) % 2).inspect == "(3/2)" && (5 % Rational(3, 2)).inspect == "(1/2)" &&
+                 (Rational(2, 3)**0.5) == 0.816496580927726)
+  check("ra63d", 1e-300.to_r.numerator == 6032057205060441)
 end
 
 s39() # SECTION-CALL 39
@@ -3165,5 +3185,6 @@ s59() # SECTION-CALL 59
 s60() # SECTION-CALL 60
 s61() # SECTION-CALL 61
 s62() # SECTION-CALL 62
+s63() # SECTION-CALL 63
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -1583,7 +1583,7 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case *jsPyFlo: // Python's boxed float.
 		return t.f
 	case jsRat:
-		return t.n / t.d
+		return rubyRatToF(t)
 	case jsCpx:
 		return rubyToF(t.re)
 	case jsUndefT:
@@ -3882,7 +3882,14 @@ type jsSym struct {
 // externs below), so every branch added for these three types is unreachable from
 // MetaJS, JS, Java, Kotlin, Go, Python and the rest.
 type jsFlo struct{ f float64 }
-type jsRat struct{ n, d float64 }
+
+// n / d, or past 2^53 the exact bn / bd with n / d their nearest doubles: see
+// rubyMkRatB in jsrtruby.go.
+type jsRat struct {
+	n, d   float64
+	bn, bd *big.Int
+}
+
 // A Complex's parts are TYPED Ruby reals (float64 Integer, *jsBigInt, jsFlo,
 // jsRat): see rubyCpxBin in jsrtruby.go.
 type jsCpx struct{ re, im interface{} }
@@ -3918,7 +3925,7 @@ func rubyToF(v interface{}) float64 {
 	case float64:
 		return t
 	case jsRat:
-		return t.n / t.d
+		return rubyRatToF(t)
 	case jsFlo:
 		return t.f
 	case jsCpx:
@@ -4484,12 +4491,8 @@ func rubyImOf(v interface{}) interface{} {
 // and the interpreter run THE SAME STEPS and agree by construction; math.Frexp takes an
 // out-parameter and is not reachable from MetaJS at all (manual 7.7).
 //
-// WHAT THIS CANNOT REACH is a property of the value model, not of the arithmetic: jsRat's
-// n and d are float64, so d = 2^-e is representable only while -e <= 1023. A normal double
-// may need 2^1074 (the second-smallest normal reduces to an ODD numerator over 2^1074), so
-// |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
-// denominator this model cannot hold, and falls back to x/1. Closing it needs a
-// bignum-Rational value model.
+// A float64 denominator holds 2^-e only while -e <= 1023; below about 2^-971 the
+// pair is built as bigs (rubyMkRatB).
 //
 // An infinity or a NaN has no Rational: MRI raises FloatDomainError, and without the guard
 // rubyGcd would loop forever on math.Mod(x, NaN). The twins are ratOfFlo in
@@ -4529,8 +4532,15 @@ func (rt *jsrt) rubyRatOfFlo(x float64) jsRat {
 	//
 	// e >= 0 means x is itself an integer, and then to_r is x/1 - including every
 	// integral Float past 2^53, whose numerator rubyIntStr expands exactly.
-	if e >= 0 || e < -1023 {
+	if e >= 0 {
 		return jsRat{n: x, d: 1}
+	}
+	if e < -1023 {
+		n := rubyExactInt(a)
+		if neg {
+			n.Neg(n)
+		}
+		return rubyMkRatB(n, new(big.Int).Lsh(big.NewInt(1), uint(-e)))
 	}
 	d := 1.0
 	for k := 0; k < -e; k++ {
@@ -4551,6 +4561,9 @@ func (rt *jsrt) rubyAsRat(v interface{}) jsRat {
 	}
 	if n, ok := v.(float64); ok {
 		return rubyMkRat(n, 1)
+	}
+	if b, ok := v.(*jsBigInt); ok {
+		return rubyMkRatB(b.v, big.NewInt(1))
 	}
 	return rubyMkRat(rubyToF(v), 1)
 }
@@ -4635,11 +4648,16 @@ func rubyHypot(a, b float64) float64 {
 // 2^53 is a different integer: 2^55 prints as "36028797018963970", while MRI's
 // (0.001).to_r is 1152921504606847/1152921504606846976. rubyIntStr is the exact
 // expansion.
-func rubyRatText(t jsRat) string { return rubyIntStr(t.n) + "/" + rubyIntStr(t.d) }
+func rubyRatText(t jsRat) string {
+	if t.bn != nil {
+		return t.bn.String() + "/" + t.bd.String()
+	}
+	return rubyIntStr(t.n) + "/" + rubyIntStr(t.d)
+}
 
 // rubyRatDigitOp is Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI
 // keeps the Rational at a positive ndigits - `(2r/3r).round(1)` is (7/10), not
-// 0.7. The full rule and the 2^53 ceiling
+// 0.7. The full rule
 // are at ratDigitOp in languages/ruby-interpreter.abnf; rbRatDigitOp in
 // languages/lib/ruby-rt.metajs is the other twin. `round` is half AWAY FROM ZERO
 // and is written on integers, (2n +/- d) over 2d, so it does not depend on a
@@ -4660,6 +4678,18 @@ func rubyRatIntOp(n, d float64, mode byte) float64 {
 }
 
 func (rt *jsrt) rubyRatDigitOp(v jsRat, mode byte, nd int) interface{} {
+	if v.bn != nil || (nd > 0 && math.Abs(v.n*math.Pow(10, float64(nd))) > 9007199254740992) {
+		n, d := rubyRatParts(v)
+		if nd > 0 {
+			p := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(nd)), nil)
+			return rubyMkRatB(rubyRatIntOpB(new(big.Int).Mul(n, p), d, mode), p)
+		}
+		k := rt.rubyBigNarrow(rubyRatIntOpB(n, d, mode))
+		if nd == 0 {
+			return k
+		}
+		return rt.rubyIntDigitOp(k, -nd, mode)
+	}
 	if nd > 0 {
 		p := math.Pow(10, float64(nd))
 		return rubyMkRat(rubyRatIntOp(v.n*p, v.d, mode), p)
@@ -5253,14 +5283,16 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 	if rk == 1 {
 		p, q := rt.rubyAsRat(l), rt.rubyAsRat(r)
 		switch op {
-		case "+":
-			return rubyMkRat(p.n*q.d+q.n*p.d, p.d*q.d)
-		case "-":
-			return rubyMkRat(p.n*q.d-q.n*p.d, p.d*q.d)
-		case "*":
-			return rubyMkRat(p.n*q.n, p.d*q.d)
-		case "/":
-			return rubyMkRat(p.n*q.d, p.d*q.n)
+		case "+", "-", "*", "/":
+			return rt.rubyRatArith(op, p, q)
+		case "%":
+			fq := rt.rubyRatArith("/", p, q)
+			fn, fd := rubyRatParts(fq)
+			return rt.rubyNumBin("-", p, rt.rubyNumBin("*", q, rt.rubyBigNarrow(rubyRatIntOpB(fn, fd, 'f'))))
+		case "**":
+			if k, ok := rt.rubyIntExponent(r); ok {
+				return rt.rubyRatPow(p, k)
+			}
 		}
 	}
 	if rk >= 1 { // Float (and a Rational meeting an operator it has no exact form for).
@@ -5718,6 +5750,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	// #truncate is not here: it takes an ndigits like #floor and #round
 	// (`1.567.truncate(1)` is the Float 1.5).
 	case "to_i", "to_int":
+		if r, ok := t.(jsRat); ok {
+			return rt.rubyRatDigitOp(r, 't', 0), true
+		}
 		return rt.rubyIntFromF(math.Trunc(x)), true
 	case "to_f":
 		if f, ok := t.(jsFlo); ok {
@@ -5735,7 +5770,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "abs", "magnitude":
 		if r, ok := t.(jsRat); ok {
 			if r.n < 0 {
-				return jsRat{n: -r.n, d: r.d}, true
+				return rubyRatNeg(r), true
 			}
 			return r, true
 		}
@@ -5784,9 +5819,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "integer?":
 		return isInt, true
 	case "numerator":
-		return rt.rubyAsRat(t).n, true
+		return rt.rubyRatPart(rt.rubyAsRat(t), true), true
 	case "denominator":
-		return rt.rubyAsRat(t).d, true
+		return rt.rubyRatPart(rt.rubyAsRat(t), false), true
 	case "times": // n.times { |i| ... }
 		_, tblk := rubyBlockArgs(args)
 		for i := 0.0; i < x; i++ {
@@ -5808,7 +5843,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "div", "divmod", "modulo", "rationalize":
 		return rt.rubyNumDivOp(t, name, args), true
 	case "fdiv":
-		return jsFlo{f: rt.rubyIntFdiv(t, argAt(args, 0))}, true
+		return jsFlo{f: rubyIntFdiv(t, argAt(args, 0))}, true
 	case "pow", "**":
 		return rt.rubyBin("**", t, argAt(args, 0)), true
 	case "gcd":
@@ -6933,7 +6968,7 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		if q.n == 0 {
 			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
 		}
-		return rubyMkRat(p.n*q.d, p.d*q.n)
+		return rt.rubyRatArith("/", p, q)
 	case "Complex":
 		if len(args) < 2 {
 			if c, isCpx := v.(jsCpx); isCpx {
@@ -7837,7 +7872,7 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 	case jsFlo:
 		return jsFlo{f: -t.f}
 	case jsRat:
-		return jsRat{n: -t.n, d: t.d}
+		return rubyRatNeg(t)
 	case jsCpx:
 		return jsCpx{re: rt.rubyNeg(t.re), im: rt.rubyNeg(t.im)}
 	case *jsBigInt:
@@ -8211,6 +8246,9 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 		if _, rc := r.(jsCpx); lc || rc {
 			return rt.rubyEq(rubyReOf(l), rubyReOf(r)) && rt.rubyEq(rubyImOf(l), rubyImOf(r))
 		}
+		if c, ok := rt.rubyRatExact(l, r); ok {
+			return c == 0
+		}
 		if c, ok := rubyBigCmp(l, r); ok {
 			return c == 0
 		}
@@ -8381,6 +8419,9 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 		return 0, false
 	}
 	if rubyIsNum(l) && rubyIsNum(r) {
+		if c, ok := rt.rubyRatExact(l, r); ok {
+			return c, true
+		}
 		if c, ok := rubyBigCmp(l, r); ok {
 			return c, true
 		}

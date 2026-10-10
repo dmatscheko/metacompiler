@@ -162,7 +162,7 @@ func (rt *jsrt) rubyRealCall(name string, args interface{}) (string, interface{}
 // of about 70 bits, rounded once and scaled by a power of two. Twin of intFdiv in
 // languages/ruby-interpreter.abnf (the reasoning is there) and rbIntFdiv in
 // languages/lib/ruby-rt.metajs; the digit counts choose the same scale in all three.
-func (rt *jsrt) rubyIntFdiv(a, b interface{}) float64 {
+func rubyIntFdiv(a, b interface{}) float64 {
 	x, y := rubyToF(a), rubyToF(b)
 	bi, isInt := rubyBigOf(b)
 	if (!math.IsInf(x, 0) && !math.IsInf(y, 0)) || !isInt || y == 0 {
@@ -178,10 +178,20 @@ func (rt *jsrt) rubyIntFdiv(a, b interface{}) float64 {
 		q.Quo(pa, new(big.Int).Lsh(pb, uint(-s)))
 	}
 	r, _ := new(big.Float).SetInt(q).Float64()
-	for k := s; k > 0; k-- {
+	// Halving is exact while the result stays normal; the rest is one multiply by
+	// an exact power of two, so a subnormal answer rounds once.
+	k := s
+	for ; k > 0 && r/2 >= 0x1p-1022; k-- {
 		r = r / 2
 	}
-	for k := s; k < 0; k++ {
+	if k > 0 {
+		pk := 1.0
+		for ; k > 0; k-- {
+			pk = pk / 2
+		}
+		r = r * pk
+	}
+	for ; k < 0; k++ {
 		r = r * 2
 	}
 	if (ai.Sign() < 0) != (bi.Sign() < 0) {
@@ -837,7 +847,7 @@ func (rt *jsrt) rubyFloDivmod(x, y float64) interface{} {
 func (rt *jsrt) rubyRationalize(t interface{}, args []interface{}) interface{} {
 	switch v := t.(type) {
 	case float64, *jsBigInt:
-		return rubyMkRat(rubyToF(t), 1)
+		return rt.rubyAsRat(t)
 	case jsRat:
 		if len(args) == 0 {
 			return v
@@ -847,12 +857,14 @@ func (rt *jsrt) rubyRationalize(t interface{}, args []interface{}) interface{} {
 			if er.n == 0 {
 				return v
 			}
-			d := new(big.Int).Mul(rubyExactInt(v.d), rubyExactInt(er.d))
-			c := new(big.Int).Mul(rubyExactInt(math.Abs(v.n)), rubyExactInt(er.d))
-			e := new(big.Int).Mul(rubyExactInt(math.Abs(er.n)), rubyExactInt(v.d))
+			vn, vd := rubyRatParts(v)
+			en, ed := rubyRatParts(er)
+			d := new(big.Int).Mul(vd, ed)
+			c := new(big.Int).Mul(new(big.Int).Abs(vn), ed)
+			e := new(big.Int).Mul(new(big.Int).Abs(en), vd)
 			r, _ := rubyRatSimplest(new(big.Rat).SetFrac(new(big.Int).Sub(c, e), d), new(big.Rat).SetFrac(new(big.Int).Add(c, e), d))
 			if v.n < 0 {
-				r.n = -r.n
+				r = rubyRatNeg(r)
 			}
 			return r
 		}
@@ -892,9 +904,155 @@ func (rt *jsrt) rubyRationalize(t interface{}, args []interface{}) interface{} {
 		return rt.rubyAsRat(t)
 	}
 	if x < 0 {
-		r.n = -r.n
+		r = rubyRatNeg(r)
 	}
 	return r
+}
+
+// ----- Rational parts past 2^53 --------------------------------------------
+//
+// A Rational's parts are Integers of any size, as in MRI: 10**20 + Rational(1, 3)
+// is (300000000000000000001/3). A pair that fits the doubles keeps the plain
+// float64 form every other site reads; past 2^53 the exact parts ride along as
+// bn / bd, and n / d hold only their nearest doubles. Twins: mkRat / mkRatBig in
+// languages/ruby-interpreter.abnf and rbMkRat in languages/lib/ruby-rt.metajs.
+
+var rubyRatLim = new(big.Int).Lsh(big.NewInt(1), 53)
+
+// rubyRatParts is the exact pair, whichever form the Rational has.
+func rubyRatParts(r jsRat) (*big.Int, *big.Int) {
+	if r.bn != nil {
+		return r.bn, r.bd
+	}
+	return rubyExactInt(r.n), rubyExactInt(r.d)
+}
+
+// rubyMkRatB reduces an exact pair, sign on the numerator.
+func rubyMkRatB(n0, d0 *big.Int) jsRat {
+	n, d := new(big.Int).Set(n0), new(big.Int).Set(d0)
+	if d.Sign() < 0 {
+		n.Neg(n)
+		d.Neg(d)
+	}
+	if g := new(big.Int).GCD(nil, nil, new(big.Int).Abs(n), d); g.Cmp(big.NewInt(1)) > 0 {
+		n.Quo(n, g)
+		d.Quo(d, g)
+	}
+	if n.CmpAbs(rubyRatLim) <= 0 && d.CmpAbs(rubyRatLim) <= 0 {
+		return jsRat{n: rubyBigIntToF(n), d: rubyBigIntToF(d)}
+	}
+	return jsRat{n: rubyBigIntToF(n), d: rubyBigIntToF(d), bn: n, bd: d}
+}
+
+func (rt *jsrt) rubyRatArith(op string, p, q jsRat) jsRat {
+	pn, pd := rubyRatParts(p)
+	qn, qd := rubyRatParts(q)
+	mul := func(a, b *big.Int) *big.Int { return new(big.Int).Mul(a, b) }
+	switch op {
+	case "+":
+		return rubyMkRatB(new(big.Int).Add(mul(pn, qd), mul(qn, pd)), mul(pd, qd))
+	case "-":
+		return rubyMkRatB(new(big.Int).Sub(mul(pn, qd), mul(qn, pd)), mul(pd, qd))
+	case "*":
+		return rubyMkRatB(mul(pn, qn), mul(pd, qd))
+	}
+	return rubyMkRatB(mul(pn, qd), mul(pd, qn))
+}
+
+func rubyRatNeg(r jsRat) jsRat {
+	if r.bn != nil {
+		return jsRat{n: -r.n, d: r.d, bn: new(big.Int).Neg(r.bn), bd: r.bd}
+	}
+	return jsRat{n: -r.n, d: r.d}
+}
+
+func rubyRatToF(r jsRat) float64 {
+	if r.bn != nil {
+		return rubyIntFdiv(&jsBigInt{v: r.bn}, &jsBigInt{v: r.bd})
+	}
+	return r.n / r.d
+}
+
+// rubyRatPart is a numerator or a denominator as a Ruby Integer.
+func (rt *jsrt) rubyRatPart(r jsRat, num bool) interface{} {
+	if r.bn == nil {
+		if num {
+			return r.n
+		}
+		return r.d
+	}
+	if num {
+		return rt.rubyBigNarrow(r.bn)
+	}
+	return rt.rubyBigNarrow(r.bd)
+}
+
+// rubyRatExact compares a Rational with an Integer or a Rational EXACTLY, by cross
+// multiplication; ok is false for any other pair.
+func (rt *jsrt) rubyRatExact(l, r interface{}) (int, bool) {
+	_, lr := l.(jsRat)
+	_, rr := r.(jsRat)
+	if !lr && !rr {
+		return 0, false
+	}
+	for _, v := range []interface{}{l, r} {
+		switch v.(type) {
+		case jsRat, float64, *jsBigInt:
+		default:
+			return 0, false
+		}
+	}
+	pn, pd := rubyRatParts(rt.rubyAsRat(l))
+	qn, qd := rubyRatParts(rt.rubyAsRat(r))
+	return new(big.Int).Mul(pn, qd).Cmp(new(big.Int).Mul(qn, pd)), true
+}
+
+// rubyIntExponent is an Integer exponent, a Rational one over 1 included.
+func (rt *jsrt) rubyIntExponent(r interface{}) (*big.Int, bool) {
+	if q, ok := r.(jsRat); ok {
+		n, d := rubyRatParts(q)
+		return n, d.Cmp(big.NewInt(1)) == 0
+	}
+	switch r.(type) {
+	case float64, *jsBigInt:
+		return rubyBigOf(r)
+	}
+	return nil, false
+}
+
+// rubyRatPow is a Rational to an Integer power, exactly. Twin of ratPow in
+// languages/ruby-interpreter.abnf.
+func (rt *jsrt) rubyRatPow(p jsRat, k *big.Int) interface{} {
+	n, d := rubyRatParts(p)
+	if k.Sign() < 0 {
+		if n.Sign() == 0 {
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		}
+		n, d = d, n
+		k = new(big.Int).Neg(k)
+	}
+	return rubyMkRatB(new(big.Int).Exp(n, k, nil), new(big.Int).Exp(d, k, nil))
+}
+
+// rubyRatIntOpB is rubyRatIntOp on exact parts (d > 0, so Div is the floor).
+func rubyRatIntOpB(n, d *big.Int, mode byte) *big.Int {
+	switch mode {
+	case 'f':
+		return new(big.Int).Div(n, d)
+	case 'c':
+		return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Neg(n), d))
+	case 't':
+		if n.Sign() < 0 {
+			return rubyRatIntOpB(n, d, 'c')
+		}
+		return new(big.Int).Div(n, d)
+	}
+	n2 := new(big.Int).Lsh(n, 1)
+	d2 := new(big.Int).Lsh(d, 1)
+	if n.Sign() >= 0 {
+		return new(big.Int).Div(new(big.Int).Add(n2, d), d2)
+	}
+	return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
 }
 
 func rubyExactInt(x float64) *big.Int {
@@ -907,8 +1065,8 @@ func rubyBigIntToF(x *big.Int) float64 {
 	return f
 }
 
-// rubyRatSimplest is MRI's nurat_rationalize_internal over exact bounds a < b.
-// ok is false when the answer does not fit a Rational's double parts.
+// rubyRatSimplest is MRI's nurat_rationalize_internal over exact bounds a < b;
+// the answer is exact (ok is always true).
 func rubyRatSimplest(a, b *big.Rat) (jsRat, bool) {
 	p0, p1, q0, q1 := big.NewInt(0), big.NewInt(1), big.NewInt(1), big.NewInt(0)
 	var c *big.Int
@@ -928,7 +1086,7 @@ func rubyRatSimplest(a, b *big.Rat) (jsRat, bool) {
 	}
 	p := new(big.Int).Add(new(big.Int).Mul(c, p1), p0)
 	q := new(big.Int).Add(new(big.Int).Mul(c, q1), q0)
-	return rubyFiniteRat(rubyBigIntToF(p), rubyBigIntToF(q))
+	return rubyMkRatB(p, q), true
 }
 
 func rubyFiniteRat(p, q float64) (jsRat, bool) {
@@ -1071,6 +1229,9 @@ func (rt *jsrt) rubyCpxBin(op string, l, r interface{}) interface{} {
 
 func rubyRatCanon(v interface{}) interface{} {
 	if r, ok := v.(jsRat); ok && r.d == 1 {
+		if r.bn != nil {
+			return &jsBigInt{v: r.bn}
+		}
 		return r.n
 	}
 	return v

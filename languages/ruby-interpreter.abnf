@@ -3521,8 +3521,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var rp = asRat(v)
             if (argv.length < 2) { return mkRat(rp.n, rp.d) }
             var rq = asRat(argv[1])
-            if (rq.n == 0) { raiseErr("ZeroDivisionError", "divided by 0") }
-            return mkRat(rp.n * rq.d, rp.d * rq.n)
+            if (numEq(rq.n, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+            return mkRat(numBin("*", rp.n, rq.d), numBin("*", rp.d, rq.n))
         }
         if (name == "Complex") {
             if (argv.length < 2 && isCpx(v)) { return v }
@@ -4040,7 +4040,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return x
     }
+    // A Rational's parts are Integers - plain numbers, or bigs past 2^53, so
+    // 10**20 + Rational(1, 3) stays exact. Reduced, with the sign on n.
     function mkRat(n, d) {
+        if (isBig(n) || isBig(d)) { return mkRatBig(n, d) }
         var nn = n
         var dd = d
         if (dd < 0) { nn = 0 - nn; dd = 0 - dd }
@@ -4048,6 +4051,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (g > 1) { nn = nn / g; dd = dd / g }
         return {__rat: true, n: nn, d: dd}
     }
+    function mkRatBig(n, d) {
+        var nn = anytype
+        var dd = anytype
+        nn = n
+        dd = d
+        if (numCmp(dd, 0) < 0) { nn = rneg(nn); dd = rneg(dd) }
+        var x = anytype
+        var y = anytype
+        x = realAbs(nn)
+        y = dd
+        while (!numEq(y, 0)) { var t = anytype; t = numBin("%", x, y); x = y; y = t }
+        if (numCmp(x, 1) > 0) { nn = numBin("/", nn, x); dd = numBin("/", dd, x) }
+        return {__rat: true, n: nn, d: dd}
+    }
+    // Integer text for a part: a big or a plain number.
+    function intText(v) { return isBig(v) ? bigStr(v) : intStr(v) }
     function isNumV(v) { return typeof v == "number" || isBig(v) || isFlo(v) || isRat(v) || isCpx(v) }
     // A big is rank 0: it IS an Integer, not a fourth kind of number. Meeting a
     // Rational, a Float or a Complex it therefore promotes to that rank through
@@ -4064,7 +4083,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function toF(v) {
         if (typeof v == "number") { return v }
         if (isFlo(v)) { return v.f }
-        if (isRat(v)) { return v.n / v.d }
+        if (isRat(v)) { return (isBig(v.n) || isBig(v.d)) ? intFdiv(v.n, v.d) : v.n / v.d }
         if (isCpx(v)) { return toF(v.re) }
         if (isBig(v)) { return bigToNum(v) }
         return 0
@@ -4078,13 +4097,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // they do not. (1.5).to_r is (3/2) and (0.1).to_r is
     // 3602879701896397/36028797018963968.
     //
-    // WHAT THIS CANNOT REACH, and it is a property of the value model rather than of
-    // the arithmetic: n and d are DOUBLES here, so d = 2^-e is representable only
-    // while -e <= 1023. A normal double may need 2^1074 (the second-smallest normal,
-    // 2^-1022 * (1 + 2^-52), reduces to an ODD numerator over 2^1074), so every
-    // |x| below about 2^-971 - the subnormals and the bottom of the normals - has a
-    // denominator this model cannot hold. Those fall back to x/1, which is visibly
-    // not an Integer pair rather than a plausible wrong one.
+    // A double denominator holds 2^-e only while -e <= 1023, and a normal double
+    // may need 2^1074 (the second-smallest normal reduces to an ODD numerator over
+    // 2^1074), so below about 2^-971 the denominator is built as a big.
     //
     // An infinity or a NaN has no Rational at all: MRI raises FloatDomainError, and
     // without the guard mkRat's gcd2 would loop forever on `x % NaN`.
@@ -4110,7 +4125,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         //
         // e >= 0 means x is itself an integer, and then to_r is x/1 - including every
         // integral Float too big for 2^53, whose numerator intStr expands exactly.
-        if (e >= 0 || e < 0 - 1023) { return {__rat: true, n: x, d: 1} }
+        if (e >= 0) { return {__rat: true, n: x, d: 1} }
+        if (e < 0 - 1023) { return {__rat: true, n: neg ? 0 - a : a, d: numBin("**", 2, 0 - e)} }
         var d = 1
         for (var i = 0; i < 0 - e; i++) { d = d * 2 }
         return {__rat: true, n: neg ? 0 - a : a, d: d}
@@ -4118,7 +4134,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function asRat(v) {
         if (isRat(v)) { return v }
         if (isFlo(v)) { return ratOfFlo(v.f) }
-        if (typeof v == "number") { return mkRat(v, 1) }
+        if (typeof v == "number" || isBig(v)) { return mkRat(v, 1) }
         return mkRat(toF(v), 1)
     }
     // ----- Complex#abs, which is hypot and not sqrt(re*re + im*im) -------------
@@ -4567,21 +4583,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // carried - rather than on the quotient, so it does not depend on a double
     // holding a/b exactly.
     //
-    // THE CEILING: n and d here are plain doubles, so n * 10**nd must stay under
-    // 2^53 - the same limit the Rational value model has everywhere else.
+    // Parts past 2^53 are bigs and take ratIntOpBig, the same rule on Integers.
     function ratIntOp(n, d, mode) {
+        if (isBig(n) || isBig(d)) { return ratIntOpBig(n, d, mode) }
         if (mode == "f") { return Math.floor(n / d) }
         if (mode == "c") { return Math.ceil(n / d) }
         if (mode == "t") { return Math.trunc(n / d) }
         if (n >= 0) { return Math.floor((2 * n + d) / (2 * d)) }
         return Math.ceil((2 * n - d) / (2 * d))
     }
+    // The same on Integer parts of any size: floor is Integer#/, the rest follow.
+    function ratIntOpBig(n, d, mode) {
+        if (mode == "f") { return numBin("/", n, d) }
+        if (mode == "c") { return rneg(numBin("/", rneg(n), d)) }
+        if (mode == "t") { return numCmp(n, 0) < 0 ? ratIntOpBig(n, d, "c") : numBin("/", n, d) }
+        var n2 = anytype
+        n2 = numBin("*", 2, n)
+        var d2 = anytype
+        d2 = numBin("*", 2, d)
+        if (numCmp(n, 0) >= 0) { return numBin("/", numBin("+", n2, d), d2) }
+        return rneg(numBin("/", numBin("-", d, n2), d2))
+    }
+    // A Rational to an Integer power, exactly; 0 to a negative one is
+    // ZeroDivisionError. Twins: rubyRatPow in abnf/jsrtruby.go, rbRatPow in
+    // lib/ruby-rt.metajs.
+    function ratPow(p, k) {
+        if (numCmp(k, 0) >= 0) { return mkRat(numBin("**", p.n, k), numBin("**", p.d, k)) }
+        if (numEq(p.n, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+        var nk = anytype
+        nk = rneg(k)
+        return mkRat(numBin("**", p.d, nk), numBin("**", p.n, nk))
+    }
     function ratDigitOp(v, mode, nd) {
         if (nd > 0) {
             var p = pow10(nd)
-            return mkRat(ratIntOp(v.n * p, v.d, mode), p)
+            return mkRat(ratIntOp(numBin("*", v.n, p), v.d, mode), p)
         }
-        var k = intFromF(ratIntOp(v.n, v.d, mode))
+        var k0 = anytype
+        k0 = ratIntOp(v.n, v.d, mode)
+        var k = isBig(k0) ? k0 : intFromF(k0)
         if (nd == 0) { return k }
         return intDigitOp(k, 0 - nd, mode)
     }
@@ -4594,10 +4634,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (rk == 1) {
             var p = asRat(l)
             var q = asRat(r)
-            if (op == "+") { return mkRat(p.n * q.d + q.n * p.d, p.d * q.d) }
-            if (op == "-") { return mkRat(p.n * q.d - q.n * p.d, p.d * q.d) }
-            if (op == "*") { return mkRat(p.n * q.n, p.d * q.d) }
-            if (op == "/") { return mkRat(p.n * q.d, p.d * q.n) }
+            if (op == "+") { return mkRat(numBin("+", numBin("*", p.n, q.d), numBin("*", q.n, p.d)), numBin("*", p.d, q.d)) }
+            if (op == "-") { return mkRat(numBin("-", numBin("*", p.n, q.d), numBin("*", q.n, p.d)), numBin("*", p.d, q.d)) }
+            if (op == "*") { return mkRat(numBin("*", p.n, q.n), numBin("*", p.d, q.d)) }
+            if (op == "/") { return mkRat(numBin("*", p.n, q.d), numBin("*", p.d, q.n)) }
+            // x % y is x - y * (x / y).floor, a Rational (Rational(7, 2) % 2 is (3/2)).
+            if (op == "%") {
+                var fq = anytype
+                fq = numBin("/", p, q)
+                return numBin("-", p, numBin("*", q, ratIntOp(fq.n, fq.d, "f")))
+            }
+            // An Integer power (a Rational exponent over 1 counts) stays exact.
+            if (op == "**" && (typeof r == "number" || isBig(r) || (isRat(r) && numEq(r.d, 1)))) {
+                return ratPow(p, isRat(r) ? r.n : r)
+            }
         }
         if (rk >= 1) {
             var x = toF(l)
@@ -4694,9 +4744,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         else { q = numBin("/", pa, numBin("*", pb, numBin("**", 2, 0 - s))) }
         var r = toF(q)
         var k = s
-        while (k > 0) { r = r / 2; k = k - 1 }
+        // Halving is exact while the result stays normal; the rest of the scale is ONE
+        // multiply by an exact power of two, so a subnormal answer rounds once.
+        var lo = minNormal()
+        while (k > 0 && r / 2 >= lo) { r = r / 2; k = k - 1 }
+        if (k > 0) {
+            var pk = 1
+            while (k > 0) { pk = pk / 2; k = k - 1 }
+            r = r * pk
+        }
         while (k < 0) { r = r * 2; k = k + 1 }
         return fdivSign(na != nb ? 0 - r : r, toF(a), toF(b))
+    }
+    // 2^-1022, the smallest normal double, built by halving (no exponent literals).
+    var MIN_NORMAL = 0
+    function minNormal() {
+        if (MIN_NORMAL == 0) {
+            var m = 1
+            for (var i = 0; i < 1022; i++) { m = m / 2 }
+            MIN_NORMAL = m
+        }
+        return MIN_NORMAL
     }
     // A zero quotient keeps the sign IEEE-754 gives it (7.fdiv(-10**400) is -0.0),
     // which the tag engine's integral zero would drop.
@@ -4712,14 +4780,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cr = bigCmpOf(r)
             if (cl != null && cr != null) { return bigCmp(cl, cr) }
         }
+        if (ratExactPair(l, r)) { return ratCmp(l, r) }
         var a = toF(l)
         var b = toF(r)
         if (a < b) { return -1 }
         if (a > b) { return 1 }
         return 0
     }
+    // A Rational against an Integer or a Rational compares EXACTLY, by cross
+    // multiplication - through toF two parts past 2^53 would round together.
+    function ratExactPair(l, r) {
+        return (isRat(l) || isRat(r)) && (isRat(l) || typeof l == "number" || isBig(l))
+               && (isRat(r) || typeof r == "number" || isBig(r))
+    }
+    function ratCmp(l, r) {
+        var p = asRat(l)
+        var q = asRat(r)
+        return numCmp(numBin("*", p.n, q.d), numBin("*", q.n, p.d))
+    }
     function numEq(l, r) {
         if (isCpx(l) || isCpx(r)) { return numEq(reOf(l), reOf(r)) && numEq(imOf(l), imOf(r)) }
+        if (ratExactPair(l, r)) { return ratCmp(l, r) == 0 }
         if (isBig(l) || isBig(r)) {
             var el = bigCmpOf(l)
             var er = bigCmpOf(r)
@@ -4734,7 +4815,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // where `0 - 0.0` is +0.0 and Ruby's -0.0 keeps its sign ((-0.0).to_s is
         // "-0.0").
         if (isFlo(v)) { return mkFlo(v.f * (0 - 1)) }
-        if (isRat(v)) { return mkRat(0 - v.n, v.d) }
+        if (isRat(v)) { return mkRat(rneg(v.n), v.d) }
         if (isCpx(v)) { return mkCpx(rneg(v.re), rneg(v.im)) }
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
         fail("cannot negate")
@@ -5174,7 +5255,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // which past 2^53 is a different integer: `"" + 36028797018963968` (2^55) is
     // "36028797018963970" - and (0.1).to_r's denominator is 2^55. intStr is the
     // exact expansion, the same rule Integer#to_s follows.
-    function ratText(v) { return intStr(v.n) + "/" + intStr(v.d) }
+    function ratText(v) { return intText(v.n) + "/" + intText(v.d) }
     // MRI's f_format: each part in its own rendering (#inspect parenthesizes a
     // Rational part), the imaginary one by magnitude after its sign, and a `*`
     // before the `i` when that rendering does not end in a digit ("(1/1)*i").
@@ -7185,19 +7266,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // searched exactly; with one they are self -/+ |eps| in the receiver's own
     // arithmetic (doubles for a Float, as MRI does).
     function numRationalize(t, args) {
-        if (typeof t == "number" || isBig(t)) { return mkRat(toF(t), 1) }
+        if (typeof t == "number" || isBig(t)) { return mkRat(t, 1) }
         if (isRat(t) && args.length == 0) { return t }
         var e = args.length > 0 ? args[0] : 0
         if (isRat(t) && !isFlo(e)) {
             var er = asRat(e)
-            if (er.n == 0) { return t }
-            var en = er.n < 0 ? 0 - er.n : er.n
-            var tn = t.n < 0 ? 0 - t.n : t.n
+            if (numEq(er.n, 0)) { return t }
+            var en = anytype
+            en = realAbs(er.n)
+            var tn = anytype
+            tn = realAbs(t.n)
             var rd = numBin("*", t.d, er.d)
             var rc = numBin("*", tn, er.d)
             var re = numBin("*", en, t.d)
             var rr = ratSimplest(numBin("-", rc, re), rd, numBin("+", rc, re), rd)
-            return t.n < 0 ? mkRat(0 - rr.n, rr.d) : rr
+            return numCmp(t.n, 0) < 0 ? mkRat(rneg(rr.n), rr.d) : rr
         }
         var x = toF(t)
         floDomainGuard(x)
@@ -7257,10 +7340,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             ad = td
             p0 = p1; q0 = q1; p1 = p2; q1 = q2
         }
-        return finiteRat(toF(numBin("+", numBin("*", c, p1), p0)), toF(numBin("+", numBin("*", c, q1), q0)))
+        return mkRat(numBin("+", numBin("*", c, p1), p0), numBin("+", numBin("*", c, q1), q0))
     }
-    // A Rational's parts are doubles, so an answer past them (the rationalize of
-    // a subnormal) is null, and the caller falls back to #to_r.
+    // The double walk below can overflow; an answer past the doubles is null, and
+    // the caller falls back to #to_r.
     function finiteRat(p, q) {
         if (p - p != 0 || q - q != 0) { return null }
         return mkRat(p, q)
@@ -7343,12 +7426,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "to_f") { return isFlo(t) ? t : mkFlo(toF(t)) }
         // #truncate is answered with #floor / #round below, because it takes an
         // ndigits too (`1.567.truncate(1)' is the Float 1.5).
+        if ((name == "to_i" || name == "to_int") && isRat(t)) { return ratDigitOp(t, "t", 0) }
         if (name == "to_i" || name == "to_int") { var x1 = toF(t); floDomainGuard(x1); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
         if (name == "to_c") { return isCpx(t) ? t : mkCpx(t, 0) }
         // Rational#abs stays a RATIONAL (Complex#abs is cpxAbs).
         if (name == "abs" || name == "magnitude") {
-            if (isRat(t)) { return t.n < 0 ? mkRat(0 - t.n, t.d) : t }
+            if (isRat(t)) { return numCmp(t.n, 0) < 0 ? mkRat(rneg(t.n), t.d) : t }
             var x2 = toF(t)
             return mkFlo(x2 < 0 ? 0 - x2 : x2)
         }
