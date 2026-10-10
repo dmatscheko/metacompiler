@@ -97,6 +97,31 @@ func (e *pyStrEnv) cpw(s string, i int) int {
 	return 1
 }
 
+// Python indexes a str by CODE POINT and the strings here are UTF-16: the unit
+// index of code point cp, and back. A cp past the end stays as far past it, so a
+// search window that starts beyond the string is still empty.
+func (e *pyStrEnv) cpUnit(s string, cp int) int {
+	if e.rt.strMeta(s).shape == 1 { // ASCII: a unit is a code point.
+		return cp
+	}
+	i, n, k := 0, e.sLen(s), 0
+	for ; k < cp && i < n; k++ {
+		i += e.cpw(s, i)
+	}
+	return i + cp - k
+}
+
+func (e *pyStrEnv) unitCp(s string, u int) int {
+	if e.rt.strMeta(s).shape == 1 {
+		return u
+	}
+	k := 0
+	for i := 0; i < u; k++ {
+		i += e.cpw(s, i)
+	}
+	return k
+}
+
 func (e *pyStrEnv) chars(s string) []string {
 	out := []string{}
 	n := e.sLen(s)
@@ -397,19 +422,29 @@ func (e *pyStrEnv) stripHit(ch, chars string, useWS bool) bool {
 	return e.sIndex(chars, ch) >= 0
 }
 
+// Each end is tested a whole code point at a time, so an astral character in
+// `chars` strips as one character and never splits a pair.
 func (e *pyStrEnv) strip(s, chars string, useWS, doL, doR bool) string {
 	a, b := 0, e.sLen(s)
 	if doL {
-		for a < b && e.stripHit(e.sAt(s, a), chars, useWS) {
-			a++
+		for a < b && e.stripHit(e.sSub(s, a, a+e.cpw(s, a)), chars, useWS) {
+			a += e.cpw(s, a)
 		}
 	}
 	if doR {
-		for b > a && e.stripHit(e.sAt(s, b-1), chars, useWS) {
-			b--
+		for b > a && e.stripHit(e.sSub(s, b-e.cpwBack(s, a, b), b), chars, useWS) {
+			b -= e.cpwBack(s, a, b)
 		}
 	}
 	return e.sSub(s, a, b)
+}
+
+// cpwBack is the unit width of the code point ENDING at unit b, not reaching below a.
+func (e *pyStrEnv) cpwBack(s string, a, b int) int {
+	if b-2 >= a && e.cpw(s, b-2) == 2 {
+		return 2
+	}
+	return 1
 }
 
 // ---- splitting ----
@@ -1079,29 +1114,37 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return e.replace(s, e.strArg(pysArgAt(args, 0)), e.strArg(pysArgAt(args, 1)),
 			pysOptInt(rt, args, 2, -1))
 
+	// The window arguments and the answer are CODE POINT positions; the search
+	// itself runs on units.
 	case "find", "index", "rfind", "rindex":
+		cn := e.cpLen(s)
 		sub := e.strArg(pysArgAt(args, 0))
-		st := pysAdjStart(pysOptInt(rt, args, 1, 0), n)
-		en := pysAdjEnd(pysOptInt(rt, args, 2, n), n)
+		st := e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn))
+		en := e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))
 		at := -1
 		if name == "find" || name == "index" {
 			at = e.find(s, sub, st, en)
 		} else {
 			at = e.rfind(s, sub, st, en)
 		}
-		if at < 0 && (name == "index" || name == "rindex") {
-			e.fail("ValueError: substring not found")
+		if at < 0 {
+			if name == "index" || name == "rindex" {
+				e.fail("ValueError: substring not found")
+			}
+			return float64(at)
 		}
-		return float64(at)
+		return float64(e.unitCp(s, at))
 
 	case "count":
+		cn := e.cpLen(s)
 		return float64(e.count(s, e.strArg(pysArgAt(args, 0)),
-			pysAdjStart(pysOptInt(rt, args, 1, 0), n),
-			pysAdjEnd(pysOptInt(rt, args, 2, n), n)))
+			e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn)),
+			e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))))
 
 	case "startswith", "endswith":
-		st := pysAdjStart(pysOptInt(rt, args, 1, 0), n)
-		en := pysAdjEnd(pysOptInt(rt, args, 2, n), n)
+		cn := e.cpLen(s)
+		st := e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn))
+		en := e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))
 		hit := func(one string) bool {
 			if name == "startswith" {
 				return e.starts(s, one, st, en)
@@ -1227,6 +1270,25 @@ func init() {
 				}
 				return base(a)
 			}
+		}
+		// js_pyidx is python's subscript: js_pyget, except that a str is indexed
+		// by CODE POINT. js_pyget stays UTF-16 for dart and csharp. Twin of
+		// js_pyidx in lib/python-rt.metajs.
+		get := m["js_pyget"]
+		m["js_pyidx"] = func(a []uint64) uint64 {
+			s, isStr := u(a[0]).(string)
+			if !isStr {
+				return get(a)
+			}
+			i := rt.pySeqIdx(s, u(a[1]))
+			if i < 0 {
+				i += pyStrLen(rt, s)
+			}
+			at := env.cpUnit(s, i)
+			if i < 0 || at >= env.sLen(s) {
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "string index out of range")})
+			}
+			return rt.wrapStr(env.sSub(s, at, at+env.cpw(s, at)))
 		}
 		if f := wrap(m["js_pymcall"]); f != nil {
 			m["js_pymcall"] = f

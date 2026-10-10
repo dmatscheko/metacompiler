@@ -14829,11 +14829,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case *jsArray:
 				return w(&jsArray{elems: append([]interface{}{}, o.elems...)})
 			case string:
-				out := &jsArray{}
-				for i, n := 0, rt.strLen(o); i < n; i++ {
-					out.elems = append(out.elems, rt.strAt(o, i))
-				}
-				return w(out)
+				return w(&jsArray{elems: pyStrChars(rt, o)})
 			}
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
@@ -14855,11 +14851,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case *jsArray:
 				return a[0]
 			case string:
-				out := &jsArray{}
-				for i, n := 0, rt.strLen(o); i < n; i++ {
-					out.elems = append(out.elems, rt.strAt(o, i))
-				}
-				return w(out)
+				return w(&jsArray{elems: pyStrChars(rt, o)})
 			}
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
@@ -15168,9 +15160,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			case string:
 				arr.dropIdx()
-				for i, n := 0, rt.strLen(o); i < n; i++ {
-					arr.elems = append(arr.elems, rt.strAt(o, i))
-				}
+				arr.elems = append(arr.elems, pyStrChars(rt, o)...)
 				return 0
 			}
 			if keys, _, ok := dictParts(u(a[1])); ok {
@@ -15296,12 +15286,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(out)
 			case string:
-				idx := rt.pySliceIndices(rt.strLen(o), u(a[1]), u(a[2]), u(a[3]))
-				out := ""
-				for _, i := range idx {
-					out += rt.toString(rt.strAt(o, i))
+				cs := pyStrChars(rt, o)
+				var out strings.Builder
+				for _, i := range rt.pySliceIndices(len(cs), u(a[1]), u(a[2]), u(a[3])) {
+					out.WriteString(cs[i].(string))
 				}
-				return rt.wrapStr(out)
+				return rt.wrapStr(out.String())
 			}
 			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -19908,11 +19898,7 @@ func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
 	case *jsArray:
 		return o.elems
 	case string:
-		var out []interface{}
-		for i, n := 0, rt.strLen(o); i < n; i++ {
-			out = append(out, rt.strAt(o, i))
-		}
-		return out
+		return pyStrChars(rt, o)
 	}
 	if keys, _, ok := dictParts(v); ok {
 		return append([]interface{}{}, keys.elems...)
@@ -20627,12 +20613,8 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 		rt.fail("max/min needs an argument array")
 	}
 	elems := args.elems
-	if len(elems) == 1 {
-		if inner, ok := elems[0].(*jsArray); ok {
-			elems = inner.elems
-		} else if pyIterName(rt, elems[0]) != "" || pyIsGenerator(elems[0]) {
-			elems = rt.pyElemsOf(elems[0]) // max(map(f, xs)), max(iter(xs)).
-		}
+	if len(elems) == 1 { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
+		elems = rt.pyElemsOf(elems[0])
 	}
 	if len(elems) == 0 {
 		rt.fail("max/min of an empty sequence")
@@ -21568,6 +21550,30 @@ func (rt *jsrt) pyFmtPad(fill string, align rune, width int, head, body string) 
 
 // pyStrLen counts Unicode CODE POINTS: Python's len() of a string, where a
 // surrogate pair is one character. Only the Python grammars ask for this.
+// pyStrChars is a str as Python iterates it: one string per CODE POINT, so an
+// astral character is one element where the UTF-16 units make it two. Twin of
+// pySChars in lib/python-rt.metajs and python-interpreter.abnf.
+func pyStrChars(rt *jsrt, s string) []interface{} {
+	e := rt.strMeta(s)
+	if e.shape == 1 {
+		out := make([]interface{}, len(s))
+		for i := 0; i < len(s); i++ {
+			out[i] = s[i : i+1]
+		}
+		return out
+	}
+	out := make([]interface{}, 0, len(e.units))
+	for i, n := 0, len(e.units); i < n; {
+		k := 1
+		if c := e.units[i]; c >= 0xD800 && c <= 0xDBFF && i+1 < n && e.units[i+1] >= 0xDC00 && e.units[i+1] <= 0xDFFF {
+			k = 2
+		}
+		out = append(out, strFromUnits(e.units[i:i+k]))
+		i += k
+	}
+	return out
+}
+
 func pyStrLen(rt *jsrt, s string) int {
 	n, unitN := 0, rt.strLen(s)
 	for i := 0; i < unitN; i++ {

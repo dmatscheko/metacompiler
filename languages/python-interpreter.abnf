@@ -2636,9 +2636,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // key would otherwise pin it to boolean.
         if (typeof o == "string") {
             var si = pySeqIdx(o, i)
-            if (si < 0) si += o.length
-            if (si < 0 || si >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
-            return o.charAt(si)
+            if (si < 0) si += pyLen(o)
+            var at = pySCpUnit(o, si)
+            if (si < 0 || at >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
+            return o.substring(at, at + pySCPW(o, at))
         }
         // Subscripting something that is not a sequence, a mapping or a generic
         // alias is CPython's TypeError, not a host crash reading `.length` of
@@ -2696,12 +2697,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // element. Both compiled halves do the same in js_pyiter / js_pylist.
         if (isPyIt(v)) return pyItRest(v)
         if (isDict(v)) return v.keys.slice(0)
-        if (typeof v == "string") {
-            var out = []
-            for (var i = 0; i < v.length; i++) out.push(v.charAt(i))
-            return out
-        }
-        fail("iteration over " + pstr(v))
+        if (typeof v == "string") return pySChars(v)
+        pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(v).__name + "' object is not iterable"]))
     }
     // ----- Regular expressions: the `re` module -----
     //
@@ -3330,13 +3327,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // toLowerCase) plus String.fromCharCode, so that the same source compiles in the
     // tag-script host AND through metajs-to-llvm-ir.abnf.
     //
-    // INDEXING. CPython counts CODE POINTS; the floor's strings are UTF-16 and
-    // js_pyget already indexes a string by CODE UNIT (an inconsistency this project
-    // records rather than repairs, see the manual 7.9). The search/slice methods here
-    // therefore work in code UNITS and the length-shaped ones (len via center/ljust/
-    // rjust/zfill, and the per-character walks of title/swapcase/upper/lower) work in
-    // code POINTS. For any string inside the BMP - which is everything the corpus and
-    // the suite contain - the two coincide exactly.
+    // INDEXING. CPython counts CODE POINTS and the floor's strings are UTF-16. The
+    // searches run on code UNITS and convert their window arguments and answers
+    // with pySCpUnit / pySUnitCp; the length-shaped methods (center/ljust/rjust/
+    // zfill, and the per-character walks of title/swapcase/upper/lower) count code
+    // POINTS directly.
     //
     // CASE MAPPING is done per code point WITH A LENGTH GUARD: goja's toUpperCase is
     // ECMAScript's FULL mapping ("ss" from "ß") while the frozen engine's is Go's
@@ -3364,6 +3359,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (t >= 56320 && t <= 57343) { return 2 }
         }
         return 1
+    }
+
+    // Python indexes a str by CODE POINT and the strings here are UTF-16: the unit
+    // index of code point cp, and back. A cp past the end stays as far past it, so
+    // a search window that starts beyond the string is still empty.
+    function pySCpUnit(s, cp) {
+        var i = 0
+        var k = 0
+        while (k < cp && i < s.length) {
+            i = i + pySCPW(s, i)
+            k = k + 1
+        }
+        return i + cp - k
+    }
+    function pySUnitCp(s, u) {
+        var i = 0
+        var k = 0
+        while (i < u) {
+            i = i + pySCPW(s, i)
+            k = k + 1
+        }
+        return k
     }
 
     // The code points of s, each as a one- or two-unit string.
@@ -3608,16 +3625,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return chars.indexOf(ch) >= 0
     }
 
+    // Each end is tested a whole code point at a time, so an astral character in
+    // `chars` strips as one character and never splits a pair.
     function pySStrip(s, chars, useWS, doL, doR) {
         var a = 0
         var b = s.length
         if (doL) {
-            while (a < b && pySStripHit(s.charAt(a), chars, useWS)) { a = a + 1 }
+            while (a < b && pySStripHit(s.substring(a, a + pySCPW(s, a)), chars, useWS)) { a = a + pySCPW(s, a) }
         }
         if (doR) {
-            while (b > a && pySStripHit(s.charAt(b - 1), chars, useWS)) { b = b - 1 }
+            while (b > a && pySStripHit(s.substring(b - pySSCPWBack(s, a, b), b), chars, useWS)) { b = b - pySSCPWBack(s, a, b) }
         }
         return s.substring(a, b)
+    }
+    // The unit width of the code point ENDING at unit b, not reaching below a.
+    function pySSCPWBack(s, a, b) {
+        if (b - 2 >= a && pySCPW(s, b - 2) == 2) { return 2 }
+        return 1
     }
 
     // ---- splitting ----
@@ -4161,6 +4185,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function pyStrMethod(s, name, args, kw) {
         var n = s.length
+        var cn = 0 // The code point count, taken only by the methods that need it.
         if (name == "upper") { return pySMapCase(s, true) }
         if (name == "lower" || name == "casefold") { return pySMapCase(s, false) }
         if (name == "title") { return pySTitle(s) }
@@ -4216,25 +4241,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySReplace(s, pySStrArg(args[0]), pySStrArg(args[1]), pySOptInt(args, 2, -1))
         }
 
+        // The window arguments and the answer are CODE POINT positions; the search
+        // itself runs on units.
         if (name == "find" || name == "index" || name == "rfind" || name == "rindex") {
+            cn = pySLen(s)
             var sub = pySStrArg(args[0])
-            var st = pySAdjStart(pySOptInt(args, 1, 0), n)
-            var en = pySAdjEnd(pySOptInt(args, 2, n), n)
+            var st = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
+            var en = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
             var at = -1
             if (name == "find" || name == "index") { at = pySFind(s, sub, st, en) }
             else { at = pySRFind(s, sub, st, en) }
             if (at < 0) {
                 if (name == "index" || name == "rindex") { pySFail("ValueError: substring not found") }
+                return at
             }
-            return at
+            return pySUnitCp(s, at)
         }
         if (name == "count") {
-            return pySCount(s, pySStrArg(args[0]), pySAdjStart(pySOptInt(args, 1, 0), n),
-                            pySAdjEnd(pySOptInt(args, 2, n), n))
+            cn = pySLen(s)
+            return pySCount(s, pySStrArg(args[0]), pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn)),
+                            pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn)))
         }
         if (name == "startswith" || name == "endswith") {
-            var st2 = pySAdjStart(pySOptInt(args, 1, 0), n)
-            var en2 = pySAdjEnd(pySOptInt(args, 2, n), n)
+            cn = pySLen(s)
+            var st2 = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
+            var en2 = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
             var pv = args[0]
             if (pySIsArr(pv)) {
                 var i2 = 0
@@ -7566,12 +7597,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function pySliceStep(o, lo, hi, st) {
-        var ix = sliceIdx(o.length, lo, hi, st)
         if (typeof o == "string") {
+            var cs = pySChars(o)
+            var ixs = sliceIdx(cs.length, lo, hi, st)
             var s2 = ""
-            for (var i = 0; i < ix.length; i++) { s2 += o.charAt(ix[i]) }
+            for (var i = 0; i < ixs.length; i++) { s2 += cs[ixs[i]] }
             return s2
         }
+        var ix = sliceIdx(o.length, lo, hi, st)
         var out = []
         for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
         return out

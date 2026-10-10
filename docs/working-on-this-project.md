@@ -800,10 +800,12 @@ and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
 print the character now. JS: `(-0.4).toFixed(0)` is `"0"`,
 `(0.1).toString(3)` emits 52 fraction digits, the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
-`Infinity`/`NaN`, the format mini-language is a subset,
-and **`js_pylen` counts CODE POINTS while `js_pyget`'s string indexing counts
-UTF-16 CODE UNITS** — an `abnf/jsrt.go` inconsistency reproduced rather than
-repaired. `abnf/jsrtphp.go` misreads `"1e400"` as 1 where both our halves answer
+`Infinity`/`NaN`, the format mini-language is a subset.
+A Python str is indexed, sliced, iterated and searched by CODE POINT over the
+floor's UTF-16 strings: python emits `js_pyidx` for a subscript because the
+shared `js_pyget` must stay UTF-16 for dart and csharp, and layer 2 converts
+positions with an ASCII fast path (`byteLen(s) == s.length`), so a non-ASCII
+string pays a linear scan per position. `abnf/jsrtphp.go` misreads `"1e400"` as 1 where both our halves answer
 INF (the PHP spec agrees with us) — sole cause of 431 hunks in a 40,948-line
 probe, and permanent, since retiring the Go twin was declined.
 `c-interpreter.abnf` deliberately lacks the varargs `printf` family,

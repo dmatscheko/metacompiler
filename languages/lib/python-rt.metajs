@@ -516,10 +516,11 @@ function pyToStr(v) {
     return "" + v
 }
 
-// pyStrLen counts CODE POINTS (as abnf/jsrt.go does), where the string indexing of
-// js_pyget counts UTF-16 code units. That inconsistency is the Go twin's and is
-// reproduced rather than repaired.
+// pyStrLen counts CODE POINTS, as Python's len() does: an astral character is
+// one, where the UTF-16 units count two. byteLen equal to the unit count means
+// ASCII, where the two coincide without a scan.
 function pyStrLen(s) {
+    if (byteLen(s) == s.length) { return s.length }
     var n = 0
     var i = 0
     while (i < s.length) {
@@ -529,20 +530,6 @@ function pyStrLen(s) {
         n = n + 1
     }
     return n
-}
-
-function pyStrAt(s, i) {
-    var n = 0
-    var k = 0
-    while (k < s.length) {
-        var c = s.charCodeAt(k)
-        var w = 1
-        if (c >= 55296 && c <= 56319 && k + 1 < s.length) { w = 2 }
-        if (n == i) { return s.substring(k, k + w) }
-        k = k + w
-        n = n + 1
-    }
-    return ""
 }
 
 // ===================================================== rendering ============
@@ -1566,12 +1553,7 @@ function pySeqElems(v) {
     // A CURSOR gives what is LEFT of it, and the read exhausts it - the same rule
     // js_pylist and js_pyiter follow, so `xs[1:3] = iter([5, 6])` is [9, 5, 6, 9].
     if (pyIsIter(v)) { return pyIterRest(v) }
-    if (typeof v == "string") {
-        var s = []
-        var n = pyStrLen(v)
-        for (var k = 0; k < n; k++) { s.push(pyStrAt(v, k)) }
-        return s
-    }
+    if (typeof v == "string") { return pySChars(v) }
     fail("cannot assign a " + pyTypeName(v) + " to a slice")
     return []
 }
@@ -2967,9 +2949,8 @@ function js_pysum(v) {
 function pyAMinMax(argsV, want) {
     if (!pyIsArr(argsV)) { pyFail("max/min needs an argument array") }
     var elems = argsV
-    if (elems.length == 1 && pyIsArr(elems[0])) { elems = elems[0] }
-    else if (elems.length == 1 && (pyIsIter(elems[0]) || pyIsGen(elems[0]))) {
-        elems = pyElemsOf(elems[0]) // max(map(f, xs)), max(iter(xs)).
+    if (elems.length == 1) { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
+        elems = pyElemsOf(elems[0])
     }
     if (elems.length == 0) { pyFail("max/min of an empty sequence") }
     var best = anytype
@@ -3125,7 +3106,7 @@ function pyElemsOf(v) {
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return pyCCopyArr(els) }
     if (pyIsArr(v)) { return v }
-    if (typeof v == "string") { return pyCStrChars(v) }
+    if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
     throw pyExcInstance("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
 }
@@ -4430,16 +4411,9 @@ function pyFmtPad(fill, align, width, head, body) {
 // Each extern below names the abnf/jsrt.go function it ports. Python's are the
 // fullest of the layer-2 copies: the `__getitem__` / `__setitem__` / `__len__`
 // dunder arms (a Python class may define them), the generic-alias arm of
-// js_pyget (list[int] is a VALUE in Python), the set arm and the code-POINT
-// string length of js_pylen.
+// js_pyidx (list[int] is a VALUE in Python), the set arm and the code-POINT
+// string indexing of js_pyidx and length of js_pylen.
 //
-// ---- one Go inconsistency that is ported as it stands -----------------------
-// Go indexes and slices a string by UTF-16 CODE UNIT (rt.strLen / rt.strAt /
-// rt.strRange) but measures it with `len()` in CODE POINTS (pyStrLen). So
-// s[0] of an emoji string is half a surrogate pair while len(s) is 1. That is
-// what abnf/jsrt.go does, and the Go code is the specification, so `.length` /
-// `.charAt` (code units) are used everywhere Go used strLen / strAt, and the
-// prelude's pyStrLen (code points) only in js_pylen.
 // ============================================================================
 
 
@@ -4475,19 +4449,6 @@ function pyCCopyArr(xs) {
     var n = xs.length
     while (i < n) {
         out.push(xs[i])
-        i = i + 1
-    }
-    return out
-}
-
-// The characters of a string as a list, by CODE UNIT - Go's
-// `for i, n := 0, rt.strLen(o); i < n; i++ { out = append(out, rt.strAt(o, i)) }`.
-function pyCStrChars(s) {
-    var out = []
-    var i = 0
-    var n = s.length
-    while (i < n) {
-        out.push(s.charAt(i))
         i = i + 1
     }
     return out
@@ -4599,10 +4560,11 @@ function pyCGenericAlias(origin, param) {
 // js_dict_new is SHARED - lib/runtime.metajs.
 
 
-// ----- js_pyget ---------------------------------------------------------------
-// Sequence indexing (negative wraps), dict lookup, the __getitem__ dunder of a
-// user class, and the generic-alias reading of `list[int]`.
-function js_pyget(c, k) {
+// ----- js_pyidx ---------------------------------------------------------------
+// Sequence indexing (negative wraps; a str by CODE POINT), dict lookup, the
+// __getitem__ dunder of a user class, and the generic-alias reading of
+// `list[int]`. Go: js_pyidx in abnf/pystrmethod.go over js_pyget.
+function js_pyidx(c, k) {
     var cls = pyInstClassOf(c) // A user class may define __getitem__.
     if (cls !== null && cls !== undefined) {
         if (pyLookupHas(cls, "__getitem__")) {
@@ -4629,11 +4591,10 @@ function js_pyget(c, k) {
     }
     if (typeof c == "string") {
         idx = pySeqIdx(c, k)
-        // Go: rt.strLen / rt.strAt - UTF-16 code units. See the banner.
-        var n = c.length
-        if (idx < 0) { idx = idx + n }
-        if (idx < 0 || idx >= n) { pyRaiseExc("IndexError", "string index out of range") }
-        return c.charAt(idx)
+        if (idx < 0) { idx = idx + pyStrLen(c) }
+        var at = pySCpUnit(c, idx)
+        if (idx < 0 || at >= c.length) { pyRaiseExc("IndexError", "string index out of range") }
+        return c.substring(at, at + pySCPW(c, at))
     }
     // list[int] / dict[str, int]: subscripting a TYPE (a class object or a
     // builtin like list) is a generic alias, not an indexing. One object per
@@ -4737,7 +4698,7 @@ function js_pylist(v) {
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return pyCCopyArr(els) }
     if (pyIsArr(v)) { return pyCCopyArr(v) }
-    if (typeof v == "string") { return pyCStrChars(v) }
+    if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
     fail("list() of a " + typeof v)
     return []
@@ -4756,7 +4717,7 @@ function js_pyiter(v) {
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return pyCCopyArr(els) }
     if (pyIsArr(v)) { return v }
-    if (typeof v == "string") { return pyCStrChars(v) }
+    if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
     fail("iteration over a " + typeof v)
     return []
@@ -4796,10 +4757,10 @@ function js_pyspread(arr, it) {
         return undefined
     }
     if (typeof it == "string") {
+        var cs = pySChars(it)
         var si = 0
-        var sn = it.length
-        while (si < sn) {
-            arr.push(it.charAt(si))
+        while (si < cs.length) {
+            arr.push(cs[si])
             si = si + 1
         }
         return undefined
@@ -4922,12 +4883,12 @@ function js_pyslice3(c, lo, hi, step) {
         return out
     }
     if (typeof c == "string") {
-        // Go: rt.strLen / rt.strAt - UTF-16 code units.
-        var sidx = pySliceIndices(c.length, lo, hi, step)
+        var cs = pySChars(c)
+        var sidx = pySliceIndices(cs.length, lo, hi, step)
         var s = ""
         var si = 0
         while (si < sidx.length) {
-            s = s + c.charAt(sidx[si])
+            s = s + cs[sidx[si]]
             si = si + 1
         }
         return s
@@ -5060,8 +5021,8 @@ function js_pyellipsis() {
 
 
 // ----- js_pydel_item ----------------------------------------------------------
-// del obj[k]. Unlike js_pyget, whose miss is an rt.fail, this one RAISES a
-// catchable KeyError / IndexError - the Go twin panics with a jsThrown.
+// del obj[k]. A miss RAISES a catchable KeyError / IndexError - the Go twin
+// panics with a jsThrown.
 function js_pydel_item(c, k) {
     var cls = pyInstClassOf(c) // A user class may define __delitem__.
     if (cls !== null && cls !== undefined) {
@@ -8260,7 +8221,7 @@ function pySFail(msg) { fail(msg) }
 function pySRaiseKey(nm) { pyRaiseExc("KeyError", nm) }
 function pySFormat1(v, spec, conv) { return js_pyformat(v, spec, conv) }
 function pySGetAttr(v, nm) { return pyGetAttr(v, nm) }
-function pySGetItem(v, k) { return js_pyget(v, k) }
+function pySGetItem(v, k) { return js_pyidx(v, k) }
 function pySIsArr(v) { return pyIsArr(v) }
 function pySTruthy(v) { return pyATruthy(v) }
 function pySKwGet(kw, nm) {
@@ -8288,13 +8249,11 @@ function pySKwGet(kw, nm) {
 // toLowerCase) plus String.fromCharCode, so that the same source compiles in the
 // tag-script host AND through metajs-to-llvm-ir.abnf.
 //
-// INDEXING. CPython counts CODE POINTS; the floor's strings are UTF-16 and
-// js_pyget already indexes a string by CODE UNIT (an inconsistency this project
-// records rather than repairs, see the manual 7.9). The search/slice methods here
-// therefore work in code UNITS and the length-shaped ones (len via center/ljust/
-// rjust/zfill, and the per-character walks of title/swapcase/upper/lower) work in
-// code POINTS. For any string inside the BMP - which is everything the corpus and
-// the suite contain - the two coincide exactly.
+// INDEXING. CPython counts CODE POINTS and the floor's strings are UTF-16. The
+// searches run on code UNITS and convert their window arguments and answers
+// with pySCpUnit / pySUnitCp; the length-shaped methods (center/ljust/rjust/
+// zfill, and the per-character walks of title/swapcase/upper/lower) count code
+// POINTS directly.
 //
 // CASE MAPPING is done per code point WITH A LENGTH GUARD: goja's toUpperCase is
 // ECMAScript's FULL mapping ("ss" from "ß") while the frozen engine's is Go's
@@ -8322,6 +8281,30 @@ function pySCPW(s, i) {
         if (t >= 56320 && t <= 57343) { return 2 }
     }
     return 1
+}
+
+// Python indexes a str by CODE POINT and the strings here are UTF-16: the unit
+// index of code point cp, and back. A cp past the end stays as far past it, so
+// a search window that starts beyond the string is still empty.
+function pySCpUnit(s, cp) {
+    if (byteLen(s) == s.length) { return cp } // ASCII: a unit is a code point.
+    var i = 0
+    var k = 0
+    while (k < cp && i < s.length) {
+        i = i + pySCPW(s, i)
+        k = k + 1
+    }
+    return i + cp - k
+}
+function pySUnitCp(s, u) {
+    if (byteLen(s) == s.length) { return u }
+    var i = 0
+    var k = 0
+    while (i < u) {
+        i = i + pySCPW(s, i)
+        k = k + 1
+    }
+    return k
 }
 
 // The code points of s, each as a one- or two-unit string.
@@ -8565,16 +8548,23 @@ function pySStripHit(ch, chars, useWS) {
     return chars.indexOf(ch) >= 0
 }
 
+// Each end is tested a whole code point at a time, so an astral character in
+// `chars` strips as one character and never splits a pair.
 function pySStrip(s, chars, useWS, doL, doR) {
     var a = 0
     var b = s.length
     if (doL) {
-        while (a < b && pySStripHit(s.charAt(a), chars, useWS)) { a = a + 1 }
+        while (a < b && pySStripHit(s.substring(a, a + pySCPW(s, a)), chars, useWS)) { a = a + pySCPW(s, a) }
     }
     if (doR) {
-        while (b > a && pySStripHit(s.charAt(b - 1), chars, useWS)) { b = b - 1 }
+        while (b > a && pySStripHit(s.substring(b - pySSCPWBack(s, a, b), b), chars, useWS)) { b = b - pySSCPWBack(s, a, b) }
     }
     return s.substring(a, b)
+}
+// The unit width of the code point ENDING at unit b, not reaching below a.
+function pySSCPWBack(s, a, b) {
+    if (b - 2 >= a && pySCPW(s, b - 2) == 2) { return 2 }
+    return 1
 }
 
 // ---- splitting ----
@@ -9116,6 +9106,7 @@ function pySIsStrMethod(name) {
 
 function pyStrMethod(s, name, args, kw) {
     var n = s.length
+    var cn = 0 // The code point count, taken only by the methods that need it.
     if (name == "upper") { return pySMapCase(s, true) }
     if (name == "lower" || name == "casefold") { return pySMapCase(s, false) }
     if (name == "title") { return pySTitle(s) }
@@ -9172,25 +9163,31 @@ function pyStrMethod(s, name, args, kw) {
         return pySReplace(s, pySStrArg(args[0]), pySStrArg(args[1]), pySOptInt(args, 2, -1))
     }
 
+    // The window arguments and the answer are CODE POINT positions; the search
+    // itself runs on units.
     if (name == "find" || name == "index" || name == "rfind" || name == "rindex") {
+        cn = pySLen(s)
         var sub = pySStrArg(args[0])
-        var st = pySAdjStart(pySOptInt(args, 1, 0), n)
-        var en = pySAdjEnd(pySOptInt(args, 2, n), n)
+        var st = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
+        var en = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
         var at = -1
         if (name == "find" || name == "index") { at = pySFind(s, sub, st, en) }
         else { at = pySRFind(s, sub, st, en) }
         if (at < 0) {
             if (name == "index" || name == "rindex") { pySFail("ValueError: substring not found") }
+            return at
         }
-        return at
+        return pySUnitCp(s, at)
     }
     if (name == "count") {
-        return pySCount(s, pySStrArg(args[0]), pySAdjStart(pySOptInt(args, 1, 0), n),
-                        pySAdjEnd(pySOptInt(args, 2, n), n))
+        cn = pySLen(s)
+        return pySCount(s, pySStrArg(args[0]), pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn)),
+                        pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn)))
     }
     if (name == "startswith" || name == "endswith") {
-        var st2 = pySAdjStart(pySOptInt(args, 1, 0), n)
-        var en2 = pySAdjEnd(pySOptInt(args, 2, n), n)
+        cn = pySLen(s)
+        var st2 = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
+        var en2 = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
         var pv = args[0]
         if (pySIsArr(pv)) {
             var i2 = 0

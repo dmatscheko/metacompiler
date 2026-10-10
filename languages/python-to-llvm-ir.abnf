@@ -136,7 +136,7 @@ enclosing function binds the same name, while global / nonlocal send it to the
 module scope or the enclosing binding. A try, except, with or finally body is its
 own IR closure but NOT a boundary, so what it assigns belongs to the function
 around it. Negative
-indexing and dict entries through js_pyget/js_pyset, dicts through js_dict_new (two
+indexing and dict entries through js_pyidx/js_pyset, dicts through js_dict_new (two
 parallel key/value arrays keep the insertion order), slices through js_pyslice,
 iteration through js_pyiter, len through js_pylen, floor division and modulo through
 js_fdiv/js_fmod, truthiness through js_pytruthy, every user visible operator through the
@@ -2251,7 +2251,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = callExt(b, "js_pyget", [cur, ir2.v])
+                    cur = callExt(b, "js_pyidx", [cur, ir2.v])
                 }
             }
             return {b: b, v: cur}
@@ -2540,7 +2540,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: fexit, v: dV}
         }
     }
-    // One step along a target path: an index ([i], js_pyget) or an attribute
+    // One step along a target path: an index ([i], js_pyidx) or an attribute
     // (.name, js_get - matching the pyattr read of the interpreter). Everything BUT
     // the last step of a target is an ordinary READ, so the call and method-call forms
     // emit exactly what foldCallMember emits - that is what makes `hold()["k"] = 1`
@@ -2565,7 +2565,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: sb.b, v: callExt(sb.b, "js_pyslice3", [o, sb.lo, sb.hi, sb.step])}
         }
         var r = step.idx(b)
-        return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
+        return {b: r.b, v: callExt(r.b, "js_pyidx", [o, r.v])}
     }
     // The object a target's LAST step applies to: the base and every step but the
     // last. `reads` takes the base through py_getvar rather than js_scope_get, so a
@@ -2603,7 +2603,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitRefLoad(b, o, last, key) {
         if (last.tattr == true) { return callExt(b, "js_pygetattr", [o, emitStr(b, last.name)]) }
         if (last.tslice == true) { return callExt(b, "js_pyslice3", [o, key.lo, key.hi, key.step]) }
-        return callExt(b, "js_pyget", [o, key.k])
+        return callExt(b, "js_pyidx", [o, key.k])
     }
     function emitRefStore(b, o, last, key, v) {
         if (last.tattr == true) { callExt(b, "js_pysetattr", [o, emitStr(b, last.name), v]) }
@@ -2730,7 +2730,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Write one runtime value through a target: a plain reference (emitRefWrite) or
     // a nested tuple pattern, which unpacks. The value is normalized with js_pyiter
     // once per level, so a string, a dict or a tuple unpack like a list.
-    // The elements are read by INDEX (js_pyget wraps a negative one), so the targets
+    // The elements are read by INDEX (js_pyidx wraps a negative one), so the targets
     // after a *rest are addressed from the END - which is exactly what makes the
     // length of the rest a runtime question that needs no length arithmetic here.
     function writeTarget(b, t, v) {
@@ -2741,13 +2741,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
         if (star < 0) {
             for (var k = 0; k < items.length; k++) {
-                b = writeTarget(b, items[k], callExt(b, "js_pyget", [arr, emitNum(b, k)]))
+                b = writeTarget(b, items[k], callExt(b, "js_pyidx", [arr, emitNum(b, k)]))
             }
             return b
         }
         var after = items.length - star - 1
         for (var a = 0; a < star; a++) {
-            b = writeTarget(b, items[a], callExt(b, "js_pyget", [arr, emitNum(b, a)]))
+            b = writeTarget(b, items[a], callExt(b, "js_pyidx", [arr, emitNum(b, a)]))
         }
         // The rest is the slice from the starred position to just before the targets
         // that follow it; with none following, it runs to the end.
@@ -2756,7 +2756,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = writeTarget(b, items[star].startgt,
                         callExt(b, "js_pyslice3", [arr, emitNum(b, star), hiV, hUndef]))
         for (var z = 0; z < after; z++) {
-            b = writeTarget(b, items[star + 1 + z], callExt(b, "js_pyget", [arr, emitNum(b, z - after)]))
+            b = writeTarget(b, items[star + 1 + z], callExt(b, "js_pyidx", [arr, emitNum(b, z - after)]))
         }
         return b
     }
@@ -2950,7 +2950,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A sequence pattern matches lists and tuples (one type here), never a string
     // or a dict. The elements before a *rest are read from the front and those
-    // after it from the BACK (js_pyget wraps a negative index), so the length of
+    // after it from the BACK (js_pyidx wraps a negative index), so the length of
     // the rest never has to be computed here.
     function emitSeqPattern(b, parts, v, failB) {
         var star = -1
@@ -2961,7 +2961,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                (star < 0) ? hFalse : hTrue])
         b = emitGuardStep(b, okV, failB)
         for (var a = 0; a < before; a++) {
-            b = emitPattern(b, parts[a], callExt(b, "js_pyget", [v, emitNum(b, a)]), failB)
+            b = emitPattern(b, parts[a], callExt(b, "js_pyidx", [v, emitNum(b, a)]), failB)
         }
         if (star < 0) { return b }
         var hiV = hUndef
@@ -2969,7 +2969,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = emitBind(b, stripWs(parts[star].pstar).substring(1),
                      callExt(b, "js_pyslice3", [v, emitNum(b, star), hiV, hUndef]))
         for (var z = 0; z < after; z++) {
-            b = emitPattern(b, parts[star + 1 + z], callExt(b, "js_pyget", [v, emitNum(b, z - after)]), failB)
+            b = emitPattern(b, parts[star + 1 + z], callExt(b, "js_pyidx", [v, emitNum(b, z - after)]), failB)
         }
         return b
     }
@@ -2987,7 +2987,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitGuardStep(b, callExt(b, "js_pymatchmap", [v, keysV]), failB)
         for (var k = 0; k < p.pmap.length; k++) {
-            b = emitPattern(b, p.pmap[k].mpat, callExt(b, "js_pyget", [v, keyVals[k]]), failB)
+            b = emitPattern(b, p.pmap[k].mpat, callExt(b, "js_pyidx", [v, keyVals[k]]), failB)
         }
         if (p.prest != null) {
             b = emitBind(b, p.prest, callExt(b, "js_pymaprest", [v, keysV]))
@@ -3007,7 +3007,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var haveV = callExt(b, "js_sne", [argsV, hUndef])
             b = emitGuardStep(b, haveV, failB)
             for (var i = 0; i < p.ppos.length; i++) {
-                b = emitPattern(b, p.ppos[i], callExt(b, "js_pyget", [argsV, emitNum(b, i)]), failB)
+                b = emitPattern(b, p.ppos[i], callExt(b, "js_pyidx", [argsV, emitNum(b, i)]), failB)
             }
         }
         for (var k = 0; k < p.pkw.length; k++) {

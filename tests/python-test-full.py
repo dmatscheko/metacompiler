@@ -3232,6 +3232,18 @@ def s52():
 def s53():
     check("uname1", "\N{bullet}" == "\u2022" and "\N{Euro Sign}" == "\u20ac" and f"x\N{em dash}{1}" == "x\u20141")
 
+# ===== SECTION 54: a str is indexed, sliced, iterated and searched by code point =====
+# An astral character is ONE character to every position-taking operation, not
+# the two UTF-16 units the strings are stored as.
+def s54():
+    s = "a😀b𝐀c"
+    check("cp1", [ord(x) for x in chr(0x1D400)] == [119808] and [ord(x) for x in s] == [97, 128512, 98, 119808, 99])
+    check("cp2", s[1] == "😀" and s[2] == "b" and s[-2] == "𝐀" and s[1:3] == "😀b" and s[::-1] == "c𝐀b😀a" and s[::2] == "abc")
+    check("cp3", s.find("b") == 2 and s.index("c") == 4 and s.rfind("😀") == 1 and s.find("c", -1) == 4 and s.find("", 9) == -1)
+    check("cp4", s.startswith("😀", 1) and s.endswith("𝐀", 0, 4) and s.count("b", 2) == 1 and list(s) == ["a", "😀", "b", "𝐀", "c"])
+    check("cp5", s.strip("a😀c") == "b𝐀" and s.rstrip("c𝐀") == "a😀b" and max("a😀b") == "😀" and min("ba") == "a")
+    check("cp6", [i for i, c in enumerate(s) if c == "𝐀"] == [3] and "".join(reversed(s)) == "c𝐀b😀a")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3287,5 +3299,6 @@ def main():
     s51() # SECTION-CALL 51
     s52() # SECTION-CALL 52
     s53() # SECTION-CALL 53
+    s54() # SECTION-CALL 54
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
