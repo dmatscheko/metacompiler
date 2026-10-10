@@ -184,6 +184,17 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	strOf := map[value.Value]string{}     // js_str_mem call -> its string literal
 	nameRead := map[value.Value]string{}  // js_scope_get/js_kget call -> the variable name
 	closureFn := map[value.Value]string{} // js_closure call -> IR function name jsf_N
+	// jsf_N -> the statement that creates its closure: the js_srcpos marker right
+	// before the js_closure in the creating function. That statement is the
+	// definition (`def f`, `function f`), so its line names the function rather
+	// than the first statement of its body. Not when another closure came between
+	// them, nor for a closure stored into an object member: a class statement
+	// creates all its methods after ONE marker, its own.
+	type cgSite struct {
+		in  *ir.Func
+		pos int
+	}
+	closureSite := map[string]cgSite{}
 
 	forEachCall := func(visit func(f *ir.Func, call *ir.InstCall, callee string)) {
 		for _, f := range m.Funcs {
@@ -198,16 +209,32 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	}
 
 	// Pass 1: string literals and closure creations (values compare by pointer).
+	var posFn *ir.Func
+	lastPos := -1
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
+		if f != posFn {
+			posFn, lastPos = f, -1
+		}
 		switch callee {
 		case "js_str_mem":
 			if s, ok := decodeStrMem(call); ok {
 				strOf[call] = s
 			}
+		case "js_srcpos":
+			if len(call.Args) > 0 {
+				if ci, ok := call.Args[0].(*constant.Int); ok {
+					lastPos = int(ci.X.Int64())
+				}
+			}
 		case "js_closure":
 			if len(call.Args) > 0 {
 				if ci, ok := call.Args[0].(*constant.Int); ok {
-					closureFn[call] = fmt.Sprintf("jsf_%d", ci.X.Int64())
+					fn := fmt.Sprintf("jsf_%d", ci.X.Int64())
+					closureFn[call] = fn
+					if _, seen := closureSite[fn]; !seen && lastPos >= 0 {
+						closureSite[fn] = cgSite{f, lastPos}
+					}
+					lastPos = -1
 				}
 			}
 		}
@@ -245,6 +272,9 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		case "js_tdecl", "js_scope_decl", "js_pyset_var", "js_tset", "js_scope_set", "js_kset", "js_set":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
+					if callee == "js_set" {
+						delete(closureSite, fn)
+					}
 					if s, ok2 := strOf[call.Args[1]]; ok2 {
 						if _, exists := fnName[fn]; !exists {
 							fnName[fn] = s
@@ -343,6 +373,15 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					// A direct call (the integer-IR languages, putchar, ...).
 					calls = append(calls, cgCall{from, callee, file})
 				}
+			}
+		}
+		// A marker is the position where its statement's node ENDS in most
+		// grammars and where it begins in a few (python, ruby, php), so the
+		// definition's line is used only when it does not follow the body's.
+		if site, ok := closureSite[f.Name()]; ok {
+			_, siteStarts := srcOf(site.in)
+			if l := lineOfPosIn(site.pos, siteStarts); l > 0 && (line == 0 || l <= line) {
+				line = l
 			}
 		}
 		if !scaffold(f.Name()) {
