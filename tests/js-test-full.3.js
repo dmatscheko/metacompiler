@@ -941,6 +941,37 @@ function s53() {
     check("its11", pr(s53g()) === 12)
 }
 
+// ===== SECTION 54: a derived constructor's `this` is what super() answers =====
+// A parent constructor that returns an OBJECT replaces the instance: in the derived
+// constructor `this` is bound to that object once super() returns, the derived class's
+// fields are initialized on it, and `new` answers it - unless the derived constructor
+// returns an object of its own. A primitive return is ignored. Values read off node 24.
+var s54stash = { tag: "stash" }
+class S54A { constructor() { return s54stash } }
+class S54B extends S54A { constructor() { super(); this.y = 2 } }
+class S54C extends S54A { }
+class S54D extends S54A { constructor() { super(); this.z = 3; return undefined } }
+class S54E extends S54A { f = 9 }
+class S54F extends S54B { constructor() { super(); this.w = 4 } }
+class S54P { constructor() { this.p = 1; return 5 } }
+class S54Q extends S54P { constructor() { super(); this.q = 2 } }
+class S54R extends S54P { g = 7; constructor() { super(); this.h = this.g + 1 } }
+function s54() {
+    var b = new S54B()
+    check("sup01", b === s54stash && b.y === 2 && !(b instanceof S54B))
+    check("sup02", new S54C() === s54stash)
+    var d = new S54D()
+    check("sup03", d === s54stash && d.z === 3)
+    var e = new S54E()
+    check("sup04", e === s54stash && e.f === 9)
+    var f = new S54F()
+    check("sup05", f === s54stash && f.w === 4 && Object.keys(s54stash).join(",") === "tag,y,z,f,w")
+    var q = new S54Q()
+    check("sup06", q.p === 1 && q.q === 2 && q instanceof S54Q)
+    var r = new S54R()
+    check("sup07", r.g === 7 && r.h === 8 && Object.keys(r).join(",") === "p,g,h")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -954,6 +985,7 @@ function main() {
     s51() // SECTION-CALL 51
     s52() // SECTION-CALL 52
     s53() // SECTION-CALL 53
+    s54() // SECTION-CALL 54
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

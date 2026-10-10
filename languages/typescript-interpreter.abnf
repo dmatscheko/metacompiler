@@ -6085,8 +6085,8 @@ NotFuncHead = :script(~~
         }
     }
 
-    // A constructor closure: binds this = arguments[0], runs (for a default subclass ctor)
-    // the implicit no-argument super, then the field initializers, then the body.
+    // A constructor closure: binds this = arguments[0], runs the field initializers (a
+    // derived class: when super() returns - see ctorSuperDone), then the body.
     function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault) {
         var env = defScopes.slice()
         return function() {
@@ -6101,15 +6101,10 @@ NotFuncHead = :script(~~
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
-            // TypeScript PARAMETER PROPERTIES: a constructor parameter carrying an access
-            // modifier also declares and assigns the field of the same name. The write
-            // happens before the field initializers and the body, so both can read it.
-            for (var pi = 0; pi < params.length; pi++) {
-                var pp = params[pi]
-                if (typeof pp == "string" || pp.prop != true) { continue }
-                scopePut(self, pp.pname, sc[pp.pname])
-                trackKey(self, pp.pname)
-            }
+            // See the twin of this comment in js-interpreter.abnf. TypeScript PARAMETER
+            // PROPERTIES are written in the same step, ahead of the field initializers.
+            var fscopes = scopes.slice()
+            sc["0fields"] = function() { ctorFields(params, fields, fscopes) }
             // The implicit 'super()' of a default constructor. The parent is read off the
             // DEFINING class rather than resolved by name, which is what lets a heritage
             // EXPRESSION ('class extends mixin(B) {}') have a default constructor too.
@@ -6120,21 +6115,50 @@ NotFuncHead = :script(~~
                 // on to A, which is also how `class E extends Error {}` carries its message.
                 var supArgs = [self]
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
-                supCls.__ctor.apply(undefined, supArgs)
-            }
-            for (var k = 0; k < fields.length; k++) {
-                var fk = memberKey(fields[k])
-                var fv = (fields[k].init != null) ? fields[k].init() : undefined
-                scopePut(self, fk, fv)
-                trackKey(self, fk)
+                ctorSuperDone(self, supCls.__ctor.apply(undefined, supArgs))
+            } else if (!hasSuper) {
+                ctorFields(params, fields, fscopes)
             }
             var rb = anytype // The body's return record, or absent.
             rb = undefined
             if (bodyT != null) rb = bodyT()
             scopes = saved
-            // An explicit `return v` reaches makeNewFrom, which keeps it if it is an object.
-            return (rb != undefined && rb.isRet) ? rb.v : undefined
+            // See the twin of this comment in js-interpreter.abnf.
+            var rv = anytype
+            rv = (rb != undefined && rb.isRet) ? rb.v : undefined
+            if (hasSuper && (rv == undefined || rv == null || (typeof rv != "object" && typeof rv != "function"))) { return sc["this"] }
+            return rv
         }
+    }
+    // TypeScript PARAMETER PROPERTIES: a constructor parameter carrying an access
+    // modifier also declares and assigns the field of the same name, before the field
+    // initializers run, so both they and the body can read it.
+    function ctorFields(params, fields, fscopes) {
+        var saved = scopes
+        scopes = fscopes
+        var self = getVar("this")
+        for (var pi = 0; pi < params.length; pi++) {
+            var pp = params[pi]
+            if (typeof pp == "string" || pp.prop != true) { continue }
+            scopePut(self, pp.pname, getVar(pp.pname))
+            trackKey(self, pp.pname)
+        }
+        for (var k = 0; k < fields.length; k++) {
+            var fk = memberKey(fields[k])
+            var fv = (fields[k].init != null) ? fields[k].init() : undefined
+            scopePut(self, fk, fv)
+            trackKey(self, fk)
+        }
+        scopes = saved
+        return undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function ctorSuperDone(self, r) {
+        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function") && r !== self) {
+            setVar("this", r)
+        }
+        getVar("0fields")()
+        return undefined
     }
 
     // See the twin of this comment in js-interpreter.abnf.
@@ -6315,7 +6339,7 @@ NotFuncHead = :script(~~
                                       aa.acc + " " + ak, fnArity(aa.params)))
             }
             if (ctorInfo != null) {
-                cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, false, false)
+                cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false)
             } else {
                 cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true)
             }
@@ -6688,7 +6712,7 @@ NotFuncHead = :script(~~
                 var supCls = getVar("__class__").__super
                 if (supCls == undefined) fail("super() with no superclass")
                 var argv = concat2impl([self], evalArgs(argThunks))
-                supCls.__ctor.apply(undefined, argv)
+                ctorSuperDone(self, supCls.__ctor.apply(undefined, argv))
                 return undefined
             }
         }

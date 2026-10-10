@@ -4425,7 +4425,10 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function emitClassFunc(params, body, isInstance, initFields, implicitSuper, propNames) {
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var superFields = null
+    var derivedCtorF = null
+    function emitClassFunc(params, body, isInstance, initFields, implicitSuper, propNames, derived) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4458,41 +4461,60 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
         }
         b = bindParams(b, params, f.Params[1], off)
+        var inits = {fields: initFields, props: propNames}
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            jsCall(b, supCtor, hUndef, f.Params[1])
+            b = emitSuperDone(b, jsCall(b, supCtor, hUndef, f.Params[1]), inits)
+        } else if (derived != true) {
+            b = emitFieldInits(b, inits)
         }
-        if (initFields != null) {
-            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
-            for (var k = 0; k < initFields.length; k++) {
-                var fv = hUndef
-                if (initFields[k].init != null && initFields[k].init != undefined) {
-                    var r = initFields[k].init(b)
-                    b = r.b
-                    fv = r.v
-                }
-                callExt(b, memSetExt(), [thisV, emitStr(b, initFields[k].name), fv])
-            }
-        }
-        // The TypeScript parameter properties: 'this.x = x' for every modifier-carrying
-        // constructor parameter, after the field initializers and before the body.
-        if (propNames != undefined && propNames != null) {
-            var thisP = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
-            for (var pi = 0; pi < propNames.length; pi++) {
-                callExt(b, memSetExt(), [thisP, emitStr(b, propNames[pi]),
-                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, propNames[pi])])])
-            }
-        }
+        var savedSuperFields = superFields
+        var savedDerivedF = derivedCtorF
+        superFields = (derived == true && implicitSuper == null) ? inits : null
+        derivedCtorF = (derived == true) ? f : null
         var endB = body != null ? body(b) : b
-        endB.NewRet(hUndef)
+        if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
+        else { endB.NewRet(hUndef) }
+        superFields = savedSuperFields
+        derivedCtorF = savedDerivedF
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
         forOfIters = savedForOf
         emitStrict = savedStrict
         return idx
+    }
+    // The field initializers, then the TypeScript parameter properties ('this.x = x' for
+    // every modifier-carrying constructor parameter), both on the current `this`.
+    function emitFieldInits(b, inits) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        if (inits.fields != undefined && inits.fields != null) {
+            for (var k = 0; k < inits.fields.length; k++) {
+                var fv = hUndef
+                if (inits.fields[k].init != null && inits.fields[k].init != undefined) {
+                    var r = inits.fields[k].init(b)
+                    b = r.b
+                    fv = r.v
+                }
+                callExt(b, memSetExt(), [thisV, emitStr(b, inits.fields[k].name), fv])
+            }
+        }
+        if (inits.props != undefined && inits.props != null) {
+            for (var pi = 0; pi < inits.props.length; pi++) {
+                callExt(b, memSetExt(), [thisV, emitStr(b, inits.props[pi]),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, inits.props[pi])])])
+            }
+        }
+        return b
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitSuperDone(b, retV, inits) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), callExt(b, "js_jsnewres", [retV, thisV])])
+        if (inits != null) { b = emitFieldInits(b, inits) }
+        return b
     }
 
     // ----- The static namespace -----
@@ -4560,9 +4582,9 @@ NotFuncHead = :script(~~
         }
         var ctorIdx = anytype
         if (info.ctor != null) {
-            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.ctor.props)
+            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.ctor.props, info.superName != null)
         } else {
-            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
+            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, null, info.superName != null)
         }
         clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
         for (var mi = 0; mi < info.methods.length; mi++) {
@@ -4720,7 +4742,7 @@ NotFuncHead = :script(~~
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, thisV])
                 b = pushArgs(b, argsV, argThunks)
-                jsCall(b, supCtor, hUndef, argsV)
+                b = emitSuperDone(b, jsCall(b, supCtor, hUndef, argsV), superFields)
                 return {b: b, v: hUndef}
             }
         }
@@ -5386,6 +5408,10 @@ NotFuncHead = :script(~~
                 var r = t(b)
                 b = r.b
                 v = r.v
+            }
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            if (curF === derivedCtorF) {
+                v = callExt(b, "js_jsnewres", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
             }
             emitIterUnwind(b, 0) // A return out of a for-of body closes its iterator.
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body

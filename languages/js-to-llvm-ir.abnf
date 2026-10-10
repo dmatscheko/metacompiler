@@ -5812,7 +5812,15 @@ NotFuncHead = :script(~~
     // is 'this'. A constructor (initFields != null) sets the field defaults/initializers
     // at entry; a default constructor of a subclass (implicitSuper set) first runs the
     // parent constructor with no arguments.
-    function emitClassFunc(params, body, isInstance, initFields, implicitSuper) {
+    // A DERIVED constructor's `this` is whatever super() answers: an object the parent
+    // constructor returns replaces the instance (BindThisValue), the derived class's
+    // fields are initialized on it when super() returns, and the constructor answers it
+    // unless it returns an object of its own. While such a body is emitted, superFields
+    // holds the fields makeSuperCall initializes and derivedCtorF is the function whose
+    // `return` answers `this`. Twin of ctorSuperDone in js-interpreter.abnf.
+    var superFields = null
+    var derivedCtorF = null
+    function emitClassFunc(params, body, isInstance, initFields, implicitSuper, derived) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5859,28 +5867,46 @@ NotFuncHead = :script(~~
             // own), which is exactly the shape the parent constructor is called with, so
             // it is handed over unchanged. `class E extends Error {}` relies on it to
             // carry its message through.
-            jsCall(b, supCtor, hUndef, f.Params[1])
+            b = emitSuperDone(b, jsCall(b, supCtor, hUndef, f.Params[1]), initFields)
+        } else if (initFields != null && derived != true) {
+            b = emitFieldInits(b, initFields)
         }
-        if (initFields != null) {
-            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
-            for (var k = 0; k < initFields.length; k++) {
-                var fv = hUndef
-                if (initFields[k].init != null && initFields[k].init != undefined) {
-                    var r = initFields[k].init(b)
-                    b = r.b
-                    fv = r.v
-                }
-                callExt(b, memSetExt(), [thisV, emitStr(b, initFields[k].name), fv])
-            }
-        }
+        var savedSuperFields = superFields
+        var savedDerivedF = derivedCtorF
+        superFields = (derived == true && implicitSuper == null) ? initFields : null
+        derivedCtorF = (derived == true) ? f : null
         var endB = body != null ? body(b) : b
-        endB.NewRet(hUndef)
+        if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
+        else { endB.NewRet(hUndef) }
+        superFields = savedSuperFields
+        derivedCtorF = savedDerivedF
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
         forOfIters = savedForOf
         emitStrict = savedStrict
         return idx
+    }
+    function emitFieldInits(b, initFields) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        for (var k = 0; k < initFields.length; k++) {
+            var fv = hUndef
+            if (initFields[k].init != null && initFields[k].init != undefined) {
+                var r = initFields[k].init(b)
+                b = r.b
+                fv = r.v
+            }
+            callExt(b, memSetExt(), [thisV, emitStr(b, initFields[k].name), fv])
+        }
+        return b
+    }
+    // super() answered retV: rebind `this` to it when it is an object (js_jsnewres),
+    // then initialize the derived class's fields on it.
+    function emitSuperDone(b, retV, initFields) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), callExt(b, "js_jsnewres", [retV, thisV])])
+        if (initFields != null) { b = emitFieldInits(b, initFields) }
+        return b
     }
 
     // ----- The static namespace -----
@@ -5970,9 +5996,9 @@ NotFuncHead = :script(~~
         }
         var ctorIdx = anytype
         if (info.ctor != null) {
-            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null)
+            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.superName != null)
         } else {
-            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
+            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, info.superName != null)
         }
         clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
         for (var mi = 0; mi < info.methods.length; mi++) {
@@ -6138,7 +6164,7 @@ NotFuncHead = :script(~~
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, thisV])
                 b = pushArgs(b, argsV, argThunks)
-                jsCall(b, supCtor, hUndef, argsV)
+                b = emitSuperDone(b, jsCall(b, supCtor, hUndef, argsV), superFields)
                 return {b: b, v: hUndef}
             }
         }
@@ -6447,6 +6473,10 @@ NotFuncHead = :script(~~
                 var r = t(b)
                 b = r.b
                 v = r.v
+            }
+            // A derived constructor answers `this` unless it returns an object.
+            if (curF === derivedCtorF) {
+                v = callExt(b, "js_jsnewres", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
             }
             emitIterUnwind(b, 0) // A return out of a for-of body closes its iterator.
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body

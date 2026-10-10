@@ -2987,6 +2987,30 @@ function s50() {
     check("its06", (a as number) + (b as number) + (c as number) === 3 && s50log.join(",") === "closed");
 }
 
+// ===== SECTION 51: a derived constructor's `this` is what super() answers =====
+// A parent constructor that returns an OBJECT replaces the instance: `this` is bound to
+// it once super() returns, the derived fields and parameter properties land on it, and
+// `new` answers it. Values read off node 24 (tsc 6.0.3 with target ES2022).
+const s51stash: any = { tag: "stash" };
+class S51A { constructor() { return s51stash; } }
+class S51B extends S51A { y: number; constructor() { super(); this.y = 2; } }
+class S51C extends S51A { }
+class S51E extends S51A { f = 9; }
+class S51G extends S51A { constructor(public pp: number) { super(); } }
+class S51P { p: number; constructor() { this.p = 1; } }
+class S51R extends S51P { g = 7; h: number; constructor() { super(); this.h = this.g + 1; } }
+function s51() {
+    const b = new S51B();
+    check("sup01", (b as any) === s51stash && b.y === 2 && !(b instanceof S51B));
+    check("sup02", (new S51C() as any) === s51stash);
+    const e = new S51E();
+    check("sup03", (e as any) === s51stash && e.f === 9);
+    const g = new S51G(6);
+    check("sup04", (g as any) === s51stash && s51stash.pp === 6);
+    const r = new S51R();
+    check("sup05", r.g === 7 && r.h === 8 && Object.keys(r).join(",") === "p,g,h");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3053,6 +3077,7 @@ function main(): number {
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
+    s51(); // SECTION-CALL 51
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
