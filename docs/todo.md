@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-238** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-242** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -289,33 +289,19 @@ throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same
 
 # GO — Go  (oracle: `go run`)
 
-### T-070 go: the built-in `error` interface is not modelled · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
-`x.(error)` is false even for a type with `Error() string`; `case error:` in a type
-switch never matches; a recovered runtime panic is a plain string, so `r.(string)`
-succeeds where go fails and `r.(error).Error()` fails where go answers
-`runtime error: ...`. Model `error` structurally (method set {Error() string}) and
-give runtime panics a runtime.Error value whose Error() is the text, in all engines.
+### T-239 go: panic texts name user types without `main.` · P1 · GO · OPEN [V]
+go writes `main.T` (e.g. `interface conversion: interface {} is main.T, not int`); every
+engine writes `T`. Check every panic and `%v`-of-type site.
 
-### T-071 go: a scalar type assertion does not panic on mismatch · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
-`var a interface{} = "s"; _ = a.(int)` does not panic in any engine; go:
-`panic: interface conversion: interface {} is string, not int`. The comma-ok form
-must answer `0 false`.
+### T-240 go: a value of a defined non-struct type is the underlying value · P2 · GO · OPEN [V]
+`type MyInt int; var v interface{} = MyInt(4); _ = v.(int)` succeeds in all engines; go
+panics. Same family: int vs int64, rune vs int32 in type switches/asserts. Value-model:
+see T-081.
 
-### T-072 go: an unrecovered native integer divide by zero dies through the C floor · P1 · GO · Shared: runtime.c · IN PROGRESS (GO worker, round 2) [V]
-Natively, with no `recover()` in the program, `a / b` with b == 0 prints
-`js runtime error: integer divide by zero`, exit 1 (the floor's `si_arith` die), where
-go prints `panic: runtime error: integer divide by zero` + goroutine trace, exit 2.
-The emitter gates the checked divide (`js_gidivz`) on `usesRecover` for speed:
-measure with `tests/bench.sh go` before and after.
-
-### T-073 go: fmt bad-verb notes for composites and wide ints · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
-Composites are not walked per element: go gives `[%!s(int=1) %!s(int=2)]`, we `[1 2]`.
-int64/uint64 print as int/uint in the note because the box does not keep the declared
-name (may need T-081).
-
-### T-074 go: fmt verbs `%f %g %e %x %o %b` (and widths/flags) · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
-Unimplemented; they currently render as a typed bad-verb note. Implement go's
-semantics including width, precision, `-`, `+`, `0`, `#` flags and `%x` on strings.
+### T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability · P1 · GO · OPEN [V]
+`%T` and `%p` render as bad verbs, `%#v` as `%v`, extra operands get no
+`%!(EXTRA type=value)`; `%q` printability approximates strconv.IsPrint (U+2028 prints
+raw, go escapes it). See the gap list in languages/lib/go-fmt.js. Oracle: go run.
 
 ---
 
@@ -370,7 +356,7 @@ Dart. Decide from the spec; if invalid, rewrite the checks with parentheses.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-120 php: an undefined `$variable` aborts · P1 · PHP · Shared: runtime.c · OPEN [V spec-only]
+### T-120 php: an undefined `$variable` aborts · P1 · PHP · Shared: runtime.c · IN PROGRESS (PHP worker, round 2) [V spec-only]
 PHP 8 warns and evaluates to null and continues. The floor's miss hook can only
 answer a value to THROW, never one to RETURN. Options: (a) a runtime.c hook (~15
 lines + Go twin + php registration; a floor change must land with its layer-2
@@ -379,19 +365,19 @@ on php's hottest path - measure); (c) emitter pre-declaration of every `$name` a
 mentions (~30 lines × 2 grammars, isset/compact/global regression risk). Written at
 `js_phmissname`. Must land before T-121.
 
-### T-121 php: variable scope leaks into every function · P1 · PHP · OPEN [V spec-only]
+### T-121 php: variable scope leaks into every function · P1 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
 `$g=5; function f(){ echo $g; }` prints `5`; a closure sees `$g` without `use`. PHP
 has no lexical variable scope. Needs a variable boundary (`global`/`use`/`$GLOBALS`/
 `static`) in both grammars on the hottest path: ONE `js_scope_has` on ONE frame, never
 a walk. Depends on T-120.
 
-### T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify · P1 · PHP · OPEN [V spec-only]
+### T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify · P1 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
 `empty($undef)` / `empty($undef[0])` must answer true silently; select the
 non-aborting read at PARSE time (`KwEmpty "(" TgtOnly ")"` before the expression
 alternative) in both grammars. `$u[0] = 1` on an undeclared variable must create the
 array: `emitRefPathV`'s `viv && ref.path.length > 1` guard skips a single-step target.
 
-### T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts · P1 · PHP · Shared: compile-core.js · OPEN [V]
+### T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts · P1 · PHP · Shared: compile-core.js · IN PROGRESS (PHP worker, round 2) [V]
 `TypeError: Not a function` from compile-core.js `makeSeq` via `buildMain`: the
 top-level list does not recognise the `{lblstmt}` / `{body}` records (php's own
 `makeBody` does). Works inside a function. compile-core.js feeds the frozen snapshot:
@@ -438,6 +424,11 @@ the Unicode version the oracles use; check every language's upper/lower on the d
 The `-frozen` interpreter spends ~2-8M steps per operation on ~300-digit numbers; the
 ruby ratchet needs ~50M of its 1e8 per-call budget. Profile the frozen host's path for
 the shared bignum helpers (interp-core.js / runtime.metajs) and cut it.
+
+### T-238 tests/coro-poc/build.sh fails on main · P2 · CORE · OPEN [V]
+`coro-floor.py: the C floor is missing 1 of the 17 coroutine pieces: gc_trace tag 16`.
+Bring the proof-of-concept's checker in line with the floor, or delete the PoC if it
+no longer earns its keep (it is referenced by T-172/T-173).
 
 ### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · OPEN [V]
 `"\f".charCodeAt(0)` is 102 in MetaJS. tools/metajs-lint guards known sites (it found
@@ -529,10 +520,6 @@ labelled syntax errors); php / csharp / java / c long tails. python 92.9% and ru
 python must each come from that language's own toolchain or spec (python3 is Unicode
 16.0, node 24 is 17.0).
 
-### T-182 go: `tests/go-test-widen.go` asserts `a.(int)` on a non-interface `a` · P3 · GO · IN PROGRESS (GO worker, round 2) [V]
-Real Go rejects a type assertion on a non-interface value at compile time. Rewrite the
-row with an `interface{}` operand.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · OPEN [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -591,6 +578,12 @@ T-092 swift: `Dictionary.first` answers a key, not a `(key, value)` tuple — DO
 T-093 swift: remaining write-adoption cases — DONE dfe498e
 T-094 swift: an extension on a builtin receiver — DONE dfe498e
 T-095 swift: an extension-only member through a protocol-typed variable — DONE f459804 (receivers whose declared type the walk knows; call results / property chains stay dynamic, T-237)
+T-070 go: the built-in `error` interface is not modelled — DONE 64995a2
+T-071 go: a scalar type assertion does not panic on mismatch — DONE 64995a2 (int vs int64, rune vs int32, defined non-struct types stay indistinguishable: T-240)
+T-072 go: an unrecovered native integer divide by zero dies through the C floor — DONE 5aeb8d0
+T-073 go: fmt bad-verb notes for composites and wide ints — PARTIAL f09061c (composites walked per element); the uint64=/int64= note names wait on T-081
+T-074 go: fmt verbs `%f %g %e %x %o %b` (and widths/flags) — DONE f09061c
+T-182 go: `tests/go-test-widen.go` asserts `a.(int)` on a non-interface `a` — DONE c887ae4
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
