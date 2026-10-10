@@ -981,6 +981,9 @@ fdlibm.js                 <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtfdlibm.go)
 java-chars.js             <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtjavachars.go)
+ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
+                             builtin; Go twin: rubyRespondNames in
+                             abnf/jsrtruby.go, kept equal by a go test)
 ```
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`

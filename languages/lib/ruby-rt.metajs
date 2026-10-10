@@ -110,6 +110,9 @@
 
 import "./regex.js"
 
+// Object#respond_to? for a builtin value (rbResponds).
+import "./ruby-respond.js"
+
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
@@ -6276,6 +6279,24 @@ function rbMemberCall(target, name, args) {
 
 // rubyMethod is the direct method dispatch (js_rmcall in the Go twin; here it is
 // reached only through js_rxmcall, which is the one the ruby emitter emits).
+// The builtin class respond_to? looks up, "" for a user instance or class. Twin
+// of rubyRespondClass in abnf/jsrtruby.go.
+function rbRespondClass(v) {
+    if (rbRxIsRegex(v)) { return "Regexp" }
+    if (rbRxIsMatch(v)) { return "MatchData" }
+    if (rbIsObj(v) && (v["__isclass"] === true || v["__class"] !== undefined)) { return "" }
+    return rbClassName(v)
+}
+
+// `x.respond_to?(n)`, which the emitter lowers here rather than to js_rxmcall so
+// no other call pays for the test. A user instance or class answers from its own
+// tables in rbMethod. Twin of js_rrespond in abnf/jsrtruby.go.
+function js_rrespond(target, args) {
+    var rcls = rbRespondClass(target)
+    if (rcls != "") { return rbResponds(rcls, rbStr(rbArgAt(args, 0))) }
+    return rbMethod(target, "respond_to?", args)
+}
+
 function rbMethod(target, name, args) {
     // Object#send / #__send__ / #public_send: the method NAME is the first
     // argument and the rest of the list (block marker included) is the call.
@@ -6300,6 +6321,7 @@ function rbMethod(target, name, args) {
         var rest = []
         var si = 1
         while (si < args.length) { rest.push(args[si]); si = si + 1 }
+        if (mn == "respond_to?") { return js_rrespond(target, rest) }
         return rbMethod(target, mn, rest)
     }
     // Ruby's universal reflective methods, answered for every kind of value.

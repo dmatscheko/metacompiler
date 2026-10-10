@@ -6072,6 +6072,12 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 // JavaScript's is 2). Math.log takes an optional base, which JavaScript's does
 // not. The other two engines are rbMathCall in languages/lib/ruby-rt.metajs and
 // the "$s$" methods on hostGlobals["Math"] in languages/ruby-interpreter.abnf.
+//
+// All three compute with Go's math algorithms (runtime.c ports them line for
+// line), so they agree to the bit. MRI calls the PLATFORM libm instead, and on
+// macOS its last bit matches neither Go's algorithm, nor fdlibm, nor the correctly
+// rounded value, so no port can reproduce it: Math.atan2 / Math.atan one ulp from
+// MRI on some arguments is expected.
 func rubyMathCall(name string, rt *jsrt, args []interface{}) (interface{}, bool) {
 	a := func(i int) float64 { return rt.toNumber(argAt(args, i)) }
 	one := map[string]func(float64) float64{
@@ -9190,6 +9196,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return jsNull
 			}
 			return rt.rubyBin(mn, target, args[1])
+		}
+		if mn == "respond_to?" {
+			return rt.rubyRespond(target, args[1:])
 		}
 		return rt.rubyMethod(target, mn, args[1:])
 	}

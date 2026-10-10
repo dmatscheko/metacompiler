@@ -2335,6 +2335,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // see docs/abnf-dialect-gotchas.md) so a bad pattern reports like every other
     // Ruby runtime error.
     include("lib/regex.js")
+    include("lib/ruby-respond.js")
     rxFail = function (msg) { fail(msg) }
 
     // ----- Control signals: everything is an expression, so a body threads the
@@ -7545,6 +7546,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // The methods every value answers.
         if (name == "class") { return classOf(target) }
+        // A user instance or class answers from its own tables further down.
+        if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
+            return rbResponds(classOf(target).__name, rstr(args[0]))
+        }
         if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
             if (name == "instance_of?") { return classOf(target) === args[0] }
             return valueIsA(target, args[0])
@@ -9569,6 +9574,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
+    // The Object methods a bare call reaches on the implicit self when no def or
+    // local of the name exists. Twin of selfCallNames in ruby-to-llvm-ir.abnf.
+    var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
+                         "instance_of?", "instance_variable_get", "instance_variable_set",
+                         "singleton_methods", "define_singleton_method", "frozen?", "equal?"]
     function makeCall(items) {
         var name = items[0]
         var sp = splitBlock(items.slice(1))
@@ -9601,6 +9611,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (f == undefined && typeof selfMethod(name) == "function") {
                 if (bf == null) { return mcall(findSelf(), name, argv, null) }
                 return catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) })
+            }
+            // An Object method a bare call reaches on the implicit self.
+            if (f == undefined && selfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
+                if (bf == null) { return mcall(ivarSelf(), name, argv, null) }
+                return catchBlkBreak(function() { return mcall(ivarSelf(), name, argv, bf) })
             }
             if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 f = getVar("$d$" + name)
@@ -11526,6 +11541,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         mathMod["$s$exp"] = function() { return mkFlo(Math.exp(toF(arguments[1]))) }
         mathMod["$s$log2"] = function() { return mkFlo(Math.log2(toF(arguments[1]))) }
         mathMod["$s$log10"] = function() { return mkFlo(Math.log10(toF(arguments[1]))) }
+        // One ulp from MRI on some arguments: see rubyMathCall in abnf/jsrt.go.
         mathMod["$s$atan2"] = function() { return mkFlo(Math.atan2(toF(arguments[1]), toF(arguments[2]))) }
         mathMod["$s$hypot"] = function() { return mkFlo(Math.hypot(toF(arguments[1]), toF(arguments[2]))) }
         // Math.log(x) and Math.log(x, base); JavaScript's Math.log has no base.

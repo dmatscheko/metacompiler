@@ -3287,6 +3287,29 @@ def s69
   check("pc69a", r == [-10, 49, 2, -19])
 end
 
+# ===== SECTION 70: respond_to? on builtin values and on the implicit self =====
+# A builtin value answers respond_to? for the methods its class has, and a bare
+# respond_to? / send inside a method asks self. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S70K
+  def a
+    1
+  end
+
+  def q
+    [respond_to?(:a), respond_to?(:zz70), send(:a)]
+  end
+end
+def s70
+  v = [5, "a", [1], nil, :a, 1.5, {1 => 2}, /a/, (1..2), true]
+  r = [v[0].respond_to?(:+), v[0].respond_to?(:upcase), v[1].respond_to?(:upcase), v[2].respond_to?(:each),
+       v[3].respond_to?(:to_a), v[4].respond_to?(:length), v[5].respond_to?(:nan?), v[6].respond_to?(:keys),
+       v[7].respond_to?(:match), v[7].respond_to?(:upcase), v[8].respond_to?(:each), v[9].respond_to?(:even?),
+       v[2].respond_to?("map"), v[0].respond_to?(:respond_to?)]
+  check("rt70a", r == [true, false, true, true, true, true, true, true, true, false, true, false, true, true])
+  check("rt70b", S70K.new.q == [true, false, 1])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3318,5 +3341,6 @@ s66() # SECTION-CALL 66
 s67() # SECTION-CALL 67
 s68() # SECTION-CALL 68
 s69() # SECTION-CALL 69
+s70() # SECTION-CALL 70
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

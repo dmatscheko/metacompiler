@@ -3171,6 +3171,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         })
                         b = rw.b
                         cur = rw.v
+                    } else if (s.name == "respond_to?") {
+                        var rea = emitArgs(b, unwrapArgs(s.args))
+                        b = rea.b
+                        cur = callExt(b, "js_rrespond", [cur, rea.v])
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
@@ -4881,15 +4885,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var callHasBlk = hasBlockArg(args)
         return function(b) {
-            if (selfMethod(curClsName, name)) {
+            if (selfMethod(curClsName, name) || isSelfCall(name)) {
                 if (callHasBlk) {
                     return emitBlkBreakCall(b, function(bb) {
-                        var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
+                        var sV = emitIvarSelf(bb)
                         var ia = emitArgs(bb, args)
                         return {b: ia.b, v: callExt(ia.b, "js_rxmcall", [sV, emitStr(ia.b, methodKey(name)), ia.v])}
                     })
                 }
-                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                var selfV = emitIvarSelf(b)
                 var eam = emitArgs(b, args)
                 b = eam.b
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
@@ -4912,10 +4916,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // to when the program defines a method of that name itself.
     // The scope slot a call of `name` reads: a def's own (see curTopLocals).
     function calleeKey(name) { return rubyMethods["$" + name] === true ? "$d$" + name : name }
+    // The Object methods a bare call reaches on the implicit self (`respond_to?(:x)`
+    // inside a method, `send(:m)` at the top level) when no def or local of the name
+    // exists. Twin of selfCallNames in ruby-interpreter.abnf.
+    var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
+                         "instance_of?", "instance_variable_get", "instance_variable_set",
+                         "singleton_methods", "define_singleton_method", "frozen?", "equal?"]
+    function isSelfCall(name) {
+        return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
+    }
     function makePlainCall(name, args) {
         return function(b) {
-            if (selfMethod(curClsName, name)) {
-                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            if (selfMethod(curClsName, name) || isSelfCall(name)) {
+                var selfV = emitIvarSelf(b)
                 var eam = emitArgs(b, args)
                 b = eam.b
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
