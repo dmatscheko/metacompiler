@@ -7037,9 +7037,16 @@ function js_rsplitw(v, asSym) {
 
 // Ruby indexing: a Proc calls itself, a user class dispatches `def [](i)`, a Hash
 // answers nil for a missing key and an Array answers nil out of range.
+// Integer#[]. Twin of intBitAt in ruby-interpreter.abnf.
+function rbIntBit(n, i) {
+    if (rbToF(i) < 0) { return 0 }
+    return rbBin("&", rbBin(">>", n, i), 1)
+}
+
 function js_rget(o, k) {
     if (rbIsFn(o)) { return o.apply(undefined, [k]) }
     if (rbUserObj(o)) { return rbMethod(o, "[]", [k]) }
+    if (typeof o == "number" || rbIsBig(o)) { return rbIntBit(o, k) }
     if (rbIsDict(o)) {
         var i = rbDictFind(o["keys"], k)
         if (i < 0) { return rbHashDefault(o, k) }

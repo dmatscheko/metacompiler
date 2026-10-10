@@ -1055,6 +1055,15 @@ func rubyRatIntOpB(n, d *big.Int, mode byte) *big.Int {
 	return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
 }
 
+// rubyIntBit is Integer#[]: bit i of the infinite two's complement, 0 for a
+// negative i. Twin of intBitAt in ruby-interpreter.abnf.
+func (rt *jsrt) rubyIntBit(n, i interface{}) interface{} {
+	if rubyToF(i) < 0 {
+		return 0.0
+	}
+	return rt.rubyBin("&", rt.rubyBin(">>", n, i), 1.0)
+}
+
 func rubyExactInt(x float64) *big.Int {
 	b, _ := big.NewFloat(x).Int(nil)
 	return b

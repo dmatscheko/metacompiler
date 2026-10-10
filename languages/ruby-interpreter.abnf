@@ -6855,12 +6855,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (d == undefined) { return null }
         return d
     }
+    // Integer#[]: bit i of the infinite two's complement (`(-3)[5]` is 1); a
+    // negative i is below bit 0 and answers 0. Twins: rubyIntBit in
+    // abnf/jsrtruby.go, rbIntBit in lib/ruby-rt.metajs.
+    function intBitAt(n, i) {
+        if (toF(i) < 0) { return 0 }
+        return numBin("&", numBin(">>", n, i), 1)
+    }
     function rindex(o, i) {
         // p[x] calls a Proc, obj[i] a user-defined def [].
         if (typeof o == "function") { return blockCall(o, [i]) }
         // m[1] / m[:name] on a MatchData reads a capture group.
         if (isMatchD(o)) { return mdGet(o, i) }
         if (isRange(o)) { return rangeToA(o)[i] }
+        if (typeof o == "number" || isBig(o)) { return intBitAt(o, i) }
         if (isUserObj(o)) { return mcall(o, "[]", [i], null) }
         if (isDict(o)) {
             var di = dictFind(o, i)

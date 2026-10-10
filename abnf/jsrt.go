@@ -7771,6 +7771,10 @@ func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
 	if rubyUserObj(o) {
 		return rt.rubyMethod(o, "[]", []interface{}{k})
 	}
+	switch o.(type) {
+	case float64, *jsBigInt:
+		return rt.rubyIntBit(o, k)
+	}
 	if keys, vals, ok := dictParts(o); ok {
 		i := rt.rubyDictFind(keys, k)
 		if i < 0 {

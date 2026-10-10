@@ -3161,6 +3161,17 @@ def s63
   check("ra63d", 1e-300.to_r.numerator == 6032057205060441)
 end
 
+# ===== SECTION 64: Integer#[] reads one bit =====
+# Bit i of the infinite two's complement: a negative Integer has an endless run of
+# 1s above its sign, and a negative i answers 0. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s64
+  n = [5, -3, 1024, 2**70, -(2**70)]
+  check("ib64a", n[0][0] == 1 && n[0][1] == 0 && n[0][2] == 1 && n[0][-1] == 0 && n[1][0] == 1 && n[1][1] == 0 &&
+                 n[1][63] == 1 && n[1][200] == 1 && n[2][10] == 1 && n[2][9] == 0)
+  check("ib64b", n[3][70] == 1 && n[3][69] == 0 && n[3][71] == 0 && n[4][70] == 1 && n[4][69] == 0 && n[4][300] == 1)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3186,5 +3197,6 @@ s60() # SECTION-CALL 60
 s61() # SECTION-CALL 61
 s62() # SECTION-CALL 62
 s63() # SECTION-CALL 63
+s64() # SECTION-CALL 64
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
