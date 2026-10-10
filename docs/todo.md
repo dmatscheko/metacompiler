@@ -231,7 +231,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · OPEN [V]
+### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
 `arrayOf<Int>().first()` → `Array is empty.`, `asSequence().first()` → `Sequence is
 empty.`, `map.values.first()` → `Collection is empty.` (check each with the jar). An
 Array, a Sequence, a values view and a List are the same host array here, so no
@@ -244,7 +244,7 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-198 kotlin: `String.toDouble()` accepts a numeric prefix · P1 · KT · OPEN [V spec-only]
+### T-198 kotlin: `String.toDouble()` accepts a numeric prefix · P1 · KT · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
 `"1.5abc".toDouble()` parses (k2ParseNum: layer 2 parseFloat, Go twin Sscanf %g); Kotlin
 throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same way.
 
@@ -300,20 +300,20 @@ interpreter and llvm.Run (swiftc `[3]`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-100 dart: an extension on `int` · P1 · DA · OPEN [V spec-only]
+### T-100 dart: an extension on `int` · P1 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
 `extension IX on int { bool evenq() => isEven; }` fails: `getMember` knows no Dart
 `int` members. Needs a member table in abnf/jsrt.go (or jsrtdart.go) and layer 2. Do
 NOT route through `js_kget` (`"abc".slice(1)` started working when dart tried, which
 real Dart rejects).
 
-### T-101 dart: function-type subtyping · P2 · DA · OPEN [V spec-only]
+### T-101 dart: function-type subtyping · P2 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
 The features check `tdef-legacy-form` asserts `fDouble is FOldStyle` is true with
 `typedef FOldStyle(bool e)` and `int fDouble(int)`; parameters are contravariant, so
 `int Function(int)` is not a `dynamic Function(bool)` and Dart says false. Implement
 function-type subtyping (parameter contravariance, return covariance) and correct the
 check.
 
-### T-102 dart: chained `x as T is T` · P3 · DA · OPEN [U spec-only]
+### T-102 dart: chained `x as T is T` · P3 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [U spec-only]
 The spec grammar's relationalExpression allows one `is`/`as` postfix; the features
 checks `typetest-chain-as-then-is` and `typetest-chain-as-as-isnot` may be invalid
 Dart. Decide from the spec; if invalid, rewrite the checks with parentheses.
@@ -373,14 +373,14 @@ matrix row could now compare all three engines.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-140 bash: unquoted `${a[@]@A}` splits into 3 words · P1 · SH · OPEN [V]
+### T-140 bash: unquoted `${a[@]@A}` splits into 3 words · P1 · SH · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
 bash 5.3: 4 words. Both halves give 3.
 
 ---
 
 # C — C subset
 
-### T-150 c: `(float)x` is a no-op · P1 · C · OPEN [V]
+### T-150 c: `(float)x` is a no-op · P1 · C · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
 The C subset's float cast does not round to binary32. Oracle: cc.
 
 ---
@@ -492,7 +492,7 @@ labelled syntax errors); php / csharp / java / c long tails. python 92.9% and ru
 python must each come from that language's own toolchain or spec (python3 is Unicode
 16.0, node 24 is 17.0).
 
-### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · OPEN [U spec-only]
+### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
