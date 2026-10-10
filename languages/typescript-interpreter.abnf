@@ -354,7 +354,7 @@ PatternAssign <~~ push(makePatternAssign(takeAll())) ~~>
 LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
             = HasTopLevelAssign LhsHead LhsSuffixes ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
               | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
-LhsHead     <~~ push({lhsprim: pop(), ptxt: up.in}) ~~>
+LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
 // path does in between, the LAST suffix is always a member and the place exists.
@@ -547,7 +547,7 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
 // (up.in is the text matched in THIS rule, so both arms see the head's own source text
 // and not the whole chain's - which is what siteTexts wants.)
 CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
-            | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
+            | CallPrimary <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> ;
 // See the twin of this comment in js-interpreter.abnf.
 CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
@@ -566,14 +566,14 @@ DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up
 // because the plain form's Id cannot start at a '#'.
 PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
             = "." "#" Id <~~ push(idName(up.in)) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
 OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ) ;
 OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"member", opt: true, txt: up.in, key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"member", opt: true, txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "[" Expression "]" ;
 OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivateDotSuffix. A private member is an
@@ -622,10 +622,10 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 
 // See the twin of this comment in js-interpreter.abnf.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
-            = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
+            = KwNew NewCallee <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // See the twin of this comment in js-interpreter.abnf.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | ImportCall | "(" Expression ")" | FunctionExpr | ClassExpr
             | TemplateLit | ArrayLit | ObjectLit | VarRef ;
 
@@ -948,7 +948,7 @@ ClassDecorators <~~ push({cdecs: takeAll()}) ~~>
 // The decorator expression is a LeftHandSideExpression, so a call may sit in the MIDDLE
 // of it ('@x().y', '@f(1).g(2)') and not only at the end.
 Decorator   <~~ push(foldCallMember(takeAll())) ~~>
-            = "@" ( "(" Expression ")" | VarRef ) <~~ push({ptxt: up.in}) ~~> { DotSuffix | CallSuffix | TypeArgsSuffix } ;
+            = "@" ( "(" Expression ")" | VarRef ) <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | CallSuffix | TypeArgsSuffix } ;
 
 // See the twin of this comment in js-interpreter.abnf.
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
@@ -7009,9 +7009,9 @@ NotFuncHead = :script(~~
     // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
     // not a name (node's own "(intermediate value)"). An operation inside parentheses or an
     // index is RE-PRINTED the way V8 prints its AST - `(o.a + 1)`, `xs[(i + 1)]`, `xs[2]`
-    // for xs[1+1] - by lib/js-callee.js. NOT matching: a word operator (`typeof`, `in`,
-    // `instanceof`, `void`, `delete`), which reaches the grammar glued to its operand
-    // because the matched text has its whitespace removed, and an exponent literal.
+    // for xs[1+1] - by lib/js-callee.js, from the source as written (cpTxt), so a word
+    // operator keeps its spacing: `(typeof o.a)`. A lone number literal prints as its
+    // value, `2e3.x` reads `2000.x` (cpLiteral).
     function siteIdentOk(t) {
         // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
         if (t.length == 0) { return false }
@@ -7033,7 +7033,7 @@ NotFuncHead = :script(~~
     function sitePrimaryText(t) {
         // See the twin of this comment in js-interpreter.abnf.
         if (t.length == 0) { return "(intermediate value)" }
-        if (t.indexOf("(") < 0) { return t }
+        if (t.indexOf("(") < 0) { return cpLiteral(t) }
         if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
             var inner = t.substring(1, t.length - 1)
             // V8 re-prints the operation inside the parentheses (lib/js-callee.js).

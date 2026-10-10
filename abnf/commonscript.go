@@ -359,6 +359,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"rtLib":           RuntimeLib,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		"srcSlice":        func(from, to int) string { return srcSlice(from, to) },
 		// The entry-point function name (-main flag, default "main").
 		"mainName": EntryPoint,
 		// Output path for a native executable (-exe flag); "" means run in the IR

@@ -2260,6 +2260,13 @@ function s41() {
         && msg(function () { return (o.a*i-3)() }) === "true|true|((o.a * i) - 3) is not a function")
     check("nfn35", msg(function () { return xs[i+1]() }) === "true|true|xs[(i + 1)] is not a function"
         && msg(function () { return (i - 2 - 3)() }) === "true|true|(i - 2 - 3) is not a function")
+    // A word operator keeps its spacing; a number literal prints as its value.
+    check("nfn36", msg(function () { return (typeof o.a)() }) === "true|true|(typeof o.a) is not a function"
+        && msg(function () { return xs[typeof /* c */ i]() }) === "true|true|xs[(typeof i)] is not a function"
+        && msg(function () { return ("a" in o)() }) === "true|true|(\"a\" in o) is not a function")
+    check("nfn37", msg(function () { return (1e21 + 1)() }) === "true|true|1e+21 is not a function"
+        && msg(function () { return (2e3 + i)() }) === "true|true|(2000 + i) is not a function"
+        && msg(function () { return 0x10.nope() }) === "true|true|16.nope is not a function")
 }
 
 // ===== SECTION 42: the top-level 'this' is the global object (the Script goal) =====

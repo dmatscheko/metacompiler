@@ -239,7 +239,8 @@ in the matrix, `--full` or `--cross` can see this - only a native `-exe` probe c
 **`up.in` arrives with whitespace ALREADY STRIPPED.** `<T extends num>` reads as
 `<Textendsnum>`, so a scan cannot separate a type parameter's name from its bound
 and a structured parse is the only option. Cost one agent a wrong first
-implementation of dart's type parameters.
+implementation of dart's type parameters. `c.srcSlice(from, to)` reads the source as
+written back (docs/abnf-dialect-gotchas.md, "`up.in` hands over the matched TOKENS").
 
 **`hasOwn` exists in `interp-core.js` and NOT in `compile-core.js`.** In an emitter,
 test `map["$k"] == undefined` instead. The two cores are not the same surface, and

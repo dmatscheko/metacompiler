@@ -62,23 +62,38 @@ func SetTraceSource(name, text string) {
 			sourceLineStarts = map[string][]int{}
 		}
 		sourceLineStarts[name] = traceLineStarts
-		// -why quotes the statement it reports on, so the text is kept too. Only
-		// when it is asked for: nothing else needs it, and a pipeline can carry
-		// several megabytes of source.
-		if WhyEnabled {
-			if sourceTexts == nil {
-				sourceTexts = map[string]string{}
-			}
-			sourceTexts[name] = text
+		// The text is kept for -why (sourceLine) and c.srcSlice. It is the caller's
+		// own string, so keeping it copies nothing.
+		if sourceTexts == nil {
+			sourceTexts = map[string]string{}
 		}
+		sourceTexts[name] = text
 	}
+}
+
+// srcSlice answers the bytes [from, to) of the current source, clamped to it, or ""
+// when no text is registered. It is c.srcSlice in the tag scripts: up.in has the
+// whitespace between tokens removed, and a grammar that must see the source as
+// written (js-callee.js) reads it back through up.pos.
+func srcSlice(from, to int) string {
+	text := sourceTexts[traceSrcName]
+	if from < 0 {
+		from = 0
+	}
+	if to > len(text) {
+		to = len(text)
+	}
+	if from >= to {
+		return ""
+	}
+	return text[from:to]
 }
 
 var (
 	traceSrcName     string
 	traceLineStarts  []int             // Byte offset of every line start; nil = no source known.
 	sourceLineStarts map[string][]int  // file name -> its line-start table (for re-push by name).
-	sourceTexts      map[string]string // file name -> its text; only filled under -why (sourceLine).
+	sourceTexts      map[string]string // file name -> its text (sourceLine, srcSlice).
 )
 
 // lineOfPos converts a byte offset to a 1-based line number (0 = unknown),

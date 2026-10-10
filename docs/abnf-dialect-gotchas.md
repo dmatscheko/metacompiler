@@ -703,7 +703,9 @@ Two ways out. Scan the run for the keywords themselves rather than for words:
 
 or, if the tokens must stay separate, give the sub-rule its own tag and collect
 them: `BaseElem = TypeTok <~~ push(up.in) ~~> | Attr ;` — a single token's
-`up.in` IS its own text. The same trap applies to any `raw`-text test over a
+`up.in` IS its own text. When the source as written is what matters, a tag can
+read it back: `c.srcSlice(from, to)` answers the current source's bytes, and
+`up.pos` is the node's end (`cpSrc` in `lib/js-callee.js` walks back from it). The same trap applies to any `raw`-text test over a
 multi-token run; `isUnsignedTy(raw)` survives only because `indexOf("unsigned")`
 does not care about the missing space.
 

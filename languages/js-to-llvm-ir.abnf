@@ -442,7 +442,7 @@ TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" [ TargetTail ] ;
 TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
-            = Primary <~~ push({ptxt: up.in}) ~~> TargetTail ;
+            = Primary <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> TargetTail ;
 TargetSuffix = CallSuffix | DotSuffix | IndexSuffix ;
 // The suffix chain of an assignment TARGET. It is a recursion rather than the plain
 // '{ TargetSuffix }' repetition because the LAST suffix has to be a MEMBER access: a call
@@ -584,7 +584,7 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
 // (up.in is the text matched in THIS rule, so both arms see the head's own source text
 // and not the whole chain's - which is what siteTexts wants.)
 CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
-            | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
+            | CallPrimary <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> ;
 // PARENTHESES DO NOT DROP THE RECEIVER. '(o.m)()' calls m with 'this' === o, because a
 // parenthesized MemberExpression still evaluates to a Reference, which carries its base
 // (the assignment side does the same through TargetParen/retarget).
@@ -697,14 +697,14 @@ DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in)
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
 PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
 OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"optmember", txt: up.in, key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "?." "[" Expression "]" ;
 OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 
@@ -735,7 +735,7 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 // this from NewExpr above - so makeNewFrom does the whole construction for both, and
 // NewExpr is kept only because a bare name resolves without evaluating a thunk.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
-            = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
+            = KwNew NewCallee <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // 'new function () {}' and 'new class {}' are as legal as 'new a.b()', so the function
 // and class EXPRESSION forms belong among the callees too.
 //
@@ -743,7 +743,7 @@ NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
 // not contain a call: 'new f()' is the construction, not a call of f whose result is
 // constructed. Every seed therefore shares one member-only chain.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | ArrayLit | ObjectLit | VarRef ;
 
@@ -4483,9 +4483,9 @@ NotFuncHead = :script(~~
     // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
     // not a name (node's own "(intermediate value)"). An operation inside parentheses or an
     // index is RE-PRINTED the way V8 prints its AST - `(o.a + 1)`, `xs[(i + 1)]`, `xs[2]`
-    // for xs[1+1] - by lib/js-callee.js. NOT matching: a word operator (`typeof`, `in`,
-    // `instanceof`, `void`, `delete`), which reaches the grammar glued to its operand
-    // because the matched text has its whitespace removed, and an exponent literal.
+    // for xs[1+1] - by lib/js-callee.js, from the source as written (cpTxt), so a word
+    // operator keeps its spacing: `(typeof o.a)`. A lone number literal prints as its
+    // value, `2e3.x` reads `2000.x` (cpLiteral).
     function siteIdentOk(t) {
         // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
         if (t.length == 0) { return false }
@@ -4515,7 +4515,7 @@ NotFuncHead = :script(~~
         // parenthesized-expression form and is balanced by construction, so there is
         // no `(a)(b)` to mis-strip - that is a primary plus a call SUFFIX.
         if (t.length == 0) { return "(intermediate value)" }
-        if (t.indexOf("(") < 0) { return t }
+        if (t.indexOf("(") < 0) { return cpLiteral(t) }
         if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
             var inner = t.substring(1, t.length - 1)
             // V8 re-prints the operation inside the parentheses (lib/js-callee.js).
@@ -4526,8 +4526,9 @@ NotFuncHead = :script(~~
         return "(intermediate value)"
     }
     function siteIndexText(base, txt) {
-        // txt is the suffix's own matched input, brackets and all, with the tag
-        // engine's whitespace already elided ("[ i + 1 ]" arrives as "[i+1]"). The
+        // txt is the suffix's own matched input, brackets and all: up.in, which has
+        // its whitespace elided ("[ i + 1 ]" arrives as "[i+1]"), or the source as
+        // written when that spacing matters (cpTxt). The
         // optional form's rule also matched its "?." in one grammar and not in the
         // other, so the opening bracket is SEARCHED for rather than assumed at 0.
         var open = txt.indexOf("[")

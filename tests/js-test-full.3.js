@@ -162,6 +162,22 @@ function s44() {
         && msg(function () { return (i ? o.a : o.g)() }) === "true|true|(intermediate value)(intermediate value)(intermediate value) is not a function")
     check("nfn39", msg(function () { return (o.sub.x + o[k])() }) === "true|true|(o.sub.x + o[k]) is not a function"
         && msg(function () { return (i++)() }) === "true|true|(i++) is not a function")
+    // A word operator keeps its spacing, which the source as written carries.
+    check("nfn40", msg(function () { return (typeof o.a)() }) === "true|true|(typeof o.a) is not a function"
+        && msg(function () { return ("a" in o)() }) === "true|true|(\"a\" in o) is not a function"
+        && msg(function () { return (o instanceof Object)() }) === "true|true|(o instanceof Object) is not a function")
+    check("nfn41", msg(function () { return (void i, delete o.zz)() }) === "true|true|((void i) , (delete o.zz)) is not a function"
+        && msg(function () { return xs[typeof /* c */ i]() }) === "true|true|xs[(typeof i)] is not a function"
+        && msg(function () { return (typeof typeof i in o)() }) === "true|true|((typeof (typeof i)) in o) is not a function")
+    // A number literal prints as its value, and two of them fold, exponents included.
+    check("nfn42", msg(function () { return (1e21 + 1)() }) === "true|true|1e+21 is not a function"
+        && msg(function () { return (2e3 + i)() }) === "true|true|(2000 + i) is not a function"
+        && msg(function () { return xs[0.5 + 0.5]() }) === "true|true|xs[1] is not a function"
+        && msg(function () { return (1 / 4)() }) === "true|true|0.25 is not a function")
+    check("nfn43", msg(function () { return 2e3.nope() }) === "true|true|2000.nope is not a function"
+        && msg(function () { return 0x10.nope() }) === "true|true|16.nope is not a function"
+        && msg(function () { return ('x')() }) === "true|true|\"x\" is not a function"
+        && msg(function () { return (1e300 * 1e300)() }) === "true|true|Infinity is not a function")
 }
 
 // ===== SECTION 45: the top-level 'this' is the global object (the Script goal) =====

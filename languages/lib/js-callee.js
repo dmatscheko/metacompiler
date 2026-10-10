@@ -13,17 +13,22 @@
 //     nesting shows its grouping, "((i % 2) * 3)"
 //   - a unary operator is parenthesized, "(-i)", "(!a)", "(typeof a)", and so is an
 //     update, "(i++)", "(++i)"
-//   - two NUMBER literals fold, as V8's parser folds them: "(1 + 2)" reads "3", and a
-//     signed literal is one literal, "-1"; two string literals concatenate
+//   - a number literal prints as its value, "2e3" reads "2000" and "1e21" "1e+21";
+//     two NUMBER literals fold, as V8's parser folds them: "(1 + 2)" reads "3",
+//     "(1 / 4)" "0.25", and a signed literal is one literal, "-1"; two string
+//     literals concatenate
 //   - an assignment prints its target alone, a conditional "(intermediate value)"
 //     three times, a comma "(a , b)", a call "f(...)", a string-literal index as a
 //     dotted name ('o["a b"]' reads "o.a b")
 //
 // cpPrint answers null for anything it does not parse - a function, a class, an
 // object, array or template literal, '=>', '?.', a regular expression - and the
-// grammar keeps its own answer then. The callee text reaches the grammars with its
-// whitespace removed (docs/abnf-dialect-gotchas.md), so a word operator is glued to
-// its operand ('typeofx', 'ainb') and prints as the identifier it now looks like.
+// grammar keeps its own answer then.
+//
+// THE SOURCE AS WRITTEN. up.in arrives with the whitespace between its tokens removed
+// (docs/abnf-dialect-gotchas.md), which glues a word operator to its operand
+// ('typeofx', 'ainb'). So the call-site tags also hand over up.pos, the node's END
+// byte offset, and cpSrc reads the span back out of the source (c.srcSlice).
 
 var CP_PUNCT = [">>>=", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "...",
     "=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=",
@@ -62,6 +67,86 @@ function cpIndex(src) {
     return "[" + cpShow(n) + "]"
 }
 
+// The source text of a node whose tokens are txt and whose end offset is end, or null:
+// when txt cannot hold a glued word operator (the common case, which costs nothing),
+// and when the span does not line up - a line comment inside it, or a node that is not
+// from the current source. Walking backwards from the end, every character of txt is
+// matched and the whitespace and block comments between them skipped.
+function cpSrc(txt, end) {
+    if (!cpGlued(txt)) { return null }
+    var from = end - txt.length * 4 - 256
+    var src = c.srcSlice(from, end)
+    var i = src.length - 1
+    var j = txt.length - 1
+    while (j >= 0) {
+        if (i < 0) { return null }
+        var sc = src.charCodeAt(i)
+        if (sc == txt.charCodeAt(j)) { j = j - 1 }
+        else if (sc == 47 && i > 0 && src.charCodeAt(i - 1) == 42) {
+            var k = i - 2
+            while (k > 0 && !(src.charCodeAt(k - 1) == 47 && src.charCodeAt(k) == 42)) { k = k - 1 }
+            if (k <= 0) { return null }
+            i = k - 1
+        }
+        else if (!(sc == 32 || sc == 9 || sc == 10 || sc == 13)) { return null }
+        i = i - 1
+    }
+    return src.substring(i + 1)
+}
+
+// The text a call-site tag records for a primary or an index suffix: the source as
+// written for a parenthesized primary and a bracketed index (the two forms cpPrint and
+// cpIndex re-print), up.in for everything else.
+function cpTxt(txt, end) {
+    if (txt.length < 2) { return txt }
+    var c0 = txt.charCodeAt(0)
+    if (c0 != 40 && c0 != 91 && c0 != 63) { return txt }
+    var src = cpSrc(txt, end)
+    if (src === null) { return txt }
+    return src
+}
+
+// Whether txt may hold a word operator: typeof, void, delete, in, instanceof.
+function cpGlued(t) {
+    return t.indexOf("in") >= 0 || t.indexOf("typeof") >= 0 || t.indexOf("void") >= 0 || t.indexOf("delete") >= 0
+}
+
+// The JavaScript text of a number, or null when the host printer cannot be trusted
+// with it: goja's is not always exact, and a text that does not read back is declined.
+function cpNumText(v) {
+    if (v !== v) { return "NaN" }
+    if (v - v !== 0) { return v > 0 ? "Infinity" : "-Infinity" }
+    var t = "" + v
+    if (parseFloat(t) !== v) { return null }
+    return t
+}
+
+// The radix a 0x / 0o / 0b prefix letter names, else 0.
+function cpRadix(c) {
+    if (c == 120 || c == 88) { return 16 }
+    if (c == 111 || c == 79) { return 8 }
+    if (c == 98 || c == 66) { return 2 }
+    return 0
+}
+function cpDigitVal(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 102) { return c - 87 }
+    if (c >= 65 && c <= 70) { return c - 55 }
+    return 0 - 1
+}
+
+// The text V8 prints for a callee primary that has no parentheses: a lone number
+// literal as its value ("2e3" reads "2000", "0x10" "16"), a lone string literal in
+// double quotes, anything else as it is.
+function cpLiteral(t) {
+    var c0 = t.charCodeAt(0)
+    if (!cpIsDigit(c0) && c0 != 46 && c0 != 39) { return t }
+    var toks = cpLex(t)
+    if (toks === null || toks.length != 1) { return t }
+    if (toks[0]["k"] != "num" && toks[0]["k"] != "str") { return t }
+    return cpShow(toks[0])
+}
+
 function cpIsIdStart(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 36 }
 function cpIsDigit(c) { return c >= 48 && c <= 57 }
 
@@ -71,23 +156,54 @@ function cpLex(s) {
     while (i < s.length) {
         var c = s.charCodeAt(i)
         if (c == 32 || c == 9 || c == 10 || c == 13) { i = i + 1; continue }
+        if (c == 47 && i + 1 < s.length && s.charCodeAt(i + 1) == 42) {
+            i = i + 2
+            while (i + 1 < s.length && !(s.charCodeAt(i) == 42 && s.charCodeAt(i + 1) == 47)) { i = i + 1 }
+            if (i + 1 >= s.length) { return null }
+            i = i + 2
+            continue
+        }
         var start = i
         if (cpIsIdStart(c)) {
             while (i < s.length && (cpIsIdStart(s.charCodeAt(i)) || cpIsDigit(s.charCodeAt(i)))) { i = i + 1 }
             out.push({k: "id", v: s.substring(start, i)})
             continue
         }
+        if (c == 48 && i + 1 < s.length && cpRadix(s.charCodeAt(i + 1)) > 0) {
+            var rx = cpRadix(s.charCodeAt(i + 1))
+            var rv = 0
+            i = i + 2
+            while (i < s.length && cpDigitVal(s.charCodeAt(i)) >= 0 && cpDigitVal(s.charCodeAt(i)) < rx) {
+                rv = rv * rx + cpDigitVal(s.charCodeAt(i))
+                i = i + 1
+            }
+            // Past 2^53 the running sum is no longer exact.
+            if (i == start + 2 || rv > 9007199254740991) { return null }
+            if (i < s.length && (cpIsIdStart(s.charCodeAt(i)) || cpIsDigit(s.charCodeAt(i)))) { return null }
+            out.push({k: "num", v: "" + rv, f: rv})
+            continue
+        }
         if (cpIsDigit(c) || (c == 46 && i + 1 < s.length && cpIsDigit(s.charCodeAt(i + 1)))) {
-            // A plain decimal literal only; a hex, octal, binary, BigInt or separated
-            // one is left to the grammar's own answer.
+            // A decimal literal; a legacy octal ('010'), a BigInt or a separated one is
+            // left to the grammar's own answer.
+            if (c == 48 && i + 1 < s.length && cpIsDigit(s.charCodeAt(i + 1))) { return null }
             while (i < s.length && cpIsDigit(s.charCodeAt(i))) { i = i + 1 }
             if (i < s.length && s.charCodeAt(i) == 46) {
                 i = i + 1
                 while (i < s.length && cpIsDigit(s.charCodeAt(i))) { i = i + 1 }
             }
-            if (i < s.length && (s.charCodeAt(i) == 101 || s.charCodeAt(i) == 69)) { return null }
+            if (i < s.length && (s.charCodeAt(i) == 101 || s.charCodeAt(i) == 69)) {
+                var ep = i + 1
+                if (ep < s.length && (s.charCodeAt(ep) == 43 || s.charCodeAt(ep) == 45)) { ep = ep + 1 }
+                if (ep >= s.length || !cpIsDigit(s.charCodeAt(ep))) { return null }
+                i = ep
+                while (i < s.length && cpIsDigit(s.charCodeAt(i))) { i = i + 1 }
+            }
             if (i < s.length && (cpIsIdStart(s.charCodeAt(i)) || s.charCodeAt(i) == 95)) { return null }
-            out.push({k: "num", v: s.substring(start, i)})
+            var nv = parseFloat(s.substring(start, i))
+            var nt = cpNumText(nv)
+            if (nt === null) { return null }
+            out.push({k: "num", v: nt, f: nv})
             continue
         }
         if (c == 34 || c == 39) {
@@ -216,17 +332,24 @@ function cpNumOf(n) {
     return parseFloat(n["v"])
 }
 
-// Folding is limited to results whose text is unambiguous in every script host: a
-// safe integer. Anything else stays an unfolded operation.
+// The arithmetic operators fold; a result cpNumText declines stays an unfolded
+// operation. ECMAScript's ** is NaN for a NaN exponent and for (+-1) ** (+-Infinity),
+// where C's pow (the frozen host's) answers 1.
 function cpFold(op, a, b) {
     var v = 0
     if (op == "+") { v = a + b }
     else if (op == "-") { v = a - b }
     else if (op == "*") { v = a * b }
-    else if (op == "**") { v = Math.pow(a, b) }
+    else if (op == "/") { v = a / b }
+    else if (op == "%") { v = a % b }
+    else if (op == "**") {
+        if (b !== b || ((a == 1 || a == -1) && b - b !== 0)) { v = b - b }
+        else { v = Math.pow(a, b) }
+    }
     else { return null }
-    if (Math.floor(v) !== v || Math.abs(v) > 9007199254740991) { return null }
-    return {k: "num", v: "" + v, f: v}
+    var t = cpNumText(v)
+    if (t === null) { return null }
+    return {k: "num", v: t, f: v}
 }
 
 function cpUnary(p) {
@@ -237,8 +360,9 @@ function cpUnary(p) {
         var x = cpUnary(p)
         if ((v == "-" || v == "+") && x["k"] == "num") {
             var nv = cpNumOf(x)
-            if (v == "-") { nv = 0 - nv }
-            if (Math.floor(nv) === nv && nv !== 0) { return {k: "num", v: "" + nv, f: nv} }
+            if (v == "-") { nv = -nv }
+            var nt = cpNumText(nv)
+            if (nt !== null) { return {k: "num", v: nt, f: nv} }
         }
         return {k: "un", op: v, x: x}
     }

@@ -300,7 +300,7 @@ DecoratedDecl <~~ push(makeDecoratedClass(takeAll())) ~~>
 Decorator   <~~ push({deco: pop()}) ~~>
             = "@" DecoExpr ;
 DecoExpr    <~~ push(foldCallMember(takeAll())) ~~>
-            = DecoBase <~~ push({ptxt: up.in}) ~~> { DotSuffix | CallSuffix } ;
+            = DecoBase <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | CallSuffix } ;
 DecoBase    = "(" Expression ")" | DecoName ;
 DecoName    <~~ push(makeSoftVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
@@ -572,7 +572,7 @@ TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" { TargetSuffix } ;
 TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
-            = Primary <~~ push({ptxt: up.in}) ~~> TargetSuffix { TargetSuffix } ;
+            = Primary <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> TargetSuffix { TargetSuffix } ;
 TargetSuffix = CallSuffix | DotSuffix | IndexSuffix | NonNullSfx ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
@@ -803,7 +803,7 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
                       | AsCast | SatisfiesCast | NonNullSfx } ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
-            | CallPrimary <~~ push({ptxt: up.in}) ~~> ;
+            | CallPrimary <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
@@ -839,14 +839,14 @@ DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in)
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
 PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
 OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"optmember", txt: up.in, key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
             = "?." "[" Expression "]" ;
 OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivSuffix. It must use the SAME mangled
@@ -891,12 +891,12 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
 // argument list at all - go through makeNewGeneral, which takes the callee as a value.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
-            = KwNew NewCallee <~~ push({ptxt: up.in}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
+            = KwNew NewCallee <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // The suffix chain belongs to the CALLEE ('new a.b.C()' constructs a.b.C), and it must
 // not contain a call: 'new f()' is the construction, not a call of f whose result is
 // constructed. Every seed therefore shares one member-only chain.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: up.in}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef ;
 
 // super.x / super[i] as a VALUE (SuperCall above covers the call forms). Any further
@@ -3288,7 +3288,7 @@ NotFuncHead = :script(~~
     function sitePrimaryText(t) {
         // See the twin of this comment in js-to-llvm-ir.abnf.
         if (t.length == 0) { return "(intermediate value)" }
-        if (t.indexOf("(") < 0) { return t }
+        if (t.indexOf("(") < 0) { return cpLiteral(t) }
         if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
             var inner = t.substring(1, t.length - 1)
             // V8 re-prints the operation inside the parentheses (lib/js-callee.js).

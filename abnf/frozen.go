@@ -460,6 +460,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"rtLib":           RuntimeLib,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		"srcSlice":        func(from, to int) string { return srcSlice(from, to) },
 		// The entry-point function name (-main flag, default "main").
 		"mainName": EntryPoint,
 		// Output path for a native executable (-exe flag); see commonscript.go.
@@ -743,6 +744,7 @@ func (ps *frozenParserScript) init() {
 		"rtLib":           RuntimeLib,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		"srcSlice":        func(from, to int) string { return srcSlice(from, to) },
 		"mainName":        EntryPoint,
 		"exePath":         ExePath,
 		"runtime":         RuntimeInputs,
