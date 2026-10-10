@@ -3432,6 +3432,42 @@ def s74
                  !v[1].respond_to?(:s74nope, true))
 end
 
+# ===== SECTION 75: instance_variables, and no hidden slot leaks out =====
+# Object#instance_variables lists the assigned @ivars in assignment order; a
+# builtin value has none, and neither a body-less class's instance nor an
+# exception exposes its constructor arguments or its message as an @ivar. A dup
+# keeps the message. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+# THIS SECTION RUNS UNDER REAL RUBY.
+class S75A
+end
+class S75B
+  def initialize(x)
+    @x = x
+    @y = nil
+  end
+
+  def names
+    instance_variables
+  end
+end
+class S75E < StandardError
+  def initialize(m)
+    super("e:" + m)
+    @code = 7
+  end
+end
+def s75
+  a = S75A.new
+  b = S75B.new(1)
+  b.instance_variable_set(:@q, 2)
+  check("iv75a", a.instance_variable_get(:@args).nil? && a.instance_variables == [] && b.names == [:@x, :@y, :@q] &&
+                 [5, "s", [1], nil, :s, {1 => 2}].map(&:instance_variables) == [[], [], [], [], [], []])
+  e = RuntimeError.new("boom")
+  f = S75E.new("z")
+  check("iv75b", e.instance_variables == [] && e.instance_variable_get(:@message).nil? && e.dup.message == "boom" &&
+                 f.instance_variables == [:@code] && f.message == "e:z" && f.dup.message == "e:z")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3468,5 +3504,6 @@ s71() # SECTION-CALL 71
 s72() # SECTION-CALL 72
 s73() # SECTION-CALL 73
 s74() # SECTION-CALL 74
+s75() # SECTION-CALL 75
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -5546,6 +5546,10 @@ func rubySingCopy(o *jsObject, withSing bool) *jsObject {
 		}
 		out.set(k, o.props[k])
 	}
+	// An exception's message travels with the copy.
+	if a, has := o.props["__args"]; has {
+		out.set("__args", a)
+	}
 	if !withSing {
 		return out
 	}
@@ -5642,7 +5646,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		// `raise e + "er"' inside a rescue keeps working.
 		if op == "+" {
 			if o, isObj := l.(*jsObject); isObj {
-				if _, isExc := o.props["args"]; isExc {
+				if _, isExc := o.props["__args"]; isExc {
 					if _, hasOp := rubyFindMethod(l, "+"); !hasOp {
 						return strConcat(rt.rubyStr(l), rt.rubyStr(r))
 					}
@@ -6455,7 +6459,7 @@ func rubyExcObj(v interface{}) bool {
 	if _, isCls := o.props["__isclass"]; isCls {
 		return false
 	}
-	_, hasArgs := o.props["args"]
+	_, hasArgs := o.props["__args"]
 	_, hasClass := o.props["__class"]
 	return hasArgs && hasClass
 }
@@ -7690,10 +7694,12 @@ func rubySmRindexUnits(rt *jsrt, o, sub string) int {
 	return -1
 }
 
+// rubyExc is an exception instance: its constructor arguments sit in the hidden
+// __args slot, which no @ivar reflection sees. Twin of rbExc in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyExc(cls *jsObject, args []interface{}) *jsObject {
 	inst := newJSObject()
 	inst.set("__class", cls)
-	inst.set("args", &jsArray{elems: append([]interface{}{}, args...)})
+	inst.set("__args", &jsArray{elems: append([]interface{}{}, args...)})
 	return inst
 }
 
@@ -7874,7 +7880,7 @@ func (rt *jsrt) rubyExcTopLine(exc interface{}) string {
 // rubyExcMessage is Exception#message / #to_s: the first constructor argument,
 // or the class name when the exception was raised without one (MRI's default).
 func (rt *jsrt) rubyExcMessage(o *jsObject) (interface{}, bool) {
-	if arr, ok := o.props["args"].(*jsArray); ok && len(arr.elems) > 0 {
+	if arr, ok := o.props["__args"].(*jsArray); ok && len(arr.elems) > 0 {
 		return rt.rubyStr(arr.elems[0]), true
 	}
 	if cls, ok := o.props["__class"].(*jsObject); ok {
@@ -9337,6 +9343,15 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
 				return rt.rubyIvarAccess(o, name, args)
 			}
+		}
+	case "instance_variables":
+		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				return rubyIvarNames(o)
+			}
+		} else if rt.rubyRespondClass(target) != "" {
+			// A builtin value carries no instance variables.
+			return &jsArray{}
 		}
 	case "frozen?":
 		_, isStr := target.(string)

@@ -4935,7 +4935,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // exists. Twin of selfCallNames in ruby-interpreter.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "frozen?", "equal?"]
+                         "singleton_methods", "define_singleton_method", "frozen?", "equal?",
+                         "instance_variables"]
+    // The ones of them that also stand alone, as a bare name with no arguments.
+    // Twin of bareSelfCallNames in ruby-interpreter.abnf.
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?"]
     function isSelfCall(name) {
         return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
     }
@@ -6334,6 +6338,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
+            if (bareSelfCallNames.indexOf(name) >= 0 && isSelfCall(name)) { return makePlainCall(name, [])(b) }
             if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
                 return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }
@@ -6933,12 +6938,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // only emitted when nothing above supplies it: a root class, or one whose
             // superclass is a BUILTIN (`class MyErr < StandardError'), which carries no
             // compiled initialize for js_rnew / super to find. The default stores the
-            // constructor arguments under `args', which is where Exception#message
-            // reads the message from - so a user exception class needs no body at all.
+            // constructor arguments under the hidden `__args', which is where
+            // Exception#message reads the message from - so a user exception class
+            // needs no body at all.
             if (builtinSuper && (!hasInit || hasShim)) {
                 var emptyBody = function(bb) {
                     var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
-                    callExt(bb, "js_set", [sV, emitStr(bb, "args"),
+                    callExt(bb, "js_set", [sV, emitStr(bb, "__args"),
                                            callExt(bb, "js_rargrest", [curArgsV, handle(1)])])
                     return {b: bb, v: hNull}
                 }

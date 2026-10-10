@@ -1312,6 +1312,20 @@ func (rt *jsrt) rubyIvarAccess(o *jsObject, name string, args []interface{}) int
 	return jsNull
 }
 
+// rubyIvarNames is Object#instance_variables on an instance: its @ivar slots in
+// assignment order, the hidden __ slots left out. Twin of ivarNames in
+// ruby-interpreter.abnf and rbIvarNames in lib/ruby-rt.metajs.
+func rubyIvarNames(o *jsObject) *jsArray {
+	out := &jsArray{}
+	for _, k := range o.keys {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+			continue
+		}
+		out.elems = append(out.elems, jsSym{s: "@" + k})
+	}
+	return out
+}
+
 // rubyIvarNameOk: "@" and then an identifier (a letter, "_" or a non-ASCII
 // character first, digits allowed after it).
 func rubyIvarNameOk(n string) bool {

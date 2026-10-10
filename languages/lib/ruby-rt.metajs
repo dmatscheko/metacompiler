@@ -3115,12 +3115,12 @@ function rbPyEqual(x, y) {
     return x === y
 }
 
-// An exception instance: a user object carrying the `args` slot every raise path
-// fills in. A class descriptor is not one.
+// An exception instance: a user object carrying the `__args` slot every raise
+// path fills in. A class descriptor is not one.
 function rbExcObj(v) {
     if (!rbIsObj(v)) { return false }
     if (v["__isclass"] === true) { return false }
-    if (v["args"] === undefined) { return false }
+    if (v["__args"] === undefined) { return false }
     return v["__class"] !== undefined
 }
 
@@ -3379,6 +3379,8 @@ function rbSingCopy(o, withSing) {
         out[ks[i]] = o[ks[i]]
         i = i + 1
     }
+    // An exception's message travels with the copy.
+    if (o["__args"] !== undefined) { out["__args"] = o["__args"] }
     if (!withSing) { return out }
     var t = o["__sing"]
     if (t !== undefined && t !== null) {
@@ -3755,25 +3757,26 @@ function rbModRel(l, r, op) {
     return same || rIsL
 }
 
-// rubyExc: {__class: <class>, args: [message]}, the shape the message reader and
-// the rescue type test both understand.
+// rubyExc: {__class: <class>, __args: [message]}, the shape the message reader
+// and the rescue type test both understand. The slot is hidden, so no @ivar
+// reflection sees it. Twin of rubyExc in abnf/jsrt.go.
 function rbExc(cls, args) {
-    return {__class: cls, args: rtCopyArr(args)}
+    return {__class: cls, __args: rtCopyArr(args)}
 }
 
 // Exception#message / #to_s: the first constructor argument, or the class name.
-// rbExcInst is "v is an EXCEPTION instance", which "has args" alone is not: the
+// rbExcInst is "v is an EXCEPTION instance", which "has __args" alone is not: the
 // emitter gives every body-less class a default initialize that stores its
-// arguments under `args`, so an ordinary instance has the same shape (and MRI
+// arguments under `__args`, so an ordinary instance has the same shape (and MRI
 // writes "#<Name>" for it). Mirrors rubyExcInst of abnf/jsrt.go.
 function rbExcInst(v) {
     if (!rbIsObj(v) || v["__isclass"] === true) { return false }
-    if (v["args"] === undefined || v["__class"] === undefined) { return false }
+    if (v["__args"] === undefined || v["__class"] === undefined) { return false }
     return rbIsA(v, rbBuiltinClass("Exception"))
 }
 
 function rbExcMessage(o) {
-    var arr = o["args"]
+    var arr = o["__args"]
     if (rbIsArr(arr) && arr.length > 0) { return rbStr(arr[0]) }
     var cls = o["__class"]
     if (rbIsObj(cls)) {
@@ -4099,7 +4102,7 @@ function rbBin(op, l, r) {
     if (rbUserObj(l)) {
         // An exception instance that defines no + of its own concatenates as its
         // message, so `raise e + "er"` inside a rescue keeps working.
-        if (op == "+" && l["args"] !== undefined && rbFindMethod(l, "+") === undefined) {
+        if (op == "+" && l["__args"] !== undefined && rbFindMethod(l, "+") === undefined) {
             return rbStr(l) + rbStr(r)
         }
         return rbMethod(l, op, [r])
@@ -6442,6 +6445,14 @@ function rbMethod(target, name, args) {
             return rbIvarAccess(target, name, args)
         }
     }
+    if (name == "instance_variables") {
+        if (rbUserObj(target)) {
+            if (rbFindMethod(target, name) === undefined) { return rbIvarNames(target) }
+        } else if (rbRespondClass(target) != "") {
+            // A builtin value carries no instance variables.
+            return []
+        }
+    }
     if (name == "frozen?") {
         if (typeof target == "string") { return true }
         return rbIsNum(target)
@@ -7143,6 +7154,20 @@ function rbIvarAccess(o, name, args) {
     var got = o[k]
     if (got === undefined) { return null }
     return got
+}
+
+// Object#instance_variables on an instance: its @ivar slots in assignment order
+// (keysOf leaves the hidden __ slots out). Twin of rubyIvarNames in
+// abnf/jsrtruby.go.
+function rbIvarNames(o) {
+    var ks = keysOf(o)
+    var out = []
+    var i = 0
+    while (i < ks.length) {
+        out.push(rbSym("@" + ks[i]))
+        i = i + 1
+    }
+    return out
 }
 
 // Twin of ivarNameOk in ruby-interpreter.abnf.

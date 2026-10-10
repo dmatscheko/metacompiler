@@ -7657,6 +7657,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The methods every value answers.
         if (name == "class") { return classOf(target) }
         // A user instance or class answers from its own tables further down.
+        // A builtin value carries no instance variables.
+        if (name == "instance_variables" && !isUserObj(target) && !isClassObj(target)) { return [] }
         if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
             return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0])))
         }
@@ -8042,6 +8044,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (name == "instance_variable_get" || name == "instance_variable_set") {
                     return ivarAccess(target, name == "instance_variable_set", args)
                 }
+                if (name == "instance_variables") { return ivarNames(target) }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
@@ -9541,6 +9544,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (set) { ivarPut(o, n.slice(1), args[1]); return args[1] }
         return hasOwn(o, n.slice(1)) ? o[n.slice(1)] : null
     }
+    // Object#instance_variables: the @ivar names in assignment order (__ivn). Twin
+    // of rubyIvarNames in abnf/jsrtruby.go and rbIvarNames in lib/ruby-rt.metajs.
+    function ivarNames(o) {
+        var out = []
+        if (o.__ivn != undefined) {
+            for (var i = 0; i < o.__ivn.length; i++) { out.push(mkSym("@" + o.__ivn[i])) }
+        }
+        return out
+    }
     // "@" and then an identifier: a letter, "_" or a non-ASCII character first,
     // digits allowed after it.
     function ivarNameOk(n) {
@@ -9689,7 +9701,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // local of the name exists. Twin of selfCallNames in ruby-to-llvm-ir.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "frozen?", "equal?"]
+                         "singleton_methods", "define_singleton_method", "frozen?", "equal?",
+                         "instance_variables"]
+    // The ones of them that also stand alone, as a bare name with no arguments.
+    // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?"]
     function makeCall(items) {
         var name = items[0]
         var sp = splitBlock(items.slice(1))
@@ -10219,6 +10235,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var ks = o.__ivn
             for (var i = 0; i < ks.length; i++) { ivarPut(out, ks[i], o[ks[i]]) }
         }
+        // An exception's message travels with the copy.
+        if (hasOwn(o, "__message")) { out.__message = o.__message }
         if (!withSing) { return out }
         if (o.__sing != undefined) {
             var t = {}
@@ -10452,6 +10470,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var f = anytype
                 f = getVar("$d$" + name)
                 if (frameScopeOf(scopes) != null || !hasOwn(globalScope, name) || globalScope[name] === f) { return f() }
+            }
+            if (bareSelfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
+                return mcall(ivarSelf(), name, [], null)
             }
             // A def does not see the locals around it: inside a method the loop above
             // searched its whole own frame, and what globalScope holds under a local
@@ -11710,12 +11731,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var self = arguments[0]
         var m = anytype
         m = arguments.length > 1 ? arguments[1] : undefined
-        ivarPut(self, "message", (m !== undefined && m !== null) ? rstr(m) : self.__class.__name)
+        // The hidden __message slot, which no @ivar reflection sees.
+        self.__message = (m !== undefined && m !== null) ? rstr(m) : self.__class.__name
         return null
     }
     function excMessageFn() {
         var self = arguments[0]
-        return hasOwn(self, "message") ? self["message"] : self.__class.__name
+        return hasOwn(self, "__message") ? self.__message : self.__class.__name
     }
     // MRI's Exception#message IS #to_s, so a subclass that overrides to_s changes
     // its message too. rstr prefers the instance's own to_s and falls back to
