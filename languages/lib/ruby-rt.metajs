@@ -3344,7 +3344,13 @@ var rbExcParent = {
     $FloatDomainError: "RangeError",
     $StopIteration: "IndexError",
     $FrozenError: "RuntimeError",
-    $NotImplementedError: "StandardError"
+    $IOError: "StandardError",
+    $EOFError: "IOError",
+    $LocalJumpError: "StandardError",
+    // ScriptError sits beside StandardError, so a bare `rescue` does not catch
+    // NotImplementedError.
+    $ScriptError: "Exception",
+    $NotImplementedError: "ScriptError"
 }
 
 function rbExcParentOf(name) {
@@ -5805,6 +5811,16 @@ function rbArrayMethod(t, name, args) {
     }
     if (name == "dup" || name == "clone" || name == "entries") { return rtCopyArr(t) }
     if (name == "freeze" || name == "itself") { return t }
+    // Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
+    if (name == "fetch") {
+        var fx = rbToF(rbArgAt(args, 0))
+        var fj = fx
+        if (fx < 0) { fj = fx + t.length }
+        if (fj >= 0 && fj < t.length) { return t[fj] }
+        if (nPos > 1) { return rbArgAt(args, 1) }
+        if (blk !== null) { return rbCall1(blk, rbArgAt(args, 0)) }
+        rbRaiseErr("IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
+    }
     fail("unknown Array method: " + name)
     return null
 }
@@ -6132,7 +6148,7 @@ function rbMethod(target, name, args) {
                 if (rbNPos(args) > 1) { return rbArgAt(args, 1) }
                 var fblk = rbBlockOf(args)
                 if (fblk !== null) { return rbCall1(fblk, rbArgAt(args, 0)) }
-                fail("key not found: " + rbInspect(rbArgAt(args, 0)))
+                rbRaiseErr("KeyError", "key not found: " + rbInspect(rbArgAt(args, 0)))
             }
             var hres = rbHashMethod(target, keys, vals, name, args)
             if (hres !== rbHashUnknown) { return hres }

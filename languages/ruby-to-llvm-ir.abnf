@@ -4315,10 +4315,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var runB = curF.NewBlock("")
                     var nextB = curF.NewBlock("")
                     if (cl.etypes.length == 0) {
-                        // A catch-all clause: everything but the block break / retry
-                        // markers, which are control flow rather than exceptions.
+                        // A bare clause: a StandardError, or a raised value that is no
+                        // Exception at all - but not the block break / retry markers,
+                        // which are control flow. Twin of rescueMatches in
+                        // ruby-interpreter.abnf.
                         var notMark = callExt(b, "js_not", [callExt(b, "js_is_type", [excV, emitStr(b, blkBrkName)])])
-                        b.NewCondBr(truthy(b, notMark), runB, nextB)
+                        var stdB = curF.NewBlock("")
+                        var anyB = curF.NewBlock("")
+                        b.NewCondBr(truthy(b, notMark), stdB, nextB)
+                        var stdV = callExt(stdB, "js_scope_get", [curScopeV, emitStr(stdB, "StandardError")])
+                        stdB.NewCondBr(truthy(stdB, callExt(stdB, "js_rcase", [stdV, excV])), runB, anyB)
+                        var excClsV = callExt(anyB, "js_scope_get", [curScopeV, emitStr(anyB, "Exception")])
+                        anyB.NewCondBr(truthy(anyB, callExt(anyB, "js_rcase", [excClsV, excV])), nextB, runB)
                     }
                     // `rescue A, B => e': any of the listed classes matches.
                     for (var ti = 0; ti < cl.etypes.length; ti++) {
@@ -6528,6 +6536,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError",
+        "ScriptError", "IOError", "EOFError", "LocalJumpError",
         // FloatDomainError < RangeError: what Float::INFINITY.to_i and
         // "%d" % Float::INFINITY raise.
         "FloatDomainError"]

@@ -2818,6 +2818,53 @@ def s50
   check("pu50b", S50LOG == ["r1", "r2", "r3", "p3", "p4", "u2", "u3"])
 end
 
+# ===== SECTION 51: the builtin exception tree a rescue clause sees =====
+# Hash#fetch and Array#fetch raise KeyError / IndexError (so `rescue IndexError`
+# catches both), NotImplementedError is a ScriptError and NOT a StandardError (a
+# bare `rescue` lets it through), and IOError, EOFError and LocalJumpError exist in
+# every engine. Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS
+# SECTION RUNS UNDER REAL RUBY.
+class S51Exc < Exception
+end
+def s51t(cls)
+  begin
+    begin
+      raise cls, "m"
+    rescue => e
+      "bare #{e.class}"
+    end
+  rescue Exception => e
+    "outer #{e.class}"
+  end
+end
+def s51fetch
+  begin
+    yield
+  rescue KeyError => e
+    "KE " + e.message
+  rescue IndexError => e
+    "IE " + e.message
+  end
+end
+def s51
+  check("ex51a", s51fetch { {}.fetch(:a) } == "KE key not found: :a" &&
+                 s51fetch { {"a" => 1}.fetch("b") } == "KE key not found: \"b\"")
+  check("ex51b", s51fetch { [1].fetch(5) } == "IE index 5 outside of array bounds: -1...1" &&
+                 s51fetch { [1, 2].fetch(-3) } == "IE index -3 outside of array bounds: -2...2")
+  check("ex51c", [10, 20].fetch(-1) == 20 && [10, 20].fetch(5, :d) == :d &&
+                 [10, 20].fetch(-7) { |i| i * 2 } == -14 && {a: 1}.fetch(:b) { |k| k.to_s } == "b")
+  check("ex51d", KeyError.superclass == IndexError && (begin; {}.fetch(1); rescue IndexError; true; end))
+  check("ex51e", s51t(NotImplementedError) == "outer NotImplementedError" &&
+                 s51t(ScriptError) == "outer ScriptError" && s51t(S51Exc) == "outer S51Exc" &&
+                 s51t(Exception) == "outer Exception")
+  check("ex51f", NotImplementedError.superclass == ScriptError && ScriptError.superclass == Exception &&
+                 !NotImplementedError.new("x").is_a?(StandardError))
+  check("ex51g", s51t(IOError) == "bare IOError" && s51t(EOFError) == "bare EOFError" &&
+                 s51t(LocalJumpError) == "bare LocalJumpError" && s51t(RuntimeError) == "bare RuntimeError")
+  check("ex51h", IOError.superclass == StandardError && EOFError.superclass == IOError &&
+                 LocalJumpError.superclass == StandardError)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2830,5 +2877,6 @@ s47() # SECTION-CALL 47
 s48() # SECTION-CALL 48
 s49() # SECTION-CALL 49
 s50() # SECTION-CALL 50
+s51() # SECTION-CALL 51
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

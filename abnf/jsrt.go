@@ -6390,19 +6390,25 @@ func rubyExcObj(v interface{}) bool {
 // rubyExcParent is the ancestry of the builtin exception classes: the part of
 // Ruby's class tree a `rescue' clause has to know about. Exception is the root.
 var rubyExcParent = map[string]string{
-	"StandardError":       "Exception",
-	"RuntimeError":        "StandardError",
-	"ArgumentError":       "StandardError",
-	"TypeError":           "StandardError",
-	"NameError":           "StandardError",
-	"NoMethodError":       "NameError",
-	"IndexError":          "StandardError",
-	"KeyError":            "IndexError",
-	"RangeError":          "StandardError",
-	"ZeroDivisionError":   "StandardError",
-	"StopIteration":       "IndexError",
-	"FrozenError":         "RuntimeError",
-	"NotImplementedError": "StandardError",
+	"StandardError":     "Exception",
+	"RuntimeError":      "StandardError",
+	"ArgumentError":     "StandardError",
+	"TypeError":         "StandardError",
+	"NameError":         "StandardError",
+	"NoMethodError":     "NameError",
+	"IndexError":        "StandardError",
+	"KeyError":          "IndexError",
+	"RangeError":        "StandardError",
+	"ZeroDivisionError": "StandardError",
+	"StopIteration":     "IndexError",
+	"FrozenError":       "RuntimeError",
+	"IOError":           "StandardError",
+	"EOFError":          "IOError",
+	"LocalJumpError":    "StandardError",
+	// ScriptError sits beside StandardError, so a bare `rescue' does not catch
+	// NotImplementedError.
+	"ScriptError":         "Exception",
+	"NotImplementedError": "ScriptError",
 }
 
 // rubyExcIsA answers `v is an exception of builtin class named bn': it walks the
@@ -9583,7 +9589,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if blk != nil {
 					return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
 				}
-				rt.fail("key not found: %s", rt.rubyInspect(argAt(pos, 0)))
+				rt.rubyRaiseErr("KeyError", "key not found: "+rt.rubyInspect(argAt(pos, 0)))
 			}
 			if v, handled := rt.rubyHashMethod(o, keys, vals, name, args); handled {
 				return v
@@ -11434,6 +11440,24 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "freeze", "itself":
 		return t
+	// Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
+	case "fetch":
+		n := len(t.elems)
+		fx := int(rt.toNumber(argAt(pos, 0)))
+		fj := fx
+		if fx < 0 {
+			fj += n
+		}
+		if fj >= 0 && fj < n {
+			return t.elems[fj]
+		}
+		if len(pos) > 1 {
+			return pos[1]
+		}
+		if blk != nil {
+			return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
+		}
+		rt.rubyRaiseErr("IndexError", fmt.Sprintf("index %d outside of array bounds: %d...%d", fx, -n, n))
 	}
 	rt.fail("unknown Array method: %s", name)
 	return nil
