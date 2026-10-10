@@ -315,7 +315,7 @@ class S10 {
             String plain = (String) o;
             Main.check("iof5", plain.length() == 4);
         } else {
-            Main.check("iof5", false);
+            Main.check("iof5a", false);
         }
     }
 }
@@ -1057,11 +1057,11 @@ class S25 {
         // Integer division by zero THROWS (JLS 15.17.2), it does not give Infinity.
         boolean threw = false;
         String msg = "";
-        try { int z = 0; int q = 1 / z; Main.check("int27", q == 99); }
+        try { int z = 0; int q = 1 / z; Main.check("int27a", q == 99); }
         catch (ArithmeticException e) { threw = true; msg = e.getMessage(); }
         Main.check("int27", threw && msg.equals("/ by zero"));
         boolean lthrew = false;
-        try { long lz = 0; long lq = 1L % lz; Main.check("int28", lq == 99); }
+        try { long lz = 0; long lq = 1L % lz; Main.check("int28a", lq == 99); }
         catch (ArithmeticException e) { lthrew = true; }
         Main.check("int28", lthrew);
 

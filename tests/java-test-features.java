@@ -794,7 +794,7 @@ public class Main {
         if (iofObj instanceof String iofS) {
             Main.check("iof-binding", iofS.length() == 4);
         } else {
-            Main.check("iof-binding", false);
+            Main.check("iof-binding-else", false);
         }
         Main.check("iof-int", 7 instanceof Integer);
 
