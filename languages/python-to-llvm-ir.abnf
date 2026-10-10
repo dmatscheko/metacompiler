@@ -4288,8 +4288,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "int", "js_pyint", 1)
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
         b = declKwBuiltin(b, "dict", "js_pydict", [])
-        b = declBuiltin(b, "max", "js_pymax", 0)
-        b = declBuiltin(b, "min", "js_pymin", 0)
+        b = declKwBuiltin(b, "max", "js_pymax", [])
+        b = declKwBuiltin(b, "min", "js_pymin", [])
         // The remaining conversions pyConvert of python-interpreter.abnf offers.
         b = declBuiltin(b, "bool", "js_pybool", 1)
         b = declBuiltin(b, "float", "js_pyfloat", 1)
@@ -4310,7 +4310,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // in lib/python-rt.metajs, with a Go twin of the same js_py* name in
         // abnf/jsrt.go. argc 0 hands the extern the whole ARGUMENT ARRAY, which
         // is how the variadic ones (next, round, pow, zip, map, enumerate,
-        // getattr, setattr, sorted) reach their optional arguments.
+        // getattr, setattr) reach their optional arguments.
         //
         // NOT done, and each for a reason recorded at the site: `input` reads
         // stdin, `format` needs the format mini-language plumbed to a free
@@ -4325,7 +4325,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "map", "js_pymapfn", 0)
         b = declBuiltin(b, "filter", "js_pyfilterfn", 2)
         b = declBuiltin(b, "reversed", "js_pyreversed", 1)
-        b = declBuiltin(b, "sorted", "js_pysorted", 0)
+        b = declKwBuiltin(b, "sorted", "js_pysorted", [])
         b = declBuiltin(b, "all", "js_pyall", 1)
         b = declBuiltin(b, "any", "js_pyany2", 1)
         b = declBuiltin(b, "bin", "js_pybinstr", 1)

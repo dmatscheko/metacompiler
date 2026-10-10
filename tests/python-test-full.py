@@ -3437,6 +3437,51 @@ def s61():
           and math.pow(0.0, -inf) == inf and repr(math.exp(709)) == "8.218407461554972e+307")
 
 
+# ===== SECTION 62: sorted, min, max and list.sort take key= and reverse= =====
+# The keywords are keyword-only; sort and sorted are STABLE, also under
+# reverse=True. min/max take default= for an empty iterable and raise a
+# catchable ValueError without it. A list orders element-wise, so a key that
+# returns a list (a tuple here) sorts by its fields, and a class orders by __lt__.
+def s62():
+    xs = [3, 1, 2, 5, 4]
+    words = ["bb", "a", "ccc", "dd", "e"]
+    check("srt1", sorted(xs, key=lambda x: -x) == [5, 4, 3, 2, 1] and sorted(xs, reverse=True) == [5, 4, 3, 2, 1])
+    check("srt2", sorted(words, key=len) == ["a", "e", "bb", "dd", "ccc"]
+          and sorted(words, key=len, reverse=True) == ["ccc", "bb", "dd", "a", "e"])
+    check("srt3", max(xs, key=lambda x: -x) == 1 and min(words, key=len) == "a" and max(words, key=len) == "ccc"
+          and max(1, 2, key=lambda x: -x) == 1)
+    check("srt4", min([], default=7) == 7 and max([], default="d") == "d" and max([3, 1], default=None) == 3)
+    ys = list(xs)
+    ys.sort(key=lambda x: -x)
+    ws = list(words)
+    ws.sort(key=len, reverse=True)
+    d = {"a": 3, "b": 1, "c": 2}
+    check("srt5", ys == [5, 4, 3, 2, 1] and ws == ["ccc", "bb", "dd", "a", "e"] and sorted(d, key=d.get) == ["b", "c", "a"]
+          and max(d, key=d.get) == "a" and sorted([3, 10, 2], key=str) == [10, 2, 3])
+    check("srt6", sorted([[1, 3], [1, 2], [0, 5]]) == [[0, 5], [1, 2], [1, 3]] and [1, 2] < [1, 3] and not [2] < [1, 3]
+          and sorted([3, 1, 2, 4], key=lambda x: (x % 2, x)) == [2, 4, 1, 3])
+    class P:
+        def __init__(self, v):
+            self.v = v
+        def __lt__(self, o):
+            return self.v < o.v
+    ps = sorted([P(3), P(1), P(2)])
+    check("srt7", [p.v for p in ps] == [1, 2, 3] and min([P(3), P(1), P(2)]).v == 1)
+    msgs = []
+    for f in [lambda: max([]), lambda: min([]), lambda: max(1, 2, default=3), lambda: max([1], kk=1),
+              lambda: sorted([1], [2]), lambda: [].sort(kk=1), lambda: sorted([1, 2], kk=1)]:
+        try:
+            f()
+        except (TypeError, ValueError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("srt8", msgs == ["ValueError: max() iterable argument is empty", "ValueError: min() iterable argument is empty",
+                           "TypeError: Cannot specify a default for max() with multiple positional arguments",
+                           "TypeError: max() got an unexpected keyword argument 'kk'",
+                           "TypeError: sorted expected 1 argument, got 2",
+                           "TypeError: sort() got an unexpected keyword argument 'kk'",
+                           "TypeError: sort() got an unexpected keyword argument 'kk'"])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3499,5 +3544,6 @@ def main():
     s59() # SECTION-CALL 59
     s60() # SECTION-CALL 60
     s61() # SECTION-CALL 61
+    s62() # SECTION-CALL 62
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

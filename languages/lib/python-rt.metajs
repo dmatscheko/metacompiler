@@ -2969,6 +2969,9 @@ function js_pybin(opv, l, r) {
     }
     if (op == "==") { return pyAEqual(l, r) }
     if (op == "!=") { return !pyAEqual(l, r) }
+    if (pyIsArr(l) && pyIsArr(r) && (op == "<" || op == ">" || op == "<=" || op == ">=")) {
+        return pyASeqOrder(op, l, r)
+    }
     if (op == "<") { return pyACompare(l, r) == -1 }
     if (op == ">") { return pyACompare(l, r) == 1 }
     if (op == "<=") {
@@ -2981,6 +2984,29 @@ function js_pybin(opv, l, r) {
     }
     pyFail("unsupported operand type for " + op + ": " + pyAJsTypeOf(l) + " and " + pyAJsTypeOf(r))
     return false
+}
+
+// Go: rt.pySeqOrder. An order comparison of two lists, CPython's: the first
+// pair of elements that are not equal decides, with op itself; otherwise the
+// lengths do.
+function pyASeqOrder(op, l, r) {
+    var i = 0
+    while (i < l.length && i < r.length) {
+        if (!pyAEqual(l[i], r[i])) { return js_pybin(op, l[i], r[i]) }
+        i = i + 1
+    }
+    return js_pybin(op, l.length, r.length)
+}
+
+// Go: rt.pyOrder. Python's `l op r` for an order operator, by js_pybin's rules;
+// two plain numbers or two strings take the comparison js_pybin would reach.
+function pyAOrder(op, l, r) {
+    if ((typeof l == "number" && typeof r == "number") || (typeof l == "string" && typeof r == "string")) {
+        var c = pyACompare(l, r)
+        if (op == "<") { return c == -1 }
+        return c == 1
+    }
+    return pyATruthy(js_pybin(op, l, r))
 }
 
 // Go: js_pyunary. Unary - / ~ with the __neg__ / __invert__
@@ -3261,27 +3287,54 @@ function js_pysum(v, start) {
     return t
 }
 
-// Go: rt.pyMinMax. want is +1 for max, -1 for min. A SINGLE
-// argument that is a list is iterated; anything else is the argument list itself.
+// Go: rt.pyMinMax. max/min(iterable, *, key=None, default=...) and
+// max/min(a, b, *args, key=None), bound as [positionals, keywords]. want is +1
+// for max, -1 for min; the first of equal extremes wins.
 function pyAMinMax(argsV, want) {
-    if (!pyIsArr(argsV)) { pyFail("max/min needs an argument array") }
-    var elems = argsV
+    var elems = argsV[0]
+    var kw = argsV[1]
+    var fname = "max"
+    var op = ">"
+    if (want < 0) {
+        fname = "min"
+        op = "<"
+    }
+    pyKwOnly(kw, fname, "key", "default")
+    var key = pyKwArg(kw, "key")
+    var hasDflt = false
+    if (pyIsDict(kw)) { hasDflt = pyDictFind(kw["keys"], "default") >= 0 }
+    if (elems.length == 0) { pyRaiseExc("TypeError", fname + " expected at least 1 argument, got 0") }
     if (elems.length == 1) { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
         elems = pyElemsOf(elems[0])
+    } else if (hasDflt) {
+        pyRaiseExc("TypeError", "Cannot specify a default for " + fname + "() with multiple positional arguments")
     }
-    if (elems.length == 0) { pyFail("max/min of an empty sequence") }
+    if (elems.length == 0) {
+        if (hasDflt) { return pyKwArg(kw, "default") }
+        pyRaiseExc("ValueError", fname + "() iterable argument is empty")
+    }
+    var noKey = key === undefined || key === null
     var best = anytype
     best = elems[0]
+    var bestK = anytype
+    bestK = best
+    if (!noKey) { bestK = pyDCallPyValue(key, [best], undefined) }
     var i = 1
     while (i < elems.length) {
-        if (pyACompare(elems[i], best) == want) { best = elems[i] }
+        var k = anytype
+        k = elems[i]
+        if (!noKey) { k = pyDCallPyValue(key, [k], undefined) }
+        if (pyAOrder(op, k, bestK)) {
+            best = elems[i]
+            bestK = k
+        }
         i = i + 1
     }
     return best
 }
 
-// Go: js_pymax / js_pymin. declBuiltin passes the WHOLE argument
-// array (argc 0 in languages/python-to-llvm-ir.abnf).
+// Go: js_pymax / js_pymin. declKwBuiltin binds the arguments by signature
+// (python-to-llvm-ir.abnf).
 function js_pymax(args) { return pyAMinMax(args, 1) }
 function js_pymin(args) { return pyAMinMax(args, -1) }
 
@@ -3600,25 +3653,15 @@ function js_pyreversed(v) {
     return pyMkIter("reversed", out)
 }
 
-// sorted(x): a NEW list, ascending, by the same comparison `<` uses. CPython's
-// key= and reverse= are KEYWORD-ONLY and a signature-less builtin here is
-// reached positionally only, so they are refused loudly rather than ignored.
-// Insertion sort, which is STABLE - Python's sort is.
+// Go: js_pysorted. sorted(iterable, /, *, key=None, reverse=False): list.sort
+// on a new list, bound by its signature as [positionals, keywords].
 function js_pysorted(args) {
-    if (args.length > 1) { fail("sorted(): key= and reverse= are not supported") }
-    var a = pyCCopyArr(pyElemsOf(pyEArgAt(args, 0)))
-    var i = 1
-    while (i < a.length) {
-        var x = anytype
-        x = a[i]
-        var j = i - 1
-        while (j >= 0 && pyACompare(x, a[j]) == -1) {
-            a[j + 1] = a[j]
-            j = j - 1
-        }
-        a[j + 1] = x
-        i = i + 1
+    var pos = args[0]
+    if (pos.length != 1) {
+        pyRaiseExc("TypeError", "sorted expected 1 argument, got " + pyIntStr(pos.length))
     }
+    var a = pyCCopyArr(pyElemsOf(pos[0]))
+    pySortList(a, [], args[1])
     return a
 }
 
@@ -6620,13 +6663,15 @@ function pyListClamp(v, dflt, n) {
 // it is one here rather than being read as the key. reverse= is done by
 // reversing, sorting ascending and reversing again, which is how CPython keeps
 // equal elements in their original order under it; an inverted comparison would
-// not. The comparison is pyACompare, the same one js_pysorted uses, so sort()
-// and sorted() can never disagree.
+// not. sorted() is this same function run on a copy, as in CPython, which is
+// why its unknown-keyword error names sort().
 function pySortList(xs, args, kw) {
     if (args.length > 0) {
         throw pyExcInstance("TypeError", "sort() takes no positional arguments")
     }
+    pyKwOnly(kw, "sort", "key", "reverse")
     var key = pyKwArg(kw, "key")
+    var noKey = key === undefined || key === null
     var rev = pyDTruthy(pyKwArg(kw, "reverse"))
     var vals = []
     var keys = []
@@ -6637,10 +6682,10 @@ function pySortList(xs, args, kw) {
         var e = anytype
         e = xs[j]
         vals.push(e)
-        if (pyIsCallable(key)) { keys.push(pyCall(key, [e])) } else { keys.push(e) }
+        if (noKey) { keys.push(e) } else { keys.push(pyDCallPyValue(key, [e], undefined)) }
         i = i + 1
     }
-    // Insertion sort, which is STABLE, exactly as js_pysorted does it.
+    // Insertion sort, which is STABLE.
     var s = 1
     while (s < vals.length) {
         var kx = anytype
@@ -6648,7 +6693,7 @@ function pySortList(xs, args, kw) {
         var vx = anytype
         vx = vals[s]
         var p = s - 1
-        while (p >= 0 && pyACompare(kx, keys[p]) == -1) {
+        while (p >= 0 && pyAOrder("<", kx, keys[p])) {
             keys[p + 1] = keys[p]
             vals[p + 1] = vals[p]
             p = p - 1
@@ -6663,6 +6708,20 @@ function pySortList(xs, args, kw) {
         if (rev) { t = vals.length - 1 - w }
         xs[t] = vals[w]
         w = w + 1
+    }
+    return undefined
+}
+
+// CPython's TypeError for a keyword argument other than a or b.
+function pyKwOnly(kw, fname, a, b) {
+    if (!pyIsDict(kw)) { return undefined }
+    var ks = kw["keys"]
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] != a && ks[i] != b) {
+            pyRaiseExc("TypeError", fname + "() got an unexpected keyword argument '" + ks[i] + "'")
+        }
+        i = i + 1
     }
     return undefined
 }

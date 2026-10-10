@@ -1379,18 +1379,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (f < 0) { return 0 - Math.floor(0 - f) }
         return Math.floor(f)
     }
-    function pyMinMax(args, sign) {
+    // max/min(iterable, *, key=None, default=...) and max/min(a, b, *args,
+    // key=None). The first of equal extremes wins. Twin of rt.pyMinMax in
+    // abnf/jsrt.go and pyAMinMax in lib/python-rt.metajs.
+    function pyMinMax(args, sign, kw) {
+        var fname = sign > 0 ? "max" : "min"
+        pyKwOnly(kw, fname, "key", "default")
+        var key = pyKwArg(kw, "key")
+        var hasDflt = kw !== null && kw !== undefined && dictFind(kw, "default") >= 0
         var vals = []
         var i
+        if (args.length == 0) { pyListErr("TypeError", fname + " expected at least 1 argument, got 0") }
         if (args.length == 1) { vals = iterToList(args[0]) }
-        else { for (i = 0; i < args.length; i++) { vals.push(args[i]) } }
-        if (vals.length == 0) { fail("ValueError: max() arg is an empty sequence") }
+        else {
+            if (hasDflt) {
+                pyListErr("TypeError", "Cannot specify a default for " + fname + "() with multiple positional arguments")
+            }
+            for (i = 0; i < args.length; i++) { vals.push(args[i]) }
+        }
+        if (vals.length == 0) {
+            if (hasDflt) { return pyKwArg(kw, "default") }
+            pyListErr("ValueError", fname + "() iterable argument is empty")
+        }
         var best = anytype
         best = vals[0]
+        var bestK = anytype
+        bestK = key === undefined || key === null ? best : pyCall(key, [best], null)
         // Through binOp so a boxed operand (a float, a bigint) compares by VALUE
         // rather than as an object: max(1, 2.5) is 2.5.
         for (i = 1; i < vals.length; i++) {
-            if (pytruthy(binOp(sign > 0 ? ">" : "<", vals[i], best))) { best = vals[i] }
+            var k = anytype
+            k = key === undefined || key === null ? vals[i] : pyCall(key, [vals[i]], null)
+            if (pytruthy(binOp(sign > 0 ? ">" : "<", k, bestK))) { best = vals[i]; bestK = k }
         }
         return best
     }
@@ -1432,8 +1452,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // max/min over the arguments, or over a single iterable one - the same shape
     // js_pymax / js_pymin give the compiler.
-    hostGlobals["max"] = function() { return pyMinMax(arguments, 1) }
-    hostGlobals["min"] = function() { return pyMinMax(arguments, -1) }
+    hostGlobals["max"] = function() { return pyMinMax(arguments, 1, kTakeNamed()) }
+    hostGlobals["min"] = function() { return pyMinMax(arguments, -1, kTakeNamed()) }
     // ord(c) / chr(n). Twins: js_pyord / js_pychr in python-to-llvm-ir.abnf,
     // languages/lib/python-rt.metajs and abnf/jsrt.go.
     //
@@ -1597,24 +1617,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = a.length - 1; i >= 0; i--) { out.push(a[i]) }
         return pyMkIter("reversed", out)
     }
-    // sorted(x): a NEW list, ascending, by the same comparison `<` uses.
-    // CPython's key= and reverse= are KEYWORD-ONLY, and a host builtin here is
-    // reached positionally only, so they are refused loudly rather than ignored.
-    hostGlobals["sorted"] = function(v, extra) {
-        if (extra !== undefined) { fail("sorted(): key= and reverse= are not supported") }
-        var a = iterToList(v).slice(0)
-        // Insertion sort, which is STABLE - Python's sort is - and needs no
-        // comparator plumbing through the tag engine's own sort.
-        for (var i = 1; i < a.length; i++) {
-            var x = anytype
-            x = a[i]
-            var j = i - 1
-            while (j >= 0 && pytruthy(binOp("<", x, a[j]))) {
-                a[j + 1] = a[j]
-                j = j - 1
-            }
-            a[j + 1] = x
+    // sorted(iterable, /, *, key=None, reverse=False): list.sort on a new list.
+    // Twin of js_pysorted in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["sorted"] = function() {
+        var kw = kTakeNamed()
+        if (arguments.length != 1) {
+            pyListErr("TypeError", "sorted expected 1 argument, got " + arguments.length)
         }
+        var a = iterToList(arguments[0]).slice(0)
+        pySortList(a, [], kw)
         return a
     }
     hostGlobals["all"] = function(v) {
@@ -4644,10 +4655,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // there, so it is one here rather than being read as the key. reverse= is
     // done by reversing, sorting ascending and reversing again, which is how
     // CPython keeps equal elements in their original order under it; an inverted
-    // comparison would not. The comparison is binOp("<"), the same one sorted()
-    // uses, so the two can never disagree.
+    // comparison would not. sorted() is this same function run on a copy, as in
+    // CPython, which is why its unknown-keyword error names sort().
     function pySortList(xs, args, kw) {
         if (args.length > 0) { pyListErr("TypeError", "sort() takes no positional arguments") }
+        pyKwOnly(kw, "sort", "key", "reverse")
         var key = pyKwArg(kw, "key")
         var rev = pytruthy(pyKwArg(kw, "reverse"))
         var vals = []
@@ -4655,9 +4667,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < xs.length; i++) {
             var j = rev ? xs.length - 1 - i : i
             vals.push(xs[j])
-            keys.push(typeof key == "function" ? key(xs[j]) : xs[j])
+            keys.push(key === undefined || key === null ? xs[j] : pyCall(key, [xs[j]], null))
         }
-        // Insertion sort, which is STABLE, exactly as sorted() does it.
+        // Insertion sort, which is STABLE.
         for (var s = 1; s < vals.length; s++) {
             var kx = anytype
             kx = keys[s]
@@ -4674,6 +4686,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         for (var w = 0; w < vals.length; w++) {
             xs[rev ? vals.length - 1 - w : w] = vals[w]
+        }
+    }
+    // CPython's TypeError for a keyword argument other than A or B.
+    function pyKwOnly(kw, fname, a, b) {
+        if (kw === null || kw === undefined) { return }
+        for (var i = 0; i < kw.keys.length; i++) {
+            if (kw.keys[i] != a && kw.keys[i] != b) {
+                pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kw.keys[i] + "'")
+            }
         }
     }
     // One keyword argument of a method call, or undefined when it was not passed.
@@ -6487,6 +6508,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isSet(l) && isSet(r)) {
             if (op == "<" || op == ">" || op == "<=" || op == ">=") {
                 return setOrder(op, l, r)
+            }
+        }
+        // Two lists (and tuples) order element-wise, CPython's rule: the first
+        // pair that is not equal decides with op itself, otherwise the lengths do.
+        // Twin of rt.pySeqOrder in abnf/jsrt.go and pyASeqOrder in
+        // lib/python-rt.metajs.
+        if (Array.isArray(l) && Array.isArray(r)) {
+            if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+                for (var si = 0; si < l.length && si < r.length; si++) {
+                    if (!pyEq(l[si], r[si])) { return binOp(op, l[si], r[si]) }
+                }
+                return binOp(op, l.length, r.length)
             }
         }
         if (op == "<")  return l < r

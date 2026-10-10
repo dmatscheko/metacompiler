@@ -15816,6 +15816,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
 				return boolH(!rt.pyEqual(l, r))
+			case "<", ">", "<=", ">=":
+				if la, ok := l.(*jsArray); ok {
+					if ra, ok := r.(*jsArray); ok {
+						return w(rt.pySeqOrder(op, la.elems, ra.elems))
+					}
+				}
+			}
+			switch op {
 			case "<":
 				return boolH(rt.jsCompare(l, r) == -1)
 			case ">":
@@ -15854,7 +15862,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				"__dict": true, "keys": keys, "vals": vals,
 			}})
 		},
-		// max(...) / min(...): over the arguments, or over a single iterable one.
+		// max(...) / min(...), bound by their signature as [positionals, keywords].
 		"js_pymax": func(a []uint64) uint64 { return rt.pyMinMax(u(a[0]), 1) },
 		"js_pymin": func(a []uint64) uint64 { return rt.pyMinMax(u(a[0]), -1) },
 		// The context-manager protocol. A context expression that is NOT a context
@@ -16465,18 +16473,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.pyMkIter("reversed", out))
 		},
-		// sorted(x): a NEW list, ascending, by the same comparison `<` uses.
-		// CPython's key= and reverse= are KEYWORD-ONLY and a signature-less
-		// builtin here receives positional arguments only, so they are refused
-		// loudly rather than silently ignored.
+		// sorted(iterable, /, *, key=None, reverse=False): list.sort on a new
+		// list, bound by its signature as [positionals, keywords].
 		"js_pysorted": func(a []uint64) uint64 {
-			args := rt.argArray(u(a[0]))
-			if len(args) > 1 {
-				rt.fail("sorted(): key= and reverse= are not supported")
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if len(pos) != 1 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					fmt.Sprintf("sorted expected 1 argument, got %d", len(pos)))})
 			}
-			out := append([]interface{}{}, rt.pyElemsOf(argAt(args, 0))...)
-			sort.SliceStable(out, func(i, j int) bool { return rt.jsCompare(out[i], out[j]) == -1 })
-			return w(&jsArray{elems: out})
+			out := &jsArray{elems: append([]interface{}{}, rt.pyElemsOf(pos[0])...)}
+			rt.pySortList(out, nil, el[1])
+			return w(out)
 		},
 		"js_pyall": func(a []uint64) uint64 {
 			for _, e := range rt.pyElemsOf(u(a[0])) {
@@ -19603,12 +19611,14 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 // TypeError there, so it is one here too rather than being read as the key.
 // reverse= is done by reversing, sorting ascending and reversing again, which is
 // how CPython keeps equal elements in their original order under it; sorting
-// with an inverted comparison would not.
+// with an inverted comparison would not. sorted() is this same function run on
+// a copy, as in CPython, which is why its unknown-keyword error names sort().
 func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 	if len(args) > 0 {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 			"sort() takes no positional arguments")})
 	}
+	rt.pyKwOnly(kw, "sort", "key", "reverse")
 	key := rt.pyKwArg(kw, "key")
 	rev := rt.pyTruthyOf(rt.pyKwArg(kw, "reverse"))
 	type pySortPair struct{ k, v interface{} }
@@ -19620,14 +19630,14 @@ func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 		}
 		e = arr.elems[j]
 		k := e
-		if isCallable(key) {
-			k = rt.call(key, jsUndef, []interface{}{e})
+		if !isUndefOrNull(key) {
+			k = rt.callPyValue(key, []interface{}{e}, jsUndef)
 		}
 		pairs[i] = pySortPair{k: k, v: e}
 	}
 	// The same comparison js_pysorted uses, so sort() and sorted() can never
 	// disagree inside one engine.
-	sort.SliceStable(pairs, func(i, j int) bool { return rt.jsCompare(pairs[i].k, pairs[j].k) == -1 })
+	sort.SliceStable(pairs, func(i, j int) bool { return rt.pyOrder("<", pairs[i].k, pairs[j].k) })
 	out := make([]interface{}, len(pairs))
 	for i, p := range pairs {
 		j := i
@@ -19638,6 +19648,20 @@ func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 	}
 	arr.dropIdx()
 	arr.elems = out
+}
+
+// pyKwOnly raises CPython's TypeError for a keyword argument other than a or b.
+func (rt *jsrt) pyKwOnly(kw interface{}, fname, a, b string) {
+	keys, _, ok := dictParts(kw)
+	if !ok {
+		return
+	}
+	for _, k := range keys.elems {
+		if n := rt.toString(k); n != a && n != b {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				fname+"() got an unexpected keyword argument '"+n+"'")})
+		}
+	}
 }
 
 // pyKwArg reads one keyword argument out of the keyword dict a method call
@@ -21196,27 +21220,96 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	return append(out, rest, left), true
 }
 
-// pyMinMax is the max()/min() builtin: over the call arguments, or over the
-// elements of a single iterable argument. want is +1 for max, -1 for min.
+// pyMinMax is max/min(iterable, *, key=None, default=...) and max/min(a, b,
+// *args, key=None), bound as [positionals, keywords]. want is +1 for max, -1
+// for min; the first of equal extremes wins.
 func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
-	args, ok := argsV.(*jsArray)
-	if !ok {
-		rt.fail("max/min needs an argument array")
+	el := argsV.(*jsArray).elems
+	elems := el[0].(*jsArray).elems
+	kw := el[1]
+	fname, op := "max", ">"
+	if want < 0 {
+		fname, op = "min", "<"
 	}
-	elems := args.elems
-	if len(elems) == 1 { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
+	rt.pyKwOnly(kw, fname, "key", "default")
+	key := rt.pyKwArg(kw, "key")
+	var dflt interface{} = jsUndef
+	hasDflt := false
+	if keys, vals, ok := dictParts(kw); ok {
+		for i, k := range keys.elems {
+			if rt.toString(k) == "default" {
+				dflt, hasDflt = vals.elems[i], true
+			}
+		}
+	}
+	switch {
+	case len(elems) == 0:
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", fname+" expected at least 1 argument, got 0")})
+	case len(elems) == 1: // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
 		elems = rt.pyElemsOf(elems[0])
+	case hasDflt:
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"Cannot specify a default for "+fname+"() with multiple positional arguments")})
 	}
 	if len(elems) == 0 {
-		rt.fail("max/min of an empty sequence")
+		if hasDflt {
+			return rt.wrap(dflt)
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", fname+"() iterable argument is empty")})
+	}
+	keyOf := func(e interface{}) interface{} {
+		if isUndefOrNull(key) {
+			return e
+		}
+		return rt.callPyValue(key, []interface{}{e}, jsUndef)
 	}
 	best := elems[0]
+	bestK := keyOf(best)
 	for _, e := range elems[1:] {
-		if rt.jsCompare(e, best) == want {
-			best = e
+		if k := keyOf(e); rt.pyOrder(op, k, bestK) {
+			best, bestK = e, k
 		}
 	}
 	return rt.wrap(best)
+}
+
+// pyOrder answers Python's `l op r` for an order operator: js_pybin's rules, so
+// a list compares element-wise and a user class answers with its dunder. Two
+// plain numbers or two strings take the comparison js_pybin would reach anyway.
+func (rt *jsrt) pyOrder(op string, l, r interface{}) bool {
+	_, ln := l.(float64)
+	_, rn := r.(float64)
+	_, ls := l.(string)
+	_, rs := r.(string)
+	if (ln && rn) || (ls && rs) {
+		c := rt.jsCompare(l, r)
+		switch op {
+		case "<":
+			return c == -1
+		case ">":
+			return c == 1
+		}
+	}
+	return rt.pyTruthyOf(rt.unwrap(pyExternMaps[rt]["js_pybin"]([]uint64{rt.wrapStr(op), rt.wrap(l), rt.wrap(r)})))
+}
+
+// pySeqOrder is an order comparison of two lists, CPython's: the first pair of
+// elements that are not equal decides, with op itself; otherwise the lengths do.
+func (rt *jsrt) pySeqOrder(op string, l, r []interface{}) interface{} {
+	for i := 0; i < len(l) && i < len(r); i++ {
+		if !rt.pyEqual(l[i], r[i]) {
+			return rt.unwrap(pyExternMaps[rt]["js_pybin"]([]uint64{rt.wrapStr(op), rt.wrap(l[i]), rt.wrap(r[i])}))
+		}
+	}
+	switch op {
+	case "<":
+		return len(l) < len(r)
+	case ">":
+		return len(l) > len(r)
+	case "<=":
+		return len(l) <= len(r)
+	}
+	return len(l) >= len(r)
 }
 
 // pyDeletedT is the value `del x` leaves in the scope slot; scopeGet turns a
