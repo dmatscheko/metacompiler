@@ -6155,29 +6155,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 continue
             }
             if (e == 117) {
+                // \u{...} holds any number of code points, separated by spaces or
+                // tabs ("\u{48 49}" is "HI", "\u{}" is empty).
                 if (i + 2 < s.length && s.charCodeAt(i + 2) == 123) {
-                    var bv = 0
-                    var bn = 0
-                    while (rbHexDigAt(s, i + 3 + bn) >= 0) {
-                        bv = bv * 16 + rbHexDigAt(s, i + 3 + bn)
-                        bn = bn + 1
+                    var bj = i + 3
+                    while (bj < s.length) {
+                        var bc = s.charCodeAt(bj)
+                        if (bc == 32 || bc == 9) { bj = bj + 1; continue }
+                        if (rbHexDigAt(s, bj) < 0) { break }
+                        var bv = 0
+                        while (rbHexDigAt(s, bj) >= 0) {
+                            bv = bv * 16 + rbHexDigAt(s, bj)
+                            bj = bj + 1
+                        }
+                        if (bv > 65535) {
+                            var pv = bv - 65536
+                            // An ASTRAL code point becomes the surrogate PAIR, one unit at a
+                            // time: handing both to String.fromCharCode in one call makes the
+                            // COMPILER half print the character while the other two print
+                            // U+FFFD, so the two-call form is kept and astral text is U+FFFD
+                            // everywhere, as it already is in swift and in Go's byte slicing.
+                            out += String.fromCharCode(55296 + Math.trunc(pv / 1024))
+                            out += String.fromCharCode(56320 + (pv - Math.trunc(pv / 1024) * 1024))
+                        } else {
+                            out += String.fromCharCode(bv)
+                        }
                     }
-                    var skip = i + 3 + bn
-                    if (skip < s.length && s.charCodeAt(skip) == 125) { skip = skip + 1 }
-                    if (bn == 0) { out += "u"; i = i + 2; continue }
-                    if (bv > 65535) {
-                        var pv = bv - 65536
-                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a time:
-                        // handing both to String.fromCharCode in one call makes the COMPILER
-                        // half print the character while the other two print U+FFFD, so the
-                        // two-call form is kept and astral text is U+FFFD everywhere, as it
-                        // already is in swift and in Go's byte slicing.
-                        out += String.fromCharCode(55296 + Math.trunc(pv / 1024))
-                        out += String.fromCharCode(56320 + (pv - Math.trunc(pv / 1024) * 1024))
-                    } else {
-                        out += String.fromCharCode(bv)
-                    }
-                    i = skip
+                    if (bj < s.length && s.charCodeAt(bj) == 125) { bj = bj + 1 }
+                    i = bj
                     continue
                 }
                 var uv = 0

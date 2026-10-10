@@ -2897,6 +2897,17 @@ def s52
                  Rational(-7, 3).rationalize(1) == -2)
 end
 
+# ===== SECTION 53: a \u{...} escape holds several code points =====
+# Separated by spaces or tabs, with optional space inside the braces; `\u{}` is
+# empty. Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION
+# RUNS UNDER REAL RUBY.
+def s53
+  x = "z"
+  check("ue53a", "\u{48 49}" == "HI" && "\u{48  49}" == "HI" && "\u{ 48 49 }" == "HI" && "\u{48	49}" == "HI")
+  check("ue53b", "\u{}" == "" && "a\u{41 42}c" == "aABc" && "#{x}\u{48 49}#{x}" == "zHIz" && :"\u{48 49}" == :HI)
+  check("ue53c", "\u{e9 41}".codepoints == [233, 65] && "\u{1F600 41}".codepoints.last == 65)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2911,5 +2922,6 @@ s49() # SECTION-CALL 49
 s50() # SECTION-CALL 50
 s51() # SECTION-CALL 51
 s52() # SECTION-CALL 52
+s53() # SECTION-CALL 53
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
