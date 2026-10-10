@@ -1861,6 +1861,23 @@ function js_jvovcall(cls, name, spec, args, off) {
     }
     return fn.apply(undefined, args)
 }
+// A call javac resolved from static types: (receiver, name, sig, args). The
+// implementation under "name#sig" is found from the receiver's class upwards -
+// or from a class descriptor itself, for a static call; a receiver with no such
+// slot takes the ordinary js_mcall. Twin of js_jvsigcall in abnf/jsrtjava.go.
+function js_jvsigcall(recv, name, sig, args) {
+    var slot = name + "#" + sig
+    if (rtIsObj(recv) && !Array.isArray(recv)) {
+        if (recv["__isclass"] === true) {
+            var sf = rtFindMethod(recv, slot)
+            if (typeof sf == "function") { return sf.apply(undefined, args) }
+        } else {
+            var f = rtFindMethod(recv["__class"], slot)
+            if (typeof f == "function") { return f.apply(undefined, rtPrepend(recv, args)) }
+        }
+    }
+    return js_mcall(recv, name, args)
+}
 function jvOvSplit(s, sep) {
     var out = []
     var from = 0

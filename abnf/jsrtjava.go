@@ -1427,6 +1427,30 @@ func init() {
 			return w(rt.callH(owner.props[slot], jsUndef, args.elems, a[3]))
 		}
 		baseMcall := m["js_mcall"]
+		// A call javac resolved from static types: (receiver, name, sig, args).
+		// The implementation under "name#sig" is found from the receiver's class
+		// upwards - or from a class descriptor itself, for a static call. A
+		// receiver with no such slot (a lambda, a class that declares the method
+		// under another signature) takes the ordinary js_mcall. Twin of jSigCall
+		// in java-interpreter.abnf and of js_jvsigcall in
+		// languages/lib/java-rt.metajs.
+		m["js_jvsigcall"] = func(a []uint64) uint64 {
+			args, ok := u(a[3]).(*jsArray)
+			if !ok {
+				rt.fail("js_jvsigcall args must be an array")
+			}
+			slot := rt.toString(u(a[1])) + "#" + rt.toString(u(a[2]))
+			if o, isObj := u(a[0]).(*jsObject); isObj {
+				if isClassDesc(o) {
+					if owner := jvStaticOwner(o, slot); owner != nil {
+						return w(rt.callH(owner.props[slot], jsUndef, args.elems, a[3]))
+					}
+				} else if owner := jvStaticOwner(o.props["__class"], slot); owner != nil {
+					return w(rt.call(owner.props[slot], jsUndef, append([]interface{}{o}, args.elems...)))
+				}
+			}
+			return baseMcall([]uint64{a[0], a[1], a[3]})
+		}
 		// String.toCharArray: one char per UTF-16 unit. Anything else is an
 		// ordinary call of a method by that name.
 		m["js_jvchars"] = func(a []uint64) uint64 {

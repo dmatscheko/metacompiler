@@ -75,9 +75,11 @@ assignments and ++/-- alike - and a field OBSCURES a type name of the same spell
 that declares none, dispatching to a declared or inherited override first.
 
 Overload resolution follows JLS 15.12.2 (three phases, most specific first) over the
-arguments' RUNTIME types: exact for primitives, by runtime class for references, so it
-differs from javac only where a reference's static type is wider than its value; an
-enum's or an anonymous class' overloads are not resolved. Not genuinely modelled:
+arguments' STATIC types wherever the receiver's and the arguments' types read from the
+source text (declarations, literals, casts, `new`, declared result types - the call
+then names its name#sig slot through js_jvsigcall); any other call picks over the
+arguments' RUNTIME types, which differs from javac only where a reference's static
+type is wider than its value. Not genuinely modelled:
 generic type checking (type arguments are erased at parse time),
 checked exception analysis, modules, threads and reflection. Object#equals on two
 PRIMITIVES is type-exact (1 does not equal 1L), but two boxed values of the same
@@ -919,7 +921,7 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())); jNoteCall(up.in) ~~>
 
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx } ;
 // expr::m - a BOUND method reference whose receiver is an arbitrary expression:
 // `check()::ido`, `new Foo()::getA`, `((C) t)::m`. Like QNewSfx it is a SUFFIX
@@ -939,10 +941,10 @@ MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
             = "." KwNew [ SkipAngle ] { Annotation } Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
               "(" [ Expression { "," Expression } ] ")" [ "{" { Member } "}" ] ;
-MethodSfx   <~~ push(jNoteMSfx({kind:"mcall", name: popName(), args: takeAll()})); jNoteCall(up.in) ~~>
+MethodSfx   <~~ push(jNoteMSfx(jMcallSfx(popName(), takeAll(), up.in))); jNoteCall(up.in) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push(jNoteIdx({kind:"index", idx: pop()})) ~~>
+IndexSfx    <~~ push(jNoteIdx({kind:"index", idx: pop(), stext: up.in})) ~~>
             = "[" Expression "]" ;
 
 // A switch EXPRESSION: the same case forms as the statement, but every arm supplies
@@ -1059,7 +1061,7 @@ OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
 // (or an ancestor) declares static is called on the class descriptor, everything else
 // on the enclosing instance - and in a static context there is none, so the class
 // descriptor is used there too. Tried before VarRef, which would read the name alone.
-BareCall    <~~ push(makeBareCall(takeAll())); jNoteCall(up.in) ~~>
+BareCall    <~~ push(makeBareCall(takeAll(), up.in)); jNoteCall(up.in) ~~>
             = BareName "(" [ Expression { "," Expression } ] ")" ;
 // A reserved word is not a method name (`case 0 -> if (true);` must not parse as
 // a call to a method named `if`) - but `this(...)` and `super(...)` reach this
@@ -2763,6 +2765,7 @@ HasStatic   = :script(~~
                       deleg: {deleg: "super", dargs: dargs}})
         }
         for (var j = 0; j < qmembers.length; j++) { mem.push(qmembers[j]) }
+        jOvDeclare(aname, mem)
         return {kind: "qnew", cname: aname, args: qargs, cls: buildClassStmt(aname, mem, undefined)}
     }
     // Emits `outerV.new Cls(args)`: a fresh object whose __class is Cls and whose
@@ -2984,10 +2987,11 @@ HasStatic   = :script(~~
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
         }
     }
-    function makeBareCall(items) {
+    function makeBareCall(items, text) {
         var name = items[0]
         var args = items.slice(1)
         var cls = curClassName
+        var atys = jCallArgTys(text, args.length)
         return function(b) {
             var kind = lookupMethodKind(cls, name)
             var recvV
@@ -3005,6 +3009,10 @@ HasStatic   = :script(~~
             }
             var ea = emitArgs(b, args)
             b = ea.b
+            var sig = jOvStaticSig(cls, name, atys, null)
+            if (sig != "") {
+                return {b: b, v: callExt(b, "js_jvsigcall", [recvV, emitStr(b, name), emitStr(b, sig), ea.v])}
+            }
             return {b: b, v: callExt(b, "js_mcall", [recvV, emitStr(b, name), ea.v])}
         }
     }
@@ -3342,10 +3350,18 @@ HasStatic   = :script(~~
     // instead of js_mcall, which only dispatches named methods on objects/strings.
     // The receiver kind is decided at runtime with js_typeof, so ordinary method
     // calls are unaffected. This overrides the compile-core foldCallMember.
-    foldCallMember = function(items) {
+    // A named method call: js_jvsigcall where javac's static resolution is
+    // known (jSfxSig in lib/java-decltypes.js), the ordinary js_mcall otherwise.
+    function jEmitMcall(b, recv, s, argsV) {
+        var sig = jSfxSig(s)
+        if (sig != "") { return callExt(b, "js_jvsigcall", [recv, emitStr(b, s.name), emitStr(b, sig), argsV]) }
+        return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])
+    }
+    foldCallMember = function(items, text) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        if (text != undefined) { jChainRecvTys(suffixes, text) }
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -3399,7 +3415,7 @@ HasStatic   = :script(~~
                                    ? callExt(mcallB, "js_jvstr", [cur])
                                    : ((s.name == "equals" && s.args.length == 1)
                                       ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))))))
+                                      : jEmitMcall(mcallB, cur, s, ea.v))))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4956,8 +4972,13 @@ HasStatic   = :script(~~
         var subs = []
         for (var s = 0; s < consts.length; s++) {
             if (consts[s].body == null) { subs.push(null); continue }
-            subs.push(buildClassStmt(name + "$" + consts[s].name, [{ext: name}].concat(consts[s].body), undefined))
+            var smem = [{ext: name}].concat(consts[s].body)
+            jOvDeclare(name + "$" + consts[s].name, smem)
+            subs.push(buildClassStmt(name + "$" + consts[s].name, smem, undefined))
         }
+        jOvDeclare(name, members)
+        // A constant is a static field of the enum's own type (JLS 8.9.1).
+        for (var fc = 0; fc < consts.length; fc++) { jNoteFieldTy(consts[fc].name, name) }
         // java.lang.Enum#toString answers the constant's name unless the enum
         // overrides it. java-interpreter.abnf installs the same default the same way
         // (`if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }`).
@@ -5147,6 +5168,7 @@ HasStatic   = :script(~~
                       deleg: {deleg: "super", dargs: dargs}})
         }
         for (var j = 0; j < members.length; j++) { mem.push(members[j]) }
+        jOvDeclare(aname, mem)
         var clsStmt = buildClassStmt(aname, mem, undefined)
         var newT = makeNew([aname].concat(args))
         return function(b) {

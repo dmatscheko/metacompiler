@@ -49,9 +49,30 @@ function jRetTy() { return jRetTys[jRetTys.length - 1] }
 // declarations disagree - the jFieldTys rule. Registered as the walk passes
 // the method's name, so a recursive call already sees it.
 var jMethodTys = {}
+// The same per declaring class ("Cls.name"), which a call whose receiver type
+// is known reads first (jClsMethodTyOf).
+var jMethodTysC = {}
 function jNoteMethodTy(name) {
     var have = jMethodTys["$" + name]
     jMethodTys["$" + name] = (have == undefined || have == jRetTy()) ? jRetTy() : "?"
+    var key = "$" + curClassName + "." + name
+    var hc = jMethodTysC[key]
+    jMethodTysC[key] = (hc == undefined || hc == jRetTy()) ? jRetTy() : "?"
+}
+// A method's result type as class cls or a superclass declares it, else by
+// name across the program.
+function jClsMethodTyOf(cls, name) {
+    var c = cls
+    var guard = 0
+    while (c != "" && guard < 64) {
+        guard++
+        var t = jMethodTysC["$" + c + "." + name]
+        if (t != undefined) { return t == "?" ? "" : t }
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { break }
+        c = rec.sup
+    }
+    return jMethodTyOf(name)
 }
 function jMethodTyOf(name) {
     var t = jMethodTys["$" + name]
@@ -269,6 +290,19 @@ function jNoteCall(text) {
         jCallEsc["$" + name] = true
         return
     }
+    var args = jSplitArgs(inner)
+    var key = "$" + name + "/" + args.length
+    var have = jCallTys[key]
+    var tys = []
+    for (var k = 0; k < args.length; k++) {
+        var t = jExprTy(args[k])
+        if (have != undefined && have[k] != t) { t = "?" }
+        tys.push(t)
+    }
+    jCallTys[key] = tys
+}
+// An argument list's (whitespace-free) text split at its top-level commas.
+function jSplitArgs(inner) {
     var args = []
     var i = 0
     var from = 0
@@ -287,15 +321,7 @@ function jNoteCall(text) {
         }
     }
     if (inner.length > 0) { args.push(inner.substring(from)) }
-    var key = "$" + name + "/" + args.length
-    var have = jCallTys[key]
-    var tys = []
-    for (var k = 0; k < args.length; k++) {
-        var t = jExprTy(args[k])
-        if (have != undefined && have[k] != t) { t = "?" }
-        tys.push(t)
-    }
-    jCallTys[key] = tys
+    return args
 }
 function jIsIdChar(c) {
     return c == 95 || c == 36 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57)
@@ -383,7 +409,8 @@ var jArrCtx = ""
 // own class upwards - so super.m(...) stays non-virtual. The value model
 // carries every primitive's type, so primitive arguments resolve as javac
 // resolves them; a reference resolves by its runtime class, which differs from
-// javac only where the static type is wider than the value.
+// javac where the static type is wider than the value - the call sites whose
+// static types are readable bypass the dispatcher (jOvStaticSig, below).
 var jOvCls = {}
 var jOvNames = []
 var jOvIfaces = {}
@@ -430,6 +457,7 @@ function jOvDeclare(name, members) {
 }
 function jOvIface(name, members) {
     jOvIfaces["$" + name] = true
+    jOvIfaceDeclare(name, members)
     var abs = []
     for (var i = 0; i < members.length; i++) {
         if (members[i].kind == "amethod" || members[i].kind == "abstract") { abs.push(members[i]) }
@@ -697,4 +725,466 @@ function jOvBox(k) {
     if (k == "short") { return "Short" }
     if (k == "byte") { return "Byte" }
     return "Boolean"
+}
+
+// ----- Static overload selection (JLS 15.12.2 is static) -----
+//
+// javac picks an overload from the arguments' STATIC types, which the value
+// model does not carry: `Object o = "s"; f(o)` calls f(Object) although o
+// holds a String, and an Integer is a plain int at run time. A call site whose
+// receiver type and argument types all read from the source text is resolved,
+// once the walk is complete, to the "name#sig" slot it must call. A site with
+// any type this cannot read keeps the dispatcher's runtime pick, so a shape it
+// does not understand never changes what was resolved before.
+var jOvIfaceMs = {}
+// An interface's methods as jOvDeclare records a class': a call through an
+// interface-typed receiver resolves over these.
+function jOvIfaceDeclare(name, members) {
+    var ms = []
+    for (var i = 0; i < members.length; i++) {
+        var m = members[i]
+        if ((m.kind == "amethod" || m.kind == "abstract" || m.kind == "method") && m.ptys != undefined) {
+            var v = m.params != undefined && jOvIsVar(m)
+            ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik == true})
+        }
+    }
+    jOvIfaceMs["$" + name] = ms
+}
+function jOvIfaceCands(name, mname) {
+    var ms = jOvIfaceMs["$" + name]
+    if (ms == undefined) { return null }
+    var out = []
+    var seen = {}
+    for (var i = 0; i < ms.length; i++) {
+        if (ms[i].name != mname || seen["$" + ms[i].raw] == true) { continue }
+        seen["$" + ms[i].raw] = true
+        out.push(ms[i])
+    }
+    if (out.length < 2) { return null }
+    return out
+}
+// The static types of a call's arguments, read from the call's own text
+// (`name(args)` or `.name(args)`), or null when the split does not yield the
+// `n` arguments the grammar parsed.
+function jCallArgTys(text, n) {
+    var p = text.indexOf("(")
+    if (p < 0) { return null }
+    var args = jSplitArgs(text.substring(p + 1, jSkipGroup(text, p) - 1))
+    if (args.length != n) { return null }
+    var out = []
+    for (var i = 0; i < n; i++) { out.push(jStaticTy(args[i])) }
+    return out
+}
+// A few java.lang results a call site reads often.
+var jLibRetTys = {
+    "$Integer.valueOf": "Integer", "$Long.valueOf": "Long", "$Double.valueOf": "Double",
+    "$Float.valueOf": "Float", "$Short.valueOf": "Short", "$Byte.valueOf": "Byte",
+    "$Character.valueOf": "Character", "$Boolean.valueOf": "Boolean", "$String.valueOf": "String",
+    "$Integer.parseInt": "int", "$Long.parseLong": "long", "$Double.parseDouble": "double",
+    "$String.length": "int", "$String.charAt": "char", "$String.indexOf": "int",
+    "$String.equals": "boolean", "$String.isEmpty": "boolean", "$String.substring": "String",
+    "$String.trim": "String", "$String.toUpperCase": "String", "$String.toLowerCase": "String",
+    "$String.concat": "String", "$String.repeat": "String", "$String.toString": "String"
+}
+// The static type of an expression's whitespace-free text, "" when unknown.
+// "null" is the null literal's type and "fn" a lambda's or method
+// reference's, which only a functional interface accepts.
+function jStaticTy(t) {
+    if (t.length == 0) { return "" }
+    var pt = jExprTy(t)
+    if (pt != "") { return pt }
+    if (t == "null") { return "null" }
+    if (t == "true" || t == "false") { return "boolean" }
+    if (jTopFind(t, "->") >= 0 || jTopFind(t, "::") >= 0) { return "fn" }
+    if (jTopFind(t, "?") >= 0) { return jCondTy(t) }
+    if (jTopOp(t, 1) >= 0) { return jConcatTy(t) }
+    var c0 = t.charAt(0)
+    if (c0 == "\"") { return (t.charAt(1) != "\"" && jSkipQuote(t, 0) == t.length) ? "String" : "" }
+    if (c0 == "(") {
+        var g = jSkipGroup(t, 0)
+        var inner = t.substring(1, g - 1)
+        if (g == t.length) { return jStaticTy(inner) }
+        // A cast: a type in the parentheses and an operand after them.
+        if (jIsTypeText(inner) && (jIsIdChar(t.charCodeAt(g)) || "\"'(!~".indexOf(t.charAt(g)) >= 0)) { return inner }
+        return ""
+    }
+    var nt = jNewTy(t)
+    if (nt != "") { return nt }
+    return jChainTy(t)
+}
+// `new T(...)`, `new T(...){...}`, `new T[n]...` and `new T[]{...}` - the
+// text reads "newT(...)" once its whitespace is gone, so a method of that
+// name is not mistaken for one.
+function jNewTy(t) {
+    if (t.length < 5 || t.substring(0, 3) != "new") { return "" }
+    var e = jIdentEnd(t, 3)
+    if (e == 3 || jMethodTys["$" + t.substring(0, e)] != undefined) { return "" }
+    while (t.charAt(e) == "." && jIdentEnd(t, e + 1) > e + 1) { e = jIdentEnd(t, e + 1) }
+    var ty = t.substring(3, e)
+    if (t.charAt(e) == "<") {
+        var a = jSkipAngle(t, e)
+        if (a < 0) { return "" }
+        ty = ty + t.substring(e, a)
+        e = a
+    }
+    if (t.charAt(e) == "(") {
+        e = jSkipGroup(t, e)
+        if (t.charAt(e) == "{") { e = jSkipGroup(t, e) }
+        return e == t.length ? ty : ""
+    }
+    var dims = ""
+    while (t.charAt(e) == "[") {
+        e = jSkipGroup(t, e)
+        dims = dims + "[]"
+    }
+    if (dims == "") { return "" }
+    if (t.charAt(e) == "{") { e = jSkipGroup(t, e) }
+    return e == t.length ? ty + dims : ""
+}
+// A name or a call, then `.f`, `.m(...)` and `[i]` suffixes. A class name
+// followed by a member is a static access.
+function jChainTy(t) {
+    var i = jIdentEnd(t, 0)
+    if (i == 0) { return "" }
+    var nm = t.substring(0, i)
+    var ty = ""
+    var isCls = false
+    if (t.charAt(i) == "(") {
+        ty = jClsMethodTyOf(curClassName, nm)
+        i = jSkipGroup(t, i)
+    } else {
+        var lt = jTyOf(nm)
+        if (lt != undefined) { ty = lt }
+        else if (jFieldTys["$" + nm] != undefined) { ty = jFieldTyOf(nm) }
+        else if (jIsClassName(nm)) { ty = nm; isCls = true }
+    }
+    while (i < t.length && ty != "") {
+        var c = t.charAt(i)
+        if (c == "[") {
+            if (isCls) { return "" }
+            ty = jElemTy(ty)
+            i = jSkipGroup(t, i)
+        } else if (c == ".") {
+            var e = jIdentEnd(t, i + 1)
+            if (e == i + 1) { return "" }
+            var mn = t.substring(i + 1, e)
+            i = e
+            if (t.charAt(i) == "(") {
+                i = jSkipGroup(t, i)
+                ty = jMemberRetTy(ty, mn)
+            } else if (isCls) {
+                ty = jOvCls["$" + ty] != undefined ? jFieldTyOf(mn) : ""
+            } else if (mn == "length" && jElemTy(ty) != "") {
+                ty = "int"
+            } else {
+                ty = jFieldTyOf(mn)
+            }
+            isCls = false
+        } else {
+            return ""
+        }
+    }
+    if (isCls) { return "" }
+    return ty
+}
+// The result type of `recv.mn(...)`: java.lang's from jLibRetTys, a declared
+// class' or interface's from the method's declared result type.
+function jMemberRetTy(ty, mn) {
+    var b = jOvBare(ty)
+    var lib = jLibRetTys["$" + b + "." + mn]
+    if (lib != undefined) { return lib }
+    if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) { return jClsMethodTyOf(b, mn) }
+    return ""
+}
+// A type name a static access can start with: a declared type, or a
+// java.lang one this subset provides.
+function jIsClassName(nm) {
+    if (jOvCls["$" + nm] != undefined || jOvIfaces["$" + nm] == true) { return true }
+    return ",String,Integer,Long,Double,Float,Short,Byte,Character,Boolean,Math,StrictMath,System,".indexOf("," + nm + ",") >= 0
+}
+// Is `t` the text of a type: a (qualified) name with optional type
+// arguments and array brackets?
+function jIsTypeText(t) {
+    var e = jIdentEnd(t, 0)
+    if (e == 0) { return false }
+    while (t.charAt(e) == "." && jIdentEnd(t, e + 1) > e + 1) { e = jIdentEnd(t, e + 1) }
+    if (t.charAt(e) == "<") { e = jSkipAngle(t, e) }
+    if (e < 0) { return false }
+    while (t.substring(e, e + 2) == "[]") { e = e + 2 }
+    return e == t.length
+}
+// The index just past the <...> that opens at i, -1 when it does not close
+// over type-argument characters only.
+function jSkipAngle(t, i) {
+    var depth = 0
+    for (var j = i; j < t.length; j++) {
+        var c = t.charAt(j)
+        if (c == "<") { depth++ }
+        else if (c == ">") {
+            depth--
+            if (depth == 0) { return j + 1 }
+        } else if (!jIsIdChar(t.charCodeAt(j)) && ",.?[]".indexOf(c) < 0) { return -1 }
+    }
+    return -1
+}
+// The first top-level occurrence of `s` in t (outside groups and literals).
+function jTopFind(t, s) {
+    var i = 0
+    while (i < t.length) {
+        var c = t.charAt(i)
+        if (c == "(" || c == "[" || c == "{") { i = jSkipGroup(t, i) }
+        else if (c == "\"" || c == "'") { i = jSkipQuote(t, i) }
+        else if (t.substring(i, i + s.length) == s) { return i }
+        else { i++ }
+    }
+    return -1
+}
+// The first top-level binary operator at or after `from`, -1 when there is
+// none: a sign or `!` / `~` at the start or after another operator is unary.
+function jTopOp(t, from) {
+    var i = 0
+    var prevOp = true
+    while (i < t.length) {
+        var c = t.charAt(i)
+        if (c == "(" || c == "[" || c == "{") { i = jSkipGroup(t, i); prevOp = false }
+        else if (c == "\"" || c == "'") { i = jSkipQuote(t, i); prevOp = false }
+        else if ("+-*/%&|^<>=!?:~".indexOf(c) >= 0) {
+            if (!prevOp && i >= from) { return i }
+            prevOp = true
+            i++
+        } else {
+            prevOp = false
+            i++
+        }
+    }
+    return -1
+}
+// `c ? a : b` (JLS 15.25): the arms' common type when one arm's type is the
+// other's or a supertype of it, "" for any other pair (a numeric promotion, a
+// boxing, a least upper bound).
+function jCondTy(t) {
+    var q = jTopFind(t, "?")
+    var rest = t.substring(q + 1)
+    var depth = 0
+    var i = 0
+    var col = -1
+    while (i < rest.length && col < 0) {
+        var c = rest.charAt(i)
+        if (c == "(" || c == "[" || c == "{") { i = jSkipGroup(rest, i) }
+        else if (c == "\"" || c == "'") { i = jSkipQuote(rest, i) }
+        else {
+            if (c == "?") { depth++ }
+            if (c == ":") { if (depth == 0) { col = i } else { depth-- } }
+            i++
+        }
+    }
+    if (col < 0) { return "" }
+    var a = jStaticTy(rest.substring(0, col))
+    var b = jStaticTy(rest.substring(col + 1))
+    if (a == b) { return a }
+    var sa = jOvSTok(a)
+    var sb = jOvSTok(b)
+    if (sa == "" || sb == "" || jOvIsPrim(sa) || jOvIsPrim(sb)) { return "" }
+    if (sa == "null") { return b }
+    if (sb == "null") { return a }
+    if (jOvSAccepts(sb, sa, 1, jOvBare(b))) { return b }
+    if (jOvSAccepts(sa, sb, 1, jOvBare(a))) { return a }
+    return ""
+}
+// A top-level `+` chain is a String concatenation when any operand is a
+// String (JLS 15.18.1); any other top-level operator makes it unknown.
+function jConcatTy(t) {
+    var parts = []
+    var from = 0
+    var i = jTopOp(t, 1)
+    while (i >= 0) {
+        if (t.charAt(i) != "+" || t.charAt(i + 1) == "+" || t.charAt(i + 1) == "=") { return "" }
+        parts.push(t.substring(from, i))
+        from = i + 1
+        var nx = jTopOp(t.substring(from), 1)
+        i = nx < 0 ? -1 : from + nx
+    }
+    parts.push(t.substring(from))
+    var str = false
+    for (var k = 0; k < parts.length; k++) {
+        if (jStaticTy(parts[k]) == "String") { str = true }
+    }
+    return str ? "String" : ""
+}
+// A static type as the token a spec entry is matched with (jOvTok's
+// vocabulary), "" when it is not one this can judge: a type variable or a
+// library type. A declared interface is "#Name", which no class token takes.
+function jOvSTok(ty) {
+    if (ty == "null" || ty == "fn" || ty == "") { return ty }
+    var b = jOvBare(ty)
+    if (jOvIsArr(b)) {
+        var et = jOvSTok(b.substring(0, b.length - 2))
+        return (et == "" || et == "null" || et == "fn") ? "" : et + "[]"
+    }
+    if (jOvIsPrim(b) || jOvCore.indexOf("," + b + ",") >= 0) { return b }
+    if (jOvIfaces["$" + b] == true) { return "#" + b }
+    if (jOvCls["$" + b] != undefined) { return b }
+    return ""
+}
+// The primitive a box unboxes to (JLS 5.1.8), "" for anything else.
+function jOvUnbox(s) {
+    var p = ",Integer:int,Long:long,Double:double,Float:float,Short:short,Byte:byte,Character:char,Boolean:boolean,"
+    var at = p.indexOf("," + s + ":")
+    if (at < 0) { return "" }
+    var from = at + s.length + 2
+    return p.substring(from, p.indexOf(",", from))
+}
+// The java.lang and java.util interfaces a parameter is commonly declared as,
+// each with the java.lang types this subset models that implement it ("fn"
+// for a functional interface). jOvTok reads all of them as "*"; a name not
+// listed (a type variable, most often) takes any reference.
+var jLibIfaces = {
+    "$Comparable": ",String,Integer,Long,Double,Float,Short,Byte,Character,Boolean,",
+    "$CharSequence": ",String,",
+    "$Serializable": ",String,Integer,Long,Double,Float,Short,Byte,Character,Boolean,Number,",
+    "$Runnable": ",fn,", "$Comparator": ",fn,", "$Iterable": ",fn,", "$Callable": ",fn,",
+    "$Supplier": ",fn,", "$Consumer": ",fn,", "$BiConsumer": ",fn,", "$Function": ",fn,",
+    "$BiFunction": ",fn,", "$Predicate": ",fn,", "$BiPredicate": ",fn,",
+    "$UnaryOperator": ",fn,", "$BinaryOperator": ",fn,",
+    "$Collection": ",", "$List": ",", "$Map": ",", "$Set": ",", "$Iterator": ","
+}
+// Does a parameter of the library-or-variable type `raw` (token "*") take an
+// argument of static token s?
+function jOvLibAccepts(raw, s) {
+    var impl = jLibIfaces["$" + raw]
+    if (impl == undefined) { impl = jSamLib["$" + raw] != undefined ? ",fn," : undefined }
+    if (impl == undefined) { return true }
+    if (s == "fn" || jOvCore.indexOf("," + s + ",") >= 0) { return impl.indexOf("," + s + ",") >= 0 }
+    return !jOvIsArr(s)
+}
+// Can an argument of static token s be passed to a parameter of token t in
+// this phase (1: subtyping and widening, 2: also boxing and unboxing)? raw is
+// the parameter's declared type, which a "*" token is judged by.
+function jOvSAccepts(t, s, phase, raw) {
+    if (s == "null") { return !jOvIsPrim(t) }
+    if (jOvIsArr(t)) {
+        if (!jOvIsArr(s)) { return false }
+        var et = t.substring(0, t.length - 2)
+        var es = s.substring(0, s.length - 2)
+        if (jOvIsPrim(et) || jOvIsPrim(es)) { return et == es }
+        return jOvSAccepts(et, es, 1, raw.substring(0, raw.length - 2))
+    }
+    if (jOvIsArr(s)) { return t == "Object" || (t == "*" && jOvLibAccepts(raw, s)) }
+    if (s == "fn") { return t == "*" && jOvLibAccepts(raw, s) }
+    if (jOvIsPrim(t)) {
+        if (jOvIsPrim(s)) { return jOvWiden(s, t) }
+        if (phase < 2) { return false }
+        var u = jOvUnbox(s)
+        return u != "" && jOvWiden(u, t)
+    }
+    if (jOvIsPrim(s)) {
+        if (phase < 2) { return false }
+        if (t == "*") { return jOvLibAccepts(raw, jOvBox(s)) }
+        if (t == "Object") { return true }
+        if (t == "Number") { return s != "char" && s != "boolean" }
+        return t == jOvBox(s)
+    }
+    if (t == "*") { return jOvLibAccepts(raw, s) }
+    if (t == "Object" || t == s) { return true }
+    if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
+    if (s.charAt(0) == "#") { return false }
+    return jOvSub(s, t)
+}
+// jOvPick's three phases over static tokens; "" when no entry applies.
+function jOvPickStatic(spec, stoks) {
+    var ents = spec.split("|")
+    var n = stoks.length
+    for (var phase = 1; phase <= 3; phase++) {
+        for (var e = 0; e < ents.length; e++) {
+            var at = ents[e].indexOf("@")
+            var toks = at == 0 ? [] : ents[e].substring(0, at).split(",")
+            var raws = at == 0 ? [] : ents[e].substring(at + 1).split(",")
+            var p = toks.length
+            var isVar = p > 0 && toks[p - 1].indexOf("...") > 0
+            var ok = true
+            if (phase < 3) {
+                if (p != n) { continue }
+                for (var i = 0; i < p && ok; i++) {
+                    var t = (isVar && i == p - 1) ? toks[i].substring(0, toks[i].length - 3) + "[]" : toks[i]
+                    var r = (isVar && i == p - 1) ? raws[i].substring(0, raws[i].length - 3) + "[]" : raws[i]
+                    ok = jOvSAccepts(t, stoks[i], phase, r)
+                }
+            } else {
+                if (!isVar || n < p - 1) { continue }
+                for (var j = 0; j < n && ok; j++) {
+                    var tv = j < p - 1 ? toks[j] : toks[p - 1].substring(0, toks[p - 1].length - 3)
+                    var rv = j < p - 1 ? raws[j] : raws[p - 1].substring(0, raws[p - 1].length - 3)
+                    ok = jOvSAccepts(tv, stoks[j], 2, rv)
+                }
+            }
+            if (ok) { return ents[e].substring(at + 1) }
+        }
+    }
+    return ""
+}
+// The signature a call of `mname` on a receiver of static type rty resolves
+// to, "" when the call keeps the runtime pick: the receiver type is unknown
+// or not overloaded on mname, an argument type is unknown, or the
+// candidates' static-ness is not the receiver's (wantStatic: true for a
+// class name, false for an instance, null for an unqualified call).
+function jOvStaticSig(rty, mname, atys, wantStatic) {
+    if (atys == null || rty == "") { return "" }
+    var b = jOvBare(rty)
+    var cands = jOvCands(b, mname)
+    if (cands == null) { cands = jOvIfaceCands(b, mname) }
+    if (cands == null) { return "" }
+    if (wantStatic != null && cands[0].statik != wantStatic) { return "" }
+    var stoks = []
+    for (var i = 0; i < atys.length; i++) {
+        var s = jOvSTok(atys[i])
+        if (s == "") { return "" }
+        stoks.push(s)
+    }
+    return jOvPickStatic(jOvSpec(cands), stoks)
+}
+// The receiver of a member call, from the text before its `.name(`: a class
+// name is a static access ("static:" + name), anything else jStaticTy's type.
+function jRecvTy(t) {
+    var e = jIdentEnd(t, 0)
+    if (e == t.length && e > 0 && jTyOf(t) == undefined && jFieldTys["$" + t] == undefined && jIsClassName(t)) {
+        return "static:" + t
+    }
+    return jStaticTy(t)
+}
+// A `.name(args)` suffix record, with its text and its arguments' static types.
+function jMcallSfx(name, args, text) {
+    return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length)}
+}
+// Gives each `.m(...)` suffix of a member chain `rty`, its receiver's static
+// type: jRecvTy of the chain's text up to that suffix, measured by taking the
+// suffixes' own texts off its end. A suffix that has no text to measure makes
+// every receiver before it unknown.
+function jChainRecvTys(sfxs, text) {
+    var starts = []
+    for (var k = 0; k < sfxs.length; k++) { starts.push(-1) }
+    var end = text.length
+    for (var i = sfxs.length - 1; i >= 0; i--) {
+        var s = sfxs[i]
+        var st = ""
+        if (s.kind == "field") { st = "." + s.name } else if (s.stext != undefined) { st = s.stext } else { break }
+        if (end < st.length || text.substring(end - st.length, end) != st) { break }
+        end = end - st.length
+        starts[i] = end
+    }
+    for (var j = 0; j < sfxs.length; j++) {
+        if (sfxs[j].kind == "mcall") { sfxs[j].rty = starts[j] > 0 ? jRecvTy(text.substring(0, starts[j])) : "" }
+    }
+}
+// The static signature of a `.m(...)` suffix, resolved once the walk is
+// complete and cached on the record; "" keeps the runtime pick.
+function jSfxSig(s) {
+    if (s.sig == undefined) {
+        s.sig = (s.rty == undefined || s.rty == "") ? "" : jOvMemberSig(s.rty, s.name, s.atys)
+    }
+    return s.sig
+}
+// jOvStaticSig for a member call whose receiver jRecvTy read as rty.
+function jOvMemberSig(rty, mname, atys) {
+    if (rty.length > 7 && rty.substring(0, 7) == "static:") { return jOvStaticSig(rty.substring(7), mname, atys, true) }
+    return jOvStaticSig(rty, mname, atys, false)
 }

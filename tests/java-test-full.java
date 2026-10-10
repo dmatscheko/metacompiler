@@ -87,6 +87,7 @@ class Main {
         S41.run(); // SECTION-CALL 41
         S42.run(); // SECTION-CALL 42
         S43.run(); // SECTION-CALL 43
+        S44.run(); // SECTION-CALL 44
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2501,5 +2502,57 @@ class S43 {
         Main.check("hp2", pd(t[3]).equals("Infinity") && pd(t[4]).equals("4.9E-324") && pd(t[5]).equals("1.0000000000000002"));
         Main.check("hp3", ("" + Float.parseFloat(t[6])).equals("1.0000001") && ("" + Double.valueOf(t[6])).equals("1.0000000596046448"));
         Main.check("hp4", pd(t[7]).equals("For input string: \"0x1p\""));
+    }
+}
+
+// ===== SECTION 44: overloads resolve by STATIC type (JLS 15.12.2) =====
+//
+// javac chooses the overload from the arguments' static types: an Object
+// variable holding a String still calls f(Object), an Integer takes the
+// boxed overload ahead of a widening, and a cast or a conditional decides
+// the type. An enum's and an anonymous class' own overloads resolve the same
+// way, and so does a call through an interface. Every expected string is java
+// 24.0.2's output.
+class S44A { String who() { return "A"; } }
+class S44B extends S44A { String who() { return "B"; } }
+interface S44I { String q(Object o); String q(String s); }
+enum S44E {
+    X;
+    String p(Object o) { return "pO"; }
+    String p(String s) { return "pS"; }
+    String p(int i) { return "pI"; }
+}
+class S44 {
+    static String f(Object o) { return "O"; }
+    static String f(String s) { return "S"; }
+    static String g(long x) { return "long"; }
+    static String g(Integer x) { return "Integer"; }
+    static String h(Object o) { return "hO"; }
+    static String h(int i) { return "hI"; }
+    static String k(S44A a) { return "kA" + a.who(); }
+    static String k(S44B b) { return "kB" + b.who(); }
+    static String t(Runnable r) { return "tR"; }
+    static String t(Object o) { return "tO"; }
+    String m(Object o) { return "mO"; }
+    String m(String s) { return "mS"; }
+    static Object mk() { return "made"; }
+    static void run() {
+        Object o = "s";
+        String s = "s";
+        Integer boxed = 3;
+        int prim = 3;
+        S44A ab = new S44B();
+        S44B bb = new S44B();
+        Main.check("sov1", (f(o) + f(s) + f("l") + f((Object) "c") + f(null) + f(mk())).equals("OSSOSO"));
+        Main.check("sov2", (g(prim) + g(boxed) + h(boxed) + h(prim) + h(Integer.valueOf(5))).equals("longIntegerhOhIhO"));
+        Main.check("sov3", (k(ab) + k(bb) + k(new S44B()) + k((S44A) bb)).equals("kABkBBkBBkAB"));
+        Main.check("sov4", (new S44().m(o) + new S44().m(s) + f(o == null ? s : o) + f(s + 1)).equals("mOmSOS"));
+        Main.check("sov5", (S44E.X.p(o) + S44E.X.p(s) + S44E.X.p(7)).equals("pOpSpI"));
+        S44I anon = new S44I() {
+            public String q(Object x) { return "qO"; }
+            public String q(String x) { return "qS"; }
+        };
+        Runnable rn = () -> { };
+        Main.check("sov6", (anon.q(o) + anon.q(s) + t(rn) + t(() -> { }) + t("z")).equals("qOqStRtRtO"));
     }
 }
