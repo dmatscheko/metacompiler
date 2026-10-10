@@ -2069,8 +2069,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     globalScope["math"] = {
         // floor/ceil answer an INTEGER. An operand that already is one is handed back
         // untouched - Math.floor of math.maxinteger would round it.
-        floor: function(x) { if (isInt(x)) { return x } return Math.floor(numOf(x)) },
-        ceil: function(x) { if (isInt(x)) { return x } return 0 - Math.floor(0 - numOf(x)) },
+        floor: function(x) { if (isInt(x)) { return x } return Math.floor(mathArg(x, "floor")) },
+        ceil: function(x) { if (isInt(x)) { return x } return 0 - Math.floor(0 - mathArg(x, "ceil")) },
         abs: function(x) { return numOf(x) < 0 ? luaArith("-", 0, x) : x },
         // max/min keep the WINNING argument, so the subtype survives - and the tie
         // goes to the FIRST one, which is real Lua's rule (its loop replaces the

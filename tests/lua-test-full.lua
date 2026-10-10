@@ -1136,6 +1136,19 @@ function s27()
     -- Parenthesised, it is an ordinary call and the frame stays.
     ok, e = pcall(function() return (needs(nil)) end)
     check("err29", at(e, "nil arg"), 89)
+    -- Only a table can be indexed (a string reads its library): any other value
+    -- is an error on read, on write, and for #.
+    ok, e = pcall(function() return id(5).x end)
+    check("err30", at(e, "attempt to index a number value"), 93)
+    ok, e = pcall(function() id(true).x = 1 end)
+    check("err31", at(e, "attempt to index a boolean value"), 95)
+    ok, e = pcall(function() return #id(print) end)
+    check("err32", at(e, "attempt to get length of a function value"), 97)
+    ok, e = pcall(function() return id(5)() end)
+    check("err33", at(e, "attempt to call a number value"), 99)
+    check("err34", (pcall(math.floor, "x")), false)
+    ok, e = pcall(function() undefinedGlobal.x = 1 end)
+    check("err35", ok, false)
 end
 
 -- ===== SECTION 28: pairs hands a key back as the value that stored it =====

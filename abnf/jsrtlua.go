@@ -897,6 +897,9 @@ func init() {
 				}
 				n, ok := luToNum(v)
 				if !ok {
+					if up {
+						rt.luFail("bad argument to 'ceil' (number expected)")
+					}
 					rt.luFail("bad argument to 'floor' (number expected)")
 				}
 				if luIsInt(n) {

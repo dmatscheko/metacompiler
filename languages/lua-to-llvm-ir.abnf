@@ -1622,18 +1622,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // 0strlib (an ordinary Lua name cannot begin with a digit, so nothing can shadow it)
     // and only the string arm of the branch reads it - a table access pays one js_typeof
     // and one compare.
+    //
+    // Any other value that is not a table is a Lua error ("attempt to index a
+    // number value"), as in luaIndex; the table test comes first, so a table
+    // access still pays one compare.
     function emitMemberGet(b, v, kV) {
-        var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [v]), emitStr(b, "string")])
-        var strB = curF.NewBlock("")
+        var tyV = callExt(b, "js_typeof", [v])
         var objB = curF.NewBlock("")
+        var notObjB = curF.NewBlock("")
+        var strB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
-        b.NewCondBr(rawTruthy(b, isStr), strB, objB)
+        b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "object")])), objB, notObjB)
+        var ov = callExt(objB, "js_get", [v, kV])
+        objB.NewBr(joinB)
+        notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
         var libV = callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")])
         var sv = callExt(strB, "js_get", [libV, kV])
         strB.NewBr(joinB)
-        var ov = callExt(objB, "js_get", [v, kV])
-        objB.NewBr(joinB)
-        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(ov, objB)])}
+        luaIndexError(badB, v)
+        badB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(hUndef, badB)])}
+    }
+    function luaIndexError(b, v) {
+        callLua(b, "lua_raise", [callExt(b, "js_add", [callExt(b, "js_add", [emitStr(b, "attempt to index a "),
+            callExt(b, "js_lutname", [v])]), emitStr(b, " value")])])
     }
     // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...]. A chain that ends
     // in a call is built twice, the second time as the tail call makeReturn
@@ -1716,7 +1729,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
             return b
         }
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var o = callLua(b, "lua_getvar", [curScopeV, emitStr(b, ref.name)])
         // emitLuaStep, not a bare js_get: the leading steps of a target may be calls
         // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
         var afterCall = false
@@ -1729,8 +1742,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (afterCall) { o = callLua(b, "lua_first", [o]) }
         var lk = pathKeyV(b, ref.path[ref.path.length - 1])
         b = lk.b
-        callExt(b, "js_set", [o, lk.v, v])
-        return b
+        // Only a table takes a field; anything else is a Lua error, as in luaSetIndex.
+        var setB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [o]), emitStr(b, "object")])), setB, badB)
+        callExt(setB, "js_set", [o, lk.v, v])
+        setB.NewBr(doneB)
+        luaIndexError(badB, o)
+        badB.NewBr(doneB)
+        return doneB
     }
     // items interleave targets (objects) and value thunks (functions); all right hand
     // sides are evaluated first, then assigned positionally (missing values are nil).

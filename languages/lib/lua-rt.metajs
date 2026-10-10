@@ -966,7 +966,7 @@ function js_lutoint(v) {
 function luRound(v, up) {
     if (luIsInt(v)) { return v }
     var n = luToNum(v)
-    if (n === undefined) { luFail("bad argument to 'floor' (number expected)") }
+    if (n === undefined) { luFail("bad argument to '" + (up ? "ceil" : "floor") + "' (number expected)") }
     if (luIsInt(n)) { return n }
     var f = luNumOf(n)
     if (up) { f = Math.ceil(f) } else { f = Math.floor(f) }
