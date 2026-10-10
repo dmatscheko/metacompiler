@@ -78,6 +78,7 @@ class Main {
         S32.run(); // SECTION-CALL 32
         S33.run(); // SECTION-CALL 33
         S34.run(); // SECTION-CALL 34
+        S35.run(); // SECTION-CALL 35
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2087,5 +2088,53 @@ class S34 {
         catch (ArrayIndexOutOfBoundsException e) { }
         finally { r = r + "f2"; }
         return r;
+    }
+}
+
+// ===== SECTION 35: Integer.parseInt / Long.parseLong and NumberFormatException =====
+//
+// java.lang.Integer#parseInt accepts an optional sign and a digit run in the
+// radix and NOTHING else: no surrounding whitespace, no underscore, no 0x, and no
+// magnitude past the width's range. Every other input throws a catchable
+// NumberFormatException, which is an IllegalArgumentException. Every message is
+// java 24.0.2's own text.
+class S35 {
+    static String pi(String s) {
+        try { return "" + Integer.parseInt(s); } catch (NumberFormatException e) { return e.getMessage(); }
+    }
+    static String pl(String s) {
+        try { return "" + Long.parseLong(s); } catch (NumberFormatException e) { return e.getMessage(); }
+    }
+    static String pr(String s, int r) {
+        try { return "" + Integer.parseInt(s, r); } catch (NumberFormatException e) { return e.getMessage(); }
+    }
+    static String kind(String s) {
+        try { Integer.parseInt(s); return "none"; }
+        catch (IllegalArgumentException e) { return (e instanceof NumberFormatException) ? "NFE" : "IAE"; }
+    }
+    static void run() {
+        String[] s = { "12", "x", " 5", "", "-", "2147483647", "2147483648", "-2147483648",
+                       "-2147483649", "9223372036854775807", "9223372036854775808",
+                       "-9223372036854775808", "18446744073709551616", "+7", "1_0" };
+        Main.check("pa1", S35.pi(s[0]).equals("12"));
+        Main.check("pa2", S35.pi(s[1]).equals("For input string: \"x\""));
+        Main.check("pa3", S35.pi(s[2]).equals("For input string: \" 5\""));
+        Main.check("pa4", S35.pi(s[3]).equals("For input string: \"\""));
+        Main.check("pa5", S35.pi(s[4]).equals("For input string: \"-\""));
+        Main.check("pa6", S35.pi(s[5]).equals("2147483647"));
+        Main.check("pa7", S35.pi(s[6]).equals("For input string: \"2147483648\""));
+        Main.check("pa8", S35.pi(s[7]).equals("-2147483648"));
+        Main.check("pa9", S35.pi(s[8]).equals("For input string: \"-2147483649\""));
+        Main.check("pa10", S35.pl(s[6]).equals("2147483648"));
+        Main.check("pa11", S35.pl(s[9]).equals("9223372036854775807"));
+        Main.check("pa12", S35.pl(s[10]).equals("For input string: \"9223372036854775808\""));
+        Main.check("pa13", S35.pl(s[11]).equals("-9223372036854775808"));
+        Main.check("pa14", S35.pl(s[12]).equals("For input string: \"18446744073709551616\""));
+        Main.check("pa15", S35.pi(s[13]).equals("7") && S35.pi(s[14]).equals("For input string: \"1_0\""));
+        Main.check("pa16", S35.pr("ff", 16).equals("255") && S35.pr("-z", 36).equals("-35"));
+        Main.check("pa17", S35.pr("g", 16).equals("For input string: \"g\" under radix 16"));
+        Main.check("pa18", S35.pr("80000000", 16).equals("For input string: \"80000000\" under radix 16"));
+        Main.check("pa19", S35.kind(s[1]).equals("NFE") && S35.kind(s[0]).equals("none"));
+        Main.check("pa20", Integer.valueOf(s[0]) + Long.valueOf(s[9]) == -9223372036854775797L);
     }
 }

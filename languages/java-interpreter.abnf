@@ -2135,20 +2135,48 @@ HasStatic   = :script(~~
     // all, and Integer.MAX_VALUE + 1 has to wrap to Integer.MIN_VALUE rather than
     // grow. Byte / Short / Integer keep the plain-number or narrow-box shape their
     // own width implies; Long's two are 64 bit boxes.
-    // Integer.parseInt / Long.parseLong throw NumberFormatException on junk, which
-    // is the one behaviour of theirs programs actually depend on.
-    function jParseInt(s, w) {
-        var t = stripWs("" + s)
+    // Integer.parseInt / Long.parseLong and their radix overloads throw
+    // NumberFormatException on anything but an optional sign and a digit run in
+    // the radix: surrounding whitespace and a magnitude past the width's range
+    // included. The magnitude accumulates as two exact base-2^32 halves in plain
+    // doubles (lo * 36 + 35 < 2^53), so nothing wraps before the range check.
+    // java 24.0.2's message is `For input string: "x"`, plus ` under radix 16`
+    // off radix 10. Twin of jvParseInt in languages/lib/java-rt.metajs and
+    // abnf/jsrtjava.go.
+    function jParseInt(s, w, radixArg) {
+        var radix = radixArg === undefined ? 10 : jNum(radixArg)
+        var t = "" + s
+        var bad = "For input string: \"" + t + "\"" + (radix == 10 ? "" : " under radix " + radix)
         var neg = false
-        if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; t = t.substring(1) }
-        if (t.length == 0) { jThrowExc("NumberFormatException", "For input string: \"" + s + "\"") }
-        for (var i = 0; i < t.length; i++) {
-            var c = t.charCodeAt(i)
-            if (c < 48 || c > 57) { jThrowExc("NumberFormatException", "For input string: \"" + s + "\"") }
+        var i = 0
+        if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; i = 1 }
+        if (i >= t.length) { jThrowExc("NumberFormatException", bad) }
+        var hi = 0
+        var lo = 0
+        while (i < t.length) {
+            var d = jDigitOf(t.charCodeAt(i))
+            if (d >= radix) { jThrowExc("NumberFormatException", bad) }
+            lo = lo * radix + d
+            var carry = Math.floor(lo / 4294967296)
+            lo = lo - carry * 4294967296
+            hi = hi * radix + carry
+            if (hi >= 4294967296) { jThrowExc("NumberFormatException", bad) }
+            i++
         }
-        var p = i64FromStr(t)
+        var over = w == 64 ? (hi > 2147483648 || (hi == 2147483648 && (lo > 0 || !neg)))
+                           : (hi > 0 || lo > 2147483648 || (lo == 2147483648 && !neg))
+        if (over) { jThrowExc("NumberFormatException", bad) }
+        var p = i64Make(hi, lo)
         if (neg) { p = i64Neg(p) }
         return jNarrow(szMake(p, 64, jNoU), w)
+    }
+    // Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35; 99 for
+    // anything else, which no radix accepts.
+    function jDigitOf(c) {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 122) { return c - 87 }
+        if (c >= 65 && c <= 90) { return c - 55 }
+        return 99
     }
     // Integer.toHexString / Long.toHexString: the UNSIGNED hex
     // reading AT THE VALUE'S OWN WIDTH, lowercase, no leading zeros, so
@@ -2184,9 +2212,9 @@ HasStatic   = :script(~~
     }
     hostGlobals["Integer"] = {
         MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE: 32, BYTES: 4,
-        parseInt: function(s) { return jParseInt(s, 32) },
+        parseInt: function(s, radix) { return jParseInt(s, 32, radix) },
         toHexString: function(v) { return jToHex(v, 32) },
-        valueOf: function(v) { return jNarrow(v, 32) },
+        valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 32, radix) : jNarrow(v, 32) },
         toString: function(v) { return jstr(v) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) },
@@ -2196,9 +2224,9 @@ HasStatic   = :script(~~
         MAX_VALUE: szMake(i64Make(0x7fffffff, 0xffffffff), 64, false),
         MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false),
         SIZE: 64, BYTES: 8,
-        parseLong: function(s) { return jParseInt(s, 64) },
+        parseLong: function(s, radix) { return jParseInt(s, 64, radix) },
         toHexString: function(v) { return jToHex(v, 64) },
-        valueOf: function(v) { return jNarrow(v, 64) },
+        valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 64, radix) : jNarrow(v, 64) },
         toString: function(v) { return jstr(v) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) },

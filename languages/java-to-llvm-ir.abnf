@@ -4546,9 +4546,11 @@ HasStatic   = :script(~~
     var jUsesIdx = false        // any `a[i]`      -> AIOOBE + NullPointerException
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
+    var jUsesParse = false      // parseInt/parseLong/valueOf -> NumberFormatException
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring") { jUsesStrIdx = true }
+        if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "valueOf") { jUsesParse = true }
         return sfx
     }
     // These are needed whether or not the program names them, because the
@@ -4556,7 +4558,8 @@ HasStatic   = :script(~~
     // ArithmeticException on an integer divide by zero (JLS 15.17.2, js_jvarith),
     // ArrayIndexOutOfBoundsException on every out-of-range array access (JLS 10.4,
     // js_jvidx), StringIndexOutOfBoundsException from charAt/substring and
-    // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen).
+    // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen),
+    // NumberFormatException from Integer.parseInt and its kin.
     // js_jvexc registers each descriptor by NAME. ArithmeticException alone is
     // unconditional: an integer divide by zero is reachable from arithmetic the
     // emitter cannot see around; the others are gated on the flags above.
@@ -4579,6 +4582,10 @@ HasStatic   = :script(~~
         if (jUsesNewArr) {
             runtimeExc["$NegativeArraySizeException"] = true
             noteTypeUse("NegativeArraySizeException")
+        }
+        if (jUsesParse) {
+            runtimeExc["$NumberFormatException"] = true
+            noteTypeUse("NumberFormatException")
         }
     }
     var userDeclared = {}

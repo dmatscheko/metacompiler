@@ -101,21 +101,23 @@ func jvW(l, r interface{}) uint8 {
 // jvI is the int reading of an integral operand: the low 32 bits of its value.
 func jvI(rt *jsrt, v interface{}) int32 { return int32(giVal(rt, v)) }
 
-// The five runtime-raised exception class descriptors, each registered by NAME
+// The six runtime-raised exception class descriptors, each registered by NAME
 // by js_jvexc at module init, because the externs that raise them have no access
 // to the program's scope; without one the raise aborts the run instead of
 // throwing. One compile runs one program, so a package-level holder is
 // per-program and stays out of the shared jsrt struct.
 //
-// ArithmeticException is "/ by zero" (JLS 15.17.2). The other four: an
+// ArithmeticException is "/ by zero" (JLS 15.17.2). The other five: an
 // out-of-range array access, an out-of-range string index or range, a negative
-// array length and a null array reference. The layer-2 twin is the block of
-// jv*Cls slots in languages/lib/java-rt.metajs.
+// array length, a null array reference and a malformed parseInt / parseLong
+// string. The layer-2 twin is the block of jv*Cls slots in
+// languages/lib/java-rt.metajs.
 var jvArithExcCls *jsObject
 var jvAioobeCls *jsObject
 var jvSioobeCls *jsObject
 var jvNegArrCls *jsObject
 var jvNpeCls *jsObject
+var jvNfeCls *jsObject
 
 func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 	if cls == nil {
@@ -346,31 +348,75 @@ func jvNarrow(rt *jsrt, v interface{}, w uint8) interface{} {
 	return jsGInt{v: int64(int8(p)), w: 8, u: false}
 }
 
-// jvParseInt is Integer.parseInt / Long.parseLong: a decimal digit run with an
-// optional sign, and a NumberFormatException - here a plain abort, since the
-// message is the only part a program reads - on anything else.
-func (rt *jsrt) jvParseInt(s string, width uint8) interface{} {
-	t := strings.TrimSpace(s)
+// jvParseInt is Integer.parseInt / Long.parseLong and their radix overloads: an
+// optional sign and a digit run in the radix; anything else - whitespace and a
+// magnitude past the width's range included - throws NumberFormatException.
+// Twin of jParseInt in languages/java-interpreter.abnf and jvParseInt in
+// languages/lib/java-rt.metajs.
+func (rt *jsrt) jvParseInt(s string, width uint8, radix int) interface{} {
+	bad := "For input string: \"" + s + "\""
+	if radix != 10 {
+		bad += " under radix " + strconv.Itoa(radix)
+	}
+	t := s
 	neg := false
 	if strings.HasPrefix(t, "+") || strings.HasPrefix(t, "-") {
 		neg = t[0] == '-'
 		t = t[1:]
 	}
 	if t == "" {
-		rt.fail("java.lang.NumberFormatException: For input string: %q", s)
+		rt.jvThrowCls(jvNfeCls, bad)
+	}
+	limit := uint64(1)<<(width-1) - 1
+	if neg {
+		limit++
 	}
 	var acc uint64
 	for i := 0; i < len(t); i++ {
-		if t[i] < '0' || t[i] > '9' {
-			rt.fail("java.lang.NumberFormatException: For input string: %q", s)
+		d := jvDigitOf(t[i])
+		if d >= radix || acc > (limit-uint64(d))/uint64(radix) {
+			rt.jvThrowCls(jvNfeCls, bad)
 		}
-		acc = acc*10 + uint64(t[i]-'0')
+		acc = acc*uint64(radix) + uint64(d)
 	}
 	v := int64(acc)
 	if neg {
 		v = -v
 	}
 	return jvNarrow(rt, jvBox(v), width)
+}
+
+// jvDigitOf is Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35,
+// and 99 - which no radix accepts - for anything else.
+func jvDigitOf(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'z':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'Z':
+		return int(c-'A') + 10
+	}
+	return 99
+}
+
+// jvRadixArg is the optional radix argument of parseInt / valueOf: 10 if absent.
+func jvRadixArg(rt *jsrt, args []interface{}) int {
+	if len(args) < 2 {
+		return 10
+	}
+	return int(giVal(rt, args[1]))
+}
+
+// jvValueOfHost is Integer.valueOf / Long.valueOf: a String parses exactly as
+// parseInt / parseLong does, anything else narrows.
+func jvValueOfHost(width uint8) *hostFunc {
+	return jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if s, ok := argAt(args, 0).(string); ok {
+			return rt.jvParseInt(s, width, jvRadixArg(rt, args))
+		}
+		return jvNarrow(rt, argAt(args, 0), width)
+	})
 }
 
 // jvHexOf is Integer.toHexString / Long.toHexString: the UNSIGNED
@@ -446,8 +492,9 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", float64(math.MinInt32))
 		addCommon(32, 32, 4)
 		o.set("parseInt", jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32)
+			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32, jvRadixArg(rt, args))
 		}))
+		o.set("valueOf", jvValueOfHost(32))
 		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jvHexOf(rt, argAt(args, 0), 32)
 		}))
@@ -456,8 +503,9 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
 		addCommon(64, 64, 8)
 		o.set("parseLong", jsHostFunc("parseLong", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64)
+			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64, jvRadixArg(rt, args))
 		}))
+		o.set("valueOf", jvValueOfHost(64))
 		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jvHexOf(rt, argAt(args, 0), 64)
 		}))
@@ -538,6 +586,8 @@ func init() {
 				jvNegArrCls = o
 			case "NullPointerException":
 				jvNpeCls = o
+			case "NumberFormatException":
+				jvNfeCls = o
 			}
 			return 0
 		}

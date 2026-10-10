@@ -254,9 +254,10 @@ function jvNarrow(v, w) {
 // ============================================ the runtime-raised exceptions ==
 
 // The class descriptors js_jvexc hands over once each at module init, so that a
-// divide by zero, an out-of-range index, a negative array length and a null array
-// reference can THROW rather than abort. None of these externs has access to the
-// program's scope, which is exactly why the emitter passes the descriptors in.
+// divide by zero, an out-of-range index, a negative array length, a null array
+// reference and a malformed number string can THROW rather than abort. None of
+// these externs has access to the program's scope, which is exactly why the
+// emitter passes the descriptors in.
 // Separate module-level slots rather than a dictionary: the lookup is on a THROW
 // path or the array-index path, and in MetaJS a call is a scope frame.
 var jvArithExcCls = undefined
@@ -264,6 +265,7 @@ var jvAioobeCls = undefined
 var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
+var jvNfeCls = undefined
 
 function jvThrowCls(cls, msg) {
     if (cls === undefined) {
@@ -675,7 +677,8 @@ function jvBoxType(name) {
         o["MAX_VALUE"] = 2147483647
         o["MIN_VALUE"] = 0 - 2147483648
         jvAddCommon(o, 32, 32, 4)
-        o["parseInt"] = function(s) { return jvParseInt(jpStr(s), 32) }
+        o["parseInt"] = function(s, r) { return jvParseInt(jpStr(s), 32, jvRadixOf(r)) }
+        o["valueOf"] = function(v, r) { return jvValueOf(v, 32, r) }
         o["toHexString"] = function(v) { return jvToHex32(v) }
         return o
     }
@@ -683,7 +686,8 @@ function jvBoxType(name) {
         o["MAX_VALUE"] = rtjMaxL()
         o["MIN_VALUE"] = rtjMinL()
         jvAddCommon(o, 64, 64, 8)
-        o["parseLong"] = function(s) { return jvParseInt(jpStr(s), 64) }
+        o["parseLong"] = function(s, r) { return jvParseInt(jpStr(s), 64, jvRadixOf(r)) }
+        o["valueOf"] = function(v, r) { return jvValueOf(v, 64, r) }
         o["toHexString"] = function(v) { return jvToHex64(v) }
         return o
     }
@@ -816,41 +820,69 @@ function jvBoolOf(v) {
     return v === true
 }
 
-// Integer.parseInt / Long.parseLong: a decimal digit run with an optional sign,
-// and a NumberFormatException - here a plain abort, since the message is the only
-// part a program reads - on anything else.
-function jvParseInt(s, width) {
-    var t = s.trim()
+// Integer.parseInt / Long.parseLong and their radix overloads: an optional sign
+// and a digit run in the radix; anything else - whitespace and a magnitude past
+// the width's range included - throws NumberFormatException. The magnitude
+// accumulates as two exact base-2^32 halves in plain doubles (lo * 36 + 35 <
+// 2^53), so nothing wraps before the range check. Twin of jParseInt in
+// languages/java-interpreter.abnf and rt.jvParseInt in abnf/jsrtjava.go.
+function jvParseInt(s, width, radix) {
+    var bad = "For input string: \"" + s + "\""
+    if (radix != 10) { bad = bad + " under radix " + radix }
     var neg = false
     var i = 0
-    if (t.length > 0) {
-        var c0 = t.charAt(0)
+    if (s.length > 0) {
+        var c0 = s.charAt(0)
         if (c0 == "+") { i = 1 } else if (c0 == "-") {
             neg = true
             i = 1
         }
     }
-    if (i >= t.length) {
-        fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
-        return 0
-    }
-    var acc = jlZero()
-    var ten = jlFromNum(10)
-    while (i < t.length) {
-        var d = t.charCodeAt(i) - 48
-        if (d < 0) {
-            fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
-            return 0
-        }
-        if (d > 9) {
-            fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
-            return 0
-        }
-        acc = jlOp(0, jlOp(2, acc, ten), jlFromNum(d))
+    if (i >= s.length) { jvThrowCls(jvNfeCls, bad) }
+    var hi = 0
+    var lo = 0
+    while (i < s.length) {
+        var d = jvDigitOf(s.charCodeAt(i))
+        if (d >= radix) { jvThrowCls(jvNfeCls, bad) }
+        lo = lo * radix + d
+        var carry = Math.floor(lo / 4294967296)
+        lo = lo - carry * 4294967296
+        hi = hi * radix + carry
+        if (hi >= 4294967296) { jvThrowCls(jvNfeCls, bad) }
         i = i + 1
     }
+    var over = false
+    if (width == 64) {
+        over = hi > 2147483648 || (hi == 2147483648 && (lo > 0 || !neg))
+    } else {
+        over = hi > 0 || lo > 2147483648 || (lo == 2147483648 && !neg)
+    }
+    if (over) { jvThrowCls(jvNfeCls, bad) }
+    var acc = sintRaw(hi, lo, 64, false)
     if (neg) { acc = jlNeg(acc) }
     return jvNarrow(acc, width)
+}
+
+// Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35, and 99 -
+// which no radix accepts - for anything else.
+function jvDigitOf(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 122) { return c - 87 }
+    if (c >= 65 && c <= 90) { return c - 55 }
+    return 99
+}
+
+// The optional radix argument of parseInt / valueOf: 10 when absent.
+function jvRadixOf(r) {
+    if (r === undefined) { return 10 }
+    return rtjNum(r)
+}
+
+// Integer.valueOf / Long.valueOf: a String parses exactly as parseInt /
+// parseLong does, anything else narrows.
+function jvValueOf(v, width, r) {
+    if (typeof v == "string") { return jvParseInt(v, width, jvRadixOf(r)) }
+    return jvNarrow(v, width)
 }
 
 // ===================================================== the exports ==========
@@ -1028,6 +1060,7 @@ function js_jvexc(name, cls) {
     else if (name == "StringIndexOutOfBoundsException") { jvSioobeCls = cls }
     else if (name == "NegativeArraySizeException") { jvNegArrCls = cls }
     else if (name == "NullPointerException") { jvNpeCls = cls }
+    else if (name == "NumberFormatException") { jvNfeCls = cls }
     return undefined
 }
 
