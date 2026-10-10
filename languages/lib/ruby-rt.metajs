@@ -1523,6 +1523,7 @@ function rbStrInspect(s) {
             var hi = Math.trunc(c / 16)
             out = out + "\\u00" + "0123456789ABCDEF".charAt(hi) + "0123456789ABCDEF".charAt(c - hi * 16)
         }
+        else if (rbPairAt(s, i)) { out = out + s.substring(i, i + 2); i = i + 1 }
         else { out = out + s.charAt(i) }
         i = i + 1
     }
@@ -4645,11 +4646,23 @@ function rbStrStrip(s) {
 function rbIsSpaceCh(c) {
     return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\u000c" || c == "\u000b" || c == "\u0000"
 }
+// One element per CHARACTER: a surrogate pair is taken whole, as one substring -
+// rebuilt from its two halves it would be two U+FFFD.
 function rbStrChars(s) {
     var out = []
     var i = 0
-    while (i < s.length) { out.push(s.charAt(i)); i = i + 1 }
+    while (i < s.length) {
+        var n = rbPairAt(s, i) ? 2 : 1
+        out.push(s.substring(i, i + n))
+        i = i + n
+    }
     return out
+}
+function rbPairAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c < 55296 || c > 56319 || i + 1 >= s.length) { return false }
+    var d = s.charCodeAt(i + 1)
+    return d >= 56320 && d <= 57343
 }
 function rbStrSplit(s, sep) {
     var out = []
@@ -6227,14 +6240,14 @@ function rbMethod(target, name, args) {
         var sn = target["s"]
         if (name == "to_s" || name == "id2name" || name == "name") { return sn }
         if (name == "to_sym") { return target }
-        if (name == "length" || name == "size") { return sn.length }
+        if (name == "length" || name == "size") { return rbCharCount(sn) }
         if (name == "inspect") { return ":" + sn }
         if (name == "upcase") { return rbSym(rbUpper(sn)) }
         if (name == "downcase") { return rbSym(rbLower(sn)) }
         fail("unknown Symbol method: " + name)
     }
     if (typeof target == "string") {
-        if (name == "length" || name == "size") { return target.length }
+        if (name == "length" || name == "size") { return rbCharCount(target) }
         if (name == "to_s") { return target }
         // The QUOTED form, for `p` of a string or any .inspect reaching a String.
         if (name == "inspect") { return rbInspect(target) }
@@ -6592,9 +6605,10 @@ function js_pyget(c, k) {
 // List element (negative wraps) or dict entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (knobs rtkIsDict and rtkDictFind).
 
-// len() for strings, lists and dicts. Ruby never reaches the Python set arm.
+// len() for strings, lists and dicts. Ruby never reaches the Python set arm. A
+// String's length is in CHARACTERS: a surrogate pair is one.
 function js_pylen(v) {
-    if (typeof v == "string") { return v.length }
+    if (typeof v == "string") { return rbCharCount(v) }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
     // An Enumerator's length is its element count: a bare `.size' / `.length' is

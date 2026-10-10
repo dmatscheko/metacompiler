@@ -9349,7 +9349,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "to_sym":
 			return o
 		case "length", "size":
-			return float64(rt.strLen(o.s))
+			return float64(rubyCharCount(o.s))
 		case "inspect":
 			return ":" + o.s
 		case "upcase":
@@ -9361,7 +9361,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case string:
 		switch name {
 		case "length", "size":
-			return float64(rt.strLen(o))
+			// CHARACTERS, as js_pylen counts them for the lowered `.length`.
+			return float64(rubyCharCount(o))
 		case "to_s":
 			return o
 		case "inspect":
@@ -9451,10 +9452,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "strip":
 			return strings.Trim(o, " \t\n\r\f\v\x00")
 		case "chars":
-			n := rt.strLen(o)
+			// One element per CHARACTER, so a surrogate pair stays whole.
 			out := &jsArray{}
-			for i := 0; i < n; i++ {
-				out.elems = append(out.elems, rt.strAt(o, i))
+			for _, r := range o {
+				out.elems = append(out.elems, string(r))
 			}
 			return out
 		case "split":

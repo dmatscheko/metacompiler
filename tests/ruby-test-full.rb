@@ -3087,6 +3087,18 @@ def s59
   check("bg59a", S59T == [1, "s59", 2, 3] && s59b == [1, "in", 2, 3])
 end
 
+# ===== SECTION 60: an astral character is one character =====
+# "\u{1F600}" is ONE character (two UTF-16 units, four bytes): #length and #size
+# count it once, #chars keeps it whole and #inspect prints it. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s60
+  s = ["a\u{1F600}b"][0]
+  check("as60a", s.length == 3 && s.size == 3 && "\u{1F600}".length == 1 && s.send(:length) == 3 &&
+                 s.bytesize == 6)
+  check("as60b", s.chars == ["a", "\u{1F600}", "b"] && s.chars.join("|") == "a|\u{1F600}|b")
+  check("as60c", s.inspect == "\"a\u{1F600}b\"" && [s].inspect == "[\"a\u{1F600}b\"]")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3108,5 +3120,6 @@ s56() # SECTION-CALL 56
 s57() # SECTION-CALL 57
 s58() # SECTION-CALL 58
 s59() # SECTION-CALL 59
+s60() # SECTION-CALL 60
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
