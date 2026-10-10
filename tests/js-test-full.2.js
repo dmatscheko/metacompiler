@@ -978,6 +978,18 @@ function s42() {
         if (typeof rv === "number" && rv >= 0 && rv < 1) { rok = rok + 1 }
     }
     check("math41", typeof Math.random === "function" && rok === 50)
+
+    // ECMAScript's pow is not C99's: a NaN exponent is NaN even for base 1, and
+    // (+-1) ** (+-Infinity) is NaN where C says 1. '**', '**=' and Math.pow (also as a
+    // detached value) answer alike. Values read off node 24.
+    var pw = [1, -1, NaN, Infinity, -Infinity, 0, 2]
+    var pdet = Math.pow
+    function n42(x) { return x !== x }
+    check("math42", n42(Math.pow(pw[0], pw[2])) && n42(Math.pow(pw[0], pw[3])) && n42(Math.pow(pw[1], pw[4]))
+        && n42(pdet(pw[1], pw[3])) && n42(pw[0] ** pw[2]) && n42(pw[1] ** pw[3]) && n42(pw[0] ** pw[4]))
+    var pe = pw[0]
+    pe **= pw[2]
+    check("math43", n42(pe) && Math.pow(pw[2], pw[5]) === 1 && pw[1] ** pw[6] === 1 && Math.pow(pw[0], pw[6]) === 1)
 }
 
 // ===== SECTION 43: three uncatchable aborts become catchable throws =====

@@ -4008,14 +4008,30 @@ function js_jsushr(a, b) {
     return a >>> b
 }
 
-// '**' has no shared external: it lowers to Math.pow, which only has doubles.
-// The double arm below IS Math.pow over ToNumber.
+// '**' has no shared external. Its double arm is JavaScript's Math.pow over ToNumber.
 function js_jspow(a, b) {
     if (jbStrict) {
         var r = jbBinary("**", a, b)
         if (r !== jbMiss) { return r }
     }
-    return Math.pow(a - 0, b - 0)
+    return jvPow(a - 0, b - 0)
+}
+// ECMAScript's Number::exponentiate over the floor's C99 pow: a NaN exponent is NaN
+// even for base 1, and (+-1) ** (+-Infinity) is NaN. y - y is NaN exactly for an
+// infinite y here. Twin of jsPowD in abnf/jsrtjsbig.go.
+function jvPow(x, y) {
+    if (y != y) { return y }
+    if ((x == 1 || x == -1) && y - y != 0) { return y - y }
+    return Math.pow(x, y)
+}
+// The program's Math global: the shared Math object's members with pow replaced by
+// jvPow. Twin of js_jsmath in abnf/jsrtjsbig.go.
+function js_jsmath(src) {
+    var o = {}
+    var ks = keysOf(src)
+    for (var i = 0; i < ks.length; i++) { o[ks[i]] = src[ks[i]] }
+    o["pow"] = function (x, y) { return jvPow(x - 0, y - 0) }
+    return o
 }
 
 // ##########################################################################

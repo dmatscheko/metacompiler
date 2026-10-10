@@ -375,15 +375,31 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 		return baseJSAdd(a)
 	}
 
-	// '**' has no shared external: it lowers to Math.pow, which only has doubles. The
-	// double arm below IS Math.pow (math.Pow over ToNumber).
+	// '**' has no shared external. Its double arm is JavaScript's Math.pow (jsPowD over
+	// ToNumber), the same function js_jsmath installs as the program's Math.pow.
 	m["js_jspow"] = func(a []uint64) uint64 {
 		if strict {
 			if r, ok := rt.bigBinary("**", u(a[0]), u(a[1])); ok {
 				return w(r)
 			}
 		}
-		return rt.wrapNum(math.Pow(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
+		return rt.wrapNum(jsPowD(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
+	}
+	// The program's Math global: the shared Math object's members, copied in order,
+	// with pow replaced by the ECMAScript one. The shared object stays C99's pow for the
+	// other languages. Twins: js_jsmath in languages/lib/js-rt.metajs, jsMathObj in
+	// both *-interpreter.abnf start scripts.
+	m["js_jsmath"] = func(a []uint64) uint64 {
+		o := newJSObject()
+		if src, ok := u(a[0]).(*jsObject); ok {
+			for _, k := range src.keys {
+				o.set(k, src.props[k])
+			}
+		}
+		o.set("pow", jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsPowD(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+		}))
+		return w(o)
 	}
 
 	// ~x on a BigInt is exactly -x - 1 in arbitrary precision, so it gets an external
@@ -510,4 +526,15 @@ func (rt *jsrt) jsvBigIntMethod(x *big.Int, name string, args []interface{}) (in
 		return bigWrap(x), true
 	}
 	return nil, false
+}
+
+// jsPowD is ECMAScript's Number::exponentiate. It differs from C99 pow (math.Pow) in
+// two places only: a NaN exponent gives NaN even for base 1, and (+-1) ** (+-Infinity)
+// is NaN, not 1. Twins: jvPow in languages/lib/js-rt.metajs, jsPow in both
+// *-interpreter.abnf start scripts.
+func jsPowD(x, y float64) float64 {
+	if math.IsNaN(y) || (math.IsInf(y, 0) && math.Abs(x) == 1) {
+		return math.NaN()
+	}
+	return math.Pow(x, y)
 }

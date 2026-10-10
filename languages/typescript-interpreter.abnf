@@ -3333,11 +3333,28 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     var jsGlobalObj = {"__keys": []}
 
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsPow(x, y) {
+        if (y != y) { return y }
+        if ((x == 1 || x == -1) && y - y != 0) { return y - y }
+        return Math.pow(x, y)
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsMathObj = {}
+    var jsMathNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "cbrt",
+        "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log",
+        "log1p", "log10", "log2", "max", "min", "random", "round", "sign", "sin", "sinh", "sqrt",
+        "tan", "tanh", "trunc", "E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2"]
+    for (var jmi = 0; jmi < jsMathNames.length; jmi++) {
+        if (Math[jsMathNames[jmi]] !== undefined) { jsMathObj[jsMathNames[jmi]] = Math[jsMathNames[jmi]] }
+    }
+    jsMathObj["pow"] = jsPow
+
     var hostGlobals = {
         // println / print render every argument with JAVASCRIPT's ToString first (the
         // shared host functions print Go's %v). js_jsprintfn is the compiler twin.
         "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
-        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": jsStringFn,
+        "parseInt": parseInt, "parseFloat": parseFloat, "Math": jsMathObj, "String": jsStringFn,
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
         "BigInt": jsBigIntFn, "Number": jsNumberFn,
@@ -5048,7 +5065,7 @@ NotFuncHead = :script(~~
                 var l = anytype
                 l = items[i]()
                 if (isBigInt(l) || isBigInt(v)) { v = biBinOp("**", l, v).v }
-                else { v = Math.pow(l, v) }
+                else { v = jsPow(l, v) }
             }
             return v
         }
@@ -7158,7 +7175,7 @@ NotFuncHead = :script(~~
         if (op == "*=") return a * b
         if (op == "/=") return a / b
         if (op == "%=") return a % b
-        if (op == "**=") return Math.pow(a, b)
+        if (op == "**=") return jsPow(a, b)
         if (op == "<<=") return a << b
         if (op == ">>=") return a >> b
         if (op == ">>>=") return a >>> b
