@@ -755,7 +755,10 @@ CallTgtAhead = :script(~~
 // and property name, a variable-variable head the THUNK that computes the name, and
 // every reader below asks refNameV for the name - so one code path serves all three.
 // The static form must be tried FIRST or PlainHead never sees it.
-TargetHead  = StaticHead | PlainHead | VarVarHead ;
+TargetHead  = StaticHead | GlobalsHead | PlainHead | VarVarHead ;
+// $GLOBALS[e] = v: a variable of the MAIN frame, whatever frame runs (refNameV).
+GlobalsHead <~~ push({gkey: pop()}) ~~>
+            = "$GLOBALS" KwEnd "[" Expression "]" ;
 // self::$made = e / C::$made++ : a static property as an assignment target. The head
 // carries the base thunk and the property name; makeAssign and incDec route those to
 // js_phsget / js_phsset instead of the scope.
@@ -954,7 +957,10 @@ Primary     = "(" Expression ")"
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | VarRef | VarVarRef | StaticExpr | Call | ConstRef ;
+            | GlobalsRead | VarRef | VarVarRef | StaticExpr | Call | ConstRef ;
+// $GLOBALS[e] as a value: the main frame's variable, read without creating it.
+GlobalsRead <~~ push(makeGlobalsRead(pop())) ~~>
+            = "$GLOBALS" KwEnd "[" Expression "]" ;
 
 // include / require (and _once): a file-inclusion expression. A single-quoted string
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
@@ -1520,7 +1526,19 @@ KwInstanceof = "instanceof" KwEnd ;
     function rawVar(b, name) { return rawVarV(b, emitStr(b, name)) }
     // The NAME a target denotes, as a handle: a literal for '$x', and the run-time
     // string "$" . (name expression) for the variable-variable form '$$x' / '${e}'.
+    //
+    // A $GLOBALS[e] target names a variable of the main frame. It is bound here, for
+    // every reader below, as a hidden local alias of that variable's storage cell -
+    // exactly what `global $x` binds - so a write through the alias reaches the main
+    // frame. Twin of the gkey refs in php-interpreter.abnf.
     function refNameV(b, ref) {
+        if (ref.gkey != undefined) {
+            var g = globalsNameV(b, ref)
+            var rc = varCellIn(g.b, globalsFrameV(g.b), g.v)
+            var alias = callExt(rc.b, "js_phcat", [emitStr(rc.b, "\x00G"), g.v])
+            callExt(rc.b, "js_scope_decl", [curScopeV, alias, rc.v])
+            return {b: rc.b, v: alias}
+        }
         if (ref.nameT == null || ref.nameT == undefined) { return {b: b, v: emitStr(b, ref.name)} }
         var r = ref.nameT(b)
         return {b: r.b, v: callExt(r.b, "js_phcat", [emitStr(r.b, "$"), callExt(r.b, "js_phstr", [r.v])])}
@@ -1531,9 +1549,26 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return function(b) { return readVarV(b, emitStr(b, name)) }
     }
-    function readVarV(b, nameV) {
-        var raw = rawVarV(b, nameV)
+    function readVarV(b, nameV) { return readRawV(b, rawVarV(b, nameV)) }
+    function readRawV(b, raw) {
         return phDeref(b, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, raw, hUndef), hNull, raw))
+    }
+    // The main frame, from any frame (buildMain declares it under this name), and the
+    // name and raw slot a $GLOBALS[e] ref denotes there - read without creating it.
+    function globalsFrameV(b) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "\x00globals")]) }
+    function globalsNameV(b, ref) {
+        var r = ref.gkey(b)
+        return {b: r.b, v: callExt(r.b, "js_phcat", [emitStr(r.b, "$"), callExt(r.b, "js_phstr", [r.v])])}
+    }
+    function globalsRawV(b, ref) {
+        var g = globalsNameV(b, ref)
+        return {b: g.b, v: callExt(g.b, "js_scope_own", [globalsFrameV(g.b), g.v])}
+    }
+    function makeGlobalsRead(t) {
+        return function(b) {
+            var g = globalsRawV(b, {gkey: t})
+            return readRawV(g.b, g.v)
+        }
     }
     // Write a variable, THROUGH its cell when the slot holds one. Returns the block to
     // continue in, since the reference form branches.
@@ -1602,7 +1637,11 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var rc = targetCell(b, rhs)
             b = rc.b
-            if (lhs.path.length == 0) {
+            if (lhs.path.length == 0 && lhs.gkey != undefined) {
+                var gn = globalsNameV(b, lhs)
+                b = gn.b
+                callExt(b, "js_scope_decl", [globalsFrameV(b), gn.v, rc.v])
+            } else if (lhs.path.length == 0) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lhs.name), rc.v])
             } else {
                 var p = emitRefPathV(b, lhs, true)
@@ -1658,7 +1697,7 @@ KwInstanceof = "instanceof" KwEnd ;
     function makeGlobal(names) {
         noteRef()
         return function(b) {
-            var gV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "\x00globals")])
+            var gV = globalsFrameV(b)
             for (var i = 0; i < names.length; i++) {
                 var rc = varCellIn(b, gV, emitStr(b, names[i]))
                 b = rc.b
@@ -2358,9 +2397,15 @@ KwInstanceof = "instanceof" KwEnd ;
     // target and goes through the path walk.
     function emitFeBind(b, ref, v) {
         if (ref == null) { return b }
-        if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null) {
+        if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null
+            && ref.gkey == undefined) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ref.name), v])
             return b
+        }
+        // A computed name ($$n, $GLOBALS[e]) has no path to walk.
+        if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined) {
+            var rn = refNameV(b, ref)
+            return setVarV(rn.b, rn.v, v)
         }
         var p = emitRefPathV(b, ref, true)
         return writeRefSlot(p.b, p, v)
@@ -3484,6 +3529,11 @@ KwInstanceof = "instanceof" KwEnd ;
                 b = rs3.b
                 return {b: b, v: isSetHandle(b, callExt(b, "js_phsget", [rb.v, rs3.v]))}
             }
+            if (ref.gkey != undefined) {
+                var gr = globalsRawV(b, ref)
+                var gd = phDeref(gr.b, gr.v)
+                return {b: gd.b, v: isSetHandle(gd.b, gd.v)}
+            }
             var rn2 = refNameV(b, ref)
             var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
             return {b: rd.b, v: isSetHandle(rd.b, rd.v)}
@@ -3522,6 +3572,9 @@ KwInstanceof = "instanceof" KwEnd ;
                     var rb = ref.sbase(b)
                     var rs = sNameV(rb.b, ref)
                     r0 = {b: rs.b, v: callExt(rs.b, "js_phsget", [rb.v, rs.v])}
+                } else if (ref.gkey != undefined) {
+                    var gr = globalsRawV(b, ref)
+                    r0 = readRawV(gr.b, gr.v)
                 } else {
                     var rn = refNameV(b, ref)
                     r0 = readVarV(rn.b, rn.v)
@@ -3551,7 +3604,11 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
-                if (ref.path.length == 0) {
+                if (ref.path.length == 0 && ref.gkey != undefined) {
+                    var gn = globalsNameV(b, ref)
+                    b = gn.b
+                    callExt(b, "js_scope_decl", [globalsFrameV(b), gn.v, hUndef])
+                } else if (ref.path.length == 0) {
                     if (ref.sbase == undefined) {
                         var rn3 = refNameV(b, ref)
                         b = rn3.b
@@ -4038,6 +4095,11 @@ KwInstanceof = "instanceof" KwEnd ;
             return {name: null, nameT: null, path: items.slice(1), sbase: undefined, sname: undefined,
                     snameT: null, headT: head.headT}
         }
+        if (head.gkey != undefined) {
+            noteRef()
+            return {name: null, nameT: null, gkey: head.gkey, path: items.slice(1), sbase: undefined,
+                    sname: undefined, snameT: null, headT: undefined}
+        }
         return {name: head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
                 path: items.slice(1), sbase: head.sbase, sname: head.sname,
                 snameT: head.snameT == undefined ? null : head.snameT, headT: undefined}
@@ -4054,6 +4116,10 @@ KwInstanceof = "instanceof" KwEnd ;
             var rb = ref.sbase(b)
             var rs4 = sNameV(rb.b, ref)
             return {b: rs4.b, v: callExt(rs4.b, "js_phsget", [rb.v, rs4.v])}
+        }
+        if (!viv && ref.gkey != undefined) {
+            var gr = globalsRawV(b, ref)
+            return phDeref(gr.b, gr.v)
         }
         var rn = refNameV(b, ref)
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
@@ -4971,7 +5037,7 @@ KwInstanceof = "instanceof" KwEnd ;
         noteSig(fn.name, fn)
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
-            var gV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "\x00globals")])
+            var gV = globalsFrameV(b)
             callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), closureV(b, idx, gV)])
             return b
         }

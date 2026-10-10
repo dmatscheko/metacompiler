@@ -720,7 +720,10 @@ CallTgtAhead = :script(~~
 // sits alongside a plain variable. It must be tried FIRST: PlainHead would otherwise
 // never see it, but VarVarHead / PlainHead both start at '$' and a bare class name
 // is not a target at all, so the ordering only matters against a later ConstRef.
-TargetHead  = StaticHead | PlainHead | VarVarHead ;
+TargetHead  = StaticHead | GlobalsHead | PlainHead | VarVarHead ;
+// $GLOBALS[e] = v: a variable of the MAIN frame, whatever frame runs (makeTargetRef).
+GlobalsHead <~~ push({gkey: pop()}) ~~>
+            = "$GLOBALS" KwEnd "[" Expression "]" ;
 StaticHead  <~~ push({staticvar: takeAll()}) ~~>
             = StaticBase "::" ( StaticProp | StaticDynProp ) ;
 PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
@@ -922,7 +925,10 @@ Primary     = "(" Expression ")"
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | IssetExpr | EmptyTgt | EmptyExpr | VarVar | VarRef | StaticExpr | Call | ConstRef ;
+            | IssetExpr | EmptyTgt | EmptyExpr | GlobalsRead | VarVar | VarRef | StaticExpr | Call | ConstRef ;
+// $GLOBALS[e] as a value: the main frame's variable, read without creating it.
+GlobalsRead <~~ push(makeGlobalsRead(pop())) ~~>
+            = "$GLOBALS" KwEnd "[" Expression "]" ;
 
 // isset()/empty() are language constructs, not calls: isset() must NOT evaluate a
 // missing variable into an error, and empty() applies PHP truthiness.
@@ -2408,6 +2414,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A CALL head has no variable to probe: the call runs and the walk starts
         // from what it returned.
         if (ref.headT != null && ref.headT != undefined) { o = ref.headT() }
+        else if (ref.gkey != undefined) { o = globalsVal(ref.gkey) }
         // A STATIC PROPERTY head: isset(C::$sp) asks whether the property exists and
         // is not null. staticCell raises for one that was never declared, which is
         // exactly the "false" answer here, so the probe catches it.
@@ -2479,6 +2486,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
                 var nm = refName(ref)
+                if (ref.path.length == 0 && ref.gkey != undefined) {
+                    var gn = globalsName(ref.gkey)
+                    if (hasOwn(globalScope, gn)) { scopePut(globalScope, gn, UNSET) }
+                    continue
+                }
                 if (ref.path.length == 0) {
                     if (hasOwn(scopes[scopes.length - 1], nm)) { scopePut(scopes[scopes.length - 1], nm, UNSET) }
                     continue
@@ -3669,11 +3681,30 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (head.staticvar != undefined) {
             return {name: null, nameT: null, sref: makeStaticRef(head.staticvar), headT: null, path: items.slice(1)}
         }
+        if (head.gkey != undefined) {
+            return {name: null, nameT: null, sref: globalsCell(head.gkey), gkey: head.gkey, headT: null, path: items.slice(1)}
+        }
         return {name: head.var == undefined ? null : head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
                 sref: null, headT: null, path: items.slice(1)}
     }
     // $$name resolves its name on every use, so it cannot be baked in at build time.
     function refName(ref) { return ref.nameT == null ? ref.name : "$" + phpStr(ref.nameT()) }
+    // $GLOBALS[e] names a variable of the MAIN frame (globalScope) from any frame. As a
+    // target it is that variable's storage cell - an sref head, created on demand the
+    // way `global $x` creates it - and isset, unset and `= &` reach the frame directly.
+    // As a value it is read without being created. Twin of the gkey refs in
+    // php-to-llvm-ir.abnf.
+    function globalsName(t) { return "$" + phpStr(t()) }
+    function globalsVal(t) {
+        var nm = globalsName(t)
+        if (!hasOwn(globalScope, nm)) { return null }
+        var v = anytype
+        v = globalScope[nm]
+        if (v === UNSET) { return null }
+        return deref(v)
+    }
+    function makeGlobalsRead(t) { return function() { return globalsVal(t) } }
+    function globalsCell(t) { return function() { return varCellIn(globalScope, globalsName(t)) } }
     function phpSet(name, value) {
         var fr = scopes[scopes.length - 1]
         if (hasOwn(fr, name)) {
@@ -3973,6 +4004,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var cell = targetCell(rhs)
             if (cell == null) { fail("cannot take a reference to this expression") }
+            if (lhs.path.length == 0 && lhs.gkey != undefined) { scopePut(globalScope, globalsName(lhs.gkey), cell); return cell.v }
             if (lhs.path.length == 0) { scopePut(scopes[scopes.length - 1], refName(lhs), cell); return cell.v }
             var p = resolveRefPhp(lhs)
             if (p.last.append === true) { arrPush(p.obj, null); p.obj.vals[p.obj.keys.length - 1] = cell }

@@ -22,7 +22,7 @@
 // namespaces and use-imports (single-file harness), declare(strict_types=1)
 // (it would change the semantics of every section), the standard library
 // beyond what the feature-matrix file already uses (strlen, count, ...),
-// define(), superglobals, include/require/eval, fibers, Generator methods
+// define(), superglobals other than $GLOBALS, include/require/eval, fibers, Generator methods
 // (->send() and friends live on the engine's Generator class), references
 // returned from functions, reflection (attributes are applied, never read
 // back), and the "${var}" interpolation form (deprecated since PHP 8.2).
@@ -1346,6 +1346,43 @@ function s35() {
     check("nf2", s35cond() === "c" && s35fromMethod() === "m");
 }
 
+// ===== SECTION 36: $GLOBALS =====
+// $GLOBALS[e] is the main program's variable named e, read and written from any
+// frame: a write creates it, a compound assignment and ++ go through it, an index
+// path below it vivifies, isset/empty/unset see the main frame, and a by-reference
+// parameter binds it. A function's own variable of the same name is untouched.
+$s36a = 1;
+$s36arr = [1, 2];
+function s36set() {
+    $GLOBALS['s36a'] = $GLOBALS['s36a'] + 10;
+    $GLOBALS['s36new'] = "n";
+    $GLOBALS['s36arr'][] = 3;
+    $k = 's36a';
+    $GLOBALS[$k]++;
+    $GLOBALS['s36cat'] .= "x";
+    $GLOBALS['s36deep']['k']['j'] = 7;
+    return $GLOBALS['s36arr'][0] . "|" . count($GLOBALS['s36arr']);
+}
+function s36probe() {
+    $r = isset($GLOBALS['s36a']) ? "set" : "unset";
+    $r .= isset($GLOBALS['s36none']) ? ",set" : ",unset";
+    $r .= empty($GLOBALS['s36none']) ? ",empty" : ",full";
+    unset($GLOBALS['s36new']);
+    return $r;
+}
+function s36inc(&$v) { $v = $v + 1; }
+function s36byref() { s36inc($GLOBALS['s36a']); }
+function s36local() { $s36a = "local"; return $s36a . "/" . $GLOBALS['s36a']; }
+function s36() {
+    global $s36a, $s36arr, $s36new, $s36cat, $s36deep;
+    check("gl1", s36set() === "1|3");
+    check("gl2", $s36a === 12 && $s36new === "n" && $s36cat === "x" && count($s36arr) === 3);
+    check("gl3", $s36deep['k']['j'] === 7);
+    check("gl4", s36probe() === "set,unset,empty" && !isset($GLOBALS['s36new']));
+    s36byref();
+    check("gl5", $s36a === 13 && s36local() === "local/13" && "{$GLOBALS['s36a']}" === "13");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1387,6 +1424,7 @@ function main() {
     s33(); // SECTION-CALL 33
     s34(); // SECTION-CALL 34
     s35(); // SECTION-CALL 35
+    s36(); // SECTION-CALL 36
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
