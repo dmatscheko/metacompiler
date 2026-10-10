@@ -3196,6 +3196,38 @@ def s51():
     xs[True] = 7
     check("item6", got[-1] == 3 and xs == [1, 7])
 
+# ===== SECTION 52: an augmented assignment walks its target once =====
+# `f().k += v` calls f once, and `a[g()] += v()` evaluates the container, then
+# the subscript, then reads, then the right side, then writes.
+def s52():
+    log = []
+    class C:
+        pass
+    c = C()
+    c.k = 1
+    a = [1, 2, 3, 4]
+    def f():
+        log.append("f")
+        return c
+    def g(i):
+        log.append("g" + str(i))
+        return i
+    def v():
+        log.append("v")
+        return 5
+    class K:
+        def __getitem__(self, k):
+            log.append("get" + str(k))
+            return 10
+        def __setitem__(self, k, x):
+            log.append("set" + str(k) + "=" + str(x))
+    f().k += v()
+    a[g(1)] += v()
+    a[g(0):g(2)] *= 2
+    K()[g(3)] -= v()
+    check("aug1", c.k == 6 and a == [1, 7, 1, 7, 3, 4])
+    check("aug2", log == ["f", "v", "g1", "v", "g0", "g2", "g3", "get3", "v", "set3=5"])
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3249,5 +3281,6 @@ def main():
     s49() # SECTION-CALL 49
     s50() # SECTION-CALL 50
     s51() # SECTION-CALL 51
+    s52() # SECTION-CALL 52
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -7669,10 +7669,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function assignRef(ref, v) {
         if (ref.path.length == 0) { pySet(ref.name, v); return }
+        var last = ref.path[ref.path.length - 1]
+        refStore(refHolder(ref), last, refKey(last), v)
+    }
+    // The object a target's LAST step applies to: every step but the last walked.
+    function refHolder(ref) {
         var o = anytype // The containers along the path may be of mixed types.
         o = ref.named ? getVar(ref.name) : ref.basef()
         for (var i = 0; i < ref.path.length - 1; i++) o = pathStep(o, ref.path[i])
-        var last = ref.path[ref.path.length - 1]
+        return o
+    }
+    // The operands of a target's last step, evaluated once: the subscript, or a
+    // slice's three bounds. An augmented assignment reads and writes with them.
+    function refKey(last) {
+        if (last.tattr == true) { return {} }
+        if (last.kind == "slice") {
+            return {lo: last.lo != null ? last.lo() : undefined,
+                    hi: last.hi != null ? last.hi() : undefined,
+                    st: last.step != null ? last.step() : undefined}
+        }
+        return {idx: last.idx()}
+    }
+    function refLoad(o, last, key) {
+        if (last.tattr == true) { return pyattr(o, last.name) }
+        if (last.kind == "slice") { return pySliceStep(o, key.lo, key.hi, key.st) }
+        return pyget(o, key.idx)
+    }
+    function refStore(o, last, key, v) {
         if (last.tattr == true) {
             if (typeof o == "function") { pyFnSetAttr(o, last.name, v); return }
             if (o === null || o === undefined || typeof o != "object") {
@@ -7685,9 +7708,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // xs[a:b:c] = values: a contiguous slice may change length, an extended one
         // must receive exactly as many values as it selects (Python's rule).
         if (last.kind == "slice") {
-            var lo = last.lo != null ? last.lo() : undefined
-            var hi = last.hi != null ? last.hi() : undefined
-            var st = last.step != null ? last.step() : undefined
+            var lo = key.lo
+            var hi = key.hi
+            var st = key.st
             var vals = iterToList(v)
             if (st === undefined || st === null || st === 1) {
                 var ixc = sliceIdx(o.length, lo, hi, 1)
@@ -7703,7 +7726,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var e2 = 0; e2 < ixe.length; e2++) { o[ixe[e2]] = vals[e2] }
             return
         }
-        var idx = last.idx()
+        var idx = key.idx
         if (pyUser(o)) {
             var si = clsFind(o.__class, "__setitem__")
             if (si != null) { si(o, idx, v); return }
@@ -7714,13 +7737,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pos < 0) pos += o.length
         if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
         o[pos] = v
-    }
-    function readRef(ref) {
-        if (ref.path.length == 0) { return pyReadName(ref.name) }
-        var o = anytype // The last step lands on the element itself.
-        o = ref.named ? getVar(ref.name) : ref.basef()
-        for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
-        return o
     }
     // A target LIST: one target stays itself, several become a tuple pattern that
     // unpacks the value. A {startgt} entry is the *rest target.
@@ -7896,12 +7912,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var op = items[1].op
         var valT = items[2]
         var bop = op.substring(0, op.length - 1)
+        // CPython walks the target once: `f().k += 1` calls f a single time, and
+        // the subscript of `a[g()] += 1` is evaluated before the right side.
         return function() {
             var a = anytype // The target may hold any type.
-            a = readRef(ref)
             var b = anytype
+            if (ref.path.length == 0) {
+                a = pyReadName(ref.name)
+                b = valT()
+                pySet(ref.name, binOp(bop, a, b))
+                return
+            }
+            var o = anytype
+            o = refHolder(ref)
+            var last = ref.path[ref.path.length - 1]
+            var key = refKey(last)
+            a = refLoad(o, last, key)
             b = valT()
-            assignRef(ref, binOp(bop, a, b))
+            refStore(o, last, key, binOp(bop, a, b))
         }
     }
 

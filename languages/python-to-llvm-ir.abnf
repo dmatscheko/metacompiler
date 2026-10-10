@@ -2549,23 +2549,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var r = step.idx(b)
         return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
     }
-    function emitRefRead(b, ref) {
-        // py_getvar, not js_scope_get: a name that `del` emptied has to raise here
-        // too (an augmented assignment READS first), which is what abnf/jsrt.go's
-        // scopeGet does for every read.
+    // The object a target's LAST step applies to: the base and every step but the
+    // last. `reads` takes the base through py_getvar rather than js_scope_get, so a
+    // name that `del` emptied raises when an augmented assignment READS it, as
+    // abnf/jsrt.go's scopeGet does for every read.
+    function emitRefHolder(b, ref, reads) {
         var o = hUndef
-        if (ref.named) { o = pyGetVar(b, curScopeV, emitStr(b, ref.name)) }
-        else {
+        if (ref.named) {
+            if (reads) { o = pyGetVar(b, curScopeV, emitStr(b, ref.name)) }
+            else { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)]) }
+        } else {
             var rb = ref.basef(b)
             b = rb.b
             o = rb.v
         }
-        for (var i = 0; i < ref.path.length; i++) {
+        for (var i = 0; i < ref.path.length - 1; i++) {
             var r = emitPathStep(b, o, ref.path[i])
             b = r.b
             o = r.v
         }
         return {b: b, v: o}
+    }
+    // The operands of a target's last step, emitted once: the subscript, or a
+    // slice's three bounds. An augmented assignment reads and writes with them.
+    // Twin of refKey in python-interpreter.abnf.
+    function emitRefKey(b, last) {
+        if (last.tattr == true) { return {b: b, k: hUndef, lo: hUndef, hi: hUndef, step: hUndef} }
+        if (last.tslice == true) {
+            var sb = emitSliceBounds(b, last)
+            return {b: sb.b, k: hUndef, lo: sb.lo, hi: sb.hi, step: sb.step}
+        }
+        var kr = last.idx(b)
+        return {b: kr.b, k: kr.v, lo: hUndef, hi: hUndef, step: hUndef}
+    }
+    function emitRefLoad(b, o, last, key) {
+        if (last.tattr == true) { return callExt(b, "js_pygetattr", [o, emitStr(b, last.name)]) }
+        if (last.tslice == true) { return callExt(b, "js_pyslice3", [o, key.lo, key.hi, key.step]) }
+        return callExt(b, "js_pyget", [o, key.k])
+    }
+    function emitRefStore(b, o, last, key, v) {
+        if (last.tattr == true) { callExt(b, "js_pysetattr", [o, emitStr(b, last.name), v]) }
+        else if (last.tslice == true) { callExt(b, "js_pysetslice", [o, key.lo, key.hi, key.step, v]) }
+        else { callExt(b, "js_pyset", [o, key.k, v]) }
     }
     // Overridden by ASSIGNMENT: lib/compile-core.js DECLARES makeTargetRef, and a second
     // declaration would leave goja and the frozen engine disagreeing about which is live
@@ -2583,33 +2608,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pySetVar(b, curScopeV, ref.name, v)
             return b
         }
-        var o = hUndef
-        if (ref.named) { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)]) }
-        else {
-            var rb = ref.basef(b)
-            b = rb.b
-            o = rb.v
-        }
-        for (var i = 0; i < ref.path.length - 1; i++) {
-            var r = emitPathStep(b, o, ref.path[i])
-            b = r.b
-            o = r.v
-        }
+        var h = emitRefHolder(b, ref, false)
         var last = ref.path[ref.path.length - 1]
-        if (last.tattr == true) {
-            callExt(b, "js_pysetattr", [o, emitStr(b, last.name), v])
-            return b
-        }
-        if (last.tslice == true) {
-            var sb = emitSliceBounds(b, last)
-            b = sb.b
-            callExt(b, "js_pysetslice", [o, sb.lo, sb.hi, sb.step, v])
-            return b
-        }
-        var kr = last.idx(b)
-        b = kr.b
-        callExt(b, "js_pyset", [o, kr.v, v])
-        return b
+        var key = emitRefKey(h.b, last)
+        emitRefStore(key.b, h.v, last, key, v)
+        return key.b
     }
     // name := value. It writes the binding with the same js_pyset_var an ordinary
     // assignment uses (so the scoping rule is identical) and leaves the value behind,
@@ -2758,12 +2761,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
+        var bop = op.substring(0, op.length - 1)
+        // CPython walks the target once: `f().k += 1` calls f a single time, and
+        // the subscript of `a[g()] += 1` is evaluated before the right side.
         return function(b) {
-            var rr = emitRefRead(b, ref)
-            b = rr.b
+            if (ref.path.length == 0) {
+                var cur = pyGetVar(b, curScopeV, emitStr(b, ref.name))
+                var rv0 = valT(b)
+                return emitRefWrite(rv0.b, ref, emitPyBin(rv0.b, bop, cur, rv0.v))
+            }
+            var h = emitRefHolder(b, ref, true)
+            var last = ref.path[ref.path.length - 1]
+            var key = emitRefKey(h.b, last)
+            b = key.b
+            var old = emitRefLoad(b, h.v, last, key)
             var rv = valT(b)
             b = rv.b
-            return emitRefWrite(b, ref, emitPyBin(b, op.substring(0, op.length - 1), rr.v, rv.v))
+            emitRefStore(b, h.v, last, key, emitPyBin(b, bop, old, rv.v))
+            return b
         }
     }
 
