@@ -49,16 +49,12 @@ package abnf
 //     promoted from an embedded struct is not found. Go's method set rules are not
 //     modelled either, so a String() with a POINTER receiver is used for the value
 //     form too (go prints `{2}` there).
-//   - fmt's format verbs are limited to %v %d %s %t %q %c and %%. Width, precision,
-//     flags (%-5d, %.2f) and the remaining verbs (%f %g %e %x %o %b %p %T %U) are
-//     not implemented. A verb that does not apply to a scalar operand, and every
-//     unimplemented verb, renders as go's bad-verb note %!<verb>(<type>=<value>)
-//     (%!<verb>(<nil>) for nil); a composite operand is not walked element by
-//     element, and int64/uint64 are named int/uint. A missing operand is
-//     %!<verb>(MISSING). Surplus operands are ignored where go appends
-//     %!(EXTRA ...). %q escapes the
-//     backslash, the delimiter and the seven letter escapes; a control character
-//     go would spell with a hex or unicode escape is left verbatim.
+//   - fmt's format verbs are those of languages/lib/go-fmt.js, gaps included (see
+//     its head): no %T %p, %#v renders as %v, a bad-verb note names int64/uint64
+//     int/uint, and surplus operands are ignored where go appends %!(EXTRA ...).
+//     %q escapes the backslash, the delimiter and the seven letter escapes; a
+//     control character go would spell with a hex or unicode escape is left
+//     verbatim.
 
 import (
 	"fmt"
@@ -66,6 +62,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func init() {
@@ -380,37 +377,145 @@ func gopKeyOrder(keys []interface{}) []int {
 // ----------------------------------------------------------------------------
 // Format verbs
 
-// gopFormat is fmt.Sprintf over the verb subset documented at the top of the file.
+// gopFlags is one directive's flags, width and precision (gfState in
+// languages/lib/go-fmt.js).
+type gopFlags struct {
+	sharp, zero, plus, minus, space bool
+	wid, prec                       int
+	widPresent, precPresent, plusV  bool
+}
+
+// gopFormat is fmt.Sprintf: the twin of gfFormat in languages/lib/go-fmt.js, which
+// the interpreter half and layer 2 share. The parser, the walk over composites and
+// the notes follow that file line for line; a SCALAR is handed to Go's own fmt with
+// its directive respelled, so this twin checks go-fmt.js's port of fmt/format.go
+// and strconv. %q and %U are formatted here the way go-fmt.js does, gaps included
+// (see the head of that file).
 func (rt *jsrt) gopFormat(format string, args []interface{}) string {
-	out := ""
-	next := 0
-	for i := 0; i < len(format); i++ {
-		if format[i] != '%' || i+1 >= len(format) {
-			out += string(format[i])
+	var out strings.Builder
+	argi := 0
+	n := len(format)
+	i := 0
+	for i < n {
+		c := format[i]
+		if c != '%' {
+			out.WriteByte(c)
+			i++
 			continue
 		}
 		i++
-		verb := format[i]
+		f := gopFlags{}
+	flags:
+		for i < n {
+			switch format[i] {
+			case '#':
+				f.sharp = true
+			case '0':
+				f.zero = !f.minus
+			case '+':
+				f.plus = true
+			case '-':
+				f.minus = true
+				f.zero = false
+			case ' ':
+				f.space = true
+			default:
+				break flags
+			}
+			i++
+		}
+		if i < n && format[i] == '*' {
+			i++
+			w, ok := 0, false
+			if argi < len(args) {
+				w, ok = rt.gopIntArg(args[argi])
+				argi++
+			}
+			if !ok {
+				out.WriteString("%!(BADWIDTH)")
+			} else {
+				f.widPresent = true
+				f.wid = w
+				if f.wid < 0 {
+					f.minus = true
+					f.zero = false
+					f.wid = -f.wid
+				}
+			}
+		} else {
+			for i < n && format[i] >= '0' && format[i] <= '9' {
+				f.wid = f.wid*10 + int(format[i]-'0')
+				f.widPresent = true
+				i++
+			}
+		}
+		if i < n && format[i] == '.' {
+			i++
+			f.precPresent = true
+			if i < n && format[i] == '*' {
+				i++
+				pr, ok := 0, false
+				if argi < len(args) {
+					pr, ok = rt.gopIntArg(args[argi])
+					argi++
+				}
+				if !ok {
+					f.precPresent = false
+					out.WriteString("%!(BADPREC)")
+				} else if pr < 0 {
+					f.precPresent = false
+				} else {
+					f.prec = pr
+				}
+			} else {
+				for i < n && format[i] >= '0' && format[i] <= '9' {
+					f.prec = f.prec*10 + int(format[i]-'0')
+					i++
+				}
+			}
+		}
+		if i >= n {
+			out.WriteString("%!(NOVERB)")
+			break
+		}
+		verb, size := utf8.DecodeRuneInString(format[i:])
+		i += size
 		if verb == '%' {
-			out += "%"
+			out.WriteByte('%')
 			continue
 		}
-		if next >= len(args) {
-			out += "%!" + string(verb) + "(MISSING)"
+		if argi >= len(args) {
+			out.WriteString("%!" + string(verb) + "(MISSING)")
 			continue
 		}
-		a := args[next]
-		next++
-		out += rt.gopVerb(verb, a)
+		if verb == 'v' {
+			f.plusV = f.plus
+			f.plus = false
+			f.sharp = false
+		}
+		out.WriteString(rt.gopArg(f, args[argi], verb, 0, false))
+		argi++
 	}
-	return out
+	return out.String()
+}
+
+// gopIntArg is the integer a '*' takes from its operand (gfIntArg).
+func (rt *jsrt) gopIntArg(v interface{}) (int, bool) {
+	if gopKind(v) != "int" {
+		return 0, false
+	}
+	x := giVal(rt, v)
+	if x > 1000000 || x < -1000000 {
+		return 0, false
+	}
+	return int(x), true
 }
 
 // gopFmtTy is the type name fmt writes in a bad-verb note for a SCALAR operand,
-// "nil" for nil and "" for anything else (a slice, map, struct or complex value).
-// A 64 bit box answers "int" or "uint": the value model does not keep
-// int64/uint64 apart from int/uint. The twins are gFmtTy in
-// languages/go-interpreter.abnf and gopFmtTy in languages/lib/go-rt.metajs.
+// "nil" for nil and "" for anything else (a slice, map or struct). A 64 bit box
+// answers "int" or "uint": the value model does not keep int64/uint64 apart from
+// int/uint. The twins are gFmtTy in languages/go-interpreter.abnf and gopFmtTy in
+// languages/lib/go-rt.metajs.
 func gopFmtTy(a interface{}) string {
 	switch t := a.(type) {
 	case jsNullT, jsUndefT:
@@ -434,83 +539,415 @@ func gopFmtTy(a interface{}) string {
 		}
 		return base + strconv.Itoa(int(t.w))
 	case float64:
-		if t == math.Trunc(t) {
+		if t-t == 0 && t == math.Trunc(t) {
 			return "int"
 		}
 		return "float64"
 	}
+	if cls := goClassOf(a); cls != nil && cls.props["__name"] == "$cx" {
+		return "complex128"
+	}
 	return ""
 }
 
-func gopIsIntTy(ty string) bool { return strings.HasPrefix(ty, "int") || strings.HasPrefix(ty, "uint") }
-
-func (rt *jsrt) gopBadVerb(verb byte, ty string, a interface{}) string {
-	switch ty {
-	case "nil":
-		return "%!" + string(verb) + "(<nil>)"
+// gopKind is gfHKind.
+func gopKind(v interface{}) string {
+	switch ty := gopFmtTy(v); ty {
+	case "nil", "bool", "string":
+		return ty
+	case "float64", "float32":
+		return "float"
+	case "complex128":
+		return "complex"
 	case "":
-		return "%!" + string(verb) + "(" + rt.gopStr(a) + ")"
+	default:
+		return "int"
 	}
-	return "%!" + string(verb) + "(" + ty + "=" + rt.gopStr(a) + ")"
+	if _, ok := v.(*jsArray); ok {
+		return "list"
+	}
+	if _, _, ok := dictParts(v); ok {
+		return "map"
+	}
+	cls := goClassOf(v)
+	if cls == nil {
+		return "other"
+	}
+	if cls.props["__name"] == "$sl" {
+		return "list"
+	}
+	if _, ok := cls.props["__fields"].(*jsArray); ok && cls.props["__isclass"] == true {
+		return "struct"
+	}
+	return "other"
 }
 
-func (rt *jsrt) gopVerb(verb byte, a interface{}) string {
-	if verb == 'v' {
-		return rt.gopStr(a)
+// gopScalar is v as the Go value of its own type, for Go's fmt to format.
+func (rt *jsrt) gopScalar(v interface{}) interface{} {
+	switch t := v.(type) {
+	case jsJFlo:
+		if t.sty == floGoF {
+			return float32(t.f)
+		}
+		return t.f
+	case jsGInt:
+		switch {
+		case t.u && t.w == 8:
+			return uint8(t.v)
+		case t.u && t.w == 16:
+			return uint16(t.v)
+		case t.u && t.w == 32:
+			return uint32(t.v)
+		case t.u:
+			return uint(uint64(t.v))
+		case t.w == 8:
+			return int8(t.v)
+		case t.w == 16:
+			return int16(t.v)
+		case t.w == 32:
+			return int32(t.v)
+		}
+		return int(t.v)
+	case float64:
+		if gopFmtTy(t) == "int" {
+			return int(t)
+		}
+		return t
+	case jsNullT, jsUndefT:
+		return nil
 	}
-	ty := gopFmtTy(a)
-	switch verb {
-	case 's':
-		if ty == "string" || ty == "" {
-			return rt.gopStr(a)
+	if gopFmtTy(v) == "complex128" {
+		o := v.(*jsObject)
+		return complex(rt.toNumber(o.props["re"]), rt.toNumber(o.props["im"]))
+	}
+	return v
+}
+
+// gopSpec respells a directive for Go's fmt.
+func gopSpec(f gopFlags, verb rune) string {
+	b := []byte{'%'}
+	if f.sharp {
+		b = append(b, '#')
+	}
+	if f.zero {
+		b = append(b, '0')
+	}
+	if f.plus || f.plusV {
+		b = append(b, '+')
+	}
+	if f.minus {
+		b = append(b, '-')
+	}
+	if f.space {
+		b = append(b, ' ')
+	}
+	if f.widPresent {
+		b = strconv.AppendInt(b, int64(f.wid), 10)
+	}
+	if f.precPresent {
+		b = append(b, '.')
+		b = strconv.AppendInt(b, int64(f.prec), 10)
+	}
+	return string(utf8.AppendRune(b, verb))
+}
+
+func gopPadRunes(f gopFlags, s string, zeroOK bool) string {
+	if !f.widPresent || f.wid == 0 {
+		return s
+	}
+	w := f.wid - utf8.RuneCountInString(s)
+	if w <= 0 {
+		return s
+	}
+	if f.minus {
+		return s + strings.Repeat(" ", w)
+	}
+	if f.zero && zeroOK {
+		return strings.Repeat("0", w) + s
+	}
+	return strings.Repeat(" ", w) + s
+}
+
+// gopTrunc is f.truncateString.
+func gopTrunc(f gopFlags, s string) string {
+	if !f.precPresent {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == f.prec {
+			return s[:i]
 		}
-	case 'd':
-		if b, ok := a.(jsGInt); ok {
-			return giStr(b)
-		}
-		if ty == "int" {
-			return strconv.FormatInt(int64(rt.toNumber(a)), 10)
-		}
-		if ty == "" {
-			return rt.gopStr(a)
-		}
-	case 't':
-		if ty == "bool" {
-			if a.(bool) {
-				return "true"
+		n++
+	}
+	return s
+}
+
+// gopQuote is fmtQ (gfQuote).
+func gopQuote(f gopFlags, s0 string) string {
+	s := gopTrunc(f, s0)
+	if f.sharp {
+		ok := true
+		for _, c := range s {
+			if c == '`' || c == 127 || c == 0xFEFF || (c < 32 && c != '\t') {
+				ok = false
+				break
 			}
-			return "false"
 		}
-	case 'c':
-		if gopIsIntTy(ty) {
-			return string(rune(giVal(rt, a)))
-		}
-	case 'q':
-		if s, ok := a.(string); ok {
-			return `"` + gopQuoteBody(s, '"') + `"`
-		}
-		if gopIsIntTy(ty) {
-			return "'" + gopQuoteBody(string(rune(giVal(rt, a))), '\'') + "'"
+		if ok {
+			return gopPadRunes(f, "`"+s+"`", true)
 		}
 	}
-	return rt.gopBadVerb(verb, ty, a)
+	return gopPadRunes(f, `"`+gopQBody(f, s, '"')+`"`, true)
 }
 
-// gopQuoteBody is the escaping strconv.Quote / strconv.QuoteRune do, minus the \x
-// and \u forms: the letter escapes, the backslash and whichever delimiter is in
-// force. A control character Go would spell \x00 is left verbatim. The twin is
-// gQuoteBody in languages/go-interpreter.abnf; keep the two in step.
+// gopQBody is gfQBody: with + every rune outside ASCII is escaped.
+func gopQBody(f gopFlags, s string, delim byte) string {
+	q := gopQuoteBody(s, delim)
+	if !f.plus {
+		return q
+	}
+	var b strings.Builder
+	for _, c := range q {
+		switch {
+		case c < 128:
+			b.WriteRune(c)
+		case c < 0x10000:
+			fmt.Fprintf(&b, `\u%04x`, c)
+		default:
+			fmt.Fprintf(&b, `\U%08x`, c)
+		}
+	}
+	return b.String()
+}
+
+// gopRuneOf is rune(c) for %c %q %U (gfRuneOf).
+func (rt *jsrt) gopRuneOf(v interface{}) rune {
+	if b, ok := v.(jsGInt); ok && b.u {
+		if uint64(b.v) > 0x10FFFF {
+			return utf8.RuneError
+		}
+	}
+	x := giVal(rt, v)
+	if x < 0 || x > 0x10FFFF || (x >= 0xD800 && x <= 0xDFFF) {
+		return utf8.RuneError
+	}
+	return rune(x)
+}
+
+// gopArg is gfArg: printArg and printValue in one.
+func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth bool) string {
+	k := gopKind(v)
+	if verb == 'v' && !f.widPresent && !f.precPresent && !f.space && !f.plus && !f.sharp && !f.plusV {
+		return rt.gopStr(v)
+	}
+	if k == "nil" {
+		if depth > 0 {
+			return "<nil>"
+		}
+		if verb == 'v' {
+			return gopPadRunes(f, "<nil>", true)
+		}
+		return "%!" + string(verb) + "(<nil>)"
+	}
+	if !noMeth && (verb == 'v' || verb == 's' || verb == 'x' || verb == 'X' || verb == 'q') {
+		if ms, ok := rt.gopMeth(v); ok {
+			return rt.gopString(f, ms, verb)
+		}
+	}
+	// %T is not one of go-fmt.js's verbs, so it is a bad verb there; Go's fmt
+	// would answer the type.
+	if verb == 'T' && k != "list" && k != "map" && k != "struct" {
+		g := f
+		g.plusV = false
+		ty := gopFmtTy(v)
+		shown := rt.gopArg(g, v, 'v', 0, true)
+		if ty == "" {
+			return "%!T(" + shown + ")"
+		}
+		return "%!T(" + ty + "=" + shown + ")"
+	}
+	switch k {
+	case "bool", "int", "float", "complex":
+		switch {
+		case k == "int" && verb == 'q':
+			return gopPadRunes(f, "'"+gopQBody(f, string(rt.gopRuneOf(v)), '\'')+"'", true)
+		case k == "int" && verb == 'U':
+			return rt.gopUnicode(f, v)
+		case k == "int" && verb == 'c':
+			return gopPadRunes(f, string(rt.gopRuneOf(v)), true)
+		}
+		return fmt.Sprintf(gopSpec(f, verb), rt.gopScalar(v))
+	case "string":
+		return rt.gopString(f, v.(string), verb)
+	case "list":
+		return rt.gopList(f, v, verb, depth, noMeth)
+	case "map":
+		keys, vals, _ := dictParts(v)
+		var b strings.Builder
+		b.WriteString("map[")
+		for n, i := range gopKeyOrder(keys.elems) {
+			if n > 0 {
+				b.WriteByte(' ')
+			}
+			var val interface{} = jsUndef
+			if i < len(vals.elems) {
+				val = vals.elems[i]
+			}
+			b.WriteString(rt.gopArg(f, keys.elems[i], verb, depth+1, noMeth))
+			b.WriteByte(':')
+			b.WriteString(rt.gopArg(f, val, verb, depth+1, noMeth))
+		}
+		b.WriteByte(']')
+		return b.String()
+	case "struct":
+		o := v.(*jsObject)
+		flds := goClassOf(v).props["__fields"].(*jsArray)
+		var b strings.Builder
+		b.WriteByte('{')
+		for n, fl := range flds.elems {
+			if n > 0 {
+				b.WriteByte(' ')
+			}
+			name := rt.toString(fl)
+			if f.plusV {
+				b.WriteString(name + ":")
+			}
+			var fv interface{} = jsUndef
+			if x, ok := o.props[name]; ok {
+				fv = x
+			}
+			b.WriteString(rt.gopArg(f, fv, verb, depth+1, noMeth || !goNameExported(name)))
+		}
+		b.WriteByte('}')
+		return b.String()
+	}
+	if verb == 'v' {
+		return gopPadRunes(f, rt.gopStr(v), true)
+	}
+	return "%!" + string(verb) + "(" + rt.gopStr(v) + ")"
+}
+
+// gopMeth is gfHMeth: the text of Error(), else String().
+func (rt *jsrt) gopMeth(v interface{}) (string, bool) {
+	cls := goClassOf(v)
+	if cls == nil {
+		return "", false
+	}
+	for _, name := range []string{"Error", "String"} {
+		if mth, ok := cls.props[name]; ok && isCallable(mth) {
+			return rt.gopStr(rt.call(mth, jsUndef, []interface{}{v})), true
+		}
+	}
+	return "", false
+}
+
+// gopString is fmtString (gfString).
+func (rt *jsrt) gopString(f gopFlags, s string, verb rune) string {
+	if verb == 'q' {
+		return gopQuote(f, s)
+	}
+	return fmt.Sprintf(gopSpec(f, verb), s)
+}
+
+// gopUnicode is fmtUnicode (gfUnicode), with go-fmt.js's printability rule.
+func (rt *jsrt) gopUnicode(f gopFlags, v interface{}) string {
+	mag := uint64(giVal(rt, v))
+	hex := strings.ToUpper(strconv.FormatUint(mag, 16))
+	prec := 4
+	if f.precPresent && f.prec > 4 {
+		prec = f.prec
+	}
+	for len(hex) < prec {
+		hex = "0" + hex
+	}
+	out := "U+" + hex
+	if f.sharp && mag <= 0x10FFFF {
+		cp := rune(mag)
+		if (cp >= 32 && cp < 127) || (cp >= 161 && cp != 173 && (cp < 0xD800 || cp > 0xDFFF)) {
+			out += " '" + string(cp) + "'"
+		}
+	}
+	return gopPadRunes(f, out, false)
+}
+
+// gopList is gfList: a byte slice is a string to %s %q %x %X.
+func (rt *jsrt) gopList(f gopFlags, v interface{}, verb rune, depth int, noMeth bool) string {
+	var es []interface{}
+	isBytes := false
+	if arr, ok := v.(*jsArray); ok {
+		es = arr.elems
+	} else {
+		o := v.(*jsObject)
+		if back, ok := o.props["a"].(*jsArray); ok {
+			off := int(rt.toNumber(o.props["o"]))
+			n := int(rt.toNumber(o.props["n"]))
+			for i := 0; i < n; i++ {
+				var e interface{} = jsUndef
+				if off+i < len(back.elems) {
+					e = back.elems[off+i]
+				}
+				es = append(es, e)
+			}
+		}
+		if et, ok := o.props["et"].(string); ok && (et == "byte" || et == "uint8") {
+			isBytes = true
+		}
+	}
+	if !isBytes && len(es) > 0 {
+		isBytes = true
+		for _, e := range es {
+			if gopFmtTy(e) != "uint8" {
+				isBytes = false
+				break
+			}
+		}
+	}
+	if isBytes && (verb == 's' || verb == 'q' || verb == 'x' || verb == 'X') {
+		bs := make([]byte, len(es))
+		for i, e := range es {
+			bs[i] = byte(giVal(rt, e))
+		}
+		if verb == 'q' {
+			return gopQuote(f, string(bs))
+		}
+		return fmt.Sprintf(gopSpec(f, verb), bs)
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, e := range es {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		// A byte slice's elements are uint8 whatever the engine holds them as.
+		if isBytes && gopKind(e) == "int" {
+			e = jsGInt{v: giVal(rt, e), w: 8, u: true}
+		}
+		b.WriteString(rt.gopArg(f, e, verb, depth+1, noMeth))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
+// backslash and whichever delimiter is in force, \xHH for the other ASCII controls
+// and \u00HH for the Latin-1 ones; any other rune is copied whole
+// (languages/lib/go-fmt.js's printability rule). The twins are gQuoteBody in
+// languages/go-interpreter.abnf and gopQuoteBody in languages/lib/go-rt.metajs.
 func gopQuoteBody(s string, delim byte) string {
-	named := map[byte]string{'\n': `\n`, '\t': `\t`, '\r': `\r`, 7: `\a`, 8: `\b`, 12: `\f`, 11: `\v`}
+	named := map[rune]string{'\n': `\n`, '\t': `\t`, '\r': `\r`, 7: `\a`, 8: `\b`, 12: `\f`, 11: `\v`}
 	out := ""
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range s {
 		if c == '\\' {
 			out += `\\`
-		} else if c == delim {
+		} else if c == rune(delim) {
 			out += `\` + string(c)
 		} else if e, ok := named[c]; ok {
 			out += e
+		} else if c < 32 || c == 127 {
+			out += fmt.Sprintf(`\x%02x`, c)
+		} else if (c >= 128 && c <= 160) || c == 173 {
+			out += fmt.Sprintf(`\u%04x`, c)
 		} else {
 			out += string(c)
 		}

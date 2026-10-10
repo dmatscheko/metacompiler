@@ -791,7 +791,7 @@ evaluator and the compiler has none at runtime; `readonly` is not enforced;
 
 Per-language divergences from real toolchains, recorded and permanent: Go byte-
 slicing a rune in half cannot be represented at all (the floor's strings are
-UTF-16); Go counts `len([]byte(s))` in RUNES and prints `%q` as UTF-8 bytes. An
+UTF-16); Go counts `len([]byte(s))` in RUNES. An
 ~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
@@ -970,6 +970,8 @@ lua-rt.metajs             <- imports NOTHING
 js-rt.metajs              <- imports regex.js and json.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)
+go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
+                             gopFormat in abnf/jsrtgolang.go)
 ```
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`

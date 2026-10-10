@@ -1419,17 +1419,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             return out
         },
-        // fmt.Printf / fmt.Sprintf. The verb subset is %v %d %s %t %q %c and %%;
-        // see gFormat below, whose twin is gopFormat in abnf/jsrtgolang.go.
+        // fmt.Printf / fmt.Sprintf: gfFormat in lib/go-fmt.js, over the gfH* hooks
+        // below. The twin is gopFormat in abnf/jsrtgolang.go.
         Printf: function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
-            print(gFormat(gstr(arguments[0]), a))
+            print(gfFormat(gstr(arguments[0]), a))
         },
         Sprintf: function() {
             var a2 = []
             for (var j = 1; j < arguments.length; j++) { a2.push(arguments[j]) }
-            return gFormat(gstr(arguments[0]), a2)
+            return gfFormat(gstr(arguments[0]), a2)
         }
     }
     // Go's two BUILTINS, which are NOT fmt: println separates every pair of operands
@@ -1626,35 +1626,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return "" + v
     }
     var gStrDepth = 0
-    // ----- fmt's format verbs -----
-    // %v %d %s %t %q %c and %% only. Width, precision, flags (%-5d, %.2f) and the
-    // remaining verbs (%f %g %e %x %o %b %p %T %U) are NOT implemented. A verb that
-    // does not apply to its operand renders as Go's bad-verb note
-    // %!<verb>(<type>=<value>) (%!<verb>(<nil>) for nil), and so does every
-    // unimplemented verb; a missing operand is %!<verb>(MISSING), and a surplus
-    // operand is ignored where Go appends %!(EXTRA ...). abnf/jsrtgolang.go and
-    // languages/lib/go-rt.metajs implement exactly the same subset; keep the three
-    // in step.
-    function gFormat(f, args) {
-        var out = ""
-        var next = 0
-        for (var i = 0; i < f.length; i++) {
-            var ch = f.charAt(i)
-            if (ch != "%" || i + 1 >= f.length) { out += ch; continue }
-            i = i + 1
-            var verb = f.charAt(i)
-            if (verb == "%") { out += "%"; continue }
-            if (next >= args.length) { out += "%!" + verb + "(MISSING)"; continue }
-            var a = args[next]
-            next = next + 1
-            out += gVerb(verb, a)
-        }
-        return out
-    }
+    // ----- fmt's format verbs: lib/go-fmt.js over this engine's value model -----
+    include("lib/go-fmt.js")
     // The type name fmt writes in a bad-verb note for a SCALAR operand, "nil" for
-    // nil and "" for anything else (a slice, map, struct or complex value, which fmt
-    // walks element by element rather than noting). A 64 bit box answers "int" or
-    // "uint": the value model does not keep int64/uint64 apart from int/uint.
+    // nil and "" for anything else (a slice, map or struct, which fmt walks element
+    // by element rather than noting). A 64 bit box answers "int" or "uint": the
+    // value model does not keep int64/uint64 apart from int/uint.
     function gFmtTy(a) {
         if (a === undefined || a === null) { return "nil" }
         if (typeof a == "boolean") { return "bool" }
@@ -1664,57 +1641,91 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var base = a.u ? "uint" : "int"
             return a.w == 64 ? base : base + a.w
         }
-        if (typeof a == "number") { return (a == gtrunc(a)) ? "int" : "float64" }
+        if (typeof a == "number") { return (a - a === 0 && a == gtrunc(a)) ? "int" : "float64" }
+        if (isCx(a)) { return "complex128" }
         return ""
     }
-    function gIsIntTy(ty) { return ty.indexOf("int") == 0 || ty.indexOf("uint") == 0 }
-    // The note renders the value through gstr, which takes a float's digits from
-    // coreDecDigits and never from the host printer (goja's is not always shortest).
-    function gBadVerb(verb, ty, a) {
-        if (ty == "nil") { return "%!" + verb + "(<nil>)" }
-        if (ty == "") { return "%!" + verb + "(" + gstr(a) + ")" }
-        return "%!" + verb + "(" + ty + "=" + gstr(a) + ")"
+    // The gfH* hooks lib/go-fmt.js reads values through. The twins are the gfH*
+    // functions in languages/lib/go-rt.metajs.
+    function gfHKind(v) {
+        var ty = gFmtTy(v)
+        if (ty == "nil") { return "nil" }
+        if (ty == "bool" || ty == "string") { return ty }
+        if (ty == "float64" || ty == "float32") { return "float" }
+        if (ty == "complex128") { return "complex" }
+        if (ty != "") { return "int" }
+        if (isSl(v) || Array.isArray(v)) { return "list" }
+        if (isMap(v)) { return "map" }
+        if (typeof v == "object" && v.__class != undefined && Array.isArray(v.__class.__fields)) { return "struct" }
+        return "other"
     }
-    function gVerb(verb, a) {
-        if (verb == "v") { return gstr(a) }
-        var ty = gFmtTy(a)
-        if (verb == "s") {
-            if (ty == "string" || ty == "") { return gstr(a) }
-            return gBadVerb(verb, ty, a)
+    function gfHTy(v) { return gFmtTy(v) }
+    function gfHIntNeg(v) { return szIs(v) ? (!v.u && szNum(v) < 0) : v < 0 }
+    function gfHIntMag(v) {
+        if (szIs(v)) {
+            var t = szStr(v)
+            return t.charAt(0) == "-" ? t.substring(1) : t
         }
-        // %d on a SIZED integer has to go through szStr, not through a double: a
-        // uint64 above 2^63 prints unsigned, and a 64 bit value above 2^53 has no
-        // exact double to render from. A composite prints its elements.
-        if (verb == "d") {
-            if (szIs(a)) { return szStr(a) }
-            if (ty == "int") { return "" + a }
-            if (ty == "") { return gstr(a) }
-            return gBadVerb(verb, ty, a)
-        }
-        if (verb == "t") {
-            if (ty == "bool") { return a === true ? "true" : "false" }
-            return gBadVerb(verb, ty, a)
-        }
-        if (verb == "c") {
-            if (gIsIntTy(ty)) { return fromCodePoint(szNum(a)) }
-            return gBadVerb(verb, ty, a)
-        }
-        if (verb == "q") {
-            if (ty == "string") { return '"' + gQuoteBody(a, 34) + '"' }
-            if (gIsIntTy(ty)) { return "'" + gQuoteBody(fromCodePoint(szNum(a)), 39) + "'" }
-            return gBadVerb(verb, ty, a)
-        }
-        return gBadVerb(verb, ty, a)
+        var a = v < 0 ? 0 - v : v
+        if (a < 9007199254740992) { return "" + a }
+        return coreExactDec(a).i
     }
-    // The escapes strconv.Quote spells with a letter, plus the backslash and whichever
-    // delimiter is in force (Quote escapes only the double quote, QuoteRune only the
-    // single one - `delim` is that character's code). A control character Go would
-    // write as \x.. or \u.... is left verbatim here - the one deliberate gap, shared
-    // with gopQuoteBody in abnf/jsrtgolang.go.
+    function gfHNum(v) { return szIs(v) ? szNum(v) : gNumF(v) }
+    function gfHF32(v) { return isF32(v) }
+    function gfHCx(v) { return [gNumF(v.re), gNumF(v.im)] }
+    function gfHElems(v) { return isSl(v) ? slElems(v) : v }
+    function gfHIsBytes(v) {
+        if (isSl(v) && (v.et == "byte" || v.et == "uint8")) { return true }
+        return gfAllBytes(gfHElems(v))
+    }
+    function gfHMapKV(v) {
+        var ord = gKeyOrder(v.keys)
+        var ks = []
+        var vs = []
+        for (var i = 0; i < ord.length; i++) { ks.push(v.keys[ord[i]]); vs.push(v.vals[ord[i]]) }
+        return [ks, vs]
+    }
+    function gfHFields(v) {
+        var fs = v.__class.__fields
+        var vs = []
+        for (var i = 0; i < fs.length; i++) { vs.push(v[fs[i]]) }
+        return [fs, vs]
+    }
+    // Error() wins over String(), as in gstr; the depth guard is gstr's too.
+    function gfHMeth(v) {
+        var r = anytype
+        r = undefined
+        if (v === undefined || v === null || typeof v != "object" || v.__class == undefined || gStrDepth >= 32) { return r }
+        var m = anytype
+        m = undefined
+        if (typeof v.__class["Error"] == "function") { m = v.__class["Error"] }
+        else if (typeof v.__class["String"] == "function") { m = v.__class["String"] }
+        if (m === undefined) { return r }
+        gStrDepth = gStrDepth + 1
+        r = m(v)
+        gStrDepth = gStrDepth - 1
+        return gstr(r)
+    }
+    function gfHStr(v) { return gstr(v) }
+    function gfHShort(a, f32) { return f32 ? coreF32Sig(a) : coreDecDigits(a) }
+    function gfHExact(a) { return coreExactDec(a) }
+    function gfHRound(ds, n) { return coreRoundHalfEven(ds, n) }
+    function gfHBytes(s) { return utf8Bytes(s) }
+    function gfHBytesStr(bs) { return utf8Decode(bs) }
+    function gfHQuote(s, delim) { return gQuoteBody(s, delim.charCodeAt(0)) }
+    function gfHRune(cp) { return fromCodePoint(cp) }
+    // The body of strconv.Quote / QuoteRune: the letter escapes, the backslash and
+    // whichever delimiter is in force (`delim` is that character's code), \xHH for
+    // the other ASCII controls and \u00HH for the Latin-1 ones; any other character
+    // is copied whole, a surrogate pair included (lib/go-fmt.js's printability
+    // rule). The twins are gopQuoteBody in abnf/jsrtgolang.go and
+    // languages/lib/go-rt.metajs.
     function gQuoteBody(s, delim) {
         var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i)
+        var i = 0
+        while (i < s.length) {
+            var r = strRuneAt(s, i)
+            var c = r.cp
             if (c == 92) { out += "\\\\" }
             else if (c == delim) { out += "\\" + s.charAt(i) }
             else if (c == 10) { out += "\\n" }
@@ -1724,7 +1735,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else if (c == 8) { out += "\\b" }
             else if (c == 12) { out += "\\f" }
             else if (c == 11) { out += "\\v" }
-            else { out += s.charAt(i) }
+            else if (c < 32 || c == 127) { out += "\\x" + gfHex2(c) }
+            else if ((c >= 128 && c <= 160) || c == 173) { out += "\\u00" + gfHex2(c) }
+            else { out += s.substring(i, i + r.n) }
+            i += r.n
         }
         return out
     }
@@ -3773,8 +3787,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // value that is ALREADY a box: `var g float32 = f` with f a float64 is not
         // a program go accepts, but `var g float32 = 0.1` arrives here as the
         // untyped constant's float64 box.
-        if (goTyWord(ty) == "float32" && (typeof v == "number" || isFlo(v))) { return gFlo32(gNumF(v)) }
-        if (isFloatTy(ty) && typeof v == "number") { return gFlo(v) }
+        // An integer constant beyond 2^53 arrives as a 64-bit box and rounds to the
+        // nearest double, as go's constant conversion does.
+        if (goTyWord(ty) == "float32" && (typeof v == "number" || isFlo(v) || szIs(v))) { return gFlo32(szIs(v) ? szNum(v) : gNumF(v)) }
+        if (isFloatTy(ty) && (typeof v == "number" || szIs(v))) { return gFlo(szNum(v)) }
         var it = goIntTy(goTyWord(ty))
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         return v

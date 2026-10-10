@@ -2789,6 +2789,47 @@ func s44() {
 	check("ta7", rec44(func() { _ = qa.(P44) }) != "no panic" && qa.(Q44).y == 1)
 }
 
+// ===== SECTION 45: fmt's verbs, flags, width and precision =====
+// Every expected string was read off `go run`. The operands come out of slices so
+// nothing is folded at compile time.
+type P45 struct {
+	A int
+	b string
+}
+
+type E45 struct{ m string }
+
+func (e E45) Error() string { return "E:" + e.m }
+
+func s45() {
+	fs := []float64{3.14159, 2.675, 1234.5678, 1e21, 0.000123, 2.5, -3.14159, 0.1, 1.0}
+	is := []int{255, -255, 7, 0, 65, 5}
+	check("fv1", fmt.Sprintf("%f|%.2f|%6.2f|%-8.3e|", fs[0], fs[1], fs[0], fs[2]) == "3.141590|2.67|  3.14|1.235e+03|")
+	check("fv2", fmt.Sprintf("%g|%g|%.3g|%e|%E|%G", fs[3], fs[2], fs[2], fs[4], fs[2], fs[4]) == "1e+21|1234.5678|1.23e+03|1.230000e-04|1.234568E+03|0.000123")
+	check("fv3", fmt.Sprintf("%.0f|%.0e|%+08.2f|%08.2f|% .2f", fs[5], fs[5], fs[6], fs[6], fs[0]) == "2|2e+00|-0003.14|-0003.14| 3.14")
+	check("fv4", fmt.Sprintf("%#g|%#.0f|%x|%.2x|%X|%b", fs[8], fs[8], fs[7], fs[7], fs[6], fs[8]) == "1.00000|1.|0x1.999999999999ap-04|0x1.9ap-04|-0X1.921F9F01B866EP+01|4503599627370496p-52")
+	check("fv5", fmt.Sprintf("%x|%X|%#x|%o|%#o|%O|%b|%#b", is[0], is[0], is[1], is[2]+1, is[2]+1, is[2]+1, is[5], is[5]) == "ff|FF|-0xff|10|010|0o10|101|0b101")
+	check("fv6", fmt.Sprintf("%5d|%-5d|%05d|%+d|% d|%.3d|%.0d|%#08x", is[0], is[2], is[1], is[2], is[2], is[2], is[3], is[0]) == "  255|7    |-0255|+7| 7|007||0x000000ff")
+	check("fv7", fmt.Sprintf("%c|%q|%U|%#U|%x|% x|%#x", is[4], is[4], is[4], is[4], "hi", "hi", "hi") == "A|'A'|U+0041|U+0041 'A'|6869|68 69|0x6869")
+	check("fv8", fmt.Sprintf("%.2s|%5.1s|%-4s|%05s|%q|%#q|%+q", "hello", "hello", "ab", "ab", "a\"b", "ab", "é") == "he|    h|ab  |000ab|\"a\\\"b\"|`ab`|\"\\u00e9\"")
+	check("fv9", fmt.Sprintf("%*d|%-*d|%.*f|%5t|%v|%+v", 5, is[5], 4, is[2], 2, fs[0], true, fs[0], is[5]) == "    5|7   |3.14| true|3.14159|5")
+	check("fv10", fmt.Sprintf("%5.1f|%x|%s", []float64{1.25, -2}, []byte("hi"), []byte("hi")) == "[  1.2  -2.0]|6869|hi")
+	check("fv11", fmt.Sprintf("%v|%.1f|%+.2e", complex(fs[8], -2), complex(1.25, 2.35), complex(fs[8], 0)) == "(1-2i)|(1.2+2.4i)|(+1.00e+00+0.00e+00i)")
+	check("fv12", fmt.Sprintf("%d|%x", []byte("hi"), E45{"a"}) == "[104 105]|453a61")
+	check("fv13", fmt.Sprintf("%!|%z|%d %d|%", is[2], is[2]) == "%!!(int=7)|%!z(int=7)|%!d(MISSING) %!d(MISSING)|%!(NOVERB)")
+	// An integer constant past 2^53 in a float64 slot rounds to the nearest double.
+	big := []float64{9007199254740993}
+	check("fv14", fmt.Sprintf("%v|%.1f", big[0], big[0]) == "9.007199254740992e+15|9007199254740992.0")
+
+	// Composites are walked element by element, so a verb that does not suit an
+	// element is noted on that element.
+	check("bv1", fmt.Sprintf("%s", []int{1, 2}) == "[%!s(int=1) %!s(int=2)]")
+	check("bv2", fmt.Sprintf("%d", P45{1, "x"}) == "{1 %!d(string=x)}")
+	check("bv3", fmt.Sprintf("%s|%d", map[string]int{"b": 2, "a": 1}, []string{"a"}) == "map[a:%!s(int=1) b:%!s(int=2)]|[%!d(string=a)]")
+	check("bv4", fmt.Sprintf("%+v|%d|%5t|%-5s|", P45{1, "x"}, E45{"a"}, 1, 3) == "{A:1 b:x}|{%!d(string=a)}|%!t(int=    1)|%!s(int=3    )|")
+	check("bv5", fmt.Sprintf("%d|%s|%t", fs[7], fs[7], nil) == "%!d(float64=0.1)|%!s(float64=0.1)|%!t(<nil>)")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2834,6 +2875,7 @@ func main() {
 	s42() // SECTION-CALL 42
 	s43() // SECTION-CALL 43
 	s44() // SECTION-CALL 44
+	s45() // SECTION-CALL 45
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

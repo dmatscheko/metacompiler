@@ -874,34 +874,17 @@ function goCxSign(s) {
 
 // ===================================================== fmt's verbs ==========
 
-// gopFormat is fmt.Sprintf over the verb subset abnf/jsrtgolang.go documents:
-// %v %d %s %t %q %c and %%. Width, precision, flags and the remaining verbs are
-// not implemented; a verb that does not apply to its operand, and every
-// unimplemented verb, renders as go's %!<verb>(<type>=<value>) note, and a
-// missing operand as %!<verb>(MISSING).
-function gopFormat(format, args) {
-    var out = ""
-    var next = 0
-    var i = 0
-    while (i < format.length) {
-        var c = format.charAt(i)
-        if (c != "%" || i + 1 >= format.length) { out = out + c; i = i + 1; continue }
-        i = i + 1
-        var verb = format.charAt(i)
-        i = i + 1
-        if (verb == "%") { out = out + "%"; continue }
-        if (next >= args.length) { out = out + "%!" + verb + "(MISSING)"; continue }
-        var a = args[next]
-        next = next + 1
-        out = out + gopVerb(verb, a)
-    }
-    return out
-}
+// fmt.Sprintf is gfFormat in lib/go-fmt.js, over the gfH* hooks below. The twins
+// are the gfH* hooks in languages/go-interpreter.abnf and gopFormat in
+// abnf/jsrtgolang.go.
+import "./go-fmt.js"
+
+function gopFormat(format, args) { return gfFormat(format, args) }
 
 // The type name fmt writes in a bad-verb note for a SCALAR operand, "nil" for nil
-// and "" for anything else (a slice, map, struct or complex value). A 64 bit box
-// answers "int" or "uint": the value model does not keep int64/uint64 apart from
-// int/uint. The twin is gopFmtTy in abnf/jsrtgolang.go.
+// and "" for anything else (a slice, map or struct). A 64 bit box answers "int" or
+// "uint": the value model does not keep int64/uint64 apart from int/uint. The twin
+// is gopFmtTy in abnf/jsrtgolang.go.
 function gopFmtTy(a) {
     if (a === undefined || a === null) { return "nil" }
     if (a === true || a === false) { return "bool" }
@@ -920,62 +903,142 @@ function gopFmtTy(a) {
             if (w == 32) { return base + "32" }
             return base
         }
-        if (a === Math.trunc(a)) { return "int" }
+        if (a - a === 0 && a === Math.trunc(a)) { return "int" }
         return "float64"
     }
+    var cls = goClassOf(a)
+    if (cls !== undefined && goStrOf(cls.__name) == "$cx") { return "complex128" }
     return ""
 }
 
-function gopIsIntTy(ty) { return ty.indexOf("int") == 0 || ty.indexOf("uint") == 0 }
-
-function gopBadVerb(verb, ty, a) {
-    if (ty == "nil") { return "%!" + verb + "(<nil>)" }
-    if (ty == "") { return "%!" + verb + "(" + gopStr(a) + ")" }
-    return "%!" + verb + "(" + ty + "=" + gopStr(a) + ")"
+function gfHKind(v) {
+    var ty = gopFmtTy(v)
+    if (ty == "nil") { return "nil" }
+    if (ty == "bool" || ty == "string") { return ty }
+    if (ty == "float64" || ty == "float32") { return "float" }
+    if (ty == "complex128") { return "complex" }
+    if (ty != "") { return "int" }
+    if (Array.isArray(v)) { return "list" }
+    if (goIsDict(v)) { return "map" }
+    var cls = goClassOf(v)
+    if (cls === undefined) { return "other" }
+    var name = goStrOf(cls.__name)
+    if (name == "$sl") { return "list" }
+    if (cls.__isclass === true && Array.isArray(cls.__fields)) { return "struct" }
+    return "other"
 }
-
-function gopVerb(verb, a) {
-    if (verb == "v") { return gopStr(a) }
-    var ty = gopFmtTy(a)
-    if (verb == "s") {
-        if (ty == "string" || ty == "") { return gopStr(a) }
-    }
-    if (verb == "d") {
-        if (sintIs(a)) { return sintStr(a) }
-        if (ty == "int") { return "" + Math.trunc(goNum(a)) }
-        if (ty == "") { return gopStr(a) }
-    }
-    if (verb == "t") {
-        if (a === true) { return "true" }
-        if (a === false) { return "false" }
-    }
-    if (verb == "c") {
-        if (gopIsIntTy(ty)) { return goRuneStr(goIdx(a)) }
-    }
-    if (verb == "q") {
-        if (typeof a == "string") { return "\"" + gopQuoteBody(a, "\"") + "\"" }
-        if (gopIsIntTy(ty)) { return "'" + gopQuoteBody(goRuneStr(goIdx(a)), "'") + "'" }
-    }
-    return gopBadVerb(verb, ty, a)
+function gfHTy(v) { return gopFmtTy(v) }
+function gfHIntNeg(v) {
+    if (sintIs(v)) { return !sintUns(v) && sintNum(v) < 0 }
+    return v < 0
 }
+function gfHIntMag(v) {
+    if (sintIs(v)) {
+        var t = sintStr(v)
+        if (t.charAt(0) == "-") { return t.substring(1) }
+        return t
+    }
+    var a = v
+    if (a < 0) { a = 0 - a }
+    if (a < 9007199254740992) { return "" + a }
+    return rtExactDec(a)["i"]
+}
+function gfHNum(v) { return goNum(v) }
+function gfHF32(v) { return goIsF32(v) }
+function gfHCx(v) { return [goNum(v.re), goNum(v.im)] }
+function gfHElems(v) {
+    if (Array.isArray(v)) { return v }
+    var back = v.a
+    var out = []
+    if (!Array.isArray(back)) { return out }
+    var off = goIdx(v.o)
+    var n = goIdx(v.n)
+    var i = 0
+    while (i < n) {
+        var e = anytype
+        e = undefined
+        if (off + i < back.length) { e = back[off + i] }
+        out.push(e)
+        i = i + 1
+    }
+    return out
+}
+function gfHIsBytes(v) {
+    if (!Array.isArray(v)) {
+        var et = v.et
+        if (et == "byte" || et == "uint8") { return true }
+    }
+    return gfAllBytes(gfHElems(v))
+}
+function gfHMapKV(v) {
+    var order = gopKeyOrder(v.keys)
+    var ks = []
+    var vs = []
+    var i = 0
+    while (i < order.length) {
+        ks.push(v.keys[order[i]])
+        var val = anytype
+        val = undefined
+        if (order[i] < v.vals.length) { val = v.vals[order[i]] }
+        vs.push(val)
+        i = i + 1
+    }
+    return [ks, vs]
+}
+function gfHFields(v) {
+    var flds = goClassOf(v).__fields
+    var names = []
+    var vals = []
+    var i = 0
+    while (i < flds.length) {
+        var fn = goStrOf(flds[i])
+        names.push(fn)
+        var fv = anytype
+        fv = undefined
+        if (goHas(v, fn)) { fv = v[fn] }
+        vals.push(fv)
+        i = i + 1
+    }
+    return [names, vals]
+}
+// Error() wins over String(), as in gopObj.
+function gfHMeth(v) {
+    var r = anytype
+    r = undefined
+    var cls = goClassOf(v)
+    if (cls === undefined) { return r }
+    var m = anytype
+    m = undefined
+    if (goHas(cls, "Error") && goIsFn(cls.Error)) { m = cls.Error }
+    else if (goHas(cls, "String") && goIsFn(cls.String)) { m = cls.String }
+    if (m === undefined) { return r }
+    r = gopStr(m(v))
+    return r
+}
+function gfHStr(v) { return gopStr(v) }
+function gfHShort(a, f32) {
+    if (f32) { return rtF32Sig(a) }
+    return rtDecDigits(a)
+}
+function gfHExact(a) { return rtExactDec(a) }
+function gfHRound(ds, n) { return rtRoundHalfEven(ds, n) }
+function gfHBytes(s) { return goBytes(s) }
+function gfHBytesStr(bs) { return goDecodeUtf8(bs) }
+function gfHQuote(s, delim) { return gopQuoteBody(s, delim) }
+function gfHRune(cp) { return goRuneStr(cp) }
 
-// gopQuoteBody is the escaping strconv.Quote / strconv.QuoteRune do, minus the
-// \x and \u forms: the letter escapes, the backslash and whichever delimiter is
-// in force. A control character Go would spell \x00 is left verbatim. The twin
-// is gQuoteBody in languages/go-interpreter.abnf; keep the two in step.
-//
-// IT WALKS BYTES, NOT CHARACTERS, as abnf/jsrtgolang.go's loop does
-// (`for i := 0; i < len(s); i++` over a Go string): a multi-byte rune arrives as its
-// individual UTF-8 bytes and each one becomes the CODE POINT of that byte value, so
-// %q of "hello" with an e-acute prints the two bytes C3 A9 as U+00C3 U+00A9. Kept
-// on purpose: both halves have to say the same thing.
+// gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
+// backslash and whichever delimiter is in force, \xHH for the other ASCII controls
+// and \u00HH for the Latin-1 ones; any other character is copied whole
+// (lib/go-fmt.js's printability rule). The twins are gQuoteBody in
+// languages/go-interpreter.abnf and gopQuoteBody in abnf/jsrtgolang.go.
 function gopQuoteBody(s, delim) {
-    var bs = goBytes(s)
+    var cps = goRunes(s).cps
     var dc = delim.charCodeAt(0)
     var out = ""
     var i = 0
-    while (i < bs.length) {
-        var k = bs[i]
+    while (i < cps.length) {
+        var k = cps[i]
         if (k == 92) { out = out + "\\\\" }
         else if (k == dc) { out = out + "\\" + String.fromCharCode(k) }
         else if (k == 10) { out = out + "\\n" }
@@ -985,7 +1048,9 @@ function gopQuoteBody(s, delim) {
         else if (k == 8) { out = out + "\\b" }
         else if (k == 12) { out = out + "\\f" }
         else if (k == 11) { out = out + "\\v" }
-        else { out = out + String.fromCharCode(k) }
+        else if (k < 32 || k == 127) { out = out + "\\x" + gfHex2(k) }
+        else if ((k >= 128 && k <= 160) || k == 173) { out = out + "\\u00" + gfHex2(k) }
+        else { out = out + goRuneStr(k) }
         i = i + 1
     }
     return out
