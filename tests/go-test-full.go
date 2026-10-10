@@ -2837,6 +2837,41 @@ func s45() {
 	check("bv3", fmt.Sprintf("%s|%d", map[string]int{"b": 2, "a": 1}, []string{"a"}) == "map[a:%!s(int=1) b:%!s(int=2)]|[%!d(string=a)]")
 	check("bv4", fmt.Sprintf("%+v|%d|%5t|%-5s|", P45{1, "x"}, E45{"a"}, 1, 3) == "{A:1 b:x}|{%!d(string=a)}|%!t(int=    1)|%!s(int=3    )|")
 	check("bv5", fmt.Sprintf("%d|%s|%t", fs[7], fs[7], nil) == "%!d(float64=0.1)|%!s(float64=0.1)|%!t(<nil>)")
+
+	// %T is reflect's spelling of the dynamic type.
+	ch := make(chan string)
+	check("tv1", fmt.Sprintf("%T|%T|%T|%T|%T|%T", is[0], fs[0], "s", true, complex(fs[8], 1), nil) == "int|float64|string|bool|complex128|<nil>")
+	check("tv2", fmt.Sprintf("%T|%T|%T|%T|%-8T|%.3T", P45{}, []P45{}, map[string][]byte{}, [2]bool{}, is[0], "s") == "main.P45|[]main.P45|map[string][]uint8|[2]bool|int     |str")
+	check("tv3", fmt.Sprintf("%T|%T|%T", ch, struct{ N int }{1}, E45{}) == "chan string|struct { N int }|main.E45")
+	// Operands no directive used are listed with their types.
+	check("ex1", fmt.Sprintf("%d", is[0], "x", P45{1, "y"}, nil, []int{2}) == "255%!(EXTRA string=x, main.P45={1 y}, <nil>, []int=[2])")
+	check("ex2", fmt.Sprintf("x", fs[5]) == "x%!(EXTRA float64=2.5)" && fmt.Sprintf("%d %", is[2], is[3]) == "7 %!(NOVERB)%!(EXTRA int=0)")
+	// %p is an address for a reference and a bad verb for anything else; a function
+	// and a channel print theirs under %v too.
+	xs := []int{1, 2}
+	ys := xs
+	var nm map[string]int
+	f := func() {}
+	check("pv1", fmt.Sprintf("%p", xs) == fmt.Sprintf("%p", ys) && fmt.Sprintf("%p", xs) != fmt.Sprintf("%p", xs[1:]) && fmt.Sprintf("%p", xs)[:2] == "0x")
+	check("pv2", fmt.Sprintf("%p|%#p|%p|%p", nm, nm, is[2], [2]int{1, 2}) == "0x0|0|%!p(int=7)|%!p([2]int=[1 2])")
+	check("pv3", fmt.Sprint(f) == fmt.Sprintf("%p", f) && fmt.Sprintf("%v", ch) == fmt.Sprintf("%p", ch) && fmt.Sprint(f)[:2] == "0x")
+	// %#v writes a Go literal; a nil in a typed slot is spelled with the slot's type.
+	type W45 struct {
+		P   P45
+		S   []string
+		M   map[string]int
+		Err error
+		Any interface{}
+		U   uint8
+	}
+	check("gv1", fmt.Sprintf("%#v|%#v|%#v|%#v|%#v", is[0], "a\tb", fs[5], true, nil) == "255|\"a\\tb\"|2.5|true|<nil>")
+	check("gv2", fmt.Sprintf("%#v", W45{P: P45{1, "x"}, M: map[string]int{"b": 2, "a": 1}, U: 7}) == "main.W45{P:main.P45{A:1, b:\"x\"}, S:[]string(nil), M:map[string]int{\"a\":1, \"b\":2}, Err:error(nil), Any:interface {}(nil), U:0x7}")
+	check("gv3", fmt.Sprintf("%#v|%#v|%#v", []interface{}{1, "a", nil}, [2]bool{true}, []byte("hi")) == "[]interface {}{1, \"a\", interface {}(nil)}|[2]bool{true, false}|[]byte{0x68, 0x69}")
+	check("gv4", fmt.Sprintf("%#v|%#v|%#6v", E45{"q"}, struct{ N int }{3}, is[2]) == "main.E45{m:\"q\"}|struct { N int }{N:3}|     7")
+	// %q, %+q and %#U escape what strconv.IsPrint refuses.
+	us := []int{0x378, 0x2028, 0x4e16}
+	check("qv1", fmt.Sprintf("%q|%+q|%q", "a\u2028b\u0378", "\u200b\u00e9", rune(us[0])) == "\"a\\u2028b\\u0378\"|\"\\u200b\\u00e9\"|'\\u0378'")
+	check("qv2", fmt.Sprintf("%#U|%#U|%#U", us[0], us[1], us[2]) == "U+0378|U+2028|U+4E16 '\u4e16'")
 }
 
 func main() {

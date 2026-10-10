@@ -50,18 +50,17 @@ package abnf
 //     modelled either, so a String() with a POINTER receiver is used for the value
 //     form too (go prints `{2}` there).
 //   - fmt's format verbs are those of languages/lib/go-fmt.js, gaps included (see
-//     its head): no %T %p, %#v renders as %v, a bad-verb note names int64/uint64
-//     int/uint, and surplus operands are ignored where go appends %!(EXTRA ...).
-//     %q escapes the backslash, the delimiter and the seven letter escapes; a
-//     control character go would spell with a hex or unicode escape is left
-//     verbatim.
+//     its head). %p and the %v of a function or a channel print an address
+//     this runtime makes up, one per referent (gopAddr).
 
 import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -193,9 +192,16 @@ func (rt *jsrt) gopRender(v interface{}, depth int) string {
 		}
 		return "[" + strings.Join(parts, " ") + "]"
 	case *jsObject:
+		// fmt prints a channel as its address (gfAddrText in lib/go-fmt.js).
+		if c, _ := t.props["__chan"].(bool); c {
+			return fmt.Sprintf("0x%x", rt.gopAddr(t, ""))
+		}
 		if s, ok := rt.gopObj(t, depth); ok {
 			return s
 		}
+	}
+	if isCallable(v) {
+		return fmt.Sprintf("0x%x", rt.gopAddr(v, ""))
 	}
 	return rt.toString(v)
 }
@@ -383,6 +389,7 @@ type gopFlags struct {
 	sharp, zero, plus, minus, space bool
 	wid, prec                       int
 	widPresent, precPresent, plusV  bool
+	sharpV                          bool
 }
 
 // gopFormat is fmt.Sprintf: the twin of gfFormat in languages/lib/go-fmt.js, which
@@ -488,15 +495,285 @@ func (rt *jsrt) gopFormat(format string, args []interface{}) string {
 			out.WriteString("%!" + string(verb) + "(MISSING)")
 			continue
 		}
-		if verb == 'v' {
-			f.plusV = f.plus
-			f.plus = false
-			f.sharp = false
+		switch verb {
+		case 'T':
+			out.WriteString(rt.gopTypeVerb(f, args[argi]))
+		case 'p':
+			out.WriteString(rt.gopPointer(f, args[argi]))
+		default:
+			if verb == 'v' {
+				f.plusV = f.plus
+				f.plus = false
+				f.sharpV = f.sharp
+				f.sharp = false
+			}
+			if f.sharpV {
+				out.WriteString(rt.gopGoSyn(f, args[argi], "", 0))
+			} else {
+				out.WriteString(rt.gopArg(f, args[argi], verb, 0, false))
+			}
 		}
-		out.WriteString(rt.gopArg(f, args[argi], verb, 0, false))
 		argi++
 	}
+	// Operands no directive used: %!(EXTRA type=value, ...).
+	if argi < len(args) {
+		out.WriteString("%!(EXTRA ")
+		for i, a := range args[argi:] {
+			if i > 0 {
+				out.WriteString(", ")
+			}
+			if gopKind(a) == "nil" {
+				out.WriteString("<nil>")
+				continue
+			}
+			out.WriteString(rt.gopTyPrefix(a) + rt.gopArg(gopFlags{}, a, 'v', 0, false))
+		}
+		out.WriteByte(')')
+	}
 	return out.String()
+}
+
+// gopGoSyn is gfGoSyn in languages/lib/go-fmt.js: %#v, v as a Go literal of its
+// type, slot being the type the enclosing composite declares for it.
+func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) string {
+	k := gopKind(v)
+	switch k {
+	case "nil":
+		if depth == 0 {
+			return gopPadRunes(f, "<nil>", true)
+		}
+		return gopNilOf(slot)
+	case "bool", "float", "complex", "string":
+		// Go's own %#v of the scalar: strconv.Quote for a string, %g for a float.
+		g := f
+		g.sharpV = false
+		return fmt.Sprintf(strings.Replace(gopSpec(g, 'v'), "%", "%#", 1), rt.gopScalar(v))
+	case "int":
+		g := f
+		g.plusV = false
+		if strings.HasPrefix(gopFmtTy(v), "u") || strings.HasPrefix(slot, "u") && strings.Contains(gopPredecl, " "+slot+" ") {
+			g.sharp = true
+			return fmt.Sprintf(gopSpec(g, 'x'), uint64(giVal(rt, v)))
+		}
+		return fmt.Sprintf(gopSpec(g, 'd'), rt.gopScalar(v))
+	}
+	ty := rt.gopTypeName(v)
+	var b strings.Builder
+	switch k {
+	case "struct":
+		o := v.(*jsObject)
+		cls := goClassOf(v)
+		flds, _ := cls.props["__fields"].(*jsArray)
+		var tys []interface{}
+		if ft, ok := cls.props["__ftypes"].(*jsArray); ok {
+			tys = ft.elems
+		}
+		b.WriteString(ty + "{")
+		if flds != nil {
+			for i, fl := range flds.elems {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				name := rt.toString(fl)
+				ft := ""
+				if i < len(tys) {
+					if t := rt.toString(tys[i]); t != "" {
+						ft = gopQualTy(t)
+					}
+				}
+				var fv interface{} = jsUndef
+				if x, ok := o.props[name]; ok {
+					fv = x
+				}
+				b.WriteString(name + ":" + rt.gopGoSyn(f, fv, ft, depth+1))
+			}
+		}
+		b.WriteByte('}')
+		return b.String()
+	case "list":
+		es, _, isArr := rt.gopListParts(v)
+		et := ty[strings.IndexByte(ty, ']')+1:]
+		// A []byte operand spells its type []byte, an element or field []uint8.
+		if ty == "[]uint8" && depth == 0 {
+			ty = "[]byte"
+		}
+		if !isArr && giIsNilZero(v) {
+			return ty + "(nil)"
+		}
+		b.WriteString(ty + "{")
+		for i, e := range es {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(rt.gopGoSyn(f, e, et, depth+1))
+		}
+		b.WriteByte('}')
+		return b.String()
+	case "map":
+		if giIsNilZero(v) {
+			return ty + "(nil)"
+		}
+		kt := gopMapKeyTy(ty)
+		vt := ty[len(kt)+5:]
+		keys, vals, _ := dictParts(v)
+		b.WriteString(ty + "{")
+		for n, i := range gopKeyOrder(keys.elems) {
+			if n > 0 {
+				b.WriteString(", ")
+			}
+			var val interface{} = jsUndef
+			if i < len(vals.elems) {
+				val = vals.elems[i]
+			}
+			b.WriteString(rt.gopGoSyn(f, keys.elems[i], kt, depth+1) + ":" + rt.gopGoSyn(f, val, vt, depth+1))
+		}
+		b.WriteByte('}')
+		return b.String()
+	}
+	if strings.HasPrefix(ty, "chan ") {
+		return "(" + ty + ")(" + rt.gopStr(v) + ")"
+	}
+	return rt.gopStr(v)
+}
+
+// gopNilOf is gfNilOf: a nil in a slot of the given type.
+func gopNilOf(slot string) string {
+	switch {
+	case slot == "" || slot == "interface {}":
+		return "interface {}(nil)"
+	case strings.HasPrefix(slot, "*") || strings.HasPrefix(slot, "func") || strings.HasPrefix(slot, "chan"):
+		return "(" + slot + ")(nil)"
+	}
+	return slot + "(nil)"
+}
+
+// gopMapKeyTy is gfMapKeyTy: K of a "map[K]V" type text.
+func gopMapKeyTy(t string) string {
+	d := 0
+	for i := 3; i < len(t); i++ {
+		switch t[i] {
+		case '[':
+			d++
+		case ']':
+			d--
+			if d == 0 {
+				return t[4:i]
+			}
+		}
+	}
+	return ""
+}
+
+// gopTyPrefix is gfTyPrefix: "type=" before a noted value, "" for an unknown type.
+func (rt *jsrt) gopTyPrefix(v interface{}) string {
+	if t := rt.gopTypeName(v); t != "" {
+		return t + "="
+	}
+	return ""
+}
+
+// gopTypeVerb is gfTypeVerb: %T.
+func (rt *jsrt) gopTypeVerb(f gopFlags, v interface{}) string {
+	if gopKind(v) == "nil" {
+		return gopPadRunes(f, "<nil>", true)
+	}
+	t := rt.gopTypeName(v)
+	if t == "" {
+		return rt.gopBad(f, 'T', v)
+	}
+	return gopPadRunes(f, gopTrunc(f, t), true)
+}
+
+// gopBad is gfBad: %!verb(type=value).
+func (rt *jsrt) gopBad(f gopFlags, verb rune, v interface{}) string {
+	if gopKind(v) == "nil" {
+		return "%!" + string(verb) + "(<nil>)"
+	}
+	g := f
+	g.plusV = false
+	return "%!" + string(verb) + "(" + rt.gopTyPrefix(v) + rt.gopArg(g, v, 'v', 0, true) + ")"
+}
+
+// gopAddrs is gfAddr's table, one per runtime: the referents %p has met, in order.
+var gopAddrs = struct {
+	sync.Mutex
+	m map[*jsrt][]gopAddrEnt
+}{m: map[*jsrt][]gopAddrEnt{}}
+
+type gopAddrEnt struct {
+	o   interface{}
+	key string
+}
+
+// gopAddr is gfAddr. Only pointer-shaped referents are compared, so an
+// incomparable value can never reach ==.
+func (rt *jsrt) gopAddr(o interface{}, key string) int64 {
+	gopAddrs.Lock()
+	defer gopAddrs.Unlock()
+	tab := gopAddrs.m[rt]
+	if reflect.ValueOf(o).Kind() == reflect.Pointer {
+		for i, e := range tab {
+			if e.o == o && e.key == key {
+				return 824633786368 + int64(i)*4096
+			}
+		}
+	}
+	gopAddrs.m[rt] = append(tab, gopAddrEnt{o, key})
+	return 824633786368 + int64(len(tab))*4096
+}
+
+// gopRef is gfHRef: the referent %p takes an address from, nil for a nil one, and
+// ok=false for a value that is not a reference. A struct counts as a pointer:
+// &T{} and T{} are one object in this value model.
+func (rt *jsrt) gopRef(v interface{}) (o interface{}, key string, off int64, ok bool) {
+	if isCallable(v) {
+		return v, "", 0, true
+	}
+	ob, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, "", 0, false
+	}
+	if giIsNilZero(v) {
+		return nil, "", 0, true
+	}
+	if _, _, isMap := dictParts(v); isMap {
+		return v, "", 0, true
+	}
+	if c, _ := ob.props["__chan"].(bool); c {
+		return v, "", 0, true
+	}
+	cls := goClassOf(v)
+	if cls == nil {
+		return nil, "", 0, false
+	}
+	switch cls.props["__name"] {
+	case "$sl":
+		return ob.props["a"], "", int64(rt.toNumber(ob.props["o"])) * 8, true
+	case "$ptr":
+		return ob.props["o"], rt.toString(ob.props["k"]), 0, true
+	}
+	if gopKind(v) == "struct" {
+		return v, "", 0, true
+	}
+	return nil, "", 0, false
+}
+
+// gopPointer is gfPointer: fmtPointer's %p.
+func (rt *jsrt) gopPointer(f gopFlags, v interface{}) string {
+	if gopKind(v) == "nil" {
+		return rt.gopBad(f, 'p', v)
+	}
+	o, key, off, ok := rt.gopRef(v)
+	if !ok {
+		return rt.gopBad(f, 'p', v)
+	}
+	var a int64
+	if o != nil {
+		a = rt.gopAddr(o, key) + off
+	}
+	g := f
+	g.sharp = !f.sharp
+	return fmt.Sprintf(gopSpec(g, 'x'), a)
 }
 
 // gopIntArg is the integer a '*' takes from its operand (gfIntArg).
@@ -581,6 +858,8 @@ func gopQualTy(t string) string {
 			if strings.HasPrefix(t[j:], "{}") {
 				j += 2
 			}
+		case len(id) > 4 && strings.HasPrefix(id, "chan") && strings.Contains(gopPredecl, " "+id[4:]+" "):
+			id = "chan " + id[4:]
 		case !dotted && !strings.Contains(gopPredecl, " "+id+" "):
 			id = "main." + id
 		}
@@ -629,6 +908,13 @@ func (rt *jsrt) gopTypeName(v interface{}) string {
 		}
 		keys, vals, _ := dictParts(v)
 		return "map[" + rt.gopCommonTy(keys.elems) + "]" + rt.gopCommonTy(vals.elems)
+	}
+	if o, ok := v.(*jsObject); ok {
+		if c, _ := o.props["__chan"].(bool); c {
+			if et, ok := o.props["czero"].(string); ok && et != "" {
+				return "chan " + gopQualTy(et)
+			}
+		}
 	}
 	return ""
 }
@@ -910,18 +1196,6 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 			return rt.gopString(f, ms, verb)
 		}
 	}
-	// %T is not one of go-fmt.js's verbs, so it is a bad verb there; Go's fmt
-	// would answer the type.
-	if verb == 'T' && k != "list" && k != "map" && k != "struct" {
-		g := f
-		g.plusV = false
-		ty := gopFmtTy(v)
-		shown := rt.gopArg(g, v, 'v', 0, true)
-		if ty == "" {
-			return "%!T(" + shown + ")"
-		}
-		return "%!T(" + ty + "=" + shown + ")"
-	}
 	switch k {
 	case "bool", "int", "float", "complex":
 		switch {
@@ -980,7 +1254,7 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 	if verb == 'v' {
 		return gopPadRunes(f, rt.gopStr(v), true)
 	}
-	return "%!" + string(verb) + "(" + rt.gopStr(v) + ")"
+	return rt.gopBad(f, verb, v)
 }
 
 // gopMeth is gfHMeth: the text of Error(), else String().
@@ -1005,7 +1279,7 @@ func (rt *jsrt) gopString(f gopFlags, s string, verb rune) string {
 	return fmt.Sprintf(gopSpec(f, verb), s)
 }
 
-// gopUnicode is fmtUnicode (gfUnicode), with go-fmt.js's printability rule.
+// gopUnicode is fmtUnicode (gfUnicode).
 func (rt *jsrt) gopUnicode(f gopFlags, v interface{}) string {
 	mag := uint64(giVal(rt, v))
 	hex := strings.ToUpper(strconv.FormatUint(mag, 16))
@@ -1017,11 +1291,8 @@ func (rt *jsrt) gopUnicode(f gopFlags, v interface{}) string {
 		hex = "0" + hex
 	}
 	out := "U+" + hex
-	if f.sharp && mag <= 0x10FFFF {
-		cp := rune(mag)
-		if (cp >= 32 && cp < 127) || (cp >= 161 && cp != 173 && (cp < 0xD800 || cp > 0xDFFF)) {
-			out += " '" + string(cp) + "'"
-		}
+	if f.sharp && mag <= 0x10FFFF && strconv.IsPrint(rune(mag)) {
+		out += " '" + string(rune(mag)) + "'"
 	}
 	return gopPadRunes(f, out, false)
 }
@@ -1086,8 +1357,8 @@ func (rt *jsrt) gopList(f gopFlags, v interface{}, verb rune, depth int, noMeth 
 
 // gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
 // backslash and whichever delimiter is in force, \xHH for the other ASCII controls
-// and \u00HH for the Latin-1 ones; any other rune is copied whole
-// (languages/lib/go-fmt.js's printability rule). The twins are gQuoteBody in
+// and \uHHHH / \UHHHHHHHH for any other rune strconv.IsPrint refuses (gfIsPrint in
+// languages/lib/go-fmt.js carries the same table). The twins are gQuoteBody in
 // languages/go-interpreter.abnf and gopQuoteBody in languages/lib/go-rt.metajs.
 func gopQuoteBody(s string, delim byte) string {
 	named := map[rune]string{'\n': `\n`, '\t': `\t`, '\r': `\r`, 7: `\a`, 8: `\b`, 12: `\f`, 11: `\v`}
@@ -1101,8 +1372,10 @@ func gopQuoteBody(s string, delim byte) string {
 			out += e
 		} else if c < 32 || c == 127 {
 			out += fmt.Sprintf(`\x%02x`, c)
-		} else if (c >= 128 && c <= 160) || c == 173 {
+		} else if !strconv.IsPrint(c) && c < 0x10000 {
 			out += fmt.Sprintf(`\u%04x`, c)
+		} else if !strconv.IsPrint(c) {
+			out += fmt.Sprintf(`\U%08x`, c)
 		} else {
 			out += string(c)
 		}

@@ -434,6 +434,8 @@ function gopRender(v, depth) {
         }
         return out + "]"
     }
+    // fmt prints a function or a channel as its address (gfAddrText).
+    if (goIsFn(v) || goIsChan(v)) { return gfAddrText(v) }
     if (goIsObj(v)) {
         var r = gopObj(v, depth)
         if (r !== undefined) { return r }
@@ -1038,6 +1040,24 @@ function gfHMapTy(v) {
     if (typeof v.mty == "string") { return v.mty }
     return ""
 }
+function gfHChanTy(v) {
+    if (goIsChan(v) && typeof v.czero == "string") { return v.czero }
+    return ""
+}
+// A struct counts as a pointer: &T{} and T{} are one object in this value model.
+function gfHRef(v) {
+    if (goIsFn(v)) { return [v, "", 0] }
+    if (!goIsObj(v)) { return [] }
+    if (goIsNilZero(v)) { return [null, "", 0] }
+    if (goIsDict(v) || goIsChan(v)) { return [v, "", 0] }
+    var cls = goClassOf(v)
+    if (cls === undefined) { return [] }
+    var nm = goStrOf(cls.__name)
+    if (nm == "$sl") { return [v.a, "", goIdx(v.o) * 8] }
+    if (nm == "$ptr") { return [v.o, goStrOf(v.k), 0] }
+    if (gfHKind(v) == "struct") { return [v, "", 0] }
+    return []
+}
 function gfHShort(a, f32) {
     if (f32) { return rtF32Sig(a) }
     return rtDecDigits(a)
@@ -1051,8 +1071,8 @@ function gfHRune(cp) { return goRuneStr(cp) }
 
 // gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
 // backslash and whichever delimiter is in force, \xHH for the other ASCII controls
-// and \u00HH for the Latin-1 ones; any other character is copied whole
-// (lib/go-fmt.js's printability rule). The twins are gQuoteBody in
+// and gfUEsc for any other character that is not printable (gfIsPrint); a
+// printable one is copied whole. The twins are gQuoteBody in
 // languages/go-interpreter.abnf and gopQuoteBody in abnf/jsrtgolang.go.
 function gopQuoteBody(s, delim) {
     var cps = goRunes(s).cps
@@ -1071,7 +1091,7 @@ function gopQuoteBody(s, delim) {
         else if (k == 12) { out = out + "\\f" }
         else if (k == 11) { out = out + "\\v" }
         else if (k < 32 || k == 127) { out = out + "\\x" + gfHex2(k) }
-        else if ((k >= 128 && k <= 160) || k == 173) { out = out + "\\u00" + gfHex2(k) }
+        else if (!gfIsPrint(k)) { out = out + gfUEsc(k) }
         else { out = out + goRuneStr(k) }
         i = i + 1
     }

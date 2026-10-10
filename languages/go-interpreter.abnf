@@ -1557,6 +1557,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Go prints a pointer as an address; the value model has none, so the pointee
         // is printed behind an '&' (which is what fmt does for a pointer to a struct).
         if (isPtr(v)) { return "&" + gstr(ptrGet(v)) }
+        // fmt prints a function or a channel as its address (gfAddrText).
+        if (typeof v == "function" || isChan(v)) { return gfAddrText(v) }
         if (isCx(v)) { return cxStr(v) }
         if (isFlo(v)) { return isF32(v) ? gF32Str(v.__flo) : gFloStr(v.__flo) }
         // A sized integer prints its digits, unsigned where it is unsigned - so a
@@ -1717,6 +1719,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHElemTy(v) { return (isSl(v) && typeof v.et == "string") ? v.et : "" }
     function gfHIsArray(v) { return Array.isArray(v) }
     function gfHMapTy(v) { return typeof v.mty == "string" ? v.mty : "" }
+    function gfHChanTy(v) {
+        if (v !== undefined && v !== null && typeof v == "object" && v.__chan == true && typeof v.czero == "string") { return v.czero }
+        return ""
+    }
+    // A struct counts as a pointer: &T{} and T{} are one object in this value model.
+    function gfHRef(v) {
+        if (isSl(v)) { return v.__nil == true ? [null, "", 0] : [v.a, "", v.o * 8] }
+        if (isMap(v)) { return v.__nil == true ? [null, "", 0] : [v, "", 0] }
+        if (isPtr(v)) { return [v.o, v.k, 0] }
+        if (typeof v == "function") { return [v, "", 0] }
+        if (typeof v == "object" && v.__chan == true) { return [v, "", 0] }
+        if (gfHKind(v) == "struct") { return [v, "", 0] }
+        return []
+    }
     function gfHShort(a, f32) { return f32 ? coreF32Sig(a) : coreDecDigits(a) }
     function gfHExact(a) { return coreExactDec(a) }
     function gfHRound(ds, n) { return coreRoundHalfEven(ds, n) }
@@ -1726,9 +1742,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHRune(cp) { return fromCodePoint(cp) }
     // The body of strconv.Quote / QuoteRune: the letter escapes, the backslash and
     // whichever delimiter is in force (`delim` is that character's code), \xHH for
-    // the other ASCII controls and \u00HH for the Latin-1 ones; any other character
-    // is copied whole, a surrogate pair included (lib/go-fmt.js's printability
-    // rule). The twins are gopQuoteBody in abnf/jsrtgolang.go and
+    // the other ASCII controls and gfUEsc for any other character that is not
+    // printable (gfIsPrint); a printable one is copied whole, a surrogate pair
+    // included. The twins are gopQuoteBody in abnf/jsrtgolang.go and
     // languages/lib/go-rt.metajs.
     function gQuoteBody(s, delim) {
         var out = ""
@@ -1746,7 +1762,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else if (c == 12) { out += "\\f" }
             else if (c == 11) { out += "\\v" }
             else if (c < 32 || c == 127) { out += "\\x" + gfHex2(c) }
-            else if ((c >= 128 && c <= 160) || c == 173) { out += "\\u00" + gfHex2(c) }
+            else if (!gfIsPrint(c)) { out += gfUEsc(c) }
             else { out += s.substring(i, i + r.n) }
             i += r.n
         }
