@@ -83,6 +83,7 @@ class Main {
         S37.run(); // SECTION-CALL 37
         S38.run(); // SECTION-CALL 38
         S39.run(); // SECTION-CALL 39
+        S40.run(); // SECTION-CALL 40
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2377,5 +2378,57 @@ class S39 {
         S39Base b = new S39Derived();
         Main.check("ov9", b.f(k[0]).equals("D.int 1/B.int 1") && b.f(s[0]).equals("B.str x"));
         Main.check("ov10", new S39P(k[0], k[1]).tag.equals("ii 3") && new S39P(d[0], k[1]).tag.equals("dd 3.5"));
+    }
+}
+
+// ===== SECTION 40: String.toCharArray, Runnable, Character, Math.*Exact, Double.sum =====
+//
+// A handful of java.lang members, each checked against java 24.0.2: an
+// anonymous class over Runnable (a library interface the program does not
+// declare) reaching a static field of the enclosing class; Character's
+// classification and case mapping for Latin letters, digits and blanks; the
+// overflow-checked Math.*Exact family (ArithmeticException "integer overflow"
+// / "long overflow"); Double.sum / max / min, whose max and min order -0.0
+// below 0.0.
+class S40 {
+    static int runs = 0;
+    static String exact(int which, int[] k, long[] l) {
+        try {
+            if (which == 0) { return "" + Math.addExact(k[0], k[1]); }
+            if (which == 1) { return "" + Math.subtractExact(k[2], k[1]); }
+            if (which == 2) { return "" + Math.multiplyExact(k[3], k[3]); }
+            if (which == 3) { return "" + Math.negateExact(k[2]); }
+            if (which == 4) { return "" + Math.addExact(l[0], l[1]); }
+            if (which == 5) { return "" + Math.multiplyExact(l[0], 2L); }
+            return "" + Math.toIntExact(l[0]);
+        } catch (ArithmeticException e) {
+            return e.getMessage();
+        }
+    }
+    static void run() {
+        String[] s = { "hello", "" };
+        char[] cs = s[0].toCharArray();
+        Main.check("tc1", cs.length == 5 && cs[1] == 'e' && cs[0] + 1 == 105 && s[1].toCharArray().length == 0);
+        Runnable r = new Runnable() { public void run() { runs++; } };
+        r.run();
+        r.run();
+        Main.check("rn1", S40.runs == 2);
+        char[] c = { '7', 'a', 'Z', ' ', '_', 'é', 'ß', '²' };
+        Main.check("ch1", Character.isDigit(c[0]) && !Character.isDigit(c[1]) && Character.isLetter(c[1]) && !Character.isLetter(c[0]));
+        Main.check("ch2", Character.isLetter(c[5]) && !Character.isLetter(c[4]) && Character.isLetterOrDigit(c[0]) && !Character.isLetterOrDigit(c[3]));
+        Main.check("ch3", Character.toUpperCase(c[1]) == 'A' && Character.toUpperCase(c[5]) == 'É' && Character.toUpperCase(c[6]) == 'ß' && Character.toLowerCase(c[2]) == 'z');
+        Main.check("ch4", Character.getNumericValue(c[0]) == 7 && Character.getNumericValue(c[1]) == 10 && Character.getNumericValue(c[2]) == 35
+            && Character.getNumericValue(c[4]) == -1 && Character.getNumericValue(c[7]) == 2);
+        Main.check("ch5", Character.isWhitespace(c[3]) && !Character.isWhitespace(c[4]) && Character.isUpperCase(c[2]) && Character.isLowerCase(c[6]));
+        Main.check("ch6", ("" + Character.toUpperCase(c[1])).equals("A") && Character.toUpperCase(97) == 65);
+        int[] k = { Integer.MAX_VALUE, 1, Integer.MIN_VALUE, 46341 };
+        long[] l = { Long.MAX_VALUE, 1L };
+        Main.check("ex1", Math.addExact(k[1], k[1]) == 2 && Math.multiplyExact(k[3], k[1]) == 46341 && Math.toIntExact(l[1]) == 1);
+        Main.check("ex2", exact(0, k, l).equals("integer overflow") && exact(1, k, l).equals("integer overflow") && exact(2, k, l).equals("integer overflow"));
+        Main.check("ex3", exact(3, k, l).equals("integer overflow") && exact(4, k, l).equals("long overflow") && exact(5, k, l).equals("long overflow"));
+        Main.check("ex4", exact(6, k, l).equals("integer overflow") && Math.incrementExact(l[1]) * 1000000 * 1000000 * 1000 == 2000000000000000L);
+        double[] d = { 1.5, 2.25, -0.0, 0.0 };
+        Main.check("ds1", ("" + Double.sum(d[0], d[1])).equals("3.75") && ("" + Double.max(d[0], d[1])).equals("2.25") && ("" + Double.min(d[0], d[1])).equals("1.5"));
+        Main.check("ds2", ("" + Double.min(d[2], d[3])).equals("-0.0") && ("" + Double.max(d[2], d[3])).equals("0.0"));
     }
 }

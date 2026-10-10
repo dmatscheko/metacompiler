@@ -500,6 +500,199 @@ func jvMathMembers(o *jsObject) {
 		}
 		return r
 	}))
+	for name, op := range map[string]string{"addExact": "+", "subtractExact": "-", "multiplyExact": "*"} {
+		op := op
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.jvExact(op, argAt(args, 0), argAt(args, 1))
+		}))
+	}
+	unit := func(v interface{}, n int64) interface{} {
+		if jvIsLong(v) {
+			return jvBox(n)
+		}
+		return float64(n)
+	}
+	o.set("incrementExact", jsHostFunc("incrementExact", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.jvExact("+", argAt(args, 0), unit(argAt(args, 0), 1))
+	}))
+	o.set("decrementExact", jsHostFunc("decrementExact", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.jvExact("-", argAt(args, 0), unit(argAt(args, 0), 1))
+	}))
+	o.set("negateExact", jsHostFunc("negateExact", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.jvExact("-", unit(argAt(args, 0), 0), argAt(args, 0))
+	}))
+	o.set("toIntExact", jsHostFunc("toIntExact", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		n := jvNarrow(rt, argAt(args, 0), 32)
+		if rt.jvCmp("!=", n, argAt(args, 0)) {
+			rt.jvThrowArith("integer overflow")
+		}
+		return n
+	}))
+}
+
+// jvExact is Math.addExact / subtractExact / multiplyExact at the promoted
+// width: the wrapped result, or ArithmeticException "integer overflow" / "long
+// overflow" when it differs from the true one. Twin of jExact in
+// java-interpreter.abnf, whose comment has the two tests.
+func (rt *jsrt) jvExact(op string, a, b interface{}) interface{} {
+	r := rt.jvArith(op, a, b)
+	if !jvIsLong(r) {
+		x, y := rt.toNumber(a), rt.toNumber(b)
+		t := x * y
+		switch op {
+		case "+":
+			t = x + y
+		case "-":
+			t = x - y
+		}
+		if t != rt.toNumber(r) {
+			rt.jvThrowArith("integer overflow")
+		}
+		return r
+	}
+	zero := float64(0)
+	na, nb, nr := rt.jvCmp("<", a, zero), rt.jvCmp("<", b, zero), rt.jvCmp("<", r, zero)
+	bad := false
+	switch op {
+	case "+":
+		bad = na == nb && nr != na
+	case "-":
+		bad = na != nb && nr != na
+	default:
+		bad = (rt.jvCmp("!=", b, zero) && rt.jvCmp("!=", rt.jvArith("/", r, b), a)) ||
+			(rt.jvCmp("==", a, jvBox(math.MinInt64)) && rt.jvCmp("==", b, float64(-1)))
+	}
+	if bad {
+		rt.jvThrowArith("long overflow")
+	}
+	return r
+}
+
+// jvCharMembers is java.lang.Character's classification and case mapping.
+// Twin of jCharMembers in java-interpreter.abnf, whose comment has the rules,
+// and of languages/lib/java-rt.metajs.
+func jvCharMembers(o *jsObject) {
+	code := func(rt *jsrt, v interface{}) int {
+		if c, ok := v.(jsChar); ok {
+			return int(c.code)
+		}
+		return int(rt.toNumber(v))
+	}
+	like := func(v interface{}, c int) interface{} {
+		if _, ok := v.(jsChar); ok {
+			return jsChar{code: int32(c)}
+		}
+		return float64(c)
+	}
+	pred := func(name string, p func(c int) bool) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return p(code(rt, argAt(args, 0)))
+		}))
+	}
+	isDigit := func(c int) bool { return c >= '0' && c <= '9' }
+	pred("isDigit", isDigit)
+	pred("isLetter", jvChLetter)
+	pred("isAlphabetic", jvChLetter)
+	pred("isLetterOrDigit", func(c int) bool { return isDigit(c) || jvChLetter(c) })
+	pred("isUpperCase", jvChUpper)
+	pred("isLowerCase", func(c int) bool {
+		return jvChLetter(c) && !jvChUpper(c) && !(jvChLo(c) != c && jvChUp(c) != c) && c != 443 && !(c >= 448 && c <= 451)
+	})
+	pred("isWhitespace", func(c int) bool {
+		return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 5760 || (c >= 8192 && c <= 8198) ||
+			(c >= 8200 && c <= 8202) || c == 8232 || c == 8233 || c == 8287 || c == 12288
+	})
+	o.set("toUpperCase", jsHostFunc("toUpperCase", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return like(argAt(args, 0), jvChUp(code(rt, argAt(args, 0))))
+	}))
+	o.set("toLowerCase", jsHostFunc("toLowerCase", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return like(argAt(args, 0), jvChLo(code(rt, argAt(args, 0))))
+	}))
+	o.set("getNumericValue", jsHostFunc("getNumericValue", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		c := code(rt, argAt(args, 0))
+		switch {
+		case c == 178 || c == 179:
+			return float64(c - 176)
+		case c == 185:
+			return float64(1)
+		case c >= 188 && c <= 190:
+			return float64(-2)
+		}
+		if d := jvChDigit(c); d != 99 {
+			return float64(d)
+		}
+		return float64(-1)
+	}))
+	o.set("digit", jsHostFunc("digit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if d := jvChDigit(code(rt, argAt(args, 0))); float64(d) < rt.toNumber(argAt(args, 1)) {
+			return float64(d)
+		}
+		return float64(-1)
+	}))
+}
+
+// jvChDigit is jvDigitOf for any code: 99 past ASCII.
+func jvChDigit(c int) int {
+	if c < 0 || c > 127 {
+		return 99
+	}
+	return jvDigitOf(byte(c))
+}
+
+func jvChUp(c int) int {
+	if s := utf16.Encode([]rune(strings.ToUpper(string(rune(c))))); len(s) == 1 {
+		return int(s[0])
+	}
+	return c
+}
+
+func jvChLo(c int) int {
+	if s := utf16.Encode([]rune(strings.ToLower(string(rune(c))))); len(s) == 1 {
+		return int(s[0])
+	}
+	return c
+}
+
+func jvChLetter(c int) bool {
+	switch {
+	case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+		return true
+	case c < 192:
+		return c == 170 || c == 181 || c == 186
+	case c <= 591:
+		return c != 215 && c != 247
+	}
+	return jvChUp(c) != c || jvChLo(c) != c
+}
+
+func jvChUpper(c int) bool { return jvChLetter(c) && jvChLo(c) != c && jvChUp(c) == c }
+
+// jvMaxD / jvMinD are Math.max / Math.min on doubles: NaN wins, and -0.0 is
+// below 0.0. Twin of jMaxD / jMinD in java-interpreter.abnf.
+func jvMaxD(a, b float64) float64 {
+	if a != a {
+		return a
+	}
+	if a == 0 && b == 0 && math.Signbit(a) {
+		return b
+	}
+	if a >= b {
+		return a
+	}
+	return b
+}
+
+func jvMinD(a, b float64) float64 {
+	if a != a {
+		return a
+	}
+	if a == 0 && b == 0 && math.Signbit(b) {
+		return b
+	}
+	if a <= b {
+		return a
+	}
+	return b
 }
 
 // jvIsDouble: is v a Java double (and not a float or an integral value)?
@@ -664,6 +857,14 @@ func jvFloType(o *jsObject, sty uint8) {
 	o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return jvDoubleCompare(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
 	}))
+	for name, fn := range map[string]func(float64, float64) float64{
+		"sum": func(a, b float64) float64 { return a + b }, "max": jvMaxD, "min": jvMinD,
+	} {
+		fn := fn
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return mk(fn(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))))
+		}))
+	}
 	parse := jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return mk(rt.jvParseDbl(rt.toString(argAt(args, 0))))
 	})
@@ -882,6 +1083,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jsChar{code: 0})
 		o.set("SIZE", float64(16))
 		o.set("BYTES", float64(2))
+		jvCharMembers(o)
 	case "Double":
 		jvFloType(o, floJava)
 	case "Float":
@@ -1042,6 +1244,19 @@ func init() {
 			return w(rt.callH(owner.props[slot], jsUndef, args.elems, a[3]))
 		}
 		baseMcall := m["js_mcall"]
+		// String.toCharArray: one char per UTF-16 unit. Anything else is an
+		// ordinary call of a method by that name.
+		m["js_jvchars"] = func(a []uint64) uint64 {
+			if s, ok := u(a[0]).(string); ok {
+				units := utf16.Encode([]rune(s))
+				out := make([]interface{}, len(units))
+				for i, c := range units {
+					out[i] = jsChar{code: int32(c)}
+				}
+				return w(&jsArray{elems: out})
+			}
+			return baseMcall([]uint64{a[0], w("toCharArray"), w(&jsArray{})})
+		}
 		m["js_jvsub"] = func(a []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
 				if args, ok := u(a[1]).(*jsArray); ok {

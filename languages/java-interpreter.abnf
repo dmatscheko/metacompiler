@@ -2211,7 +2211,47 @@ HasStatic   = :script(~~
             var r = jArith("%", a, b)
             if (jCmp("!=", r, 0) && jCmp("<", r, 0) != jCmp("<", b, 0)) { return jArith("+", r, b) }
             return r
+        },
+        addExact: function(a, b) { return jExact("+", a, b) },
+        subtractExact: function(a, b) { return jExact("-", a, b) },
+        multiplyExact: function(a, b) { return jExact("*", a, b) },
+        incrementExact: function(a) { return jExact("+", a, jIsLong(a) ? jL(1) : 1) },
+        decrementExact: function(a) { return jExact("-", a, jIsLong(a) ? jL(1) : 1) },
+        negateExact: function(a) { return jExact("-", jIsLong(a) ? jL(0) : 0, a) },
+        toIntExact: function(a) {
+            var n = jNarrow(a, 32)
+            if (jCmp("!=", n, a)) { jThrowExc("ArithmeticException", "integer overflow") }
+            return n
         }
+    }
+    // Math.addExact / subtractExact / multiplyExact at the promoted width: the
+    // wrapped result, or ArithmeticException "integer overflow" / "long
+    // overflow" when it differs from the true one. An int result is checked
+    // against the double arithmetic (exact below 2^53, and a product past it is
+    // past int's range anyway); a long one by the sign rules of two's
+    // complement and, for *, by dividing back (Math.multiplyExact's own test).
+    // Twin of jvExact in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jExact(op, a, b) {
+        var r = jArith(op, a, b)
+        if (!jIsLong(r)) {
+            var x = jNumD(a)
+            var y = jNumD(b)
+            var t = op == "+" ? x + y : (op == "-" ? x - y : x * y)
+            if (t !== jNum(r)) { jThrowExc("ArithmeticException", "integer overflow") }
+            return r
+        }
+        var na = jCmp("<", a, 0)
+        var nb = jCmp("<", b, 0)
+        var nr = jCmp("<", r, 0)
+        var bad = false
+        if (op == "+") { bad = na == nb && nr != na }
+        if (op == "-") { bad = na != nb && nr != na }
+        if (op == "*") {
+            bad = (jCmp("!=", b, 0) && jCmp("!=", jArith("/", r, b), a))
+                || (jCmp("==", a, hostGlobals["Long"].MIN_VALUE) && jCmp("==", b, jNegOne))
+        }
+        if (bad) { jThrowExc("ArithmeticException", "long overflow") }
+        return r
     }
     // java.lang.Math#pow where it parts from IEEE-754's pow: a NaN exponent is
     // always NaN, and |x| == 1 to an infinite power is NaN (not 1). Twin of
@@ -2509,6 +2549,68 @@ HasStatic   = :script(~~
         }
         return x
     }
+    // java.lang.Character's classification and case mapping. Each takes a char
+    // or an int code point, and toUpperCase / toLowerCase answer the argument's
+    // own type. Exact through U+024F (checked against java 24.0.2 for every
+    // code there); beyond it a letter is a CASED one and only 0-9 are digits.
+    // The case mapping is the host's one-character mapping, the Unicode simple
+    // mapping Java's is. Twin of jvCharMembers in abnf/jsrtjava.go and
+    // languages/lib/java-rt.metajs.
+    function jCharMembers(o) {
+        var code = function(v) { return jIsChar(v) ? v.__char : jNum(v) }
+        var like = function(v, c) { return jIsChar(v) ? jChar(c) : c }
+        o.isDigit = function(v) { var c = code(v); return c >= 48 && c <= 57 }
+        o.isLetter = function(v) { return jChLetter(code(v)) }
+        o.isAlphabetic = function(v) { return jChLetter(code(v)) }
+        o.isLetterOrDigit = function(v) { var c = code(v); return (c >= 48 && c <= 57) || jChLetter(c) }
+        o.isUpperCase = function(v) { return jChUpper(code(v)) }
+        o.isLowerCase = function(v) {
+            var c = code(v)
+            return jChLetter(c) && !jChUpper(c) && !(jChLo(c) != c && jChUp(c) != c) && c != 443 && !(c >= 448 && c <= 451)
+        }
+        o.isWhitespace = function(v) {
+            var c = code(v)
+            return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 5760 || (c >= 8192 && c <= 8198)
+                || (c >= 8200 && c <= 8202) || c == 8232 || c == 8233 || c == 8287 || c == 12288
+        }
+        o.toUpperCase = function(v) { return like(v, jChUp(code(v))) }
+        o.toLowerCase = function(v) { return like(v, jChLo(code(v))) }
+        o.getNumericValue = function(v) {
+            var c = code(v)
+            if (c == 178 || c == 179) { return c - 176 }
+            if (c == 185) { return 1 }
+            if (c >= 188 && c <= 190) { return 0 - 2 }
+            var d = jDigitOf(c)
+            return d == 99 ? 0 - 1 : d
+        }
+        o.digit = function(v, radix) { var d = jDigitOf(code(v)); return d < jNum(radix) ? d : 0 - 1 }
+    }
+    jCharMembers(hostGlobals["Character"])
+    function jChUp(c) { var s = String.fromCharCode(c).toUpperCase(); return s.length == 1 ? s.charCodeAt(0) : c }
+    function jChLo(c) { var s = String.fromCharCode(c).toLowerCase(); return s.length == 1 ? s.charCodeAt(0) : c }
+    // The Latin letters are listed (ª µ º are letters, × ÷ are not); past
+    // U+024F a letter is one with a case mapping.
+    function jChLetter(c) {
+        if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return true }
+        if (c < 192) { return c == 170 || c == 181 || c == 186 }
+        if (c <= 591) { return c != 215 && c != 247 }
+        return jChUp(c) != c || jChLo(c) != c
+    }
+    // Upper case: a letter that lower-cases and does not upper-case (a
+    // titlecase digraph like U+01C5 does both).
+    function jChUpper(c) { return jChLetter(c) && jChLo(c) != c && jChUp(c) == c }
+    // Java's Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0.
+    // Double.max / min and Float.max / min are these.
+    function jMaxD(a, b) {
+        if (a !== a) { return a }
+        if (a == 0 && b == 0 && 1 / a < 0) { return b }
+        return a >= b ? a : b
+    }
+    function jMinD(a, b) {
+        if (a !== a) { return a }
+        if (a == 0 && b == 0 && 1 / b < 0) { return b }
+        return a <= b ? a : b
+    }
     // Double and Float: the IEEE-754 constants of the width and the static
     // methods over it. Twin of jvFloType in languages/lib/java-rt.metajs and of
     // the "Double" / "Float" arms of jvBoxType in abnf/jsrtjava.go.
@@ -2526,6 +2628,9 @@ HasStatic   = :script(~~
         o.isInfinite = function(v) { var f = jNumD(v); return f == inf || f == -inf }
         o.isFinite = function(v) { var f = jNumD(v); return f == f && f != inf && f != -inf }
         o.compare = function(a, b) { return jDblCompare(jNumD(a), jNumD(b)) }
+        o.sum = function(a, b) { return jFloRes(jNumD(a) + jNumD(b), f32) }
+        o.max = function(a, b) { return jFloRes(jMaxD(jNumD(a), jNumD(b)), f32) }
+        o.min = function(a, b) { return jFloRes(jMinD(jNumD(a), jNumD(b)), f32) }
         var parse = function(s) { return jFloRes(jParseDbl("" + s), f32) }
         if (f32) { o.parseFloat = parse } else { o.parseDouble = parse }
         o.valueOf = function(v) { return typeof v == "string" ? parse(v) : jFloRes(jNumD(v), f32) }
@@ -3175,6 +3280,11 @@ HasStatic   = :script(~~
             if (name == "substring") return jSubstr(target, args)
             if (name == "indexOf") return target.indexOf(args[0])
             if (name == "isEmpty") return target.length == 0
+            if (name == "toCharArray") {
+                var cs = []
+                for (var ci = 0; ci < target.length; ci++) { cs.push(jChar(target.charCodeAt(ci))) }
+                return cs
+            }
             fail("unknown String method: " + name)
         }
         // A char answers the handful of methods a program calls on one. equals()
@@ -3751,7 +3861,9 @@ HasStatic   = :script(~~
         return function() {
             if (built == null) {
                 jAnonSeq = jAnonSeq + 1
-                var ms = [{ext: superName}]
+                // A supertype the program does not declare (Runnable,
+                // Comparator, ...) is a library interface: nothing to extend.
+                var ms = jResolveClass(superName) == undefined ? [] : [{ext: superName}]
                 for (var k = 0; k < members.length; k++) { ms.push(members[k]) }
                 built = buildClassFrom("$anon" + jAnonSeq + "$" + superName, ms, undefined)
                 built.__name = superName
@@ -5545,6 +5657,12 @@ HasStatic   = :script(~~
             if (ch != undefined && ch != null) {
                 for (var ci = ch.length - 1; ci >= 0; ci--) {
                     if (hasOwn(ch[ci], name)) { return ch[ci] }
+                    // A STATIC enclosing method has no enclosing instance; its
+                    // frame carries the class (__jcls), whose statics come next.
+                    if (hasOwn(ch[ci], "__jcls")) {
+                        var so = jStaticOwner(ch[ci]["__jcls"], name)
+                        if (so != null) { return so }
+                    }
                 }
             }
             v = v.__outer

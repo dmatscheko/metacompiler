@@ -3386,8 +3386,11 @@ HasStatic   = :script(~~
                     // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
                     // Go extern table is SHARED across languages, so a wrapper on
                     // js_mcall would make a C# Substring raise java's message.
+                    // String.toCharArray (js_jvchars) is java-only for the same reason.
                     var mv = (s.name == "substring")
                              ? callExt(mcallB, "js_jvsub", [cur, ea.v])
+                             : ((s.name == "toCharArray" && s.args.length == 0)
+                             ? callExt(mcallB, "js_jvchars", [cur])
                              : ((s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
                              : ((s.name == "hashCode" && s.args.length == 0)
@@ -3396,7 +3399,7 @@ HasStatic   = :script(~~
                                    ? callExt(mcallB, "js_jvstr", [cur])
                                    : ((s.name == "equals" && s.args.length == 1)
                                       ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])))))
+                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4465,7 +4468,10 @@ HasStatic   = :script(~~
             var impls = []
             var i
             for (i = 0; i < members.length; i++) {
-                if (members[i].ext != undefined) { superName = baseTypeName(members[i].ext) }
+                if (members[i].ext != undefined
+                    && (members[i].lib !== true || classNames["$" + baseTypeName(members[i].ext)] == true)) {
+                    superName = baseTypeName(members[i].ext)
+                }
                 if (members[i].impls != undefined) {
                     for (var q = 0; q < members[i].impls.length; q++) {
                         var iname = baseTypeName(members[i].impls[q])
@@ -5090,7 +5096,9 @@ HasStatic   = :script(~~
         jRegAnonFields(members)
         anonCount++
         var aname = "Anon$" + anonCount
-        var mem = [{ext: baseName}]
+        // lib: a base this program does not declare (Runnable, Comparator, ...)
+        // is a library interface, and buildClassStmt drops it.
+        var mem = [{ext: baseName, lib: true}]
         if (args.length > 0) {
             // Forward the arguments to the base constructor: the anonymous class's own
             // constructor takes them positionally and delegates with super(...).

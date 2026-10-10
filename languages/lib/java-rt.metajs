@@ -744,6 +744,7 @@ function jvBoxType(name) {
         o["MIN_VALUE"] = jvChar(0)
         o["SIZE"] = 16
         o["BYTES"] = 2
+        jvCharMembers(o)
         return o
     }
     if (name == "Double") {
@@ -828,6 +829,17 @@ function jvMathMembers(o) {
         var r = jvArith("%", a, b)
         if (jvCmp("!=", r, 0) && jvCmp("<", r, 0) != jvCmp("<", b, 0)) { return jvArith("+", r, b) }
         return r
+    }
+    o["addExact"] = function(a, b) { return jvExact("+", a, b) }
+    o["subtractExact"] = function(a, b) { return jvExact("-", a, b) }
+    o["multiplyExact"] = function(a, b) { return jvExact("*", a, b) }
+    o["incrementExact"] = function(a) { return jvExact("+", a, jvUnitLike(a, 1)) }
+    o["decrementExact"] = function(a) { return jvExact("-", a, jvUnitLike(a, 1)) }
+    o["negateExact"] = function(a) { return jvExact("-", jvUnitLike(a, 0), a) }
+    o["toIntExact"] = function(a) {
+        var n = jvNarrow(a, 32)
+        if (jvCmp("!=", n, a)) { jvThrowArith("integer overflow") }
+        return n
     }
 }
 
@@ -1007,6 +1019,9 @@ function jvFloType(o, f32) {
         return f != Infinity && f != 0 - Infinity
     }
     o["compare"] = function(a, b) { return jvDoubleCompare(rtjNum(a), rtjNum(b)) }
+    o["sum"] = function(a, b) { return jvFloOf(rtjNum(a) + rtjNum(b), f32) }
+    o["max"] = function(a, b) { return jvFloOf(jvMaxD(rtjNum(a), rtjNum(b)), f32) }
+    o["min"] = function(a, b) { return jvFloOf(jvMinD(rtjNum(a), rtjNum(b)), f32) }
     var parse = function(s) { return jvFloOf(jvParseDbl(jpStr(s)), f32) }
     if (f32) { o["parseFloat"] = parse } else { o["parseDouble"] = parse }
     o["valueOf"] = function(v) {
@@ -1660,6 +1675,21 @@ function jvEqKind(v) {
     return 0
 }
 
+// String.toCharArray: one char per UTF-16 unit. Anything else is an ordinary
+// call of a method by that name. Twin of js_jvchars in abnf/jsrtjava.go.
+function js_jvchars(v) {
+    if (typeof v == "string") {
+        var out = []
+        var i = 0
+        while (i < v.length) {
+            out.push(jvChar(v.charCodeAt(i)))
+            i = i + 1
+        }
+        return out
+    }
+    return js_mcall(v, "toCharArray", [])
+}
+
 // ----- Overload resolution ---------------------------------------------------
 //
 // An overload dispatcher's call: (class, name, spec, args, off). jvOvPick chooses
@@ -2200,3 +2230,127 @@ function js_jvadd(l, r) {
 // The shared jsAdd for the operand pairs Java's own arms do not cover: anything
 // that is not a string and not integral coerces to a number.
 function jvGenericAdd(l, r) { return rtjNum(l) + rtjNum(r) }
+
+// n as a long when v is one, else as an int.
+function jvUnitLike(v, n) {
+    if (jvIsLong(v)) { return jvNarrow(n, 64) }
+    return n
+}
+
+// Math.addExact / subtractExact / multiplyExact at the promoted width: the
+// wrapped result, or ArithmeticException "integer overflow" / "long overflow"
+// when it differs from the true one. Twin of jExact in java-interpreter.abnf,
+// whose comment has the two tests, and jvExact in abnf/jsrtjava.go.
+function jvExact(op, a, b) {
+    var r = jvArith(op, a, b)
+    if (!jvIsLong(r)) {
+        var x = rtjNum(a)
+        var y = rtjNum(b)
+        var t = x * y
+        if (op == "+") { t = x + y }
+        if (op == "-") { t = x - y }
+        if (t !== rtjNum(r)) { jvThrowArith("integer overflow") }
+        return r
+    }
+    var na = jvCmp("<", a, 0)
+    var nb = jvCmp("<", b, 0)
+    var nr = jvCmp("<", r, 0)
+    var bad = false
+    if (op == "+") { bad = na == nb && nr != na }
+    if (op == "-") { bad = na != nb && nr != na }
+    if (op == "*") {
+        if (jvCmp("!=", b, 0)) { bad = jvCmp("!=", jvArith("/", r, b), a) }
+        if (jvCmp("==", a, rtjMinL()) && jvCmp("==", b, 0 - 1)) { bad = true }
+    }
+    if (bad) { jvThrowArith("long overflow") }
+    return r
+}
+
+// java.lang.Character's classification and case mapping. Twin of jCharMembers
+// in java-interpreter.abnf, whose comment has the rules, and of jvCharMembers
+// in abnf/jsrtjava.go.
+function jvCharCode(v) {
+    if (jvIsChar(v)) { return v["__char"] }
+    return rtjNum(v)
+}
+function jvCharLike(v, c) {
+    if (jvIsChar(v)) { return jvChar(c) }
+    return c
+}
+function jvCharMembers(o) {
+    o["isDigit"] = function(v) {
+        var c = jvCharCode(v)
+        return c >= 48 && c <= 57
+    }
+    o["isLetter"] = function(v) { return jvChLetter(jvCharCode(v)) }
+    o["isAlphabetic"] = function(v) { return jvChLetter(jvCharCode(v)) }
+    o["isLetterOrDigit"] = function(v) {
+        var c = jvCharCode(v)
+        if (c >= 48 && c <= 57) { return true }
+        return jvChLetter(c)
+    }
+    o["isUpperCase"] = function(v) { return jvChUpper(jvCharCode(v)) }
+    o["isLowerCase"] = function(v) {
+        var c = jvCharCode(v)
+        if (!jvChLetter(c) || jvChUpper(c)) { return false }
+        if (jvChLo(c) != c && jvChUp(c) != c) { return false }
+        return c != 443 && !(c >= 448 && c <= 451)
+    }
+    o["isWhitespace"] = function(v) {
+        var c = jvCharCode(v)
+        if ((c >= 9 && c <= 13) || (c >= 28 && c <= 32)) { return true }
+        if (c == 5760 || (c >= 8192 && c <= 8198) || (c >= 8200 && c <= 8202)) { return true }
+        return c == 8232 || c == 8233 || c == 8287 || c == 12288
+    }
+    o["toUpperCase"] = function(v) { return jvCharLike(v, jvChUp(jvCharCode(v))) }
+    o["toLowerCase"] = function(v) { return jvCharLike(v, jvChLo(jvCharCode(v))) }
+    o["getNumericValue"] = function(v) {
+        var c = jvCharCode(v)
+        if (c == 178 || c == 179) { return c - 176 }
+        if (c == 185) { return 1 }
+        if (c >= 188 && c <= 190) { return 0 - 2 }
+        var d = jvDigitOf(c)
+        if (d == 99) { return 0 - 1 }
+        return d
+    }
+    o["digit"] = function(v, radix) {
+        var d = jvDigitOf(jvCharCode(v))
+        if (d < rtjNum(radix)) { return d }
+        return 0 - 1
+    }
+}
+function jvChUp(c) {
+    var s = String.fromCharCode(c).toUpperCase()
+    if (s.length == 1) { return s.charCodeAt(0) }
+    return c
+}
+function jvChLo(c) {
+    var s = String.fromCharCode(c).toLowerCase()
+    if (s.length == 1) { return s.charCodeAt(0) }
+    return c
+}
+function jvChLetter(c) {
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return true }
+    if (c < 192) { return c == 170 || c == 181 || c == 186 }
+    if (c <= 591) { return c != 215 && c != 247 }
+    return jvChUp(c) != c || jvChLo(c) != c
+}
+function jvChUpper(c) {
+    if (!jvChLetter(c)) { return false }
+    return jvChLo(c) != c && jvChUp(c) == c
+}
+
+// Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0. Twin of
+// jMaxD / jMinD in java-interpreter.abnf.
+function jvMaxD(a, b) {
+    if (a !== a) { return a }
+    if (a == 0 && b == 0 && 1 / a < 0) { return b }
+    if (a >= b) { return a }
+    return b
+}
+function jvMinD(a, b) {
+    if (a !== a) { return a }
+    if (a == 0 && b == 0 && 1 / b < 0) { return b }
+    if (a <= b) { return a }
+    return b
+}
