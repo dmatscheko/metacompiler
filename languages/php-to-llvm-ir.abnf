@@ -4964,11 +4964,15 @@ KwInstanceof = "instanceof" KwEnd ;
         if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
         return clo
     }
+    // A named function is GLOBAL wherever its declaration stands: one written inside
+    // a function body is declared in the main frame when control reaches it, and
+    // closes over that frame. Twin of makeDefStmt in php-interpreter.abnf.
     function makeDefStmt(fn) {
         noteSig(fn.name, fn)
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name), closureV(b, idx, curScopeV)])
+            var gV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "\x00globals")])
+            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), closureV(b, idx, gV)])
             return b
         }
     }

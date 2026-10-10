@@ -4188,8 +4188,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return invokePhpCls(fn, self, argset, defCls, st)
         }
     }
+    // A named function is GLOBAL wherever its declaration stands: one written inside
+    // a function body is registered in the global table when control reaches it.
+    // Twin of makeDefStmt in php-to-llvm-ir.abnf.
     function makeDefStmt(fn) {
-        return function() { declVar(fn.name, makeFunClosure(fn)); return null }
+        return function() { scopePut(globalScope, fn.name, makeFunClosure(fn)); return null }
     }
     // Creating an instance: the declared property defaults are installed first (in
     // declaration order, walking the base classes first so an override wins), then

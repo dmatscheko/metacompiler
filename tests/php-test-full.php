@@ -1333,6 +1333,19 @@ function s34() {
     check("gt1", $s34n === 13 && $i === 5);
 }
 
+// ===== SECTION 35: a function declared inside a function is global =====
+// A named function is registered in the global function table when control reaches
+// its declaration, wherever that stands: inside a function, a method or an if body.
+function s35outer() { function s35inner($x) { return $x * 2; } return "o"; }
+class S35K { function declare() { function s35fromMethod() { return "m"; } return 0; } }
+function s35() {
+    $o = s35outer();
+    if (true) { function s35cond() { return "c"; } }
+    (new S35K())->declare();
+    check("nf1", $o === "o" && s35inner(21) === 42);
+    check("nf2", s35cond() === "c" && s35fromMethod() === "m");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1373,6 +1386,7 @@ function main() {
     s32(); // SECTION-CALL 32
     s33(); // SECTION-CALL 33
     s34(); // SECTION-CALL 34
+    s35(); // SECTION-CALL 35
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
