@@ -88,6 +88,49 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			return base(a)
 		}
 	}
+
+	// A local read / write the emitter could not prove bound earlier in its frame.
+	// A def does not see the locals around it, so the walk stops at the frame, the
+	// scope holding "$blk" (the emitter's blkSlot). Past the frame only a callable -
+	// a top-level def - still answers a read; anything else is MRI's NameError. A
+	// write that finds no binding binds a[3] scopes up from where it stands, past
+	// the begin/rescue/ensure closures Ruby has no scope for. Twins: js_rlvar /
+	// js_rlset in languages/lib/ruby-rt.metajs.
+	m["js_rlvar"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		inFrame := true
+		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+			if v, ok := sc.get(name); ok {
+				if inFrame || isCallable(v) {
+					return w(v)
+				}
+				break
+			}
+			if sc.has("$blk") {
+				inFrame = false
+			}
+		}
+		panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("NameError"),
+			[]interface{}{"undefined local variable or method '" + name + "'"})})
+	}
+	m["js_rlset"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+			if sc.has(name) {
+				sc.put(name, u(a[2]))
+				return 0
+			}
+			if sc.has("$blk") {
+				break
+			}
+		}
+		home := rt.scopeOf(a[0])
+		for d := int(rt.toNumber(u(a[3]))); d > 0 && home.parent != nil; d-- {
+			home = home.parent
+		}
+		home.put(name, u(a[2]))
+		return 0
+	}
 }
 
 func rubyIsKernelObj(v interface{}) bool {

@@ -3504,7 +3504,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function forVarSet(b, name, v) {
         if (name.charAt(0) != "@" && name.charAt(0) != "$") {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
+            emitLocalSet(b, name, v)
             return b
         }
         if (name.charAt(0) == "$") { callExt(b, "js_rgset", [emitStr(b, name.slice(1)), v]); return b }
@@ -3537,7 +3537,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             for (var k = 0; k < names.length; k++) {
                 if (names[k] == "" || names[k].charAt(0) == "@" || names[k].charAt(0) == "$") { continue }
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, names[k]), hNull])
+                emitLocalSet(b, names[k], hNull)
             }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -3619,7 +3619,46 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var selfC = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             return {b: b, v: callExt(b, "js_rcvget", [selfC, emitStr(b, ref.cvar)])}
         }
-        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+        return {b: b, v: callExt(b, inDefFrame(ref.name) ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+    }
+    // A def does not see the locals of the code around it, so inside one a local is
+    // only ever looked up as far as the method's own frame. curDefLocals is the set
+    // of names the method (and, in a copy, each block in it) has bound so far in
+    // source order - null outside every def. A name in it is in the frame by
+    // construction and takes the ordinary chain walk; any other local name goes
+    // through js_rlvar / js_rlset, which stop at the frame (the scope holding
+    // $blk). Twin of the frameScopeOf tests in ruby-interpreter.abnf. The set is
+    // {m: name map, l: name list}; the list is what a copy walks.
+    var curDefLocals = null
+    function defLocalAdd(name) {
+        if (curDefLocals.m["$" + name] !== true) { curDefLocals.m["$" + name] = true; curDefLocals.l.push(name) }
+    }
+    function isLocalName(name) {
+        var c0 = name.charCodeAt(0)
+        return (c0 >= 97 && c0 <= 122) || c0 == 95
+    }
+    function inDefFrame(name) {
+        return curDefLocals != null && curDefLocals.m["$" + name] !== true && isLocalName(name)
+    }
+    // In the def's OWN function (curDefFn) the current scope IS the frame, so every
+    // local write binds right there and needs no walk at all. A begin / rescue /
+    // ensure body is a closure with a scope of its own that Ruby does not have:
+    // curCtlDepth counts those between the code and its real scope (a def, a block
+    // or the top level), and a NEW local binds that many scopes up, so it outlives
+    // the clause as it does in MRI.
+    var curDefFn = false
+    var curCtlDepth = 0
+    function emitLocalSet(b, name, v) {
+        var local = isLocalName(name)
+        if (local && curDefFn) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+        } else if (local && (inDefFrame(name) || (curDefLocals == null && curCtlDepth > 0))) {
+            callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
+        } else {
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
+        }
+        if (curDefLocals != null) { defLocalAdd(name) }
+        return b
     }
     // The write half of emitHead: the four kinds of un-pathed target.
     function emitHeadSet(b, ref, v) {
@@ -3642,7 +3681,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_rcvset", [selfC, emitStr(b, ref.cvar), v])
             return b
         }
-        callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+        emitLocalSet(b, ref.name, v)
         return b
     }
     function emitRefPath(b, ref) {
@@ -3678,16 +3717,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.path.length == 1 && ref.texpr == undefined) { return emitHeadSet(b, ref, nv) }
         return b
     }
-    // Bind the raised value to a rescue clause's `=> TARGET`. A bare local name
-    // DECLARES in the handler's own scope (Ruby); everything else - an @ivar, a
-    // @@classvar, a $global, obj.field, obj&.field, a[i] - goes through the ordinary
-    // assignment path.
+    // Bind the raised value to a rescue clause's `=> TARGET` - an ordinary assignment:
+    // a bare name is a local of the code around the begin (emitLocalSet reaches past
+    // the clause's closure scope), everything else - an @ivar, a @@classvar, a
+    // $global, obj.field, obj&.field, a[i] - goes through the assignment path.
     function bindExcTarget(b, ref, v) {
         if (ref.path.length == 0) {
-            if (ref.name != undefined) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ref.name), v])
-                return b
-            }
+            if (ref.name != undefined) { return emitLocalSet(b, ref.name, v) }
             return emitHeadSet(b, ref, v)
         }
         var p = emitRefPath(b, ref)
@@ -3849,7 +3885,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     function makePatVar(name) {
         return function(b, valV, failB) {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), valV])
+            emitLocalSet(b, name, valV)
             return b
         }
     }
@@ -3918,7 +3954,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var nm = items[1].bindname
         return function(b, valV, failB) {
             var okB = pat(b, valV, failB)
-            callExt(okB, "js_pyset_var", [curScopeV, emitStr(okB, nm), valV])
+            emitLocalSet(okB, nm, valV)
             return okB
         }
     }
@@ -3958,7 +3994,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (parts[s].psplat != "" && parts[s].psplat != undefined) {
                     var sl = sliceInto(b, an, emitNum(b, s), callExt(b, "js_rsub", [patRead(b, lenNm), emitNum(b, post)]))
                     b = sl.b
-                    callExt(b, "js_pyset_var", [curScopeV, emitStr(b, parts[s].psplat), patRead(b, sl.name)])
+                    emitLocalSet(b, parts[s].psplat, patRead(b, sl.name))
                 }
                 return b
             }
@@ -3989,14 +4025,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (parts[0].psplat != "" && parts[0].psplat != undefined) {
                 var pre = sliceInto(b, an, emitNum(b, 0), patRead(b, startNm))
                 b = pre.b
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, parts[0].psplat), patRead(b, pre.name)])
+                emitLocalSet(b, parts[0].psplat, patRead(b, pre.name))
             }
             var lastP = parts[parts.length - 1]
             if (lastP.psplat != "" && lastP.psplat != undefined) {
                 var fromV = callExt(b, "js_radd", [patRead(b, startNm), emitNum(b, mid)])
                 var pst = sliceInto(b, an, fromV, patRead(b, lenNm))
                 b = pst.b
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lastP.psplat), patRead(b, pst.name)])
+                emitLocalSet(b, lastP.psplat, patRead(b, pst.name))
             }
             return b
         }
@@ -4024,7 +4060,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = okB
                 var gotV = callExt(b, "js_rget", [patRead(b, hn), callExt(b, "js_sym", [emitStr(b, pairs[i2].pkey)])])
                 if (pairs[i2].pval != null) { b = pairs[i2].pval(b, gotV, failB) }
-                else { callExt(b, "js_pyset_var", [curScopeV, emitStr(b, pairs[i2].pkey), gotV]) }
+                else { emitLocalSet(b, pairs[i2].pkey, gotV) }
             }
             if (restName != null && restName != "" && restName != undefined) {
                 var restNm = patTemp(b, callExt(b, "js_dict_new", []))
@@ -4051,7 +4087,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     addB.NewBr(skipB)
                     return skipB
                 })
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, restName), patRead(b, restNm)])
+                emitLocalSet(b, restName, patRead(b, restNm))
             }
             return b
         }
@@ -5057,6 +5093,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedBlkArg = emitBlkArg
         var savedHasSelf = curHasSelf
         if (isMethod) { curHasSelf = true }
+        // A def starts a fresh local set; a block or lambda sees its enclosing one
+        // but keeps what it binds itself; a begin/rescue/ensure closure IS its
+        // enclosing scope as far as Ruby is concerned.
+        var savedDefLocals = curDefLocals
+        var savedDefFn = curDefFn
+        var savedCtlDepth = curCtlDepth
+        curDefFn = declBlk === true
+        curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
+        if (declBlk === true) { curDefLocals = {m: {}, l: []} }
+        else if (isCtl !== true && curDefLocals != null) {
+            var outer = curDefLocals
+            curDefLocals = {m: {}, l: []}
+            for (var dk = 0; dk < outer.l.length; dk++) { defLocalAdd(outer.l[dk]) }
+        }
+        if (curDefLocals != null) {
+            var pn = paramNames(params)
+            for (var pi = 0; pi < pn.length; pi++) { if (typeof pn[pi] == "string") { defLocalAdd(pn[pi]) } }
+        }
         // A def (or a method in a class body) is the frame a block's `return' leaves;
         // a block inherits the method it was written in. emitBlkArg is consumed once
         // here, so a lambda or proc written INSIDE a wrapped block does not inherit
@@ -5109,6 +5163,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curBlkNonlocal = savedBlkNL
         emitBlkArg = savedBlkArg
         curHasSelf = savedHasSelf
+        curDefLocals = savedDefLocals
+        curDefFn = savedDefFn
+        curCtlDepth = savedCtlDepth
         return idx
     }
     function makeFun(items) {
@@ -5930,6 +5987,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name)) {
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
+            }
+            if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
+                return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }
             var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             if (rubyMethods["$" + name] === true) {
@@ -6850,7 +6910,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(bb, "js_rtop", [excV])
             return {b: bb, v: hNull}
         }
+        // The body's closure scope IS the top level's own scope (curCtlDepth 0 inside),
+        // not a begin clause Ruby would see through.
+        curCtlDepth = -1
         var topTryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
+        curCtlDepth = 0
         var topCatchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], topCatchT, false, true)), curScopeV])
         callExt(b, "js_try", [topTryClo, topCatchClo, hUndef])
         b.NewRet(handle(0))

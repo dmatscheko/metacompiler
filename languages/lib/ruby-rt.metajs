@@ -7740,6 +7740,49 @@ function js_rraise(v, msg) {
     throw rbMakeExc(v, msg)
 }
 
+// A local read / write the emitter could not prove bound earlier in its frame. The
+// walk stops at the frame, the scope holding "$blk"; past it only a callable (a
+// top-level def) still answers a read, anything else is MRI's NameError. A write
+// that finds no binding binds `depth` scopes up from where it stands, past the
+// begin/rescue/ensure closures Ruby has no scope for. Twins: js_rlvar / js_rlset
+// in abnf/jsrtruby.go.
+function js_rlvar(scope, name) {
+    var n = rbStr(name)
+    var s = anytype
+    var v = anytype
+    var inFrame = true
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) {
+            v = scopeGet(s, n)
+            if (inFrame || typeof v == "function") { return v }
+            break
+        }
+        if (scopeHas(s, "$blk")) { inFrame = false }
+        s = scopeParent(s)
+    }
+    js_rraise(rbBuiltinClass("NameError"), "undefined local variable or method '" + n + "'")
+    return null
+}
+function js_rlset(scope, name, v, depth) {
+    var n = rbStr(name)
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) { scopeDecl(s, n, v); return null }
+        if (scopeHas(s, "$blk")) { break }
+        s = scopeParent(s)
+    }
+    s = scope
+    var d = depth
+    while (d > 0 && scopeParent(s) !== undefined && scopeParent(s) !== null) {
+        s = scopeParent(s)
+        d = d - 1
+    }
+    scopeDecl(s, n, v)
+    return null
+}
+
 // The same raise, plus the SOURCE SITE of the `raise' that wrote it - "prog.rb:2:in
 // `<main>'", exactly MRI's first backtrace frame. Only makeRaise emits this form, so
 // a re-raise (js_rraise, which hands the same object back) keeps the ORIGINAL site,

@@ -9060,10 +9060,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rubySet(ref.name, v)
     }
     // Ruby has no declaration keyword: assignment updates an existing local (search
-    // the scope chain) or creates a new one in the innermost scope.
+    // the scope chain) or creates a new one in the innermost scope. Inside a method
+    // the top level's locals (globalScope) are out of reach, so a local name found
+    // only there is a NEW local of the method.
     function rubySet(name, value) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
+            if (hasOwn(scopes[i], name)) {
+                if (i == 0 && isLocalName(name) && frameScopeOf(scopes) != null) { break }
+                scopePut(scopes[i], name, value)
+                return
+            }
         }
         var sc = scopes[scopes.length - 1]
         // The name trail a module body needs (see publishModuleScope) - the frozen
@@ -9890,8 +9896,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 f = hasOwn(globalScope, name) ? globalScope[name] : undefined
                 if (typeof f == "function") { return f() }
             }
+            // A def does not see the locals around it: inside a method the loop above
+            // searched its whole own frame, and what globalScope holds under a local
+            // name is a top-level LOCAL unless it is a method. Twin of js_rlvar in
+            // languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
+            if (isLocalName(name) && frameScopeOf(scopes) != null) {
+                var gv = anytype
+                gv = hasOwn(globalScope, name) ? globalScope[name] : undefined
+                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) {
+                    throw {__exc: true, v: mkExc(hostGlobals["NameError"],
+                                                 "undefined local variable or method '" + name + "'")}
+                }
+            }
             return getVar(name)
         }
+    }
+    function isLocalName(name) {
+        var c0 = name.charCodeAt(0)
+        return (c0 >= 97 && c0 <= 122) || c0 == 95
     }
     // The class whose body is running, and the visibility mode `private` /
     // `protected` last selected in it. Both are needed because Ruby's visibility is
@@ -10686,7 +10708,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // assignment path.
     function bindExcTarget(ref, v) {
         if (ref.path.length == 0) {
-            if (ref.name != undefined) { declVar(ref.name, v); return }
+            if (ref.name != undefined) { rubySet(ref.name, v); return }
             writeTarget(ref, v)
             return
         }
@@ -10753,19 +10775,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     }
                     if (hit == null) { throw e }
                     threw = true
-                    scopes.push({})
+                    // A rescue clause opens no scope: `=> e` and what the clause
+                    // assigns are locals of the code around the begin.
                     if (hit.href != null) { bindExcTarget(hit.href, e.v) }
                     curExc.push(e.v)
                     try {
                         box.v = hit.handler()
                     } catch (e2) {
                         curExc.pop()
-                        scopes.pop()
                         // retry re-runs the whole begin body from the top.
                         if (e2 !== null && e2 !== undefined && e2.__retry === true) { box.again = true }
                         else { throw e2 }
                     }
-                    if (!box.again) { curExc.pop(); scopes.pop() }
+                    if (!box.again) { curExc.pop() }
                 } finally {
                     scopes = savedChain.slice()
                     if (!threw && !box.again && !isSig(box.v) && elseT != undefined) {

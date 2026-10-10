@@ -2,17 +2,18 @@
 # LLVM-IR compiler (ruby-to-llvm-ir.abnf). Every implemented construct is exercised
 # with the SMALLEST program that can prove it works - loops run 0, 1, 3 or 4 times,
 # recursion stays below depth 6. A failed check prints its id (so a diff pinpoints
-# it) and the file ends with exit(fails); exit 0 and byte-identical output on all
+# it) and the file ends with exit(FEAT[1]); exit 0 and byte-identical output on all
 # four legs (interpreter/compiler x goja/-frozen) mean everything passed.
 
-fails = 0
-checks = 0
+# FEAT[0] counts checks, FEAT[1] failures: a constant, because a def cannot see
+# the top-level locals.
+FEAT = [0, 0]
 
 def check(name, got, want)
-  checks = checks + 1
+  FEAT[0] = FEAT[0] + 1
   if got != want
     puts "FAIL #{name}: got #{got} want #{want}"
-    fails = fails + 1
+    FEAT[1] = FEAT[1] + 1
   end
 end
 
@@ -151,15 +152,15 @@ check("word-and", (1 < 2 and 2 < 3), true)
 check("word-or", (false or 5), 5)
 check("word-not", (not false), true)
 
-hits = 0
+HITS = [0]
 def bump
-  hits = hits + 1
+  HITS[0] = HITS[0] + 1
   true
 end
 sc1 = false && bump()
 sc2 = true && bump()
 sc3 = true || bump()
-check("logic-short-circuit", hits, 1)
+check("logic-short-circuit", HITS[0], 1)
 check("logic-and-false", sc1, false)
 check("logic-and-true", sc2, true)
 check("logic-or-skip", sc3, true)
@@ -595,16 +596,16 @@ check("safe-nav-nil", gone&.upcase, nil)
 check("safe-nav-chain-nil", gone&.upcase&.length, nil)
 check("safe-nav-chain-present", here&.upcase&.length, 6)
 
-pokes = 0
+POKES = [0]
 def poke
-  pokes = pokes + 1
+  POKES[0] = POKES[0] + 1
   "ell"
 end
 sn1 = gone&.include?(poke())
-check("safe-nav-args-skipped", pokes, 0)
+check("safe-nav-args-skipped", POKES[0], 0)
 check("safe-nav-nil-result", sn1, nil)
 sn2 = here&.include?(poke())
-check("safe-nav-args-evaluated", pokes, 1)
+check("safe-nav-args-evaluated", POKES[0], 1)
 check("safe-nav-present-result", sn2, true)
 
 # ----- exceptions: begin / rescue / else / ensure, raise, control flow -----
@@ -702,9 +703,9 @@ def nested_return
 end
 check("nested-return", nested_return(), 9)
 
-marks = 0
+MARKS = [0]
 def note_mark
-  marks = marks + 1
+  MARKS[0] = MARKS[0] + 1
 end
 def ret_across_ensure
   begin
@@ -714,7 +715,7 @@ def ret_across_ensure
   end
 end
 check("return-across-ensure", ret_across_ensure(), "from-begin")
-check("ensure-ran-on-return", marks, 1)
+check("ensure-ran-on-return", MARKS[0], 1)
 
 def ret_in_ensure_overrides
   begin
@@ -1598,5 +1599,5 @@ check("sym-prefix", [:abc, :ab].sort, [:ab, :abc])
 check("sym-between", :a.between?(:a, :z), true)
 check("sym-keys-sort", {:b => 1, :a => 2}.keys.sort, [:a, :b])
 
-puts "features: #{checks} checks, #{fails} failures"
-exit(fails)
+puts "features: #{FEAT[0]} checks, #{FEAT[1]} failures"
+exit(FEAT[1])

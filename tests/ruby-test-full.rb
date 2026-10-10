@@ -3037,6 +3037,56 @@ def s58
   check("iv58a", S58R == [3, nil, "instance-variable", nil] && s58get == 3 && S58B == [9, 4])
 end
 
+# ===== SECTION 59: a def does not see the locals around it =====
+# A top-level local is invisible inside a def (NameError); assigning the same name
+# there makes a new local of the method and leaves the outer one alone; a block
+# still sees the locals of the code it is written in, inside a def as outside.
+# begin / rescue / ensure open no scope: what their bodies assign, and the
+# `=> e` of a rescue clause, are locals of the code around them. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+S59L = []
+s59loc = 1
+def s59read
+  s59loc
+end
+def s59write
+  s59loc = 5
+  [1].each { s59loc = s59loc + 1 }
+  s59loc
+end
+begin
+  s59read
+  S59L.push(:no)
+rescue NameError
+  S59L.push(:nameerror)
+end
+S59L.push(s59write, s59loc)
+[1].each { S59L.push(s59loc) }
+begin
+  s59t = 1
+  raise "s59"
+rescue => s59e
+  s59r = 2
+ensure
+  s59n = 3
+end
+S59T = [s59t, s59e.message, s59r, s59n]
+def s59b
+  begin
+    t = 1
+    raise "in"
+  rescue => e
+    r = 2
+  ensure
+    n = 3
+  end
+  [t, e.message, r, n]
+end
+def s59
+  check("dl59a", S59L == [:nameerror, 6, 1, 1])
+  check("bg59a", S59T == [1, "s59", 2, 3] && s59b == [1, "in", 2, 3])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3057,5 +3107,6 @@ s55() # SECTION-CALL 55
 s56() # SECTION-CALL 56
 s57() # SECTION-CALL 57
 s58() # SECTION-CALL 58
+s59() # SECTION-CALL 59
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
