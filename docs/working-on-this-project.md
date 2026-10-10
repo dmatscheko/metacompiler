@@ -967,8 +967,16 @@ declaration allows it to become.**
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt
 regex.js                  <- js python ruby kotlin
 lua-rt.metajs             <- imports NOTHING
-js-rt.metajs              <- imports regex.js ONLY
+js-rt.metajs              <- imports regex.js and json.js ONLY
+json.js                   <- js-rt.metajs, js and typescript interpreters
+                             (Go twin: abnf/jsrtjson.go)
 ```
+
+Grammar-level includes shared by one language's grammars only: `go-constfold.js`
+(go), `java-decltypes.js` (both java grammars: declared types for assignment
+conversion), `js-callee.js` (all four js/ts grammars: V8's re-printing of a callee
+in "is not a function"). Each is ONE implementation of a feature, not a home for
+helpers that happen to be duplicated (7.12 still holds for those).
 
 There is one shared layer-2 module. A layer-2 call is a scope lookup by NAME, so a
 body in `runtime.metajs` that a language never calls costs that language nothing at
