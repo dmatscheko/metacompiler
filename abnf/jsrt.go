@@ -14333,45 +14333,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				"__dict": true, "keys": keys, "vals": vals,
 			}})
 		},
-		// One arm of a Go type switch: does v have dynamic type `want`? The value
-		// model has a single numeric type, so an integral number is an int and a
-		// fractional one a float64; a map, a slice and a struct answer their own
-		// spelling, and any / interface{} matches every non-nil value.
-		"js_gotypeis": func(a []uint64) uint64 {
-			want := rt.toString(u(a[1]))
-			v := u(a[0])
-			got := "any"
-			switch t := v.(type) {
-			case jsUndefT, jsNullT:
-				got = "nil"
-			case bool:
-				got = "bool"
-			case string:
-				got = "string"
-			case float64:
-				if t == math.Trunc(t) {
-					got = "int"
-				} else {
-					got = "float64"
-				}
-			case *jsArray:
-				got = "slice"
-			case *jsObject:
-				if _, _, isDict := dictParts(v); isDict {
-					got = "map"
-				} else if cls, has := t.props["__class"]; has {
-					if co, ok := cls.(*jsObject); ok {
-						if nm, ok2 := co.props["__name"].(string); ok2 {
-							got = nm
-						}
-					}
-				}
-			}
-			if want == "any" || want == "interface{}" {
-				return boolH(got != "nil")
-			}
-			return boolH(got == want)
-		},
 		// The variadic Go builtins, taking the callee's whole argument array: append
 		// starts a new slice from a nil one (append(m[k], v) where m[k] is missing),
 		// and min/max/clear are the Go 1.21 builtins.

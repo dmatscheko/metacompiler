@@ -849,11 +849,11 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-// x.(T): a type assertion. The value is unchanged, but a target that is a DECLARED
-// INTERFACE is CHECKED, and a value that does not have its methods panics the way Go
-// does. Every other target type is the identity: js_gotypeis is deliberately
-// approximate for the numeric boxes, and a panic on a wrong answer is worse than a
-// pass-through. The twin is TypeAssertSfx in go-interpreter.abnf.
+// x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
+// that does not hold the target type panics the way Go does: js_goifas by method set
+// for an interface, js_goassert by dynamic type for a predeclared scalar or a
+// declared struct (assertTyWant). Any other target is the identity. The twin is
+// TypeAssertSfx in go-interpreter.abnf.
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
 AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
@@ -2151,6 +2151,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 } else if (s.kind == "assert") {
                     if (isIface(s.at)) {
                         cur = callExt(b, "js_goifas", [cur, emitStr(b, s.at), emitStr(b, ifaceMethodCsv(s.at))])
+                    } else {
+                        var aw = assertTyWant(s.at)
+                        if (aw != "") { cur = callExt(b, "js_goassert", [cur, emitStr(b, aw), emitStr(b, s.at)]) }
                     }
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
@@ -4760,8 +4763,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     // Declared interface name -> its method names. Filled at parse time by the
-    // IfaceBody tag, read long after by the type test and the type assertion.
-    var ifaceMeths = {}
+    // IfaceBody tag, read long after by the type test and the type assertion. The
+    // predeclared `error` is the interface {Error() string}.
+    var ifaceMeths = {"$error": ["Error"]}
     // A DECLARED INTERFACE is matched STRUCTURALLY - a value satisfies it exactly when
     // it has every method - so its arm of a type switch and its comma-ok assertion go
     // to js_goifis and not to js_gotypeis, which can only compare NAMES. Static: a
@@ -4770,6 +4774,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitTypeIs(b, v, ty) {
         if (isIface(ty)) { return callExt(b, "js_goifis", [v, emitStr(b, ifaceMethodCsv(ty))]) }
         return emitHelper(b, "$istype", [v, emitStr(b, ty)])
+    }
+    // The type js_goassert tests x.(T) against, or "" when T is not decided and the
+    // assertion keeps the identity. Only a predeclared scalar type or a declared
+    // struct (or a pointer to one: the value model does not tell &S{} from S{}) is
+    // decided; a defined non-struct type, a composite or a type parameter carries
+    // no type on its values that the test could read. Twin of goAssertType in
+    // go-interpreter.abnf.
+    var goScalarTys = {bool: 1, string: 1, int: 1, int8: 1, int16: 1, int32: 1, int64: 1,
+                       uint: 1, uint8: 1, uint16: 1, uint32: 1, uint64: 1, uintptr: 1,
+                       byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
+    function assertTyWant(t) {
+        if (t.charAt(0) == "*") {
+            var pt = t.substring(1)
+            return sFields(pt) != undefined ? pt : ""
+        }
+        if (goScalarTys[t] == 1 || sFields(t) != undefined) { return t }
+        return ""
     }
     // The comma-joined method set of a declared interface, or "" for anything else.
     function isIface(name) {

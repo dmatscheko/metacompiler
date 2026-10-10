@@ -2703,6 +2703,92 @@ func s43() {
 	check("rp22", rec43(func() { _ = xs[ns[1]:ns[2]] }) == "<nil>")
 }
 
+// ===== SECTION 44: the error interface and type assertions =====
+// Every expected value was read off `go run`. `error` is the predeclared interface
+// {Error() string}; a run-time panic recovers as an error, a panic(string) as a
+// string; a type assertion to a concrete type that does not hold panics.
+type E44 struct{ m string }
+
+func (e E44) Error() string { return "e44: " + e.m }
+
+type P44 struct{ x int }
+type Q44 struct{ y int }
+
+// rec44 runs f and describes what recover() handed back.
+func rec44(f func()) (out string) {
+	defer func() {
+		r := recover()
+		if e, ok := r.(error); ok {
+			out = "error " + e.Error()
+			return
+		}
+		if s, ok := r.(string); ok {
+			out = "string " + s
+			return
+		}
+		if r != nil {
+			out = "other"
+		}
+	}()
+	f()
+	return "no panic"
+}
+
+func kind44(v interface{}) string {
+	switch t := v.(type) {
+	case error:
+		return "error " + t.Error()
+	case float64:
+		return "float64"
+	case uint8:
+		return "uint8"
+	case string:
+		return "string"
+	case int:
+		return "int"
+	}
+	return "other"
+}
+
+func s44() {
+	var v interface{} = E44{"x"}
+	_, ok := v.(error)
+	check("er1", ok)
+	var p interface{} = P44{1}
+	_, ok = p.(error)
+	check("er2", !ok)
+	var e error = E44{"z"}
+	check("er3", e.Error() == "e44: z" && fmt.Sprint(e) == "e44: z")
+	ns := []int{0, 3}
+	xs := []int{1, 2}
+	var nilm map[string]int
+	check("er4", rec44(func() { _ = ns[1] / ns[0] }) == "error runtime error: integer divide by zero")
+	check("er5", rec44(func() { _ = xs[ns[1]] }) == "error runtime error: index out of range [3] with length 2")
+	check("er6", rec44(func() { nilm["a"] = 1 }) == "error assignment to entry in nil map")
+	check("er7", rec44(func() { panic("boom") }) == "string boom")
+	check("er8", rec44(func() {}) == "no panic")
+
+	var f64 float64 = 2.5
+	var u8 uint8 = 7
+	check("ts1", kind44(E44{"y"}) == "error e44: y" && kind44("s") == "string" && kind44(3) == "int")
+	check("ts2", kind44(f64) == "float64" && kind44(u8) == "uint8" && kind44(P44{2}) == "other")
+
+	var a interface{} = "s"
+	n, ok := a.(int)
+	check("ta1", n == 0 && !ok)
+	check("ta2", rec44(func() { _ = a.(int) }) == "error interface conversion: interface {} is string, not int")
+	var fa interface{} = f64
+	check("ta3", rec44(func() { _ = fa.(int) }) == "error interface conversion: interface {} is float64, not int")
+	check("ta4", fa.(float64) == 2.5)
+	var ua interface{} = u8
+	b, ok := ua.(byte)
+	check("ta5", ok && b == 7 && rec44(func() { _ = ua.(string) }) == "error interface conversion: interface {} is uint8, not string")
+	var na interface{}
+	check("ta6", rec44(func() { _ = na.(bool) }) == "error interface conversion: interface {} is nil, not bool")
+	var qa interface{} = Q44{1}
+	check("ta7", rec44(func() { _ = qa.(P44) }) != "no panic" && qa.(Q44).y == 1)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2747,6 +2833,7 @@ func main() {
 	s41() // SECTION-CALL 41
 	s42() // SECTION-CALL 42
 	s43() // SECTION-CALL 43
+	s44() // SECTION-CALL 44
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

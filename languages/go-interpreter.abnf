@@ -828,9 +828,10 @@ CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 Spread      <~~ push({spread: true}) ~~> = "..." ;
 // x.(T): a type assertion. The value is unchanged - a successful assertion yields
-// the same underlying value - but a target that is a DECLARED INTERFACE is CHECKED,
-// and a value that does not have its methods panics the way Go does. Every other
-// target type is the identity (see goAssertIface for why).
+// the same underlying value - but it is CHECKED, and a value that does not hold the
+// target type panics the way Go does: by method set for an interface, by dynamic
+// type for a predeclared scalar or a declared struct. Any other target is the
+// identity (see goAssertType).
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
 AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
@@ -1813,7 +1814,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     if (typeof cur != "function") { fail("call of a non function value") }
                     cur = cur.apply(undefined, callArgs(s))
                 }
-                else if (s.kind == "assert") { cur = goAssertIface(cur, s.at) }
+                else if (s.kind == "assert") { cur = goAssertType(cur, s.at) }
                 else if (s.kind == "slice") { cur = goSlice(cur, s) }
                 else if (typeof cur == "function") { cur = cur } // f[int]: erased instantiation
                 else { cur = goIndex(cur, s.idx()) }
@@ -1973,20 +1974,29 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A Go RUNTIME PANIC - `panic: runtime error: index out of range [7] with
     // length 3` - and it is RECOVERABLE, which is why it cannot be `fail`.
     //
-    // The recovered value is the STRING go's runtime.Error prints,
-    // "runtime error: <msg>", and it is the same string in all three engines: the
-    // twins are goRTFail in abnf/jsrtgolang.go and goRTPanic in
-    // languages/lib/go-rt.metajs. `fail` is not used because it aborts the process,
-    // which no deferred recover() could catch.
-    function goRTPanic(msg) { throw {__gopanic: true, v: "runtime error: " + msg} }
-    // A run-time panic whose text carries NO "runtime error: " prefix in go: a store
-    // into a nil map (a plainError) and a failed interface conversion (a
-    // TypeAssertionError).
-    function goPlainPanic(msg) { throw {__gopanic: true, v: msg} }
+    // The recovered value is an `error`: an instance of the runtime type go panics
+    // with (runtime.errorString, runtime.boundsError, runtime.plainError,
+    // *runtime.TypeAssertionError) whose Error() answers the text. So r.(error)
+    // holds, r.(string) does not, and fmt prints the text through the Error() arm.
+    // The twins are goRTErr in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
+    var goRTClasses = {}
+    function goRTErr(name, text) {
+        if (!hasOwn(goRTClasses, name)) {
+            goRTClasses[name] = {__isclass: true, __name: name, __fields: ["msg"], __ftypes: ["string"],
+                                 Error: function(e) { return e.msg }}
+        }
+        return {__class: goRTClasses[name], msg: text}
+    }
+    function goRTPanic(msg) { throw {__gopanic: true, v: goRTErr("runtime.errorString", "runtime error: " + msg)} }
+    function goBoundsPanic(msg) { throw {__gopanic: true, v: goRTErr("runtime.boundsError", "runtime error: " + msg)} }
+    // A store into a nil map: go's text carries no "runtime error: " prefix.
+    function goPlainPanic(msg) { throw {__gopanic: true, v: goRTErr("runtime.plainError", msg)} }
+    // A failed type assertion.
+    function goConvPanic(msg) { throw {__gopanic: true, v: goRTErr("*runtime.TypeAssertionError", "interface conversion: " + msg)} }
     // Go's index and slice-bounds wordings (runtime/error.go, boundsErrorFmt).
     function goIdxPanic(i, n) {
-        if (i < 0) { goRTPanic("index out of range [" + i + "]") }
-        goRTPanic("index out of range [" + i + "] with length " + n)
+        if (i < 0) { goBoundsPanic("index out of range [" + i + "]") }
+        goBoundsPanic("index out of range [" + i + "] with length " + n)
     }
     // Panics when s[lo:hi] (three false) or s[lo:hi:mx] breaks
     // 0 <= lo <= hi <= mx <= cp, checking in go's own order so the bound it names is
@@ -1996,18 +2006,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goSliceCheck(lo, hi, mx, cp, three, word) {
         var p = "slice bounds out of range ["
         if (three) {
-            if (mx < 0) { goRTPanic(p + "::" + mx + "]") }
-            if (mx > cp) { goRTPanic(p + "::" + mx + "] with " + word + " " + cp) }
-            if (hi < 0) { goRTPanic(p + ":" + hi + ":]") }
-            if (hi > mx) { goRTPanic(p + ":" + hi + ":" + mx + "]") }
-            if (lo < 0) { goRTPanic(p + lo + "::]") }
-            if (lo > hi) { goRTPanic(p + lo + ":" + hi + ":]") }
+            if (mx < 0) { goBoundsPanic(p + "::" + mx + "]") }
+            if (mx > cp) { goBoundsPanic(p + "::" + mx + "] with " + word + " " + cp) }
+            if (hi < 0) { goBoundsPanic(p + ":" + hi + ":]") }
+            if (hi > mx) { goBoundsPanic(p + ":" + hi + ":" + mx + "]") }
+            if (lo < 0) { goBoundsPanic(p + lo + "::]") }
+            if (lo > hi) { goBoundsPanic(p + lo + ":" + hi + ":]") }
             return
         }
-        if (hi < 0) { goRTPanic(p + ":" + hi + "]") }
-        if (hi > cp) { goRTPanic(p + ":" + hi + "] with " + word + " " + cp) }
-        if (lo < 0) { goRTPanic(p + lo + ":]") }
-        if (lo > hi) { goRTPanic(p + lo + ":" + hi + "]") }
+        if (hi < 0) { goBoundsPanic(p + ":" + hi + "]") }
+        if (hi > cp) { goBoundsPanic(p + ":" + hi + "] with " + word + " " + cp) }
+        if (lo < 0) { goBoundsPanic(p + lo + ":]") }
+        if (lo > hi) { goBoundsPanic(p + lo + ":" + hi + "]") }
     }
     // The twins are goNilDeref in languages/lib/go-rt.metajs and goNilDeref in
     // abnf/jsrtgolang.go.
@@ -4103,16 +4113,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return undefined
     }
     // The dynamic type name of a runtime value, in the spelling a case label uses.
+    // A float box knows its width and a sized-integer box its width and sign; a
+    // 64-bit integer does not (int and int64 are one plain number, uint and uint64
+    // one box), so it answers int / uint. Twin of goTypeNameOf in
+    // abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
     function goTypeName(v) {
         if (v === undefined || v === null) { return "nil" }
         if (typeof v == "boolean") { return "bool" }
         if (typeof v == "string") { return "string" }
         if (typeof v == "number") { return (v == gtrunc(v)) ? "int" : "float64" }
+        if (isFlo(v)) { return isF32(v) ? "float32" : "float64" }
+        if (szIs(v)) {
+            var base = v.u ? "uint" : "int"
+            return v.w == 64 ? base : base + v.w
+        }
+        if (isCx(v)) { return "complex128" }
         if (isMap(v)) { return "map" }
-        if (isSl(v)) { return "slice" }
-        if (Array.isArray(v)) { return "array" }
+        if (isSl(v) || Array.isArray(v)) { return "slice" }
         if (typeof v == "object" && v.__class != undefined) { return v.__class.__name }
         return "any"
+    }
+    // Does v's dynamic type equal `want`? 1 yes, 0 no, and 2 when the value model
+    // cannot tell: an int64, and a rune from a literal or a range over a string, are
+    // the same plain number as an int; a uint64 is the same box as a uint. A type
+    // switch and the comma-ok form take only a 1; x.(T) panics only on a 0. Twin of
+    // goTypeIs in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
+    function goTypeIs(v, want) {
+        if (want == "any" || want == "interface{}") { return (v !== undefined && v !== null) ? 1 : 0 }
+        var w = want
+        if (w == "byte") { w = "uint8" }
+        if (w == "rune") { w = "int32" }
+        var got = goTypeName(v)
+        if (got == w) { return 1 }
+        if (got == "int" && (w == "int64" || w == "int32")) { return 2 }
+        if (got == "uint" && (w == "uint64" || w == "uintptr")) { return 2 }
+        return 0
     }
     // The method names of an interface body, off the {imname} markers IfaceMeth
     // pushed. An interface whose body is not a plain method list left none, and no
@@ -4125,8 +4160,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     // Declared interface name -> its method names. Filled at parse time by the
-    // IfaceBody tag, read long after by the type test and the type assertion.
-    var ifaceMeths = {}
+    // IfaceBody tag, read long after by the type test and the type assertion. The
+    // predeclared `error` is the interface {Error() string}.
+    var ifaceMeths = {"error": ["Error"]}
     // The comma-joined method set of a declared interface, or "" for anything else.
     function ifaceMethodCsv(name) {
         if (name == undefined || name == null || !hasOwn(ifaceMeths, name)) { return "" }
@@ -4142,10 +4178,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // a defined non-struct type (`type MyInt int`) is not reachable from the value
         // in this model.
         if (hasOwn(ifaceMeths, want)) { return goIsInstance(v) && goSatisfies(v, ifaceMeths[want]) == "" }
-        var got = goTypeName(v)
-        if (want == got) { return true }
-        if (want == "float64" && got == "int") { return false }
-        return false
+        return goTypeIs(v, want) == 1
     }
     function goIsInstance(v) {
         if (v === undefined || v === null || typeof v != "object") { return false }
@@ -4180,11 +4213,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return false
     }
-    // x.(I) FOR A DECLARED INTERFACE PANICS when the value does not satisfy it. Only an
-    // interface target is checked: every other type text keeps the identity, because
-    // typeMatches is deliberately approximate for the boxes (see js_gotypeis in
-    // languages/lib/go-rt.metajs) and a panic on a wrong answer is worse than a
-    // pass-through. Go's own text is
+    // x.(I) FOR A DECLARED INTERFACE PANICS when the value does not satisfy it (a
+    // concrete target is goAssertType's). Go's own text is
     // `interface conversion: main.Dog is not main.Sp: missing method Fly`; the
     // package qualifier has no meaning here, so the names are bare.
     function goAssertIface(v, want) {
@@ -4196,11 +4226,32 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // missing) for a value that is not a struct instance. The package qualifier is
         // dropped for the same reason the missing-method text drops it.
         if (v === undefined || v === null) {
-            goPlainPanic("interface conversion: interface is nil, not " + want)
+            goConvPanic("interface is nil, not " + want)
         }
         var miss = goSatisfies(v, ifaceMeths[want])
         if (miss == "") { return v }
-        goPlainPanic("interface conversion: " + goTypeName(v) + " is not " + want + ": missing method " + miss)
+        goConvPanic(goTypeName(v) + " is not " + want + ": missing method " + miss)
+        return v
+    }
+    // x.(T) for a T that is not an interface: the value, or go's TypeAssertionError
+    // panic. Only a predeclared scalar type or a declared struct (or a pointer to
+    // one: the value model does not tell &S{} from S{}) is decided; any other T - a
+    // defined non-struct type, a composite, a type parameter - keeps the identity,
+    // because its values carry no type the test could read. The static type of x is
+    // not known here, and interface{} is what it nearly always is (recover()
+    // answers one), so the text names it. Twin of js_goassert in
+    // abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
+    var goScalarTys = {bool: 1, string: 1, int: 1, int8: 1, int16: 1, int32: 1, int64: 1,
+                       uint: 1, uint8: 1, uint16: 1, uint32: 1, uint64: 1, uintptr: 1,
+                       byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
+    function goAssertType(v, want) {
+        if (hasOwn(ifaceMeths, want)) { return goAssertIface(v, want) }
+        var w = want
+        if (w.charAt(0) == "*") {
+            w = w.substring(1)
+            if (structAt(curPkgName, w) == undefined) { return v }
+        } else if (!hasOwn(goScalarTys, w) && structAt(curPkgName, w) == undefined) { return v }
+        if (goTypeIs(v, w) == 0) { goConvPanic("interface {} is " + goTypeName(v) + ", not " + want) }
         return v
     }
     function makeTypeSwitch(items) {
@@ -4770,7 +4821,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // deferred closure can still change them) and panic/recover: a panic unwinds as a
     // host exception, the defers of every frame it passes still run, and a recover()
     // inside one of them turns it back into an ordinary return.
-    var panicVal = null
+    var panicVal = anytype // any panic value: a string, a number, an error instance
+    panicVal = null
     var panicking = false
     hostGlobals["panic"] = function(v) { throw {__gopanic: true, v: v} }
     hostGlobals["recover"] = function() {

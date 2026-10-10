@@ -951,8 +951,8 @@ func init() {
 			//
 			// plus a blank line and a "goroutine 1 [running]:" trace, which
 			// no engine here can produce. "panic: " prefixes BOTH kinds; a
-			// runtime panic's value already reads "runtime error: <msg>"
-			// (see goRTFail).
+			// runtime panic's value is an error whose Error() already reads
+			// "runtime error: <msg>" (see goRTErr).
 			text := ""
 			if exc, ok := p.(*jsThrown); ok {
 				text = rt.gopStr(exc.value)
@@ -987,7 +987,7 @@ func init() {
 			// A store into a NIL MAP is a panic in Go, and it is the one thing a
 			// nil map does not share with an empty one (see giIsNilMap).
 			if giIsNilMap(u(a[0])) {
-				panic("assignment to entry in nil map")
+				panic(goRTErr("runtime.plainError", "assignment to entry in nil map"))
 			}
 			// An out of range ARRAY store panics with the same wording the READ
 			// uses, not js_pyset's "list assignment index out of range" (whose
@@ -1005,6 +1005,28 @@ func init() {
 			return basePyset([]uint64{a[0], a[1], w(giAdoptLike(rt, cur, u(a[2])))})
 		}
 
+		// One arm of a type switch, and the ok of the comma-ok assertion: does v
+		// have dynamic type `want` (see goTypeIs)?
+		m["js_gotypeis"] = func(a []uint64) uint64 {
+			if goTypeIs(rt, u(a[0]), rt.toString(u(a[1]))) == 1 {
+				return jsHTrue
+			}
+			return jsHFalse
+		}
+		// The single-result x.(T) for a T the emitter can decide (assertTyWant):
+		// the value, or go's TypeAssertionError panic. The arguments are the value,
+		// the type tested and the type as written. The static type of x is not
+		// known here, and interface{} is what it nearly always is (recover()
+		// answers one), so the text names it. The twins are js_goassert in
+		// languages/lib/go-rt.metajs and goAssertType in
+		// languages/go-interpreter.abnf.
+		m["js_goassert"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if goTypeIs(rt, v, rt.toString(u(a[1]))) == 0 {
+				goConvFail("interface {} is " + goTypeText(rt, v) + ", not " + rt.toString(u(a[2])))
+			}
+			return a[0]
+		}
 		// A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it
 		// exactly when it has every method. js_gotypeis can only compare type
 		// NAMES, which is not enough for `v.(Sp)` and `case Sp:`. The method set
@@ -1026,7 +1048,7 @@ func init() {
 			// goMissingMethod answers "" for a value that is not an instance, so
 			// nil needs this arm.
 			if v == nil || v == jsNull || v == jsUndef {
-				panic("interface conversion: interface is nil, not " + rt.toString(u(a[1])))
+				goConvFail("interface is nil, not " + rt.toString(u(a[1])))
 			}
 			miss := goMissingMethod(rt, v, rt.toString(u(a[2])))
 			if miss == "" {
@@ -1035,7 +1057,8 @@ func init() {
 			// Go's own text is `interface conversion: main.Dog is not main.Sp:
 			// missing method Fly`; there is no package concept in this value
 			// model, so the names are bare.
-			panic("interface conversion: " + goTypeNameOf(rt, v) + " is not " + rt.toString(u(a[1])) + ": missing method " + miss)
+			goConvFail(goTypeText(rt, v) + " is not " + rt.toString(u(a[1])) + ": missing method " + miss)
+			return a[0]
 		}
 
 		// A MULTI-VALUE RESULT IS MARKED with a __gomv slot, because Go EXPANDS a
@@ -1172,8 +1195,14 @@ func goMissingMethod(rt *jsrt, v interface{}, csv string) string {
 	return ""
 }
 
-// goTypeNameOf is the value side of js_gotypeis: the dynamic type name, for the
-// interface-conversion panic text.
+// goTypeNameOf is the dynamic type name of a value, in the spelling a case label
+// uses: what js_gotypeis compares and what the interface-conversion panic names.
+// A float box knows its width and a sized-integer box its width and sign; a
+// 64-bit integer does not (int and int64 are one plain number, uint and uint64
+// one box), so it answers int / uint. A plain array is "slice", which is what the
+// emitter's $istype asks to tell an array from everything else. The twins are
+// goTypeName in languages/go-interpreter.abnf and goTypeNameOf in
+// languages/lib/go-rt.metajs.
 func goTypeNameOf(rt *jsrt, v interface{}) string {
 	switch t := v.(type) {
 	case jsUndefT, jsNullT:
@@ -1182,6 +1211,20 @@ func goTypeNameOf(rt *jsrt, v interface{}) string {
 		return "bool"
 	case string:
 		return "string"
+	case jsJFlo:
+		if t.sty == floGoF {
+			return "float32"
+		}
+		return "float64"
+	case jsGInt:
+		base := "int"
+		if t.u {
+			base = "uint"
+		}
+		if t.w == 64 {
+			return base
+		}
+		return base + strconv.Itoa(int(t.w))
 	case float64:
 		if t == math.Trunc(t) {
 			return "int"
@@ -1191,7 +1234,11 @@ func goTypeNameOf(rt *jsrt, v interface{}) string {
 		return "slice"
 	}
 	if cls := goClassOf(v); cls != nil {
-		return rt.toString(cls.props["__name"])
+		name := rt.toString(cls.props["__name"])
+		if name == "$cx" {
+			return "complex128"
+		}
+		return name
 	}
 	if _, _, isDict := dictParts(v); isDict {
 		return "map"
@@ -1199,20 +1246,98 @@ func goTypeNameOf(rt *jsrt, v interface{}) string {
 	return "any"
 }
 
-// goRTFail raises a Go run-time panic. Its value - what recover() hands the
-// program and what an unrecovered panic prints - is the string go's
-// runtime.Error spells, "runtime error: <msg>". A store into a nil map and a
-// failed interface conversion panic with their bare text instead, as go's do.
-// The twins are goRTPanic in languages/go-interpreter.abnf and
-// languages/lib/go-rt.metajs.
-func goRTFail(msg string) { panic("runtime error: " + msg) }
+// goTypeText is goTypeNameOf for a panic text, where a slice header reads "slice".
+// goTypeNameOf keeps "$sl", because $istype in the emitter unwraps a header and
+// asks "slice" of the backing array only.
+func goTypeText(rt *jsrt, v interface{}) string {
+	if t := goTypeNameOf(rt, v); t != "$sl" {
+		return t
+	}
+	return "slice"
+}
+
+// goTypeIs answers whether v's dynamic type is `want`: 1 yes, 0 no, and 2 when the
+// value model cannot tell - an int64, and a rune from a literal or a range over a
+// string, are the same plain number as an int; a uint64 is the same box as a uint.
+// A type switch and the comma-ok form take only a 1; the
+// single-result assertion panics only on a 0. The twins are goTypeIs in
+// languages/go-interpreter.abnf and languages/lib/go-rt.metajs.
+func goTypeIs(rt *jsrt, v interface{}, want string) int {
+	if want == "any" || want == "interface{}" {
+		if isUndefOrNull(v) {
+			return 0
+		}
+		return 1
+	}
+	switch want {
+	case "byte":
+		want = "uint8"
+	case "rune":
+		want = "int32"
+	}
+	got := goTypeNameOf(rt, v)
+	if got == want {
+		return 1
+	}
+	if (got == "int" && (want == "int64" || want == "int32")) || (got == "uint" && (want == "uint64" || want == "uintptr")) {
+		return 2
+	}
+	return 0
+}
+
+// goRTClasses holds one descriptor per runtime error type. It is built once, at
+// package initialisation, so concurrent runtimes only ever read it.
+var goRTClasses = goRTClassTable("runtime.errorString", "runtime.boundsError",
+	"runtime.plainError", "*runtime.TypeAssertionError")
+
+func goRTClassTable(names ...string) map[string]*jsObject {
+	out := map[string]*jsObject{}
+	for _, name := range names {
+		cls := newJSObject()
+		cls.set("__isclass", true)
+		cls.set("__name", name)
+		cls.set("__fields", &jsArray{elems: []interface{}{"msg"}})
+		cls.set("Error", &hostFunc{name: "Error", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if len(a) > 0 {
+				if o, ok := a[0].(*jsObject); ok {
+					return o.props["msg"]
+				}
+			}
+			return ""
+		}})
+		out[name] = cls
+	}
+	return out
+}
+
+// goRTErr is the value of a run-time panic: an instance of a runtime error type
+// (runtime.errorString, runtime.boundsError, runtime.plainError,
+// *runtime.TypeAssertionError) whose Error() answers its text. So recover() hands
+// back an `error` - r.(error) holds, r.(string) does not - and fmt prints the text
+// through the Error() arm. The twins are goRTErr in languages/go-interpreter.abnf
+// and languages/lib/go-rt.metajs.
+func goRTErr(name, text string) *jsThrown {
+	o := newJSObject()
+	o.set("__class", goRTClasses[name])
+	o.set("msg", text)
+	return &jsThrown{value: o}
+}
+
+// goRTFail raises a run-time panic whose text go prefixes with "runtime error: "
+// (a runtime.errorString); goBoundsFail is the same for runtime.boundsError.
+func goRTFail(msg string) { panic(goRTErr("runtime.errorString", "runtime error: "+msg)) }
+
+func goBoundsFail(msg string) { panic(goRTErr("runtime.boundsError", "runtime error: "+msg)) }
+
+// goConvFail is a failed type assertion, a *runtime.TypeAssertionError.
+func goConvFail(msg string) { panic(goRTErr("*runtime.TypeAssertionError", "interface conversion: "+msg)) }
 
 // goIdxFail is go's index-out-of-range panic (runtime/error.go, boundsErrorFmt).
 func goIdxFail(i, n int) {
 	if i < 0 {
-		goRTFail(fmt.Sprintf("index out of range [%d]", i))
+		goBoundsFail(fmt.Sprintf("index out of range [%d]", i))
 	}
-	goRTFail(fmt.Sprintf("index out of range [%d] with length %d", i, n))
+	goBoundsFail(fmt.Sprintf("index out of range [%d] with length %d", i, n))
 }
 
 // goSliceFail panics when s[lo:hi] (three false) or s[lo:hi:mx] breaks
@@ -1225,29 +1350,29 @@ func goSliceFail(lo, hi, mx, cp int, three bool, word string) {
 	if three {
 		switch {
 		case mx < 0:
-			goRTFail(fmt.Sprintf("%s::%d]", p, mx))
+			goBoundsFail(fmt.Sprintf("%s::%d]", p, mx))
 		case mx > cp:
-			goRTFail(fmt.Sprintf("%s::%d] with %s %d", p, mx, word, cp))
+			goBoundsFail(fmt.Sprintf("%s::%d] with %s %d", p, mx, word, cp))
 		case hi < 0:
-			goRTFail(fmt.Sprintf("%s:%d:]", p, hi))
+			goBoundsFail(fmt.Sprintf("%s:%d:]", p, hi))
 		case hi > mx:
-			goRTFail(fmt.Sprintf("%s:%d:%d]", p, hi, mx))
+			goBoundsFail(fmt.Sprintf("%s:%d:%d]", p, hi, mx))
 		case lo < 0:
-			goRTFail(fmt.Sprintf("%s%d::]", p, lo))
+			goBoundsFail(fmt.Sprintf("%s%d::]", p, lo))
 		case lo > hi:
-			goRTFail(fmt.Sprintf("%s%d:%d:]", p, lo, hi))
+			goBoundsFail(fmt.Sprintf("%s%d:%d:]", p, lo, hi))
 		}
 		return
 	}
 	switch {
 	case hi < 0:
-		goRTFail(fmt.Sprintf("%s:%d]", p, hi))
+		goBoundsFail(fmt.Sprintf("%s:%d]", p, hi))
 	case hi > cp:
-		goRTFail(fmt.Sprintf("%s:%d] with %s %d", p, hi, word, cp))
+		goBoundsFail(fmt.Sprintf("%s:%d] with %s %d", p, hi, word, cp))
 	case lo < 0:
-		goRTFail(fmt.Sprintf("%s%d:]", p, lo))
+		goBoundsFail(fmt.Sprintf("%s%d:]", p, lo))
 	case lo > hi:
-		goRTFail(fmt.Sprintf("%s%d:%d]", p, lo, hi))
+		goBoundsFail(fmt.Sprintf("%s%d:%d]", p, lo, hi))
 	}
 }
 

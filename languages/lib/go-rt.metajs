@@ -1266,19 +1266,32 @@ function js_range_val(v, i) {
 // A Go RUNTIME PANIC, and it has to be a THROW rather than a `fail`.
 //
 // `fail` is the C floor's hard abort, which js_gotry (what makes a compiled Go
-// frame recoverable) cannot catch. The thrown value is the string go's
-// runtime.Error spells, "runtime error: <msg>", which recover() hands the program;
-// a store into a nil map and a failed interface conversion throw their bare text,
-// as go's do. The twins are goRTFail in abnf/jsrtgolang.go and goRTPanic in
-// languages/go-interpreter.abnf.
+// frame recoverable) cannot catch. The thrown value is an `error`: an instance of
+// the runtime type go panics with (runtime.errorString, runtime.boundsError,
+// runtime.plainError, *runtime.TypeAssertionError) whose Error() answers the text.
+// So recover() hands back a value r.(error) accepts and r.(string) does not, and
+// fmt prints the text through the Error() arm. The twins are goRTErr in
+// abnf/jsrtgolang.go and languages/go-interpreter.abnf.
 //
 // An UNRECOVERED one is reported by js_gotop, so the floor's uncaught-throw
 // handler never adds its own prefix.
-function goRTPanic(msg) { throw "runtime error: " + msg }
+var goRTClasses = {}
+function goRTErrMsg(e) { return e.msg }
+function goRTErr(name, text) {
+    var cls = goRTClasses[name]
+    if (cls === undefined) {
+        cls = {__isclass: true, __name: name, __fields: ["msg"], Error: goRTErrMsg}
+        goRTClasses[name] = cls
+    }
+    return {__class: cls, msg: text}
+}
+function goRTPanic(msg) { throw goRTErr("runtime.errorString", "runtime error: " + msg) }
+function goBoundsPanic(msg) { throw goRTErr("runtime.boundsError", "runtime error: " + msg) }
+function goConvPanic(msg) { throw goRTErr("*runtime.TypeAssertionError", "interface conversion: " + msg) }
 // Go's index and slice-bounds wordings (runtime/error.go, boundsErrorFmt).
 function goIdxPanic(i, n) {
-    if (i < 0) { goRTPanic("index out of range [" + i + "]") }
-    goRTPanic("index out of range [" + i + "] with length " + n)
+    if (i < 0) { goBoundsPanic("index out of range [" + i + "]") }
+    goBoundsPanic("index out of range [" + i + "] with length " + n)
 }
 // Panics when s[lo:hi] (three false) or s[lo:hi:mx] breaks 0 <= lo <= hi <= mx
 // <= cp, checking in go's own order so the bound named is the one go names. word
@@ -1288,18 +1301,18 @@ function goIdxPanic(i, n) {
 function goSliceCheck(lo, hi, mx, cp, three, word) {
     var p = "slice bounds out of range ["
     if (three) {
-        if (mx < 0) { goRTPanic(p + "::" + mx + "]") }
-        if (mx > cp) { goRTPanic(p + "::" + mx + "] with " + word + " " + cp) }
-        if (hi < 0) { goRTPanic(p + ":" + hi + ":]") }
-        if (hi > mx) { goRTPanic(p + ":" + hi + ":" + mx + "]") }
-        if (lo < 0) { goRTPanic(p + lo + "::]") }
-        if (lo > hi) { goRTPanic(p + lo + ":" + hi + ":]") }
+        if (mx < 0) { goBoundsPanic(p + "::" + mx + "]") }
+        if (mx > cp) { goBoundsPanic(p + "::" + mx + "] with " + word + " " + cp) }
+        if (hi < 0) { goBoundsPanic(p + ":" + hi + ":]") }
+        if (hi > mx) { goBoundsPanic(p + ":" + hi + ":" + mx + "]") }
+        if (lo < 0) { goBoundsPanic(p + lo + "::]") }
+        if (lo > hi) { goBoundsPanic(p + lo + ":" + hi + ":]") }
         return undefined
     }
-    if (hi < 0) { goRTPanic(p + ":" + hi + "]") }
-    if (hi > cp) { goRTPanic(p + ":" + hi + "] with " + word + " " + cp) }
-    if (lo < 0) { goRTPanic(p + lo + ":]") }
-    if (lo > hi) { goRTPanic(p + lo + ":" + hi + "]") }
+    if (hi < 0) { goBoundsPanic(p + ":" + hi + "]") }
+    if (hi > cp) { goBoundsPanic(p + ":" + hi + "] with " + word + " " + cp) }
+    if (lo < 0) { goBoundsPanic(p + lo + ":]") }
+    if (lo > hi) { goBoundsPanic(p + lo + ":" + hi + "]") }
     return undefined
 }
 // Reading a member of nil, writing one and calling a method on one all raise
@@ -1426,35 +1439,12 @@ function js_gorange(v) {
     return {__dict: true, keys: keys, vals: vals}
 }
 
-// One arm of a Go type switch: does v have dynamic type `want`? The value model
-// has a single numeric type, so an integral number is an int and a fractional
-// one a float64; a map, a slice and a struct answer their own spelling, and
-// any / interface{} matches every non-nil value.
+// One arm of a type switch, and the ok of the comma-ok assertion: does v have
+// dynamic type `want` (see goTypeIs)? The emitter's $acopy asks "slice" of the
+// value of EVERY assignment, so that question is answered here without a call.
 function js_gotypeis(v, want) {
-    var got = "any"
-    if (v === undefined || v === null) { got = "nil" }
-    else if (v === true || v === false) { got = "bool" }
-    else if (typeof v == "string") { got = "string" }
-    else if (typeof v == "number") {
-        // WRITTEN AGAINST THE GO CODE, NOT AGAINST GO. The twin's type switch is
-        // `switch t := v.(type)` with a `case float64` arm and NO arm for either
-        // box, so a jsJFlo and a jsGInt both fall through to the default "any" -
-        // `case float64:` in a type switch of interface{} does not match a
-        // float64 held in a `var f float64` slot, and `case int:` does not match
-        // a uint8. Go answers "float64" for the first and "other" for the second;
-        // the two halves have to agree byte for byte, so layer 2 follows the twin.
-        if (floIs(v) || sintIs(v)) { got = "any" }
-        else if (v === Math.trunc(v)) { got = "int" }
-        else { got = "float64" }
-    }
-    else if (Array.isArray(v)) { got = "slice" }
-    else if (goIsDict(v)) { got = "map" }
-    else if (goIsObj(v)) {
-        var cls = goClassOf(v)
-        if (cls !== undefined) { got = goStrOf(cls.__name) }
-    }
-    if (want == "any" || want == "interface{}") { return got != "nil" }
-    return got == want
+    if (want == "slice") { return Array.isArray(v) }
+    return goTypeIs(v, goStrOf(want)) == 1
 }
 
 // min()/max(), the Go 1.21 builtins, over the callee's whole argument array.
@@ -1922,30 +1912,87 @@ function js_goifas(v, namev, csv) {
     // there is no dynamic type. It is tested first because goMissingMethod answers ""
     // for a non-instance.
     if (v === undefined || v === null) {
-        throw "interface conversion: interface is nil, not " + goStrOf(namev)
+        goConvPanic("interface is nil, not " + goStrOf(namev))
     }
     var miss = goMissingMethod(v, csv)
     if (miss == "") { return v }
-    throw "interface conversion: " + goTypeNameOf(v) + " is not " + goStrOf(namev) + ": missing method " + miss
+    goConvPanic(goTypeText(v) + " is not " + goStrOf(namev) + ": missing method " + miss)
     return v
 }
 
-// The dynamic type NAME of a value, for the panic text above. js_gotypeis answers
-// the same spellings; this is the value-side half of it.
+// The dynamic type name of a value, in the spelling a case label uses: what
+// js_gotypeis compares and what the interface-conversion panic names. A float box
+// knows its width and a sized-integer box its width and sign; a 64-bit integer
+// does not (int and int64 are one plain number, uint and uint64 one box), so it
+// answers int / uint. Twin of goTypeNameOf in abnf/jsrtgolang.go and goTypeName in
+// languages/go-interpreter.abnf.
 function goTypeNameOf(v) {
     if (v === undefined || v === null) { return "nil" }
     if (v === true || v === false) { return "bool" }
     if (typeof v == "string") { return "string" }
     var cls = goClassOf(v)
-    if (cls !== undefined) { return goStrOf(cls.__name) }
+    if (cls !== undefined) {
+        var nm = goStrOf(cls.__name)
+        if (nm == "$cx") { return "complex128" }
+        return nm
+    }
     if (Array.isArray(v)) { return "slice" }
     if (goIsDict(v)) { return "map" }
     if (typeof v == "number") {
-        if (floIs(v) || sintIs(v)) { return "any" }
+        if (floIs(v)) {
+            if (goIsF32(v)) { return "float32" }
+            return "float64"
+        }
+        if (sintIs(v)) {
+            var base = "int"
+            if (sintUns(v)) { base = "uint" }
+            var w = sintWidth(v)
+            if (w == 64) { return base }
+            return base + w
+        }
         if (v === Math.trunc(v)) { return "int" }
         return "float64"
     }
     return "any"
+}
+
+// goTypeNameOf for a panic text, where a slice header reads "slice". Twin of
+// goTypeText in abnf/jsrtgolang.go.
+function goTypeText(v) {
+    var t = goTypeNameOf(v)
+    if (t == "$sl") { return "slice" }
+    return t
+}
+
+// Does v's dynamic type equal `want`? 1 yes, 0 no, and 2 when the value model
+// cannot tell: an int64, and a rune from a literal or a range over a string, are
+// the same plain number as an int; a uint64 is the same box as a uint. A type
+// switch and the comma-ok form take only a 1; x.(T) panics only on a 0. Twin of
+// goTypeIs in abnf/jsrtgolang.go and languages/go-interpreter.abnf.
+function goTypeIs(v, want) {
+    if (want == "any" || want == "interface{}") {
+        if (v === undefined || v === null) { return 0 }
+        return 1
+    }
+    var w = want
+    if (w == "byte") { w = "uint8" }
+    if (w == "rune") { w = "int32" }
+    var got = goTypeNameOf(v)
+    if (got == w) { return 1 }
+    if (got == "int" && (w == "int64" || w == "int32")) { return 2 }
+    if (got == "uint" && (w == "uint64" || w == "uintptr")) { return 2 }
+    return 0
+}
+
+// The single-result x.(T) for a T the emitter can decide (assertTyWant in
+// languages/go-to-llvm-ir.abnf): the value, or go's TypeAssertionError panic. The
+// static type of x is not known, and interface{} is what it nearly always is, so
+// the text names it. Twin of js_goassert in abnf/jsrtgolang.go.
+function js_goassert(v, want, disp) {
+    if (goTypeIs(v, goStrOf(want)) == 0) {
+        goConvPanic("interface {} is " + goTypeText(v) + ", not " + goStrOf(disp))
+    }
+    return v
 }
 
 // ----- multi-value results ---------------------------------------------------
@@ -2331,7 +2378,7 @@ function js_gislget(h, iv) {
 function js_gisetat(c, k, v) {
     // A store into a NIL MAP is a panic in Go, and it is the one thing a nil map
     // does not share with an empty one (see goIsNilMap).
-    if (goIsNilMap(c)) { throw "assignment to entry in nil map" }
+    if (goIsNilMap(c)) { throw goRTErr("runtime.plainError", "assignment to entry in nil map") }
     // An out of range ARRAY store panics with the same wording the READ uses,
     // rather than reaching js_pyset, whose own bound is the floor's `fail` (a hard
     // abort no recover() can catch).
