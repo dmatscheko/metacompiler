@@ -679,12 +679,13 @@ function rbToF(v) {
     if (typeof v == "number") { return v }
     if (rbIsFlo(v)) { return v["f"] }
     if (rbIsRat(v)) { return v["n"] / v["d"] }
-    if (rbIsCpx(v)) { return v["re"] }
+    if (rbIsCpx(v)) { return rbToF(v["re"]) }
     if (rbIsBig(v)) { return rbABigToF(v) }
     return 0
 }
 
 function rbMkFlo(x) { return {__flo: true, f: x} }
+// A Complex's parts are TYPED reals (Integer, Float box, Rational): see rbCpxBin.
 function rbMkCpx(re, im) { return {__cpx: true, re: re, im: im} }
 
 // ----- EXACT integer arithmetic on doubles, and why every one of these exists ---
@@ -1044,12 +1045,71 @@ function rbMkRat(n, d) {
 
 function rbReOf(v) {
     if (rbIsCpx(v)) { return v["re"] }
-    return rbToF(v)
+    return v
 }
 
 function rbImOf(v) {
     if (rbIsCpx(v)) { return v["im"] }
     return 0
+}
+
+// Complex arithmetic on the typed parts. Twin of cpxBin in ruby-interpreter.abnf,
+// which states the rules, and rubyCpxBin in abnf/jsrtruby.go.
+function rbCpxBin(op, l, r) {
+    if (!rbIsCpx(r)) {
+        if (op == "+") { return rbMkCpx(rbNumBin("+", l["re"], r), l["im"]) }
+        if (op == "-") { return rbMkCpx(rbNumBin("-", l["re"], r), l["im"]) }
+        if (op == "*") { return rbMkCpx(rbNumBin("*", l["re"], r), rbNumBin("*", l["im"], r)) }
+        if (op == "/") { return rbMkCpx(rbRealQuo(l["re"], r), rbRealQuo(l["im"], r)) }
+        fail("Complex does not support '" + op + "'")
+    }
+    var a = anytype
+    a = l
+    if (!rbIsCpx(l)) { a = rbMkCpx(l, 0) }
+    if (op == "+") { return rbMkCpx(rbNumBin("+", a["re"], r["re"]), rbNumBin("+", a["im"], r["im"])) }
+    if (op == "-") { return rbMkCpx(rbNumBin("-", a["re"], r["re"]), rbNumBin("-", a["im"], r["im"])) }
+    if (op == "*") { return rbCpxMul(a, r) }
+    if (op == "/") {
+        var x = anytype
+        var y = anytype
+        var q = anytype
+        var n = anytype
+        if (rbNumCmp(rbRealAbs(r["re"]), rbRealAbs(r["im"])) > 0) {
+            q = rbRealQuo(r["im"], r["re"])
+            n = rbNumBin("*", r["re"], rbNumBin("+", 1, rbNumBin("*", q, q)))
+            x = rbNumBin("+", rbRealQuo(a["re"], n), rbRealQuo(rbNumBin("*", a["im"], q), n))
+            y = rbNumBin("-", rbRealQuo(a["im"], n), rbRealQuo(rbNumBin("*", a["re"], q), n))
+        } else {
+            q = rbRealQuo(r["re"], r["im"])
+            n = rbNumBin("*", r["im"], rbNumBin("+", 1, rbNumBin("*", q, q)))
+            x = rbNumBin("+", rbRealQuo(rbNumBin("*", a["re"], q), n), rbRealQuo(a["im"], n))
+            y = rbNumBin("-", rbRealQuo(rbNumBin("*", a["im"], q), n), rbRealQuo(a["re"], n))
+        }
+        if (rbIsFlo(a["re"]) || rbIsFlo(a["im"]) || rbIsFlo(r["re"]) || rbIsFlo(r["im"])) { return rbMkCpx(x, y) }
+        return rbMkCpx(rbRatCanon(x), rbRatCanon(y))
+    }
+    fail("Complex does not support '" + op + "'")
+    return null
+}
+function rbRatCanon(v) {
+    if (rbIsRat(v) && v["d"] == 1) { return v["n"] }
+    return v
+}
+function rbCpxMul(a, b) {
+    return rbMkCpx(rbNumBin("-", rbNumBin("*", a["re"], b["re"]), rbNumBin("*", a["im"], b["im"])),
+                   rbNumBin("+", rbNumBin("*", a["re"], b["im"]), rbNumBin("*", a["im"], b["re"])))
+}
+function rbCpxConj(c) { return rbMkCpx(c["re"], rbNeg(c["im"])) }
+// Numeric#quo on two reals. Twin of realQuo in ruby-interpreter.abnf.
+function rbRealQuo(a, b) {
+    if (rbIsFlo(a) || rbIsFlo(b)) { return rbNumBin("/", a, b) }
+    if (rbEq(b, 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    return rbNumBin("/", rbAsRat(a), b)
+}
+function rbRealAbs(v) {
+    if (rbIsFlo(v)) { return rbMkFlo(Math.abs(v["f"])) }
+    if (rbNumCmp(v, 0) < 0) { return rbNeg(v) }
+    return v
 }
 
 // ----- Float#to_r, EXACTLY -------------------------------------------------
@@ -1173,10 +1233,21 @@ function rbHypot(a, b) {
 // (0.001).to_r is 1152921504606847/1152921504606846976, so this is reachable.
 // rbIntStr is the exact expansion.
 function rbRatText(v) { return rbIntStr(v["n"]) + "/" + rbIntStr(v["d"]) }
-function rbCpxText(v) {
+// Complex#to_s (insp false) and the inside of #inspect: MRI's f_format. Twin of
+// cpxText in ruby-interpreter.abnf.
+function rbCpxText(v, insp) {
     var im = v["im"]
-    if (im < 0) { return ("" + v["re"]) + "-" + ("" + (0 - im)) + "i" }
-    return ("" + v["re"]) + "+" + ("" + im) + "i"
+    var pos = true
+    if (rbIsFlo(im)) {
+        var f = im["f"]
+        pos = !(f < 0 || (f == 0 && 1 / f < 0))
+    } else { pos = rbNumCmp(im, 0) >= 0 }
+    var ia = rbRealAbs(im)
+    var it = insp ? rbInspect(ia) : rbStr(ia)
+    var out = (insp ? rbInspect(v["re"]) : rbStr(v["re"])) + (pos ? "+" : "-") + it
+    var lc = it.charCodeAt(it.length - 1)
+    if (lc < 48 || lc > 57) { out = out + "*" }
+    return out + "i"
 }
 
 // Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI keeps the Rational at
@@ -1224,20 +1295,7 @@ function rbNumBin(op, l, r) {
     if (typeof r != "number") { rr = rbNumRank(r) }
     if (rk < 0 || rr < 0) { fail("not a number in '" + op + "'") }
     if (rr > rk) { rk = rr }
-    if (rk == 3) {
-        var ar = rbReOf(l)
-        var ai = rbImOf(l)
-        var br = rbReOf(r)
-        var bi = rbImOf(r)
-        if (op == "+") { return rbMkCpx(ar + br, ai + bi) }
-        if (op == "-") { return rbMkCpx(ar - br, ai - bi) }
-        if (op == "*") { return rbMkCpx(ar * br - ai * bi, ar * bi + ai * br) }
-        if (op == "/") {
-            var den = br * br + bi * bi
-            return rbMkCpx((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
-        }
-        fail("Complex does not support '" + op + "'")
-    }
+    if (rk == 3) { return rbCpxBin(op, l, r) }
     if (rk == 1) {
         var p = rbAsRat(l)
         var q = rbAsRat(r)
@@ -1373,6 +1431,37 @@ function rbBits64(op, a, b) {
     return sintNum(sintOp(code, x, y))
 }
 
+// Integer#fdiv, exact past the double range: the quotient is formed as an integer
+// of about 70 bits, rounded once and scaled by a power of two. Twin of intFdiv in
+// ruby-interpreter.abnf (the reasoning is there) and rubyIntFdiv in jsrtruby.go.
+function rbIntFdiv(a, b) {
+    var x = rbToF(a)
+    var y = rbToF(b)
+    if ((x - x == 0 && y - y == 0) || !(typeof b == "number" || rbIsBig(b)) || y == 0) { return rbFdivSign(x / y, x, y) }
+    var na = rbNumCmp(a, 0) < 0
+    var nb = rbNumCmp(b, 0) < 0
+    var pa = anytype
+    var pb = anytype
+    pa = na ? rbNeg(a) : a
+    pb = nb ? rbNeg(b) : b
+    var la = rbIsBig(pa) ? rtABigStr(pa).length : rbIntStr(pa).length
+    var lb = rbIsBig(pb) ? rtABigStr(pb).length : rbIntStr(pb).length
+    var s = Math.ceil((lb - la) * 3.33) + 70
+    var q = anytype
+    if (s >= 0) { q = rbNumBin("/", rbNumBin("*", pa, rbNumBin("**", 2, s)), pb) }
+    else { q = rbNumBin("/", pa, rbNumBin("*", pb, rbNumBin("**", 2, 0 - s))) }
+    var r = rbToF(q)
+    var k = s
+    while (k > 0) { r = r / 2; k = k - 1 }
+    while (k < 0) { r = r * 2; k = k + 1 }
+    if (na != nb) { return rbFdivSign(0 - r, x, y) }
+    return rbFdivSign(r, x, y)
+}
+// A zero quotient keeps the sign IEEE-754 gives it. Twin of fdivSign.
+function rbFdivSign(r, x, y) {
+    if (r == 0 && (x < 0) != (y < 0)) { return 0 / (0 - 1) }
+    return r
+}
 function rbNumCmp(l, r) {
     // Two Integers of which one is past 2^53 have to be compared EXACTLY:
     // through rbToF they would both round to the same double and answer 0.
@@ -1398,7 +1487,7 @@ function rbNeg(v) {
     if (rtTag(v, "__bint")) { return rtABigNarrow(rtABigNeg(v)) }
     if (rbIsFlo(v)) { return rbMkFlo(-v["f"]) }
     if (rbIsRat(v)) { return {__rat: true, n: -v["n"], d: v["d"]} }
-    if (rbIsCpx(v)) { return rbMkCpx(-v["re"], -v["im"]) }
+    if (rbIsCpx(v)) { return rbMkCpx(rbNeg(v["re"]), rbNeg(v["im"])) }
     if (rbUserObj(v)) { return rbMethod(v, "-@", []) }
     fail("cannot negate a " + typeof v)
     return 0
@@ -1444,7 +1533,7 @@ function rbStr(v) {
     if (rtTag(v, "__bint")) { return rtABigStr(v) }
     if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
     if (rbIsRat(v)) { return rbRatText(v) }
-    if (rbIsCpx(v)) { return rbCpxText(v) }
+    if (rbIsCpx(v)) { return rbCpxText(v, false) }
     if (rbIsSym(v)) { return v["s"] }
     if (rbIsArr(v)) { return rbInspect(v) }
     if (rbIsDict(v)) { return rbInspect(v) }
@@ -1538,7 +1627,7 @@ function rbInspect(v) {
     // `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one place the
     // two differ for a numeric.
     if (rbIsRat(v)) { return "(" + rbRatText(v) + ")" }
-    if (rbIsCpx(v)) { return "(" + rbCpxText(v) + ")" }
+    if (rbIsCpx(v)) { return "(" + rbCpxText(v, true) + ")" }
     // Range#inspect INSPECTS its endpoints where #to_s renders them, which is the
     // only place the two differ: `("a".."e").inspect' is `"a".."e"' and its #to_s
     // is `a..e'.
@@ -2911,10 +3000,7 @@ function rbExcObj(v) {
 // own == when it defines one, and the structural comparison otherwise.
 function rbEq(l, r) {
     if (rbIsNum(l) && rbIsNum(r)) {
-        if (rbIsCpx(l) || rbIsCpx(r)) {
-            if (rbReOf(l) != rbReOf(r)) { return false }
-            return rbImOf(l) == rbImOf(r)
-        }
+        if (rbIsCpx(l) || rbIsCpx(r)) { return rbEq(rbReOf(l), rbReOf(r)) && rbEq(rbImOf(l), rbImOf(r)) }
         if (typeof l != "number" || typeof r != "number") {
             if (rbIsBig(l) || rbIsBig(r)) { return rbNumCmp(l, r) == 0 }
         }
@@ -4414,34 +4500,40 @@ function rbFloSimplest(a0, b0) {
 var rbCpxUndefNames = ["round", "floor", "ceil", "truncate", "positive?", "negative?",
                        "div", "divmod", "modulo", "remainder"]
 function rbCpxAbs(re, im) {
-    if (re == 0 || im == 0) {
-        var a = im
-        if (im == 0) { a = re }
-        if (a < 0) { a = -a }
-        if (Math.floor(a) == a) { return a }
-        return rbMkFlo(a)
+    var a = anytype
+    if (rbEq(re, 0)) {
+        a = rbRealAbs(im)
+        if (rbIsFlo(re) && !rbIsFlo(im)) { return rbMkFlo(rbToF(a)) }
+        return a
     }
-    return rbMkFlo(rbHypot(re, im))
+    if (rbEq(im, 0)) {
+        a = rbRealAbs(re)
+        if (!rbIsFlo(re) && rbIsFlo(im)) { return rbMkFlo(rbToF(a)) }
+        return a
+    }
+    return rbMkFlo(rbHypot(rbToF(re), rbToF(im)))
 }
 
 function rbCpxMethod(t, name) {
     var re = t["re"]
     var im = t["im"]
-    if (name == "conjugate" || name == "conj") { return rbMkCpx(re, -im) }
+    if (name == "conjugate" || name == "conj") { return rbCpxConj(t) }
     if (name == "rect" || name == "rectangular") { return [re, im] }
     if (name == "abs" || name == "magnitude") { return rbCpxAbs(re, im) }
-    if (name == "polar") { return [rbCpxAbs(re, im), rbMkFlo(Math.atan2(im, re))] }
-    if (name == "arg" || name == "angle" || name == "phase") { return rbMkFlo(Math.atan2(im, re)) }
+    if (name == "polar") { return [rbCpxAbs(re, im), rbMkFlo(Math.atan2(rbToF(im), rbToF(re)))] }
+    if (name == "arg" || name == "angle" || name == "phase") { return rbMkFlo(Math.atan2(rbToF(im), rbToF(re))) }
+    if (name == "zero?") { return rbEq(re, 0) && rbEq(im, 0) }
     if (name == "real?") { return false }
     if (rbCpxUndefNames.indexOf(name) >= 0) {
         rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + rbInspect(t) + ":Complex")
     }
-    if (im != 0) {
-        var into = ""
-        if (name == "to_i" || name == "to_int") { into = "Integer" }
-        if (name == "to_f") { into = "Float" }
-        if (name == "to_r" || name == "rationalize") { into = "Rational" }
-        if (into != "") { rbRaiseErr("RangeError", "can't convert " + rbStr(t) + " into " + into) }
+    var into = ""
+    if (name == "to_i" || name == "to_int") { into = "Integer" }
+    if (name == "to_f") { into = "Float" }
+    if (name == "to_r" || name == "rationalize") { into = "Rational" }
+    if (into != "") {
+        if (rbIsFlo(im) || !rbEq(im, 0)) { rbRaiseErr("RangeError", "can't convert " + rbStr(t) + " into " + into) }
+        return rbMethod(re, name, [])
     }
     return undefined
 }
@@ -4482,12 +4574,9 @@ function rbNumMethod(t, name, args) {
         return rbMkFlo(x)
     }
     if (name == "to_r") { return rbAsRat(t) }
-    // #to_c. MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is
-    // (5.0+0i)); this Complex carries two raw doubles, so it answers (5+0i) for
-    // both - the same part-ness gap Complex(0, 0).abs has.
     if (name == "to_c") {
         if (rbIsCpx(t)) { return t }
-        return rbMkCpx(x, 0)
+        return rbMkCpx(t, 0)
     }
     // Rational#abs stays a RATIONAL (Complex#abs is rbCpxAbs).
     if (name == "abs" || name == "magnitude") {
@@ -4561,7 +4650,7 @@ function rbNumMethod(t, name, args) {
         return t
     }
     if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return rbNumDivOp(t, name, args) }
-    if (name == "fdiv") { return rbMkFlo(x / rbToF(rbArgAt(args, 0))) }
+    if (name == "fdiv") { return rbMkFlo(rbIntFdiv(t, rbArgAt(args, 0))) }
     if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
     if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }
     // between? / clamp are Comparable's, shared with String, and answered
@@ -6633,7 +6722,7 @@ function js_sym(name) { return rbSym(rbStr(name)) }
 // The three boxes of the numeric tower.
 function js_rflo(v) { return rbMkFlo(rbToF(v)) }
 function js_rrat(n, d) { return rbMkRat(rbToF(n), rbToF(d)) }
-function js_rcpx(re, im) { return rbMkCpx(rbToF(re), rbToF(im)) }
+function js_rcpx(re, im) { return rbMkCpx(re, im) }
 
 // The binary operators.
 function js_radd(l, r) { return rbBin("+", l, r) }
@@ -7233,7 +7322,8 @@ function js_rkconv(name, args) {
     if (name == "Complex") {
         var nargs = rbIsArr(args) ? args.length : 0
         if (nargs < 2 && rbIsCpx(v)) { return v }
-        return rbMkCpx(rbToF(v), nargs > 1 ? rbToF(args[1]) : 0)
+        if (nargs > 1) { return rbMkCpx(v, args[1]) }
+        return rbMkCpx(v, 0)
     }
     if (name == "Array") {
         if (rtIsNil(v)) { return [] }

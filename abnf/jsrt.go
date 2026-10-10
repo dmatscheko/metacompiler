@@ -1585,7 +1585,7 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case jsRat:
 		return t.n / t.d
 	case jsCpx:
-		return t.re
+		return rubyToF(t.re)
 	case jsUndefT:
 		return math.NaN()
 	case jsNullT:
@@ -1668,7 +1668,7 @@ func (rt *jsrt) toString(v interface{}) string {
 	case jsRat:
 		return rubyRatText(t)
 	case jsCpx:
-		return rubyCpxText(t)
+		return rt.rubyCpxText(t, false)
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -3883,7 +3883,9 @@ type jsSym struct {
 // MetaJS, JS, Java, Kotlin, Go, Python and the rest.
 type jsFlo struct{ f float64 }
 type jsRat struct{ n, d float64 }
-type jsCpx struct{ re, im float64 }
+// A Complex's parts are TYPED Ruby reals (float64 Integer, *jsBigInt, jsFlo,
+// jsRat): see rubyCpxBin in jsrtruby.go.
+type jsCpx struct{ re, im interface{} }
 
 // rubyNumRank orders the tower: int < rational < float < complex. Every arithmetic
 // step promotes both operands to the higher of the two ranks. -1 is "not a number".
@@ -3920,7 +3922,7 @@ func rubyToF(v interface{}) float64 {
 	case jsFlo:
 		return t.f
 	case jsCpx:
-		return t.re
+		return rubyToF(t.re)
 	case *jsBigInt:
 		f, _ := new(big.Float).SetInt(t.v).Float64()
 		return f
@@ -4457,18 +4459,18 @@ func rubyMkRat(n, d float64) jsRat {
 	return jsRat{n: n, d: d}
 }
 
-func rubyReOf(v interface{}) float64 {
+func rubyReOf(v interface{}) interface{} {
 	if c, ok := v.(jsCpx); ok {
 		return c.re
 	}
-	return rubyToF(v)
+	return v
 }
 
-func rubyImOf(v interface{}) float64 {
+func rubyImOf(v interface{}) interface{} {
 	if c, ok := v.(jsCpx); ok {
 		return c.im
 	}
-	return 0
+	return 0.0
 }
 
 // ----- Float#to_r, EXACTLY -------------------------------------------------
@@ -4627,21 +4629,13 @@ func rubyHypot(a, b float64) float64 {
 	return math.Sqrt(xs*xs+ys*ys) * sc
 }
 
-// rubyRatText / rubyCpxText are Rational#to_s and Complex#to_s. A negative
-// imaginary part joins with "-" and its own magnitude: Complex(3, -4) is `3-4i`.
+// rubyRatText is Rational#to_s (Complex#to_s is rubyCpxText in jsrtruby.go).
 // Both parts go through rubyIntStr and NOT through jsNumString, because a Rational's
 // parts are INTEGERS and jsNumString answers the SHORTEST ROUND-TRIPPING form, which past
 // 2^53 is a different integer: 2^55 prints as "36028797018963970", while MRI's
 // (0.001).to_r is 1152921504606847/1152921504606846976. rubyIntStr is the exact
 // expansion.
 func rubyRatText(t jsRat) string { return rubyIntStr(t.n) + "/" + rubyIntStr(t.d) }
-
-func rubyCpxText(t jsCpx) string {
-	if t.im < 0 {
-		return jsNumString(t.re) + "-" + jsNumString(-t.im) + "i"
-	}
-	return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
-}
 
 // rubyRatDigitOp is Rational#floor / #ceil / #round / #truncate, EXACTLY. MRI
 // keeps the Rational at a positive ndigits - `(2r/3r).round(1)` is (7/10), not
@@ -5254,19 +5248,7 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		rk = rr
 	}
 	if rk == 3 {
-		ar, ai, br, bi := rubyReOf(l), rubyImOf(l), rubyReOf(r), rubyImOf(r)
-		switch op {
-		case "+":
-			return jsCpx{re: ar + br, im: ai + bi}
-		case "-":
-			return jsCpx{re: ar - br, im: ai - bi}
-		case "*":
-			return jsCpx{re: ar*br - ai*bi, im: ar*bi + ai*br}
-		case "/":
-			den := br*br + bi*bi
-			return jsCpx{re: (ar*br + ai*bi) / den, im: (ai*br - ar*bi) / den}
-		}
-		rt.fail("Complex does not support '%s'", op)
+		return rt.rubyCpxBin(op, l, r)
 	}
 	if rk == 1 {
 		p, q := rt.rubyAsRat(l), rt.rubyAsRat(r)
@@ -5744,14 +5726,11 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return jsFlo{f: x}, true
 	case "to_r":
 		return rt.rubyAsRat(t), true
-	// MRI's Complex keeps its parts' Integer/Float-ness (5.0.to_c is (5.0+0i)); jsCpx
-	// carries two float64, so it answers (5+0i) for both - the same part-ness gap
-	// Complex(0, 0).abs has.
 	case "to_c":
 		if c, ok := t.(jsCpx); ok {
 			return c, true
 		}
-		return jsCpx{re: x, im: 0}, true
+		return jsCpx{re: t, im: 0.0}, true
 	// Rational#abs stays a RATIONAL (Complex#abs is rubyCpxAbs).
 	case "abs", "magnitude":
 		if r, ok := t.(jsRat); ok {
@@ -5829,7 +5808,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "div", "divmod", "modulo", "rationalize":
 		return rt.rubyNumDivOp(t, name, args), true
 	case "fdiv":
-		return jsFlo{f: x / rubyToF(argAt(args, 0))}, true
+		return jsFlo{f: rt.rubyIntFdiv(t, argAt(args, 0))}, true
 	case "pow", "**":
 		return rt.rubyBin("**", t, argAt(args, 0)), true
 	case "gcd":
@@ -6961,11 +6940,11 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 				return c
 			}
 		}
-		im := 0.0
+		var im interface{} = 0.0
 		if len(args) > 1 {
-			im = rubyToF(args[1])
+			im = args[1]
 		}
-		return jsCpx{re: rubyToF(v), im: im}
+		return jsCpx{re: v, im: im}
 	case "Array":
 		if isUndefOrNull(v) {
 			return &jsArray{}
@@ -7860,7 +7839,7 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 	case jsRat:
 		return jsRat{n: -t.n, d: t.d}
 	case jsCpx:
-		return jsCpx{re: -t.re, im: -t.im}
+		return jsCpx{re: rt.rubyNeg(t.re), im: rt.rubyNeg(t.im)}
 	case *jsBigInt:
 		return rt.rubyBigNarrow(new(big.Int).Neg(t.v))
 	}
@@ -7900,7 +7879,7 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	case jsRat:
 		return rubyRatText(t)
 	case jsCpx:
-		return rubyCpxText(t)
+		return rt.rubyCpxText(t, false)
 	case *jsArray:
 		return rt.rubyInspect(v)
 	case *jsObject:
@@ -8162,7 +8141,7 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 	case jsRat:
 		return "(" + rubyRatText(t) + ")"
 	case jsCpx:
-		return "(" + rubyCpxText(t) + ")"
+		return "(" + rt.rubyCpxText(t, true) + ")"
 	case *jsArray:
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
@@ -8228,11 +8207,9 @@ func rubyExcInspect(name, msg string) string {
 // Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
 func (rt *jsrt) rubyEq(l, r interface{}) bool {
 	if rubyIsNum(l) && rubyIsNum(r) {
-		if _, lc := l.(jsCpx); lc {
-			return rubyReOf(l) == rubyReOf(r) && rubyImOf(l) == rubyImOf(r)
-		}
-		if _, rc := r.(jsCpx); rc {
-			return rubyReOf(l) == rubyReOf(r) && rubyImOf(l) == rubyImOf(r)
+		_, lc := l.(jsCpx)
+		if _, rc := r.(jsCpx); lc || rc {
+			return rt.rubyEq(rubyReOf(l), rubyReOf(r)) && rt.rubyEq(rubyImOf(l), rubyImOf(r))
 		}
 		if c, ok := rubyBigCmp(l, r); ok {
 			return c == 0
@@ -12920,7 +12897,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// js_jadd/js_sub/... operators, whose semantics are untouched by them.
 		"js_rflo": func(a []uint64) uint64 { return w(jsFlo{f: rt.toNumber(u(a[0]))}) },
 		"js_rrat": func(a []uint64) uint64 { return w(rubyMkRat(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
-		"js_rcpx": func(a []uint64) uint64 { return w(jsCpx{re: rt.toNumber(u(a[0])), im: rt.toNumber(u(a[1]))}) },
+		"js_rcpx": func(a []uint64) uint64 { return w(jsCpx{re: u(a[0]), im: u(a[1])}) },
 		"js_radd": func(a []uint64) uint64 { return w(rt.rubyBin("+", u(a[0]), u(a[1]))) },
 		"js_rsub": func(a []uint64) uint64 { return w(rt.rubyBin("-", u(a[0]), u(a[1]))) },
 		"js_rmul": func(a []uint64) uint64 { return w(rt.rubyBin("*", u(a[0]), u(a[1]))) },

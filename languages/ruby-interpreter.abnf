@@ -3526,7 +3526,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "Complex") {
             if (argv.length < 2 && isCpx(v)) { return v }
-            return mkCpx(toF(v), argv.length > 1 ? toF(argv[1]) : 0)
+            return mkCpx(v, argv.length > 1 ? argv[1] : 0)
         }
         if (name == "Array") {
             if (v === null || v === undefined) { return [] }
@@ -4026,6 +4026,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     function mkFlo(x) { return {__flo: true, f: x} }
+    // A Complex's parts are TYPED real values - an Integer, a Float or a Rational -
+    // and keep that type through arithmetic, as in MRI: 5.0.to_c is (5.0+0i) and
+    // Complex(3, 0.0) is not real enough for #to_i.
     function mkCpx(re, im) { return {__cpx: true, re: re, im: im} }
     function gcd2(a, b) {
         var x = a < 0 ? 0 - a : a
@@ -4062,7 +4065,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "number") { return v }
         if (isFlo(v)) { return v.f }
         if (isRat(v)) { return v.n / v.d }
-        if (isCpx(v)) { return v.re }
+        if (isCpx(v)) { return toF(v.re) }
         if (isBig(v)) { return bigToNum(v) }
         return 0
     }
@@ -4171,8 +4174,80 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var ys = y / sc
         return Math.sqrt(xs * xs + ys * ys) * sc
     }
-    function reOf(v) { if (isCpx(v)) { return v.re } return toF(v) }
+    function reOf(v) { if (isCpx(v)) { return v.re } return v }
     function imOf(v) { if (isCpx(v)) { return v.im } return 0 }
+    // Complex arithmetic on the typed parts. A real operand acts on the parts the
+    // way MRI's real arm does (Complex(1.5, 2) + 2 leaves the imaginary 2 alone);
+    // `/` is MRI 2.6's quo: per part by a real, Smith's algorithm by a Complex.
+    // Twins: rubyCpxBin in abnf/jsrtruby.go and rbCpxBin
+    // in lib/ruby-rt.metajs.
+    function cpxBin(op, l, r) {
+        if (!isCpx(r)) {
+            if (op == "+") { return mkCpx(numBin("+", l.re, r), l.im) }
+            if (op == "-") { return mkCpx(numBin("-", l.re, r), l.im) }
+            if (op == "*") { return mkCpx(numBin("*", l.re, r), numBin("*", l.im, r)) }
+            if (op == "/") { return mkCpx(realQuo(l.re, r), realQuo(l.im, r)) }
+            fail("Complex does not support '" + op + "'")
+        }
+        var a = anytype
+        a = isCpx(l) ? l : mkCpx(l, 0)
+        if (op == "+") { return mkCpx(numBin("+", a.re, r.re), numBin("+", a.im, r.im)) }
+        if (op == "-") { return mkCpx(numBin("-", a.re, r.re), numBin("-", a.im, r.im)) }
+        if (op == "*") { return cpxMul(a, r) }
+        if (op == "/") {
+            // Smith's division, with each term divided by n on its own - the order
+            // MRI 2.6 rounds in (300 of 300 random Float quotients agree). With no
+            // Float anywhere an integral Rational part becomes an Integer.
+            var x = anytype
+            var y = anytype
+            if (numCmp(realAbs(r.re), realAbs(r.im)) > 0) {
+                var q1 = anytype
+                q1 = realQuo(r.im, r.re)
+                var n1 = anytype
+                n1 = numBin("*", r.re, numBin("+", 1, numBin("*", q1, q1)))
+                x = numBin("+", realQuo(a.re, n1), realQuo(numBin("*", a.im, q1), n1))
+                y = numBin("-", realQuo(a.im, n1), realQuo(numBin("*", a.re, q1), n1))
+            } else {
+                var q2 = anytype
+                q2 = realQuo(r.re, r.im)
+                var n2 = anytype
+                n2 = numBin("*", r.im, numBin("+", 1, numBin("*", q2, q2)))
+                x = numBin("+", realQuo(numBin("*", a.re, q2), n2), realQuo(a.im, n2))
+                y = numBin("-", realQuo(numBin("*", a.im, q2), n2), realQuo(a.re, n2))
+            }
+            if (isFlo(a.re) || isFlo(a.im) || isFlo(r.re) || isFlo(r.im)) { return mkCpx(x, y) }
+            return mkCpx(ratCanon(x), ratCanon(y))
+        }
+        fail("Complex does not support '" + op + "'")
+    }
+    function ratCanon(v) { return isRat(v) && v.d == 1 ? v.n : v }
+    function cpxMul(a, b) {
+        return mkCpx(numBin("-", numBin("*", a.re, b.re), numBin("*", a.im, b.im)),
+                     numBin("+", numBin("*", a.re, b.im), numBin("*", a.im, b.re)))
+    }
+    function cpxConj(c) { return mkCpx(c.re, rneg(c.im)) }
+    // Numeric#quo on two reals: a Float stays a Float division, two exact operands
+    // make a Rational (3.quo(2) is (3/2), 4.quo(2) is (2/1)).
+    function realQuo(a, b) {
+        if (isFlo(a) || isFlo(b)) { return numBin("/", a, b) }
+        if (numEq(b, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+        return numBin("/", asRat(a), b)
+    }
+    // |x| of a real, keeping its type (a Float -0.0 is 0.0).
+    function realAbs(v) {
+        if (isFlo(v)) { return mkFlo(Math.abs(v.f)) }
+        if (numCmp(v, 0) < 0) { return rneg(v) }
+        return v
+    }
+    // The sign MRI's Complex#to_s writes before the imaginary part: a Float's sign
+    // BIT, so -0.0 is "-".
+    function cpxImPos(im) {
+        if (isFlo(im)) { return !(im.f < 0 || (im.f == 0 && 1 / im.f < 0)) }
+        return numCmp(im, 0) >= 0
+    }
+    // An imaginary part that is EXACTLY zero (an Integer or a Rational 0, never a
+    // Float) is what lets a Complex convert to a real.
+    function cpxExactReal(t) { return !isFlo(t.im) && numEq(t.im, 0) }
     function isUserObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined }
     // ----- the FUSED `x - q*y` ----------------------------------------------
     //
@@ -4239,6 +4314,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and the sign is gone. Dividing a zero by -1 is a float division in every
     // engine and keeps the sign. Twins: rbZeroSign in languages/lib/ruby-rt.metajs;
     // abnf/jsrt.go spells it math.Copysign(0, x).
+    function signNeg(x) { return x < 0 || (x == 0 && 1 / x < 0) }
     function zeroSigned(x) {
         var z = 0
         if (x < 0) { return z / (0 - 1) }
@@ -4514,20 +4590,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var rr = numRank(r)
         if (rr > rk) { rk = rr }
         if (rk < 0) { fail("not a number in '" + op + "'") }
-        if (rk == 3) {
-            var ar = reOf(l)
-            var ai = imOf(l)
-            var br = reOf(r)
-            var bi = imOf(r)
-            if (op == "+") { return mkCpx(ar + br, ai + bi) }
-            if (op == "-") { return mkCpx(ar - br, ai - bi) }
-            if (op == "*") { return mkCpx(ar * br - ai * bi, ar * bi + ai * br) }
-            if (op == "/") {
-                var den = br * br + bi * bi
-                return mkCpx((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
-            }
-            fail("Complex does not support '" + op + "'")
-        }
+        if (rk == 3) { return cpxBin(op, l, r) }
         if (rk == 1) {
             var p = asRat(l)
             var q = asRat(r)
@@ -4541,8 +4604,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var y = toF(r)
             if (op == "+") { return mkFlo(x + y) }
             if (op == "-") { return mkFlo(x - y) }
-            if (op == "*") { return mkFlo(x * y) }
-            if (op == "/") { return mkFlo(x / y) }
+            // A ZERO product or quotient takes the sign IEEE-754 gives it (0.0 * -3 is
+            // -0.0), which the tag engine's integral zero drops.
+            if (op == "*") { var fp = x * y; if (fp == 0) { return mkFlo(zeroSigned(signNeg(x) != signNeg(y) ? -1 : 1)) } return mkFlo(fp) }
+            if (op == "/") { var fq = x / y; if (fq == 0) { return mkFlo(zeroSigned(signNeg(x) != signNeg(y) ? -1 : 1)) } return mkFlo(fq) }
             // Float#% - see rubyFloMod in abnf/jsrt.go for the whole reasoning.
             // Ruby's flodivmod IS `mod = fmod(x, y); if (y*mod < 0) mod += y`,
             // and nothing else. The dialect's `%` is fmod, so this is that body
@@ -4606,6 +4671,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         fail("Integer does not support '" + op + "'")
     }
+    // Integer#fdiv. When an Integer operand does not fit a double,
+    // (10**400).fdiv(10**399) would be Infinity / Infinity; MRI answers 10.0. The
+    // quotient is then formed EXACTLY, as an integer of about 70 bits, and only that
+    // is rounded once and scaled by a power of two (exact). Twins: rubyIntFdiv in
+    // abnf/jsrtruby.go and rbIntFdiv in lib/ruby-rt.metajs.
+    function intFdiv(a, b) {
+        var x = toF(a)
+        var y = toF(b)
+        if ((x - x == 0 && y - y == 0) || !(typeof b == "number" || isBig(b)) || y == 0) { return fdivSign(x / y, x, y) }
+        var na = numCmp(a, 0) < 0
+        var nb = numCmp(b, 0) < 0
+        var pa = anytype
+        var pb = anytype
+        pa = na ? rneg(a) : a
+        pb = nb ? rneg(b) : b
+        var la = isBig(pa) ? bigStr(pa).length : intStr(pa).length
+        var lb = isBig(pb) ? bigStr(pb).length : intStr(pb).length
+        var s = Math.ceil((lb - la) * 3.33) + 70
+        var q = anytype
+        if (s >= 0) { q = numBin("/", numBin("*", pa, numBin("**", 2, s)), pb) }
+        else { q = numBin("/", pa, numBin("*", pb, numBin("**", 2, 0 - s))) }
+        var r = toF(q)
+        var k = s
+        while (k > 0) { r = r / 2; k = k - 1 }
+        while (k < 0) { r = r * 2; k = k + 1 }
+        return fdivSign(na != nb ? 0 - r : r, toF(a), toF(b))
+    }
+    // A zero quotient keeps the sign IEEE-754 gives it (7.fdiv(-10**400) is -0.0),
+    // which the tag engine's integral zero would drop.
+    function fdivSign(r, x, y) {
+        if (r == 0 && (x < 0) != (y < 0)) { return 0 / (0 - 1) }
+        return r
+    }
     function numCmp(l, r) {
         // A big on either side has to be compared EXACTLY: through toF both
         // operands would round to the same double and answer 0.
@@ -4621,7 +4719,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return 0
     }
     function numEq(l, r) {
-        if (isCpx(l) || isCpx(r)) { return reOf(l) == reOf(r) && imOf(l) == imOf(r) }
+        if (isCpx(l) || isCpx(r)) { return numEq(reOf(l), reOf(r)) && numEq(imOf(l), imOf(r)) }
         if (isBig(l) || isBig(r)) {
             var el = bigCmpOf(l)
             var er = bigCmpOf(r)
@@ -4637,7 +4735,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // "-0.0").
         if (isFlo(v)) { return mkFlo(v.f * (0 - 1)) }
         if (isRat(v)) { return mkRat(0 - v.n, v.d) }
-        if (isCpx(v)) { return mkCpx(0 - v.re, 0 - v.im) }
+        if (isCpx(v)) { return mkCpx(rneg(v.re), rneg(v.im)) }
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
         fail("cannot negate")
     }
@@ -5077,10 +5175,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // "36028797018963970" - and (0.1).to_r's denominator is 2^55. intStr is the
     // exact expansion, the same rule Integer#to_s follows.
     function ratText(v) { return intStr(v.n) + "/" + intStr(v.d) }
-    function cpxText(v) {
-        var im = v.im
-        if (im < 0) { return "" + v.re + "-" + (0 - im) + "i" }
-        return "" + v.re + "+" + im + "i"
+    // MRI's f_format: each part in its own rendering (#inspect parenthesizes a
+    // Rational part), the imaginary one by magnitude after its sign, and a `*`
+    // before the `i` when that rendering does not end in a digit ("(1/1)*i").
+    function cpxText(v, insp) {
+        var ia = anytype
+        ia = realAbs(v.im)
+        var it = insp ? rinspect(ia) : rstr(ia)
+        var lc = it.charCodeAt(it.length - 1)
+        var out = (insp ? rinspect(v.re) : rstr(v.re)) + (cpxImPos(v.im) ? "+" : "-") + it
+        if (lc < 48 || lc > 57) { out = out + "*" }
+        return out + "i"
     }
     function rstr(v) {
         if (v === null || v === undefined) { return "" }
@@ -5092,7 +5197,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "number") { return intStr(v) }
         if (isFlo(v)) { return floStr(v.f) }
         if (isRat(v)) { return ratText(v) }
-        if (isCpx(v)) { return cpxText(v) }
+        if (isCpx(v)) { return cpxText(v, false) }
         if (isRange(v)) { return rstr(v.lo) + (v.excl ? "..." : "..") + rstr(v.hi) }
         // Regexp#to_s is the embeddable (?-mix:...) form, not the /.../ literal.
         if (isRegex(v)) { return "(?-mix:" + v.src + ")" }
@@ -5168,7 +5273,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // not - `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one
         // place the two differ for a numeric.
         if (isRat(v)) { return "(" + ratText(v) + ")" }
-        if (isCpx(v)) { return "(" + cpxText(v) + ")" }
+        if (isCpx(v)) { return "(" + cpxText(v, true) + ")" }
         // Range#inspect INSPECTS its endpoints where #to_s renders them, which is
         // the only place the two differ: `("a".."e").inspect' is `"a".."e"' and its
         // #to_s is `a..e'.
@@ -7034,7 +7139,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return [bigOut(dm.q), bigOut(dm.r)]
             }
         }
-        if (name == "fdiv") { return mkFlo(bigToNum(t) / toF(args[0])) }
+        if (name == "fdiv") { return mkFlo(intFdiv(t, args[0])) }
         if (name == "pow") { return rbin("**", t, args[0]) }
         return numberMethod(t, name, args, blk)
     }
@@ -7190,31 +7295,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var cpxUndefNames = ["round", "floor", "ceil", "truncate", "positive?", "negative?",
                          "div", "divmod", "modulo", "remainder"]
     // MRI's Complex#abs: with one part zero it is the other part's own abs, so it
-    // keeps that part's type - an integral part reads as the Integer it prints as.
+    // keeps that part's type - a Float only if either part is one.
     function cpxAbs(t) {
-        if (t.re == 0 || t.im == 0) {
-            var a = t.re == 0 ? t.im : t.re
-            if (a < 0) { a = -a }
-            return Math.floor(a) == a ? a : mkFlo(a)
+        var a = anytype
+        if (numEq(t.re, 0)) {
+            a = realAbs(t.im)
+            return isFlo(t.re) && !isFlo(t.im) ? mkFlo(toF(a)) : a
         }
-        return mkFlo(hypotOf(t.re, t.im))
+        if (numEq(t.im, 0)) {
+            a = realAbs(t.re)
+            return !isFlo(t.re) && isFlo(t.im) ? mkFlo(toF(a)) : a
+        }
+        return mkFlo(hypotOf(toF(t.re), toF(t.im)))
     }
     function cpxMethod(t, name) {
-        if (name == "conjugate" || name == "conj") { return mkCpx(t.re, -t.im) }
+        if (name == "conjugate" || name == "conj") { return cpxConj(t) }
         if (name == "rect" || name == "rectangular") { return [t.re, t.im] }
         if (name == "abs" || name == "magnitude") { return cpxAbs(t) }
-        if (name == "polar") { return [cpxAbs(t), mkFlo(Math.atan2(t.im, t.re))] }
-        if (name == "arg" || name == "angle" || name == "phase") { return mkFlo(Math.atan2(t.im, t.re)) }
+        if (name == "polar") { return [cpxAbs(t), mkFlo(Math.atan2(toF(t.im), toF(t.re)))] }
+        if (name == "arg" || name == "angle" || name == "phase") { return mkFlo(Math.atan2(toF(t.im), toF(t.re))) }
+        if (name == "zero?") { return numEq(t.re, 0) && numEq(t.im, 0) }
         if (name == "real?") { return false }
         if (cpxUndefNames.indexOf(name) >= 0) {
             raiseErr("NoMethodError", "undefined method `" + name + "' for " + rinspect(t) + ":Complex")
         }
-        if (t.im != 0) {
-            var into = ""
-            if (name == "to_i" || name == "to_int") { into = "Integer" }
-            if (name == "to_f") { into = "Float" }
-            if (name == "to_r" || name == "rationalize") { into = "Rational" }
-            if (into != "") { raiseErr("RangeError", "can't convert " + rstr(t) + " into " + into) }
+        var into = ""
+        if (name == "to_i" || name == "to_int") { into = "Integer" }
+        if (name == "to_f") { into = "Float" }
+        if (name == "to_r" || name == "rationalize") { into = "Rational" }
+        if (into != "") {
+            if (!cpxExactReal(t)) { raiseErr("RangeError", "can't convert " + rstr(t) + " into " + into) }
+            return mcall(t.re, name, [], null)
         }
         return undefined
     }
@@ -7234,7 +7345,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ndigits too (`1.567.truncate(1)' is the Float 1.5).
         if (name == "to_i" || name == "to_int") { var x1 = toF(t); floDomainGuard(x1); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
-        if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
+        if (name == "to_c") { return isCpx(t) ? t : mkCpx(t, 0) }
         // Rational#abs stays a RATIONAL (Complex#abs is cpxAbs).
         if (name == "abs" || name == "magnitude") {
             if (isRat(t)) { return t.n < 0 ? mkRat(0 - t.n, t.d) : t }
@@ -7424,7 +7535,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "pred") { return numBin("-", target, 1) }
             if (name == "integer?") { return true }
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
-            if (name == "fdiv") { return mkFlo(target / toF(args[0])) }
+            if (name == "fdiv") { return mkFlo(intFdiv(target, args[0])) }
             if (name == "pow") { return rbin("**", target, args[0]) }
             if (name == "times") {
                 for (var ni = 0; ni < target; ni++) { blockCall(blk, [ni]) }

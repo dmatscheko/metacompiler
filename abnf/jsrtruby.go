@@ -158,6 +158,38 @@ func (rt *jsrt) rubyRealCall(name string, args interface{}) (string, interface{}
 // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL and not a
 // boolean. The twins are numberMethod in languages/ruby-interpreter.abnf and
 // rbNumMethod in languages/lib/ruby-rt.metajs.
+// Integer#fdiv, exact past the double range: the quotient is formed as an integer
+// of about 70 bits, rounded once and scaled by a power of two. Twin of intFdiv in
+// languages/ruby-interpreter.abnf (the reasoning is there) and rbIntFdiv in
+// languages/lib/ruby-rt.metajs; the digit counts choose the same scale in all three.
+func (rt *jsrt) rubyIntFdiv(a, b interface{}) float64 {
+	x, y := rubyToF(a), rubyToF(b)
+	bi, isInt := rubyBigOf(b)
+	if (!math.IsInf(x, 0) && !math.IsInf(y, 0)) || !isInt || y == 0 {
+		return x / y
+	}
+	ai, _ := rubyBigOf(a)
+	pa, pb := new(big.Int).Abs(ai), new(big.Int).Abs(bi)
+	s := int(math.Ceil(float64(len(pb.String())-len(pa.String()))*3.33)) + 70
+	q := new(big.Int)
+	if s >= 0 {
+		q.Quo(new(big.Int).Lsh(pa, uint(s)), pb)
+	} else {
+		q.Quo(pa, new(big.Int).Lsh(pb, uint(-s)))
+	}
+	r, _ := new(big.Float).SetInt(q).Float64()
+	for k := s; k > 0; k-- {
+		r = r / 2
+	}
+	for k := s; k < 0; k++ {
+		r = r * 2
+	}
+	if (ai.Sign() < 0) != (bi.Sign() < 0) {
+		return -r
+	}
+	return r
+}
+
 func rubyFloPredicate(target interface{}, name string) (interface{}, bool) {
 	if name != "nan?" && name != "infinite?" && name != "finite?" {
 		return nil, false
@@ -929,16 +961,26 @@ func rubyFloSimplest(a, b float64) (jsRat, bool) {
 }
 
 // rubyCpxAbs is MRI's Complex#abs: with one part zero it is the other part's
-// own abs. Twin of cpxAbs in languages/ruby-interpreter.abnf.
-func rubyCpxAbs(t jsCpx) interface{} {
-	if t.re == 0 || t.im == 0 {
-		a := math.Abs(t.re + t.im)
-		if math.Floor(a) == a {
-			return a
+// own abs, a Float only if either part is one. Twin of cpxAbs in
+// languages/ruby-interpreter.abnf.
+func (rt *jsrt) rubyCpxAbs(t jsCpx) interface{} {
+	_, reF := t.re.(jsFlo)
+	_, imF := t.im.(jsFlo)
+	if rt.rubyEq(t.re, 0.0) {
+		a := rt.rubyRealAbs(t.im)
+		if reF && !imF {
+			return jsFlo{f: rubyToF(a)}
 		}
-		return jsFlo{f: a}
+		return a
 	}
-	return jsFlo{f: rubyHypot(t.re, t.im)}
+	if rt.rubyEq(t.im, 0.0) {
+		a := rt.rubyRealAbs(t.re)
+		if !reF && imF {
+			return jsFlo{f: rubyToF(a)}
+		}
+		return a
+	}
+	return jsFlo{f: rubyHypot(rubyToF(t.re), rubyToF(t.im))}
 }
 
 // rubyCpxMethod is Complex's own surface. Twin of cpxMethod in
@@ -946,25 +988,146 @@ func rubyCpxAbs(t jsCpx) interface{} {
 func (rt *jsrt) rubyCpxMethod(t jsCpx, name string) (interface{}, bool) {
 	switch name {
 	case "conjugate", "conj":
-		return jsCpx{re: t.re, im: -t.im}, true
+		return rt.rubyCpxConj(t), true
 	case "rect", "rectangular":
 		return &jsArray{elems: []interface{}{t.re, t.im}}, true
 	case "abs", "magnitude":
-		return rubyCpxAbs(t), true
+		return rt.rubyCpxAbs(t), true
 	case "polar":
-		return &jsArray{elems: []interface{}{rubyCpxAbs(t), jsFlo{f: math.Atan2(t.im, t.re)}}}, true
+		return &jsArray{elems: []interface{}{rt.rubyCpxAbs(t), jsFlo{f: math.Atan2(rubyToF(t.im), rubyToF(t.re))}}}, true
 	case "arg", "angle", "phase":
-		return jsFlo{f: math.Atan2(t.im, t.re)}, true
+		return jsFlo{f: math.Atan2(rubyToF(t.im), rubyToF(t.re))}, true
+	case "zero?":
+		return rt.rubyEq(t.re, 0.0) && rt.rubyEq(t.im, 0.0), true
 	case "real?":
 		return false, true
 	case "round", "floor", "ceil", "truncate", "positive?", "negative?", "div", "divmod", "modulo", "remainder":
 		rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyInspect(t)+":Complex")
 	}
-	if t.im != 0 {
-		into := map[string]string{"to_i": "Integer", "to_int": "Integer", "to_f": "Float", "to_r": "Rational", "rationalize": "Rational"}[name]
-		if into != "" {
+	into := map[string]string{"to_i": "Integer", "to_int": "Integer", "to_f": "Float", "to_r": "Rational", "rationalize": "Rational"}[name]
+	if into != "" {
+		if _, imF := t.im.(jsFlo); imF || !rt.rubyEq(t.im, 0.0) {
 			rt.rubyRaiseErr("RangeError", "can't convert "+rt.rubyStr(t)+" into "+into)
 		}
+		return rt.rubyMethod(t.re, name, nil), true
 	}
 	return nil, false
+}
+
+// rubyCpxBin is Complex arithmetic on the TYPED parts. Twin of cpxBin in
+// languages/ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubyCpxBin(op string, l, r interface{}) interface{} {
+	rc, rIsCpx := r.(jsCpx)
+	if !rIsCpx {
+		lc := l.(jsCpx)
+		switch op {
+		case "+":
+			return jsCpx{re: rt.rubyNumBin("+", lc.re, r), im: lc.im}
+		case "-":
+			return jsCpx{re: rt.rubyNumBin("-", lc.re, r), im: lc.im}
+		case "*":
+			return jsCpx{re: rt.rubyNumBin("*", lc.re, r), im: rt.rubyNumBin("*", lc.im, r)}
+		case "/":
+			return jsCpx{re: rt.rubyRealQuo(lc.re, r), im: rt.rubyRealQuo(lc.im, r)}
+		}
+		rt.fail("Complex does not support '%s'", op)
+	}
+	a, aIsCpx := l.(jsCpx)
+	if !aIsCpx {
+		a = jsCpx{re: l, im: 0.0}
+	}
+	switch op {
+	case "+":
+		return jsCpx{re: rt.rubyNumBin("+", a.re, rc.re), im: rt.rubyNumBin("+", a.im, rc.im)}
+	case "-":
+		return jsCpx{re: rt.rubyNumBin("-", a.re, rc.re), im: rt.rubyNumBin("-", a.im, rc.im)}
+	case "*":
+		return rt.rubyCpxMul(a, rc)
+	case "/":
+		nb := rt.rubyNumBin
+		q := rt.rubyRealQuo
+		var x, y interface{}
+		if c, _ := rt.rubySpaceship(rt.rubyRealAbs(rc.re), rt.rubyRealAbs(rc.im)); c > 0 {
+			q1 := q(rc.im, rc.re)
+			n1 := nb("*", rc.re, nb("+", 1.0, nb("*", q1, q1)))
+			x = nb("+", q(a.re, n1), q(nb("*", a.im, q1), n1))
+			y = nb("-", q(a.im, n1), q(nb("*", a.re, q1), n1))
+		} else {
+			q2 := q(rc.re, rc.im)
+			n2 := nb("*", rc.im, nb("+", 1.0, nb("*", q2, q2)))
+			x = nb("+", q(nb("*", a.re, q2), n2), q(a.im, n2))
+			y = nb("-", q(nb("*", a.im, q2), n2), q(a.re, n2))
+		}
+		for _, p := range []interface{}{a.re, a.im, rc.re, rc.im} {
+			if _, f := p.(jsFlo); f {
+				return jsCpx{re: x, im: y}
+			}
+		}
+		return jsCpx{re: rubyRatCanon(x), im: rubyRatCanon(y)}
+	}
+	rt.fail("Complex does not support '%s'", op)
+	return nil
+}
+
+func rubyRatCanon(v interface{}) interface{} {
+	if r, ok := v.(jsRat); ok && r.d == 1 {
+		return r.n
+	}
+	return v
+}
+
+func (rt *jsrt) rubyCpxMul(a, b jsCpx) jsCpx {
+	nb := rt.rubyNumBin
+	return jsCpx{re: nb("-", nb("*", a.re, b.re), nb("*", a.im, b.im)),
+		im: nb("+", nb("*", a.re, b.im), nb("*", a.im, b.re))}
+}
+
+func (rt *jsrt) rubyCpxConj(c jsCpx) jsCpx { return jsCpx{re: c.re, im: rt.rubyNeg(c.im)} }
+
+// Numeric#quo on two reals. Twin of realQuo in languages/ruby-interpreter.abnf.
+func (rt *jsrt) rubyRealQuo(a, b interface{}) interface{} {
+	_, af := a.(jsFlo)
+	_, bf := b.(jsFlo)
+	if af || bf {
+		return rt.rubyNumBin("/", a, b)
+	}
+	if rt.rubyEq(b, 0.0) {
+		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+	}
+	return rt.rubyNumBin("/", rt.rubyAsRat(a), b)
+}
+
+func (rt *jsrt) rubyRealAbs(v interface{}) interface{} {
+	if f, ok := v.(jsFlo); ok {
+		return jsFlo{f: math.Abs(f.f)}
+	}
+	if c, _ := rt.rubySpaceship(v, 0.0); c < 0 {
+		return rt.rubyNeg(v)
+	}
+	return v
+}
+
+// rubyCpxText is Complex#to_s (insp false) and the inside of #inspect: MRI's
+// f_format. Twin of cpxText in languages/ruby-interpreter.abnf.
+func (rt *jsrt) rubyCpxText(t jsCpx, insp bool) string {
+	render := rt.rubyStr
+	if insp {
+		render = rt.rubyInspect
+	}
+	pos := true
+	if f, ok := t.im.(jsFlo); ok {
+		pos = !math.Signbit(f.f)
+	} else if c, _ := rt.rubySpaceship(t.im, 0.0); c < 0 {
+		pos = false
+	}
+	sign := "+"
+	if !pos {
+		sign = "-"
+	}
+	it := render(rt.rubyRealAbs(t.im))
+	out := render(t.re) + sign + it
+	if lc := it[len(it)-1]; lc < '0' || lc > '9' {
+		out += "*"
+	}
+	return out + "i"
 }

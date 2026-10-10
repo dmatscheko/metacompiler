@@ -3117,6 +3117,30 @@ def s61
                  defined?(puts(1)) == "method" && defined?(x.to_s + "b") == "method" && defined?(String.new) == "method")
 end
 
+# ===== SECTION 62: Complex parts keep their type; Integer#fdiv past the double range =====
+# A Complex's parts stay Integer, Float or Rational through arithmetic, which is
+# what decides how it prints and whether it is real enough for #to_i (a Float 0.0
+# imaginary part is not). Integer#fdiv of operands no double can hold is still
+# exact to the last bit. Every right-hand side is /usr/bin/ruby 2.6.10's own
+# answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s62
+  c = [Complex(3, 4), Complex(1.5, 2), Complex(3, 0.0), Complex(-2, -0.0)]
+  check("cx62a", 5.0.to_c.inspect == "(5.0+0i)" && c[2].inspect == "(3+0.0i)" && (c[0] * 2.0).inspect == "(6.0+8.0i)" &&
+                 (c[1] + 2).inspect == "(3.5+2i)" && c[0].real.class == Integer && c[1].real.class == Float &&
+                 Complex(1r, 2).inspect == "((1/1)+2i)" && c[3].to_s == "-2-0.0i" && (c[2] * -3).inspect == "(-9-0.0i)")
+  r = begin
+    c[2].to_i
+  rescue RangeError
+    :range
+  end
+  check("cx62b", r == :range && Complex(3, 0).to_i == 3 && Complex(3, 0).to_f == 3.0 && c[2].abs == 3.0 && Complex(0, 5).abs == 5)
+  check("cx62c", (c[0] / Complex(1, 2)).inspect == "((11/5)-(2/5)*i)" && Complex(0, 5) / Complex(1, 2) == Complex(2, 1) &&
+                 (Complex(0, 5) / Complex(1, 2)).real.class == Integer && (c[0] * Rational(1, 3)).imaginary == Rational(4, 3))
+  big = [10**400, 3**700, 7**400]
+  check("fd62a", big[0].fdiv(10**399) == 10.0 && (-big[0]).fdiv(3) == -Float::INFINITY && 7.fdiv(-big[0]).to_s == "-0.0" &&
+                 big[1].fdiv(big[2]) == 8.823934954745734e-05 && 7.fdiv(2) == 3.5)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3140,5 +3164,6 @@ s58() # SECTION-CALL 58
 s59() # SECTION-CALL 59
 s60() # SECTION-CALL 60
 s61() # SECTION-CALL 61
+s62() # SECTION-CALL 62
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
