@@ -5335,23 +5335,21 @@ function js_pydelslice(arr, lo, hi, step) {
 
 
 // ----- js_pydict --------------------------------------------------------------
-// dict(x): a fresh dict copying the entries of a dict argument, in its
-// insertion order. Anything else - including a list of pairs, which real Python
-// accepts - yields the EMPTY dict, which is what the Go twin does.
-function js_pydict(src) {
+// dict(mapping_or_pairs=(), **kw), bound by its signature as [positionals,
+// keywords]; the source is read by update()'s own rules. Go: js_pydict.
+function js_pydict(args) {
+    var pos = args[0]
+    if (pos.length > 1) {
+        pyRaiseExc("TypeError", "dict expected at most 1 argument, got " + pyIntStr(pos.length))
+    }
     var out = pyNewDict()
-    if (pyIsDict(src)) {
-        var keys = out["keys"]
-        var vals = out["vals"]
-        var sk = src["keys"]
-        var sv = src["vals"]
-        var i = 0
-        var n = sk.length
-        while (i < n) {
-            // Go calls dictAppend, which APPENDS without a duplicate check.
-            keys.push(sk[i])
-            vals.push(sv[i])
-            i = i + 1
+    if (pos.length == 1) { pyDictUpdateFrom(out, pos[0]) }
+    var kw = args[1]
+    if (pyIsDict(kw)) {
+        var ki = 0
+        while (ki < kw["keys"].length) {
+            pyDictSet(out, kw["keys"][ki], kw["vals"][ki])
+            ki = ki + 1
         }
     }
     return out
@@ -6129,7 +6127,7 @@ function js_pycall(callee, pos, kw) {
     // object) and int("42") still runs the same IR function it always did.
     if (pyIsObj(callee)) {
         var cv = callee["__conv"]
-        if (pyIsCallable(cv)) { return pyCall(cv, pos) }
+        if (pyIsCallable(cv)) { return pyCall(cv, pyConvArgs(callee, cv, pos, kw)) }
     }
     var cls = pyClassOf(callee)
     if (cls !== null) { return pyDInstantiate(cls, pos, kw) }
@@ -6153,6 +6151,14 @@ function js_pycall(callee, pos, kw) {
     // rebinds to an array of the same length (`def f(a, *rest, **kw)` called
     // `f(1, 2, 3)`).
     return pyCall(callee, bound)
+}
+
+// The argument array for a builtin type's conversion closure: one marked
+// __convkw (dict) carries a signature and takes its arguments bound, the others
+// take the positionals as they are. Go: rt.pyConvArgs.
+function pyConvArgs(cls, cv, pos, kw) {
+    if (cls["__convkw"] === true) { return pyBindCall(cv, pos, kw) }
+    return pos
 }
 
 // [v, ...args], the receiver-prepending Python's `self` needs, is SHARED as
@@ -6191,7 +6197,7 @@ function pyDCallPyValue(v, args, kw) {
     // `map(str, xs)` works. Go: rt.callPyValue in abnf/jsrt.go.
     if (v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v)) {
         var cv = v["__conv"]
-        if (typeof cv == "function") { return pyCall(cv, args) }
+        if (typeof cv == "function") { return pyCall(cv, pyConvArgs(v, cv, args, kw)) }
     }
     var cls = pyClassOf(v)
     if (cls !== null) { return pyDInstantiate(cls, args, kw) }

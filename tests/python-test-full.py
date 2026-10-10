@@ -3355,6 +3355,30 @@ def s57():
     print("b", end="\n", flush=True)
 
 
+# ===== SECTION 58: dict() builds from a mapping, pairs and keywords =====
+# dict(x, **kw) reads x by update()'s rules - a mapping is copied, any other
+# iterable must yield 2-item pairs - then adds the keywords; at most one
+# positional argument.
+def s58():
+    d = {"q": 1}
+    e = dict(d)
+    e["r"] = 2
+    check("dic1", dict(enumerate("ab")) == {0: "a", 1: "b"} and dict(zip("ab", [1, 2])) == {"a": 1, "b": 2}
+          and d == {"q": 1} and e == {"q": 1, "r": 2})
+    check("dic2", dict((k, k * 2) for k in range(3)) == {0: 0, 1: 2, 2: 4} and dict([("a", 1), "cd"]) == {"a": 1, "c": "d"}
+          and dict(a=1) == {"a": 1} and dict([("k", 1)], k=3) == {"k": 3} and dict(**{"m": 5}) == {"m": 5})
+    check("dic3", list(map(dict, [[("z", 0)]])) == [{"z": 0}] and dict() == {} and len(dict(map(lambda i: (i, -i), [1, 2]))) == 2)
+    msgs = []
+    for bad in [lambda: dict(5), lambda: dict([1]), lambda: dict([(1, 2, 3)]), lambda: dict({}, {})]:
+        try:
+            bad()
+        except (TypeError, ValueError) as ex:
+            msgs.append(type(ex).__name__ + ": " + str(ex))
+    check("dic4", msgs == ["TypeError: 'int' object is not iterable", "TypeError: object is not iterable",
+                           "ValueError: dictionary update sequence element #0 has length 3; 2 is required",
+                           "TypeError: dict expected at most 1 argument, got 2"])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3413,5 +3437,6 @@ def main():
     s55() # SECTION-CALL 55
     s56() # SECTION-CALL 56
     s57() # SECTION-CALL 57
+    s58() # SECTION-CALL 58
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

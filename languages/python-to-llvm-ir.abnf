@@ -4151,11 +4151,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // can be filled from the very scope bindings the global names resolve to -
     // which is what makes `builtins.len is len` hold rather than answering a copy.
     var pyBuiltinNameList = []
+    var pyKwBound = {}
     function declBind(b, name, cloV) {
         pyBuiltinNameList.push(name)
         if (pyTypeBuiltin["$" + name] == true) {
             var cls = callExt(b, "js_pybuiltincls", [emitStr(b, name)])
             callExt(b, "js_set", [cls, emitStr(b, "__conv"), cloV])
+            // A conversion with a signature takes its arguments bound (js_pycall).
+            if (pyKwBound["$" + name] == true) { callExt(b, "js_set", [cls, emitStr(b, "__convkw"), hTrue]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cls])
             return b
         }
@@ -4187,6 +4190,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return declBind(b, name, callExt(b, "js_closure", [handle(idx), curScopeV]))
     }
 
+    // A builtin whose keywords are bound by a signature: the keyword-only KWNAMES,
+    // then *args and **unknown (the extended layout), handed whole to EXT.
+    function declKwBuiltin(b, name, ext, kwNames) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        fb.NewRet(fb.NewCall(getExtern(ext, 1), [f.Params[1]]))
+        var namesV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < kwNames.length; i++) { callExt(b, "js_arr_push", [namesV, emitStr(b, kwNames[i])]) }
+        var clo = callExt(b, "js_pysig", [callExt(b, "js_closure", [handle(idx), curScopeV]), namesV,
+                                          emitNum(b, kwNames.length), hTrue])
+        pyKwBound["$" + name] = true
+        return declBind(b, name, clo)
+    }
+
     // jsmain: declare the builtins, then run the file top to bottom.
     function buildMain(items) {
         // The walk of an imported file ends here too: stash its statements for
@@ -4202,20 +4221,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // reaches past it into the host runtime's own scope. It is also where the
         // "pymod*" and "pydel*" marks live (pyOpenBoundary).
         curScopeV = pyOpenBoundary(b, f.Params[0], true)
-        // print(...): hand the argument array to the Python renderer.
-        funcCount++
-        var prIdx = funcCount
-        var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var pb = pf.NewBlock("entry")
-        pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
-        pb.NewRet(hUndef)
-        // The keyword-only sep, end, file and flush, plus *objects and **unknown
-        // (the extended layout js_pyprint reads).
-        var prNames = callExt(b, "js_arr_new", [])
-        var prKw = ["sep", "end", "file", "flush"]
-        for (var pki = 0; pki < prKw.length; pki++) { callExt(b, "js_arr_push", [prNames, emitStr(b, prKw[pki])]) }
-        var prClo = callExt(b, "js_pysig", [callExt(b, "js_closure", [handle(prIdx), curScopeV]), prNames, emitNum(b, 4), hTrue])
-        b = declBind(b, "print", prClo)
+        // print(*objects, sep, end, file, flush): the Python renderer.
+        b = declKwBuiltin(b, "print", "js_pyprint", ["sep", "end", "file", "flush"])
         // len(x): strings, lists and dicts via js_pylen.
         funcCount++
         var lenIdx = funcCount
@@ -4273,7 +4280,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "str", "js_pyrxstr", 1)
         b = declBuiltin(b, "int", "js_pyint", 1)
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
-        b = declBuiltin(b, "dict", "js_pydict", 1)
+        b = declKwBuiltin(b, "dict", "js_pydict", [])
         b = declBuiltin(b, "max", "js_pymax", 0)
         b = declBuiltin(b, "min", "js_pymin", 0)
         // The remaining conversions pyConvert of python-interpreter.abnf offers.

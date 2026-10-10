@@ -15176,7 +15176,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// object) and int("42") still runs the same IR function it always did.
 			if o, isObj := callee.(*jsObject); isObj {
 				if conv, has := o.props["__conv"]; has && isCallable(conv) {
-					return w(rt.call(conv, jsUndef, args.elems))
+					return w(rt.call(conv, jsUndef, rt.pyConvArgs(o, conv, args.elems, kw)))
 				}
 			}
 			if cls, ok := pyClassObj(callee); ok {
@@ -15727,11 +15727,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// dict(...): a fresh dict from a mapping (or from the keyword arguments,
 		// which reach a signature-less builtin as one trailing dict).
+		// dict(mapping_or_pairs=(), **kw), bound by its signature as [positionals,
+		// keywords]; the source is read by update()'s own rules.
 		"js_pydict": func(a []uint64) uint64 {
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if len(pos) > 1 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					fmt.Sprintf("dict expected at most 1 argument, got %d", len(pos)))})
+			}
 			keys, vals := &jsArray{}, &jsArray{}
-			if sk, sv, ok := dictParts(u(a[0])); ok {
-				for i, k := range sk.elems {
-					dictAppend(keys, vals, k, sv.elems[i])
+			if len(pos) == 1 {
+				rt.pyDictUpdateFrom(keys, vals, pos[0])
+			}
+			if kk, kv, ok := dictParts(el[1]); ok {
+				for i, k := range kk.elems {
+					rt.pyDictStore(keys, vals, k, kv.elems[i])
 				}
 			}
 			return w(&jsObject{props: map[string]interface{}{
@@ -20031,6 +20042,16 @@ func pyForeignMethod(target interface{}, name string) bool {
 }
 
 // callPyValue calls a value that may itself be a class or a __call__ instance.
+// pyConvArgs is the argument array for a builtin type's conversion closure: one
+// marked __convkw (dict) carries a signature and takes its arguments bound, the
+// others take the positionals as they are.
+func (rt *jsrt) pyConvArgs(cls *jsObject, conv interface{}, args []interface{}, kw interface{}) []interface{} {
+	if _, bound := cls.props["__convkw"]; bound {
+		return rt.pyBindCall(conv, args, kw)
+	}
+	return args
+}
+
 func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) interface{} {
 	if sup, isSup := pySuperObj(v); isSup {
 		return rt.pySuperCall(sup, args)
@@ -20042,7 +20063,7 @@ func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) i
 	// passed as a function - died with "call of a non function value".
 	if o, isObj := v.(*jsObject); isObj {
 		if conv, has := o.props["__conv"]; has && isCallable(conv) {
-			return rt.call(conv, jsUndef, args)
+			return rt.call(conv, jsUndef, rt.pyConvArgs(o, conv, args, kw))
 		}
 	}
 	if cls, ok := pyClassObj(v); ok {

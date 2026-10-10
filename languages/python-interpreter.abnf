@@ -1336,7 +1336,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
-    function pyConvert(name, args) {
+    function pyConvert(name, args, named) {
         var v = args.length > 0 ? args[0] : undefined
         if (name == "str") { return args.length == 0 ? "" : pstr(v) }
         if (name == "int") { return pyToInt(v) }
@@ -1353,7 +1353,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (args.length > 0) { var a = iterToList(v); for (var i = 0; i < a.length; i++) { setAdd(out, a[i]) } }
             return out
         }
-        if (name == "dict") { return args.length == 0 ? newDict() : v }
+        // dict(mapping_or_pairs=(), **kw): the source is read by update()'s rules.
+        if (name == "dict") {
+            if (args.length > 1) { pyListErr("TypeError", "dict expected at most 1 argument, got " + args.length) }
+            var d = newDict()
+            if (args.length == 1) { pyDictUpdateFrom(d, v) }
+            if (named != null) {
+                for (var ki = 0; ki < named.keys.length; ki++) { dictSet(d, named.keys[ki], named.vals[ki]) }
+            }
+            return d
+        }
         if (name == "type") { return pyTypeOf(v) }
         if (name == "complex") { return pyComplexNew(args) }
         fail("TypeError: cannot construct " + name)
@@ -9387,7 +9396,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyCall(f, args, named) {
         if (f != null && f != undefined && typeof f == "object" && f.__pysup == true) { return pySuperCall(f, args) }
         if (f != null && f != undefined && f.__isclass == true) {
-            if (f.__builtin == true) { return pyConvert(f.__name, args) }
+            if (f.__builtin == true) { return pyConvert(f.__name, args, named) }
             return pyNew(f, args, named)
         }
         if (typeof f != "function") {
