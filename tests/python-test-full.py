@@ -3278,6 +3278,52 @@ def s55():
                           "ZeroDivisionError: division by zero"])
 
 
+# ===== SECTION 56: `+` stays within one kind; `xs += it` extends in place =====
+# str + int, int + str, list + str and None + 1 raise TypeError with CPython's
+# texts; a list's `+=` is list.extend, so an alias sees it and any iterable is
+# accepted; sum() folds with the same `+` and refuses a str start.
+def s56():
+    vals = ["a", 1, 2.5, None, [1], 1j, 10**30]
+    msgs = []
+    for a in vals:
+        for b in vals:
+            try:
+                a + b
+            except TypeError as e:
+                msgs.append(str(e))
+    check("add1", len(msgs) == 31 and msgs[0] == 'can only concatenate str (not "int") to str'
+          and msgs[6] == "unsupported operand type(s) for +: 'int' and 'str'"
+          and "unsupported operand type(s) for +: 'NoneType' and 'NoneType'" in msgs
+          and 'can only concatenate list (not "complex") to list' in msgs
+          and "unsupported operand type(s) for +: 'complex' and 'str'" in msgs)
+    y = ["s"]
+    try:
+        y[0] += 1
+    except TypeError as e:
+        msgs.append(str(e))
+    check("add2", msgs[-1] == 'can only concatenate str (not "int") to str' and y == ["s"] and 3 * "x" == "xxx")
+    a = [1]
+    b = a
+    a += "ab"
+    a += (i for i in range(2))
+    a += a
+    check("add3", b == [1, "a", "b", 0, 1, 1, "a", "b", 0, 1])
+    try:
+        a += 5
+    except TypeError as e:
+        msgs.append(str(e))
+    check("add4", msgs[-1] == "'int' object is not iterable")
+    check("add5", sum([[1], [2]], []) == [1, 2] and sum([1.5, 2]) == 3.5 and sum([10**30, 1]) == 10**30 + 1
+          and sum([], 5) == 5 and sum(x for x in range(4)) == 6)
+    for bad in [lambda: sum(["a", "b"]), lambda: sum(["a"], "")]:
+        try:
+            bad()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("add6", msgs[-2:] == ["unsupported operand type(s) for +: 'int' and 'str'",
+                                "sum() can't sum strings [use ''.join(seq) instead]"])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3334,5 +3380,6 @@ def main():
     s53() # SECTION-CALL 53
     s54() # SECTION-CALL 54
     s55() # SECTION-CALL 55
+    s56() # SECTION-CALL 56
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

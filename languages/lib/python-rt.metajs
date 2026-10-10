@@ -2726,6 +2726,26 @@ function pyAContains(x, y) {
 // EXPORTS
 // ============================================================================
 
+// CPython's `+` is defined only within one kind - numbers (bool, int, float,
+// complex), str, or a list - and raises TypeError for any other pair.
+// Go: rt.pyAddCheck.
+function pyAAddKind(v) {
+    if (typeof v == "number" || typeof v == "boolean") { return "n" }
+    if (typeof v == "string") { return "s" }
+    if (pyIsArr(v)) { return "l" }
+    if (pyIsFlo(v) || pyIsBig(v) || pyIsCplx(v)) { return "n" }
+    return ""
+}
+
+function pyAAddCheck(l, r) {
+    var kl = pyAAddKind(l)
+    if (kl != "" && kl == pyAAddKind(r)) { return }
+    var rn = pyTypeName(r)
+    if (kl == "s") { pyRaiseExc("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
+    if (kl == "l") { pyRaiseExc("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
+    pyRaiseExc("TypeError", "unsupported operand type(s) for +: '" + pyTypeName(l) + "' and '" + rn + "'")
+}
+
 // Go: js_pybin. Every user visible binary operator of the Python
 // compiler goes through here so an instance of a user class can answer it with a
 // dunder. THE ORDER OF THE ARMS IS THE SPECIFICATION: the bit operators are
@@ -2733,6 +2753,22 @@ function pyAContains(x, y) {
 // sees "|" - matching Go exactly, including that.
 function js_pybin(opv, l, r) {
     var op = pyToStr(opv)
+    // `xs += it` is list.extend IN PLACE, so every alias of xs sees it and any
+    // iterable is accepted; on anything else it is the binary `+`. The length is
+    // read first so `xs += xs` doubles.
+    if (op == "+=") {
+        if (pyIsArr(l)) {
+            var ext = pyElemsOf(r)
+            var en = ext.length
+            var ei = 0
+            while (ei < en) {
+                l.push(ext[ei])
+                ei = ei + 1
+            }
+            return l
+        }
+        op = "+"
+    }
     if (op == "is") { return pyAStrictEq(l, r) }
     if (op == "is not") { return !pyAStrictEq(l, r) }
     if (op == "in" || op == "not in") {
@@ -2811,6 +2847,9 @@ function js_pybin(opv, l, r) {
         return pyNum(l) >> pyNum(r)
     }
     if (pyIsCplx(l) || pyIsCplx(r)) {
+        // The complex arithmetic reads any operand as a number, so a mixed `+` is
+        // refused here unless a user class may still answer it.
+        if (op == "+" && pyInstClassOf(l) === null && pyInstClassOf(r) === null) { pyAAddCheck(l, r) }
         var cb = pyAComplexBin(op, l, r)
         if (cb !== null) { return cb["v"] }
     }
@@ -2854,6 +2893,15 @@ function js_pybin(opv, l, r) {
             }
             return out
         }
+        if (typeof l == "number" && typeof r == "number") {
+            var nadd = l + r
+            if (pyAOver53(nadd)) {
+                var pnum = pyAPromote("+", l, r)
+                if (pnum !== null) { return pnum }
+            }
+            return nadd
+        }
+        pyAAddCheck(l, r)
         var sadd = pyAJsAdd(l, r)
         if (pyAOver53(sadd)) {
             var padd = pyAPromote("+", l, r)
@@ -3180,8 +3228,8 @@ function js_pybool(v) {
 // Go: js_pycomplex.
 function js_pycomplex(re, im) { return pyNewCplx(pyNum(re), pyNum(im)) }
 
-// A generator drained to a list - Go's (*jsGenerator).drain, which js_pysum
-// calls before summing. There is no tag test in layer 2, so the generator is
+// A generator drained to a list - Go's (*jsGenerator).drain, which pyElemsOf
+// calls. There is no tag test in layer 2, so the generator is
 // driven structurally.
 function pyADrainGen(g) {
     var out = []
@@ -3193,32 +3241,24 @@ function pyADrainGen(g) {
     return out
 }
 
-// Go: js_pysum. Note that the failure message interpolates
-// rt.typeOf - the JAVASCRIPT type name - and reports it for the ORIGINAL
-// argument, not for the drained one.
-function js_pysum(v) {
-    var it = anytype
-    it = v
-    if (pyIsGen(it)) { it = pyADrainGen(it) }
-    // An ITERATOR object is materialized too, so sum(map(f, xs)) works (the Go
-    // twin's pyIterName test).
-    if (pyIsIter(it)) { it = pyIterRest(it) }
-    var els = pySetElemsOf(it)
-    if (els !== null) { it = els }
-    var total = 0
-    var anyFlo = false
-    if (pyIsArr(it)) {
-        var i = 0
-        while (i < it.length) {
-            if (pyIsFlo(it[i])) { anyFlo = true }
-            total = total + pyNum(it[i])
-            i = i + 1
-        }
-    } else {
-        pyFail("sum() of a " + pyAJsTypeOf(v))
+// Go: js_pysum. sum(iterable, start=0) folds with js_pybin's `+`; two plain
+// ints whose sum stays exact take the inline add.
+function js_pysum(v, start) {
+    var t = anytype
+    t = 0
+    if (start !== undefined) {
+        if (typeof start == "string") { pyRaiseExc("TypeError", "sum() can't sum strings [use ''.join(seq) instead]") }
+        t = start
     }
-    if (anyFlo) { return pyMkFlo(total) }
-    return total
+    var els = pyElemsOf(v)
+    var i = 0
+    while (i < els.length) {
+        var e = els[i]
+        if (typeof t == "number" && typeof e == "number" && !pyAOver53(t + e)) { t = t + e }
+        else { t = js_pybin("+", t, e) }
+        i = i + 1
+    }
+    return t
 }
 
 // Go: rt.pyMinMax. want is +1 for max, -1 for min. A SINGLE

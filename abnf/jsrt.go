@@ -15479,6 +15479,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pybin": func(a []uint64) uint64 { // (operator, left, right)
 			op := rt.toString(u(a[0]))
 			l, r := u(a[1]), u(a[2])
+			// `xs += it` is list.extend IN PLACE, so every alias of xs sees it and
+			// any iterable is accepted; on anything else it is the binary `+`.
+			if op == "+=" {
+				if la, ok := l.(*jsArray); ok {
+					la.elems = append(la.elems, rt.pyElemsOf(r)...)
+					return a[1]
+				}
+				op = "+"
+			}
 			switch op {
 			case "is":
 				return boolH(rt.strictEq(l, r))
@@ -15542,6 +15551,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return rt.wrapNum(float64(rt.toInt32(l) >> (uint32(rt.toInt32(r)) & 31)))
 			}
 			if isPyComplex(l) || isPyComplex(r) {
+				// The complex arithmetic reads any operand as a number, so a mixed
+				// `+` is refused here unless a user class may still answer it.
+				_, _, li := pyInstance(l)
+				_, _, ri := pyInstance(r)
+				if op == "+" && !li && !ri {
+					rt.pyAddCheck(l, r)
+				}
 				if v, ok := rt.pyComplexBin(op, l, r); ok {
 					return w(v)
 				}
@@ -15619,6 +15635,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						return w(out)
 					}
 				}
+				rt.pyAddCheck(l, r)
 				if pyIsFlo(l) || pyIsFlo(r) {
 					return w(&jsPyFlo{f: rt.toNumber(l) + rt.toNumber(r)})
 				}
@@ -16485,35 +16502,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pySetAttr(argAt(args, 0), rt.toString(argAt(args, 1)), argAt(args, 2))
 			return jsHUndefined
 		},
+		// sum(iterable, start=0) folds with Python's own `+` (js_pybin), so a float,
+		// an arbitrary precision int, a complex or a list start all add as they do
+		// in CPython, and "a" + 1 raises. A str start is refused outright.
 		"js_pysum": func(a []uint64) uint64 {
-			v := u(a[0])
-			if g, ok := v.(*jsGenerator); ok {
-				v = g.drain(rt)
-			}
-			// An ITERATOR object is materialized too, so
-			// sum(map(f, xs)) works.
-			if pyIterName(rt, v) != "" {
-				v = &jsArray{elems: rt.pyElemsOf(v)}
-			}
-			if els, ok := pySetElems(v); ok {
-				v = els
-			}
-			total := float64(0)
-			anyFlo := false
-			if arr, ok := v.(*jsArray); ok {
-				for _, e := range arr.elems {
-					anyFlo = anyFlo || pyIsFlo(e)
-					total += rt.toNumber(e)
+			total := rt.wrapNum(0)
+			if st := u(a[1]); st != jsUndef {
+				if _, isStr := st.(string); isStr {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+						"sum() can't sum strings [use ''.join(seq) instead]")})
 				}
-			} else {
-				rt.fail("sum() of a %s", rt.typeOf(u(a[0])))
+				total = a[1]
 			}
-			// One float in the sequence makes the total a float: sum([1.0, 2])
-			// is 3.0.
-			if anyFlo {
-				return w(&jsPyFlo{f: total})
+			add := pyExternMaps[rt]["js_pybin"]
+			plus := rt.wrapStr("+")
+			for _, e := range rt.pyElemsOf(u(a[0])) {
+				total = add([]uint64{plus, total, w(e)})
 			}
-			return rt.wrapNum(total)
+			return total
 		},
 		// format(v, spec, conv): the slice of Python's format mini-language an
 		// f-string replacement field writes - [[fill]align][sign][0][width]
@@ -20536,6 +20542,44 @@ func (rt *jsrt) pyIsSubclass(c, target interface{}) bool {
 		}
 	}
 	return false
+}
+
+// pyAddKind classes an operand of Python's `+`, which is defined only within one
+// kind: 'n' a number (bool, int, float, complex), 's' a str, 'l' a list, and 0
+// anything else.
+func pyAddKind(v interface{}) byte {
+	switch t := v.(type) {
+	case float64, bool, *jsPyFlo, *jsBigInt:
+		return 'n'
+	case string:
+		return 's'
+	case *jsArray:
+		return 'l'
+	case *jsObject:
+		if isPyComplex(t) {
+			return 'n'
+		}
+	}
+	return 0
+}
+
+// pyAddCheck raises CPython's TypeError for a `+` across kinds ("a" + 1, 1 + None).
+// Twin of pyAddCheck in languages/python-interpreter.abnf and pyAAddCheck in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyAddCheck(l, r interface{}) {
+	kl := pyAddKind(l)
+	if kl != 0 && kl == pyAddKind(r) {
+		return
+	}
+	rn := pyTypeName(rt, r)
+	msg := "unsupported operand type(s) for +: '" + pyTypeName(rt, l) + "' and '" + rn + "'"
+	switch kl {
+	case 's':
+		msg = "can only concatenate str (not \"" + rn + "\") to str"
+	case 'l':
+		msg = "can only concatenate list (not \"" + rn + "\") to list"
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
 
 // pyTypeName is the Python name of a builtin value's type.

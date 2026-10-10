@@ -2779,14 +2779,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
-        var bop = op.substring(0, op.length - 1)
+        // js_pybin's "+=" is list.extend in place on a list and `+` otherwise.
+        var aop = op == "+=" ? op : op.substring(0, op.length - 1)
         // CPython walks the target once: `f().k += 1` calls f a single time, and
         // the subscript of `a[g()] += 1` is evaluated before the right side.
         return function(b) {
             if (ref.path.length == 0) {
                 var cur = pyGetVar(b, curScopeV, emitStr(b, ref.name))
                 var rv0 = valT(b)
-                return emitRefWrite(rv0.b, ref, emitPyBin(rv0.b, bop, cur, rv0.v))
+                return emitRefWrite(rv0.b, ref, emitPyBin(rv0.b, aop, cur, rv0.v))
             }
             var h = emitRefHolder(b, ref, true)
             var last = ref.path[ref.path.length - 1]
@@ -2795,7 +2796,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var old = emitRefLoad(b, h.v, last, key)
             var rv = valT(b)
             b = rv.b
-            emitRefStore(b, h.v, last, key, emitPyBin(b, bop, old, rv.v))
+            emitRefStore(b, h.v, last, key, emitPyBin(b, aop, old, rv.v))
             return b
         }
     }
@@ -4275,7 +4276,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "complex", "js_pycomplexnew", 0)
         b = declBuiltin(b, "repr", "js_pyrepr", 1)
         b = declBuiltin(b, "set", "js_pyset_new", 1)
-        b = declBuiltin(b, "sum", "js_pysum", 1)
+        b = declBuiltin(b, "sum", "js_pysum", 2)
         b = declBuiltin(b, "tuple", "js_pylist", 1)
         // ord(c) / chr(n): hostGlobals in python-interpreter.abnf, js_pyord /
         // js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.

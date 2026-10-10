@@ -100,9 +100,12 @@ func init() {
 			return
 		}
 		m["js_pybin"] = func(a []uint64) uint64 {
-			switch rt.toString(u(a[0])) {
-			case "+", "-", "*":
-				if v, ok := rt.pyPromoteArith(rt.toString(u(a[0])), u(a[1]), u(a[2])); ok {
+			switch op := rt.toString(u(a[0])); op {
+			case "+", "-", "*", "+=":
+				if op == "+=" {
+					op = "+"
+				}
+				if v, ok := rt.pyPromoteArith(op, u(a[1]), u(a[2])); ok {
 					return w(v)
 				}
 			}

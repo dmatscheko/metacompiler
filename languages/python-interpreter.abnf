@@ -1358,10 +1358,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // sum() adds through binOp so a float in the sequence makes the total a
     // float (sum([1.0, 2]) is 3.0). The accumulator is `anytype` because MetaJS
     // is TYPED: a local that started as the number 0 could not later hold a box.
-    hostGlobals["sum"] = function(v) {
+    hostGlobals["sum"] = function(v, start) {
         var a = iterToList(v)
         var t = anytype
         t = 0
+        if (start !== undefined) {
+            if (typeof start == "string") { pyListErr("TypeError", "sum() can't sum strings [use ''.join(seq) instead]") }
+            t = start
+        }
         for (var i = 0; i < a.length; i++) { t = binOp("+", t, a[i]) }
         return t
     }
@@ -6306,6 +6310,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // object. An ordinary number therefore pays two comparisons and no call at
         // all.
         if (typeof l == "object" || typeof r == "object") {
+            // Ahead of floOp and boxOp, which would read a str operand as NaN. A
+            // user instance first gets its __add__ / __radd__ chance below.
+            if (op == "+" && !pyUser(l) && !pyUser(r)) { pyAddCheck(l, r) }
             // The float box first: it is not pyBoxed, and a float against a big
             // or a complex has to be settled by the FLOAT rules, not the tower's.
             if (isFlo(l) || isFlo(r)) {
@@ -6339,6 +6346,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "+") {
             if (Array.isArray(l) && Array.isArray(r)) return l.concat(r)
             var sadd = l + r
+            // A text or NaN result is the only sign of a mixed pair, so the
+            // number-plus-number path pays one typeof and one compare.
+            if (typeof sadd == "string") {
+                if (typeof l != "string" || typeof r != "string") { pyAddCheck(l, r) }
+                return sadd
+            }
+            if (sadd !== sadd) { pyAddCheck(l, r) }
             if (pyOver53(sadd)) { return boxOp("+", l, r).v }
             return sadd
         }
@@ -6352,6 +6366,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (Array.isArray(l) && typeof r == "number") return listRepeat(l, r)
             if (Array.isArray(r) && typeof l == "number") return listRepeat(r, l)
             if (typeof l == "string" && typeof r == "number") return strRepeat(l, r)
+            if (typeof r == "string" && typeof l == "number") return strRepeat(r, l)
             var smul = l * r
             if (pyOver53(smul)) { return boxOp("*", l, r).v }
             return smul
@@ -6411,6 +6426,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (op == "@") return null
         fail("unsupported operator " + op)
+    }
+    // CPython's `+` is defined only within one kind - numbers (bool, int, float,
+    // complex), str, or a list - and raises TypeError for any other pair.
+    // Twin of pyAAddCheck in lib/python-rt.metajs and rt.pyAddCheck in abnf/jsrt.go.
+    function pyAddKind(v) {
+        if (typeof v == "number" || typeof v == "boolean") { return "n" }
+        if (typeof v == "string") { return "s" }
+        if (Array.isArray(v)) { return "l" }
+        if (isFlo(v) || bigIsBig(v) || isCplx(v)) { return "n" }
+        return ""
+    }
+    function pyAddCheck(l, r) {
+        var kl = pyAddKind(l)
+        if (kl != "" && kl == pyAddKind(r)) { return }
+        var rn = pyTypeOf(r).__name
+        if (kl == "s") { pyListErr("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
+        if (kl == "l") { pyListErr("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
+        pyListErr("TypeError", "unsupported operand type(s) for +: '" + pyTypeOf(l).__name + "' and '" + rn + "'")
     }
     function listRepeat(a, n) {
         var out = []
@@ -8265,7 +8298,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (ref.path.length == 0) {
                 a = pyReadName(ref.name)
                 b = valT()
-                pySet(ref.name, binOp(bop, a, b))
+                pySet(ref.name, pyAugOp(bop, a, b))
                 return
             }
             var o = anytype
@@ -8274,8 +8307,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var key = refKey(last)
             a = refLoad(o, last, key)
             b = valT()
-            refStore(o, last, key, binOp(bop, a, b))
+            refStore(o, last, key, pyAugOp(bop, a, b))
         }
+    }
+    // `xs += it` is list.extend IN PLACE (every alias of xs sees it, and any
+    // iterable is accepted); every other augmented operator is the binary one.
+    // Twin of the "+=" arm of js_pybin in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyAugOp(bop, a, b) {
+        if (bop == "+" && Array.isArray(a)) {
+            var src = pyIterOrTypeErr(b).slice(0)
+            for (var i = 0; i < src.length; i++) { a.push(src[i]) }
+            return a
+        }
+        return binOp(bop, a, b)
     }
 
     // ----- Statement thunks -----
