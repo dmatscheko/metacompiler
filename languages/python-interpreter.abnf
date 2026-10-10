@@ -375,7 +375,7 @@ Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
 // checks each of them.
 Del         <~~ push(makeDel(takeAll())) ~~>
             = "del" KwEnd DelTarget { "," DelTarget } [ "," ] ;
-DelTarget   = "(" :whitespace(WhitespaceNL) [ Target { "," Target } [ "," ] ] ")" :whitespace(Whitespace) | Target ;
+DelTarget   = "(" :whitespace(WhitespaceNL) [ Target { "," Target } [ "," ] ] ")" :whitespace(Whitespace) NoSfxAhead | Target ;
 
 // yield / yield from as a statement: the expression, value dropped.
 YieldStmt   <~~ push(exprToStmt(pop())) ~~>
@@ -535,6 +535,15 @@ SfxAhead    = :script(~~
         var ch = c.peek(i)
         if (ch === 46 || ch === 91 || ch === 40) { return undefined }
         return abnf.newToken("\x01no-suffix", 0)
+    })()
+~~) ;
+// Its inverse: `del (x)` is a parenthesized target list, `del (1).k` is not.
+NoSfxAhead  = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i++ }
+        var ch = c.peek(i)
+        if (ch === 46 || ch === 91 || ch === 40) { return abnf.newToken("\x01suffix", 0) }
     })()
 ~~) ;
 // d[1, 1] = v: the subscript is an expression LIST, so a tuple index works.

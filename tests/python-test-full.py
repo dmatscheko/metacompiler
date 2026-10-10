@@ -3056,6 +3056,14 @@ def s46():
     check("atg2", msgs[2] == "'dict' object has no attribute 'k'" + nd and msgs[3] == "'set' object has no attribute 'k'" + nd)
     check("atg3", msgs[4] == "'NoneType' object has no attribute 'k'" + nd and msgs[5] == "'NoneType' object has no attribute 'k'")
     check("atg4", len(msgs) == 6)
+    m5 = ""
+    try:
+        del (1).k
+    except AttributeError as e:
+        m5 = str(e)
+    xs = [1, 2, 3]
+    del (xs)[0]
+    check("atg5", m5 == "'int' object has no attribute 'k' and no __dict__ for setting new attributes" and xs == [2, 3])
 
 # ===== SECTION 47: an astral character written into a string literal =====
 # A character above U+FFFF typed as itself is one character, equal to the one
