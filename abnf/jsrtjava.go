@@ -1025,6 +1025,22 @@ func init() {
 		// Substring raise java's message. js_ktsmcall and js_swmcall are the
 		// same pattern for the same reason. Only the java emitter emits
 		// js_jvsub, and only for the name `substring`.
+		// An overload dispatcher: (class, name, spec, args, off). jvOvPick chooses
+		// a signature from the arguments past `off` (1 when args[0] is the
+		// receiver), and the implementation under "name#sig" is found from the
+		// dispatcher's own class upwards and handed the same args array.
+		m["js_jvovcall"] = func(a []uint64) uint64 {
+			args, ok := u(a[3]).(*jsArray)
+			if !ok {
+				rt.fail("js_jvovcall args must be an array")
+			}
+			slot := rt.toString(u(a[1])) + "#" + jvOvPick(rt.toString(u(a[2])), args.elems, jsToInt(rt.toNumber(u(a[4]))))
+			owner := jvStaticOwner(u(a[0]), slot)
+			if owner == nil {
+				rt.fail("unknown method '%s'", slot)
+			}
+			return w(rt.callH(owner.props[slot], jsUndef, args.elems, a[3]))
+		}
 		baseMcall := m["js_mcall"]
 		m["js_jvsub"] = func(a []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
@@ -1431,6 +1447,179 @@ func jvEqKind(v interface{}) int {
 		return 7
 	}
 	return 0
+}
+
+// jvOvPick is overload resolution at a dispatcher (js_jvovcall): the twin of
+// jOvPick in languages/lib/java-decltypes.js, whose header describes the spec
+// string. It answers the chosen candidate's signature key.
+func jvOvPick(spec string, args []interface{}, off int) string {
+	ents := strings.Split(spec, "|")
+	n := len(args) - off
+	toksOf := func(e string) ([]string, string) {
+		at := strings.IndexByte(e, '@')
+		if at == 0 {
+			return nil, e[1:]
+		}
+		return strings.Split(e[:at], ","), e[at+1:]
+	}
+	for phase := 1; phase <= 3; phase++ {
+		for _, e := range ents {
+			toks, raw := toksOf(e)
+			p := len(toks)
+			isVar := p > 0 && strings.HasSuffix(toks[p-1], "...")
+			ok := true
+			if phase < 3 {
+				if p != n {
+					continue
+				}
+				for i := 0; i < p && ok; i++ {
+					t := toks[i]
+					if isVar && i == p-1 {
+						t = strings.TrimSuffix(t, "...") + "[]"
+					}
+					ok = jvOvAccepts(t, args[off+i], phase)
+				}
+			} else {
+				if !isVar || n < p-1 {
+					continue
+				}
+				for j := 0; j < n && ok; j++ {
+					t := strings.TrimSuffix(toks[p-1], "...")
+					if j < p-1 {
+						t = toks[j]
+					}
+					ok = jvOvAccepts(t, args[off+j], 2)
+				}
+			}
+			if ok {
+				return raw
+			}
+		}
+	}
+	for _, e := range ents {
+		if toks, raw := toksOf(e); len(toks) == n {
+			return raw
+		}
+	}
+	_, raw := toksOf(ents[0])
+	return raw
+}
+
+// jvOvKind names an argument's runtime type as jOvKind does.
+func jvOvKind(v interface{}) string {
+	switch t := v.(type) {
+	case nil, jsUndefT, jsNullT:
+		return "null"
+	case bool:
+		return "boolean"
+	case string:
+		return "String"
+	case float64:
+		return "int"
+	case jsChar:
+		return "char"
+	case jsJFlo:
+		if t.sty == floJavaF {
+			return "float"
+		}
+		return "double"
+	case jsGInt:
+		switch t.w {
+		case 64:
+			return "long"
+		case 16:
+			return "short"
+		case 8:
+			return "byte"
+		}
+		return "int"
+	case *jsArray:
+		return "[]"
+	case *jsObject:
+		return "obj"
+	}
+	if isCallable(v) {
+		return "fn"
+	}
+	return "obj"
+}
+
+var jvOvPrims = ",byte,short,char,int,long,float,double,boolean,"
+
+func jvOvIsPrim(t string) bool { return strings.Contains(jvOvPrims, ","+t+",") }
+
+// jvOvWiden is JLS 5.1.2's widening primitive conversion, identity included.
+func jvOvWiden(k, t string) bool {
+	if k == t {
+		return true
+	}
+	if k == "boolean" || t == "boolean" || t == "char" || t == "byte" {
+		return false
+	}
+	if k == "char" {
+		return t != "short"
+	}
+	const order = ",byte,short,int,long,float,double,"
+	return strings.Index(order, ","+t+",") > strings.Index(order, ","+k+",")
+}
+
+// jvOvAccepts is jOvAccepts of languages/lib/java-decltypes.js.
+func jvOvAccepts(t string, v interface{}, phase int) bool {
+	k := jvOvKind(v)
+	if strings.HasSuffix(t, "[]") {
+		if k == "null" {
+			return true
+		}
+		arr, ok := v.(*jsArray)
+		if !ok {
+			return false
+		}
+		if len(arr.elems) == 0 {
+			return true
+		}
+		et := t[:len(t)-2]
+		if jvOvIsPrim(et) {
+			return jvOvKind(arr.elems[0]) == et
+		}
+		return jvOvAccepts(et, arr.elems[0], 1)
+	}
+	if jvOvIsPrim(t) {
+		return jvOvIsPrim(k) && jvOvWiden(k, t)
+	}
+	if k == "null" {
+		return true
+	}
+	if jvOvIsPrim(k) {
+		if phase < 2 {
+			return false
+		}
+		switch t {
+		case "*", "Object":
+			return true
+		case "Number":
+			return k != "char" && k != "boolean"
+		}
+		box := map[string]string{"int": "Integer", "char": "Character", "long": "Long", "double": "Double",
+			"float": "Float", "short": "Short", "byte": "Byte", "boolean": "Boolean"}
+		return t == box[k]
+	}
+	if t == "*" {
+		return true
+	}
+	if k == "fn" {
+		return false
+	}
+	if t == "Object" {
+		return true
+	}
+	if k == "[]" {
+		return false
+	}
+	if k == "String" {
+		return t == "String"
+	}
+	o, ok := v.(*jsObject)
+	return ok && jvClassIs(o.props["__class"], t)
 }
 
 // jvStaticOwner finds the class descriptor in cls' __super chain that carries

@@ -6,7 +6,7 @@ The subset: classes with fields (instance and static, with initializers), method
 (instance and static), constructors, single inheritance (class B extends A: inherited
 fields and methods, overriding with dynamic dispatch, the implicit no argument super
 constructor, and super.m() calls; a class must appear before its subclasses),
-constructor OVERLOADING (resolved by argument count) and the explicit constructor
+method and constructor OVERLOADING (lib/java-decltypes.js) and the explicit constructor
 invocations super(args) and this(args), static and instance initializer blocks,
 records (auto generated constructor, accessors and value equality, plus the compact
 constructor and extra constructors), enums (constants with arguments, constant
@@ -74,8 +74,11 @@ assignments and ++/-- alike - and a field OBSCURES a type name of the same spell
 (JLS 6.4.2). Object#toString, Object#equals and Object#hashCode answer on a class
 that declares none, dispatching to a declared or inherited override first.
 
-Not genuinely modelled: overload resolution by argument TYPE (only the count
-discriminates), generic type checking (type arguments are erased at parse time),
+Overload resolution follows JLS 15.12.2 (three phases, most specific first) over the
+arguments' RUNTIME types: exact for primitives, by runtime class for references, so it
+differs from javac only where a reference's static type is wider than its value; an
+enum's or an anonymous class' overloads are not resolved. Not genuinely modelled:
+generic type checking (type arguments are erased at parse time),
 checked exception analysis, modules, threads and reflection. Object#equals on two
 PRIMITIVES is type-exact (1 does not equal 1L), but two boxed values of the same
 kind and different declared classes cannot be told apart - this value model has one
@@ -85,7 +88,8 @@ Fields live directly on the instance object (js_get/js_set), methods become own 
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
 class descriptor object; calls dispatch through the js_mcall external. A constructor
 always exists (a default one is generated) and first applies the field initializers;
-an overloaded class also gets a dispatcher that picks the arity matching slot.
+an overloaded class also gets a dispatcher that picks the arity matching slot, and
+several of one arity, like an overloaded method name, a type dispatcher (js_jvovcall).
 The whole program becomes jsmain(env, args): it builds the class descriptors, then calls
 Main.main. Self checking programs end with System.exit(failures).
 The same language with the same semantics is interpreted directly by java-interpreter.abnf.") ;
@@ -4324,6 +4328,27 @@ HasStatic   = :script(~~
         curFTag = savedTag
         return idx
     }
+    // An overload dispatcher (jOvCands / jOvSpec in lib/java-decltypes.js): the
+    // extern js_jvovcall picks a signature from the arguments past `off` and calls
+    // the implementation under slot + "#" + sig, found from this class upwards.
+    function emitOvDispatch(clsName, slot, spec, off) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedTag = curFTag
+        curF = f
+        curFTag = idx
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+        b.NewRet(callExt(b, "js_jvovcall", [clsV, emitStr(b, slot), emitStr(b, spec), f.Params[1], emitNum(b, off)]))
+        curF = savedF
+        curScopeV = savedScope
+        curFTag = savedTag
+        return idx
+    }
     // A record's value equality: same class descriptor and every component equal
     // per JLS 8.10.3, through js_jvaleq (abnf/jsrtjava.go and
     // languages/lib/java-rt.metajs), which answers per component:
@@ -4519,6 +4544,12 @@ HasStatic   = :script(~~
             // dispatcher when the class is overloaded.
             var arities = []
             var ctorClos = []
+            var perArity = {}
+            for (i = 0; i < ctors.length; i++) {
+                var na = "$" + ctors[i].params.length
+                if (perArity[na] == undefined) { perArity[na] = [] }
+                perArity[na].push(ctors[i])
+            }
             for (i = 0; i < ctors.length; i++) {
                 var ci = ctors[i]
                 var pre = undefined
@@ -4533,8 +4564,24 @@ HasStatic   = :script(~~
                 curHasThis = true
                 var cidx = emitFunc(ci.params, ci.body, true, flds, undefined, sup, false, pre, ci.ptys)
                 var cclo = callExt(b, "js_closure", [handle(cidx), curScopeV])
-                callExt(b, "js_set", [clsV, emitStr(b, "__ctor#" + ci.params.length), cclo])
-                arities.push(ci.params.length)
+                var cslot = "__ctor#" + ci.params.length
+                var group = perArity["$" + ci.params.length]
+                if (group.length > 1) {
+                    // Several constructors of one arity: "__ctor#<n>" is a dispatcher
+                    // over their "__ctor#<n>#<sig>" slots, built with the first.
+                    var gcands = jOvCtorCands(group)
+                    if (group[0] == ci) {
+                        callExt(b, "js_set", [clsV, emitStr(b, cslot),
+                                              callExt(b, "js_closure", [handle(emitOvDispatch(name, cslot, jOvSpec(gcands), 1)), curScopeV])])
+                        arities.push(ci.params.length)
+                    }
+                    for (var gi = 0; gi < group.length; gi++) {
+                        if (group[gi] == ci) { cslot = cslot + "#" + gcands[gi].raw }
+                    }
+                } else {
+                    arities.push(ci.params.length)
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, cslot), cclo])
                 ctorClos.push(cclo)
             }
             if (ctors.length == 1) {
@@ -4545,6 +4592,7 @@ HasStatic   = :script(~~
                                       callExt(b, "js_closure", [handle(didx), curScopeV])])
             }
             var declared = {}
+            var ovDone = {}
             for (i = 0; i < members.length; i++) {
                 var m2 = members[i]
                 if (m2.kind == "method") {
@@ -4553,7 +4601,18 @@ HasStatic   = :script(~~
                     var m2Var = m2.params.length > 0 && typeof m2.params[m2.params.length - 1] != "string"
                     var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, null, false, null,
                                        jBoundTys(m2.name, m2.ptys, m2Var))
-                    callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                    var mclo = callExt(b, "js_closure", [handle(idx), curScopeV])
+                    if (jOvNeedsSlot(m2.name)) {
+                        callExt(b, "js_set", [clsV, emitStr(b, m2.name + "#" + jOvRawOf(m2.ptys, m2Var)), mclo])
+                    }
+                    var ovc = jOvCands(name, m2.name)
+                    if (ovc == null) {
+                        callExt(b, "js_set", [clsV, emitStr(b, m2.name), mclo])
+                    } else if (ovDone["$" + m2.name] != true) {
+                        ovDone["$" + m2.name] = true
+                        var oidx = emitOvDispatch(name, m2.name, jOvSpec(ovc), m2.statik ? 0 : 1)
+                        callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(oidx), curScopeV])])
+                    }
                 }
             }
             // Default methods of every implemented interface that is NOT the one on
@@ -4588,11 +4647,13 @@ HasStatic   = :script(~~
     }
     function makeClassStmt(items) {
         jExitClass()
+        jOvDeclare(items[0], items.slice(1))
         return buildClassStmt(items[0], items.slice(1), undefined)
     }
     function makeRecordStmt(items) {
         jExitClass()
         recordComponents["$" + items[0]] = items[1].rparams
+        jOvDeclare(items[0], items.slice(2))
         return buildClassStmt(items[0], items.slice(2), items[1].rparams)
     }
 
@@ -4762,6 +4823,7 @@ HasStatic   = :script(~~
     function makeInterfaceStmt(items) {
         jExitClass()
         var name = items[0]
+        jOvIface(name)
         var members = []
         var supers = []
         var meths = []

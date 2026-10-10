@@ -1660,6 +1660,164 @@ function jvEqKind(v) {
     return 0
 }
 
+// ----- Overload resolution ---------------------------------------------------
+//
+// An overload dispatcher's call: (class, name, spec, args, off). jvOvPick chooses
+// a signature from the arguments past `off` (1 when args[0] is the receiver) and
+// the implementation under "name#sig" is found from the dispatcher's own class
+// upwards. Twin of js_jvovcall in abnf/jsrtjava.go; the pick is jOvPick of
+// languages/lib/java-decltypes.js, whose header describes the spec string.
+function js_jvovcall(cls, name, spec, args, off) {
+    var slot = name + "#" + jvOvPick(spec, args, off)
+    var fn = rtFindMethod(cls, slot)
+    if (typeof fn != "function") {
+        fail("unknown method '" + slot + "'")
+        return undefined
+    }
+    return fn.apply(undefined, args)
+}
+function jvOvSplit(s, sep) {
+    var out = []
+    var from = 0
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) == sep) {
+            out.push(s.substring(from, i))
+            from = i + 1
+        }
+        i = i + 1
+    }
+    out.push(s.substring(from))
+    return out
+}
+// One spec entry's parameter tokens.
+function jvOvToks(ent) {
+    var at = ent.indexOf("@")
+    if (at == 0) { return [] }
+    return jvOvSplit(ent.substring(0, at), ",")
+}
+function jvOvPick(spec, args, off) {
+    var ents = jvOvSplit(spec, "|")
+    var n = args.length - off
+    var phase = 1
+    while (phase <= 3) {
+        var e = 0
+        while (e < ents.length) {
+            var ent = ents[e]
+            var toks = jvOvToks(ent)
+            var p = toks.length
+            var isVar = p > 0 && toks[p - 1].indexOf("...") > 0
+            var ok = true
+            var skip = false
+            if (phase < 3) {
+                if (p != n) { skip = true } else {
+                    var i = 0
+                    while (i < p && ok) {
+                        var t = toks[i]
+                        if (isVar && i == p - 1) { t = t.substring(0, t.length - 3) + "[]" }
+                        ok = jvOvAccepts(t, args[off + i], phase)
+                        i = i + 1
+                    }
+                }
+            } else {
+                if (!isVar || n < p - 1) { skip = true } else {
+                    var last = toks[p - 1]
+                    var elem = last.substring(0, last.length - 3)
+                    var j = 0
+                    while (j < n && ok) {
+                        var tv = elem
+                        if (j < p - 1) { tv = toks[j] }
+                        ok = jvOvAccepts(tv, args[off + j], 2)
+                        j = j + 1
+                    }
+                }
+            }
+            if (!skip && ok) { return ent.substring(ent.indexOf("@") + 1) }
+            e = e + 1
+        }
+        phase = phase + 1
+    }
+    var f = 0
+    while (f < ents.length) {
+        if (jvOvToks(ents[f]).length == n) { return ents[f].substring(ents[f].indexOf("@") + 1) }
+        f = f + 1
+    }
+    return ents[0].substring(ents[0].indexOf("@") + 1)
+}
+// An argument's runtime type as jOvKind names it; the boxes are tested before
+// the plain number, as in jvEqKind.
+function jvOvKind(v) {
+    if (v === undefined || v === null) { return "null" }
+    if (v === true || v === false) { return "boolean" }
+    if (typeof v == "string") { return "String" }
+    if (jvIsChar(v)) { return "char" }
+    if (floIs(v)) { return (floStyle(v) == 3) ? "float" : "double" }
+    if (sintIs(v)) {
+        var wd = sintWidth(v)
+        if (wd == 64) { return "long" }
+        if (wd == 16) { return "short" }
+        if (wd == 8) { return "byte" }
+        return "int"
+    }
+    if (Array.isArray(v)) { return "[]" }
+    if (typeof v == "function") { return "fn" }
+    if (typeof v == "number") { return "int" }
+    return "obj"
+}
+function jvOvIsPrim(t) { return ",byte,short,char,int,long,float,double,boolean,".indexOf("," + t + ",") >= 0 }
+// Widening primitive conversion (JLS 5.1.2), identity included.
+function jvOvWiden(k, t) {
+    if (k == t) { return true }
+    if (k == "boolean" || t == "boolean" || t == "char" || t == "byte") { return false }
+    if (k == "char") { return t != "short" }
+    var order = ",byte,short,int,long,float,double,"
+    return order.indexOf("," + t + ",") > order.indexOf("," + k + ",")
+}
+function jvOvBox(k) {
+    if (k == "int") { return "Integer" }
+    if (k == "char") { return "Character" }
+    if (k == "long") { return "Long" }
+    if (k == "double") { return "Double" }
+    if (k == "float") { return "Float" }
+    if (k == "short") { return "Short" }
+    if (k == "byte") { return "Byte" }
+    return "Boolean"
+}
+function jvOvAccepts(t, v, phase) {
+    var k = jvOvKind(v)
+    if (t.length > 2 && t.substring(t.length - 2) == "[]") {
+        if (k == "null") { return true }
+        if (k != "[]") { return false }
+        if (v.length == 0) { return true }
+        var et = t.substring(0, t.length - 2)
+        if (jvOvIsPrim(et)) { return jvOvKind(v[0]) == et }
+        return jvOvAccepts(et, v[0], 1)
+    }
+    if (jvOvIsPrim(t)) { return jvOvIsPrim(k) && jvOvWiden(k, t) }
+    if (k == "null") { return true }
+    if (jvOvIsPrim(k)) {
+        if (phase < 2) { return false }
+        if (t == "*" || t == "Object") { return true }
+        if (t == "Number") { return k != "char" && k != "boolean" }
+        return t == jvOvBox(k)
+    }
+    if (t == "*") { return true }
+    if (k == "fn") { return false }
+    if (t == "Object") { return true }
+    if (k == "[]") { return false }
+    if (k == "String") { return t == k }
+    var c = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (c === undefined || c === null) { return false }
+        if (typeof c != "object") { return false }
+        if (c["__name"] === t) { return true }
+        c = c["__super"]
+    }
+    return false
+}
+
 // Double.compare(x, y) == 0, i.e. doubleToLongBits equality: one NaN, and the
 // sign of a zero is part of the value. ONE body serves both widths - a float box
 // already holds the binary32-rounded value, and two distinct binary32 values are

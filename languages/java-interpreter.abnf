@@ -61,8 +61,10 @@ accepted: a file that declares members but no class becomes a synthetic class
 Main, whose `main` may be an instance method (the launcher constructs it).
 
 Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
-switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
-are picked by arity), the flow scoping of pattern variables (a binding outlives the
+switch EXHAUSTIVENESS checking, overloads by STATIC type (they resolve by JLS 15.12.2
+over the arguments' runtime types, which differs from javac only where a reference's
+static type is wider than its value; an enum's or anonymous class' overloads are not
+resolved), the flow scoping of pattern variables (a binding outlives the
 test that introduced it), threads and reflection. A JPMS module declaration
 (module-info.java, with requires / exports / opens / uses / provides, and 'import
 module M;') is PARSED and dropped - nothing here has a module system for it to
@@ -4701,7 +4703,12 @@ HasStatic   = :script(~~
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
-                cls[m2.name] = m2.statik ? makeStaticClosure(m2, cls) : makeInstanceClosure(m2)
+                var clo = m2.statik ? makeStaticClosure(m2, cls) : makeInstanceClosure(m2)
+                // Every declaration is also reachable under its "name#sig" slot: a
+                // subclass declared later may dispatch to it (jOvCands).
+                cls[m2.name + "#" + jOvRawOf(m2.ptys, m2.vararg)] = clo
+                var ovc = jOvCands(name, m2.name)
+                cls[m2.name] = (ovc == null) ? clo : makeOvDispatch(cls, m2.name, ovc, m2.statik)
                 jNoteKind(name, m2.name, m2.statik)
             }
             if (m2.kind == "amethod") { jNoteKind(name, m2.name, false) }
@@ -4730,7 +4737,7 @@ HasStatic   = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
-            var c = jPickCtor(closures, args.length)
+            var c = jPickCtor(closures, args)
             if (c == null) {
                 // No constructor of this class fits. That is what an anonymous
                 // subclass (and an enum constant with a body) looks like: it
@@ -4984,13 +4991,58 @@ HasStatic   = :script(~~
         for (var i = 0; i < argv.length; i++) { a.push(argv[i]) }
         cls.__ctor.apply(undefined, a)
     }
-    // Java resolves an overload by argument TYPES; arity is what this model can see,
-    // and it separates every overload a program in this subset actually writes.
-    function jPickCtor(list, n) {
+    // The constructor for these arguments: the one of their count, and among
+    // several of one count the one jOvPick chooses by the arguments' types.
+    function jPickCtor(list, args) {
+        var same = []
         var i
-        for (i = 0; i < list.length; i++) { if (list[i].info.params.length == n) { return list[i] } }
+        for (i = 0; i < list.length; i++) { if (list[i].info.params.length == args.length) { same.push(list[i]) } }
+        if (same.length == 1) { return same[0] }
+        if (same.length > 1) {
+            var infos = []
+            for (i = 0; i < same.length; i++) { infos.push(same[i].info) }
+            var cands = jOvCtorCands(infos)
+            var raw = jOvPick(jOvSpec(cands), args, 0, jOvKind, jOvIsA)
+            for (i = 0; i < same.length; i++) { if (cands[i].raw == raw) { return same[i] } }
+        }
         if (list.length == 1) { return list[0] }
         return null
+    }
+    // A method name with several candidate signatures in this class (jOvCands):
+    // pick one by the arguments' runtime types and call the implementation
+    // under its "name#sig" slot, found from this class upwards. The spec is
+    // built at the first call, once every class has been walked.
+    function makeOvDispatch(cls, mname, cands, statik) {
+        var spec = ""
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            if (spec == "") { spec = jOvSpec(cands) }
+            var raw = jOvPick(spec, args, statik ? 0 : 1, jOvKind, jOvIsA)
+            return jFindMember(cls, mname + "#" + raw).apply(undefined, args)
+        }
+    }
+    // An argument's runtime type, as jOvPick names it. Twin of jvOvKind in
+    // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jOvKind(v) {
+        if (v === null || v === undefined) { return "null" }
+        if (v === true || v === false) { return "boolean" }
+        if (typeof v == "string") { return "String" }
+        if (typeof v == "number") { return "int" }
+        if (typeof v == "function") { return "fn" }
+        if (jIsChar(v)) { return "char" }
+        if (jIsFlo(v)) { return jIsF32(v) ? "float" : "double" }
+        if (jIsSz(v)) { return v.w == 64 ? "long" : (v.w == 16 ? "short" : (v.w == 8 ? "byte" : "int")) }
+        if (Array.isArray(v)) { return "[]" }
+        return "obj"
+    }
+    // Is v an instance of the declared class cn? The __class / __super walk,
+    // as instanceof answers it.
+    function jOvIsA(v, cn) {
+        for (var c = v.__class; c != undefined && c != null; c = c.__super) {
+            if (c.__name == cn) { return true }
+        }
+        return false
     }
     function makeInstanceClosure(m) {
         return function() {
@@ -5024,6 +5076,7 @@ HasStatic   = :script(~~
             if (items[i].iext != undefined) { supers.push(items[i].iext) }
             else { members.push(items[i]) }
         }
+        jOvIface(name)
         var cls = {__isclass: true, __isiface: true, __name: name, __abstract: []}
         globalScope[name] = cls
         var inherited = []
@@ -5253,6 +5306,7 @@ HasStatic   = :script(~~
         }
     }
     function buildClass(items) {
+        jOvDeclare(items[0], items.slice(1))
         jExitClass(items[0], buildClassFrom(items[0], items.slice(1), undefined))
     }
     // "Outer", "Nested" -> "Outer.Nested" (the type arguments are already gone).
@@ -5370,6 +5424,7 @@ HasStatic   = :script(~~
         }
     }
     function buildRecord(items) {
+        jOvDeclare(items[0], items.slice(2))
         jExitClass(items[0], buildClassFrom(items[0], items.slice(2), items[1].rparams))
     }
 

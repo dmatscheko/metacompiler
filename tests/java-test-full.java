@@ -82,6 +82,7 @@ class Main {
         S36.run(); // SECTION-CALL 36
         S37.run(); // SECTION-CALL 37
         S38.run(); // SECTION-CALL 38
+        S39.run(); // SECTION-CALL 39
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2314,5 +2315,67 @@ class S38 {
         g = f[1];
         for (int i = 0; i < 87; i++) g = g * f[0];
         Main.check("sd5", ("" + g).equals("1.5474251E26") && ("" + g * f[0] * f[0] * f[0]).equals("1.2379401E27"));
+    }
+}
+
+// ===== SECTION 39: overload resolution by argument type (JLS 15.12.2) =====
+//
+// Among overloads of one arity the applicable ones are found in three phases
+// (no boxing, boxing, varargs) and the most specific of the first phase that
+// has any is called. An inherited overload stays a candidate next to the
+// subclass' own, and super.m(...) stays non-virtual. Every expected string is
+// java 24.0.2's output.
+class S39Animal { String who() { return "animal"; } }
+class S39Dog extends S39Animal { String who() { return "dog"; } }
+class S39Base {
+    String f(int x) { return "B.int " + x; }
+    String f(String s) { return "B.str " + s; }
+}
+class S39Derived extends S39Base {
+    String f(int x) { return "D.int " + x + "/" + super.f(x); }
+}
+class S39P {
+    String tag;
+    S39P(int a, int b) { this("ii " + (a + b)); }
+    S39P(double a, double b) { this("dd " + (a + b)); }
+    S39P(String s) { tag = s; }
+}
+class S39 {
+    static String pick(int a, int b) { return "int " + (a + b); }
+    static String pick(double a, double b) { return "double " + (a + b); }
+    static String show(long x) { return "long " + x; }
+    static String show(String s) { return "str " + s; }
+    static String box(Integer i) { return "Integer " + i; }
+    static String box(Object o) { return "Object " + o; }
+    static String ch(char c) { return "char " + c; }
+    static String ch(int i) { return "int " + i; }
+    static String fl(float f) { return "float " + f; }
+    static String fl(double d) { return "double " + d; }
+    static String an(S39Animal a) { return "Animal " + a.who(); }
+    static String an(S39Dog d) { return "Dog " + d.who(); }
+    static String va(int... xs) { return "varargs " + xs.length; }
+    static String va(int a) { return "single " + a; }
+    static String arr(int[] xs) { return "int[] " + xs.length; }
+    static String arr(Object o) { return "Object"; }
+    static String nul(String s) { return "String " + s; }
+    static String nul(Object o) { return "Object " + o; }
+    static void run() {
+        int[] k = { 1, 2, 3 };
+        long[] l = { 5L };
+        double[] d = { 1.5 };
+        char[] c = { 'a' };
+        float[] f = { 2.5f };
+        String[] s = { "x" };
+        Main.check("ov1", pick(k[0], k[1]).equals("int 3") && pick(d[0], k[1]).equals("double 3.5"));
+        Main.check("ov2", show(k[0]).equals("long 1") && show(l[0]).equals("long 5") && show(s[0]).equals("str x"));
+        Main.check("ov3", box(k[2]).equals("Integer 3") && box(s[0]).equals("Object x") && box(d[0]).equals("Object 1.5"));
+        Main.check("ov4", ch(c[0]).equals("char a") && ch(k[0]).equals("int 1"));
+        Main.check("ov5", fl(f[0]).equals("float 2.5") && fl(l[0]).equals("float 5.0") && fl(d[0]).equals("double 1.5"));
+        Main.check("ov6", an(new S39Dog()).equals("Dog dog") && an(new S39Animal()).equals("Animal animal"));
+        Main.check("ov7", va().equals("varargs 0") && va(k[0]).equals("single 1") && va(k[0], k[1]).equals("varargs 2") && va(k).equals("varargs 3"));
+        Main.check("ov8", arr(k).equals("int[] 3") && arr(s).equals("Object") && nul(null).equals("String null") && nul(k[0]).equals("Object 1"));
+        S39Base b = new S39Derived();
+        Main.check("ov9", b.f(k[0]).equals("D.int 1/B.int 1") && b.f(s[0]).equals("B.str x"));
+        Main.check("ov10", new S39P(k[0], k[1]).tag.equals("ii 3") && new S39P(d[0], k[1]).tag.equals("dd 3.5"));
     }
 }

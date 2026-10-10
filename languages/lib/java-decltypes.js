@@ -369,3 +369,276 @@ function jDimsOf(text) {
 // elements to: set (jArrTyped) by the declaration, field or `new T[]` that owns
 // it while that initializer runs, and by an outer initializer for a nested one.
 var jArrCtx = ""
+
+// ----- Overload resolution (JLS 15.12.2) -----
+//
+// Every class and record declaration registers its superclass and its methods'
+// parameter types as the walk passes it. A method name whose candidates - the
+// class' own declarations plus the inherited ones it does not override - have
+// more than one signature gets a DISPATCHER in that class' slot. It picks a
+// candidate from the arguments' runtime types (jOvPick here; jvOvPick in
+// abnf/jsrtjava.go and languages/lib/java-rt.metajs for the compiler) and calls
+// the implementation stored under "name#sig", looked up from the dispatcher's
+// own class upwards - so super.m(...) stays non-virtual. The value model
+// carries every primitive's type, so primitive arguments resolve as javac
+// resolves them; a reference resolves by its runtime class, which differs from
+// javac only where the static type is wider than the value.
+var jOvCls = {}
+var jOvNames = []
+var jOvIfaces = {}
+// A declared type with its type arguments dropped and its qualifier cut to the
+// last segment: "java.util.List<String>[]" -> "List[]".
+function jOvBare(ty) {
+    var out = ""
+    var depth = 0
+    for (var i = 0; i < ty.length; i++) {
+        var c = ty.charAt(i)
+        if (c == "<") { depth++ } else if (c == ">") { depth-- } else if (depth == 0) {
+            out = (c == ".") ? "" : out + c
+        }
+    }
+    return out
+}
+// A parameter list's signature key: the bare types, "..." on a varargs one.
+function jOvRawOf(ptys, isVar) {
+    var parts = []
+    for (var i = 0; i < ptys.length; i++) {
+        parts.push(jOvBare(ptys[i]) + ((isVar && i == ptys.length - 1) ? "..." : ""))
+    }
+    return parts.join(",")
+}
+// A varargs declaration: the interpreter flags it, the compiler's last
+// parameter is a {rest} record instead of a name.
+function jOvIsVar(m) {
+    if (m.vararg === true) { return true }
+    return m.params.length > 0 && typeof m.params[m.params.length - 1] != "string"
+}
+function jOvDeclare(name, members) {
+    var sup = ""
+    var ms = []
+    for (var i = 0; i < members.length; i++) {
+        var m = members[i]
+        if (m.ext != undefined) { sup = jOvBare(m.ext) }
+        if (m.kind == "method") {
+            var v = jOvIsVar(m)
+            ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
+        }
+    }
+    if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
+    jOvCls["$" + name] = {sup: sup, ms: ms}
+}
+function jOvIface(name) { jOvIfaces["$" + name] = true }
+// The candidates for `mname` in class cls: its own declarations, then each
+// superclass' that no nearer declaration overrides. null unless that is two or
+// more signatures of one kind (all static or all instance).
+function jOvCands(cls, mname) {
+    var out = []
+    var seen = {}
+    var c = cls
+    var guard = 0
+    while (c != "" && guard < 64) {
+        guard++
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { break }
+        for (var i = 0; i < rec.ms.length; i++) {
+            var m = rec.ms[i]
+            if (m.name != mname || seen["$" + m.raw] == true) { continue }
+            seen["$" + m.raw] = true
+            out.push(m)
+        }
+        c = rec.sup
+    }
+    if (out.length < 2) { return null }
+    for (var k = 1; k < out.length; k++) { if (out[k].statik != out[0].statik) { return null } }
+    return out
+}
+// Does any class dispatch over `mname`? Then every declaration of it is stored
+// under its "name#sig" slot as well. Asked only once the walk is complete.
+var jOvSlotNames = null
+function jOvNeedsSlot(mname) {
+    if (jOvSlotNames == null) {
+        jOvSlotNames = {}
+        for (var c = 0; c < jOvNames.length; c++) {
+            var ms = jOvCls["$" + jOvNames[c]].ms
+            for (var i = 0; i < ms.length; i++) {
+                if (jOvCands(jOvNames[c], ms[i].name) != null) { jOvSlotNames["$" + ms[i].name] = true }
+            }
+        }
+    }
+    return jOvSlotNames["$" + mname] == true
+}
+var jOvPrims = ",byte,short,char,int,long,float,double,boolean,"
+var jOvCore = ",String,Object,Integer,Long,Double,Float,Short,Byte,Character,Boolean,Number,"
+function jOvIsPrim(t) { return jOvPrims.indexOf("," + t + ",") >= 0 }
+// The token a parameter type is matched with: a primitive or a java.lang name
+// as itself, an array as its element's token plus "[]", a declared class by
+// name, and everything else (an interface, a type variable, a library type) as
+// "*", which takes any reference and any lambda.
+function jOvTok(raw) {
+    if (raw.length > 2 && raw.substring(raw.length - 2) == "[]") { return jOvTok(raw.substring(0, raw.length - 2)) + "[]" }
+    if (jOvIsPrim(raw) || jOvCore.indexOf("," + raw + ",") >= 0) { return raw }
+    if (jOvCls["$" + raw] != undefined && jOvIfaces["$" + raw] != true) { return raw }
+    return "*"
+}
+// Widening primitive conversion (JLS 5.1.2), identity included.
+function jOvWiden(k, t) {
+    if (k == t) { return true }
+    if (k == "boolean" || t == "boolean" || t == "char" || t == "byte") { return false }
+    if (k == "char") { return t != "short" }
+    var order = ",byte,short,int,long,float,double,"
+    return order.indexOf("," + t + ",") > order.indexOf("," + k + ",")
+}
+// Is token s at least as specific as t (JLS 15.12.2.5: s <: t)?
+function jOvSub(s, t) {
+    if (s == t) { return true }
+    if (jOvIsArr(s) && jOvIsArr(t)) {
+        var es = s.substring(0, s.length - 2)
+        var et = t.substring(0, t.length - 2)
+        return !jOvIsPrim(es) && !jOvIsPrim(et) && jOvSub(es, et)
+    }
+    var sp = jOvIsPrim(s)
+    var tp = jOvIsPrim(t)
+    if (sp && tp) { return jOvWiden(s, t) }
+    if (sp || tp) { return false }
+    if (t == "*" || t == "Object") { return true }
+    if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
+    var c = s
+    var guard = 0
+    while (guard < 64) {
+        guard++
+        var rec = jOvCls["$" + c]
+        if (rec == undefined || rec.sup == "") { return false }
+        c = rec.sup
+        if (c == t) { return true }
+    }
+    return false
+}
+function jOvIsArr(t) { return t.length > 2 && t.substring(t.length - 2) == "[]" }
+function jOvMore(a, b) {
+    if (a.length != b.length) { return false }
+    for (var i = 0; i < a.length; i++) { if (!jOvSub(a[i], b[i])) { return false } }
+    return true
+}
+// A dispatcher's specification: one "tokens@sig" entry per candidate, "|"
+// between them, MOST SPECIFIC FIRST, so the first applicable candidate of a
+// phase is the one JLS 15.12.2.5 chooses.
+function jOvSpec(cands) {
+    var rest = []
+    for (var i = 0; i < cands.length; i++) {
+        var toks = []
+        for (var k = 0; k < cands[i].ptys.length; k++) {
+            var tk = jOvTok(jOvBare(cands[i].ptys[k]))
+            if (cands[i].isVar && k == cands[i].ptys.length - 1) { tk = tk + "..." }
+            toks.push(tk)
+        }
+        rest.push({toks: toks, raw: cands[i].raw})
+    }
+    var parts = []
+    while (rest.length > 0) {
+        var pick = 0
+        var found = false
+        for (var r = 0; r < rest.length && !found; r++) {
+            var beaten = false
+            for (var q = 0; q < rest.length; q++) {
+                if (q != r && jOvMore(rest[q].toks, rest[r].toks) && !jOvMore(rest[r].toks, rest[q].toks)) { beaten = true }
+            }
+            if (!beaten) { pick = r; found = true }
+        }
+        parts.push(rest[pick].toks.join(",") + "@" + rest[pick].raw)
+        var left = []
+        for (var l = 0; l < rest.length; l++) { if (l != pick) { left.push(rest[l]) } }
+        rest = left
+    }
+    return parts.join("|")
+}
+// One arity's constructors, as jOvSpec's records. A record's canonical
+// constructor carries no declared types; its components match anything.
+function jOvCtorCands(ctors) {
+    var out = []
+    for (var i = 0; i < ctors.length; i++) {
+        var v = jOvIsVar(ctors[i])
+        var pt = ctors[i].ptys
+        if (pt == undefined) {
+            pt = []
+            for (var k = 0; k < ctors[i].params.length; k++) { pt.push("Object") }
+        }
+        out.push({raw: jOvRawOf(pt, v), ptys: pt, isVar: v})
+    }
+    return out
+}
+// The interpreter's pick over a jOvSpec string. kindOf(v) names a value's
+// runtime type: "null", a primitive, "String", "[]", "fn" (a lambda) or "obj";
+// isA(v, cls) tests a class token. Phase 1 matches without boxing, phase 2
+// with it, phase 3 expands a varargs parameter (JLS 15.12.2.2-4). Answers the
+// chosen candidate's sig; with none applicable, the first of the right arity.
+function jOvPick(spec, args, off, kindOf, isA) {
+    var ents = spec.split("|")
+    var n = args.length - off
+    for (var phase = 1; phase <= 3; phase++) {
+        for (var e = 0; e < ents.length; e++) {
+            var at = ents[e].indexOf("@")
+            var toks = at == 0 ? [] : ents[e].substring(0, at).split(",")
+            var p = toks.length
+            var isVar = p > 0 && toks[p - 1].indexOf("...") > 0
+            var ok = true
+            if (phase < 3) {
+                if (p != n) { continue }
+                for (var i = 0; i < p && ok; i++) {
+                    var t = (isVar && i == p - 1) ? toks[i].substring(0, toks[i].length - 3) + "[]" : toks[i]
+                    ok = jOvAccepts(t, args[off + i], phase, kindOf, isA)
+                }
+            } else {
+                if (!isVar || n < p - 1) { continue }
+                for (var j = 0; j < n && ok; j++) {
+                    var tv = j < p - 1 ? toks[j] : toks[p - 1].substring(0, toks[p - 1].length - 3)
+                    ok = jOvAccepts(tv, args[off + j], 2, kindOf, isA)
+                }
+            }
+            if (ok) { return ents[e].substring(at + 1) }
+        }
+    }
+    for (var f = 0; f < ents.length; f++) {
+        var af = ents[f].indexOf("@")
+        var nf = af == 0 ? 0 : ents[f].substring(0, af).split(",").length
+        if (nf == n) { return ents[f].substring(af + 1) }
+    }
+    return ents[0].substring(ents[0].indexOf("@") + 1)
+}
+// Can the argument v be passed to a parameter of token t in this phase? An
+// array is judged by its first element, the only type evidence it carries:
+// a primitive element type must match exactly (int[] is no long[]). Twin of
+// jvOvAccepts in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+function jOvAccepts(t, v, phase, kindOf, isA) {
+    var k = kindOf(v)
+    if (jOvIsArr(t)) {
+        if (k == "null") { return true }
+        if (k != "[]") { return false }
+        if (v.length == 0) { return true }
+        var et = t.substring(0, t.length - 2)
+        if (jOvIsPrim(et)) { return kindOf(v[0]) == et }
+        return jOvAccepts(et, v[0], 1, kindOf, isA)
+    }
+    if (jOvIsPrim(t)) { return jOvIsPrim(k) && jOvWiden(k, t) }
+    if (k == "null") { return true }
+    if (jOvIsPrim(k)) {
+        if (phase < 2) { return false }
+        if (t == "*" || t == "Object") { return true }
+        if (t == "Number") { return k != "char" && k != "boolean" }
+        return t == jOvBox(k)
+    }
+    if (t == "*") { return true }
+    if (k == "fn") { return false }
+    if (t == "Object") { return true }
+    if (k == "String") { return t == k }
+    return k == "obj" && isA(v, t)
+}
+function jOvBox(k) {
+    if (k == "int") { return "Integer" }
+    if (k == "char") { return "Character" }
+    if (k == "long") { return "Long" }
+    if (k == "double") { return "Double" }
+    if (k == "float") { return "Float" }
+    if (k == "short") { return "Short" }
+    if (k == "byte") { return "Byte" }
+    return "Boolean"
+}
