@@ -2561,7 +2561,19 @@ class S44 {
         };
         Runnable rn = () -> { };
         Main.check("sov6", (anon.q(o) + anon.q(s) + t(rn) + t(() -> { }) + t("z")).equals("qOqStRtRtO"));
+        Main.check("sov7", (new S44P(o).tag + new S44P(s).tag + new S44P(boxed).tag + new S44P(prim).tag
+            + new S44Q(s).tag + new S44P((Object) "x").tag).equals("OSIntegerlongOO"));
     }
+}
+class S44P {
+    String tag;
+    S44P(Object o) { tag = "O"; }
+    S44P(String s) { tag = "S"; }
+    S44P(long x) { tag = "long"; }
+    S44P(Integer x) { tag = "Integer"; }
+}
+class S44Q extends S44P {
+    S44Q(Object o) { super(o); }
 }
 
 // ===== SECTION 45: the transcendentals are StrictMath's, fdlibm =====

@@ -632,7 +632,7 @@ Throw       <~~ push(excThrow(pop())) ~~>
 // An explicit constructor invocation (super(args) or this(args)). It may only
 // stand first in a constructor body; makeCtorHead lifts it out and
 // makeCtorClosure decides what it initializes.
-CtorCall    <~~ push(makeCtorHead(takeAll())) ~~>
+CtorCall    <~~ push(makeCtorHead(takeAll(), up.in)) ~~>
             = [ SkipAngle ] CtorWhich "(" [ Expression { "," Expression } ] ")" ";" ;
 CtorWhich   <~~ push({cwhich: stripWs(up.in)}) ~~>
             = KwSuper | "this" KwEnd ;
@@ -903,7 +903,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // new Point(1, 2) | new int[]{1, 2, 3} | new int[n] | new Foo() { ... } (anonymous)
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
-NewObject   <~~ push(makeNew(takeAll())) ~~>
+NewObject   <~~ push(makeNew(takeAll(), up.in)) ~~>
             = KwNew [ SkipAngle ] NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
 // The type of a `new` may be qualified (new Outer.Nested()), carry a TYPE
 // ANNOTATION on any segment (`new @TA Object()`, `new Outer.@TA Inner()`,
@@ -3865,9 +3865,11 @@ HasStatic   = :script(~~
         }
         return out
     }
-    function makeNew(items) {
+    function makeNew(items, text) {
         var clsName = items[0]
         var args = items.slice(1)
+        var atys = text == undefined ? null : jCallArgTys(text, args.length)
+        var sig = anytype // the static constructor signature, resolved at the first run
         return function() {
             var cls = jResolveClass(clsName)
             if (clsName == "String" && cls == undefined) {
@@ -3883,9 +3885,10 @@ HasStatic   = :script(~~
             // unrelated object's fields. A static nested type gets one too and
             // never uses it (its body cannot legally name an outer instance field).
             var obj = {__class: cls, __outer: jNestOuter(cls)}
-            var argv = [obj]
+            var argv = []
             for (var i = 0; i < args.length; i++) argv.push(args[i]())
-            cls.__ctor.apply(undefined, argv)
+            if (sig == undefined) { sig = jOvCtorSig(cls.__name, atys) }
+            jCallCtorSig(cls, obj, argv, sig)
             return obj
         }
     }
@@ -4827,10 +4830,10 @@ HasStatic   = :script(~~
     // NOTE the unique name: two `function` declarations sharing a name inside this
     // script silently rebind TAGS to the wrong productions (a Method node then runs
     // the Ctor tag). Keep names unique.
-    function makeCtorHead(items) {
+    function makeCtorHead(items, text) {
         var which = items[0].cwhich
         var args = items.slice(1)
-        return {ctorhead: true, which: which, args: args}
+        return {ctorhead: true, which: which, args: args, atys: jCallArgTys(text, args.length)}
     }
     function makeFieldVar(items) {
         var dims = ""
@@ -4961,6 +4964,7 @@ HasStatic   = :script(~~
             cls.equals = makeRecordEquals(recordParams)
         }
         cls.__ctor = makeCtorDispatch(closures, ownInit, refs)
+        jCtorSlots(cls, closures)
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
@@ -5232,9 +5236,11 @@ HasStatic   = :script(~~
                 if (head != undefined && head != null) {
                     var av = []
                     for (var k = 0; k < head.args.length; k++) { av.push(head.args[k]()) }
-                    if (head.which == "this") { jCallCtor(refs.self, self, av) }
+                    var target = head.which == "this" ? refs.self : refs.sup
+                    if (target != null && head.sig == undefined) { head.sig = jOvCtorSig(target.__name, head.atys) }
+                    if (head.which == "this") { jCallCtorSig(refs.self, self, av, head.sig) }
                     else {
-                        if (refs.sup != null) { jCallCtor(refs.sup, self, av) }
+                        if (refs.sup != null) { jCallCtorSig(refs.sup, self, av, head.sig) }
                         ownInit(self)
                     }
                 } else {
@@ -5244,6 +5250,40 @@ HasStatic   = :script(~~
                 return body()
             }
             return invokeBody(info.params, full, self, "this", jCallArgs(info, args))
+        }
+    }
+    // jCallCtor for a call site whose constructor javac picks from static
+    // argument types (sig, jOvCtorSig): that one, from its "__ctor#<n>#<sig>"
+    // slot (jCtorSlots); "" leaves the choice to the dispatcher.
+    function jCallCtorSig(cls, self, argv, sig) {
+        if (sig != "") {
+            var f = cls["__ctor#" + argv.length + "#" + sig]
+            if (typeof f == "function") {
+                f.apply(undefined, concat2impl([self], argv))
+                return
+            }
+        }
+        jCallCtor(cls, self, argv)
+    }
+    // Every constructor that shares its parameter count with another is also
+    // stored under "__ctor#<n>#<sig>", the slot jCallCtorSig calls. Twin of the
+    // "__ctor#<n>#<sig>" slots of buildClassStmt in java-to-llvm-ir.abnf.
+    function jCtorSlots(cls, closures) {
+        for (var i = 0; i < closures.length; i++) {
+            var n = closures[i].info.params.length
+            var group = []
+            var infos = []
+            for (var k = 0; k < closures.length; k++) {
+                if (closures[k].info.params.length == n) {
+                    group.push(closures[k])
+                    infos.push(closures[k].info)
+                }
+            }
+            if (group.length < 2) { continue }
+            var cands = jOvCtorCands(infos)
+            for (var g = 0; g < group.length; g++) {
+                if (group[g] === closures[i]) { cls["__ctor#" + n + "#" + cands[g].raw] = closures[i].fn }
+            }
         }
     }
     // Calls cls' constructor on an ALREADY allocated object.

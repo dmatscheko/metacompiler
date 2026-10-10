@@ -360,7 +360,7 @@ CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> CtorBody ;
 CtorBody    <~~ push({cbody: takeAll()}) ~~>
             = "{" [ CtorDelegate ] { Statement } "}" ;
-CtorDelegate <~~ push(makeCtorDelegate(takeAll())) ~~>
+CtorDelegate <~~ push(makeCtorDelegate(takeAll(), up.in)) ~~>
             = ( KwSuper <~~ push("super") ~~> | KwThis <~~ push("this") ~~> )
               "(" [ Expression { "," Expression } ] ")" ";" ;
 
@@ -887,7 +887,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
 // `new Outer.Nested()`: nested types are hoisted under their simple name, so the
 // qualifier only has to be accepted - the last segment names the descriptor.
-NewObject   <~~ push(makeNew(takeAll())) ~~>
+NewObject   <~~ push(makeNew(takeAll(), up.in)) ~~>
             = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] } "(" [ Expression { "," Expression } ] ")" ;
 // An anonymous class `new Base(args) { members }`: a real, uniquely named class
@@ -3031,7 +3031,7 @@ HasStatic   = :script(~~
             return {b: b, v: callExt(b, "js_jouterthis", [thisV, emitStr(b, nm)])}
         }
     }
-    function makeNew(items) {
+    function makeNew(items, text) {
         var clsName = ""
         var args = []
         for (var q = 0; q < items.length; q++) {
@@ -3040,6 +3040,7 @@ HasStatic   = :script(~~
             if (typeof items[q] == "string") { clsName = items[q] } else { args.push(items[q]) }
         }
         noteTypeUse(clsName)
+        var atys = text == undefined ? null : jCallArgTys(text, args.length)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
         return function(b) {
@@ -3073,7 +3074,10 @@ HasStatic   = :script(~~
                 b = r.b
                 callExt(b, "js_arr_push", [argsV, r.v])
             }
-            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+            // The constructor javac picks from static argument types (jOvCtorSig),
+            // from its "__ctor#<n>#<sig>" slot; otherwise the dispatcher.
+            var sig = jOvCtorSig(clsName, atys)
+            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, sig == "" ? "__ctor" : "__ctor#" + args.length + "#" + sig)])
             callExt(b, "js_call", [ctorV, hUndef, argsV])
             return {b: b, v: objV}
         }
@@ -4083,8 +4087,9 @@ HasStatic   = :script(~~
     }
     // super(args) / this(args) as the first statement of a constructor body. The
     // marker travels inside CtorBody's item list; makeCtor lifts it out.
-    function makeCtorDelegate(items) {
-        return {deleg: items[0], dargs: items.slice(1)}
+    function makeCtorDelegate(items, text) {
+        var dargs = items.slice(1)
+        return {deleg: items[0], dargs: dargs, atys: jCallArgTys(text, dargs.length)}
     }
     // Splits a CtorBody item list into the optional leading delegate and the rest.
     function splitCtorBody(cbody) {
@@ -4135,7 +4140,9 @@ HasStatic   = :script(~~
             var ownV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var tgtObj = ownV
             if (!isThis) { tgtObj = callExt(b, "js_get", [ownV, emitStr(b, "__super")]) }
-            var ctorV = callExt(b, "js_get", [tgtObj, emitStr(b, slot)])
+            // The constructor javac picks from static argument types (jOvCtorSig).
+            var sig = (isThis || supKnown) ? jOvCtorSig(isThis ? clsName : superName, deleg.atys) : ""
+            var ctorV = callExt(b, "js_get", [tgtObj, emitStr(b, sig == "" ? slot : "__ctor#" + args.length + "#" + sig)])
             callExt(b, "js_call", [ctorV, hUndef, argsV])
             return b
         }

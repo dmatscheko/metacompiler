@@ -444,6 +444,7 @@ function jOvIsVar(m) {
 function jOvDeclare(name, members) {
     var sup = ""
     var ms = []
+    var ctors = []
     for (var i = 0; i < members.length; i++) {
         var m = members[i]
         if (m.ext != undefined) { sup = jOvBare(m.ext) }
@@ -451,9 +452,33 @@ function jOvDeclare(name, members) {
             var v = jOvIsVar(m)
             ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
         }
+        if (m.kind == "ctor" && m.ptys != undefined) { ctors.push(m) }
     }
+    var cts = jOvCtorCands(ctors)
+    for (var k = 0; k < cts.length; k++) { cts[k].n = ctors[k].params.length }
     if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
-    jOvCls["$" + name] = {sup: sup, ms: ms}
+    jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts}
+}
+// The signature `new cls(args)`, `this(args)` or `super(args)` resolves to
+// among cls' constructors of that many parameters, "" when there are fewer
+// than two of them (one needs no choosing) or an argument type is unknown.
+// Its implementation is the class' "__ctor#<n>#<sig>" slot.
+function jOvCtorSig(cls, atys) {
+    if (atys == null) { return "" }
+    var rec = jOvCls["$" + jOvBare(cls)]
+    if (rec == undefined) { return "" }
+    var same = []
+    for (var i = 0; i < rec.cts.length; i++) {
+        if (rec.cts[i].n == atys.length) { same.push(rec.cts[i]) }
+    }
+    if (same.length < 2) { return "" }
+    var stoks = []
+    for (var k = 0; k < atys.length; k++) {
+        var s = jOvSTok(atys[k])
+        if (s == "") { return "" }
+        stoks.push(s)
+    }
+    return jOvPickStatic(jOvSpec(same), stoks)
 }
 function jOvIface(name, members) {
     jOvIfaces["$" + name] = true
