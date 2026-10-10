@@ -346,7 +346,8 @@ it has bitten `d_pow`, `d_mod_go`, Swift's `rounded()`, Java, Dart's `math.Mod` 
 Ruby's interpreter.
 
 **MetaJS has no exponent literal.** `1e308` parses as the identifier `e308`. Build
-an infinity as `1e307 * 10`.
+an infinity as `Math.pow(2, 1024)`, as `pyMInf` does - under goja `1e307 * 10` is
+the finite 1e308.
 
 **Brace value-less early returns.** `if (bad) return` followed by an expression on
 the next line parses as `return (expr)` — real JS applies ASI, the frozen parser does

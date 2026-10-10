@@ -1370,6 +1370,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["println"] = function(x) { println(pstr(x)) }
     // abs() keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5.
     hostGlobals["abs"] = function(v) {
+        if (isCplx(v)) { return cplxAbs(v) }
         if (isFlo(v)) { var f = v.__flo; return pyFlo(f < 0 ? floNegate(f) : f) }
         if (pyBoxed(v)) { return pytruthy(binOp("<", v, 0)) ? binOp("-", 0, v) : v }
         return v < 0 ? -v : v
@@ -5299,34 +5300,308 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function isCplx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cplx === true }
     function cRe(v) { if (isCplx(v)) { return v.real } ; return floVal(v) }
     function cIm(v) { if (isCplx(v)) { return v.imag } ; return 0 }
+    // ---- complex arithmetic, as CPython 3.14's Objects/complexobject.c ----
+    //
+    // Each answer is a [real, imag] pair. CPython's binary is compiled with
+    // floating-point contraction, so every `x + y * z` in its C source is a fused
+    // multiply-add and the last bit of a quotient or a general power depends on it;
+    // pyCxFma is that fused operation. Twin of the pyCx* functions in
+    // abnf/jsrt.go.
+
+    // fma(a, b, c): a*b + c rounded ONCE. Dekker's exact product and Knuth's exact
+    // sum carry the value as s + v + w; rounding s + v is the answer unless s + v
+    // is exactly halfway between two doubles, where w decides. Outside the range
+    // where Veltkamp's split is exact (an operand beyond 2^995 or a product below
+    // 2^-960) it falls back to two roundings; a complex operand that extreme is
+    // the residual.
+    function pyCxFma(a, b, c) {
+        var p = a * b
+        if (p == 0 || p !== p || p - p !== 0 || c !== c || c - c !== 0) { return p + c }
+        var K = pyCxConsts()
+        if (Math.abs(a) > K[3] || Math.abs(b) > K[3] || Math.abs(p) * K[2] < 1) { return p + c }
+        var t1 = 134217729 * a
+        var ah = t1 - (t1 - a)
+        var al = a - ah
+        var t2 = 134217729 * b
+        var bh = t2 - (t2 - b)
+        var bl = b - bh
+        var e = al * bl - (((p - ah * bh) - al * bh) - ah * bl)
+        var s = p + c
+        var z = s - p
+        var t = (p - (s - z)) + (c - z)
+        var v = t + e
+        var z2 = v - t
+        var w = (t - (v - z2)) + (e - z2)
+        var r = s + v
+        var z3 = r - s
+        var err = (s - (r - z3)) + (v - z3)
+        if (err != 0 && w != 0 && (err > 0) == (w > 0)) {
+            var h = err + err
+            if ((r + h) - r == h) { return r + h }
+        }
+        return r
+    }
+
+    // 2^400, 2^600, 2^960 and 2^995, the bounds pyCxFma and pyCxHypot test
+    // against, built once (MetaJS has no exponent literal).
+    var pyCxK = []
+    function pyCxConsts() {
+        if (pyCxK.length == 0) {
+            var p = 1
+            var k = 0
+            while (k <= 995) {
+                if (k == 400 || k == 600 || k == 960 || k == 995) { pyCxK.push(p) }
+                p = p * 2
+                k = k + 1
+            }
+        }
+        return pyCxK
+    }
+
+    function pyCxIsInf(x) { return x === x && x - x !== 0 }
+    function pyCxNaN() { return Math.pow(2, 1024) - Math.pow(2, 1024) }
+    // copysign(m, s) for m = 0 or 1 - also how a signed zero is made, since a
+    // product with 0 keeps no sign in the tag dialect. A NaN's sign bit is out of
+    // reach, so a NaN counts as positive - the NaN this arithmetic produces is.
+    function pyCxSign(m, s) {
+        if (s < 0 || (s === 0 && 1 / s < 0)) { return m / (0 - 1) }
+        return m
+    }
+    function pyCxBox(x) {
+        if (pyCxIsInf(x)) { return pyCxSign(1, x) }
+        return pyCxSign(0, x)
+    }
+    function pyCxDeNaN(x) {
+        if (x !== x) { return 0 }
+        return x
+    }
+
+    // _Py_c_prod, with C11 Annex G's recovery of an infinity that the four
+    // products turned into nan+nanj.
+    function pyCxProd(a, b, c, d) {
+        var ac = a * c
+        var bd = b * d
+        var ad = a * d
+        var bc = b * c
+        var re = ac - bd
+        var im = ad + bc
+        if (re !== re && im !== im) {
+            var recalc = false
+            if (pyCxIsInf(a) || pyCxIsInf(b)) {
+                a = pyCxBox(a)
+                b = pyCxBox(b)
+                c = pyCxDeNaN(c)
+                d = pyCxDeNaN(d)
+                recalc = true
+            }
+            if (pyCxIsInf(c) || pyCxIsInf(d)) {
+                c = pyCxBox(c)
+                d = pyCxBox(d)
+                a = pyCxDeNaN(a)
+                b = pyCxDeNaN(b)
+                recalc = true
+            }
+            if (!recalc && (pyCxIsInf(ac) || pyCxIsInf(bd) || pyCxIsInf(ad) || pyCxIsInf(bc))) {
+                a = pyCxDeNaN(a)
+                b = pyCxDeNaN(b)
+                c = pyCxDeNaN(c)
+                d = pyCxDeNaN(d)
+                recalc = true
+            }
+            if (recalc) {
+                var inf = Math.pow(2, 1024)
+                return [inf * (a * c - b * d), inf * (a * d + b * c)]
+            }
+        }
+        return [re, im]
+    }
+
+    // _Py_c_quot: Smith's algorithm, then Annex G's recovery. null for a zero
+    // divisor, which the caller raises as ZeroDivisionError.
+    function pyCxQuot(a, b, c, d) {
+        var ac = Math.abs(c)
+        var ad = Math.abs(d)
+        var re = 0
+        var im = 0
+        if (ac >= ad) {
+            if (ac == 0) { return null }
+            var ratio = d / c
+            var denom = pyCxFma(d, ratio, c)
+            re = pyCxFma(b, ratio, a) / denom
+            im = pyCxFma(-a, ratio, b) / denom
+        } else if (ad >= ac) {
+            var ratio2 = c / d
+            var denom2 = pyCxFma(c, ratio2, d)
+            re = pyCxFma(a, ratio2, b) / denom2
+            im = pyCxFma(b, ratio2, -a) / denom2
+        } else {
+            re = pyCxNaN()
+            im = re
+        }
+        if (re !== re && im !== im) {
+            if ((pyCxIsInf(a) || pyCxIsInf(b)) && c - c === 0 && d - d === 0) {
+                var x = pyCxBox(a)
+                var y = pyCxBox(b)
+                var inf = Math.pow(2, 1024)
+                return [inf * (x * c + y * d), inf * (y * c - x * d)]
+            }
+            if ((pyCxIsInf(ac) || pyCxIsInf(ad)) && a - a === 0 && b - b === 0) {
+                var x2 = pyCxBox(c)
+                var y2 = pyCxBox(d)
+                return [pyCxSign(0, a * x2 + b * y2), pyCxSign(0, b * x2 - a * y2)]
+            }
+        }
+        return [re, im]
+    }
+
+    // _Py_rc_quot: a REAL dividend, so no imaginary part takes part.
+    function pyCxRQuot(a, c, d) {
+        var ac = Math.abs(c)
+        var ad = Math.abs(d)
+        var re = 0
+        var im = 0
+        if (ac >= ad) {
+            if (ac == 0) { return null }
+            var ratio = d / c
+            var denom = pyCxFma(d, ratio, c)
+            re = a / denom
+            im = ((-a) * ratio) / denom
+        } else if (ad >= ac) {
+            var ratio2 = c / d
+            var denom2 = pyCxFma(c, ratio2, d)
+            re = (a * ratio2) / denom2
+            im = (-a) / denom2
+        } else {
+            re = pyCxNaN()
+            im = re
+        }
+        if (re !== re && im !== im && a - a === 0 && (pyCxIsInf(ac) || pyCxIsInf(ad))) {
+            var x = pyCxBox(c)
+            var y = pyCxBox(d)
+            return [pyCxSign(0, a * x), pyCxSign(0, (-a) * y)]
+        }
+        return [re, im]
+    }
+
+    // a / b with either side possibly real (lc / rc say which are complex); null
+    // for a zero divisor.
+    function pyCxDiv(lc, rc, a, b, c, d) {
+        if (!rc) {
+            if (c == 0) { return null }
+            return [a / c, b / c]
+        }
+        if (!lc) { return pyCxRQuot(a, c, d) }
+        return pyCxQuot(a, b, c, d)
+    }
+
+    // hypot(x, y) as the platform libm computes it: sqrt(fma(small, small,
+    // big*big)), with the operands scaled by 2^600 when the squares could leave
+    // the normal range. Measured against CPython's abs(complex) on 70,000 pairs
+    // across the whole double range: identical.
+    function pyCxHypot(x, y) {
+        var a = Math.abs(x)
+        var b = Math.abs(y)
+        if (pyCxIsInf(a) || pyCxIsInf(b)) { return Math.pow(2, 1024) }
+        if (a !== a || b !== b) { return pyCxNaN() }
+        if (a < b) {
+            var t = a
+            a = b
+            b = t
+        }
+        if (a == 0) { return 0 }
+        var K = pyCxConsts()
+        var sc = K[1]
+        var lim = K[0]
+        if (a > lim) { return Math.sqrt(pyCxFma(b / sc, b / sc, (a / sc) * (a / sc))) * sc }
+        if (a < 1 / lim) { return Math.sqrt(pyCxFma(b * sc, b * sc, (a * sc) * (a * sc))) / sc }
+        return Math.sqrt(pyCxFma(b, b, a * a))
+    }
+
+    // _Py_c_pow, the exponent not a small integer.
+    function pyCxPowGen(a, b, c, d) {
+        if (c == 0 && d == 0) { return [1, 0] }
+        if (a == 0 && b == 0) {
+            if (d != 0 || c < 0) { return null }
+            return [0, 0]
+        }
+        var vabs = pyCxHypot(a, b)
+        var len = Math.pow(vabs, c)
+        var at = Math.atan2(b, a)
+        var phase = at * c
+        if (d != 0) {
+            len = len / Math.exp(at * d)
+            phase = pyCxFma(d, Math.log(vabs), phase)
+        }
+        return [len * Math.cos(phase), len * Math.sin(phase)]
+    }
+
+    // c_powu: square and multiply, the order of the products CPython's.
+    function pyCxPowU(a, b, n) {
+        var rr = 1
+        var ri = 0
+        var pr = a
+        var pi = b
+        while (n > 0) {
+            if (n % 2 == 1) {
+                var q = pyCxProd(rr, ri, pr, pi)
+                rr = q[0]
+                ri = q[1]
+            }
+            var sq = pyCxProd(pr, pi, pr, pi)
+            pr = sq[0]
+            pi = sq[1]
+            n = Math.floor(n / 2)
+        }
+        return [rr, ri]
+    }
+
+    // complex ** complex: c_powi for an integral real exponent up to 100 in size,
+    // else the general form. null is a zero base to a negative or complex power.
+    function pyCxPow(a, b, c, d) {
+        if (d == 0 && c == Math.floor(c) && Math.abs(c) <= 100) {
+            if (c > 0) { return pyCxPowU(a, b, c) }
+            var u = pyCxPowU(a, b, 0 - c)
+            return pyCxQuot(1, 0, u[0], u[1])
+        }
+        return pyCxPowGen(a, b, c, d)
+    }
+
+    // A binary operator with a complex operand. A REAL operand on either side
+    // takes CPython 3.14's mixed-mode rule rather than being widened to complex,
+    // which is what keeps a -0.0 imaginary part through `z + 1.0` and an infinity
+    // through `z * 2.0`. Twin of rt.pyComplexBin in abnf/jsrt.go and
+    // pyAComplexBin in lib/python-rt.metajs.
     function cplxOp(op, l, r) {
+        var lc = isCplx(l)
+        var rc = isCplx(r)
         var ar = cRe(l)
         var ai = cIm(l)
         var br = cRe(r)
         var bi = cIm(r)
-        if (op == "+") { return pyCplx(ar + br, ai + bi) }
-        if (op == "-") { return pyCplx(ar - br, ai - bi) }
-        if (op == "*") { return pyCplx(ar * br - ai * bi, ar * bi + ai * br) }
+        if (op == "+") {
+            if (!lc) { return pyCplx(ar + br, bi) }
+            return pyCplx(ar + br, rc ? ai + bi : ai)
+        }
+        if (op == "-") {
+            if (!lc) { return pyCplx(ar - br, -bi) }
+            return pyCplx(ar - br, rc ? ai - bi : ai)
+        }
+        if (op == "*") {
+            if (!lc) { return pyCplx(br * ar, bi * ar) }
+            if (!rc) { return pyCplx(ar * br, ai * br) }
+            var pm = pyCxProd(ar, ai, br, bi)
+            return pyCplx(pm[0], pm[1])
+        }
         if (op == "/") {
-            var d = br * br + bi * bi
-            return pyCplx((ar * br + ai * bi) / d, (ai * br - ar * bi) / d)
+            var q = pyCxDiv(lc, rc, ar, ai, br, bi)
+            if (q == null) { pyRaise(pyMakeExc("ZeroDivisionError", ["division by zero"])) }
+            return pyCplx(q[0], q[1])
         }
         if (op == "**") {
-            // An integral power 0..100, by CPython's c_powu square-and-multiply
-            // (the order of the products decides the rounding); an infinite part
-            // is CPython's OverflowError. Twin of the "**" arm of
-            // rt.pyComplexBin in abnf/jsrt.go.
-            var n = br
-            if (bi !== 0 || n < 0 || n > 100 || Math.floor(n) != n) { fail("unsupported complex power") }
-            var acc = pyCplx(1, 0)
-            var p = pyCplx(ar, ai)
-            while (n > 0) {
-                if (n % 2 == 1) { acc = cplxOp("*", acc, p) }
-                p = cplxOp("*", p, p)
-                n = Math.floor(n / 2)
-            }
-            if (cplxIsInf(acc.real) || cplxIsInf(acc.imag)) { pyRaise(pyMakeExc("OverflowError", ["complex exponentiation"])) }
-            return acc
+            var pw = pyCxPow(ar, ai, br, bi)
+            if (pw == null) { pyRaise(pyMakeExc("ZeroDivisionError", ["zero to a negative or complex power"])) }
+            if (pyCxIsInf(pw[0]) || pyCxIsInf(pw[1])) { pyRaise(pyMakeExc("OverflowError", ["complex exponentiation"])) }
+            return pyCplx(pw[0], pw[1])
         }
         if (op == "==") { return ar === br && ai === bi }
         if (op == "!=") { return !(ar === br && ai === bi) }
@@ -5334,7 +5609,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "is not") { return l !== r }
         fail("unsupported operand type for " + op + ": complex")
     }
-    function cplxIsInf(x) { return x === x && x - x !== 0 }
+    // abs(complex): the libm hypot, and CPython's OverflowError when finite parts
+    // give an infinite modulus.
+    function cplxAbs(v) {
+        var h = pyCxHypot(v.real, v.imag)
+        if (pyCxIsInf(h) && !pyCxIsInf(v.real) && !pyCxIsInf(v.imag)) {
+            pyRaise(pyMakeExc("OverflowError", ["absolute value too large"]))
+        }
+        return pyFlo(h)
+    }
     // repr(complex): each part is repr(float) without its forced ".0"; the real
     // part is left out when it is +0.0, otherwise the pair is parenthesized.
     // Twin of pyCplxRepr in abnf/jsrt.go and languages/lib/python-rt.metajs.

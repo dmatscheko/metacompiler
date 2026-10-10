@@ -16044,6 +16044,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// and abs() of an arbitrary precision int stays exact.
 		"js_pyabs": func(a []uint64) uint64 {
 			v := u(a[0])
+			if re, im, ok := pyComplexParts(v); ok {
+				return w(&jsPyFlo{f: rt.pyCxAbs(re, im)})
+			}
 			if f, ok := v.(*jsPyFlo); ok {
 				return w(&jsPyFlo{f: math.Abs(f.f)})
 			}
@@ -17825,63 +17828,295 @@ func (rt *jsrt) pyRealOf(v interface{}) float64 {
 	return rt.toNumber(v)
 }
 
-// pyComplexBin is + - * / ** == != on complex numbers, with a real operand promoted.
-// ok is false for an operator complex numbers do not have (Python has no ordering
-// on them either), which lets js_pybin fall through to its usual error.
+// pyComplexBin is + - * / ** == != with a complex operand. ok is false for an
+// operator complex numbers do not have (Python has no ordering on them either),
+// which lets js_pybin fall through to its usual error. A REAL operand on either
+// side takes CPython 3.14's mixed-mode rule rather than being widened, which
+// keeps a -0.0 imaginary part through `z + 1.0` and an infinity through
+// `z * 2.0`. Twin of cplxOp in languages/python-interpreter.abnf and
+// pyAComplexBin in languages/lib/python-rt.metajs.
 func (rt *jsrt) pyComplexBin(op string, l, r interface{}) (interface{}, bool) {
-	lr, li, lok := pyComplexParts(l)
-	if !lok {
+	lr, li, lc := pyComplexParts(l)
+	if !lc {
 		lr, li = rt.pyRealOf(l), 0
 	}
-	rr, ri, rok := pyComplexParts(r)
-	if !rok {
+	rr, ri, rc := pyComplexParts(r)
+	if !rc {
 		rr, ri = rt.pyRealOf(r), 0
 	}
 	switch op {
 	case "+":
+		if !lc {
+			return newPyComplex(lr+rr, ri), true
+		}
+		if !rc {
+			return newPyComplex(lr+rr, li), true
+		}
 		return newPyComplex(lr+rr, li+ri), true
 	case "-":
+		if !lc {
+			return newPyComplex(lr-rr, -ri), true
+		}
+		if !rc {
+			return newPyComplex(lr-rr, li), true
+		}
 		return newPyComplex(lr-rr, li-ri), true
 	case "*":
-		return newPyComplex(pyCplxMul(lr, li, rr, ri)), true
-	case "/":
-		d := float64(rr*rr) + float64(ri*ri)
-		if d == 0 {
-			return nil, false
+		if !lc {
+			return newPyComplex(float64(rr*lr), float64(ri*lr)), true
 		}
-		return newPyComplex((float64(lr*rr)+float64(li*ri))/d, (float64(li*rr)-float64(lr*ri))/d), true
+		if !rc {
+			return newPyComplex(float64(lr*rr), float64(li*rr)), true
+		}
+		return newPyComplex(pyCxProd(lr, li, rr, ri)), true
+	case "/":
+		qr, qi, ok := pyCxDiv(lc, rc, lr, li, rr, ri)
+		if !ok {
+			panic(&jsThrown{value: rt.pyExcInstance("ZeroDivisionError", "division by zero")})
+		}
+		return newPyComplex(qr, qi), true
 	case "==":
 		return lr == rr && li == ri, true
 	case "!=":
 		return lr != rr || li != ri, true
 	case "**":
-		// An integral power 0..100, by CPython's c_powu square-and-multiply (the
-		// order of the products decides the rounding); an infinite part is
-		// CPython's OverflowError. Twin of the "**" arm of cplxOp in
-		// languages/python-interpreter.abnf and pyAComplexBin in
-		// languages/lib/python-rt.metajs.
-		if ri != 0 || rr < 0 || rr > 100 || rr != math.Floor(rr) {
-			return nil, false
+		pr, pi, ok := pyCxPow(lr, li, rr, ri)
+		if !ok {
+			panic(&jsThrown{value: rt.pyExcInstance("ZeroDivisionError", "zero to a negative or complex power")})
 		}
-		ar, ai, pr, pi := 1.0, 0.0, lr, li
-		for n := int(rr); n > 0; n >>= 1 {
-			if n&1 == 1 {
-				ar, ai = pyCplxMul(ar, ai, pr, pi)
-			}
-			pr, pi = pyCplxMul(pr, pi, pr, pi)
-		}
-		if math.IsInf(ar, 0) || math.IsInf(ai, 0) {
+		if math.IsInf(pr, 0) || math.IsInf(pi, 0) {
 			panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "complex exponentiation")})
 		}
-		return newPyComplex(ar, ai), true
+		return newPyComplex(pr, pi), true
 	}
 	return nil, false
 }
 
-// pyCplxMul is the complex product. The float64 conversions keep Go from fusing
-// a product into an FMA (arm64 does), which CPython's product does not.
-func pyCplxMul(ar, ai, br, bi float64) (float64, float64) {
-	return float64(ar*br) - float64(ai*bi), float64(ar*bi) + float64(ai*br)
+// ---- complex arithmetic, as CPython 3.14's Objects/complexobject.c ----
+//
+// CPython's binary is compiled with floating-point contraction, so every
+// `x + y * z` in its C source is a fused multiply-add; pyCxFma is that. Every
+// other product and sum is written float64(...) so Go does not fuse it (arm64
+// does). Twin of the pyCx* functions in lib/python-rt.metajs and
+// python-interpreter.abnf, whose software FMA falls back to two roundings for
+// an operand beyond 2^995 or a product below 2^-960; this one does the same so
+// the engines agree there too.
+func pyCxFma(a, b, c float64) float64 {
+	p := float64(a * b)
+	if p == 0 || math.IsNaN(p) || math.IsInf(p, 0) || math.IsNaN(c) || math.IsInf(c, 0) ||
+		math.Abs(a) > 0x1p995 || math.Abs(b) > 0x1p995 || math.Abs(p) < 0x1p-960 {
+		return p + c
+	}
+	return math.FMA(a, b, c)
+}
+
+// pyCxSign is copysign(m, s); a NaN counts as positive, as in the MetaJS twins
+// that cannot read a NaN's sign bit.
+func pyCxSign(m, s float64) float64 {
+	if s < 0 || (s == 0 && math.Signbit(s)) {
+		return -m
+	}
+	return m
+}
+
+func pyCxBox(x float64) float64 {
+	if math.IsInf(x, 0) {
+		return pyCxSign(1, x)
+	}
+	return pyCxSign(0, x)
+}
+
+func pyCxDeNaN(x float64) float64 {
+	if math.IsNaN(x) {
+		return pyCxSign(0, x)
+	}
+	return x
+}
+
+// pyCxProd is _Py_c_prod, with C11 Annex G's recovery of an infinity that the
+// four products turned into nan+nanj.
+func pyCxProd(a, b, c, d float64) (float64, float64) {
+	ac, bd, ad, bc := float64(a*c), float64(b*d), float64(a*d), float64(b*c)
+	re, im := ac-bd, ad+bc
+	if math.IsNaN(re) && math.IsNaN(im) {
+		recalc := false
+		if math.IsInf(a, 0) || math.IsInf(b, 0) {
+			a, b, c, d = pyCxBox(a), pyCxBox(b), pyCxDeNaN(c), pyCxDeNaN(d)
+			recalc = true
+		}
+		if math.IsInf(c, 0) || math.IsInf(d, 0) {
+			c, d, a, b = pyCxBox(c), pyCxBox(d), pyCxDeNaN(a), pyCxDeNaN(b)
+			recalc = true
+		}
+		if !recalc && (math.IsInf(ac, 0) || math.IsInf(bd, 0) || math.IsInf(ad, 0) || math.IsInf(bc, 0)) {
+			a, b, c, d = pyCxDeNaN(a), pyCxDeNaN(b), pyCxDeNaN(c), pyCxDeNaN(d)
+			recalc = true
+		}
+		if recalc {
+			inf := math.Inf(1)
+			return inf * (float64(a*c) - float64(b*d)), inf * (float64(a*d) + float64(b*c))
+		}
+	}
+	return re, im
+}
+
+// pyCxQuot is _Py_c_quot: Smith's algorithm, then Annex G's recovery. ok is
+// false for a zero divisor.
+func pyCxQuot(a, b, c, d float64) (float64, float64, bool) {
+	ac, ad := math.Abs(c), math.Abs(d)
+	var re, im float64
+	switch {
+	case ac >= ad:
+		if ac == 0 {
+			return 0, 0, false
+		}
+		ratio := d / c
+		denom := pyCxFma(d, ratio, c)
+		re, im = pyCxFma(b, ratio, a)/denom, pyCxFma(-a, ratio, b)/denom
+	case ad >= ac:
+		ratio := c / d
+		denom := pyCxFma(c, ratio, d)
+		re, im = pyCxFma(a, ratio, b)/denom, pyCxFma(b, ratio, -a)/denom
+	default:
+		re, im = math.NaN(), math.NaN()
+	}
+	if math.IsNaN(re) && math.IsNaN(im) {
+		finite := func(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
+		if (math.IsInf(a, 0) || math.IsInf(b, 0)) && finite(c) && finite(d) {
+			x, y := pyCxBox(a), pyCxBox(b)
+			inf := math.Inf(1)
+			return inf * (float64(x*c) + float64(y*d)), inf * (float64(y*c) - float64(x*d)), true
+		}
+		if (math.IsInf(ac, 0) || math.IsInf(ad, 0)) && finite(a) && finite(b) {
+			x, y := pyCxBox(c), pyCxBox(d)
+			return 0 * (float64(a*x) + float64(b*y)), 0 * (float64(b*x) - float64(a*y)), true
+		}
+	}
+	return re, im, true
+}
+
+// pyCxRQuot is _Py_rc_quot: a REAL dividend, so no imaginary part takes part.
+func pyCxRQuot(a, c, d float64) (float64, float64, bool) {
+	ac, ad := math.Abs(c), math.Abs(d)
+	var re, im float64
+	switch {
+	case ac >= ad:
+		if ac == 0 {
+			return 0, 0, false
+		}
+		ratio := d / c
+		denom := pyCxFma(d, ratio, c)
+		re, im = a/denom, float64(-a*ratio)/denom
+	case ad >= ac:
+		ratio := c / d
+		denom := pyCxFma(c, ratio, d)
+		re, im = float64(a*ratio)/denom, -a/denom
+	default:
+		re, im = math.NaN(), math.NaN()
+	}
+	if math.IsNaN(re) && math.IsNaN(im) && !math.IsNaN(a) && !math.IsInf(a, 0) &&
+		(math.IsInf(ac, 0) || math.IsInf(ad, 0)) {
+		x, y := pyCxBox(c), pyCxBox(d)
+		return 0 * float64(a*x), 0 * float64(-a*y), true
+	}
+	return re, im, true
+}
+
+// pyCxDiv is a / b with either side possibly real (lc / rc say which are
+// complex); ok is false for a zero divisor.
+func pyCxDiv(lc, rc bool, a, b, c, d float64) (float64, float64, bool) {
+	if !rc {
+		if c == 0 {
+			return 0, 0, false
+		}
+		return a / c, b / c, true
+	}
+	if !lc {
+		return pyCxRQuot(a, c, d)
+	}
+	return pyCxQuot(a, b, c, d)
+}
+
+// pyCxHypot is hypot(x, y) as the platform libm computes it:
+// sqrt(fma(small, small, big*big)), the operands scaled by 2^600 when the
+// squares could leave the normal range.
+func pyCxHypot(x, y float64) float64 {
+	a, b := math.Abs(x), math.Abs(y)
+	if math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return math.Inf(1)
+	}
+	if math.IsNaN(a) || math.IsNaN(b) {
+		return math.NaN()
+	}
+	if a < b {
+		a, b = b, a
+	}
+	if a == 0 {
+		return 0
+	}
+	if a > 0x1p400 {
+		a, b = a/0x1p600, b/0x1p600
+		return math.Sqrt(pyCxFma(b, b, float64(a*a))) * 0x1p600
+	}
+	if a < 0x1p-400 {
+		a, b = a*0x1p600, b*0x1p600
+		return math.Sqrt(pyCxFma(b, b, float64(a*a))) / 0x1p600
+	}
+	return math.Sqrt(pyCxFma(b, b, float64(a*a)))
+}
+
+// pyCxPowU is c_powu: square and multiply, the order of the products CPython's.
+func pyCxPowU(a, b float64, n int) (float64, float64) {
+	rr, ri, pr, pi := 1.0, 0.0, a, b
+	for ; n > 0; n >>= 1 {
+		if n&1 == 1 {
+			rr, ri = pyCxProd(rr, ri, pr, pi)
+		}
+		pr, pi = pyCxProd(pr, pi, pr, pi)
+	}
+	return rr, ri
+}
+
+// pyCxPow is complex ** complex: c_powi for an integral real exponent up to 100
+// in size, else _Py_c_pow. ok is false for a zero base to a negative or
+// complex power.
+func pyCxPow(a, b, c, d float64) (float64, float64, bool) {
+	if d == 0 && c == math.Floor(c) && math.Abs(c) <= 100 {
+		if c > 0 {
+			re, im := pyCxPowU(a, b, int(c))
+			return re, im, true
+		}
+		ur, ui := pyCxPowU(a, b, int(-c))
+		return pyCxQuot(1, 0, ur, ui)
+	}
+	if c == 0 && d == 0 {
+		return 1, 0, true
+	}
+	if a == 0 && b == 0 {
+		if d != 0 || c < 0 {
+			return 0, 0, false
+		}
+		return 0, 0, true
+	}
+	vabs := pyCxHypot(a, b)
+	ln := math.Pow(vabs, c)
+	at := math.Atan2(b, a)
+	phase := float64(at * c)
+	if d != 0 {
+		ln /= math.Exp(float64(at * d))
+		phase = pyCxFma(d, math.Log(vabs), phase)
+	}
+	return float64(ln * math.Cos(phase)), float64(ln * math.Sin(phase)), true
+}
+
+// pyCxAbs is abs(complex): the libm hypot, and CPython's OverflowError when
+// finite parts give an infinite modulus.
+func (rt *jsrt) pyCxAbs(re, im float64) float64 {
+	h := pyCxHypot(re, im)
+	if math.IsInf(h, 0) && !math.IsInf(re, 0) && !math.IsInf(im, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "absolute value too large")})
+	}
+	return h
 }
 
 // pyCplxPart is one part of repr(complex): repr(float) without its forced ".0".

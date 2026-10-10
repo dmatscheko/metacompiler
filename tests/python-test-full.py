@@ -3244,6 +3244,31 @@ def s54():
     check("cp5", s.strip("a😀c") == "b𝐀" and s.rstrip("c𝐀") == "a😀b" and max("a😀b") == "😀" and min("ba") == "a")
     check("cp6", [i for i, c in enumerate(s) if c == "𝐀"] == [3] and "".join(reversed(s)) == "c𝐀b😀a")
 
+# ===== SECTION 55: complex abs, infinities, powers and division =====
+# abs is the libm hypot; a product recovers an infinity that the textbook
+# formula turns into nan+nanj (C11 Annex G); an integral power up to 100 is
+# square-and-multiply and any other power the polar form; division is Smith's
+# algorithm with CPython's fused multiply-adds; a real operand takes the
+# mixed-mode rule, so a -0.0 imaginary part survives `z + 1.0`.
+def s55():
+    inf = float("inf")
+    nan = float("nan")
+    zs = [3+4j, complex(inf, nan), 1e10-3j, complex(1, -0.0), complex(1e308, 1.7e308)]
+    check("cx1", abs(zs[0]) == 5.0 and repr(abs(-3j)) == "3.0" and abs(complex(nan, inf)) == inf and abs(0.3+0.4j) == 0.5)
+    check("cx2", repr(zs[1] * (1+1j)) == "(inf+infj)" and repr((1+2j) ** -3) == "(-0.08800000000000001+0.016j)" and (1+2j) ** 0 == 1)
+    check("cx3", repr((0.1+0.1j) / (0.1+0.3j)) == "(0.4-0.2j)" and repr((0.1+0.1j) / (0.3+0.9j)) == "(0.13333333333333333-0.06666666666666667j)")
+    check("cx4", repr(zs[3] + 1.0) == "(2-0j)" and repr(1.0 - zs[3]) == "0j" and repr(2.0 / zs[3]) == "(2+0j)" and repr(zs[3] * 2.0) == "(2-0j)")
+    check("cx5", repr((1+2j) ** 0.5) == "(1.272019649514069+0.7861513777574233j)" and repr(2 ** (1+1j)) == "(1.5384778027279442+1.2779225526272695j)")
+    msgs = []
+    for f in [lambda: zs[2] ** 100, lambda: abs(zs[4]), lambda: 0j ** -1, lambda: (1+2j) / 0, lambda: 1 / 0j]:
+        try:
+            f()
+        except (OverflowError, ZeroDivisionError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("cx6", msgs == ["OverflowError: complex exponentiation", "OverflowError: absolute value too large",
+                          "ZeroDivisionError: zero to a negative or complex power", "ZeroDivisionError: division by zero",
+                          "ZeroDivisionError: division by zero"])
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3300,5 +3325,6 @@ def main():
     s52() # SECTION-CALL 52
     s53() # SECTION-CALL 53
     s54() # SECTION-CALL 54
+    s55() # SECTION-CALL 55
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
