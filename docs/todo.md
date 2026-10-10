@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-303** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-308** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -91,32 +91,26 @@ model, see T-170/T-259).
 
 # RB — Ruby
 
-### T-273 ruby: dispatch gaps that differ between the legs · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
-Interpreter only (compiled aborts): Object#between?/clamp/hash/object_id/tap on
-builtins; String#match/match?/scan/sub/gsub with a non-regex argument; Symbol#to_proc.
-Compiled only (interpreter aborts): Integer#chr/gcd/numerator/denominator/finite?/
-infinite?/nan?/real/imag/magnitude; Float/Rational/Complex #succ/pred/times/upto/
-downto/even?/odd?/gcd/chr (check MRI: most are NoMethodError there - then the compiled
-answer is the wrong one); Symbol#upcase/downcase; String#itself; Hash/Range/
-Enumerator#backtrace (MRI NoMethodError). Regexp/MatchData #send/public_send/is_a?/
-nil?/frozen?/equal? abort compiled. Converge every row on MRI and widen
-ruby-respond.js accordingly.
+### T-303 ruby: `#hash` / `#object_id` are constant 0 · P2 · RB · OPEN [V]
+All four legs answer 0, so `a.hash == b.hash` holds for unequal values; MRI gives
+value-based hashes (`1.hash != 2.hash`, `"a".hash == "a".hash`) and distinct ids.
+Make hash value-based; object_id distinct per object where the model allows.
 
-### T-274 ruby: Boolean `&`, `|`, `^` in the interpreter · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
-`a = [true, false]; p a[0] & a[1]`: interpreter aborts "not a number in '&'"; compiled
-and MRI `false`. Then `defined?(true & false)` becomes "method" again.
+### T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` · P1 · RB · OPEN [V]
+Abort in every leg; MRI `4.lcm(6)` 12, `7.abs2` 49, `7.conj` 7, `7.real?` true. Sweep
+Numeric's remaining public methods against MRI 2.6 while there.
 
-### T-275 ruby: a class's singleton `to_s` is ignored by rendering · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
-`class C; def self.to_s; "Cz"; end; end; puts C` prints `C` in all legs; MRI `Cz`.
+### T-305 ruby: an unknown method aborts instead of raising NoMethodError · P1 · RB · OPEN [V]
+Every leg aborts, so `begin; 5.nope; rescue NoMethodError => e; p e.message; end`
+cannot rescue it; MRI prints "undefined method `nope' for 5:Integer". Make it a
+catchable NoMethodError in all three engines (message as MRI 2.6).
 
-### T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` · P2 · RB · IN PROGRESS (RB worker, round 4) [V]
-A root class without its own initialize stores a visible "args" slot, so
-`instance_variable_get(:@args)` answers the args array (MRI nil) and
-`#instance_variables` (unimplemented) would list it. Hide the slot, then implement
-`instance_variables`.
+### T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse · P1 · RB · OPEN [V]
+Both grammars; MRI accepts both (the second with an ambiguity warning).
 
-### T-277 ruby: `respond_to?(name, true)` ignores include_all · P3 · RB · IN PROGRESS (RB worker, round 4) [V]
-`respond_to?(:top, true)` on main for a private top-level def: false, MRI true.
+### T-307 ruby: `C.instance_variables` on a class object · P3 · RB · OPEN [V]
+Compiled class objects store class-level ivars and methods as the same plain keys;
+needs a recorded name list (like `__ivn`).
 
 ---
 
@@ -141,22 +135,22 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-295 js: `yield*` answers the outer `return()` value · P1 · JS · OPEN [V]
+### T-295 js: `yield*` answers the outer `return()` value · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
 `function* d(){ yield* it }` where `it.return()` answers `{done:true}`: `g.next();
 g.return(7)` - node `{value: undefined, done: true}` (the delegate's return value); all
 four legs `{value: 7, done: true}`.
 
-### T-296 js: Object.prototype methods on objects · P1 · JS · OPEN [V]
+### T-296 js: Object.prototype methods on objects · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
 `o.toString()`, `o.valueOf()`, `o.propertyIsEnumerable(k)` on plain objects, Math and
 JSON are "not a function" in all legs; node "[object Object]", "[object Math]".
 `typeof o.hasOwnProperty` is "undefined" (node "function"). `Object.hasOwnProperty
 ("keys")` false (node true). `Object.getOwnPropertyNames(Array)` is
 `["length","name"]` (node adds prototype, isArray, from, of, fromAsync).
 
-### T-297 js: `class A extends Object {}` aborts the interpreter · P1 · JS · OPEN [V]
+### T-297 js: `class A extends Object {}` aborts the interpreter · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
 "unknown superclass: Object"; the compiled legs accept it (= node).
 
-### T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 · P3 · JS · OPEN [V]
+### T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 · P3 · JS · IN PROGRESS (JS worker, round 5) [V]
 An older marker before the real end; remove it and check the ratchet harness still
 counts every section.
 
@@ -599,6 +593,11 @@ T-269 swift: a top-level observed var does not fire — DONE 7425564
 T-270 swift: generic-argument call syntax — DONE 6e99635 (with a Set type in all engines)
 T-271 swift: missing String/Array/Dictionary members — DONE c54bba9 (String.Index prints as an Int offset; no ArraySlice type)
 T-272 swift: an untyped closure parameter is not inferred from the return type — DONE 33151d0
+T-273 ruby: dispatch gaps that differ between the legs — DONE 20b991d (154-row four-leg probe; 8 residual rows filed)
+T-274 ruby: Boolean `&`, `|`, `^` in the interpreter — DONE b793cb4
+T-275 ruby: a class's singleton `to_s` is ignored by rendering — DONE ce5b7d6
+T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` — DONE 73f5b30 (class objects: T-307)
+T-277 ruby: `respond_to?(name, true)` ignores include_all — DONE da56e04 (visibility both ways)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
