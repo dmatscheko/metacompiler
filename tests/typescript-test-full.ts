@@ -3011,6 +3011,29 @@ function s51() {
     check("sup05", r.g === 7 && r.h === 8 && Object.keys(r).join(",") === "p,g,h");
 }
 
+// ===== SECTION 52: JSON.stringify and JSON.parse =====
+// lib/json.js serves the interpreter halves and layer 2, abnf/jsrtjson.go llvm.Run.
+// Only "Unexpected end of JSON input" is worded as node words it, so no other parse
+// message is asserted. Values read off node 24.
+class S52Pt { constructor(public x: number, public y: number) {} toJSON(k: string) { return "Pt" + this.x + this.y + k; } }
+function s52err(f: () => any): any[] {
+    try { f(); return [false, false, ""]; }
+    catch (e: any) { return [e instanceof TypeError, e instanceof SyntaxError, e.message]; }
+}
+function s52() {
+    check("jsn01", JSON.stringify([0, -0, NaN, Infinity, 1.5, 1e21]) === "[0,0,null,null,1.5,1e+21]");
+    check("jsn02", JSON.stringify({a: 1, b: "x", c: [1, null, true], u: undefined, f: () => 1}) === '{"a":1,"b":"x","c":[1,null,true]}');
+    check("jsn03", JSON.stringify({a: [1, {b: 2}]}, null, 2) === '{\n  "a": [\n    1,\n    {\n      "b": 2\n    }\n  ]\n}');
+    check("jsn04", JSON.stringify({p: new S52Pt(3, 4)}) === '{"p":"Pt34p"}' && JSON.stringify(new Error("m")) === "{}");
+    check("jsn05", JSON.stringify({a: 1, b: 2, c: 3}, ["c", "a"]) === '{"c":3,"a":1}');
+    check("jsn06", s52err(() => JSON.stringify(1n))[2] === "Do not know how to serialize a BigInt");
+    const p = JSON.parse('{"a": [1, -3e2, false, null], "b": {"c": "x\\ny"}}');
+    check("jsn07", p.a[1] === -300 && p.a[3] === null && p.b.c === "x\ny" && Object.keys(p).join(",") === "a,b");
+    check("jsn08", s52err(() => JSON.parse("{bad"))[1] === true && s52err(() => JSON.parse("[1,"))[2] === "Unexpected end of JSON input");
+    const rv = JSON.parse('{"a": 1, "b": [2]}', (k: string, v: any) => typeof v == "number" ? v + 100 : v);
+    check("jsn09", JSON.stringify(rv) === '{"a":101,"b":[102]}');
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3078,6 +3101,7 @@ function main(): number {
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
+    s52(); // SECTION-CALL 52
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

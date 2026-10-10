@@ -1,12 +1,12 @@
-// Full-syntax test: JavaScript - part 3 of 3, sections 44-52.
+// Full-syntax test: JavaScript - part 3 of 3, sections 44-55.
 //
 // THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file).
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-52, the call/class/private-name model,
-//                             plus the Unicode identifier tables
+//   tests/js-test-full.3.js   sections 44-55, the call/class/private-name model, the Unicode
+//                             identifier tables, iterators, derived constructors, JSON
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the three
 // files together run the assertions in order, and ./test.sh --full reports them as the
@@ -972,6 +972,63 @@ function s54() {
     check("sup07", r.g === 7 && r.h === 8 && Object.keys(r).join(",") === "p,g,h")
 }
 
+// ===== SECTION 55: JSON.stringify and JSON.parse =====
+// One implementation (lib/json.js) serves the interpreter halves and layer 2, with
+// abnf/jsrtjson.go as the llvm.Run twin. A malformed text is a SyntaxError in every
+// engine, but only "Unexpected end of JSON input" is worded as node words it, so the
+// other messages are not asserted. Values read off node 24.
+class S55Pt { constructor(x, y) { this.x = x; this.y = y } toJSON(k) { return "Pt" + this.x + this.y + k } }
+class S55Plain { constructor() { this.a = 1; this.f = function () {} } m() {} }
+function s55() {
+    var nz = [0, -0, NaN, Infinity, -Infinity, 1.5, 1e21, 1e-7, 123]
+    check("jsn01", JSON.stringify(nz) === "[0,0,null,null,null,1.5,1e+21,1e-7,123]")
+    check("jsn02", JSON.stringify({a: 1, b: "x", c: [1, "two", null, true], d: {e: {}}, u: undefined, f: function () {}})
+        === '{"a":1,"b":"x","c":[1,"two",null,true],"d":{"e":{}}}')
+    var ctl = "q\"b\\s/\n\t\r" + String.fromCharCode(8, 12, 1, 31, 127)
+    check("jsn03", JSON.stringify(ctl) === '"q\\"b\\\\s/\\n\\t\\r\\b\\f\\u0001\\u001f' + String.fromCharCode(127) + '"')
+    check("jsn04", JSON.stringify([undefined, function () {}, null]) === "[null,null,null]" && JSON.stringify(undefined) === undefined)
+    check("jsn05", JSON.stringify(null) + JSON.stringify(true) + JSON.stringify(5) === "nulltrue5")
+    check("jsn06", JSON.stringify({a: [1, {b: 2}], c: "d"}, null, 2) === '{\n  "a": [\n    1,\n    {\n      "b": 2\n    }\n  ],\n  "c": "d"\n}')
+    check("jsn07", JSON.stringify([1, [2, []], {}], null, "--") === "[\n--1,\n--[\n----2,\n----[]\n--],\n--{}\n]")
+    check("jsn08", JSON.stringify([1], null, 20) === "[\n          1\n]" && JSON.stringify([1], null, "abcdefghijkl") === "[\nabcdefghij1\n]")
+    check("jsn09", JSON.stringify(new S55Pt(1, 2)) === '"Pt12"' && JSON.stringify({p: new S55Pt(3, 4)}) === '{"p":"Pt34p"}')
+    check("jsn10", JSON.stringify(new S55Plain()) === '{"a":1}' && JSON.stringify({toJSON: function () { return 42 }}) === "42")
+    // An Error's name, message and stack are not enumerable.
+    check("jsn11", JSON.stringify(new Error("m")) === "{}" && JSON.stringify([new TypeError("t")]) === "[{}]")
+    check("jsn12", JSON.stringify({a: 1, b: 2, c: 3}, ["c", "a"]) === '{"c":3,"a":1}')
+    check("jsn13", JSON.stringify({a: 1, b: "s", c: [1, 2]}, function (k, v) { return typeof v == "number" ? v * 10 : v })
+        === '{"a":10,"b":"s","c":[10,20]}')
+    var big = anyErr(function () { return JSON.stringify(1n) })
+    check("jsn14", big[0] === true && big[2] === "Do not know how to serialize a BigInt")
+    var cyc = {a: 1}
+    cyc.self = cyc
+    check("jsn15", anyErr(function () { return JSON.stringify(cyc) })[0] === true)
+    // A lone surrogate is escaped, a pair is copied.
+    check("jsn16", JSON.stringify(String.fromCharCode(55357)) === '"\\ud83d"' && JSON.stringify(String.fromCharCode(55357, 56832)).length === 4)
+    var p = JSON.parse('{"a": [1, 2.5, -3e2, true, false, null], "b": {"c": "x\\ny\\u0041\\"z"}, "d": ""}')
+    check("jsn17", p.a.length === 6 && p.a[1] === 2.5 && p.a[2] === -300 && p.a[3] === true && p.a[5] === null)
+    check("jsn18", p.b.c === "x\nyA\"z" && p.d === "" && Object.keys(p).join(",") === "a,b,d")
+    check("jsn19", JSON.parse("  7 ") === 7 && JSON.parse('"s"') === "s" && JSON.parse("null") === null && JSON.parse("[]").length === 0)
+    check("jsn20", JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":2}]}}')) === '{"x":{"y":[1,{"z":2}]}}' && JSON.parse('{"a":1,"a":2}').a === 2)
+    var bad = ["{bad", "[1,", "", "01", "[1,]", "'a'", "tru", '"a', "1 2", '{"a" 1}']
+    var nbad = 0
+    for (var bi = 0; bi < bad.length; bi++) {
+        var r = anyErr(function () { return JSON.parse(bad[bi]) })
+        if (r[1] === true) { nbad = nbad + 1 }
+    }
+    check("jsn21", nbad === 10 && anyErr(function () { return JSON.parse("[1,") })[2] === "Unexpected end of JSON input")
+    var rv = JSON.parse('{"a": 1, "b": [2, 3], "c": {"d": 4}}', function (k, v) { return typeof v == "number" ? v + 100 : v })
+    check("jsn22", JSON.stringify(rv) === '{"a":101,"b":[102,103],"c":{"d":104}}')
+    var rd = JSON.parse('{"a": 1, "b": 2}', function (k, v) { return k === "a" ? undefined : v })
+    check("jsn23", JSON.stringify(rd) === '{"b":2}' && Object.keys(rd).join(",") === "b")
+    check("jsn24", typeof JSON === "object" && typeof JSON.stringify === "function" && typeof JSON.parse === "function")
+}
+// [isTypeError, isSyntaxError, message] of what f throws.
+function anyErr(f) {
+    try { f(); return [false, false, ""] }
+    catch (e) { return [e instanceof TypeError, e instanceof SyntaxError, e.message] }
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -986,6 +1043,7 @@ function main() {
     s52() // SECTION-CALL 52
     s53() // SECTION-CALL 53
     s54() // SECTION-CALL 54
+    s55() // SECTION-CALL 55
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

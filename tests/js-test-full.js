@@ -5,7 +5,8 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-51, the call/class/private-name model
+//   tests/js-test-full.3.js   sections 44-55, the call/class/private-name model, the Unicode
+//                             identifier tables, iterators, derived constructors, JSON
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the three
 // files together run the assertions in order, and ./test.sh --full reports them as the
@@ -32,7 +33,7 @@
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // cross-module import linkage, `with`, eval/Function, the standard library
-// (Symbol, Proxy, Promise combinators, JSON, RegExp methods, ...).
+// (Symbol, Proxy, Promise combinators, RegExp methods, ...).
 // Async/generator SYNTAX is covered; where running it needs an event loop,
 // functions are only defined and type-checked, never awaited.
 // `export` IS covered (section 34): an import here runs the referenced file

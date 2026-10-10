@@ -2348,6 +2348,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 
 	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
 	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.
+	rt.addJSONExterns(m)
 	rt.addJSBigIntExterns(m)
 }
 

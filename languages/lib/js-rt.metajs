@@ -4059,6 +4059,57 @@ function js_jsmath(src) {
     return o
 }
 
+// ===================================================== JSON =================
+//
+// The program's JSON global over lib/json.js, and the value-model hooks that file
+// calls. Twins: m["js_jsjson"] in abnf/jsrtjson.go, jsJsonObj and the jsonH* hooks
+// in both *-interpreter.abnf start scripts.
+
+import "./json.js"
+
+function js_jsjson() {
+    var o = {}
+    o["stringify"] = function (v, r, s) { return jsonStringify(v, r, s) }
+    o["parse"] = function (t, r) { return jsonParse(t, r) }
+    return o
+}
+function jsonHKeys(o) { return js_jskeys(o) }
+function jsonHGet(o, k) { return js_jsmget(o, k) }
+function jsonHPut(o, k, v) {
+    o[k] = v
+    return undefined
+}
+function jsonHDel(o, k) {
+    delKey(o, k)
+    return undefined
+}
+function jsonHNew() { return {} }
+function jsonHCall(f, self, a) { return jvCallT(f, self, a) }
+// A class method takes its receiver PREPENDED (see jvCallMethod); an own function
+// property is an ordinary closure that reads `this`.
+function jsonHToJSON(v, k) {
+    if (!jvIsObj(v)) { return jsonMiss }
+    var cls = v["__class"]
+    while (jvIsObj(cls)) {
+        var m = cls["toJSON"]
+        if (jvIsCallable(m)) { return jvCallT(m, undefined, [v, k]) }
+        cls = cls["__super"]
+    }
+    var own = v["toJSON"]
+    if (jvIsCallable(own)) { return jvCallT(own, v, [k]) }
+    return jsonMiss
+}
+function jsonHIsFn(v) { return js_jstypeof(v) == "function" }
+function jsonHIsBig(v) { return jbIsBig(v) }
+function jsonHIsObj(v) {
+    if (!jvIsObj(v)) { return false }
+    if (jbIsBig(v)) { return false }
+    return v["__isclass"] !== true
+}
+function jsonHStr(v) { return jvStr(v) }
+function jsonHParseNum(s) { return parseFloat(s) }
+function jsonHRaise(t) { jbRaise(t) }
+
 // ##########################################################################
 // # LAYER 2, PART C - REGULAR EXPRESSIONS (abnf/jsrtregexjs.go over lib/regex.js)
 // ##########################################################################

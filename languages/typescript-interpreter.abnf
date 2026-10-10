@@ -2195,6 +2195,10 @@ NotFuncHead = :script(~~
     include("lib/regex.js")
     rxFail = function (msg) { fail(msg) }
 
+    // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
+    // the jsonH* hooks it calls are defined beside jsJsonObj below.
+    include("lib/json.js")
+
 
     // ----- JavaScript's own value semantics -----
     // This block is PORTED VERBATIM from languages/js-interpreter.abnf (TypeScript is
@@ -3353,6 +3357,45 @@ NotFuncHead = :script(~~
     }
     jsMathObj["pow"] = jsPow
 
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsJsonObj = {
+        "stringify": function(v, r, s) { return jsonStringify(v, r, s) },
+        "parse": function(t, r) { return jsonParse(t, r) }
+    }
+    function jsonHKeys(o) { return jsOwnKeys(o) }
+    function jsonHGet(o, k) { return getMember(o, k) }
+    function jsonHPut(o, k, v) {
+        scopePut(o, k, v)
+        trackKey(o, k)
+        return undefined
+    }
+    function jsonHDel(o, k) {
+        scopePut(o, k, undefined)
+        var ks = o["__keys"]
+        var keep = []
+        for (var i = 0; i < ks.length; i++) { if (ks[i] !== k) { keep.push(ks[i]) } }
+        scopePut(o, "__keys", keep)
+        return undefined
+    }
+    function jsonHNew() { return {"__keys": []} }
+    function jsonHCall(f, self, a) { return callWithThis(f, self, a) }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsonHToJSON(v, k) {
+        for (var cl = v.__class; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, "toJSON") && typeof cl["toJSON"] == "function") { return cl["toJSON"].apply(undefined, [v, k]) }
+        }
+        if (!Array.isArray(v) && hasOwn(v, "toJSON") && typeof v["toJSON"] == "function") { return callWithThis(v["toJSON"], v, [k]) }
+        return jsonMiss
+    }
+    function jsonHIsFn(v) { return typeof v == "function" || isClassDesc(v) }
+    function jsonHIsBig(v) { return isBigInt(v) }
+    function jsonHIsObj(v) {
+        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && !isBigInt(v) && !isClassDesc(v)
+    }
+    function jsonHStr(v) { return jsStr(v) }
+    function jsonHParseNum(s) { return parseFloat(s) }
+    function jsonHRaise(t) { biRaise(t) }
+
     var hostGlobals = {
         // println / print render every argument with JAVASCRIPT's ToString first (the
         // shared host functions print Go's %v). js_jsprintfn is the compiler twin.
@@ -3362,7 +3405,7 @@ NotFuncHead = :script(~~
         // back out of a BigInt, since unary '+' refuses it.
         "BigInt": jsBigIntFn, "Number": jsNumberFn,
         // Object is OURS, not the host's (see jsObjectGlobal).
-        "Object": jsObjectGlobal, "Array": Array,
+        "Object": jsObjectGlobal, "Array": Array, "JSON": jsJsonObj,
         // The Promise global: a function value, so `new Promise(exec)` constructs one
         // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
         "Promise": jsPromiseFn,

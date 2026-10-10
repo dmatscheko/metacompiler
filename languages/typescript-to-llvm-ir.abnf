@@ -5628,6 +5628,8 @@ NotFuncHead = :script(~~
         // The Math global: the shared one with an ECMAScript pow (js_jsmath).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
                 callExt(b, "js_jsmath", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])])])
+        // The JSON global (js_jsjson; lib/json.js in layer 2).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "JSON"), callExt(b, "js_jsjson", [])])
         // The Promise global: a function value, so `new Promise(exec)` constructs one and
         // `typeof Promise` is "function"; the statics resolve through js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
