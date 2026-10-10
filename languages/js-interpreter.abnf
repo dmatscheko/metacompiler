@@ -4423,9 +4423,11 @@ NotFuncHead = :script(~~
         return Math.pow(x, y)
     }
     // The Math global: the host's functions and constants with pow replaced by jsPow.
-    // A plain object without __keys, so for-in over it visits nothing - node's Math
-    // members are not enumerable either. Twin: js_jsmath.
+    // Its members are not in __keys, so for-in over it visits nothing - node's Math
+    // members are not enumerable either - while a property the program adds is listed
+    // (setMember skips the listing for a write over a member). Twin: js_jsmath.
     var jsMathObj = {}
+    jsMathObj["__keys"] = []
     var jsMathNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "cbrt",
         "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log",
         "log1p", "log10", "log2", "max", "min", "random", "round", "sign", "sin", "sinh", "sqrt",
@@ -5152,6 +5154,9 @@ NotFuncHead = :script(~~
             trackKey(fp, "" + k)
             return
         }
+        // A write over a builtin Math member keeps it non-enumerable. A deleted one
+        // reads undefined here, so writing it again lists it, as in node.
+        if (o === jsMathObj && hasOwn(o, k) && o[k] !== undefined) { scopePut(o, k, v); return }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
     }
@@ -6540,6 +6545,8 @@ NotFuncHead = :script(~~
         if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
         // ...and so are an Error instance's name / message / stack (see jsErrInit).
         if (hasOwn(o, "__errh") && hasOwn(o, "" + k)) { return true }
+        // ...and so is a builtin Math member (see jsMathObj).
+        if (o === jsMathObj && hasOwn(o, "" + k) && o["" + k] !== undefined) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
         // A METHOD is not an own property here - it lives on the __class descriptor -

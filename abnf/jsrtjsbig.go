@@ -389,16 +389,21 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	// with pow replaced by the ECMAScript one. The shared object stays C99's pow for the
 	// other languages. Twins: js_jsmath in languages/lib/js-rt.metajs, jsMathObj in
 	// both *-interpreter.abnf start scripts.
+	//
+	// The members are NOT ENUMERABLE, as in node (`for (k in Math)` visits nothing),
+	// so they go into props without a key-order entry: every key list skips them,
+	// and a delete-then-write makes the name an ordinary enumerable property. Layer
+	// 2 cannot hold an unlisted key and hides them by name instead (jvMathHid).
 	m["js_jsmath"] = func(a []uint64) uint64 {
 		o := newJSObject()
 		if src, ok := u(a[0]).(*jsObject); ok {
 			for _, k := range src.keys {
-				o.set(k, src.props[k])
+				o.props[k] = src.props[k]
 			}
 		}
-		o.set("pow", jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		o.props["pow"] = jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsPowD(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
-		}))
+		})
 		return w(o)
 	}
 

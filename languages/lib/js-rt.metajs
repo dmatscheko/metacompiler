@@ -276,6 +276,13 @@ var jvClsN = 0
 // 1 once any Error instance exists; see js_jserrinit.
 var jvErrN = 0
 
+// The program's Math object and the names of its builtin members, which are NOT
+// ENUMERABLE in node. A floor object lists every key it holds, so jvErrHide drops
+// these by name; js_jsdel forgets a deleted one, so a delete-then-write makes it an
+// ordinary enumerable property. The Go twin keeps them out of the key order instead.
+var jvMathObj = anytype
+var jvMathHid = anytype
+
 // The `String` global js_jsstringfn handed out, kept so that js_jsmcall can
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
 var jvStringFn = anytype
@@ -605,7 +612,10 @@ function js_jsdel(o, key) {
         fp = jvFnPropsOf(o)
         if (fp !== undefined) { delKey(fp, jvStr(key)) }
     }
-    if (jvIsObj(o)) { delKey(o, jvStr(key)) }
+    if (jvIsObj(o)) {
+        if (o === jvMathObj) { delKey(jvMathHid, jvStr(key)) }
+        delKey(o, jvStr(key))
+    }
     return true
 }
 
@@ -1802,9 +1812,19 @@ function jvErrOwn(o, k) {
     return jvMiss
 }
 
-// An Error instance's own key list without the non-enumerable three. Gated on
-// jvErrN, so a program that never built an error pays one integer compare.
+// An Error instance's own key list without the non-enumerable three, and the Math
+// object's without its builtin members (jvMathHid). Gated on jvErrN, so a program
+// that never built an error pays one identity and one integer compare.
 function jvErrHide(o, ks) {
+    if (o === jvMathObj) {
+        var mk = []
+        var mi = 0
+        while (mi < ks.length) {
+            if (jvMathHid[ks[mi]] !== true) { mk.push(ks[mi]) }
+            mi = mi + 1
+        }
+        return mk
+    }
     if (jvErrN == 0) { return ks }
     var h = anytype
     h = o["__errh"]
@@ -4053,9 +4073,16 @@ function jvPow(x, y) {
 // jvPow. Twin of js_jsmath in abnf/jsrtjsbig.go.
 function js_jsmath(src) {
     var o = {}
+    var h = {}
     var ks = keysOf(src)
-    for (var i = 0; i < ks.length; i++) { o[ks[i]] = src[ks[i]] }
+    for (var i = 0; i < ks.length; i++) {
+        o[ks[i]] = src[ks[i]]
+        h[ks[i]] = true
+    }
     o["pow"] = function (x, y) { return jvPow(x - 0, y - 0) }
+    h["pow"] = true
+    jvMathObj = o
+    jvMathHid = h
     return o
 }
 

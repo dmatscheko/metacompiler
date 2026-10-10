@@ -2063,6 +2063,22 @@ function s39(): void {
     let pe = pw[0];
     pe **= pw[2];
     check("math43", n39(pe) && Math.pow(pw[2], pw[5]) === 1 && pw[1] ** pw[6] === 1);
+
+    // Math's members are NOT ENUMERABLE; a property the program adds is, and a write
+    // over a member keeps it hidden. Values read off node 24 (tsc's emit).
+    const M: any = Math;
+    let mk = 0;
+    for (const mx in Math) { mk = mk + 1; }
+    check("math44", mk === 0 && Object.keys(Math).length === 0 && JSON.stringify(Math) === "{}" && ("abs" in Math));
+    const flo = Math.floor;
+    M.zz = a[0];
+    M.floor = Math.ceil;
+    let mks = "";
+    for (const my in Math) { mks = mks + my; }
+    check("math45", mks === "zz" && Object.keys(Math).join(",") === "zz" && Math.floor(a[2]) === 1);
+    M.floor = flo;
+    delete M.zz;
+    check("math46", Object.keys(Math).length === 0 && Math.floor(a[2]) === 0);
 }
 
 // ===== SECTION 40: three uncatchable aborts become catchable throws =====

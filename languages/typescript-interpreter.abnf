@@ -3350,6 +3350,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     var jsMathObj = {}
+    jsMathObj["__keys"] = []
     var jsMathNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "cbrt",
         "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log",
         "log1p", "log10", "log2", "max", "min", "random", "round", "sign", "sin", "sinh", "sqrt",
@@ -3923,6 +3924,8 @@ NotFuncHead = :script(~~
             trackKey(fp, "" + k)
             return
         }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (o === jsMathObj && hasOwn(o, k) && o[k] !== undefined) { scopePut(o, k, v); return }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
     }
@@ -5182,6 +5185,8 @@ NotFuncHead = :script(~~
         if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
         // ...and so are an Error instance's name / message / stack (see jsErrInit).
         if (hasOwn(o, "__errh") && hasOwn(o, "" + k)) { return true }
+        // ...and so is a builtin Math member (see jsMathObj).
+        if (o === jsMathObj && hasOwn(o, "" + k) && o["" + k] !== undefined) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
         // See the twin of this comment in js-interpreter.abnf.

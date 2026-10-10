@@ -1002,6 +1002,22 @@ function s42() {
     var pe = pw[0]
     pe **= pw[2]
     check("math43", n42(pe) && Math.pow(pw[2], pw[5]) === 1 && pw[1] ** pw[6] === 1 && Math.pow(pw[0], pw[6]) === 1)
+
+    // Math's members are NOT ENUMERABLE: for-in, Object.keys and JSON see none of
+    // them, while a property the program adds is an ordinary one and a write over a
+    // member keeps it hidden. Values read off node 24.
+    var mk = 0
+    for (var mx in Math) { mk = mk + 1 }
+    check("math44", mk === 0 && Object.keys(Math).length === 0 && JSON.stringify(Math) === "{}" && ("abs" in Math))
+    var flo = Math.floor
+    Math.zz = a[0]
+    Math.floor = Math.ceil
+    var mks = ""
+    for (var my in Math) { mks = mks + my }
+    check("math45", mks === "zz" && Object.keys(Math).join(",") === "zz" && Math.floor(a[2]) === 1)
+    Math.floor = flo
+    delete Math.zz
+    check("math46", Object.keys(Math).length === 0 && Math.floor(a[2]) === 0)
 }
 
 // ===== SECTION 43: three uncatchable aborts become catchable throws =====
