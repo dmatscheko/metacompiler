@@ -1225,6 +1225,29 @@ s28() {
   set -- "a b:c"
   set -- $1
   check ifs14 "$#" 1
+  # AN UNQUOTED "$@" OR ${a[@]} IS SPLIT AGAIN: bash joins the fields with the
+  # first IFS character and splits that, so an element holding a delimiter is two
+  # fields and, under IFS=:, an empty element between two others is kept. Under
+  # a null IFS each non-empty element stands alone.
+  IFS=$' \t\n'
+  set -- "a b" c "" d
+  set -- $@
+  check ifs15 "$#" 4
+  check ifs16 "[$1][$2][$4]" "[a][b][d]"
+  local -a sp28=(" p q " r "" s)
+  set -- x${sp28[@]}y
+  check ifs17 "$#" 5
+  check ifs18 "[$1][$2][$5]" "[x][p][sy]"
+  IFS=:
+  local -a cl28=("p:q" "" r)
+  set -- ${cl28[@]}
+  check ifs19 "$#" 4
+  check ifs20 "[$2][$3]" "[q][]"
+  IFS=
+  set -- a "" "b c"
+  set -- $@
+  check ifs21 "$#" 2
+  check ifs22 "[$2]" "[b c]"
   IFS="$saved_ifs"
   set --
 }
@@ -1735,10 +1758,6 @@ s33() {
 #     the plain-assignment form is asserted on a GLOBAL, exactly as pex10 does.
 #
 # STILL NOT ASSERTED, and each is measured rather than assumed:
-#   * `${a[@]@A}` under a NON-DEFAULT IFS. bash splits the declare text on IFS
-#     with the parenthesised group atomic, so `IFS=: ; printf '<%s>' "${a[@]@A}"`
-#     is ONE field there and three here. The three-field form is bash's answer
-#     under the default IFS, which is what this models.
 #   * `${v@P}` of a value holding `$name`: bash runs the decoded prompt through
 #     a full word expansion and answers the variable's value. The compiler has
 #     no expander at run time, so modelling it in one half only would trade a
@@ -1769,6 +1788,17 @@ s34() {
   check xa7 "${U34@A}" "declare -u U34='ABC'"
   check xa8 "${nosuch34@A}" ""
   check xa9 "${A34[9]@A}" 'declare -a A34'
+  # UNQUOTED, the field list is split again: "p b" inside the value too.
+  check xa10 "$(printf '<%s>' ${A34[@]@A})" '<declare><-a><A34=([0]="pa"><[1]="p><b")>'
+  # bash splits `declare -a A34=` on IFS and keeps the value atomic: one field
+  # under IFS=:, two under IFS==, and [*] is the space-joined text under any IFS.
+  local ifs34="$IFS"
+  IFS=:
+  check xa11 "$(printf '<%s>' "${A34[@]@A}")" '<declare -a A34=([0]="pa" [1]="p b")>'
+  check xa12 "${A34[*]@A}" 'declare -a A34=([0]="pa" [1]="p b")'
+  IFS='='
+  check xa13 "$(printf '<%s>' "${A34[@]@A}")" '<declare -a A34><([0]="pa" [1]="p b")>'
+  IFS="$ifs34"
 
   check xb1 "${A34[*]@a}" 'a a'
   check xb2 "${A34@a}" 'a'

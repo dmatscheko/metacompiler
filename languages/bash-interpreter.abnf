@@ -1728,13 +1728,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     //                      ${a[@]@K} -> 0 "pa" 1 "pb"
                     //                      ${a[@]@k} -> the four fields 0 pa 1 pb
                     //   s=hi (not an array) ${s[@]@A} -> s='hi'   i.e. the scalar form
-                    // @A's array form is three FIELDS - `declare`, the flags and the
-                    // assignment - which is what makes `printf '<%s>' "${a[@]@A}"` print
-                    // three items in bash and is why it cannot be one joined string here.
+                    // @A's [@] form is a FIELD LIST: bash splits the text `declare -a a=` on
+                    // IFS (a null IFS counting as the default) and keeps the parenthesised
+                    // value atomic, glued to the last field unless that text ends in a
+                    // delimiter. So `printf '<%s>' "${a[@]@A}"` prints three items under the
+                    // default IFS, one under IFS=: and two (`declare -a a`, the value) under
+                    // IFS==. The [*] form is the one string `declare -a a=(...)` whatever
+                    // IFS holds. Twin of rt_declxa in languages/lib/bash-rt.c.
                     if (idxXf == "A" && declIsArr(idxName)) {
-                        var dfs = ["declare", "-" + varAttrs(idxName), declArrAssign(idxName)]
-                        if (sub == "@") { return encFields(dfs) }
-                        return joinList(dfs, ifsFirst())
+                        var dflag = "-" + varAttrs(idxName)
+                        var dasg = declArrAssign(idxName)
+                        if (sub == "*") { return "declare " + dflag + " " + dasg }
+                        if (ifsFirst() == "") { return encFields(["declare", dflag, dasg]) }
+                        var dval = dasg.slice(idxName.length + 1)
+                        var dtxt = "declare " + dflag + " " + idxName + "="
+                        var dfs = splitIFS(dtxt)
+                        if (dfs.length == 0 || ifsTrail(dtxt)) { dfs.push(dval) } else { dfs[dfs.length - 1] = dfs[dfs.length - 1] + dval }
+                        return encFields(dfs)
                     }
                     if (idxXf == "A" || idxXf == "K" || idxXf == "k") {
                         if (!isArr(idxName)) {
@@ -2655,7 +2665,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sg = segThunks[k]
                 if (typeof sg == "function") { open = open + sg(); opened = true }
                 else {
-                    var v = sg.sp()
+                    var v = uqList(sg.sp())
                     var f = anytype
                     var lead = false
                     var trail = false
@@ -2675,6 +2685,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (res.length == 1) { return res[0] }
             return encFields(res)
         }
+    }
+    // AN UNQUOTED FIELD LIST ("$@", ${a[@]} and their transforms outside quotes) IS SPLIT
+    // AGAIN, AS ONE VALUE: bash 5.3 joins the fields with the first IFS character and splits
+    // the result like any other expansion, so `set -- "a b" c; printf '<%s>' $@` is three
+    // fields, and under IFS=: the list ("a" "" "b") is a, "", b. A null IFS cannot join
+    // anything: each non-empty field then stands alone and the empty ones vanish.
+    // Twin of rt_uqlist in languages/lib/bash-rt.c.
+    function uqList(v) {
+        if (!isFields(v)) { return v }
+        var f = decFields(v)
+        var sep = ifsFirst()
+        if (sep != "") { return joinList(f, sep) }
+        var out = []
+        var i
+        for (i = 0; i < f.length; i++) { if (f[i] != "") { out.push(f[i]) } }
+        return encFields(out)
     }
     // Does this value BEGIN with a delimiter that separates it from the text before it?
     // Only IFS whitespace does - see mkWord.

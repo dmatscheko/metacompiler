@@ -163,6 +163,7 @@ char *rt_unescape(char *s);
 int rt_nfields(char *v);
 char *rt_getfield(char *v, int k);
 char *rt_wordjoin(char *v);
+char *rt_uqlist(char *l, char *ifs);
 char *rt_splitifs(char *v, char *ifs);
 int rt_ifsws(char *ifs, int ch);
 char *rt_bnd_acc(char *acc, char *open, char *f);
@@ -188,7 +189,7 @@ int rt_keymeta(char *k);
 char *rt_shq(char *v, int isset);
 int rt_isset(char *v);
 char *rt_declasg(char *nm, char *at, char *v, int isset);
-char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *sep, int star);
+char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, int star);
 char *rt_kvq(char *nm, int assoc, char *v, int isset);
 char *rt_kvp(char *nm, char *sep, int star, char *v, int isset);
 char *rt_attrf(char *nm, char *at, char *sep, int star);
@@ -1602,6 +1603,43 @@ char *rt_getfield(char *v, int k) {
     return &empty[0];
 }
 
+/* AN UNQUOTED FIELD LIST ("$@", ${a[@]} and their transforms outside quotes) IS
+ * SPLIT AGAIN, AS ONE VALUE: bash 5.3 joins the fields with the first IFS
+ * character and splits the result like any other expansion, so
+ * `set -- "a b" c; printf '<%s>' $@` is three fields, and under IFS=: the list
+ * ("a" "" "b") is a, "", b. A null IFS cannot join anything: each non-empty
+ * field then stands alone and the empty ones vanish. Answers the joined string
+ * for the caller to split, a field list for a null IFS, and a plain string
+ * unchanged. bash-interpreter.abnf's uqList is the same rule. */
+char *rt_uqlist(char *l, char *ifs) {
+    int len = rt_strlen(l);
+    int sep = (int)(unsigned char)ifs[0];
+    int i = 1;
+    int o = 0;
+    char *dst;
+    if ((int)(unsigned char)l[0] != 2) return l;
+    if (len < 2) return sep == 0 ? "\x02" : &empty[0];
+    dst = rt_bump(len + 1);
+    if (sep == 0) {
+        dst[0] = 2;
+        o = 1;
+        while (i < len) {
+            int ch = (int)(unsigned char)l[i];
+            int prev = (int)(unsigned char)dst[o - 1];
+            if (ch != 1 || (prev != 1 && prev != 2)) { dst[o] = l[i]; o = o + 1; }
+            i = i + 1;
+        }
+    } else {
+        while (i < len) {
+            if ((int)(unsigned char)l[i] != 1) { dst[o] = l[i]; o = o + 1; }
+            else if (i < len - 1) { dst[o] = ifs[0]; o = o + 1; }
+            i = i + 1;
+        }
+    }
+    dst[o] = 0;
+    return dst;
+}
+
 /* rt_wordjoin: a field list flattened back to one string, fields space-joined. */
 char *rt_wordjoin(char *v) {
     int c0 = (int)(unsigned char)v[0];
@@ -1629,7 +1667,7 @@ int rt_ifsws(char *ifs, int ch) {
 }
 
 char *rt_splitifs(char *v, char *ifs) {
-    int len = rt_strlen(v);
+    int len;
     int q = 0;
     int nf = 0;
     int tot = 0;
@@ -1638,6 +1676,13 @@ char *rt_splitifs(char *v, char *ifs) {
     int pass;
     char *dst;
     dst = &empty[0];
+    /* A field list is split as the one value rt_uqlist makes of it; under a null
+     * IFS that is a list again, already split. */
+    if ((int)(unsigned char)v[0] == 2) {
+        v = rt_uqlist(v, ifs);
+        if ((int)(unsigned char)v[0] == 2) return v;
+    }
+    len = rt_strlen(v);
     /* THE POSIX DELIMITER RULE: bash 5.3.15 splits "a:b::c" under IFS=: into
      * FOUR fields. A run of IFS whitespace is one delimiter and is ignored at both ends of
      * the value; any OTHER member of IFS delimits exactly one field by itself,
@@ -2165,16 +2210,23 @@ char *rt_declasg(char *nm, char *at, char *v, int isset) {
     return rt_strcat(rt_strcat(base, "="), rt_shquote(v));
 }
 
-/* ${a[@]@A}: the whole `declare -p` rendering, as the THREE fields bash makes
- * of it - `declare`, `-a`, `a=([0]="pa" [1]="pb")`. It is three and not one
- * because `printf '<%s>' "${a[@]@A}"` prints three items in bash 5.3.15. The
- * [*] form joins them with the first character of IFS. A name that is not an
- * array falls back to the scalar form, which is what bash does too. */
-char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *sep, int star) {
+/* ${a[@]@A}: the whole `declare -p` rendering as a FIELD LIST. bash splits the
+ * text `declare -a a=` on IFS (a null IFS counting as the default) and keeps the
+ * parenthesised value atomic, glued to the last field unless that text ends in a
+ * delimiter: `printf '<%s>' "${a[@]@A}"` prints three items under the default
+ * IFS, one under IFS=: and two under IFS==. The [*] form is the one string
+ * `declare -a a=(...)` whatever IFS holds. A name that is not an array falls back
+ * to the scalar form, which is what bash does too. Twin of the @A arm in
+ * bash-interpreter.abnf. */
+char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, int star) {
     int isarr = (rt_arr_count(nm) > 0 || assoc != 0) ? 1 : 0;
     char *flag;
     char *asg;
+    char *val;
+    char *txt;
+    char *fs;
     char *out;
+    int n;
     if (isarr == 0) return rt_declasg(nm, at, v, isset);
     /* `at` already carries the array letter in front of the scalar ones, so
      * `declare -ai x` answers `-ai`; the fallback is for the case where the
@@ -2182,15 +2234,23 @@ char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *sep, in
     flag = at[0] == 0 ? (assoc != 0 ? "-A" : "-a") : rt_strcat("-", at);
     asg = rt_arrassign(nm, assoc);
     if (star != 0) {
-        out = rt_strcat("declare", sep);
-        out = rt_strcat(out, flag);
-        out = rt_strcat(out, sep);
+        out = rt_strcat("declare ", flag);
+        out = rt_strcat(out, " ");
         return rt_strcat(out, asg);
     }
-    out = rt_strcat("\002declare\001", flag);
-    out = rt_strcat(out, "\001");
-    out = rt_strcat(out, asg);
-    return rt_strcat(out, "\001");
+    if (ifs[0] == 0) {
+        out = rt_strcat("\002declare\001", flag);
+        out = rt_strcat(out, "\001");
+        out = rt_strcat(out, asg);
+        return rt_strcat(out, "\001");
+    }
+    val = rt_substr(asg, rt_strlen(nm) + 1, rt_strlen(asg) - rt_strlen(nm) - 1);
+    txt = rt_strcat(rt_strcat(rt_strcat("declare ", flag), " "), rt_strcat(nm, "="));
+    fs = rt_splitifs(txt, ifs);
+    if ((int)(unsigned char)fs[0] != 2) return rt_strcat(fs, val);
+    n = rt_strlen(fs);
+    if (n < 2 || rt_ifstrail(txt, ifs) != 0) return rt_strcat(rt_strcat(fs, val), "\001");
+    return rt_strcat(rt_strcat(rt_substr(fs, 0, n - 1), val), "\001");
 }
 
 /* ${a[@]@K}: `key "value"` pairs as ONE field, with the trailing space bash

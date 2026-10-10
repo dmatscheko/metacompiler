@@ -1225,6 +1225,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtGetField = rtDecl("rt_getfield", true, [1, 0])
     var rtWordJoin = rtDecl("rt_wordjoin", true, [1])
     var rtSplitIfs = rtDecl("rt_splitifs", true, [1, 1])
+    var rtUqList = rtDecl("rt_uqlist", true, [1, 1])
     var rtBndAcc = rtDecl("rt_bnd_acc", true, [1, 1, 1])
     var rtBndOpen = rtDecl("rt_bnd_open", true, [1, 1])
     var rtBndAcc2 = rtDecl("rt_bnd_acc2", true, [1, 1, 0, 1, 0, 0])
@@ -1640,7 +1641,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var wholeV = null
                     if (xf == "A") {
                         wholeV = b.NewCall(rtDeclXa, [nmOf(b), attrLetters(b, nmOf(b)), one1, elemSet,
-                                                      assocI, ifsFirstValue(b), b.NewZExt(star, i32)])
+                                                      assocI, ifsValue(b), b.NewZExt(star, i32)])
                     } else if (xf == "K") {
                         wholeV = b.NewCall(rtKvq, [nmOf(b), assocI, one1, elemSet])
                     } else if (xf == "k") {
@@ -1967,7 +1968,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }, c: undefined}
         }
         // ONE UNQUOTED EXPANSION AND NOTHING ELSE - `$i`, `$@`, `${a[@]}` - IS ITS OWN FIELD
-        // LIST, and it is by far the commonest splittable word. There is no literal text for
+        // LIST once rt_splitifs has split it, and it is by far the commonest
+        // splittable word. There is no literal text for
         // a boundary delimiter to separate it from, so neither flag can change the answer
         // (a leading one finds nothing open, a trailing one closes the last field the word
         // would have closed anyway), and the acc/open assembly below can only rebuild what
@@ -1979,10 +1981,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {s: anySub, f: true, c: undefined, fn: function(b) {
                 var r0 = only.fn(b)
                 b = r0.b
-                var isL0 = b.NewICmp(llvm.enum.IPredEQ,
-                            b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, r0.v, zero)), i32),
-                            llvm.constant.NewInt(i32, 2))
-                return {b: b, v: b.NewSelect(isL0, r0.v, b.NewCall(rtSplitIfs, [r0.v, ifsValue(b)]))}
+                return {b: b, v: b.NewCall(rtSplitIfs, [r0.v, ifsValue(b)])}
             }}
         }
         // Some segment can produce several fields: build the list, joining at the boundaries.
@@ -2005,16 +2004,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (sg.sp != undefined) {
                     var r = sg.sp.fn(b)
                     b = r.b
-                    // an unquoted expansion: already a field list, or split on IFS
-                    var isL = b.NewICmp(llvm.enum.IPredEQ,
-                                b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, r.v, zero)), i32),
-                                llvm.constant.NewInt(i32, 2))
+                    // An unquoted expansion is split on IFS. "$@" and ${a[@]} are joined
+                    // first (rt_uqlist), except under a null IFS, where they stay a list
+                    // with no boundary of its own.
                     var ifsv = ifsValue(b)
-                    fv = b.NewSelect(isL, r.v, b.NewCall(rtSplitIfs, [r.v, ifsv]))
-                    // "$@" and ${a[@]} arrive as a list already and have no boundary of
-                    // their own; only a value this word had to split does.
-                    lead = b.NewSelect(isL, zero, b.NewCall(rtIfsLead, [r.v, ifsv]))
-                    trail = b.NewSelect(isL, zero, b.NewCall(rtIfsTrail, [r.v, ifsv]))
+                    var uv = b.NewCall(rtUqList, [r.v, ifsv])
+                    var isL = b.NewICmp(llvm.enum.IPredEQ,
+                                b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, uv, zero)), i32),
+                                llvm.constant.NewInt(i32, 2))
+                    fv = b.NewSelect(isL, uv, b.NewCall(rtSplitIfs, [uv, ifsv]))
+                    lead = b.NewSelect(isL, zero, b.NewCall(rtIfsLead, [uv, ifsv]))
+                    trail = b.NewSelect(isL, zero, b.NewCall(rtIfsTrail, [uv, ifsv]))
                 } else if (sg.f == true) {
                     var r2 = sg.fn(b)
                     b = r2.b
