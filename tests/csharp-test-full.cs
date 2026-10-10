@@ -121,6 +121,8 @@ b";                                                   // verbatim keeps the newl
             Program.Check("str5", """he said "hi" here""".Length == 17);
             Program.Check("str6", $"{x,4}" == "   6" && $"{x:D3}" == "006");
             Program.Check("str7", $"o{$"i{x}"}" == "oi6" && $"{{x}}" == "{x}");
+            // The simple escapes \b \f \v are control characters, also in an interpolation.
+            Program.Check("str8", "\b\f\v" == "\u0008\u000C\u000B" && $"{x}\f" == "6\u000C");
         }
 
         // ===== SECTION 04: typeof, nameof, sizeof, default =====

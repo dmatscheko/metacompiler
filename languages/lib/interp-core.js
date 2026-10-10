@@ -274,6 +274,10 @@ function unescapeJs(s) {
         if (e == 116) { out += "\t"; i += 2; continue }
         if (e == 114) { out += "\r"; i += 2; continue }
         if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
+        // By code: under -frozen this function is what reads a "\f" literal.
+        if (e == 98)  { out += String.fromCharCode(8); i += 2; continue }
+        if (e == 102) { out += String.fromCharCode(12); i += 2; continue }
+        if (e == 118) { out += String.fromCharCode(11); i += 2; continue }
         if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
         if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
         out += String.fromCharCode(e)

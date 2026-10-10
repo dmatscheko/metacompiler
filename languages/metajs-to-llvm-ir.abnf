@@ -303,7 +303,7 @@ KwDefault   = "default" KwEnd ;
 
     // takeAll empties the local stack of the current tag and returns its items in push
     // order as a plain JS array.
-    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
+    // Resolves the JS string escapes (\n \t \r \0 \b \f \v \xNN \uNNNN, and \c for the char itself).
     // ----- The emitter state -----
 
     var i8 = llvm.types.I8

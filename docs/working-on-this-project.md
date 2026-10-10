@@ -290,12 +290,6 @@ the fix simply, silently did not work — while a subset of probes passed for an
 unrelated reason. It took an instrumented emit to see it. **Pass an INDEX into a
 script-side array, not the record.** (`swift-to-llvm-ir.abnf`, `declRecs`.)
 
-**MetaJS's string literal has no `\f` and no `\v` — it drops the backslash**, so
-`ch == "\f"` compiles to `ch == "f"`. This ate the `f`s of `Integer("0xff")` **in
-the native binary only**: goja and the Go twin were green, so the matrix, `--full`
-and `--cross` were all blind to it, and only a native `-exe` probe found it. Test
-whitespace by character code.
-
 **`rxExtraExterns` fills ONE extern map for EVERY language.** Wrapping a *shared*
 extern in a language's own twin file therefore leaks across languages: overriding
 `m["js_mcall"]` in `jsrtjava.go` made a **C# `Substring`** raise java's

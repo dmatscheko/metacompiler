@@ -86,6 +86,8 @@ line2"""
     check("tpl4", """total: ${'$'}$price""" == "total: \$5")
     check("tpl5", "he said \"hi\"".length == 12)
     check("tpl6", "outer ${"inner $x"}" == "outer inner 6")
+    // \b is the backspace character, in a plain string and in a template chunk.
+    check("tpl7", "\b"[0].code == 8 && "a${x}\b".length == 3 && "a${x}\b"[2].code == 8)
 }
 
 // ===== SECTION 04: ranges and progressions =====

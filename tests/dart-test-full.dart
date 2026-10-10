@@ -77,6 +77,8 @@ cd''';
   check("li8", 'A' == "A" && '\x42' == "B" && '\u{1F600}'.length == 2);
   var n = 6;
   check("li9", 'v=$n' == "v=6" && '${n + 1}!' == "7!");
+  // \b \f \v are control characters, also beside an interpolation.
+  check("li10", "\b\f\v" == "\u0008\u000C\u000B" && "$n\f" == "6\u000C");
   // Dart has ONE numeric tower: only ~/ and the bitwise operators truncate. Each of
   // the six lines below was wrong in exactly one half. The interpreter reached the
   // shared core.add, whose default truncates the sum with |0, so 0.1 + 0.2 was 0 and

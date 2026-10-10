@@ -159,6 +159,7 @@ check("str-charcodeat", "A".charCodeAt(0), 65);
 check("str-charcodeat-pos", str.charCodeAt(1), 101);
 check("str-indexof", str.indexOf("ll"), 2);
 check("str-indexof-missing", str.indexOf("z"), -1);
+check("str-escape-bfv", "\b\f\v".charCodeAt(0) * 10000 + "\b\f\v".charCodeAt(1) * 100 + "\b\f\v".charCodeAt(2), 81211);
 check("str-replace-first", str.replace("l", "_"), "he_lo");
 check("str-slice", str.slice(1, 3), "el");
 check("str-slice-open", str.slice(3), "lo");

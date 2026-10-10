@@ -245,6 +245,10 @@ function s07() {
     check("str18", "".length === 0 && "".indexOf("") === 0)
     check("str19", "tab\tnl\nq\"e\\z" .length === 12)
     check("str20", 'single' === "single")
+    // \b \f \v are the JS control characters, not the letters.
+    var esc = "\b\f\v"
+    check("str21", esc.length === 3 && esc.charCodeAt(0) === 8 && esc.charCodeAt(1) === 12 &&
+                   esc.charCodeAt(2) === 11)
 }
 
 // ===== SECTION 08: UTF-16 string semantics =====
