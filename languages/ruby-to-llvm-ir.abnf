@@ -375,12 +375,15 @@ MSplat      <~~ var n = takeAll(); push({splat: n.length > 0 ? n[0] : makeTarget
 MGroup      <~~ push({group: takeAll()}) ~~>
             = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
-// puts / print command form: puts x, puts a, b, puts (no args), puts(x).
+// puts / print command form: puts x, puts a, b, puts (no args), puts(a, b).
 // SameLine is what makes the no-argument form a no-argument form: without it the
 // optional Expression reaches ACROSS the newline, and a bare `puts' followed by `p x'
-// parses as `puts p'. CommandForm spells the same guard for the same reason.
+// parses as `puts p'. CommandForm spells the same guard for the same reason. A `(`
+// glued to the name opens the ARGUMENT LIST, so `puts(a, b)' is two arguments, while
+// `puts (a + b) * 2' keeps the spaced parenthesis inside its one argument, as in MRI.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
-            = KwPuts <~~ push({cmd: up.in}) ~~> [ SameLine Expression { "," Expression } ] ;
+            = KwPuts <~~ push({cmd: up.in}) ~~> ( ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")"
+                                                | [ SameLine Expression { "," Expression } ] ) ;
 
 ExprStmt    = Expression [ ";" ] ;
 
@@ -2034,6 +2037,12 @@ SameLine    = :script(~~
     })()
 ~~) ;
 
+// ParenNext succeeds (matching empty) only when a `(` follows with no whitespace
+// at all: the spacing that tells MRI an argument list from a parenthesised argument.
+ParenNext   = :script(~~
+    (c.peek(0) === 40) ? undefined : abnf.newToken("\x01noparen", 0)
+~~) ;
+
 // CmdArgAhead succeeds (matching empty) only where a parenthesis-less argument list
 // really starts: the next character must be able to OPEN an expression and must not
 // be readable as a binary operator continuing the previous one. Ruby's own rule is
@@ -3336,11 +3345,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (!isPrint) { callExt(b, "js_rputs", [emitStr(b, "")]) }
                 return {b: b, v: hNull}
             }
+            // Every argument is evaluated before any is written (MRI), so a
+            // raising one prints nothing. Twin of makePuts in ruby-interpreter.abnf.
+            var vals = []
             for (var i = 0; i < args.length; i++) {
                 var r = args[i](b)
                 b = r.b
-                callExt(b, extName, [r.v])
+                vals.push(r.v)
             }
+            for (var k = 0; k < vals.length; k++) { callExt(b, extName, [vals[k]]) }
             return {b: b, v: hNull}
         }
     }

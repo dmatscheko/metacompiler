@@ -338,12 +338,15 @@ MSplat      <~~ var n = takeAll(); push({splat: n.length > 0 ? n[0] : makeTarget
 MGroup      <~~ push({group: takeAll()}) ~~>
             = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
-// puts / print command form: puts x, puts a, b, puts (no args), puts(x).
+// puts / print command form: puts x, puts a, b, puts (no args), puts(a, b).
 // SameLine is what makes the no-argument form a no-argument form: without it the
 // optional Expression reaches ACROSS the newline, and a bare `puts' followed by `p x'
-// parses as `puts p'. CommandForm spells the same guard for the same reason.
+// parses as `puts p'. CommandForm spells the same guard for the same reason. A `(`
+// glued to the name opens the ARGUMENT LIST, so `puts(a, b)' is two arguments, while
+// `puts (a + b) * 2' keeps the spaced parenthesis inside its one argument, as in MRI.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
-            = KwPuts <~~ push({cmd: up.in}) ~~> [ SameLine Expression { "," Expression } ] ;
+            = KwPuts <~~ push({cmd: up.in}) ~~> ( ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")"
+                                                | [ SameLine Expression { "," Expression } ] ) ;
 
 ExprStmt    = Expression [ ";" ] ;
 
@@ -1937,6 +1940,12 @@ SameLine    = :script(~~
         if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
+~~) ;
+
+// ParenNext succeeds (matching empty) only when a `(` follows with no whitespace
+// at all: the spacing that tells MRI an argument list from a parenthesised argument.
+ParenNext   = :script(~~
+    (c.peek(0) === 40) ? undefined : abnf.newToken("\x01noparen", 0)
 ~~) ;
 
 // CmdArgAhead succeeds (matching empty) only where a parenthesis-less argument list
@@ -8526,15 +8535,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makePuts(items) {
         var isPrint = items[0].cmd.indexOf("print") >= 0
         var args = items.slice(1)
+        // MRI evaluates EVERY argument before writing any, so a raising one
+        // prints nothing; only a to_s raising mid-write leaves the earlier ones out.
         return function() {
+            var vals = []
+            for (var i = 0; i < args.length; i++) { vals.push(args[i]()) }
             if (isPrint) {
-                var out = ""
-                for (var i = 0; i < args.length; i++) { out += rstr(args[i]()) }
-                print(out)
+                for (var k = 0; k < vals.length; k++) { print(rstr(vals[k])) }
                 return null
             }
-            if (args.length == 0) { println("") ; return null }
-            for (var j = 0; j < args.length; j++) { putsVal(args[j]()) }
+            if (vals.length == 0) { println("") ; return null }
+            for (var j = 0; j < vals.length; j++) { putsVal(vals[j]) }
             return null
         }
     }

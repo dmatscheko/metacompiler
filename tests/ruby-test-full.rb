@@ -2783,6 +2783,41 @@ def s49
   check("ti49i", "%d" % "9007199254740993" == "9007199254740993" && Integer("0_1") == 1)
 end
 
+# ===== SECTION 50: puts / print evaluate every argument before writing =====
+# MRI evaluates the whole argument list first, so an argument that raises leaves
+# NOTHING written - observed here through a to_s that logs when it is written. A `(`
+# glued to the name is the argument list itself: `print(a, b)` is two arguments.
+# THIS SECTION RUNS UNDER REAL RUBY.
+S50LOG = []
+class S50Tell
+  def initialize(tag); @tag = tag; end
+  def to_s; S50LOG.push(@tag); ""; end
+end
+def s50boom
+  raise "boom"
+end
+def s50
+  begin
+    print S50Tell.new("p1"), s50boom
+  rescue RuntimeError
+    S50LOG.push("r1")
+  end
+  begin
+    puts S50Tell.new("u1"), s50boom
+  rescue RuntimeError
+    S50LOG.push("r2")
+  end
+  begin
+    print(S50Tell.new("p2"), s50boom)
+  rescue RuntimeError
+    S50LOG.push("r3")
+  end
+  check("pu50a", S50LOG == ["r1", "r2", "r3"])
+  print(S50Tell.new("p3"), S50Tell.new("p4"))
+  puts(S50Tell.new("u2"), [S50Tell.new("u3")])
+  check("pu50b", S50LOG == ["r1", "r2", "r3", "p3", "p4", "u2", "u3"])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2794,5 +2829,6 @@ s46() # SECTION-CALL 46
 s47() # SECTION-CALL 47
 s48() # SECTION-CALL 48
 s49() # SECTION-CALL 49
+s50() # SECTION-CALL 50
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
