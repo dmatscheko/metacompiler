@@ -80,6 +80,7 @@ class Main {
         S34.run(); // SECTION-CALL 34
         S35.run(); // SECTION-CALL 35
         S36.run(); // SECTION-CALL 36
+        S37.run(); // SECTION-CALL 37
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2197,5 +2198,82 @@ class S36 {
         Main.check("rx1", Integer.toString(n[0], 16).equals("ff") && Integer.toString(n[1], 16).equals("-ff") && Integer.toString(n[0], 99).equals("255"));
         Main.check("rx2", Integer.toBinaryString(n[1]).equals("11111111111111111111111100000001") && Integer.toOctalString(n[2]).equals("20000000000"));
         Main.check("rx3", Long.toString(Long.MIN_VALUE, 36).equals("-1y2p0ij32e8e8") && Long.toBinaryString(5L).equals("101"));
+    }
+}
+
+// ===== SECTION 37: assignment conversion at every site (JLS 5.2) =====
+//
+// A value converts to the DECLARED type of the slot it lands in - not only at a
+// declaration but when it is passed as an argument, returned, reassigned,
+// stored into a field or an array element, or written in an array
+// initializer. An Object slot keeps the value's own type. Every expected
+// string is java 24.0.2's output.
+interface S37Long { long apply(long x); }
+class S37 {
+    static double fd;
+    static long fl;
+    static Object fo;
+    static double[] fda;
+    long il;
+    float iflt;
+    static String d(double x) { return "" + x; }
+    static String f(float x) { return "" + x; }
+    static long mul(long x) { return x * 1000000 * 1000000; }
+    static String cc(int c) { return "" + c; }
+    static String vsum(double... xs) { String s = ""; for (double x : xs) s = s + x + ";"; return s; }
+    static double r3() { return 3; }
+    static long r2() { return 2; }
+    static float rbig() { return 16777217; }
+    static char rch() { return 66; }
+    static int rint() { return 'z'; }
+    static Object robj() { return 3; }
+    static long twice(long x) { return x * 2; }
+    static long viaRef(S37Long g) { return g.apply(3) * 1000000 * 1000000; }
+    static void run() {
+        int[] k = { 2, 3, 16777217, 97 };
+        Main.check("ac1", d(k[0]).equals("2.0") && f(k[2]).equals("1.6777216E7") && mul(k[0]) == 2000000000000L);
+        Main.check("ac2", cc('a').equals("97") && vsum(k[0], k[1]).equals("2.0;3.0;"));
+        Main.check("ac3", ("" + r3()).equals("3.0") && r2() * 1000000 * 1000000 * 1000 == 2000000000000000L);
+        Main.check("ac4", ("" + rbig()).equals("1.6777216E7") && ("" + rch()).equals("B") && ("" + rint()).equals("122"));
+        Main.check("ac5", ("" + robj()).equals("3") && viaRef(S37::twice) == 6000000000000L);
+        long t;
+        t = k[0];
+        Main.check("ac6", t * 1000000 * 1000000 * 1000 == 2000000000000000L);
+        double dd;
+        dd = k[1];
+        char ch;
+        ch = 65;
+        int ic;
+        ic = 'c';
+        Main.check("ac7", ("" + dd).equals("3.0") && ("" + ch).equals("A") && ("" + ic).equals("99"));
+        Object o = k[0];
+        o = 2.5;
+        Main.check("ac8", ("" + o).equals("2.5"));
+        o = k[1];
+        Main.check("ac9", ("" + o).equals("3"));
+        fd = k[0];
+        fl = k[0];
+        fo = k[0];
+        Main.check("ac10", ("" + S37.fd).equals("2.0") && S37.fl * 1000000 * 1000000 * 1000 == 2000000000000000L && ("" + S37.fo).equals("2"));
+        S37 s = new S37();
+        s.il = k[1];
+        s.iflt = k[2];
+        Main.check("ac11", s.il * 1000000 * 1000000 * 1000 == 3000000000000000L && ("" + s.iflt).equals("1.6777216E7"));
+        double[] da = new double[2];
+        da[0] = k[0];
+        fda = new double[1];
+        fda[0] = k[1];
+        long[][] lm = new long[1][1];
+        lm[0][0] = k[0];
+        Main.check("ac12", ("" + da[0]).equals("2.0") && ("" + fda[0]).equals("3.0") && lm[0][0] * 1000000 * 1000000 * 1000 == 2000000000000000L);
+        float[] fa = { 16777217 };
+        double[][] dm = { { 1, 2 }, { 3 } };
+        long[] la = new long[] { 3 };
+        int ca[] = { 'a', 1 };
+        Main.check("ac13", ("" + fa[0]).equals("1.6777216E7") && ("" + dm[1][0]).equals("3.0") && ("" + ca[0]).equals("97"));
+        Main.check("ac14", la[0] * 1000000 * 1000000 * 1000 == 3000000000000000L);
+        long acc = 0;
+        for (int i = 0; i < 4; i++) { acc = acc * 1000000 + i; }
+        Main.check("ac15", acc == 1000002000003L);
     }
 }

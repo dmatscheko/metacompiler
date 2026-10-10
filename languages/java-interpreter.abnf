@@ -351,7 +351,7 @@ InstInit    <~~ push({kind: "iinit", body: pop()}) ~~>
 // A constructor. Its body is NOT a plain Block: an explicit this(...) / super(...)
 // invocation may only stand first, and it decides what initializes the object, so it
 // is parsed as a separate head rather than as an ordinary statement.
-Ctor        <~~ push(makeCtor(takeAll())) ~~>
+Ctor        <~~ jTyPop(); push(makeCtor(takeAll())) ~~>
             = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
 CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
             = "{" [ CtorCall ] { Statement } "}" ;
@@ -360,18 +360,22 @@ CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
 CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> Block ;
 // An abstract (or interface) method: a signature and no body.
-AbstractMethod <~~ push({kind: "amethod", name: pop()}) ~~>
+AbstractMethod <~~ jTyPop(); push({kind: "amethod", name: pop()}) ~~>
             = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
-Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
+Method      <~~ jTyPop(); jRetPop(); push(makeMethod(takeAll())) ~~>
+            = Mods [ SkipAngle ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
+// The declared result type, which every value the method returns converts to:
+// the walk reaches this tag before the body (jRetPush; the Method tag pops).
+RetType     <~~ jRetPush(stripWs(up.in)) ~~>
+            = Type ;
 
 // One `int a, b = 2, c;` declares several fields, which share their modifiers
 // and type but not their initializer - so each declarator becomes its own member.
 Field       <~~ pushFields(takeAll()) ~~>
             = Mods FType FieldVar { "," FieldVar } ";" ;
 FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
-            = NotResvKw NotUscore Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ;
+            = NotResvKw NotUscore Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" VarInit ] ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
@@ -391,16 +395,19 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // `Inner(Outer Outer.this)`) - a declaration of the type of `this`, not a real
 // parameter, so it pushes nothing and makeParams never sees it. It has to come
 // FIRST: the ordinary form would match `Foo Foo` and then die on `.this`.
-Param       = RecvParam | { Annotation | "final" KwEnd } Type { Annotation } [ VarArgs ] Id <~~ push(up.in) ~~> [ CDims ] ;
+Param       = RecvParam | { Annotation | "final" KwEnd } PType { Annotation } [ VarArgs ] Id <~~ push(up.in) ~~> [ CDims ] ;
+PType       <~~ push({pty: stripWs(up.in)}) ~~>
+            = Type ;
 RecvParam   = { Annotation } Type { Id "." } "this" KwEnd ;
 VarArgs     <~~ push({vararg: true}) ~~>
             = "..." ;
 // The C-style declarator suffix: `int a[]` and `int[] a[]` declare arrays too.
 CDims       = { Annotation } "[" "]" { { Annotation } "[" "]" } ;
 
-// Types are parsed and (apart from field defaults) ignored. Generic arguments
-// (<...>), dotted names, extra array dimensions and the extra primitive keywords are
-// accepted and dropped. Semantics stay dynamic.
+// Types are parsed; the value model carries a value's type, so a declared type
+// is only read where a value lands in a slot of it - a field default and the
+// assignment conversion (jTyDecl and friends). Generic arguments (<...>) and
+// type annotations are accepted and dropped.
 // A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
 // qualified one, and in front of each array bracket pair (`@A String @A []`,
 // `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
@@ -525,7 +532,7 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" { Annotation | "final" KwEnd } Type Id <~~ push(up.in) ~~> [ CDims ] ":" Expression ")" SubStmt ;
+            = KwFor "(" { Annotation | "final" KwEnd } Type Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" Expression ")" SubStmt ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
@@ -536,7 +543,11 @@ ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] ";" ;
+            = KwReturn [ ConvExpr ] ";" ;
+// An expression whose value converts to a declared type (a returned value, an
+// assignment's right side): its text rides along for jExprTy.
+ConvExpr    <~~ push({etext: up.in}) ~~>
+            = Expression ;
 
 // break / continue accept an optional target label; a labeled one travels as its
 // own signal (makeBreakL) to the loop or Labeled wrapper of that name.
@@ -600,7 +611,7 @@ ResRef      <~~ push(makeResRef(up.in)) ~~>
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(jCatch(takeAll())) ~~>
-            = KwCatch "(" { Annotation | "final" KwEnd } CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
+            = KwCatch "(" { Annotation | "final" KwEnd } CatchTypes Id <~~ push(up.in); jTyDecl(up.in, "") ~~> ")" Block ;
 CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
             = Type { "|" Type } ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
@@ -631,7 +642,10 @@ VarDeclType <~~ push({dty: stripWs(up.in)}) ~~>
 DeclType    <~~ push({dty: stripWs(up.in)}) ~~>
             = Type ;
 Declarator  <~~ push(makeDeclSpec(takeAll())) ~~>
-            = NotResvKw UsBrkt Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ;
+            = NotResvKw UsBrkt Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" VarInit ] ;
+// `int a[] = {1}` declares an int[]: the brackets after the NAME join the type.
+DeclDims    <~~ push({cdims: jDimsOf(stripWs(up.in))}) ~~>
+            = CDims ;
 // An initializer is an expression or a BARE array initializer - `int[] a = {1, 2}`
 // and the nested `int[][] j = {{1}, {2, 3}}`, which needs no `new`.
 VarInit     = ArrayInit | Expression ;
@@ -647,7 +661,7 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = Assignment | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>>=" | ">>=" | "&=" | "^=" | "|=" | "=" ) <~~ push(up.in) ~~> Expression ;
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>>=" | ">>=" | "&=" | "^=" | "|=" | "=" ) <~~ push(up.in) ~~> ConvExpr ;
 
 // An assignable place: a variable (this and class names are variables too),
 // or a member/index path: this.x, p.x, Main.fails, arr[i].
@@ -666,7 +680,7 @@ ParenTarget = "(" Target ")" ;
 // The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
 // repetition never gives a match back, so the two-part spelling can never see
 // its final suffix. The LAST suffix the run consumed is the place.
-ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
+ChainTarget <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
             = PlaceAhead Primary ChainSfx { ChainSfx } ;
 ChainSfx    = QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx ;
 // Without this fast-fail every expression in the file is parsed TWICE per
@@ -834,7 +848,7 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 // fast-fail here is safe because this rule is only entered after a literal
 // ++/--, so the chain is parsed once per occurrence, not once per expression.
 PreTarget   = ParenTarget | PreChain | PlainTarget ;
-PreChain    <~~ push(makeChainTarget(takeAll())) ~~>
+PreChain    <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
             = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
@@ -871,7 +885,7 @@ RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotat
 PostfixExpr = IncDec | SuperCall | IfaceSuper | CallMember ;
 // Greet.super.hello() - the default method of a NAMED interface, which is how a
 // class that inherits two defaults picks one.
-IfaceSuper  <~~ push(makeIfaceSuper(takeAll())) ~~>
+IfaceSuper  <~~ push(makeIfaceSuper(takeAll())); jNoteCall(up.in) ~~>
             = Id <~~ push({isup: up.in}) ~~> "." KwSuper "." Id <~~ push({ismeth: up.in}) ~~>
               "(" [ Expression { "," Expression } ] ")" ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
@@ -894,7 +908,10 @@ NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
             = KwNew [ SkipAngle ] NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" AnonBody ;
 AnonBody    <~~ push({anonmembers: takeAll()}) ~~>
             = "{" { Member } "}" ;
-NewArrLit   = KwNew Type ArrayInit ;
+NewArrLit   <~~ push(makeNewArrLit(pop(), pop())) ~~>
+            = KwNew ArrLitType ArrayInit ;
+ArrLitType  <~~ push({alty: stripWs(up.in)}) ~~>
+            = Type ;
 // new T[a][b]...[]: every sized dimension is allocated, the trailing empty ones
 // leave their elements null (new int[2][] gives two null rows).
 NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
@@ -912,7 +929,7 @@ ArrEmpty    <~~ push({aempty: true}) ~~>
 
 // super.m(args): the method search starts at the superclass of the class the call
 // appears in (curClassName is set while the class body is being built).
-SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
+SuperCall   <~~ push(makeSuperCall(popName(), takeAll())); jNoteCall(up.in) ~~>
             = KwSuper "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 
 // A primary followed by method calls, field reads and indexing:
@@ -926,7 +943,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 // and cost 2^depth on nested calls. Java evaluates the receiver of a bound
 // reference ONCE, where the reference is written, which is exactly what folding
 // it into the chain does.
-MRefSfx     <~~ push({kind:"mref", name: popName()}) ~~>
+MRefSfx     <~~ push(jNoteMRef({kind:"mref", name: popName()})) ~~>
             = "::" [ SkipAngle ] MRefName ;
 MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 // o.new Inner(args) - creation qualified by an enclosing instance. It is a
@@ -940,7 +957,7 @@ QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
               "(" [ Expression { "," Expression } ] ")" [ AnonBody ] ;
 // An explicit call-site type argument (list.<String>of(...)) is parsed and
 // dropped like every other generic: types are erased in this model.
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); jNoteCall(up.in) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
@@ -981,7 +998,7 @@ Primary     = ArrClassLit | PrimClassLit | NewExpr | SwitchExpr | Lambda | Metho
 // every other one on the enclosing instance - and a static context has none, so
 // the descriptor stands in there too. Tried before VarRef, which would read the
 // name alone and leave the argument list behind.
-BareCall    <~~ push(makeBareCall(takeAll())) ~~>
+BareCall    <~~ push(makeBareCall(takeAll())); jNoteCall(up.in) ~~>
             = BareName "(" [ Expression { "," Expression } ] ")" ;
 // A reserved word is not a method name (`case 0 -> if (true);` must not parse as
 // a call to a method named `if`) - but `this(...)` and `super(...)` reach this
@@ -1015,9 +1032,11 @@ OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
 // the defining scope; a functional-interface call site (any method call on the
 // value, whatever the single abstract method is named) invokes it. The body is an
 // expression (its value is the result) or a block (a return supplies the result).
-Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
+Lambda      <~~ jRetPop(); push(makeLambdaExpr(takeAll(), up.pos)) ~~>
             = LamUniform LambdaHead "->" LambdaBody ;
-LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | LamId ;
+// A lambda's body returns its own values, not the enclosing method's type.
+LambdaHead  <~~ jRetPush("") ~~>
+            = "(" [ LamParam { "," LamParam } ] ")" | LamId ;
 // A parameter is an optional type then a name; the explicit "Type LamId | LamId"
 // alternation lets an untyped "(x)" work despite the possessive optional (Type
 // would otherwise greedily consume the sole identifier).
@@ -1027,7 +1046,7 @@ LamParam    = [ "final" KwEnd ] ( Type LamId | LamId ) ;
 // arm arrow) parses as `s != (null -> "y")`, a lambda whose parameter is named
 // `null`, and the arm then dies on the missing `->`. Same shape as the
 // case-label/lambda trap in docs/abnf-dialect-gotchas.md.
-LamId       <~~ push({lparam: up.in}) ~~> = NotJavaKw Id ;
+LamId       <~~ push({lparam: up.in}); jTyDecl(up.in, "") ~~> = NotJavaKw Id ;
 NotJavaKw   = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -1065,7 +1084,7 @@ LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 // int[]::clone) is recognised too; makeMethodRef strips both back off the text.
 // The receiver that is an arbitrary EXPRESSION - check()::m, new Foo()::m,
 // ((C) t)::m - is MRefSfx down in the member chain instead.
-MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
+MethodRef   <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
             = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] { "[" "]" }
               "::" [ SkipAngle ] ( Id | KwNew ) ;
 
@@ -3162,15 +3181,33 @@ HasStatic   = :script(~~
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        var vty = jExprTy(items[3].etext)
+        // The base name's local type is a WALK-time fact; the place's whole type
+        // also needs the field table, which is complete only once the walk is.
+        var lty = ref.base == undefined ? jTyOf(ref.name) : ref.tylty
+        var tyRef = ref.base == undefined ? ref : ref.tyref
+        var pty = anytype
+        pty = null
         return function() {
             var v = anytype // The assigned value may be a number, a string, a double box, ...
             v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, jGetVar(ref.name), v)
-                jSetVar(ref.name, v)
+                if (op != "=") {
+                    v = applyOp(op, jGetVar(ref.name), v)
+                    jSetVar(ref.name, v)
+                } else {
+                    v = jSetVarTyped(ref.name, v, lty, vty)
+                }
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
+                if (op != "=") { v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v) }
+                else {
+                    if (pty === null) {
+                        pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
+                        if (pty == vty) { pty = "" }
+                    }
+                    v = jConvTo(v, pty)
+                }
                 p.obj[p.key] = v
             }
             return v
@@ -3567,13 +3604,21 @@ HasStatic   = :script(~~
             return obj
         }
     }
+    // An array initializer: its own type is jArrCtx, each element converts to
+    // the element type, and a nested initializer sees that element type.
     function makeArray(items) {
         return function() {
+            var saved = jArrCtx
+            var ety = jElemTy(saved)
+            jArrCtx = ety
             var a = []
-            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            for (var i = 0; i < items.length; i++) { a.push(jConvTo(items[i](), ety)) }
+            jArrCtx = saved
             return a
         }
     }
+    // new T[]{...}: the initializer builds a T[].
+    function makeNewArrLit(initT, tyItem) { return jArrTyped(initT, tyItem.alty) }
     // The default value of a field or an array element (JLS 4.12.5): the zero
     // of the type's own kind and width (0.0, 0L, (byte) 0, '\u0000'), false, or
     // null. new T[a][b][] fills the innermost allocated dimension with it - null
@@ -4040,23 +4085,72 @@ HasStatic   = :script(~~
     // (which the enclosing DeclCore knows) decides whether a lambda initializer has
     // to adopt a functional interface.
     function makeDeclSpec(items) {
-        return {dname: items[0], dinit: items.length > 1 ? items[1] : makeConst(0)}
+        var dims = ""
+        var rest = items.slice(1)
+        if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
+        return {dname: items[0], dinit: rest.length > 0 ? rest[0] : makeConst(0), ddims: dims}
     }
     function makeDeclList(items) {
         var ty = items[0].dty
         var specs = items.slice(1)
         var thunks = []
-        for (var i = 0; i < specs.length; i++) { thunks.push(makeDeclOne(specs[i], ty)) }
+        for (var i = 0; i < specs.length; i++) {
+            jTyDecl(specs[i].dname, ty + specs[i].ddims)
+            thunks.push(makeDeclOne(specs[i], ty + specs[i].ddims))
+        }
         return makeSeq(thunks)
     }
     function makeDeclOne(spec, ty) {
         var nm = spec.dname
-        var it = spec.dinit
+        var it = jArrTyped(spec.dinit, ty)
         return function() {
             var v = anytype
             v = it()
             declVar(nm, jTypeAdopt(v, ty))
         }
+    }
+
+    // The walk-time record of declared types, shared with java-to-llvm-ir.abnf.
+    include("lib/java-decltypes.js")
+    // A value on its way into a slot of declared type ty (JLS 5.2).
+    function jConvTo(v, ty) { return jIsPrimTy(ty) ? jTypeAdopt(v, ty) : v }
+    // The write of a plain name, deciding local or field the way jSetVar does
+    // and converting to that slot's type unless the value's static type vty
+    // already is it. Answers the value stored.
+    function jSetVarTyped(name, value, lty, vty) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], name)) {
+                if (!jIsClassVal(sc[i][name])) {
+                    var lv = (lty != undefined && lty != vty) ? jConvTo(value, lty) : value
+                    scopePut(sc[i], name, lv)
+                    return lv
+                }
+                break
+            }
+        }
+        var fty = jFieldTyOf(name)
+        var fv = fty == vty ? value : jConvTo(value, fty)
+        var o = jSelfWith(name)
+        if (o != null) { o[name] = fv } else { setVar(name, fv) }
+        return fv
+    }
+    // An initializer thunk that runs with jArrCtx set to its declared type ty.
+    function jArrTyped(initT, ty) {
+        if (jElemTy(ty) == "") { return initT }
+        return function() {
+            var saved = jArrCtx
+            jArrCtx = ty
+            var v = anytype
+            v = initT()
+            jArrCtx = saved
+            return v
+        }
+    }
+    // Does a parameter list need jCallArgs' conversion at all?
+    function jNeedsConv(ptys) {
+        for (var i = 0; i < ptys.length; i++) { if (jIsPrimTy(ptys[i])) { return true } }
+        return false
     }
     // A lambda or method reference assigned to a functional-interface variable
     // becomes an OBJECT of that interface, so its default methods work and the
@@ -4082,6 +4176,11 @@ HasStatic   = :script(~~
         // (int -> long) and the narrowing JLS 5.2 (a constant in range).
         if (hasOwn(jDeclWidth, ty)) {
             if (jIsIntegral(v)) { return jNarrow(v, jDeclWidth[ty]) }
+            return v
+        }
+        // A constant int fits a char too (JLS 5.2): `char c = 65;` holds 'A'.
+        if (ty == "char") {
+            if (typeof v == "number" || jIsSz(v)) { return jChar(jNum(v) & 65535) }
             return v
         }
         if (typeof v != "function") { return v }
@@ -4294,24 +4393,37 @@ HasStatic   = :script(~~
     }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeConst(undefined)
-        return function() { return {isRet: true, v: t()} }
+        var cty = items.length > 0 ? jConvTy(jRetTy(), items[1].etext) : ""
+        if (cty == "") { return function() { return {isRet: true, v: t()} } }
+        return function() { return {isRet: true, v: jTypeAdopt(t(), cty)} }
     }
     // ----- Class building -----
 
-    // The declared parameter names, and whether the last one is varargs.
+    // The parameter names, their declared types (a varargs one as its ELEMENT
+    // type) and whether the last is varargs. The walk reaches this tag before
+    // the body, so it opens the method's local type map (jTyPush).
     function makeParams(items) {
         var names = []
+        var tys = []
         var isVar = false
+        var ty = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] != null && items[i] != undefined && items[i].vararg != undefined) { isVar = true; continue }
+            if (items[i] != null && items[i] != undefined && items[i].pty != undefined) { ty = items[i].pty; continue }
             names.push(items[i])
+            tys.push(ty)
         }
-        return {params: names, vararg: isVar}
+        jTyPush()
+        for (var k = 0; k < names.length; k++) {
+            jTyDecl(names[k], (isVar && k == names.length - 1) ? tys[k] + "[]" : tys[k])
+        }
+        return {params: names, ptys: tys, vararg: isVar}
     }
     // Reshapes a call's arguments for a varargs parameter: the trailing ones are
     // collected into an array, unless the call already passes exactly one array
     // there (sumV(given) forwards the array itself, as Java does).
-    function jFixVarargs(isVar, np, args) {
+    // The collected elements convert to the varargs ELEMENT type ety.
+    function jFixVarargs(isVar, np, args, ety) {
         if (!isVar || np == 0) { return args }
         var out = []
         var i
@@ -4321,24 +4433,47 @@ HasStatic   = :script(~~
             return out
         }
         var rest = []
-        for (i = np - 1; i < args.length; i++) { rest.push(args[i]) }
+        for (i = np - 1; i < args.length; i++) { rest.push(jConvTo(args[i], ety)) }
         out.push(rest)
         return out
+    }
+    // A call's arguments, shaped for varargs and converted to the declared
+    // parameter types of m (a method or constructor record).
+    function jCallArgs(m, args) {
+        var np = m.params.length
+        if (!m.conv) { return jFixVarargs(m.vararg, np, args, "") }
+        var tys = jMethodBoundTys(m)
+        var a = jFixVarargs(m.vararg, np, args, np > 0 ? tys[np - 1] : "")
+        var n = m.vararg ? np - 1 : np
+        for (var i = 0; i < n && i < a.length; i++) { a[i] = jConvTo(a[i], tys[i]) }
+        return a
+    }
+    // A method's jBoundTys, worked out once the walk has seen every call site;
+    // a constructor converts every primitive parameter.
+    var jWalkDone = false
+    function jMethodBoundTys(m) {
+        if (m.kind != "method") { return m.ptys }
+        if (m.btys != undefined) { return m.btys }
+        var b = jBoundTys(m.name, m.ptys, m.vararg)
+        if (jWalkDone) { m.btys = b }
+        return b
     }
     function makeMethod(items) {
         var mods = items[0].mods
         var name = items[1]
-        var params = items[2].params
+        var pl = items[2]
         var body = items[3]
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
-        return {kind: "method", name: name, statik: isStatic, params: params, vararg: items[2].vararg, body: body}
+        return {kind: "method", name: name, statik: isStatic, params: pl.params, ptys: pl.ptys, vararg: pl.vararg,
+                body: body, conv: jNeedsConv(pl.ptys)}
     }
     // items = [name, {params}, {cbody}]; the cbody carries the optional explicit
     // this()/super() head separately from the rest of the body.
     function makeCtor(items) {
         var b = items[2]
-        return {kind: "ctor", name: items[0], params: items[1].params, vararg: items[1].vararg, body: b.cbody, head: b.head}
+        return {kind: "ctor", name: items[0], params: items[1].params, ptys: items[1].ptys, vararg: items[1].vararg,
+                body: b.cbody, head: b.head, conv: jNeedsConv(items[1].ptys)}
     }
     // A record's compact constructor: no declared parameters - it is handed the
     // record components, and its body may reassign them.
@@ -4365,7 +4500,10 @@ HasStatic   = :script(~~
         return {ctorhead: true, which: which, args: args}
     }
     function makeFieldVar(items) {
-        return {fname: items[0], finit: items.length > 1 ? items[1] : null}
+        var dims = ""
+        var rest = items.slice(1)
+        if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
+        return {fname: items[0], finit: rest.length > 0 ? rest[0] : null, fdims: dims}
     }
     // Pushes one member per declarator; they share the modifiers and the type.
     function pushFields(items) {
@@ -4381,14 +4519,17 @@ HasStatic   = :script(~~
         var dflt = anytype
         dflt = jZeroOf(ty)
         for (i = 2; i < items.length; i++) {
-            push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, ty), dflt: dflt})
+            var fty = ty + items[i].fdims
+            jNoteFieldTy(items[i].fname, fty)
+            push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, fty),
+                  dflt: items[i].fdims == "" ? dflt : null})
         }
     }
-    // A primitive field's initializer gets the same assignment conversion as a
-    // local declaration's: `static float f = 16777217;` holds 1.6777216E7.
+    // A field's initializer gets the same assignment conversion as a local
+    // declaration's: `static float f = 16777217;` holds 1.6777216E7.
     function jFieldInit(initT, ty) {
         if (initT == null || initT == undefined) { return initT }
-        if (ty != "double" && ty != "float" && !hasOwn(jDeclWidth, ty)) { return initT }
+        if (!jIsPrimTy(ty)) { return jArrTyped(initT, ty) }
         return function() { return jTypeAdopt(initT(), ty) }
     }
 
@@ -4764,7 +4905,7 @@ HasStatic   = :script(~~
                 }
                 return body()
             }
-            return invokeBody(info.params, full, self, "this", jFixVarargs(info.vararg, info.params.length, args))
+            return invokeBody(info.params, full, self, "this", jCallArgs(info, args))
         }
     }
     // Calls cls' constructor on an ALREADY allocated object.
@@ -4786,7 +4927,7 @@ HasStatic   = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, self, "this", jFixVarargs(m.vararg, m.params.length, args))
+            return invokeBody(m.params, m.body, self, "this", jCallArgs(m, args))
         }
     }
     // A static method has no receiver, so the frame carries the CLASS instead,
@@ -4797,7 +4938,7 @@ HasStatic   = :script(~~
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, cls, "__jcls", jFixVarargs(m.vararg, m.params.length, args))
+            return invokeBody(m.params, m.body, cls, "__jcls", jCallArgs(m, args))
         }
     }
 
@@ -5078,14 +5219,18 @@ HasStatic   = :script(~~
     // The target of an assignment whose root is an arbitrary primary. The value
     // it returns is an ordinary target record with a `base` thunk in place of a
     // variable name; the resolveRef override below is what reads that thunk.
-    function makeChainTarget(items) {
+    function makeChainTarget(items, text) {
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
-        if (last.kind == "index") { return {name: "", path: [{idx: last.idx}], base: foldCallMember(head)} }
+        if (last.kind == "index") {
+            var tr = jChainTyRef(text)
+            return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
+                    tyref: tr, tylty: tr == null ? undefined : jTyOf(tr.name)}
+        }
         // A run that ends in a call is not an assignable place; the parse still
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
@@ -5393,6 +5538,7 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
+    jWalkDone = true
 
     // The entry point defaults to the static main of class Main, but the -main flag
     // (c.mainName) can name any other static method of Main.
