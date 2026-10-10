@@ -4212,7 +4212,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (op == "*") { return cpxMul(a, r) }
         if (op == "/") {
             // Smith's division, with each term divided by n on its own - the order
-            // MRI 2.6 rounds in (300 of 300 random Float quotients agree). With no
+            // MRI 2.6 rounds in. With no
             // Float anywhere an integral Rational part becomes an Integer.
             var x = anytype
             var y = anytype
